@@ -243,6 +243,38 @@ impl CodexStructuredState {
                 let output = payload.get("output").and_then(Value::as_str);
                 Some(vec![exec_command_row(&pending, meta, path, output)])
             }
+            // The Codex CLI's structured-tools update emits shell commands as a
+            // `custom_tool_call` named `exec` whose `input` is a JS harness
+            // (`const r = await tools.exec_command({…}); text(r.output);`),
+            // paired with a `custom_tool_call_output`. Join the pair into the
+            // same `tool_call` row shape the classic `exec_command` join emits so
+            // the command text stays searchable. `apply_patch` and any other JS
+            // stay on the generic byte-counted `tool_event` path.
+            "custom_tool_call" => match payload.get("name").and_then(Value::as_str) {
+                Some("exec" | "exec_command") => {
+                    if self.buffer_custom_exec_call(payload, model, offset, timestamp_of(record)) {
+                        // Consumed: emission is deferred until the paired output.
+                        Some(Vec::new())
+                    } else {
+                        // Not an `exec_command` harness (other JS) — generic path.
+                        None
+                    }
+                }
+                _ => None,
+            },
+            "custom_tool_call_output" => {
+                let call_id = payload.get("call_id").and_then(Value::as_str)?;
+                // Only outputs paired with a buffered custom exec call are ours;
+                // everything else falls through to the generic path.
+                let pending = self.pending_exec.remove(call_id)?;
+                let output = custom_tool_output_text(payload.get("output"));
+                Some(vec![exec_command_row(
+                    &pending,
+                    meta,
+                    path,
+                    output.as_deref(),
+                )])
+            }
             _ => None,
         }
     }
@@ -285,6 +317,53 @@ impl CodexStructuredState {
                 turn_id,
             },
         );
+    }
+
+    /// Buffer a `custom_tool_call` shell invocation (the new Codex CLI shape).
+    /// The command lives inside the JS harness `input` as the argument to
+    /// `tools.exec_command( … )`. Returns `true` when the line is recognized as
+    /// an exec call (buffered for its output); `false` leaves it on the generic
+    /// `tool_event` path (`apply_patch`, or JS that is not an `exec_command`
+    /// call).
+    fn buffer_custom_exec_call(
+        &mut self,
+        payload: &Value,
+        model: Option<&str>,
+        offset: i64,
+        timestamp: Option<i64>,
+    ) -> bool {
+        let Some(call_id) = payload.get("call_id").and_then(Value::as_str) else {
+            return false;
+        };
+        let Some(input) = payload.get("input").and_then(Value::as_str) else {
+            return false;
+        };
+        // `None` — no `tools.exec_command(` call in the harness (other JS); the
+        // caller leaves the line on the generic path. `Some(inv)` — an exec call
+        // was found; `cmd`/`workdir` may still be `None` when the argument could
+        // not be extracted (fields fall back to null, never guessed).
+        let Some(inv) = extract_exec_command_args(input) else {
+            return false;
+        };
+        let cmd = inv.cmd.unwrap_or_default();
+        let workdir = inv.workdir;
+        let turn_id = payload
+            .pointer("/internal_chat_message_metadata_passthrough/turn_id")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        self.pending_exec.insert(
+            call_id.to_string(),
+            PendingExec {
+                offset,
+                timestamp,
+                model: model.map(str::to_string),
+                call_id: call_id.to_string(),
+                cmd,
+                workdir,
+                turn_id,
+            },
+        );
+        true
     }
 
     /// Emit `tool_call` rows for any `exec_command` calls whose output never
@@ -356,6 +435,214 @@ fn parse_arguments(arguments: Option<&Value>) -> Option<Value> {
     }
 }
 
+/// The shell command(s) and working directory extracted from a custom `exec`
+/// tool's JS harness. Fields are `None` when they could not be recovered from
+/// the harness text (never guessed).
+struct ExecInvocation {
+    cmd: Option<String>,
+    workdir: Option<String>,
+}
+
+const EXEC_MARKER: &str = "tools.exec_command(";
+
+/// Extract the shell command(s) from a custom `exec` tool's JS harness `input`.
+///
+/// The command is the `cmd` field of the object passed to
+/// `tools.exec_command( … )`. That object is a *JavaScript* object literal, not
+/// JSON: keys are frequently unquoted (`{cmd:"…"}`) and string values use
+/// single, double, or backtick (template-literal) quotes. A single harness can
+/// also batch several `exec_command` calls. So rather than a JSON parse (which
+/// only covers the quoted-key minority), scan the literal tolerantly for the
+/// top-level `cmd`/`workdir` string values.
+///
+/// Returns `None` when the harness contains no `exec_command` call (other JS) —
+/// the caller then leaves the line on the generic `tool_event` path. When a call
+/// is present but no `cmd` string can be recovered, the returned `cmd` is `None`
+/// (the field falls back to null; nothing is guessed).
+fn extract_exec_command_args(input: &str) -> Option<ExecInvocation> {
+    if !input.contains(EXEC_MARKER) {
+        return None;
+    }
+    let bytes = input.as_bytes();
+    let mut cmds: Vec<String> = Vec::new();
+    let mut workdir: Option<String> = None;
+    let mut search = 0;
+    while let Some(rel) = input[search..].find(EXEC_MARKER) {
+        let after_marker = search + rel + EXEC_MARKER.len();
+        // Skip whitespace to the opening brace of the argument object.
+        let mut i = after_marker;
+        while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        if i < bytes.len() && bytes[i] == b'{' {
+            let (cmd, wd, next) = scan_js_exec_object(input, i);
+            if let Some(cmd) = cmd {
+                cmds.push(cmd);
+            }
+            if workdir.is_none() {
+                workdir = wd;
+            }
+            search = next.max(after_marker);
+        } else {
+            search = after_marker;
+        }
+    }
+    let cmd = (!cmds.is_empty()).then(|| cmds.join("\n"));
+    Some(ExecInvocation { cmd, workdir })
+}
+
+/// Walk the JS object literal beginning at `brace_idx` (`{`), returning the
+/// top-level `cmd` and `workdir` string values and the byte index just past the
+/// object. Nested objects/arrays and string contents (single/double/backtick)
+/// are skipped so only genuine top-level keys are matched.
+fn scan_js_exec_object(s: &str, brace_idx: usize) -> (Option<String>, Option<String>, usize) {
+    let bytes = s.as_bytes();
+    let mut cmd = None;
+    let mut workdir = None;
+    let mut i = brace_idx + 1; // past '{'
+    loop {
+        i = skip_ws_and_commas(s, i);
+        if i >= s.len() || bytes[i] == b'}' {
+            return (cmd, workdir, (i + 1).min(s.len()));
+        }
+        let (key, after_key) = read_js_object_key(s, i);
+        i = skip_ws(s, after_key);
+        // A malformed pair (no `:`) — bail rather than risk spinning.
+        if i >= s.len() || bytes[i] != b':' {
+            return (cmd, workdir, i);
+        }
+        i = skip_ws(s, i + 1);
+        if i < s.len() && matches!(bytes[i], b'"' | b'\'' | b'`') {
+            let Some((value, next)) = read_js_string(s, i) else {
+                return (cmd, workdir, i);
+            };
+            match key.as_str() {
+                "cmd" if cmd.is_none() => cmd = Some(value),
+                "workdir" if workdir.is_none() => workdir = Some(value),
+                _ => {}
+            }
+            i = next;
+        } else {
+            i = skip_js_value(s, i);
+        }
+    }
+}
+
+/// Read an object key at `i`: a quoted string, or a bare identifier up to the
+/// next whitespace or `:`.
+fn read_js_object_key(s: &str, i: usize) -> (String, usize) {
+    let bytes = s.as_bytes();
+    if i < s.len() && matches!(bytes[i], b'"' | b'\'' | b'`') {
+        if let Some((key, next)) = read_js_string(s, i) {
+            return (key, next);
+        }
+    }
+    let mut j = i;
+    while j < s.len() && !bytes[j].is_ascii_whitespace() && bytes[j] != b':' {
+        j += 1;
+    }
+    (s[i..j].to_string(), j)
+}
+
+/// Read a JS string literal whose opening quote (`"`, `'`, or `` ` ``) is at
+/// `open_idx`, honoring backslash escapes. Returns the decoded content and the
+/// byte index just past the closing quote; `None` if the string is unterminated.
+fn read_js_string(s: &str, open_idx: usize) -> Option<(String, usize)> {
+    let quote = s[open_idx..].chars().next()?;
+    let content_start = open_idx + quote.len_utf8();
+    let mut out = String::new();
+    let mut chars = s[content_start..].char_indices();
+    while let Some((rel, c)) = chars.next() {
+        if c == '\\' {
+            if let Some((_, esc)) = chars.next() {
+                out.push(match esc {
+                    'n' => '\n',
+                    't' => '\t',
+                    'r' => '\r',
+                    other => other,
+                });
+            }
+        } else if c == quote {
+            return Some((out, content_start + rel + c.len_utf8()));
+        } else {
+            out.push(c);
+        }
+    }
+    None
+}
+
+/// Skip a non-string JS value (number, identifier, or a balanced object/array)
+/// starting at `i`, returning the byte index just past it.
+fn skip_js_value(s: &str, mut i: usize) -> usize {
+    let bytes = s.as_bytes();
+    if i >= s.len() {
+        return i;
+    }
+    if matches!(bytes[i], b'{' | b'[') {
+        let mut depth = 0usize;
+        while i < s.len() {
+            match bytes[i] {
+                b'"' | b'\'' | b'`' => {
+                    i = read_js_string(s, i).map_or(i + 1, |(_, next)| next);
+                    continue;
+                }
+                b'{' | b'[' => depth += 1,
+                b'}' | b']' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return i + 1;
+                    }
+                }
+                _ => {}
+            }
+            i += 1;
+        }
+        return i;
+    }
+    // Bare token: run to the next top-level `,` or `}`.
+    while i < s.len() && !matches!(bytes[i], b',' | b'}') {
+        if matches!(bytes[i], b'"' | b'\'' | b'`') {
+            i = read_js_string(s, i).map_or(i + 1, |(_, next)| next);
+            continue;
+        }
+        i += 1;
+    }
+    i
+}
+
+fn skip_ws(s: &str, mut i: usize) -> usize {
+    let bytes = s.as_bytes();
+    while i < s.len() && bytes[i].is_ascii_whitespace() {
+        i += 1;
+    }
+    i
+}
+
+fn skip_ws_and_commas(s: &str, mut i: usize) -> usize {
+    let bytes = s.as_bytes();
+    while i < s.len() && (bytes[i].is_ascii_whitespace() || bytes[i] == b',') {
+        i += 1;
+    }
+    i
+}
+
+/// Flatten a `custom_tool_call_output` `output` into one string for exit/wall
+/// parsing. Codex emits it either as a JSON string or as an array of
+/// `{ "type": "input_text", "text": … }` chunks; concatenate the chunk text.
+fn custom_tool_output_text(output: Option<&Value>) -> Option<String> {
+    match output? {
+        Value::String(text) => Some(text.clone()),
+        Value::Array(parts) => {
+            let joined: String = parts
+                .iter()
+                .filter_map(|part| part.get("text").and_then(Value::as_str))
+                .collect();
+            (!joined.is_empty()).then_some(joined)
+        }
+        _ => None,
+    }
+}
+
 /// A shell command is usually a string but can be an argv array; join arrays
 /// with spaces so the searchable text is a single command line.
 fn command_string(value: Option<&Value>) -> Option<String> {
@@ -374,17 +661,30 @@ fn command_string(value: Option<&Value>) -> Option<String> {
 }
 
 /// Extract `exit_code` and `wall_time_s` from an `exec_command` output body.
-/// Both live only as free text ("Process exited with code N", "Wall time: X
-/// seconds"); an absent marker yields `None` (never guessed).
+/// Both live only as free text; an absent marker yields `None` (never guessed).
+///
+/// Codex wrappers put these markers in the status header that precedes the
+/// `Output:` body, so parsing is restricted to that header. This keeps a
+/// command whose *own* stdout prints "Process exited with code N" (or a wall
+/// time line) from spoofing the exec result. Both wrappers are covered: the
+/// classic `exec_command` output ("Process exited with code N", "Wall time: X
+/// seconds") and the newer custom `exec` harness ("Script completed\nWall time
+/// X seconds", which carries no exit code — so it stays null).
 pub(super) fn parse_exec_output(output: &str) -> (Option<i64>, Option<f64>) {
     const EXIT_MARKER: &str = "Process exited with code ";
-    const WALL_MARKER: &str = "Wall time:";
-    let exit_code = output
+    const WALL_MARKER: &str = "Wall time";
+    let header = output
+        .split_once("\nOutput:\n")
+        .map_or(output, |(head, _)| head);
+    let exit_code = header
         .find(EXIT_MARKER)
-        .and_then(|idx| parse_leading_int(&output[idx + EXIT_MARKER.len()..]));
-    let wall_time_s = output
-        .find(WALL_MARKER)
-        .and_then(|idx| parse_leading_float(output[idx + WALL_MARKER.len()..].trim_start()));
+        .and_then(|idx| parse_leading_int(&header[idx + EXIT_MARKER.len()..]));
+    let wall_time_s = header.find(WALL_MARKER).and_then(|idx| {
+        // Accept both "Wall time: X" (classic) and "Wall time X" (custom exec).
+        let rest = header[idx + WALL_MARKER.len()..].trim_start();
+        let rest = rest.strip_prefix(':').unwrap_or(rest).trim_start();
+        parse_leading_float(rest)
+    });
     (exit_code, wall_time_s)
 }
 
@@ -1254,6 +1554,229 @@ mod tests {
         assert_eq!(md["exit_code"], Value::Null);
         assert_eq!(md["success"], Value::Null);
         assert_eq!(flushed[0].text, "sleep 100");
+    }
+
+    #[test]
+    fn custom_tool_call_exec_joins_into_one_tool_call_row() {
+        // The new Codex CLI emits shell commands as a `custom_tool_call` named
+        // `exec` whose `input` is a JS harness, paired with a
+        // `custom_tool_call_output` whose `output` is an array of text chunks.
+        let mut state = CodexStructuredState::new();
+        let path = std::path::Path::new("/tmp/rollout.jsonl");
+        let call = json!({
+            "timestamp": "2026-07-09T17:50:49.017Z",
+            "type": "response_item",
+            "payload": {
+                "type": "custom_tool_call",
+                "id": "ctc_1",
+                "status": "completed",
+                "call_id": "call_abc",
+                "name": "exec",
+                "input": "const r = await tools.exec_command({\"cmd\":\"gh pr merge 366\",\"workdir\":\"/home/zack/projects/tracedecay\",\"yield_time_ms\":10000});\ntext(r.output);\n",
+                "internal_chat_message_metadata_passthrough": {"turn_id": "turn-9"}
+            }
+        });
+        let buffered = state
+            .event_from_line(&call, &meta(), Some("gpt-5.5"), path, 100)
+            .expect("custom exec call is structured");
+        assert!(buffered.is_empty(), "call buffers, emits nothing yet");
+
+        let output = json!({
+            "timestamp": "2026-07-09T17:50:49.226Z",
+            "type": "response_item",
+            "payload": {
+                "type": "custom_tool_call_output",
+                "call_id": "call_abc",
+                "output": [
+                    {"type": "input_text", "text": "Script completed\nWall time 0.2 seconds\nOutput:\n"},
+                    {"type": "input_text", "text": "Merged pull request #366\n"}
+                ]
+            }
+        });
+        let rows = state
+            .event_from_line(&output, &meta(), Some("gpt-5.5"), path, 260)
+            .expect("output completes the join");
+        assert_eq!(rows.len(), 1);
+        let row = &rows[0];
+        assert_eq!(row.role, "tool");
+        assert_eq!(row.kind.as_deref(), Some("tool_call"));
+        // The command text is searchable (the whole point of the fix).
+        assert_eq!(row.text, "gh pr merge 366");
+        assert_eq!(row.tool_names.as_deref(), Some("exec_command"));
+        // Keyed on the call offset, not the output offset.
+        assert_eq!(row.ordinal, 100);
+        let md = metadata_of(row);
+        assert_eq!(md["tool"], "exec_command");
+        assert_eq!(md["call_id"], "call_abc");
+        assert_eq!(md["cmd"], "gh pr merge 366");
+        assert_eq!(md["workdir"], "/home/zack/projects/tracedecay");
+        assert_eq!(md["turn_id"], "turn-9");
+        // The custom harness header carries a wall time but no exit code, so the
+        // exit code and success stay null (never guessed from the body).
+        assert_eq!(md["wall_time_s"], 0.2);
+        assert_eq!(md["exit_code"], Value::Null);
+        assert_eq!(md["success"], Value::Null);
+        // The output body itself is never stored in the searchable text.
+        assert!(!row.text.contains("Merged pull request"));
+    }
+
+    #[test]
+    fn custom_tool_call_exec_extracts_command_with_nested_quotes_and_escapes() {
+        // The command contains single quotes and escaped double quotes; the
+        // scanner reads the JS string literal honoring the backslash escapes.
+        let mut state = CodexStructuredState::new();
+        let path = std::path::Path::new("/tmp/rollout.jsonl");
+        let call = json!({
+            "type": "response_item",
+            "payload": {
+                "type": "custom_tool_call",
+                "name": "exec",
+                "call_id": "call_q",
+                "input": "const r = await tools.exec_command({\"cmd\":\"sed -n '1,240p' a.md && rg -n \\\"pr merge 366\\\" .\",\"workdir\":\"/repo\"});\ntext(r.output);\n"
+            }
+        });
+        state
+            .event_from_line(&call, &meta(), None, path, 5)
+            .expect("custom exec call is structured");
+        // A plain-string output also joins (Codex sometimes emits a bare string).
+        let output = json!({
+            "type": "response_item",
+            "payload": {
+                "type": "custom_tool_call_output",
+                "call_id": "call_q",
+                "output": "Script running with cell ID 10\nWall time 10.1 seconds\nOutput:\n"
+            }
+        });
+        let rows = state
+            .event_from_line(&output, &meta(), None, path, 9)
+            .expect("string output completes the join");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            rows[0].text,
+            "sed -n '1,240p' a.md && rg -n \"pr merge 366\" ."
+        );
+        let md = metadata_of(&rows[0]);
+        assert_eq!(
+            md["cmd"],
+            "sed -n '1,240p' a.md && rg -n \"pr merge 366\" ."
+        );
+        assert_eq!(md["workdir"], "/repo");
+        assert_eq!(md["wall_time_s"], 10.1);
+    }
+
+    #[test]
+    fn extract_exec_command_args_reads_js_object_literal_shapes() {
+        // Real Codex harnesses are JS object literals, not JSON: keys are often
+        // unquoted and values may use single, double, or backtick quotes.
+        let inv = extract_exec_command_args(
+            "const r = await tools.exec_command({cmd:\"gh pr merge 366 --squash --admin\",workdir:\"/home/zack/projects/tracedecay\",yield_time_ms:10000});\ntext(r.output);\n",
+        )
+        .expect("exec call present");
+        assert_eq!(inv.cmd.as_deref(), Some("gh pr merge 366 --squash --admin"));
+        assert_eq!(
+            inv.workdir.as_deref(),
+            Some("/home/zack/projects/tracedecay")
+        );
+
+        // Template literals (backticks with `${…}`) are kept verbatim.
+        let inv = extract_exec_command_args(
+            "const r = await tools.exec_command({cmd:`gh pr view ${num} --json ${fields}`,workdir:'/repo'});\n",
+        )
+        .expect("exec call present");
+        assert_eq!(
+            inv.cmd.as_deref(),
+            Some("gh pr view ${num} --json ${fields}")
+        );
+        assert_eq!(inv.workdir.as_deref(), Some("/repo"));
+
+        // A single harness can batch several exec_command calls; every command
+        // is captured so each stays searchable.
+        let inv = extract_exec_command_args(
+            "await Promise.all([\n  tools.exec_command({cmd:\"git fetch origin master\",workdir:\"/repo\",max_output_tokens:4000}),\n  tools.exec_command({cmd:\"gh pr merge 371 --merge\"})]);\n",
+        )
+        .expect("exec calls present");
+        assert_eq!(
+            inv.cmd.as_deref(),
+            Some("git fetch origin master\ngh pr merge 371 --merge")
+        );
+        assert_eq!(inv.workdir.as_deref(), Some("/repo"));
+
+        // Non-exec JS has no marker at all.
+        assert!(extract_exec_command_args("const x = ALL_TOOLS.filter(t => t.exec);\n").is_none());
+    }
+
+    #[test]
+    fn custom_tool_call_non_exec_js_falls_through_to_generic() {
+        // A custom `exec` tool whose harness does not call `exec_command` (e.g.
+        // pure JS) is not an exec join — it stays on the generic path.
+        let mut state = CodexStructuredState::new();
+        let path = std::path::Path::new("/tmp/rollout.jsonl");
+        let call = json!({
+            "type": "response_item",
+            "payload": {
+                "type": "custom_tool_call",
+                "name": "exec",
+                "call_id": "call_js",
+                "input": "text('just some javascript, no exec_command call');\n"
+            }
+        });
+        assert!(
+            state
+                .event_from_line(&call, &meta(), None, path, 3)
+                .is_none(),
+            "non-exec JS is left for the generic tool_event handler"
+        );
+        // Its output, never buffered, also falls through.
+        let output = json!({
+            "type": "response_item",
+            "payload": {
+                "type": "custom_tool_call_output",
+                "call_id": "call_js",
+                "output": "Script completed\nWall time 0.1 seconds\nOutput:\nhi\n"
+            }
+        });
+        assert!(
+            state
+                .event_from_line(&output, &meta(), None, path, 4)
+                .is_none(),
+            "an output with no buffered exec call falls through"
+        );
+    }
+
+    #[test]
+    fn custom_tool_call_exec_without_output_flushes_null_result_row() {
+        let mut state = CodexStructuredState::new();
+        let path = std::path::Path::new("/tmp/rollout.jsonl");
+        let call = json!({
+            "type": "response_item",
+            "payload": {
+                "type": "custom_tool_call",
+                "name": "exec",
+                "call_id": "call_hang",
+                "input": "const r = await tools.exec_command({\"cmd\":\"cargo test-all\"});\ntext(r.output);\n"
+            }
+        });
+        state
+            .event_from_line(&call, &meta(), None, path, 7)
+            .expect("custom exec call recognized");
+        let flushed = state.flush_pending(&meta(), path);
+        assert_eq!(flushed.len(), 1);
+        assert_eq!(flushed[0].text, "cargo test-all");
+        let md = metadata_of(&flushed[0]);
+        assert_eq!(md["exit_code"], Value::Null);
+        assert_eq!(md["success"], Value::Null);
+    }
+
+    #[test]
+    fn parse_exec_output_ignores_exit_marker_in_the_body() {
+        // The custom harness header ("Script completed\nWall time X seconds")
+        // has no exit code; a "Process exited with code N" line inside the
+        // command's own stdout must not be mistaken for the exec result.
+        let output =
+            "Script completed\nWall time 0.3 seconds\nOutput:\nProcess exited with code 137\n";
+        let (exit, wall) = parse_exec_output(output);
+        assert_eq!(exit, None, "body exit marker must not spoof the result");
+        assert_eq!(wall, Some(0.3));
     }
 
     #[test]
