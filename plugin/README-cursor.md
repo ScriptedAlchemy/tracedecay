@@ -73,6 +73,7 @@ per-call review, add the snippet below to `~/.cursor/permissions.json`
     "tracedecay:tracedecay_active_project",
     "tracedecay:tracedecay_affected",
     "tracedecay:tracedecay_analytics",
+    "tracedecay:tracedecay_ast_grep_search",
     "tracedecay:tracedecay_automation_run_artifact_view",
     "tracedecay:tracedecay_body",
     "tracedecay:tracedecay_branch_diff",
