@@ -3168,7 +3168,9 @@ fn git_capture(project: &std::path::Path, args: &[&str]) -> String {
 ///      the ingest sweep.
 #[tokio::test]
 async fn hook_route_records_spans_and_ingest_attributes_commits() {
-    use tracedecay::sessions::git_correlation::{GitRefFilter, SessionsForQuery, SpanOverlapKind};
+    use tracedecay::sessions::git_correlation::{
+        CommitRelationFilter, GitRefFilter, SessionsForQuery, SpanOverlapKind,
+    };
 
     let (_env, project) = crate::common::IsolatedEnv::acquire().await;
     let worktree = project.with_file_name("feature-worktree");
@@ -3317,12 +3319,15 @@ async fn hook_route_records_spans_and_ingest_attributes_commits() {
     tracedecay::sessions::ingest_global_sources(&db, &project_root).await;
 
     let by_commit = db
-        .git_sessions_for(&SessionsForQuery {
-            git_ref: GitRefFilter::Commit(sha.clone()),
-            since: None,
-            until: None,
-            limit: 10,
-        })
+        .git_sessions_for_with_relation(
+            &SessionsForQuery {
+                git_ref: GitRefFilter::Commit(sha.clone()),
+                since: None,
+                until: None,
+                limit: 10,
+            },
+            CommitRelationFilter::Observed,
+        )
         .await
         .unwrap();
     assert_eq!(

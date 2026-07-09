@@ -253,7 +253,7 @@ async fn structured_backfill_inserts_codex_goal_rows_once() {
     db.run_structured_backfill().await;
     assert_eq!(count_kind(&project, "codex", "goal").await, 1);
     drop(db);
-    assert_eq!(structured_marker_version(&project).await, Some(1));
+    assert_eq!(structured_marker_version(&project).await, Some(2));
 }
 
 #[tokio::test]
@@ -313,7 +313,7 @@ async fn structured_backfill_inserts_claude_marker_rows_once() {
     db.run_structured_backfill().await;
     assert_eq!(count_kind(&project, "claude", "pr_link").await, 1);
     drop(db);
-    assert_eq!(structured_marker_version(&project).await, Some(1));
+    assert_eq!(structured_marker_version(&project).await, Some(2));
 }
 
 /// Regression for the stale-cursor-vs-version-bump defect: the sweep's path
@@ -335,7 +335,7 @@ async fn structured_backfill_version_bump_reparses_from_start() {
     ingest_source(&db, &source, &project, None).await;
     db.run_structured_backfill().await; // parses the file, advances the cursor
     db.run_structured_backfill().await; // no candidates: marks complete, clears cursors
-    assert_eq!(structured_marker_version(&project).await, Some(1));
+    assert_eq!(structured_marker_version(&project).await, Some(2));
     drop(db);
 
     // Drop the structured rows and reset the marker so the sweep re-enters

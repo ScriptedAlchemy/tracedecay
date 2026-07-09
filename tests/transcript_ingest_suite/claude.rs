@@ -3,9 +3,12 @@ use std::io::Write;
 use tempfile::TempDir;
 use tracedecay::sessions::claude::ClaudeSource;
 use tracedecay::sessions::cursor::open_project_session_db;
+use tracedecay::sessions::git_correlation::{
+    CommitEvidence, CommitRelation, GitRefFilter, SessionsForQuery, SpanOverlapKind,
+};
 use tracedecay::sessions::source::ingest_source;
 
-use crate::support::{assert_metadata_path_eq, init_git_repo, init_project_at, setup};
+use crate::support::{assert_metadata_path_eq, init_git_repo, init_project_at, run_git, setup};
 
 /// Writes a Claude Code transcript (one JSON object per line) for `session` whose
 /// recorded `cwd` is `project`.
@@ -1068,4 +1071,108 @@ async fn claude_workflow_nested_subagent_links_to_parent_not_orphan() {
         .await;
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].session.session_id, "agent-nested");
+}
+
+#[tokio::test]
+async fn claude_git_operation_becomes_direct_producer_evidence_atomically() {
+    let tmp = TempDir::new().unwrap();
+    let (home, project) = setup(&tmp);
+    init_git_repo(&project);
+    std::fs::write(project.join("commit.txt"), "commit evidence\n").unwrap();
+    run_git(&project, &["add", "commit.txt"]);
+    run_git(
+        &project,
+        &[
+            "-c",
+            "user.name=TraceDecay Tests",
+            "-c",
+            "user.email=tests@example.invalid",
+            "commit",
+            "-m",
+            "commit evidence",
+        ],
+    );
+    let output = std::process::Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(&project)
+        .output()
+        .unwrap();
+    let sha = String::from_utf8(output.stdout).unwrap().trim().to_string();
+
+    let dir = home.join(".claude/projects/-some-slug");
+    std::fs::create_dir_all(&dir).unwrap();
+    let cwd = project.to_string_lossy();
+    std::fs::write(
+        dir.join("claude-commit.jsonl"),
+        format!(
+            "{}\n",
+            serde_json::json!({
+                "type": "user",
+                "cwd": cwd,
+                "gitBranch": "main",
+                "sessionId": "claude-commit",
+                "uuid": "commit-result-1",
+                "timestamp": "2026-01-01T00:00:00.000Z",
+                "message": {"role": "user", "content": [{
+                    "type": "tool_result",
+                    "tool_use_id": "tool-commit",
+                    "is_error": false,
+                    "content": "commit complete"
+                }]},
+                "toolUseResult": {"gitOperation": {"commit": {
+                    "sha": &sha[..8],
+                    "kind": "committed"
+                }}}
+            })
+        ),
+    )
+    .unwrap();
+
+    let db = open_project_session_db(&project).await.unwrap();
+    let source = ClaudeSource::with_home(&home);
+    let stats = ingest_source(&db, &source, &project, None).await;
+    assert_eq!(stats.messages_upserted, 1);
+
+    let message = db
+        .get_session_message("claude", "commit-result-1")
+        .await
+        .unwrap();
+    let metadata: serde_json::Value =
+        serde_json::from_str(message.metadata_json.as_deref().unwrap()).unwrap();
+    assert_eq!(
+        metadata["produced_commit_candidates"],
+        serde_json::json!([&sha[..8]])
+    );
+    assert_eq!(metadata["produced_commit_evidence"], "host_event");
+    assert_eq!(metadata["produced_commit_kind"], "committed");
+
+    let hits = db
+        .git_sessions_for(&SessionsForQuery {
+            git_ref: GitRefFilter::Commit(sha[..8].to_string()),
+            since: None,
+            until: None,
+            limit: 10,
+        })
+        .await
+        .unwrap();
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].relation, Some(CommitRelation::Produced));
+    assert_eq!(hits[0].evidence, Some(CommitEvidence::HostEvent));
+    assert_eq!(hits[0].span_overlap_kind, Some(SpanOverlapKind::Direct));
+    assert_eq!(
+        hits[0].evidence_message_id.as_deref(),
+        Some("commit-result-1")
+    );
+    let branch_hits = db
+        .git_sessions_for(&SessionsForQuery {
+            git_ref: GitRefFilter::Branch("main".to_string()),
+            since: None,
+            until: None,
+            limit: 10,
+        })
+        .await
+        .unwrap();
+    assert_eq!(branch_hits.len(), 1);
+    assert_eq!(branch_hits[0].session_id, "claude-commit");
+    assert_eq!(branch_hits[0].sources, vec!["ingest".to_string()]);
 }

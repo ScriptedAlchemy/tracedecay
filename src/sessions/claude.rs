@@ -969,6 +969,13 @@ fn message_metadata(
         CLAUDE_MESSAGE_LOCATION_KEYS,
         TranscriptLocation::new(location_cwd, location_provenance),
     );
+    if let Some(branch) = record
+        .get("gitBranch")
+        .and_then(Value::as_str)
+        .filter(|branch| !branch.is_empty())
+    {
+        metadata.insert("git_branch".to_string(), Value::String(branch.to_string()));
+    }
     append_tool_calls_metadata(&mut metadata, message);
     append_tool_event_metadata(&mut metadata, content);
     // Anthropic-style per-message counters: `message.usage.{input_tokens,
@@ -984,8 +991,51 @@ fn message_metadata(
     // patch bodies) and fold the file into the session summary.
     if kind == "user" {
         append_edited_file_metadata(&mut metadata, record, accumulator);
+        append_git_operation_metadata(&mut metadata, record);
     }
     Value::Object(metadata)
+}
+
+/// Preserve Claude's structured git-operation event as direct commit evidence.
+/// The abbreviated id is resolved against the repository before persistence;
+/// raw stdout/stderr stays in the lossless transcript rather than metadata.
+fn append_git_operation_metadata(metadata: &mut Map<String, Value>, record: &Value) {
+    let Some(commit) = record
+        .pointer("/toolUseResult/gitOperation/commit")
+        .and_then(Value::as_object)
+    else {
+        return;
+    };
+    let Some(sha) = commit.get("sha").and_then(Value::as_str).filter(|sha| {
+        (7..=64).contains(&sha.len()) && sha.chars().all(|ch| ch.is_ascii_hexdigit())
+    }) else {
+        return;
+    };
+    metadata.insert(
+        "produced_commit_candidates".to_string(),
+        Value::Array(vec![Value::String(sha.to_ascii_lowercase())]),
+    );
+    metadata.insert(
+        "produced_commit_evidence".to_string(),
+        Value::String("host_event".to_string()),
+    );
+    if let Some(kind) = commit
+        .get("kind")
+        .and_then(Value::as_str)
+        .filter(|kind| !kind.is_empty())
+    {
+        metadata.insert(
+            "produced_commit_kind".to_string(),
+            Value::String(kind.to_string()),
+        );
+    }
+    if let Some(branch) = record
+        .get("gitBranch")
+        .and_then(Value::as_str)
+        .filter(|branch| !branch.is_empty())
+    {
+        metadata.insert("git_branch".to_string(), Value::String(branch.to_string()));
+    }
 }
 
 /// Copy Claude's top-level attribution fields onto an assistant row's metadata.
@@ -1067,4 +1117,39 @@ fn record_cwd(record: &Value) -> Option<PathBuf> {
         .and_then(Value::as_str)
         .filter(|cwd| !cwd.is_empty())
         .map(PathBuf::from)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn structured_git_operation_becomes_host_commit_evidence() {
+        let mut metadata = Map::new();
+        append_git_operation_metadata(
+            &mut metadata,
+            &json!({
+                "gitBranch": "feature/attribution",
+                "toolUseResult": {
+                    "gitOperation": {
+                        "commit": {"sha": "ABCDEF12", "kind": "commit"}
+                    }
+                }
+            }),
+        );
+        assert_eq!(metadata["produced_commit_candidates"], json!(["abcdef12"]));
+        assert_eq!(metadata["produced_commit_evidence"], "host_event");
+        assert_eq!(metadata["git_branch"], "feature/attribution");
+    }
+
+    #[test]
+    fn unstructured_user_content_cannot_spoof_commit_evidence() {
+        let mut metadata = Map::new();
+        append_git_operation_metadata(
+            &mut metadata,
+            &json!({"message": {"content": "gitOperation commit abcdef12"}}),
+        );
+        assert!(metadata.is_empty());
+    }
 }

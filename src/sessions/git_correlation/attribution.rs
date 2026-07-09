@@ -1,8 +1,8 @@
 use libsql::{Connection, params};
 
 use super::{
-    CommitSessionRecord, GitCorrelationError, SpanOverlapKind, correlation_tables_present,
-    opt_text, upsert_commit_session,
+    CommitEvidence, CommitRelation, CommitSessionRecord, GitCorrelationError, SpanOverlapKind,
+    correlation_tables_present, opt_text, upsert_commit_session,
 };
 
 const COMMIT_SWEEP_WATERMARK_KEY: &str = "commit_attribution_watermark";
@@ -81,10 +81,9 @@ pub fn commit_overlap_kind(
     }
 }
 
-/// Attributes one commit to every span whose window contains it, preferring
-/// `WithinSpan` matches. Returns one record per `(span provider, session)`
-/// pair so a commit made while several sessions were concurrently active on
-/// the same branch is attributed to all of them.
+/// Records that every matching span observed a commit. Time overlap is
+/// candidate evidence only: concurrent sessions must never be labelled as
+/// producers without a direct tool/host event.
 pub fn match_commit_to_spans(
     commit_sha: &str,
     branch: Option<&str>,
@@ -111,6 +110,15 @@ pub fn match_commit_to_spans(
             committed_at,
             span_overlap_kind: kind,
             span_id: Some(span.span_id),
+            relation: CommitRelation::Observed,
+            evidence: CommitEvidence::TimeOverlap,
+            confidence: match kind {
+                SpanOverlapKind::Direct => 100,
+                SpanOverlapKind::WithinSpan => 20,
+                SpanOverlapKind::ExtendedWindow => 10,
+                SpanOverlapKind::Reflog => 30,
+            },
+            evidence_message_id: None,
         });
     }
     records

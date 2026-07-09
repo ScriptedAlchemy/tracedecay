@@ -12,10 +12,24 @@ use std::fmt::Write as _;
 use libsql::{Connection, Value, params};
 use serde::{Deserialize, Serialize};
 
+use super::SessionMessageRecord;
+
 /// Schema version recorded in `session_schema_migrations`.
-pub const GIT_CORRELATION_SCHEMA_VERSION: i64 = 2;
+pub const GIT_CORRELATION_SCHEMA_VERSION: i64 = 3;
 
 const MIGRATION_NAME: &str = "git_correlation";
+
+const MESSAGE_WORKTREE_KEYS: [&str; 9] = [
+    "codex_turn_worktree",
+    "claude_message_worktree",
+    "cursor_event_worktree",
+    "kiro_workspace_worktree",
+    "cline_like_task_worktree",
+    "vibe_session_worktree",
+    "codex_session_worktree",
+    "claude_session_worktree",
+    "hermes_session_worktree",
+];
 
 /// Default gap (seconds) within which a new observation extends the newest
 /// matching span instead of opening a new one. Tool-use events inside one
@@ -92,6 +106,8 @@ impl SpanSource {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SpanOverlapKind {
+    /// Direct producer evidence, not a span/time inference.
+    Direct,
     /// Commit time fell strictly inside `[first_ts, last_ts]` of a span on
     /// the same branch/worktree.
     WithinSpan,
@@ -106,6 +122,7 @@ pub enum SpanOverlapKind {
 impl SpanOverlapKind {
     pub const fn as_str(self) -> &'static str {
         match self {
+            Self::Direct => "direct",
             Self::WithinSpan => "within_span",
             Self::ExtendedWindow => "extended_window",
             Self::Reflog => "reflog",
@@ -114,10 +131,107 @@ impl SpanOverlapKind {
 
     pub fn from_db(value: &str) -> Option<Self> {
         match value {
+            "direct" => Some(Self::Direct),
             "within_span" => Some(Self::WithinSpan),
             "extended_window" => Some(Self::ExtendedWindow),
             "reflog" => Some(Self::Reflog),
             _ => None,
+        }
+    }
+}
+
+/// What a commit/session relationship actually proves.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CommitRelation {
+    /// Direct evidence says this session created the commit.
+    Produced,
+    /// The session merely saw the commit or overlapped it in time.
+    Observed,
+}
+
+impl CommitRelation {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Produced => "produced",
+            Self::Observed => "observed",
+        }
+    }
+
+    pub fn from_db(value: &str) -> Option<Self> {
+        match value {
+            "produced" => Some(Self::Produced),
+            "observed" => Some(Self::Observed),
+            _ => None,
+        }
+    }
+}
+
+/// Durable evidence class behind a commit relationship.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CommitEvidence {
+    /// Successful tool result containing the produced commit ref.
+    ToolResult,
+    /// Exact host-emitted commit event.
+    HostEvent,
+    /// The host reported this commit as current HEAD.
+    HeadObservation,
+    /// Reconstructed from reflog branch history plus a session window.
+    ReflogOverlap,
+    /// Inferred only from branch/worktree/time overlap.
+    TimeOverlap,
+}
+
+impl CommitEvidence {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::ToolResult => "tool_result",
+            Self::HostEvent => "host_event",
+            Self::HeadObservation => "head_observation",
+            Self::ReflogOverlap => "reflog_overlap",
+            Self::TimeOverlap => "time_overlap",
+        }
+    }
+
+    pub fn from_db(value: &str) -> Option<Self> {
+        match value {
+            "tool_result" => Some(Self::ToolResult),
+            "host_event" => Some(Self::HostEvent),
+            "head_observation" => Some(Self::HeadObservation),
+            "reflog_overlap" => Some(Self::ReflogOverlap),
+            "time_overlap" => Some(Self::TimeOverlap),
+            _ => None,
+        }
+    }
+}
+
+/// Relation selector for commit queries. Producer evidence is the safe default.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum CommitRelationFilter {
+    #[default]
+    Produced,
+    Observed,
+    All,
+}
+
+impl CommitRelationFilter {
+    pub fn parse(value: Option<&str>) -> Result<Self, GitCorrelationError> {
+        match value.unwrap_or("produced") {
+            "produced" => Ok(Self::Produced),
+            "observed" => Ok(Self::Observed),
+            "all" => Ok(Self::All),
+            other => Err(GitCorrelationError::InvalidArgument(format!(
+                "relation must be one of produced, observed, all (got `{other}`)"
+            ))),
+        }
+    }
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Produced => "produced",
+            Self::Observed => "observed",
+            Self::All => "all",
         }
     }
 }
@@ -167,6 +281,12 @@ pub struct CommitSessionRecord {
     pub span_overlap_kind: SpanOverlapKind,
     /// Span row that claimed the commit, when attribution was span-based.
     pub span_id: Option<i64>,
+    pub relation: CommitRelation,
+    pub evidence: CommitEvidence,
+    /// Evidence-class confidence on a fixed 0-100 scale.
+    pub confidence: i64,
+    /// Source message or host event that supplied direct evidence, when known.
+    pub evidence_message_id: Option<String>,
 }
 
 /// A parsed, validated git reference to correlate sessions against.
@@ -299,6 +419,14 @@ pub struct SessionGitCorrelationHit {
     pub committed_at: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub span_overlap_kind: Option<SpanOverlapKind>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub relation: Option<CommitRelation>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub evidence: Option<CommitEvidence>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub confidence: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub evidence_message_id: Option<String>,
 }
 
 #[allow(clippy::trivially_copy_pass_by_ref)] // serde skip_serializing_if signature
@@ -397,19 +525,31 @@ pub fn span_debounce_key(
 pub(crate) async fn ensure_git_correlation_schema(
     conn: &Connection,
 ) -> Result<(), GitCorrelationError> {
-    if schema_version(conn)
-        .await
-        .is_some_and(|version| version >= GIT_CORRELATION_SCHEMA_VERSION)
-    {
-        return Ok(());
-    }
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS session_schema_migrations (
             name TEXT PRIMARY KEY,
             version INTEGER NOT NULL,
             applied_at INTEGER NOT NULL DEFAULT (unixepoch())
-        );
-        CREATE TABLE IF NOT EXISTS session_git_spans (
+        );",
+    )
+    .await?;
+    let version = schema_version(conn).await?;
+    if version.is_some_and(|version| version > GIT_CORRELATION_SCHEMA_VERSION) {
+        return Err(GitCorrelationError::Db(format!(
+            "database uses newer git correlation schema {} (this binary supports {})",
+            version.unwrap_or_default(),
+            GIT_CORRELATION_SCHEMA_VERSION
+        )));
+    }
+    if version == Some(GIT_CORRELATION_SCHEMA_VERSION) {
+        return Ok(());
+    }
+    let rebuild_commit_table = table_exists(conn, "commit_sessions").await?;
+
+    conn.execute("BEGIN IMMEDIATE", ()).await?;
+    let migration = async {
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS session_git_spans (
             span_id INTEGER PRIMARY KEY AUTOINCREMENT,
             provider TEXT NOT NULL DEFAULT '',
             session_id TEXT NOT NULL,
@@ -430,7 +570,22 @@ pub(crate) async fn ensure_git_correlation_schema(
             ON session_git_spans(branch, last_ts);
         CREATE INDEX IF NOT EXISTS idx_session_git_spans_worktree
             ON session_git_spans(worktree, last_ts);
-        CREATE TABLE IF NOT EXISTS commit_sessions (
+        CREATE TABLE IF NOT EXISTS git_correlation_meta (
+            key TEXT PRIMARY KEY,
+            value INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL DEFAULT (unixepoch())
+        );",
+        )
+        .await?;
+        if rebuild_commit_table {
+            conn.execute(
+                "ALTER TABLE commit_sessions RENAME TO commit_sessions_legacy_v3",
+                (),
+            )
+            .await?;
+        }
+        conn.execute_batch(
+            "CREATE TABLE commit_sessions (
             commit_sha TEXT NOT NULL,
             provider TEXT NOT NULL DEFAULT '',
             session_id TEXT NOT NULL,
@@ -438,47 +593,256 @@ pub(crate) async fn ensure_git_correlation_schema(
             worktree TEXT,
             committed_at INTEGER NOT NULL,
             span_overlap_kind TEXT NOT NULL
-                CHECK(span_overlap_kind IN ('within_span', 'extended_window', 'reflog')),
+                CHECK(span_overlap_kind IN ('direct', 'within_span', 'extended_window', 'reflog')),
             span_id INTEGER,
+            relation TEXT NOT NULL DEFAULT 'observed'
+                CHECK(relation IN ('produced', 'observed')),
+            evidence TEXT NOT NULL DEFAULT 'time_overlap'
+                CHECK(evidence IN ('tool_result', 'host_event', 'head_observation', 'reflog_overlap', 'time_overlap')),
+            confidence INTEGER NOT NULL DEFAULT 20
+                CHECK(confidence BETWEEN 0 AND 100),
+            evidence_message_id TEXT,
             created_at INTEGER NOT NULL DEFAULT (unixepoch()),
             PRIMARY KEY(commit_sha, provider, session_id)
-        );
-        CREATE INDEX IF NOT EXISTS idx_commit_sessions_session
-            ON commit_sessions(provider, session_id, committed_at);
-        CREATE INDEX IF NOT EXISTS idx_commit_sessions_branch
-            ON commit_sessions(branch, committed_at);
-        CREATE TABLE IF NOT EXISTS git_correlation_meta (
-            key TEXT PRIMARY KEY,
-            value INTEGER NOT NULL,
-            updated_at INTEGER NOT NULL DEFAULT (unixepoch())
         );",
-    )
-    .await?;
-    conn.execute(
-        "INSERT INTO session_schema_migrations(name, version)
+        )
+        .await?;
+        if rebuild_commit_table {
+            conn.execute(
+                "INSERT INTO commit_sessions (
+                    commit_sha, provider, session_id, branch, worktree,
+                    committed_at, span_overlap_kind, span_id,
+                    relation, evidence, confidence, evidence_message_id, created_at
+                 )
+                 SELECT commit_sha, provider, session_id, branch, worktree,
+                    committed_at, span_overlap_kind, span_id,
+                    'observed',
+                    CASE WHEN span_overlap_kind = 'reflog'
+                         THEN 'reflog_overlap' ELSE 'time_overlap' END,
+                    CASE WHEN span_overlap_kind = 'reflog' THEN 30 ELSE 20 END,
+                    NULL, created_at
+                 FROM commit_sessions_legacy_v3",
+                (),
+            )
+            .await?;
+            conn.execute("DROP TABLE commit_sessions_legacy_v3", ())
+                .await?;
+        }
+        conn.execute_batch(
+            "CREATE INDEX IF NOT EXISTS idx_commit_sessions_session
+                ON commit_sessions(provider, session_id, committed_at);
+             CREATE INDEX IF NOT EXISTS idx_commit_sessions_branch
+                ON commit_sessions(branch, committed_at);",
+        )
+        .await?;
+        conn.execute(
+            "INSERT INTO session_schema_migrations(name, version)
          VALUES (?1, ?2)
          ON CONFLICT(name) DO UPDATE SET
             version = excluded.version,
             applied_at = unixepoch()",
-        params![MIGRATION_NAME, GIT_CORRELATION_SCHEMA_VERSION],
-    )
-    .await?;
-    Ok(())
+            params![MIGRATION_NAME, GIT_CORRELATION_SCHEMA_VERSION],
+        )
+        .await?;
+        Ok::<(), GitCorrelationError>(())
+    }
+    .await;
+    match migration {
+        Ok(()) => {
+            if let Err(err) = conn.execute("COMMIT", ()).await {
+                let _ = conn.execute("ROLLBACK", ()).await;
+                Err(err.into())
+            } else {
+                Ok(())
+            }
+        }
+        Err(err) => {
+            let _ = conn.execute("ROLLBACK", ()).await;
+            Err(err)
+        }
+    }
 }
 
-async fn schema_version(conn: &Connection) -> Option<i64> {
+async fn schema_version(conn: &Connection) -> Result<Option<i64>, GitCorrelationError> {
     let mut rows = conn
         .query(
             "SELECT version FROM session_schema_migrations WHERE name = ?1",
             params![MIGRATION_NAME],
         )
-        .await
-        .ok()?;
-    rows.next().await.ok()??.get(0).ok()
+        .await?;
+    rows.next()
+        .await?
+        .map(|row| row.get(0).map_err(GitCorrelationError::from))
+        .transpose()
+}
+
+async fn table_exists(conn: &Connection, table: &str) -> Result<bool, GitCorrelationError> {
+    let mut rows = conn
+        .query(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
+            params![table],
+        )
+        .await?;
+    Ok(rows
+        .next()
+        .await?
+        .is_some_and(|row| row.get::<i64>(0).ok() == Some(1)))
 }
 
 fn opt_text(value: Option<&str>) -> Value {
     value.map_or(Value::Null, |text| Value::Text(text.to_string()))
+}
+
+/// Resolves provider-reported commit candidates against the repository and
+/// turns them into durable producer evidence. Ambiguous, missing, or non-commit
+/// object ids are ignored; transcript ingest can safely retry them later.
+pub(crate) fn direct_commit_records(
+    messages: &[SessionMessageRecord],
+    project_root: &std::path::Path,
+) -> Vec<CommitSessionRecord> {
+    if !messages.iter().any(|message| {
+        message
+            .metadata_json
+            .as_deref()
+            .is_some_and(|json| json.contains("\"produced_commit_candidates\""))
+    }) {
+        return Vec::new();
+    }
+    let Ok(repo) = gix::discover(project_root) else {
+        return Vec::new();
+    };
+    let mut seen = HashSet::new();
+    let mut records = Vec::new();
+    for message in messages {
+        let Some(metadata_value) = message
+            .metadata_json
+            .as_deref()
+            .and_then(|json| serde_json::from_str::<serde_json::Value>(json).ok())
+        else {
+            continue;
+        };
+        let Some(metadata) = metadata_value.as_object() else {
+            continue;
+        };
+        let Some(candidates) = metadata
+            .get("produced_commit_candidates")
+            .and_then(serde_json::Value::as_array)
+        else {
+            continue;
+        };
+        for candidate in candidates.iter().filter_map(serde_json::Value::as_str) {
+            if !(7..=64).contains(&candidate.len())
+                || !candidate.chars().all(|ch| ch.is_ascii_hexdigit())
+            {
+                continue;
+            }
+            let Ok(spec) = repo.rev_parse_single(candidate) else {
+                continue;
+            };
+            let Ok(object) = spec.object() else {
+                continue;
+            };
+            let Ok(commit) = object.try_into_commit() else {
+                continue;
+            };
+            let sha = commit.id.to_string();
+            if !seen.insert((
+                sha.clone(),
+                message.provider.clone(),
+                message.session_id.clone(),
+            )) {
+                continue;
+            }
+            let worktree = metadata_worktree(metadata)
+                .map(normalize_worktree)
+                .or_else(|| Some(normalize_worktree(&project_root.to_string_lossy())));
+            let branch = metadata
+                .get("git_branch")
+                .or_else(|| metadata.get("codex_git_branch"))
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string);
+            let committed_at = commit.time().ok().map_or_else(
+                || message.timestamp.unwrap_or_default(),
+                |time| time.seconds,
+            );
+            let evidence = match metadata
+                .get("produced_commit_evidence")
+                .and_then(serde_json::Value::as_str)
+            {
+                Some("host_event") => CommitEvidence::HostEvent,
+                _ => CommitEvidence::ToolResult,
+            };
+            records.push(CommitSessionRecord {
+                commit_sha: sha,
+                provider: message.provider.clone(),
+                session_id: message.session_id.clone(),
+                branch,
+                worktree,
+                committed_at,
+                span_overlap_kind: SpanOverlapKind::Direct,
+                span_id: None,
+                relation: CommitRelation::Produced,
+                evidence,
+                confidence: 100,
+                evidence_message_id: Some(message.message_id.clone()),
+            });
+        }
+    }
+    records
+}
+
+/// Derives durable branch/worktree observations from provider message
+/// metadata. These rows survive worktree deletion and make transcript ingest,
+/// rather than a live hook, the source of truth for historical locations.
+pub(crate) fn ingest_span_observations(messages: &[SessionMessageRecord]) -> Vec<SpanObservation> {
+    let mut observations = Vec::new();
+    for message in messages {
+        let Some(ts) = message.timestamp else {
+            continue;
+        };
+        let Some(json) = message.metadata_json.as_deref() else {
+            continue;
+        };
+        if !json.contains("_worktree\"") {
+            continue;
+        }
+        let Some(metadata_value) = serde_json::from_str::<serde_json::Value>(json).ok() else {
+            continue;
+        };
+        let Some(metadata) = metadata_value.as_object() else {
+            continue;
+        };
+        let Some(worktree) = metadata_worktree(metadata).filter(|path| !path.is_empty()) else {
+            continue;
+        };
+        let branch = metadata
+            .get("git_branch")
+            .or_else(|| metadata.get("codex_git_branch"))
+            .and_then(serde_json::Value::as_str)
+            .filter(|branch| !branch.is_empty())
+            .map(str::to_string);
+        let thread_id = metadata
+            .get("turn_id")
+            .and_then(serde_json::Value::as_str)
+            .filter(|id| !id.is_empty())
+            .map(str::to_string);
+        observations.push(SpanObservation {
+            provider: message.provider.clone(),
+            session_id: message.session_id.clone(),
+            thread_id,
+            branch,
+            worktree: normalize_worktree(worktree),
+            ts,
+            source: SpanSource::Ingest,
+        });
+    }
+    observations
+}
+
+fn metadata_worktree(metadata: &serde_json::Map<String, serde_json::Value>) -> Option<&str> {
+    MESSAGE_WORKTREE_KEYS
+        .into_iter()
+        .find_map(|key| metadata.get(key).and_then(serde_json::Value::as_str))
 }
 
 /// Folds one observation into the span table: extends the newest span for
@@ -511,7 +875,7 @@ pub(crate) async fn record_span_observation(
     }
 }
 
-async fn record_span_observation_in_transaction(
+pub(crate) async fn record_span_observation_in_transaction(
     conn: &Connection,
     observation: &SpanObservation,
     merge_gap_secs: i64,
@@ -578,9 +942,9 @@ async fn record_span_observation_in_transaction(
     Ok(conn.last_insert_rowid())
 }
 
-/// Inserts one commit attribution row; existing rows win (idempotent for
-/// re-runs of live attribution and the backfill command). Returns `true`
-/// when a new row was inserted.
+/// Inserts one commit attribution row. Stronger evidence replaces weaker
+/// evidence; identical or weaker replays are no-ops. Returns `true` when the
+/// row was inserted or strengthened.
 pub(crate) async fn upsert_commit_session(
     conn: &Connection,
     record: &CommitSessionRecord,
@@ -588,11 +952,25 @@ pub(crate) async fn upsert_commit_session(
     let worktree = record.worktree.as_deref().map(normalize_worktree);
     let inserted = conn
         .execute(
-            "INSERT OR IGNORE INTO commit_sessions (
+            "INSERT INTO commit_sessions (
                 commit_sha, provider, session_id, branch, worktree,
-                committed_at, span_overlap_kind, span_id
+                committed_at, span_overlap_kind, span_id,
+                relation, evidence, confidence, evidence_message_id
              )
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+             ON CONFLICT(commit_sha, provider, session_id) DO UPDATE SET
+                branch = excluded.branch,
+                worktree = excluded.worktree,
+                committed_at = excluded.committed_at,
+                span_overlap_kind = excluded.span_overlap_kind,
+                span_id = excluded.span_id,
+                relation = excluded.relation,
+                evidence = excluded.evidence,
+                confidence = excluded.confidence,
+                evidence_message_id = excluded.evidence_message_id
+             WHERE (excluded.relation = 'produced' AND commit_sessions.relation != 'produced')
+                OR (excluded.relation = commit_sessions.relation
+                    AND excluded.confidence > commit_sessions.confidence)",
             params![
                 record.commit_sha.as_str(),
                 record.provider.as_str(),
@@ -602,6 +980,10 @@ pub(crate) async fn upsert_commit_session(
                 record.committed_at,
                 record.span_overlap_kind.as_str(),
                 record.span_id.map_or(Value::Null, Value::Integer),
+                record.relation.as_str(),
+                record.evidence.as_str(),
+                record.confidence,
+                opt_text(record.evidence_message_id.as_deref()),
             ],
         )
         .await?;
@@ -622,6 +1004,14 @@ pub(crate) use attribution::{read_meta_value, run_commit_attribution_sweep, writ
 pub(crate) async fn sessions_for(
     conn: &Connection,
     query: &SessionsForQuery,
+) -> Result<Vec<SessionGitCorrelationHit>, GitCorrelationError> {
+    sessions_for_with_relation(conn, query, CommitRelationFilter::Produced).await
+}
+
+pub(crate) async fn sessions_for_with_relation(
+    conn: &Connection,
+    query: &SessionsForQuery,
+    relation: CommitRelationFilter,
 ) -> Result<Vec<SessionGitCorrelationHit>, GitCorrelationError> {
     // Read-only opens never run DDL, so a store written before this schema
     // existed simply has no correlation rows yet — report that as "no
@@ -651,7 +1041,7 @@ pub(crate) async fn sessions_for(
             )
             .await
         }
-        GitRefFilter::Commit(sha) => commit_hits(conn, sha, query, limit).await,
+        GitRefFilter::Commit(sha) => commit_hits(conn, sha, query, relation, limit).await,
     }
 }
 
@@ -721,7 +1111,8 @@ async fn commit_session_ids(
     let mut rows = conn
         .query(
             "SELECT DISTINCT provider, session_id FROM commit_sessions
-             WHERE commit_sha = ?1 OR commit_sha LIKE ?2",
+             WHERE relation = 'produced'
+               AND (commit_sha = ?1 OR commit_sha LIKE ?2)",
             params![sha, format!("{sha}%")],
         )
         .await?;
@@ -766,7 +1157,7 @@ pub(crate) fn git_scope_exists_clauses(
         clauses.push((
             format!(
                 "EXISTS (SELECT 1 FROM commit_sessions c \
-                 WHERE c.session_id = {session_column} \
+                 WHERE c.session_id = {session_column} AND c.relation = 'produced' \
                  AND (c.commit_sha = ? OR c.commit_sha LIKE ?))"
             ),
             vec![
@@ -845,6 +1236,14 @@ impl CorrelationIndexHealth {
     /// populated index that simply had no rows matching a given git ref.
     pub const fn is_empty(&self) -> bool {
         self.span_count == 0
+    }
+
+    /// Whether the index lacks the row family needed by this reference kind.
+    pub const fn is_empty_for(&self, git_ref: &GitRefFilter) -> bool {
+        match git_ref {
+            GitRefFilter::Branch(_) | GitRefFilter::Worktree(_) => self.span_count == 0,
+            GitRefFilter::Commit(_) => self.commit_count == 0,
+        }
     }
 }
 
@@ -946,6 +1345,10 @@ async fn span_hits(
             commit_sha: None,
             committed_at: None,
             span_overlap_kind: None,
+            relation: None,
+            evidence: None,
+            confidence: None,
+            evidence_message_id: None,
         });
     }
     Ok(hits)
@@ -964,16 +1367,22 @@ async fn commit_hits(
     conn: &Connection,
     sha: &str,
     query: &SessionsForQuery,
+    relation: CommitRelationFilter,
     limit: i64,
 ) -> Result<Vec<SessionGitCorrelationHit>, GitCorrelationError> {
     let mut sql = "SELECT provider, session_id, branch, worktree,
-                commit_sha, committed_at, span_overlap_kind
+                commit_sha, committed_at, span_overlap_kind,
+                relation, evidence, confidence, evidence_message_id
          FROM commit_sessions
          WHERE (commit_sha = ?1 OR commit_sha LIKE ?2)"
         .to_string();
     // `parse_commit_sha` guarantees hex-only input, so the LIKE pattern
     // cannot contain wildcards other than the appended one.
     let mut query_params = vec![Value::Text(sha.to_string()), Value::Text(format!("{sha}%"))];
+    if relation != CommitRelationFilter::All {
+        query_params.push(Value::Text(relation.as_str().to_string()));
+        let _ = write!(sql, " AND relation = ?{}", query_params.len());
+    }
     if let Some(since) = query.since {
         query_params.push(Value::Integer(since));
         let _ = write!(sql, " AND committed_at >= ?{}", query_params.len());
@@ -993,6 +1402,8 @@ async fn commit_hits(
     let mut hits = Vec::new();
     while let Some(row) = rows.next().await? {
         let overlap: String = row.get(6)?;
+        let relation: String = row.get(7)?;
+        let evidence: String = row.get(8)?;
         hits.push(SessionGitCorrelationHit {
             provider: row.get(0)?,
             session_id: row.get(1)?,
@@ -1006,6 +1417,10 @@ async fn commit_hits(
             commit_sha: row.get(4)?,
             committed_at: row.get(5)?,
             span_overlap_kind: SpanOverlapKind::from_db(&overlap),
+            relation: CommitRelation::from_db(&relation),
+            evidence: CommitEvidence::from_db(&evidence),
+            confidence: row.get(9)?,
+            evidence_message_id: row.get(10)?,
         });
     }
     Ok(hits)

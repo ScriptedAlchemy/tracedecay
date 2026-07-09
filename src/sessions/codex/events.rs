@@ -501,6 +501,17 @@ fn exec_command_row(
         "success".to_string(),
         success.map_or(Value::Null, Value::Bool),
     );
+    if success == Some(true) {
+        let candidates = output
+            .map(|output| produced_commit_candidates(&exec.cmd, output))
+            .unwrap_or_default();
+        if !candidates.is_empty() {
+            metadata.insert(
+                "produced_commit_candidates".to_string(),
+                Value::Array(candidates.into_iter().map(Value::String).collect()),
+            );
+        }
+    }
 
     build_row(
         meta,
@@ -514,6 +525,69 @@ fn exec_command_row(
         Some("exec_command".to_string()),
         &Value::Object(metadata),
     )
+}
+
+fn produced_commit_candidates(command: &str, wrapped_output: &str) -> Vec<String> {
+    let creates_commit = command
+        .split([';', '\n', '&', '|'])
+        .any(segment_creates_commit);
+    if !creates_commit {
+        return Vec::new();
+    }
+
+    let output = wrapped_output
+        .rsplit_once("\nOutput:\n")
+        .map_or(wrapped_output, |(_, output)| output);
+    let reports_head = command
+        .split([';', '\n', '&', '|'])
+        .any(segment_reports_head);
+    let mut candidates = Vec::new();
+    for line in output.lines() {
+        let trimmed = line.trim();
+        let bracket_candidate = trimmed
+            .strip_prefix('[')
+            .and_then(|line| line.split_once(']'))
+            .and_then(|(header, _)| header.split_whitespace().next_back())
+            .map(|token| token.trim_matches(|ch: char| !ch.is_ascii_hexdigit()));
+        let exact_head = reports_head.then_some(trimmed).filter(|candidate| {
+            matches!(candidate.len(), 40 | 64) && candidate.chars().all(|ch| ch.is_ascii_hexdigit())
+        });
+        for candidate in bracket_candidate.into_iter().chain(exact_head) {
+            if candidate.len() >= 7
+                && candidate.chars().all(|ch| ch.is_ascii_hexdigit())
+                && !candidates.iter().any(|known| known == candidate)
+            {
+                candidates.push(candidate.to_ascii_lowercase());
+            }
+        }
+    }
+    candidates
+}
+
+fn segment_reports_head(segment: &str) -> bool {
+    let tokens: Vec<_> = segment.split_whitespace().collect();
+    tokens
+        .windows(3)
+        .any(|tokens| tokens == ["git", "rev-parse", "HEAD"])
+}
+
+fn segment_creates_commit(segment: &str) -> bool {
+    let mut tokens = segment.split_whitespace();
+    let Some(git) = tokens.next() else {
+        return false;
+    };
+    if git.trim_matches(['\'', '"']) != "git" {
+        return false;
+    }
+    let mut subcommand = tokens.next();
+    while matches!(subcommand, Some("-C" | "-c" | "--git-dir" | "--work-tree")) {
+        let _ = tokens.next();
+        subcommand = tokens.next();
+    }
+    matches!(
+        subcommand,
+        Some("commit" | "cherry-pick" | "revert" | "merge")
+    ) || subcommand == Some("rebase") && tokens.any(|token| token == "--continue")
 }
 
 fn patch_apply_row(
@@ -1034,6 +1108,55 @@ mod tests {
         assert_eq!(md["exit_code"], 0);
         assert_eq!(md["wall_time_s"], 1.5);
         assert_eq!(md["success"], true);
+    }
+
+    #[test]
+    fn successful_git_commit_output_records_only_resolvable_candidates() {
+        let mut state = CodexStructuredState::new();
+        let path = std::path::Path::new("/tmp/rollout.jsonl");
+        let call = json!({
+            "type": "response_item",
+            "payload": {
+                "type": "function_call",
+                "name": "exec_command",
+                "arguments": "{\"cmd\":\"git commit -m test && git rev-parse HEAD\"}",
+                "call_id": "commit-call"
+            }
+        });
+        state
+            .event_from_line(&call, &meta(), None, path, 10)
+            .unwrap();
+        let output = json!({
+            "type": "response_item",
+            "payload": {
+                "type": "function_call_output",
+                "call_id": "commit-call",
+                "output": "Chunk ID: deadbe\nProcess exited with code 0\nOutput:\n[main abcdef1] test\n0123456789abcdef0123456789abcdef01234567\n"
+            }
+        });
+        let rows = state
+            .event_from_line(&output, &meta(), None, path, 20)
+            .unwrap();
+        let md = metadata_of(&rows[0]);
+        assert_eq!(
+            md["produced_commit_candidates"],
+            json!(["abcdef1", "0123456789abcdef0123456789abcdef01234567"])
+        );
+    }
+
+    #[test]
+    fn failed_or_non_commit_commands_never_claim_commit_production() {
+        assert!(produced_commit_candidates("git status", "Output:\nabcdef1").is_empty());
+        assert!(
+            produced_commit_candidates("rg git commit", "Output:\n[main abcdef1] test").is_empty()
+        );
+        assert_eq!(
+            produced_commit_candidates(
+                "git commit -m 0123456789abcdef0123456789abcdef01234567",
+                "Output:\n[main abcdef1] 0123456789abcdef0123456789abcdef01234567"
+            ),
+            vec!["abcdef1"]
+        );
     }
 
     #[test]

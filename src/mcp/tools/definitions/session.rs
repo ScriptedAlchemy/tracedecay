@@ -85,7 +85,7 @@ pub(super) fn def_sessions_for() -> ToolDefinition {
     def(
         "tracedecay_sessions_for",
         "Sessions For Git Ref",
-        "Find agent sessions correlated with a git artifact in the active project: all sessions active on a branch, in a worktree, or attributed to a commit (the conversations that produced it). Attribution is span-based, so mid-session branch switches are respected. Supports time-scoped queries via since/until.",
+        "Find agent sessions correlated with a git artifact in the active project: sessions active on a branch or worktree, or sessions with evidence that they produced or observed a commit. Commit queries default to direct producer evidence; use relation=observed/all for weaker historical overlap. Supports time-scoped queries via since/until.",
         json!({
             "type": "object",
             "properties": {
@@ -100,6 +100,11 @@ pub(super) fn def_sessions_for() -> ToolDefinition {
                 },
                 "since": time_filter_schema("Optional inclusive minimum activity/commit timestamp. Integer strings and timezone-aware ISO/RFC3339 strings are accepted."),
                 "until": time_filter_schema("Optional inclusive maximum activity/commit timestamp. Integer strings and timezone-aware ISO/RFC3339 strings are accepted."),
+                "relation": {
+                    "type": "string",
+                    "enum": ["produced", "observed", "all"],
+                    "description": "Commit relationship to return (default: produced). produced requires direct creation evidence; observed is weaker HEAD/reflog/time-overlap evidence. Ignored for branch/worktree queries."
+                },
                 "limit": {
                     "type": "integer",
                     "minimum": 1,

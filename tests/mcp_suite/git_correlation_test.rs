@@ -11,7 +11,8 @@ use serde_json::{Value, json};
 
 use tracedecay::global_db::GlobalDb;
 use tracedecay::sessions::git_correlation::{
-    CommitSessionRecord, DEFAULT_SPAN_MERGE_GAP_SECS, SpanObservation, SpanOverlapKind, SpanSource,
+    CommitEvidence, CommitRelation, CommitSessionRecord, DEFAULT_SPAN_MERGE_GAP_SECS,
+    SpanObservation, SpanOverlapKind, SpanSource,
 };
 use tracedecay::sessions::{SessionMessageRecord, SessionRecord};
 use tracedecay::tracedecay::{TraceDecay, TraceDecayOpenOptions};
@@ -241,8 +242,30 @@ async fn sessions_for_and_scoped_search_end_to_end() {
             branch: Some("feature/session".to_string()),
             worktree: Some(feature_worktree.clone()),
             committed_at: 8_850,
+            span_overlap_kind: SpanOverlapKind::Direct,
+            span_id: None,
+            relation: CommitRelation::Produced,
+            evidence: CommitEvidence::ToolResult,
+            confidence: 100,
+            evidence_message_id: Some("commit-tool-result".to_string()),
+        })
+        .await
+        .unwrap()
+    );
+    assert!(
+        db.git_upsert_commit_session(&CommitSessionRecord {
+            commit_sha: "abcdef1234567890abcdef1234567890abcdef12".to_string(),
+            provider: "claude".to_string(),
+            session_id: "s2".to_string(),
+            branch: Some("feature/session".to_string()),
+            worktree: Some(feature_worktree.clone()),
+            committed_at: 8_850,
             span_overlap_kind: SpanOverlapKind::WithinSpan,
             span_id: None,
+            relation: CommitRelation::Observed,
+            evidence: CommitEvidence::TimeOverlap,
+            confidence: 20,
+            evidence_message_id: None,
         })
         .await
         .unwrap()
@@ -298,7 +321,23 @@ async fn sessions_for_and_scoped_search_end_to_end() {
             by_commit["results"][0]["commit_sha"],
             "abcdef1234567890abcdef1234567890abcdef12"
         );
+        assert_eq!(by_commit["results"][0]["relation"], "produced");
     }
+    let observed_commit = call(
+        &cg,
+        "tracedecay_sessions_for",
+        json!({ "git_ref": "commit", "value": "abcdef12", "relation": "observed" }),
+    )
+    .await;
+    assert_eq!(session_ids(&observed_commit), vec!["s2".to_string()]);
+    assert_eq!(observed_commit["results"][0]["evidence"], "time_overlap");
+    let all_commit = call(
+        &cg,
+        "tracedecay_sessions_for",
+        json!({ "git_ref": "commit", "value": "abcdef12", "relation": "all" }),
+    )
+    .await;
+    assert_eq!(all_commit["count"], 2);
 
     // (d) mid-session branch switch: sessions_for(main) and (feature) both
     // return `switcher`.

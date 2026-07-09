@@ -177,6 +177,10 @@ async fn ingest_one(
     }
 
     let provider = source.provider();
+    let commit_records =
+        crate::sessions::git_correlation::direct_commit_records(&parsed.messages, project_root);
+    let span_observations =
+        crate::sessions::git_correlation::ingest_span_observations(&parsed.messages);
     let draft = parsed.draft;
     let existing = db.get_session(provider, &draft.session_id).await;
     // Preserve the session's original start time and title across appends; only
@@ -217,9 +221,11 @@ async fn ingest_one(
     };
 
     if !db
-        .upsert_transcript_batch(
+        .upsert_transcript_batch_with_git_evidence(
             &session,
             &parsed.messages,
+            &commit_records,
+            &span_observations,
             &path_str,
             ParseOffset {
                 byte_offset: parsed.new_cursor.position,

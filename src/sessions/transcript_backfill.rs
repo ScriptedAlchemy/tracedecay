@@ -406,7 +406,7 @@ fn derive_usage(provider: &str, record: &Value) -> Option<Value> {
 // current parser and inserts message ids missing from legacy stores.
 
 const STRUCTURED_MARKER_NAME: &str = "structured_rows_backfill";
-const STRUCTURED_MARKER_VERSION: i64 = 1;
+const STRUCTURED_MARKER_VERSION: i64 = 2;
 /// Base name of the sweep's path watermark. The live key is namespaced by the
 /// marker version (see [`structured_cursor_key`]) so bumping
 /// [`STRUCTURED_MARKER_VERSION`] naturally starts the re-sweep from a fresh
@@ -478,6 +478,7 @@ pub(crate) async fn backfill_structured_rows(db: &GlobalDb) -> Option<Structured
             load_project_paths_for_source(conn, &candidate.provider, &candidate.source_path)
                 .await?;
         for project_path in project_paths {
+            let project_root = PathBuf::from(&project_path);
             let provider = candidate.provider.clone();
             let source_path = candidate.source_path.clone();
             let messages = match tokio::task::spawn_blocking(move || {
@@ -506,8 +507,23 @@ pub(crate) async fn backfill_structured_rows(db: &GlobalDb) -> Option<Structured
             if messages.is_empty() {
                 continue;
             }
+            let commit_records =
+                crate::sessions::git_correlation::direct_commit_records(&messages, &project_root);
+            let span_observations =
+                crate::sessions::git_correlation::ingest_span_observations(&messages);
             let inserted = db.insert_absent_session_messages(&messages).await?;
             stats.inserted += inserted;
+            for record in &commit_records {
+                db.git_upsert_commit_session(record).await.ok()?;
+            }
+            for observation in &span_observations {
+                db.git_record_span_observation(
+                    observation,
+                    crate::sessions::git_correlation::DEFAULT_SPAN_MERGE_GAP_SECS,
+                )
+                .await
+                .ok()?;
+            }
         }
         stats.files_scanned += 1;
         write_backfill_cursor(conn, &cursor_key, &candidate.source_path).await?;

@@ -77,12 +77,233 @@ fn git_scope_filter_reports_emptiness_and_validates_commit() {
     assert!(GitScopeFilter::from_args(None, None, Some("xyz")).is_err());
 }
 
+#[test]
+fn direct_commit_candidates_resolve_to_producer_evidence() {
+    use std::process::Command;
+
+    let temp = tempfile::tempdir().unwrap();
+    let git = |args: &[&str]| {
+        Command::new("git")
+            .args(args)
+            .current_dir(temp.path())
+            .output()
+            .unwrap()
+    };
+    assert!(git(&["init", "-q"]).status.success());
+    assert!(
+        git(&["config", "user.email", "test@example.com"])
+            .status
+            .success()
+    );
+    assert!(git(&["config", "user.name", "Test"]).status.success());
+    std::fs::write(temp.path().join("file.txt"), "one\n").unwrap();
+    assert!(git(&["add", "file.txt"]).status.success());
+    assert!(git(&["commit", "-q", "-m", "test"]).status.success());
+    let sha = String::from_utf8(git(&["rev-parse", "HEAD"]).stdout)
+        .unwrap()
+        .trim()
+        .to_string();
+    let short = &sha[..8];
+    let message = SessionMessageRecord {
+        provider: "codex".to_string(),
+        message_id: "m1".to_string(),
+        session_id: "s1".to_string(),
+        role: "tool".to_string(),
+        timestamp: Some(10),
+        ordinal: 1,
+        text: "git commit -m test".to_string(),
+        kind: Some("tool_call".to_string()),
+        model: None,
+        tool_names: Some("exec_command".to_string()),
+        source_path: None,
+        source_offset: None,
+        metadata_json: Some(
+            serde_json::json!({
+                "produced_commit_candidates": [short],
+                "codex_git_branch": "main",
+                "codex_turn_worktree": temp.path(),
+            })
+            .to_string(),
+        ),
+    };
+    let records = direct_commit_records(&[message], temp.path());
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].commit_sha, sha);
+    assert_eq!(records[0].relation, CommitRelation::Produced);
+    assert_eq!(records[0].evidence, CommitEvidence::ToolResult);
+    assert_eq!(records[0].evidence_message_id.as_deref(), Some("m1"));
+}
+
+#[test]
+fn transcript_locations_become_durable_ingest_spans() {
+    let message = SessionMessageRecord {
+        provider: "codex".to_string(),
+        message_id: "m1".to_string(),
+        session_id: "s1".to_string(),
+        role: "assistant".to_string(),
+        timestamp: Some(1_234),
+        ordinal: 1,
+        text: "done".to_string(),
+        kind: Some("message".to_string()),
+        model: None,
+        tool_names: None,
+        source_path: None,
+        source_offset: None,
+        metadata_json: Some(
+            serde_json::json!({
+                "codex_session_worktree": "/stale/session",
+                "codex_turn_worktree": "/moved/repo/",
+                "codex_git_branch": "feature/history",
+                "turn_id": "turn-1"
+            })
+            .to_string(),
+        ),
+    };
+    let observations = ingest_span_observations(&[message]);
+    assert_eq!(observations.len(), 1);
+    assert_eq!(observations[0].worktree, "/moved/repo");
+    assert_eq!(observations[0].branch.as_deref(), Some("feature/history"));
+    assert_eq!(observations[0].thread_id.as_deref(), Some("turn-1"));
+    assert_eq!(observations[0].source, SpanSource::Ingest);
+}
+
 #[tokio::test]
 async fn schema_is_idempotent() {
     let conn = test_conn().await;
     ensure_git_correlation_schema(&conn)
         .await
         .expect("second ensure should be a no-op");
+}
+
+#[tokio::test]
+async fn schema_v2_commit_rows_migrate_to_observed_without_becoming_producers() {
+    let db = Builder::new_local(":memory:").build().await.unwrap();
+    let conn = db.connect().unwrap();
+    conn.execute_batch(
+        "CREATE TABLE session_schema_migrations (
+            name TEXT PRIMARY KEY,
+            version INTEGER NOT NULL,
+            applied_at INTEGER NOT NULL DEFAULT (unixepoch())
+         );
+         INSERT INTO session_schema_migrations(name, version)
+            VALUES ('git_correlation', 2);
+         CREATE TABLE session_git_spans (
+            span_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            provider TEXT NOT NULL DEFAULT '',
+            session_id TEXT NOT NULL,
+            thread_id TEXT,
+            branch TEXT,
+            worktree TEXT NOT NULL,
+            first_ts INTEGER NOT NULL,
+            last_ts INTEGER NOT NULL,
+            event_count INTEGER NOT NULL DEFAULT 1,
+            source TEXT NOT NULL,
+            created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+            updated_at INTEGER NOT NULL DEFAULT (unixepoch())
+         );
+         CREATE TABLE commit_sessions (
+            commit_sha TEXT NOT NULL,
+            provider TEXT NOT NULL DEFAULT '',
+            session_id TEXT NOT NULL,
+            branch TEXT,
+            worktree TEXT,
+            committed_at INTEGER NOT NULL,
+            span_overlap_kind TEXT NOT NULL,
+            span_id INTEGER,
+            created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+            PRIMARY KEY(commit_sha, provider, session_id)
+         );
+         CREATE TABLE git_correlation_meta (
+            key TEXT PRIMARY KEY,
+            value INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL DEFAULT (unixepoch())
+         );
+         INSERT INTO commit_sessions(
+            commit_sha, provider, session_id, branch, worktree,
+            committed_at, span_overlap_kind, span_id
+         ) VALUES (
+            'abcdef1234567890abcdef1234567890abcdef12',
+            'claude', 'observed-session', 'main', '/repo', 1150,
+            'within_span', NULL
+         );",
+    )
+    .await
+    .unwrap();
+
+    ensure_git_correlation_schema(&conn).await.unwrap();
+    let query = SessionsForQuery {
+        git_ref: GitRefFilter::Commit("abcdef12".to_string()),
+        since: None,
+        until: None,
+        limit: 10,
+    };
+    assert!(
+        sessions_for(&conn, &query).await.unwrap().is_empty(),
+        "migrated overlap rows must not satisfy producer-default queries"
+    );
+    let observed = sessions_for_with_relation(&conn, &query, CommitRelationFilter::Observed)
+        .await
+        .unwrap();
+    assert_eq!(observed.len(), 1);
+    assert_eq!(observed[0].relation, Some(CommitRelation::Observed));
+    assert_eq!(observed[0].evidence, Some(CommitEvidence::TimeOverlap));
+    assert_eq!(observed[0].confidence, Some(20));
+
+    let produced = CommitSessionRecord {
+        commit_sha: "1111111111111111111111111111111111111111".to_string(),
+        provider: "codex".to_string(),
+        session_id: "producer-session".to_string(),
+        branch: Some("main".to_string()),
+        worktree: Some("/repo".to_string()),
+        committed_at: 1200,
+        span_overlap_kind: SpanOverlapKind::Direct,
+        span_id: None,
+        relation: CommitRelation::Produced,
+        evidence: CommitEvidence::ToolResult,
+        confidence: 100,
+        evidence_message_id: Some("m1".to_string()),
+    };
+    assert!(upsert_commit_session(&conn, &produced).await.unwrap());
+    let produced_hits = sessions_for(
+        &conn,
+        &SessionsForQuery {
+            git_ref: GitRefFilter::Commit("11111111".to_string()),
+            since: None,
+            until: None,
+            limit: 10,
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        produced_hits[0].span_overlap_kind,
+        Some(SpanOverlapKind::Direct)
+    );
+
+    ensure_git_correlation_schema(&conn)
+        .await
+        .expect("v3 migration must be repeat-safe");
+}
+
+#[tokio::test]
+async fn future_git_correlation_schema_is_rejected_without_rewrite() {
+    let db = Builder::new_local(":memory:").build().await.unwrap();
+    let conn = db.connect().unwrap();
+    conn.execute_batch(
+        "CREATE TABLE session_schema_migrations (
+            name TEXT PRIMARY KEY,
+            version INTEGER NOT NULL,
+            applied_at INTEGER NOT NULL DEFAULT (unixepoch())
+         );
+         INSERT INTO session_schema_migrations(name, version)
+            VALUES ('git_correlation', 99);",
+    )
+    .await
+    .unwrap();
+
+    let err = ensure_git_correlation_schema(&conn).await.unwrap_err();
+    assert!(err.to_string().contains("newer git correlation schema 99"));
+    assert_eq!(schema_version(&conn).await.unwrap(), Some(99));
 }
 
 #[tokio::test]
@@ -205,6 +426,10 @@ async fn sessions_for_branch_worktree_and_commit_round_trip() {
         committed_at: 1_150,
         span_overlap_kind: SpanOverlapKind::WithinSpan,
         span_id: None,
+        relation: CommitRelation::Produced,
+        evidence: CommitEvidence::ToolResult,
+        confidence: 100,
+        evidence_message_id: Some("tool-result-1".to_string()),
     };
     assert!(upsert_commit_session(&conn, &record).await.unwrap());
     assert!(
@@ -230,6 +455,13 @@ async fn sessions_for_branch_worktree_and_commit_round_trip() {
         Some("abcdef1234567890abcdef1234567890abcdef12")
     );
     assert_eq!(by_commit[0].committed_at, Some(1_150));
+    assert_eq!(by_commit[0].relation, Some(CommitRelation::Produced));
+    assert_eq!(by_commit[0].evidence, Some(CommitEvidence::ToolResult));
+    assert_eq!(by_commit[0].confidence, Some(100));
+    assert_eq!(
+        by_commit[0].evidence_message_id.as_deref(),
+        Some("tool-result-1")
+    );
     assert_eq!(
         by_commit[0].span_overlap_kind,
         Some(SpanOverlapKind::WithinSpan)
@@ -486,7 +718,8 @@ fn match_commit_to_spans_filters_by_branch_worktree_and_window() {
         },
     ];
 
-    // A within-window commit is attributed to both concurrent main spans.
+    // A within-window commit is observed by both concurrent main spans. Time
+    // overlap is never direct evidence that either session produced it.
     let records = match_commit_to_spans("deadbeef", Some("main"), "/repo", 150, &spans, 60);
     assert_eq!(records.len(), 2);
     let ids: Vec<i64> = records.iter().filter_map(|r| r.span_id).collect();
@@ -495,6 +728,16 @@ fn match_commit_to_spans_filters_by_branch_worktree_and_window() {
         records
             .iter()
             .all(|r| r.span_overlap_kind == SpanOverlapKind::WithinSpan)
+    );
+    assert!(
+        records
+            .iter()
+            .all(|r| r.relation == CommitRelation::Observed)
+    );
+    assert!(
+        records
+            .iter()
+            .all(|r| r.evidence == CommitEvidence::TimeOverlap && r.confidence == 20)
     );
     assert_eq!(records[0].session_id, "s1");
     assert_eq!(records[0].worktree.as_deref(), Some("/repo"));
@@ -543,21 +786,22 @@ async fn commit_attribution_sweep_attributes_and_advances_watermark() {
     .unwrap();
     assert_eq!(inserted, 1);
 
-    // The commit is now queryable by prefix.
-    let hits = sessions_for(
-        &conn,
-        &SessionsForQuery {
-            git_ref: GitRefFilter::Commit("abcdef12".to_string()),
-            since: None,
-            until: None,
-            limit: 10,
-        },
-    )
-    .await
-    .unwrap();
+    // Time-overlap sweep rows are not producer evidence. They remain available
+    // only through an explicit observed/all query.
+    let query = SessionsForQuery {
+        git_ref: GitRefFilter::Commit("abcdef12".to_string()),
+        since: None,
+        until: None,
+        limit: 10,
+    };
+    assert!(sessions_for(&conn, &query).await.unwrap().is_empty());
+    let hits = sessions_for_with_relation(&conn, &query, CommitRelationFilter::Observed)
+        .await
+        .unwrap();
     assert_eq!(hits.len(), 1);
     assert_eq!(hits[0].session_id, "s1");
     assert_eq!(hits[0].span_overlap_kind, Some(SpanOverlapKind::WithinSpan));
+    assert_eq!(hits[0].relation, Some(CommitRelation::Observed));
 
     // Re-running the sweep is idempotent: even if the boundary span is
     // re-scanned (watermark uses `>=` so nothing is ever missed), the

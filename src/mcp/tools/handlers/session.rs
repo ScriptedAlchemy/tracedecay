@@ -17,7 +17,9 @@ use crate::mcp::response_handles::{
 };
 use crate::mcp::tools::{MAX_RESPONSE_CHARS, ToolResult};
 use crate::sessions::cursor::HermesProfileDbReadOnly;
-use crate::sessions::git_correlation::{GitRefFilter, GitScopeFilter, SessionsForQuery};
+use crate::sessions::git_correlation::{
+    CommitRelationFilter, GitRefFilter, GitScopeFilter, SessionsForQuery,
+};
 use crate::sessions::lcm::compression_decision::{self, AssemblyCapInput};
 use crate::sessions::lcm::{
     LCM_EXPAND_QUERY_SYNTHESIS_SYSTEM_PROMPT, LcmCleanConfig, LcmCompressionRequest,
@@ -2125,11 +2127,19 @@ fn render_sessions_for_md(value: &Value) -> String {
                 .unwrap_or(false);
             md.blank();
             if index_empty {
-                md.empty_note(
-                    "Correlation index is empty — no git spans recorded yet. It will \
-                     auto-backfill on the next MCP server startup, or run \
-                     `tracedecay sessions git-backfill` to populate it now.",
-                );
+                if value.get("git_ref").and_then(Value::as_str) == Some("commit") {
+                    md.empty_note(
+                        "No commit evidence is indexed yet. Run `tracedecay sync` to ingest \
+                         direct host/tool evidence; `tracedecay sessions git-backfill` adds \
+                         weaker historical overlap evidence.",
+                    );
+                } else {
+                    md.empty_note(
+                        "Correlation index is empty — no git spans recorded yet. It will \
+                         auto-backfill on the next MCP server startup, or run \
+                         `tracedecay sessions git-backfill` to populate it now.",
+                    );
+                }
             } else {
                 md.empty_note("No correlated sessions recorded for this git ref.");
             }
@@ -2176,6 +2186,15 @@ fn append_sessions_for_hit(md: &mut Md, hit: &Value) {
         }
         let short = sha.get(..12).unwrap_or(sha);
         let _ = write!(detail, "commit `{short}`");
+        if let Some(relation) = hit.get("relation").and_then(Value::as_str) {
+            let _ = write!(detail, " · {relation}");
+        }
+        if let Some(evidence) = hit.get("evidence").and_then(Value::as_str) {
+            let _ = write!(detail, " via {evidence}");
+        }
+        if let Some(confidence) = hit.get("confidence").and_then(Value::as_i64) {
+            let _ = write!(detail, " ({confidence}/100)");
+        }
         if let Some(committed_at) = hit.get("committed_at").and_then(Value::as_i64) {
             let _ = write!(
                 detail,
@@ -2198,6 +2217,8 @@ pub(super) async fn handle_sessions_for(cg: &TraceDecay, args: Value) -> Result<
     let until = non_negative_timestamp_arg(&args, "until", SearchTimeBound::End)?;
     let limit = bounded_usize_arg(&args, "limit", 1, MAX_LCM_RESULT_LIMIT)?
         .unwrap_or(DEFAULT_SESSIONS_FOR_LIMIT);
+    let relation = CommitRelationFilter::parse(string_arg(&args, "relation"))
+        .map_err(|err| argument_error(err.to_string()))?;
     let query = SessionsForQuery {
         git_ref,
         since,
@@ -2227,7 +2248,7 @@ pub(super) async fn handle_sessions_for(cg: &TraceDecay, args: Value) -> Result<
         // index that simply had no rows matching this git ref.
         let health = db.git_correlation_index_health().await.ok();
         let results = db
-            .git_sessions_for(&query)
+            .git_sessions_for_with_relation(&query, relation)
             .await
             .map_err(|err| TraceDecayError::Config {
                 message: err.to_string(),
@@ -2239,15 +2260,19 @@ pub(super) async fn handle_sessions_for(cg: &TraceDecay, args: Value) -> Result<
     };
 
     // The index is "empty" when there is no store, the correlation tables are
-    // absent, or they hold zero spans. In every such case `sessions_for` can
-    // only ever return nothing, which must not read as "no sessions matched".
-    let index_empty = index_health.as_ref().is_none_or(|health| health.is_empty());
+    // absent, or the row family for this ref kind is empty (spans for
+    // branch/worktree, commit rows for commit). That must not read as a genuine
+    // "no sessions matched" result.
+    let index_empty = index_health
+        .as_ref()
+        .is_none_or(|health| health.is_empty_for(&query.git_ref));
     let mut payload = json!({
         "status": "ok",
         "git_ref": query.git_ref.kind(),
         "value": query.git_ref.value(),
         "since": since,
         "until": until,
+        "relation": relation.as_str(),
         "count": results.len(),
         "results": results,
         "index_empty": index_empty,
@@ -2266,7 +2291,11 @@ pub(super) async fn handle_sessions_for(cg: &TraceDecay, args: Value) -> Result<
     // populated index genuinely had no session on this ref.
     if results.is_empty() {
         payload["message"] = json!(if index_empty {
-            "correlation index empty (no git spans recorded yet) — it will auto-backfill on the next MCP server startup, or run `tracedecay sessions git-backfill` to populate it now"
+            if matches!(&query.git_ref, GitRefFilter::Commit(_)) {
+                "no commit evidence indexed yet — run `tracedecay sync` to ingest direct host/tool evidence; `tracedecay sessions git-backfill` adds weaker historical overlap evidence"
+            } else {
+                "correlation index empty (no git spans recorded yet) — it will auto-backfill on the next MCP server startup, or run `tracedecay sessions git-backfill` to populate it now"
+            }
         } else {
             "no sessions matched this git ref"
         });

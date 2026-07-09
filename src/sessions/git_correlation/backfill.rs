@@ -1,8 +1,9 @@
 use libsql::{Connection, params};
 
 use super::{
-    AUTO_BACKFILL_WATERMARK_KEY, CommitSessionRecord, DEFAULT_SPAN_MERGE_GAP_SECS,
-    GitCorrelationError, SpanObservation, SpanOverlapKind, SpanSource, normalize_worktree,
+    AUTO_BACKFILL_WATERMARK_KEY, CommitEvidence, CommitRelation, CommitSessionRecord,
+    DEFAULT_SPAN_MERGE_GAP_SECS, GitCorrelationError, SpanObservation, SpanOverlapKind, SpanSource,
+    normalize_worktree,
 };
 
 // Historical backfill for sessions that predate live span recording.
@@ -591,6 +592,10 @@ async fn backfill_one_session(
                     committed_at,
                     span_overlap_kind: SpanOverlapKind::WithinSpan,
                     span_id: None,
+                    relation: CommitRelation::Observed,
+                    evidence: CommitEvidence::ReflogOverlap,
+                    confidence: 30,
+                    evidence_message_id: None,
                 })
                 .await
                 .map_err(|_| BackfillSkipReason::GitError)?;

@@ -3143,12 +3143,36 @@ impl GlobalDb {
         parse_offset_path: &str,
         parse_offset: ParseOffset,
     ) -> bool {
+        self.upsert_transcript_batch_with_git_evidence(
+            session,
+            messages,
+            &[],
+            &[],
+            parse_offset_path,
+            parse_offset,
+        )
+        .await
+    }
+
+    /// Atomically persists transcript rows, direct commit evidence, and the
+    /// parse cursor so a failed attribution write is replayed on the next sync.
+    pub(crate) async fn upsert_transcript_batch_with_git_evidence(
+        &self,
+        session: &SessionRecord,
+        messages: &[SessionMessageRecord],
+        commit_records: &[crate::sessions::git_correlation::CommitSessionRecord],
+        span_observations: &[crate::sessions::git_correlation::SpanObservation],
+        parse_offset_path: &str,
+        parse_offset: ParseOffset,
+    ) -> bool {
         let batch = TranscriptBatch {
             session: session.clone(),
             messages: messages.to_vec(),
         };
         self.upsert_transcript_batches_inner(
             std::slice::from_ref(&batch),
+            commit_records,
+            span_observations,
             parse_offset_path,
             parse_offset,
             TranscriptWriteMode::Full,
@@ -3176,6 +3200,8 @@ impl GlobalDb {
     ) -> bool {
         self.upsert_transcript_batches_inner(
             batches,
+            &[],
+            &[],
             parse_offset_path,
             parse_offset,
             TranscriptWriteMode::ProjectionOnly,
@@ -3186,6 +3212,8 @@ impl GlobalDb {
     async fn upsert_transcript_batches_inner(
         &self,
         batches: &[TranscriptBatch],
+        commit_records: &[crate::sessions::git_correlation::CommitSessionRecord],
+        span_observations: &[crate::sessions::git_correlation::SpanObservation],
         parse_offset_path: &str,
         parse_offset: ParseOffset,
         mode: TranscriptWriteMode,
@@ -3217,6 +3245,28 @@ impl GlobalDb {
                     let _ = self.conn.execute("ROLLBACK", ()).await;
                     return false;
                 }
+            }
+        }
+        for record in commit_records {
+            if crate::sessions::git_correlation::upsert_commit_session(&self.conn, record)
+                .await
+                .is_err()
+            {
+                let _ = self.conn.execute("ROLLBACK", ()).await;
+                return false;
+            }
+        }
+        for observation in span_observations {
+            if crate::sessions::git_correlation::record_span_observation_in_transaction(
+                &self.conn,
+                observation,
+                crate::sessions::git_correlation::DEFAULT_SPAN_MERGE_GAP_SECS,
+            )
+            .await
+            .is_err()
+            {
+                let _ = self.conn.execute("ROLLBACK", ()).await;
+                return false;
             }
         }
         if !self
@@ -3813,6 +3863,20 @@ impl GlobalDb {
         crate::sessions::git_correlation::GitCorrelationError,
     > {
         crate::sessions::git_correlation::sessions_for(&self.conn, query).await
+    }
+
+    /// Returns sessions for a git ref with an explicit commit relationship
+    /// selector. Branch and worktree queries are unaffected by the selector.
+    pub async fn git_sessions_for_with_relation(
+        &self,
+        query: &crate::sessions::git_correlation::SessionsForQuery,
+        relation: crate::sessions::git_correlation::CommitRelationFilter,
+    ) -> Result<
+        Vec<crate::sessions::git_correlation::SessionGitCorrelationHit>,
+        crate::sessions::git_correlation::GitCorrelationError,
+    > {
+        crate::sessions::git_correlation::sessions_for_with_relation(&self.conn, query, relation)
+            .await
     }
 
     /// Reports the per-project session↔git correlation index health (span/commit

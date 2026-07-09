@@ -16,8 +16,8 @@ use tempfile::TempDir;
 
 use tracedecay::global_db::GlobalDb;
 use tracedecay::sessions::git_correlation::{
-    BackfillOptions, BranchTimelineEntry, GitRefFilter, GitReflogSource, SessionsForQuery,
-    normalize_worktree, run_backfill,
+    BackfillOptions, BranchTimelineEntry, CommitRelationFilter, GitRefFilter, GitReflogSource,
+    SessionsForQuery, normalize_worktree, run_backfill,
 };
 use tracedecay::sessions::{SessionMessageRecord, SessionRecord};
 
@@ -269,12 +269,15 @@ async fn backfill_attributes_branch_switch_and_commits() {
         .find(|sha| !main_shas.contains(sha))
         .expect("feature-only commit");
     let commit_hits = db
-        .git_sessions_for(&SessionsForQuery {
-            git_ref: GitRefFilter::Commit(feature_sha.clone()),
-            since: None,
-            until: None,
-            limit: 20,
-        })
+        .git_sessions_for_with_relation(
+            &SessionsForQuery {
+                git_ref: GitRefFilter::Commit(feature_sha.clone()),
+                since: None,
+                until: None,
+                limit: 20,
+            },
+            CommitRelationFilter::Observed,
+        )
         .await
         .unwrap();
     let commit_ids: Vec<&str> = commit_hits.iter().map(|h| h.session_id.as_str()).collect();
