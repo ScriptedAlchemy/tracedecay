@@ -1591,7 +1591,7 @@ fn def_pr_context() -> ToolDefinition {
             "properties": {
                 "base_ref": {
                     "type": "string",
-                    "description": "Base branch or ref to compare against (default: 'main')"
+                    "description": "Base branch or ref to compare against (default: detected repository default branch)"
                 },
                 "head_ref": {
                     "type": "string",

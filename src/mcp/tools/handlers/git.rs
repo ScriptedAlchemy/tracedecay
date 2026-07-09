@@ -18,6 +18,12 @@ struct GitFileChange {
     status: &'static str,
 }
 
+struct GitPrComparison {
+    merge_base: String,
+    changes: Vec<GitFileChange>,
+    commits: Vec<Value>,
+}
+
 fn git_error_result(cg: &TraceDecay, args: &Value, operation: &str, message: &str) -> ToolResult {
     let output = json!({
         "error": {
@@ -363,6 +369,46 @@ fn git_diff_file_changes(
     Ok(changed)
 }
 
+/// Resolve PR refs to their common ancestor and compare only changes reachable
+/// from the head. This matches `git diff base...head`; comparing the two tip
+/// trees directly would incorrectly report unrelated files added to an
+/// advanced default branch as deletions in the PR.
+fn git_pr_comparison(
+    project_root: &std::path::Path,
+    base_ref: &str,
+    head_ref: &str,
+) -> std::result::Result<GitPrComparison, String> {
+    let repo = gix::open(project_root).map_err(|e| format!("failed to open git repo: {e}"))?;
+    let base_commit = repo
+        .rev_parse_single(base_ref)
+        .map_err(|e| format!("cannot resolve '{base_ref}': {e}"))?
+        .object()
+        .map_err(|e| format!("cannot read object for '{base_ref}': {e}"))?
+        .peel_to_commit()
+        .map_err(|e| format!("cannot peel '{base_ref}' to commit: {e}"))?;
+    let head_commit = repo
+        .rev_parse_single(head_ref)
+        .map_err(|e| format!("cannot resolve '{head_ref}': {e}"))?
+        .object()
+        .map_err(|e| format!("cannot read object for '{head_ref}': {e}"))?
+        .peel_to_commit()
+        .map_err(|e| format!("cannot peel '{head_ref}' to commit: {e}"))?;
+    let merge_base = repo
+        .merge_base(base_commit.id, head_commit.id)
+        .map_err(|e| format!("cannot find merge base for '{base_ref}' and '{head_ref}': {e}"))?;
+    let merge_base = merge_base.to_string();
+
+    Ok(GitPrComparison {
+        changes: git_diff_file_changes(project_root, &merge_base, head_ref)?,
+        commits: git_commit_log(project_root, &merge_base, head_ref)?,
+        merge_base,
+    })
+}
+
+fn default_pr_base_ref(project_root: &std::path::Path) -> String {
+    crate::branch::detect_default_branch(project_root).unwrap_or_else(|| "main".to_string())
+}
+
 /// Returns file paths changed in the working tree (unstaged + staged, or staged-only).
 fn git_changed_files(
     project_root: &std::path::Path,
@@ -497,23 +543,34 @@ fn git_commit_log(
     let base_id = repo
         .rev_parse_single(base_ref)
         .map_err(|e| format!("cannot resolve '{base_ref}': {e}"))?
-        .detach();
+        .object()
+        .map_err(|e| format!("cannot read object for '{base_ref}': {e}"))?
+        .peel_to_commit()
+        .map_err(|e| format!("cannot peel '{base_ref}' to commit: {e}"))?
+        .id;
 
     let head_id = repo
         .rev_parse_single(head_ref)
         .map_err(|e| format!("cannot resolve '{head_ref}': {e}"))?
-        .detach();
+        .object()
+        .map_err(|e| format!("cannot read object for '{head_ref}': {e}"))?
+        .peel_to_commit()
+        .map_err(|e| format!("cannot peel '{head_ref}' to commit: {e}"))?
+        .id;
 
     let mut commits = Vec::new();
-    let mut current_id = head_id;
+    let walk = repo
+        .rev_walk([head_id])
+        .with_hidden([base_id])
+        .all()
+        .map_err(|e| format!("cannot walk commits from '{base_ref}' to '{head_ref}': {e}"))?;
 
-    // Walk back from head until we hit base (max 100 commits)
-    for _ in 0..100 {
-        if current_id == base_id {
-            break;
-        }
+    // Include commits reachable from head but not base, including merge-shaped
+    // histories where the merge base is not on the first-parent chain.
+    for info in walk.take(100) {
+        let info = info.map_err(|e| format!("cannot walk commit: {e}"))?;
         let commit = repo
-            .find_object(current_id)
+            .find_object(info.id)
             .map_err(|e| format!("cannot find object: {e}"))?
             .try_into_commit()
             .map_err(|e| format!("not a commit: {e}"))?;
@@ -528,12 +585,6 @@ fn git_commit_log(
             .to_string();
         let short_id = format!("{:.7}", commit.id);
         commits.push(json!({"hash": short_id, "subject": subject}));
-
-        let parent_id = commit.parent_ids().next().map(gix::Id::detach);
-        match parent_id {
-            Some(pid) => current_id = pid,
-            None => break,
-        }
     }
 
     Ok(commits)
@@ -764,21 +815,25 @@ pub(super) async fn handle_pr_context(cg: &TraceDecay, args: Value) -> Result<To
     let base = args
         .get("base_ref")
         .and_then(|v| v.as_str())
-        .unwrap_or("main");
+        .map(str::to_owned)
+        .unwrap_or_else(|| default_pr_base_ref(cg.project_root()));
     let head = args
         .get("head_ref")
         .and_then(|v| v.as_str())
         .unwrap_or("HEAD");
 
-    let changes = match git_diff_file_changes(cg.project_root(), base, head) {
-        Ok(files) => files,
+    let comparison = match git_pr_comparison(cg.project_root(), &base, head) {
+        Ok(comparison) => comparison,
         Err(e) => {
             return Ok(git_error_result(cg, &args, "diff", &e));
         }
     };
+    let GitPrComparison {
+        merge_base,
+        changes,
+        commits,
+    } = comparison;
     let changed_files: Vec<String> = changes.iter().map(|change| change.path.clone()).collect();
-
-    let commits = git_commit_log(cg.project_root(), base, head).unwrap_or_default();
 
     let mut symbols_added: Vec<Value> = Vec::new();
     let mut symbols_modified: Vec<Value> = Vec::new();
@@ -876,6 +931,7 @@ pub(super) async fn handle_pr_context(cg: &TraceDecay, args: Value) -> Result<To
     let output = json!({
         "base": base,
         "head": head,
+        "merge_base": merge_base,
         "commits": commits,
         "files_changed": changed_files.len(),
         "symbols_added": symbols_added.len(),
@@ -1159,6 +1215,62 @@ pub(super) async fn handle_branch_diff(cg: &TraceDecay, args: Value) -> Result<T
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_git(root: &std::path::Path, args: &[&str]) {
+        let output = std::process::Command::new("git")
+            .args(args)
+            .current_dir(root)
+            .env("GIT_AUTHOR_NAME", "TraceDecay Test")
+            .env("GIT_AUTHOR_EMAIL", "test@tracedecay.invalid")
+            .env("GIT_COMMITTER_NAME", "TraceDecay Test")
+            .env("GIT_COMMITTER_EMAIL", "test@tracedecay.invalid")
+            .output()
+            .expect("git command should run");
+        assert!(
+            output.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    fn pr_comparison_anchors_at_merge_base_when_base_advanced() {
+        let temp = tempfile::tempdir().expect("temp repo");
+        let root = temp.path();
+        test_git(root, &["init", "-b", "main"]);
+        std::fs::write(root.join("common.txt"), "common\n").expect("write common");
+        test_git(root, &["add", "."]);
+        test_git(root, &["commit", "-m", "common"]);
+        test_git(root, &["switch", "-c", "feature"]);
+        std::fs::write(root.join("feature.txt"), "feature\n").expect("write feature");
+        test_git(root, &["add", "."]);
+        test_git(root, &["commit", "-m", "feature"]);
+        test_git(root, &["switch", "main"]);
+        std::fs::write(root.join("main-only.txt"), "main\n").expect("write main");
+        test_git(root, &["add", "."]);
+        test_git(root, &["commit", "-m", "main advanced"]);
+
+        let comparison = git_pr_comparison(root, "main", "feature").expect("PR comparison");
+        let paths: Vec<_> = comparison
+            .changes
+            .iter()
+            .map(|change| change.path.as_str())
+            .collect();
+
+        assert_eq!(paths, ["feature.txt"]);
+        assert_eq!(comparison.commits.len(), 1);
+        assert_eq!(comparison.commits[0]["subject"], "feature");
+    }
+
+    #[test]
+    fn pr_context_default_base_detects_master() {
+        let temp = tempfile::tempdir().expect("temp repo");
+        test_git(temp.path(), &["init", "-b", "master"]);
+        std::fs::write(temp.path().join("README.md"), "test\n").expect("write fixture");
+        test_git(temp.path(), &["add", "."]);
+        test_git(temp.path(), &["commit", "-m", "initial"]);
+        assert_eq!(default_pr_base_ref(temp.path()), "master");
+    }
 
     #[test]
     fn config_files_classified_as_config_not_source() {
