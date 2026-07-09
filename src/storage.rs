@@ -12,6 +12,8 @@ use crate::errors::{Result, TraceDecayError};
 
 pub const ENROLLMENT_FILENAME: &str = "enrollment.json";
 pub const STORE_MANIFEST_FILENAME: &str = "store_manifest.json";
+pub const IDENTITY_CUTOVER_BACKUP_MANIFEST_FILENAME: &str =
+    "store_manifest.identity-cutover-backup.json";
 pub const SESSIONS_DB_FILENAME: &str = "sessions.db";
 pub const BRANCH_META_FILENAME: &str = "branch-meta.json";
 pub const REPOSITORY_IDENTITY_FILENAME: &str = "tracedecay-project.json";
@@ -420,6 +422,135 @@ pub(crate) fn resolve_persisted_layout(
         },
     )
     .map(Some)
+}
+
+/// Finds pre-repository-identity profile stores that were keyed by an older
+/// path-derived project id but still name this exact local checkout in their
+/// manifest. Remote URLs are deliberately not considered: two clones of one
+/// remote are different local identities.
+pub(crate) fn matching_legacy_profile_layouts(
+    project_root: &Path,
+    profile_root: &Path,
+    excluded_project_id: Option<&str>,
+) -> Result<Vec<StoreLayout>> {
+    let projects_root = profile_root.join("projects");
+    let Ok(entries) = fs::read_dir(&projects_root) else {
+        return Ok(Vec::new());
+    };
+    let mut manifest_paths = entries
+        .flatten()
+        .map(|entry| entry.path().join(STORE_MANIFEST_FILENAME))
+        .filter(|path| path.is_file())
+        .collect::<Vec<_>>();
+    manifest_paths.sort();
+
+    let mut layouts = Vec::new();
+    for manifest_path in manifest_paths {
+        let Ok(manifest) = read_store_manifest(&manifest_path) else {
+            continue;
+        };
+        if !same_local_path(&manifest.project_root, project_root) {
+            continue;
+        }
+        let project_id = manifest
+            .project_id
+            .as_deref()
+            .ok_or_else(|| invalid_legacy_manifest(&manifest_path, "project_id is missing"))?;
+        validate_project_id(project_id)
+            .map_err(|message| invalid_legacy_manifest(&manifest_path, message))?;
+        if excluded_project_id == Some(project_id) {
+            continue;
+        }
+        if manifest.schema_version != STORE_MANIFEST_SCHEMA_VERSION
+            || manifest.store_kind != StoreKind::CodeProject
+            || manifest.storage_mode != StorageMode::ProfileSharded
+        {
+            return Err(invalid_legacy_manifest(
+                &manifest_path,
+                "unsupported schema, store kind, or storage mode",
+            ));
+        }
+
+        let layout = profile_sharded_layout(
+            project_root,
+            profile_root,
+            &EnrollmentMarker {
+                project_id: project_id.to_string(),
+                storage_mode: StorageMode::ProfileSharded,
+            },
+        )?;
+        let manifest_data_root = manifest
+            .data_root
+            .canonicalize()
+            .unwrap_or_else(|_| manifest.data_root.clone());
+        let layout_data_root = layout
+            .data_root
+            .canonicalize()
+            .unwrap_or_else(|_| layout.data_root.clone());
+        if manifest_path.parent() != Some(manifest.data_root.as_path())
+            || manifest_data_root != layout_data_root
+            || manifest.data_root.join(&manifest.graph_db_relpath) != layout.graph_db_path
+            || manifest.data_root.join(&manifest.sessions_db_relpath) != layout.sessions_db_path
+            || manifest.data_root.join(&manifest.branch_meta_relpath) != layout.branch_meta_path
+        {
+            return Err(invalid_legacy_manifest(
+                &manifest_path,
+                "manifest paths do not match the profile shard layout",
+            ));
+        }
+        layouts.push(layout);
+    }
+    Ok(layouts)
+}
+
+pub(crate) fn retire_identity_cutover_manifest(layout: &StoreLayout) -> Result<PathBuf> {
+    let source = layout
+        .manifest_path
+        .as_ref()
+        .ok_or_else(|| TraceDecayError::Config {
+            message: "profile store has no manifest path".to_string(),
+        })?;
+    let backup = layout
+        .data_root
+        .join(IDENTITY_CUTOVER_BACKUP_MANIFEST_FILENAME);
+    if !source.exists() && backup.is_file() {
+        return Ok(backup);
+    }
+    if backup.exists() {
+        return Err(TraceDecayError::Config {
+            message: format!(
+                "refusing to replace existing identity-cutover backup '{}'",
+                backup.display()
+            ),
+        });
+    }
+    fs::rename(source, &backup).map_err(|error| TraceDecayError::Config {
+        message: format!(
+            "failed to retire empty identity-cutover manifest '{}' to '{}': {error}",
+            source.display(),
+            backup.display()
+        ),
+    })?;
+    Ok(backup)
+}
+
+fn same_local_path(left: &Path, right: &Path) -> bool {
+    if left == right {
+        return true;
+    }
+    match (left.canonicalize(), right.canonicalize()) {
+        (Ok(left), Ok(right)) => left == right,
+        _ => false,
+    }
+}
+
+fn invalid_legacy_manifest(path: &Path, detail: impl std::fmt::Display) -> TraceDecayError {
+    TraceDecayError::Config {
+        message: format!(
+            "legacy profile store manifest '{}' cannot be adopted safely: {detail}",
+            path.display()
+        ),
+    }
 }
 
 pub fn default_profile_root() -> Result<PathBuf> {
