@@ -15879,3 +15879,126 @@ async fn message_search_selects_registered_project_session_db_by_project_id() {
         );
     }
 }
+
+/// Builds a crate that plants a needless `unsafe { }` block inside an
+/// otherwise-safe function — mirroring the agent-adoption eval fixture's
+/// `src/audit.rs::raw_total_len` — so `tracedecay_unsafe_patterns` has a
+/// concrete, unambiguous site to surface.
+async fn setup_unsafe_block_fixture() -> (TestTraceDecay, TestProject) {
+    let dir = test_temp_dir();
+    let project = dir.path();
+    let env_lock = GLOBAL_DB_ENV_LOCK.lock().await;
+    let home = project.join("home");
+    let home_guard = HomeEnvGuard::set(&home);
+    let global_db_guard = GlobalDbEnvGuard::set(&home.join(".tracedecay/global.db"));
+    fs::create_dir_all(project.join("src")).unwrap();
+
+    fs::write(
+        project.join("Cargo.toml"),
+        r#"
+[package]
+name = "unsafe_fixture"
+version = "0.1.0"
+edition = "2021"
+"#,
+    )
+    .unwrap();
+
+    fs::write(
+        project.join("src/lib.rs"),
+        r#"
+/// Reinterpret a total as a `usize` through a raw-pointer read. There is no
+/// memory-safety reason for this to be `unsafe` — exactly the needless kind a
+/// safety audit should flag.
+pub fn raw_total_len(total: u64) -> usize {
+    let ptr = &total as *const u64;
+    unsafe { *ptr as usize }
+}
+
+/// A plainly safe function with no unsafe markers at all.
+pub fn safe_add(a: u64, b: u64) -> u64 {
+    a + b
+}
+"#,
+    )
+    .unwrap();
+
+    let cg = fixture::init_project_from_template(project).await.unwrap();
+    cg.index_all().await.unwrap();
+    (
+        TestTraceDecay::new(cg),
+        TestProject {
+            dir: Some(dir),
+            _env_lock: env_lock,
+            _home_guard: home_guard,
+            _global_db_guard: global_db_guard,
+        },
+    )
+}
+
+/// Regression test for the empty-output bug: `tracedecay_unsafe_patterns`
+/// detected the unsafe block (the JSON payload was correct) but the Markdown
+/// renderer dropped every finding and printed "No diagnostics.", so agents saw
+/// nothing. The default (Markdown) response must now surface the site.
+#[tokio::test]
+async fn unsafe_patterns_reports_unsafe_block_in_markdown_and_json() {
+    let (cg, _project) = setup_unsafe_block_fixture().await;
+
+    // Markdown is the runtime default; request it explicitly so the test helper
+    // (which force-injects `format=json` for tools outside its allowlist) does
+    // not override it.
+    let md = handle_tool_call(
+        &cg,
+        "tracedecay_unsafe_patterns",
+        json!({"format": "markdown"}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let text = extract_text(&md.value);
+    assert!(
+        !text.contains("No diagnostics"),
+        "renderer regression: markdown swallowed the finding: {text}"
+    );
+    assert!(text.contains("## Risky Patterns"), "got: {text}");
+    assert!(
+        text.contains("UNSAFE_BLOCK at src/lib.rs:7"),
+        "markdown must report the unsafe block with file:line: {text}"
+    );
+    assert!(
+        text.contains("raw_total_len"),
+        "markdown must name the enclosing symbol: {text}"
+    );
+
+    // JSON output must carry the same structured match.
+    let js = handle_tool_call(
+        &cg,
+        "tracedecay_unsafe_patterns",
+        json!({"format": "json"}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let payload: Value = serde_json::from_str(extract_text(&js.value)).unwrap();
+    assert_eq!(payload["match_count"], 1, "payload: {payload}");
+    assert_eq!(payload["by_kind"]["unsafe_block"], 1, "payload: {payload}");
+    let m = &payload["matches"][0];
+    assert_eq!(m["kind"], "unsafe_block");
+    assert_eq!(m["file"], "src/lib.rs");
+    assert_eq!(m["line"], 7);
+    assert!(
+        m["enclosing"]
+            .as_str()
+            .unwrap_or_default()
+            .ends_with("raw_total_len"),
+        "payload: {payload}"
+    );
+
+    // The safe function must NOT be flagged.
+    assert!(
+        !text.contains("safe_add"),
+        "safe code should produce no findings: {text}"
+    );
+}

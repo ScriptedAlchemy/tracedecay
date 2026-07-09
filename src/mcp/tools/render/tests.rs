@@ -378,6 +378,53 @@ fn diagnostics_md_renders_bullets_not_tables() {
 }
 
 #[test]
+fn risky_patterns_md_renders_matches() {
+    // Regression: this payload uses the `matches` shape, not `diagnostics`.
+    // Routing it through `diagnostics_md` printed "No diagnostics." and dropped
+    // every finding, which is why `tracedecay_unsafe_patterns` looked empty.
+    let v = json!({
+        "match_count": 1,
+        "by_kind": { "unsafe_block": 1 },
+        "matches": [{
+            "kind": "unsafe_block",
+            "file": "src/audit.rs",
+            "line": 28,
+            "snippet": "unsafe { *ptr as usize }",
+            "enclosing": "src/audit.rs::raw_total_len",
+            "in_test": false
+        }]
+    });
+
+    let out = risky_patterns_md(&v);
+
+    assert!(out.contains("## Risky Patterns"), "got: {out}");
+    assert!(out.contains("**Match count:** 1"), "got: {out}");
+    assert!(out.contains("**By kind:** unsafe_block: 1"), "got: {out}");
+    assert!(
+        out.contains("- **UNSAFE_BLOCK at src/audit.rs:28**"),
+        "got: {out}"
+    );
+    assert!(
+        out.contains("  **Snippet:** unsafe { *ptr as usize }"),
+        "got: {out}"
+    );
+    assert!(
+        out.contains("  **Enclosing:** src/audit.rs::raw_total_len"),
+        "got: {out}"
+    );
+    assert!(!out.contains("No diagnostics"), "got: {out}");
+    assert!(!out.contains("No risky patterns"), "got: {out}");
+}
+
+#[test]
+fn risky_patterns_md_empty_is_noted() {
+    let out = risky_patterns_md(&json!({ "match_count": 0, "by_kind": {}, "matches": [] }));
+    assert!(out.contains("## Risky Patterns"), "got: {out}");
+    assert!(out.contains("**Match count:** 0"), "got: {out}");
+    assert!(out.contains("No risky patterns found."), "got: {out}");
+}
+
+#[test]
 fn generic_md_empty_is_noted() {
     assert!(generic_md(&json!([])).contains("None."));
     assert!(generic_md(&json!({})).contains("No results."));

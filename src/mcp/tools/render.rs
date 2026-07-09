@@ -554,6 +554,75 @@ pub(super) fn diagnostics_md(value: &Value) -> String {
     md.render()
 }
 
+/// Renders the `tracedecay_unsafe_patterns` payload
+/// (`{ match_count, by_kind, matches: [...] }`).
+///
+/// This shape is distinct from the compiler-`diagnostics` shape rendered by
+/// [`diagnostics_md`]: each match carries a `kind`, `file`, `line`, `snippet`,
+/// `enclosing`, and `in_test` field rather than a `level`/`code`/`message`.
+/// Feeding it through `diagnostics_md` silently dropped every finding (the
+/// `diagnostics` key is absent, so it always printed "No diagnostics."), which
+/// is why the tool appeared to return nothing even when matches existed.
+pub(super) fn risky_patterns_md(value: &Value) -> String {
+    let mut md = Md::new();
+    md.heading(2, "Risky Patterns");
+
+    let matches = value
+        .get("matches")
+        .and_then(Value::as_array)
+        .map_or(&[][..], Vec::as_slice);
+
+    let match_count = value
+        .get("match_count")
+        .and_then(Value::as_u64)
+        .unwrap_or(matches.len() as u64);
+    md.field("Match count", &match_count.to_string());
+
+    if let Some(by_kind) = value.get("by_kind").and_then(Value::as_object) {
+        if !by_kind.is_empty() {
+            let mut entries: Vec<(String, u64)> = by_kind
+                .iter()
+                .map(|(k, v)| (k.clone(), v.as_u64().unwrap_or(0)))
+                .collect();
+            entries.sort_by(|a, b| a.0.cmp(&b.0));
+            let summary = entries
+                .iter()
+                .map(|(kind, count)| format!("{kind}: {count}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            md.field("By kind", &summary);
+        }
+    }
+    md.blank();
+
+    if matches.is_empty() {
+        md.empty_note("No risky patterns found.");
+        return md.render();
+    }
+
+    md.heading(3, "Findings");
+    for m in matches {
+        let kind = m.get("kind").and_then(Value::as_str).unwrap_or("pattern");
+        let file = m.get("file").and_then(Value::as_str).unwrap_or("<unknown>");
+        let line = m.get("line").and_then(Value::as_u64).unwrap_or(0);
+        md.bullet(&format!("**{} at {file}:{line}**", kind.to_uppercase()));
+        if let Some(snippet) = m.get("snippet").and_then(Value::as_str) {
+            if !snippet.is_empty() {
+                md.line(&format!("  **Snippet:** {snippet}"));
+            }
+        }
+        if let Some(enclosing) = m.get("enclosing").and_then(Value::as_str) {
+            if !enclosing.is_empty() {
+                md.line(&format!("  **Enclosing:** {enclosing}"));
+            }
+        }
+        if m.get("in_test").and_then(Value::as_bool).unwrap_or(false) {
+            md.line("  **In test:** true");
+        }
+    }
+    md.render()
+}
+
 fn render_diagnostic_record(md: &mut Md, diagnostic: &Value) {
     let level = diagnostic
         .get("level")

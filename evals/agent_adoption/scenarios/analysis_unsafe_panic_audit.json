@@ -7,7 +7,7 @@
     "codex"
   ],
   "fixture": "main",
-  "status": "deferred",
+  "status": "active",
   "prompt": "Are there any risky unwrap/panic/unsafe spots in this crate I should know about before shipping?",
   "expected_tools": {
     "required_first": [
@@ -33,8 +33,10 @@
       "ack "
     ]
   },
-  "ground_truth": [],
+  "ground_truth": [
+    "raw_total_len",
+    "unsafe"
+  ],
   "max_tool_calls": 5,
-  "requires_fixture": "planted-unsafe-panic-todo-markers",
-  "notes": "STILL DEFERRED, different reason now: lane 1's fixture/src/audit.rs::raw_total_len plants a genuine needless `unsafe { }` block, so the fixture-readiness gap is closed. Live-verified against the built fixture: `tracedecay tool unsafe_patterns` still returns 'No diagnostics' (empty) despite the planted block -- this is the tool bug the README documents ('even in the main repo for unwrap/unsafe_block kinds'), not a missing marker. Requiring tracedecay_unsafe_patterns as required_first would fail every agent that correctly discovers the right tool, so keep deferred until that tool is fixed; re-verify with a fresh `tracedecay tool unsafe_patterns` call before promoting."
+  "notes": "ACTIVE. The tool bug is fixed: `tracedecay_unsafe_patterns` previously returned an empty 'No diagnostics' response because its Markdown renderer (src/mcp/tools/render.rs) only understood the compiler-`diagnostics` payload shape and silently dropped the `matches` shape this tool emits. With the dedicated `risky_patterns_md` renderer it now surfaces findings. Live-verified against the built fixture (fresh `tracedecay tool unsafe_patterns`): the sole finding across the crate is the needless `unsafe { }` block at fixture/src/audit.rs:28, enclosing symbol `raw_total_len`, kind `unsafe_block` (there are no unwrap/panic/todo-macro sites; the planted TODO is a `//` comment, not `todo!(`). ground_truth fragments are the enclosing symbol name and the `unsafe` nature that any correct answer must report."
 }

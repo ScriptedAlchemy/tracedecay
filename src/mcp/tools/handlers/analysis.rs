@@ -1496,7 +1496,7 @@ pub(super) async fn handle_unsafe_patterns(
         "matches": matches,
     });
     let text = render::finalize(Some(cg.project_root()), &args, &payload, || {
-        render::diagnostics_md(&payload)
+        render::risky_patterns_md(&payload)
     });
     Ok(ToolResult::new(
         json!({
@@ -2540,5 +2540,58 @@ mod diagnostics_warming_tests {
             .unwrap_or_else(|err| panic!("format=json should stay parseable JSON: {err}"));
         assert_eq!(json_payload["status"], "warming");
         assert_eq!(json_payload["diagnostic_count"], 0);
+    }
+}
+
+#[cfg(test)]
+mod unsafe_pattern_detection_tests {
+    use super::{contains_unsafe_block_start, line_matches_unsafe_kind};
+
+    #[test]
+    fn detects_unsafe_block_inside_safe_fn() {
+        // An `unsafe { }` block living inside an otherwise-safe function — the
+        // exact shape the audit fixture plants.
+        assert!(line_matches_unsafe_kind(
+            "    unsafe { *ptr as usize }",
+            "unsafe_block"
+        ));
+        assert!(contains_unsafe_block_start("    unsafe { *ptr as usize }"));
+    }
+
+    #[test]
+    fn detects_unsafe_fn_impl_and_trait() {
+        assert!(line_matches_unsafe_kind(
+            "pub unsafe fn raw(&self) {",
+            "unsafe_block"
+        ));
+        assert!(line_matches_unsafe_kind(
+            "unsafe impl Send for Foo {}",
+            "unsafe_block"
+        ));
+        assert!(line_matches_unsafe_kind(
+            "unsafe trait Zeroable {}",
+            "unsafe_block"
+        ));
+    }
+
+    #[test]
+    fn ignores_safe_code_and_comments() {
+        // Plain safe code has no unsafe markers.
+        assert!(!line_matches_unsafe_kind(
+            "let x = total as usize;",
+            "unsafe_block"
+        ));
+        // The word appears only in a comment/doc line: not a real unsafe site.
+        assert!(!line_matches_unsafe_kind(
+            "// this is not unsafe { } really",
+            "unsafe_block"
+        ));
+        assert!(!line_matches_unsafe_kind(
+            "/// drop the needless unsafe block",
+            "unsafe_block"
+        ));
+        // A substring of a longer identifier must not trip the word-boundary check.
+        assert!(!contains_unsafe_block_start("let unsafely = 1;"));
+        assert!(!contains_unsafe_block_start("let make_unsafe_thing = 2;"));
     }
 }
