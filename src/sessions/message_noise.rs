@@ -107,7 +107,10 @@ fn is_branch_inventory(lower: &str) -> bool {
 /// does not count — that message is still a bare inventory.
 fn shows_substantive_work(lower: &str) -> bool {
     const WORK_VERBS: [&str; 4] = ["implemented", "fixed", "refactored", "committed"];
-    if lower.contains("```") || lower.contains("diff --git") || lower.contains("@@ ") {
+    // A bare code fence is NOT evidence: a fenced branch roster is still an
+    // inventory. Only concrete diff markers count on their own; fenced code
+    // accompanying real work co-occurs with the affirmative verbs below.
+    if lower.contains("diff --git") || lower.contains("@@ ") {
         return true;
     }
     WORK_VERBS
@@ -256,6 +259,15 @@ mod tests {
     }
 
     #[test]
+    #[test]
+    fn fenced_branch_roster_stays_inventory() {
+        // A bare Markdown fence must not vouch for work: a fenced branch
+        // roster is still an inventory (review finding on PR #361).
+        assert!(is_inventory_text(
+            "Branch inventory sweep:\n```\ncodex/foo\ncodex/bar\ncodex/baz\n```"
+        ));
+    }
+
     fn genuine_roster_with_negated_work_verb_stays_inventory() {
         // A roster that explicitly says nothing was implemented is still a bare
         // inventory: the negated verb must not trip the work-evidence guard.
