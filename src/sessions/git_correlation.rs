@@ -701,10 +701,10 @@ pub(crate) fn direct_commit_records(
     project_root: &std::path::Path,
 ) -> Vec<CommitSessionRecord> {
     if !messages.iter().any(|message| {
-        message
-            .metadata_json
-            .as_deref()
-            .is_some_and(|json| json.contains("\"produced_commit_candidates\""))
+        message.metadata_json.as_deref().is_some_and(|json| {
+            json.contains("\"produced_commit_candidates\"")
+                || json.contains("\"observed_commit_candidates\"")
+        })
     }) {
         return Vec::new();
     }
@@ -713,82 +713,119 @@ pub(crate) fn direct_commit_records(
     };
     let mut seen = HashSet::new();
     let mut records = Vec::new();
-    for message in messages {
-        let Some(metadata_value) = message
-            .metadata_json
-            .as_deref()
-            .and_then(|json| serde_json::from_str::<serde_json::Value>(json).ok())
-        else {
-            continue;
-        };
-        let Some(metadata) = metadata_value.as_object() else {
-            continue;
-        };
-        let Some(candidates) = metadata
-            .get("produced_commit_candidates")
-            .and_then(serde_json::Value::as_array)
-        else {
-            continue;
-        };
-        for candidate in candidates.iter().filter_map(serde_json::Value::as_str) {
-            if !(7..=64).contains(&candidate.len())
-                || !candidate.chars().all(|ch| ch.is_ascii_hexdigit())
-            {
+    // Producer evidence is collected first so it always claims the
+    // (sha, provider, session) slot ahead of a weaker head observation of the
+    // same commit made by the same session.
+    for kind in [DirectEvidenceKind::Produced, DirectEvidenceKind::Observed] {
+        for message in messages {
+            let Some(metadata_value) = message
+                .metadata_json
+                .as_deref()
+                .and_then(|json| serde_json::from_str::<serde_json::Value>(json).ok())
+            else {
                 continue;
+            };
+            let Some(metadata) = metadata_value.as_object() else {
+                continue;
+            };
+            let Some(candidates) = metadata
+                .get(kind.metadata_key())
+                .and_then(serde_json::Value::as_array)
+            else {
+                continue;
+            };
+            for candidate in candidates.iter().filter_map(serde_json::Value::as_str) {
+                if !(7..=64).contains(&candidate.len())
+                    || !candidate.chars().all(|ch| ch.is_ascii_hexdigit())
+                {
+                    continue;
+                }
+                let Ok(spec) = repo.rev_parse_single(candidate) else {
+                    continue;
+                };
+                let Ok(object) = spec.object() else {
+                    continue;
+                };
+                let Ok(commit) = object.try_into_commit() else {
+                    continue;
+                };
+                let sha = commit.id.to_string();
+                if !seen.insert((
+                    sha.clone(),
+                    message.provider.clone(),
+                    message.session_id.clone(),
+                )) {
+                    continue;
+                }
+                let worktree = metadata_worktree(metadata)
+                    .map(normalize_worktree)
+                    .or_else(|| Some(normalize_worktree(&project_root.to_string_lossy())));
+                let branch = metadata
+                    .get("git_branch")
+                    .or_else(|| metadata.get("codex_git_branch"))
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_string);
+                let committed_at = commit.time().ok().map_or_else(
+                    || message.timestamp.unwrap_or_default(),
+                    |time| time.seconds,
+                );
+                let (relation, evidence, confidence) = match kind {
+                    DirectEvidenceKind::Produced => {
+                        let evidence = match metadata
+                            .get("produced_commit_evidence")
+                            .and_then(serde_json::Value::as_str)
+                        {
+                            Some("host_event") => CommitEvidence::HostEvent,
+                            _ => CommitEvidence::ToolResult,
+                        };
+                        (CommitRelation::Produced, evidence, 100)
+                    }
+                    // A printed HEAD proves the session saw the commit, not that
+                    // it made it: observed relation, sub-100 head-observation.
+                    DirectEvidenceKind::Observed => (
+                        CommitRelation::Observed,
+                        CommitEvidence::HeadObservation,
+                        HEAD_OBSERVATION_CONFIDENCE,
+                    ),
+                };
+                records.push(CommitSessionRecord {
+                    commit_sha: sha,
+                    provider: message.provider.clone(),
+                    session_id: message.session_id.clone(),
+                    branch,
+                    worktree,
+                    committed_at,
+                    span_overlap_kind: SpanOverlapKind::Direct,
+                    span_id: None,
+                    relation,
+                    evidence,
+                    confidence,
+                    evidence_message_id: Some(message.message_id.clone()),
+                });
             }
-            let Ok(spec) = repo.rev_parse_single(candidate) else {
-                continue;
-            };
-            let Ok(object) = spec.object() else {
-                continue;
-            };
-            let Ok(commit) = object.try_into_commit() else {
-                continue;
-            };
-            let sha = commit.id.to_string();
-            if !seen.insert((
-                sha.clone(),
-                message.provider.clone(),
-                message.session_id.clone(),
-            )) {
-                continue;
-            }
-            let worktree = metadata_worktree(metadata)
-                .map(normalize_worktree)
-                .or_else(|| Some(normalize_worktree(&project_root.to_string_lossy())));
-            let branch = metadata
-                .get("git_branch")
-                .or_else(|| metadata.get("codex_git_branch"))
-                .and_then(serde_json::Value::as_str)
-                .map(str::to_string);
-            let committed_at = commit.time().ok().map_or_else(
-                || message.timestamp.unwrap_or_default(),
-                |time| time.seconds,
-            );
-            let evidence = match metadata
-                .get("produced_commit_evidence")
-                .and_then(serde_json::Value::as_str)
-            {
-                Some("host_event") => CommitEvidence::HostEvent,
-                _ => CommitEvidence::ToolResult,
-            };
-            records.push(CommitSessionRecord {
-                commit_sha: sha,
-                provider: message.provider.clone(),
-                session_id: message.session_id.clone(),
-                branch,
-                worktree,
-                committed_at,
-                span_overlap_kind: SpanOverlapKind::Direct,
-                span_id: None,
-                relation: CommitRelation::Produced,
-                evidence,
-                confidence: 100,
-                evidence_message_id: Some(message.message_id.clone()),
-            });
         }
     }
     records
+}
+
+/// Confidence for a commit a session printed as current HEAD: stronger than a
+/// pure time-overlap guess, well below direct producer evidence.
+const HEAD_OBSERVATION_CONFIDENCE: i64 = 60;
+
+/// Which direct-evidence candidate list a `direct_commit_records` pass reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DirectEvidenceKind {
+    Produced,
+    Observed,
+}
+
+impl DirectEvidenceKind {
+    const fn metadata_key(self) -> &'static str {
+        match self {
+            Self::Produced => "produced_commit_candidates",
+            Self::Observed => "observed_commit_candidates",
+        }
+    }
 }
 
 /// Derives durable branch/worktree observations from provider message
@@ -1093,8 +1130,12 @@ async fn span_session_ids(
     ref_predicate: &str,
     ref_value: Value,
 ) -> Result<Vec<(String, String)>, GitCorrelationError> {
+    // Canonicalize to one identity per session (see `span_hits`): `MAX(provider)`
+    // collapses the hook-route (`provider ''`) and ingest rows so scope
+    // intersection compares matching `(provider, session_id)` pairs.
     let sql = format!(
-        "SELECT DISTINCT provider, session_id FROM session_git_spans WHERE {ref_predicate}"
+        "SELECT MAX(provider), session_id FROM session_git_spans \
+         WHERE {ref_predicate} GROUP BY session_id"
     );
     let mut rows = conn.query(&sql, vec![ref_value]).await?;
     let mut ids = Vec::new();
@@ -1108,11 +1149,23 @@ async fn commit_session_ids(
     conn: &Connection,
     sha: &str,
 ) -> Result<Vec<(String, String)>, GitCorrelationError> {
+    // Prefer producer evidence, but fall back to every session correlated with
+    // the commit when no producer row exists. A store upgraded from schema v2
+    // whose transcripts were later pruned keeps only observed/overlap rows
+    // (they exist precisely to survive worktree deletion); a hard
+    // `relation = 'produced'` filter would drop them and make the commit look
+    // untouched forever. `MAX(provider)` collapses the hook-route (`provider
+    // ''`) and ingest identities of one session into a single row.
     let mut rows = conn
         .query(
-            "SELECT DISTINCT provider, session_id FROM commit_sessions
-             WHERE relation = 'produced'
-               AND (commit_sha = ?1 OR commit_sha LIKE ?2)",
+            "SELECT MAX(provider), session_id FROM commit_sessions c
+             WHERE (commit_sha = ?1 OR commit_sha LIKE ?2)
+               AND (c.relation = 'produced'
+                    OR NOT EXISTS (
+                        SELECT 1 FROM commit_sessions p
+                        WHERE (p.commit_sha = ?1 OR p.commit_sha LIKE ?2)
+                          AND p.relation = 'produced'))
+             GROUP BY session_id",
             params![sha, format!("{sha}%")],
         )
         .await?;
@@ -1154,15 +1207,26 @@ pub(crate) fn git_scope_exists_clauses(
         ));
     }
     if let Some(commit) = &filter.commit {
+        // Prefer producer evidence, but fall back to any correlation when no
+        // producer row exists for the commit (see `commit_session_ids`): a
+        // pruned v2-upgraded store keeps only observed rows, and dropping them
+        // would erase the commit scope entirely.
+        let pattern = format!("{commit}%");
         clauses.push((
             format!(
                 "EXISTS (SELECT 1 FROM commit_sessions c \
-                 WHERE c.session_id = {session_column} AND c.relation = 'produced' \
-                 AND (c.commit_sha = ? OR c.commit_sha LIKE ?))"
+                 WHERE c.session_id = {session_column} \
+                 AND (c.commit_sha = ? OR c.commit_sha LIKE ?) \
+                 AND (c.relation = 'produced' \
+                      OR NOT EXISTS (SELECT 1 FROM commit_sessions p \
+                                     WHERE (p.commit_sha = ? OR p.commit_sha LIKE ?) \
+                                       AND p.relation = 'produced')))"
             ),
             vec![
                 Value::Text(commit.clone()),
-                Value::Text(format!("{commit}%")),
+                Value::Text(pattern.clone()),
+                Value::Text(commit.clone()),
+                Value::Text(pattern),
             ],
         ));
     }
@@ -1296,8 +1360,13 @@ async fn span_hits(
     query: &SessionsForQuery,
     limit: i64,
 ) -> Result<Vec<SessionGitCorrelationHit>, GitCorrelationError> {
+    // Group by `session_id` alone, not `(provider, session_id)`: hook-route
+    // spans store `provider = ''` while transcript ingest stores the real
+    // provider, so keying on both splits one session into two rows with its
+    // event/span counts divided between them. `MAX(provider)` picks the real
+    // (non-empty) provider as the session's single canonical identity.
     let mut sql = format!(
-        "SELECT provider, session_id,
+        "SELECT MAX(provider), session_id,
                 MIN(first_ts), MAX(last_ts), SUM(event_count), COUNT(*),
                 GROUP_CONCAT(DISTINCT source),
                 GROUP_CONCAT(DISTINCT branch),
@@ -1317,7 +1386,7 @@ async fn span_hits(
     query_params.push(Value::Integer(limit));
     let _ = write!(
         sql,
-        " GROUP BY provider, session_id
+        " GROUP BY session_id
           ORDER BY MAX(last_ts) DESC
           LIMIT ?{}",
         query_params.len()
@@ -1399,12 +1468,19 @@ async fn commit_hits(
     );
 
     let mut rows = conn.query(&sql, query_params).await?;
-    let mut hits = Vec::new();
+    // One session can hold two rows for the same commit — a hook-route
+    // observation (`provider ''`) and an ingest/producer row — because the
+    // primary key includes provider. Collapse them into a single canonical hit
+    // per session, keeping the strongest evidence and the real provider, so a
+    // session is never double-counted for one commit.
+    let mut order: Vec<String> = Vec::new();
+    let mut by_session: std::collections::HashMap<String, SessionGitCorrelationHit> =
+        std::collections::HashMap::new();
     while let Some(row) = rows.next().await? {
         let overlap: String = row.get(6)?;
         let relation: String = row.get(7)?;
         let evidence: String = row.get(8)?;
-        hits.push(SessionGitCorrelationHit {
+        let candidate = SessionGitCorrelationHit {
             provider: row.get(0)?,
             session_id: row.get(1)?,
             branch: row.get(2)?,
@@ -1421,9 +1497,48 @@ async fn commit_hits(
             evidence: CommitEvidence::from_db(&evidence),
             confidence: row.get(9)?,
             evidence_message_id: row.get(10)?,
-        });
+        };
+        if let Some(existing) = by_session.get_mut(&candidate.session_id) {
+            merge_commit_hit(existing, candidate);
+        } else {
+            order.push(candidate.session_id.clone());
+            by_session.insert(candidate.session_id.clone(), candidate);
+        }
     }
-    Ok(hits)
+    Ok(order
+        .into_iter()
+        .filter_map(|session_id| by_session.remove(&session_id))
+        .collect())
+}
+
+/// Folds a second commit hit for the same session into `existing`, keeping the
+/// stronger evidence and preferring a non-empty (real) provider.
+fn merge_commit_hit(existing: &mut SessionGitCorrelationHit, candidate: SessionGitCorrelationHit) {
+    if existing.provider.is_empty() && !candidate.provider.is_empty() {
+        existing.provider.clone_from(&candidate.provider);
+    }
+    if commit_hit_strength(&candidate) > commit_hit_strength(existing) {
+        let provider = if candidate.provider.is_empty() {
+            existing.provider.clone()
+        } else {
+            candidate.provider.clone()
+        };
+        *existing = SessionGitCorrelationHit {
+            provider,
+            ..candidate
+        };
+    }
+}
+
+/// Ranks a commit hit so producer evidence beats observation, breaking ties on
+/// confidence. Used to pick one canonical row per session.
+fn commit_hit_strength(hit: &SessionGitCorrelationHit) -> (u8, i64) {
+    let relation_rank = match hit.relation {
+        Some(CommitRelation::Produced) => 2,
+        Some(CommitRelation::Observed) => 1,
+        None => 0,
+    };
+    (relation_rank, hit.confidence.unwrap_or(0))
 }
 
 mod backfill;

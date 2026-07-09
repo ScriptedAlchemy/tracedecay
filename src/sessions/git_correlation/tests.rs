@@ -817,6 +817,422 @@ async fn commit_attribution_sweep_attributes_and_advances_watermark() {
     assert_eq!(again, 0, "re-attribution of the same commit is a no-op");
 }
 
+fn span_with(
+    provider: &str,
+    session_id: &str,
+    branch: Option<&str>,
+    worktree: &str,
+    ts: i64,
+    source: SpanSource,
+) -> SpanObservation {
+    SpanObservation {
+        provider: provider.to_string(),
+        session_id: session_id.to_string(),
+        thread_id: None,
+        branch: branch.map(str::to_string),
+        worktree: worktree.to_string(),
+        ts,
+        source,
+    }
+}
+
+#[test]
+fn head_observation_candidates_record_observed_not_produced() {
+    use std::process::Command;
+
+    let temp = tempfile::tempdir().unwrap();
+    let git = |args: &[&str]| {
+        Command::new("git")
+            .args(args)
+            .current_dir(temp.path())
+            .output()
+            .unwrap()
+    };
+    assert!(git(&["init", "-q"]).status.success());
+    assert!(
+        git(&["config", "user.email", "test@example.com"])
+            .status
+            .success()
+    );
+    assert!(git(&["config", "user.name", "Test"]).status.success());
+    std::fs::write(temp.path().join("file.txt"), "one\n").unwrap();
+    assert!(git(&["add", "file.txt"]).status.success());
+    assert!(git(&["commit", "-q", "-m", "test"]).status.success());
+    let sha = String::from_utf8(git(&["rev-parse", "HEAD"]).stdout)
+        .unwrap()
+        .trim()
+        .to_string();
+
+    let message = SessionMessageRecord {
+        provider: "codex".to_string(),
+        message_id: "m1".to_string(),
+        session_id: "s1".to_string(),
+        role: "tool".to_string(),
+        timestamp: Some(10),
+        ordinal: 1,
+        text: "git rev-parse HEAD".to_string(),
+        kind: Some("tool_call".to_string()),
+        model: None,
+        tool_names: Some("exec_command".to_string()),
+        source_path: None,
+        source_offset: None,
+        metadata_json: Some(
+            serde_json::json!({
+                "observed_commit_candidates": [sha],
+                "codex_git_branch": "main",
+                "codex_turn_worktree": temp.path(),
+            })
+            .to_string(),
+        ),
+    };
+    let records = direct_commit_records(&[message], temp.path());
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].commit_sha, sha);
+    assert_eq!(records[0].relation, CommitRelation::Observed);
+    assert_eq!(records[0].evidence, CommitEvidence::HeadObservation);
+    assert_eq!(records[0].confidence, HEAD_OBSERVATION_CONFIDENCE);
+}
+
+#[test]
+fn producer_evidence_wins_over_head_observation_of_same_commit() {
+    use std::process::Command;
+
+    let temp = tempfile::tempdir().unwrap();
+    let git = |args: &[&str]| {
+        Command::new("git")
+            .args(args)
+            .current_dir(temp.path())
+            .output()
+            .unwrap()
+    };
+    assert!(git(&["init", "-q"]).status.success());
+    assert!(
+        git(&["config", "user.email", "test@example.com"])
+            .status
+            .success()
+    );
+    assert!(git(&["config", "user.name", "Test"]).status.success());
+    std::fs::write(temp.path().join("file.txt"), "one\n").unwrap();
+    assert!(git(&["add", "file.txt"]).status.success());
+    assert!(git(&["commit", "-q", "-m", "test"]).status.success());
+    let sha = String::from_utf8(git(&["rev-parse", "HEAD"]).stdout)
+        .unwrap()
+        .trim()
+        .to_string();
+    let short = &sha[..8];
+
+    // The same exec both created the commit (bracket) and printed HEAD, so the
+    // one commit appears in both candidate lists. Only one producer record must
+    // survive.
+    let message = SessionMessageRecord {
+        provider: "codex".to_string(),
+        message_id: "m1".to_string(),
+        session_id: "s1".to_string(),
+        role: "tool".to_string(),
+        timestamp: Some(10),
+        ordinal: 1,
+        text: "git commit && git rev-parse HEAD".to_string(),
+        kind: Some("tool_call".to_string()),
+        model: None,
+        tool_names: Some("exec_command".to_string()),
+        source_path: None,
+        source_offset: None,
+        metadata_json: Some(
+            serde_json::json!({
+                "produced_commit_candidates": [short],
+                "observed_commit_candidates": [sha],
+                "codex_git_branch": "main",
+                "codex_turn_worktree": temp.path(),
+            })
+            .to_string(),
+        ),
+    };
+    let records = direct_commit_records(&[message], temp.path());
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].relation, CommitRelation::Produced);
+    assert_eq!(records[0].confidence, 100);
+}
+
+#[tokio::test]
+async fn mixed_provider_spans_collapse_to_one_session_in_branch_query() {
+    let conn = test_conn().await;
+    // A live session observed by the provider-agnostic hook route (provider '')
+    // and again by transcript ingest (provider 'claude').
+    record_span_observation(
+        &conn,
+        &span_with(
+            "",
+            "s1",
+            Some("main"),
+            "/repo",
+            1_000,
+            SpanSource::HookRoute,
+        ),
+        600,
+    )
+    .await
+    .unwrap();
+    record_span_observation(
+        &conn,
+        &span_with(
+            "claude",
+            "s1",
+            Some("main"),
+            "/repo",
+            1_050,
+            SpanSource::Ingest,
+        ),
+        600,
+    )
+    .await
+    .unwrap();
+
+    let hits = sessions_for(
+        &conn,
+        &SessionsForQuery {
+            git_ref: GitRefFilter::Branch("main".to_string()),
+            since: None,
+            until: None,
+            limit: 10,
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(hits.len(), 1, "one session must not split into two rows");
+    assert_eq!(hits[0].session_id, "s1");
+    assert_eq!(hits[0].provider, "claude", "real provider is canonical");
+    assert_eq!(hits[0].event_count, 2, "counts are summed, not split");
+    assert_eq!(hits[0].span_count, 2);
+}
+
+#[tokio::test]
+async fn mixed_provider_commit_rows_collapse_to_one_hit() {
+    let conn = test_conn().await;
+    let sha = "abcdef1234567890abcdef1234567890abcdef12";
+    for provider in ["", "claude"] {
+        upsert_commit_session(
+            &conn,
+            &CommitSessionRecord {
+                commit_sha: sha.to_string(),
+                provider: provider.to_string(),
+                session_id: "s1".to_string(),
+                branch: Some("main".to_string()),
+                worktree: Some("/repo".to_string()),
+                committed_at: 1_500,
+                span_overlap_kind: SpanOverlapKind::WithinSpan,
+                span_id: None,
+                relation: CommitRelation::Observed,
+                evidence: CommitEvidence::TimeOverlap,
+                confidence: 20,
+                evidence_message_id: None,
+            },
+        )
+        .await
+        .unwrap();
+    }
+
+    let hits = sessions_for_with_relation(
+        &conn,
+        &SessionsForQuery {
+            git_ref: GitRefFilter::Commit("abcdef12".to_string()),
+            since: None,
+            until: None,
+            limit: 10,
+        },
+        CommitRelationFilter::All,
+    )
+    .await
+    .unwrap();
+    assert_eq!(hits.len(), 1, "one session must not be double-counted");
+    assert_eq!(hits[0].session_id, "s1");
+    assert_eq!(hits[0].provider, "claude");
+}
+
+#[tokio::test]
+async fn attribution_sweep_writes_one_row_for_mixed_provider_session() {
+    let conn = test_conn().await;
+    // Same session, two provider identities, both overlapping the commit.
+    record_span_observation(
+        &conn,
+        &span_with(
+            "",
+            "s1",
+            Some("main"),
+            "/repo",
+            1_500,
+            SpanSource::HookRoute,
+        ),
+        600,
+    )
+    .await
+    .unwrap();
+    record_span_observation(
+        &conn,
+        &span_with(
+            "claude",
+            "s1",
+            Some("main"),
+            "/repo",
+            1_500,
+            SpanSource::Ingest,
+        ),
+        600,
+    )
+    .await
+    .unwrap();
+
+    let sha = "abcdef1234567890abcdef1234567890abcdef12";
+    run_commit_attribution_sweep(&conn, 600, |_| {
+        vec![ScannedCommit {
+            sha: sha.to_string(),
+            committed_at: 1_500,
+        }]
+    })
+    .await
+    .unwrap();
+
+    let mut rows = conn
+        .query(
+            "SELECT COUNT(*) FROM commit_sessions WHERE commit_sha = ?1",
+            libsql::params![sha],
+        )
+        .await
+        .unwrap();
+    let count: i64 = rows.next().await.unwrap().unwrap().get(0).unwrap();
+    assert_eq!(
+        count, 1,
+        "canonical provider yields a single attribution row"
+    );
+}
+
+#[tokio::test]
+async fn commit_scope_falls_back_to_observed_when_no_producer_exists() {
+    let conn = test_conn().await;
+    // Only an observed row exists (the state of every migrated v2 store).
+    upsert_commit_session(
+        &conn,
+        &CommitSessionRecord {
+            commit_sha: "abcdef1234567890abcdef1234567890abcdef12".to_string(),
+            provider: "claude".to_string(),
+            session_id: "observer".to_string(),
+            branch: Some("main".to_string()),
+            worktree: Some("/repo".to_string()),
+            committed_at: 1_500,
+            span_overlap_kind: SpanOverlapKind::WithinSpan,
+            span_id: None,
+            relation: CommitRelation::Observed,
+            evidence: CommitEvidence::TimeOverlap,
+            confidence: 20,
+            evidence_message_id: None,
+        },
+    )
+    .await
+    .unwrap();
+
+    let filter = GitScopeFilter::from_args(None, None, Some("abcdef12")).unwrap();
+    let ids = session_ids_for_scope(&conn, &filter)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        ids,
+        vec![("claude".to_string(), "observer".to_string())],
+        "observed-only commit rows must still resolve for commit scope"
+    );
+
+    // Once a producer is known, the observer no longer resolves — producer
+    // evidence takes precedence.
+    upsert_commit_session(
+        &conn,
+        &CommitSessionRecord {
+            commit_sha: "abcdef1234567890abcdef1234567890abcdef12".to_string(),
+            provider: "codex".to_string(),
+            session_id: "producer".to_string(),
+            branch: Some("main".to_string()),
+            worktree: Some("/repo".to_string()),
+            committed_at: 1_500,
+            span_overlap_kind: SpanOverlapKind::Direct,
+            span_id: None,
+            relation: CommitRelation::Produced,
+            evidence: CommitEvidence::ToolResult,
+            confidence: 100,
+            evidence_message_id: Some("m1".to_string()),
+        },
+    )
+    .await
+    .unwrap();
+    let ids = session_ids_for_scope(&conn, &filter)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(ids, vec![("codex".to_string(), "producer".to_string())]);
+}
+
+#[tokio::test]
+async fn sweep_watermark_tracks_ingest_time_so_late_history_is_attributed() {
+    let conn = test_conn().await;
+    // A recent session fixes the watermark near "now".
+    record_span_observation(
+        &conn,
+        &span_with(
+            "claude",
+            "recent",
+            Some("main"),
+            "/repo",
+            10_000,
+            SpanSource::Ingest,
+        ),
+        600,
+    )
+    .await
+    .unwrap();
+    run_commit_attribution_sweep(&conn, 600, |_| Vec::new())
+        .await
+        .unwrap();
+    let watermark = read_meta_value(&conn, "commit_attribution_watermark")
+        .await
+        .unwrap()
+        .unwrap();
+
+    // A historical session is ingested late: its event time (500) is far below
+    // the watermark, but its write time is now.
+    record_span_observation(
+        &conn,
+        &span_with(
+            "claude",
+            "historical",
+            Some("feat"),
+            "/repo",
+            500,
+            SpanSource::Ingest,
+        ),
+        600,
+    )
+    .await
+    .unwrap();
+    assert!(
+        500 < watermark,
+        "historical event time must sit below the watermark to exercise the fix"
+    );
+
+    let inserted = run_commit_attribution_sweep(&conn, 600, |target| {
+        if target.branch.as_deref() == Some("feat") {
+            vec![ScannedCommit {
+                sha: "abcdef1234567890abcdef1234567890abcdef12".to_string(),
+                committed_at: 500,
+            }]
+        } else {
+            Vec::new()
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        inserted, 1,
+        "a late-ingested historical span must still be attributed"
+    );
+}
+
 #[test]
 fn activity_sort_key_prefers_message_then_end_then_start() {
     let row = |started, ended, msg_max| SessionActivityRow {

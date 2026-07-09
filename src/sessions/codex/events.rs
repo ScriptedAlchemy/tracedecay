@@ -503,12 +503,18 @@ fn exec_command_row(
     );
     if success == Some(true) {
         let candidates = output
-            .map(|output| produced_commit_candidates(&exec.cmd, output))
+            .map(|output| commit_candidates(&exec.cmd, output))
             .unwrap_or_default();
-        if !candidates.is_empty() {
+        if !candidates.produced.is_empty() {
             metadata.insert(
                 "produced_commit_candidates".to_string(),
-                Value::Array(candidates.into_iter().map(Value::String).collect()),
+                Value::Array(candidates.produced.into_iter().map(Value::String).collect()),
+            );
+        }
+        if !candidates.observed.is_empty() {
+            metadata.insert(
+                "observed_commit_candidates".to_string(),
+                Value::Array(candidates.observed.into_iter().map(Value::String).collect()),
             );
         }
     }
@@ -527,12 +533,28 @@ fn exec_command_row(
     )
 }
 
-fn produced_commit_candidates(command: &str, wrapped_output: &str) -> Vec<String> {
+/// Commit refs mined from one exec result, split by evidence strength.
+///
+/// `produced` refs come from output a commit-creating command emits only when
+/// it actually writes a commit (the `[branch sha] subject` line git prints for
+/// `commit`/`merge`/`cherry-pick`/`revert`). `observed` refs come from a
+/// read-only HEAD print (`git rev-parse HEAD`): that a session printed the
+/// current HEAD is proof it *saw* the commit, never that it created it. A
+/// pipeline like `git commit -m x; git rev-parse HEAD` exits 0 on the
+/// rev-parse even when the commit failed, so the printed HEAD must never be
+/// promoted to producer evidence.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct CommitCandidates {
+    produced: Vec<String>,
+    observed: Vec<String>,
+}
+
+fn commit_candidates(command: &str, wrapped_output: &str) -> CommitCandidates {
     let creates_commit = command
         .split([';', '\n', '&', '|'])
         .any(segment_creates_commit);
     if !creates_commit {
-        return Vec::new();
+        return CommitCandidates::default();
     }
 
     let output = wrapped_output
@@ -541,27 +563,38 @@ fn produced_commit_candidates(command: &str, wrapped_output: &str) -> Vec<String
     let reports_head = command
         .split([';', '\n', '&', '|'])
         .any(segment_reports_head);
-    let mut candidates = Vec::new();
+    let mut candidates = CommitCandidates::default();
     for line in output.lines() {
         let trimmed = line.trim();
+        // The `[branch sha] subject` line is emitted only when a commit was
+        // actually written, so it is genuine producer evidence.
         let bracket_candidate = trimmed
             .strip_prefix('[')
             .and_then(|line| line.split_once(']'))
             .and_then(|(header, _)| header.split_whitespace().next_back())
             .map(|token| token.trim_matches(|ch: char| !ch.is_ascii_hexdigit()));
-        let exact_head = reports_head.then_some(trimmed).filter(|candidate| {
-            matches!(candidate.len(), 40 | 64) && candidate.chars().all(|ch| ch.is_ascii_hexdigit())
-        });
-        for candidate in bracket_candidate.into_iter().chain(exact_head) {
-            if candidate.len() >= 7
-                && candidate.chars().all(|ch| ch.is_ascii_hexdigit())
-                && !candidates.iter().any(|known| known == candidate)
-            {
-                candidates.push(candidate.to_ascii_lowercase());
-            }
+        if let Some(candidate) = bracket_candidate {
+            push_commit_candidate(&mut candidates.produced, candidate);
+        }
+        // A bare full-length sha is the output of a read-only HEAD print. It
+        // only tells us the session observed the current HEAD.
+        if reports_head
+            && matches!(trimmed.len(), 40 | 64)
+            && trimmed.chars().all(|ch| ch.is_ascii_hexdigit())
+        {
+            push_commit_candidate(&mut candidates.observed, trimmed);
         }
     }
     candidates
+}
+
+fn push_commit_candidate(candidates: &mut Vec<String>, candidate: &str) {
+    if candidate.len() >= 7
+        && candidate.chars().all(|ch| ch.is_ascii_hexdigit())
+        && !candidates.iter().any(|known| known == candidate)
+    {
+        candidates.push(candidate.to_ascii_lowercase());
+    }
 }
 
 fn segment_reports_head(segment: &str) -> bool {
@@ -1138,23 +1171,63 @@ mod tests {
             .event_from_line(&output, &meta(), None, path, 20)
             .unwrap();
         let md = metadata_of(&rows[0]);
+        // The `[main abcdef1]` line is producer evidence; the bare HEAD sha that
+        // `git rev-parse HEAD` prints is only an observation of current HEAD.
+        assert_eq!(md["produced_commit_candidates"], json!(["abcdef1"]));
         assert_eq!(
-            md["produced_commit_candidates"],
-            json!(["abcdef1", "0123456789abcdef0123456789abcdef01234567"])
+            md["observed_commit_candidates"],
+            json!(["0123456789abcdef0123456789abcdef01234567"])
+        );
+    }
+
+    #[test]
+    fn rev_parse_head_after_failed_commit_is_observed_not_produced() {
+        // `;` keeps the process exit 0 on the rev-parse even though the commit
+        // failed, so the printed old HEAD must never become producer evidence.
+        let candidates = commit_candidates(
+            "git commit -m x; git rev-parse HEAD",
+            "Output:\nabcdef1234567890abcdef1234567890abcdef12",
+        );
+        assert!(candidates.produced.is_empty());
+        assert_eq!(
+            candidates.observed,
+            vec!["abcdef1234567890abcdef1234567890abcdef12"]
+        );
+    }
+
+    #[test]
+    fn fast_forward_merge_head_print_is_observed_not_produced() {
+        // A fast-forward merge creates no commit; the HEAD it prints belongs to
+        // whichever branch it advanced to, not to this session.
+        let candidates = commit_candidates(
+            "git merge feature && git rev-parse HEAD",
+            "Output:\nUpdating 1111111..2222222\nFast-forward\n2222222222222222222222222222222222222222",
+        );
+        assert!(candidates.produced.is_empty());
+        assert_eq!(
+            candidates.observed,
+            vec!["2222222222222222222222222222222222222222"]
         );
     }
 
     #[test]
     fn failed_or_non_commit_commands_never_claim_commit_production() {
-        assert!(produced_commit_candidates("git status", "Output:\nabcdef1").is_empty());
         assert!(
-            produced_commit_candidates("rg git commit", "Output:\n[main abcdef1] test").is_empty()
+            commit_candidates("git status", "Output:\nabcdef1")
+                .produced
+                .is_empty()
+        );
+        assert!(
+            commit_candidates("rg git commit", "Output:\n[main abcdef1] test")
+                .produced
+                .is_empty()
         );
         assert_eq!(
-            produced_commit_candidates(
+            commit_candidates(
                 "git commit -m 0123456789abcdef0123456789abcdef01234567",
                 "Output:\n[main abcdef1] 0123456789abcdef0123456789abcdef01234567"
-            ),
+            )
+            .produced,
             vec!["abcdef1"]
         );
     }

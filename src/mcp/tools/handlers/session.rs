@@ -2230,7 +2230,7 @@ pub(super) async fn handle_sessions_for(cg: &TraceDecay, args: Value) -> Result<
     // means nothing was ever recorded, which is a valid empty result (the
     // tool never ghost-creates an empty sessions.db).
     let db_path = cg.store_layout().sessions_db_path.clone();
-    let (results, index_health) = if db_path.is_file() {
+    let (results, index_health, observed_fallback) = if db_path.is_file() {
         let Some(db) = GlobalDb::open_read_only_at(&db_path).await else {
             return Ok(tool_json(
                 Some(cg.project_root()),
@@ -2253,10 +2253,25 @@ pub(super) async fn handle_sessions_for(cg: &TraceDecay, args: Value) -> Result<
             .map_err(|err| TraceDecayError::Config {
                 message: err.to_string(),
             })?;
-        (results, health)
+        // A commit attributed only by time overlap (or a migrated v2 store) has
+        // observed rows but no producer, so the producer-default query is
+        // empty. That must not read as "no session touched this commit": look
+        // up the observed sessions so the caller can be pointed at them.
+        let observed_fallback = if results.is_empty()
+            && matches!(query.git_ref, GitRefFilter::Commit(_))
+            && relation == CommitRelationFilter::Produced
+        {
+            db.git_sessions_for_with_relation(&query, CommitRelationFilter::Observed)
+                .await
+                .ok()
+                .filter(|hits| !hits.is_empty())
+        } else {
+            None
+        };
+        (results, health, observed_fallback)
     } else {
         // No store file at all: the correlation index was never created.
-        (Vec::new(), None)
+        (Vec::new(), None, None)
     };
 
     // The index is "empty" when there is no store, the correlation tables are
@@ -2290,15 +2305,24 @@ pub(super) async fn handle_sessions_for(cg: &TraceDecay, args: Value) -> Result<
     // auto-backfill (or a manual `tracedecay sessions git-backfill`), whereas a
     // populated index genuinely had no session on this ref.
     if results.is_empty() {
-        payload["message"] = json!(if index_empty {
-            if matches!(&query.git_ref, GitRefFilter::Commit(_)) {
-                "no commit evidence indexed yet — run `tracedecay sync` to ingest direct host/tool evidence; `tracedecay sessions git-backfill` adds weaker historical overlap evidence"
-            } else {
-                "correlation index empty (no git spans recorded yet) — it will auto-backfill on the next MCP server startup, or run `tracedecay sessions git-backfill` to populate it now"
-            }
+        if let Some(observed) = &observed_fallback {
+            payload["observed_count"] = json!(observed.len());
+            payload["observed_sessions"] = json!(observed);
+            payload["message"] = json!(format!(
+                "no producing sessions; {} session(s) observed this commit — pass relation=observed to list them",
+                observed.len()
+            ));
         } else {
-            "no sessions matched this git ref"
-        });
+            payload["message"] = json!(if index_empty {
+                if matches!(&query.git_ref, GitRefFilter::Commit(_)) {
+                    "no commit evidence indexed yet — run `tracedecay sync` to ingest direct host/tool evidence; `tracedecay sessions git-backfill` adds weaker historical overlap evidence"
+                } else {
+                    "correlation index empty (no git spans recorded yet) — it will auto-backfill on the next MCP server startup, or run `tracedecay sessions git-backfill` to populate it now"
+                }
+            } else {
+                "no sessions matched this git ref"
+            });
+        }
     }
     Ok(tool_json_with_md(
         Some(cg.project_root()),
