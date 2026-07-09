@@ -1169,3 +1169,103 @@ async fn session_reflector_runner_records_noop_fallback_when_backend_run_task_fa
         json!({ "facts": [] }),
     );
 }
+
+/// Near-duplicate paraphrases must fold into the existing pending proposal
+/// (bumping duplicate_count) instead of multiplying in the queue. Live
+/// evidence: one lesson was restated 21 times across a 50-proposal queue
+/// because only exact normalized content was deduped.
+#[tokio::test]
+async fn session_fact_proposals_fold_paraphrases_into_one_proposal() {
+    let temp = tempdir().unwrap();
+    let dashboard_root = temp.path().join("dashboard");
+    let fact = |content: &str| {
+        json!({
+            "add_fact_request": {
+                "content": content,
+                "category": "project",
+                "source": "session_reflector",
+                "tags": ["session-reflector"],
+                "entities": ["merge discipline"],
+                "trust": 0.9,
+                "metadata": {
+                    "source_span": { "session_id": "s", "message_id": "m" },
+                    "trust_reason": "repeated evidence"
+                }
+            },
+            "proposal": { "content": content }
+        })
+    };
+    let batch = vec![
+        fact(
+            "Never merge a PR batch after a single flaky green pass; require stable \
+             aggregate verification and a live PR-state recheck before merging",
+        ),
+        // Paraphrase: heavy token overlap, different wording/order.
+        fact(
+            "Before merging a PR batch, require stable aggregate verification and a \
+             live PR-state recheck — a single flaky green pass is never enough to merge",
+        ),
+        // Second paraphrase of the same lesson.
+        fact(
+            "A single flaky green pass is not enough: merging the PR batch needs \
+             stable aggregate verification plus a live PR-state recheck first",
+        ),
+        // Genuinely different lesson in the same category: must stay separate.
+        fact(
+            "Cursor composer ingestion reads cursorDiskKV with immutable read-only \
+             SQLite opens and indexed primary-key lookups only",
+        ),
+    ];
+
+    let recorded =
+        record_session_fact_proposals(&dashboard_root, "run-a", Some("evidence-a"), &batch, &[])
+            .await
+            .unwrap();
+    assert_eq!(
+        recorded.len(),
+        2,
+        "paraphrases must fold into the first proposal"
+    );
+
+    // A later run restating the same lesson folds in as well.
+    let restated = vec![fact(
+        "Require stable aggregate verification and live PR-state rechecks; never \
+         merge the batch off one flaky green pass",
+    )];
+    let second =
+        record_session_fact_proposals(&dashboard_root, "run-b", Some("evidence-b"), &restated, &[])
+            .await
+            .unwrap();
+    assert_eq!(second.len(), 0);
+
+    let proposals = list_fact_proposals(
+        &dashboard_root,
+        Some(FactProposalState::PendingApproval),
+        10,
+    )
+    .await
+    .unwrap();
+    assert_eq!(proposals.len(), 2);
+    let folded = proposals
+        .iter()
+        .find(|p| {
+            p.add_fact_request
+                .as_ref()
+                .is_some_and(|r| r.content.contains("flaky green"))
+        })
+        .expect("merge-discipline proposal present");
+    assert_eq!(
+        folded.duplicate_count, 3,
+        "two in-batch paraphrases plus one cross-run restatement"
+    );
+    assert_eq!(folded.last_duplicate_run_id.as_deref(), Some("run-b"));
+    let distinct = proposals
+        .iter()
+        .find(|p| {
+            p.add_fact_request
+                .as_ref()
+                .is_some_and(|r| r.content.contains("cursorDiskKV"))
+        })
+        .expect("distinct proposal preserved");
+    assert_eq!(distinct.duplicate_count, 0);
+}

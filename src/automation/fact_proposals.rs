@@ -59,6 +59,19 @@ pub struct FactProposalRecord {
     pub apply_outcome: Option<AddFactOutcome>,
     pub created_at: i64,
     pub updated_at: i64,
+    /// Number of later near-duplicate proposals folded into this record
+    /// instead of being enqueued as their own entries. A high count is a
+    /// strong repeated-evidence signal for reviewers.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub duplicate_count: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_duplicate_run_id: Option<String>,
+}
+
+// serde's `skip_serializing_if` requires the `fn(&T) -> bool` shape.
+#[allow(clippy::trivially_copy_pass_by_ref)]
+fn is_zero(count: &u32) -> bool {
+    *count == 0
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -170,6 +183,13 @@ pub async fn record_session_fact_proposals(
         if active_add_fact_request_exists(&store, &add_fact_request) {
             continue;
         }
+        if let Some(existing_idx) = find_similar_active_proposal(&store, &add_fact_request) {
+            let existing = &mut store.proposals[existing_idx];
+            existing.duplicate_count = existing.duplicate_count.saturating_add(1);
+            existing.last_duplicate_run_id = Some(run_id.to_string());
+            existing.updated_at = now;
+            continue;
+        }
         let proposal = value.get("proposal").cloned();
         let validation = value.get("validation").cloned();
         let record = FactProposalRecord {
@@ -187,6 +207,8 @@ pub async fn record_session_fact_proposals(
             apply_outcome: None,
             created_at: now,
             updated_at: now,
+            duplicate_count: 0,
+            last_duplicate_run_id: None,
         };
         records.push(record.clone());
         store.proposals.push(record);
@@ -210,12 +232,39 @@ pub async fn record_session_fact_proposals(
             apply_outcome: None,
             created_at: now,
             updated_at: now,
+            duplicate_count: 0,
+            last_duplicate_run_id: None,
         };
         records.push(record.clone());
         store.proposals.push(record);
     }
     save_fact_proposal_store(dashboard_root, &store).await?;
     Ok(records)
+}
+
+/// Near-duplicate gate: a live run showed one lesson restated 21 times across
+/// a 50-proposal queue because only exact normalized content matched. Reuses
+/// the shared lexical-overlap scoring (the same signals the memory curator's
+/// duplicate tiers use) so paraphrases of an already-queued proposal fold
+/// into it instead of multiplying.
+fn find_similar_active_proposal(
+    store: &FactProposalStore,
+    request: &AddFactRequest,
+) -> Option<usize> {
+    store.proposals.iter().position(|proposal| {
+        if proposal.state == FactProposalState::Rejected {
+            return false;
+        }
+        let Some(existing) = proposal.add_fact_request.as_ref() else {
+            return false;
+        };
+        if existing.category != request.category {
+            return false;
+        }
+        let (_, token_overlap, overlap_coefficient) =
+            crate::memory::similarity::lexical_overlap(&existing.content, &request.content);
+        overlap_coefficient >= 0.65 || token_overlap >= 0.45
+    })
 }
 
 fn active_add_fact_request_exists(store: &FactProposalStore, request: &AddFactRequest) -> bool {

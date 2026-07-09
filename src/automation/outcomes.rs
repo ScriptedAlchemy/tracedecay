@@ -526,6 +526,8 @@ mod tests {
             apply_outcome: None,
             created_at: applied_at,
             updated_at: applied_at,
+            duplicate_count: 0,
+            last_duplicate_run_id: None,
         }
     }
 
