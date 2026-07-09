@@ -138,15 +138,21 @@ enriches the copied fixture at setup so more scenario tiers are gradable:
   markers: a genuine unused import (`use std::collections::BTreeMap;`), a `TODO`
   marker, and a needless `unsafe { }` block.
   * The `TODO` is reliably surfaced by `tracedecay_todos` (two matches).
-  * **Known tool gaps (tracedecay v0.0.40):** `tracedecay_unused_imports` did
-    **not** flag the planted unused import in this small crate (imports sharing a
-    path with a used one collapse to one node; even a crate-unique unused import
-    was not surfaced), and `tracedecay_unsafe_patterns` returned an empty
-    "No diagnostics" response even in the main repo for `unwrap`/`unsafe_block`
-    kinds. The plants are real (rustc warns on the import; the `unsafe` block
-    compiles), so anchor audit-tier scenarios on `tracedecay_todos` + the
-    audit-safety skill + `tracedecay_context` for now, and consider filing an
-    issue on those two tools (strip proprietary code first).
+  * All three plants now have working tool coverage:
+    * `tracedecay_unused_imports` flags the planted `BTreeMap` at
+      `src/audit.rs` (whole-crate run: `unused_import_count` 1). This was
+      previously an empty-result gap: the resolver drops `Uses` edges for
+      std/foreign-crate imports, so the tool falls back to a text scan of the
+      file — but it counted the import identifier appearing in the **comment
+      directly above the `use`** as a real reference, so the crate-unique
+      import was read as "used" and never surfaced. Fixed by masking comments
+      and string/char literals (`mask_rust_noise` in
+      `src/mcp/tools/handlers/analysis.rs`) before the scan, plus a dedicated
+      `unused_imports_md` renderer. Anchored by `analysis_unused_import_hunt`.
+    * `tracedecay_unsafe_patterns` surfaces the needless `unsafe { }` block
+      (dedicated `risky_patterns_md` renderer). Anchored by
+      `analysis_unsafe_panic_audit`.
+    * `tracedecay_todos` surfaces the `TODO`. Anchored by `diag_todo_inventory`.
 
 ### Seeding prior sessions — a gap
 

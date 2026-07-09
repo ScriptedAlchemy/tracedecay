@@ -13498,6 +13498,80 @@ pub fn used_one() -> HashMap<u32, u32> { HashMap::new() }
     );
 }
 
+/// Regression for the "empty results on small crates" bug: an import named only
+/// in a nearby comment (like the audit fixture's own
+/// `// Planted unused import: BTreeMap …`) was read as "used" by the text scan
+/// and never flagged. Asserts the masked scan flags it in BOTH markdown and
+/// JSON with file:line, and that a genuinely-used import is NOT flagged.
+#[tokio::test]
+async fn unused_imports_reports_in_markdown_and_json() {
+    let dir = test_temp_dir();
+    let project = dir.path();
+    fs::create_dir_all(project.join("src")).unwrap();
+    // `HashMap` is used; `BTreeMap` is unused but named in the comment above it.
+    fs::write(
+        project.join("src/lib.rs"),
+        "use std::collections::HashMap;\n\
+         // Planted unused import: BTreeMap is referenced nowhere in real code.\n\
+         use std::collections::BTreeMap;\n\
+         \n\
+         pub fn used_one() -> HashMap<u32, u32> { HashMap::new() }\n",
+    )
+    .unwrap();
+    let (cg, _env) = init_test_project(project).await;
+    cg.index_all().await.unwrap();
+
+    // Markdown (runtime default; request explicitly so the test helper does not
+    // force-inject `format=json`).
+    let md = handle_tool_call(
+        &cg,
+        "tracedecay_unused_imports",
+        json!({"format": "markdown"}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let text = extract_text(&md.value);
+    assert!(text.contains("## Unused Imports"), "got: {text}");
+    // `line` is the node's 0-based start line (source line 3 → 2), matching the
+    // rest of the graph API.
+    assert!(
+        text.contains("**BTreeMap unused in src/lib.rs:2**"),
+        "markdown must report the unused import with file:line: {text}"
+    );
+    assert!(
+        !text.contains("HashMap unused"),
+        "used import must not be flagged: {text}"
+    );
+
+    // JSON output must carry the same structured finding.
+    let js = handle_tool_call(
+        &cg,
+        "tracedecay_unused_imports",
+        json!({"format": "json"}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let payload: Value = serde_json::from_str(extract_text(&js.value)).unwrap();
+    assert_eq!(payload["unused_import_count"], 1, "payload: {payload}");
+    let imports = payload["imports"].as_array().unwrap();
+    assert_eq!(imports.len(), 1, "payload: {payload}");
+    let m = &imports[0];
+    assert_eq!(m["unused"], "BTreeMap");
+    assert_eq!(m["file"], "src/lib.rs");
+    assert_eq!(m["line"], 2);
+    // The used import must never appear.
+    assert!(
+        imports
+            .iter()
+            .all(|u| u["unused"].as_str() != Some("HashMap")),
+        "used HashMap must not be flagged: {payload}"
+    );
+}
+
 /// Regression for bug #8a: `tracedecay_dead_code` must support `include_public`
 /// so agents can audit pub items with no callers in the indexed scope. The
 /// previous SQL hard-coded `visibility != 'public'`, so on a codebase that

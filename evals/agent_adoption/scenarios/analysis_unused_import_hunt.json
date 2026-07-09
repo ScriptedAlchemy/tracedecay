@@ -1,0 +1,42 @@
+{
+  "id": "analysis_unused_import_hunt",
+  "category": "unused_imports",
+  "pack": "pack_analysis",
+  "hosts": [
+    "claude",
+    "codex"
+  ],
+  "fixture": "main",
+  "status": "active",
+  "prompt": "Is this crate carrying any imports that aren't actually referenced anywhere? I'd like to trim them before shipping.",
+  "expected_tools": {
+    "required_first": [
+      "tracedecay_unused_imports",
+      "tracedecay_context"
+    ],
+    "acceptable": [
+      "tracedecay_grep",
+      "tracedecay_search",
+      "Read"
+    ],
+    "forbidden_first": [
+      "Grep",
+      "Glob"
+    ],
+    "forbidden_bash": [
+      "grep",
+      "rg ",
+      "rg\t",
+      "find ",
+      "cat ",
+      "sed ",
+      "awk ",
+      "ack "
+    ]
+  },
+  "ground_truth": [
+    "BTreeMap"
+  ],
+  "max_tool_calls": 5,
+  "notes": "ACTIVE. The tool bug is fixed: `tracedecay_unused_imports` previously returned empty results on small crates because its text-based scan treated an import merely named in a nearby comment as a real use (the resolver drops `Uses` edges for std/foreign-crate imports, so the scan is text-based by design). The planted `use std::collections::BTreeMap;` in fixture/src/audit.rs is described in the comment directly above it, so the identifier `BTreeMap` appeared on a non-use line and the import was read as 'used' -> zero findings. Fixed by masking comments and string/char literals (`mask_rust_noise` in src/mcp/tools/handlers/analysis.rs) before the identifier scan, plus a dedicated `unused_imports_md` renderer (src/mcp/tools/render.rs). Live-verified against the built fixture (fresh `tracedecay tool unused_imports`, whole crate): `unused_import_count` is 1 and the sole finding is `std::collections::BTreeMap` at fixture/src/audit.rs (node 0-based line 17 / source line 18); every other import in the crate is referenced and correctly left unflagged. ground_truth fragment `BTreeMap` is the import name any correct answer must report."
+}
