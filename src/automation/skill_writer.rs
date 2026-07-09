@@ -399,6 +399,12 @@ fn refresh_managed_skill_exports_after_auto_enable(profile_root: &Path) {
             );
         }
     }
+    // Auto-applied (policy-off) skills also materialize their host-loadable
+    // SKILL.md files, matching the manual approve path.
+    crate::automation::skill_materialization::reconcile_after_activation(
+        profile_root,
+        &project_root,
+    );
 }
 
 fn accepted_skill_approval_status(
