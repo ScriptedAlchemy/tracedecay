@@ -77,7 +77,9 @@ pub async fn run_doctor(agent_filter: Option<&str>) {
         for ag in &agents_to_check {
             ag.healthcheck(&mut dc, &hctx);
         }
-        check_managed_skill_materialization(&mut dc, home, &project_path);
+        let materialization_root =
+            crate::automation::skill_materialization::resolve_project_root(&project_path);
+        check_managed_skill_materialization(&mut dc, home, &materialization_root);
     } else {
         dc.fail("Could not determine home directory");
     }
@@ -137,6 +139,10 @@ fn check_managed_skill_materialization(dc: &mut DoctorCounters, home: &Path, pro
                 )),
                 SkillDrift::Orphan { .. } => dc.warn(&format!(
                     "{}: stale materialized skill '{skill_id}' ({path}); run `tracedecay update` to remove",
+                    scope.describe()
+                )),
+                SkillDrift::Warning { ref message, .. } => dc.warn(&format!(
+                    "{}: '{skill_id}' {message} ({path})",
                     scope.describe()
                 )),
             }

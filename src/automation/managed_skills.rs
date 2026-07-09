@@ -7,9 +7,9 @@ use crate::errors::{Result, TraceDecayError};
 use super::managed_skill_model::current_metadata_timestamp;
 pub use super::managed_skill_model::{
     MAX_MANAGED_SKILL_BODY_BYTES, MAX_MANAGED_SUPPORT_FILE_BYTES, MAX_MANAGED_SUPPORT_FILES,
-    ManagedSkill, ManagedSkillDraft, ManagedSkillMetadata, ManagedSkillPendingUpdate,
-    ManagedSkillProvenance, ManagedSkillSource, ManagedSkillState, ManagedSkillUpdate,
-    ManagedSupportFile, SkillInstallTarget, default_managed_skill_targets,
+    ManagedSkill, ManagedSkillDraft, ManagedSkillMaterializationScope, ManagedSkillMetadata,
+    ManagedSkillPendingUpdate, ManagedSkillProvenance, ManagedSkillSource, ManagedSkillState,
+    ManagedSkillUpdate, ManagedSupportFile, SkillInstallTarget, default_managed_skill_targets,
 };
 pub use super::managed_skill_validation::validate_managed_support_files;
 use super::managed_skill_validation::{

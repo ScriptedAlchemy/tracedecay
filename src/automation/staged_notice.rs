@@ -225,6 +225,8 @@ mod tests {
                 category: "testing".to_string(),
                 targets: crate::automation::managed_skills::default_managed_skill_targets(),
                 state,
+                materialization_scope:
+                    crate::automation::managed_skill_model::ManagedSkillMaterializationScope::Global,
                 pinned: false,
                 checksum: String::new(),
                 created_at: 1,
