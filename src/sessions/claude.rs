@@ -44,6 +44,10 @@ const PROVIDER: &str = "claude";
 const KIND_PR_LINK: &str = "pr_link";
 const KIND_COMPACT_BOUNDARY: &str = "compact_boundary";
 const KIND_MODEL_FALLBACK: &str = "model_fallback";
+/// A separate reasoning row per assistant message, matching how Codex and Cursor
+/// store the model's thinking as its own `kind="reasoning"` row instead of
+/// leaving it buried inside the serialized assistant-message content blob.
+const KIND_REASONING: &str = "reasoning";
 
 /// Cap on the capped preview text carried on a marker row.
 const MARKER_PREVIEW_BYTES: usize = 2000;
@@ -173,6 +177,12 @@ impl TranscriptSource for ClaudeSource {
                     line.offset,
                     &mut accumulator,
                 );
+            }
+            // Additive reasoning row for assistant thinking blocks. Emitted
+            // before the message row so the thinking precedes the visible answer
+            // in ordinal+insertion order (both share this line's byte offset).
+            if let Some(reasoning) = reasoning_from_line(record, &session_id, path, line.offset) {
+                messages.push(reasoning);
             }
             if let Some(message) = message {
                 messages.push(message);
@@ -446,12 +456,7 @@ fn message_from_line(
         return None;
     }
 
-    let message_id = message
-        .get("id")
-        .and_then(Value::as_str)
-        .or_else(|| record.get("uuid").and_then(Value::as_str))
-        .filter(|id| !id.is_empty())
-        .map_or_else(|| format!("{session_id}:{offset}"), ToString::to_string);
+    let message_id = conversational_message_id(message, record, session_id, offset);
     let model = message
         .get("model")
         .and_then(Value::as_str)
@@ -484,6 +489,131 @@ fn message_from_line(
             accumulator,
         ))
         .ok(),
+    })
+}
+
+/// Stable id for a conversational (`user`/`assistant`) row: the message `id`,
+/// else the record `uuid`, else a synthesized `{session}:{offset}`. Shared by
+/// the message row and the reasoning row so a reasoning row's
+/// `{base}:thinking` id always links back to its owning assistant message.
+fn conversational_message_id(
+    message: &Value,
+    record: &Value,
+    session_id: &str,
+    offset: i64,
+) -> String {
+    message
+        .get("id")
+        .and_then(Value::as_str)
+        .or_else(|| record.get("uuid").and_then(Value::as_str))
+        .filter(|id| !id.is_empty())
+        .map_or_else(|| format!("{session_id}:{offset}"), ToString::to_string)
+}
+
+/// Emit a separate `kind="reasoning"` row for an assistant message that carries
+/// one or more `thinking` blocks, so the model's reasoning is kind-filterable
+/// and searchable on its own row — matching how Codex
+/// ([`crate::sessions::codex`]) and Cursor ([`crate::sessions::cursor_composer`])
+/// store reasoning as a dedicated row (role "assistant", `kind="reasoning"`)
+/// rather than leaving the thinking text embedded in the serialized
+/// assistant-message content blob.
+///
+/// Multiple `thinking` blocks are concatenated in transcript order. A
+/// `redacted_thinking` block carries no plaintext, so — mirroring Codex's
+/// encrypted-reasoning convention, where
+/// `response_item_reasoning_summary_text` declines to emit a row when there is
+/// no plaintext summary — it never fabricates a body: a message whose only
+/// reasoning is redacted yields no row (the block count is recorded as metadata
+/// only when a plaintext row already exists).
+///
+/// Purely additive: the assistant message row itself is untouched (its content
+/// blob still carries the thinking blocks verbatim in lossless storage).
+fn reasoning_from_line(
+    record: &Value,
+    session_id: &str,
+    path: &Path,
+    offset: i64,
+) -> Option<SessionMessageRecord> {
+    if record.get("type").and_then(Value::as_str) != Some("assistant") {
+        return None;
+    }
+    let message = record.get("message").unwrap_or(record);
+    let blocks = message.get("content").and_then(Value::as_array)?;
+
+    let mut thinking_parts = Vec::new();
+    let mut redacted_blocks = 0usize;
+    for block in blocks {
+        match block.get("type").and_then(Value::as_str) {
+            Some("thinking") => {
+                if let Some(text) = block
+                    .get("thinking")
+                    .and_then(Value::as_str)
+                    .filter(|text| !text.trim().is_empty())
+                {
+                    thinking_parts.push(text.to_string());
+                }
+            }
+            Some("redacted_thinking") => redacted_blocks += 1,
+            _ => {}
+        }
+    }
+    // No plaintext thinking: mirror Codex, which records nothing for encrypted
+    // reasoning rather than fabricating a body from redacted content.
+    if thinking_parts.is_empty() {
+        return None;
+    }
+    let text = thinking_parts.join("\n\n");
+
+    let base_id = conversational_message_id(message, record, session_id, offset);
+    let role = message
+        .get("role")
+        .and_then(Value::as_str)
+        .filter(|role| !role.is_empty())
+        .unwrap_or("assistant")
+        .to_string();
+    let model = message
+        .get("model")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+
+    let mut metadata = Map::new();
+    metadata.insert(
+        "source".to_string(),
+        Value::String("claude_thinking".to_string()),
+    );
+    // Parent linkage back to the assistant message row that owns this reasoning.
+    metadata.insert(
+        "parent_message_id".to_string(),
+        Value::String(base_id.clone()),
+    );
+    metadata.insert(
+        "thinking_blocks".to_string(),
+        Value::from(thinking_parts.len() as i64),
+    );
+    if redacted_blocks > 0 {
+        metadata.insert(
+            "redacted_thinking_blocks".to_string(),
+            Value::from(redacted_blocks as i64),
+        );
+    }
+
+    Some(SessionMessageRecord {
+        provider: PROVIDER.to_string(),
+        // `{base}:thinking` keeps re-ingest idempotent and can never collide
+        // with the owning message row's `{base}` id under the
+        // `(provider, message_id)` primary key.
+        message_id: format!("{base_id}:thinking"),
+        session_id: session_id.to_string(),
+        role,
+        timestamp: record_timestamp(record),
+        ordinal: offset,
+        text,
+        kind: Some(KIND_REASONING.to_string()),
+        model,
+        tool_names: None,
+        source_path: Some(path.to_string_lossy().to_string()),
+        source_offset: Some(offset),
+        metadata_json: serde_json::to_string(&Value::Object(metadata)).ok(),
     })
 }
 
@@ -1151,5 +1281,120 @@ mod tests {
             &json!({"message": {"content": "gitOperation commit abcdef12"}}),
         );
         assert!(metadata.is_empty());
+    }
+
+    fn assistant_record(content: &Value) -> Value {
+        json!({
+            "type": "assistant",
+            "sessionId": "sess",
+            "uuid": "u-assistant",
+            "timestamp": "2026-01-01T00:00:05.000Z",
+            "message": {
+                "id": "msg_1",
+                "role": "assistant",
+                "model": "claude-opus-4-8",
+                "content": content.clone(),
+            }
+        })
+    }
+
+    #[test]
+    fn thinking_blocks_become_a_linked_reasoning_row_leaving_the_message_row_unchanged() {
+        let record = assistant_record(&json!([
+            {"type": "thinking", "thinking": "First I inspect the parser."},
+            {"type": "thinking", "thinking": "Then I add the row."},
+            {"type": "text", "text": "Done."}
+        ]));
+        let path = Path::new("/tmp/sess.jsonl");
+
+        let mut accumulator = SessionAccumulator::default();
+        let message = message_from_line(&record, "sess", path, 10, None, &mut accumulator)
+            .expect("assistant message row");
+        // The message row is untouched: it still stores the whole content array
+        // (thinking blocks included) as its lossless blob.
+        assert_eq!(message.message_id, "msg_1");
+        assert_eq!(message.kind.as_deref(), Some("message"));
+        assert!(message.text.contains("First I inspect the parser"));
+        assert!(message.text.contains("Done."));
+
+        let reasoning =
+            reasoning_from_line(&record, "sess", path, 10).expect("reasoning row for thinking");
+        assert_eq!(reasoning.message_id, "msg_1:thinking");
+        assert_eq!(reasoning.kind.as_deref(), Some("reasoning"));
+        assert_eq!(reasoning.role, "assistant");
+        assert_eq!(reasoning.model.as_deref(), Some("claude-opus-4-8"));
+        assert_eq!(reasoning.ordinal, 10);
+        assert_eq!(reasoning.timestamp, Some(1_767_225_605));
+        assert_eq!(
+            reasoning.text,
+            "First I inspect the parser.\n\nThen I add the row."
+        );
+        let metadata: Value = serde_json::from_str(reasoning.metadata_json.as_deref().unwrap())
+            .expect("reasoning metadata json");
+        assert_eq!(metadata["source"], "claude_thinking");
+        assert_eq!(metadata["parent_message_id"], "msg_1");
+        assert_eq!(metadata["thinking_blocks"], 2);
+        assert!(metadata.get("redacted_thinking_blocks").is_none());
+    }
+
+    #[test]
+    fn redacted_only_thinking_records_no_reasoning_row() {
+        // Matches Codex's encrypted-reasoning convention: no plaintext, no row.
+        let record = assistant_record(&json!([
+            {"type": "redacted_thinking", "data": "ENCRYPTED_SHOULD_NOT_INDEX"},
+            {"type": "text", "text": "Answer."}
+        ]));
+        assert!(reasoning_from_line(&record, "sess", Path::new("/tmp/sess.jsonl"), 3).is_none());
+    }
+
+    #[test]
+    fn mixed_thinking_and_redacted_records_the_redacted_count_but_no_plaintext() {
+        let record = assistant_record(&json!([
+            {"type": "thinking", "thinking": "Visible reasoning."},
+            {"type": "redacted_thinking", "data": "ENCRYPTED_SHOULD_NOT_INDEX"}
+        ]));
+        let reasoning = reasoning_from_line(&record, "sess", Path::new("/tmp/sess.jsonl"), 4)
+            .expect("reasoning row for the plaintext block");
+        assert_eq!(reasoning.text, "Visible reasoning.");
+        assert!(!reasoning.text.contains("ENCRYPTED"));
+        let metadata: Value =
+            serde_json::from_str(reasoning.metadata_json.as_deref().unwrap()).unwrap();
+        assert_eq!(metadata["thinking_blocks"], 1);
+        assert_eq!(metadata["redacted_thinking_blocks"], 1);
+    }
+
+    #[test]
+    fn assistant_message_without_thinking_records_no_reasoning_row() {
+        let record = assistant_record(&json!([{"type": "text", "text": "Just an answer."}]));
+        assert!(reasoning_from_line(&record, "sess", Path::new("/tmp/sess.jsonl"), 7).is_none());
+    }
+
+    #[test]
+    fn reasoning_row_id_falls_back_to_record_uuid_when_message_id_is_absent() {
+        let record = json!({
+            "type": "assistant",
+            "sessionId": "sess",
+            "uuid": "u-fallback",
+            "timestamp": "2026-01-01T00:00:05.000Z",
+            "message": {
+                "role": "assistant",
+                "content": [{"type": "thinking", "thinking": "Reasoning without a message id."}]
+            }
+        });
+        let reasoning = reasoning_from_line(&record, "sess", Path::new("/tmp/sess.jsonl"), 9)
+            .expect("reasoning row");
+        assert_eq!(reasoning.message_id, "u-fallback:thinking");
+        let metadata: Value =
+            serde_json::from_str(reasoning.metadata_json.as_deref().unwrap()).unwrap();
+        assert_eq!(metadata["parent_message_id"], "u-fallback");
+    }
+
+    #[test]
+    fn user_record_never_produces_a_reasoning_row() {
+        let record = json!({
+            "type": "user",
+            "message": {"role": "user", "content": [{"type": "thinking", "thinking": "nope"}]}
+        });
+        assert!(reasoning_from_line(&record, "sess", Path::new("/tmp/sess.jsonl"), 1).is_none());
     }
 }

@@ -406,7 +406,10 @@ fn derive_usage(provider: &str, record: &Value) -> Option<Value> {
 // current parser and inserts message ids missing from legacy stores.
 
 const STRUCTURED_MARKER_NAME: &str = "structured_rows_backfill";
-const STRUCTURED_MARKER_VERSION: i64 = 2;
+// v3: Claude assistant `thinking` blocks now emit a separate `kind="reasoning"`
+// row (previously they lived only inside the serialized assistant-message blob),
+// so re-sweep already-ingested Claude transcripts to add the missing rows.
+const STRUCTURED_MARKER_VERSION: i64 = 3;
 /// Base name of the sweep's path watermark. The live key is namespaced by the
 /// marker version (see [`structured_cursor_key`]) so bumping
 /// [`STRUCTURED_MARKER_VERSION`] naturally starts the re-sweep from a fresh
