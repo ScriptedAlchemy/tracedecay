@@ -1,6 +1,6 @@
 use std::fmt;
 use std::fs;
-use std::io::{self, Read};
+use std::io;
 use std::path::{Component, Path, PathBuf};
 
 use libsql::{Builder, Connection, OpenFlags, Value};
@@ -13,8 +13,8 @@ use crate::migrate::registry::{
 };
 use crate::storage::{
     EnrollmentMarker, PrivateStoreIo, STORE_MANIFEST_FILENAME, StorageMode, StoreKind,
-    profile_sharded_data_root, profile_sharded_layout, read_enrollment_marker, read_store_manifest,
-    validate_project_id, write_store_manifest,
+    has_sqlite_database_header, profile_sharded_data_root, profile_sharded_layout,
+    read_enrollment_marker, read_store_manifest, validate_project_id, write_store_manifest,
 };
 
 pub const MIGRATION_MANIFEST_SCHEMA_VERSION: u32 = 1;
@@ -988,7 +988,7 @@ fn verify_artifact_contents(source: &Path, target: &Path) -> io::Result<()> {
     if !source_meta.is_file() || !target_meta.is_file() {
         return Err(invalid_manifest("migration artifact is not a regular file"));
     }
-    if is_sqlite_database_file(source)? && is_sqlite_database_file(target)? {
+    if has_sqlite_database_header(source)? && has_sqlite_database_header(target)? {
         return verify_sqlite_artifact_contents(source, target);
     }
     if fs::read(source)? != fs::read(target)? {
@@ -999,16 +999,6 @@ fn verify_artifact_contents(source: &Path, target: &Path) -> io::Result<()> {
         )));
     }
     Ok(())
-}
-
-fn is_sqlite_database_file(path: &Path) -> io::Result<bool> {
-    let mut file = fs::File::open(path)?;
-    let mut header = [0_u8; 16];
-    match file.read_exact(&mut header) {
-        Ok(()) => Ok(header == *b"SQLite format 3\0"),
-        Err(err) if err.kind() == io::ErrorKind::UnexpectedEof => Ok(false),
-        Err(err) => Err(err),
-    }
 }
 
 fn verify_sqlite_artifact_contents(source: &Path, target: &Path) -> io::Result<()> {

@@ -150,6 +150,7 @@ impl Database {
     /// Returns `(Self, migrated)` where `migrated` is `true` if schema
     /// migrations were applied during open.
     pub async fn open(db_path: &Path) -> Result<(Self, bool)> {
+        Self::validate_sqlite_header(db_path, "open", true)?;
         let db =
             Builder::new_local(db_path)
                 .build()
@@ -177,6 +178,7 @@ impl Database {
     /// status/verification paths can inspect read-only `SQLite` files without
     /// creating WAL files or attempting schema updates.
     pub async fn open_read_only(db_path: &Path) -> Result<(Self, bool)> {
+        Self::validate_sqlite_header(db_path, "open_read_only", false)?;
         let db = Builder::new_local(db_path)
             .flags(OpenFlags::SQLITE_OPEN_READ_ONLY)
             .build()
@@ -195,6 +197,46 @@ impl Database {
         Self::apply_read_only_pragmas(&conn, file_size).await?;
 
         Ok((Self { conn, _db: db }, false))
+    }
+
+    fn validate_sqlite_header(
+        db_path: &Path,
+        operation: &str,
+        allow_fresh_path: bool,
+    ) -> Result<()> {
+        match std::fs::metadata(db_path) {
+            Ok(metadata) if allow_fresh_path && metadata.len() == 0 => return Ok(()),
+            Ok(_) => {}
+            Err(e) if allow_fresh_path && e.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(());
+            }
+            Err(e) => {
+                return Err(TraceDecayError::Database {
+                    message: format!(
+                        "failed to inspect database path at '{}': {e}",
+                        db_path.display()
+                    ),
+                    operation: operation.to_string(),
+                });
+            }
+        }
+        match crate::storage::has_sqlite_database_header(db_path) {
+            Ok(true) => Ok(()),
+            Ok(false) => Err(TraceDecayError::Database {
+                message: format!(
+                    "file is not a database: SQLite header is missing at '{}'",
+                    db_path.display()
+                ),
+                operation: operation.to_string(),
+            }),
+            Err(e) => Err(TraceDecayError::Database {
+                message: format!(
+                    "failed to read database header at '{}': {e}",
+                    db_path.display()
+                ),
+                operation: operation.to_string(),
+            }),
+        }
     }
 
     /// Returns a reference to the underlying libsql connection.

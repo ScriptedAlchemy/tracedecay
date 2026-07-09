@@ -305,9 +305,11 @@ impl Database {
     pub fn is_corruption_error(e: &TraceDecayError) -> bool {
         match e {
             TraceDecayError::Database { message, .. } => {
+                let message = message.to_ascii_lowercase();
                 message.contains("malformed")
                     || message.contains("corrupt")
                     || message.contains("disk image")
+                    || message.contains("file is not a database")
             }
             _ => false,
         }
