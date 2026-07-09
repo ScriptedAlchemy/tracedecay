@@ -20,6 +20,26 @@ pub struct DaemonServiceSpec {
     pub data_dir_override: Option<PathBuf>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DaemonServiceState {
+    Missing,
+    RunningEnabled,
+    RunningDisabled,
+    StoppedEnabled,
+    StoppedDisabled,
+    Masked,
+}
+
+impl DaemonServiceState {
+    fn is_running(self) -> bool {
+        matches!(self, Self::RunningEnabled | Self::RunningDisabled)
+    }
+
+    fn is_enabled(self) -> bool {
+        matches!(self, Self::RunningEnabled | Self::StoppedEnabled)
+    }
+}
+
 impl DaemonServiceSpec {
     pub fn render_systemd_user_unit(&self) -> String {
         let service_path = daemon_service_path_env(&self.tracedecay_bin);
@@ -264,6 +284,11 @@ pub fn service_spec(
 }
 
 pub fn install_service(spec: &DaemonServiceSpec, start: bool) -> Result<PathBuf> {
+    let _lifecycle_lease = crate::lifecycle_lease::acquire_exclusive("daemon service install")?;
+    install_service_under_lease(spec, start)
+}
+
+fn install_service_under_lease(spec: &DaemonServiceSpec, start: bool) -> Result<PathBuf> {
     let runner = ServiceRunner::current()?;
     let service_path = write_service_unit(spec)?;
     runner.install(&service_path, start, &spec.socket_path)?;
@@ -272,13 +297,58 @@ pub fn install_service(spec: &DaemonServiceSpec, start: bool) -> Result<PathBuf>
 }
 
 pub fn refresh_service(spec: &DaemonServiceSpec) -> Result<PathBuf> {
+    let _lifecycle_lease = crate::lifecycle_lease::acquire_exclusive("daemon service refresh")?;
+    refresh_service_under_lease(spec)
+}
+
+fn refresh_service_under_lease(spec: &DaemonServiceSpec) -> Result<PathBuf> {
     let runner = ServiceRunner::current()?;
+    refresh_service_with_runner(&runner, spec, DaemonServiceState::RunningEnabled)
+}
+
+fn refresh_service_with_runner(
+    runner: &ServiceRunner,
+    spec: &DaemonServiceSpec,
+    previous_state: DaemonServiceState,
+) -> Result<PathBuf> {
+    if matches!(runner, ServiceRunner::Systemd) && previous_state == DaemonServiceState::Masked {
+        let service_path = service_unit_path()?;
+        if std::fs::read_link(&service_path).is_ok_and(|target| target == Path::new("/dev/null")) {
+            return Err(TraceDecayError::Config {
+                message: format!(
+                    "TraceDecay daemon service '{}' is persistently masked; preserved the /dev/null mask and skipped rewriting it",
+                    service_path.display()
+                ),
+            });
+        }
+    }
     let service_path = write_service_unit(spec)?;
-    runner.refresh(&service_path, &spec.socket_path)?;
+    runner.refresh(&service_path, &spec.socket_path, previous_state)?;
     Ok(service_path)
 }
 
 pub fn refresh_installed_service(spec: &DaemonServiceSpec) -> Result<Option<PathBuf>> {
+    let _lifecycle_lease = crate::lifecycle_lease::acquire_exclusive("daemon service refresh")?;
+    refresh_installed_service_under_lease(spec)
+}
+
+#[doc(hidden)]
+pub fn refresh_installed_service_under_lease(spec: &DaemonServiceSpec) -> Result<Option<PathBuf>> {
+    refresh_installed_service_with_state(spec, None)
+}
+
+#[doc(hidden)]
+pub fn refresh_installed_service_under_lease_with_state(
+    spec: &DaemonServiceSpec,
+    previous_state: DaemonServiceState,
+) -> Result<Option<PathBuf>> {
+    refresh_installed_service_with_state(spec, Some(previous_state))
+}
+
+fn refresh_installed_service_with_state(
+    spec: &DaemonServiceSpec,
+    previous_state: Option<DaemonServiceState>,
+) -> Result<Option<PathBuf>> {
     let service_path = service_unit_path()?;
     if !service_path.exists() {
         return Ok(None);
@@ -288,13 +358,49 @@ pub fn refresh_installed_service(spec: &DaemonServiceSpec) -> Result<Option<Path
     if let Some(socket_path) = socket_path_from_unit_text(&unit) {
         refreshed_spec.socket_path = socket_path;
     }
-    if matches!(ServiceRunner::current(), Ok(ServiceRunner::Launchd)) {
+    let runner = ServiceRunner::current()?;
+    let previous_state =
+        previous_state.unwrap_or_else(|| runner.service_state(&refreshed_spec.socket_path));
+    if matches!(runner, ServiceRunner::Launchd) {
         // The installed plist is the source of truth for the daemon's data
         // directory; the refreshing shell may not have the override set.
         refreshed_spec.data_dir_override =
             launchd_plist_env_value(&unit, crate::config::USER_DATA_DIR_ENV).map(PathBuf::from);
     }
-    refresh_service(&refreshed_spec).map(Some)
+    refresh_service_with_runner(&runner, &refreshed_spec, previous_state).map(Some)
+}
+
+#[doc(hidden)]
+pub fn quiesce_installed_service_under_lease() -> Result<DaemonServiceState> {
+    let service_path = service_unit_path()?;
+    if !service_path.exists() {
+        if daemon_reachable() {
+            return Err(TraceDecayError::Config {
+                message: "refusing post-update mutations: a TraceDecay daemon is reachable but no managed service unit exists; stop the unmanaged daemon and retry".to_string(),
+            });
+        }
+        return Ok(DaemonServiceState::Missing);
+    }
+    let unit = read_service_unit(&service_path)?;
+    let socket_path = socket_path_from_unit_text(&unit).unwrap_or(default_socket_path()?);
+    let runner = ServiceRunner::current()?;
+    let state = runner.service_state(&socket_path);
+    if !state.is_running() {
+        if matches!(
+            daemon_socket_state(&socket_path),
+            DaemonSocketState::Connectable
+        ) {
+            return Err(TraceDecayError::Config {
+                message: format!(
+                    "refusing post-update mutations: an unmanaged TraceDecay daemon is reachable at '{}'; stop it and retry",
+                    socket_path.display()
+                ),
+            });
+        }
+        return Ok(state);
+    }
+    runner.stop_for_update()?;
+    Ok(state)
 }
 
 fn write_service_unit(spec: &DaemonServiceSpec) -> Result<PathBuf> {
@@ -410,6 +516,11 @@ fn socket_path_from_unit_text(unit: &str) -> Option<PathBuf> {
 }
 
 pub fn uninstall_service(stop: bool) -> Result<PathBuf> {
+    let _lifecycle_lease = crate::lifecycle_lease::acquire_exclusive("daemon service uninstall")?;
+    uninstall_service_under_lease(stop)
+}
+
+fn uninstall_service_under_lease(stop: bool) -> Result<PathBuf> {
     let runner = ServiceRunner::current()?;
     let service_path = service_unit_path()?;
     runner.before_uninstall(stop)?;
@@ -553,15 +664,72 @@ impl ServiceRunner {
         }
     }
 
-    fn refresh(&self, service_path: &Path, socket_path: &Path) -> Result<()> {
+    fn refresh(
+        &self,
+        service_path: &Path,
+        socket_path: &Path,
+        previous_state: DaemonServiceState,
+    ) -> Result<()> {
         match self {
             Self::Systemd => {
                 run_systemctl(&["daemon-reload"])?;
-                run_systemctl(&["enable", super::SERVICE_NAME])?;
-                run_systemctl(&["restart", super::SERVICE_NAME])?;
+                if previous_state.is_enabled() {
+                    run_systemctl(&["enable", super::SERVICE_NAME])?;
+                }
+                if previous_state.is_running() {
+                    run_systemctl(&["restart", super::SERVICE_NAME])?;
+                }
                 Ok(())
             }
-            Self::Launchd => launchd_refresh(service_path, socket_path),
+            Self::Launchd if previous_state.is_running() => {
+                launchd_refresh(service_path, socket_path)?;
+                if !previous_state.is_enabled() {
+                    run_launchctl(&["disable", &launchd_service_target()?])?;
+                }
+                Ok(())
+            }
+            Self::Launchd => Ok(()),
+        }
+    }
+
+    fn service_state(&self, socket_path: &Path) -> DaemonServiceState {
+        match self {
+            Self::Systemd => {
+                let running = Command::new("systemctl")
+                    .args(["--user", "is-active", "--quiet", super::SERVICE_NAME])
+                    .status()
+                    .is_ok_and(|status| status.success());
+                let enablement = Command::new("systemctl")
+                    .args(["--user", "is-enabled", super::SERVICE_NAME])
+                    .output()
+                    .ok()
+                    .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
+                    .unwrap_or_default();
+                if enablement.starts_with("masked") {
+                    DaemonServiceState::Masked
+                } else if running && enablement.starts_with("enabled") {
+                    DaemonServiceState::RunningEnabled
+                } else if running {
+                    DaemonServiceState::RunningDisabled
+                } else if enablement.starts_with("enabled") {
+                    DaemonServiceState::StoppedEnabled
+                } else {
+                    DaemonServiceState::StoppedDisabled
+                }
+            }
+            Self::Launchd => {
+                let running = matches!(
+                    daemon_socket_state(socket_path),
+                    DaemonSocketState::Connectable
+                );
+                let enabled = !launchd_service_is_disabled();
+                match (running, enabled) {
+                    (true, true) => DaemonServiceState::RunningEnabled,
+                    (true, false) => DaemonServiceState::RunningDisabled,
+                    (false, true) => DaemonServiceState::StoppedEnabled,
+                    (false, false) => DaemonServiceState::StoppedDisabled,
+                }
+            }
         }
     }
 
@@ -574,6 +742,13 @@ impl ServiceRunner {
                 Ok(())
             }
             Self::Launchd => launchd_before_uninstall(stop),
+        }
+    }
+
+    fn stop_for_update(&self) -> Result<()> {
+        match self {
+            Self::Systemd => run_systemctl(&["stop", super::SERVICE_NAME]),
+            Self::Launchd => launchd_before_uninstall(true),
         }
     }
 
@@ -764,6 +939,28 @@ fn launchd_service_target() -> Result<String> {
     Ok(format!("{}/{}", launchd_domain()?, LAUNCHD_LABEL))
 }
 
+fn launchd_service_is_disabled() -> bool {
+    let Ok(domain) = launchd_domain() else {
+        return false;
+    };
+    let Ok(output) = Command::new("launchctl")
+        .args(["print-disabled", &domain])
+        .output()
+    else {
+        return false;
+    };
+    launchd_disabled_output_contains_label(&String::from_utf8_lossy(&output.stdout), LAUNCHD_LABEL)
+}
+
+fn launchd_disabled_output_contains_label(output: &str, label: &str) -> bool {
+    output.lines().any(|line| {
+        line.contains(label)
+            && line
+                .split_once("=>")
+                .is_some_and(|(_, value)| value.trim().starts_with("true"))
+    })
+}
+
 fn ensure_launchd_runtime_dirs() -> Result<()> {
     let data_dir = tracedecay_data_dir()?;
     std::fs::create_dir_all(&data_dir).map_err(|e| TraceDecayError::Config {
@@ -875,7 +1072,9 @@ mod tests {
     #[cfg(unix)]
     use tempfile::TempDir;
 
-    use super::{DaemonServiceSpec, LaunchctlFailureMode, LaunchdCommand};
+    use super::{
+        DaemonServiceSpec, DaemonServiceState, LaunchctlFailureMode, LaunchdCommand, ServiceRunner,
+    };
     use crate::config::lock_user_data_dir_test_env;
 
     struct EnvVarGuard {
@@ -1228,6 +1427,22 @@ mod tests {
         assert!(!super::launchctl_stderr_is_not_loaded(""));
     }
 
+    #[test]
+    fn launchd_disabled_output_matches_only_the_tracedecay_label() {
+        assert!(super::launchd_disabled_output_contains_label(
+            "disabled services = {\n\t\"com.tracedecay.daemon\" => true\n}",
+            "com.tracedecay.daemon"
+        ));
+        assert!(!super::launchd_disabled_output_contains_label(
+            "disabled services = {\n\t\"com.tracedecay.daemon\" => false\n}",
+            "com.tracedecay.daemon"
+        ));
+        assert!(!super::launchd_disabled_output_contains_label(
+            "disabled services = {\n\t\"com.example.other\" => true\n}",
+            "com.tracedecay.daemon"
+        ));
+    }
+
     #[cfg(target_os = "linux")]
     #[test]
     fn refresh_service_rewrites_unit_and_restarts_daemon() {
@@ -1308,6 +1523,27 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
+    fn post_update_rejects_reachable_unmanaged_daemon() {
+        let _env_lock = lock_user_data_dir_test_env();
+        let dir = TempDir::new().expect("temp dir");
+        let data_dir = dir.path().join("profile");
+        let config_home = dir.path().join("config");
+        std::fs::create_dir_all(&data_dir).expect("data dir");
+        let _data_guard = EnvVarGuard::set(crate::config::USER_DATA_DIR_ENV, &data_dir);
+        let _config_guard = EnvVarGuard::set("XDG_CONFIG_HOME", &config_home);
+        let _socket_guard = EnvVarGuard::unset(crate::daemon::SOCKET_ENV);
+        let socket_path = super::default_socket_path().expect("default socket");
+        let _listener = std::os::unix::net::UnixListener::bind(&socket_path).expect("bind socket");
+
+        let error = super::quiesce_installed_service_under_lease()
+            .expect_err("unmanaged daemon must block post-update mutations");
+
+        assert!(error.to_string().contains("unmanaged daemon"));
+        assert!(error.to_string().contains("stop"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
     fn refresh_installed_service_preserves_existing_socket_path() {
         let _env_lock = lock_user_data_dir_test_env();
         let dir = TempDir::new().expect("temp dir");
@@ -1321,7 +1557,7 @@ mod tests {
         let log = dir.path().join("systemctl.log");
         std::fs::write(
             &systemctl,
-            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$TRACEDECAY_SYSTEMCTL_LOG\"\n",
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$TRACEDECAY_SYSTEMCTL_LOG\"\n[ \"$2\" = is-enabled ] && echo enabled\nexit 0\n",
         )
         .expect("fake systemctl");
         std::fs::set_permissions(&systemctl, std::fs::Permissions::from_mode(0o755))
@@ -1353,7 +1589,11 @@ mod tests {
             data_dir_override: None,
         };
 
-        let outcome = super::refresh_installed_service(&spec).expect("refresh service");
+        let previous_state =
+            super::quiesce_installed_service_under_lease().expect("quiesce installed service");
+        let outcome =
+            super::refresh_installed_service_under_lease_with_state(&spec, previous_state)
+                .expect("refresh service");
 
         assert_eq!(outcome, Some(service_path.clone()));
         let unit = std::fs::read_to_string(service_path).expect("service unit");
@@ -1363,7 +1603,112 @@ mod tests {
         assert!(!unit.contains("/run/user/1000/tracedecay.sock"));
         assert_eq!(
             std::fs::read_to_string(log).expect("systemctl log"),
-            "--user daemon-reload\n--user enable tracedecay.service\n--user restart tracedecay.service\n"
+            "--user is-active --quiet tracedecay.service\n--user is-enabled tracedecay.service\n--user stop tracedecay.service\n--user daemon-reload\n--user enable tracedecay.service\n--user restart tracedecay.service\n"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn refresh_installed_service_preserves_stopped_state() {
+        let _env_lock = lock_user_data_dir_test_env();
+        let dir = TempDir::new().expect("temp dir");
+        let config_home = dir.path().join("config");
+        let fake_bin = dir.path().join("bin");
+        let home = dir.path().join("home");
+        std::fs::create_dir_all(&fake_bin).expect("fake bin dir");
+        std::fs::create_dir_all(&home).expect("home dir");
+        let systemctl = fake_bin.join("systemctl");
+        let log = dir.path().join("systemctl.log");
+        std::fs::write(
+            &systemctl,
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$TRACEDECAY_SYSTEMCTL_LOG\"\n[ \"$2\" = is-active ] && exit 3\nexit 0\n",
+        )
+        .expect("fake systemctl");
+        std::fs::set_permissions(&systemctl, std::fs::Permissions::from_mode(0o755))
+            .expect("systemctl permissions");
+        let _config_guard = EnvVarGuard::set("XDG_CONFIG_HOME", &config_home);
+        let _home_guard = EnvVarGuard::set("HOME", &home);
+        let _path_guard = EnvVarGuard::set("PATH", &fake_bin);
+        let _log_guard = EnvVarGuard::set("TRACEDECAY_SYSTEMCTL_LOG", &log);
+        let service_path = config_home
+            .join("systemd/user")
+            .join(crate::daemon::SERVICE_NAME);
+        std::fs::create_dir_all(service_path.parent().expect("service parent"))
+            .expect("service dir");
+        std::fs::write(
+            &service_path,
+            "[Service]\nExecStart=/old/tracedecay daemon run --socket /custom/tracedecay.sock\n",
+        )
+        .expect("existing service unit");
+        let spec = DaemonServiceSpec {
+            tracedecay_bin: PathBuf::from("/opt/tracedecay/bin/tracedecay"),
+            socket_path: PathBuf::from("/run/user/1000/tracedecay.sock"),
+            data_dir_override: None,
+        };
+
+        super::refresh_installed_service(&spec).expect("refresh service");
+
+        let commands = std::fs::read_to_string(log).expect("systemctl log");
+        assert!(commands.contains("--user is-active --quiet tracedecay.service"));
+        assert!(!commands.contains("enable tracedecay.service"));
+        assert!(!commands.contains("restart tracedecay.service"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn systemd_service_state_detects_runtime_mask() {
+        let _env_lock = lock_user_data_dir_test_env();
+        let dir = TempDir::new().expect("temp dir");
+        let fake_bin = dir.path().join("bin");
+        std::fs::create_dir_all(&fake_bin).expect("fake bin dir");
+        let systemctl = fake_bin.join("systemctl");
+        std::fs::write(
+            &systemctl,
+            "#!/bin/sh\n[ \"$2\" = is-active ] && exit 3\n[ \"$2\" = is-enabled ] && { echo masked-runtime; exit 1; }\nexit 0\n",
+        )
+        .expect("fake systemctl");
+        std::fs::set_permissions(&systemctl, std::fs::Permissions::from_mode(0o755))
+            .expect("systemctl permissions");
+        let _path_guard = EnvVarGuard::set("PATH", &fake_bin);
+
+        assert_eq!(
+            ServiceRunner::Systemd.service_state(&dir.path().join("daemon.sock")),
+            DaemonServiceState::Masked
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn refresh_preserves_persistent_systemd_mask_symlink() {
+        let _env_lock = lock_user_data_dir_test_env();
+        let dir = TempDir::new().expect("temp dir");
+        let config_home = dir.path().join("config");
+        let home = dir.path().join("home");
+        std::fs::create_dir_all(&home).expect("home dir");
+        let _config_guard = EnvVarGuard::set("XDG_CONFIG_HOME", &config_home);
+        let _home_guard = EnvVarGuard::set("HOME", &home);
+        let service_path = config_home
+            .join("systemd/user")
+            .join(crate::daemon::SERVICE_NAME);
+        std::fs::create_dir_all(service_path.parent().expect("service parent"))
+            .expect("service dir");
+        std::os::unix::fs::symlink("/dev/null", &service_path).expect("mask service");
+        let spec = DaemonServiceSpec {
+            tracedecay_bin: PathBuf::from("/opt/tracedecay/bin/tracedecay"),
+            socket_path: PathBuf::from("/run/user/1000/tracedecay.sock"),
+            data_dir_override: None,
+        };
+
+        let error = super::refresh_installed_service_under_lease_with_state(
+            &spec,
+            DaemonServiceState::Masked,
+        )
+        .expect_err("persistent mask must not be overwritten");
+
+        assert!(error.to_string().contains("persistently masked"));
+        assert_eq!(
+            std::fs::read_link(service_path).unwrap(),
+            PathBuf::from("/dev/null")
         );
     }
 

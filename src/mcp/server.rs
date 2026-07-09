@@ -1845,7 +1845,7 @@ impl McpServer {
     /// responses to stdout. Runs until stdin is closed or a shutdown signal
     /// (SIGINT/SIGTERM) is received, then performs graceful cleanup.
     pub async fn run(&self, transport: &mut impl super::transport::McpTransport) -> Result<()> {
-        self.run_with_shutdown_policy(transport, true, true, None)
+        self.run_with_shutdown_policy(transport, true, true, None, None)
             .await
     }
 
@@ -1856,7 +1856,7 @@ impl McpServer {
         &self,
         transport: &mut impl super::transport::McpTransport,
     ) -> Result<()> {
-        self.run_with_shutdown_policy(transport, false, false, None)
+        self.run_with_shutdown_policy(transport, false, false, None, None)
             .await
     }
 
@@ -1867,8 +1867,24 @@ impl McpServer {
         transport: &mut impl super::transport::McpTransport,
         timings_enabled: bool,
     ) -> Result<()> {
-        self.run_with_shutdown_policy(transport, false, false, Some(timings_enabled))
+        self.run_with_shutdown_policy(transport, false, false, Some(timings_enabled), None)
             .await
+    }
+
+    pub(crate) async fn run_daemon_connection_with_timings(
+        &self,
+        transport: &mut impl super::transport::McpTransport,
+        timings_enabled: bool,
+        lifecycle: &crate::daemon::DaemonLifecycle,
+    ) -> Result<()> {
+        self.run_with_shutdown_policy(
+            transport,
+            false,
+            false,
+            Some(timings_enabled),
+            Some(lifecycle),
+        )
+        .await
     }
 
     async fn run_with_shutdown_policy(
@@ -1877,6 +1893,7 @@ impl McpServer {
         shutdown_on_exit: bool,
         listen_for_process_signals: bool,
         timings_override: Option<bool>,
+        request_lifecycle: Option<&crate::daemon::DaemonLifecycle>,
     ) -> Result<()> {
         let mut route_cache = self.hook_project_routes.snapshot();
 
@@ -1911,6 +1928,20 @@ impl McpServer {
                             }
                             _ = tokio::signal::ctrl_c() => break,
                             _ = sigterm.recv() => break,
+                        }
+                    } else if let Some(lifecycle) = request_lifecycle {
+                        tokio::select! {
+                            result = transport.read_line() => {
+                                match result {
+                                    Ok(Some(line)) => line,
+                                    Ok(None) => break,
+                                    Err(e) => {
+                                        self.shutdown_if(shutdown_on_exit).await;
+                                        return Err(e.into());
+                                    }
+                                }
+                            }
+                            () = lifecycle.wait_for_draining() => break,
                         }
                     } else {
                         match transport.read_line().await {
@@ -1959,32 +1990,47 @@ impl McpServer {
 
             // Parse the incoming JSON
             let parsed: std::result::Result<JsonRpcRequest, _> = serde_json::from_str(&line);
+            let request_activity = request_lifecycle.and_then(|lifecycle| lifecycle.try_enter());
+            let rejecting_for_drain = request_lifecycle.is_some() && request_activity.is_none();
 
-            let response = match parsed {
-                Ok(request) => {
-                    if matches!(classify_mcp_method(&request.method), McpMethod::Initialize)
-                        && self.initialize_root_routing_enabled.load(Ordering::Relaxed)
-                    {
-                        connection_route
-                            .observe_initialize(
-                                request.params.as_ref(),
-                                self.registry_db.as_deref(),
-                            )
-                            .await;
+            let response = if rejecting_for_drain {
+                parsed.as_ref().ok().and_then(|request| {
+                    request.id.clone().map(|id| {
+                        JsonRpcResponse::error(
+                            id,
+                            ErrorCode::InternalError,
+                            "TraceDecay daemon is draining for upgrade; retry the request"
+                                .to_string(),
+                        )
+                    })
+                })
+            } else {
+                match parsed {
+                    Ok(request) => {
+                        if matches!(classify_mcp_method(&request.method), McpMethod::Initialize)
+                            && self.initialize_root_routing_enabled.load(Ordering::Relaxed)
+                        {
+                            connection_route
+                                .observe_initialize(
+                                    request.params.as_ref(),
+                                    self.registry_db.as_deref(),
+                                )
+                                .await;
+                        }
+                        Box::pin(self.handle_request_with_timings_and_implicit_project(
+                            &request,
+                            timings_override.unwrap_or_else(|| self.timings_enabled()),
+                            &mut route_cache,
+                            connection_route.implicit_project_path(),
+                        ))
+                        .await
                     }
-                    Box::pin(self.handle_request_with_timings_and_implicit_project(
-                        &request,
-                        timings_override.unwrap_or_else(|| self.timings_enabled()),
-                        &mut route_cache,
-                        connection_route.implicit_project_path(),
-                    ))
-                    .await
+                    Err(e) => Some(JsonRpcResponse::error(
+                        Value::Null,
+                        ErrorCode::ParseError,
+                        format!("failed to parse JSON-RPC request: {e}"),
+                    )),
                 }
-                Err(e) => Some(JsonRpcResponse::error(
-                    Value::Null,
-                    ErrorCode::ParseError,
-                    format!("failed to parse JSON-RPC request: {e}"),
-                )),
             };
 
             // Drain and write any pending notifications (e.g., version warnings).
@@ -2022,6 +2068,12 @@ impl McpServer {
                     self.shutdown_if(shutdown_on_exit).await;
                     return Err(e.into());
                 }
+            }
+            drop(request_activity);
+            if rejecting_for_drain
+                || request_lifecycle.is_some_and(|lifecycle| !lifecycle.accepting())
+            {
+                break;
             }
         }
 

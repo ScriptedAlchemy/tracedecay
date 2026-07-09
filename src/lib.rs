@@ -53,6 +53,7 @@ pub mod git;
 pub mod global_db;
 pub mod graph;
 pub mod hooks;
+pub mod lifecycle_lease;
 pub mod mcp;
 pub mod memory;
 pub mod migrate;

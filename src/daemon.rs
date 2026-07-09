@@ -4,8 +4,8 @@ use std::fmt::Write;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-#[cfg(unix)]
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use serde::{Deserialize, Serialize};
 #[cfg(unix)]
@@ -15,7 +15,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 #[cfg(unix)]
 use tokio::net::{UnixListener, UnixStream};
 #[cfg(unix)]
-use tokio::task::JoinHandle;
+use tokio::task::{JoinHandle, JoinSet};
 #[cfg(unix)]
 use tokio::time::{Duration, timeout};
 
@@ -35,6 +35,82 @@ const HOOK_EVENT_NOTIFY_TIMEOUT: Duration = Duration::from_millis(750);
 /// being killed with `SIGKILL` mid-checkpoint.
 #[cfg(unix)]
 const DAEMON_SHUTDOWN_DEADLINE: Duration = Duration::from_secs(45);
+#[cfg(unix)]
+const DAEMON_CLIENT_DRAIN_DEADLINE: Duration = Duration::from_secs(15);
+
+#[derive(Clone, Default)]
+pub(crate) struct DaemonLifecycle {
+    inner: Arc<DaemonLifecycleInner>,
+}
+
+#[derive(Default)]
+struct DaemonLifecycleInner {
+    draining: AtomicBool,
+    active: AtomicUsize,
+    idle: tokio::sync::Notify,
+    draining_notify: tokio::sync::Notify,
+}
+
+pub(crate) struct DaemonActivity {
+    inner: Arc<DaemonLifecycleInner>,
+}
+
+impl DaemonLifecycle {
+    pub(crate) fn accepting(&self) -> bool {
+        !self.inner.draining.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn try_enter(&self) -> Option<DaemonActivity> {
+        if !self.accepting() {
+            return None;
+        }
+        self.inner.active.fetch_add(1, Ordering::AcqRel);
+        if self.accepting() {
+            Some(DaemonActivity {
+                inner: Arc::clone(&self.inner),
+            })
+        } else {
+            if self.inner.active.fetch_sub(1, Ordering::AcqRel) == 1 {
+                self.inner.idle.notify_waiters();
+            }
+            None
+        }
+    }
+
+    fn begin_draining(&self) {
+        if !self.inner.draining.swap(true, Ordering::AcqRel) {
+            self.inner.draining_notify.notify_waiters();
+        }
+    }
+
+    pub(crate) async fn wait_for_draining(&self) {
+        loop {
+            let notified = self.inner.draining_notify.notified();
+            if !self.accepting() {
+                return;
+            }
+            notified.await;
+        }
+    }
+
+    async fn wait_for_idle(&self) {
+        loop {
+            let notified = self.inner.idle.notified();
+            if self.inner.active.load(Ordering::Acquire) == 0 {
+                return;
+            }
+            notified.await;
+        }
+    }
+}
+
+impl Drop for DaemonActivity {
+    fn drop(&mut self) {
+        if self.inner.active.fetch_sub(1, Ordering::AcqRel) == 1 {
+            self.inner.idle.notify_waiters();
+        }
+    }
+}
 
 #[cfg(unix)]
 mod git_watch;
@@ -42,8 +118,10 @@ mod git_watch;
 pub mod pr_autotrack;
 mod service;
 pub use service::{
-    DaemonServiceSpec, daemon_reachable, default_socket_path, install_service,
-    installed_service_socket_path, refresh_installed_service, refresh_service, service_spec,
+    DaemonServiceSpec, DaemonServiceState, daemon_reachable, default_socket_path, install_service,
+    installed_service_socket_path, quiesce_installed_service_under_lease,
+    refresh_installed_service, refresh_installed_service_under_lease,
+    refresh_installed_service_under_lease_with_state, refresh_service, service_spec,
     service_status, socket_path_or_default, uninstall_service,
 };
 
@@ -1275,26 +1353,30 @@ async fn run_foreground_unix(socket_path: PathBuf) -> Result<()> {
     // PR-branch auto-tracking runs independently of the metadata watcher: it is
     // gated per-project on `sync.auto_track_pr_branches` (default off), so this
     // loop is inert unless a project opts in.
-    pr_autotrack::spawn(crate::global_db::global_db_path());
-    let engine = DaemonEngine::default().with_git_watcher(git_watcher);
+    let pr_autotrack_task = pr_autotrack::spawn(crate::global_db::global_db_path());
+    let engine = DaemonEngine::default()
+        .with_git_watcher(git_watcher)
+        .with_pr_autotrack_task(pr_autotrack_task)
+        .await;
     let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+    let mut client_tasks: JoinSet<Result<()>> = JoinSet::new();
 
     loop {
         let stream = tokio::select! {
             accepted = listener.accept() => accepted?.0,
+            completed = client_tasks.join_next(), if !client_tasks.is_empty() => {
+                if let Some(completed) = completed {
+                    log_client_task_result(completed);
+                }
+                continue;
+            },
             _ = tokio::signal::ctrl_c() => break,
             _ = sigterm.recv() => break,
         };
         let engine = engine.clone();
-        tokio::spawn(async move {
-            if let Err(e) = Box::pin(serve_socket_client(stream, engine)).await {
-                log_daemon_event(
-                    "daemon_client",
-                    &[("outcome", "error".to_string()), ("error", e.to_string())],
-                );
-            }
-        });
+        client_tasks.spawn(async move { Box::pin(serve_socket_client(stream, engine)).await });
     }
+    engine.lifecycle.begin_draining();
     log_daemon_event(
         "daemon_shutdown",
         &[("socket", socket_path.display().to_string())],
@@ -1305,13 +1387,35 @@ async fn run_foreground_unix(socket_path: PathBuf) -> Result<()> {
     // will never be served.
     drop(listener);
     let _ = std::fs::remove_file(&socket_path);
+    let clients_drained = drain_client_tasks(&mut client_tasks, DAEMON_CLIENT_DRAIN_DEADLINE).await;
+    engine.lifecycle.wait_for_idle().await;
+    // Client setup and in-flight requests may create schedulers or project
+    // servers. Sweep owned background tasks only after all client work drains.
+    engine.shutdown_background_tasks().await;
+    if !clients_drained {
+        log_daemon_event(
+            "daemon_shutdown",
+            &[
+                ("outcome", "client_drain_timeout".to_string()),
+                (
+                    "deadline_secs",
+                    DAEMON_CLIENT_DRAIN_DEADLINE.as_secs().to_string(),
+                ),
+                (
+                    "checkpoint",
+                    "skipped_active_clients_were_aborted".to_string(),
+                ),
+            ],
+        );
+        return Ok(());
+    }
     // Graceful shutdown persists tokens-saved counters and checkpoints WALs
     // for every live project server sequentially; with many servers or large
     // WALs that can exceed systemd's stop timeout, which then sends `SIGKILL`
     // to the daemon. On timeout the shutdown future is dropped and we proceed
     // to exit: the remaining persistence is best-effort and the database WAL
     // keeps state crash-safe.
-    let completed = timeout(DAEMON_SHUTDOWN_DEADLINE, engine.shutdown_all())
+    let completed = timeout(DAEMON_SHUTDOWN_DEADLINE, engine.shutdown_servers())
         .await
         .is_ok();
     if !completed {
@@ -1327,6 +1431,40 @@ async fn run_foreground_unix(socket_path: PathBuf) -> Result<()> {
         );
     }
     Ok(())
+}
+
+#[cfg(unix)]
+fn log_client_task_result(completed: std::result::Result<Result<()>, tokio::task::JoinError>) {
+    let error = match completed {
+        Ok(Ok(())) => return,
+        Ok(Err(error)) => error.to_string(),
+        Err(error) if error.is_cancelled() => return,
+        Err(error) => error.to_string(),
+    };
+    log_daemon_event(
+        "daemon_client",
+        &[("outcome", "error".to_string()), ("error", error)],
+    );
+}
+
+#[cfg(unix)]
+async fn drain_client_tasks(clients: &mut JoinSet<Result<()>>, deadline: Duration) -> bool {
+    let drained = timeout(deadline, async {
+        while let Some(completed) = clients.join_next().await {
+            log_client_task_result(completed);
+        }
+    })
+    .await
+    .is_ok();
+    if drained {
+        return true;
+    }
+
+    clients.abort_all();
+    while let Some(completed) = clients.join_next().await {
+        log_client_task_result(completed);
+    }
+    false
 }
 
 #[cfg(unix)]
@@ -1362,6 +1500,7 @@ async fn prepare_socket_path(socket_path: &Path) -> Result<()> {
 #[cfg(unix)]
 #[derive(Clone, Default)]
 struct DaemonEngine {
+    lifecycle: DaemonLifecycle,
     /// Shared daemon state, partitioned by the client-scoped project server key.
     project_servers: Arc<tokio::sync::Mutex<HashMap<ProjectServerKey, Arc<crate::mcp::McpServer>>>>,
     /// Background automation loops, partitioned with the same client/project identity as MCP state.
@@ -1373,6 +1512,8 @@ struct DaemonEngine {
     /// config-driven watcher is installed by `run_foreground_unix` via
     /// [`DaemonEngine::with_git_watcher`] before the accept loop starts.
     git_watcher: git_watch::GitWatcher,
+    /// PR reconciliation task, retained so shutdown never leaves it writing.
+    pr_autotrack_task: Arc<tokio::sync::Mutex<Option<JoinHandle<()>>>>,
 }
 
 #[cfg(unix)]
@@ -1400,6 +1541,11 @@ impl DaemonEngine {
     /// once by `run_foreground_unix` before the accept loop.
     fn with_git_watcher(mut self, watcher: git_watch::GitWatcher) -> Self {
         self.git_watcher = watcher;
+        self
+    }
+
+    async fn with_pr_autotrack_task(self, task: JoinHandle<()>) -> Self {
+        *self.pr_autotrack_task.lock().await = Some(task);
         self
     }
 
@@ -1579,7 +1725,7 @@ impl DaemonEngine {
         schedulers.insert(key, handle);
     }
 
-    async fn shutdown_all(&self) {
+    async fn shutdown_background_tasks(&self) {
         let scheduler_handles: Vec<JoinHandle<()>> = {
             let mut schedulers = self.automation_schedulers.lock().await;
             schedulers.drain().map(|(_, handle)| handle).collect()
@@ -1589,13 +1735,33 @@ impl DaemonEngine {
             let _ = handle.await;
         }
 
+        self.git_watcher.shutdown().await;
+        if let Some(handle) = self.pr_autotrack_task.lock().await.take() {
+            handle.abort();
+            let _ = handle.await;
+        }
+    }
+
+    async fn shutdown_servers(&self) {
         let servers: Vec<Arc<crate::mcp::McpServer>> = {
             let servers = self.project_servers.lock().await;
-            servers.values().cloned().collect()
+            let mut seen = HashSet::new();
+            servers
+                .values()
+                .filter(|server| seen.insert(Arc::as_ptr(server) as usize))
+                .cloned()
+                .collect()
         };
         for server in servers {
             server.shutdown().await;
         }
+    }
+
+    #[cfg(test)]
+    async fn shutdown_all(&self) {
+        self.lifecycle.begin_draining();
+        self.shutdown_background_tasks().await;
+        self.shutdown_servers().await;
     }
 }
 
@@ -2129,12 +2295,19 @@ async fn run_user_jobs_scheduler_pass(
 #[cfg(unix)]
 async fn serve_socket_client(stream: tokio::net::UnixStream, engine: DaemonEngine) -> Result<()> {
     let mut transport = UnixStreamTransport::new(stream);
-    let Some(line) = transport.read_line().await? else {
+    let line = tokio::select! {
+        result = transport.read_line() => result?,
+        () = engine.lifecycle.wait_for_draining() => return Ok(()),
+    };
+    let Some(line) = line else {
+        return Ok(());
+    };
+    let Some(setup_activity) = engine.lifecycle.try_enter() else {
         return Ok(());
     };
     let handshake = DaemonHandshake::from_line(&line)?;
     engine.log_client_version_skew(&handshake).await;
-    if handshake.project_path.is_some() {
+    let server = if handshake.project_path.is_some() {
         let server = match Box::pin(engine.project_server(&handshake)).await {
             Ok(server) => server,
             Err(e) => {
@@ -2142,9 +2315,29 @@ async fn serve_socket_client(stream: tokio::net::UnixStream, engine: DaemonEngin
                 return Err(e);
             }
         };
-        Box::pin(server.run_connection_with_timings(&mut transport, handshake.timings)).await?;
+        Some(server)
     } else {
-        serve_projectless_client(&mut transport, &handshake.client_identity).await?;
+        None
+    };
+    drop(setup_activity);
+    if !engine.lifecycle.accepting() {
+        return Ok(());
+    }
+
+    if let Some(server) = server {
+        Box::pin(server.run_daemon_connection_with_timings(
+            &mut transport,
+            handshake.timings,
+            &engine.lifecycle,
+        ))
+        .await?;
+    } else {
+        serve_projectless_client(
+            &mut transport,
+            &handshake.client_identity,
+            &engine.lifecycle,
+        )
+        .await?;
     }
     Ok(())
 }
@@ -2283,8 +2476,19 @@ async fn write_json_rpc_response(
 async fn serve_projectless_client(
     transport: &mut UnixStreamTransport,
     client_identity: &DaemonClientIdentity,
+    lifecycle: &DaemonLifecycle,
 ) -> Result<()> {
-    while let Some(line) = transport.read_line().await? {
+    loop {
+        let line = tokio::select! {
+            result = transport.read_line() => result?,
+            () = lifecycle.wait_for_draining() => break,
+        };
+        let Some(line) = line else {
+            break;
+        };
+        let Some(_activity) = lifecycle.try_enter() else {
+            break;
+        };
         let response = match serde_json::from_str::<JsonRpcRequest>(&line) {
             Ok(request) => projectless_response(&request, client_identity).await,
             Err(e) => Some(JsonRpcResponse::error(
@@ -2295,6 +2499,9 @@ async fn serve_projectless_client(
         };
         if let Some(response) = response {
             write_json_rpc_response(transport, &response).await?;
+        }
+        if !lifecycle.accepting() {
+            break;
         }
     }
     Ok(())

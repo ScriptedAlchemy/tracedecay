@@ -42,7 +42,8 @@ fn explicit_agent_config_commands_skip_startup_maintenance() {
     }));
     assert!(should_skip_startup_maintenance(&Commands::PostUpdate {
         no_heal: false,
-        no_reinstall: false
+        no_reinstall: false,
+        lifecycle_lease_token: None,
     }));
     assert!(should_skip_startup_maintenance(&Commands::Uninstall {
         agent: Some("kiro".to_string()),
@@ -100,7 +101,8 @@ fn agent_install_maintenance_is_selective() {
     assert!(should_skip_agent_install_maintenance(
         &Commands::PostUpdate {
             no_heal: false,
-            no_reinstall: false
+            no_reinstall: false,
+            lifecycle_lease_token: None,
         }
     ));
     assert!(should_skip_agent_install_maintenance(&Commands::Tool {

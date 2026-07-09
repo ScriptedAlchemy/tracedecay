@@ -343,6 +343,9 @@ pub enum Commands {
         /// Skip refreshing already-configured agent integrations
         #[arg(long)]
         no_reinstall: bool,
+        /// Lifecycle lease token passed only by the parent updater.
+        #[arg(long, hide = true)]
+        lifecycle_lease_token: Option<String>,
     },
     /// Show or switch the update channel (stable or beta)
     #[command(long_about = CHANNEL_LONG_ABOUT, after_help = CHANNEL_AFTER_HELP)]

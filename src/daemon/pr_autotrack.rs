@@ -875,10 +875,10 @@ fn remove_worktree(repo_root: &Path, worktree: &Path) {
 
 /// Spawns the PR-autotrack poll loop. Cheap and inert when no registered project
 /// has the feature enabled — each tick only reads per-project config.
-pub fn spawn(global_db_path: Option<PathBuf>) {
+pub fn spawn(global_db_path: Option<PathBuf>) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         run(global_db_path).await;
-    });
+    })
 }
 
 async fn run(global_db_path: Option<PathBuf>) {

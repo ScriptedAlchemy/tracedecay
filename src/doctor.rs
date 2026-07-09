@@ -17,6 +17,13 @@ pub(crate) mod registry_drift;
 
 /// Runs a comprehensive health check of the tracedecay installation.
 pub async fn run_doctor(agent_filter: Option<&str>) {
+    let _lifecycle_lease = match crate::lifecycle_lease::acquire_shared_or_inherited("doctor") {
+        Ok(lease) => lease,
+        Err(error) => {
+            eprintln!("tracedecay doctor could not start: {error}");
+            return;
+        }
+    };
     debug_assert!(
         !env!("CARGO_PKG_VERSION").is_empty(),
         "CARGO_PKG_VERSION must not be empty"
