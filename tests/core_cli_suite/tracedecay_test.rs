@@ -790,3 +790,88 @@ async fn last_sync_timestamp_falls_back_to_indexed_at_without_metadata() {
     let fallback = cg.last_index_time().await.unwrap();
     assert_eq!(observed, fallback);
 }
+
+// ---------------------------------------------------------------------------
+// attrs_start_line = 0 (first-in-file documented item) end-to-end
+// ---------------------------------------------------------------------------
+
+/// Creates a temp project whose first file line is a doc comment for the fn
+/// on line two — the extractor emits attrs_start_line=0 / start_line=1.
+async fn setup_first_in_file_doc() -> (TempDir, TraceDecay) {
+    let dir = TempDir::new().unwrap();
+    let project = dir.path();
+    fs::create_dir_all(project.join("src")).unwrap();
+    fs::write(project.join("src/lib.rs"), "/// doc\nfn foo() {}\n").unwrap();
+    let cg = TraceDecay::init(project).await.unwrap();
+    cg.index_all().await.unwrap();
+    (dir, cg)
+}
+
+/// Regression: a stored attrs_start_line of 0 is a legitimate value (doc block
+/// at the very top of a file) and must survive the DB round-trip. The read
+/// path used to treat 0 as "unset" and substitute start_line, collapsing the
+/// doc block out of the item's full span after indexing.
+#[tokio::test]
+async fn attrs_start_line_zero_survives_indexing_round_trip() {
+    let (_dir, cg) = setup_first_in_file_doc().await;
+
+    let nodes = cg
+        .get_nodes_by_qualified_name("src/lib.rs::foo")
+        .await
+        .unwrap();
+    assert_eq!(nodes.len(), 1, "expected exactly one foo node");
+    let n = &nodes[0];
+    assert_eq!(n.start_line, 1, "fn foo is on 0-based row 1");
+    assert_eq!(
+        n.attrs_start_line, 0,
+        "doc block starts at row 0 and must round-trip as 0, not be rewritten to start_line"
+    );
+    assert!(
+        n.attrs_start_line < n.start_line,
+        "leading doc block must remain part of the item's full span"
+    );
+}
+
+/// Regression: replace_symbol on a first-in-file documented fn must preserve
+/// the leading doc comment (replace only the item lines, never orphan or eat
+/// the doc block above).
+#[tokio::test]
+async fn replace_symbol_preserves_first_in_file_doc_comment() {
+    let (dir, cg) = setup_first_in_file_doc().await;
+
+    let result = cg
+        .replace_symbol("src/lib.rs::foo", "fn foo() { let _x = 1; }")
+        .await
+        .unwrap();
+    assert!(result.success, "replace failed: {}", result.message);
+
+    let content = fs::read_to_string(dir.path().join("src/lib.rs")).unwrap();
+    assert_eq!(
+        content, "/// doc\nfn foo() { let _x = 1; }\n",
+        "doc comment must stay attached above the replaced item"
+    );
+}
+
+/// Regression: insert_at_symbol position=before must insert ABOVE the leading
+/// doc block, not between the doc comment and the fn. Only works when the
+/// legitimate attrs_start_line=0 survives the DB round-trip.
+#[tokio::test]
+async fn insert_before_first_in_file_documented_fn_goes_above_doc_block() {
+    let (dir, cg) = setup_first_in_file_doc().await;
+
+    let result = cg
+        .insert_at_symbol(
+            "src/lib.rs::foo",
+            "// SPDX-License-Identifier: MIT",
+            "before",
+        )
+        .await
+        .unwrap();
+    assert!(result.success, "insert failed: {}", result.message);
+
+    let content = fs::read_to_string(dir.path().join("src/lib.rs")).unwrap();
+    assert_eq!(
+        content, "// SPDX-License-Identifier: MIT\n/// doc\nfn foo() {}\n",
+        "insertion must land above the doc block, not split doc from fn"
+    );
+}

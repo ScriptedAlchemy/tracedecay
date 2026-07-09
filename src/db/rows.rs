@@ -18,13 +18,20 @@ pub(super) fn row_to_node(row: &libsql::Row) -> std::result::Result<Node, libsql
     let vis_str = get_string_lossy(row, 11)?;
     let is_async_int = row.get::<i64>(12)?;
     let start_line = row.get::<u32>(5)?;
-    // Pre-v7 rows may have attrs_start_line == 0 (default); fall back to start_line.
-    let attrs_raw = row.get::<u32>(21).unwrap_or(0);
-    let attrs_start_line = if attrs_raw == 0 {
-        start_line
-    } else {
-        attrs_raw
-    };
+    // `attrs_start_line` is the first line of an item's leading doc-comment /
+    // attribute block. A stored `0` is a *legitimate* value — an item documented
+    // or attributed at the very top of a file (e.g. `/// doc\nfn foo() {}` yields
+    // attrs_start_line=0, start_line=1). We therefore trust the stored integer
+    // verbatim, including 0, and never conflate it with "unset". We only fall
+    // back to `start_line` when the column is genuinely absent: a SQL NULL (a
+    // legacy row that predates the column) or an older SELECT list that does not
+    // request column 21. `Option<u32>` distinguishes those cases (NULL / missing
+    // column => `None`) from a real zero (`Some(0)`).
+    let attrs_start_line = row
+        .get::<Option<u32>>(21)
+        .ok()
+        .flatten()
+        .unwrap_or(start_line);
     // `parent_id` is column 22 in v9+ SELECT lists. Older SELECTs in this
     // file don't request it; the .ok().flatten() chain swallows the missing-
     // column error and yields None.

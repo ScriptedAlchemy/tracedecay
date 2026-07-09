@@ -32,15 +32,16 @@ fn row_to_node_dead_code(row: &libsql::Row) -> std::result::Result<Node, libsql:
     let vis_str = get_string_lossy(row, 11)?;
     let is_async_int = row.get::<i64>(12)?;
     let start_line = row.get::<u32>(5)?;
-    // Pre-v7 rows lack attrs_start_line; fall back to start_line. The dead-code
-    // SELECT below does not include the new column, so attempts to read at 21
-    // will always error here — keep the fallback path explicit.
-    let attrs_raw = row.get::<u32>(21).unwrap_or(0);
-    let attrs_start_line = if attrs_raw == 0 {
-        start_line
-    } else {
-        attrs_raw
-    };
+    // Same contract as `row_to_node` in db/rows.rs: a stored 0 is a legitimate
+    // value (item documented at the very top of a file), so trust the stored
+    // integer verbatim and fall back to `start_line` only when the column is
+    // genuinely absent — SQL NULL on a legacy row, or a SELECT list that does
+    // not request column 21.
+    let attrs_start_line = row
+        .get::<Option<u32>>(21)
+        .ok()
+        .flatten()
+        .unwrap_or(start_line);
 
     Ok(Node {
         id: get_string_lossy(row, 0)?,
