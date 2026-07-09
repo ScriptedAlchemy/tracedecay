@@ -25,14 +25,17 @@
 
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use libsql::{Connection, params};
 use serde_json::Value;
 
+use crate::global_db::GlobalDb;
+use crate::sessions::SessionMessageRecord;
 use crate::sessions::codex::{CodexTurnUsage, merge_usage_counters};
 use crate::sessions::cursor::TimestampCarry;
 use crate::sessions::shared::usage_counters_from;
+use crate::sessions::source::{StoredCursor, TranscriptSource};
 
 const MARKER_NAME: &str = "transcript_facts_backfill";
 const MARKER_VERSION: i64 = 1;
@@ -64,7 +67,7 @@ pub(crate) struct BackfillStats {
 /// number of rows that gained facts, or `None` on database errors (in which
 /// case the marker is not written and a later open retries).
 pub(crate) async fn backfill_transcript_facts(conn: &Connection) -> Option<BackfillStats> {
-    if marker_version(conn).await >= MARKER_VERSION {
+    if marker_version(conn, MARKER_NAME).await >= MARKER_VERSION {
         return Some(BackfillStats::default());
     }
 
@@ -121,11 +124,11 @@ pub(crate) async fn backfill_transcript_facts(conn: &Connection) -> Option<Backf
     Some(stats)
 }
 
-async fn marker_version(conn: &Connection) -> i64 {
+async fn marker_version(conn: &Connection, name: &str) -> i64 {
     let Ok(mut rows) = conn
         .query(
             "SELECT version FROM session_schema_migrations WHERE name = ?1",
-            params![MARKER_NAME],
+            params![name],
         )
         .await
     else {
@@ -397,4 +400,286 @@ fn derive_usage(provider: &str, record: &Value) -> Option<Value> {
             .or_else(|| record.get("message").and_then(usage_counters_from)),
         _ => None,
     }
+}
+
+// ---------------------------------------------------------------------------
+// Structured-row backfill
+// ---------------------------------------------------------------------------
+//
+// The pass above only *updates* facts on rows a prior ingest already wrote.
+// It cannot recover rows the old parser never emitted at all: append-only
+// ingest advances a per-file byte cursor, so once a transcript is past its
+// offset the newly-added row kinds (Codex `goal`/telemetry rows, Claude
+// `pr_link`/`compact_boundary`/`model_fallback` marker rows) never appear for
+// history ingested before those parsers shipped.
+//
+// This sibling pass re-parses each already-ingested Claude/Codex transcript
+// from byte 0 through the *current* parser and inserts any row whose
+// `(provider, message_id)` key is absent. Structured rows derive stable ids
+// from `session_id:offset` (or `kind:uuid`), so a re-parse reproduces the
+// original conversational rows (which are skipped as already-present) and the
+// new structured rows (which are inserted exactly once). Existing rows keep
+// their content — [`GlobalDb::insert_absent_session_messages`] never updates a
+// row that is already stored.
+//
+// Scope + safety:
+//   * per-provider allowlist ([`STRUCTURED_PROVIDERS`]) — Cursor is excluded
+//     because its composer store re-ingests through its own watermarks;
+//   * bounded work per sweep ([`STRUCTURED_BACKFILL_BATCH`] files) with a path
+//     watermark stored in `session_backfill_meta`, mirroring the incremental
+//     git-correlation sweep;
+//   * a version marker in `session_schema_migrations` runs the full history
+//     once and is bumpable when future row kinds are added.
+
+/// Marker recording that the whole transcript history has been swept for the
+/// current structured-row vocabulary. Bump [`STRUCTURED_MARKER_VERSION`] when a
+/// new row kind is added so the full re-sweep runs again.
+const STRUCTURED_MARKER_NAME: &str = "structured_rows_backfill";
+const STRUCTURED_MARKER_VERSION: i64 = 1;
+/// Meta-table key holding the last transcript path fully re-parsed by the sweep.
+const STRUCTURED_CURSOR_KEY: &str = "structured_backfill_cursor";
+/// Transcript files re-parsed per open. Keeps each catch-up open bounded while
+/// the version marker guarantees the whole history is eventually covered.
+const STRUCTURED_BACKFILL_BATCH: usize = 32;
+/// Providers whose current parsers emit structured rows an older ingest lacked.
+/// Cursor is intentionally excluded (its composer store self-heals).
+const STRUCTURED_PROVIDERS: [&str; 2] = ["claude", "codex"];
+
+/// Rows inserted (and files touched) by one structured-backfill sweep.
+#[derive(Default, Clone, Copy)]
+pub(crate) struct StructuredBackfillStats {
+    pub(crate) inserted: u64,
+    pub(crate) files_scanned: u64,
+}
+
+/// One transcript file still owed a structured re-parse.
+struct StructuredCandidate {
+    provider: String,
+    source_path: String,
+}
+
+/// Re-parses the next bounded batch of already-ingested Claude/Codex
+/// transcripts through the current parsers and inserts any structured rows the
+/// original ingest missed. Marker-guarded (full history swept once), watermarked
+/// (each open advances through the remaining files), and idempotent (a second
+/// run inserts nothing). Returns `None` on a database error so the marker and
+/// watermark stay put and a later open retries.
+pub(crate) async fn backfill_structured_rows(db: &GlobalDb) -> Option<StructuredBackfillStats> {
+    let conn = db.conn();
+    if marker_version(conn, STRUCTURED_MARKER_NAME).await >= STRUCTURED_MARKER_VERSION {
+        return Some(StructuredBackfillStats::default());
+    }
+    ensure_backfill_meta_table(conn).await?;
+    let cursor = read_backfill_cursor(conn, STRUCTURED_CURSOR_KEY).await;
+    let candidates = load_structured_candidates(conn, &cursor, STRUCTURED_BACKFILL_BATCH).await?;
+    if candidates.is_empty() {
+        // The whole history is swept: record completion so future opens skip
+        // straight past the marker check above. New transcripts ingested from
+        // here on already carry the current row kinds via live ingest.
+        mark_structured_backfill_complete(conn).await?;
+        return Some(StructuredBackfillStats::default());
+    }
+
+    let mut stats = StructuredBackfillStats::default();
+    for candidate in &candidates {
+        // A single transcript file can be attributed to more than one project
+        // root (Claude sessions that cross worktrees split by per-row cwd), so
+        // re-parse once per owning project so the parser's cwd filter accepts
+        // the same rows it did at live ingest.
+        let project_paths =
+            load_project_paths_for_source(conn, &candidate.provider, &candidate.source_path)
+                .await?;
+        for project_path in project_paths {
+            let provider = candidate.provider.clone();
+            let source_path = candidate.source_path.clone();
+            let messages = tokio::task::spawn_blocking(move || {
+                parse_structured_messages(&provider, &source_path, &project_path)
+            })
+            .await
+            .ok()?
+            .unwrap_or_default();
+            if messages.is_empty() {
+                continue;
+            }
+            let inserted = db.insert_absent_session_messages(&messages).await?;
+            stats.inserted += inserted;
+        }
+        stats.files_scanned += 1;
+        // Advance the watermark per file so a crash mid-batch resumes cleanly
+        // rather than re-reading everything from the start.
+        write_backfill_cursor(conn, STRUCTURED_CURSOR_KEY, &candidate.source_path).await?;
+    }
+
+    if stats.inserted > 0 {
+        eprintln!(
+            "Backfilled {} structured transcript row(s) across {} file(s).",
+            stats.inserted, stats.files_scanned
+        );
+    }
+    Some(stats)
+}
+
+/// Re-parses one transcript from byte 0 through its provider's current parser,
+/// returning every message record it would ingest today. `None` when the
+/// provider is unknown or the parser declines the file (missing/foreign
+/// transcript); the caller treats that as "no rows to insert".
+fn parse_structured_messages(
+    provider: &str,
+    source_path: &str,
+    project_path: &str,
+) -> Option<Vec<SessionMessageRecord>> {
+    let source = provider_source(provider)?;
+    // A zero cursor forces a full read from offset 0 regardless of the stored
+    // ingest offset, reproducing every row (existing rows are skipped later by
+    // their `(provider, message_id)` key).
+    let parsed = source.parse_new(
+        Path::new(source_path),
+        StoredCursor::default(),
+        Path::new(project_path),
+        None,
+    )?;
+    Some(parsed.messages)
+}
+
+/// Builds the transcript source for a backfill provider. The home-derived scan
+/// directory is unused by `parse_new` (it only reads the explicit path), so a
+/// missing home degrades to a harmless root and never blocks the backfill.
+fn provider_source(provider: &str) -> Option<Box<dyn TranscriptSource>> {
+    let home = crate::sessions::home_dir().unwrap_or_else(|| PathBuf::from("/"));
+    match provider {
+        "claude" => Some(Box::new(crate::sessions::claude::ClaudeSource::with_home(
+            &home,
+        ))),
+        "codex" => Some(Box::new(crate::sessions::codex::CodexSource::with_home(
+            &home,
+        ))),
+        _ => None,
+    }
+}
+
+/// Distinct transcript files (past the watermark) still owed a structured
+/// re-parse, ordered by path so the watermark can advance monotonically.
+async fn load_structured_candidates(
+    conn: &Connection,
+    after_path: &str,
+    limit: usize,
+) -> Option<Vec<StructuredCandidate>> {
+    let providers = STRUCTURED_PROVIDERS
+        .map(|provider| format!("'{provider}'"))
+        .join(", ");
+    let sql = format!(
+        "SELECT DISTINCT sm.source_path, sm.provider
+         FROM session_messages sm
+         WHERE sm.provider IN ({providers})
+           AND sm.source_path IS NOT NULL
+           AND sm.source_path > ?1
+         ORDER BY sm.source_path
+         LIMIT ?2"
+    );
+    let mut rows = conn
+        .query(&sql, params![after_path, limit as i64])
+        .await
+        .ok()?;
+    let mut out = Vec::new();
+    while let Ok(Some(row)) = rows.next().await {
+        let (Ok(source_path), Ok(provider)) = (row.get::<String>(0), row.get::<String>(1)) else {
+            continue;
+        };
+        out.push(StructuredCandidate {
+            provider,
+            source_path,
+        });
+    }
+    Some(out)
+}
+
+/// Distinct project roots that own messages from one transcript file. Used as
+/// the `project_root` the parser filters rows against, so re-parsing accepts the
+/// same rows it accepted at live ingest.
+async fn load_project_paths_for_source(
+    conn: &Connection,
+    provider: &str,
+    source_path: &str,
+) -> Option<Vec<String>> {
+    let mut rows = conn
+        .query(
+            "SELECT DISTINCT s.project_path
+             FROM session_messages sm
+             JOIN sessions s
+               ON s.provider = sm.provider AND s.session_id = sm.session_id
+             WHERE sm.provider = ?1
+               AND sm.source_path = ?2
+               AND s.project_path IS NOT NULL
+               AND s.project_path <> ''",
+            params![provider, source_path],
+        )
+        .await
+        .ok()?;
+    let mut out = Vec::new();
+    while let Ok(Some(row)) = rows.next().await {
+        if let Ok(project_path) = row.get::<String>(0) {
+            out.push(project_path);
+        }
+    }
+    Some(out)
+}
+
+/// Lazily creates the small key/value table the sweep uses for its path
+/// watermark (mirrors `git_correlation_meta` / `workflow_index_meta`).
+async fn ensure_backfill_meta_table(conn: &Connection) -> Option<()> {
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS session_backfill_meta (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL,
+            updated_at INTEGER NOT NULL DEFAULT (unixepoch())
+        )",
+        (),
+    )
+    .await
+    .ok()?;
+    Some(())
+}
+
+/// Reads the sweep watermark, defaulting to the empty string (which sorts
+/// before every real path, so the first sweep sees the whole history).
+async fn read_backfill_cursor(conn: &Connection, key: &str) -> String {
+    let Ok(mut rows) = conn
+        .query(
+            "SELECT value FROM session_backfill_meta WHERE key = ?1",
+            params![key],
+        )
+        .await
+    else {
+        return String::new();
+    };
+    match rows.next().await {
+        Ok(Some(row)) => row.get::<String>(0).unwrap_or_default(),
+        _ => String::new(),
+    }
+}
+
+async fn write_backfill_cursor(conn: &Connection, key: &str, value: &str) -> Option<()> {
+    conn.execute(
+        "INSERT INTO session_backfill_meta(key, value) VALUES (?1, ?2)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = unixepoch()",
+        params![key, value],
+    )
+    .await
+    .ok()?;
+    Some(())
+}
+
+/// Records that the structured sweep has covered the whole history.
+async fn mark_structured_backfill_complete(conn: &Connection) -> Option<()> {
+    conn.execute(
+        "INSERT INTO session_schema_migrations(name, version)
+         VALUES (?1, ?2)
+         ON CONFLICT(name) DO UPDATE SET
+            version = excluded.version,
+            applied_at = unixepoch()",
+        params![STRUCTURED_MARKER_NAME, STRUCTURED_MARKER_VERSION],
+    )
+    .await
+    .ok()?;
+    Some(())
 }

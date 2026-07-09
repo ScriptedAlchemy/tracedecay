@@ -1078,6 +1078,13 @@ impl GlobalDb {
         // Marker-guarded (runs once per store) and fail-open, like the LCM
         // schema migrations above.
         let _ = crate::sessions::transcript_backfill::backfill_transcript_facts(&db.conn).await;
+        // Insert-capable structured-row backfill: re-parses already-ingested
+        // Claude/Codex transcripts through the *current* parsers and inserts any
+        // structured rows (goals, telemetry, marker records) that older ingests
+        // never wrote, keyed by their stable ids so existing rows are untouched.
+        // Version-gated to run the full history once, then watermarked/bounded
+        // so each open only re-parses the next batch of files.
+        let _ = crate::sessions::transcript_backfill::backfill_structured_rows(&db).await;
 
         Some(db)
     }
@@ -1114,6 +1121,14 @@ impl GlobalDb {
     /// server queries the LCM tables directly).
     pub(crate) fn dashboard_connection(&self) -> Connection {
         self.conn.clone()
+    }
+
+    /// Borrow the underlying connection for crate-internal maintenance passes
+    /// (e.g. the transcript structured-row backfill) that run their own read
+    /// queries and marker/watermark bookkeeping alongside this DB's write
+    /// helpers.
+    pub(crate) fn conn(&self) -> &Connection {
+        &self.conn
     }
 
     /// Transcript-ingest backlog for the session store backing this DB.
@@ -2778,6 +2793,66 @@ impl GlobalDb {
             }
             Err(_) => false,
         }
+    }
+
+    /// Inserts only the messages whose `(provider, message_id)` key is not
+    /// already stored, using the same full write path as live ingest (raw
+    /// payload + searchable projection + any derived LCM summary node). Rows
+    /// that already exist are left **exactly** as they are — their timestamps,
+    /// text, and metadata are never touched — so re-parsing an already-ingested
+    /// transcript adds new structured rows without clobbering the originals.
+    ///
+    /// Runs the whole batch in one transaction. Returns the number of rows
+    /// newly inserted, or `None` on any database error (the transaction is
+    /// rolled back, so a later retry sees no partial write).
+    pub(crate) async fn insert_absent_session_messages(
+        &self,
+        messages: &[SessionMessageRecord],
+    ) -> Option<u64> {
+        if messages.is_empty() {
+            return Some(0);
+        }
+        if self.conn.execute("BEGIN IMMEDIATE", ()).await.is_err() {
+            return None;
+        }
+        let mut inserted = 0u64;
+        for message in messages {
+            match self
+                .session_message_present(&message.provider, &message.message_id)
+                .await
+            {
+                Some(true) => continue,
+                Some(false) => {}
+                None => {
+                    let _ = self.conn.execute("ROLLBACK", ()).await;
+                    return None;
+                }
+            }
+            if !self.upsert_session_message_in_existing_tx(message).await {
+                let _ = self.conn.execute("ROLLBACK", ()).await;
+                return None;
+            }
+            inserted += 1;
+        }
+        if self.conn.execute("COMMIT", ()).await.is_ok() {
+            return Some(inserted);
+        }
+        let _ = self.conn.execute("ROLLBACK", ()).await;
+        None
+    }
+
+    /// True when a `(provider, message_id)` row already exists in the searchable
+    /// projection. `None` signals a query error the caller must treat as fatal.
+    async fn session_message_present(&self, provider: &str, message_id: &str) -> Option<bool> {
+        let mut rows = self
+            .conn
+            .query(
+                "SELECT 1 FROM session_messages WHERE provider = ?1 AND message_id = ?2",
+                params![provider, message_id],
+            )
+            .await
+            .ok()?;
+        Some(rows.next().await.ok()?.is_some())
     }
 
     async fn upsert_lcm_summary_for_transcript_summary(
