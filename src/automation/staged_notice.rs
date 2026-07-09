@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use super::config_error;
 use super::fact_proposals::{FactProposalState, load_fact_proposal_store};
 use super::managed_skills::{ManagedSkillState, list_managed_skills};
 use super::run_ledger::load_run_records;
@@ -172,10 +173,6 @@ pub async fn maybe_automation_staged_notice(
     // Best-effort persistence: a failed write only risks a repeat notice.
     let _ = save_notice_state(dashboard_root, &state).await;
     Some(message)
-}
-
-fn config_error(message: String) -> TraceDecayError {
-    TraceDecayError::Config { message }
 }
 
 #[cfg(test)]

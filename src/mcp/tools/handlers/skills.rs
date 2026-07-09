@@ -20,7 +20,8 @@ use crate::errors::{Result, TraceDecayError};
 use crate::mcp::tools::ToolResult;
 use crate::tracedecay::TraceDecay;
 
-use super::super::{render, renderers};
+use super::super::renderers;
+use super::support::{tool_json, tool_json_with_md};
 
 const SKILL_ANALYTICS_IMPORT_LIMIT: usize = 10_000;
 const STALE_SKILL_AFTER_SECS: i64 = 60 * 60 * 24 * 90;
@@ -29,21 +30,6 @@ fn config_error(message: impl Into<String>) -> TraceDecayError {
     TraceDecayError::Config {
         message: message.into(),
     }
-}
-
-fn tool_json(cg: &TraceDecay, args: &Value, value: &Value) -> ToolResult {
-    tool_json_with_md(cg, args, value, || render::generic_md(value))
-}
-
-fn tool_json_with_md<F>(cg: &TraceDecay, args: &Value, value: &Value, md: F) -> ToolResult
-where
-    F: FnOnce() -> String,
-{
-    let text = render::finalize(Some(cg.project_root()), args, value, || md());
-    ToolResult::new(
-        json!({ "content": [{ "type": "text", "text": text }] }),
-        vec![],
-    )
 }
 
 fn optional_bool(args: &Value, key: &str, default: bool) -> bool {
@@ -147,9 +133,12 @@ pub(super) async fn handle_skill_list(cg: &TraceDecay, args: Value) -> Result<To
             })
             .collect::<Vec<_>>(),
     });
-    Ok(tool_json_with_md(cg, &args, &payload, || {
-        renderers::skill_list_md(&payload)
-    }))
+    Ok(tool_json_with_md(
+        Some(cg.project_root()),
+        &args,
+        &payload,
+        || renderers::skill_list_md(&payload),
+    ))
 }
 
 pub(super) async fn handle_skill_view(cg: &TraceDecay, args: Value) -> Result<ToolResult> {
@@ -210,9 +199,12 @@ pub(super) async fn handle_skill_view(cg: &TraceDecay, args: Value) -> Result<To
         "improvement_recommendation": improvement_recommendation,
         "support_files_included": include_support_files,
     });
-    Ok(tool_json_with_md(cg, &args, &payload, || {
-        renderers::skill_view_md(&payload)
-    }))
+    Ok(tool_json_with_md(
+        Some(cg.project_root()),
+        &args,
+        &payload,
+        || renderers::skill_view_md(&payload),
+    ))
 }
 
 pub(super) async fn handle_automation_run_artifact_view(
@@ -241,9 +233,12 @@ pub(super) async fn handle_automation_run_artifact_view(
         "artifact": artifact,
         "payload": payload,
     });
-    Ok(tool_json_with_md(cg, &args, &payload, || {
-        renderers::automation_artifact_md(&payload)
-    }))
+    Ok(tool_json_with_md(
+        Some(cg.project_root()),
+        &args,
+        &payload,
+        || renderers::automation_artifact_md(&payload),
+    ))
 }
 
 async fn sync_project_skill_analytics(cg: &TraceDecay, profile_root: &Path) -> Result<()> {
@@ -271,5 +266,5 @@ pub(super) fn handle_hermes_skill_bridge(cg: &TraceDecay, args: &Value) -> Resul
         "status": "ok",
         "bridge": snapshot,
     });
-    Ok(tool_json(cg, args, &payload))
+    Ok(tool_json(Some(cg.project_root()), args, &payload))
 }

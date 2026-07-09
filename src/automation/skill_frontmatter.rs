@@ -3,7 +3,8 @@
 
 use std::collections::BTreeMap;
 
-use crate::errors::{Result, TraceDecayError};
+use super::config_error;
+use crate::errors::Result;
 
 /// One parsed frontmatter value.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -113,12 +114,6 @@ fn unquote_scalar(value: &str) -> String {
         serde_json::from_str(value).unwrap_or_else(|_| inner.to_string())
     } else {
         value.to_string()
-    }
-}
-
-fn config_error(message: impl Into<String>) -> TraceDecayError {
-    TraceDecayError::Config {
-        message: message.into(),
     }
 }
 

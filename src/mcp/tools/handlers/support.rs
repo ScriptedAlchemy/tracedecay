@@ -45,6 +45,14 @@ pub(super) fn tool_json_with_md<F: FnOnce() -> String>(
     )
 }
 
+/// Wraps a JSON payload in a text `ToolResult`, rendering the default markdown
+/// body via [`render::generic_md`]. Convenience wrapper around
+/// [`tool_json_with_md`] for handlers that don't need a custom markdown
+/// renderer.
+pub(super) fn tool_json(project_root: Option<&Path>, args: &Value, value: &Value) -> ToolResult {
+    tool_json_with_md(project_root, args, value, || render::generic_md(value))
+}
+
 /// Extracts the `node_id` parameter from tool arguments, accepting `id` as a
 /// fallback alias. LLMs occasionally shorten `node_id` to `id`; this avoids a
 /// confusing error when that happens.

@@ -21,6 +21,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use super::backend::AgentTaskKind;
+use super::config_error;
 use super::fact_proposals::{FactProposalRecord, FactProposalState, load_fact_proposal_store};
 use super::managed_skills::{ManagedSkillState, list_managed_skills};
 use super::skill_usage::{SkillUsageSummary, summarize_skill_usage};
@@ -473,10 +474,6 @@ fn verdict_counts<'a>(verdicts: impl Iterator<Item = &'a str>) -> Value {
         }
     }
     Value::Object(counts)
-}
-
-fn config_error(message: String) -> TraceDecayError {
-    TraceDecayError::Config { message }
 }
 
 #[cfg(test)]

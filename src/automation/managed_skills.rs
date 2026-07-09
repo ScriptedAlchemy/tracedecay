@@ -1,6 +1,7 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
+use super::config_error;
 use crate::errors::{Result, TraceDecayError};
 
 use super::managed_skill_model::current_metadata_timestamp;
@@ -514,8 +515,4 @@ pub async fn archive_managed_skill(profile_root: &Path, id: &str) -> Result<Mana
 
 pub async fn restore_managed_skill(profile_root: &Path, id: &str) -> Result<ManagedSkill> {
     set_managed_skill_state(profile_root, id, ManagedSkillState::PendingApproval).await
-}
-
-fn config_error(message: String) -> TraceDecayError {
-    TraceDecayError::Config { message }
 }

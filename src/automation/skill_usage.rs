@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use super::config_error;
 use super::managed_skills::{ManagedSkill, ManagedSkillSource, ManagedSkillState};
 use crate::errors::{Result, TraceDecayError};
 use crate::tracedecay::current_timestamp;
@@ -416,8 +417,4 @@ fn insert_sorted_unique(values: &mut Vec<String>, value: String) {
 
 fn max_optional(existing: Option<i64>, timestamp: i64) -> i64 {
     existing.map_or(timestamp, |current| current.max(timestamp))
-}
-
-fn config_error(message: String) -> TraceDecayError {
-    TraceDecayError::Config { message }
 }

@@ -11,7 +11,8 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::errors::{Result, TraceDecayError};
+use super::config_error;
+use crate::errors::Result;
 
 use super::hermes_config_projection::load_config_projection;
 use super::hermes_pending_skills::{load_pending_skill_writes, pending_skill_ids_by_name};
@@ -264,10 +265,4 @@ fn load_curator_state_projection(path: &Path) -> Result<HermesCuratorStateProjec
         last_report_path: value.get("last_report_path").cloned(),
         run_count: value.get("run_count").and_then(Value::as_u64),
     })
-}
-
-fn config_error(message: impl Into<String>) -> TraceDecayError {
-    TraceDecayError::Config {
-        message: message.into(),
-    }
 }

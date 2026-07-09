@@ -6,7 +6,8 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::errors::{Result, TraceDecayError};
+use super::config_error;
+use crate::errors::Result;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct HermesPendingSkillWrite {
@@ -170,12 +171,6 @@ fn created_at_sort_key(value: Option<&Value>) -> Option<CreatedAtSortKey> {
     value
         .as_str()
         .map(|text| CreatedAtSortKey::Text(text.to_string()))
-}
-
-fn config_error(message: impl Into<String>) -> TraceDecayError {
-    TraceDecayError::Config {
-        message: message.into(),
-    }
 }
 
 #[cfg(test)]

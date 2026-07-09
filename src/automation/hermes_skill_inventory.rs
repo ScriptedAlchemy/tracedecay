@@ -5,10 +5,12 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::errors::{Result, TraceDecayError};
+use super::config_error;
+use crate::errors::Result;
 
 use super::hermes_config_projection::{load_hermes_yaml_projection, yaml_bool};
 use super::skill_frontmatter::{SkillFrontmatterValue, parse_skill_frontmatter};
+use super::text::truncate_chars_for_prompt;
 
 const SKILL_MD: &str = "SKILL.md";
 pub(crate) const USAGE_FILE: &str = ".usage.json";
@@ -77,8 +79,8 @@ pub(crate) fn load_skill_summaries(
                 (relative.components().count() > 0).then(|| relative.display().to_string())
             })
             .filter(|value| !value.is_empty());
-        let body_markdown =
-            include_skill_bodies.then(|| truncate_chars(&contents, MAX_BRIDGED_BODY_CHARS));
+        let body_markdown = include_skill_bodies
+            .then(|| truncate_chars_for_prompt(&contents, MAX_BRIDGED_BODY_CHARS));
         skills.push(HermesSkillSummary {
             usage: usage_records.get(&name).cloned(),
             pending_write_ids: pending_by_skill.get(&name).cloned().unwrap_or_default(),
@@ -373,19 +375,6 @@ fn parse_frontmatter(contents: &str) -> BTreeMap<String, String> {
                 .collect()
         })
         .unwrap_or_default()
-}
-
-fn truncate_chars(value: &str, max_chars: usize) -> String {
-    if value.chars().count() <= max_chars {
-        return value.to_string();
-    }
-    value.chars().take(max_chars).collect()
-}
-
-fn config_error(message: impl Into<String>) -> TraceDecayError {
-    TraceDecayError::Config {
-        message: message.into(),
-    }
 }
 
 #[cfg(test)]
