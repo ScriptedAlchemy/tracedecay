@@ -22,3 +22,4 @@ mod migration_manifest_test;
 mod migration_test;
 mod profile_storage_migration_test;
 mod storage_resolver_test;
+mod worktree_canonical_root_guard_test;

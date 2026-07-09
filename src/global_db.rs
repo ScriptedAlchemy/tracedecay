@@ -105,6 +105,19 @@ pub struct SessionToolUsageRow {
     pub metadata_json: String,
 }
 
+/// One ingested session message, projected to the fields the hint-outcome
+/// correlator needs: the timestamp/ordinal that order activity after a hint and
+/// the tool-activity carriers (`kind='tool_event'` + `tool_names` for Codex,
+/// `tool_names`/`metadata_json.tool_events` for Claude/Cursor).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionActivityRow {
+    pub timestamp: Option<i64>,
+    pub ordinal: i64,
+    pub kind: Option<String>,
+    pub tool_names: Option<String>,
+    pub metadata_json: Option<String>,
+}
+
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct AnalyticsEventQuery {
     pub provider: Option<String>,
@@ -2496,6 +2509,55 @@ impl GlobalDb {
             .ok_or_else(|| "project session message count returned no row".to_string())?;
         row.get::<i64>(0)
             .map_err(|e| format!("failed to decode project session message count: {e}"))
+    }
+
+    /// Session messages for one provider session with `timestamp >= since_ts`,
+    /// ordered oldest-first, capped at `limit`. Powers the hint-outcome
+    /// correlator's bounded post-hint activity scan. Rows without a timestamp
+    /// are excluded because the correlator's horizon is time-anchored.
+    pub async fn session_messages_after(
+        &self,
+        provider: &str,
+        session_id: &str,
+        since_ts: i64,
+        limit: usize,
+    ) -> Result<Vec<SessionActivityRow>, String> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let mut rows = self
+            .conn
+            .query(
+                "SELECT timestamp, ordinal, kind, tool_names, metadata_json
+                 FROM session_messages
+                 WHERE provider = ?1 AND session_id = ?2
+                   AND timestamp IS NOT NULL AND timestamp >= ?3
+                 ORDER BY timestamp, ordinal
+                 LIMIT ?4",
+                params![
+                    provider,
+                    session_id,
+                    since_ts,
+                    i64::try_from(limit).unwrap_or(i64::MAX)
+                ],
+            )
+            .await
+            .map_err(|e| format!("failed to query session messages after hint: {e}"))?;
+        let mut out = Vec::new();
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|e| format!("failed to read session messages after hint: {e}"))?
+        {
+            out.push(SessionActivityRow {
+                timestamp: row.get::<Option<i64>>(0).ok().flatten(),
+                ordinal: row.get::<i64>(1).unwrap_or_default(),
+                kind: row.get::<Option<String>>(2).ok().flatten(),
+                tool_names: row.get::<Option<String>>(3).ok().flatten(),
+                metadata_json: row.get::<Option<String>>(4).ok().flatten(),
+            });
+        }
+        Ok(out)
     }
 
     pub async fn query_analytics_events(

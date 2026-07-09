@@ -262,6 +262,75 @@ fn hint_summary_from_events(events: &[Value]) -> Value {
     })
 }
 
+#[derive(Default)]
+struct HintEfficacyCounts {
+    emitted: i64,
+    acted: i64,
+    ignored: i64,
+}
+
+/// Per-category hint efficacy from durable `hint_emitted` + `hint_outcome`
+/// events: how many hints were emitted, how many the model then acted on, how
+/// many it ignored, and how many remain unresolved (emitted with no outcome yet
+/// — the correlator's later-pass backlog). `unresolved` is derived so it stays
+/// non-negative even if the event sample is truncated mid-pair.
+fn hint_efficacy_from_events(events: &[Value]) -> Value {
+    let mut by_category: BTreeMap<String, HintEfficacyCounts> = BTreeMap::new();
+    let mut totals = HintEfficacyCounts::default();
+
+    for event in events {
+        let category = str_field(event, "hint_category");
+        if category.is_empty() {
+            continue;
+        }
+        let entry = by_category.entry(category.to_string()).or_default();
+        match str_field(event, "event_kind") {
+            "hint_emitted" => {
+                entry.emitted += 1;
+                totals.emitted += 1;
+            }
+            "hint_outcome" => match normalize(str_field(event, "outcome")).as_str() {
+                "acted" => {
+                    entry.acted += 1;
+                    totals.acted += 1;
+                }
+                "ignored" => {
+                    entry.ignored += 1;
+                    totals.ignored += 1;
+                }
+                _ => {}
+            },
+            _ => {}
+        }
+    }
+
+    let rows = by_category
+        .into_iter()
+        .map(|(category, counts)| {
+            let unresolved = (counts.emitted - counts.acted - counts.ignored).max(0);
+            json!({
+                "category": category,
+                "emitted": counts.emitted,
+                "acted": counts.acted,
+                "ignored": counts.ignored,
+                "unresolved": unresolved,
+            })
+        })
+        .collect::<Vec<_>>();
+
+    json!({
+        "available": !rows.is_empty(),
+        "source": "analytics_events",
+        "totals": {
+            "emitted": totals.emitted,
+            "acted": totals.acted,
+            "ignored": totals.ignored,
+            "unresolved": (totals.emitted - totals.acted - totals.ignored).max(0),
+        },
+        "by_category": rows,
+    })
+}
+
 async fn hint_summary(
     conn: Option<&libsql::Connection>,
     durable_events: Option<&[Value]>,
@@ -526,6 +595,12 @@ pub(crate) fn diagnostics_summary_from_parts(
             "by_outcome": [],
             "by_hook": hook_count_rows(hook_rows),
             "by_prompt_category": hook_prompt_category_rows(hook_rows),
+            "hint_efficacy": json!({
+                "available": false,
+                "source": "analytics_events_unavailable",
+                "totals": {"emitted": 0, "acted": 0, "ignored": 0, "unresolved": 0},
+                "by_category": [],
+            }),
             "recent_events": [],
             "recent_hooks": recent_hook_rows(hook_rows, 20),
         });
@@ -602,6 +677,7 @@ pub(crate) fn diagnostics_summary_from_parts(
         "by_outcome": count_rows("outcome", by_outcome),
         "by_hook": hook_count_rows(hook_rows),
         "by_prompt_category": hook_prompt_category_rows(hook_rows),
+        "hint_efficacy": hint_efficacy_from_events(events),
         "recent_events": recent_event_rows(events, 20),
         "recent_hooks": recent_hook_rows(hook_rows, 20),
     })
@@ -827,7 +903,55 @@ fn normalize(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{HookAnalyticsRows, read_hook_analytics_file};
+    use serde_json::json;
+
+    use super::{HookAnalyticsRows, hint_efficacy_from_events, read_hook_analytics_file};
+
+    #[test]
+    fn hint_efficacy_counts_emitted_acted_ignored_and_unresolved() {
+        let events = vec![
+            json!({"event_kind": "hint_emitted", "hint_category": "search"}),
+            json!({"event_kind": "hint_emitted", "hint_category": "search"}),
+            json!({"event_kind": "hint_emitted", "hint_category": "search"}),
+            json!({"event_kind": "hint_outcome", "hint_category": "search", "outcome": "acted"}),
+            json!({"event_kind": "hint_outcome", "hint_category": "search", "outcome": "ignored"}),
+            json!({"event_kind": "hint_emitted", "hint_category": "impact"}),
+            // Unrelated events must not affect hint efficacy.
+            json!({"event_kind": "mcp_tool_call", "tool_name": "tracedecay_context"}),
+        ];
+
+        let summary = hint_efficacy_from_events(&events);
+        assert_eq!(summary["available"], json!(true));
+        assert_eq!(summary["totals"]["emitted"], json!(4));
+        assert_eq!(summary["totals"]["acted"], json!(1));
+        assert_eq!(summary["totals"]["ignored"], json!(1));
+        // 4 emitted - 1 acted - 1 ignored = 2 still unresolved.
+        assert_eq!(summary["totals"]["unresolved"], json!(2));
+
+        let by_category = summary["by_category"].as_array().unwrap();
+        let search = by_category
+            .iter()
+            .find(|row| row["category"] == json!("search"))
+            .unwrap();
+        assert_eq!(search["emitted"], json!(3));
+        assert_eq!(search["acted"], json!(1));
+        assert_eq!(search["ignored"], json!(1));
+        assert_eq!(search["unresolved"], json!(1));
+
+        let impact = by_category
+            .iter()
+            .find(|row| row["category"] == json!("impact"))
+            .unwrap();
+        assert_eq!(impact["emitted"], json!(1));
+        assert_eq!(impact["unresolved"], json!(1));
+    }
+
+    #[test]
+    fn hint_efficacy_is_unavailable_without_hint_events() {
+        let summary = hint_efficacy_from_events(&[json!({"event_kind": "mcp_tool_call"})]);
+        assert_eq!(summary["available"], json!(false));
+        assert!(summary["by_category"].as_array().unwrap().is_empty());
+    }
 
     #[test]
     fn hook_analytics_sources_report_malformed_jsonl_rows() {

@@ -24,6 +24,7 @@ row below, run it, and stop when the question is answered.
 | Half-remembered name | `tracedecay_similar` | guessing greps |
 | Code by shape (return type, params, async) | `tracedecay_signature_search` | reading modules |
 | Duplicate code / similar function bodies / repeated helper logic | `tracedecay_redundancy` (`path`, `min_lines`, `max_pairs`) | name-only search |
+| A trait/interface/class's full type hierarchy (implementors + extenders, recursively) | `tracedecay_type_hierarchy` | manually grepping `impl X for` / `extends X` |
 
 ## Read cheaply — stop at the first rung that answers
 
