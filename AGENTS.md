@@ -7,6 +7,19 @@
 - Cargo-launched TraceDecay test data uses `target/test-profile/.tracedecay`.
 - Run normal repo commands from the repo root: `cargo check`, `cargo test`, `cargo test-all`, `cargo nextest run --workspace --no-fail-fast`.
 - Do not set a shared `CARGO_TARGET_DIR`; use the repo-local default or a repo-specific temporary directory.
+- If you do need a custom `CARGO_TARGET_DIR` (isolated merge-verification builds, throwaway
+  worktrees, scratch experiments), it MUST live on the fast NVMe volume under the dedicated
+  targets folder: `/fast/cargo-target/<repo-or-worktree-name>` (e.g.
+  `/fast/cargo-target/tracedecay-merge-check`). Never place target dirs under `/tmp`, `$HOME`,
+  or anywhere on the root disk — those are on the slow volume and get wiped or fill up.
+  Repo checkouts under `/fast/projects/` already sit on the fast disk, so their repo-local
+  `target` needs no override. Toolchain caches (`sccache`, cargo registry) live under
+  `/fast/cache/` and need no per-agent changes.
+
+```sh
+CARGO_TARGET_DIR=/fast/cargo-target/tracedecay-<purpose> cargo check
+```
+
 - If local environment overrides point elsewhere, override both paths for that command:
 
 ```sh
@@ -32,4 +45,4 @@ cargo test-all
 
 - Parallel branch work uses git worktrees under `.worktrees/` in the repo root (for example `.worktrees/codex-cli-args-stdin`).
 - Integration/default branch is `master` (GitHub: ScriptedAlchemy/tracedecay).
-- Multi-PR merge verification: build a detached temporary worktree on `origin/master`, merge all target branches, then run tests with isolated `CARGO_TARGET_DIR` and `TRACEDECAY_DATA_DIR` paths.
+- Multi-PR merge verification: build a detached temporary worktree on `origin/master`, merge all target branches, then run tests with isolated `CARGO_TARGET_DIR` (under `/fast/cargo-target/`, see the Cargo section) and `TRACEDECAY_DATA_DIR` paths.
