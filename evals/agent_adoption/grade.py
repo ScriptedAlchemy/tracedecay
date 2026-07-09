@@ -199,8 +199,12 @@ class ToolCall:
         return str(c) if c is not None else ""
 
 
+# Require an explicit `tracedecay tool <name>` invocation. Optional `tool` plus
+# a capture that accepts leading dashes would also rewrite help/setup commands
+# (`tracedecay --help`, `tracedecay tool --help`, `tracedecay init`) into fake
+# `tracedecay_*` adoption events and inflate CLI-only metrics.
 _TRACEDECAY_CLI = re.compile(
-    r"(?:^|[\s;&|'\"])(?:\S*/)?tracedecay\s+(?:tool\s+)?([a-zA-Z0-9_-]+)"
+    r"(?:^|[\s;&|'\"])(?:\S*/)?tracedecay\s+tool\s+([a-zA-Z][a-zA-Z0-9_-]*)"
 )
 
 

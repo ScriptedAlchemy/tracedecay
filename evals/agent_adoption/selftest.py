@@ -122,6 +122,23 @@ def test_channels():
     check("channel: CLI-only", grade.attribute_channel(tr, "cli-only") == grade.CH_CLI)
     check("normalize: CLI tool identity", tr.tools[0].canon == "tracedecay_status")
 
+    # Help/setup CLI commands must not count as TraceDecay tool adoption.
+    for label, command in (
+        ("--help", "tracedecay --help"),
+        ("tool --help", "tracedecay tool --help"),
+        ("init", "tracedecay init"),
+        ("tool --args", "tracedecay tool --args '{}'"),
+    ):
+        tr = transcript([
+            claude_tool("Bash", {"command": command}),
+            claude_result("done"),
+        ])
+        check(
+            f"normalize: reject help/setup CLI ({label})",
+            tr.tools[0].canon == "Bash" and not tr.tools[0].is_tracedecay,
+            tr.tools[0].canon,
+        )
+
     # none: never reached a tracedecay tool.
     tr = transcript([claude_tool("Grep", {"pattern": "x"}), claude_result("done")])
     check("channel: none", grade.attribute_channel(tr, "full") == grade.CH_NONE)

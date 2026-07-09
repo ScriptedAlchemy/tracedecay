@@ -458,8 +458,19 @@ impl ManagedSkill {
         let mut support_files = self.support_files.iter().collect::<Vec<_>>();
         support_files.sort_by(|left, right| left.path.cmp(&right.path));
         for support in support_files {
+            // Keep package-hash path bytes slash-normalized so Windows
+            // on-disk recompute (which joins Path components with `/`) matches.
+            let key = support
+                .path
+                .components()
+                .filter_map(|component| match component {
+                    std::path::Component::Normal(part) => Some(part.to_string_lossy()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("/");
             hasher.update(b"\0file:");
-            hasher.update(support.path.to_string_lossy().as_bytes());
+            hasher.update(key.as_bytes());
             hasher.update(b"\0");
             hasher.update(&support.bytes);
         }

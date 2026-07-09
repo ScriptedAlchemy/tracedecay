@@ -472,9 +472,13 @@ fn recompute_on_disk_package(
     let mut files = BTreeMap::new();
     files.insert(SKILL_FILE.to_string(), hash_bytes(&skill_bytes));
     for (relative, bytes) in &supports {
+        // Hash the slash-normalized key, not Path display form. On Windows,
+        // `strip_prefix` relatives stringify with `\`, while authoring hashes
+        // use forward-slash support paths — a mismatch would make every
+        // pristine lost-manifest package look forked.
         let key = support_relative_key(relative)?;
         hasher.update(b"\0file:");
-        hasher.update(relative.to_string_lossy().as_bytes());
+        hasher.update(key.as_bytes());
         hasher.update(b"\0");
         hasher.update(bytes);
         files.insert(key, hash_bytes(bytes));
