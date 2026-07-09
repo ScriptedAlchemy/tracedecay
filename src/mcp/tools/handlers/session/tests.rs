@@ -1,5 +1,101 @@
 use super::*;
 use crate::mcp::response_handles::lock_response_handle_store;
+use crate::sessions::{SessionMessageRecord, SessionRecord};
+
+/// Build a search hit with a given relevance score, message timestamp, and
+/// stable ids — enough to exercise the cross-project merge ordering contract.
+fn merge_result(
+    score: f64,
+    timestamp: i64,
+    session_id: &str,
+    message_id: &str,
+) -> SessionMessageSearchResult {
+    SessionMessageSearchResult {
+        session: SessionRecord {
+            provider: "cursor".to_string(),
+            session_id: session_id.to_string(),
+            project_key: "proj".to_string(),
+            project_path: "proj".to_string(),
+            title: None,
+            started_at: None,
+            ended_at: None,
+            transcript_path: None,
+            metadata_json: None,
+            parent_session_id: None,
+            is_subagent: false,
+            agent_id: None,
+            parent_tool_use_id: None,
+        },
+        message: SessionMessageRecord {
+            provider: "cursor".to_string(),
+            message_id: message_id.to_string(),
+            session_id: session_id.to_string(),
+            role: "assistant".to_string(),
+            timestamp: Some(timestamp),
+            ordinal: 0,
+            text: String::new(),
+            kind: None,
+            model: None,
+            tool_names: None,
+            source_path: None,
+            source_offset: None,
+            metadata_json: None,
+        },
+        score,
+    }
+}
+
+/// Regression: the cross-project merge must produce an *exact* distributed
+/// top-K. Each shard is truncated in SQL by BM25 relevance, so a shard returns
+/// its own top rows by score. A recency merge (the old behavior) would keep a
+/// low-relevance-but-newer row and drop a genuinely top-relevance row a shard
+/// returned — corrupting the top-K. The merge must order by score DESC.
+#[test]
+fn cross_project_merge_keeps_top_relevance_not_newest() {
+    // Two shards, each already truncated by relevance:
+    //   shard A: score 10 @ t=100, score 3 @ t=90
+    //   shard B: score 9  @ t=50,  score 8 @ t=40
+    let mut results = vec![
+        merge_result(10.0, 100, "a", "a-hi"),
+        merge_result(3.0, 90, "a", "a-lo"),
+        merge_result(9.0, 50, "b", "b-hi"),
+        merge_result(8.0, 40, "b", "b-mid"),
+    ];
+    sort_and_truncate_message_results_by_relevance(&mut results, 3);
+
+    let ids: Vec<&str> = results
+        .iter()
+        .map(|r| r.message.message_id.as_str())
+        .collect();
+    // Exact relevance top-3: 10, 9, 8. The newer-but-low-relevance row
+    // (score 3 @ t=90) must be dropped, and the top-relevance row that a
+    // recency merge would have discarded (score 8) must survive.
+    assert_eq!(ids, ["a-hi", "b-hi", "b-mid"], "top-K must be by relevance");
+    assert!(
+        !ids.contains(&"a-lo"),
+        "recency must not resurrect a low-relevance row: {ids:?}"
+    );
+}
+
+/// Equal-score rows must order deterministically: timestamp DESC, then a
+/// stable session-id / message-id tie-break, matching the per-shard key.
+#[test]
+fn cross_project_merge_tie_break_is_stable() {
+    let mut results = vec![
+        merge_result(5.0, 100, "z", "z-1"),
+        merge_result(5.0, 100, "a", "a-2"),
+        merge_result(5.0, 100, "a", "a-1"),
+        merge_result(5.0, 200, "m", "m-1"),
+    ];
+    sort_and_truncate_message_results_by_relevance(&mut results, 10);
+    let ids: Vec<&str> = results
+        .iter()
+        .map(|r| r.message.message_id.as_str())
+        .collect();
+    // Newest timestamp first (m-1 @ 200), then equal ts=100 ordered by
+    // session_id then message_id: (a,a-1), (a,a-2), (z,z-1).
+    assert_eq!(ids, ["m-1", "a-1", "a-2", "z-1"], "{ids:?}");
+}
 
 fn sample_message_search_payload() -> Value {
     json!({
@@ -69,6 +165,28 @@ fn message_search_markdown_drops_raw_json_blobs() {
     }
     // And it must not be a JSON document.
     assert!(serde_json::from_str::<Value>(&md).is_err(), "{md}");
+}
+
+#[test]
+fn message_search_markdown_surfaces_project_scope_counts() {
+    let mut payload = sample_message_search_payload();
+    if let Some(map) = payload.as_object_mut() {
+        map.insert("project_scope".to_string(), json!("all_registered"));
+        map.insert("searched_project_count".to_string(), json!(3));
+        map.insert("skipped_project_count".to_string(), json!(2));
+    }
+    let md = render_message_search_md(&payload);
+    assert!(
+        md.contains("**project scope:** all_registered (searched 3, skipped 2)"),
+        "cross-project scope/counts must appear in default markdown:\n{md}"
+    );
+
+    // Single-project searches (no project_scope) must not grow the line.
+    let plain = render_message_search_md(&sample_message_search_payload());
+    assert!(
+        !plain.contains("project scope"),
+        "project scope line must be omitted when unscoped:\n{plain}"
+    );
 }
 
 #[test]

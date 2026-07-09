@@ -66,6 +66,18 @@ fn render_message_search_md(value: &Value) -> String {
         }
     }
     md.field("count", &render::field_i64(value, "count").to_string());
+    if let Some(scope) = value
+        .get("project_scope")
+        .and_then(Value::as_str)
+        .filter(|scope| !scope.is_empty())
+    {
+        let searched = render::field_i64(value, "searched_project_count");
+        let skipped = render::field_i64(value, "skipped_project_count");
+        md.field(
+            "project scope",
+            &format!("{scope} (searched {searched}, skipped {skipped})"),
+        );
+    }
     if let Some(summary) = git_filter_summary(value) {
         md.field("git filter", &summary);
     }
@@ -444,12 +456,27 @@ async fn search_session_messages_in_db(
     }
 }
 
-fn sort_and_truncate_message_results(results: &mut Vec<SessionMessageSearchResult>, limit: usize) {
+/// Merge per-project shards into a single relevance-ordered top-K.
+///
+/// Each shard is truncated in SQL by BM25 relevance (`ORDER BY bm25(...) LIMIT
+/// k`, see `search_session_messages_*` in `global_db`), so the merged set must
+/// be re-sorted by the *same* key for the distributed top-K to be exact.
+/// Sorting by recency here would drop a top-relevance row a shard kept while
+/// surfacing lower-relevance-but-newer rows the shards never returned. Key:
+/// score DESC (relevance), then timestamp DESC, then a stable session/message
+/// id tie-break so equal-score rows order deterministically. This matches the
+/// single-project path, which returns DB rows already in BM25 order without a
+/// resort.
+fn sort_and_truncate_message_results_by_relevance(
+    results: &mut Vec<SessionMessageSearchResult>,
+    limit: usize,
+) {
     results.sort_by(|a, b| {
-        b.message
-            .timestamp
-            .cmp(&a.message.timestamp)
-            .then_with(|| b.score.total_cmp(&a.score))
+        b.score
+            .total_cmp(&a.score)
+            .then_with(|| b.message.timestamp.cmp(&a.message.timestamp))
+            .then_with(|| a.session.session_id.cmp(&b.session.session_id))
+            .then_with(|| a.message.message_id.cmp(&b.message.message_id))
     });
     results.truncate(limit);
 }
@@ -2211,7 +2238,13 @@ pub(super) async fn handle_message_search(
                 skipped_project_count += 1;
                 continue;
             };
-            let candidates = registry_session_db_candidates(&context, &profile_root)?;
+            // One project's malformed store relpath must not abort the whole
+            // cross-project sweep; skip it like the neighboring missing-context
+            // / missing-db / open-failure branches.
+            let Ok(candidates) = registry_session_db_candidates(&context, &profile_root) else {
+                skipped_project_count += 1;
+                continue;
+            };
             let Some(db_path) = candidates.into_iter().find(|path| path.is_file()) else {
                 skipped_project_count += 1;
                 continue;
@@ -2243,7 +2276,7 @@ pub(super) async fn handle_message_search(
             let mut project_results = search_session_messages_in_db(&db, &request).await;
             results.append(&mut project_results);
         }
-        sort_and_truncate_message_results(&mut results, request.limit);
+        sort_and_truncate_message_results_by_relevance(&mut results, request.limit);
         let mut payload = message_search_payload(&request, &results, request.catch_up);
         if let Some(map) = payload.as_object_mut() {
             map.insert(

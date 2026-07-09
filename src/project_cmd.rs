@@ -148,52 +148,170 @@ fn print_project_context(context: &ProjectRegistryContext, json_output: bool) ->
         println!("{}", serde_json::to_string_pretty(&payload)?);
         return Ok(());
     }
+    print!("{}", render_project_context_text(context));
+    Ok(())
+}
 
+/// Renders the plain-text `projects context` view. Deliberately omits
+/// `project.git_remote_url` — a git remote URL can embed credentials
+/// (`https://user:token@host/...`), so it must never be printed here or
+/// serialized into the JSON view (see `PublicCodeProject`).
+fn render_project_context_text(context: &ProjectRegistryContext) -> String {
+    let mut out = String::new();
     let project = &context.project;
-    println!("Project: {}", project.project_id);
-    println!("root: {}", project.display_root);
+    out.push_str(&format!("Project: {}\n", project.project_id));
+    out.push_str(&format!("root: {}\n", project.display_root));
     if let Some(branch) = &project.default_branch {
-        println!("default branch: {branch}");
+        out.push_str(&format!("default branch: {branch}\n"));
     }
     if let Some(git_common_dir) = &project.git_common_dir {
-        println!("git common dir: {git_common_dir}");
+        out.push_str(&format!("git common dir: {git_common_dir}\n"));
     }
-    println!("last seen: {}", project.last_seen_at);
+    out.push_str(&format!("last seen: {}\n", project.last_seen_at));
 
     if !context.aliases.is_empty() {
-        println!();
-        println!("Aliases:");
+        out.push('\n');
+        out.push_str("Aliases:\n");
         for alias in &context.aliases {
-            println!("  {}", alias.alias_path);
+            out.push_str(&format!("  {}\n", alias.alias_path));
         }
     }
 
     if !context.stores.is_empty() {
-        println!();
-        println!("Stores:");
+        out.push('\n');
+        out.push_str("Stores:\n");
         for store_context in &context.stores {
             let store = &store_context.store;
-            println!(
-                "  {} [{} / {}] {}",
+            out.push_str(&format!(
+                "  {} [{} / {}] {}\n",
                 store.store_id, store.store_kind, store.storage_mode, store.store_relpath
-            );
+            ));
             for scope in &store_context.graph_scopes {
-                println!(
-                    "    scope {} branch={} db={} writable={}",
+                out.push_str(&format!(
+                    "    scope {} branch={} db={} writable={}\n",
                     scope.graph_scope_id, scope.branch_name, scope.db_relpath, scope.writable
-                );
+                ));
             }
             for artifact in &store_context.artifacts {
                 let size = artifact
                     .size_bytes
                     .map(|bytes| bytes.to_string())
                     .unwrap_or_else(|| "-".to_string());
-                println!(
-                    "    artifact {} path={} size={}",
+                out.push_str(&format!(
+                    "    artifact {} path={} size={}\n",
                     artifact.artifact_kind, artifact.relpath, size
-                );
+                ));
             }
         }
     }
-    Ok(())
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tracedecay::global_db::{
+        GraphScopeRecord, ProjectAliasRecord, ProjectStoreContext, StoreArtifactRecord,
+        StoreInstanceRecord,
+    };
+
+    const CREDENTIAL_REMOTE_URL: &str =
+        "https://user:sekret-token@github.com/example/private-repo.git";
+
+    fn context_with_credential_remote() -> ProjectRegistryContext {
+        ProjectRegistryContext {
+            project: CodeProjectRecord {
+                project_id: "proj_test".to_string(),
+                canonical_root: "/repo".to_string(),
+                display_root: "/repo".to_string(),
+                git_common_dir: Some("/repo/.git".to_string()),
+                git_remote_url: Some(CREDENTIAL_REMOTE_URL.to_string()),
+                default_branch: Some("main".to_string()),
+                created_at: 100,
+                last_seen_at: 200,
+            },
+            aliases: vec![ProjectAliasRecord {
+                alias_path: "/repo".to_string(),
+                project_id: "proj_test".to_string(),
+                last_seen_at: 200,
+            }],
+            stores: vec![ProjectStoreContext {
+                store: StoreInstanceRecord {
+                    store_id: "store:test".to_string(),
+                    project_id: "proj_test".to_string(),
+                    store_kind: "code_project".to_string(),
+                    storage_mode: "profile_sharded".to_string(),
+                    store_relpath: "projects/proj_test".to_string(),
+                    manifest_relpath: None,
+                    created_at: 110,
+                    last_verified_at: Some(210),
+                    last_write_at: Some(220),
+                },
+                graph_scopes: vec![GraphScopeRecord {
+                    graph_scope_id: "store:test:branch:main".to_string(),
+                    project_id: "proj_test".to_string(),
+                    store_id: "store:test".to_string(),
+                    branch_name: "main".to_string(),
+                    db_relpath: "projects/proj_test/branches/main.db".to_string(),
+                    parent_scope_id: None,
+                    last_synced_at: Some(230),
+                    writable: true,
+                }],
+                artifacts: vec![StoreArtifactRecord {
+                    store_id: "store:test".to_string(),
+                    artifact_kind: "graph_db".to_string(),
+                    relpath: "projects/proj_test/branches/main.db".to_string(),
+                    size_bytes: Some(4096),
+                    schema_version: None,
+                    updated_at: Some(240),
+                }],
+            }],
+        }
+    }
+
+    #[test]
+    fn plain_text_context_omits_credential_bearing_remote_url() {
+        let context = context_with_credential_remote();
+        let text = render_project_context_text(&context);
+
+        assert!(
+            !text.contains("sekret-token"),
+            "plain-text projects context leaked a credential: {text}"
+        );
+        assert!(
+            !text.contains(CREDENTIAL_REMOTE_URL),
+            "plain-text projects context leaked the remote URL: {text}"
+        );
+        assert!(
+            !text.to_lowercase().contains("git_remote_url")
+                && !text.to_lowercase().contains("remote:"),
+            "plain-text projects context should not print remote metadata: {text}"
+        );
+        // Sanity: the rest of the context still renders as expected, so
+        // this isn't just an empty-output false pass.
+        assert!(text.contains("Project: proj_test"));
+        assert!(text.contains("root: /repo"));
+    }
+
+    #[test]
+    fn json_context_omits_credential_bearing_remote_url() {
+        let context = context_with_credential_remote();
+        let payload = PublicProjectRegistryContext::new(&context, None);
+        let json = serde_json::to_string(&payload).expect("payload should serialize");
+
+        assert!(
+            !json.contains("sekret-token"),
+            "JSON projects context leaked a credential: {json}"
+        );
+        assert!(
+            !json.contains(CREDENTIAL_REMOTE_URL),
+            "JSON projects context leaked the remote URL: {json}"
+        );
+        assert!(
+            !json.contains("git_remote_url"),
+            "JSON projects context should not include the git_remote_url field: {json}"
+        );
+        // Sanity: the rest of the context still serializes as expected.
+        assert!(json.contains("proj_test"));
+    }
 }

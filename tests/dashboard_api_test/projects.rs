@@ -31,7 +31,29 @@ fn dashboard_projects_endpoint_lists_registered_projects_and_active_project() {
         let agent = http_agent();
 
         let (target_root, target_cg) = setup_target_project(&fixture).await;
+        let target_project_id = project_id(&target_cg);
         drop(target_cg);
+
+        // Register a credential-bearing git remote for the target project
+        // via the same seeding path production code uses, so the
+        // redaction assertion below is actually exercised instead of
+        // passing vacuously on an absent field.
+        let credential_remote_url = "https://user:sekret-token@github.com/example/target.git";
+        {
+            let global_db = GlobalDb::open()
+                .await
+                .expect("global db should open for credential-remote seeding");
+            global_db
+                .upsert_code_project(
+                    &target_project_id,
+                    &target_root,
+                    None,
+                    Some(credential_remote_url),
+                    None,
+                )
+                .await
+                .expect("target project should accept credential-bearing remote upsert");
+        }
 
         let (status, projects) = get_json(&agent, &format!("{}/api/projects", fixture.base_url));
         assert_eq!(status, 200);
@@ -40,12 +62,25 @@ fn dashboard_projects_endpoint_lists_registered_projects_and_active_project() {
             projects["active_project_root"],
             fixture.project_root.display().to_string()
         );
+        assert!(
+            !projects.to_string().contains("sekret-token"),
+            "project list response must not leak credential-bearing remote URL: {projects}"
+        );
         let rows = projects["projects"]
             .as_array()
             .unwrap_or_else(|| panic!("expected project list array: {projects}"));
+        let tree = projects["project_tree"]
+            .as_array()
+            .unwrap_or_else(|| panic!("project list should include compact tree: {projects}"));
         assert!(
-            projects["project_tree"].as_array().is_some(),
-            "project list should include compact tree: {projects}"
+            tree.iter().any(|group| {
+                group["projects"].as_array().is_some_and(|entries| {
+                    entries
+                        .iter()
+                        .any(|entry| entry["project_id"] == target_project_id)
+                })
+            }),
+            "project tree should contain the target project id {target_project_id}: {projects}"
         );
         assert!(
             projects["summary"]["project_count"]
@@ -68,11 +103,11 @@ fn dashboard_projects_endpoint_lists_registered_projects_and_active_project() {
             "other registered project should be listed for selection: {projects}"
         );
 
-        let target_project_id = rows
-            .iter()
-            .find(|row| row["project_root"] == target_root.display().to_string())
-            .and_then(|row| row["project_id"].as_str())
-            .expect("target project id should be listed");
+        assert!(
+            rows.iter()
+                .any(|row| row["project_id"] == target_project_id),
+            "target project id should be listed: {projects}"
+        );
         let (status, context) = get_json(
             &agent,
             &format!("{}/api/projects/{target_project_id}", fixture.base_url),
@@ -80,7 +115,11 @@ fn dashboard_projects_endpoint_lists_registered_projects_and_active_project() {
         assert_eq!(status, 200);
         assert!(
             !context.to_string().contains("git_remote_url"),
-            "project context should omit credential-bearing remote metadata: {context}"
+            "project context should omit credential-bearing remote metadata field: {context}"
+        );
+        assert!(
+            !context.to_string().contains("sekret-token"),
+            "project context response must not leak the credential-bearing remote URL: {context}"
         );
     });
 }

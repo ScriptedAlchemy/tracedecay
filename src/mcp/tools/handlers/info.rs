@@ -449,8 +449,37 @@ fn registry_missing_payload() -> Value {
     })
 }
 
+/// Zeroed summary/tree keys for the missing-registry branch, mirroring the
+/// ok-shape's `summary`/`project_tree` so callers get a stable payload shape
+/// regardless of whether the registry is present (see
+/// `src/dashboard/projects.rs`'s missing-registry branch).
+fn empty_registry_view_payload(title: &str) -> (Value, Value, Value) {
+    (
+        json!(title),
+        json!({
+            "project_count": 0,
+            "repo_count": 0,
+            "truncated": false,
+        }),
+        json!([]),
+    )
+}
+
+/// Resolves the active project's registry id by looking up `cg`'s project
+/// root in the registry, the same identity lookup the `tracedecay projects`
+/// CLI performs for its own `active_project_id` (see `src/project_cmd.rs`).
+async fn active_project_id(cg: &TraceDecay, db: &ProjectRegistryDb<'_>) -> Option<String> {
+    let project_root = cg.project_root();
+    let git_common_dir = crate::worktree::git_common_dir(project_root);
+    db.db()
+        .project_registry_context_by_identity(project_root, git_common_dir.as_deref())
+        .await
+        .map(|context| context.project.project_id)
+}
+
 /// Handles `tracedecay_project_list` tool calls.
 pub(super) async fn handle_project_list(
+    cg: &TraceDecay,
     args: Value,
     global_db: Option<&GlobalDb>,
     allow_default_registry_fallback: bool,
@@ -460,10 +489,15 @@ pub(super) async fn handle_project_list(
         open_project_registry_read_only(global_db, allow_default_registry_fallback).await?
     else {
         let mut payload = registry_missing_payload();
+        let (title, summary, project_tree) = empty_registry_view_payload("registered projects");
+        payload["title"] = title;
+        payload["summary"] = summary;
+        payload["project_tree"] = project_tree;
         payload["limit"] = json!(limit);
         payload["truncated"] = json!(false);
         return Ok(registry_result(&args, &payload));
     };
+    let active_id = active_project_id(cg, &db).await;
     let mut projects = db.db().list_code_projects(limit + 1).await;
     let truncated = projects.len() > limit;
     projects.truncate(limit);
@@ -471,10 +505,10 @@ pub(super) async fn handle_project_list(
         .db()
         .project_registry_contexts_for_projects(&projects)
         .await;
-    let view = build_project_registry_view(&contexts, None, truncated);
+    let view = build_project_registry_view(&contexts, active_id.as_deref(), truncated);
     let projects = projects
         .iter()
-        .map(|project| PublicCodeProject::from_record(project, None))
+        .map(|project| PublicCodeProject::from_record(project, active_id.as_deref()))
         .collect::<Vec<_>>();
     Ok(registry_result(
         &args,
@@ -493,6 +527,7 @@ pub(super) async fn handle_project_list(
 
 /// Handles `tracedecay_project_search` tool calls.
 pub(super) async fn handle_project_search(
+    cg: &TraceDecay,
     args: Value,
     global_db: Option<&GlobalDb>,
     allow_default_registry_fallback: bool,
@@ -508,11 +543,17 @@ pub(super) async fn handle_project_search(
         open_project_registry_read_only(global_db, allow_default_registry_fallback).await?
     else {
         let mut payload = registry_missing_payload();
+        let (title, summary, project_tree) =
+            empty_registry_view_payload(&format!("projects matching \"{query}\""));
+        payload["title"] = title;
+        payload["summary"] = summary;
+        payload["project_tree"] = project_tree;
         payload["query"] = json!(query);
         payload["limit"] = json!(limit);
         payload["truncated"] = json!(false);
         return Ok(registry_result(&args, &payload));
     };
+    let active_id = active_project_id(cg, &db).await;
     let mut projects = db.db().search_code_projects(query, limit + 1).await;
     let truncated = projects.len() > limit;
     projects.truncate(limit);
@@ -520,10 +561,10 @@ pub(super) async fn handle_project_search(
         .db()
         .project_registry_contexts_for_projects(&projects)
         .await;
-    let view = build_project_registry_view(&contexts, None, truncated);
+    let view = build_project_registry_view(&contexts, active_id.as_deref(), truncated);
     let projects = projects
         .iter()
-        .map(|project| PublicCodeProject::from_record(project, None))
+        .map(|project| PublicCodeProject::from_record(project, active_id.as_deref()))
         .collect::<Vec<_>>();
     Ok(registry_result(
         &args,
@@ -599,13 +640,16 @@ pub(super) async fn handle_project_context(
             }),
         ));
     };
+    let active_id = active_project_id(cg, &db).await;
+    let is_active = active_id.as_deref() == Some(context.project.project_id.as_str());
     Ok(project_registry_result(
         cg,
         &args,
         &json!({
             "status": "ok",
+            "is_active": is_active,
             "registry_path": display_path(&registry_path),
-            "project": PublicProjectRegistryContext::new(&context, None).project,
+            "project": PublicProjectRegistryContext::new(&context, active_id.as_deref()).project,
             "aliases": context.aliases,
             "stores": context.stores,
         }),

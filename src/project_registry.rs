@@ -293,3 +293,113 @@ fn repo_label_with_parent(group: &ProjectRepoGroup) -> String {
         None => group.label.clone(),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn project_record(
+        project_id: &str,
+        canonical_root: &str,
+        git_common_dir: Option<&str>,
+    ) -> CodeProjectRecord {
+        CodeProjectRecord {
+            project_id: project_id.to_string(),
+            canonical_root: canonical_root.to_string(),
+            display_root: canonical_root.to_string(),
+            git_common_dir: git_common_dir.map(|s| s.to_string()),
+            git_remote_url: None,
+            default_branch: None,
+            created_at: 0,
+            last_seen_at: 0,
+        }
+    }
+
+    fn registry_context(project: CodeProjectRecord) -> ProjectRegistryContext {
+        ProjectRegistryContext {
+            project,
+            aliases: Vec::new(),
+            stores: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn repo_label_with_parent_disambiguates_identical_repo_labels() {
+        // Two distinct repos that both happen to be named "app" under
+        // different parent directories should end up with distinct,
+        // parent-qualified labels instead of colliding.
+        let ctx_a = registry_context(project_record(
+            "a1",
+            "/work/teamA/app",
+            Some("/work/teamA/app/.git"),
+        ));
+        let ctx_b = registry_context(project_record(
+            "b1",
+            "/work/teamB/app",
+            Some("/work/teamB/app/.git"),
+        ));
+
+        let view = build_project_registry_view(&[ctx_a, ctx_b], None, false);
+
+        assert_eq!(view.summary.repo_count, 2);
+        let labels: BTreeSet<String> = view.project_tree.iter().map(|g| g.label.clone()).collect();
+        assert!(
+            labels.contains("app (teamA)"),
+            "expected disambiguated label for teamA, got {labels:?}"
+        );
+        assert!(
+            labels.contains("app (teamB)"),
+            "expected disambiguated label for teamB, got {labels:?}"
+        );
+        // The plain, colliding label must not survive disambiguation.
+        assert!(!labels.contains("app"));
+    }
+
+    #[test]
+    fn worktree_groups_under_parent_repo_git_common_dir() {
+        // A worktree's git_common_dir points back at the primary repo's
+        // .git directory, so both entries should be grouped together
+        // under a single repo group.
+        let primary = registry_context(project_record(
+            "main",
+            "/repo/main",
+            Some("/repo/main/.git"),
+        ));
+        let worktree = registry_context(project_record(
+            "wt",
+            "/repo/main-wt",
+            Some("/repo/main/.git"),
+        ));
+
+        let view = build_project_registry_view(&[primary, worktree], None, false);
+
+        assert_eq!(view.summary.project_count, 2);
+        assert_eq!(view.summary.repo_count, 1);
+        let group = &view.project_tree[0];
+        assert_eq!(group.project_count, 2);
+
+        let mut kinds: BTreeMap<&str, &str> = BTreeMap::new();
+        for project in &group.projects {
+            kinds.insert(project.project_id.as_str(), project.kind.as_str());
+        }
+        assert_eq!(kinds.get("main"), Some(&"primary"));
+        assert_eq!(kinds.get("wt"), Some(&"worktree"));
+    }
+
+    #[test]
+    fn repo_label_with_parent_leaves_label_unchanged_for_root_path() {
+        // Degenerate case: a project rooted at "/" has no parent
+        // directory to qualify the label with, so the label must be
+        // returned unchanged rather than panicking or producing garbage.
+        let entry = project_entry(&registry_context(project_record("root", "/", None)), None);
+        let group = ProjectRepoGroup {
+            label: "root".to_string(),
+            git_common_dir: None,
+            project_count: 1,
+            branches: Vec::new(),
+            projects: vec![entry],
+        };
+
+        assert_eq!(repo_label_with_parent(&group), "root");
+    }
+}
