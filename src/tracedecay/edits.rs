@@ -28,7 +28,7 @@ impl TraceDecay {
     }
 
     /// Re-indexes a single file after an edit.
-    async fn reindex_file(&self, file_path: &str) -> Result<()> {
+    pub(super) async fn reindex_file(&self, file_path: &str) -> Result<()> {
         let abs_path = self.absolute_path(file_path);
         let source = std::fs::read_to_string(&abs_path).map_err(|e| TraceDecayError::Config {
             message: format!("failed to read file {file_path}: {e}"),
@@ -738,17 +738,17 @@ fn can_use_literal_rewrite_fallback(pattern: &str) -> bool {
 
 /// Unchanged context lines shown on each side of the changed region in a
 /// dry-run preview diff.
-const PREVIEW_DIFF_CONTEXT: usize = 3;
+pub(super) const PREVIEW_DIFF_CONTEXT: usize = 3;
 
 /// Hard cap on the number of lines emitted in a dry-run preview diff. Keeps the
 /// preview bounded even when an edit rewrites a large span; the remainder is
 /// noted as truncated.
-const MAX_PREVIEW_DIFF_LINES: usize = 200;
+pub(super) const MAX_PREVIEW_DIFF_LINES: usize = 200;
 
 /// Success-path message wrapper: on a real edit returns `base` verbatim; on a
 /// dry run wraps it to make clear that nothing was written and only a preview
 /// was produced.
-fn edit_success_message(dry_run: bool, base: &str) -> String {
+pub(super) fn edit_success_message(dry_run: bool, base: &str) -> String {
     if dry_run {
         format!("dry run — nothing written; preview only ({base})")
     } else {
@@ -763,7 +763,12 @@ fn edit_success_message(dry_run: bool, base: &str) -> String {
 /// `max_lines` (excess is noted as truncated). This is a cheap single-hunk
 /// preview for a localized edit, not a minimal multi-hunk LCS diff; a widely
 /// scattered set of changes collapses into one hunk spanning them.
-fn bounded_region_diff(original: &str, modified: &str, context: usize, max_lines: usize) -> String {
+pub(super) fn bounded_region_diff(
+    original: &str,
+    modified: &str,
+    context: usize,
+    max_lines: usize,
+) -> String {
     if original == modified {
         return "(no changes)".to_string();
     }
@@ -825,7 +830,7 @@ fn bounded_region_diff(original: &str, modified: &str, context: usize, max_lines
 /// callable kinds (function/method/etc.). If still more than one candidate
 /// remains the edit is refused — silently picking the wrong site is far
 /// worse than asking the caller to disambiguate.
-async fn resolve_symbol_for_edit(cg: &TraceDecay, symbol: &str) -> Result<Node> {
+pub(super) async fn resolve_symbol_for_edit(cg: &TraceDecay, symbol: &str) -> Result<Node> {
     let nodes = cg.get_nodes_by_qualified_name(symbol).await?;
     let mut iter = nodes.into_iter();
     let Some(first) = iter.next() else {

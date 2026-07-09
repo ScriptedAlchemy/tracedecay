@@ -7,7 +7,7 @@
     "codex"
   ],
   "fixture": "main",
-  "status": "deferred",
+  "status": "active",
   "prompt": "Move compute_grand_total out of pricing.rs into its own module.",
   "expected_tools": {
     "required_first": [
@@ -15,7 +15,8 @@
     ],
     "acceptable": [
       "tracedecay_context",
-      "tracedecay_search"
+      "tracedecay_search",
+      "tracedecay_body"
     ],
     "forbidden_first": [
       "Grep",
@@ -32,8 +33,10 @@
       "ack "
     ]
   },
-  "ground_truth": [],
+  "ground_truth": [
+    "compute_grand_total"
+  ],
   "max_tool_calls": 6,
   "requires_tool": "move_symbol",
-  "notes": "PENDING: forward-looking scenario for a move_symbol tool that does not exist yet in the refactor toolset."
+  "notes": "move-a-function-to-its-own-module. tracedecay_move_symbol relocates compute_grand_total from pricing.rs, auto-inserts `use crate::pricing::LineItem;` at the destination, and reports the module_missing hint (`pub mod grand_total;`) — verified live against the fixture crate. Ground truth is the moved symbol name, which any correct final answer states regardless of the destination module the agent picks. Live runs mutate the throwaway fixture copy."
 }

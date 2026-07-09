@@ -418,6 +418,7 @@ fn group_for(def: &ToolDefinition) -> &'static str {
         || n == "tracedecay_ast_grep_rewrite"
         || n == "tracedecay_replace_symbol"
         || n == "tracedecay_insert_at_symbol"
+        || n == "tracedecay_move_symbol"
     {
         "edit"
     } else if n == "tracedecay_fact_store"

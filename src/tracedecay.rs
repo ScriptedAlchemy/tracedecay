@@ -22,6 +22,7 @@ mod facts;
 mod indexing;
 mod lifecycle;
 mod locking;
+mod move_symbol;
 mod queries;
 mod scan;
 

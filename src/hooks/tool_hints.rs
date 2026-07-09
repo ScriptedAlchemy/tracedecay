@@ -261,6 +261,7 @@ const CATEGORY_SPECS: &[HintCategorySpec] = &[
             "tracedecay_insert_at_symbol",
             "tracedecay_ast_grep_rewrite",
             "tracedecay_replace_symbol",
+            "tracedecay_move_symbol",
         ],
         nonblocking: false,
     },

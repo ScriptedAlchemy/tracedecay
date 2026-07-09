@@ -101,7 +101,8 @@ fn test_tool_definitions_count() {
     // requirement at runtime so plugin docs/rules can consistently reference it.
     // LCM comparison and profile-storage registry support add extra tools.
     // ast_grep_search (in-process structural search) is always registered.
-    let expected = 102 + usize::from(tracedecay::mcp::tools::ast_grep_available());
+    // move_symbol (relocate a symbol with an impact report) is always registered.
+    let expected = 103 + usize::from(tracedecay::mcp::tools::ast_grep_available());
     assert_eq!(tools.len(), expected);
 }
 
@@ -132,6 +133,7 @@ fn test_write_and_exec_tools_are_not_read_only() {
         "tracedecay_insert_at",
         "tracedecay_replace_symbol",
         "tracedecay_insert_at_symbol",
+        "tracedecay_move_symbol",
         "tracedecay_run_affected_tests",
         "tracedecay_ast_grep_rewrite",
         "tracedecay_lcm_doctor",

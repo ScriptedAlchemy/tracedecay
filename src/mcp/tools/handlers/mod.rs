@@ -410,6 +410,7 @@ pub async fn handle_tool_call_with_registry_and_implicit_project(
         "tracedecay_file_dependents" => graph::handle_file_dependents(cg, args).await,
         "tracedecay_replace_symbol" => edit::handle_replace_symbol(cg, args).await,
         "tracedecay_insert_at_symbol" => edit::handle_insert_at_symbol(cg, args).await,
+        "tracedecay_move_symbol" => edit::handle_move_symbol(cg, args).await,
         "tracedecay_find_exact_symbol" => {
             graph::handle_find_exact_symbol(cg, args, selected_scope_prefix).await
         }
@@ -1169,6 +1170,7 @@ mod tests {
         assert!(tool_names.contains(&"tracedecay_file_dependents"));
         assert!(tool_names.contains(&"tracedecay_replace_symbol"));
         assert!(tool_names.contains(&"tracedecay_insert_at_symbol"));
+        assert!(tool_names.contains(&"tracedecay_move_symbol"));
         assert!(tool_names.contains(&"tracedecay_find_exact_symbol"));
     }
 
@@ -1251,6 +1253,7 @@ mod tests {
             "tracedecay_insert_at",
             "tracedecay_replace_symbol",
             "tracedecay_insert_at_symbol",
+            "tracedecay_move_symbol",
             "tracedecay_ast_grep_rewrite",
             "tracedecay_run_affected_tests",
             "tracedecay_session_start",
