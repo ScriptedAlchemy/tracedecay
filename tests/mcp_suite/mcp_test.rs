@@ -100,7 +100,8 @@ fn test_tool_definitions_count() {
     // is available. Outline stays registered and reports the ast-grep outline
     // requirement at runtime so plugin docs/rules can consistently reference it.
     // LCM comparison and profile-storage registry support add extra tools.
-    let expected = 101 + usize::from(tracedecay::mcp::tools::ast_grep_available());
+    // ast_grep_search (in-process structural search) is always registered.
+    let expected = 102 + usize::from(tracedecay::mcp::tools::ast_grep_available());
     assert_eq!(tools.len(), expected);
 }
 
@@ -114,6 +115,9 @@ fn test_ast_grep_tools_follow_capability_gates() {
         tracedecay::mcp::tools::ast_grep_available(),
         "rewrite should be gated on the external ast-grep CLI"
     );
+    // Structural search runs in-process (bundled grammars), so it is advertised
+    // unconditionally — no host ast-grep CLI required.
+    assert!(tool_names.contains(&"tracedecay_ast_grep_search"));
     assert!(tool_names.contains(&"tracedecay_outline"));
 }
 

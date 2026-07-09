@@ -112,9 +112,14 @@ const CATEGORY_SPECS: &[HintCategorySpec] = &[
         key: "search",
         label: "search",
         skill: "exploring-code",
-        message: "For codebase search, route by what you're matching: literal/regex text -> tracedecay_grep; symbol name -> tracedecay_search; concept -> tracedecay_context.",
-        context: "tracedecay_grep runs a literal or regex content search over the indexed tree (pattern, fixed_strings, path_glob) and enriches each hit with its enclosing symbol; tracedecay_search ranks symbols by name; tracedecay_context answers concept-level questions. Grep/ripgrep still fit prose and un-indexed files.",
-        expected_tools: &["tracedecay_grep", "tracedecay_search", "tracedecay_context"],
+        message: "For codebase search, route by what you're matching: literal/regex text -> tracedecay_grep; a code structure like a call shape or argument order -> tracedecay_ast_grep_search; symbol name -> tracedecay_search; concept -> tracedecay_context.",
+        context: "tracedecay_grep runs a literal or regex content search over the indexed tree (pattern, fixed_strings, path_glob) and enriches each hit with its enclosing symbol; tracedecay_ast_grep_search matches a syntax-tree pattern in-process (e.g. `foo($$$)`, `if ($C) { $$$ }`) when a text regex cannot express the call/argument shape, then pair it with tracedecay_ast_grep_rewrite to change matches; tracedecay_search ranks symbols by name; tracedecay_context answers concept-level questions. Grep/ripgrep still fit prose and un-indexed files.",
+        expected_tools: &[
+            "tracedecay_grep",
+            "tracedecay_ast_grep_search",
+            "tracedecay_search",
+            "tracedecay_context",
+        ],
         nonblocking: false,
     },
     HintCategorySpec {

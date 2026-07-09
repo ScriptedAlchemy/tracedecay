@@ -62,7 +62,9 @@ Run this read-only recon in one shot for a symbol or `Struct::field` with
 5. **Structural pattern rewrite → `tracedecay_ast_grep_rewrite`** (`path`,
    `pattern`, `rewrite`, ast-grep SGPattern syntax): rewrite every match of a
    syntactic pattern in one file (e.g. `foo($A)` → `bar(foo($A))`); repeat
-   per file for multi-file rewrites.
+   per file for multi-file rewrites. Scope the change first with
+   `tracedecay_ast_grep_search` (read-only, in-process, whole-tree) to see every
+   match and confirm the pattern before rewriting.
 
 ## Porting code
 

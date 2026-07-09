@@ -18,6 +18,7 @@ row below, run it, and stop when the question is answered.
 | You are matching | Call | Not |
 |---|---|---|
 | Literal string / regex / config key / error text | `tracedecay_grep` (`fixed_strings` for plain literals) | raw Grep/rg |
+| A code structure — call shape, argument order, expression form (e.g. `foo($$$)`, `if ($C) { $$$ }`) a text regex cannot pin down | `tracedecay_ast_grep_search` (in-process AST match; then `tracedecay_ast_grep_rewrite` via `tracedecay:editing-safely` to change matches) | multi-line regex guesses |
 | A symbol by exact name | `tracedecay_find_exact_symbol`, else `tracedecay_search` | Glob + open |
 | A concept / "how does X work" (names unknown) | `tracedecay_context` (`task` = the question, add `keywords` synonyms) | Explore agent |
 | A file by role or path | `tracedecay_files` | find/ls -R |
