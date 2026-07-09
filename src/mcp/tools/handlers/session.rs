@@ -515,17 +515,23 @@ async fn search_session_messages_in_db(
 /// be re-sorted by the *same* key for the distributed top-K to be exact.
 /// Sorting by recency here would drop a top-relevance row a shard kept while
 /// surfacing lower-relevance-but-newer rows the shards never returned. Key:
-/// score DESC (relevance), then timestamp DESC, then a stable session/message
-/// id tie-break so equal-score rows order deterministically. This matches the
-/// single-project path, which returns DB rows already in BM25 order without a
-/// resort.
+/// inventory-last (transcript/branch inventory noise sinks below substantive
+/// hits, matching the per-shard downrank in `search_session_messages_*` so the
+/// merge does not resurrect noise the shards demoted), then score DESC
+/// (relevance), then timestamp DESC, then a stable session/message id tie-break
+/// so equal-score rows order deterministically. This matches the single-project
+/// path, which returns DB rows already inventory-downranked in BM25 order
+/// without a resort.
 fn sort_and_truncate_message_results_by_relevance(
     results: &mut Vec<SessionMessageSearchResult>,
     limit: usize,
 ) {
     results.sort_by(|a, b| {
-        b.score
-            .total_cmp(&a.score)
+        crate::sessions::message_noise::is_inventory_text(&a.message.text)
+            .cmp(&crate::sessions::message_noise::is_inventory_text(
+                &b.message.text,
+            ))
+            .then_with(|| b.score.total_cmp(&a.score))
             .then_with(|| b.message.timestamp.cmp(&a.message.timestamp))
             .then_with(|| a.session.session_id.cmp(&b.session.session_id))
             .then_with(|| a.message.message_id.cmp(&b.message.message_id))

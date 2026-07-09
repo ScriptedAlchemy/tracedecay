@@ -620,6 +620,34 @@ fn row_to_store_artifact(row: &libsql::Row, offset: i32) -> Option<StoreArtifact
     })
 }
 
+/// Upper bound on the BM25 over-fetch that precedes the inventory downrank in
+/// [`GlobalDb::search_session_messages_filtered_inner`]. Keeps the pre-rerank
+/// fetch bounded even for large caller limits.
+const SESSION_MESSAGE_SEARCH_MAX_FETCH: usize = 200;
+
+/// Stable inventory downrank for a BM25 result page: transcript inventory/
+/// listing messages and prose branch/worktree rosters (per the shared
+/// [`crate::sessions::message_noise`] classifier) are moved below substantive
+/// hits while preserving the relative BM25 order within each group. Applied
+/// before truncation so a downranked hit still surfaces when it is the only
+/// match. Mirrors the lcm/grep re-rank (`sessions::lcm::query::rerank_grep_hits`).
+fn downrank_inventory_messages(results: &mut Vec<SessionMessageSearchResult>) {
+    if results.len() < 2 {
+        return;
+    }
+    let mut substantive = Vec::with_capacity(results.len());
+    let mut inventory = Vec::new();
+    for result in results.drain(..) {
+        if crate::sessions::message_noise::is_inventory_text(&result.message.text) {
+            inventory.push(result);
+        } else {
+            substantive.push(result);
+        }
+    }
+    substantive.append(&mut inventory);
+    *results = substantive;
+}
+
 fn session_fts_query(query: &str) -> String {
     query
         .split_whitespace()
@@ -4007,7 +4035,15 @@ impl GlobalDb {
                 query_params.len()
             );
         }
-        query_params.push(Value::Integer(limit as i64));
+        // Over-fetch before the deterministic inventory downrank so a
+        // substantive hit buried below inventory/listing noise in raw BM25
+        // order can still surface within the caller's `limit`. The downrank
+        // reorders, never drops, then we truncate back to `limit`.
+        let fetch_limit = crate::sessions::message_noise::rerank_fetch_limit(
+            limit,
+            SESSION_MESSAGE_SEARCH_MAX_FETCH,
+        );
+        query_params.push(Value::Integer(fetch_limit as i64));
         let _ = write!(
             sql,
             " ORDER BY bm25(session_messages_fts, 10.0, 2.0, 1.0, 1.0, 1.0)
@@ -4036,6 +4072,8 @@ impl GlobalDb {
                 score,
             });
         }
+        downrank_inventory_messages(&mut results);
+        results.truncate(limit);
         results
     }
 

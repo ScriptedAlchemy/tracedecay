@@ -46,11 +46,6 @@ const RAW_ROLE_PENALTY_CASE: &str =
 /// sessions. Single-session scopes (`current`/`session`) are exempt — capping
 /// there would silently drop legitimate same-session recall.
 const PER_SESSION_HIT_CAP: usize = 3;
-/// Over-fetch multiplier applied before the deterministic re-rank
-/// (inventory downrank + per-session cap) so that substantive hits buried
-/// below inventory/listing noise in the raw SQL order can still surface within
-/// the caller's `limit`.
-const RERANK_OVERFETCH_FACTOR: usize = 4;
 
 #[allow(clippy::struct_field_names)]
 struct LcmLifecycleMetadata {
@@ -409,12 +404,11 @@ pub(crate) async fn grep(
     Ok(hits)
 }
 
-/// Fetch budget before the re-rank stage: over-fetch by
-/// [`RERANK_OVERFETCH_FACTOR`], bounded by [`MAX_PAGE_LIMIT`].
+/// Fetch budget before the re-rank stage: over-fetch by the shared
+/// [`RERANK_OVERFETCH_FACTOR`](crate::sessions::message_noise::RERANK_OVERFETCH_FACTOR),
+/// bounded by [`MAX_PAGE_LIMIT`].
 fn rerank_fetch_limit(limit: usize) -> usize {
-    limit
-        .saturating_mul(RERANK_OVERFETCH_FACTOR)
-        .clamp(limit, MAX_PAGE_LIMIT)
+    crate::sessions::message_noise::rerank_fetch_limit(limit, MAX_PAGE_LIMIT)
 }
 
 /// Deterministic post-fetch re-rank applied to every grep page:
@@ -460,72 +454,16 @@ fn rerank_grep_hits(hits: &mut Vec<LcmGrepHit>, sort: LcmGrepSort, scope: LcmSco
 }
 
 /// Cheap, deterministic heuristic: is this hit a transcript inventory/listing
-/// tool call or an otherwise path-list-dominated message rather than
-/// substantive conversation? Such messages enumerate file paths, so they match
-/// many unrelated queries and drown out real answers when sorted by recency.
-/// Operates only on the returned snippet — no extra DB reads.
+/// tool call, an otherwise path-list-dominated message, or a prose branch/
+/// worktree roster rather than substantive conversation? Delegates to the
+/// shared [`message_noise`](crate::sessions::message_noise) classifier so the
+/// lcm/grep and global message-search re-ranks agree. Summary nodes are curated
+/// prose, never raw inventory, so they are exempt.
 fn hit_is_inventory(hit: &LcmGrepHit) -> bool {
-    // Summary nodes are curated prose, never raw inventory tool calls.
     if hit.kind != "raw_message" {
         return false;
     }
-    snippet_is_inventory(&hit.snippet)
-}
-
-fn snippet_is_inventory(snippet: &str) -> bool {
-    let lower = snippet.to_ascii_lowercase();
-    // A listing/glob/find/grep invocation aimed at transcript or session
-    // directories: the classic "inventory" tool call over `**/*.jsonl` etc.
-    let mentions_transcript_dir = lower.contains(".jsonl")
-        || lower.contains("sessions/")
-        || lower.contains(".claude")
-        || lower.contains(".codex")
-        || lower.contains("transcript");
-    let looks_like_listing = snippet.contains("**/")
-        || lower.contains("\"pattern\"")
-        || lower.contains("glob(")
-        || lower.contains("\"glob\"")
-        || lower.starts_with("ls ")
-        || lower.contains(" ls ")
-        || lower.contains("find ")
-        || lower.contains("rg -")
-        || lower.contains("grep -");
-    if mentions_transcript_dir && looks_like_listing {
-        return true;
-    }
-    path_list_dominated(snippet)
-}
-
-/// True when a snippet is mostly a list of filesystem paths rather than prose:
-/// at least three path-like tokens making up a majority of the content. A lone
-/// path mentioned inside a sentence stays below the threshold.
-fn path_list_dominated(snippet: &str) -> bool {
-    let mut total = 0usize;
-    let mut path_like = 0usize;
-    for token in snippet.split_whitespace() {
-        total += 1;
-        if token_is_path_like(token) {
-            path_like += 1;
-        }
-    }
-    total >= 4 && path_like >= 3 && path_like * 5 >= total * 3
-}
-
-/// A token counts as "path-like" when it embeds a directory separator and is
-/// long enough to be a real path, or ends in a common source/transcript
-/// extension.
-fn token_is_path_like(token: &str) -> bool {
-    let token = token.trim_matches(|c: char| matches!(c, '"' | '\'' | ',' | '`' | '(' | ')'));
-    if token.len() < 4 {
-        return false;
-    }
-    let has_sep = token.contains('/') && !token.starts_with("//");
-    let has_ext = [
-        ".jsonl", ".json", ".rs", ".ts", ".tsx", ".js", ".py", ".md", ".toml", ".txt", ".log",
-    ]
-    .iter()
-    .any(|ext| token.ends_with(ext));
-    has_sep && (has_ext || token.chars().any(|c| c.is_ascii_alphanumeric()))
+    crate::sessions::message_noise::is_inventory_text(&hit.snippet)
 }
 
 pub(crate) async fn expand(

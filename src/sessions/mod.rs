@@ -17,6 +17,7 @@ pub mod git_correlation;
 pub mod hermes;
 pub mod kiro;
 pub mod lcm;
+pub(crate) mod message_noise;
 pub mod providers;
 pub mod shared;
 pub mod source;
