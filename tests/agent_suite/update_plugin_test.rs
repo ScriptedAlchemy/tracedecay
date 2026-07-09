@@ -436,7 +436,7 @@ fn claude_update_plugin_writes_plugin_permissions_and_refreshes_claude_md() {
     let allow = settings["permissions"]["allow"].as_array_mut().unwrap();
     allow.retain(|v| {
         !v.as_str()
-            .is_some_and(|s| s.starts_with("mcp__plugin_tracedecay_tracedecay__"))
+            .is_some_and(|s| s.starts_with("mcp__plugin_tracedecay_graph__"))
     });
     allow.push(serde_json::json!("Bash(*)"));
     std::fs::write(
@@ -462,7 +462,7 @@ fn claude_update_plugin_writes_plugin_permissions_and_refreshes_claude_md() {
         .filter_map(|v| v.as_str().map(str::to_string))
         .collect();
     for name in tracedecay::agents::tool_names() {
-        let perm = format!("mcp__plugin_tracedecay_tracedecay__{name}");
+        let perm = format!("mcp__plugin_tracedecay_graph__{name}");
         assert!(
             allow_strs.contains(&perm),
             "update-plugin should write plugin-namespace permission {perm}"
@@ -1266,7 +1266,7 @@ fn assert_cursor_rendered_bundle_valid(plugin_dir: &Path, bin: &str) {
     // by serve's unexpanded-template fallback, not by dropping the argument
     // from the template.
     let mcp = read_json(&plugin_dir.join("mcp.json"));
-    let server = &mcp["mcpServers"]["tracedecay"];
+    let server = &mcp["mcpServers"]["graph"];
     assert_eq!(server["type"], "stdio");
     assert_eq!(server["command"], json!(bin));
     assert!(
@@ -1320,7 +1320,7 @@ fn assert_cursor_rendered_bundle_valid(plugin_dir: &Path, bin: &str) {
         rendered_json_placeholders(plugin_dir),
         vec![(
             "mcp.json".to_string(),
-            "/mcpServers/tracedecay/args/2".to_string(),
+            "/mcpServers/graph/args/2".to_string(),
             "${workspaceFolder}".to_string()
         )],
         "the mcp.json args pin is the only placeholder allowed in rendered JSON"
@@ -1444,7 +1444,7 @@ fn codex_install_renders_structurally_valid_bundle() {
     // Global-scope MCP rendering: absolute command, plain `serve` args, and
     // the global-DB env flag.
     let mcp = read_json(&plugin_dir.join(".mcp.json"));
-    let server = &mcp["mcpServers"]["tracedecay"];
+    let server = &mcp["mcpServers"]["graph"];
     assert_eq!(server["type"], "stdio");
     assert_eq!(server["command"], json!(NEW_BIN));
     assert_eq!(server["args"], json!(["serve"]));
@@ -1467,7 +1467,7 @@ fn codex_local_install_renders_project_scoped_mcp() {
     // Project-local scope renders relative-path serve args and drops the
     // global-DB env flag.
     let mcp = read_json(&plugin_dir.join(".mcp.json"));
-    let server = &mcp["mcpServers"]["tracedecay"];
+    let server = &mcp["mcpServers"]["graph"];
     assert_eq!(server["command"], json!(NEW_BIN));
     assert_eq!(server["args"], json!(["serve", "--path", "."]));
     assert!(
