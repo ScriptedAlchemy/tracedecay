@@ -40,6 +40,17 @@ const SUMMARY_GREP_RECENCY_EXPR: &str =
     "COALESCE(n.source_time_end, n.source_time_start, n.created_at)";
 const RAW_ROLE_PENALTY_CASE: &str =
     "CASE r.role WHEN 'user' THEN 0 WHEN 'assistant' THEN 1 WHEN 'tool' THEN 2 ELSE 1 END";
+/// Maximum grep hits retained per session in a cross-session (`scope: all`)
+/// page. Keeps one noisy session (e.g. a review session full of transcript
+/// inventory tool calls) from flooding the page and crowding out distinct
+/// sessions. Single-session scopes (`current`/`session`) are exempt — capping
+/// there would silently drop legitimate same-session recall.
+const PER_SESSION_HIT_CAP: usize = 3;
+/// Over-fetch multiplier applied before the deterministic re-rank
+/// (inventory downrank + per-session cap) so that substantive hits buried
+/// below inventory/listing noise in the raw SQL order can still surface within
+/// the caller's `limit`.
+const RERANK_OVERFETCH_FACTOR: usize = 4;
 
 #[allow(clippy::struct_field_names)]
 struct LcmLifecycleMetadata {
@@ -382,15 +393,139 @@ pub(crate) async fn grep(
 
     let raw_only_filters =
         request.role.is_some() || request.start_time.is_some() || request.end_time.is_some();
-    let mut hits = raw_grep_hits(conn, &request, session_filter, &query_plan, limit).await?;
-    if request.include_summaries && !raw_only_filters && hits.len() < limit {
-        let remaining = limit - hits.len();
+    // Over-fetch so the deterministic re-rank below can promote substantive
+    // hits above inventory/listing noise and still fill the caller's `limit`.
+    let fetch_limit = rerank_fetch_limit(limit);
+    let mut hits = raw_grep_hits(conn, &request, session_filter, &query_plan, fetch_limit).await?;
+    if request.include_summaries && !raw_only_filters && hits.len() < fetch_limit {
+        let remaining = fetch_limit - hits.len();
         hits.extend(
             summary_grep_hits(conn, &request, session_filter, &query_plan, remaining).await?,
         );
     }
     sort_hits(&mut hits, request.sort);
+    rerank_grep_hits(&mut hits, request.sort, request.scope);
+    hits.truncate(limit);
     Ok(hits)
+}
+
+/// Fetch budget before the re-rank stage: over-fetch by
+/// [`RERANK_OVERFETCH_FACTOR`], bounded by [`MAX_PAGE_LIMIT`].
+fn rerank_fetch_limit(limit: usize) -> usize {
+    limit
+        .saturating_mul(RERANK_OVERFETCH_FACTOR)
+        .clamp(limit, MAX_PAGE_LIMIT)
+}
+
+/// Deterministic post-fetch re-rank applied to every grep page:
+///
+/// 1. **Inventory downrank** — for the relevance-shaped sorts (the default
+///    `relevance` and `hybrid`), messages that are themselves transcript
+///    inventory/listing tool calls (or are dominated by file-path lists) are
+///    stably moved below substantive hits. `recency` is left untouched so the
+///    explicit "most recent first" contract still holds.
+/// 2. **Per-session cap** — in cross-session (`scope: all`) pages no single
+///    session may contribute more than [`PER_SESSION_HIT_CAP`] hits, so one
+///    noisy session cannot flood the page. Single-session scopes are exempt.
+///
+/// Both stages are stable, preserving the relative order established by the
+/// requested `sort` within each retained group.
+fn rerank_grep_hits(hits: &mut Vec<LcmGrepHit>, sort: LcmGrepSort, scope: LcmScope) {
+    if !matches!(sort, LcmGrepSort::Recency) {
+        let mut substantive = Vec::with_capacity(hits.len());
+        let mut inventory = Vec::new();
+        for hit in hits.drain(..) {
+            if hit_is_inventory(&hit) {
+                inventory.push(hit);
+            } else {
+                substantive.push(hit);
+            }
+        }
+        substantive.append(&mut inventory);
+        *hits = substantive;
+    }
+
+    if matches!(scope, LcmScope::All) {
+        let mut per_session: BTreeMap<String, usize> = BTreeMap::new();
+        hits.retain(|hit| {
+            let count = per_session.entry(hit.session_id.clone()).or_insert(0);
+            if *count >= PER_SESSION_HIT_CAP {
+                false
+            } else {
+                *count += 1;
+                true
+            }
+        });
+    }
+}
+
+/// Cheap, deterministic heuristic: is this hit a transcript inventory/listing
+/// tool call or an otherwise path-list-dominated message rather than
+/// substantive conversation? Such messages enumerate file paths, so they match
+/// many unrelated queries and drown out real answers when sorted by recency.
+/// Operates only on the returned snippet — no extra DB reads.
+fn hit_is_inventory(hit: &LcmGrepHit) -> bool {
+    // Summary nodes are curated prose, never raw inventory tool calls.
+    if hit.kind != "raw_message" {
+        return false;
+    }
+    snippet_is_inventory(&hit.snippet)
+}
+
+fn snippet_is_inventory(snippet: &str) -> bool {
+    let lower = snippet.to_ascii_lowercase();
+    // A listing/glob/find/grep invocation aimed at transcript or session
+    // directories: the classic "inventory" tool call over `**/*.jsonl` etc.
+    let mentions_transcript_dir = lower.contains(".jsonl")
+        || lower.contains("sessions/")
+        || lower.contains(".claude")
+        || lower.contains(".codex")
+        || lower.contains("transcript");
+    let looks_like_listing = snippet.contains("**/")
+        || lower.contains("\"pattern\"")
+        || lower.contains("glob(")
+        || lower.contains("\"glob\"")
+        || lower.starts_with("ls ")
+        || lower.contains(" ls ")
+        || lower.contains("find ")
+        || lower.contains("rg -")
+        || lower.contains("grep -");
+    if mentions_transcript_dir && looks_like_listing {
+        return true;
+    }
+    path_list_dominated(snippet)
+}
+
+/// True when a snippet is mostly a list of filesystem paths rather than prose:
+/// at least three path-like tokens making up a majority of the content. A lone
+/// path mentioned inside a sentence stays below the threshold.
+fn path_list_dominated(snippet: &str) -> bool {
+    let mut total = 0usize;
+    let mut path_like = 0usize;
+    for token in snippet.split_whitespace() {
+        total += 1;
+        if token_is_path_like(token) {
+            path_like += 1;
+        }
+    }
+    total >= 4 && path_like >= 3 && path_like * 5 >= total * 3
+}
+
+/// A token counts as "path-like" when it embeds a directory separator and is
+/// long enough to be a real path, or ends in a common source/transcript
+/// extension.
+fn token_is_path_like(token: &str) -> bool {
+    let token = token.trim_matches(|c: char| matches!(c, '"' | '\'' | ',' | '`' | '(' | ')'));
+    if token.len() < 4 {
+        return false;
+    }
+    let has_sep = token.contains('/') && !token.starts_with("//");
+    let has_ext = [
+        ".jsonl", ".json", ".rs", ".ts", ".tsx", ".js", ".py", ".md", ".toml", ".txt", ".log",
+    ]
+    .iter()
+    .any(|ext| token.ends_with(ext));
+    has_sep && (has_ext || token.chars().any(|c| c.is_ascii_alphanumeric()))
 }
 
 pub(crate) async fn expand(
@@ -1431,6 +1566,13 @@ impl ExpandQueryAssembler {
         source_ref: Option<LcmSourceRef>,
         content: &str,
     ) -> Option<(String, LcmContentRange)> {
+        // Drop pure machine-noise blocks (base64 thinking-signature blobs and
+        // other binary-ish payloads) before they consume the context budget or
+        // pollute the synthesized answer. Dropping is silent — no pagination
+        // entry — because there is nothing meaningful to resume.
+        if is_noise_block_content(content) {
+            return None;
+        }
         let remaining = self.remaining_chars();
         if remaining == 0 {
             self.context_pagination.push(LcmExpandQueryPagination {
@@ -1465,6 +1607,49 @@ impl ExpandQueryAssembler {
         }
         Some((sliced, range))
     }
+}
+
+/// True when a context block is machine noise rather than readable text: a
+/// base64/hex thinking-signature blob or comparable binary-ish payload. Such
+/// blocks never help answer a query and only waste the synthesis budget, so
+/// expand-query assembly skips them.
+///
+/// Deterministic and cheap: prose never contains an unbroken ~160-char run of
+/// pure base64/hex-alphabet characters, whereas signature blobs are exactly
+/// that. Whitespace-delimited tokens are checked so ordinary URLs or paths
+/// (which contain separators well under the threshold) are never misclassified.
+fn is_noise_block_content(content: &str) -> bool {
+    const NOISE_TOKEN_MIN_CHARS: usize = 160;
+    let trimmed = content.trim();
+    if trimmed.len() < NOISE_TOKEN_MIN_CHARS {
+        return false;
+    }
+    trimmed
+        .split_whitespace()
+        .any(|token| token_is_signature_blob(token, NOISE_TOKEN_MIN_CHARS))
+}
+
+fn token_is_signature_blob(token: &str, min_chars: usize) -> bool {
+    if token.chars().count() < min_chars {
+        return false;
+    }
+    // Base64 / base64url / hex alphabet only. A real word or path this long
+    // would contain characters outside this set (spaces are already split off).
+    let mut has_lower = false;
+    let mut has_upper = false;
+    let mut has_digit = false;
+    for c in token.chars() {
+        if !(c.is_ascii_alphanumeric() || matches!(c, '+' | '/' | '=' | '-' | '_')) {
+            return false;
+        }
+        has_lower |= c.is_ascii_lowercase();
+        has_upper |= c.is_ascii_uppercase();
+        has_digit |= c.is_ascii_digit();
+    }
+    // Require real base64 entropy (mixed case and digits). A monotonous run of
+    // one repeated character — long padding, ASCII art, a giant single-case
+    // word — is not a signature blob and must not be dropped as noise.
+    has_lower && has_upper && has_digit
 }
 
 fn expand_query_match_from_hit(hit: &LcmGrepHit) -> LcmExpandQueryMatch {

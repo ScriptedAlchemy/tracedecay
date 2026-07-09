@@ -460,3 +460,129 @@ fn lcm_expand_query_in_budget_and_synthesis_compaction_paths_unchanged() {
         "tier compaction keeps bounded context blocks"
     );
 }
+
+/// Deterministic backend stand-in for the expand-query synthesis path. Returns
+/// canned output, or a permanent (non-retryable) failure to exercise fallback.
+struct FakeSynthesisBackend {
+    output: String,
+    fail: bool,
+}
+
+impl crate::automation::backend::AgentTaskBackend for FakeSynthesisBackend {
+    fn run_task(
+        &self,
+        request: &crate::automation::backend::AgentTaskRequest,
+    ) -> crate::errors::Result<crate::automation::backend::AgentTaskResponse> {
+        if self.fail {
+            return Err(crate::errors::TraceDecayError::Config {
+                message: "synthesis backend permanently unavailable".to_string(),
+            });
+        }
+        Ok(crate::automation::backend::AgentTaskResponse {
+            run_id: request.run_id.clone(),
+            task: request.task,
+            output_text: self.output.clone(),
+            output_json: None,
+            model: None,
+            input_tokens: None,
+            output_tokens: None,
+        })
+    }
+}
+
+fn expand_query_response_needing_synthesis() -> crate::sessions::lcm::LcmExpandQueryResponse {
+    use crate::sessions::lcm::{
+        LcmContentRange, LcmExpandQueryBudget, LcmExpandQueryContextBlock, LcmExpandQueryResponse,
+        LcmExpandQuerySynthesisPrompt,
+    };
+    LcmExpandQueryResponse {
+        answer: None,
+        needs_synthesis: true,
+        prompt: "What did we decide?".to_string(),
+        query: Some("decision".to_string()),
+        synthesis_prompt: Some(LcmExpandQuerySynthesisPrompt {
+            system: "You synthesize answers from LCM context.".to_string(),
+            user: "QUESTION:\nWhat did we decide?\n\nEXPANDED CONTEXT:\n[block]".to_string(),
+        }),
+        max_tokens: 512,
+        context_max_tokens: 4096,
+        context_budget: LcmExpandQueryBudget {
+            requested_max_chars: 4096,
+            used_chars: 18,
+        },
+        context_truncated: false,
+        context_pagination: Vec::new(),
+        node_ids: vec!["node-1".to_string()],
+        matches: Vec::new(),
+        context_blocks: vec![LcmExpandQueryContextBlock {
+            kind: "raw_message".to_string(),
+            node_id: Some("node-1".to_string()),
+            source_ref: None,
+            content: "we decided to ship".to_string(),
+            content_range: LcmContentRange {
+                offset: 0,
+                limit: 100,
+                returned_chars: 18,
+                total_chars: 18,
+                truncated: false,
+            },
+            raw_message: None,
+            summary_node: None,
+        }],
+    }
+}
+
+#[tokio::test]
+async fn synthesize_expand_query_answer_populates_answer_with_backend() {
+    let mut response = expand_query_response_needing_synthesis();
+    let backend = FakeSynthesisBackend {
+        output: "  We decided to ship the ranker change.  ".to_string(),
+        fail: false,
+    };
+    let policy = crate::automation::backend::BackendRetryPolicy::new(
+        1,
+        Vec::new(),
+        std::time::Duration::from_secs(30),
+    );
+
+    let synthesized = synthesize_expand_query_answer(&mut response, &backend, &policy).await;
+
+    assert!(
+        synthesized,
+        "backend output should be synthesized into an answer"
+    );
+    assert_eq!(
+        response.answer.as_deref(),
+        Some("We decided to ship the ranker change.")
+    );
+    assert!(
+        !response.needs_synthesis,
+        "needs_synthesis must be cleared once an answer is synthesized"
+    );
+}
+
+#[tokio::test]
+async fn synthesize_expand_query_answer_falls_back_when_backend_fails() {
+    let mut response = expand_query_response_needing_synthesis();
+    let backend = FakeSynthesisBackend {
+        output: String::new(),
+        fail: true,
+    };
+    let policy = crate::automation::backend::BackendRetryPolicy::new(
+        1,
+        Vec::new(),
+        std::time::Duration::from_secs(30),
+    );
+
+    let synthesized = synthesize_expand_query_answer(&mut response, &backend, &policy).await;
+
+    assert!(
+        !synthesized,
+        "a failed backend must not fabricate an answer"
+    );
+    assert!(response.answer.is_none());
+    assert!(
+        response.needs_synthesis,
+        "needs_synthesis stays true so the host can synthesize from raw context"
+    );
+}

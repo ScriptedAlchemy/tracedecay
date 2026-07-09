@@ -49,9 +49,10 @@ const MAX_PERSISTED_SEEN_ENTRIES: usize = 4_096;
 const SEEN_FACTS_FILENAME: &str = "memory_inject_seen.json";
 
 const DIGEST_HEADER: &str = "Durable project memory (tracedecay fact store; \
-rate with tracedecay_fact_feedback, correct via tracedecay_fact_store update):";
+rate with tracedecay_fact_feedback — unhelpful for a wrong fact counts as much as helpful; \
+correct via tracedecay_fact_store update):";
 const PROMPT_RECALL_HEADER: &str = "Possibly relevant project memory \
-(tracedecay fact store; rate with tracedecay_fact_feedback):";
+(tracedecay fact store; rate with tracedecay_fact_feedback — unhelpful for wrong facts counts too):";
 
 // ---------------------------------------------------------------------------
 // Config gate

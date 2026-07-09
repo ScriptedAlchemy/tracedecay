@@ -354,6 +354,118 @@ async fn backfill_is_idempotent_and_dry_run_writes_nothing() {
     assert_eq!(ids, vec!["s_main".to_string(), "s_switch".to_string()]);
 }
 
+/// Watermark key mirrored from `git_correlation::AUTO_BACKFILL_WATERMARK_KEY`
+/// (that const is `pub(crate)`, so integration tests reference the literal).
+const AUTO_BACKFILL_WATERMARK_KEY: &str = "auto_backfill_activity_watermark";
+
+fn incremental_git(repo: &Path) -> FakeGit {
+    FakeGit {
+        timeline: vec![
+            (T_BASE + 300, Some("feature".to_string())),
+            (T_BASE + 600, Some("main".to_string())),
+        ],
+        current: Some("main".to_string()),
+        real_repo: repo.to_path_buf(),
+    }
+}
+
+#[tokio::test]
+async fn incremental_backfill_advances_watermark_and_is_idempotent() {
+    let (_base, repo, _main, _feature) = build_repo();
+    let (_db_tmp, db, _project) = open_seeded_db(&repo).await;
+    let git = incremental_git(&repo);
+
+    // No pass has run yet, so no watermark is recorded.
+    assert_eq!(
+        db.git_correlation_meta_get(AUTO_BACKFILL_WATERMARK_KEY)
+            .await
+            .unwrap(),
+        None
+    );
+
+    // First pass drains both seeded sessions and writes their spans.
+    let first = db.git_run_incremental_backfill(&git, 50).await.unwrap();
+    assert_eq!(first.sessions_scanned, 2);
+    assert!(
+        first.spans_written >= 2,
+        "both sessions map to the worktree"
+    );
+
+    // The watermark advances to the newest session activity: s_switch's last
+    // message at T_BASE + 850.
+    assert_eq!(
+        db.git_correlation_meta_get(AUTO_BACKFILL_WATERMARK_KEY)
+            .await
+            .unwrap(),
+        Some(T_BASE + 850)
+    );
+
+    // A second pass finds nothing newer than the watermark: no rescans.
+    let second = db.git_run_incremental_backfill(&git, 50).await.unwrap();
+    assert_eq!(second.sessions_scanned, 0);
+    assert_eq!(second.spans_written, 0);
+
+    // The spans written by the first pass are intact and queryable.
+    let hits = db
+        .git_sessions_for(&SessionsForQuery {
+            git_ref: GitRefFilter::Branch("main".to_string()),
+            since: None,
+            until: None,
+            limit: 20,
+        })
+        .await
+        .unwrap();
+    let mut ids: Vec<String> = hits.iter().map(|h| h.session_id.clone()).collect();
+    ids.sort();
+    assert_eq!(ids, vec!["s_main".to_string(), "s_switch".to_string()]);
+}
+
+#[tokio::test]
+async fn incremental_backfill_cap_drains_history_oldest_first_across_passes() {
+    let (_base, repo, _main, _feature) = build_repo();
+    let (_db_tmp, db, _project) = open_seeded_db(&repo).await;
+    let git = incremental_git(&repo);
+
+    // A cap of one session per pass drains oldest-first. s_main's activity
+    // (last message T_BASE + 200) precedes s_switch's (T_BASE + 850).
+    let pass1 = db.git_run_incremental_backfill(&git, 1).await.unwrap();
+    assert_eq!(pass1.sessions_scanned, 1);
+    assert_eq!(
+        db.git_correlation_meta_get(AUTO_BACKFILL_WATERMARK_KEY)
+            .await
+            .unwrap(),
+        Some(T_BASE + 200),
+        "oldest session processed first"
+    );
+
+    let pass2 = db.git_run_incremental_backfill(&git, 1).await.unwrap();
+    assert_eq!(pass2.sessions_scanned, 1);
+    assert_eq!(
+        db.git_correlation_meta_get(AUTO_BACKFILL_WATERMARK_KEY)
+            .await
+            .unwrap(),
+        Some(T_BASE + 850)
+    );
+
+    // History fully drained: the next pass has nothing to do.
+    let pass3 = db.git_run_incremental_backfill(&git, 1).await.unwrap();
+    assert_eq!(pass3.sessions_scanned, 0);
+
+    // Both sessions ended up attributed to main across the two passes.
+    let hits = db
+        .git_sessions_for(&SessionsForQuery {
+            git_ref: GitRefFilter::Branch("main".to_string()),
+            since: None,
+            until: None,
+            limit: 20,
+        })
+        .await
+        .unwrap();
+    let mut ids: Vec<String> = hits.iter().map(|h| h.session_id.clone()).collect();
+    ids.sort();
+    assert_eq!(ids, vec!["s_main".to_string(), "s_switch".to_string()]);
+}
+
 #[tokio::test]
 async fn backfill_skips_non_worktree_sessions() {
     let (_base, repo, _main, _feature) = build_repo();

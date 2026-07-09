@@ -572,3 +572,64 @@ async fn commit_attribution_sweep_attributes_and_advances_watermark() {
     .unwrap();
     assert_eq!(again, 0, "re-attribution of the same commit is a no-op");
 }
+
+#[test]
+fn activity_sort_key_prefers_message_then_end_then_start() {
+    let row = |started, ended, msg_max| SessionActivityRow {
+        provider: "claude".to_string(),
+        session_id: "s".to_string(),
+        project_path: "/p".to_string(),
+        started_at: started,
+        ended_at: ended,
+        message_min_ts: None,
+        message_max_ts: msg_max,
+    };
+    assert_eq!(row(Some(1), Some(2), Some(3)).activity_sort_key(), Some(3));
+    assert_eq!(row(Some(1), Some(2), None).activity_sort_key(), Some(2));
+    assert_eq!(row(Some(1), None, None).activity_sort_key(), Some(1));
+    assert_eq!(row(None, None, None).activity_sort_key(), None);
+}
+
+#[tokio::test]
+async fn correlation_index_health_reports_empty_then_populated() {
+    let conn = test_conn().await;
+
+    // Freshly-migrated store: tables exist but hold nothing.
+    let empty = correlation_index_health(&conn).await.unwrap();
+    assert!(empty.tables_present);
+    assert_eq!(empty.span_count, 0);
+    assert_eq!(empty.commit_count, 0);
+    assert_eq!(empty.last_span_write, None);
+    assert_eq!(empty.backfill_watermark, None);
+    assert!(empty.is_empty(), "no spans means the index is empty");
+
+    // One recorded observation flips the index to populated with a write time.
+    record_span_observation(&conn, &observation("s1", Some("main"), "/repo", 1_000), 600)
+        .await
+        .unwrap();
+    let populated = correlation_index_health(&conn).await.unwrap();
+    assert_eq!(populated.span_count, 1);
+    assert!(populated.last_span_write.is_some());
+    assert!(!populated.is_empty());
+
+    // The auto-backfill watermark surfaces once a pass has written it.
+    write_meta_value(&conn, AUTO_BACKFILL_WATERMARK_KEY, 4_242)
+        .await
+        .unwrap();
+    let with_watermark = correlation_index_health(&conn).await.unwrap();
+    assert_eq!(with_watermark.backfill_watermark, Some(4_242));
+}
+
+#[tokio::test]
+async fn correlation_index_health_without_tables_is_empty() {
+    // A store predating the correlation schema (no DDL run) must report an
+    // absent, empty index rather than erroring on missing tables.
+    let db = Builder::new_local(":memory:").build().await.unwrap();
+    let conn = db.connect().unwrap();
+    let health = correlation_index_health(&conn).await.unwrap();
+    assert!(!health.tables_present);
+    assert!(health.is_empty());
+    assert_eq!(health.span_count, 0);
+    assert_eq!(health.commit_count, 0);
+    assert_eq!(health.backfill_watermark, None);
+}

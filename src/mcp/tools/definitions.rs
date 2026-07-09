@@ -2674,7 +2674,7 @@ fn def_lcm_grep() -> ToolDefinition {
                 "sort": {
                     "type": "string",
                     "enum": ["recency", "relevance", "hybrid"],
-                    "description": "How to order matches. Defaults to recency."
+                    "description": "How to order matches. Defaults to relevance (FTS rank primary, recency as tiebreak) so distinct queries do not collapse onto the same recent sessions; pass 'recency' for newest-first or 'hybrid' for a recency-decayed relevance blend. Transcript inventory/listing tool calls are downranked below substantive hits, and in scope 'all' no single session may contribute more than a few hits per page."
                 },
                 "source": {
                     "type": "string",
@@ -2848,7 +2848,7 @@ fn def_lcm_expand_query() -> ToolDefinition {
     def(
         "tracedecay_lcm_expand_query",
         "LCM Expand Query",
-        "Assemble bounded LCM retrieval context for a prompt from the active project or Hermes profile store; host integrations synthesize the final answer when needs_synthesis is true.",
+        "Assemble bounded LCM retrieval context for a prompt from the active project or Hermes profile store and, when an automation backend is configured and available, synthesize the answer directly (returned first as `answer`, with `needs_synthesis:false`). Pure-noise blocks (base64 signature blobs, directory listings) are filtered from the context. When no backend is available it falls back to returning the raw context with `needs_synthesis:true` for the host to synthesize.",
         json!({
             "type": "object",
             "properties": {

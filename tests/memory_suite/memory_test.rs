@@ -1279,6 +1279,75 @@ async fn memory_status_reports_exact_bucket_and_feedback_counts() {
     assert_eq!(status.helpful_count, 1);
     assert_eq!(status.unhelpful_count, 1);
     assert_eq!(status.missing_vector_count, 0);
+
+    // Feedback funnel: two facts were rated (helpful + unhelpful), none were
+    // ever retrieved via search/probe in this test, so the funnel reports
+    // rated facts with no "seen" activity behind them.
+    assert_eq!(status.feedback_funnel.rated_fact_count, 2);
+    assert_eq!(status.feedback_funnel.feedback_total, 2);
+    assert_eq!(status.feedback_funnel.retrieval_count_total, 0);
+    assert_eq!(status.feedback_funnel.access_count_total, 0);
+    assert_eq!(status.feedback_funnel.retrieved_fact_count, 0);
+    assert_eq!(status.feedback_funnel.seen_to_feedback_ratio, Some(0));
+}
+
+#[tokio::test]
+async fn memory_status_feedback_funnel_tracks_retrieval_and_ratio() {
+    let (_tmp, cg) = make_project().await;
+    let fact = cg
+        .add_fact(AddFactRequest {
+            content: "Funnel fact retrieved via recall search".to_string(),
+            category: MemoryCategory::General,
+            source: Some("test".to_string()),
+            tags: Vec::new(),
+            entities: Vec::new(),
+            trust: Some(0.6),
+            metadata: serde_json::json!({}),
+        })
+        .await
+        .unwrap()
+        .fact
+        .unwrap();
+
+    // A tracked search bumps retrieval_count (search_facts) without any
+    // feedback being recorded yet: the funnel should show activity "seen"
+    // with a dead (None) seen:feedback ratio — nothing has been rated.
+    cg.search_facts(SearchFactsRequest {
+        query: "funnel fact retrieved".to_string(),
+        category: None,
+        limit: Some(5),
+        min_trust: Some(0.0),
+        include_why: false,
+    })
+    .await
+    .unwrap();
+
+    let before_feedback = cg.memory_status().await.unwrap();
+    assert!(before_feedback.feedback_funnel.retrieval_count_total >= 1);
+    assert_eq!(before_feedback.feedback_funnel.retrieved_fact_count, 1);
+    assert_eq!(before_feedback.feedback_funnel.rated_fact_count, 0);
+    assert_eq!(before_feedback.feedback_funnel.feedback_total, 0);
+    assert_eq!(before_feedback.feedback_funnel.seen_to_feedback_ratio, None);
+
+    cg.record_fact_feedback(FeedbackRequest {
+        fact_id: fact.fact_id,
+        action: FeedbackAction::Helpful,
+        source: Some("test".to_string()),
+        note: None,
+    })
+    .await
+    .unwrap();
+
+    let after_feedback = cg.memory_status().await.unwrap();
+    assert_eq!(after_feedback.feedback_funnel.rated_fact_count, 1);
+    assert_eq!(after_feedback.feedback_funnel.feedback_total, 1);
+    assert_eq!(
+        after_feedback.feedback_funnel.seen_to_feedback_ratio,
+        Some(
+            after_feedback.feedback_funnel.retrieval_count_total
+                + after_feedback.feedback_funnel.access_count_total
+        )
+    );
 }
 
 #[tokio::test]
@@ -1287,6 +1356,10 @@ async fn memory_status_handles_empty_fact_store() {
     let status = cg.memory_status().await.unwrap();
     assert_eq!(status.fact_count, 0);
     assert_eq!(status.missing_vector_count, 0);
+    assert_eq!(status.feedback_funnel.retrieval_count_total, 0);
+    assert_eq!(status.feedback_funnel.rated_fact_count, 0);
+    assert_eq!(status.feedback_funnel.feedback_total, 0);
+    assert_eq!(status.feedback_funnel.seen_to_feedback_ratio, None);
 }
 
 #[tokio::test]

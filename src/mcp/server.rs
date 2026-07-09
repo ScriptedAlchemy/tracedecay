@@ -806,6 +806,15 @@ pub struct McpServer {
     /// per [`crate::sessions::git_correlation::DEFAULT_SPAN_OBSERVATION_DEBOUNCE_SECS`].
     span_observation_debounce:
         std::sync::Mutex<crate::sessions::git_correlation::SpanObservationDebounce>,
+    /// The negotiated MCP client name from the most recent `initialize`
+    /// handshake's `clientInfo.name` (e.g. `"claude-code"`, `"codex"`,
+    /// `"cursor"`). `None` until the first `initialize` request lands.
+    /// Plumbed into analytics events so per-host tool adoption is visible
+    /// (previously every call recorded `provider="mcp"` with no client
+    /// identity). Re-set on every `initialize` so a long-lived daemon
+    /// connection that gets re-initialized by a different client picks up
+    /// the new identity.
+    client_name: std::sync::Mutex<Option<String>>,
 }
 
 impl McpServer {
@@ -942,6 +951,7 @@ impl McpServer {
             span_observation_debounce: std::sync::Mutex::new(
                 crate::sessions::git_correlation::SpanObservationDebounce::new(),
             ),
+            client_name: std::sync::Mutex::new(None),
         });
 
         tokio::task::spawn_blocking(move || {
@@ -1276,6 +1286,20 @@ impl McpServer {
                 let _ = tokio::time::timeout(std::time::Duration::from_secs(20), async move {
                     if let Some(db) = GlobalDb::open_at(&session_db_path).await {
                         let _ = crate::sessions::ingest_global_sources(&db, &project_root).await;
+                        // Historical git-span correlation is only ever written by
+                        // live hook events (which never fire for stdio/daemonless
+                        // deployments) or a manual CLI backfill. Neither runs for
+                        // most projects, leaving `session_git_spans` empty so
+                        // `sessions_for` silently returns nothing. Drain that
+                        // history here — one bounded, watermarked pass per startup
+                        // — so correlation self-heals without a manual invocation.
+                        let git = crate::sessions::git_correlation::SystemGit;
+                        let _ = db
+                            .git_run_incremental_backfill(
+                                &git,
+                                crate::sessions::git_correlation::DEFAULT_AUTO_BACKFILL_SESSIONS_PER_PASS,
+                            )
+                            .await;
                         // With transcripts freshly ingested into `db`'s
                         // session_messages, close the hint-efficacy loop: import
                         // any new hook telemetry into the durable analytics store
@@ -2015,7 +2039,7 @@ impl McpServer {
         let id = request.id.clone()?;
 
         let result = match classify_mcp_method(&request.method) {
-            McpMethod::Initialize => Some(Self::handle_initialize(id)),
+            McpMethod::Initialize => Some(self.handle_initialize(id, request.params.as_ref())),
             // Some clients send the initialized notification with an id (or
             // via the alternate method name); both stay compatibility no-ops.
             // Hook events were consumed by the early notification dispatch
@@ -2180,8 +2204,30 @@ impl McpServer {
     }
 
     /// Handles the `initialize` method, returning server capabilities.
-    fn handle_initialize(id: Value) -> JsonRpcResponse {
+    ///
+    /// Also records the caller's negotiated `clientInfo.name` (e.g.
+    /// `"claude-code"`, `"codex"`, `"cursor"`) so subsequent `tools/call`
+    /// analytics events can attribute per-host adoption instead of every
+    /// call recording the same opaque `provider="mcp"`. Only the short
+    /// name field is retained — never the full `clientInfo` payload.
+    fn handle_initialize(&self, id: Value, params: Option<&Value>) -> JsonRpcResponse {
+        let client_name = params
+            .and_then(|p| p.get("clientInfo"))
+            .and_then(|ci| ci.get("name"))
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned);
+        if client_name.is_some() {
+            if let Ok(mut slot) = self.client_name.lock() {
+                *slot = client_name;
+            }
+        }
         JsonRpcResponse::success(id, initialize_result(SERVER_INSTRUCTIONS))
+    }
+
+    /// The negotiated MCP client name recorded by the most recent
+    /// `initialize` handshake, if any (see [`Self::client_name`] field doc).
+    fn client_name(&self) -> Option<String> {
+        self.client_name.lock().ok().and_then(|slot| slot.clone())
     }
 
     /// Handles the `tools/list` method, returning all available tool definitions.
@@ -2584,6 +2630,7 @@ impl McpServer {
                     let project_path_str = GlobalDb::canonical_project_key(cg.project_root());
                     let tool_name_owned = tool_name.to_string();
                     let ts = crate::tracedecay::current_timestamp();
+                    let client_name = self.client_name();
                     let analytics_event = mcp_tool_analytics_event(McpToolAnalyticsEvent {
                         project_root: cg.project_root(),
                         session_id: analytics_session_id.clone(),
@@ -2597,6 +2644,7 @@ impl McpServer {
                         request_id: &request_id,
                         arguments: &analytics_arguments,
                         internal_analytics: result.internal_analytics(),
+                        client_name: client_name.as_deref(),
                     });
                     self.spawn_observed_ledger_write(async move {
                         gdb.record_savings(
@@ -2800,6 +2848,7 @@ impl McpServer {
         let Some(gdb) = self.global_db.clone() else {
             return;
         };
+        let client_name = self.client_name();
         let event = mcp_tool_analytics_event(McpToolAnalyticsEvent {
             project_root,
             session_id,
@@ -2813,6 +2862,7 @@ impl McpServer {
             request_id,
             arguments,
             internal_analytics: None,
+            client_name: client_name.as_deref(),
         });
         self.spawn_observed_ledger_write(async move {
             if let Err(e) = gdb.append_analytics_event(&event).await {

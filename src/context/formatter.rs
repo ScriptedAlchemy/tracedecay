@@ -5,7 +5,7 @@ use crate::types::TaskContext;
 
 pub(crate) const CODE_CONTEXT_HEADING: &str = "## Code Context";
 pub(crate) const CONTEXT_MEMORY_MATCHES_HEADING: &str = "### Memory Matches";
-pub(crate) const CONTEXT_MEMORY_FEEDBACK_HINT: &str = "Rate what you use: call tracedecay_fact_feedback with a fact_id above — action=helpful if a fact steered you right, action=unhelpful if it was wrong or stale. Trust is earned from this; recalled facts are almost never rated, so rate the ones you actually used.";
+pub(crate) const CONTEXT_MEMORY_FEEDBACK_HINT: &str = "Rate what you use: call tracedecay_fact_feedback with a fact_id above — action=helpful if a fact steered you right, action=unhelpful if it was wrong or misleading. Flagging a bad fact matters as much as confirming a good one; trust is earned only from this feedback, so rate the ones you actually used.";
 pub(crate) const CONTEXT_ENTRY_POINTS_HEADING: &str = "### Entry Points";
 pub(crate) const CONTEXT_RELATED_SYMBOLS_HEADING: &str = "### Related Symbols";
 pub(crate) const CONTEXT_CODE_HEADING: &str = "### Code";

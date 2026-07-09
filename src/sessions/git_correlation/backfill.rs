@@ -1,8 +1,8 @@
 use libsql::{Connection, params};
 
 use super::{
-    CommitSessionRecord, DEFAULT_SPAN_MERGE_GAP_SECS, GitCorrelationError, SpanObservation,
-    SpanOverlapKind, SpanSource, normalize_worktree,
+    AUTO_BACKFILL_WATERMARK_KEY, CommitSessionRecord, DEFAULT_SPAN_MERGE_GAP_SECS,
+    GitCorrelationError, SpanObservation, SpanOverlapKind, SpanSource, normalize_worktree,
 };
 
 // Historical backfill for sessions that predate live span recording.
@@ -61,6 +61,15 @@ impl SessionActivityRow {
             (Some(lo), Some(hi)) => Some((lo, hi)),
             _ => None,
         }
+    }
+
+    /// The activity timestamp the incremental backfill orders and watermarks by:
+    /// the newest message time, else the declared end, else the start. Mirrors
+    /// the `COALESCE(MAX(m.timestamp), s.ended_at, s.started_at)` key used by
+    /// [`session_activity_rows_since`], so the returned value compares directly
+    /// against the persisted watermark (both are raw, un-normalized bounds).
+    pub fn activity_sort_key(&self) -> Option<i64> {
+        self.message_max_ts.or(self.ended_at).or(self.started_at)
     }
 }
 
@@ -260,7 +269,10 @@ impl BackfillStats {
 
 /// Abstracts the git subprocess surface the backfill needs, so tests can run
 /// the core against a real repo ([`SystemGit`]) or a canned fixture.
-pub trait GitReflogSource {
+///
+/// `Send + Sync` so a `&dyn GitReflogSource` can be held across an `.await`
+/// inside a spawned task (the startup auto-backfill runs on a tokio worker).
+pub trait GitReflogSource: Send + Sync {
     /// `git reflog --date=unix HEAD` text for `worktree`, or `None` on error.
     fn reflog(&self, worktree: &std::path::Path) -> Option<String>;
     /// The branch `HEAD` currently points at in `worktree` (`None` = detached
@@ -353,12 +365,106 @@ pub async fn run_backfill(
     git: &dyn GitReflogSource,
     opts: &BackfillOptions,
 ) -> Result<BackfillStats, GitCorrelationError> {
-    let mut stats = BackfillStats::default();
     let rows = session_store
         .session_activity_rows(opts.limit_sessions)
         .await
         .map_err(GitCorrelationError::Db)?;
+    let mut stats = BackfillStats::default();
+    backfill_rows(
+        session_store,
+        git,
+        opts,
+        &rows,
+        analytics_events,
+        &mut stats,
+    )
+    .await?;
+    Ok(stats)
+}
 
+/// Default number of previously-unattempted sessions the auto-backfill drains
+/// per pass. Bounds a single startup/tick so the first run on a store with
+/// months of history never blocks; successive passes advance the watermark and
+/// drain the remainder.
+pub const DEFAULT_AUTO_BACKFILL_SESSIONS_PER_PASS: usize = 50;
+
+/// Runs one incremental, idempotent pass of the historical git-span backfill,
+/// advancing a persistent watermark so unattended callers (MCP server startup)
+/// drain months of history a bounded batch at a time without a manual CLI
+/// invocation.
+///
+/// The watermark ([`AUTO_BACKFILL_WATERMARK_KEY`]) records the highest session
+/// activity timestamp already attempted. Each pass reads up to `limit_sessions`
+/// sessions strictly newer than the watermark, oldest-first, backfills them
+/// (span/commit writes are idempotent), then advances the watermark to the
+/// newest activity in the batch. Fresh sessions recorded after a pass are
+/// picked up by a later pass; a fully-drained store scans nothing.
+///
+/// Analytics timestamps are not consulted here (the manual
+/// `tracedecay sessions git-backfill` remains the exhaustive, watermark-free,
+/// analytics-aware path); auto-backfill relies on session and reflog
+/// timestamps alone, which is enough to populate branch/worktree spans.
+pub async fn run_incremental_backfill(
+    session_store: &crate::global_db::GlobalDb,
+    git: &dyn GitReflogSource,
+    limit_sessions: usize,
+) -> Result<BackfillStats, GitCorrelationError> {
+    let mut stats = BackfillStats::default();
+    if limit_sessions == 0 {
+        return Ok(stats);
+    }
+    let watermark = session_store
+        .git_correlation_meta_get(AUTO_BACKFILL_WATERMARK_KEY)
+        .await?
+        .unwrap_or(0);
+    let rows = session_store
+        .session_activity_rows_since(watermark, limit_sessions)
+        .await
+        .map_err(GitCorrelationError::Db)?;
+    if rows.is_empty() {
+        return Ok(stats);
+    }
+
+    // `since` is left at 0: the query already excludes anything at or below the
+    // watermark, so a second time floor would only drop legitimately-new spans.
+    let opts = BackfillOptions {
+        since: 0,
+        limit_sessions,
+        merge_gap_secs: DEFAULT_SPAN_MERGE_GAP_SECS,
+        max_commits_per_repo: BackfillOptions::default().max_commits_per_repo,
+        dry_run: false,
+    };
+    backfill_rows(session_store, git, &opts, &rows, &[], &mut stats).await?;
+
+    // Advance the watermark to the newest activity attempted this pass. Rows are
+    // ordered oldest-first, so the last row carries the max; fall back to a scan
+    // to stay correct if the query's ordering ever changes.
+    let new_watermark = rows
+        .iter()
+        .filter_map(SessionActivityRow::activity_sort_key)
+        .max();
+    if let Some(new_watermark) = new_watermark {
+        if new_watermark > watermark {
+            session_store
+                .git_correlation_meta_set(AUTO_BACKFILL_WATERMARK_KEY, new_watermark)
+                .await?;
+        }
+    }
+    Ok(stats)
+}
+
+/// Shared per-session backfill loop used by both the exhaustive
+/// [`run_backfill`] and the incremental [`run_incremental_backfill`]. Indexes
+/// the supplied analytics timestamps once, then folds each row into the span
+/// and commit tables, counting skips instead of aborting.
+async fn backfill_rows(
+    session_store: &crate::global_db::GlobalDb,
+    git: &dyn GitReflogSource,
+    opts: &BackfillOptions,
+    rows: &[SessionActivityRow],
+    analytics_events: &[crate::global_db::AnalyticsEventRecord],
+    stats: &mut BackfillStats,
+) -> Result<(), GitCorrelationError> {
     // Index analytics timestamps by (provider, session_id) for O(1) lookup.
     let mut analytics_ts: std::collections::HashMap<(String, String), Vec<i64>> =
         std::collections::HashMap::new();
@@ -371,15 +477,15 @@ pub async fn run_backfill(
         }
     }
 
-    for row in &rows {
+    for row in rows {
         stats.sessions_scanned += 1;
         if let Err(reason) =
-            backfill_one_session(session_store, git, opts, row, &analytics_ts, &mut stats).await
+            backfill_one_session(session_store, git, opts, row, &analytics_ts, stats).await
         {
             stats.record_skip(reason);
         }
     }
-    Ok(stats)
+    Ok(())
 }
 
 async fn backfill_one_session(
@@ -526,29 +632,75 @@ pub(crate) async fn session_activity_rows(
         .await
         .map_err(|e| format!("failed to read session activity row: {e}"))?
     {
-        out.push(SessionActivityRow {
-            provider: row
-                .get(0)
-                .map_err(|e| format!("failed to decode provider: {e}"))?,
-            session_id: row
-                .get(1)
-                .map_err(|e| format!("failed to decode session_id: {e}"))?,
-            project_path: row
-                .get(2)
-                .map_err(|e| format!("failed to decode project_path: {e}"))?,
-            started_at: row
-                .get(3)
-                .map_err(|e| format!("failed to decode started_at: {e}"))?,
-            ended_at: row
-                .get(4)
-                .map_err(|e| format!("failed to decode ended_at: {e}"))?,
-            message_min_ts: row
-                .get(5)
-                .map_err(|e| format!("failed to decode message_min_ts: {e}"))?,
-            message_max_ts: row
-                .get(6)
-                .map_err(|e| format!("failed to decode message_max_ts: {e}"))?,
-        });
+        out.push(decode_session_activity_row(&row)?);
     }
     Ok(out)
+}
+
+/// Reads per-session activity windows whose activity timestamp is strictly
+/// greater than `since_exclusive`, oldest-first and capped at `limit`. Backs the
+/// incremental auto-backfill: paired with a persisted watermark it drains
+/// history forward in bounded batches. Sessions with no timestamp at all are
+/// excluded (their `COALESCE` key is `NULL`, so the `HAVING` filter drops them —
+/// they carry no derivable activity window anyway).
+pub(crate) async fn session_activity_rows_since(
+    conn: &Connection,
+    since_exclusive: i64,
+    limit: usize,
+) -> Result<Vec<SessionActivityRow>, String> {
+    if limit == 0 {
+        return Ok(Vec::new());
+    }
+    let mut rows = conn
+        .query(
+            "SELECT s.provider, s.session_id, s.project_path,
+                    s.started_at, s.ended_at,
+                    MIN(m.timestamp), MAX(m.timestamp)
+             FROM sessions s
+             LEFT JOIN session_messages m
+                    ON m.provider = s.provider AND m.session_id = s.session_id
+             GROUP BY s.provider, s.session_id
+             HAVING COALESCE(MAX(m.timestamp), s.ended_at, s.started_at) > ?1
+             ORDER BY COALESCE(MAX(m.timestamp), s.ended_at, s.started_at) ASC
+             LIMIT ?2",
+            params![since_exclusive, i64::try_from(limit).unwrap_or(i64::MAX)],
+        )
+        .await
+        .map_err(|e| format!("failed to query session activity rows: {e}"))?;
+    let mut out = Vec::new();
+    while let Some(row) = rows
+        .next()
+        .await
+        .map_err(|e| format!("failed to read session activity row: {e}"))?
+    {
+        out.push(decode_session_activity_row(&row)?);
+    }
+    Ok(out)
+}
+
+/// Decodes one `session_activity_rows*` result row into a [`SessionActivityRow`].
+fn decode_session_activity_row(row: &libsql::Row) -> Result<SessionActivityRow, String> {
+    Ok(SessionActivityRow {
+        provider: row
+            .get(0)
+            .map_err(|e| format!("failed to decode provider: {e}"))?,
+        session_id: row
+            .get(1)
+            .map_err(|e| format!("failed to decode session_id: {e}"))?,
+        project_path: row
+            .get(2)
+            .map_err(|e| format!("failed to decode project_path: {e}"))?,
+        started_at: row
+            .get(3)
+            .map_err(|e| format!("failed to decode started_at: {e}"))?,
+        ended_at: row
+            .get(4)
+            .map_err(|e| format!("failed to decode ended_at: {e}"))?,
+        message_min_ts: row
+            .get(5)
+            .map_err(|e| format!("failed to decode message_min_ts: {e}"))?,
+        message_max_ts: row
+            .get(6)
+            .map_err(|e| format!("failed to decode message_max_ts: {e}"))?,
+    })
 }

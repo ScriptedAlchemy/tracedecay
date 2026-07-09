@@ -133,12 +133,14 @@ fn compose_digest_body_orders_projects_newest_first_and_enforces_budget() {
     assert!(beta_at < alpha_at, "newest project section must come first");
 
     // Budget sized so the (larger, feedback-nudge) header plus the newest
-    // section fits while the older section is truncated.
-    let tight = compose_digest_body(&snapshot, 340).unwrap();
+    // section fits while the older section is truncated. Header text
+    // includes the unhelpful-matters-too feedback wording, so this must
+    // stay in step with `compose_digest_body`'s fixed intro length.
+    let tight = compose_digest_body(&snapshot, 405).unwrap();
     assert!(tight.contains("beta fact"));
     assert!(!tight.contains("alpha fact"));
     assert!(tight.contains("digest truncated at char budget"));
-    assert!(tight.len() <= 340 + 64, "budget overshoot: {}", tight.len());
+    assert!(tight.len() <= 405 + 64, "budget overshoot: {}", tight.len());
 
     let empty = MemoryDigestSnapshot::default();
     assert!(compose_digest_body(&empty, 2000).is_none());

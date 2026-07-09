@@ -7,7 +7,10 @@ use super::{
 
 const COMMIT_SWEEP_WATERMARK_KEY: &str = "commit_attribution_watermark";
 
-async fn read_meta_value(conn: &Connection, key: &str) -> Result<Option<i64>, GitCorrelationError> {
+pub(crate) async fn read_meta_value(
+    conn: &Connection,
+    key: &str,
+) -> Result<Option<i64>, GitCorrelationError> {
     let mut rows = conn
         .query(
             "SELECT value FROM git_correlation_meta WHERE key = ?1",
@@ -20,7 +23,7 @@ async fn read_meta_value(conn: &Connection, key: &str) -> Result<Option<i64>, Gi
     }
 }
 
-async fn write_meta_value(
+pub(crate) async fn write_meta_value(
     conn: &Connection,
     key: &str,
     value: i64,
