@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.42](https://github.com/ScriptedAlchemy/tracedecay/compare/v0.0.41...v0.0.42) - 2026-07-09
+
+### Fixed
+
+- *(storage)* preserve symlink guard under macOS temp roots
+- *(storage)* scope symlink guard to the final path component
+- *(graph)* reject external qualified calls, prune lcm table
+- *(graph)* resolver prefilter, scheduler hardening, security batch
+
 ## [0.0.41](https://github.com/ScriptedAlchemy/tracedecay/compare/v0.0.40...v0.0.41) - 2026-07-09
 
 ### Added
