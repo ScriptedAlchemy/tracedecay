@@ -1,6 +1,7 @@
 use super::{
-    TraceDecayConfig, USER_DATA_DIR_ENV, db_filename, get_project_db_path, get_tracedecay_dir,
-    is_excluded, is_excluded_dir, is_ignored_by_explicit_global_excludes, is_ignored_by_git,
+    GENERATED_DIR_SEGMENTS, TraceDecayConfig, USER_DATA_DIR_ENV, db_filename, get_project_db_path,
+    get_tracedecay_dir, is_excluded, is_excluded_dir, is_generated_dir_segment,
+    is_generated_path_segment, is_ignored_by_explicit_global_excludes, is_ignored_by_git,
     is_included, lock_user_data_dir_test_env, user_data_dir,
 };
 use std::ffi::OsString;
@@ -551,4 +552,89 @@ async fn discover_project_root_with_identity_preserves_sync_fast_path() {
         sync,
         "identity wrapper fast path must equal the sync result"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Shared generated/vendored segment list
+//
+// GENERATED_DIR_SEGMENTS unifies what used to be four independently
+// hand-maintained lists: this module's own DEFAULT_EXCLUDE_PATTERNS,
+// tracedecay::scan's is_skipped_dir_hint, migrate::inventory's
+// should_prune_dir, and mcp::tools::handlers::redundancy's
+// is_generated_path. These tests pin the union those four call sites need
+// and spot-check that segments unique to one of the formerly-separate lists
+// are now recognized everywhere.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn generated_dir_segments_cover_the_union_all_call_sites_need() {
+    // Formerly scan.rs-only (its HINTABLE_DIRS list).
+    for segment in [
+        "node_modules",
+        "vendor",
+        "build",
+        "dist",
+        "out",
+        "coverage",
+        ".cache",
+        ".next",
+        ".turbo",
+        ".gradle",
+        ".venv",
+        "venv",
+        "__pycache__",
+    ] {
+        assert!(
+            GENERATED_DIR_SEGMENTS.contains(&segment),
+            "{segment} (from scan.rs's old list) missing from GENERATED_DIR_SEGMENTS"
+        );
+    }
+    // Formerly migrate::inventory-only addition beyond the scan.rs set.
+    assert!(GENERATED_DIR_SEGMENTS.contains(&"target"));
+    // Formerly redundancy.rs-only addition beyond the scan.rs set.
+    assert!(GENERATED_DIR_SEGMENTS.contains(&".worktrees"));
+    // `.git` is intentionally NOT part of the shared list — it stays a
+    // site-local addition in migrate::inventory::should_prune_dir (see its
+    // doc comment) because it's VCS metadata, not generated/vendored code.
+    assert!(!GENERATED_DIR_SEGMENTS.contains(&".git"));
+}
+
+#[test]
+fn is_generated_dir_segment_delegates_for_segments_unique_to_one_former_list() {
+    // Every one of these previously lived in only one of the four lists;
+    // is_generated_dir_segment must now recognize all of them.
+    for segment in ["target", ".worktrees", "coverage", ".venv", "__pycache__"] {
+        assert!(
+            is_generated_dir_segment(segment),
+            "{segment} should be recognized as a generated/vendored segment"
+        );
+    }
+    assert!(!is_generated_dir_segment("src"));
+    assert!(!is_generated_dir_segment("builder"));
+}
+
+#[test]
+fn is_generated_path_segment_matches_segments_and_minified_suffix() {
+    assert!(is_generated_path_segment("packages/web/target/debug/x"));
+    assert!(is_generated_path_segment(".worktrees/feature/src/lib.rs"));
+    assert!(is_generated_path_segment("assets/app.min.js"));
+    assert!(is_generated_path_segment("assets/app.min.css"));
+    assert!(!is_generated_path_segment("src/redundancy.rs"));
+    assert!(!is_generated_path_segment("builder/mod.rs"));
+}
+
+#[test]
+fn default_excludes_still_catch_target_and_worktrees() {
+    // Regression guard for the DEFAULT_EXCLUDE_PATTERNS rebuild: target/**
+    // previously had no **/target/** nested form (a real drift bug this
+    // unification fixes), and .worktrees was never excluded by default at
+    // all.
+    let config = TraceDecayConfig::default();
+    assert!(is_excluded("target/debug/build", &config));
+    assert!(is_excluded("crates/sub/target/debug/build", &config));
+    assert!(is_excluded(".worktrees/feature/src/lib.rs", &config));
+    // Site-local additions (not part of GENERATED_DIR_SEGMENTS) still work.
+    assert!(is_excluded(".git/HEAD", &config));
+    assert!(is_excluded(".tracedecay/tracedecay.db", &config));
+    assert!(is_excluded("bin/cli.js", &config));
 }

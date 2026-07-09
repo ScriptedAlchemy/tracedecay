@@ -918,11 +918,17 @@ fn leading_spaces(line: &str) -> usize {
     line.bytes().take_while(|byte| *byte == b' ').count()
 }
 
+/// Authoritative prune during migration inventory scans (unlike the
+/// scan.rs hint, nothing here is config-overridable — these directories are
+/// always skipped while hunting for legacy data stores). Delegates the
+/// generated/vendored segment check to the shared
+/// [`crate::config::is_generated_dir_segment`] list, plus one site-local
+/// addition: `.git`, which migration scans always want to skip but which
+/// isn't part of the shared "generated/vendored" concept (the other three
+/// call sites — scan hint, config default excludes, redundancy scanner —
+/// don't all treat `.git` the same way).
 fn should_prune_dir(name: &str) -> bool {
-    matches!(
-        name,
-        "node_modules" | "target" | ".git" | "vendor" | "dist" | "build" | ".next" | ".venv"
-    )
+    name == ".git" || config::is_generated_dir_segment(name)
 }
 
 fn file_size(path: &Path) -> u64 {
@@ -960,4 +966,42 @@ fn dir_size(dir: &Path) -> u64 {
     let mut visited_dirs = HashSet::new();
     walk(dir, &mut total, &mut visited_dirs);
     total
+}
+
+#[cfg(test)]
+mod prune_dir_tests {
+    use super::should_prune_dir;
+
+    #[test]
+    fn prunes_shared_generated_segments_and_the_local_git_addition() {
+        for name in [
+            "node_modules",
+            "target",
+            "vendor",
+            "dist",
+            "build",
+            ".next",
+            ".venv",
+            ".git", // site-local addition, not part of GENERATED_DIR_SEGMENTS
+        ] {
+            assert!(should_prune_dir(name), "{name} should be pruned");
+        }
+    }
+
+    #[test]
+    fn gains_segments_it_previously_missed_via_the_shared_list() {
+        // These were absent from the old hand-maintained should_prune_dir
+        // list but are part of the shared GENERATED_DIR_SEGMENTS union that
+        // other call sites already recognized.
+        for name in [".worktrees", "coverage", "out", ".cache", "venv"] {
+            assert!(should_prune_dir(name), "{name} should now be pruned too");
+        }
+    }
+
+    #[test]
+    fn does_not_prune_real_source_dirs() {
+        for name in ["src", "builder", "distributed"] {
+            assert!(!should_prune_dir(name), "{name} is real source");
+        }
+    }
 }
