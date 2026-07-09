@@ -596,36 +596,26 @@ impl PrivateStoreIo {
 }
 
 fn reject_symlink_components(path: &Path, subject: &str) -> io::Result<()> {
-    let mut current = PathBuf::new();
-    let mut has_normal_component = false;
     for component in path.components() {
-        match component {
-            Component::Normal(_) => {
-                current.push(component.as_os_str());
-                has_normal_component = true;
-            }
-            Component::RootDir | Component::Prefix(_) => {
-                current.push(component.as_os_str());
-            }
-            Component::CurDir | Component::ParentDir => {
-                return Err(invalid_input(format!("{subject} path must be normalized")));
-            }
-        }
-        if !has_normal_component {
-            continue;
-        }
-        match fs::symlink_metadata(&current) {
-            Ok(meta) if meta.file_type().is_symlink() => {
-                return Err(invalid_input(format!(
-                    "{subject} path must not contain symlinks"
-                )));
-            }
-            Ok(_) => {}
-            Err(err) if err.kind() == io::ErrorKind::NotFound => break,
-            Err(err) => return Err(err),
+        if matches!(component, Component::CurDir | Component::ParentDir) {
+            return Err(invalid_input(format!("{subject} path must be normalized")));
         }
     }
-    Ok(())
+    // Only the final component — the store path itself — must not be a
+    // symlink: that is the redirect a same-host attacker could plant for
+    // store writes. Containing directories are covered by their own
+    // final-component check when the write path ensures them, and ancestors
+    // above are system-controlled and may legitimately be symlinks (macOS's
+    // /var -> /private/var puts every tempdir behind one); walking the whole
+    // chain broke all store IO under macOS temp paths.
+    match fs::symlink_metadata(path) {
+        Ok(meta) if meta.file_type().is_symlink() => Err(invalid_input(format!(
+            "{subject} path must not contain symlinks"
+        ))),
+        Ok(_) => Ok(()),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(err),
+    }
 }
 
 fn invalid_input(message: impl Into<String>) -> io::Error {
@@ -892,6 +882,44 @@ mod tests {
             serde_json::from_str::<Value>(row).unwrap();
         }
         assert!(append_lock_path(&path).is_file());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn symlink_guard_tolerates_ancestors_but_rejects_managed_tail() {
+        use std::os::unix::fs::symlink;
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+
+        // An ancestor symlink two levels above the file (the macOS
+        // /var -> /private/var shape) must be tolerated.
+        let real = root.join("real");
+        std::fs::create_dir_all(real.join("store")).unwrap();
+        let alias = root.join("alias");
+        symlink(&real, &alias).unwrap();
+        PrivateStoreIo::append_line(&alias.join("store").join("f.jsonl"), "{\"n\":1}")
+            .expect("ancestor symlink must not be rejected");
+
+        // A symlinked directory is caught when the write path ensures it:
+        // the directory is then the checked final component.
+        let parent_link = root.join("plink");
+        symlink(real.join("store"), &parent_link).unwrap();
+        let err = PrivateStoreIo::create_dir_all(&parent_link).unwrap_err();
+        assert!(
+            err.to_string().contains("must not contain symlinks"),
+            "{err}"
+        );
+
+        // A symlinked final component is rejected.
+        let target = real.join("store").join("h.jsonl");
+        std::fs::write(&target, "").unwrap();
+        let file_link = real.join("store").join("h-link.jsonl");
+        symlink(&target, &file_link).unwrap();
+        let err = PrivateStoreIo::append_line(&file_link, "{}").unwrap_err();
+        assert!(
+            err.to_string().contains("must not contain symlinks"),
+            "{err}"
+        );
     }
 
     #[test]
