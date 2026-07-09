@@ -5,6 +5,7 @@
 //! formats the result.
 
 pub mod analysis;
+mod analytics;
 pub mod dashboard;
 mod dependency_hints;
 pub mod edit;
@@ -435,6 +436,15 @@ pub async fn handle_tool_call_with_registry_and_implicit_project(
         }
         "tracedecay_automation_run_artifact_view" => {
             skills::handle_automation_run_artifact_view(cg, args).await
+        }
+        "tracedecay_analytics" => {
+            analytics::handle_analytics(
+                cg,
+                args,
+                options.global_db,
+                options.allow_default_registry_fallback,
+            )
+            .await
         }
         "tracedecay_skill_list" => skills::handle_skill_list(cg, args).await,
         "tracedecay_skill_view" => skills::handle_skill_view(cg, args).await,
@@ -1044,11 +1054,12 @@ mod tests {
         // host CLI capabilities they need; agents should never see a tool that
         // will instantly fail. The count and per-tool checks below adapt to
         // the host's capability set.
-        let expected_total = 100 + usize::from(super::super::definitions::ast_grep_available());
+        let expected_total = 101 + usize::from(super::super::definitions::ast_grep_available());
         assert_eq!(tools.len(), expected_total);
 
         let tool_names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
         assert!(tool_names.contains(&"tracedecay_search"));
+        assert!(tool_names.contains(&"tracedecay_analytics"));
         assert!(tool_names.contains(&"tracedecay_retrieve"));
         assert!(tool_names.contains(&"tracedecay_context"));
         assert!(tool_names.contains(&"tracedecay_callers"));

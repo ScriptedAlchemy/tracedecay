@@ -1,0 +1,194 @@
+{
+  "name": "tracedecay_context_relevance_eval",
+  "description": "Labeled relevance eval for tracedecay_context against the frozen fixture project tests/fixtures/context_eval_project/. Each case is a natural-language task phrased like real usage. `relevant` is the allowed set of qualified names that count as a hit within the top 5 ranked entry_points (recall@5). `required_top3` is a subset of `relevant` that must appear within the top 3 ranked entry_points (anchor hit rate). Metrics are recomputed by the test from the live tracedecay_context output, so a fixture whose expected metrics disagree with its own cases fails loudly.",
+  "context_args": {
+    "format": "json"
+  },
+  "expected_metrics": {
+    "mean_recall_at_5": 0.73,
+    "anchor_hit_rate": 0.87
+  },
+  "cases": [
+    {
+      "id": "how_does_authentication_work",
+      "task": "how does authentication work",
+      "relevant": [
+        "src/auth/login.rs::authenticate",
+        "src/auth/session.rs::create_session",
+        "src/auth/session.rs::validate_session",
+        "src/auth/session.rs::Session"
+      ],
+      "required_top3": [
+        "src/auth/login.rs::authenticate"
+      ],
+      "expected_current_failure": false
+    },
+    {
+      "id": "where_is_the_retry_logic",
+      "task": "where is the retry logic",
+      "relevant": [
+        "src/net/retry.rs::retry_with_backoff",
+        "src/net/retry.rs::RetryPolicy"
+      ],
+      "required_top3": [
+        "src/net/retry.rs::retry_with_backoff"
+      ],
+      "expected_current_failure": false
+    },
+    {
+      "id": "who_writes_to_the_config_file",
+      "task": "who writes to the config file",
+      "relevant": [
+        "src/storage/config_store.rs::ConfigStore::write_config",
+        "src/storage/config_store.rs::ConfigStore"
+      ],
+      "required_top3": [
+        "src/storage/config_store.rs::ConfigStore::write_config"
+      ],
+      "expected_current_failure": false
+    },
+    {
+      "id": "how_is_a_session_created",
+      "task": "how is a new session created after login",
+      "relevant": [
+        "src/auth/session.rs::create_session",
+        "src/auth/session.rs::Session"
+      ],
+      "required_top3": [
+        "src/auth/session.rs::create_session"
+      ],
+      "expected_current_failure": false
+    },
+    {
+      "id": "what_validates_a_session_token",
+      "task": "what checks whether a session token is still valid",
+      "relevant": [
+        "src/auth/session.rs::validate_session"
+      ],
+      "required_top3": [
+        "src/auth/session.rs::validate_session"
+      ],
+      "expected_current_failure": false
+    },
+    {
+      "id": "how_the_cli_dispatches_commands",
+      "task": "how does the command line interface dispatch subcommands",
+      "relevant": [
+        "src/cli.rs::run",
+        "src/cli.rs::run_login",
+        "src/cli.rs::run_show_config"
+      ],
+      "required_top3": [
+        "src/cli.rs::run"
+      ],
+      "expected_current_failure": false
+    },
+    {
+      "id": "keyvaluestore_implementors",
+      "task": "what types implement the key value store trait",
+      "relevant": [
+        "src/storage/mod.rs::KeyValueStore",
+        "src/storage/config_store.rs::ConfigStore",
+        "src/storage/cache.rs::Cache"
+      ],
+      "required_top3": [
+        "src/storage/mod.rs::KeyValueStore"
+      ],
+      "expected_current_failure": false
+    },
+    {
+      "id": "http_client_sends_a_request",
+      "task": "how does the http client send a request",
+      "relevant": [
+        "src/net/http_client.rs::HttpClient::send_request",
+        "src/net/http_client.rs::HttpClient"
+      ],
+      "required_top3": [
+        "src/net/http_client.rs::HttpClient::send_request"
+      ],
+      "expected_current_failure": false
+    },
+    {
+      "id": "in_memory_cache_implementation",
+      "task": "where is the in memory cache implemented",
+      "relevant": [
+        "src/storage/cache.rs::Cache"
+      ],
+      "required_top3": [
+        "src/storage/cache.rs::Cache"
+      ],
+      "expected_current_failure": false
+    },
+    {
+      "id": "authentication_failure_handling",
+      "task": "what happens when authentication fails with bad credentials",
+      "relevant": [
+        "src/auth/login.rs::authenticate",
+        "src/auth/login.rs::credentials_are_valid"
+      ],
+      "required_top3": [
+        "src/auth/login.rs::authenticate"
+      ],
+      "expected_current_failure": true,
+      "note": "known ranking gap: the top-3 entry_points for this query are retry_with_backoff, credentials_are_valid, and a Use-import node from net/http_client.rs — authenticate (the actual answer) is pushed out entirely, not merely below rank 3."
+    },
+    {
+      "id": "program_entry_point",
+      "task": "how does the program start up",
+      "relevant": [
+        "src/main.rs::main"
+      ],
+      "required_top3": [
+        "src/main.rs::main"
+      ],
+      "expected_current_failure": true,
+      "note": "known ranking gap: generic wording ('program', 'start up') with no distinctive identifier never surfaces main; unrelated symbols (authenticate, RetryPolicy) outrank it."
+    },
+    {
+      "id": "config_values_read_from_disk",
+      "task": "where are configuration values read from disk",
+      "relevant": [
+        "src/storage/config_store.rs::ConfigStore::read_config"
+      ],
+      "required_top3": [
+        "src/storage/config_store.rs::ConfigStore::read_config"
+      ],
+      "expected_current_failure": false
+    },
+    {
+      "id": "retry_backoff_strategy",
+      "task": "what backoff delay strategy does the retry policy use",
+      "relevant": [
+        "src/net/retry.rs::RetryPolicy::delay_for_attempt",
+        "src/net/retry.rs::RetryPolicy"
+      ],
+      "required_top3": [
+        "src/net/retry.rs::RetryPolicy::delay_for_attempt"
+      ],
+      "expected_current_failure": false
+    },
+    {
+      "id": "session_struct_definition",
+      "task": "which struct represents a logged in user session",
+      "relevant": [
+        "src/auth/session.rs::Session"
+      ],
+      "required_top3": [
+        "src/auth/session.rs::Session"
+      ],
+      "expected_current_failure": false
+    },
+    {
+      "id": "session_token_generation",
+      "task": "how is a session token generated",
+      "relevant": [
+        "src/auth/session.rs::generate_token",
+        "src/auth/session.rs::create_session"
+      ],
+      "required_top3": [
+        "src/auth/session.rs::generate_token"
+      ],
+      "expected_current_failure": false
+    }
+  ]
+}

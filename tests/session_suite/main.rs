@@ -19,4 +19,5 @@ mod lcm_payload;
 mod lcm_query;
 mod lcm_raw;
 mod lcm_schema;
+mod message_search_eval_test;
 mod transcript_backfill;

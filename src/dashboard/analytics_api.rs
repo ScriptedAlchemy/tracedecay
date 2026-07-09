@@ -226,7 +226,7 @@ pub(crate) fn durable_analytics_event_row(event: &AnalyticsEventRecord) -> Value
     })
 }
 
-fn hint_summary_from_events(events: &[Value]) -> Value {
+pub(crate) fn hint_summary_from_events(events: &[Value]) -> Value {
     let mut by_category: BTreeMap<String, HintCounts> = HINT_CATEGORIES
         .iter()
         .map(|category| ((*category).to_string(), HintCounts::default()))
