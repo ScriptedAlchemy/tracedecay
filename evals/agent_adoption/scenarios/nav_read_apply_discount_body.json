@@ -1,0 +1,45 @@
+{
+  "id": "nav_read_apply_discount_body",
+  "category": "code_exploration",
+  "pack": "pack_navigation",
+  "hosts": [
+    "claude",
+    "codex"
+  ],
+  "fixture": "main",
+  "status": "active",
+  "prompt": "Show me the full implementation of apply_discount, exactly as written.",
+  "expected_tools": {
+    "required_first": [
+      "tracedecay_context",
+      "tracedecay_search",
+      "tracedecay_body",
+      "tracedecay_outline",
+      "tracedecay_read",
+      "tracedecay_grep"
+    ],
+    "acceptable": [
+      "Read"
+    ],
+    "forbidden_first": [
+      "Grep",
+      "Glob"
+    ],
+    "forbidden_bash": [
+      "grep",
+      "rg ",
+      "rg\t",
+      "find ",
+      "cat ",
+      "sed ",
+      "awk ",
+      "ack "
+    ]
+  },
+  "ground_truth": [
+    "apply_discount",
+    "capped"
+  ],
+  "max_tool_calls": 3,
+  "notes": "read-one-function; tracedecay_body should be preferred over opening the whole file."
+}

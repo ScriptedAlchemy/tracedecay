@@ -1,0 +1,44 @@
+{
+  "id": "nav_find_error_string",
+  "category": "code_exploration",
+  "pack": "pack_navigation",
+  "hosts": [
+    "claude",
+    "codex"
+  ],
+  "fixture": "main",
+  "status": "active",
+  "prompt": "Search the codebase for the exact error message text used when there isn't enough stock to reserve.",
+  "expected_tools": {
+    "required_first": [
+      "tracedecay_context",
+      "tracedecay_search",
+      "tracedecay_body",
+      "tracedecay_outline",
+      "tracedecay_read",
+      "tracedecay_grep"
+    ],
+    "acceptable": [
+      "Read"
+    ],
+    "forbidden_first": [
+      "Grep",
+      "Glob"
+    ],
+    "forbidden_bash": [
+      "grep",
+      "rg ",
+      "rg\t",
+      "find ",
+      "cat ",
+      "sed ",
+      "awk ",
+      "ack "
+    ]
+  },
+  "ground_truth": [
+    "insufficient stock"
+  ],
+  "max_tool_calls": 4,
+  "notes": "find-string; ground truth is the literal format! string in reserve_stock."
+}

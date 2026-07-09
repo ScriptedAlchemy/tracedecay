@@ -1,0 +1,43 @@
+{
+  "id": "mem_fact_search_pricing_overview",
+  "category": "memory_recall",
+  "pack": "pack_session_memory",
+  "hosts": [
+    "claude",
+    "codex"
+  ],
+  "fixture": "main",
+  "status": "active",
+  "prompt": "Before I start, are there any recorded decisions about how order pricing or discounts should work?",
+  "expected_tools": {
+    "required_first": [
+      "tracedecay_fact_store",
+      "tracedecay_context"
+    ],
+    "acceptable": [
+      "tracedecay_memory_status",
+      "tracedecay_search"
+    ],
+    "forbidden_first": [
+      "Grep",
+      "Glob"
+    ],
+    "forbidden_bash": [
+      "grep",
+      "rg ",
+      "rg\t",
+      "find ",
+      "cat ",
+      "sed ",
+      "awk ",
+      "ack "
+    ]
+  },
+  "ground_truth": [
+    "25",
+    "cap"
+  ],
+  "max_tool_calls": 4,
+  "seeded_fact": "discount_fact_id",
+  "notes": "fact search; answerable now from the discount_fact_id seed already produced by run.sh."
+}

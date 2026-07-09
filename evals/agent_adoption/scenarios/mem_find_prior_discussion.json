@@ -1,0 +1,41 @@
+{
+  "id": "mem_find_prior_discussion",
+  "category": "session_recovery",
+  "pack": "pack_session_memory",
+  "hosts": [
+    "claude",
+    "codex"
+  ],
+  "fixture": "main",
+  "status": "deferred",
+  "prompt": "Did we ever talk through the tradeoffs of the pricing rework? Find that discussion.",
+  "expected_tools": {
+    "required_first": [
+      "tracedecay_lcm_grep",
+      "tracedecay_message_search"
+    ],
+    "acceptable": [
+      "tracedecay_sessions_for",
+      "tracedecay_fact_store",
+      "tracedecay_context"
+    ],
+    "forbidden_first": [
+      "Grep",
+      "Glob"
+    ],
+    "forbidden_bash": [
+      "grep",
+      "rg ",
+      "rg\t",
+      "find ",
+      "cat ",
+      "sed ",
+      "awk ",
+      "ack "
+    ]
+  },
+  "ground_truth": [],
+  "max_tool_calls": 5,
+  "requires_fixture": "seeded-sessions",
+  "notes": "DEFERRED: needs seeded transcript content mentioning a 'pricing rework' discussion for lcm_grep/message_search to find; the fixture currently has no ingested sessions."
+}

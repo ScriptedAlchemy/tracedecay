@@ -1,0 +1,39 @@
+{
+  "id": "edit_extract_discount_module_boundary",
+  "category": "edit_refactor",
+  "pack": "pack_edit_refactor",
+  "hosts": [
+    "claude",
+    "codex"
+  ],
+  "fixture": "main",
+  "status": "deferred",
+  "prompt": "This pricing file is getting crowded -- extract the discount-related logic into its own module boundary.",
+  "expected_tools": {
+    "required_first": [
+      "tracedecay_extract_module"
+    ],
+    "acceptable": [
+      "tracedecay_context",
+      "tracedecay_search"
+    ],
+    "forbidden_first": [
+      "Grep",
+      "Glob"
+    ],
+    "forbidden_bash": [
+      "grep",
+      "rg ",
+      "rg\t",
+      "find ",
+      "cat ",
+      "sed ",
+      "awk ",
+      "ack "
+    ]
+  },
+  "ground_truth": [],
+  "max_tool_calls": 6,
+  "requires_tool": "extract_module",
+  "notes": "PENDING: forward-looking scenario for an extract_module tool that does not exist yet in the refactor toolset."
+}
