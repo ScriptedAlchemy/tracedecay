@@ -13572,6 +13572,42 @@ async fn unused_imports_reports_in_markdown_and_json() {
     );
 }
 
+/// Rust's format macros implicitly capture identifiers named inside the format
+/// string. Those captures are real references even though they are lexically
+/// inside a string literal, so masking string noise must preserve them.
+#[tokio::test]
+async fn unused_imports_keeps_implicit_format_capture() {
+    let dir = test_temp_dir();
+    let project = dir.path();
+    fs::create_dir_all(project.join("src")).unwrap();
+    fs::write(
+        project.join("src/lib.rs"),
+        "use std::f64::consts::PI;\n\
+         pub fn print_pi() { println!(\"{PI}\"); }\n",
+    )
+    .unwrap();
+    let (cg, _env) = init_test_project(project).await;
+    cg.index_all().await.unwrap();
+
+    let result = handle_tool_call(
+        &cg,
+        "tracedecay_unused_imports",
+        json!({"format": "json"}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let payload: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
+    let imports = payload["imports"].as_array().unwrap();
+    assert!(
+        imports
+            .iter()
+            .all(|item| item["unused"].as_str() != Some("PI")),
+        "PI is used by the implicit format capture and must not be flagged: {payload}"
+    );
+}
+
 /// Regression for bug #8a: `tracedecay_dead_code` must support `include_public`
 /// so agents can audit pub items with no callers in the indexed scope. The
 /// previous SQL hard-coded `visibility != 'public'`, so on a codebase that

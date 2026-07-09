@@ -51,10 +51,11 @@ enum MaskState {
     LineComment,
     /// Nested `/* … */` comment; carries the nesting depth.
     BlockComment(u32),
-    /// Regular or byte string `"…"` / `b"…"`.
-    Str,
+    /// Regular or byte string `"…"` / `b"…"`. The flag is true only for a
+    /// direct format literal whose implicit `{name}` captures are real uses.
+    Str(bool),
     /// Raw string `r"…"` / `r#"…"#`; carries the `#` count.
-    RawStr(u32),
+    RawStr(u32, bool),
     /// Char or byte-char literal `'x'` / `b'x'`.
     Char,
 }
@@ -106,7 +107,7 @@ fn mask_rust_noise(source: &str) -> String {
                     i += consumed;
                 } else if b == b'"' {
                     out.push(b' ');
-                    state = MaskState::Str;
+                    state = MaskState::Str(is_direct_format_literal_start(bytes, i));
                     prev_ident = false;
                     i += 1;
                 } else if b == b'\'' && is_char_literal_start(bytes, i) {
@@ -149,11 +150,23 @@ fn mask_rust_noise(source: &str) -> String {
                     i += 1;
                 }
             }
-            MaskState::Str => {
+            MaskState::Str(preserve_captures) => {
                 if b == b'\\' && i + 1 < bytes.len() {
                     out.push(b' ');
                     out.push(if bytes[i + 1] == b'\n' { b'\n' } else { b' ' });
                     i += 2;
+                } else if preserve_captures && b == b'{' && bytes.get(i + 1) == Some(&b'{') {
+                    // `{{` is an escaped literal brace, not a capture opener.
+                    out.push(b' ');
+                    out.push(b' ');
+                    i += 2;
+                } else if preserve_captures
+                    && b == b'{'
+                    && let Some(end) = format_capture_identifier_end(bytes, i + 1)
+                {
+                    out.push(b' ');
+                    out.extend_from_slice(&bytes[i + 1..end]);
+                    i = end;
                 } else if b == b'"' {
                     out.push(b' ');
                     state = MaskState::Normal;
@@ -163,12 +176,23 @@ fn mask_rust_noise(source: &str) -> String {
                     i += 1;
                 }
             }
-            MaskState::RawStr(hashes) => {
+            MaskState::RawStr(hashes, preserve_captures) => {
                 if b == b'"' && raw_string_closes(bytes, i, hashes) {
                     let closing = hashes as usize + 1; // the `"` plus its `#`s
                     out.resize(out.len() + closing, b' ');
                     state = MaskState::Normal;
                     i += closing;
+                } else if preserve_captures && b == b'{' && bytes.get(i + 1) == Some(&b'{') {
+                    out.push(b' ');
+                    out.push(b' ');
+                    i += 2;
+                } else if preserve_captures
+                    && b == b'{'
+                    && let Some(end) = format_capture_identifier_end(bytes, i + 1)
+                {
+                    out.push(b' ');
+                    out.extend_from_slice(&bytes[i + 1..end]);
+                    i = end;
                 } else {
                     out.push(if b == b'\n' { b'\n' } else { b' ' });
                     i += 1;
@@ -205,7 +229,8 @@ fn try_open_raw_or_byte_string(
     state: &mut MaskState,
 ) -> Option<usize> {
     let mut p = i;
-    if bytes.get(p) == Some(&b'b') {
+    let byte_prefixed = bytes.get(p) == Some(&b'b');
+    if byte_prefixed {
         p += 1;
     }
     let raw = bytes.get(p) == Some(&b'r');
@@ -219,7 +244,10 @@ fn try_open_raw_or_byte_string(
         if bytes.get(p) == Some(&b'"') {
             let consumed = p + 1 - i;
             out.resize(out.len() + consumed, b' ');
-            *state = MaskState::RawStr(hashes);
+            *state = MaskState::RawStr(
+                hashes,
+                !byte_prefixed && is_direct_format_literal_start(bytes, i),
+            );
             return Some(consumed);
         }
         return None;
@@ -228,10 +256,57 @@ fn try_open_raw_or_byte_string(
     if p == i + 1 && bytes.get(p) == Some(&b'"') {
         out.push(b' ');
         out.push(b' ');
-        *state = MaskState::Str;
+        *state = MaskState::Str(false);
         return Some(2);
     }
     None
+}
+
+/// True when a string or raw-string prefix starts the first argument of one of
+/// Rust's standard formatting macros. Only these literals receive the narrow
+/// `{identifier}` exception to normal string masking.
+fn is_direct_format_literal_start(bytes: &[u8], literal_start: usize) -> bool {
+    let mut i = literal_start;
+    while i > 0 && bytes[i - 1].is_ascii_whitespace() {
+        i -= 1;
+    }
+    if i == 0 || !matches!(bytes[i - 1], b'(' | b'[' | b'{') {
+        return false;
+    }
+    i -= 1;
+    while i > 0 && bytes[i - 1].is_ascii_whitespace() {
+        i -= 1;
+    }
+    if i == 0 || bytes[i - 1] != b'!' {
+        return false;
+    }
+    i -= 1;
+    let name_end = i;
+    while i > 0 && (is_ident_byte(bytes[i - 1]) || bytes[i - 1] == b':') {
+        i -= 1;
+    }
+    let Ok(path) = std::str::from_utf8(&bytes[i..name_end]) else {
+        return false;
+    };
+    matches!(
+        path.rsplit("::").next().unwrap_or(path),
+        "format" | "format_args" | "format_args_nl" | "print" | "println" | "eprint" | "eprintln"
+    )
+}
+
+/// Return the end of an implicit `{identifier}` capture starting at `start`.
+/// A following `:` also counts (`{identifier:?}`); escaped `{{...}}` is handled
+/// by the caller before reaching this helper.
+fn format_capture_identifier_end(bytes: &[u8], start: usize) -> Option<usize> {
+    let first = *bytes.get(start)?;
+    if !(first.is_ascii_alphabetic() || first == b'_') {
+        return None;
+    }
+    let mut end = start + 1;
+    while bytes.get(end).is_some_and(|byte| is_ident_byte(*byte)) {
+        end += 1;
+    }
+    matches!(bytes.get(end), Some(b'}' | b':')).then_some(end)
 }
 
 /// True if the `'` at `quote` opens a char/byte-char literal rather than a
@@ -2863,6 +2938,9 @@ mod mask_rust_noise_tests {
     #[test]
     fn string_and_char_literals_are_masked() {
         assert!(!referenced(r#"let s = "HashMap in a string";"#, "HashMap"));
+        assert!(!referenced(r#"let s = "{HashMap}";"#, "HashMap"));
+        assert!(!referenced(r#"println!("{{HashMap}}");"#, "HashMap"));
+        assert!(referenced(r#"println!("{HashMap}");"#, "HashMap"));
         // A `//` inside a string must NOT start a comment and swallow real code.
         assert!(referenced(
             "let url = \"http://x\"; let m = HashMap::new();",
@@ -2886,6 +2964,7 @@ mod mask_rust_noise_tests {
             "let s = r\"raw //\";\nlet m = HashMap::new();",
             "HashMap"
         ));
+        assert!(referenced(r##"println!(r#"{HashMap}"#);"##, "HashMap"));
     }
 
     #[test]
