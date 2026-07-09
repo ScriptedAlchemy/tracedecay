@@ -935,7 +935,7 @@ mod tests {
         let diff = bounded_region_diff("a\nb\n", "a\nNEW\nb\n", 3, 200);
         assert!(diff.contains("+NEW"), "insertion should appear: {diff}");
         assert!(
-            !diff.contains("-"),
+            !diff.lines().any(|line| line.starts_with('-')),
             "pure insertion has no removals: {diff}"
         );
     }
