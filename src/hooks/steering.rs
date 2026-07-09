@@ -16,6 +16,7 @@ pub const CURSOR_PLUGIN_SKILLS: &[&str] = &[
     "exploring-code",
     "fixing-build-and-type-errors",
     "inspecting-managed-skills",
+    "investigating-unexpected-changes",
     "managing-session-context",
     "project-memory",
     "reviewing-changes",

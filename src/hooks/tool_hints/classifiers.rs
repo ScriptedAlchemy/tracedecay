@@ -727,6 +727,55 @@ pub(super) fn asks_for_session_recall(text: &str) -> bool {
     prior_context || raw_transcript_context
 }
 
+/// Distinctive confusion phrases that mean the agent found changes it did not
+/// make — commits, amends, force-pushes, or working-tree drift it cannot
+/// account for. Grounded in real sessions that guessed instead of attributing
+/// (e.g. blind `git log` after a parallel agent amended the branch). Kept
+/// narrow on purpose: benign `git status`/`git commit` narration must not fire
+/// this. Routes to `investigating-unexpected-changes`.
+pub(super) fn signals_unexpected_change(text: &str) -> bool {
+    contains_any(
+        text,
+        &[
+            "didn't make this commit",
+            "did not make this commit",
+            "commit i didn't make",
+            "commit i did not make",
+            "commit i didn't create",
+            "commit i did not create",
+            "commit i don't recognize",
+            "commit i didn't recognize",
+            "changes i didn't make",
+            "changes i did not make",
+            "files i didn't write",
+            "file i didn't write",
+            "who committed this",
+            "who pushed this",
+            "who amended",
+            "who force-pushed",
+            "who rebased",
+            "force-pushed over my",
+            "force-pushed my branch",
+            "amended under",
+            "amended my branch",
+            "rebased under me",
+            "rebased my branch",
+            "branch appears to have been rebased",
+            "branch has moved",
+            "branch moved under",
+            "head changed under",
+            "head moved under",
+            "history was rewritten",
+            "rewrote history",
+            "someone amended",
+            "someone else committed",
+            "worked on by someone else",
+            "unexpected commit",
+            "unexpected commits",
+        ],
+    )
+}
+
 pub(super) fn asks_for_symbol_lookup(text: &str) -> bool {
     if text.contains("where is ") && text.contains(" defined") {
         return true;

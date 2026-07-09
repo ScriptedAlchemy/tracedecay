@@ -22,6 +22,7 @@ enum ScenarioFamily {
     MemoryStore,
     Subagent,
     SessionRecall,
+    UnexpectedChanges,
     NegativeSilence,
     Disabled,
     QuotedData,
@@ -49,6 +50,7 @@ const COVERAGE_FAMILIES: &[ScenarioFamily] = &[
     ScenarioFamily::MemoryStore,
     ScenarioFamily::Subagent,
     ScenarioFamily::SessionRecall,
+    ScenarioFamily::UnexpectedChanges,
     ScenarioFamily::NegativeSilence,
     ScenarioFamily::Disabled,
     ScenarioFamily::QuotedData,
@@ -270,6 +272,9 @@ fn default_families(
         Some(HintCategory::FileLookup) => families.push(ScenarioFamily::FileLookup),
         Some(HintCategory::ProjectContext) => families.push(ScenarioFamily::CrossProject),
         Some(HintCategory::SessionRecall) => families.push(ScenarioFamily::SessionRecall),
+        Some(HintCategory::UnexpectedChanges) => {
+            families.push(ScenarioFamily::UnexpectedChanges);
+        }
         Some(HintCategory::AtomicEdit) => families.push(ScenarioFamily::AtomicEdit),
         Some(HintCategory::TypeOrientation) => families.push(ScenarioFamily::TypeOrientation),
         Some(HintCategory::ExploreSubagent | HintCategory::SubagentStartContext) => {
@@ -347,6 +352,18 @@ fn real_world_prompt_cases() -> Vec<HintEval> {
             "what happened in the last memory curator automation run?",
             Some(HintCategory::SessionRecall),
             &["tracedecay_message_search"],
+        ),
+        prompt_eval(
+            "unexpected-test-file-on-branch",
+            "my branch has a dashboard test file I didn't write and commits I didn't make — who committed this?",
+            Some(HintCategory::UnexpectedChanges),
+            &["tracedecay_sessions_for"],
+        ),
+        prompt_eval(
+            "branch-amended-under-me",
+            "the branch appears to have been rebased and someone amended my branch while I was working — figure out where it came from",
+            Some(HintCategory::UnexpectedChanges),
+            &["tracedecay_sessions_for", "tracedecay_message_search"],
         ),
         prompt_eval(
             "sibling-rsncc-repo",
@@ -966,6 +983,7 @@ fn scenario_coverage_reaches_high_value_target() {
         HintCategory::ReviewChanges,
         HintCategory::MemoryStore,
         HintCategory::EditRedundancy,
+        HintCategory::UnexpectedChanges,
     ]
     .into_iter()
     .collect();

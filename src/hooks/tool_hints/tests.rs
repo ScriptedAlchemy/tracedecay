@@ -193,6 +193,42 @@ fn prior_conversation_prompt_gets_session_recall_hint() {
 }
 
 #[test]
+fn unexpected_commit_confusion_routes_to_attribution_skill() {
+    let hint = decide_hint(&ToolHintInput {
+        prompt: Some(
+            "There's a commit I didn't make on my branch and a test file I didn't write — \
+             figure out who pushed this."
+                .to_string(),
+        ),
+        session_id: Some("session-1".to_string()),
+        ..ToolHintInput::default()
+    })
+    .unwrap();
+
+    assert_eq!(hint.category.as_key(), "unexpected_changes");
+    assert!(hint.context.contains("tracedecay_sessions_for"));
+    assert!(
+        hint.context
+            .contains("Skill: tracedecay:investigating-unexpected-changes."),
+        "unexpected-change hint must route to the attribution skill"
+    );
+}
+
+#[test]
+fn benign_git_narration_does_not_fire_the_unexpected_change_hint() {
+    let benign = ToolHintInput {
+        prompt: Some("I committed the slice and confirmed the working tree is clean.".to_string()),
+        session_id: Some("session-1".to_string()),
+        ..ToolHintInput::default()
+    };
+    assert_ne!(
+        classify_hint(&benign),
+        Some(HintCategory::UnexpectedChanges),
+        "ordinary commit narration must not trigger the unexpected-change hint"
+    );
+}
+
+#[test]
 fn single_file_read_gets_a_soft_outline_hint() {
     let mut input = input_for_tool("Read");
     input.file_path = Some("src/lib.rs".to_string());
@@ -294,6 +330,7 @@ fn every_category_has_compact_skill_backed_rendering() {
         HintCategory::ReviewChanges,
         HintCategory::MemoryStore,
         HintCategory::EditRedundancy,
+        HintCategory::UnexpectedChanges,
     ];
 
     for category in categories {
