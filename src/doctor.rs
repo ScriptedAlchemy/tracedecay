@@ -193,6 +193,20 @@ fn describe_resolved_store(layout: &StoreLayout) -> String {
     )
 }
 
+/// Remediation for a graph store that is not a valid `SQLite` file. The graph
+/// index is derived from source, so the honest fix is quarantine + re-init —
+/// never `tracedecay install`, which cannot repair a corrupt DB. Session data
+/// (`sessions.db`) is a separate file and is deliberately not mentioned as
+/// removable. Returns `None` for any other open failure.
+fn graph_corruption_remediation(detail: &str) -> Option<String> {
+    if !detail.contains("file is not a database") {
+        return None;
+    }
+    Some(format!(
+        "Graph index is corrupt (not a SQLite file): {detail}. The graph store is          derived and rebuildable: stop TraceDecay daemon/MCP processes, rename          tracedecay.db aside (e.g. tracedecay.db.corrupt-<ts>) together with its          WAL/SHM, then run `tracedecay init` to rebuild. Session data          (sessions.db) is unaffected."
+    ))
+}
+
 /// Check database health without mutating a store that may be owned by the daemon.
 ///
 /// The DB path is taken from the opened instance so the size measured is the
@@ -205,6 +219,10 @@ async fn check_database(
     let ts = match TraceDecay::open_read_only_with_options(project_path, open_options).await {
         Ok(ts) => ts,
         Err(e) => {
+            if let Some(remediation) = graph_corruption_remediation(&e.to_string()) {
+                dc.fail(&remediation);
+                return;
+            }
             dc.fail(&format!("Could not open database read-only: {e}"));
             return;
         }

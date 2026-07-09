@@ -437,3 +437,45 @@ async fn registry_drift_findings_report_manifest_identity_mismatches()
 
     Ok(())
 }
+
+#[test]
+fn graph_corruption_remediation_names_rebuild_never_install() {
+    let msg = super::graph_corruption_remediation(
+        "database error: failed to apply read-only pragmas: SQLite failure: \
+         `file is not a database` (operation: apply_read_only_pragmas)",
+    )
+    .expect("corrupt graph store must get the rebuild remediation");
+    assert!(msg.contains("tracedecay init"), "{msg}");
+    assert!(msg.contains("sessions.db) is unaffected"), "{msg}");
+    assert!(!msg.contains("tracedecay install"), "{msg}");
+    assert!(
+        super::graph_corruption_remediation("failed to open database read-only: locked").is_none()
+    );
+}
+
+#[tokio::test]
+async fn database_check_flags_garbage_graph_db_with_rebuild_guidance()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    let dir = tempfile::TempDir::new()?;
+    let profile_root = dir.path().join("profile");
+    let project_root = dir.path().join("repo");
+    std::fs::create_dir_all(&project_root)?;
+    let open_options = TraceDecayOpenOptions {
+        profile_root: Some(profile_root),
+        global_db_path: Some(dir.path().join("global.db")),
+    };
+    let ts = TraceDecay::init_with_options(&project_root, open_options.clone()).await?;
+    let db_path = ts.db_path();
+    drop(ts);
+
+    // Simulate the ENOSPC-torn store: raw bytes where SQLite should be.
+    std::fs::write(&db_path, vec![0x42u8; 4096])?;
+    for sidecar in ["-wal", "-shm"] {
+        let _ = std::fs::remove_file(db_path.with_extension(format!("db{sidecar}")));
+    }
+
+    let mut counters = DoctorCounters::new();
+    super::check_database(&mut counters, &project_root, open_options).await;
+    assert_eq!(counters.issues, 1, "garbage graph db must be a hard issue");
+    Ok(())
+}

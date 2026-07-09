@@ -967,6 +967,9 @@ fn print_corruption_warning(db_path: &std::path::Path) {
     eprintln!("[tracedecay] Store: {}", db_path.display());
     eprintln!("[tracedecay] Stop TraceDecay daemon/MCP processes before explicit repair.");
     eprintln!("[tracedecay] Preserve the DB, WAL, SHM, and dirty sentinel as one recovery set.");
+    eprintln!(
+        "[tracedecay] The graph index is derived from source: after preserving the set,          rename it aside (e.g. tracedecay.db.corrupt-<ts>) and run `tracedecay init` to          rebuild. Session data (sessions.db) is a separate file and unaffected."
+    );
     eprintln!("[tracedecay] Please report this at:");
     eprintln!("[tracedecay]   https://github.com/ScriptedAlchemy/tracedecay/issues");
     eprintln!(
