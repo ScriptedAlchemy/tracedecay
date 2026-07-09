@@ -633,35 +633,40 @@ async fn structured_backfill_migrates_legacy_global_marker() {
     // Rewrite the store into the legacy shape: a single global marker at v3
     // (a store that already finished the global sweep), no per-provider markers,
     // plus stale legacy cursor rows (un-versioned and global-versioned).
-    let conn = raw_conn(&project).await;
-    conn.execute(
-        "DELETE FROM session_schema_migrations WHERE name LIKE 'structured_rows_backfill%'",
-        (),
-    )
-    .await
-    .unwrap();
-    conn.execute(
-        "INSERT INTO session_schema_migrations(name, version) VALUES ('structured_rows_backfill', 3)",
-        (),
-    )
-    .await
-    .unwrap();
-    conn.execute(
-        "DELETE FROM session_backfill_meta WHERE key LIKE 'structured_backfill_cursor%'",
-        (),
-    )
-    .await
-    .unwrap();
-    for key in [
-        "structured_backfill_cursor",
-        "structured_backfill_cursor:v3",
-    ] {
+    // Drop the raw connection before reopening GlobalDb — a held writer blocks
+    // `BEGIN IMMEDIATE` on Windows/Linux under busy_timeout and can leave the
+    // codex marker stuck at the seeded legacy baseline.
+    {
+        let conn = raw_conn(&project).await;
         conn.execute(
-            "INSERT INTO session_backfill_meta(key, value) VALUES (?1, 'legacy/path.jsonl')",
-            libsql::params![key],
+            "DELETE FROM session_schema_migrations WHERE name LIKE 'structured_rows_backfill%'",
+            (),
         )
         .await
         .unwrap();
+        conn.execute(
+            "INSERT INTO session_schema_migrations(name, version) VALUES ('structured_rows_backfill', 3)",
+            (),
+        )
+        .await
+        .unwrap();
+        conn.execute(
+            "DELETE FROM session_backfill_meta WHERE key LIKE 'structured_backfill_cursor%'",
+            (),
+        )
+        .await
+        .unwrap();
+        for key in [
+            "structured_backfill_cursor",
+            "structured_backfill_cursor:v3",
+        ] {
+            conn.execute(
+                "INSERT INTO session_backfill_meta(key, value) VALUES (?1, 'legacy/path.jsonl')",
+                libsql::params![key],
+            )
+            .await
+            .unwrap();
+        }
     }
     // Sanity: the legacy global marker is present, per-provider markers are not.
     assert_eq!(structured_marker_version(&project, None).await, Some(3));
