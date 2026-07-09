@@ -11,7 +11,8 @@ use serde_json::Value;
 use super::claude::is_code_research_prompt;
 use super::memory_inject;
 use super::post_tool_use::{
-    CODEX_POST_TOOL_USE_SPEC, notify_post_tool_use, tool_input_command_str,
+    CODEX_POST_TOOL_USE_SPEC, captured_tool_output, notify_post_tool_use, tool_input_command_str,
+    trusted_tool_failure,
 };
 use super::steering::{
     HookWorkspaceStatus, append_context_block, append_context_recovery_hint,
@@ -212,7 +213,7 @@ fn codex_post_tool_use_hint(event_json: &str) -> Option<String> {
     let hint = decide_codex_post_tool_use_hint(&parsed)?;
     let root = codex_project_root_from_parsed_event(&parsed);
     let session_id = event_session_id(&parsed);
-    let hint = deduped_project_hint(root, HintAgent::Codex, session_id, hint)?;
+    let hint = deduped_project_hint(root.as_deref(), HintAgent::Codex, session_id, hint)?;
     Some(format_tool_hint(&hint))
 }
 
@@ -244,6 +245,8 @@ fn decide_codex_post_tool_use_hint(parsed: &Value) -> Option<ToolHint> {
                 prompt: None,
                 subagent_type: None,
                 file_path: codex_apply_patch_first_target_path(&command),
+                captured_output: captured_tool_output(parsed),
+                trusted_failure: trusted_tool_failure(parsed),
                 edit_text: codex_apply_patch_added_text(&command),
                 hints_enabled: true,
             }
@@ -256,6 +259,8 @@ fn decide_codex_post_tool_use_hint(parsed: &Value) -> Option<ToolHint> {
             prompt: None,
             subagent_type: None,
             file_path: None,
+            captured_output: captured_tool_output(parsed),
+            trusted_failure: trusted_tool_failure(parsed),
             edit_text: None,
             hints_enabled: true,
         },
@@ -652,8 +657,9 @@ fn deduped_codex_hint(
     hint_id: &str,
     hint: ToolHint,
 ) -> Option<ToolHint> {
+    let root = codex_project_root_from_event(event_json);
     deduped_project_hint_with_id(
-        codex_project_root_from_event(event_json),
+        root.as_deref(),
         HintAgent::Codex,
         event_session_id(parsed),
         hint_id,
@@ -671,6 +677,8 @@ fn codex_prompt_hint(event_json: &str) -> Option<ToolHint> {
         prompt: prompt_like_text(&parsed),
         subagent_type: None,
         file_path: None,
+        captured_output: None,
+        trusted_failure: false,
         edit_text: None,
         hints_enabled: true,
     })?;

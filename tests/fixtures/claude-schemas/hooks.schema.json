@@ -2,7 +2,7 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "https://anthropic.com/schemas/claude-code/hooks.json",
   "title": "Claude Code Hooks Configuration",
-  "description": "Schema for a Claude Code hooks configuration (plugin hooks/hooks.json or the `hooks` block in settings.json). Anthropic does not publish a standalone machine-readable schema, so this is derived from the Claude Code hooks reference (https://docs.anthropic.com/en/docs/claude-code/hooks — Configuration, Hook Events) as of 2026-07-03, cross-checked against the plugin hooks files Claude Code loads. Event names are enumerated from the documented list; a Claude Code release adding new events requires re-vendoring.",
+  "description": "Schema for a Claude Code hooks configuration (plugin hooks/hooks.json or the `hooks` block in settings.json). Anthropic does not publish a standalone machine-readable schema, so this is derived from the Claude Code hooks reference (https://code.claude.com/docs/en/hooks — Configuration, Hook Events) as of 2026-07-09, cross-checked against the plugin hooks files Claude Code loads. Event names are enumerated from the documented list; a Claude Code release adding new events requires re-vendoring.",
   "type": "object",
   "required": ["hooks"],
   "additionalProperties": false,
@@ -19,6 +19,7 @@
       "properties": {
         "PreToolUse": { "$ref": "#/$defs/matcherGroupArray" },
         "PostToolUse": { "$ref": "#/$defs/matcherGroupArray" },
+        "PostToolUseFailure": { "$ref": "#/$defs/matcherGroupArray" },
         "Notification": { "$ref": "#/$defs/matcherGroupArray" },
         "UserPromptSubmit": { "$ref": "#/$defs/matcherGroupArray" },
         "Stop": { "$ref": "#/$defs/matcherGroupArray" },
@@ -43,7 +44,7 @@
       "properties": {
         "matcher": {
           "type": "string",
-          "description": "Filter pattern; matched value depends on the event (tool name regex for PreToolUse/PostToolUse, compaction trigger for PreCompact, source for SessionStart). Omitted or empty matches everything."
+          "description": "Filter pattern; matched value depends on the event (tool name regex for PreToolUse/PostToolUse/PostToolUseFailure, compaction trigger for PreCompact, source for SessionStart). Omitted or empty matches everything."
         },
         "hooks": {
           "type": "array",

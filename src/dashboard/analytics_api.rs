@@ -238,11 +238,15 @@ pub(crate) fn hint_summary_from_events(events: &[Value]) -> Value {
             continue;
         }
         let counts = by_category.entry(category.to_string()).or_default();
-        match normalize(str_field(event, "outcome")).as_str() {
-            "emitted" | "shown" => counts.emitted += 1,
-            "followed" => counts.followed += 1,
-            "ignored" => counts.ignored += 1,
-            "suppressed" => counts.suppressed += 1,
+        let event_kind = normalize(str_field(event, "event_kind"));
+        match event_kind.as_str() {
+            "hint_emitted" | "hint_escalated" | "missing_session" => counts.emitted += 1,
+            "hint_outcome" => match normalize(str_field(event, "outcome")).as_str() {
+                "acted" => counts.followed += 1,
+                "ignored" => counts.ignored += 1,
+                _ => {}
+            },
+            _ if event_kind.starts_with("suppressed_") => counts.suppressed += 1,
             _ => {}
         }
     }
@@ -905,7 +909,36 @@ fn normalize(value: &str) -> String {
 mod tests {
     use serde_json::json;
 
-    use super::{HookAnalyticsRows, hint_efficacy_from_events, read_hook_analytics_file};
+    use super::{
+        HookAnalyticsRows, hint_efficacy_from_events, hint_summary_from_events,
+        read_hook_analytics_file,
+    };
+
+    #[test]
+    fn hint_summary_counts_current_event_kinds_without_impossible_outcomes() {
+        let events = vec![
+            json!({"event_kind": "hint_emitted", "hint_category": "search", "outcome": "observed"}),
+            json!({"event_kind": "hint_outcome", "hint_category": "search", "outcome": "acted"}),
+            json!({"event_kind": "hint_emitted", "hint_category": "file_lookup", "outcome": "observed"}),
+            json!({"event_kind": "hint_outcome", "hint_category": "file_lookup", "outcome": "ignored"}),
+            json!({"event_kind": "hint_escalated", "hint_category": "impact", "outcome": "observed"}),
+            json!({"event_kind": "suppressed_duplicate", "hint_category": "impact", "outcome": "observed"}),
+        ];
+
+        let summary = hint_summary_from_events(&events);
+        let rows = summary["by_category"].as_array().unwrap();
+        let row = |category: &str| {
+            rows.iter()
+                .find(|row| row["category"] == json!(category))
+                .unwrap()
+        };
+        assert_eq!(row("search")["emitted"], json!(1));
+        assert_eq!(row("search")["followed"], json!(1));
+        assert_eq!(row("file_lookup")["emitted"], json!(1));
+        assert_eq!(row("file_lookup")["ignored"], json!(1));
+        assert_eq!(row("impact")["emitted"], json!(1));
+        assert_eq!(row("impact")["suppressed"], json!(1));
+    }
 
     #[test]
     fn hint_efficacy_counts_emitted_acted_ignored_and_unresolved() {

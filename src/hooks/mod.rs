@@ -165,7 +165,7 @@ fn hook_route_session_id(parsed: &Value) -> Option<String> {
 /// via `hint_id`. Callers that already recorded a `hint_candidate` must instead
 /// use [`deduped_project_hint_with_id`] so the terminal shares that id.
 fn deduped_project_hint(
-    root: Option<PathBuf>,
+    root: Option<&Path>,
     agent: HintAgent,
     session_id: Option<String>,
     hint: ToolHint,
@@ -175,37 +175,39 @@ fn deduped_project_hint(
 }
 
 fn deduped_project_hint_with_id(
-    root: Option<PathBuf>,
+    root: Option<&Path>,
     agent: HintAgent,
     session_id: Option<String>,
     hint_id: &str,
     hint: ToolHint,
 ) -> Option<ToolHint> {
-    let Some(root) = root else {
-        record_hint_emitted(None, agent, session_id.as_deref(), hint_id, &hint);
-        return Some(hint);
-    };
     let Some(session_id) = session_id else {
-        record_hint_emitted(Some(&root), agent, None, hint_id, &hint);
+        record_hint_emitted(root, agent, None, hint_id, &hint);
         return Some(hint);
     };
-    // Without a resolvable data dir we cannot count budget/escalation across
-    // fires, so fall back to emitting the raw hint once per candidate.
-    let Ok(layout) = crate::storage::resolve_layout_for_current_profile(&root) else {
-        record_hint_emitted(Some(&root), agent, Some(&session_id), hint_id, &hint);
+
+    // Hooks may carry a stable session id without a project root. Persist
+    // those decisions in the user profile so one missing cwd does not turn
+    // every prompt/tool event into the same repeated hint.
+    let project_path = root
+        .and_then(|root| crate::storage::resolve_layout_for_current_profile(root).ok())
+        .filter(|layout| layout.data_root.is_dir())
+        .map(|layout| layout.data_root.join("tool_hints_seen.json"));
+    let path = project_path.or_else(|| {
+        crate::storage::default_profile_root()
+            .ok()
+            .map(|profile| profile.join("tool_hints_seen.json"))
+    });
+    let Some(path) = path else {
+        record_hint_emitted(root, agent, Some(&session_id), hint_id, &hint);
         return Some(hint);
     };
-    if !layout.data_root.is_dir() {
-        record_hint_emitted(Some(&root), agent, Some(&session_id), hint_id, &hint);
-        return Some(hint);
-    }
-    let path = layout.data_root.join("tool_hints_seen.json");
     let mut dedupe = tool_hints::ToolHintDedupe::load_or_default(&path);
     match dedupe.decide(&session_id, hint.category) {
         tool_hints::HintDecision::Emit => {
             let _ = dedupe.save(&path);
             record_hint_analytics(
-                Some(&root),
+                root,
                 "hint_emitted",
                 agent,
                 Some(&session_id),
@@ -218,7 +220,7 @@ fn deduped_project_hint_with_id(
             let _ = dedupe.save(&path);
             let escalated = hint.escalated();
             record_hint_analytics(
-                Some(&root),
+                root,
                 "hint_escalated",
                 agent,
                 Some(&session_id),
@@ -230,7 +232,7 @@ fn deduped_project_hint_with_id(
         tool_hints::HintDecision::SuppressedBudget => {
             let _ = dedupe.save(&path);
             record_hint_analytics(
-                Some(&root),
+                root,
                 "suppressed_budget",
                 agent,
                 Some(&session_id),
@@ -242,7 +244,7 @@ fn deduped_project_hint_with_id(
         tool_hints::HintDecision::SuppressedDuplicate => {
             let _ = dedupe.save(&path);
             record_hint_analytics(
-                Some(&root),
+                root,
                 "suppressed_duplicate",
                 agent,
                 Some(&session_id),
@@ -571,7 +573,7 @@ mod hint_analytics_tests {
         let emit_id = mint_hint_id();
         assert!(
             deduped_project_hint_with_id(
-                Some(project_root.clone()),
+                Some(&project_root),
                 HintAgent::Cursor,
                 Some("session-emit".to_string()),
                 &emit_id,
@@ -584,7 +586,7 @@ mod hint_analytics_tests {
         let dup_id = mint_hint_id();
         assert!(
             deduped_project_hint_with_id(
-                Some(project_root.clone()),
+                Some(&project_root),
                 HintAgent::Cursor,
                 Some("session-emit".to_string()),
                 &dup_id,
@@ -597,7 +599,7 @@ mod hint_analytics_tests {
         let no_session_id = mint_hint_id();
         assert!(
             deduped_project_hint_with_id(
-                Some(project_root.clone()),
+                Some(&project_root),
                 HintAgent::Cursor,
                 None,
                 &no_session_id,
@@ -656,6 +658,37 @@ mod hint_analytics_tests {
         }
     }
 
+    #[test]
+    fn hints_without_project_root_dedupe_in_the_user_profile() {
+        let _lock = super::lock_test_env();
+        let profile = tempfile::tempdir().unwrap();
+        let profile_root = profile.path().canonicalize().unwrap();
+        let _profile_env = EnvGuard::set_path(USER_DATA_DIR_ENV, &profile_root);
+        let session = Some("session-without-project-root".to_string());
+
+        assert!(
+            deduped_project_hint_with_id(
+                None,
+                HintAgent::Codex,
+                session.clone(),
+                &mint_hint_id(),
+                test_hint(),
+            )
+            .is_some()
+        );
+        assert!(
+            deduped_project_hint_with_id(
+                None,
+                HintAgent::Codex,
+                session,
+                &mint_hint_id(),
+                test_hint(),
+            )
+            .is_none(),
+            "a missing project root must not turn every prompt into a fresh hint"
+        );
+    }
+
     /// A hint over the per-session budget resolves to a single `suppressed_budget`
     /// terminal, and no hint is returned to the caller.
     #[test]
@@ -685,7 +718,7 @@ mod hint_analytics_tests {
             };
             assert!(
                 deduped_project_hint_with_id(
-                    Some(project_root.clone()),
+                    Some(&project_root),
                     HintAgent::Cursor,
                     Some(session.clone()),
                     &mint_hint_id(),
@@ -700,7 +733,7 @@ mod hint_analytics_tests {
         // branch from the duplicate branch).
         let over_id = mint_hint_id();
         let over = deduped_project_hint_with_id(
-            Some(project_root.clone()),
+            Some(&project_root),
             HintAgent::Cursor,
             Some(session.clone()),
             &over_id,
@@ -737,7 +770,7 @@ mod hint_analytics_tests {
         let session = "session-escalate".to_string();
         let emit = |id: &str| {
             deduped_project_hint_with_id(
-                Some(project_root.clone()),
+                Some(&project_root),
                 HintAgent::Cursor,
                 Some(session.clone()),
                 id,

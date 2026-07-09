@@ -263,6 +263,11 @@ fn claude_bundle_hooks_wire_the_expected_lifecycle_events() {
             "hook-claude-post-tool-use",
             Some(post_matcher.as_str()),
         ),
+        (
+            "PostToolUseFailure",
+            "hook-claude-post-tool-use",
+            Some("Bash"),
+        ),
         ("SubagentStart", "hook-claude-subagent-start", None),
     ];
 
@@ -274,7 +279,7 @@ fn claude_bundle_hooks_wire_the_expected_lifecycle_events() {
     assert_eq!(
         actual_events,
         expected_events,
-        "{} must declare exactly the 6 expected lifecycle events",
+        "{} must declare exactly the 7 expected lifecycle events",
         hooks_path.display()
     );
 

@@ -361,6 +361,44 @@ fn test_cursor_post_tool_use_hints_for_shell_rg() {
 }
 
 #[test]
+fn test_cursor_post_tool_use_hints_for_captured_compiler_output() {
+    let input = r#"{
+        "hook_event_name": "postToolUse",
+        "tool_name": "Shell",
+        "tool_input": {
+            "command": "cargo check --workspace"
+        },
+        "tool_output": "{\"exitCode\":101,\"stdout\":\"\",\"stderr\":\"error[E0308]: mismatched types\\n --> src/lib.rs:42:5\"}",
+        "session_id": "cursor-test"
+    }"#;
+
+    let output = evaluate_cursor_post_tool_use(input)
+        .expect("captured compiler output should get a diagnostics hint");
+    let v: serde_json::Value = serde_json::from_str(&output).unwrap();
+    assert!(
+        v["additional_context"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("tracedecay_diagnostics")
+    );
+}
+
+#[test]
+fn test_cursor_post_tool_use_behavioral_failure_output_stays_silent() {
+    let input = r#"{
+        "hook_event_name": "postToolUse",
+        "tool_name": "Shell",
+        "tool_input": {
+            "command": "cargo test hooks::tool_hints"
+        },
+        "tool_output": "{\"exitCode\":101,\"stdout\":\"test result: FAILED. 3 passed; 1 failed\",\"stderr\":\"error: test failed, to rerun pass --lib\"}",
+        "session_id": "cursor-test"
+    }"#;
+
+    assert!(evaluate_cursor_post_tool_use(input).is_none());
+}
+
+#[test]
 fn test_cursor_post_tool_use_hints_for_semantic_search() {
     let input = r#"{
         "hook_event_name": "postToolUse",

@@ -6,9 +6,9 @@ use serde_json::Value;
 
 use super::codex::{codex_additional_context_json, codex_project_root_from_parsed_event};
 use super::post_tool_use::{
-    CLAUDE_POST_TOOL_USE_SHELL_TOOLS, CLAUDE_POST_TOOL_USE_SPEC, is_claude_edit_tool,
-    is_claude_hint_tool, notify_post_tool_use, tool_input_command_str, tool_input_edit_text,
-    tool_input_file_path_str,
+    CLAUDE_POST_TOOL_USE_SHELL_TOOLS, CLAUDE_POST_TOOL_USE_SPEC, captured_tool_output,
+    is_claude_edit_tool, is_claude_hint_tool, is_post_tool_use_failure_event, notify_post_tool_use,
+    tool_input_command_str, tool_input_edit_text, tool_input_file_path_str, trusted_tool_failure,
 };
 use super::steering::{
     append_context_recovery_hint, append_tracedecay_bootstrap_context,
@@ -88,6 +88,8 @@ pub fn evaluate_hook_decision(tool_input: &str) -> String {
             .and_then(Value::as_str)
             .map(str::to_string),
         file_path: None,
+        captured_output: None,
+        trusted_failure: false,
         edit_text: None,
         hints_enabled: true,
     });
@@ -273,21 +275,34 @@ async fn claude_project_root_from_event_with_identity(
     claude_session_project_root(&parsed).await
 }
 
-/// Claude Code `PostToolUse` hook handler used to keep the graph fresh and to
-/// surface a soft tracedecay hint for native search/read tools.
+/// Claude Code `PostToolUse` / `PostToolUseFailure` hook handler used to keep
+/// the graph fresh and surface outcome-aware `TraceDecay` hints.
 ///
 /// Two independent outputs: the daemon notification (targeted sync / branch
 /// tracking, via stderr/IPC only) and, for the native `Grep`/`Glob`/`Read`
-/// tools plus recursive shell searches, a `PostToolUse` `additionalContext`
-/// hint printed to stdout. The daemon path never writes stdout, so the two do
-/// not interfere. Fail-open: no surviving hint leaves prior behavior unchanged.
+/// tools plus recursive shell searches or compiler failures, an event-matched
+/// `additionalContext` hint printed to stdout. The daemon path never writes
+/// stdout, so the two do not interfere. Fail-open: no surviving hint leaves
+/// prior behavior unchanged.
 pub async fn hook_claude_post_tool_use() -> i32 {
     let event = read_hook_event!();
+    let is_failure = serde_json::from_str::<Value>(&event)
+        .ok()
+        .as_ref()
+        .is_some_and(is_post_tool_use_failure_event);
+    let hook_event_name = if is_failure {
+        "PostToolUseFailure"
+    } else {
+        "PostToolUse"
+    };
     let root = claude_project_root_from_event_with_identity(&event).await;
     let _hook_telemetry =
-        record_hook_invoked(root.as_deref(), HintAgent::Claude, "PostToolUse", &event);
+        record_hook_invoked(root.as_deref(), HintAgent::Claude, hook_event_name, &event);
     if let Some(context) = claude_post_tool_use_hint_context(&event) {
-        println!("{}", codex_additional_context_json("PostToolUse", &context));
+        println!(
+            "{}",
+            codex_additional_context_json(hook_event_name, &context)
+        );
     }
     notify_post_tool_use(&CLAUDE_POST_TOOL_USE_SPEC, &event).await;
     0
@@ -306,13 +321,13 @@ fn claude_post_tool_use_hint_context(event_json: &str) -> Option<String> {
     // separate `hint_candidate`, per its documented contract.
     let root = codex_project_root_from_parsed_event(&parsed);
     let session_id = event_session_id(&parsed);
-    let hint = deduped_project_hint(root, HintAgent::Claude, session_id, hint)?;
+    let hint = deduped_project_hint(root.as_deref(), HintAgent::Claude, session_id, hint)?;
     Some(format_tool_hint(&hint))
 }
 
-/// Pure hint decision for a Claude `PostToolUse` event: shapes a
-/// [`ToolHintInput`] from the event's tool name, `file_path`, and Bash
-/// `command`, then runs [`decide_hint`]. Returns `None` for non-candidate
+/// Pure hint decision for a Claude post-tool event: shapes a [`ToolHintInput`]
+/// from the event's tool name, input, and host-owned outcome fields, then runs
+/// [`decide_hint`]. Returns `None` for non-candidate
 /// tools (the edit/write tools that drive daemon sync only) and when no hint
 /// applies. No I/O, so it is unit-testable without a profile store.
 fn decide_post_tool_use_hint(parsed: &Value) -> Option<ToolHint> {
@@ -346,6 +361,8 @@ fn decide_post_tool_use_hint(parsed: &Value) -> Option<ToolHint> {
         prompt: None,
         subagent_type: None,
         file_path,
+        captured_output: captured_tool_output(parsed),
+        trusted_failure: trusted_tool_failure(parsed),
         edit_text,
         hints_enabled: true,
     })
@@ -460,17 +477,75 @@ mod tests {
     }
 
     #[test]
-    fn build_bash_command_decides_a_diagnostics_hint() {
+    fn build_bash_command_without_failure_signal_stays_silent() {
         for command in ["cargo check", "cargo clippy", "tsc --noEmit", "pyright"] {
             let event = post_event("Bash", &serde_json::json!({ "command": command }));
-            let hint = decide_post_tool_use_hint(&event)
-                .unwrap_or_else(|| panic!("{command} must produce a build-diagnostics hint"));
-            let context = format_tool_hint(&hint);
             assert!(
-                context.contains("tracedecay_diagnostics"),
-                "{command} hint must point at tracedecay_diagnostics: {context}"
+                decide_post_tool_use_hint(&event).is_none(),
+                "{command} has no failure signal and must stay silent"
             );
         }
+    }
+
+    #[test]
+    fn trusted_build_failure_event_decides_a_diagnostics_hint() {
+        let mut event = post_event(
+            "Bash",
+            &serde_json::json!({ "command": "cargo check --workspace" }),
+        );
+        event["hook_event_name"] = Value::String("PostToolUseFailure".to_string());
+        event["error"] = Value::String("Command exited with non-zero status code 101".to_string());
+        event["is_interrupt"] = Value::Bool(false);
+
+        let hint = decide_post_tool_use_hint(&event)
+            .expect("a host-authenticated compiler failure must produce a diagnostics hint");
+        assert_eq!(hint.category.as_key(), "build_diagnostics");
+    }
+
+    #[test]
+    fn captured_compiler_output_decides_a_diagnostics_hint() {
+        let mut event = post_event(
+            "Bash",
+            &serde_json::json!({ "command": "cargo check --workspace" }),
+        );
+        event["hook_event_name"] = Value::String("PostToolUse".to_string());
+        event["tool_response"] = serde_json::json!({
+            "stdout": "",
+            "stderr": "error[E0308]: mismatched types\n --> src/lib.rs:42:5"
+        });
+
+        let hint = decide_post_tool_use_hint(&event)
+            .expect("captured compiler output must produce a diagnostics hint");
+        assert_eq!(hint.category.as_key(), "build_diagnostics");
+    }
+
+    #[test]
+    fn untrusted_or_behavioral_failure_shapes_stay_silent() {
+        let spoofed_command = post_event(
+            "Bash",
+            &serde_json::json!({
+                "command": "printf 'error[E0308]: mismatched types\\n --> src/lib.rs:42:5'"
+            }),
+        );
+        assert!(decide_post_tool_use_hint(&spoofed_command).is_none());
+
+        let mut interrupted = post_event(
+            "Bash",
+            &serde_json::json!({ "command": "cargo check --workspace" }),
+        );
+        interrupted["hook_event_name"] = Value::String("PostToolUseFailure".to_string());
+        interrupted["error"] = Value::String("Command interrupted".to_string());
+        interrupted["is_interrupt"] = Value::Bool(true);
+        assert!(decide_post_tool_use_hint(&interrupted).is_none());
+
+        let mut tests_failed = post_event(
+            "Bash",
+            &serde_json::json!({ "command": "cargo test hooks::tool_hints" }),
+        );
+        tests_failed["hook_event_name"] = Value::String("PostToolUseFailure".to_string());
+        tests_failed["error"] =
+            Value::String("Command exited with non-zero status code 101".to_string());
+        assert!(decide_post_tool_use_hint(&tests_failed).is_none());
     }
 
     #[test]

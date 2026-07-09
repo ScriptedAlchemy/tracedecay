@@ -14,6 +14,7 @@ use super::cursor_compact::{
 };
 use super::cursor_shell::paths_same;
 use super::memory_inject;
+use super::post_tool_use::{captured_tool_output, trusted_tool_failure};
 use super::steering::{
     append_context_block, append_context_recovery_hint, build_cursor_session_context,
     cursor_index_signals_for_root, session_start_from_compaction,
@@ -160,6 +161,8 @@ fn cursor_prompt_hint(event_json: &str) -> Option<ToolHint> {
         prompt: prompt_like_text(&parsed),
         subagent_type: None,
         file_path: None,
+        captured_output: None,
+        trusted_failure: false,
         edit_text: None,
         hints_enabled: true,
     })?;
@@ -481,7 +484,7 @@ fn deduped_cursor_hint(event_json: &str, hint_id: &str, hint: ToolHint) -> Optio
         );
         return None;
     }
-    deduped_project_hint_with_id(Some(root), HintAgent::Cursor, session_id, hint_id, hint)
+    deduped_project_hint_with_id(Some(&root), HintAgent::Cursor, session_id, hint_id, hint)
 }
 
 async fn deduped_cursor_hint_for_initialized_store(
@@ -501,7 +504,7 @@ async fn deduped_cursor_hint_for_initialized_store(
         );
         return None;
     }
-    deduped_project_hint_with_id(Some(root), HintAgent::Cursor, session_id, hint_id, hint)
+    deduped_project_hint_with_id(Some(&root), HintAgent::Cursor, session_id, hint_id, hint)
 }
 
 pub fn cursor_project_root_from_event(event_json: &str) -> Option<PathBuf> {
@@ -812,6 +815,8 @@ fn cursor_tool_hint_input(parsed: &Value) -> ToolHintInput {
         subagent_type: text_field(parsed, &["subagent_type", "subagentType", "agent_type"]),
         file_path: text_field(tool_input, CURSOR_FILE_PATH_FIELDS)
             .or_else(|| text_field(parsed, CURSOR_FILE_PATH_FIELDS)),
+        captured_output: captured_tool_output(parsed),
+        trusted_failure: trusted_tool_failure(parsed),
         // Cursor's `postToolUse` edit payload carries only the target
         // `file_path`, not the applied edit body (confirmed by the recorded
         // fixtures in `tests/hooks_lsp_suite/hooks_test.rs`), so the
@@ -843,6 +848,8 @@ fn cursor_after_file_edit_hint_input(parsed: &Value) -> ToolHintInput {
         prompt: None,
         subagent_type: None,
         file_path: text_field(parsed, CURSOR_FILE_PATH_FIELDS),
+        captured_output: None,
+        trusted_failure: false,
         edit_text: cursor_after_file_edit_new_text(parsed),
         hints_enabled: true,
     }

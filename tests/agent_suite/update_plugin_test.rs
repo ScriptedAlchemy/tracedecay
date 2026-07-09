@@ -659,9 +659,13 @@ fn codex_update_plugin_migrates_legacy_caveman_home_cache_to_personal() {
 fn codex_update_plugin_preserves_existing_marketplace_identity() {
     let home = TempDir::new().unwrap();
     let project_root = home.path().join("workspace");
-    let cached_plugin_dir = codex_cached_plugin_dir(home.path());
-    write_codex_plugin_manifest(&cached_plugin_dir, "0.0.0");
+    let stale_personal_cache = codex_cached_plugin_dir(home.path());
+    write_codex_plugin_manifest(&stale_personal_cache, "0.0.0");
     write_codex_marketplace(home.path(), "my-marketplace", "My Marketplace");
+    let cached_plugin_dir = home.path().join(format!(
+        ".codex/plugins/cache/my-marketplace/tracedecay/{}",
+        env!("CARGO_PKG_VERSION")
+    ));
 
     let codex = get_integration("codex").unwrap();
     let outcome = codex
@@ -673,6 +677,10 @@ fn codex_update_plugin_preserves_existing_marketplace_identity() {
     assert_eq!(
         paths,
         vec![cached_plugin_dir.clone(), codex_bootstrap_dir(home.path())]
+    );
+    assert!(
+        !stale_personal_cache.exists(),
+        "a preserved marketplace identity must replace the stale personal cache"
     );
 
     assert_eq!(

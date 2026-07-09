@@ -40,11 +40,12 @@ impl AgentIntegration for CodexIntegration {
     fn install(&self, ctx: &InstallContext) -> Result<()> {
         install_codex_plugin(&ctx.home, &ctx.tracedecay_bin)?;
         sweep_legacy_global_codex_config(&ctx.home);
+        let marketplace_name = codex_cached_marketplace_name(&ctx.home);
 
         eprintln!();
         eprintln!("Setup complete. Next steps:");
         eprintln!("  1. cd into your project and run: tracedecay init");
-        eprintln!("  2. In Codex, run: codex plugin add tracedecay@personal");
+        eprintln!("  2. In Codex, run: codex plugin add tracedecay@{marketplace_name}");
         eprintln!("  3. Start a new Codex session — tracedecay tools are now available");
         announce_codex_hook_trust(&ctx.home, &ctx.tracedecay_bin);
         Ok(())
@@ -305,24 +306,42 @@ fn codex_plugin_install_dir(home: &Path) -> PathBuf {
     home.join("plugins/tracedecay")
 }
 
-fn codex_plugin_cached_root(home: &Path) -> PathBuf {
-    home.join(".codex/plugins/cache/personal/tracedecay")
+fn codex_plugin_cached_root(home: &Path, marketplace_name: &str) -> PathBuf {
+    home.join(".codex/plugins/cache")
+        .join(marketplace_name)
+        .join("tracedecay")
 }
 
-fn codex_plugin_legacy_cached_root(home: &Path) -> PathBuf {
-    home.join(".codex/plugins/cache/caveman-home/tracedecay")
+fn validate_codex_marketplace_name(name: &str) -> Result<&str> {
+    crate::storage::validate_project_id(name).map_err(|_| TraceDecayError::Config {
+        message: format!("Codex marketplace name {name:?} must be a safe ASCII path segment"),
+    })?;
+    Ok(name)
+}
+
+fn codex_cached_marketplace_name(home: &Path) -> String {
+    match codex_personal_marketplace_name(home).as_deref() {
+        Ok("caveman-home") | Err(_) => CODEX_DEFAULT_MARKETPLACE_NAME.to_string(),
+        Ok(name) => name.to_string(),
+    }
 }
 
 fn codex_plugin_current_cached_install_dir(home: &Path) -> PathBuf {
-    codex_plugin_cached_root(home).join(env!("CARGO_PKG_VERSION"))
+    codex_plugin_cached_root(home, &codex_cached_marketplace_name(home))
+        .join(env!("CARGO_PKG_VERSION"))
 }
 
 fn codex_plugin_cached_install_dirs(home: &Path) -> Vec<PathBuf> {
     let mut dirs = Vec::new();
-    for root in [
-        codex_plugin_cached_root(home),
-        codex_plugin_legacy_cached_root(home),
-    ] {
+    let mut marketplace_names = vec![
+        codex_cached_marketplace_name(home),
+        CODEX_DEFAULT_MARKETPLACE_NAME.to_string(),
+        "caveman-home".to_string(),
+    ];
+    marketplace_names.sort();
+    marketplace_names.dedup();
+    for marketplace_name in marketplace_names {
+        let root = codex_plugin_cached_root(home, &marketplace_name);
         let Ok(entries) = std::fs::read_dir(root) else {
             continue;
         };
@@ -702,7 +721,7 @@ const CODEX_MANAGED_HOOKS: &[CodexManagedHook] = &[
 /// Subcommands from older bundles that uninstall must also strip even though
 /// the current bundle no longer registers them.
 const CODEX_LEGACY_HOOK_SUBCOMMANDS: &[&str] = &["hook-codex-pre-tool-use"];
-const CODEX_PERSONAL_PLUGIN_HOOK_TRUST_PREFIX: &str = "tracedecay@personal:hooks/hooks.json:";
+const CODEX_DEFAULT_MARKETPLACE_NAME: &str = "personal";
 
 #[derive(Debug, PartialEq, Eq)]
 enum CodexHookTrustState {
@@ -830,8 +849,21 @@ fn codex_command_hook_hash(
 /// per-handler `timeout` is normalized the way Codex does (default 600, clamped
 /// to a minimum of 1) and `async` defaults to false, so the hash matches the
 /// TUI's `/hooks` approval regardless of whether those keys are present on disk.
+fn codex_plugin_hook_trust_prefix(marketplace_name: &str) -> String {
+    format!("tracedecay@{marketplace_name}:hooks/hooks.json:")
+}
+
+#[cfg(test)]
 fn codex_hook_trust_entries(hooks: &serde_json::Value) -> Vec<CodexHookTrustEntry> {
+    codex_hook_trust_entries_for_marketplace(hooks, CODEX_DEFAULT_MARKETPLACE_NAME)
+}
+
+fn codex_hook_trust_entries_for_marketplace(
+    hooks: &serde_json::Value,
+    marketplace_name: &str,
+) -> Vec<CodexHookTrustEntry> {
     let mut entries = Vec::new();
+    let trust_prefix = codex_plugin_hook_trust_prefix(marketplace_name);
     let Some(events) = hooks.get("hooks").and_then(|hooks| hooks.as_object()) else {
         return entries;
     };
@@ -860,9 +892,8 @@ fn codex_hook_trust_entries(hooks: &serde_json::Value) -> Vec<CodexHookTrustEntr
                     .unwrap_or(false);
                 let hash =
                     codex_command_hook_hash(&event_label, matcher, command, timeout, is_async);
-                let trust_key = format!(
-                    "{CODEX_PERSONAL_PLUGIN_HOOK_TRUST_PREFIX}{event_label}:{group_index}:{handler_index}"
-                );
+                let trust_key =
+                    format!("{trust_prefix}{event_label}:{group_index}:{handler_index}");
                 entries.push(CodexHookTrustEntry {
                     event_label: event_label.clone(),
                     trust_key,
@@ -875,10 +906,9 @@ fn codex_hook_trust_entries(hooks: &serde_json::Value) -> Vec<CodexHookTrustEntr
     entries
 }
 
-/// Render the personal-bundle `hooks.json` and derive its trust records. This
-/// is the single bridge from the hook generator ([`codex_plugin_hooks`]) to the
-/// trust machinery, so the installer, re-sync, and doctor all hash the exact
-/// bytes that ship in the bundle.
+/// Render the bundled `hooks.json` template for deterministic golden tests.
+/// Runtime trust is derived from the installed cache/source file instead.
+#[cfg(test)]
 fn codex_managed_hook_trust_entries(tracedecay_bin: &str) -> Result<Vec<CodexHookTrustEntry>> {
     let seed = codex_embedded_plugin_files()
         .into_iter()
@@ -889,6 +919,44 @@ fn codex_managed_hook_trust_entries(tracedecay_bin: &str) -> Result<Vec<CodexHoo
     let rendered = codex_plugin_hooks(seed, tracedecay_bin)?;
     let value: serde_json::Value = serde_json::from_str(&rendered)?;
     Ok(codex_hook_trust_entries(&value))
+}
+
+fn codex_personal_marketplace_name(home: &Path) -> Result<String> {
+    let marketplace_path = codex_personal_marketplace_path(home);
+    let marketplace = load_json_file_strict(&marketplace_path)?;
+    let name = marketplace
+        .get("name")
+        .and_then(serde_json::Value::as_str)
+        .filter(|name| !name.is_empty())
+        .ok_or_else(|| TraceDecayError::Config {
+            message: format!(
+                "Codex marketplace at {} has no non-empty name",
+                marketplace_path.display()
+            ),
+        })?;
+    Ok(validate_codex_marketplace_name(name)?.to_string())
+}
+
+fn codex_runtime_hooks_path(home: &Path) -> PathBuf {
+    let cached = codex_plugin_current_cached_install_dir(home).join("hooks/hooks.json");
+    if cached.is_file() {
+        cached
+    } else {
+        codex_plugin_install_dir(home).join("hooks/hooks.json")
+    }
+}
+
+fn codex_installed_hook_trust_entries(home: &Path) -> Result<(String, Vec<CodexHookTrustEntry>)> {
+    let marketplace_name = codex_personal_marketplace_name(home)?;
+    let hooks_path = codex_runtime_hooks_path(home);
+    if !hooks_path.is_file() {
+        return Err(TraceDecayError::Config {
+            message: format!("Codex hooks file not found at {}", hooks_path.display()),
+        });
+    }
+    let hooks = load_json_file_strict(&hooks_path)?;
+    let entries = codex_hook_trust_entries_for_marketplace(&hooks, &marketplace_name);
+    Ok((marketplace_name, entries))
 }
 
 /// Safety valve: only auto-trust a hook whose command is byte-for-byte one of
@@ -911,18 +979,18 @@ struct CodexHookTrustSyncOutcome {
     skipped: Vec<String>,
 }
 
-/// Record trust for the personal plugin's lifecycle hooks in
+/// Record trust for the installed plugin's lifecycle hooks in
 /// `~/.codex/config.toml` so Codex runs them without a manual `/hooks` approval.
 ///
-/// Writes only `[hooks.state."tracedecay@personal:hooks/hooks.json:…"]` tables,
-/// pruning stale tracedecay-personal entries (removed events / shifted indices)
-/// while preserving every other plugin's and the user's own config. Hooks whose
-/// command does not invoke the tracedecay binary are skipped (see
+/// Uses the marketplace identity and hook payload actually installed on disk,
+/// pruning stale active/legacy-personal entries while preserving every other
+/// plugin's and the user's own config. Hooks whose command does not exactly
+/// match a generated `TraceDecay` command are skipped (see
 /// [`codex_hook_command_invokes_tracedecay`]). An unreadable/unparseable
 /// `config.toml` surfaces as `Err`, so callers leave it untouched and fall back
 /// to printed guidance.
 fn sync_codex_hook_trust(home: &Path, tracedecay_bin: &str) -> Result<CodexHookTrustSyncOutcome> {
-    let entries = codex_managed_hook_trust_entries(tracedecay_bin)?;
+    let (marketplace_name, entries) = codex_installed_hook_trust_entries(home)?;
     let config_path = codex_config_path(home);
     let mut config = load_toml_file(&config_path)?;
     let table = config
@@ -947,10 +1015,15 @@ fn sync_codex_hook_trust(home: &Path, tracedecay_bin: &str) -> Result<CodexHookT
             message: format!("[hooks.state] in {} is not a table", config_path.display()),
         })?;
 
-    // Stale-entry hygiene: drop every tracedecay-personal trust record before
-    // re-adding the current set, so removed events or shifted indices do not
-    // linger. Foreign plugins' entries (different prefix) are untouched.
-    state.retain(|key, _| !key.starts_with(CODEX_PERSONAL_PLUGIN_HOOK_TRUST_PREFIX));
+    // Drop trust for the active marketplace plus the legacy hard-coded
+    // `personal` identity before adding the exact installed payload. Foreign
+    // plugin and repo-local marketplace records remain untouched.
+    let current_prefix = codex_plugin_hook_trust_prefix(&marketplace_name);
+    let legacy_prefix = codex_plugin_hook_trust_prefix(CODEX_DEFAULT_MARKETPLACE_NAME);
+    state.retain(|key, _| {
+        !key.starts_with(&current_prefix)
+            && (current_prefix == legacy_prefix || !key.starts_with(&legacy_prefix))
+    });
 
     let mut trusted = 0usize;
     let mut skipped = Vec::new();
@@ -972,7 +1045,7 @@ fn sync_codex_hook_trust(home: &Path, tracedecay_bin: &str) -> Result<CodexHookT
     Ok(CodexHookTrustSyncOutcome { trusted, skipped })
 }
 
-/// Auto-trust the personal plugin's hooks, printing a concise confirmation on
+/// Auto-trust the installed plugin's hooks, printing a concise confirmation on
 /// full success and falling back to [`print_hook_trust_guidance`] whenever a
 /// hook is skipped by the safety valve or the config could not be written.
 fn announce_codex_hook_trust(home: &Path, tracedecay_bin: &str) {
@@ -1070,6 +1143,9 @@ fn install_codex_marketplace_entry(
         marketplace = json!({});
     }
     let existing_name = marketplace.get("name").and_then(|value| value.as_str());
+    if let Some(existing_name) = existing_name {
+        validate_codex_marketplace_name(existing_name)?;
+    }
     let has_tracedecay_entry = marketplace
         .get("plugins")
         .and_then(serde_json::Value::as_array)
@@ -1126,9 +1202,14 @@ fn install_codex_marketplace_entry(
         },
         "category": "Productivity",
     }));
+    let effective_marketplace_name = marketplace
+        .get("name")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or(marketplace_name)
+        .to_string();
     safe_write_json_file(marketplace_path, &marketplace, None)?;
     eprintln!(
-        "\x1b[32m✔\x1b[0m Added tracedecay to Codex {marketplace_name} marketplace at {}",
+        "\x1b[32m✔\x1b[0m Added tracedecay to Codex {effective_marketplace_name} marketplace at {}",
         marketplace_path.display()
     );
     Ok(())
@@ -1717,7 +1798,14 @@ fn doctor_check_plugin_dir(
     }
     let hooks_path = plugin_dir.join("hooks/hooks.json");
     if let Some(config_path) = policy.hook_trust_config_path(home) {
-        doctor_check_hooks(dc, &hooks_path, &config_path);
+        match codex_personal_marketplace_name(home) {
+            Ok(marketplace_name) => {
+                doctor_check_hooks(dc, &hooks_path, &config_path, &marketplace_name);
+            }
+            Err(err) => dc.warn(&format!(
+                "Cannot verify Codex hook trust without the installed marketplace identity: {err}"
+            )),
+        }
     } else if hooks_path.exists() {
         dc.warn(&format!(
             "repo-local Codex bundle unexpectedly ships lifecycle hooks in {} — run `tracedecay install --local --agent codex` to refresh it",
@@ -1728,7 +1816,12 @@ fn doctor_check_plugin_dir(
 
 /// Check hooks.json registers the tracedecay lifecycle hooks, and report Codex
 /// hook trust state from the user-level config.
-fn doctor_check_hooks(dc: &mut DoctorCounters, hooks_path: &Path, config_path: &Path) {
+fn doctor_check_hooks(
+    dc: &mut DoctorCounters,
+    hooks_path: &Path,
+    config_path: &Path,
+    marketplace_name: &str,
+) {
     if !hooks_path.exists() {
         dc.warn(&format!(
             "{} not found — run `tracedecay install --agent codex` to add lifecycle hooks",
@@ -1759,7 +1852,7 @@ fn doctor_check_hooks(dc: &mut DoctorCounters, hooks_path: &Path, config_path: &
     ));
     // Hash the on-disk hooks.json exactly as Codex would, then compare against
     // the trust records in config.toml to distinguish trusted / missing / stale.
-    let entries = codex_hook_trust_entries(&hooks);
+    let entries = codex_hook_trust_entries_for_marketplace(&hooks, marketplace_name);
     match load_toml_file(config_path) {
         Ok(config) => match codex_plugin_hook_trust_state(&config, &entries) {
             CodexHookTrustState::Trusted => dc.pass(&format!(
