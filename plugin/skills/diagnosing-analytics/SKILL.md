@@ -22,6 +22,8 @@ store databases directly.
    `hook_sources` with per-file row counts, and usage ratios. Flags:
    `--all` (every project, not just the current one), `--no-sync` (skip the
    import pass; read-only).
+   Use the read-only MCP twin **`tracedecay_analytics`** when the answer should
+   be returned inside an agent tool call instead of a shell command.
 2. **`tracedecay analytics sync`** — run only the hook-log import and report
    how many rows each source contributed.
 3. **`tracedecay doctor`** — per-agent install health: hook registration, MCP

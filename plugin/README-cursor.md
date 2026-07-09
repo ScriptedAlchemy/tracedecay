@@ -70,6 +70,7 @@ per-call review, add the snippet below to `~/.cursor/permissions.json`
   "mcpAllowlist": [
     "graph:tracedecay_active_project",
     "graph:tracedecay_affected",
+    "graph:tracedecay_analytics",
     "graph:tracedecay_automation_run_artifact_view",
     "graph:tracedecay_body",
     "graph:tracedecay_branch_diff",

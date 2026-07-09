@@ -1,0 +1,386 @@
+{
+  "name": "message_search_labeled_eval",
+  "description": "Labeled ranking eval for GlobalDb::search_session_messages over a seeded synthetic corpus. Each query pins per-case ordering constraints (top-1, top-k membership sets, scoping exclusions) plus p@1/p@3/MRR metrics recomputed by the test from the LIVE ranking. Cases that current master ranks worse than the ranking we want are marked expected_current_failure:true: the test asserts the DOCUMENTED current outcome (so the suite is green now) while printing the aspirational one, forming a known-gap ledger the ranking fix must consciously flip.",
+  "default_provider": "codex",
+  "project_key": "eval-project",
+  "other_project_key": "other-project",
+  "metrics": {
+    "_comment": "Mean p@1/p@3/MRR over the 10 positive queries, recomputed by the test from the LIVE ranking. mean_p_at_1 and mean_mrr are below 1.0 solely because exact_branch_impl_over_inventory is a documented current gap (impl-1 lands at rank 2 behind inv-3). When the ranking fix flips that case, set it top1=impl-1 / expected_current_failure:false and bump mean_p_at_1 to 1.0 and mean_mrr to 1.0.",
+    "mean_p_at_1": 0.9,
+    "mean_p_at_3": 0.37,
+    "mean_mrr": 0.95
+  },
+  "corpus": [
+    {
+      "session_id": "impl-retrieval-evals",
+      "provider": "codex",
+      "project_key": "eval-project",
+      "messages": [
+        {
+          "id": "impl-1",
+          "role": "assistant",
+          "kind": "message",
+          "timestamp": 5000,
+          "text": "Implementing the retrieval eval harness on codex/retrieval-evals-analytics: seeded a fixture session store and scored message_search ranking with recomputed precision metrics."
+        }
+      ]
+    },
+    {
+      "session_id": "branch-inventory",
+      "provider": "codex",
+      "project_key": "eval-project",
+      "messages": [
+        {
+          "id": "inv-1",
+          "role": "assistant",
+          "kind": "message",
+          "timestamp": 4000,
+          "text": "Branch inventory sweep lists codex/retrieval-evals-analytics as one of many active branches, alongside codex/session-recovery-fixes, codex/redundancy-evals, release-plz, and master."
+        },
+        {
+          "id": "inv-2",
+          "role": "assistant",
+          "kind": "message",
+          "timestamp": 4100,
+          "text": "Worktree fleet status again names codex/retrieval-evals-analytics amid twelve other branches; nothing is implemented in this session, it is only an index of branch names."
+        },
+        {
+          "id": "inv-3",
+          "role": "assistant",
+          "kind": "message",
+          "timestamp": 4200,
+          "text": "Daily branch roster mentions codex/retrieval-evals-analytics once more among the archived and stale branches tracked across every worktree."
+        }
+      ]
+    },
+    {
+      "session_id": "bm25-decision",
+      "provider": "codex",
+      "project_key": "eval-project",
+      "messages": [
+        {
+          "id": "old-1",
+          "role": "assistant",
+          "kind": "message",
+          "timestamp": 1000,
+          "text": "Decision: message_search must weight the quokkabeacon relevance signal heavily, since bm25 over session_messages_fts with the text column weighted ten times is the ranking core."
+        }
+      ]
+    },
+    {
+      "session_id": "recent-marginal",
+      "provider": "codex",
+      "project_key": "eval-project",
+      "messages": [
+        {
+          "id": "new-1",
+          "role": "assistant",
+          "kind": "message",
+          "timestamp": 9000,
+          "text": "Quick note, mentioned quokkabeacon in passing while triaging unrelated flaky tests this afternoon before standup."
+        },
+        {
+          "id": "new-2",
+          "role": "assistant",
+          "kind": "message",
+          "timestamp": 9100,
+          "text": "Recent aside referencing quokkabeacon buried inside a long standup recap that also covered builds, releases, docs, chores, reviews, and deployment follow-ups."
+        }
+      ]
+    },
+    {
+      "session_id": "codex-zephyr",
+      "provider": "codex",
+      "project_key": "eval-project",
+      "messages": [
+        {
+          "id": "codz-1",
+          "role": "assistant",
+          "kind": "message",
+          "timestamp": 3200,
+          "text": "The zephyrwidget rollout is tracked from a codex session in this project."
+        }
+      ]
+    },
+    {
+      "session_id": "cursor-notes",
+      "provider": "cursor",
+      "project_key": "eval-project",
+      "messages": [
+        {
+          "id": "cur-1",
+          "role": "assistant",
+          "kind": "message",
+          "timestamp": 3000,
+          "text": "The zephyrwidget rollout notes live in the cursor workspace for this project."
+        }
+      ]
+    },
+    {
+      "session_id": "claude-notes",
+      "provider": "claude",
+      "project_key": "eval-project",
+      "messages": [
+        {
+          "id": "cla-1",
+          "role": "assistant",
+          "kind": "message",
+          "timestamp": 3100,
+          "text": "The zephyrwidget rollout was also discussed in a claude session for this project."
+        }
+      ]
+    },
+    {
+      "session_id": "tool-noise",
+      "provider": "codex",
+      "project_key": "eval-project",
+      "messages": [
+        {
+          "id": "asst-1",
+          "role": "assistant",
+          "kind": "message",
+          "timestamp": 6000,
+          "text": "The mossgate protocol governs retry backoff between agents."
+        },
+        {
+          "id": "tool-1",
+          "role": "tool",
+          "kind": "tool_result",
+          "timestamp": 6001,
+          "tool_names": "shell",
+          "text": "mossgate log dump follows: line one boilerplate, line two boilerplate, line three boilerplate, line four boilerplate, line five boilerplate, line six boilerplate, line seven boilerplate, line eight boilerplate, line nine boilerplate, line ten boilerplate, line eleven boilerplate, line twelve boilerplate, line thirteen boilerplate, line fourteen boilerplate, line fifteen boilerplate, line sixteen boilerplate, line seventeen boilerplate, line eighteen boilerplate, line nineteen boilerplate, line twenty boilerplate, protocol trace tail end."
+        }
+      ]
+    },
+    {
+      "session_id": "multiterm",
+      "provider": "codex",
+      "project_key": "eval-project",
+      "messages": [
+        {
+          "id": "mt-all",
+          "role": "assistant",
+          "kind": "message",
+          "timestamp": 7000,
+          "text": "The sqlite migration is idempotent and safe to rerun on every startup."
+        },
+        {
+          "id": "mt-two",
+          "role": "assistant",
+          "kind": "message",
+          "timestamp": 7001,
+          "text": "The sqlite migration ran during the upgrade step."
+        },
+        {
+          "id": "mt-one",
+          "role": "assistant",
+          "kind": "message",
+          "timestamp": 7002,
+          "text": "A sqlite pragma tweak adjusts the cache size."
+        },
+        {
+          "id": "mt-case",
+          "role": "assistant",
+          "kind": "message",
+          "timestamp": 7003,
+          "text": "The xylophonics module is unique to this corpus."
+        },
+        {
+          "id": "mt-glyph",
+          "role": "assistant",
+          "kind": "message",
+          "timestamp": 7004,
+          "text": "The waterglyph plan belongs to the eval project."
+        }
+      ]
+    },
+    {
+      "session_id": "other-project-session",
+      "provider": "codex",
+      "project_key": "other-project",
+      "messages": [
+        {
+          "id": "oth-1",
+          "role": "assistant",
+          "kind": "message",
+          "timestamp": 8000,
+          "text": "The waterglyph plan for a different project is unrelated to the eval corpus."
+        }
+      ]
+    }
+  ],
+  "queries": [
+    {
+      "label": "exact_branch_impl_over_inventory",
+      "note": "Exact-branch query. The implementation session should rank above the branch-inventory noise. Known production failure mode: bm25 cannot distinguish an inventory that name-drops the branch from the session that actually implemented it.",
+      "query": "codex/retrieval-evals-analytics",
+      "provider": "codex",
+      "project_key": "eval-project",
+      "limit": 10,
+      "expect": {
+        "empty": false,
+        "expected_current_failure": true,
+        "current_top1": "inv-3",
+        "aspirational_top1": "impl-1",
+        "relevant": ["impl-1"],
+        "excluded": []
+      }
+    },
+    {
+      "label": "relevance_beats_recency",
+      "note": "An older, richly-relevant decision message must outrank newer marginal mentions of the same rare term. bm25 is relevance-ranked with no recency term, so the old message wins on coverage.",
+      "query": "quokkabeacon relevance ranking",
+      "provider": "codex",
+      "project_key": "eval-project",
+      "limit": 10,
+      "expect": {
+        "empty": false,
+        "top1": "old-1",
+        "relevant": ["old-1"],
+        "excluded": []
+      }
+    },
+    {
+      "label": "provider_filter_codex_scopes",
+      "note": "A shared term across three providers, scoped to codex, must return only the codex hit.",
+      "query": "zephyrwidget",
+      "provider": "codex",
+      "project_key": "eval-project",
+      "limit": 10,
+      "expect": {
+        "empty": false,
+        "top1": "codz-1",
+        "relevant": ["codz-1"],
+        "excluded": ["cur-1", "cla-1"]
+      }
+    },
+    {
+      "label": "provider_filter_cursor_scopes",
+      "note": "Same shared term scoped to cursor returns only the cursor hit.",
+      "query": "zephyrwidget",
+      "provider": "cursor",
+      "project_key": "eval-project",
+      "limit": 10,
+      "expect": {
+        "empty": false,
+        "top1": "cur-1",
+        "relevant": ["cur-1"],
+        "excluded": ["codz-1", "cla-1"]
+      }
+    },
+    {
+      "label": "assistant_text_beats_tool_noise",
+      "note": "A focused assistant message must outrank a long, noisy tool_result that only mentions the term once, thanks to bm25 length normalization on the heavily-weighted text column.",
+      "query": "mossgate protocol",
+      "provider": "codex",
+      "project_key": "eval-project",
+      "limit": 10,
+      "expect": {
+        "empty": false,
+        "top1": "asst-1",
+        "relevant": ["asst-1"],
+        "ranked_above": [["asst-1", "tool-1"]],
+        "excluded": []
+      }
+    },
+    {
+      "label": "multi_term_full_coverage_top1",
+      "note": "A message covering all three query terms outranks partial-coverage messages.",
+      "query": "sqlite migration idempotent",
+      "provider": "codex",
+      "project_key": "eval-project",
+      "limit": 10,
+      "expect": {
+        "empty": false,
+        "top1": "mt-all",
+        "relevant": ["mt-all"],
+        "top_set": {"k": 3, "ids": ["mt-all", "mt-two", "mt-one"]},
+        "excluded": []
+      }
+    },
+    {
+      "label": "multi_term_partial_coverage_order",
+      "note": "Both multi-term messages must sit above the single-term message; the two-term relevant pair fills the top two ranks.",
+      "query": "sqlite migration",
+      "provider": "codex",
+      "project_key": "eval-project",
+      "limit": 10,
+      "expect": {
+        "empty": false,
+        "relevant": ["mt-all", "mt-two"],
+        "top_set": {"k": 2, "ids": ["mt-all", "mt-two"]},
+        "ranked_above": [["mt-two", "mt-one"], ["mt-all", "mt-one"]],
+        "excluded": []
+      }
+    },
+    {
+      "label": "case_insensitive_prefix_match",
+      "note": "An upper-case query term matches lower-case body text (FTS is case-insensitive).",
+      "query": "XYLOPHONICS",
+      "provider": "codex",
+      "project_key": "eval-project",
+      "limit": 10,
+      "expect": {
+        "empty": false,
+        "top1": "mt-case",
+        "relevant": ["mt-case"],
+        "excluded": []
+      }
+    },
+    {
+      "label": "unique_rare_term_single_hit",
+      "note": "A term appearing in exactly one message returns exactly that message.",
+      "query": "idempotent",
+      "provider": "codex",
+      "project_key": "eval-project",
+      "limit": 10,
+      "expect": {
+        "empty": false,
+        "top1": "mt-all",
+        "relevant": ["mt-all"],
+        "result_ids_exact": ["mt-all"],
+        "excluded": []
+      }
+    },
+    {
+      "label": "project_scope_excludes_other_project",
+      "note": "The project_key filter must keep an identically-worded message from another project out of the results.",
+      "query": "waterglyph",
+      "provider": "codex",
+      "project_key": "eval-project",
+      "limit": 10,
+      "expect": {
+        "empty": false,
+        "top1": "mt-glyph",
+        "relevant": ["mt-glyph"],
+        "excluded": ["oth-1"]
+      }
+    },
+    {
+      "label": "negative_absent_term_empty",
+      "note": "A query whose only term appears nowhere returns no hits.",
+      "query": "quuxnonexistentzzz",
+      "provider": "codex",
+      "project_key": "eval-project",
+      "limit": 10,
+      "expect": {
+        "empty": true,
+        "relevant": [],
+        "excluded": []
+      }
+    },
+    {
+      "label": "negative_hyphen_literal_filter_empty",
+      "note": "The hyphenated term forces an exact-substring filter; with a matching plain term present, the hyphen literal still removes every row because no message contains it verbatim.",
+      "query": "sqlite foo-bar-absent",
+      "provider": "codex",
+      "project_key": "eval-project",
+      "limit": 10,
+      "expect": {
+        "empty": true,
+        "relevant": [],
+        "excluded": []
+      }
+    }
+  ]
+}

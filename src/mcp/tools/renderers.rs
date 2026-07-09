@@ -368,3 +368,221 @@ fn append_skill_item(md: &mut Md, skill: &Value) {
         md.line(&format!("  {}", details.join("; ")));
     }
 }
+
+pub(super) fn analytics_md(value: &Value) -> String {
+    let mut md = Md::new();
+    md.heading(2, "Usage Analytics");
+    md.field("scope", render::field_str(value, "scope"));
+    let project_root = render::field_str(value, "project_root");
+    if !project_root.is_empty() {
+        md.field("project", project_root);
+    }
+    md.field(
+        "window_days",
+        &render::field_i64(value, "window_days").to_string(),
+    );
+    md.field(
+        "event_count",
+        &render::field_i64(value, "event_count").to_string(),
+    );
+    if value
+        .get("event_count_truncated")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        md.field("event_count_truncated", "true");
+    }
+
+    if let Some(tools) = value.get("tools") {
+        md.blank().heading(3, "Tools");
+        append_analytics_tools(&mut md, tools);
+    }
+    if let Some(hints) = value.get("hints") {
+        md.blank().heading(3, "Hints");
+        append_analytics_hints(&mut md, hints);
+    }
+    if let Some(facts) = value.get("facts") {
+        md.blank().heading(3, "Facts");
+        append_analytics_facts(&mut md, facts);
+    }
+    if let Some(automation) = value.get("automation") {
+        md.blank().heading(3, "Automation");
+        append_analytics_automation(&mut md, automation);
+    }
+    md.render()
+}
+
+fn append_analytics_tools(md: &mut Md, tools: &Value) {
+    if !tools
+        .get("available")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        md.empty_note("No MCP tool calls recorded in this window.");
+        return;
+    }
+    md.field(
+        "distinct_tools_called",
+        &render::field_i64(tools, "distinct_tools_called").to_string(),
+    );
+    if let Some(tiers) = tools.get("tiers").and_then(Value::as_array) {
+        md.blank().heading(4, "By Tier");
+        for tier in tiers {
+            md.bullet(&format!(
+                "**{}** - {} calls, {} errors",
+                render::field_str(tier, "tier"),
+                render::field_i64(tier, "calls"),
+                render::field_i64(tier, "errors"),
+            ));
+        }
+    }
+    if let Some(top) = tools.get("top_tools").and_then(Value::as_array) {
+        md.blank().heading(4, "Top Tools");
+        if top.is_empty() {
+            md.empty_note("None.");
+        } else {
+            for tool in top {
+                md.bullet(&format!(
+                    "**{}** ({}) - {} calls, {} errors",
+                    render::field_str(tool, "tool_name"),
+                    render::field_str(tool, "tier"),
+                    render::field_i64(tool, "calls"),
+                    render::field_i64(tool, "errors"),
+                ));
+            }
+        }
+    }
+    if let Some(zero_call) = tools.get("zero_call_tools") {
+        let count = render::field_i64(zero_call, "count");
+        md.blank().heading(4, "Zero-Call Defined Tools");
+        md.field("count", &count.to_string());
+        if let Some(sample) = zero_call.get("sample").and_then(Value::as_array) {
+            let names: Vec<&str> = sample.iter().filter_map(Value::as_str).collect();
+            if !names.is_empty() {
+                md.line(&names.join(", "));
+            }
+            if zero_call
+                .get("sample_truncated")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+            {
+                md.line(&format!(
+                    "... {} more not shown",
+                    count as usize - names.len()
+                ));
+            }
+        }
+    }
+}
+
+fn append_analytics_hints(md: &mut Md, hints: &Value) {
+    if !hints
+        .get("available")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        md.empty_note("No hint telemetry available for this window.");
+        return;
+    }
+    let Some(by_category) = hints.get("by_category").and_then(Value::as_array) else {
+        md.empty_note("No hint categories reported.");
+        return;
+    };
+    let active: Vec<&Value> = by_category
+        .iter()
+        .filter(|row| {
+            ["emitted", "followed", "ignored", "suppressed"]
+                .iter()
+                .any(|key| render::field_i64(row, key) > 0)
+        })
+        .collect();
+    if active.is_empty() {
+        md.empty_note("No hints emitted in this window.");
+        return;
+    }
+    for row in active {
+        md.bullet(&format!(
+            "**{}** - emitted {}, followed {}, ignored {}, suppressed {}",
+            render::field_str(row, "category"),
+            render::field_i64(row, "emitted"),
+            render::field_i64(row, "followed"),
+            render::field_i64(row, "ignored"),
+            render::field_i64(row, "suppressed"),
+        ));
+    }
+}
+
+fn append_analytics_facts(md: &mut Md, facts: &Value) {
+    if !facts
+        .get("available")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        let reason = render::field_str(facts, "reason");
+        md.empty_note(if reason.is_empty() {
+            "Fact-store funnel unavailable."
+        } else {
+            reason
+        });
+        return;
+    }
+    md.field("facts", &render::field_i64(facts, "facts").to_string());
+    md.field(
+        "facts_retrieved",
+        &render::field_i64(facts, "facts_retrieved").to_string(),
+    );
+    md.field(
+        "retrievals",
+        &render::field_i64(facts, "retrievals").to_string(),
+    );
+    md.field(
+        "facts_rated",
+        &render::field_i64(facts, "facts_rated").to_string(),
+    );
+    md.field(
+        "helpful_feedback",
+        &render::field_i64(facts, "helpful_feedback").to_string(),
+    );
+    md.field(
+        "unhelpful_feedback",
+        &render::field_i64(facts, "unhelpful_feedback").to_string(),
+    );
+}
+
+fn append_analytics_automation(md: &mut Md, automation: &Value) {
+    if !automation
+        .get("available")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        let reason = render::field_str(automation, "reason");
+        md.empty_note(if reason.is_empty() {
+            "Automation run ledger unavailable."
+        } else {
+            reason
+        });
+        return;
+    }
+    md.field(
+        "records_in_window",
+        &render::field_i64(automation, "records_in_window").to_string(),
+    );
+    let Some(by_job) = automation.get("by_job").and_then(Value::as_array) else {
+        md.empty_note("No automation jobs recorded.");
+        return;
+    };
+    if by_job.is_empty() {
+        md.empty_note("No automation runs in this window.");
+        return;
+    }
+    for job in by_job {
+        md.bullet(&format!(
+            "**{}** - succeeded {}, failed {}, skipped {}, other {}",
+            render::field_str(job, "job"),
+            render::field_i64(job, "succeeded"),
+            render::field_i64(job, "failed"),
+            render::field_i64(job, "skipped"),
+            render::field_i64(job, "other"),
+        ));
+    }
+}

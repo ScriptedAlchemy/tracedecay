@@ -30,6 +30,7 @@ const REGISTERED_PROJECT_SELECTOR_ONLY_TOOL_NAMES: &[&str] = &[
     "tracedecay_fact_store",
     "tracedecay_memory_status",
     "tracedecay_message_search",
+    "tracedecay_analytics",
 ];
 
 pub(super) fn tool_accepts_registered_project_selector(tool_name: &str) -> bool {

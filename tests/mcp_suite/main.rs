@@ -11,6 +11,8 @@
 #[path = "../common/mod.rs"]
 mod common;
 
+mod analytics_test;
+mod context_relevance_eval_test;
 mod fixture;
 mod git_correlation_test;
 mod mcp_cli_parity_test;

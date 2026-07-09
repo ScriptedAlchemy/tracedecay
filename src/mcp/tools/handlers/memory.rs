@@ -27,9 +27,9 @@ use super::support::{
 const DEFAULT_FACT_LIMIT: usize = 20;
 const MAX_FACT_LIMIT: usize = 200;
 
-struct TargetMemoryDb {
-    db: Database,
-    project_root: PathBuf,
+pub(super) struct TargetMemoryDb {
+    pub(super) db: Database,
+    pub(super) project_root: PathBuf,
 }
 
 fn text_tool_result(text: &str) -> ToolResult {
@@ -51,7 +51,7 @@ fn rendered_fact_store(project_root: Option<&Path>, args: &Value, value: &Value)
     text_tool_result(&text)
 }
 
-async fn open_target_memory_db(
+pub(super) async fn open_target_memory_db(
     cg: &TraceDecay,
     args: &Value,
     global_db: Option<&GlobalDb>,
