@@ -1139,79 +1139,184 @@ pub(super) async fn handle_similar(cg: &TraceDecay, args: Value) -> Result<ToolR
     ))
 }
 
-/// Handles `tracedecay_rename_preview` tool calls.
+/// Reads a file's lines (0-based) for snippet extraction, memoizing by path so
+/// a file with many references is read once. `None` when the file cannot be
+/// read (e.g. deleted since indexing).
+fn cached_file_lines<'a>(
+    cg: &TraceDecay,
+    cache: &'a mut HashMap<String, Option<Vec<String>>>,
+    file_path: &str,
+) -> Option<&'a [String]> {
+    if !cache.contains_key(file_path) {
+        let abs = cg.project_root().join(file_path);
+        let lines = std::fs::read_to_string(&abs)
+            .ok()
+            .map(|source| source.lines().map(str::to_string).collect::<Vec<_>>());
+        cache.insert(file_path.to_string(), lines);
+    }
+    cache
+        .get(file_path)
+        .and_then(Option::as_ref)
+        .map(Vec::as_slice)
+}
+
+/// Trims and length-caps a source line for use as a preview snippet.
+fn snippet_text(line: &str) -> String {
+    utf8_prefix_at_or_before(line.trim(), 160).to_string()
+}
+
+/// Picks a current-text snippet near `approx_line` (0-based; edge line bases are
+/// approximate, so neighbors are tried) that actually contains `name`, falling
+/// back to the line itself. `None` when no line is available.
+fn reference_line_snippet(
+    lines: &[String],
+    approx_line: Option<u32>,
+    name: &str,
+) -> Option<String> {
+    let approx = approx_line? as usize;
+    let candidates = [approx, approx.saturating_sub(1), approx + 1];
+    let idx = candidates
+        .into_iter()
+        .find(|&i| lines.get(i).is_some_and(|line| line.contains(name)))
+        .unwrap_or(approx);
+    lines.get(idx).map(|line| snippet_text(line))
+}
+
+/// True for bytes that can appear inside an identifier. Non-ASCII bytes count so
+/// multi-byte unicode identifiers are not falsely split at a boundary.
+fn is_ident_byte(b: u8) -> bool {
+    b == b'_' || b.is_ascii_alphanumeric() || b >= 0x80
+}
+
+/// Counts occurrences of `name` in `haystack` bounded as a whole identifier
+/// (neither neighbouring byte is an identifier byte). Used to estimate the
+/// literal textual matches a rename would touch, independent of the graph.
+fn count_identifier_occurrences(haystack: &str, name: &str) -> usize {
+    if name.is_empty() {
+        return 0;
+    }
+    let bytes = haystack.as_bytes();
+    let name_len = name.len();
+    let mut count = 0;
+    let mut start = 0;
+    while let Some(pos) = haystack[start..].find(name) {
+        let abs = start + pos;
+        let before_ok = abs == 0 || !is_ident_byte(bytes[abs - 1]);
+        let after_idx = abs + name_len;
+        let after_ok = after_idx >= bytes.len() || !is_ident_byte(bytes[after_idx]);
+        if before_ok && after_ok {
+            count += 1;
+        }
+        start = abs + name_len;
+    }
+    count
+}
+
+/// Handles `tracedecay_rename_preview` tool calls. READ-ONLY: reports what a
+/// rename of the given symbol WOULD touch — the declaration site and every graph
+/// reference site (incoming edges; outgoing edges reference other symbols and so
+/// are excluded), each with a current-text snippet, plus a per-file count of
+/// literal name occurrences that are NOT backed by a graph edge ("text-only
+/// matches — review manually"). Nothing is rewritten.
 pub(super) async fn handle_rename_preview(cg: &TraceDecay, args: Value) -> Result<ToolResult> {
     let node_id = require_node_id(&args)?;
+    let new_name = args.get("new_name").and_then(Value::as_str);
 
-    // Get the node itself
-    let node = cg.get_node(node_id).await?;
-    let node_info = match &node {
-        Some(n) => json!({
-            "id": n.id,
-            "name": n.name,
-            "kind": n.kind.as_str(),
-            "file": n.file_path,
-            "line": user_line(n.start_line),
-        }),
-        None => {
-            return Ok(text_tool_result(
-                &format!("Node not found: {node_id}"),
-                vec![],
-            ));
-        }
+    let Some(node) = cg.get_node(node_id).await? else {
+        return Ok(text_tool_result(
+            &format!("Node not found: {node_id}"),
+            vec![],
+        ));
     };
+    let symbol_name = node.name.clone();
 
-    // Get all edges referencing this node
+    let mut lines_cache: HashMap<String, Option<Vec<String>>> = HashMap::new();
+    // Graph occurrences per file (declaration + reference sites) — subtracted
+    // from the literal textual count to isolate the text-only matches.
+    let mut graph_counts: HashMap<String, usize> = HashMap::new();
+    let mut touched: Vec<String> = vec![node.file_path.clone()];
+
+    *graph_counts.entry(node.file_path.clone()).or_default() += 1;
+    let decl_snippet = cached_file_lines(cg, &mut lines_cache, &node.file_path).and_then(|lines| {
+        lines
+            .get(node.start_line as usize)
+            .map(|line| snippet_text(line))
+    });
+    let declaration = json!({
+        "id": node.id,
+        "name": node.name,
+        "kind": node.kind.as_str(),
+        "file": node.file_path,
+        "line": user_line(node.start_line),
+        "snippet": decl_snippet,
+    });
+
+    // Reference sites: incoming edges are the callers/users that name this
+    // symbol. NOTE: call-edge coverage improves as the resolver improves; the
+    // text-only counts below catch what the graph currently misses.
     let incoming = cg.get_incoming_edges(node_id).await?;
-    let outgoing = cg.get_outgoing_edges(node_id).await?;
-
     let mut references: Vec<Value> = Vec::new();
-    let mut touched: Vec<String> = Vec::new();
-
-    if let Some(ref n) = node {
-        touched.push(n.file_path.clone());
-    }
-
-    // Incoming edges: other nodes that reference this node
     for edge in &incoming {
         if let Some(source_node) = cg.get_node(&edge.source).await? {
             touched.push(source_node.file_path.clone());
+            *graph_counts
+                .entry(source_node.file_path.clone())
+                .or_default() += 1;
+            let snippet = cached_file_lines(cg, &mut lines_cache, &source_node.file_path)
+                .and_then(|lines| reference_line_snippet(lines, edge.line, &symbol_name));
             references.push(json!({
-                "direction": "incoming",
-                "node_id": source_node.id,
-                "name": source_node.name,
-                "kind": source_node.kind.as_str(),
+                "from_node_id": source_node.id,
+                "from_name": source_node.name,
+                "from_kind": source_node.kind.as_str(),
+                "edge_kind": edge.kind.as_str(),
                 "file": source_node.file_path,
-                "line": user_line(source_node.start_line),
-                "edge_kind": edge.kind.as_str(),
-                "edge_line": edge.line,
-            }));
-        }
-    }
-
-    // Outgoing edges: nodes this node references
-    for edge in &outgoing {
-        if let Some(target_node) = cg.get_node(&edge.target).await? {
-            touched.push(target_node.file_path.clone());
-            references.push(json!({
-                "direction": "outgoing",
-                "node_id": target_node.id,
-                "name": target_node.name,
-                "kind": target_node.kind.as_str(),
-                "file": target_node.file_path,
-                "line": user_line(target_node.start_line),
-                "edge_kind": edge.kind.as_str(),
-                "edge_line": edge.line,
+                "line": edge.line,
+                "snippet": snippet,
             }));
         }
     }
 
     let touched_files = unique_file_paths(touched.iter().map(std::string::String::as_str));
 
+    // Text-only matches per touched file: literal identifier occurrences of the
+    // name minus the graph occurrences already accounted for. These are the
+    // comments/strings/dynamic-dispatch/unresolved sites a graph-only rename
+    // would miss — the scan is bounded to files that already appear in the
+    // preview, so occurrences in wholly unrelated files are not counted.
+    let mut text_only_matches: Vec<Value> = Vec::new();
+    for file in &touched_files {
+        let total = cached_file_lines(cg, &mut lines_cache, file)
+            .map(|lines| {
+                lines
+                    .iter()
+                    .map(|line| count_identifier_occurrences(line, &symbol_name))
+                    .sum::<usize>()
+            })
+            .unwrap_or(0);
+        let graph = graph_counts.get(file).copied().unwrap_or(0);
+        let text_only = total.saturating_sub(graph);
+        if text_only > 0 {
+            text_only_matches.push(json!({
+                "file": file,
+                "text_only_count": text_only,
+                "note": "text-only matches — review manually",
+            }));
+        }
+    }
+
     let output = json!({
-        "node": node_info,
+        "read_only": true,
+        "note": "Preview only — no files are edited. 'references' are graph reference \
+                 sites (the declaration is reported separately in 'node'); \
+                 'text_only_matches' are literal name occurrences NOT backed by a graph \
+                 edge (comments, strings, dynamic dispatch, unresolved refs) and must be \
+                 reviewed by hand. Graph call-edge coverage improves as the resolver does.",
+        "symbol": symbol_name,
+        "new_name": new_name,
+        "node": declaration,
         "reference_count": references.len(),
         "references": references,
+        "text_only_matches": text_only_matches,
     });
 
     Ok(rendered_tool_result(

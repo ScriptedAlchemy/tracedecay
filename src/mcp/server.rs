@@ -29,7 +29,7 @@ use crate::tracedecay::TraceDecay;
 
 use super::hook_events::{self, HookAgent, HookEventPlan};
 use super::tools::{
-    ToolCallRegistryOptions, explore_call_budget, get_tool_definitions_with_budget,
+    ToolCallRegistryOptions, ToolResult, explore_call_budget, get_tool_definitions_with_budget,
     handle_tool_call_with_registry_and_implicit_project,
 };
 use super::transport::{ErrorCode, JsonRpcRequest, JsonRpcResponse};
@@ -515,7 +515,24 @@ fn format_index_age_phrase(age_secs: i64) -> String {
     }
 }
 
-fn tool_result_has_semantic_error(value: &Value) -> bool {
+/// Whether an MCP tool result should be classified as a semantic failure for
+/// analytics/`isError` purposes.
+///
+/// Handlers that build results structurally (e.g. edit tools, whose result
+/// struct carries a `success: bool`) call
+/// [`crate::mcp::tools::ToolResult::with_semantic_error`] to record the
+/// outcome directly — that marker is authoritative and wins over the
+/// rendered text. Handlers that have not been migrated to set the marker
+/// leave it `None`, and this falls back to the pre-existing text-based
+/// heuristic (`value_has_semantic_error`) that sniffs the rendered response
+/// text for JSON failure shapes or known plain-text failure prefixes.
+fn tool_result_has_semantic_error(result: &ToolResult) -> bool {
+    result
+        .semantic_error()
+        .unwrap_or_else(|| value_has_semantic_error(&result.value))
+}
+
+fn value_has_semantic_error(value: &Value) -> bool {
     value
         .get("content")
         .and_then(Value::as_array)
@@ -551,11 +568,34 @@ fn plain_text_tool_failure(text: &str) -> bool {
     text.starts_with("git error:") || text.starts_with("git diff failed:")
 }
 
-fn mark_semantic_tool_error(value: &mut Value) {
-    if !tool_result_has_semantic_error(value) {
+/// Reason to record for a semantically-failed tool result, for the
+/// `failure_reason` analytics field. Prefers the handler-supplied structural
+/// [`ToolResult::failure_message`] (e.g. an edit result's `message`, such as
+/// "`old_str` not found"); falls back to the rendered response's first text
+/// block for handlers that only signal failure via `value_has_semantic_error`
+/// text heuristics. Callers must only invoke this once the result is already
+/// known to be a semantic failure — it does not itself re-check that.
+fn semantic_failure_reason(result: &ToolResult) -> Option<String> {
+    if let Some(message) = result.failure_message() {
+        return Some(message.to_string());
+    }
+    result
+        .value
+        .get("content")
+        .and_then(Value::as_array)
+        .and_then(|content| {
+            content
+                .iter()
+                .find_map(|item| item.get("text").and_then(Value::as_str))
+        })
+        .map(|text| text.trim_start().to_string())
+}
+
+fn mark_semantic_tool_error(result: &mut ToolResult) {
+    if !tool_result_has_semantic_error(result) {
         return;
     }
-    if let Some(obj) = value.as_object_mut() {
+    if let Some(obj) = result.value.as_object_mut() {
         obj.insert("isError".to_string(), json!(true));
     }
 }
@@ -2615,7 +2655,7 @@ impl McpServer {
                         )}));
                     }
                 }
-                let analytics_outcome = if tool_result_has_semantic_error(&result.value) {
+                let analytics_outcome = if tool_result_has_semantic_error(&result) {
                     "error"
                 } else {
                     "success"
@@ -2631,6 +2671,9 @@ impl McpServer {
                     let tool_name_owned = tool_name.to_string();
                     let ts = crate::tracedecay::current_timestamp();
                     let client_name = self.client_name();
+                    let failure_reason = (analytics_outcome == "error")
+                        .then(|| semantic_failure_reason(&result))
+                        .flatten();
                     let analytics_event = mcp_tool_analytics_event(McpToolAnalyticsEvent {
                         project_root: cg.project_root(),
                         session_id: analytics_session_id.clone(),
@@ -2645,6 +2688,7 @@ impl McpServer {
                         arguments: &analytics_arguments,
                         internal_analytics: result.internal_analytics(),
                         client_name: client_name.as_deref(),
+                        failure_reason: failure_reason.as_deref(),
                     });
                     self.spawn_observed_ledger_write(async move {
                         gdb.record_savings(
@@ -2819,7 +2863,7 @@ impl McpServer {
                     }
                 }
 
-                mark_semantic_tool_error(&mut result.value);
+                mark_semantic_tool_error(&mut result);
                 JsonRpcResponse::success(id, result.value)
             }
             Err(e) => {
@@ -2830,12 +2874,14 @@ impl McpServer {
                     &request_id,
                     &analytics_arguments,
                     handler_elapsed_us,
+                    &e,
                 );
                 tool_error_response(id, tool_name, &e)
             }
         }
     }
 
+    #[allow(clippy::too_many_arguments)] // internal fan-in of independent request/analytics fields
     fn record_mcp_tool_error_analytics(
         &self,
         project_root: &std::path::Path,
@@ -2844,11 +2890,17 @@ impl McpServer {
         request_id: &Value,
         arguments: &Value,
         duration_us: Option<u64>,
+        error: &TraceDecayError,
     ) {
         let Some(gdb) = self.global_db.clone() else {
             return;
         };
         let client_name = self.client_name();
+        // `TraceDecayError`'s `Display` (via `thiserror`) already carries a
+        // variant-classified, human-readable message (e.g. "config error:
+        // missing required parameter: handle"); bounded truncation happens
+        // in `mcp_tool_analytics_event`.
+        let failure_reason = error.to_string();
         let event = mcp_tool_analytics_event(McpToolAnalyticsEvent {
             project_root,
             session_id,
@@ -2863,6 +2915,7 @@ impl McpServer {
             arguments,
             internal_analytics: None,
             client_name: client_name.as_deref(),
+            failure_reason: Some(&failure_reason),
         });
         self.spawn_observed_ledger_write(async move {
             if let Err(e) = gdb.append_analytics_event(&event).await {

@@ -57,6 +57,19 @@ pub struct ToolResult {
     /// Internal analytics metadata for the server runtime. This must never be
     /// serialized into the tool response payload.
     internal_analytics: Option<Value>,
+    /// Structural signal that the handler itself determined this call failed
+    /// semantically (e.g. an edit whose `success` field is `false`), set by
+    /// the handler rather than inferred later from rendered response text.
+    /// `None` means the handler did not classify outcome structurally, so
+    /// callers should fall back to text-based heuristics; `Some(true)`/
+    /// `Some(false)` are authoritative and skip those heuristics.
+    semantic_error: Option<bool>,
+    /// Handler-provided human-readable reason for a structural semantic
+    /// failure (e.g. an edit result's `message`, such as "`old_str` not
+    /// found"). Only meaningful when `semantic_error == Some(true)`; used to
+    /// populate analytics `failure_reason` without re-deriving it from
+    /// rendered response text.
+    failure_message: Option<String>,
 }
 
 impl ToolResult {
@@ -65,6 +78,8 @@ impl ToolResult {
             value,
             touched_files,
             internal_analytics: None,
+            semantic_error: None,
+            failure_message: None,
         }
     }
 
@@ -76,6 +91,34 @@ impl ToolResult {
 
     pub fn internal_analytics(&self) -> Option<&Value> {
         self.internal_analytics.as_ref()
+    }
+
+    /// Record a handler-determined semantic outcome for this call. Pass
+    /// `true` when the handler knows the operation failed (e.g. an edit's
+    /// `success: false`), `false` when the handler knows it succeeded.
+    #[must_use]
+    pub fn with_semantic_error(mut self, is_error: bool) -> Self {
+        self.semantic_error = Some(is_error);
+        self
+    }
+
+    /// The handler-determined semantic outcome, if the handler set one.
+    pub fn semantic_error(&self) -> Option<bool> {
+        self.semantic_error
+    }
+
+    /// Attach a human-readable reason for a structural semantic failure
+    /// (e.g. an edit result's `message`). No-op unless paired with
+    /// `with_semantic_error(true)`.
+    #[must_use]
+    pub fn with_failure_message(mut self, message: impl Into<String>) -> Self {
+        self.failure_message = Some(message.into());
+        self
+    }
+
+    /// The handler-provided failure reason, if one was set.
+    pub fn failure_message(&self) -> Option<&str> {
+        self.failure_message.as_deref()
     }
 }
 
