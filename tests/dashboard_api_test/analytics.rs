@@ -213,8 +213,8 @@ async fn seed_durable_analytics(db_path: &Path, project_root: &Path) {
         AnalyticsEventInsert {
             hint_category: Some("search".to_string()),
             hint_id: Some("hint-search".to_string()),
-            outcome: Some("shown".to_string()),
-            ..analytics_event(&project_id, 1_760_000_100, "hint")
+            outcome: Some("observed".to_string()),
+            ..analytics_event(&project_id, 1_760_000_100, "hint_emitted")
         },
         AnalyticsEventInsert {
             tool_name: Some("mcp__tracedecay__tracedecay_context".to_string()),
@@ -299,8 +299,8 @@ async fn seed_fallback_analytics(db_path: &Path, project_root: &Path) {
         AnalyticsEventInsert {
             hint_category: Some("search".to_string()),
             hint_id: Some("hint-search".to_string()),
-            outcome: Some("shown".to_string()),
-            ..analytics_event(&project_id, 1_760_000_200, "hint")
+            outcome: Some("observed".to_string()),
+            ..analytics_event(&project_id, 1_760_000_200, "hint_emitted")
         },
         AnalyticsEventInsert {
             skill_name: Some("superpowers:test-driven-development".to_string()),
