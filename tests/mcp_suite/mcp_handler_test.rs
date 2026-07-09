@@ -6055,13 +6055,15 @@ pub fn unrelated(x: i32) -> i32 {
         let mut rows = cg
             .db()
             .conn()
-            .query(
-                "SELECT id FROM nodes WHERE name = 'compute_a'",
-                (),
-            )
+            .query("SELECT id FROM nodes WHERE name = 'compute_a'", ())
             .await
             .unwrap();
-        rows.next().await.unwrap().unwrap().get::<String>(0).unwrap()
+        rows.next()
+            .await
+            .unwrap()
+            .unwrap()
+            .get::<String>(0)
+            .unwrap()
     };
 
     // The reader serves the planted pair while both source hashes are fresh.

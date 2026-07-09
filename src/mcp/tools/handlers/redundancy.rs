@@ -26,7 +26,7 @@ use serde_json::{Value, json};
 use crate::errors::Result;
 use crate::redundancy::{
     Fingerprint, RedundantPair, compute_fingerprint, connected_node_groups, find_node_at_lines,
-    find_redundant_pairs, parse_file,
+    find_redundant_pairs, parse_file, round4,
 };
 use crate::tracedecay::TraceDecay;
 use crate::types::{Node, NodeKind};
@@ -72,9 +72,14 @@ pub(super) async fn handle_redundancy(
     // effort: a write failure never fails the query.
     persist_redundancy_pairs(cg, &pairs).await;
 
-    let output = redundancy_output(&options, total_candidates, scanned, &pairs);
+    // Connected components are the shared source of truth for the JSON `groups`
+    // array and the markdown Groups section; compute them once and thread the
+    // result into both so the two views can never diverge and the O(pairs²)
+    // grouping runs a single time per call.
+    let groups = connected_node_groups(&pairs);
+    let output = redundancy_output(&options, total_candidates, scanned, &pairs, &groups);
     let text = render::finalize(Some(cg.project_root()), &args, &output, || {
-        redundancy_md(&options, total_candidates, scanned, &pairs)
+        redundancy_md(&options, total_candidates, scanned, &pairs, &groups)
     });
     Ok(ToolResult::new(
         json!({
@@ -125,6 +130,7 @@ fn redundancy_output(
     total_candidates: usize,
     scanned: usize,
     pairs: &[RedundantPair<'_>],
+    groups: &[Vec<&Node>],
 ) -> Value {
     let rendered_pairs: Vec<Value> = pairs.iter().map(redundant_pair_json).collect();
     json!({
@@ -133,7 +139,7 @@ fn redundancy_output(
         "skipped_for_size": total_candidates.saturating_sub(scanned),
         "pair_count": rendered_pairs.len(),
         "pairs": rendered_pairs,
-        "groups": duplicate_groups(pairs),
+        "groups": duplicate_groups(groups),
         "groups_scope": "connected components over the returned pairs only; raise max_pairs to see full clusters",
         "ranked_by": "ranking_score desc (composite similarity plus body-vector signal, generic helpers downranked)",
         "scope": options.path_prefix.unwrap_or("(whole project)"),
@@ -155,6 +161,7 @@ fn redundancy_md(
     total_candidates: usize,
     scanned: usize,
     pairs: &[RedundantPair<'_>],
+    groups: &[Vec<&Node>],
 ) -> String {
     let mut md = Md::new();
     md.heading(2, "Redundancy");
@@ -190,11 +197,10 @@ fn redundancy_md(
     }
 
     md.blank().heading(3, "Groups");
-    let groups = connected_node_groups(pairs);
     if groups.is_empty() {
         md.empty_note("No duplicate groups.");
     } else {
-        for group in &groups {
+        for group in groups {
             append_group_md(&mut md, group);
         }
     }
@@ -332,17 +338,7 @@ async fn ensure_fingerprints(
             let expected_hash = quick_body_hash(body);
             match cg.db().get_fingerprint(&node.id).await? {
                 Some(stored) if stored.source_hash == expected_hash => {
-                    cached.insert(
-                        node.id.as_str(),
-                        Fingerprint {
-                            ast_hash: stored.ast_hash,
-                            cfg_hash: stored.cfg_hash,
-                            call_seq_hash: stored.call_seq_hash,
-                            shingles: stored.shingles,
-                            body_tokens: stored.body_tokens as usize,
-                            source_hash: stored.source_hash,
-                        },
-                    );
+                    cached.insert(node.id.as_str(), stored.into());
                 }
                 _ => {
                     needs_parse = true;
@@ -543,10 +539,6 @@ fn redundant_pair_json(pair: &RedundantPair<'_>) -> Value {
     })
 }
 
-fn round4(value: f64) -> f64 {
-    (value * 10000.0).round() / 10000.0
-}
-
 fn node_json(node: &Node) -> Value {
     json!({
         "file": node.file_path,
@@ -556,13 +548,13 @@ fn node_json(node: &Node) -> Value {
     })
 }
 
-fn duplicate_groups<'a>(pairs: &'a [RedundantPair<'a>]) -> Vec<Value> {
-    connected_node_groups(pairs)
-        .into_iter()
+fn duplicate_groups(groups: &[Vec<&Node>]) -> Vec<Value> {
+    groups
+        .iter()
         .map(|nodes| {
             json!({
                 "size": nodes.len(),
-                "nodes": nodes.into_iter().map(node_json).collect::<Vec<_>>(),
+                "nodes": nodes.iter().map(|n| node_json(n)).collect::<Vec<_>>(),
             })
         })
         .collect()
@@ -572,7 +564,9 @@ fn duplicate_groups<'a>(pairs: &'a [RedundantPair<'a>]) -> Vec<Value> {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::{RedundancyOptions, body_slice, is_generated_path, redundancy_md};
-    use crate::redundancy::{Fingerprint, RedundancyMatchScore, RedundantPair};
+    use crate::redundancy::{
+        Fingerprint, RedundancyMatchScore, RedundantPair, connected_node_groups,
+    };
     use crate::types::{Node, NodeKind, Visibility};
 
     #[test]
@@ -692,7 +686,8 @@ mod tests {
             include_generated: false,
         };
 
-        let md = redundancy_md(&options, 4, 4, &pairs);
+        let groups = connected_node_groups(&pairs);
+        let md = redundancy_md(&options, 4, 4, &pairs, &groups);
 
         // Ranked pair line carries the ranking_score.
         assert!(md.contains("ranking_score 0.95"), "{md}");

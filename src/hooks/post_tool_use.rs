@@ -141,7 +141,11 @@ pub(super) fn tool_input_command_str(parsed: &Value) -> Option<String> {
 pub(super) fn tool_input_edit_text(parsed: &Value) -> Option<String> {
     let ti = parsed.get("tool_input")?;
     for key in ["content", "new_string", "new_source"] {
-        if let Some(text) = ti.get(key).and_then(Value::as_str).filter(|s| !s.is_empty()) {
+        if let Some(text) = ti
+            .get(key)
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+        {
             return Some(text.to_string());
         }
     }

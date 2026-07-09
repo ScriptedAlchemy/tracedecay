@@ -446,6 +446,12 @@ pub fn vector_cosine_similarity(a: &[u32], b: &[u32]) -> f64 {
 
 /// Blend the four signals into a single \[0,1\] similarity score.
 pub fn composite_similarity(a: &Fingerprint, b: &Fingerprint) -> f64 {
+    composite_similarity_with_jaccard(a, b, jaccard_similarity(&a.shingles, &b.shingles))
+}
+
+/// [`composite_similarity`] with the shingle Jaccard already computed, so a
+/// caller scoring a pair pays the merge cost once.
+fn composite_similarity_with_jaccard(a: &Fingerprint, b: &Fingerprint, jaccard: f64) -> f64 {
     let ast = if a.ast_hash == b.ast_hash { 1.0 } else { 0.0 };
     let cfg = if a.cfg_hash == b.cfg_hash { 1.0 } else { 0.0 };
     let call = if a.call_seq_hash == b.call_seq_hash {
@@ -453,20 +459,25 @@ pub fn composite_similarity(a: &Fingerprint, b: &Fingerprint) -> f64 {
     } else {
         0.0
     };
-    let shingle = jaccard_similarity(&a.shingles, &b.shingles);
-    W_AST * ast + W_CFG * cfg + W_CALL_SEQ * call + W_SHINGLE * shingle
+    W_AST * ast + W_CFG * cfg + W_CALL_SEQ * call + W_SHINGLE * jaccard
 }
 
 /// Determine the "kind" of overlap two functions share. Returned alongside
 /// the composite score so callers can filter (e.g. drop `naming` matches).
 pub fn overlap_kind(a: &Fingerprint, b: &Fingerprint) -> &'static str {
+    overlap_kind_with_jaccard(a, b, jaccard_similarity(&a.shingles, &b.shingles))
+}
+
+/// [`overlap_kind`] with the shingle Jaccard already computed, so a caller
+/// scoring a pair pays the merge cost once.
+fn overlap_kind_with_jaccard(a: &Fingerprint, b: &Fingerprint, jaccard: f64) -> &'static str {
     if a.ast_hash == b.ast_hash {
         "ast_isomorphic"
     } else if a.cfg_hash == b.cfg_hash {
         "control_flow"
     } else if a.call_seq_hash == b.call_seq_hash {
         "algorithmic"
-    } else if jaccard_similarity(&a.shingles, &b.shingles) >= 0.5 {
+    } else if jaccard >= 0.5 {
         "token_overlap"
     } else {
         "naming"
@@ -519,7 +530,8 @@ pub fn redundancy_match_score(
         return None;
     }
 
-    let similarity = composite_similarity(a, b);
+    let shingle_jaccard = jaccard_similarity(&a.shingles, &b.shingles);
+    let similarity = composite_similarity_with_jaccard(a, b, shingle_jaccard);
     let vector_cosine = vector_cosine_similarity(&a.shingles, &b.shingles);
     if similarity < threshold
         && vector_cosine < threshold
@@ -528,7 +540,7 @@ pub fn redundancy_match_score(
         return None;
     }
 
-    let mut overlap_kind = overlap_kind(a, b);
+    let mut overlap_kind = overlap_kind_with_jaccard(a, b, shingle_jaccard);
     if overlap_kind == "naming"
         && vector_cosine >= threshold
         && vector_cosine >= LIKELY_SEVERITY_FLOOR
@@ -552,7 +564,7 @@ pub fn redundancy_match_score(
         similarity,
         ranking_score,
         vector_cosine,
-        shingle_jaccard: jaccard_similarity(&a.shingles, &b.shingles),
+        shingle_jaccard,
         overlap_kind,
         severity: severity_bucket(similarity.max(vector_cosine), overlap_kind),
         generic_helper_downranked,
@@ -630,6 +642,11 @@ fn short_hex(bytes: &[u8]) -> String {
         let _ = write!(s, "{b:02x}");
     }
     s
+}
+
+/// Round a score to 4 decimal places for stable JSON/markdown output.
+pub fn round4(value: f64) -> f64 {
+    (value * 10000.0).round() / 10000.0
 }
 
 fn short_sha256(s: &str) -> String {
@@ -811,10 +828,7 @@ pub fn connected_node_groups<'a>(
     groups
 }
 
-fn push_unique_node<'a>(
-    nodes: &mut Vec<&'a crate::types::Node>,
-    node: &'a crate::types::Node,
-) {
+fn push_unique_node<'a>(nodes: &mut Vec<&'a crate::types::Node>, node: &'a crate::types::Node) {
     if nodes.iter().any(|existing| existing.id == node.id) {
         return;
     }
@@ -1054,8 +1068,7 @@ mod tests {
 
         // Filtered without include_naming; inert for different or generic names.
         assert!(
-            redundancy_match_score("clean_comment", &a, "clean_comment", &b, 0.55, false)
-                .is_none()
+            redundancy_match_score("clean_comment", &a, "clean_comment", &b, 0.55, false).is_none()
         );
         assert!(
             redundancy_match_score("clean_comment", &a, "strip_comment", &b, 0.55, true).is_none()
@@ -1198,7 +1211,10 @@ mod tests {
                 .map(|item| item.as_u64().expect("shingle") as u32)
                 .collect(),
             body_tokens: value["body_tokens"].as_u64().expect("body_tokens") as usize,
-            source_hash: value["source_hash"].as_str().unwrap_or("fixture").to_string(),
+            source_hash: value["source_hash"]
+                .as_str()
+                .unwrap_or("fixture")
+                .to_string(),
         }
     }
 

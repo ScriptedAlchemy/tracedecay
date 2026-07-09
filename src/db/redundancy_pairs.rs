@@ -77,36 +77,53 @@ impl Database {
         &self,
         pairs: &[RedundancyPairWrite<'_>],
     ) -> Result<usize> {
+        if pairs.is_empty() {
+            return Ok(0);
+        }
+
+        let tx = self
+            .conn()
+            .transaction()
+            .await
+            .map_err(|e| TraceDecayError::Database {
+                message: format!("failed to begin transaction: {e}"),
+                operation: "upsert_redundancy_pairs".to_string(),
+            })?;
+
         let mut written = 0usize;
         for pair in pairs {
-            self.conn()
-                .execute(
-                    "INSERT OR REPLACE INTO redundancy_pairs
+            tx.execute(
+                "INSERT OR REPLACE INTO redundancy_pairs
                      (node_a_id, node_b_id, source_hash_a, source_hash_b,
                       ranking_score, similarity, vector_cosine, overlap_kind,
                       severity, generic_helper_downranked, computed_at)
                      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
-                    params![
-                        pair.node_a_id,
-                        pair.node_b_id,
-                        pair.source_hash_a,
-                        pair.source_hash_b,
-                        pair.ranking_score,
-                        pair.similarity,
-                        pair.vector_cosine,
-                        pair.overlap_kind,
-                        pair.severity,
-                        i64::from(pair.generic_helper_downranked),
-                        pair.computed_at,
-                    ],
-                )
-                .await
-                .map_err(|e| TraceDecayError::Database {
-                    message: format!("failed to upsert redundancy pair: {e}"),
-                    operation: "upsert_redundancy_pairs".to_string(),
-                })?;
+                params![
+                    pair.node_a_id,
+                    pair.node_b_id,
+                    pair.source_hash_a,
+                    pair.source_hash_b,
+                    pair.ranking_score,
+                    pair.similarity,
+                    pair.vector_cosine,
+                    pair.overlap_kind,
+                    pair.severity,
+                    i64::from(pair.generic_helper_downranked),
+                    pair.computed_at,
+                ],
+            )
+            .await
+            .map_err(|e| TraceDecayError::Database {
+                message: format!("failed to upsert redundancy pair: {e}"),
+                operation: "upsert_redundancy_pairs".to_string(),
+            })?;
             written += 1;
         }
+
+        tx.commit().await.map_err(|e| TraceDecayError::Database {
+            message: format!("failed to commit transaction: {e}"),
+            operation: "upsert_redundancy_pairs".to_string(),
+        })?;
         Ok(written)
     }
 
@@ -165,7 +182,9 @@ fn row_to_pair(row: &libsql::Row) -> Result<RedundancyPairRow> {
         message: format!("failed to read redundancy pair {field}: {e}"),
         operation: "row_to_pair".to_string(),
     };
-    let downranked: i64 = row.get(7).map_err(|e| get_err("generic_helper_downranked", e))?;
+    let downranked: i64 = row
+        .get(7)
+        .map_err(|e| get_err("generic_helper_downranked", e))?;
     Ok(RedundancyPairRow {
         node_a_id: row.get(0).map_err(|e| get_err("node_a_id", e))?,
         node_b_id: row.get(1).map_err(|e| get_err("node_b_id", e))?,

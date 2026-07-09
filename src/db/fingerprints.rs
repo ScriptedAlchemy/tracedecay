@@ -20,6 +20,21 @@ pub struct StoredFingerprint {
     pub source_hash: String,
 }
 
+impl From<StoredFingerprint> for crate::redundancy::Fingerprint {
+    /// Rehydrate a stored row into the in-memory scoring shape, dropping the
+    /// `node_id` (which the fingerprint itself does not carry).
+    fn from(stored: StoredFingerprint) -> Self {
+        Self {
+            ast_hash: stored.ast_hash,
+            cfg_hash: stored.cfg_hash,
+            call_seq_hash: stored.call_seq_hash,
+            shingles: stored.shingles,
+            body_tokens: stored.body_tokens as usize,
+            source_hash: stored.source_hash,
+        }
+    }
+}
+
 impl Database {
     /// Upsert a fingerprint for a node. Replaces any existing row.
     pub async fn upsert_fingerprint(
