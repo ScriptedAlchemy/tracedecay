@@ -455,9 +455,7 @@ fn merge_optional_field<T>(current: &mut Option<T>, patch: Option<T>) {
 }
 
 fn config_error<T>(message: impl Into<String>) -> Result<T> {
-    Err(TraceDecayError::Config {
-        message: message.into(),
-    })
+    Err(super::config_error(message))
 }
 
 fn validate_task_config(task: &str, config: &AutomationTaskConfig) -> Result<()> {

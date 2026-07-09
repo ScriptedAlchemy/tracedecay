@@ -596,7 +596,5 @@ fn strip_optional_json_fence(text: &str) -> Result<&str> {
 }
 
 fn config_error<T>(message: impl Into<String>) -> Result<T> {
-    Err(TraceDecayError::Config {
-        message: message.into(),
-    })
+    Err(super::config_error(message))
 }

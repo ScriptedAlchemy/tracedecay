@@ -5,7 +5,8 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::errors::{Result, TraceDecayError};
+use super::config_error;
+use crate::errors::Result;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct HermesConfigProjection {
@@ -326,12 +327,6 @@ fn auxiliary_curator_projection(
             api_key_configured,
         },
     )
-}
-
-fn config_error(message: impl Into<String>) -> TraceDecayError {
-    TraceDecayError::Config {
-        message: message.into(),
-    }
 }
 
 #[cfg(test)]

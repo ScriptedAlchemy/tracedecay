@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
+use super::config_error;
 use crate::errors::{Result, TraceDecayError};
 use crate::memory::store::MemoryStore;
 use crate::memory::trust::DEFAULT_TRUST;
@@ -307,10 +308,4 @@ fn proposal_id(run_id: &str, index: usize, value: &Value) -> String {
     hasher.update(value.to_string().as_bytes());
     let digest = hex::encode(hasher.finalize());
     format!("fact_{}", &digest[..16])
-}
-
-fn config_error(message: impl Into<String>) -> TraceDecayError {
-    TraceDecayError::Config {
-        message: message.into(),
-    }
 }

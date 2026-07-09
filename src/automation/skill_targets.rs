@@ -5,6 +5,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
+use super::config_error;
 use crate::agents::safe_write_text_file;
 use crate::automation::managed_skills::{
     ManagedSkill, ManagedSkillState, ManagedSupportFile, managed_skill_root,
@@ -518,12 +519,6 @@ fn safe_relative_path(path: &Path) -> Result<&Path> {
         }
     }
     Ok(path)
-}
-
-fn config_error(message: impl Into<String>) -> TraceDecayError {
-    TraceDecayError::Config {
-        message: message.into(),
-    }
 }
 
 fn hermes_host_owned_error() -> TraceDecayError {

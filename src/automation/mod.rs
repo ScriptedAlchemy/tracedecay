@@ -34,3 +34,14 @@ pub mod skill_usage;
 pub mod skill_writer;
 pub mod staged_notice;
 pub mod text;
+
+/// Build a [`TraceDecayError::Config`] from any message-like value.
+///
+/// Canonical home for the `config_error` helper duplicated across the
+/// automation module tree; other automation submodules should call this
+/// instead of re-declaring their own copy.
+pub(crate) fn config_error(message: impl Into<String>) -> crate::errors::TraceDecayError {
+    crate::errors::TraceDecayError::Config {
+        message: message.into(),
+    }
+}

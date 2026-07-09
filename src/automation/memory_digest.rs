@@ -35,6 +35,7 @@ use libsql::Connection;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 
+use super::config_error;
 use crate::automation::config::AutomationConfig;
 use crate::automation::skill_targets::SkillInstallTarget;
 use crate::errors::{Result, TraceDecayError};
@@ -868,11 +869,5 @@ pub async fn refresh_memory_digest_after_memory_change(conn: &Connection, projec
             .await
     {
         eprintln!("warning: memory digest refresh failed: {err}");
-    }
-}
-
-fn config_error(message: impl Into<String>) -> TraceDecayError {
-    TraceDecayError::Config {
-        message: message.into(),
     }
 }

@@ -8,7 +8,7 @@ use serde_json::{Map, Value, json};
 use super::super::render::{self, Md, truncated_json_envelope_with_handle};
 use super::support::{
     argument_error, profile_root_for_global_db, project_registry_context, safe_profile_relpath,
-    string_arg, tool_json_with_md,
+    string_arg, tool_json, tool_json_with_md,
 };
 use crate::errors::{Result, TraceDecayError};
 use crate::global_db::{GlobalDb, ProjectRegistryContext, WorkflowScopeFilter};
@@ -42,10 +42,6 @@ const MAX_LCM_EXPAND_QUERY_PROMPT_CHARS: usize = 2_048;
 const MAX_LCM_EXPAND_QUERY_QUERY_CHARS: usize = 1_024;
 const MAX_LCM_EXPAND_QUERY_SYNTHESIS_SYSTEM_CHARS: usize = 1_024;
 const MAX_LCM_EXPAND_QUERY_SYNTHESIS_PROMPT_CHARS: usize = 2_048;
-
-fn tool_json(project_root: Option<&Path>, args: &Value, value: &Value) -> ToolResult {
-    tool_json_with_md(project_root, args, value, || render::generic_md(value))
-}
 
 const MESSAGE_SEARCH_SNIPPET_CHARS: usize = 240;
 

@@ -7,6 +7,7 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 use super::backend::{AgentTaskFailureClass, AgentTaskKind};
+use super::config_error;
 use crate::errors::{Result, TraceDecayError};
 
 const RUN_LEDGER_FILENAME: &str = "automation_runs.jsonl";
@@ -339,10 +340,6 @@ pub async fn load_run_records(
         }
     }
     Ok(records)
-}
-
-fn config_error(message: String) -> TraceDecayError {
-    TraceDecayError::Config { message }
 }
 
 fn artifact_relative_path(run_id: &str, kind: AutomationRunArtifactKind) -> String {

@@ -1,7 +1,8 @@
 use std::collections::BTreeSet;
 use std::path::{Component, Path};
 
-use crate::errors::{Result, TraceDecayError};
+use super::config_error;
+use crate::errors::Result;
 
 use super::managed_skill_format::target_key;
 use super::managed_skill_model::{
@@ -353,10 +354,6 @@ pub(crate) fn validate_managed_skill_update(update: &ManagedSkillUpdate) -> Resu
         validate_managed_support_files(support_files)?;
     }
     Ok(())
-}
-
-fn config_error(message: String) -> TraceDecayError {
-    TraceDecayError::Config { message }
 }
 
 #[cfg(test)]

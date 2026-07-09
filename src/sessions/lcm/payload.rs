@@ -870,15 +870,6 @@ fn private_file_options() -> fs::OpenOptions {
     fs::OpenOptions::new()
 }
 
-#[cfg(unix)]
 fn set_private_dir_permissions(path: &Path) -> Result<(), LcmError> {
-    use std::os::unix::fs::PermissionsExt;
-
-    fs::set_permissions(path, fs::Permissions::from_mode(0o700))
-        .map_err(|err| LcmError::Io(err.to_string()))
-}
-
-#[cfg(not(unix))]
-fn set_private_dir_permissions(_path: &Path) -> Result<(), LcmError> {
-    Ok(())
+    crate::storage::set_private_dir_permissions(path).map_err(|err| LcmError::Io(err.to_string()))
 }
