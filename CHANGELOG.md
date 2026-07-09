@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.41](https://github.com/ScriptedAlchemy/tracedecay/compare/v0.0.40...v0.0.41) - 2026-07-09
+
+### Added
+
+- *(sessions)* ingest and surface Codex thread goals
+
+### Fixed
+
+- *(db)* stop conflating attrs_start_line 0 with unset
+
+### Other
+
+- Merge pull request #347 from ScriptedAlchemy/codex/fix-unsafe-patterns
+- Merge pull request #340 from ScriptedAlchemy/codex/session-recovery-fixes
+- Merge pull request #346 from ScriptedAlchemy/codex/goal-ingestion
+
 ## [0.0.40](https://github.com/ScriptedAlchemy/tracedecay/compare/v0.0.39...v0.0.40) - 2026-07-09
 
 ### Added
