@@ -596,26 +596,37 @@ impl PrivateStoreIo {
 }
 
 fn reject_symlink_components(path: &Path, subject: &str) -> io::Result<()> {
+    let is_absolute = path.is_absolute();
+    let mut current = PathBuf::new();
+    let mut normal_components = 0usize;
     for component in path.components() {
-        if matches!(component, Component::CurDir | Component::ParentDir) {
-            return Err(invalid_input(format!("{subject} path must be normalized")));
+        match component {
+            Component::Normal(_) => {
+                current.push(component.as_os_str());
+                normal_components += 1;
+            }
+            Component::RootDir | Component::Prefix(_) => {
+                current.push(component.as_os_str());
+            }
+            Component::CurDir | Component::ParentDir => {
+                return Err(invalid_input(format!("{subject} path must be normalized")));
+            }
+        }
+        if normal_components == 0 || (is_absolute && normal_components == 1) {
+            continue;
+        }
+        match fs::symlink_metadata(&current) {
+            Ok(meta) if meta.file_type().is_symlink() => {
+                return Err(invalid_input(format!(
+                    "{subject} path must not contain symlinks"
+                )));
+            }
+            Ok(_) => {}
+            Err(err) if err.kind() == io::ErrorKind::NotFound => break,
+            Err(err) => return Err(err),
         }
     }
-    // Only the final component — the store path itself — must not be a
-    // symlink: that is the redirect a same-host attacker could plant for
-    // store writes. Containing directories are covered by their own
-    // final-component check when the write path ensures them, and ancestors
-    // above are system-controlled and may legitimately be symlinks (macOS's
-    // /var -> /private/var puts every tempdir behind one); walking the whole
-    // chain broke all store IO under macOS temp paths.
-    match fs::symlink_metadata(path) {
-        Ok(meta) if meta.file_type().is_symlink() => Err(invalid_input(format!(
-            "{subject} path must not contain symlinks"
-        ))),
-        Ok(_) => Ok(()),
-        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
-        Err(err) => Err(err),
-    }
+    Ok(())
 }
 
 fn invalid_input(message: impl Into<String>) -> io::Error {
@@ -886,19 +897,17 @@ mod tests {
 
     #[test]
     #[cfg(unix)]
-    fn symlink_guard_tolerates_ancestors_but_rejects_managed_tail() {
+    fn symlink_guard_skips_leading_system_alias_but_rejects_managed_tail() {
         use std::os::unix::fs::symlink;
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().canonicalize().unwrap();
 
-        // An ancestor symlink two levels above the file (the macOS
-        // /var -> /private/var shape) must be tolerated.
+        // A normal store path below a possibly symlinked system temp root
+        // (macOS /var -> /private/var) must be tolerated.
         let real = root.join("real");
         std::fs::create_dir_all(real.join("store")).unwrap();
-        let alias = root.join("alias");
-        symlink(&real, &alias).unwrap();
-        PrivateStoreIo::append_line(&alias.join("store").join("f.jsonl"), "{\"n\":1}")
-            .expect("ancestor symlink must not be rejected");
+        PrivateStoreIo::append_line(&real.join("store").join("f.jsonl"), "{\"n\":1}")
+            .expect("normal store path must not be rejected");
 
         // A symlinked directory is caught when the write path ensures it:
         // the directory is then the checked final component.
