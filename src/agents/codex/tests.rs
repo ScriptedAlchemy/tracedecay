@@ -379,6 +379,37 @@ fn sync_codex_hook_trust_uses_preserved_marketplace_identity() {
 }
 
 #[test]
+fn codex_marketplace_identity_rejects_path_and_trust_key_injection() {
+    let home = tempfile::tempdir().expect("tempdir");
+    let marketplace_path = codex_personal_marketplace_path(home.path());
+    std::fs::create_dir_all(marketplace_path.parent().unwrap()).unwrap();
+
+    for unsafe_name in [
+        "../escape",
+        "/absolute",
+        r"parent\child",
+        "name:hooks",
+        "line\nbreak",
+    ] {
+        std::fs::write(
+            &marketplace_path,
+            serde_json::json!({"name": unsafe_name, "plugins": []}).to_string(),
+        )
+        .unwrap();
+        let err = codex_personal_marketplace_name(home.path()).unwrap_err();
+        assert!(
+            err.to_string().contains("safe ASCII path segment"),
+            "unsafe marketplace name {unsafe_name:?} produced {err}"
+        );
+        assert_eq!(
+            codex_cached_marketplace_name(home.path()),
+            CODEX_DEFAULT_MARKETPLACE_NAME,
+            "an unsafe marketplace identity must not influence cache paths"
+        );
+    }
+}
+
+#[test]
 fn sync_codex_hook_trust_hashes_the_installed_hook_payload() {
     let home = tempfile::tempdir().expect("tempdir");
     let plugin_dir = install_codex_personal_bootstrap(home.path(), TEST_BIN).unwrap();

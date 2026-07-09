@@ -312,6 +312,13 @@ fn codex_plugin_cached_root(home: &Path, marketplace_name: &str) -> PathBuf {
         .join("tracedecay")
 }
 
+fn validate_codex_marketplace_name(name: &str) -> Result<&str> {
+    crate::storage::validate_project_id(name).map_err(|_| TraceDecayError::Config {
+        message: format!("Codex marketplace name {name:?} must be a safe ASCII path segment"),
+    })?;
+    Ok(name)
+}
+
 fn codex_cached_marketplace_name(home: &Path) -> String {
     match codex_personal_marketplace_name(home).as_deref() {
         Ok("caveman-home") | Err(_) => CODEX_DEFAULT_MARKETPLACE_NAME.to_string(),
@@ -917,17 +924,17 @@ fn codex_managed_hook_trust_entries(tracedecay_bin: &str) -> Result<Vec<CodexHoo
 fn codex_personal_marketplace_name(home: &Path) -> Result<String> {
     let marketplace_path = codex_personal_marketplace_path(home);
     let marketplace = load_json_file_strict(&marketplace_path)?;
-    marketplace
+    let name = marketplace
         .get("name")
         .and_then(serde_json::Value::as_str)
         .filter(|name| !name.is_empty())
-        .map(str::to_string)
         .ok_or_else(|| TraceDecayError::Config {
             message: format!(
                 "Codex marketplace at {} has no non-empty name",
                 marketplace_path.display()
             ),
-        })
+        })?;
+    Ok(validate_codex_marketplace_name(name)?.to_string())
 }
 
 fn codex_runtime_hooks_path(home: &Path) -> PathBuf {
@@ -1136,6 +1143,9 @@ fn install_codex_marketplace_entry(
         marketplace = json!({});
     }
     let existing_name = marketplace.get("name").and_then(|value| value.as_str());
+    if let Some(existing_name) = existing_name {
+        validate_codex_marketplace_name(existing_name)?;
+    }
     let has_tracedecay_entry = marketplace
         .get("plugins")
         .and_then(serde_json::Value::as_array)
