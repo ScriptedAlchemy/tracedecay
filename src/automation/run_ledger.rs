@@ -262,16 +262,37 @@ fn append_jsonl_line_locked(path: &Path, line: &str) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
+    crate::storage::retry_transient_file_op(|| append_jsonl_line_once(path, line))
+}
+
+fn append_jsonl_line_once(path: &Path, line: &str) -> std::io::Result<()> {
+    // Serialize on a dedicated read+write `<path>.lock` sidecar handle rather
+    // than on the append-only data handle. Locking an append-only handle fails
+    // on Windows `LockFileEx` with `ERROR_ACCESS_DENIED` (os error 5) because
+    // Rust opens such handles without `FILE_READ_DATA`/`FILE_WRITE_DATA`, which
+    // `LockFileEx` requires.
+    let lock_path = crate::storage::append_lock_path(path);
+    let lock_file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&lock_path)?;
+    lock_file.lock_exclusive()?;
+
+    let write_result = append_jsonl_line_data(path, line);
+    let unlock_result = lock_file.unlock();
+    write_result?;
+    unlock_result
+}
+
+fn append_jsonl_line_data(path: &Path, line: &str) -> std::io::Result<()> {
     let mut file = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
         .open(path)?;
-    file.lock_exclusive()?;
-    let write_result = file.write_all(format!("{line}\n").as_bytes());
-    let flush_result = write_result.and_then(|()| file.flush());
-    let unlock_result = file.unlock();
-    flush_result?;
-    unlock_result
+    file.write_all(format!("{line}\n").as_bytes())?;
+    file.flush()
 }
 
 pub async fn load_run_records(
