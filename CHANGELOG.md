@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.43](https://github.com/ScriptedAlchemy/tracedecay/compare/v0.0.42...v0.0.43) - 2026-07-09
+
+### Fixed
+
+- restore test attribute placement in message_noise
+- bare code fences no longer count as work evidence
+- precompute inventory key and guard branch-inventory over-match
+- *(sessions)* hoist listing indicators above statements for clippy
+- *(sessions)* widen fetch instead of panicking on large limits
+- *(sessions)* downrank inventory noise in message_search ranking
+
+### Other
+
+- deslop message noise followups
+
 ## [0.0.42](https://github.com/ScriptedAlchemy/tracedecay/compare/v0.0.41...v0.0.42) - 2026-07-09
 
 ### Fixed
