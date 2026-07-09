@@ -54,7 +54,18 @@ const MESSAGE_SEARCH_SNIPPET_CHARS: usize = 240;
 /// the full structured records.
 fn render_message_search_md(value: &Value) -> String {
     let mut md = Md::new();
-    md.heading(2, "Transcript Search");
+    let goals_mode = value.get("goals").and_then(Value::as_bool).unwrap_or(false);
+    md.heading(
+        2,
+        if goals_mode {
+            "Session Goals"
+        } else {
+            "Transcript Search"
+        },
+    );
+    if goals_mode {
+        md.field("mode", "goals (latest goal per session)");
+    }
     for key in ["query", "provider", "scope"] {
         let field = render::field_str(value, key);
         if !field.is_empty() {
@@ -89,7 +100,11 @@ fn render_message_search_md(value: &Value) -> String {
             }
         }
         _ => {
-            md.blank().empty_note("No matching messages.");
+            md.blank().empty_note(if goals_mode {
+                "No goals recorded for this project."
+            } else {
+                "No matching messages."
+            });
         }
     }
     md.render()
@@ -174,6 +189,11 @@ fn append_message_search_hit(md: &mut Md, hit: &Value) {
         let _ = write!(locator, " — {title}");
     }
     md.line(&format!("  {locator}"));
+    // A `goal` row carries its lifecycle status in metadata; surface it so a
+    // reader can tell whether the session's goal is still active.
+    if let Some(goal_line) = goal_status_line(message) {
+        md.line(&format!("  {goal_line}"));
+    }
     let text = message
         .and_then(|m| m.get("text"))
         .and_then(Value::as_str)
@@ -182,6 +202,29 @@ fn append_message_search_hit(md: &mut Md, hit: &Value) {
     if !snippet.is_empty() {
         md.line(&format!("  {snippet}"));
     }
+}
+
+/// `goal [status]` prefix for a `kind = 'goal'` hit, reading `status` out of the
+/// row's `metadata_json`. Returns `None` for non-goal rows (or goal rows with no
+/// recorded status, which still render their objective as the snippet).
+fn goal_status_line(message: Option<&Value>) -> Option<String> {
+    let message = message?;
+    if message.get("kind").and_then(Value::as_str) != Some("goal") {
+        return None;
+    }
+    let status = message
+        .get("metadata_json")
+        .and_then(Value::as_str)
+        .and_then(|raw| serde_json::from_str::<Value>(raw).ok())
+        .and_then(|meta| {
+            meta.get("status")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        });
+    Some(match status {
+        Some(status) => format!("goal [{status}]"),
+        None => "goal".to_string(),
+    })
 }
 
 /// Best-effort single-line plain-text snippet from a stored message body.
@@ -342,17 +385,29 @@ struct MessageSearchRequest<'a> {
     git_filter: GitScopeFilter,
     time_range: SessionSearchTimeRange,
     workflow_scope: Option<WorkflowScopeFilter>,
+    /// When true, ignore FTS and list each session's latest Codex goal
+    /// (`kind = 'goal'`) instead. `query` is optional in this mode.
+    goals: bool,
 }
 
 fn parse_message_search_request(args: &Value) -> Result<MessageSearchRequest<'_>> {
-    let query = args
+    let goals = args.get("goals").and_then(Value::as_bool).unwrap_or(false);
+    let query = match args
         .get("query")
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|query| !query.is_empty())
-        .ok_or_else(|| TraceDecayError::Config {
-            message: "missing required parameter: query".to_string(),
-        })?;
+    {
+        Some(query) => query,
+        // In goals-listing mode the query is optional: the listing is not an
+        // FTS search, so an absent query simply lists the most recent goals.
+        None if goals => "",
+        None => {
+            return Err(TraceDecayError::Config {
+                message: "missing required parameter: query".to_string(),
+            });
+        }
+    };
     let provider_scope = parse_message_search_provider_scope(args)?;
     let workflow_run = string_arg(args, "workflow_run");
     let workflow_agent = string_arg(args, "workflow_agent");
@@ -397,6 +452,7 @@ fn parse_message_search_request(args: &Value) -> Result<MessageSearchRequest<'_>
             run_id: run_id.to_string(),
             agent_label: workflow_agent.map(str::to_string),
         }),
+        goals,
     })
 }
 
@@ -500,6 +556,7 @@ fn message_search_payload(
         "since": request.time_range.start_time,
         "until": request.time_range.end_time,
         "query": request.query,
+        "goals": request.goals,
         "count": results.len(),
         "results": results,
     });
@@ -2348,7 +2405,12 @@ pub(super) async fn handle_message_search(
         },
         None => None,
     };
-    let results = search_session_messages_in_db(&db, &request).await;
+    let results = if request.goals {
+        db.recent_session_goals(request.project_key, request.limit)
+            .await
+    } else {
+        search_session_messages_in_db(&db, &request).await
+    };
     let mut payload = message_search_payload(&request, &results, catch_up_performed);
     if let Some(map) = payload.as_object_mut() {
         map.insert("selected_project_root".to_string(), json!(target_root));

@@ -204,6 +204,51 @@ fn message_search_markdown_handles_empty_results() {
 }
 
 #[test]
+fn message_search_markdown_renders_goals_view_with_status() {
+    let payload = json!({
+        "status": "ok",
+        "goals": true,
+        "count": 1,
+        "results": [{
+            "score": 0.0,
+            "session": {"provider": "codex", "session_id": "sess-goal-1", "title": "Goal work"},
+            "message": {
+                "provider": "codex",
+                "role": "system",
+                "kind": "goal",
+                "timestamp": 1_783_500_100,
+                "text": "phlogiston pipeline overhaul",
+                "metadata_json": "{\"source\":\"codex_thread_goal\",\"status\":\"paused\"}",
+            },
+        }],
+    });
+    let md = render_message_search_md(&payload);
+    assert!(md.contains("## Session Goals"), "{md}");
+    assert!(
+        md.contains("**mode:** goals (latest goal per session)"),
+        "{md}"
+    );
+    assert!(md.contains("session `sess-goal-1`"), "{md}");
+    assert!(md.contains("goal [paused]"), "{md}");
+    assert!(md.contains("phlogiston pipeline overhaul"), "{md}");
+    // Raw metadata blob must not leak.
+    assert!(!md.contains("metadata_json"), "{md}");
+}
+
+#[test]
+fn message_search_markdown_goals_view_handles_empty() {
+    let payload = json!({
+        "status": "ok",
+        "goals": true,
+        "count": 0,
+        "results": [],
+    });
+    let md = render_message_search_md(&payload);
+    assert!(md.contains("## Session Goals"), "{md}");
+    assert!(md.contains("No goals recorded for this project."), "{md}");
+}
+
+#[test]
 fn message_text_snippet_extracts_readable_content_from_json() {
     let text =
         "[{\"type\":\"tool_result\",\"content\":\"hello world\",\"tool_use_id\":\"toolu_1\"}]";

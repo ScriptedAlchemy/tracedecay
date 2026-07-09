@@ -16,6 +16,15 @@
 //! * `event_msg` with `payload.type == "token_count"` — per-API-call usage; a
 //!   turn's tool loop emits one per call, so a turn's true cost is the *sum*
 //!   (see [`CodexTurnUsage`]).
+//! * `event_msg` with `payload.type == "thread_goal_updated"` — the structured
+//!   session goal and its lifecycle (`payload.goal.{objective,status,tokensUsed,
+//!   timeUsedSeconds,createdAt,updatedAt}`). `TraceDecay` records each state as a
+//!   compact `goal` row (objective as text, the rest in `metadata_json`) so the
+//!   session's goal and whether it is still active is searchable. `status` is
+//!   stored verbatim — real rollouts emit `active`/`paused`, but any future
+//!   value (e.g. `completed`) is carried through unchanged rather than mapped to
+//!   a fixed enum. Consecutive events that repeat the same `(objective, status)`
+//!   within one parse pass are deduped; each genuine transition keeps its row.
 //! * `compacted` — Codex context-compression boundary. The rollout stores the
 //!   replacement history and an encrypted compaction body, so `TraceDecay` records
 //!   the boundary/provenance as a summary record without claiming plaintext
@@ -134,6 +143,10 @@ impl TranscriptSource for CodexSource {
         let new = stream_new_jsonl(path, prev, max_new_bytes)?;
         let mut messages = Vec::new();
         let mut turn_usage = CodexTurnUsage::default();
+        // Collapses identical consecutive goal states within this parse pass:
+        // `thread_goal_updated` fires on every token/time tick, so only an
+        // objective- or status-change opens a new `goal` row.
+        let mut last_goal_key: Option<(String, Option<String>)> = None;
         let replayed_from_start =
             prev.position > 0 && new.lines.first().is_some_and(|line| line.offset == 0);
         let mut context_state = if prev.position > 0 && !replayed_from_start {
@@ -146,6 +159,28 @@ impl TranscriptSource for CodexSource {
                 continue;
             }
             if context_state.observe_context_record(&line.value, path, &meta) {
+                continue;
+            }
+            if let Some(event) = codex_goal_event_from_line(&line.value) {
+                let key = event.dedup_key();
+                if last_goal_key.as_ref() == Some(&key) {
+                    continue;
+                }
+                last_goal_key = Some(key);
+                let mut message = goal_event_message(
+                    &meta,
+                    context_state.model.as_deref(),
+                    path,
+                    line.offset,
+                    timestamp_from_record(&line.value),
+                    &event,
+                );
+                context::annotate_message(
+                    &mut message,
+                    context_state.cwd.as_deref(),
+                    context_state.git.as_ref(),
+                );
+                messages.push(message);
                 continue;
             }
             if let Some(mut message) = response_item_goal_context_from_line(
@@ -666,6 +701,133 @@ fn goal_context_message(
     }
 }
 
+/// Codex's structured session goal, parsed from a `thread_goal_updated`
+/// `event_msg`. `status` is stored verbatim; the parser deliberately does not
+/// map it to a fixed enum so an unrecognized future value survives round-trip.
+struct CodexGoalEvent {
+    objective: String,
+    status: Option<String>,
+    thread_id: Option<String>,
+    tokens_used: Option<i64>,
+    time_used_seconds: Option<i64>,
+    created_at: Option<i64>,
+    updated_at: Option<i64>,
+}
+
+impl CodexGoalEvent {
+    /// Key used to collapse identical consecutive lifecycle states within one
+    /// parse pass. Token/time drift on the same `(objective, status)` is
+    /// progress within a state, not a transition, so it does not open a new row.
+    fn dedup_key(&self) -> (String, Option<String>) {
+        (self.objective.clone(), self.status.clone())
+    }
+
+    fn metadata(&self) -> Value {
+        let mut goal = serde_json::Map::new();
+        goal.insert(
+            "source".to_string(),
+            Value::String("codex_thread_goal".to_string()),
+        );
+        goal.insert(
+            "source_event".to_string(),
+            Value::String("thread_goal_updated".to_string()),
+        );
+        goal.insert(
+            "objective".to_string(),
+            Value::String(self.objective.clone()),
+        );
+        if let Some(status) = &self.status {
+            goal.insert("status".to_string(), Value::String(status.clone()));
+        }
+        if let Some(thread_id) = &self.thread_id {
+            goal.insert("thread_id".to_string(), Value::String(thread_id.clone()));
+        }
+        if let Some(tokens_used) = self.tokens_used {
+            goal.insert("tokens_used".to_string(), Value::from(tokens_used));
+        }
+        if let Some(time_used_seconds) = self.time_used_seconds {
+            goal.insert(
+                "time_used_seconds".to_string(),
+                Value::from(time_used_seconds),
+            );
+        }
+        if let Some(created_at) = self.created_at {
+            goal.insert("created_at".to_string(), Value::from(created_at));
+        }
+        if let Some(updated_at) = self.updated_at {
+            goal.insert("updated_at".to_string(), Value::from(updated_at));
+        }
+        Value::Object(goal)
+    }
+}
+
+/// Parse a `thread_goal_updated` `event_msg` into a [`CodexGoalEvent`], or
+/// `None` for any other line. A goal with an empty/absent objective is skipped
+/// (there is nothing to catalog or search).
+fn codex_goal_event_from_line(record: &Value) -> Option<CodexGoalEvent> {
+    if record.get("type").and_then(Value::as_str) != Some("event_msg") {
+        return None;
+    }
+    let payload = record.get("payload")?;
+    if payload.get("type").and_then(Value::as_str) != Some("thread_goal_updated") {
+        return None;
+    }
+    let goal = payload.get("goal")?;
+    let objective = goal
+        .get("objective")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|objective| !objective.is_empty())?
+        .to_string();
+    Some(CodexGoalEvent {
+        objective,
+        status: goal
+            .get("status")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|status| !status.is_empty())
+            .map(str::to_string),
+        thread_id: goal
+            .get("threadId")
+            .and_then(Value::as_str)
+            .or_else(|| payload.get("threadId").and_then(Value::as_str))
+            .filter(|thread_id| !thread_id.is_empty())
+            .map(str::to_string),
+        tokens_used: goal.get("tokensUsed").and_then(Value::as_i64),
+        time_used_seconds: goal.get("timeUsedSeconds").and_then(Value::as_i64),
+        created_at: goal.get("createdAt").and_then(Value::as_i64),
+        updated_at: goal.get("updatedAt").and_then(Value::as_i64),
+    })
+}
+
+/// Build the compact `goal` session row: the objective as searchable text, the
+/// lifecycle fields in `metadata_json`. Role `system` matches the other
+/// non-conversational Codex rows (goal context, compaction summaries).
+fn goal_event_message(
+    meta: &CodexMeta,
+    model: Option<&str>,
+    path: &Path,
+    offset: i64,
+    timestamp: Option<i64>,
+    event: &CodexGoalEvent,
+) -> SessionMessageRecord {
+    SessionMessageRecord {
+        provider: PROVIDER.to_string(),
+        message_id: format!("{}:{offset}", meta.session_id),
+        session_id: meta.session_id.clone(),
+        role: "system".to_string(),
+        timestamp,
+        ordinal: offset,
+        text: event.objective.clone(),
+        kind: Some("goal".to_string()),
+        model: model.map(str::to_string),
+        tool_names: None,
+        source_path: Some(path.to_string_lossy().to_string()),
+        source_offset: Some(offset),
+        metadata_json: serde_json::to_string(&event.metadata()).ok(),
+    }
+}
+
 fn collect_response_item_text(value: &Value) -> String {
     match value {
         Value::String(text) => text.clone(),
@@ -1166,5 +1328,125 @@ fn flush_turn_usage(messages: &mut [SessionMessageRecord], turn_usage: &mut Code
     }
     if let Ok(serialized) = serde_json::to_string(&Value::Object(metadata)) {
         message.metadata_json = Some(serialized);
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod goal_event_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn goal_event_line(objective: &str, status: &str) -> Value {
+        json!({
+            "timestamp": "2026-07-08T08:49:29.711Z",
+            "type": "event_msg",
+            "payload": {
+                "type": "thread_goal_updated",
+                "threadId": "thread-1",
+                "goal": {
+                    "threadId": "thread-1",
+                    "objective": objective,
+                    "status": status,
+                    "tokensUsed": 42,
+                    "timeUsedSeconds": 7,
+                    "createdAt": 1_783_500_569i64,
+                    "updatedAt": 1_783_500_600i64
+                }
+            }
+        })
+    }
+
+    #[test]
+    fn parses_goal_event_into_row_with_metadata() {
+        let event =
+            codex_goal_event_from_line(&goal_event_line("ship the parser", "active")).unwrap();
+        let meta = CodexMeta {
+            cwd: std::path::PathBuf::from("/tmp/project"),
+            session_id: "sess-1".to_string(),
+            model: None,
+            git: None,
+            parent_session_id: None,
+            is_subagent: false,
+            agent_id: None,
+            agent_nickname: None,
+            agent_role: None,
+            thread_source: None,
+        };
+        let message = goal_event_message(
+            &meta,
+            Some("gpt-5.5"),
+            std::path::Path::new("/tmp/rollout.jsonl"),
+            128,
+            Some(1_783_500_600),
+            &event,
+        );
+        assert_eq!(message.role, "system");
+        assert_eq!(message.kind.as_deref(), Some("goal"));
+        assert_eq!(message.text, "ship the parser");
+        assert_eq!(message.ordinal, 128);
+        let metadata: Value =
+            serde_json::from_str(message.metadata_json.as_deref().unwrap()).unwrap();
+        assert_eq!(metadata["source"], "codex_thread_goal");
+        assert_eq!(metadata["source_event"], "thread_goal_updated");
+        assert_eq!(metadata["status"], "active");
+        assert_eq!(metadata["thread_id"], "thread-1");
+        assert_eq!(metadata["tokens_used"], 42);
+        assert_eq!(metadata["time_used_seconds"], 7);
+        assert_eq!(metadata["created_at"], 1_783_500_569i64);
+        assert_eq!(metadata["updated_at"], 1_783_500_600i64);
+    }
+
+    #[test]
+    fn consecutive_identical_states_share_a_dedup_key() {
+        let a = codex_goal_event_from_line(&goal_event_line("same goal", "active")).unwrap();
+        // Same objective+status, only token/time drift -> same dedup key (skipped).
+        let mut drift = goal_event_line("same goal", "active");
+        drift["payload"]["goal"]["tokensUsed"] = json!(9999);
+        drift["payload"]["goal"]["timeUsedSeconds"] = json!(321);
+        let b = codex_goal_event_from_line(&drift).unwrap();
+        assert_eq!(a.dedup_key(), b.dedup_key());
+        // A status transition is a distinct key (new row).
+        let c = codex_goal_event_from_line(&goal_event_line("same goal", "paused")).unwrap();
+        assert_ne!(a.dedup_key(), c.dedup_key());
+    }
+
+    #[test]
+    fn unknown_status_is_carried_through_verbatim() {
+        let event =
+            codex_goal_event_from_line(&goal_event_line("do the thing", "completed")).unwrap();
+        assert_eq!(event.status.as_deref(), Some("completed"));
+        let metadata = event.metadata();
+        assert_eq!(metadata["status"], "completed");
+    }
+
+    #[test]
+    fn missing_status_and_objective_are_handled_gracefully() {
+        // No status key at all -> status None, still a valid goal row.
+        let mut no_status = goal_event_line("objective only", "active");
+        no_status["payload"]["goal"]
+            .as_object_mut()
+            .unwrap()
+            .remove("status");
+        let event = codex_goal_event_from_line(&no_status).unwrap();
+        assert!(event.status.is_none());
+        assert!(!event.metadata().as_object().unwrap().contains_key("status"));
+        // Empty objective -> no goal row (nothing to catalog).
+        let empty = goal_event_line("   ", "active");
+        assert!(codex_goal_event_from_line(&empty).is_none());
+    }
+
+    #[test]
+    fn non_goal_event_lines_are_ignored() {
+        let token_count = json!({
+            "type": "event_msg",
+            "payload": {"type": "token_count", "info": {}}
+        });
+        assert!(codex_goal_event_from_line(&token_count).is_none());
+        let user = json!({
+            "type": "event_msg",
+            "payload": {"type": "user_message", "message": "hi"}
+        });
+        assert!(codex_goal_event_from_line(&user).is_none());
     }
 }
