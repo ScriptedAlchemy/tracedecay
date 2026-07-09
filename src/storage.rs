@@ -638,42 +638,21 @@ impl PrivateStoreIo {
         set_private_file_permissions(path)
     }
 
-    /// Appends one line while holding an advisory lock on a dedicated sidecar
-    /// lock file so concurrent threads and processes never interleave partial
-    /// lines.
-    ///
-    /// The lock is taken on a separate `<path>.lock` handle opened for
-    /// read+write, never on the append-only data handle. This is deliberate:
-    /// Windows `LockFileEx` requires the handle to carry `FILE_READ_DATA` or
-    /// `FILE_WRITE_DATA`, but Rust opens append-only handles with
-    /// `FILE_GENERIC_WRITE & !FILE_WRITE_DATA` (no read-data, no write-data),
-    /// so locking such a handle fails with `ERROR_ACCESS_DENIED` (os error 5).
-    /// Locking the r/w sidecar sidesteps that and also avoids locking the data
-    /// region being appended.
+    /// Appends one line to the private store `path` while holding the shared
+    /// sidecar append lock, so concurrent threads and processes never interleave
+    /// partial lines. See [`append_line_locked`] and the sidecar-lock module
+    /// note for the read+write-handle rationale.
     pub fn append_line(path: &Path, line: &str) -> io::Result<()> {
         if let Some(parent) = path.parent() {
             Self::create_dir_all(parent)?;
         }
-        retry_transient_file_op(|| Self::append_line_once(path, line))
+        retry_transient_file_op(|| append_line_locked(path, line, true))
     }
 
-    fn append_line_once(path: &Path, line: &str) -> io::Result<()> {
-        let lock_path = append_lock_path(path);
-        reject_symlink_components(&lock_path, "private store lock file")?;
-        let mut lock_options = fs::OpenOptions::new();
-        lock_options.read(true).write(true);
-        let lock_file = Self::open_private(&lock_path, &mut lock_options)?;
-        lock_file.lock_exclusive()?;
-
-        let append_result = Self::append_line_locked(path, line);
-        let unlock_result = lock_file.unlock();
-        append_result?;
-        unlock_result?;
-        set_private_file_permissions(&lock_path)?;
-        Ok(())
-    }
-
-    fn append_line_locked(path: &Path, line: &str) -> io::Result<()> {
+    /// Writes one newline-terminated line to the private store data file with
+    /// owner-only permissions. Callers must already hold the sidecar append lock
+    /// (see [`append_line_locked`]).
+    fn append_line_data(path: &Path, line: &str) -> io::Result<()> {
         reject_symlink_components(path, "private store file")?;
         let mut options = fs::OpenOptions::new();
         options.append(true);
@@ -811,6 +790,101 @@ pub(crate) fn append_lock_path(path: &Path) -> PathBuf {
         .unwrap_or_else(|| OsString::from("append"));
     lock_name.push(".lock");
     path.with_file_name(lock_name)
+}
+
+// ── Cross-process sidecar lock utility ──────────────────────────────
+//
+// TraceDecay sanctions two cross-process file-coordination strategies; new code
+// should reuse one rather than hand-rolling a third:
+//
+//   1. Sidecar advisory lock (this utility). Open a dedicated `<file>.lock`
+//      handle for read+write and hold an `fs2` `flock` on it while mutating the
+//      real file. Use it to serialize writers to an append-only log or an
+//      mmap/config file where readers must never see a torn write and a crashed
+//      holder must not leave a stale marker (the OS drops the lock on process
+//      death). Callers: private-store appends, the automation run ledger, the
+//      monitor ring buffer and single-instance guard, the structured-backfill
+//      sweep, and the user-config save.
+//   2. Atomic rename + hash ownership (see `write_file_atomically` and the
+//      dashboard curation writers). Write a sibling temp file and `rename` it
+//      over the target so readers always observe a whole file, using a content
+//      hash to decide the final owner. Use it for whole-file replaces where
+//      last-writer-wins is acceptable.
+//
+// The lock is always taken on a *separate* r/w `<file>.lock` handle, never on
+// the data handle. Rust opens append-only handles with
+// `FILE_GENERIC_WRITE & !FILE_WRITE_DATA` (no read-data, no write-data), and
+// Windows `LockFileEx` requires the handle to carry `FILE_READ_DATA` or
+// `FILE_WRITE_DATA`, so locking such a handle fails with `ERROR_ACCESS_DENIED`
+// (os error 5). Locking the r/w sidecar sidesteps that and avoids locking the
+// data region being written. This rationale lives here once; call sites point
+// back to it rather than restating it.
+
+fn open_sidecar_lock_file(lock_path: &Path) -> io::Result<fs::File> {
+    if let Some(parent) = lock_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(lock_path)
+}
+
+/// Non-blocking sidecar lock acquisition. Returns the held lock file on
+/// success, or `None` when another process/thread already holds it (the caller
+/// then skips its critical section). See the sidecar-lock module note above for
+/// the read+write-handle rationale.
+pub(crate) fn try_acquire_sidecar_lock(lock_path: &Path) -> io::Result<Option<fs::File>> {
+    let file = open_sidecar_lock_file(lock_path)?;
+    match file.try_lock_exclusive() {
+        Ok(()) => Ok(Some(file)),
+        Err(err) if err.kind() == io::ErrorKind::WouldBlock => Ok(None),
+        Err(err) => Err(err),
+    }
+}
+
+/// Blocking sidecar lock acquisition. Returns the held lock file once the
+/// exclusive lock is granted. See the sidecar-lock module note above for the
+/// read+write-handle rationale.
+pub(crate) fn acquire_sidecar_lock_blocking(lock_path: &Path) -> io::Result<fs::File> {
+    let file = open_sidecar_lock_file(lock_path)?;
+    file.lock_exclusive()?;
+    Ok(file)
+}
+
+/// Appends `line` (newline-terminated) to `path` under the shared sidecar
+/// append lock. When `private`, the data file is created owner-only and both
+/// the data and lock paths are symlink-checked (the private-store contract);
+/// otherwise a plain create+append handle is used (the automation run ledger).
+pub(crate) fn append_line_locked(path: &Path, line: &str, private: bool) -> io::Result<()> {
+    let lock_path = append_lock_path(path);
+    if private {
+        reject_symlink_components(&lock_path, "private store lock file")?;
+    }
+    let lock_file = acquire_sidecar_lock_blocking(&lock_path)?;
+    let write_result = if private {
+        PrivateStoreIo::append_line_data(path, line)
+    } else {
+        append_line_plain(path, line)
+    };
+    let unlock_result = lock_file.unlock();
+    write_result?;
+    unlock_result?;
+    if private {
+        set_private_file_permissions(&lock_path)?;
+    }
+    Ok(())
+}
+
+fn append_line_plain(path: &Path, line: &str) -> io::Result<()> {
+    let mut file = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)?;
+    file.write_all(format!("{line}\n").as_bytes())?;
+    file.flush()
 }
 
 /// Runs `op`, retrying a bounded number of times on Windows for the transient

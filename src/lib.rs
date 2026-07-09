@@ -64,6 +64,7 @@ pub mod resolution;
 pub mod retention;
 pub mod runtime_identity;
 pub mod runtime_telemetry;
+pub mod serde_util;
 pub mod serve;
 pub mod sessions;
 mod shell;

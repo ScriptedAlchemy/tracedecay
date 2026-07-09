@@ -450,42 +450,51 @@ fn rerank_grep_hits(
 
     let mut capped: BTreeMap<String, usize> = BTreeMap::new();
     if matches!(scope, LcmScope::All) {
+        // Per-session running aggregate, folded into one map so each hit touches
+        // a single `entry`: `count` gates the cap, `has_tool` records whether a
+        // tool-role hit was already kept, and `last_idx` is the session's
+        // weakest kept slot (swapped for a reserved tool hit below).
+        #[derive(Default)]
+        struct SessionAgg {
+            count: usize,
+            last_idx: usize,
+            has_tool: bool,
+        }
+
         let mut kept: Vec<LcmGrepHit> = Vec::with_capacity(hits.len());
-        let mut kept_count: BTreeMap<String, usize> = BTreeMap::new();
-        let mut kept_last_idx: BTreeMap<String, usize> = BTreeMap::new();
-        let mut kept_has_tool: BTreeMap<String, bool> = BTreeMap::new();
+        let mut agg: BTreeMap<String, SessionAgg> = BTreeMap::new();
         let mut dropped_tool: BTreeMap<String, LcmGrepHit> = BTreeMap::new();
         for hit in hits.drain(..) {
-            let session_id = hit.session_id.clone();
-            let count = kept_count.entry(session_id.clone()).or_insert(0);
             let is_tool = hit.role.as_deref() == Some("tool");
-            if *count >= PER_SESSION_HIT_CAP {
-                *capped.entry(session_id.clone()).or_insert(0) += 1;
+            let session = agg.entry(hit.session_id.clone()).or_default();
+            if session.count >= PER_SESSION_HIT_CAP {
+                *capped.entry(hit.session_id.clone()).or_insert(0) += 1;
                 // Remember the best capped tool-role hit: narration routinely
                 // outranks exact action rows (tool calls, file edits), and a
                 // session capped to narration only cannot answer "what did it
                 // actually do". One slot is reserved for it below.
-                if is_tool && !kept_has_tool.get(&session_id).copied().unwrap_or(false) {
-                    dropped_tool.entry(session_id).or_insert(hit);
+                if is_tool && !session.has_tool {
+                    dropped_tool.entry(hit.session_id.clone()).or_insert(hit);
                 }
             } else {
-                *count += 1;
+                session.count += 1;
                 if is_tool {
-                    kept_has_tool.insert(session_id.clone(), true);
+                    session.has_tool = true;
                 }
-                kept_last_idx.insert(session_id, kept.len());
+                session.last_idx = kept.len();
                 kept.push(hit);
             }
         }
         for (session_id, tool_hit) in dropped_tool {
-            if kept_has_tool.get(&session_id).copied().unwrap_or(false) {
+            let Some(session) = agg.get(&session_id) else {
+                continue;
+            };
+            if session.has_tool {
                 continue;
             }
-            if let Some(&idx) = kept_last_idx.get(&session_id) {
-                // Swap the session's weakest kept hit for its top tool hit;
-                // one hit still drops, so the capped count stays accurate.
-                kept[idx] = tool_hit;
-            }
+            // Swap the session's weakest kept hit for its top tool hit;
+            // one hit still drops, so the capped count stays accurate.
+            kept[session.last_idx] = tool_hit;
         }
         *hits = kept;
     }

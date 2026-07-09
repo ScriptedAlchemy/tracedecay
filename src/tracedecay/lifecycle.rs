@@ -902,21 +902,7 @@ fn git_remote_url(project_root: &Path) -> Option<String> {
     if !crate::worktree::git_may_resolve_repo(project_root) {
         return None;
     }
-    git_output(project_root, &["config", "--get", "remote.origin.url"])
-}
-
-fn git_output(project_root: &Path, args: &[&str]) -> Option<String> {
-    let output = std::process::Command::new(crate::git::git_program())
-        .args(args)
-        .current_dir(project_root)
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let text = String::from_utf8(output.stdout).ok()?;
-    let text = text.trim();
-    (!text.is_empty()).then(|| text.to_string())
+    crate::git::git_capture(project_root, &["config", "--get", "remote.origin.url"])
 }
 
 fn profile_graph_scope_id(store_id: &str, branch_name: &str) -> String {

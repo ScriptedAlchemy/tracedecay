@@ -18,7 +18,6 @@
 //! Ported from `codegraph/src/sync/worktree.ts` (#312).
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 /// A mismatch between the caller's git working tree and the resolved
 /// tracedecay index root.
@@ -48,7 +47,7 @@ pub fn git_worktree_root(dir: &Path) -> Option<PathBuf> {
     if !git_may_resolve_repo(dir) {
         return None;
     }
-    let trimmed = git_output(dir, &["rev-parse", "--show-toplevel"])?;
+    let trimmed = crate::git::git_capture(dir, &["rev-parse", "--show-toplevel"])?;
     realpath(Path::new(&trimmed))
 }
 
@@ -69,7 +68,7 @@ pub fn git_common_dir(dir: &Path) -> Option<PathBuf> {
     if !git_may_resolve_repo(dir) {
         return None;
     }
-    let raw = git_output(dir, &["rev-parse", "--git-common-dir"])?;
+    let raw = crate::git::git_capture(dir, &["rev-parse", "--git-common-dir"])?;
     let common_dir = PathBuf::from(raw);
     let resolved = if common_dir.is_absolute() {
         common_dir
@@ -175,8 +174,8 @@ fn realpath(p: &Path) -> Option<PathBuf> {
 }
 
 #[cfg(test)]
-fn git_command() -> Command {
-    let mut command = Command::new("git");
+fn git_command() -> std::process::Command {
+    let mut command = std::process::Command::new("git");
     let mut paths: Vec<PathBuf> = std::env::var_os("PATH")
         .map(|path| std::env::split_paths(&path).collect())
         .unwrap_or_default();
@@ -189,21 +188,6 @@ fn git_command() -> Command {
         command.env("PATH", path);
     }
     command
-}
-
-#[cfg(not(test))]
-fn git_command() -> Command {
-    Command::new(crate::git::git_program())
-}
-
-fn git_output(dir: &Path, args: &[&str]) -> Option<String> {
-    let output = git_command().args(args).current_dir(dir).output().ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let raw = String::from_utf8(output.stdout).ok()?;
-    let trimmed = raw.trim();
-    (!trimmed.is_empty()).then(|| trimmed.to_string())
 }
 
 #[cfg(test)]
