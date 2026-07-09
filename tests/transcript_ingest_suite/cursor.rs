@@ -470,8 +470,23 @@ async fn cursor_transcript_ingest_is_idempotent() {
 }
 
 #[tokio::test]
+// Intentional: this test resolves the profile session DB path twice (capturing
+// db_path, then opening the store), so it pins process-wide profile env under
+// GLOBAL_DB_ENV_LOCK to exclude the env-mutating siblings and keep both
+// resolutions identical.
+#[allow(clippy::await_holding_lock)]
 async fn cursor_transcript_ingest_retries_after_mid_batch_db_failure() {
     let tmp = TempDir::new().unwrap();
+    let _env_lock = GLOBAL_DB_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|err| err.into_inner());
+    let profile = tmp.path().join("profile");
+    let _env_guards = [
+        EnvVarGuard::set("TRACEDECAY_DATA_DIR", &profile),
+        EnvVarGuard::set(GLOBAL_DB_ENV, profile.join("global.db")),
+        EnvVarGuard::set("HOME", tmp.path().join("home")),
+        EnvVarGuard::set("USERPROFILE", tmp.path().join("home")),
+    ];
     let project = init_project(&tmp);
     let transcript = tmp.path().join("cursor-session.jsonl");
     std::fs::write(
