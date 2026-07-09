@@ -422,11 +422,10 @@ const STRUCTURED_MARKER_NAME: &str = "structured_rows_backfill";
 /// * `claude = 3` — v3 emits a separate `kind="reasoning"` row for Claude
 ///   assistant `thinking` blocks (previously nested in the assistant blob).
 ///   This carries the merged global v3 bump from #372.
-/// * `codex = 2` — Codex is unchanged from the global v2 baseline. #382 (open
-///   at time of writing) will join the new Codex CLI `custom_tool_call` exec
-///   shape into `tool_call` rows; when it merges, translate its global bump to
-///   `codex = 4` here so only Codex transcripts re-sweep.
-const STRUCTURED_BACKFILL_VERSIONS: &[(&str, i64)] = &[("claude", 3), ("codex", 2)];
+/// * `codex = 4` — v4 joins the Codex CLI `custom_tool_call` exec harness into
+///   searchable `kind="tool_call"` rows. The version intentionally advances
+///   past the former global v3 Claude bump while re-sweeping only Codex.
+const STRUCTURED_BACKFILL_VERSIONS: &[(&str, i64)] = &[("claude", 3), ("codex", 4)];
 /// Base name of the sweep's path watermark. The live key is namespaced by both
 /// provider and target version (see [`structured_cursor_key`]) so bumping a
 /// provider's entry in [`STRUCTURED_BACKFILL_VERSIONS`] naturally starts that

@@ -493,6 +493,167 @@ async fn codex_response_item_tool_events_are_cataloged_compactly() {
     assert!(web_search_offset > call_offset);
 }
 
+/// The new Codex CLI emits shell commands as a `custom_tool_call` named `exec`
+/// whose `input` is a JS harness (`tools.exec_command({…})`) paired with a
+/// `custom_tool_call_output`. `apply_patch` keeps the generic byte-counted path.
+fn write_codex_rollout_with_custom_exec(
+    home: &std::path::Path,
+    project: &std::path::Path,
+    session: &str,
+) -> std::path::PathBuf {
+    let dir = home.join(".codex/sessions/2026/01/01");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join(format!("rollout-2026-01-01T00-00-19-{session}.jsonl"));
+    write_jsonl(
+        &path,
+        &[
+            serde_json::json!({
+                "timestamp": "2026-01-01T00:00:19.000Z",
+                "type": "session_meta",
+                "payload": {"id": session, "cwd": project.to_string_lossy(), "model": "gpt-5.5"}
+            }),
+            serde_json::json!({
+                "timestamp": "2026-01-01T00:00:19.100Z",
+                "type": "event_msg",
+                "payload": {"type": "user_message", "message": "Finish the release work"}
+            }),
+            serde_json::json!({
+                "timestamp": "2026-01-01T00:00:19.200Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "custom_tool_call",
+                    "id": "ctc_1",
+                    "status": "completed",
+                    "call_id": "call-exec-1",
+                    "name": "exec",
+                    "input": "const r = await tools.exec_command({\"cmd\":\"gh pr merge 366 --squash\",\"workdir\":\"/home/zack/projects/tracedecay\",\"yield_time_ms\":10000});\ntext(r.output);\n",
+                    "internal_chat_message_metadata_passthrough": {"turn_id": "turn-exec-1"}
+                }
+            }),
+            serde_json::json!({
+                "timestamp": "2026-01-01T00:00:19.300Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "custom_tool_call_output",
+                    "call_id": "call-exec-1",
+                    "output": [
+                        {"type": "input_text", "text": "Script completed\nWall time 1.4 seconds\nOutput:\n"},
+                        {"type": "input_text", "text": "zxqvsecrettoken merged pull request #366\n"}
+                    ]
+                }
+            }),
+            // apply_patch stays on the generic path (file edits come from
+            // patch_apply_end, not this custom_tool_call).
+            serde_json::json!({
+                "timestamp": "2026-01-01T00:00:19.400Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "custom_tool_call",
+                    "name": "apply_patch",
+                    "input": "*** Begin Patch\n*** Update File: src/lib.rs\n@@\n-old\n+new\n*** End Patch\n",
+                    "call_id": "call-patch-1",
+                    "status": "completed"
+                }
+            }),
+        ],
+    );
+    path
+}
+
+#[tokio::test]
+async fn codex_custom_tool_call_exec_is_joined_into_searchable_tool_call() {
+    let tmp = TempDir::new().unwrap();
+    let (home, project) = setup(&tmp);
+    write_codex_rollout_with_custom_exec(&home, &project, "codex-custom-exec");
+
+    let db = open_project_session_db(&project).await.unwrap();
+    let source = CodexSource::with_home(&home);
+
+    let stats = ingest_source(&db, &source, &project, None).await;
+    // user_message + one joined exec tool_call (call+output collapse into a
+    // single row) + apply_patch generic tool_event.
+    assert_eq!(stats.messages_upserted, 3);
+
+    // The command text is searchable — the regression the fix targets.
+    let results = db
+        .search_session_messages(
+            "codex",
+            Some(project.to_string_lossy().as_ref()),
+            "pr merge 366",
+            10,
+        )
+        .await;
+    assert_eq!(results.len(), 1, "the merge command is searchable");
+    let call = &results[0].message;
+    assert_eq!(call.role, "tool");
+    assert_eq!(call.kind.as_deref(), Some("tool_call"));
+    assert_eq!(call.text, "gh pr merge 366 --squash");
+    assert_eq!(call.tool_names.as_deref(), Some("exec_command"));
+
+    let metadata: serde_json::Value =
+        serde_json::from_str(call.metadata_json.as_deref().unwrap()).unwrap();
+    assert_eq!(metadata["source"], "codex_exec_command");
+    assert_eq!(metadata["tool"], "exec_command");
+    assert_eq!(metadata["call_id"], "call-exec-1");
+    assert_eq!(metadata["cmd"], "gh pr merge 366 --squash");
+    assert_eq!(metadata["workdir"], "/home/zack/projects/tracedecay");
+    assert_eq!(metadata["turn_id"], "turn-exec-1");
+    assert_eq!(metadata["wall_time_s"], 1.4);
+    // The custom harness header has no exit code, so it stays null.
+    assert_eq!(metadata["exit_code"], serde_json::Value::Null);
+    assert_eq!(metadata["success"], serde_json::Value::Null);
+    // The output body (and anything secret in it) never lands in the index.
+    assert!(!call.text.contains("zxqvsecrettoken"));
+    assert!(
+        !call
+            .metadata_json
+            .as_deref()
+            .unwrap()
+            .contains("zxqvsecrettoken")
+    );
+
+    // apply_patch stays a generic byte-counted tool_event, never an exec join.
+    let patch_results = db
+        .search_session_messages(
+            "codex",
+            Some(project.to_string_lossy().as_ref()),
+            "call-patch-1",
+            10,
+        )
+        .await;
+    assert_eq!(patch_results.len(), 1);
+    assert_eq!(patch_results[0].message.kind.as_deref(), Some("tool_event"));
+
+    // Re-parsing the same rollout from the start is idempotent: the joined row
+    // keys on the call offset, so it upserts rather than duplicating.
+    let path_str = write_codex_rollout_with_custom_exec(&home, &project, "codex-custom-exec")
+        .to_string_lossy()
+        .to_string();
+    db.set_parse_offset(
+        &path_str,
+        ParseOffset {
+            byte_offset: 0,
+            mtime: 1,
+            file_id: 1,
+        },
+    )
+    .await;
+    ingest_source(&db, &source, &project, None).await;
+    let after = db
+        .search_session_messages(
+            "codex",
+            Some(project.to_string_lossy().as_ref()),
+            "pr merge 366",
+            10,
+        )
+        .await;
+    assert_eq!(
+        after.len(),
+        1,
+        "re-ingest does not duplicate the joined row"
+    );
+}
+
 #[tokio::test]
 async fn codex_response_item_skips_developer_messages_and_keeps_reasoning_summaries() {
     let tmp = TempDir::new().unwrap();
