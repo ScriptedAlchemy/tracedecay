@@ -110,7 +110,10 @@ impl CodexContextState {
     }
 }
 
-pub(super) fn session_metadata_json(meta: &CodexMeta) -> Option<String> {
+pub(super) fn session_metadata_json(
+    meta: &CodexMeta,
+    summary: Option<&super::events::CodexSessionSummary>,
+) -> Option<String> {
     let mut metadata = serde_json::Map::new();
     metadata.insert(
         "source".to_string(),
@@ -137,6 +140,9 @@ pub(super) fn session_metadata_json(meta: &CodexMeta) -> Option<String> {
         TranscriptLocation::new(Some(&meta.cwd), "session_meta"),
     );
     insert_git_metadata(&mut metadata, meta.git.as_ref());
+    if let Some(summary) = summary {
+        summary.apply(&mut metadata);
+    }
     serde_json::to_string(&Value::Object(metadata)).ok()
 }
 
