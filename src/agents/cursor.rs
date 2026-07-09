@@ -1061,11 +1061,11 @@ mod tests {
             );
         }
 
-        // Every agent in the Cursor agent overlay on disk is deployed —
-        // dir-walk rather than hardcode, so a future overlay agent that is not
-        // wired into Cursor's deploy set is caught here.
-        let agents_root = plugin_source_root().join("overlays/cursor/agents");
-        for entry in std::fs::read_dir(&agents_root).expect("cursor agent overlay readable") {
+        // Every canonical agent is rendered into Cursor's generated deploy
+        // set. Directory discovery prevents a newly added catalog entry from
+        // being omitted by adapter generation.
+        let agents_root = plugin_source_root().join("agents");
+        for entry in std::fs::read_dir(&agents_root).expect("canonical agent catalog readable") {
             let name = entry.unwrap().file_name().to_string_lossy().into_owned();
             let expected = format!("agents/{name}");
             assert!(

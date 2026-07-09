@@ -28,57 +28,29 @@ struct ManagedAgentManifest {
     exported: Vec<ManagedAgentExportEntry>,
 }
 
-struct AgentTemplate {
-    id: &'static str,
-    codex: &'static str,
+fn agents() -> &'static [crate::agents::plugin_bundle::PluginFile] {
+    crate::agents::plugin_bundle::codex_agent_files()
 }
 
-const AGENTS: &[AgentTemplate] = &[
-    AgentTemplate {
-        id: "code-explorer",
-        codex: include_str!("../agents/codex_agents/code-explorer.toml"),
-    },
-    AgentTemplate {
-        id: "code-health-auditor",
-        codex: include_str!("../agents/codex_agents/code-health-auditor.toml"),
-    },
-    AgentTemplate {
-        id: "session-historian",
-        codex: include_str!("../agents/codex_agents/session-historian.toml"),
-    },
-    AgentTemplate {
-        id: "runtime-storage-doctor",
-        codex: include_str!("../agents/codex_agents/runtime-storage-doctor.toml"),
-    },
-    AgentTemplate {
-        id: "cross-host-integration-auditor",
-        codex: include_str!("../agents/codex_agents/cross-host-integration-auditor.toml"),
-    },
-    AgentTemplate {
-        id: "change-risk-reviewer",
-        codex: include_str!("../agents/codex_agents/change-risk-reviewer.toml"),
-    },
-    AgentTemplate {
-        id: "usage-intelligence-analyst",
-        codex: include_str!("../agents/codex_agents/usage-intelligence-analyst.toml"),
-    },
-    AgentTemplate {
-        id: "automation-auditor",
-        codex: include_str!("../agents/codex_agents/automation-auditor.toml"),
-    },
-];
+fn generated_agent_id(relative: &'static str) -> &'static str {
+    relative
+        .strip_prefix("tracedecay-")
+        .and_then(|name| name.strip_suffix(".toml"))
+        .unwrap_or_else(|| panic!("invalid generated Codex agent path: {relative}"))
+}
 
 pub fn install_codex_managed_agents(home: &Path) -> Result<ManagedAgentInstallSummary> {
     let agents_dir = agents_dir(home);
     fs::create_dir_all(&agents_dir)?;
     remove_stale_managed_agents(&agents_dir)?;
 
-    let mut exported = Vec::with_capacity(AGENTS.len());
-    for agent in AGENTS {
-        let path = agents_dir.join(agent_file_name(agent.id));
-        safe_write_text_file(&path, agent.codex, None)?;
+    let mut exported = Vec::with_capacity(agents().len());
+    for agent in agents() {
+        let id = generated_agent_id(agent.relative);
+        let path = agents_dir.join(agent.relative);
+        safe_write_text_file(&path, agent.contents, None)?;
         exported.push(ManagedAgentExportEntry {
-            id: agent.id.to_string(),
+            id: id.to_string(),
             path,
         });
     }
@@ -120,24 +92,20 @@ pub fn remove_managed_agents(agents_dir: &Path) -> Result<()> {
 
 pub fn managed_agent_label(agent_id: &str) -> Option<&'static str> {
     let normalized = agent_id.strip_prefix("tracedecay-").unwrap_or(agent_id);
-    AGENTS
+    agents()
         .iter()
-        .find(|agent| agent.id == normalized)
-        .map(|agent| agent.id)
+        .map(|agent| generated_agent_id(agent.relative))
+        .find(|id| *id == normalized)
 }
 
 fn agents_dir(home: &Path) -> PathBuf {
     home.join(".codex/agents")
 }
 
-fn agent_file_name(id: &str) -> String {
-    format!("tracedecay-{id}.toml")
-}
-
 fn remove_stale_managed_agents(agents_dir: &Path) -> Result<()> {
-    let keep: BTreeSet<PathBuf> = AGENTS
+    let keep: BTreeSet<PathBuf> = agents()
         .iter()
-        .map(|agent| agents_dir.join(agent_file_name(agent.id)))
+        .map(|agent| agents_dir.join(agent.relative))
         .chain([agents_dir.join(MANIFEST_FILE)])
         .collect();
 

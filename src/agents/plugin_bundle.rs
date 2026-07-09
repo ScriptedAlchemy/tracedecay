@@ -13,8 +13,8 @@
 //! - `plugin/overlays/cursor/commands/tracedecay-*.md` — Cursor 1.6+ native
 //!   slash commands, one per workflow slug, deployed to `commands/<slug>.md`.
 //!   These provide the explicit workflow dispatch (no dispatcher *skills*).
-//! - `plugin/agents/*.md` — Claude-form subagents (deployed by Claude).
-//! - `plugin/overlays/cursor/agents/*.md` — Cursor-form subagents.
+//! - `plugin/agents/*.md` — canonical subagents. Claude deploys them verbatim;
+//!   build.rs derives Cursor markdown and Codex TOML adapters from them.
 //! - `plugin/commands/*.md` — Claude slash commands.
 //! - `plugin/rules/*.mdc` — Cursor rules.
 //! - `plugin/hooks/hooks-<host>.json` — per-host hook wiring; each deploys to
@@ -81,8 +81,12 @@ macro_rules! plugin_file {
     };
 }
 
-// Every shared skill and native Claude/Cursor agent file, embedded by build.rs.
+// Every shared skill and canonical/generated agent file, embedded by build.rs.
 include!(concat!(env!("OUT_DIR"), "/plugin_bundle_generated.rs"));
+
+pub(crate) fn codex_agent_files() -> &'static [PluginFile] {
+    GENERATED_CODEX_AGENT_FILES
+}
 
 /// Prefix of the dispatcher skills that Cursor does **not** deploy (they are
 /// native commands on Cursor). Claude/Codex deploy every skill.

@@ -2,8 +2,7 @@
 name: cross-host-integration-auditor
 description: Read-only TraceDecay integration specialist for install, update, uninstall, configuration, and capability parity across Codex, Claude, Cursor, and supported hosts. Use when packaged skills, commands, agents, hooks, MCP, CLI fallback, or host diagnostics may have drifted.
 model: inherit
-tools: Read, Grep, Glob, Bash, ToolSearch, mcp__tracedecay, mcp__plugin_tracedecay_graph
-disallowedTools: mcp__tracedecay__tracedecay_str_replace, mcp__plugin_tracedecay_graph__tracedecay_str_replace, mcp__tracedecay__tracedecay_multi_str_replace, mcp__plugin_tracedecay_graph__tracedecay_multi_str_replace, mcp__tracedecay__tracedecay_insert_at, mcp__plugin_tracedecay_graph__tracedecay_insert_at, mcp__tracedecay__tracedecay_insert_at_symbol, mcp__plugin_tracedecay_graph__tracedecay_insert_at_symbol, mcp__tracedecay__tracedecay_replace_symbol, mcp__plugin_tracedecay_graph__tracedecay_replace_symbol, mcp__tracedecay__tracedecay_ast_grep_rewrite, mcp__plugin_tracedecay_graph__tracedecay_ast_grep_rewrite, mcp__tracedecay__tracedecay_run_affected_tests, mcp__plugin_tracedecay_graph__tracedecay_run_affected_tests, mcp__tracedecay__tracedecay_diagnostics, mcp__plugin_tracedecay_graph__tracedecay_diagnostics, mcp__tracedecay__tracedecay_session_start, mcp__plugin_tracedecay_graph__tracedecay_session_start, mcp__tracedecay__tracedecay_session_end, mcp__plugin_tracedecay_graph__tracedecay_session_end, mcp__tracedecay__tracedecay_fact_store, mcp__plugin_tracedecay_graph__tracedecay_fact_store, mcp__tracedecay__tracedecay_fact_feedback, mcp__plugin_tracedecay_graph__tracedecay_fact_feedback, mcp__tracedecay__tracedecay_memory_status, mcp__plugin_tracedecay_graph__tracedecay_memory_status, mcp__tracedecay__tracedecay_lcm_compress, mcp__plugin_tracedecay_graph__tracedecay_lcm_compress, mcp__tracedecay__tracedecay_lcm_session_boundary, mcp__plugin_tracedecay_graph__tracedecay_lcm_session_boundary, mcp__tracedecay__tracedecay_lcm_doctor, mcp__plugin_tracedecay_graph__tracedecay_lcm_doctor
+tools: Read, Grep, Glob, ToolSearch, mcp__tracedecay__tracedecay_active_project, mcp__plugin_tracedecay_graph__tracedecay_active_project, mcp__tracedecay__tracedecay_status, mcp__plugin_tracedecay_graph__tracedecay_status, mcp__tracedecay__tracedecay_storage_status, mcp__plugin_tracedecay_graph__tracedecay_storage_status, mcp__tracedecay__tracedecay_config, mcp__plugin_tracedecay_graph__tracedecay_config, mcp__tracedecay__tracedecay_files, mcp__plugin_tracedecay_graph__tracedecay_files
 ---
 
 # Cross-host integration auditor (read-only)
@@ -17,9 +16,9 @@ Audit whether the same TraceDecay capabilities survive packaging and host-native
 3. Run only read-only host diagnostics and compare actual discovery with packaged intent.
 4. Classify gaps as missing product source, packaging drift, lifecycle drift, host limitation, or stale installation.
 
-MCP is optional. If a TraceDecay MCP tool is unavailable, run the equivalent
-`tracedecay tool <name> --help`, then invoke `tracedecay tool <name>` with the
-advertised arguments. Never query `.tracedecay` databases directly.
+MCP is optional. If a TraceDecay MCP tool is unavailable, ask the parent to
+discover and run the equivalent `tracedecay tool <name> --help` command. This
+agent must not execute shell commands. Never query `.tracedecay` databases directly.
 
 ## Rules
 

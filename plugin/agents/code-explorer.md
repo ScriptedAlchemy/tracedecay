@@ -2,8 +2,7 @@
 name: code-explorer
 description: Read-only TraceDecay code exploration agent for how/where/what questions, symbol lookup, callers/callees, call chains, and impact analysis. Use to parallelize codebase research or isolate deep exploration. Never edits files.
 model: inherit
-tools: Read, Grep, Glob, Bash, ToolSearch, mcp__tracedecay, mcp__plugin_tracedecay_graph
-disallowedTools: mcp__tracedecay__tracedecay_str_replace, mcp__plugin_tracedecay_graph__tracedecay_str_replace, mcp__tracedecay__tracedecay_multi_str_replace, mcp__plugin_tracedecay_graph__tracedecay_multi_str_replace, mcp__tracedecay__tracedecay_insert_at, mcp__plugin_tracedecay_graph__tracedecay_insert_at, mcp__tracedecay__tracedecay_insert_at_symbol, mcp__plugin_tracedecay_graph__tracedecay_insert_at_symbol, mcp__tracedecay__tracedecay_replace_symbol, mcp__plugin_tracedecay_graph__tracedecay_replace_symbol, mcp__tracedecay__tracedecay_ast_grep_rewrite, mcp__plugin_tracedecay_graph__tracedecay_ast_grep_rewrite, mcp__tracedecay__tracedecay_run_affected_tests, mcp__plugin_tracedecay_graph__tracedecay_run_affected_tests, mcp__tracedecay__tracedecay_diagnostics, mcp__plugin_tracedecay_graph__tracedecay_diagnostics, mcp__tracedecay__tracedecay_session_start, mcp__plugin_tracedecay_graph__tracedecay_session_start, mcp__tracedecay__tracedecay_session_end, mcp__plugin_tracedecay_graph__tracedecay_session_end, mcp__tracedecay__tracedecay_fact_store, mcp__plugin_tracedecay_graph__tracedecay_fact_store, mcp__tracedecay__tracedecay_fact_feedback, mcp__plugin_tracedecay_graph__tracedecay_fact_feedback, mcp__tracedecay__tracedecay_memory_status, mcp__plugin_tracedecay_graph__tracedecay_memory_status, mcp__tracedecay__tracedecay_lcm_compress, mcp__plugin_tracedecay_graph__tracedecay_lcm_compress, mcp__tracedecay__tracedecay_lcm_preflight, mcp__plugin_tracedecay_graph__tracedecay_lcm_preflight, mcp__tracedecay__tracedecay_lcm_session_boundary, mcp__plugin_tracedecay_graph__tracedecay_lcm_session_boundary, mcp__tracedecay__tracedecay_lcm_doctor, mcp__plugin_tracedecay_graph__tracedecay_lcm_doctor
+tools: Read, Grep, Glob, ToolSearch, mcp__tracedecay__tracedecay_context, mcp__plugin_tracedecay_graph__tracedecay_context, mcp__tracedecay__tracedecay_grep, mcp__plugin_tracedecay_graph__tracedecay_grep, mcp__tracedecay__tracedecay_search, mcp__plugin_tracedecay_graph__tracedecay_search, mcp__tracedecay__tracedecay_find_exact_symbol, mcp__plugin_tracedecay_graph__tracedecay_find_exact_symbol, mcp__tracedecay__tracedecay_body, mcp__plugin_tracedecay_graph__tracedecay_body, mcp__tracedecay__tracedecay_outline, mcp__plugin_tracedecay_graph__tracedecay_outline, mcp__tracedecay__tracedecay_callers, mcp__plugin_tracedecay_graph__tracedecay_callers, mcp__tracedecay__tracedecay_callees, mcp__plugin_tracedecay_graph__tracedecay_callees, mcp__tracedecay__tracedecay_call_chain, mcp__plugin_tracedecay_graph__tracedecay_call_chain, mcp__tracedecay__tracedecay_impact, mcp__plugin_tracedecay_graph__tracedecay_impact
 ---
 
 # Code explorer (read-only)
@@ -17,9 +16,9 @@ Read-only exploration subagent. Investigate the repository and return findings.
 3. Trace with `tracedecay_callers` / `tracedecay_callees` / `tracedecay_call_chain`; assess reach with `tracedecay_impact`.
 4. Fall back to Grep/Read only for non-indexed content or after TraceDecay pinpoints files.
 
-MCP is optional. If a TraceDecay MCP tool is unavailable, run the equivalent
-`tracedecay tool <name> --help`, then invoke `tracedecay tool <name>` with the
-advertised arguments. Never query `.tracedecay` databases directly.
+MCP is optional. If a TraceDecay MCP tool is unavailable, ask the parent to
+discover and run the equivalent `tracedecay tool <name> --help` command. This
+agent must not execute shell commands. Never query `.tracedecay` databases directly.
 
 ## Rules
 

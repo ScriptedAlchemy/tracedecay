@@ -5,7 +5,7 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 use tracedecay::automation::skill_frontmatter::SkillFrontmatterValue;
 
@@ -15,7 +15,6 @@ use crate::plugin_validation_support::{
 
 const SHARED_SKILL_ROOT: &str = "plugin/skills";
 const CURSOR_COMMAND_ROOT: &str = "plugin/overlays/cursor/commands";
-const CURSOR_AGENT_OVERLAY_ROOT: &str = "plugin/overlays/cursor/agents";
 
 const INTERSECTION_FRONTMATTER: &[&str] = &[
     "allowed-tools",
@@ -348,13 +347,10 @@ fn cursor_native_commands_are_hygienic_slash_commands() {
 }
 
 #[test]
-fn cursor_agent_overlay_is_present_and_clean() {
-    let overlay = repo_path(CURSOR_AGENT_OVERLAY_ROOT);
-    let files: BTreeSet<String> = std::fs::read_dir(&overlay)
-        .expect("cursor agent overlay readable")
-        .flatten()
-        .filter(|entry| entry.file_type().is_ok_and(|t| t.is_file()))
-        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+fn generated_cursor_agents_are_present_and_clean() {
+    let agents: BTreeMap<&str, &str> = tracedecay::agents::plugin_bundle::cursor_files()
+        .into_iter()
+        .filter(|(path, _)| path.starts_with("agents/"))
         .collect();
     for expected in [
         "automation-auditor.md",
@@ -367,16 +363,15 @@ fn cursor_agent_overlay_is_present_and_clean() {
         "usage-intelligence-analyst.md",
     ] {
         assert!(
-            files.contains(expected),
-            "cursor agent overlay missing {expected}"
+            agents.contains_key(format!("agents/{expected}").as_str()),
+            "generated Cursor agents missing {expected}"
         );
     }
     let mut violations = Vec::new();
-    for file in &files {
-        let raw = std::fs::read_to_string(overlay.join(file)).expect("read overlay agent");
+    for (file, raw) in agents {
         if raw.contains('\r') || !raw.ends_with('\n') {
             violations.push(format!("{}: line-ending hygiene", file));
         }
     }
-    assert_no_violations("cursor agent overlay", &violations);
+    assert_no_violations("generated cursor agents", &violations);
 }

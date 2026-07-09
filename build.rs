@@ -379,10 +379,90 @@ fn append_plugin_files(
     code.push_str("];\n");
 }
 
+struct CanonicalAgent {
+    file_name: String,
+    name: String,
+    description: String,
+    body: String,
+}
+
+fn parse_agent_source(path: &Path) -> CanonicalAgent {
+    let raw = fs::read_to_string(path)
+        .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()))
+        .replace("\r\n", "\n");
+    let frontmatter_marker = raw
+        .strip_prefix("---\n")
+        .and_then(|rest| rest.find("\n---\n"))
+        .unwrap_or_else(|| panic!("{} must have fenced YAML frontmatter", path.display()));
+    let frontmatter_end = 4 + frontmatter_marker;
+    let body_start = frontmatter_end + "\n---\n".len();
+    let frontmatter = &raw[4..frontmatter_end];
+    let field = |key: &str| {
+        frontmatter
+            .lines()
+            .find_map(|line| line.strip_prefix(&format!("{key}: ")))
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| panic!("{} is missing `{key}` frontmatter", path.display()))
+            .to_string()
+    };
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or_else(|| panic!("{} has a non-UTF-8 file name", path.display()))
+        .to_string();
+    let name = field("name");
+    assert_eq!(
+        file_name.strip_suffix(".md"),
+        Some(name.as_str()),
+        "{} file name must match its agent name",
+        path.display()
+    );
+    CanonicalAgent {
+        file_name,
+        name,
+        description: field("description"),
+        body: raw[body_start..].to_string(),
+    }
+}
+
+/// Quote the shared JSON-compatible string subset accepted by both YAML and
+/// TOML basic strings.
+fn quoted_string(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len() + 2);
+    escaped.push('"');
+    for ch in value.chars() {
+        match ch {
+            '"' => escaped.push_str("\\\""),
+            '\\' => escaped.push_str("\\\\"),
+            '\n' => escaped.push_str("\\n"),
+            '\r' => escaped.push_str("\\r"),
+            '\t' => escaped.push_str("\\t"),
+            ch if ch.is_control() => panic!("agent adapter contains unsupported control character"),
+            ch => escaped.push(ch),
+        }
+    }
+    escaped.push('"');
+    escaped
+}
+
+fn append_generated_plugin_files(
+    code: &mut String,
+    const_name: &str,
+    files: impl IntoIterator<Item = (String, String)>,
+) {
+    code.push_str(&format!("pub const {const_name}: &[PluginFile] = &[\n"));
+    for (relative, contents) in files {
+        code.push_str(&format!(
+            "    PluginFile {{ relative: {relative:?}, contents: {contents:?} }},\n"
+        ));
+    }
+    code.push_str("];\n");
+}
+
 /// Generates `$OUT_DIR/plugin_bundle_generated.rs`: recursive manifests for
-/// shared skills and native Claude/Cursor agent files. Directory-driven
-/// embedding makes the product plugin tree canonical and prevents newly added
-/// agents or skill support files from being omitted by a hand-maintained list.
+/// shared skills and the canonical Claude agent catalog. Cursor markdown and
+/// Codex TOML adapters are derived from that catalog, so host metadata and
+/// instructions cannot drift between hand-maintained copies.
 ///
 /// Each entry's deploy path equals its `plugin/`-relative source path
 /// (`skills/<skill>/<subpath>`), which is identical for every host, so a single
@@ -408,12 +488,45 @@ fn generate_plugin_bundle() {
         "agents",
         "agents",
     );
-    append_plugin_files(
+    let agents = collect_files_relative(&plugin_root.join("agents"))
+        .into_iter()
+        .map(|relative| {
+            assert!(
+                relative.ends_with(".md"),
+                "plugin/agents/{relative} must be Markdown"
+            );
+            parse_agent_source(&plugin_root.join("agents").join(relative))
+        })
+        .collect::<Vec<_>>();
+    append_generated_plugin_files(
         &mut code,
         "GENERATED_CURSOR_AGENT_FILES",
-        &plugin_root.join("overlays/cursor/agents"),
-        "overlays/cursor/agents",
-        "agents",
+        agents.iter().map(|agent| {
+            (
+                format!("agents/{}", agent.file_name),
+                format!(
+                    "---\nname: {}\ndescription: {}\nreadonly: true\n---\n{}",
+                    quoted_string(&agent.name),
+                    quoted_string(&agent.description),
+                    agent.body
+                ),
+            )
+        }),
+    );
+    append_generated_plugin_files(
+        &mut code,
+        "GENERATED_CODEX_AGENT_FILES",
+        agents.iter().map(|agent| {
+            (
+                format!("tracedecay-{}.toml", agent.name),
+                format!(
+                    "name = {}\ndescription = {}\nsandbox_mode = \"read-only\"\ndeveloper_instructions = {}\n",
+                    quoted_string(&format!("tracedecay-{}", agent.name)),
+                    quoted_string(&agent.description),
+                    quoted_string(&agent.body),
+                ),
+            )
+        }),
     );
 
     let out_dir = std::env::var("OUT_DIR").expect("OUT_DIR");
