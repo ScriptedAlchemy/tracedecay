@@ -510,6 +510,13 @@ pub(super) fn asks_for_impact(text: &str) -> bool {
             "what code is affected",
             "which tests",
             "what tests",
+            "what breaks",
+            "what would break",
+            "what will break",
+            "will this break",
+            "would this break",
+            "does this break",
+            "what could break",
         ],
     )
 }
@@ -816,6 +823,15 @@ pub(super) fn asks_for_type_orientation(text: &str) -> bool {
             "duplicate logic",
             "redundant",
             "similar helper",
+            "type hierarchy",
+            "trait hierarchy",
+            "class hierarchy",
+            "interface hierarchy",
+            "inheritance hierarchy",
+            "inheritance depth",
+            "extenders of",
+            "subtypes of",
+            "supertypes of",
         ],
     )
 }

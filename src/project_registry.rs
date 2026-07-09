@@ -1,5 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
@@ -260,6 +260,50 @@ fn project_kind(project: &CodeProjectRecord) -> String {
     }
 }
 
+/// Resolves the canonical registration root for a project store rooted at
+/// `project_root`.
+///
+/// A tracedecay project id is shared across every linked worktree of a
+/// repository: [`crate::global_db::GlobalDb::upsert_code_project`] indexes a
+/// `git-common-dir:<common dir>` alias back to whichever project id first
+/// registered it, so a session opened from *any* linked worktree resolves
+/// to the same project id as the primary checkout. Because that same upsert
+/// persists whichever `project_root` it is called with as `canonical_root`
+/// and `display_root`, registering straight from a worktree's own root lets
+/// the last worktree to touch the project pin the shared row to its
+/// (often transient) path — silently dropping analytics/path-matching for
+/// the primary checkout.
+///
+/// Given the worktree's own root and its already-resolved
+/// [`crate::worktree::git_common_dir`], this returns `Some(primary_root)`
+/// when `project_root` is a linked worktree and the primary checkout still
+/// exists on disk. It returns `None` — meaning "register `project_root` as
+/// given" — when `project_root` already *is* the primary checkout, isn't a
+/// git checkout at all, or the primary checkout no longer exists (a
+/// worktree-only project is legitimate and must keep registering itself).
+pub fn primary_checkout_root(
+    project_root: &Path,
+    git_common_dir: Option<&Path>,
+) -> Option<PathBuf> {
+    let common_dir = git_common_dir?;
+    // Only a plain, non-bare `<repo>/.git` common dir has a parent that is
+    // reliably the checkout root. Bare repos and submodule gitlinks (whose
+    // common dir lives under `.git/modules/...`) are left alone rather than
+    // risk deriving a bogus "primary" and redirecting registration there.
+    if common_dir.file_name().and_then(|name| name.to_str()) != Some(".git") {
+        return None;
+    }
+    let primary_root = common_dir.parent()?;
+    let canonical_project_root = project_root
+        .canonicalize()
+        .unwrap_or_else(|_| project_root.to_path_buf());
+    if primary_root == canonical_project_root {
+        // `project_root` already is the primary checkout.
+        return None;
+    }
+    primary_root.is_dir().then(|| primary_root.to_path_buf())
+}
+
 fn path_label(path: &str) -> String {
     Path::new(path)
         .file_name()
@@ -401,5 +445,94 @@ mod tests {
         };
 
         assert_eq!(repo_label_with_parent(&group), "root");
+    }
+
+    #[test]
+    fn primary_checkout_root_redirects_linked_worktree_to_existing_primary() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let primary = tmp.path().join("main");
+        let worktree = tmp.path().join("main-wt");
+        std::fs::create_dir_all(&primary).unwrap();
+        std::fs::create_dir_all(&worktree).unwrap();
+        // `crate::worktree::git_common_dir` always returns a canonicalized
+        // path — mirror that guarantee here rather than a raw join.
+        let primary = primary.canonicalize().unwrap();
+        let common_dir = primary.join(".git");
+        std::fs::create_dir_all(&common_dir).unwrap();
+
+        let redirected = primary_checkout_root(&worktree, Some(&common_dir));
+
+        assert_eq!(
+            redirected,
+            Some(primary),
+            "a linked worktree with a live primary checkout must redirect to it"
+        );
+    }
+
+    #[test]
+    fn primary_checkout_root_is_none_when_project_root_is_already_primary() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let primary = tmp.path().join("main");
+        std::fs::create_dir_all(&primary).unwrap();
+        let primary = primary.canonicalize().unwrap();
+        let common_dir = primary.join(".git");
+        std::fs::create_dir_all(&common_dir).unwrap();
+
+        assert_eq!(
+            primary_checkout_root(&primary, Some(&common_dir)),
+            None,
+            "the primary checkout must never be redirected to itself"
+        );
+    }
+
+    #[test]
+    fn primary_checkout_root_is_none_without_git_common_dir() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let project_root = tmp.path().join("not-a-worktree");
+        std::fs::create_dir_all(&project_root).unwrap();
+
+        assert_eq!(
+            primary_checkout_root(&project_root, None),
+            None,
+            "non-git projects must register themselves unchanged"
+        );
+    }
+
+    #[test]
+    fn primary_checkout_root_keeps_worktree_when_primary_checkout_is_missing() {
+        // The primary checkout no longer exists on disk (deleted, moved off
+        // this machine, ...). A worktree-only project is legitimate and
+        // must keep registering its own root rather than redirecting to a
+        // path that doesn't exist.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let missing_primary = tmp.path().join("deleted-main");
+        let worktree = tmp.path().join("main-wt");
+        std::fs::create_dir_all(&worktree).unwrap();
+        let common_dir = missing_primary.join(".git");
+
+        assert_eq!(
+            primary_checkout_root(&worktree, Some(&common_dir)),
+            None,
+            "a missing primary checkout must not be adopted as canonical_root"
+        );
+    }
+
+    #[test]
+    fn primary_checkout_root_ignores_non_dot_git_common_dirs() {
+        // Bare repos and submodule gitlinks resolve `git_common_dir` to a
+        // path that isn't a plain `<repo>/.git`, so the parent directory
+        // isn't reliably a checkout root — leave registration alone rather
+        // than risk deriving a bogus "primary".
+        let tmp = tempfile::TempDir::new().unwrap();
+        let worktree = tmp.path().join("checkout");
+        std::fs::create_dir_all(&worktree).unwrap();
+        let submodule_common_dir = tmp.path().join("main/.git/modules/sub");
+        std::fs::create_dir_all(&submodule_common_dir).unwrap();
+
+        assert_eq!(
+            primary_checkout_root(&worktree, Some(&submodule_common_dir)),
+            None,
+            "non-`.git` common dirs must not redirect registration"
+        );
     }
 }
