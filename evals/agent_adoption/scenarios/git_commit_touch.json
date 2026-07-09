@@ -1,0 +1,47 @@
+{
+  "id": "git_commit_touch",
+  "category": "git_history",
+  "pack": "pack_git",
+  "hosts": [
+    "claude",
+    "codex"
+  ],
+  "fixture": "main",
+  "status": "deferred",
+  "prompt": "What did the most recent commit here actually touch?",
+  "expected_tools": {
+    "required_first": [
+      "tracedecay_commit_context",
+      "tracedecay_diff_context",
+      "tracedecay_context"
+    ],
+    "acceptable": [
+      "tracedecay_changelog",
+      "tracedecay_search"
+    ],
+    "forbidden_first": [
+      "Grep",
+      "Glob",
+      "Bash"
+    ],
+    "forbidden_bash": [
+      "grep",
+      "rg ",
+      "rg\t",
+      "find ",
+      "cat ",
+      "sed ",
+      "awk ",
+      "ack ",
+      "git log",
+      "git diff",
+      "git show",
+      "git blame",
+      "git status"
+    ]
+  },
+  "ground_truth": [],
+  "max_tool_calls": 5,
+  "requires_fixture": "git-history",
+  "notes": "DEFERRED: needs a seeded commit with a meaningful, nameable payload (the current fixture's sole commit is the initial import)."
+}

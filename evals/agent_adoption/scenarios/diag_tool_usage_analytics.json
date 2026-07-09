@@ -1,0 +1,38 @@
+{
+  "id": "diag_tool_usage_analytics",
+  "category": "admin",
+  "pack": "pack_diagnostics_admin",
+  "hosts": [
+    "claude",
+    "codex"
+  ],
+  "fixture": "main",
+  "status": "deferred",
+  "prompt": "How much am I actually relying on the code-graph tools versus just reading files by hand?",
+  "expected_tools": {
+    "required_first": [
+      "tracedecay_analytics"
+    ],
+    "acceptable": [
+      "tracedecay_context"
+    ],
+    "forbidden_first": [
+      "Grep",
+      "Glob"
+    ],
+    "forbidden_bash": [
+      "grep",
+      "rg ",
+      "rg\t",
+      "find ",
+      "cat ",
+      "sed ",
+      "awk ",
+      "ack "
+    ]
+  },
+  "ground_truth": [],
+  "max_tool_calls": 4,
+  "requires_tool": "tracedecay_analytics",
+  "notes": "PENDING: forward-looking scenario for a usage-analytics tool that does not exist yet."
+}

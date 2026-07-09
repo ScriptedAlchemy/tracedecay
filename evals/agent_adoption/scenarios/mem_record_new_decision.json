@@ -1,0 +1,37 @@
+{
+  "id": "mem_record_new_decision",
+  "category": "memory_recall",
+  "pack": "pack_session_memory",
+  "hosts": [
+    "claude",
+    "codex"
+  ],
+  "fixture": "main",
+  "status": "active",
+  "prompt": "We just agreed that SKU strings are free-form text with no format validation before v2 -- make sure that's remembered for later.",
+  "expected_tools": {
+    "required_first": [
+      "tracedecay_fact_store"
+    ],
+    "acceptable": [
+      "tracedecay_context"
+    ],
+    "forbidden_first": [
+      "Grep",
+      "Glob"
+    ],
+    "forbidden_bash": [
+      "grep",
+      "rg ",
+      "rg\t",
+      "find ",
+      "cat ",
+      "sed ",
+      "awk ",
+      "ack "
+    ]
+  },
+  "ground_truth": [],
+  "max_tool_calls": 4,
+  "notes": "fact add; neutral phrasing ('make sure that's remembered') should still route to tracedecay_fact_store. No ground_truth text check -- graded on tool choice, since confirmation phrasing varies by model."
+}

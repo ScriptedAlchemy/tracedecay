@@ -29,6 +29,7 @@ Announce: "Using tracedecay:assessing-impact for <change>."
 | Which tests reach this symbol/file | `tracedecay_test_map` (empty result = no indexed path, strong-not-absolute evidence of untested) |
 | Which tests can see these changed files | `tracedecay_affected` (`files`) |
 | Where the next test is most needed | `tracedecay_test_risk` (`path?`, `limit?`) |
+| "What breaks if I change/touch this" | `tracedecay_impact` (`node_id`) for a symbol, `tracedecay_affected` (`files`) for changed files |
 
 ## Running the impacted tests
 

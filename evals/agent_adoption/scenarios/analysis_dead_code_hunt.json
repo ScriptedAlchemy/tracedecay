@@ -1,0 +1,43 @@
+{
+  "id": "analysis_dead_code_hunt",
+  "category": "dead_code",
+  "pack": "pack_analysis",
+  "hosts": [
+    "claude",
+    "codex"
+  ],
+  "fixture": "main",
+  "status": "active",
+  "prompt": "Is there any function in this crate that nothing else calls anymore?",
+  "expected_tools": {
+    "required_first": [
+      "tracedecay_dead_code",
+      "tracedecay_context",
+      "tracedecay_search"
+    ],
+    "acceptable": [
+      "tracedecay_callers",
+      "tracedecay_body",
+      "Read"
+    ],
+    "forbidden_first": [
+      "Grep",
+      "Glob"
+    ],
+    "forbidden_bash": [
+      "grep",
+      "rg ",
+      "rg\t",
+      "find ",
+      "cat ",
+      "sed ",
+      "awk ",
+      "ack "
+    ]
+  },
+  "ground_truth": [
+    "compute_grand_total"
+  ],
+  "max_tool_calls": 5,
+  "notes": "dead code; compute_grand_total has zero callers and zero test coverage."
+}

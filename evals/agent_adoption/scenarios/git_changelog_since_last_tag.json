@@ -1,0 +1,47 @@
+{
+  "id": "git_changelog_since_last_tag",
+  "category": "git_history",
+  "pack": "pack_git",
+  "hosts": [
+    "claude",
+    "codex"
+  ],
+  "fixture": "main",
+  "status": "deferred",
+  "prompt": "Draft a changelog entry for what's changed recently.",
+  "expected_tools": {
+    "required_first": [
+      "tracedecay_changelog",
+      "tracedecay_diff_context",
+      "tracedecay_context"
+    ],
+    "acceptable": [
+      "tracedecay_commit_context",
+      "tracedecay_pr_context"
+    ],
+    "forbidden_first": [
+      "Grep",
+      "Glob",
+      "Bash"
+    ],
+    "forbidden_bash": [
+      "grep",
+      "rg ",
+      "rg\t",
+      "find ",
+      "cat ",
+      "sed ",
+      "awk ",
+      "ack ",
+      "git log",
+      "git diff",
+      "git show",
+      "git blame",
+      "git status"
+    ]
+  },
+  "ground_truth": [],
+  "max_tool_calls": 6,
+  "requires_fixture": "git-history",
+  "notes": "DEFERRED: tracedecay_changelog needs a real ref range with more than one commit to summarize."
+}

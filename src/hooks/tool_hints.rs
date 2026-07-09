@@ -73,6 +73,20 @@ impl HintCategory {
             .find(|spec| spec.key == key)
             .map(|spec| spec.category)
     }
+
+    /// The tracedecay MCP tools this category steers toward. Used by the
+    /// hint-outcome correlator to decide whether a fired tool satisfied a hint.
+    pub(crate) fn expected_tools(self) -> &'static [&'static str] {
+        self.spec().expected_tools
+    }
+}
+
+/// Machine-readable expected-tool list for a hint-category `key` (the value
+/// stored in `analytics_events.hint_category`), or `None` when the key is
+/// unknown. Lets the hint-outcome correlator map an emitted hint to the tools
+/// that would satisfy it without re-parsing hint prose.
+pub(crate) fn expected_tools_for_key(key: &str) -> Option<&'static [&'static str]> {
+    HintCategory::from_key(key).map(HintCategory::expected_tools)
 }
 
 struct HintCategorySpec {
@@ -82,6 +96,12 @@ struct HintCategorySpec {
     skill: &'static str,
     message: &'static str,
     context: &'static str,
+    /// Machine-readable list of the tracedecay MCP tools this hint steers the
+    /// model toward, derived from the tools named in `context`. The
+    /// hint-outcome correlator (`super::hint_outcomes`) treats a hint as
+    /// "acted" when one of these tools fires in the session after the hint,
+    /// instead of re-parsing the prose. Keep in sync with `context`.
+    expected_tools: &'static [&'static str],
     nonblocking: bool,
 }
 
@@ -93,6 +113,7 @@ const CATEGORY_SPECS: &[HintCategorySpec] = &[
         skill: "exploring-code",
         message: "For codebase search, route by what you're matching: literal/regex text -> tracedecay_grep; symbol name -> tracedecay_search; concept -> tracedecay_context.",
         context: "tracedecay_grep runs a literal or regex content search over the indexed tree (pattern, fixed_strings, path_glob) and enriches each hit with its enclosing symbol; tracedecay_search ranks symbols by name; tracedecay_context answers concept-level questions. Grep/ripgrep still fit prose and un-indexed files.",
+        expected_tools: &["tracedecay_grep", "tracedecay_search", "tracedecay_context"],
         nonblocking: false,
     },
     HintCategorySpec {
@@ -102,6 +123,7 @@ const CATEGORY_SPECS: &[HintCategorySpec] = &[
         skill: "exploring-code",
         message: "For conceptual codebase questions, consider tracedecay_context.",
         context: "tracedecay_context answers concept-level queries from the pre-built code graph (add keywords to expand synonyms); tracedecay_search ranks symbols by name/keyword; tracedecay_grep matches a literal or regex string when you want exact text, not a concept.",
+        expected_tools: &["tracedecay_context", "tracedecay_search", "tracedecay_grep"],
         nonblocking: true,
     },
     HintCategorySpec {
@@ -111,6 +133,12 @@ const CATEGORY_SPECS: &[HintCategorySpec] = &[
         skill: "exploring-code",
         message: "Before reading whole files, consider tracedecay_outline, tracedecay_body, or tracedecay_read.",
         context: "tracedecay_outline gives a file's table of contents, tracedecay_body returns one symbol's source, and tracedecay_read (mode: \"lines\") slices a range — usually far cheaper than a full-file read. If you are opening the file only to find a string in it, tracedecay_grep locates the literal or regex match with its enclosing symbol instead.",
+        expected_tools: &[
+            "tracedecay_outline",
+            "tracedecay_body",
+            "tracedecay_read",
+            "tracedecay_grep",
+        ],
         nonblocking: true,
     },
     HintCategorySpec {
@@ -120,6 +148,11 @@ const CATEGORY_SPECS: &[HintCategorySpec] = &[
         skill: "tracing-functions",
         message: "This looks like a TraceDecay MCP tool descriptor; use the tool surface instead of reading schema JSON.",
         context: "Call the named tracedecay_* MCP tool directly when available, or use tool discovery for its schema; for function tracing that usually means tracedecay_find_exact_symbol plus tracedecay_callers/tracedecay_callees.",
+        expected_tools: &[
+            "tracedecay_find_exact_symbol",
+            "tracedecay_callers",
+            "tracedecay_callees",
+        ],
         nonblocking: true,
     },
     HintCategorySpec {
@@ -129,6 +162,7 @@ const CATEGORY_SPECS: &[HintCategorySpec] = &[
         skill: "exploring-code",
         message: "For broad codebase reading, consider starting with focused tracedecay context.",
         context: "tracedecay_context gathers relevant code slices without reading entire directories or the whole repository; tracedecay_grep sweeps the indexed tree for a literal or regex string when you are hunting for exact text rather than a concept.",
+        expected_tools: &["tracedecay_context", "tracedecay_grep"],
         nonblocking: false,
     },
     HintCategorySpec {
@@ -138,6 +172,13 @@ const CATEGORY_SPECS: &[HintCategorySpec] = &[
         skill: "tracing-functions",
         message: "For function tracing, use the indexed call graph before grep/file reads.",
         context: "Resolve the symbol with tracedecay_find_exact_symbol or tracedecay_search, then use tracedecay_callers for who depends on it and tracedecay_callees for what it calls; use tracedecay_impact for broader dependents before opening files.",
+        expected_tools: &[
+            "tracedecay_find_exact_symbol",
+            "tracedecay_search",
+            "tracedecay_callers",
+            "tracedecay_callees",
+            "tracedecay_impact",
+        ],
         nonblocking: false,
     },
     HintCategorySpec {
@@ -147,6 +188,12 @@ const CATEGORY_SPECS: &[HintCategorySpec] = &[
         skill: "assessing-impact",
         message: "For impact, affected-test, or blast-radius questions, use TraceDecay's dependency tools.",
         context: "Start with tracedecay_diff_context when you have changed files, tracedecay_impact for a resolved symbol, tracedecay_affected for affected tests, and tracedecay_test_map when you need direct test attribution.",
+        expected_tools: &[
+            "tracedecay_diff_context",
+            "tracedecay_impact",
+            "tracedecay_affected",
+            "tracedecay_test_map",
+        ],
         nonblocking: false,
     },
     HintCategorySpec {
@@ -156,6 +203,7 @@ const CATEGORY_SPECS: &[HintCategorySpec] = &[
         skill: "exploring-code",
         message: "For symbol lookup, consider using tracedecay indexed symbol tools.",
         context: "tracedecay_context and tracedecay_node can locate definitions and nearby relationships from the code graph.",
+        expected_tools: &["tracedecay_context", "tracedecay_node"],
         nonblocking: false,
     },
     HintCategorySpec {
@@ -165,6 +213,7 @@ const CATEGORY_SPECS: &[HintCategorySpec] = &[
         skill: "exploring-code",
         message: "For finding files by role or path, consider using tracedecay_files.",
         context: "tracedecay_files can list indexed files and narrow file lookup before opening individual files.",
+        expected_tools: &["tracedecay_files"],
         nonblocking: false,
     },
     HintCategorySpec {
@@ -174,6 +223,12 @@ const CATEGORY_SPECS: &[HintCategorySpec] = &[
         skill: "code-health",
         message: "For other repos or registered projects, consider TraceDecay project registry tools.",
         context: "tracedecay_project_list shows known projects; tracedecay_project_search can find a sibling repo by name/path/remote; pass project_path or project_id to tracedecay_context/search for cross-project code context before scanning parent directories.",
+        expected_tools: &[
+            "tracedecay_project_list",
+            "tracedecay_project_search",
+            "tracedecay_context",
+            "tracedecay_search",
+        ],
         nonblocking: false,
     },
     HintCategorySpec {
@@ -183,6 +238,7 @@ const CATEGORY_SPECS: &[HintCategorySpec] = &[
         skill: "managing-session-context",
         message: "For prior conversation context, consider TraceDecay session search.",
         context: "tracedecay_message_search searches ingested agent transcripts across providers; tracedecay_lcm_grep can search bounded raw-message snippets and summaries when you need session-level recall before re-discovering context.",
+        expected_tools: &["tracedecay_message_search", "tracedecay_lcm_grep"],
         nonblocking: false,
     },
     HintCategorySpec {
@@ -192,6 +248,11 @@ const CATEGORY_SPECS: &[HintCategorySpec] = &[
         skill: "editing-safely",
         message: "For safe mechanical edits, use TraceDecay's anchored edit tools.",
         context: "Use tracedecay_multi_str_replace for all-or-nothing anchored replacements, tracedecay_ast_grep_rewrite for structural rewrites, and tracedecay_replace_symbol when replacing one resolved symbol.",
+        expected_tools: &[
+            "tracedecay_multi_str_replace",
+            "tracedecay_ast_grep_rewrite",
+            "tracedecay_replace_symbol",
+        ],
         nonblocking: false,
     },
     HintCategorySpec {
@@ -200,7 +261,15 @@ const CATEGORY_SPECS: &[HintCategorySpec] = &[
         label: "type orientation",
         skill: "exploring-code",
         message: "For type, constructor, field, trait, or duplicate-logic questions, use TraceDecay's AST orientation tools.",
-        context: "Use tracedecay_constructors for struct literal sites, tracedecay_field_sites for reads/writes, tracedecay_impls or tracedecay_implementations for trait methods, and tracedecay_redundancy before adding similar helpers.",
+        context: "Use tracedecay_constructors for struct literal sites, tracedecay_field_sites for reads/writes, tracedecay_impls or tracedecay_implementations for trait methods, tracedecay_type_hierarchy for a trait/interface/class's full recursive implementor/extender tree, and tracedecay_redundancy before adding similar helpers.",
+        expected_tools: &[
+            "tracedecay_constructors",
+            "tracedecay_field_sites",
+            "tracedecay_impls",
+            "tracedecay_implementations",
+            "tracedecay_type_hierarchy",
+            "tracedecay_redundancy",
+        ],
         nonblocking: false,
     },
     HintCategorySpec {
@@ -210,6 +279,12 @@ const CATEGORY_SPECS: &[HintCategorySpec] = &[
         skill: "using-tracedecay",
         message: "For code research subagents, consider adding tracedecay MCP context before broad exploration.",
         context: "tracedecay_context can gather focused code context, while tracedecay_search, tracedecay_callers, and tracedecay_impact can answer common research questions without a broad scan.",
+        expected_tools: &[
+            "tracedecay_context",
+            "tracedecay_search",
+            "tracedecay_callers",
+            "tracedecay_impact",
+        ],
         nonblocking: true,
     },
     HintCategorySpec {
@@ -219,6 +294,11 @@ const CATEGORY_SPECS: &[HintCategorySpec] = &[
         skill: "using-tracedecay",
         message: "For subagent handoff, include focused TraceDecay context instead of broad repo instructions.",
         context: "Use tracedecay_context, tracedecay_search, and tracedecay_impact to provide only the code graph slices the subagent needs; keep workflow depth in bundled skills.",
+        expected_tools: &[
+            "tracedecay_context",
+            "tracedecay_search",
+            "tracedecay_impact",
+        ],
         nonblocking: true,
     },
     HintCategorySpec {
@@ -228,6 +308,7 @@ const CATEGORY_SPECS: &[HintCategorySpec] = &[
         skill: "fixing-build-and-type-errors",
         message: "For build/type-check errors, use TraceDecay's diagnostics tools instead of parsing raw compiler output.",
         context: "tracedecay_diagnostics runs (or reads) the project's diagnostics and maps each error to its enclosing symbol; tracedecay_diagnose adds caller/impact context for a specific failure so you fix the root cause, not just the line the compiler points at.",
+        expected_tools: &["tracedecay_diagnostics", "tracedecay_diagnose"],
         nonblocking: false,
     },
     HintCategorySpec {
@@ -237,6 +318,7 @@ const CATEGORY_SPECS: &[HintCategorySpec] = &[
         skill: "reviewing-changes",
         message: "For reviewing diffs or PR changes, use TraceDecay's change-context tools before raw diff reading.",
         context: "tracedecay_diff_context maps local changed files to touched symbols, dependents, and tests; tracedecay_pr_context does the same for a PR branch when available, so use GitHub only for review comments, metadata, and CI state.",
+        expected_tools: &["tracedecay_diff_context", "tracedecay_pr_context"],
         nonblocking: false,
     },
     HintCategorySpec {
@@ -246,6 +328,7 @@ const CATEGORY_SPECS: &[HintCategorySpec] = &[
         skill: "project-memory",
         message: "For durable facts, prefer tracedecay_fact_store over hand-editing harness memory files.",
         context: "tracedecay_fact_store persists a trust-ranked project/user fact that survives across sessions and is recalled by tracedecay_context and tracedecay_recall; a memory markdown edit is only visible to the current harness. Keep secrets and unnecessary PII out of stored facts.",
+        expected_tools: &["tracedecay_fact_store"],
         nonblocking: false,
     },
     HintCategorySpec {
@@ -255,6 +338,7 @@ const CATEGORY_SPECS: &[HintCategorySpec] = &[
         skill: "editing-safely",
         message: "You just added a new function-sized block; before moving on, confirm it does not duplicate logic that already exists.",
         context: "tracedecay_redundancy surfaces near-duplicate function bodies and tracedecay_similar finds structurally similar code; if a match exists, reuse or refactor the existing helper instead of keeping a second copy.",
+        expected_tools: &["tracedecay_redundancy", "tracedecay_similar"],
         nonblocking: true,
     },
 ];

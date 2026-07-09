@@ -1,0 +1,47 @@
+{
+  "id": "diag_build_failure_plain_english",
+  "category": "diagnostics",
+  "pack": "pack_diagnostics_admin",
+  "hosts": [
+    "claude",
+    "codex"
+  ],
+  "fixture": "broken",
+  "status": "active",
+  "prompt": "Something in this crate isn't compiling -- walk me through what's broken.",
+  "expected_tools": {
+    "required_first": [
+      "tracedecay_diagnostics",
+      "tracedecay_diagnose",
+      "tracedecay_context"
+    ],
+    "acceptable": [
+      "tracedecay_body",
+      "tracedecay_search",
+      "Read"
+    ],
+    "forbidden_first": [
+      "Grep",
+      "Glob",
+      "Bash"
+    ],
+    "forbidden_bash": [
+      "grep",
+      "rg ",
+      "rg\t",
+      "find ",
+      "cat ",
+      "sed ",
+      "awk ",
+      "ack ",
+      "cargo",
+      "rustc"
+    ]
+  },
+  "ground_truth": [
+    "place_order",
+    "reserve_stock"
+  ],
+  "max_tool_calls": 6,
+  "notes": "build-fails variant of diagnostics_build_error.json with plainer phrasing; same planted place_order/reserve_stock type error."
+}

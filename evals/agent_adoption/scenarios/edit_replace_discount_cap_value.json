@@ -1,0 +1,44 @@
+{
+  "id": "edit_replace_discount_cap_value",
+  "category": "edit_refactor",
+  "pack": "pack_edit_refactor",
+  "hosts": [
+    "claude",
+    "codex"
+  ],
+  "fixture": "main",
+  "status": "active",
+  "prompt": "Replace apply_discount's body so the cap is 30 percent instead of 25, keeping the same signature.",
+  "expected_tools": {
+    "required_first": [
+      "tracedecay_replace_symbol",
+      "tracedecay_str_replace",
+      "tracedecay_multi_str_replace"
+    ],
+    "acceptable": [
+      "tracedecay_body",
+      "tracedecay_context",
+      "Read",
+      "Edit"
+    ],
+    "forbidden_first": [
+      "Grep",
+      "Glob"
+    ],
+    "forbidden_bash": [
+      "grep",
+      "rg ",
+      "rg\t",
+      "find ",
+      "cat ",
+      "sed ",
+      "awk ",
+      "ack "
+    ]
+  },
+  "ground_truth": [
+    "30"
+  ],
+  "max_tool_calls": 6,
+  "notes": "replace-this-helper-body; targets apply_discount's 25->30 cap. Live runs mutate the throwaway fixture copy, which is fine."
+}

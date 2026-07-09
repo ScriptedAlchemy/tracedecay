@@ -48,6 +48,7 @@ errors or times out, the same tool runs as `tracedecay tool <name> --args '<json
 | User names another repo/project/workspace, sibling checkout, or cross-repo/cross-project context | `tracedecay_project_list` / `tracedecay_project_search` → `tracedecay_project_context`; pass `project_id`, `project_path`, or `project_selector` to `tracedecay_context`, `tracedecay_search`, and `tracedecay_message_search` |
 | "Who calls X" / "what does X call" / "trace this" | `tracedecay:tracing-functions` |
 | Wondering what breaks or which tests to run | `tracedecay:assessing-impact` |
+| Trait/interface/class type-hierarchy question (implementors, extenders, inheritance) | `tracedecay_type_hierarchy` — skill: `tracedecay:exploring-code` |
 | About to run `gh pr diff` / read a raw diff to review | `tracedecay_pr_context` / `tracedecay_diff_context` (offline, no gh needed) — `tracedecay:reviewing-changes` |
 | About to write a new helper, rename, or mass-edit | `tracedecay:editing-safely` |
 | Looking for duplicate code, similar function bodies, repeated helper logic, or consolidation targets | `tracedecay_redundancy` first for body/functionality matches; `tracedecay_similar` only for near-duplicate names — `tracedecay:code-health` / `tracedecay:editing-safely` |

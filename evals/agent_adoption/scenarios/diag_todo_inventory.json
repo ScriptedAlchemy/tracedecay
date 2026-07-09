@@ -1,0 +1,42 @@
+{
+  "id": "diag_todo_inventory",
+  "category": "admin",
+  "pack": "pack_diagnostics_admin",
+  "hosts": [
+    "claude",
+    "codex"
+  ],
+  "fixture": "main",
+  "status": "active",
+  "prompt": "Are there any leftover TODOs or unfinished markers in this crate I should clean up before release?",
+  "expected_tools": {
+    "required_first": [
+      "tracedecay_todos",
+      "tracedecay_context"
+    ],
+    "acceptable": [
+      "tracedecay_grep",
+      "tracedecay_search"
+    ],
+    "forbidden_first": [
+      "Grep",
+      "Glob"
+    ],
+    "forbidden_bash": [
+      "grep",
+      "rg ",
+      "rg\t",
+      "find ",
+      "cat ",
+      "sed ",
+      "awk ",
+      "ack "
+    ]
+  },
+  "ground_truth": [
+    "audit.rs",
+    "raw_total_len"
+  ],
+  "max_tool_calls": 4,
+  "notes": "WIRED UP: lane 1's fixture/src/audit.rs plants a TODO(audit-fixture) marker inside raw_total_len. Live-verified against the built fixture: `tracedecay tool todos` returns match_count=2 (kind TODO) at src/audit.rs:11 and src/audit.rs:26, enclosing symbol src/audit.rs::raw_total_len -- matches the README's documented 'two matches'. Promoted from deferred now that the fixture marker exists and the tool reliably finds it."
+}

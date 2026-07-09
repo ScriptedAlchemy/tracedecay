@@ -1271,10 +1271,36 @@ impl McpServer {
             let project_root = cg.project_root().to_path_buf();
             let session_db_path = cg.store_layout().sessions_db_path.clone();
             let ingest_done_flag = Arc::clone(&self.transcript_ingest_done);
+            let analytics_db = self.global_db.clone();
             tokio::spawn(async move {
                 let _ = tokio::time::timeout(std::time::Duration::from_secs(20), async move {
                     if let Some(db) = GlobalDb::open_at(&session_db_path).await {
                         let _ = crate::sessions::ingest_global_sources(&db, &project_root).await;
+                        // With transcripts freshly ingested into `db`'s
+                        // session_messages, close the hint-efficacy loop: import
+                        // any new hook telemetry into the durable analytics store
+                        // and correlate emitted hints against the tool activity
+                        // that followed them. Best-effort and idempotent (own
+                        // parse cursors + hint_outcome watermark), so it never
+                        // blocks readiness and re-runs safely each startup.
+                        if let Some(analytics_db) = analytics_db.as_deref() {
+                            let sources =
+                                crate::analytics_bridge::hook_import_sources(Some(&project_root));
+                            let _ = crate::analytics_bridge::import_hook_analytics(
+                                analytics_db,
+                                &sources,
+                            )
+                            .await;
+                            let project_id = GlobalDb::canonical_project_key(&project_root);
+                            let now = crate::tracedecay::current_timestamp();
+                            let _ = crate::hooks::hint_outcomes::correlate_hint_outcomes(
+                                analytics_db,
+                                &db,
+                                &project_id,
+                                now,
+                            )
+                            .await;
+                        }
                     }
                 })
                 .await;

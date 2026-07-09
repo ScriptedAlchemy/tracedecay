@@ -52,12 +52,15 @@ pub(crate) fn stamp_manifest_version_with(
     Ok(format!("{}\n", serde_json::to_string_pretty(&manifest)?))
 }
 
-/// Point the MCP config's `mcpServers.tracedecay.command` at the resolved
-/// binary path, returning pretty-printed JSON with a trailing newline. Claude
-/// and Cursor use this directly; Codex layers scope-specific args/env on top.
+/// Point the MCP config's `mcpServers.graph.command` at the resolved binary
+/// path, returning pretty-printed JSON with a trailing newline. Claude and
+/// Cursor use this directly; Codex layers scope-specific args/env on top. The
+/// server key is `graph` (not `tracedecay`) so hosts that namespace a plugin
+/// server by its key render `tracedecay graph` rather than the redundant
+/// `tracedecay tracedecay`.
 pub(crate) fn set_mcp_command(raw: &str, bin: &str) -> Result<String> {
     let mut mcp: serde_json::Value = serde_json::from_str(raw)?;
-    mcp["mcpServers"]["tracedecay"]["command"] = serde_json::json!(bin);
+    mcp["mcpServers"]["graph"]["command"] = serde_json::json!(bin);
     Ok(format!("{}\n", serde_json::to_string_pretty(&mcp)?))
 }
 

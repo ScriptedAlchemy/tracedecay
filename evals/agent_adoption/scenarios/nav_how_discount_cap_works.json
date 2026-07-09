@@ -1,0 +1,47 @@
+{
+  "id": "nav_how_discount_cap_works",
+  "category": "code_exploration",
+  "pack": "pack_navigation",
+  "hosts": [
+    "claude",
+    "codex"
+  ],
+  "fixture": "main",
+  "status": "active",
+  "prompt": "How does the discount cap get applied when an order checks out?",
+  "expected_tools": {
+    "required_first": [
+      "tracedecay_context",
+      "tracedecay_search",
+      "tracedecay_body",
+      "tracedecay_outline",
+      "tracedecay_read",
+      "tracedecay_grep"
+    ],
+    "acceptable": [
+      "tracedecay_callers",
+      "tracedecay_callees",
+      "Read"
+    ],
+    "forbidden_first": [
+      "Grep",
+      "Glob"
+    ],
+    "forbidden_bash": [
+      "grep",
+      "rg ",
+      "rg\t",
+      "find ",
+      "cat ",
+      "sed ",
+      "awk ",
+      "ack "
+    ]
+  },
+  "ground_truth": [
+    "apply_discount",
+    "25"
+  ],
+  "max_tool_calls": 5,
+  "notes": "how-does-X-work opener; distinct topic (discount) from the existing stock-reservation/order-flow scenarios."
+}

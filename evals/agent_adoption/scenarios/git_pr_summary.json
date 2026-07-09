@@ -1,0 +1,47 @@
+{
+  "id": "git_pr_summary",
+  "category": "git_history",
+  "pack": "pack_git",
+  "hosts": [
+    "claude",
+    "codex"
+  ],
+  "fixture": "main",
+  "status": "deferred",
+  "prompt": "Summarize these changes like you're writing the pull request description.",
+  "expected_tools": {
+    "required_first": [
+      "tracedecay_pr_context",
+      "tracedecay_diff_context",
+      "tracedecay_context"
+    ],
+    "acceptable": [
+      "tracedecay_commit_context",
+      "tracedecay_changelog"
+    ],
+    "forbidden_first": [
+      "Grep",
+      "Glob",
+      "Bash"
+    ],
+    "forbidden_bash": [
+      "grep",
+      "rg ",
+      "rg\t",
+      "find ",
+      "cat ",
+      "sed ",
+      "awk ",
+      "ack ",
+      "git log",
+      "git diff",
+      "git show",
+      "git blame",
+      "git status"
+    ]
+  },
+  "ground_truth": [],
+  "max_tool_calls": 6,
+  "requires_fixture": "git-history",
+  "notes": "DEFERRED: needs real uncommitted/branch changes on top of seeded history for tracedecay_pr_context to have anything to summarize."
+}

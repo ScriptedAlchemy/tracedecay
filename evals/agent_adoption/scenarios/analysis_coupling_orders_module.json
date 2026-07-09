@@ -1,0 +1,45 @@
+{
+  "id": "analysis_coupling_orders_module",
+  "category": "coupling",
+  "pack": "pack_analysis",
+  "hosts": [
+    "claude",
+    "codex"
+  ],
+  "fixture": "main",
+  "status": "active",
+  "prompt": "Which module pulls in the most other modules here, and which modules get leaned on the most?",
+  "expected_tools": {
+    "required_first": [
+      "tracedecay_coupling",
+      "tracedecay_file_dependents",
+      "tracedecay_context"
+    ],
+    "acceptable": [
+      "tracedecay_search",
+      "tracedecay_outline",
+      "Read"
+    ],
+    "forbidden_first": [
+      "Grep",
+      "Glob"
+    ],
+    "forbidden_bash": [
+      "grep",
+      "rg ",
+      "rg\t",
+      "find ",
+      "cat ",
+      "sed ",
+      "awk ",
+      "ack "
+    ]
+  },
+  "ground_truth": [
+    "orders",
+    "pricing",
+    "inventory"
+  ],
+  "max_tool_calls": 5,
+  "notes": "coupling; orders.rs imports both pricing and inventory, so it has the highest fan-out while pricing/inventory have the fan-in."
+}

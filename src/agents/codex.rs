@@ -641,7 +641,7 @@ fn codex_plugin_mcp(raw: &str, tracedecay_bin: &str, policy: CodexBundlePolicy) 
     // top of the result.
     let stamped = super::plugin_bundle::set_mcp_command(raw, tracedecay_bin)?;
     let mut mcp: serde_json::Value = serde_json::from_str(&stamped)?;
-    let server = &mut mcp["mcpServers"]["tracedecay"];
+    let server = &mut mcp["mcpServers"]["graph"];
     server["args"] = policy.mcp_args();
     match policy.mcp_env() {
         Some(env) => server["env"] = env,
@@ -1700,7 +1700,7 @@ fn doctor_check_plugin_dir(
     let mcp = load_json_file(&mcp_path);
     if mcp
         .get("mcpServers")
-        .and_then(|servers| servers.get("tracedecay"))
+        .and_then(|servers| servers.get("graph"))
         .is_some()
     {
         dc.pass(&format!(
