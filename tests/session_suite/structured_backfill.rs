@@ -564,29 +564,32 @@ async fn structured_backfill_provider_bump_isolates_other_providers() {
 
     // Model a claude-only version bump: reset ONLY claude's marker and drop its
     // reasoning rows. Codex's marker (v4) and goal row are left fully intact.
-    let conn = raw_conn(&project).await;
-    conn.execute(
-        "DELETE FROM lcm_raw_messages
-         WHERE provider = 'claude'
-           AND message_id IN (
-               SELECT message_id FROM session_messages
-               WHERE provider = 'claude' AND kind = 'reasoning')",
-        (),
-    )
-    .await
-    .unwrap();
-    conn.execute(
-        "DELETE FROM session_messages WHERE provider = 'claude' AND kind = 'reasoning'",
-        (),
-    )
-    .await
-    .unwrap();
-    conn.execute(
-        "DELETE FROM session_schema_migrations WHERE name = 'structured_rows_backfill:claude'",
-        (),
-    )
-    .await
-    .unwrap();
+    // Drop the raw connection before reopening GlobalDb (busy_timeout contention).
+    {
+        let conn = raw_conn(&project).await;
+        conn.execute(
+            "DELETE FROM lcm_raw_messages
+             WHERE provider = 'claude'
+               AND message_id IN (
+                   SELECT message_id FROM session_messages
+                   WHERE provider = 'claude' AND kind = 'reasoning')",
+            (),
+        )
+        .await
+        .unwrap();
+        conn.execute(
+            "DELETE FROM session_messages WHERE provider = 'claude' AND kind = 'reasoning'",
+            (),
+        )
+        .await
+        .unwrap();
+        conn.execute(
+            "DELETE FROM session_schema_migrations WHERE name = 'structured_rows_backfill:claude'",
+            (),
+        )
+        .await
+        .unwrap();
+    }
     assert_eq!(count_kind(&project, "claude", "reasoning").await, 0);
 
     // Re-sweep to completion. Claude re-enters (its marker fell behind v3);
