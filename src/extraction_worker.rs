@@ -66,10 +66,6 @@ struct ExtractData {
     mtime: i64,
 }
 
-// Not folded into `runtime_identity::random_hex_token`: this returns the raw
-// bytes (not hex) and propagates an RNG failure as an `io::Error` rather than
-// falling back, both of which the String-returning, never-failing helper cannot
-// preserve.
 fn generate_token() -> io::Result<[u8; TOKEN_LEN]> {
     let mut buf = [0u8; TOKEN_LEN];
     getrandom::getrandom(&mut buf)

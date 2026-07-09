@@ -647,10 +647,6 @@ fn scheduler_skip_reason(
 }
 
 pub(crate) fn generated_run_id(prefix: &str) -> String {
-    // Not folded into `runtime_identity::random_hex_token`: its RNG-failure
-    // fallback is the process id (stable, distinct per process), whereas
-    // `random_hex_token` falls back to a hex timestamp. Reusing it would change
-    // this function's output on the getrandom-failure path.
     let mut random = [0u8; 8];
     let entropy = match getrandom::getrandom(&mut random) {
         Ok(()) => hex::encode(random),

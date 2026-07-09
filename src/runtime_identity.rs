@@ -1,9 +1,8 @@
-//! Process-wide runtime identity and random-token minting.
+//! Process-wide runtime identity.
 //!
 //! Hoists the "mint a random per-process id" idiom out of the MCP server so
 //! other long-lived components (notably the daemon) can adopt the *same*
-//! process instance id later instead of each minting its own. Keeping it in one
-//! crate-level home means the entropy → hex → fallback logic is written once.
+//! process instance id later instead of each minting its own.
 
 use std::sync::OnceLock;
 
@@ -29,21 +28,6 @@ pub fn process_run_id() -> &'static str {
     })
 }
 
-/// Mint a fresh lowercase-hex token from `bytes` bytes of OS entropy (two hex
-/// chars per byte). Best-effort: if the OS RNG is unavailable it falls back to a
-/// hex-encoded timestamp so the token is always populated and the call never
-/// panics.
-///
-/// This holds the raw getrandom → hex idiom so callers that need a one-off
-/// random hex segment do not each re-implement it.
-pub fn random_hex_token(bytes: usize) -> String {
-    let mut buf = vec![0u8; bytes];
-    match getrandom::getrandom(&mut buf) {
-        Ok(()) => hex::encode(&buf),
-        Err(_) => hex::encode(crate::tracedecay::current_timestamp().to_le_bytes()),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -56,14 +40,5 @@ mod tests {
         assert_eq!(first, second);
         assert!(std::ptr::eq(first, second));
         assert!(!first.is_empty());
-    }
-
-    #[test]
-    fn random_hex_token_has_two_hex_chars_per_byte() {
-        let token = random_hex_token(16);
-        assert_eq!(token.len(), 32);
-        assert!(token.chars().all(|c| c.is_ascii_hexdigit()));
-        // Distinct calls mint distinct tokens (entropy, not a cached value).
-        assert_ne!(random_hex_token(16), random_hex_token(16));
     }
 }
