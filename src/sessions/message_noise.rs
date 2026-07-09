@@ -71,10 +71,6 @@ pub(crate) fn is_inventory_text(text: &str) -> bool {
 /// These name-drop the very branch a query targets while implementing nothing,
 /// so they must sit below the session that actually did the work.
 fn is_branch_inventory(lower: &str) -> bool {
-    let mentions_branch_or_worktree = lower.contains("branch") || lower.contains("worktree");
-    if !mentions_branch_or_worktree {
-        return false;
-    }
     const LISTING_INDICATORS: [&str; 9] = [
         "inventory",
         "roster",
@@ -86,6 +82,10 @@ fn is_branch_inventory(lower: &str) -> bool {
         "index of",
         "list of",
     ];
+    let mentions_branch_or_worktree = lower.contains("branch") || lower.contains("worktree");
+    if !mentions_branch_or_worktree {
+        return false;
+    }
     LISTING_INDICATORS
         .iter()
         .any(|indicator| lower.contains(indicator))
