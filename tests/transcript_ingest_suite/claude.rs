@@ -228,6 +228,7 @@ fn write_claude_transcript_with_thinking(
                 "content": [
                     {"type": "thinking", "thinking": "Reasoning breadcrumb about the parser."},
                     {"type": "redacted_thinking", "data": "ENCRYPTED_SHOULD_NEVER_INDEX"},
+                    {"type": "tool_use", "name": "Read", "input": {"file_path": "src/lib.rs"}},
                     {"type": "text", "text": "Traced it."}
                 ]
             }
@@ -242,7 +243,7 @@ async fn claude_thinking_blocks_ingest_as_a_linked_reasoning_row() {
     let tmp = TempDir::new().unwrap();
     let (home, project) = setup(&tmp);
     init_git_repo(&project);
-    write_claude_transcript_with_thinking(&home, &project, "claude-thinking");
+    let transcript = write_claude_transcript_with_thinking(&home, &project, "claude-thinking");
 
     let db = open_project_session_db(&project).await.unwrap();
     let source = ClaudeSource::with_home(&home);
@@ -263,6 +264,14 @@ async fn claude_thinking_blocks_ingest_as_a_linked_reasoning_row() {
         .iter()
         .find(|hit| hit.message.kind.as_deref() == Some("reasoning"))
         .expect("thinking should surface as a reasoning row");
+    assert_eq!(
+        results
+            .iter()
+            .filter(|hit| hit.message.text.contains("Reasoning breadcrumb"))
+            .count(),
+        1,
+        "thinking text must exist only in the reasoning row"
+    );
     assert_eq!(reasoning.message.message_id, "msg_thinking_1:thinking");
     assert_eq!(reasoning.message.role, "assistant");
     assert_eq!(reasoning.message.model.as_deref(), Some("claude-opus-4-8"));
@@ -279,18 +288,46 @@ async fn claude_thinking_blocks_ingest_as_a_linked_reasoning_row() {
     assert_eq!(metadata["thinking_blocks"], 1);
     assert_eq!(metadata["redacted_thinking_blocks"], 1);
 
-    // The owning assistant message row is stored separately and still carries
-    // the whole content array (thinking blocks included) as its lossless blob.
-    let message = results
+    let visible_results = db
+        .search_session_messages(
+            "claude",
+            Some(project.to_string_lossy().as_ref()),
+            "Traced it",
+            10,
+        )
+        .await;
+    let message = visible_results
         .iter()
         .find(|hit| hit.message.kind.as_deref() == Some("message"))
         .expect("assistant message row should coexist with its reasoning row");
     assert_eq!(message.message.message_id, "msg_thinking_1");
-    let raw = db
-        .lcm_load_raw_message("claude", "msg_thinking_1")
-        .await
-        .expect("assistant message content should be in raw LCM storage");
-    assert!(raw.content.contains("redacted_thinking"));
+    assert!(!message.message.text.contains("Reasoning breadcrumb"));
+    assert!(
+        !message
+            .message
+            .text
+            .contains("ENCRYPTED_SHOULD_NEVER_INDEX")
+    );
+    assert!(message.message.text.contains("src/lib.rs"));
+    assert_eq!(message.message.tool_names.as_deref(), Some("Read"));
+    let redacted_results = db
+        .search_session_messages(
+            "claude",
+            Some(project.to_string_lossy().as_ref()),
+            "ENCRYPTED_SHOULD_NEVER_INDEX",
+            10,
+        )
+        .await;
+    assert!(
+        redacted_results.is_empty(),
+        "redacted thinking bytes must never enter indexed text"
+    );
+
+    // The source transcript remains lossless even though indexed text is filtered.
+    let raw = std::fs::read_to_string(transcript).unwrap();
+    assert!(raw.contains("Reasoning breadcrumb about the parser."));
+    assert!(raw.contains("redacted_thinking"));
+    assert!(raw.contains("ENCRYPTED_SHOULD_NEVER_INDEX"));
 
     // Re-ingesting the unchanged transcript is a no-op: the reasoning row's
     // stable `:thinking` id keeps the insert idempotent.

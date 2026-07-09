@@ -446,8 +446,27 @@ fn message_from_line(
         .to_string();
 
     let content = message.get("content").unwrap_or(message);
+    let indexed_content = if role == "assistant" {
+        content.as_array().map(|blocks| {
+            Value::Array(
+                blocks
+                    .iter()
+                    .filter(|block| {
+                        !matches!(
+                            block.get("type").and_then(Value::as_str),
+                            Some("thinking" | "redacted_thinking")
+                        )
+                    })
+                    .cloned()
+                    .collect(),
+            )
+        })
+    } else {
+        None
+    };
+    let content_for_index = indexed_content.as_ref().unwrap_or(content);
     let (text, tool_names) = content_storage_text_and_tools(
-        content,
+        content_for_index,
         message
             .get("tool_calls")
             .or_else(|| record.get("tool_calls")),
@@ -1299,10 +1318,11 @@ mod tests {
     }
 
     #[test]
-    fn thinking_blocks_become_a_linked_reasoning_row_leaving_the_message_row_unchanged() {
+    fn thinking_blocks_are_split_from_the_visible_message_row() {
         let record = assistant_record(&json!([
             {"type": "thinking", "thinking": "First I inspect the parser."},
             {"type": "thinking", "thinking": "Then I add the row."},
+            {"type": "tool_use", "name": "Read", "input": {"file_path": "src/lib.rs"}},
             {"type": "text", "text": "Done."}
         ]));
         let path = Path::new("/tmp/sess.jsonl");
@@ -1310,12 +1330,13 @@ mod tests {
         let mut accumulator = SessionAccumulator::default();
         let message = message_from_line(&record, "sess", path, 10, None, &mut accumulator)
             .expect("assistant message row");
-        // The message row is untouched: it still stores the whole content array
-        // (thinking blocks included) as its lossless blob.
         assert_eq!(message.message_id, "msg_1");
         assert_eq!(message.kind.as_deref(), Some("message"));
-        assert!(message.text.contains("First I inspect the parser"));
+        assert!(!message.text.contains("First I inspect the parser"));
+        assert!(!message.text.contains("Then I add the row"));
+        assert!(message.text.contains("src/lib.rs"));
         assert!(message.text.contains("Done."));
+        assert_eq!(message.tool_names.as_deref(), Some("Read"));
 
         let reasoning =
             reasoning_from_line(&record, "sess", path, 10).expect("reasoning row for thinking");
