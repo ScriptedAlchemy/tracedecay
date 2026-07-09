@@ -862,9 +862,12 @@ pub struct McpServer {
     /// connection that gets re-initialized by a different client picks up
     /// the new identity.
     client_name: std::sync::Mutex<Option<String>>,
-    /// Stable per-process instance id (random hex token minted once when this
-    /// server is constructed). Recorded in every analytics event's
-    /// `metadata.mcp_instance_id`.
+    /// Stable per-process instance id from
+    /// [`crate::runtime_identity::process_run_id`] (a random hex token minted
+    /// once per process). Recorded in every analytics event's
+    /// `metadata.mcp_instance_id`. Hoisting it to `runtime_identity` lets the
+    /// daemon later stamp the *same* id on its own events, grouping one process
+    /// lifetime across both the MCP server and the daemon.
     ///
     /// The MCP transport negotiates only `clientInfo` (host name) at
     /// `initialize` — never a session/conversation id — and no session env var
@@ -876,17 +879,6 @@ pub struct McpServer {
     /// be grouped. It is deliberately kept out of the `session_id` column so it
     /// never masquerades as a real session.
     mcp_instance_id: String,
-}
-
-/// Mint a random per-process MCP instance id (32 lowercase hex chars from 16
-/// random bytes). Best-effort: if the OS RNG is unavailable, fall back to a
-/// timestamped token so the field is always populated and never panics.
-fn new_mcp_instance_id() -> String {
-    let mut buf = [0u8; 16];
-    match getrandom::getrandom(&mut buf) {
-        Ok(()) => hex::encode(buf),
-        Err(_) => format!("mcp-{}", crate::tracedecay::current_timestamp()),
-    }
 }
 
 impl McpServer {
@@ -1024,7 +1016,11 @@ impl McpServer {
                 crate::sessions::git_correlation::SpanObservationDebounce::new(),
             ),
             client_name: std::sync::Mutex::new(None),
-            mcp_instance_id: new_mcp_instance_id(),
+            // Shared process run id: the daemon should stamp this same id on its
+            // own events so one process lifetime groups across both surfaces.
+            // Field/metadata key stay `mcp_instance_id` (no analytics schema
+            // churn) even though the id now lives in `runtime_identity`.
+            mcp_instance_id: crate::runtime_identity::process_run_id().to_string(),
         });
 
         tokio::task::spawn_blocking(move || {
