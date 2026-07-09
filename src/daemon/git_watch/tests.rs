@@ -30,6 +30,8 @@ fn ref_event_marks_branch_and_delete_marks_gc() {
         health: ProjectHealth::default(),
         task: Mutex::new(None),
         entered_debounce: Notify::new(),
+        drained_plans: AtomicU64::new(0),
+        plan_drained: Notify::new(),
     });
     let create = notify::Event {
         kind: EventKind::Create(notify::event::CreateKind::File),
@@ -288,18 +290,20 @@ async fn debounce_loop_coalesces_and_drains_events() {
 
     tokio::time::advance(Duration::from_millis(max_delay_ms + 1)).await;
 
-    let drained = tokio::time::timeout(Duration::from_secs(30), async {
-        loop {
-            if state.dirty.lock().await.is_clean() {
-                return true;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .unwrap_or(false);
+    let drained = tokio::time::timeout(Duration::from_secs(30), state.plan_drained.notified())
+        .await
+        .is_ok();
     assert!(
         drained,
         "the real debounce loop must coalesce the event burst and drain the dirty set"
+    );
+    assert_eq!(
+        state.drained_plans.load(Ordering::Relaxed),
+        1,
+        "one event burst must produce exactly one coalesced plan"
+    );
+    assert!(
+        state.dirty.lock().await.is_clean(),
+        "draining the coalesced plan must clear the dirty set"
     );
 }

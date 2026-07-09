@@ -125,6 +125,11 @@ struct WatchState {
     /// Test-only: `debounce_loop` signals once before its first `wake` wait.
     #[cfg(test)]
     entered_debounce: Notify,
+    /// Test-only: count and signal completed dirty-set drains before plan I/O.
+    #[cfg(test)]
+    drained_plans: AtomicU64,
+    #[cfg(test)]
+    plan_drained: Notify,
 }
 
 #[derive(Debug, Default)]
@@ -311,6 +316,10 @@ impl GitWatcher {
             task: Mutex::new(None),
             #[cfg(test)]
             entered_debounce: Notify::new(),
+            #[cfg(test)]
+            drained_plans: AtomicU64::new(0),
+            #[cfg(test)]
+            plan_drained: Notify::new(),
         });
         projects.insert(canonical.clone(), Arc::clone(&state));
         drop(projects);
@@ -555,6 +564,11 @@ async fn debounce_loop(inner: &Arc<GitWatcherInner>, state: &Arc<WatchState>, co
             dirty.take()
         };
         if !plan.is_empty() {
+            #[cfg(test)]
+            {
+                state.drained_plans.fetch_add(1, Ordering::Relaxed);
+                state.plan_drained.notify_one();
+            }
             execute_plan(inner, state, common, plan).await;
         }
         state.health.beat();
