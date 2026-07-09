@@ -111,8 +111,9 @@ fn write_entry_inner(
     delta: u64,
     before: u64,
 ) -> std::io::Result<()> {
-    // Exclusive lock for concurrent writer safety, taken on the shared sidecar
-    // lock helper (see the sidecar-lock module note in `src/storage.rs`).
+    // Exclusive lock for concurrent writer safety. This mmap handle is itself
+    // the lock file; the shared helper supplies the cross-platform r/w open and
+    // lock semantics without introducing a second sidecar.
     let file = crate::storage::acquire_sidecar_lock_blocking(mmap_path)?;
 
     let len = file.metadata()?.len() as usize;
