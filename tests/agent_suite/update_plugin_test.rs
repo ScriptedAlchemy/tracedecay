@@ -1270,7 +1270,7 @@ fn assert_cursor_rendered_bundle_valid(plugin_dir: &Path, bin: &str) {
     // by serve's unexpanded-template fallback, not by dropping the argument
     // from the template.
     let mcp = read_json(&plugin_dir.join("mcp.json"));
-    let server = &mcp["mcpServers"]["graph"];
+    let server = &mcp["mcpServers"]["tracedecay"];
     assert_eq!(server["type"], "stdio");
     assert_eq!(server["command"], json!(bin));
     assert!(
@@ -1324,7 +1324,7 @@ fn assert_cursor_rendered_bundle_valid(plugin_dir: &Path, bin: &str) {
         rendered_json_placeholders(plugin_dir),
         vec![(
             "mcp.json".to_string(),
-            "/mcpServers/graph/args/2".to_string(),
+            "/mcpServers/tracedecay/args/2".to_string(),
             "${workspaceFolder}".to_string()
         )],
         "the mcp.json args pin is the only placeholder allowed in rendered JSON"

@@ -701,7 +701,9 @@ fn doctor_check_plugin_mcp(dc: &mut DoctorCounters, mcp_path: &Path) {
         return;
     }
     let settings = load_json_file(mcp_path);
-    let server = &settings["mcpServers"]["graph"];
+    // Cursor Settings surfaces the MCP server key literally, so the Cursor
+    // plugin registers `tracedecay` (not the Claude/Codex `graph` key).
+    let server = &settings["mcpServers"]["tracedecay"];
     if server["command"]
         .as_str()
         .is_some_and(|command| !command.is_empty())
@@ -966,6 +968,26 @@ mod tests {
         assert!(install_dir.join("hooks/hooks.json").exists());
         assert!(install_dir.join("rules/tracedecay.mdc").exists());
 
+        // Cursor Settings surfaces the MCP server key literally, so the
+        // Cursor plugin must register `tracedecay` (not Claude/Codex `graph`).
+        let mcp: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(install_dir.join("mcp.json")).unwrap())
+                .unwrap();
+        let server = &mcp["mcpServers"]["tracedecay"];
+        assert!(
+            server.is_object(),
+            "Cursor mcp.json must declare mcpServers.tracedecay"
+        );
+        assert_eq!(server["command"], "tracedecay");
+        assert_eq!(
+            server["args"],
+            serde_json::json!(["serve", "--path", "${workspaceFolder}"])
+        );
+        assert!(
+            mcp["mcpServers"].get("graph").is_none(),
+            "Cursor mcp.json must not keep the Claude/Codex graph key"
+        );
+
         // A representative skill, the agent, and a native slash command also
         // ship, so released installs are no longer missing the bundle that the
         // symlink path provides.
@@ -1205,7 +1227,7 @@ mod tests {
             .filter_map(|line| {
                 let entry = line.trim().trim_end_matches(',').trim_matches('"');
                 entry
-                    .strip_prefix("graph:")
+                    .strip_prefix("tracedecay:")
                     .filter(|tool| tool.starts_with("tracedecay_"))
                     .map(str::to_string)
             })

@@ -1,6 +1,6 @@
 {
   "mcpServers": {
-    "graph": {
+    "tracedecay": {
       "type": "stdio",
       "command": "tracedecay",
       "args": [

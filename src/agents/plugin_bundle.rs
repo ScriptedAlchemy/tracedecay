@@ -52,15 +52,43 @@ pub(crate) fn stamp_manifest_version_with(
     Ok(format!("{}\n", serde_json::to_string_pretty(&manifest)?))
 }
 
-/// Point the MCP config's `mcpServers.graph.command` at the resolved binary
-/// path, returning pretty-printed JSON with a trailing newline. Claude and
-/// Cursor use this directly; Codex layers scope-specific args/env on top. The
-/// server key is `graph` (not `tracedecay`) so hosts that namespace a plugin
-/// server by its key render `tracedecay graph` rather than the redundant
-/// `tracedecay tracedecay`.
+/// Point the MCP config's sole `mcpServers.<key>.command` at the resolved
+/// binary path, returning pretty-printed JSON with a trailing newline. Claude
+/// and Cursor use this directly; Codex layers scope-specific args/env on top.
+///
+/// Host templates choose the server key deliberately:
+/// - Claude/Codex keep `graph` so namespaced UIs render `tracedecay graph`
+///   rather than the redundant `tracedecay tracedecay`.
+/// - Cursor uses `tracedecay` because Settings surfaces the MCP server key
+///   literally (`plugin-tracedecay-graph` looked like a bare "graph" entry).
 pub(crate) fn set_mcp_command(raw: &str, bin: &str) -> Result<String> {
     let mut mcp: serde_json::Value = serde_json::from_str(raw)?;
-    mcp["mcpServers"]["graph"]["command"] = serde_json::json!(bin);
+    let servers = mcp
+        .get_mut("mcpServers")
+        .and_then(|value| value.as_object_mut())
+        .ok_or_else(|| crate::errors::TraceDecayError::Config {
+            message: "plugin MCP config is missing mcpServers object".to_string(),
+        })?;
+    let key = if servers.contains_key("tracedecay") {
+        "tracedecay"
+    } else if servers.contains_key("graph") {
+        "graph"
+    } else {
+        return Err(crate::errors::TraceDecayError::Config {
+            message: "plugin MCP config must declare mcpServers.tracedecay or mcpServers.graph"
+                .to_string(),
+        });
+    };
+    servers
+        .get_mut(key)
+        .ok_or_else(|| crate::errors::TraceDecayError::Config {
+            message: format!("plugin MCP config is missing mcpServers.{key}"),
+        })?
+        .as_object_mut()
+        .ok_or_else(|| crate::errors::TraceDecayError::Config {
+            message: format!("plugin MCP config mcpServers.{key} must be an object"),
+        })?
+        .insert("command".to_string(), serde_json::json!(bin));
     Ok(format!("{}\n", serde_json::to_string_pretty(&mcp)?))
 }
 
@@ -293,10 +321,62 @@ mod tests {
     }
 
     #[test]
+    fn set_mcp_command_updates_tracedecay_or_graph_key() {
+        let tracedecay = set_mcp_command(
+            r#"{"mcpServers":{"tracedecay":{"type":"stdio","command":"tracedecay","args":["serve"]}}}"#,
+            "/abs/tracedecay",
+        )
+        .unwrap();
+        let tracedecay: serde_json::Value = serde_json::from_str(&tracedecay).unwrap();
+        assert_eq!(
+            tracedecay["mcpServers"]["tracedecay"]["command"],
+            "/abs/tracedecay"
+        );
+        assert!(tracedecay["mcpServers"].get("graph").is_none());
+
+        let graph = set_mcp_command(
+            r#"{"mcpServers":{"graph":{"type":"stdio","command":"tracedecay","args":["serve"]}}}"#,
+            "/abs/tracedecay",
+        )
+        .unwrap();
+        let graph: serde_json::Value = serde_json::from_str(&graph).unwrap();
+        assert_eq!(graph["mcpServers"]["graph"]["command"], "/abs/tracedecay");
+        assert!(graph["mcpServers"].get("tracedecay").is_none());
+    }
+
+    #[test]
+    fn set_mcp_command_rejects_missing_server_key() {
+        let err = set_mcp_command(r#"{"mcpServers":{}}"#, "/abs/tracedecay").unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("mcpServers.tracedecay or mcpServers.graph"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
     fn each_host_deploys_unique_relative_paths() {
         assert_unique_relatives(&claude_files(), "claude");
         assert_unique_relatives(&cursor_files(), "cursor");
         assert_unique_relatives(&codex_files(), "codex");
+    }
+
+    #[test]
+    fn cursor_mcp_template_uses_tracedecay_key() {
+        let mcp = cursor_files()
+            .into_iter()
+            .find(|(relative, _)| *relative == "mcp.json")
+            .map(|(_, contents)| contents)
+            .expect("cursor deploy set must include mcp.json");
+        let parsed: serde_json::Value = serde_json::from_str(mcp).unwrap();
+        assert!(
+            parsed["mcpServers"]["tracedecay"].is_object(),
+            "Cursor mcp-cursor.json must declare mcpServers.tracedecay"
+        );
+        assert!(
+            parsed["mcpServers"].get("graph").is_none(),
+            "Cursor mcp-cursor.json must not declare mcpServers.graph"
+        );
     }
 
     #[test]

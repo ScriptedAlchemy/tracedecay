@@ -579,7 +579,7 @@ fn assert_cursor_plugin_bundle(plugin_dir: &Path, expected_command: &str, expect
     );
 
     let mcp = read_json(&plugin_dir.join("mcp.json"));
-    let server = &mcp["mcpServers"]["graph"];
+    let server = &mcp["mcpServers"]["tracedecay"];
     assert_eq!(server["type"], "stdio");
     assert_command_eq(&server["command"], expected_command);
     assert_eq!(
