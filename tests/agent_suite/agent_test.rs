@@ -467,7 +467,7 @@ fn assert_codex_plugin_bundle(
     }
 
     let mcp = read_json(&plugin_dir.join(".mcp.json"));
-    let server = &mcp["mcpServers"]["tracedecay"];
+    let server = &mcp["mcpServers"]["graph"];
     assert_eq!(server["type"], "stdio");
     assert_command_eq(&server["command"], expected_command);
     assert_eq!(server["args"], expected_args);
@@ -579,7 +579,7 @@ fn assert_cursor_plugin_bundle(plugin_dir: &Path, expected_command: &str, expect
     );
 
     let mcp = read_json(&plugin_dir.join("mcp.json"));
-    let server = &mcp["mcpServers"]["tracedecay"];
+    let server = &mcp["mcpServers"]["graph"];
     assert_eq!(server["type"], "stdio");
     assert_command_eq(&server["command"], expected_command);
     assert_eq!(
@@ -3190,8 +3190,8 @@ fn test_claude_install_creates_config() {
     let mcp: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&plugin_mcp).unwrap()).unwrap();
     assert!(
-        mcp["mcpServers"]["tracedecay"].is_object(),
-        "plugin .mcp.json should define the tracedecay MCP server"
+        mcp["mcpServers"]["graph"].is_object(),
+        "plugin .mcp.json should define the graph MCP server"
     );
 
     // The marketplace is registered in known_marketplaces.json as a directory.

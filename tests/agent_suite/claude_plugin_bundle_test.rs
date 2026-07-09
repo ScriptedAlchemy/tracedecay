@@ -217,11 +217,13 @@ fn claude_bundle_mcp_config_declares_the_tracedecay_server() {
     let mcp_path = bundle_root().join(".mcp.json");
     let mcp = read_json_file(&mcp_path);
 
-    // Matches the codex-plugin/.mcp.json shape: mcpServers.tracedecay.
+    // Server key is `graph` (not `tracedecay`) so Claude renders the plugin
+    // namespace as `plugin tracedecay graph` instead of the redundant
+    // `plugin tracedecay tracedecay`. Matches the codex-plugin/.mcp.json shape.
     let server = mcp
         .get("mcpServers")
-        .and_then(|servers| servers.get("tracedecay"))
-        .unwrap_or_else(|| panic!("{} must declare mcpServers.tracedecay", mcp_path.display()));
+        .and_then(|servers| servers.get("graph"))
+        .unwrap_or_else(|| panic!("{} must declare mcpServers.graph", mcp_path.display()));
     assert_eq!(
         server["command"],
         "tracedecay",
@@ -437,7 +439,7 @@ fn claude_bundle_agents_are_byte_identical_to_the_source_of_truth() {
 }
 
 /// The tracedecay MCP server registers as `tracedecay` when configured
-/// directly (e.g. project `.mcp.json`) but as `plugin_tracedecay_tracedecay`
+/// directly (e.g. project `.mcp.json`) but as `plugin_tracedecay_graph`
 /// when installed via the Claude Code plugin marketplace. An agent allowlist
 /// naming only one of the two silently strips every tracedecay tool from the
 /// subagent under the other install mode, so each grant and each denied tool
@@ -446,7 +448,7 @@ fn claude_bundle_agents_are_byte_identical_to_the_source_of_truth() {
 #[test]
 fn claude_agents_grant_tracedecay_tools_under_both_mcp_namespaces() {
     const DIRECT_NS: &str = "mcp__tracedecay";
-    const PLUGIN_NS: &str = "mcp__plugin_tracedecay_tracedecay";
+    const PLUGIN_NS: &str = "mcp__plugin_tracedecay_graph";
 
     let source_agents = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/agents/claude_agents");
     for agent in EXPECTED_AGENTS {
