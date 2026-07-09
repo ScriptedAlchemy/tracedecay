@@ -604,6 +604,32 @@ fn dynamic_action_context_cases() -> Vec<HintEval> {
             None,
             &[],
         ),
+        // Codex surface: `hook_codex_post_tool_use` maps an `apply_patch` event
+        // onto this Claude-shaped input (tool_name `Edit`, patch target path,
+        // and the `+`-stripped added source as edit_text), so the shared
+        // redundancy classifier fires identically for Codex.
+        input_eval(
+            "codex-apply-patch-nudges-redundancy",
+            ToolHintInput {
+                agent: HintAgent::Codex,
+                tool_name: Some("Edit".to_string()),
+                file_path: Some("src/util.rs".to_string()),
+                edit_text: Some(
+                    "pub fn summarize(hits: &[Hit]) -> u32 {\n    \
+                     let mut total = 0;\n    \
+                     for hit in hits {\n        \
+                     if hit.active {\n            \
+                     total += hit.count;\n        \
+                     }\n    \
+                     }\n    \
+                     total\n}\n"
+                        .to_string(),
+                ),
+                ..ToolHintInput::default()
+            },
+            Some(HintCategory::EditRedundancy),
+            &["tracedecay_redundancy", "tracedecay_similar"],
+        ),
     ]
 }
 
