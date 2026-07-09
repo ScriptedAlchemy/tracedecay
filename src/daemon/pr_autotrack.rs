@@ -63,8 +63,10 @@ const BASE_TICK: Duration = Duration::from_mins(1);
 pub struct DiscoveredPr {
     /// PR number.
     pub number: u64,
-    /// The PR's head branch name (for display only; tracking uses `pr/<N>`).
+    /// The PR's head branch name (display only).
     pub head_branch: String,
+    /// The exact remote head commit observed during discovery.
+    pub head_sha: String,
 }
 
 /// The result of one discovery pass over a repo's `origin` remote.
@@ -83,23 +85,26 @@ pub struct ManagedPr {
     pub pr: u64,
     /// The PR's head branch name (display only).
     pub head_branch: String,
-    /// Path to the linked worktree checked out on the `pr/<N>` branch.
+    /// Last remote head commit successfully indexed.
+    #[serde(default)]
+    pub head_sha: String,
+    /// Path to the linked worktree on the owned synthetic branch.
     pub worktree: PathBuf,
     /// The deterministic local ref the PR head was fetched into.
     pub tracking_ref: String,
 }
 
-/// PR-autotrack persistent state: label (`pr/<N>`) → managed entry.
+/// PR-autotrack persistent state: internal branch label → managed entry.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PrAutotrackState {
-    /// Managed PR branches keyed by their tracking label (`pr/<N>`).
+    /// Managed PR branches keyed by their internal synthetic branch label.
     #[serde(default)]
     pub managed: BTreeMap<String, ManagedPr>,
 }
 
-/// The tracking label a PR number maps to (`pr/<N>`).
+/// The collision-proof internal tracking label for a PR.
 fn pr_label(number: u64) -> String {
-    format!("pr/{number}")
+    format!("tracedecay/autotrack/pr/{number}")
 }
 
 /// The deterministic local ref a PR head is fetched into.
@@ -130,7 +135,7 @@ fn save_state(data_root: &Path, state: &PrAutotrackState) -> std::io::Result<()>
 /// A summary of managed PR branches for status surfaces (dashboard / CLI).
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct ManagedPrSummary {
-    /// Tracking label (`pr/<N>`).
+    /// Internal synthetic branch label.
     pub branch: String,
     /// PR number.
     pub pr: u64,
@@ -158,12 +163,14 @@ pub fn managed_summary(data_root: &Path) -> Vec<ManagedPrSummary> {
 // Discovery (pure parsers + one impure orchestrator)
 // ---------------------------------------------------------------------------
 
-/// One entry from `gh pr list --json number,headRefName,state,isCrossRepository`.
+/// One entry from `gh pr list --json number,headRefName,headRefOid,state,isCrossRepository`.
 #[derive(Debug, Deserialize)]
 struct GhPr {
     number: u64,
     #[serde(default, rename = "headRefName")]
     head_ref_name: String,
+    #[serde(default, rename = "headRefOid")]
+    head_ref_oid: String,
     #[serde(default)]
     state: String,
     #[serde(default, rename = "isCrossRepository")]
@@ -180,12 +187,13 @@ fn parse_gh_pr_list(json: &str) -> serde_json::Result<PrDiscovery> {
         if !pr.state.eq_ignore_ascii_case("open") {
             continue;
         }
-        if pr.is_cross_repository || pr.head_ref_name.is_empty() {
+        if pr.is_cross_repository || pr.head_ref_name.is_empty() || pr.head_ref_oid.is_empty() {
             discovery.skipped_forks.push(pr.number);
         } else {
             discovery.open.push(DiscoveredPr {
                 number: pr.number,
                 head_branch: pr.head_ref_name,
+                head_sha: pr.head_ref_oid,
             });
         }
     }
@@ -250,6 +258,7 @@ fn map_pull_heads_to_branches(
             Some(branch) => discovery.open.push(DiscoveredPr {
                 number: *number,
                 head_branch: branch.clone(),
+                head_sha: sha.clone(),
             }),
             None => discovery.skipped_forks.push(*number),
         }
@@ -305,7 +314,7 @@ fn discover_via_gh(repo_root: &Path) -> Option<PrDiscovery> {
             "--limit",
             "200",
             "--json",
-            "number,headRefName,state,isCrossRepository",
+            "number,headRefName,headRefOid,state,isCrossRepository",
         ])
         .current_dir(repo_root)
         .output()
@@ -334,7 +343,7 @@ fn discover_via_ls_remote(repo_root: &Path) -> PrDiscovery {
 /// A summary of what one reconcile pass changed, for logging and tests.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct ReconcileReport {
-    /// Labels (`pr/<N>`) newly tracked this pass.
+    /// Internal labels newly tracked or recovered this pass.
     pub tracked: Vec<String>,
     /// Labels untracked this pass (PR closed/merged).
     pub untracked: Vec<String>,
@@ -342,6 +351,8 @@ pub struct ReconcileReport {
     pub skipped_forks: Vec<u64>,
     /// True when the per-cycle new-track cap held some additions back.
     pub capped: bool,
+    /// Tracking or persistence failures surfaced to callers.
+    pub failures: Vec<(String, String)>,
 }
 
 /// Reconciles the managed PR set against a discovery result.
@@ -360,6 +371,7 @@ pub async fn reconcile_project(
         skipped_forks: discovery.skipped_forks.clone(),
         ..Default::default()
     };
+    let mut state_dirty = false;
 
     // Desired label → discovered PR.
     let desired: BTreeMap<String, &DiscoveredPr> = discovery
@@ -379,6 +391,7 @@ pub async fn reconcile_project(
         if let Some(managed) = state.managed.get(&label).cloned() {
             untrack_pr(repo_root, data_root, &label, &managed).await;
             state.managed.remove(&label);
+            state_dirty = true;
             report.untracked.push(label.clone());
             log_daemon_event(
                 "pr_autotrack",
@@ -395,30 +408,67 @@ pub async fn reconcile_project(
     // Additions, capped per cycle.
     let mut added = 0usize;
     for (label, pr) in &desired {
-        if state.managed.contains_key(label) {
-            continue; // idempotent: already tracked
+        let current = state.managed.get(label).cloned();
+        if current.as_ref().is_some_and(|managed| {
+            managed.head_sha == pr.head_sha && managed.head_branch == pr.head_branch
+        }) {
+            continue;
         }
-        if added >= cap {
+        let is_new = current.is_none();
+        if is_new && added >= cap {
             report.capped = true;
             break;
         }
+        if let Some(managed) = current {
+            // A changed remote head invalidates the entire branch graph. Drop
+            // the owned store before rebuilding so stale data is never served.
+            untrack_pr(repo_root, data_root, label, &managed).await;
+            state.managed.remove(label);
+            state_dirty = true;
+        }
         match track_pr(repo_root, data_root, pr).await {
             Ok(managed) => {
-                state.managed.insert(label.clone(), managed);
-                report.tracked.push(label.clone());
-                added += 1;
-                log_daemon_event(
-                    "pr_autotrack",
-                    &[
-                        ("project", repo_root.display().to_string()),
-                        ("action", "tracked".to_string()),
-                        ("branch", label.clone()),
-                        ("pr", pr.number.to_string()),
-                        ("head", pr.head_branch.clone()),
-                    ],
-                );
+                let dirty_before_insert = state_dirty;
+                state.managed.insert(label.clone(), managed.clone());
+                match save_state(data_root, &state) {
+                    Ok(()) => {
+                        state_dirty = false;
+                        report.tracked.push(label.clone());
+                        if is_new {
+                            added += 1;
+                        }
+                        log_daemon_event(
+                            "pr_autotrack",
+                            &[
+                                ("project", repo_root.display().to_string()),
+                                ("action", "tracked".to_string()),
+                                ("branch", label.clone()),
+                                ("pr", pr.number.to_string()),
+                                ("head", pr.head_branch.clone()),
+                            ],
+                        );
+                    }
+                    Err(error) => {
+                        state.managed.remove(label);
+                        state_dirty = dirty_before_insert;
+                        untrack_pr(repo_root, data_root, label, &managed).await;
+                        let reason = format!("failed to persist managed state: {error}");
+                        report.failures.push((label.clone(), reason.clone()));
+                        log_daemon_event(
+                            "pr_autotrack",
+                            &[
+                                ("project", repo_root.display().to_string()),
+                                ("action", "skipped".to_string()),
+                                ("branch", label.clone()),
+                                ("pr", pr.number.to_string()),
+                                ("reason", reason),
+                            ],
+                        );
+                    }
+                }
             }
             Err(reason) => {
+                report.failures.push((label.clone(), reason.clone()));
                 log_daemon_event(
                     "pr_autotrack",
                     &[
@@ -445,7 +495,20 @@ pub async fn reconcile_project(
         );
     }
 
-    let _ = save_state(data_root, &state);
+    if state_dirty && let Err(error) = save_state(data_root, &state) {
+        let reason = format!("failed to persist reconciled state: {error}");
+        report
+            .failures
+            .push(("<state>".to_string(), reason.clone()));
+        log_daemon_event(
+            "pr_autotrack",
+            &[
+                ("project", repo_root.display().to_string()),
+                ("action", "skipped".to_string()),
+                ("reason", reason),
+            ],
+        );
+    }
     report
 }
 
@@ -462,13 +525,29 @@ async fn track_pr(
         .join("pr-worktrees")
         .join(format!("pr-{}", pr.number));
 
+    let graph_ready = crate::branch_meta::load_branch_meta(data_root)
+        .and_then(|meta| crate::branch::resolve_branch_db_path(data_root, &label, &meta))
+        .is_some_and(|path| path.is_file());
+    let branch_ref = format!("refs/heads/{label}");
+    let branch_ready = ref_points_to(repo_root, &branch_ref, &pr.head_sha);
+    let tracking_ref_ready = ref_points_to(repo_root, &tracking_ref, &pr.head_sha);
+    let worktree_ready = ref_points_to(&worktree, "HEAD", &pr.head_sha)
+        && crate::branch::current_branch(&worktree).as_deref() == Some(label.as_str());
+    let validated_orphan =
+        branch_ready && tracking_ref_ready && (!worktree.exists() || worktree_ready);
+    if graph_ready || validated_orphan {
+        let _ = crate::branch::remove_tracked_branch_store(data_root, &label);
+        cleanup_pr_worktree(repo_root, data_root, pr.number, &pr.head_sha, true);
+    }
+
     let repo = repo_root.to_path_buf();
     let wt = worktree.clone();
     let tref = tracking_ref.clone();
     let label_for_prep = label.clone();
+    let expected_head = pr.head_sha.clone();
     // git operations are blocking; keep them off the reactor.
     let prep = tokio::task::spawn_blocking(move || {
-        prepare_pr_worktree(&repo, &wt, &tref, &label_for_prep)
+        prepare_pr_worktree(&repo, &wt, &tref, &label_for_prep, &expected_head)
     })
     .await
     .map_err(|e| format!("join error: {e}"))?;
@@ -481,19 +560,31 @@ async fn track_pr(
     )
     .await
     {
-        Ok(crate::branch::BranchAddOutcome::NotIndexed) => {
-            // Roll back the worktree we created but could not track.
-            cleanup_pr_worktree(repo_root, &worktree, &tracking_ref, &label);
-            Err("project not indexed".to_string())
-        }
-        Ok(_) => Ok(ManagedPr {
+        Ok(crate::branch::BranchAddOutcome::Added) => Ok(ManagedPr {
             pr: pr.number,
             head_branch: pr.head_branch.clone(),
+            head_sha: pr.head_sha.clone(),
             worktree,
             tracking_ref,
         }),
+        Ok(outcome) => {
+            // Deferred may leave branch metadata behind. AlreadyTracked can
+            // be an orphan from an interrupted prior cycle. Neither proves a
+            // completed sync, so clear only our internal label and retry later.
+            let _ = crate::branch::remove_tracked_branch_store(data_root, &label);
+            cleanup_pr_worktree(repo_root, data_root, pr.number, &pr.head_sha, true);
+            let reason = match outcome {
+                crate::branch::BranchAddOutcome::NotIndexed => "project not indexed",
+                crate::branch::BranchAddOutcome::AlreadyTracked => {
+                    "internal PR branch was already tracked"
+                }
+                crate::branch::BranchAddOutcome::Deferred => "branch tracking deferred",
+                crate::branch::BranchAddOutcome::Added => unreachable!(),
+            };
+            Err(reason.to_string())
+        }
         Err(e) => {
-            cleanup_pr_worktree(repo_root, &worktree, &tracking_ref, &label);
+            cleanup_pr_worktree(repo_root, data_root, pr.number, &pr.head_sha, true);
             Err(e.to_string())
         }
     }
@@ -511,6 +602,7 @@ fn prepare_pr_worktree(
     worktree: &Path,
     tracking_ref: &str,
     label: &str,
+    expected_head: &str,
 ) -> std::result::Result<(), String> {
     let pr_ref_spec = {
         // tracking_ref is refs/tracedecay/pr/<N>; derive the pull ref from it.
@@ -525,6 +617,16 @@ fn prepare_pr_worktree(
     if fetch.is_none() {
         return Err("fetch of PR head failed".to_string());
     }
+    let fetched_head = run_git(repo_root, &["rev-parse", tracking_ref])
+        .and_then(|output| String::from_utf8(output.stdout).ok())
+        .map(|sha| sha.trim().to_string());
+    if fetched_head.as_deref() != Some(expected_head) {
+        return Err("PR head changed during reconciliation".to_string());
+    }
+    let branch_ref = format!("refs/heads/{label}");
+    if run_git(repo_root, &["show-ref", "--verify", "--quiet", &branch_ref]).is_some() {
+        return Err("internal PR worktree branch already exists".to_string());
+    }
 
     if let Some(parent) = worktree.parent() {
         let _ = std::fs::create_dir_all(parent);
@@ -538,7 +640,7 @@ fn prepare_pr_worktree(
         &[
             "worktree",
             "add",
-            "-B",
+            "-b",
             label,
             "--force",
             &wt_str,
@@ -554,20 +656,76 @@ fn prepare_pr_worktree(
 /// Untracks a managed PR: removes its branch store, its worktree, its local
 /// tracking branch, and its ref.
 async fn untrack_pr(repo_root: &Path, data_root: &Path, label: &str, managed: &ManagedPr) {
+    let expected_label = pr_label(managed.pr);
+    let legacy_label = format!("pr/{}", managed.pr);
+    let is_legacy = label == legacy_label;
+    let expected_worktree = data_root
+        .join("pr-worktrees")
+        .join(format!("pr-{}", managed.pr));
+    let expected_ref = pr_tracking_ref(managed.pr);
+    if (label != expected_label && !is_legacy)
+        || managed.worktree != expected_worktree
+        || managed.tracking_ref != expected_ref
+    {
+        return;
+    }
     let data = data_root.to_path_buf();
     let label_owned = label.to_string();
     let _ = tokio::task::spawn_blocking(move || {
         crate::branch::remove_tracked_branch_store(&data, &label_owned)
     })
     .await;
-    cleanup_pr_worktree(repo_root, &managed.worktree, &managed.tracking_ref, label);
+    // `pr/<N>` is the pre-namespace persisted format. Remove its owned store
+    // and worktree once, but never delete that ambiguous local branch name.
+    cleanup_pr_worktree(
+        repo_root,
+        data_root,
+        managed.pr,
+        &managed.head_sha,
+        !is_legacy,
+    );
 }
 
-fn cleanup_pr_worktree(repo_root: &Path, worktree: &Path, tracking_ref: &str, label: &str) {
-    remove_worktree(repo_root, worktree);
-    // Delete the synthetic local branch and the fetch ref we created.
-    let _ = run_git(repo_root, &["branch", "-D", label]);
-    let _ = run_git(repo_root, &["update-ref", "-d", tracking_ref]);
+fn cleanup_pr_worktree(
+    repo_root: &Path,
+    data_root: &Path,
+    pr: u64,
+    expected_head: &str,
+    remove_synthetic_branch: bool,
+) {
+    let worktree = data_root.join("pr-worktrees").join(format!("pr-{pr}"));
+    let tracking_ref = pr_tracking_ref(pr);
+    let owned_head = if expected_head.is_empty() {
+        let ref_head = ref_sha(repo_root, &tracking_ref);
+        let worktree_head = ref_sha(&worktree, "HEAD");
+        match (ref_head, worktree_head) {
+            (Some(ref_head), Some(worktree_head)) if ref_head == worktree_head => Some(ref_head),
+            _ => None,
+        }
+    } else {
+        Some(expected_head.to_string())
+    };
+    remove_worktree(repo_root, &worktree);
+    let label = pr_label(pr);
+    let branch_ref = format!("refs/heads/{label}");
+    if let Some(owned_head) = owned_head {
+        if remove_synthetic_branch && ref_points_to(repo_root, &branch_ref, &owned_head) {
+            let _ = run_git(repo_root, &["branch", "-D", &label]);
+        }
+        if ref_points_to(repo_root, &tracking_ref, &owned_head) {
+            let _ = run_git(repo_root, &["update-ref", "-d", &tracking_ref]);
+        }
+    }
+}
+
+fn ref_points_to(repo_root: &Path, reference: &str, expected_head: &str) -> bool {
+    ref_sha(repo_root, reference).is_some_and(|sha| sha == expected_head)
+}
+
+fn ref_sha(repo_root: &Path, reference: &str) -> Option<String> {
+    run_git(repo_root, &["rev-parse", reference])
+        .and_then(|output| String::from_utf8(output.stdout).ok())
+        .map(|sha| sha.trim().to_string())
 }
 
 fn remove_worktree(repo_root: &Path, worktree: &Path) {

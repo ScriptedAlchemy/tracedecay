@@ -5,10 +5,10 @@ use super::*;
 #[test]
 fn gh_pr_list_splits_open_same_repo_from_forks() {
     let json = r#"[
-        {"number": 1, "headRefName": "feature-a", "state": "OPEN", "isCrossRepository": false},
-        {"number": 2, "headRefName": "fork-branch", "state": "OPEN", "isCrossRepository": true},
-        {"number": 3, "headRefName": "closed-branch", "state": "CLOSED", "isCrossRepository": false},
-        {"number": 4, "headRefName": "feature-b", "state": "OPEN", "isCrossRepository": false}
+        {"number": 1, "headRefName": "feature-a", "headRefOid": "sha-a", "state": "OPEN", "isCrossRepository": false},
+        {"number": 2, "headRefName": "fork-branch", "headRefOid": "sha-fork", "state": "OPEN", "isCrossRepository": true},
+        {"number": 3, "headRefName": "closed-branch", "headRefOid": "sha-closed", "state": "CLOSED", "isCrossRepository": false},
+        {"number": 4, "headRefName": "feature-b", "headRefOid": "sha-b", "state": "OPEN", "isCrossRepository": false}
     ]"#;
     let discovery = parse_gh_pr_list(json).unwrap();
     assert_eq!(
@@ -16,11 +16,13 @@ fn gh_pr_list_splits_open_same_repo_from_forks() {
         vec![
             DiscoveredPr {
                 number: 1,
-                head_branch: "feature-a".to_string()
+                head_branch: "feature-a".to_string(),
+                head_sha: "sha-a".to_string(),
             },
             DiscoveredPr {
                 number: 4,
-                head_branch: "feature-b".to_string()
+                head_branch: "feature-b".to_string(),
+                head_sha: "sha-b".to_string(),
             },
         ]
     );
@@ -75,7 +77,8 @@ fn map_pull_heads_matches_same_repo_and_skips_forks() {
         discovery.open,
         vec![DiscoveredPr {
             number: 1,
-            head_branch: "feature-1".to_string()
+            head_branch: "feature-1".to_string(),
+            head_sha: "sha_feature".to_string(),
         }]
     );
     assert_eq!(discovery.skipped_forks, vec![2]);
@@ -90,10 +93,11 @@ fn state_round_trips_and_defaults_when_absent() {
 
     let mut state = PrAutotrackState::default();
     state.managed.insert(
-        "pr/7".to_string(),
+        "tracedecay/autotrack/pr/7".to_string(),
         ManagedPr {
             pr: 7,
             head_branch: "feature-7".to_string(),
+            head_sha: "sha-7".to_string(),
             worktree: dir.path().join("pr-worktrees/pr-7"),
             tracking_ref: "refs/tracedecay/pr/7".to_string(),
         },
@@ -102,12 +106,23 @@ fn state_round_trips_and_defaults_when_absent() {
 
     let reloaded = load_state(dir.path());
     assert_eq!(reloaded.managed.len(), 1);
-    assert_eq!(reloaded.managed["pr/7"].pr, 7);
+    assert_eq!(reloaded.managed["tracedecay/autotrack/pr/7"].pr, 7);
 
     let summary = managed_summary(dir.path());
     assert_eq!(summary.len(), 1);
-    assert_eq!(summary[0].branch, "pr/7");
+    assert_eq!(summary[0].branch, "tracedecay/autotrack/pr/7");
     assert_eq!(summary[0].head_branch, "feature-7");
+
+    std::fs::write(
+        state_path(dir.path()),
+        r#"{"managed":{"pr/8":{"pr":8,"head_branch":"legacy","worktree":"pr-worktrees/pr-8","tracking_ref":"refs/tracedecay/pr/8"}}}"#,
+    )
+    .unwrap();
+    assert_eq!(
+        load_state(dir.path()).managed["pr/8"].head_sha,
+        "",
+        "legacy state without a head SHA must migrate as needing refresh"
+    );
 }
 
 // ---- Reconcile: removal + idempotency (no index required) -------------------
@@ -133,6 +148,7 @@ async fn reconcile_untracks_closed_pr_and_cleans_store() {
         ManagedPr {
             pr: 5,
             head_branch: "feature-5".to_string(),
+            head_sha: "sha-5".to_string(),
             worktree: data_root.path().join("pr-worktrees/pr-5"),
             tracking_ref: "refs/tracedecay/pr/5".to_string(),
         },
@@ -163,10 +179,11 @@ async fn reconcile_is_idempotent_for_already_managed_pr() {
 
     let mut state = PrAutotrackState::default();
     state.managed.insert(
-        "pr/3".to_string(),
+        "tracedecay/autotrack/pr/3".to_string(),
         ManagedPr {
             pr: 3,
             head_branch: "feature-3".to_string(),
+            head_sha: "sha-3".to_string(),
             worktree: data_root.path().join("pr-worktrees/pr-3"),
             tracking_ref: "refs/tracedecay/pr/3".to_string(),
         },
@@ -177,6 +194,7 @@ async fn reconcile_is_idempotent_for_already_managed_pr() {
         open: vec![DiscoveredPr {
             number: 3,
             head_branch: "feature-3".to_string(),
+            head_sha: "sha-3".to_string(),
         }],
         skipped_forks: vec![],
     };
@@ -185,5 +203,9 @@ async fn reconcile_is_idempotent_for_already_managed_pr() {
     // Already managed and still open: nothing changes.
     assert!(report.tracked.is_empty());
     assert!(report.untracked.is_empty());
-    assert!(load_state(data_root.path()).managed.contains_key("pr/3"));
+    assert!(
+        load_state(data_root.path())
+            .managed
+            .contains_key("tracedecay/autotrack/pr/3")
+    );
 }
