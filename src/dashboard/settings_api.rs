@@ -35,6 +35,17 @@ struct ProjectSettingsPatch {
     git_ignore: Option<bool>,
     #[serde(default)]
     telemetry: Option<TelemetrySettingsPatch>,
+    #[serde(default)]
+    sync: Option<SyncSettingsPatch>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct SyncSettingsPatch {
+    #[serde(default)]
+    auto_track_pr_branches: Option<bool>,
+    #[serde(default)]
+    auto_track_pr_poll_secs: Option<u64>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -79,12 +90,37 @@ pub(crate) async fn patch_project_settings(
             "max_file_size must be at least 1 byte",
         ));
     }
+    if let Some(sync) = &patch.sync {
+        if let Some(secs) = sync.auto_track_pr_poll_secs {
+            if secs < crate::config::MIN_AUTO_TRACK_PR_POLL_SECS {
+                errors.push(validation_error(
+                    "auto_track_pr_poll_secs",
+                    &format!(
+                        "auto_track_pr_poll_secs must be at least {} seconds",
+                        crate::config::MIN_AUTO_TRACK_PR_POLL_SECS
+                    ),
+                ));
+            }
+        }
+    }
     if !errors.is_empty() {
         return Err(validation_failed(&errors));
     }
 
     let current = load_config_from_path(&state.project_root, &state.config_path)
         .map_err(|err| internal_error(&err))?;
+    let sync = patch.sync.as_ref().map_or_else(
+        || current.sync.clone(),
+        |sync| crate::config::SyncConfig {
+            auto_track_pr_branches: sync
+                .auto_track_pr_branches
+                .unwrap_or(current.sync.auto_track_pr_branches),
+            auto_track_pr_poll_secs: sync
+                .auto_track_pr_poll_secs
+                .unwrap_or(current.sync.auto_track_pr_poll_secs),
+            ..current.sync.clone()
+        },
+    );
     let telemetry = patch.telemetry.map_or_else(
         || current.telemetry.clone(),
         |telemetry| TelemetryConfig {
@@ -101,6 +137,7 @@ pub(crate) async fn patch_project_settings(
         track_call_sites: patch.track_call_sites.unwrap_or(current.track_call_sites),
         git_ignore: patch.git_ignore.unwrap_or(current.git_ignore),
         telemetry,
+        sync,
         ..current.clone()
     };
     let resync_recommended = updated != current;
@@ -199,6 +236,7 @@ async fn settings_payload(state: &DashboardState) -> std::result::Result<Value, 
             "config_path": project_config_path.display().to_string(),
             "config": project_config,
             "tracedecay_dir_gitignored": crate::config::is_in_gitignore(&state.project_root),
+            "pr_autotrack": pr_autotrack_payload(state),
         },
         "user": {
             "config_path": user_config_path,
@@ -232,6 +270,31 @@ async fn settings_payload(state: &DashboardState) -> std::result::Result<Value, 
             "cached_latest_version": non_empty(&user.cached_latest_version),
         },
     }))
+}
+
+/// Lists the PR branches the daemon currently auto-tracks for this project, read
+/// from the store's PR-autotrack state sidecar. Empty on non-unix or when the
+/// feature has tracked nothing yet.
+fn pr_autotrack_payload(state: &DashboardState) -> Value {
+    #[cfg(unix)]
+    {
+        let tracked: Vec<Value> = crate::daemon::pr_autotrack::managed_summary(&state.store_root)
+            .into_iter()
+            .map(|entry| {
+                json!({
+                    "branch": entry.branch,
+                    "pr": entry.pr,
+                    "head_branch": entry.head_branch,
+                })
+            })
+            .collect();
+        json!({ "tracked": tracked })
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = state;
+        json!({ "tracked": [] })
+    }
 }
 
 fn environment_payload() -> Value {

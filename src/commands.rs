@@ -668,6 +668,78 @@ pub(crate) async fn handle_branch_action(action: BranchAction) -> tracedecay::er
                 );
             }
         }
+        BranchAction::Autotrack { action } => {
+            handle_branch_autotrack_action(action).await?;
+        }
+    }
+    Ok(())
+}
+
+/// Reads or mutates the project-scoped `sync.auto_track_pr_branches` setting and
+/// reports the daemon's PR-autotrack status for a project.
+async fn handle_branch_autotrack_action(
+    action: crate::cli::BranchAutotrackAction,
+) -> tracedecay::errors::Result<()> {
+    use crate::cli::BranchAutotrackAction;
+    use tracedecay::config::{
+        MIN_AUTO_TRACK_PR_POLL_SECS, load_config_with_identity, save_config_with_identity,
+    };
+
+    match action {
+        BranchAutotrackAction::Status { path } => {
+            let project_path = tracedecay::config::resolve_path(path);
+            let config = load_config_with_identity(&project_path).await?;
+            let sync = &config.sync;
+            eprintln!(
+                "PR auto-tracking: {}",
+                if sync.auto_track_pr_branches {
+                    "enabled"
+                } else {
+                    "disabled"
+                }
+            );
+            eprintln!(
+                "Poll interval: {}s (effective {}s)",
+                sync.auto_track_pr_poll_secs,
+                sync.effective_auto_track_pr_poll_secs()
+            );
+            #[cfg(unix)]
+            {
+                let data_root = resolve_branch_data_root(&project_path).await;
+                let managed = tracedecay::daemon::pr_autotrack::managed_summary(&data_root);
+                if managed.is_empty() {
+                    eprintln!("Tracked PR branches: none");
+                } else {
+                    eprintln!("Tracked PR branches:");
+                    for entry in managed {
+                        eprintln!(
+                            "  {} — PR #{} (head {})",
+                            entry.branch, entry.pr, entry.head_branch
+                        );
+                    }
+                }
+            }
+        }
+        BranchAutotrackAction::Enable { poll_secs, path } => {
+            let project_path = tracedecay::config::resolve_path(path);
+            let mut config = load_config_with_identity(&project_path).await?;
+            config.sync.auto_track_pr_branches = true;
+            if let Some(secs) = poll_secs {
+                config.sync.auto_track_pr_poll_secs = secs.max(MIN_AUTO_TRACK_PR_POLL_SECS);
+            }
+            save_config_with_identity(&project_path, &config).await?;
+            eprintln!(
+                "\x1b[32m✔\x1b[0m PR auto-tracking enabled (poll every {}s). Restart the daemon (`tracedecay daemon restart`) to apply.",
+                config.sync.effective_auto_track_pr_poll_secs()
+            );
+        }
+        BranchAutotrackAction::Disable { path } => {
+            let project_path = tracedecay::config::resolve_path(path);
+            let mut config = load_config_with_identity(&project_path).await?;
+            config.sync.auto_track_pr_branches = false;
+            save_config_with_identity(&project_path, &config).await?;
+            eprintln!("\x1b[32m✔\x1b[0m PR auto-tracking disabled.");
+        }
     }
     Ok(())
 }

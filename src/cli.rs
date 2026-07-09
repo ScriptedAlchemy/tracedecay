@@ -880,6 +880,36 @@ pub enum BranchAction {
         #[arg(short, long)]
         path: Option<String>,
     },
+    /// Configure daemon auto-tracking of open PR branches
+    Autotrack {
+        #[command(subcommand)]
+        action: BranchAutotrackAction,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum BranchAutotrackAction {
+    /// Show whether PR auto-tracking is enabled and list tracked PR branches
+    Status {
+        /// Project path (default: current directory)
+        #[arg(short, long)]
+        path: Option<String>,
+    },
+    /// Enable PR auto-tracking for this project (daemon restart picks it up)
+    Enable {
+        /// Poll interval in seconds (minimum 60; default keeps the current value)
+        #[arg(long)]
+        poll_secs: Option<u64>,
+        /// Project path (default: current directory)
+        #[arg(short, long)]
+        path: Option<String>,
+    },
+    /// Disable PR auto-tracking for this project
+    Disable {
+        /// Project path (default: current directory)
+        #[arg(short, long)]
+        path: Option<String>,
+    },
 }
 
 #[cfg(test)]

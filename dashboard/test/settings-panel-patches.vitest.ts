@@ -11,6 +11,8 @@ describe("settings panel patch builders", () => {
       trackCallSites: true,
       gitIgnore: true,
       telemetryTimings: true,
+      autoTrackPrBranches: false,
+      autoTrackPrPollSecs: "300",
     };
     const draft = {
       ...saved,
@@ -19,6 +21,29 @@ describe("settings panel patch builders", () => {
 
     expect(projectPatchFrom(draft, saved)).toEqual({
       include: ["src/**", "README.md", "examples/**"],
+    });
+  });
+
+  it("sends PR auto-tracking changes under the sync key", () => {
+    const saved = {
+      includeText: "src/**",
+      excludeText: "target/**",
+      maxFileSize: "1048576",
+      extractDocstrings: true,
+      trackCallSites: true,
+      gitIgnore: true,
+      telemetryTimings: true,
+      autoTrackPrBranches: false,
+      autoTrackPrPollSecs: "300",
+    };
+    const draft = {
+      ...saved,
+      autoTrackPrBranches: true,
+      autoTrackPrPollSecs: "120",
+    };
+
+    expect(projectPatchFrom(draft, saved)).toEqual({
+      sync: { auto_track_pr_branches: true, auto_track_pr_poll_secs: 120 },
     });
   });
 

@@ -8,16 +8,36 @@ export interface ProjectConfig {
   track_call_sites: boolean;
   git_ignore: boolean;
   telemetry: TelemetryConfig;
+  sync: SyncConfig;
 }
 
 export interface TelemetryConfig {
   timings: boolean;
 }
 
+// The server serializes the full `[sync]` table; the settings panel only edits
+// the PR auto-tracking fields, so the rest is captured loosely.
+export interface SyncConfig {
+  auto_track_pr_branches: boolean;
+  auto_track_pr_poll_secs: number;
+  [key: string]: unknown;
+}
+
+export interface TrackedPrBranch {
+  branch: string;
+  pr: number;
+  head_branch: string;
+}
+
+export interface PrAutotrackInfo {
+  tracked: TrackedPrBranch[];
+}
+
 export interface ProjectSettings {
   config_path: string;
   config: ProjectConfig;
   tracedecay_dir_gitignored: boolean;
+  pr_autotrack?: PrAutotrackInfo;
 }
 
 export interface UserSettings {
@@ -87,6 +107,12 @@ export interface ProjectSettingsPatch {
   track_call_sites?: boolean;
   git_ignore?: boolean;
   telemetry?: Partial<TelemetryConfig>;
+  sync?: SyncSettingsPatch;
+}
+
+export interface SyncSettingsPatch {
+  auto_track_pr_branches?: boolean;
+  auto_track_pr_poll_secs?: number;
 }
 
 export interface UserSettingsPatch {

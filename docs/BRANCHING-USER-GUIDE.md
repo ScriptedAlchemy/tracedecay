@@ -214,6 +214,67 @@ Multi-branch is fully backward compatible:
 - `tracedecay sync` and `tracedecay sync --force` continue to work. With multi-branch active,
   they sync the current branch's database.
 
+## Auto-tracking open PR branches (daemon)
+
+The daemon can automatically track every open pull request on a repo's GitHub
+`origin` remote, so `tracedecay_branch_search` / `tracedecay_branch_diff` and
+graph queries work against every open PR without running `tracedecay branch add`
+by hand. When a PR merges or closes, its branch is untracked and its per-branch
+store is cleaned up. The feature is **off by default**.
+
+### Enabling it
+
+Per project, via the CLI:
+
+```
+tracedecay branch autotrack enable                 # default 300s poll cadence
+tracedecay branch autotrack enable --poll-secs 120 # custom cadence (min 60)
+tracedecay branch autotrack disable
+tracedecay branch autotrack status                 # show state + tracked PR branches
+```
+
+or in the dashboard **Settings → Indexing → Auto-track open PR branches**, or by
+editing the `[sync]` table in the project `config.json`:
+
+```json
+{
+  "sync": {
+    "auto_track_pr_branches": true,
+    "auto_track_pr_poll_secs": 300
+  }
+}
+```
+
+Both keys default off/`300` and are back-compatible: a `config.json` predating
+them keeps the feature disabled. Environment overrides
+`TRACEDECAY_SYNC_AUTO_TRACK_PR_BRANCHES` and
+`TRACEDECAY_SYNC_AUTO_TRACK_PR_POLL_SECS` apply on top. The poll interval is
+clamped up to a 60-second floor. Changes take effect after a daemon restart
+(`tracedecay daemon restart`).
+
+### How it works
+
+Each poll, the daemon discovers open PR heads — via `gh pr list` when `gh` is on
+`PATH` and `origin` is GitHub, otherwise via `git ls-remote origin
+'refs/pull/*/head'`. For each new same-repo PR it fetches `refs/pull/<N>/head`,
+checks it out into a linked worktree under the store's `pr-worktrees/` directory
+on a synthetic branch `pr/<N>`, and tracks that worktree exactly like any other
+branch (so the PR's own content is indexed, not your current checkout). Tracked
+PR branches appear in `tracedecay branch list` as `pr/<N>`. To keep a repo with
+many open PRs from stampeding, at most 10 new PR branches are tracked per poll
+cycle; the rest ramp up on subsequent cycles.
+
+The daemon logs structured events: `event=pr_autotrack action=tracked|untracked|skipped
+branch=pr/<N> pr=<N>` per change and an `action=poll` summary each cycle.
+
+### Scope: same-repo PRs only
+
+Only PRs whose head branch lives on the repo itself are tracked. Fork PRs (head
+on a different repository) are **skipped** with a logged reason
+(`action=skipped reason=fork`). Discovery treats a PR as a fork when its head
+SHA matches no `refs/heads/*` ref on `origin` (or, via `gh`, when
+`isCrossRepository` is true).
+
 ## FAQ
 
 **Does rebasing a branch break its database?**
