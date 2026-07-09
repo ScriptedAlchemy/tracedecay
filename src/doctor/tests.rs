@@ -38,6 +38,65 @@ fn format_bytes_fractional_kb() {
     assert_eq!(format_bytes(1536), "1.5 KB");
 }
 
+#[test]
+fn database_recovery_guidance_names_the_preserved_recovery_set() {
+    let db_path = PathBuf::from("/profile/projects/proj_test/tracedecay.db");
+    let guidance = database_recovery_guidance(&db_path);
+
+    assert!(guidance.contains("/profile/projects/proj_test/tracedecay.db"));
+    assert!(guidance.contains("/profile/projects/proj_test/tracedecay.db-wal"));
+    assert!(guidance.contains("/profile/projects/proj_test/tracedecay.db-shm"));
+    assert!(guidance.contains("/profile/projects/proj_test/dirty"));
+    assert!(guidance.contains("stop all TraceDecay daemon and MCP processes"));
+    assert!(
+        guidance.contains(
+            "Do not run `tracedecay init`, `tracedecay sync --force`, or `tracedecay wipe`"
+        )
+    );
+    assert!(guidance.contains("`sessions.db` is separate and must not be removed"));
+    assert!(guidance.contains("Facts are stored in the graph database"));
+    assert!(guidance.contains("automatic rebuild is intentionally blocked"));
+}
+
+#[tokio::test]
+async fn database_check_preserves_corrupt_graph_and_adjacent_stores()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    let dir = tempfile::TempDir::new()?;
+    let profile_root = dir.path().join("profile");
+    let project_root = dir.path().join("repo");
+    std::fs::create_dir_all(&project_root)?;
+    let open_options = TraceDecayOpenOptions {
+        profile_root: Some(profile_root),
+        global_db_path: Some(dir.path().join("global.db")),
+    };
+    let ts = TraceDecay::init_with_options(&project_root, open_options.clone()).await?;
+    let layout = ts.store_layout().clone();
+    ts.close();
+
+    let corrupt_db = b"not-a-sqlite-database";
+    let wal_path = layout.graph_db_path.with_extension("db-wal");
+    let shm_path = layout.graph_db_path.with_extension("db-shm");
+    std::fs::write(&layout.graph_db_path, corrupt_db)?;
+    std::fs::write(&wal_path, b"preserve-wal")?;
+    std::fs::write(&shm_path, b"preserve-shm")?;
+    std::fs::write(&layout.dirty_path, b"preserve-dirty")?;
+    std::fs::write(&layout.sessions_db_path, b"preserve-sessions")?;
+
+    let mut counters = DoctorCounters::new();
+    check_database(&mut counters, &project_root, open_options).await;
+
+    assert_eq!(counters.issues, 1);
+    assert_eq!(std::fs::read(&layout.graph_db_path)?, corrupt_db);
+    assert_eq!(std::fs::read(&wal_path)?, b"preserve-wal");
+    assert_eq!(std::fs::read(&shm_path)?, b"preserve-shm");
+    assert_eq!(std::fs::read(&layout.dirty_path)?, b"preserve-dirty");
+    assert_eq!(
+        std::fs::read(&layout.sessions_db_path)?,
+        b"preserve-sessions"
+    );
+    Ok(())
+}
+
 #[tokio::test]
 async fn database_check_is_read_only_while_a_writer_is_live()
 -> std::result::Result<(), Box<dyn std::error::Error>> {

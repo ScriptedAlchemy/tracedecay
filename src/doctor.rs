@@ -6,6 +6,7 @@
 use std::path::{Component, Path, PathBuf};
 
 use crate::agents::{self, DoctorCounters, HealthcheckContext};
+use crate::db::Database;
 use crate::display::{format_bytes, format_token_count};
 use crate::migrate::registry::code_project_root_exists;
 use crate::storage::StoreLayout;
@@ -202,8 +203,18 @@ async fn check_database(
     project_path: &Path,
     open_options: TraceDecayOpenOptions,
 ) {
+    let db_path = active_database_path(project_path, &open_options).await;
     let ts = match TraceDecay::open_read_only_with_options(project_path, open_options).await {
         Ok(ts) => ts,
+        Err(e) if Database::is_corruption_error(&e) => {
+            dc.fail(&format!("Database recovery required: {e}"));
+            if let Some(db_path) = db_path.as_deref() {
+                print_database_recovery_guidance(dc, db_path);
+            } else {
+                dc.info("TraceDecay could not resolve the damaged database path; no files were changed.");
+            }
+            return;
+        }
         Err(e) => {
             dc.fail(&format!("Could not open database read-only: {e}"));
             return;
@@ -216,12 +227,67 @@ async fn check_database(
 
     match ts.quick_check().await {
         Ok(true) => dc.pass("DB integrity: ok"),
-        Ok(false) => dc.fail(
-            "Database integrity check failed; stop the daemon and preserve the store before repair",
-        ),
+        Ok(false) => {
+            dc.fail("Database integrity check failed; offline recovery is required");
+            print_database_recovery_guidance(dc, &db_path);
+        }
+        Err(e) if Database::is_corruption_error(&e) => {
+            dc.fail(&format!("Database recovery required: {e}"));
+            print_database_recovery_guidance(dc, &db_path);
+        }
         Err(e) => dc.warn(&format!(
             "Could not complete read-only integrity check: {e}"
         )),
+    }
+}
+
+async fn active_database_path(
+    project_path: &Path,
+    open_options: &TraceDecayOpenOptions,
+) -> Option<PathBuf> {
+    if let Some(layout) =
+        TraceDecay::initialized_store_layout_with_options(project_path, open_options).await
+    {
+        let branch = crate::branch::current_branch(project_path);
+        return Some(
+            TraceDecay::resolve_db_for_branch(project_path, &layout.data_root, branch.as_deref()).0,
+        );
+    }
+
+    let data_root = crate::config::get_tracedecay_dir(project_path);
+    let db_path = data_root.join(crate::config::db_filename(&data_root));
+    db_path.is_file().then_some(db_path)
+}
+
+fn database_recovery_guidance(db_path: &Path) -> String {
+    let wal_path = db_path.with_extension("db-wal");
+    let shm_path = db_path.with_extension("db-shm");
+    let data_root = db_path.parent().unwrap_or_else(|| Path::new("."));
+    let dirty_path = data_root.join("dirty");
+    let sessions_path = data_root.join(crate::storage::SESSIONS_DB_FILENAME);
+
+    format!(
+        "First stop all TraceDecay daemon and MCP processes. No files were changed.\n\
+         Preserve this recovery set together before any repair:\n\
+         DB: {}\n\
+         WAL: {}\n\
+         SHM: {}\n\
+         dirty sentinel: {}\n\
+         `sessions.db` is separate and must not be removed: {}\n\
+         Facts are stored in the graph database; automatic rebuild is intentionally blocked because it cannot preserve them generically.\n\
+         Do not run `tracedecay init`, `tracedecay sync --force`, or `tracedecay wipe` until that recovery set is safely copied.\n\
+         Report the preserved set at https://github.com/ScriptedAlchemy/tracedecay/issues for offline recovery.",
+        db_path.display(),
+        wal_path.display(),
+        shm_path.display(),
+        dirty_path.display(),
+        sessions_path.display(),
+    )
+}
+
+fn print_database_recovery_guidance(dc: &DoctorCounters, db_path: &Path) {
+    for line in database_recovery_guidance(db_path).lines() {
+        dc.info(line);
     }
 }
 

@@ -32,6 +32,20 @@ async fn setup_db() -> (Database, TempDir, std::path::PathBuf) {
     (db, dir, db_path)
 }
 
+#[tokio::test]
+async fn writable_open_bootstraps_a_missing_database_path() {
+    let dir = TempDir::new().unwrap();
+    let db_path = dir.path().join("new.db");
+    assert!(!db_path.exists());
+
+    let (db, _) = Database::open(&db_path)
+        .await
+        .expect("writable open should preserve fresh-path bootstrap behavior");
+    assert!(db_path.exists());
+    assert!(db.quick_check().await.unwrap());
+    close_db(db).await;
+}
+
 async fn close_db(db: Database) {
     db.checkpoint().await.unwrap();
     db.close();
@@ -265,6 +279,15 @@ fn is_corruption_error_matches_corrupt() {
     let e = tracedecay::errors::TraceDecayError::Database {
         message: "database is corrupt".to_string(),
         operation: "test".to_string(),
+    };
+    assert!(Database::is_corruption_error(&e));
+}
+
+#[test]
+fn is_corruption_error_matches_file_is_not_a_database() {
+    let e = tracedecay::errors::TraceDecayError::Database {
+        message: "failed to apply pragmas: SQLite failure: `file is not a database`".to_string(),
+        operation: "apply_pragmas".to_string(),
     };
     assert!(Database::is_corruption_error(&e));
 }

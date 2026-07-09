@@ -1,6 +1,6 @@
 use std::ffi::OsString;
 use std::fs;
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::path::{Component, Path, PathBuf};
 
 use fs2::FileExt;
@@ -20,6 +20,21 @@ pub const REPOSITORY_IDENTITY_FILENAME: &str = "tracedecay-project.json";
 pub const BRANCH_META_QUARANTINE_PREFIX: &str = "branch-meta.json.corrupt-";
 pub const STORE_MANIFEST_SCHEMA_VERSION: u32 = 1;
 pub const REPOSITORY_IDENTITY_SCHEMA_VERSION: u32 = 1;
+
+/// Checks the fixed 16-byte `SQLite` header without opening the database.
+///
+/// This is deliberately file-only: libsql may create or rewrite WAL/SHM
+/// sidecars before reporting that the main file is not a database. Recovery
+/// paths use this preflight to preserve the complete on-disk recovery set.
+pub(crate) fn has_sqlite_database_header(path: &Path) -> io::Result<bool> {
+    let mut file = fs::File::open(path)?;
+    let mut header = [0_u8; 16];
+    match file.read_exact(&mut header) {
+        Ok(()) => Ok(header == *b"SQLite format 3\0"),
+        Err(err) if err.kind() == io::ErrorKind::UnexpectedEof => Ok(false),
+        Err(err) => Err(err),
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

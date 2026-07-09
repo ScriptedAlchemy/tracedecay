@@ -457,7 +457,7 @@ impl TraceDecay {
     /// Returns `(db_path, serving_branch, fallback_warning)`.
     /// `serving_branch` is the branch whose DB is actually opened.
     /// The warning is `Some` when falling back to an ancestor branch's DB.
-    pub(super) fn resolve_db_for_branch(
+    pub(crate) fn resolve_db_for_branch(
         project_root: &Path,
         tracedecay_dir: &Path,
         branch: Option<&str>,
@@ -967,6 +967,7 @@ fn print_corruption_warning(db_path: &std::path::Path) {
     eprintln!("[tracedecay] Store: {}", db_path.display());
     eprintln!("[tracedecay] Stop TraceDecay daemon/MCP processes before explicit repair.");
     eprintln!("[tracedecay] Preserve the DB, WAL, SHM, and dirty sentinel as one recovery set.");
+    eprintln!("[tracedecay] Run `tracedecay doctor` from the project root for exact paths.");
     eprintln!("[tracedecay] Please report this at:");
     eprintln!("[tracedecay]   https://github.com/ScriptedAlchemy/tracedecay/issues");
     eprintln!(
