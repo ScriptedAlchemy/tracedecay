@@ -4,6 +4,14 @@ use std::path::{Path, PathBuf};
 
 use crate::branch_meta::BranchMeta;
 
+/// Bounded-retry policy for a briefly-contended branch-add lock: a concurrent
+/// branch add only holds the lock for the duration of a DB clone, so a short
+/// spin lets a contender through instead of failing immediately. Shared by the
+/// async [`prepare_branch_tracking_in_layout`] and the synchronous
+/// [`acquire_branch_add_lock_blocking`]; only the sleep primitive differs.
+const BRANCH_LOCK_RETRY_ATTEMPTS: usize = 20;
+const BRANCH_LOCK_RETRY_INTERVAL: std::time::Duration = std::time::Duration::from_millis(50);
+
 /// Resolves the current branch name using `gix`. Falls back to
 /// `git symbolic-ref HEAD` for worktrees when gix cannot resolve HEAD
 /// (e.g. with minimal feature flags that exclude worktree support).
@@ -379,9 +387,11 @@ pub async fn prepare_branch_tracking_in_layout(
         loop {
             match try_acquire_branch_add_lock(tracedecay_dir) {
                 Ok(lock) => break lock,
-                Err(crate::errors::TraceDecayError::SyncLock { .. }) if attempts < 20 => {
+                Err(crate::errors::TraceDecayError::SyncLock { .. })
+                    if attempts < BRANCH_LOCK_RETRY_ATTEMPTS =>
+                {
                     attempts += 1;
-                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                    tokio::time::sleep(BRANCH_LOCK_RETRY_INTERVAL).await;
                 }
                 Err(crate::errors::TraceDecayError::SyncLock { .. }) => {
                     return Ok(BranchTrackingPreparation::Deferred);
@@ -551,11 +561,11 @@ fn try_acquire_branch_add_lock(tracedecay_dir: &Path) -> crate::errors::Result<s
 /// Returns `None` on timeout or a non-contention error, so the caller can skip
 /// its mutation this round rather than proceed unsynchronized.
 fn acquire_branch_add_lock_blocking(tracedecay_dir: &Path) -> Option<std::fs::File> {
-    for _ in 0..20 {
+    for _ in 0..BRANCH_LOCK_RETRY_ATTEMPTS {
         match try_acquire_branch_add_lock(tracedecay_dir) {
             Ok(lock) => return Some(lock),
             Err(crate::errors::TraceDecayError::SyncLock { .. }) => {
-                std::thread::sleep(std::time::Duration::from_millis(50));
+                std::thread::sleep(BRANCH_LOCK_RETRY_INTERVAL);
             }
             Err(_) => return None,
         }

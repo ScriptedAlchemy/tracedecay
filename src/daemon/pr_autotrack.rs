@@ -43,7 +43,6 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use tokio::time::Instant;
 
-use crate::config::SyncConfig;
 use crate::tracedecay::{TraceDecay, TraceDecayOpenOptions};
 
 use super::log_daemon_event;
@@ -301,10 +300,27 @@ fn disable_git_credential_prompt(command: &mut std::process::Command) {
         .env("GIT_ASKPASS", "echo");
 }
 
+/// Whether a repo's `origin` remote points at GitHub. Memoized per repo root:
+/// the remote URL is effectively constant for a checkout, so re-spawning
+/// `git remote get-url origin` every poll cycle (once per project, every minute)
+/// only re-decides a constant. A rare remote-URL change is picked up on the next
+/// daemon restart.
 fn origin_is_github(repo_root: &Path) -> bool {
-    run_git(repo_root, &["remote", "get-url", "origin"])
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<HashMap<PathBuf, bool>>> =
+        std::sync::OnceLock::new();
+    let cache = CACHE.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
+    if let Ok(map) = cache.lock() {
+        if let Some(&cached) = map.get(repo_root) {
+            return cached;
+        }
+    }
+    let result = run_git(repo_root, &["remote", "get-url", "origin"])
         .and_then(|o| String::from_utf8(o.stdout).ok())
-        .is_some_and(|url| url.contains("github.com"))
+        .is_some_and(|url| url.contains("github.com"));
+    if let Ok(mut map) = cache.lock() {
+        map.insert(repo_root.to_path_buf(), result);
+    }
+    result
 }
 
 /// Upper bound on PRs fetched in one `gh pr list` call. Reaching it means the
@@ -312,11 +328,18 @@ fn origin_is_github(repo_root: &Path) -> bool {
 /// suppressed) rather than silently dropping the tail as if those PRs closed.
 const GH_PR_LIST_LIMIT: usize = 1000;
 
+/// Whether the `gh` CLI is installed and runnable. Memoized process-wide: the
+/// answer is a property of the host binary, not of any repo, so probing it every
+/// poll cycle (once per enabled project, every minute) only re-decides a
+/// constant. The daemon restarts to pick up a newly installed `gh`.
 fn gh_available() -> bool {
-    let mut command = std::process::Command::new("gh");
-    command.arg("--version");
-    disable_git_credential_prompt(&mut command);
-    command.output().is_ok_and(|o| o.status.success())
+    static AVAILABLE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *AVAILABLE.get_or_init(|| {
+        let mut command = std::process::Command::new("gh");
+        command.arg("--version");
+        disable_git_credential_prompt(&mut command);
+        command.output().is_ok_and(|o| o.status.success())
+    })
 }
 
 /// Discovers open PR head branches on the repo's `origin` remote.
@@ -395,6 +418,25 @@ pub struct ReconcileReport {
     pub removals_suppressed: bool,
     /// Tracking or persistence failures surfaced to callers.
     pub failures: Vec<(String, String)>,
+}
+
+/// Logs a `pr_autotrack` "skipped" daemon event with the optional branch label
+/// and PR number. Every skip path (persistence failure, track failure, fork,
+/// reconciled-state persistence failure) funnels through here so the field set
+/// and ordering stay identical across them.
+fn log_pr_skip(repo_root: &Path, branch_label: Option<&str>, pr: Option<u64>, reason: &str) {
+    let mut fields = vec![
+        ("project", repo_root.display().to_string()),
+        ("action", "skipped".to_string()),
+    ];
+    if let Some(branch) = branch_label {
+        fields.push(("branch", branch.to_string()));
+    }
+    if let Some(pr) = pr {
+        fields.push(("pr", pr.to_string()));
+    }
+    fields.push(("reason", reason.to_string()));
+    log_daemon_event("pr_autotrack", &fields);
 }
 
 /// Reconciles the managed PR set against a discovery result.
@@ -525,45 +567,19 @@ pub async fn reconcile_project(
                         untrack_pr(repo_root, data_root, label, &managed).await;
                         let reason = format!("failed to persist managed state: {error}");
                         report.failures.push((label.clone(), reason.clone()));
-                        log_daemon_event(
-                            "pr_autotrack",
-                            &[
-                                ("project", repo_root.display().to_string()),
-                                ("action", "skipped".to_string()),
-                                ("branch", label.clone()),
-                                ("pr", pr.number.to_string()),
-                                ("reason", reason),
-                            ],
-                        );
+                        log_pr_skip(repo_root, Some(label), Some(pr.number), &reason);
                     }
                 }
             }
             Err(reason) => {
                 report.failures.push((label.clone(), reason.clone()));
-                log_daemon_event(
-                    "pr_autotrack",
-                    &[
-                        ("project", repo_root.display().to_string()),
-                        ("action", "skipped".to_string()),
-                        ("branch", label.clone()),
-                        ("pr", pr.number.to_string()),
-                        ("reason", reason),
-                    ],
-                );
+                log_pr_skip(repo_root, Some(label), Some(pr.number), &reason);
             }
         }
     }
 
     for pr in &discovery.skipped_forks {
-        log_daemon_event(
-            "pr_autotrack",
-            &[
-                ("project", repo_root.display().to_string()),
-                ("action", "skipped".to_string()),
-                ("pr", pr.to_string()),
-                ("reason", "fork".to_string()),
-            ],
-        );
+        log_pr_skip(repo_root, None, Some(*pr), "fork");
     }
 
     if state_dirty && let Err(error) = save_state(data_root, &state) {
@@ -571,14 +587,7 @@ pub async fn reconcile_project(
         report
             .failures
             .push(("<state>".to_string(), reason.clone()));
-        log_daemon_event(
-            "pr_autotrack",
-            &[
-                ("project", repo_root.display().to_string()),
-                ("action", "skipped".to_string()),
-                ("reason", reason),
-            ],
-        );
+        log_pr_skip(repo_root, None, None, &reason);
     }
     report
 }
@@ -903,7 +912,7 @@ async fn tick(global_db_path: Option<&Path>, last_poll: &mut HashMap<PathBuf, In
         }
         last_poll.insert(root.clone(), Instant::now());
         if cfg.auto_track_pr_branches {
-            poll_project(root, cfg).await;
+            poll_project(root).await;
         } else {
             // Feature disabled: if it left managed PR state behind (it was on,
             // then turned off), tear that state down once instead of stranding
@@ -915,7 +924,7 @@ async fn tick(global_db_path: Option<&Path>, last_poll: &mut HashMap<PathBuf, In
 }
 
 /// Runs one discovery + reconcile pass for a project and logs a poll summary.
-async fn poll_project(repo_root: PathBuf, _cfg: SyncConfig) {
+async fn poll_project(repo_root: PathBuf) {
     let opts = TraceDecayOpenOptions::default();
     let Some(layout) = TraceDecay::initialized_store_layout_with_options(&repo_root, &opts).await
     else {
