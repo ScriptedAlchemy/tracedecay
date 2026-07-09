@@ -1,0 +1,47 @@
+{
+  "id": "nav_find_symbol_compute_total",
+  "category": "code_exploration",
+  "pack": "pack_navigation",
+  "hosts": [
+    "claude",
+    "codex"
+  ],
+  "fixture": "main",
+  "status": "active",
+  "prompt": "I need to find the function that computes an order's total price. What's it called and where does it live?",
+  "expected_tools": {
+    "required_first": [
+      "tracedecay_context",
+      "tracedecay_search",
+      "tracedecay_body",
+      "tracedecay_outline",
+      "tracedecay_read",
+      "tracedecay_grep"
+    ],
+    "acceptable": [
+      "tracedecay_similar",
+      "tracedecay_find_exact_symbol",
+      "Read"
+    ],
+    "forbidden_first": [
+      "Grep",
+      "Glob"
+    ],
+    "forbidden_bash": [
+      "grep",
+      "rg ",
+      "rg\t",
+      "find ",
+      "cat ",
+      "sed ",
+      "awk ",
+      "ack "
+    ]
+  },
+  "ground_truth": [
+    "compute_total",
+    "pricing"
+  ],
+  "max_tool_calls": 4,
+  "notes": "find-symbol-by-name; expects tracedecay_search as the natural opener."
+}

@@ -1,0 +1,42 @@
+{
+  "id": "analysis_health_scorecard",
+  "category": "code_health",
+  "pack": "pack_analysis",
+  "hosts": [
+    "claude",
+    "codex"
+  ],
+  "fixture": "main",
+  "status": "active",
+  "prompt": "Give me an overall quality read on this crate -- anything structurally concerning?",
+  "expected_tools": {
+    "required_first": [
+      "tracedecay_health",
+      "tracedecay_context"
+    ],
+    "acceptable": [
+      "tracedecay_redundancy",
+      "tracedecay_dead_code",
+      "tracedecay_complexity"
+    ],
+    "forbidden_first": [
+      "Grep",
+      "Glob"
+    ],
+    "forbidden_bash": [
+      "grep",
+      "rg ",
+      "rg\t",
+      "find ",
+      "cat ",
+      "sed ",
+      "awk ",
+      "ack "
+    ]
+  },
+  "ground_truth": [
+    "redundan"
+  ],
+  "max_tool_calls": 5,
+  "notes": "health scorecard; the compute_total/compute_grand_total duplication should surface in the redundancy dimension."
+}

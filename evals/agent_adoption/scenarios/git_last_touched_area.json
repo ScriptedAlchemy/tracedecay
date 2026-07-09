@@ -1,0 +1,48 @@
+{
+  "id": "git_last_touched_area",
+  "category": "git_history",
+  "pack": "pack_git",
+  "hosts": [
+    "claude",
+    "codex"
+  ],
+  "fixture": "main",
+  "status": "deferred",
+  "prompt": "Who last touched the stock reservation code, and when?",
+  "expected_tools": {
+    "required_first": [
+      "tracedecay_commit_context",
+      "tracedecay_sessions_for",
+      "tracedecay_branch_diff",
+      "tracedecay_context"
+    ],
+    "acceptable": [
+      "tracedecay_changelog",
+      "tracedecay_search"
+    ],
+    "forbidden_first": [
+      "Grep",
+      "Glob",
+      "Bash"
+    ],
+    "forbidden_bash": [
+      "grep",
+      "rg ",
+      "rg\t",
+      "find ",
+      "cat ",
+      "sed ",
+      "awk ",
+      "ack ",
+      "git log",
+      "git diff",
+      "git show",
+      "git blame",
+      "git status"
+    ]
+  },
+  "ground_truth": [],
+  "max_tool_calls": 6,
+  "requires_fixture": "git-history",
+  "notes": "DEFERRED: 'last touched' needs blame-worthy history beyond the single initial commit."
+}

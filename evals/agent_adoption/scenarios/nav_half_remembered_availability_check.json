@@ -1,0 +1,44 @@
+{
+  "id": "nav_half_remembered_availability_check",
+  "category": "code_exploration",
+  "pack": "pack_navigation",
+  "hosts": [
+    "claude",
+    "codex"
+  ],
+  "fixture": "main",
+  "status": "active",
+  "prompt": "I'm blanking on the exact name -- there's a function that checks whether we have enough of something in stock before reserving it. What's it actually called?",
+  "expected_tools": {
+    "required_first": [
+      "tracedecay_similar",
+      "tracedecay_search",
+      "tracedecay_context",
+      "tracedecay_grep"
+    ],
+    "acceptable": [
+      "tracedecay_body",
+      "tracedecay_outline",
+      "Read"
+    ],
+    "forbidden_first": [
+      "Grep",
+      "Glob"
+    ],
+    "forbidden_bash": [
+      "grep",
+      "rg ",
+      "rg\t",
+      "find ",
+      "cat ",
+      "sed ",
+      "awk ",
+      "ack "
+    ]
+  },
+  "ground_truth": [
+    "check_availability"
+  ],
+  "max_tool_calls": 4,
+  "notes": "half-remembered name; tracedecay_similar is built for fuzzy/partial recall like this."
+}

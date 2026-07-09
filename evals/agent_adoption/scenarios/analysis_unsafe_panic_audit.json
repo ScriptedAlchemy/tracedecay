@@ -1,0 +1,40 @@
+{
+  "id": "analysis_unsafe_panic_audit",
+  "category": "unsafe_audit",
+  "pack": "pack_analysis",
+  "hosts": [
+    "claude",
+    "codex"
+  ],
+  "fixture": "main",
+  "status": "deferred",
+  "prompt": "Are there any risky unwrap/panic/unsafe spots in this crate I should know about before shipping?",
+  "expected_tools": {
+    "required_first": [
+      "tracedecay_unsafe_patterns",
+      "tracedecay_context"
+    ],
+    "acceptable": [
+      "tracedecay_grep",
+      "tracedecay_search"
+    ],
+    "forbidden_first": [
+      "Grep",
+      "Glob"
+    ],
+    "forbidden_bash": [
+      "grep",
+      "rg ",
+      "rg\t",
+      "find ",
+      "cat ",
+      "sed ",
+      "awk ",
+      "ack "
+    ]
+  },
+  "ground_truth": [],
+  "max_tool_calls": 5,
+  "requires_fixture": "planted-unsafe-panic-todo-markers",
+  "notes": "STILL DEFERRED, different reason now: lane 1's fixture/src/audit.rs::raw_total_len plants a genuine needless `unsafe { }` block, so the fixture-readiness gap is closed. Live-verified against the built fixture: `tracedecay tool unsafe_patterns` still returns 'No diagnostics' (empty) despite the planted block -- this is the tool bug the README documents ('even in the main repo for unwrap/unsafe_block kinds'), not a missing marker. Requiring tracedecay_unsafe_patterns as required_first would fail every agent that correctly discovers the right tool, so keep deferred until that tool is fixed; re-verify with a fresh `tracedecay tool unsafe_patterns` call before promoting."
+}

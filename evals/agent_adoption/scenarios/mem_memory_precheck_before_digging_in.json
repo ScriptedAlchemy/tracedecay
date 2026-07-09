@@ -1,0 +1,39 @@
+{
+  "id": "mem_memory_precheck_before_digging_in",
+  "category": "memory_recall",
+  "pack": "pack_session_memory",
+  "hosts": [
+    "claude",
+    "codex"
+  ],
+  "fixture": "main",
+  "status": "active",
+  "prompt": "How much do we actually have recorded in memory for this project -- is it worth checking before I dig into the code myself?",
+  "expected_tools": {
+    "required_first": [
+      "tracedecay_memory_status",
+      "tracedecay_fact_store",
+      "tracedecay_context"
+    ],
+    "acceptable": [
+      "tracedecay_search"
+    ],
+    "forbidden_first": [
+      "Grep",
+      "Glob"
+    ],
+    "forbidden_bash": [
+      "grep",
+      "rg ",
+      "rg\t",
+      "find ",
+      "cat ",
+      "sed ",
+      "awk ",
+      "ack "
+    ]
+  },
+  "ground_truth": [],
+  "max_tool_calls": 4,
+  "notes": "memory precheck; ready now against the two facts run.sh already seeds. No fixed ground_truth (count phrasing varies); graded on tool choice."
+}

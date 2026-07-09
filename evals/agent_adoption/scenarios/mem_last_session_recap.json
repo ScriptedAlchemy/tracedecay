@@ -1,0 +1,42 @@
+{
+  "id": "mem_last_session_recap",
+  "category": "session_recovery",
+  "pack": "pack_session_memory",
+  "hosts": [
+    "claude",
+    "codex"
+  ],
+  "fixture": "main",
+  "status": "deferred",
+  "prompt": "What was I in the middle of last time I worked on this project?",
+  "expected_tools": {
+    "required_first": [
+      "tracedecay_sessions_for",
+      "tracedecay_message_search",
+      "tracedecay_lcm_load_session",
+      "tracedecay_session_start"
+    ],
+    "acceptable": [
+      "tracedecay_fact_store",
+      "tracedecay_context"
+    ],
+    "forbidden_first": [
+      "Grep",
+      "Glob"
+    ],
+    "forbidden_bash": [
+      "grep",
+      "rg ",
+      "rg\t",
+      "find ",
+      "cat ",
+      "sed ",
+      "awk ",
+      "ack "
+    ]
+  },
+  "ground_truth": [],
+  "max_tool_calls": 5,
+  "requires_fixture": "seeded-sessions",
+  "notes": "DEFERRED: same gap as scenarios/session_recovery.json -- needs a real prior host session recorded and ingested against the fixture project path."
+}
