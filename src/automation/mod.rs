@@ -29,6 +29,7 @@ pub mod runner;
 pub mod scheduler;
 pub mod session_reflector;
 pub mod skill_frontmatter;
+pub mod skill_materialization;
 pub mod skill_targets;
 pub mod skill_usage;
 pub mod skill_writer;

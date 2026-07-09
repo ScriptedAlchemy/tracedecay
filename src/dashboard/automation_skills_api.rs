@@ -257,7 +257,14 @@ async fn export_skills_to_agent_hosts(
     let profile_root = profile_root.to_path_buf();
     let project_root = project_root.to_path_buf();
     tokio::task::spawn_blocking(move || {
-        export_managed_skills_to_agent_hosts(&home, &project_root, &profile_root)
+        let reports = export_managed_skills_to_agent_hosts(&home, &project_root, &profile_root);
+        // Materialize active managed skills as host-loadable SKILL.md files into
+        // every detected `.claude`/`.codex` skills directory (project + global).
+        crate::automation::skill_materialization::reconcile_after_activation(
+            &profile_root,
+            &project_root,
+        );
+        reports
     })
     .await
     .unwrap_or_else(|err| {
