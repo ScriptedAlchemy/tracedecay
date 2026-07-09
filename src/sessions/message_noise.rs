@@ -1,0 +1,176 @@
+//! Shared transcript-noise classification for message retrieval re-ranking.
+//!
+//! Both the LCM grep path (`sessions::lcm::query`, BM25-free recency/relevance
+//! grep over the raw store) and the global session-message search path
+//! (`GlobalDb::search_session_messages*`, BM25 over `session_messages_fts`)
+//! surface the same failure mode: an *inventory/listing* message — a glob/find
+//! tool call over transcript directories, a path-list dump, or a prose branch/
+//! worktree roster that merely name-drops many identifiers — matches a query
+//! and outranks the message that actually did the work. This module is the one
+//! place the heuristic lives so the two retrieval surfaces classify noise
+//! identically instead of drifting apart.
+//!
+//! The treatment is always a *downrank, never a drop*: callers over-fetch by
+//! [`RERANK_OVERFETCH_FACTOR`] (via [`rerank_fetch_limit`]), stably move
+//! inventory hits below substantive ones, then truncate to the caller's limit,
+//! so a downranked hit still surfaces when it is the only match.
+
+/// Over-fetch multiplier applied before the deterministic re-rank so that
+/// substantive hits buried below inventory/listing noise in the raw ranking
+/// order can still surface within the caller's `limit`.
+pub(crate) const RERANK_OVERFETCH_FACTOR: usize = 4;
+
+/// Fetch budget before the re-rank stage: over-fetch by
+/// [`RERANK_OVERFETCH_FACTOR`], clamped into `[limit, max_fetch]`.
+pub(crate) fn rerank_fetch_limit(limit: usize, max_fetch: usize) -> usize {
+    limit
+        .saturating_mul(RERANK_OVERFETCH_FACTOR)
+        .clamp(limit, max_fetch)
+}
+
+/// Cheap, deterministic heuristic: is this message text a transcript
+/// inventory/listing (a glob/find tool call over transcript or session
+/// directories), a path-list-dominated dump, or a prose branch/worktree roster
+/// that merely enumerates identifiers — rather than substantive conversation?
+/// Such messages match many unrelated queries and drown out real answers.
+/// Operates only on the supplied text — no extra DB reads.
+pub(crate) fn is_inventory_text(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    // A listing/glob/find/grep invocation aimed at transcript or session
+    // directories: the classic "inventory" tool call over `**/*.jsonl` etc.
+    let mentions_transcript_dir = lower.contains(".jsonl")
+        || lower.contains("sessions/")
+        || lower.contains(".claude")
+        || lower.contains(".codex")
+        || lower.contains("transcript");
+    let looks_like_listing = text.contains("**/")
+        || lower.contains("\"pattern\"")
+        || lower.contains("glob(")
+        || lower.contains("\"glob\"")
+        || lower.starts_with("ls ")
+        || lower.contains(" ls ")
+        || lower.contains("find ")
+        || lower.contains("rg -")
+        || lower.contains("grep -");
+    if mentions_transcript_dir && looks_like_listing {
+        return true;
+    }
+    if path_list_dominated(text) {
+        return true;
+    }
+    is_branch_inventory(&lower)
+}
+
+/// A prose branch/worktree *inventory*: a message that mentions branches or
+/// worktrees and frames itself as an enumeration (an inventory, roster, fleet
+/// status, sweep, or an "index/list of" identifiers) rather than as work done.
+/// These name-drop the very branch a query targets while implementing nothing,
+/// so they must sit below the session that actually did the work.
+fn is_branch_inventory(lower: &str) -> bool {
+    let mentions_branch_or_worktree = lower.contains("branch") || lower.contains("worktree");
+    if !mentions_branch_or_worktree {
+        return false;
+    }
+    const LISTING_INDICATORS: [&str; 9] = [
+        "inventory",
+        "roster",
+        "fleet",
+        "sweep",
+        "listing",
+        "catalog",
+        "roll call",
+        "index of",
+        "list of",
+    ];
+    LISTING_INDICATORS
+        .iter()
+        .any(|indicator| lower.contains(indicator))
+}
+
+/// True when a message is mostly a list of filesystem paths rather than prose:
+/// at least three path-like tokens making up a majority of the content. A lone
+/// path mentioned inside a sentence stays below the threshold.
+fn path_list_dominated(text: &str) -> bool {
+    let mut total = 0usize;
+    let mut path_like = 0usize;
+    for token in text.split_whitespace() {
+        total += 1;
+        if token_is_path_like(token) {
+            path_like += 1;
+        }
+    }
+    total >= 4 && path_like >= 3 && path_like * 5 >= total * 3
+}
+
+/// A token counts as "path-like" when it embeds a directory separator and is
+/// long enough to be a real path, or ends in a common source/transcript
+/// extension.
+fn token_is_path_like(token: &str) -> bool {
+    let token = token.trim_matches(|c: char| matches!(c, '"' | '\'' | ',' | '`' | '(' | ')'));
+    if token.len() < 4 {
+        return false;
+    }
+    let has_sep = token.contains('/') && !token.starts_with("//");
+    let has_ext = [
+        ".jsonl", ".json", ".rs", ".ts", ".tsx", ".js", ".py", ".md", ".toml", ".txt", ".log",
+    ]
+    .iter()
+    .any(|ext| token.ends_with(ext));
+    has_sep && (has_ext || token.chars().any(|c| c.is_ascii_alphanumeric()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn transcript_glob_listing_is_inventory() {
+        assert!(is_inventory_text(
+            "Glob **/*.jsonl over .claude sessions for branch redundancy"
+        ));
+    }
+
+    #[test]
+    fn substantive_implementation_is_not_inventory() {
+        assert!(!is_inventory_text(
+            "implemented branch redundancy scoring in the ranker"
+        ));
+        assert!(!is_inventory_text(
+            "Implementing the retrieval eval harness on codex/retrieval-evals-analytics: \
+             seeded a fixture session store and scored message_search ranking with \
+             recomputed precision metrics."
+        ));
+    }
+
+    #[test]
+    fn prose_branch_inventory_is_inventory() {
+        assert!(is_inventory_text(
+            "Branch inventory sweep lists codex/retrieval-evals-analytics as one of many \
+             active branches, alongside codex/session-recovery-fixes, codex/redundancy-evals, \
+             release-plz, and master."
+        ));
+        assert!(is_inventory_text(
+            "Worktree fleet status again names codex/retrieval-evals-analytics amid twelve \
+             other branches; nothing is implemented in this session, it is only an index of \
+             branch names."
+        ));
+        assert!(is_inventory_text(
+            "Daily branch roster mentions codex/retrieval-evals-analytics once more among the \
+             archived and stale branches tracked across every worktree."
+        ));
+    }
+
+    #[test]
+    fn branch_mention_without_listing_vocab_is_not_inventory() {
+        assert!(!is_inventory_text(
+            "the literal foo-bar marker on a scoped branch"
+        ));
+    }
+
+    #[test]
+    fn rerank_fetch_limit_over_fetches_within_bounds() {
+        assert_eq!(rerank_fetch_limit(10, 100), 40);
+        assert_eq!(rerank_fetch_limit(30, 100), 100);
+        assert_eq!(rerank_fetch_limit(0, 100), 0);
+    }
+}
