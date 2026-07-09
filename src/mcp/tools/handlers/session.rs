@@ -526,11 +526,6 @@ fn sort_and_truncate_message_results_by_relevance(
     results: &mut Vec<SessionMessageSearchResult>,
     limit: usize,
 ) {
-    // Decorate-sort-undecorate: classify each hit's inventory status exactly
-    // once up front rather than re-running the full-text classifier inside the
-    // O(n log n) comparator (each comparison would otherwise scan both message
-    // bodies, amplified on large transcripts). The sort key is byte-identical
-    // to the previous inline comparator, so ranking is unchanged.
     let mut decorated: Vec<(bool, SessionMessageSearchResult)> = results
         .drain(..)
         .map(|result| {

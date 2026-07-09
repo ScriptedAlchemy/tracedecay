@@ -86,10 +86,6 @@ fn is_branch_inventory(lower: &str) -> bool {
     if !mentions_branch_or_worktree {
         return false;
     }
-    // Over-match guard: a message that shows real work — a fenced code block, a
-    // unified diff, or an affirmative completion verb — is substantive even
-    // when it also discusses a listing/inventory/sweep feature ("implemented
-    // the branch listing, diff attached"). Never demote such a message.
     if shows_substantive_work(lower) {
         return false;
     }
@@ -98,18 +94,9 @@ fn is_branch_inventory(lower: &str) -> bool {
         .any(|indicator| lower.contains(indicator))
 }
 
-/// Cheap substantive-work signal over already-lowercased text: a fenced code
-/// block, a unified diff (a `diff --git` header or an `@@ ` hunk marker), or an
-/// affirmative completion verb (implemented/fixed/refactored/committed). Guards
-/// [`is_branch_inventory`] so a message that shows work is not demoted merely
-/// for also naming a listing feature. A verb negated by a nearby preceding
-/// "no"/"not"/"nothing"/"never" (e.g. "nothing is implemented in this session")
-/// does not count — that message is still a bare inventory.
+/// True when a branch/worktree listing also contains concrete work evidence.
 fn shows_substantive_work(lower: &str) -> bool {
     const WORK_VERBS: [&str; 4] = ["implemented", "fixed", "refactored", "committed"];
-    // A bare code fence is NOT evidence: a fenced branch roster is still an
-    // inventory. Only concrete diff markers count on their own; fenced code
-    // accompanying real work co-occurs with the affirmative verbs below.
     if lower.contains("diff --git") || lower.contains("@@ ") {
         return true;
     }
@@ -118,10 +105,7 @@ fn shows_substantive_work(lower: &str) -> bool {
         .any(|verb| contains_affirmative_verb(lower, verb))
 }
 
-/// True when `verb` appears in `lower` as a standalone word (ASCII-alphanumeric
-/// boundaries on both sides) that is not negated by one of the last three words
-/// before it. The word-window negation check is char-boundary safe (it splits
-/// on whitespace) and stays cheap.
+/// True when `verb` appears as a standalone word without nearby preceding negation.
 fn contains_affirmative_verb(lower: &str, verb: &str) -> bool {
     let mut search_from = 0;
     while let Some(rel) = lower[search_from..].find(verb) {
@@ -145,9 +129,7 @@ fn contains_affirmative_verb(lower: &str, verb: &str) -> bool {
     false
 }
 
-/// True when the text immediately preceding a work verb ends in a negation
-/// ("no"/"not"/"nothing"/"never") within the last three words, so the verb is
-/// asserting the *absence* of work rather than work done.
+/// True when the last three words before a work verb negate it.
 fn negated_before(before: &str) -> bool {
     const NEGATIONS: [&str; 4] = ["nothing", "never", "not", "no"];
     before
@@ -244,8 +226,6 @@ mod tests {
 
     #[test]
     fn branch_listing_work_with_evidence_is_not_inventory() {
-        // Discussing a listing/sweep feature while showing real work must not
-        // be demoted, even though the text contains listing vocabulary.
         assert!(!is_inventory_text(
             "Implemented the branch listing feature on codex/foo; diff attached."
         ));
@@ -260,8 +240,6 @@ mod tests {
 
     #[test]
     fn fenced_branch_roster_stays_inventory() {
-        // A bare Markdown fence must not vouch for work: a fenced branch
-        // roster is still an inventory (review finding on PR #361).
         assert!(is_inventory_text(
             "Branch inventory sweep:\n```\ncodex/foo\ncodex/bar\ncodex/baz\n```"
         ));
@@ -269,8 +247,6 @@ mod tests {
 
     #[test]
     fn genuine_roster_with_negated_work_verb_stays_inventory() {
-        // A roster that explicitly says nothing was implemented is still a bare
-        // inventory: the negated verb must not trip the work-evidence guard.
         assert!(is_inventory_text(
             "Worktree fleet status again names codex/retrieval-evals-analytics amid twelve \
              other branches; nothing is implemented in this session, it is only an index of \
