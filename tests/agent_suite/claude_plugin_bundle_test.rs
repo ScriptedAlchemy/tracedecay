@@ -70,7 +70,7 @@ const EXPECTED_COMMANDS: &[&str] = &[
     "test-changes",
 ];
 
-/// The 3 subagent definitions, byte-identical to `src/agents/claude_agents/`.
+/// The canonical product-plugin subagent definitions.
 const EXPECTED_AGENTS: &[&str] = &[
     "code-explorer.md",
     "code-health-auditor.md",
@@ -408,7 +408,12 @@ fn claude_bundle_commands_have_valid_frontmatter_and_body() {
 #[test]
 fn claude_bundle_agents_are_byte_identical_to_the_source_of_truth() {
     let bundle_agents = bundle_root().join("agents");
-    let source_agents = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/agents/claude_agents");
+    let manifest_root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let source_agents = manifest_root.join("plugin/agents");
+    assert!(
+        !manifest_root.join("src/agents/claude_agents").exists(),
+        "plugin/agents must be the only Claude agent source of truth"
+    );
 
     // The bundle ships exactly the expected agent set.
     let mut expected: Vec<String> = EXPECTED_AGENTS.iter().map(|a| a.to_string()).collect();

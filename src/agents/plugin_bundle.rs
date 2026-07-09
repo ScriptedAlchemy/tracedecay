@@ -81,7 +81,7 @@ macro_rules! plugin_file {
     };
 }
 
-// Every file under `plugin/skills/`, including support files, embedded by build.rs.
+// Every shared skill and native Claude/Cursor agent file, embedded by build.rs.
 include!(concat!(env!("OUT_DIR"), "/plugin_bundle_generated.rs"));
 
 /// Prefix of the dispatcher skills that Cursor does **not** deploy (they are
@@ -151,32 +151,6 @@ const CURSOR_COMMAND_FILES: &[PluginFile] = &[
     plugin_file!(
         "commands/tracedecay-test-changes.md",
         "overlays/cursor/commands/tracedecay-test-changes.md"
-    ),
-];
-
-/// Claude-form subagents.
-const CLAUDE_AGENT_FILES: &[PluginFile] = &[
-    plugin_file!("agents/code-explorer.md", "agents/code-explorer.md"),
-    plugin_file!(
-        "agents/code-health-auditor.md",
-        "agents/code-health-auditor.md"
-    ),
-    plugin_file!("agents/session-historian.md", "agents/session-historian.md"),
-];
-
-/// Cursor-form subagents.
-const CURSOR_AGENT_FILES: &[PluginFile] = &[
-    plugin_file!(
-        "agents/code-explorer.md",
-        "overlays/cursor/agents/code-explorer.md"
-    ),
-    plugin_file!(
-        "agents/code-health-auditor.md",
-        "overlays/cursor/agents/code-health-auditor.md"
-    ),
-    plugin_file!(
-        "agents/session-historian.md",
-        "overlays/cursor/agents/session-historian.md"
     ),
 ];
 
@@ -256,7 +230,7 @@ pub fn claude_files() -> Vec<(&'static str, &'static str)> {
     compose(
         &[
             CLAUDE_MANIFEST_FILES,
-            CLAUDE_AGENT_FILES,
+            GENERATED_CLAUDE_AGENT_FILES,
             CLAUDE_COMMAND_FILES,
         ],
         all_skill_files(),
@@ -271,7 +245,7 @@ pub fn cursor_files() -> Vec<(&'static str, &'static str)> {
         &[
             CURSOR_MANIFEST_FILES,
             CURSOR_RULE_FILES,
-            CURSOR_AGENT_FILES,
+            GENERATED_CURSOR_AGENT_FILES,
             CURSOR_COMMAND_FILES,
         ],
         cursor_skill_files(),
