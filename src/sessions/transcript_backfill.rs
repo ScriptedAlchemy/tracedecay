@@ -579,8 +579,7 @@ async fn load_structured_candidates(
     loop {
         match rows.next().await {
             Ok(Some(row)) => {
-                let (Ok(source_path), Ok(provider)) =
-                    (row.get::<String>(0), row.get::<String>(1))
+                let (Ok(source_path), Ok(provider)) = (row.get::<String>(0), row.get::<String>(1))
                 else {
                     continue;
                 };
