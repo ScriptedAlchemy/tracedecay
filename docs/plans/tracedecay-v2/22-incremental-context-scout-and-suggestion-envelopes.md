@@ -952,7 +952,7 @@ Minimum registry:
 
 | Prefix | Representative keys |
 |---|---|
-| `scout.runtime` | `enabled`, `mode=off|shadow|deterministic|model_assisted`, `pause`, worker concurrency, queue bytes/age, lease TTL |
+| `scout.runtime` | `enabled`, `mode=off\|shadow\|deterministic\|model_assisted`, `pause`, worker concurrency, queue bytes/age, lease TTL |
 | `scout.trigger` | event-family eligibility, debounce min/max, idle threshold, self-event exclusion, per-Turn run cap |
 | `scout.model` | purpose binding, provider/backend preference, model capability reference, deterministic fallback, stateless/pinned-incremental mode, warm session pool/idle TTL, soft/hard timeout, input/output tokens, daily token/cost caps |
 | `scout.tools` | generated eligible capability set, per-family limits, timeout, result items/bytes, local-only default, remote-read/egress grant |

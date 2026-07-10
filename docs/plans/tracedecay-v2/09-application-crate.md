@@ -970,7 +970,7 @@ Plan 18's PR 24H extends these same application registries/ports with privacy st
 
 **Files:** `src/migration.rs`; `tests/{future_master_migration,v1_parity}.rs`; generated post-merge parity fixture.
 
-- [ ] Add copied/redacted fixtures for merged #405 unique/ambiguous legacy adoption, merged #412 daemon drain/update recovery, #407 sessions/facts-only/profile identity, #410 native/origin/representative messages, #411 foreign-owner doctor severity, open #425 split-store consolidation manifests/recovery guidance, release-only #413 inventory drift, local/live Git drift, and every V1 writable dashboard action.
+- [ ] Add copied/redacted fixtures for merged #405 unique/ambiguous legacy adoption, merged #412 daemon drain/update recovery, #407 sessions/facts-only/profile identity, #410 native/origin/representative messages, #411 foreign-owner doctor severity, merged #425 split-store consolidation manifests/recovery guidance, release-only #413 inventory drift, local/live Git drift, and every V1 writable dashboard action.
 - [ ] Run `cargo test -p tracedecay-application --test future_master_migration --test v1_parity -- --nocapture`. Expected: parity assertions fail before bounded shadow dispatch/receipts are complete.
 - [ ] Implement per-use-case V1/V2 dispatch and `UseCaseParityReceipt`; regenerate inventory from actual accepted master rather than the planning branch snapshots.
 - [ ] Re-run the command. Expected: zero duplicate canonical entities, exact native-message hashes/counts, representative provenance parity, all mutations accounted, and every divergence explained by a checked-in receipt.

@@ -659,17 +659,7 @@ Useful partial results return 0 with `!coverage.is_complete()` unless the caller
 
 ### 13.1 Collections
 
-All bounded collections use the one page envelope defined in plan 17's contract IR; plan 10's `Page<T>` and this plan's `CursorPage<T>` are that same type, not variants:
-
-```rust
-pub struct CursorPage<T> {
-    pub items: Vec<T>,
-    pub next_cursor: Option<OpaqueCursor>,
-    pub truncation: Option<TruncationReason>,
-    pub count_semantics: CountSemantics,
-    pub ordering: OrderingContract,
-}
-```
+All bounded collections use the one `CursorPage<T>` envelope defined once in plan 17's contract IR (plan 17 §13.1) — `{ items, next_cursor, truncation, count_semantics, ordering }`; plan 10's `Page<T>` and this plan's `CursorPage<T>` are that same type, not variants, and neither plan restates its fields.
 
 The earlier draft's `returned` and `page_limits` fields fold into this shape without information loss: returned-row counts are part of `count_semantics`, and the applied default/hard page limits travel in the `truncation` receipt.
 

@@ -303,17 +303,7 @@ pub struct ApiMeta {
 
 `CoverageReportV1` is plan 01's canonical shared coverage type. The mapper is exhaustive over `ApplicationResponse<T>`. Compile tests fail if application adds metadata without an API disposition. `!coverage.is_complete()` remains HTTP 200 when useful data exists. An application top-level error maps to a problem response; a partial shard failure already represented in coverage does not become 500.
 
-List responses use the single page envelope defined in plan 17's contract IR (plan 17 §13.1) and serialized here unchanged; plan 21's CLI/MCP pages are the same type:
-
-```rust
-pub struct CursorPage<T> {
-    pub items: Vec<T>,
-    pub next_cursor: Option<OpaqueCursor>,
-    pub truncation: Option<TruncationReason>,
-    pub count_semantics: CountSemantics, // exact | lower_bound | estimate | sampled | capped | unknown
-    pub ordering: OrderingContract,      // declared sort keys, direction, and tie-break rule
-}
-```
+List responses use the single `CursorPage<T>` envelope defined once in plan 17's contract IR (plan 17 §13.1) — `{ items, next_cursor, truncation, count_semantics, ordering }` — and serialized here unchanged; plan 21's CLI/MCP pages are the same type, restated in neither plan.
 
 Cursor strings are authenticated, opaque, URL-safe, size-limited to 8 KiB, and never decoded client-side; they encode exactly the domain `CursorClaimsV1` binding set (plan 01, codec owned by plan 05): query fingerprint, caller/access digest, canonical scope digest, profile-catalog generation, schema/ranking/index versions, frozen watermarks and per-shard positions, sort cutoff, temporal mode/cutoff, intent-profile version, partial-shard dispositions, and expiry. Interactive cursors use plan-20 `query.cursor.interactive_ttl` (default 15 minutes); export/bulk continuations last their catalog-declared job lifetime. Cursor and SSE event-ID authentication uses the persisted profile-local HMAC key set of plan 17 §13.1 (key ID plus rotation), so a server restart does not invalidate otherwise-valid cursors. Frozen snapshots referenced by outstanding cursors/subscriptions are pinned against GC/compaction/projection retirement for the cursor's lifetime by the store/query retention contract (plans 02/05); a pin that cannot be honored fails with a typed `RestartPagination` reason, never silently different data. A cursor mismatch/expiry returns typed restart instructions.
 
@@ -902,4 +892,4 @@ Commands run from repository root using checkout-local `target/`; do not set tar
 - [ ] Run HTTP/SSE benchmarks at current and 10x bounded corpora. Expected: Section 15 gates pass with reference machine, corpus, watermarks, p50/p95, bytes, connection count, allocations, and peak RSS recorded.
 - [ ] Run `rg -n 'rusqlite|libsql|git2|octocrab|reqwest|sessions::|memory::store|global_db|db::connection' crates/tracedecay-api/src`. Expected: no matches.
 - [ ] Inspect router/catalog/OpenAPI sets. Expected: one-to-one bindings, no `ANY` V2 gateway, no anonymous operation, no unbounded list/query/graph/timeline/export route, and no missing command.
-- [ ] Complete #405/#407/#410 ownership/message migration, #411 doctor authority, #412 drain/update recovery, open #425 operator consolidation contract/recovery fixtures, #413 inventory refresh, stable research anchor/recipe, DNS rebinding/Origin/CSRF/CSP, cursor/event tamper, SSE gap/slow client, export containment, SPA history, stale-client failure, cutover, and rollback drills before V2 API becomes default.
+- [ ] Complete #405/#407/#410 ownership/message migration, #411 doctor authority, #412 drain/update recovery, merged #425 operator consolidation contract/recovery fixtures, #413 inventory refresh, stable research anchor/recipe, DNS rebinding/Origin/CSRF/CSP, cursor/event tamper, SSE gap/slow client, export containment, SPA history, stale-client failure, cutover, and rollback drills before V2 API becomes default.

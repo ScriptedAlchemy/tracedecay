@@ -736,7 +736,7 @@ CI fails when:
 - Git result omits membership/evidence/freshness/caps;
 - #410 filters differ between surfaces;
 - #405/#407 migration aliases appear as separate active capabilities/profiles;
-- #409 appears as required future-master behavior.
+- #409 (closed without merge, superseded by #413/#416) appears as required behavior.
 
 Every accepted drift updates the inventory manifest, definition version, generated artifacts, migration/parity fixture, and changelog in the same commit.
 

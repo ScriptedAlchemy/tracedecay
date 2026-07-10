@@ -86,7 +86,7 @@ Hooks own only host wire adaptation and bounded orchestration in [`19-system-def
 | src/mcp/hook_events.rs | FileEdit, Shell, WorkspaceOpen, SessionStart, IncrementalSync notification planning | Compatibility adapter emits canonical hook observations and proposed application effects; MCP notification transport stays thin. |
 | daemon hook notification/spool paths | Process routing, sync debounce, branch tracking | Capture/application worker consumes effects asynchronously; hook runtime records route/fallback evidence. |
 
-Base/future-master inputs refreshed on 2026-07-10:
+Accepted-base inputs refreshed on 2026-07-10:
 
 - The inspected base `99ad19bc` contains merged PR #405 legacy identity adoption and #412 daemon/update drain safety. Host requests resolve one adopted identity. Shutdown/update hooks record lifecycle lease, in-flight drain, background-writer stop, checkpoint, and service-state receipts separately and cannot acknowledge safe restart before them.
 - PR #407 user-profile Hermes consolidation. Hermes/curator/reflector/skill-writer activity is actor/workflow evidence inside the user's profile, never a separate hook profile.
@@ -712,7 +712,7 @@ Commands run from repository root with the checkout-local target directory. Do n
 
 Cutover order: notification-only session/workspace -> post-tool/edit/shell -> prompt submit -> subagent/agent lifecycle -> compaction -> explicit pre-tool blocking. Each step requires:
 
-- refreshed host manifest and future-master base;
+- refreshed host manifest and accepted base;
 - zero unexplained normalization/capture/reply gaps;
 - p95/p99 and queue/disk gates;
 - exact durability and duplicate evidence;

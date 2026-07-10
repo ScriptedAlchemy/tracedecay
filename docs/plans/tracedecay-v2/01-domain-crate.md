@@ -468,22 +468,9 @@ pub enum DataSensitivity {
     Unknown,
 }
 
-pub struct SanitizationReceiptV1 {
-    pub receipt_id: SanitizationReceiptId,
-    pub source_observation_id: ObservationId,
-    pub policy_digest: PrivacyPolicyDigest,
-    pub detector_set_digest: DetectorSetDigest,
-    pub parser_digest: ParserDigest,
-    pub input_domain: PrivacyDomainId,
-    pub input_fingerprint: KeyedPayloadFingerprint,
-    pub output_digest: SanitizedOutputDigest,
-    pub findings_by_class: std::collections::BTreeMap<SecretClass, u64>,
-    pub structured_fields_scanned: u64,
-    pub raw_fallback_used: bool,
-    pub decode_depth: u8,
-    pub completeness: ScanCompleteness,
-    pub occurred_at: UtcMicros,
-}
+// SanitizationReceiptV1 record shape is defined once in plan 18 (security authority)
+// and persisted in plan 02's `sanitization_receipts` table; this crate references it by
+// `SanitizationReceiptId` in the proof-marker vocabulary below rather than restating its fields.
 
 pub struct Unclassified<T>(/* private */ T);
 pub struct Classified<T>(/* private */ T, DataSensitivity, SanitizationReceiptId);
@@ -548,41 +535,7 @@ Handshake acceptance requires the current exact protocol epoch and compatible cu
 
 `EntityKind` includes every master-plan kind: profile/project/project-set/repository/remote/checkout/worktree/ref/commit/tree/pull-request/check/review/release; provider/host/model/installation/actor/agent/agent-presence/work-claim/session/thread/workflow/run/turn/message/content-part; tool definition/invocation/result/approval/goal/provider-native-task/provider-native-plan; initiative/plan/plan-version/work-item/work-item-version/task-dependency/acceptance-criterion/task-decision/task-assignment/task-offer/task-lease/execution-attempt/executor-registration/workspace-binding/context-packet/handoff/task-artifact/task-outcome; code snapshot/file and symbol identity/occurrence/diagnostic/test/build; fact/version/knowledge entity/decision/contradiction/retrieval/feedback; policy bundle/evaluation/hint; automation job/run/artifact/skill/skill-package/proposal/doctor-finding/remediation; lifecycle lease/drain/checkpoint/service-state receipt; query/saved view/annotation/export/payload blob. Provider-native task/plan records remain observed entities or aliases until an authorized materialization command creates canonical work.
 
-The shared diagnostic/action family is a domain contract, with product semantics and cross-surface rules owned by plan 24 §4.11:
-
-```rust
-pub struct DiagnosticEnvelopeV1 {
-    pub envelope_id: DiagnosticEnvelopeId,
-    pub schema_version: u16,
-    pub diagnostic_code: DiagnosticCode,
-    pub severity: DiagnosticSeverityV1,
-    pub subject: EntityVersionRef,
-    pub scope: ScopeResolutionId,
-    pub summary: SinkEligible<LogSafeText>,
-    pub state: DiagnosticStateV1,
-    pub evidence: BoundedVec<RetrievalAnchorId, 32>,
-    pub actions: BoundedVec<DiagnosticActionV1, 16>,
-    pub produced_by: ProducerVersionRef,
-    pub config_digest: ManifestDigest,
-    pub catalog_snapshot: CatalogSnapshotRefV1,
-    pub vector_watermark: VectorWatermark,
-    pub observed_at: UtcMicros,
-    pub expires_at: Option<UtcMicros>,
-}
-
-pub struct DiagnosticActionV1 {
-    pub action_id: DiagnosticActionId,
-    pub kind: RegisteredDiagnosticActionKind,
-    pub label: SinkEligible<LogSafeText>,
-    pub capability: Option<CapabilityId>,
-    pub effect: EffectClassV1,
-    pub input_schema: SchemaRef,
-    pub safe_defaults: Option<SchemaBoundValueRef>,
-    pub confirmation: ConfirmationRequirementV1,
-    pub enabled: bool,
-    pub unavailable_reason: Option<ReasonCode>,
-}
-```
+The shared diagnostic/action family (`DiagnosticEnvelopeV1`/`DiagnosticActionV1`) is a domain contract whose canonical field list, product semantics, and cross-surface rules are defined once in plan 24 §4.11; this crate re-exports those types and their ID/vocabulary members rather than restating their fields.
 
 `DiagnosticEnvelopeId` and `DiagnosticActionId` are UUIDv7 canonical IDs; `DiagnosticCode`, action-kind code, severity, state, and reason are registered closed vocabularies. `BoundedVec` rejects overflow rather than truncating. Unknown forward action kinds decode to a preserved opaque registered-code representation that can be rendered disabled, never to an executable default. The envelope contains no raw command, shell text, secret, absolute path, or transport instruction.
 
@@ -1636,7 +1589,7 @@ git commit -m "test(domain): freeze v2 schema contracts"
 ## Compatibility and cutover
 
 - Compatibility in this plan means on-disk evidence/schema import, shadow comparison, and bounded rollback only. It does not promise live compatibility for stale MCP, daemon, plugin, hook, CLI, HTTP, or dashboard clients or retired tool names.
-- Runtime boundaries exchange an exact `ProtocolEpoch` plus schema/catalog digests. A mismatch fails closed with `client_restart_required`, `client_update_required`, or the current capability ID/name; it never retries through an old name, guesses a schema, or translates a stale request.
+- Runtime boundaries exchange an exact `ProtocolEpoch` plus schema/catalog digests. A mismatch fails closed with `daemon_restart_required`, `client_update_required`, or `capability_replaced` naming the current capability ID/name; it never retries through an old name, guesses a schema, or translates a stale request.
 - Hints, generated help, schemas, and catalog snapshots expose current capabilities only. Historical aliases remain import/provenance evidence and replay metadata, never active runtime bindings.
 - The root crate converts V1 records at adapter boundaries; V1 modules never depend on `tracedecay-domain` storage implementations.
 - PR #405 repository markers, legacy candidate inventories, and retirement receipts are imported before a repository entity is allocated. Healthy/pristine adoption remains evidence; nonempty conflicts remain separate entities and block cutover.

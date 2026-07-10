@@ -159,9 +159,9 @@ This is not merely operator error. V2 must make the right capability discoverabl
 - A `missed_capability` outcome when a relevant tool was neither suggested nor used, and a `human_correction` event when the user redirects the workflow.
 - Hint evaluation that credits useful silence but penalizes missing a high-confidence, high-value repository capability.
 
-### 2.6 Current-master and incoming future-master changes
+### 2.6 Current-master accepted changes
 
-The plan treats merged fixes as required base semantics and assumes every open PR visible at the latest audit will merge. Implementation must not rediscover or regress them:
+The plan treats these merged fixes as required base semantics; every PR in the table below is merged into the current publication base `3567e31e`, with only the draft plan PR #421 open at the final audit. Implementation must not rediscover or regress them:
 
 | PR/status | Behavior | V2 consequence |
 |---|---|---|
