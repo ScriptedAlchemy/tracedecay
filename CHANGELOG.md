@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.49](https://github.com/ScriptedAlchemy/tracedecay/compare/v0.0.48...v0.0.49) - 2026-07-10
+
+### Fixed
+
+- *(storage)* recover untracked branch graphs
+
 ## [0.0.48](https://github.com/ScriptedAlchemy/tracedecay/compare/v0.0.47...v0.0.48) - 2026-07-10
 
 ### Added
