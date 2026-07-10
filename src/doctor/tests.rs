@@ -1,7 +1,9 @@
 use super::*;
 use crate::global_db::StoreInstanceUpsert;
 use crate::storage::{
-    STORE_MANIFEST_FILENAME, STORE_MANIFEST_SCHEMA_VERSION, StorageMode, StoreKind, StoreManifest,
+    EnrollmentMarker, STORE_MANIFEST_FILENAME, STORE_MANIFEST_SCHEMA_VERSION, StorageMode,
+    StoreKind, StoreManifest, profile_sharded_layout, write_repository_identity_marker,
+    write_store_manifest,
 };
 #[cfg(unix)]
 use std::os::unix::fs::symlink;
@@ -213,7 +215,7 @@ async fn current_project_store_resolves_profile_shard_via_registry_alias()
     // No repo-local `.tracedecay/` index exists, yet the project must not
     // be reported as uninitialized: resolution finds the profile shard.
     assert!(!crate::config::has_project_database(&project_root));
-    match resolve_current_project_store(&project_root, &open_options).await {
+    match resolve_current_project_store(&project_root, &open_options).await? {
         CurrentProjectStore::Resolved(layout) => {
             assert_eq!(layout.data_root, shard_root);
             assert_eq!(
@@ -231,7 +233,7 @@ async fn current_project_store_resolves_profile_shard_via_registry_alias()
     std::fs::create_dir_all(&unregistered)?;
     let unregistered = canonical_temp_path(&unregistered);
     assert!(matches!(
-        resolve_current_project_store(&unregistered, &open_options).await,
+        resolve_current_project_store(&unregistered, &open_options).await?,
         CurrentProjectStore::Uninitialized
     ));
     Ok(())
@@ -265,13 +267,99 @@ async fn current_project_store_resolves_moved_repository_identity_read_only()
         profile_root: Some(profile_root),
         global_db_path: Some(dir.path().join("global.db")),
     };
-    match resolve_current_project_store(&moved, &open_options).await {
+    match resolve_current_project_store(&moved, &open_options).await? {
         CurrentProjectStore::Resolved(layout) => {
             assert_eq!(layout.data_root, shard_root);
             assert_eq!(layout.identity.project_id.as_deref(), Some(project_id));
         }
         other => panic!("expected moved repository identity, got {other:?}"),
     }
+    Ok(())
+}
+
+#[tokio::test]
+async fn current_project_store_surfaces_split_identity_conflict()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    let dir = tempfile::TempDir::new()?;
+    let profile_root = dir.path().join("profile");
+    let project_root = dir.path().join("repo");
+    std::fs::create_dir_all(&project_root)?;
+    let status = std::process::Command::new("git")
+        .args(["init", "--quiet"])
+        .current_dir(&project_root)
+        .status()?;
+    assert!(status.success());
+
+    for (project_id, node_id) in [
+        ("proj_doctor_selected", "selected-node"),
+        ("proj_doctor_legacy", "legacy-node"),
+    ] {
+        let layout = profile_sharded_layout(
+            &project_root,
+            &profile_root,
+            &EnrollmentMarker {
+                project_id: project_id.to_string(),
+                storage_mode: StorageMode::ProfileSharded,
+            },
+        )?;
+        let (db, _) = crate::db::Database::initialize(&layout.graph_db_path).await?;
+        db.insert_node(&crate::types::Node {
+            id: node_id.to_string(),
+            kind: crate::types::NodeKind::Function,
+            name: node_id.to_string(),
+            qualified_name: node_id.to_string(),
+            file_path: "src/lib.rs".to_string(),
+            start_line: 1,
+            attrs_start_line: 1,
+            end_line: 1,
+            start_column: 0,
+            end_column: 1,
+            signature: None,
+            docstring: None,
+            visibility: crate::types::Visibility::Pub,
+            is_async: false,
+            branches: 0,
+            loops: 0,
+            returns: 0,
+            max_nesting: 0,
+            unsafe_blocks: 0,
+            unchecked_calls: 0,
+            assertions: 0,
+            updated_at: 1_800_000_000,
+            parent_id: None,
+        })
+        .await?;
+        db.checkpoint().await?;
+        db.close();
+        write_store_manifest(&layout)?;
+    }
+    write_repository_identity_marker(&project_root, "proj_doctor_selected")?;
+
+    let open_options = TraceDecayOpenOptions {
+        profile_root: Some(profile_root.clone()),
+        global_db_path: Some(dir.path().join("global.db")),
+    };
+    let selected_db = profile_root.join("projects/proj_doctor_selected/tracedecay.db");
+    let legacy_db = profile_root.join("projects/proj_doctor_legacy/tracedecay.db");
+    let selected_before = std::fs::read(&selected_db)?;
+    let legacy_before = std::fs::read(&legacy_db)?;
+
+    let resolution = resolve_current_project_store(&project_root, &open_options).await;
+    let diagnostic = format!("{resolution:?}");
+    assert!(
+        diagnostic.contains("identity cutover conflict"),
+        "{diagnostic}"
+    );
+    assert!(diagnostic.contains("proj_doctor_selected"), "{diagnostic}");
+    assert!(diagnostic.contains("proj_doctor_legacy"), "{diagnostic}");
+    assert!(
+        diagnostic.contains("backup-and-consolidate migration"),
+        "{diagnostic}"
+    );
+    assert!(diagnostic.contains("no files changed"), "{diagnostic}");
+    assert!(!diagnostic.contains("Uninitialized"), "{diagnostic}");
+    assert_eq!(std::fs::read(selected_db)?, selected_before);
+    assert_eq!(std::fs::read(legacy_db)?, legacy_before);
     Ok(())
 }
 

@@ -1,7 +1,7 @@
 use std::io::{self, BufRead, IsTerminal, Write};
 use std::path::Path;
 
-use tracedecay::tracedecay::TraceDecay;
+use tracedecay::tracedecay::{TraceDecay, TraceDecayOpenOptions};
 
 use crate::{commands, current_unix_timestamp, global, resolve_cli_project_root};
 
@@ -90,7 +90,13 @@ pub(crate) async fn handle_status_command(
     runtime: bool,
 ) -> tracedecay::errors::Result<()> {
     let project_path = resolve_cli_project_root(path, project_id, project_path).await?;
-    let cg = if TraceDecay::has_initialized_store(&project_path).await {
+    let initialized = TraceDecay::try_initialized_store_layout_with_options(
+        &project_path,
+        &TraceDecayOpenOptions::default(),
+    )
+    .await?
+    .is_some();
+    let cg = if initialized {
         match TraceDecay::open(&project_path).await {
             Ok(cg) => cg,
             Err(_) => TraceDecay::open_read_only(&project_path).await?,

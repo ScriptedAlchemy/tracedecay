@@ -910,10 +910,22 @@ impl TraceDecay {
         project_root: &Path,
         open_options: &TraceDecayOpenOptions,
     ) -> Option<StoreLayout> {
-        Self::resolve_store_layout_for_local_identity(project_root, open_options)
+        Self::try_initialized_store_layout_with_options(project_root, open_options)
             .await
             .ok()
-            .filter(|layout| layout.graph_db_path.is_file())
+            .flatten()
+    }
+
+    /// Resolves an initialized store without discarding identity conflicts or
+    /// other storage errors. User-facing diagnostics must use this variant so
+    /// a preserved split store is never mislabeled as uninitialized.
+    pub async fn try_initialized_store_layout_with_options(
+        project_root: &Path,
+        open_options: &TraceDecayOpenOptions,
+    ) -> Result<Option<StoreLayout>> {
+        let layout =
+            Self::resolve_store_layout_for_local_identity(project_root, open_options).await?;
+        Ok(layout.graph_db_path.is_file().then_some(layout))
     }
 
     /// Resolves the profile store layout for a local path using enrollment

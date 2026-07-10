@@ -20,7 +20,8 @@ use tracedecay::migrate::manifest::{
 use tracedecay::storage::{
     EnrollmentMarker, SESSIONS_DB_FILENAME, STORE_MANIFEST_FILENAME, STORE_MANIFEST_SCHEMA_VERSION,
     StorageMode, StoreKind, StoreManifest, default_profile_project_id, profile_sharded_data_root,
-    read_enrollment_marker, write_enrollment_marker,
+    profile_sharded_layout, read_enrollment_marker, write_enrollment_marker,
+    write_repository_identity_marker, write_store_manifest,
 };
 use tracedecay::tracedecay::{TraceDecay, TraceDecayOpenOptions};
 
@@ -1073,6 +1074,62 @@ fn status_skips_create_prompt_when_stdin_not_a_terminal() {
         stderr.contains("Non-interactive: skipping index creation"),
         "stderr should explain the non-interactive default\nstderr:\n{stderr}"
     );
+}
+
+#[tokio::test]
+async fn status_surfaces_split_identity_conflict_without_suggesting_init() {
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    let project_root = canonical_temp_path(project.path());
+    git(&project_root, &["init", "-b", "main"]);
+
+    for (project_id, node_id) in [
+        ("proj_status_selected", "status-selected-node"),
+        ("proj_status_legacy", "status-legacy-node"),
+    ] {
+        let layout = profile_sharded_layout(
+            &project_root,
+            &profile_root(home.path()),
+            &EnrollmentMarker {
+                project_id: project_id.to_string(),
+                storage_mode: StorageMode::ProfileSharded,
+            },
+        )
+        .unwrap();
+        let (db, _) = Database::initialize(&layout.graph_db_path).await.unwrap();
+        db.insert_node(&sample_node(node_id, node_id, "src/lib.rs"))
+            .await
+            .unwrap();
+        db.checkpoint().await.unwrap();
+        db.close();
+        write_store_manifest(&layout).unwrap();
+    }
+    write_repository_identity_marker(&project_root, "proj_status_selected").unwrap();
+
+    let selected_db = profile_root(home.path()).join("projects/proj_status_selected/tracedecay.db");
+    let legacy_db = profile_root(home.path()).join("projects/proj_status_legacy/tracedecay.db");
+    let selected_before = std::fs::read(&selected_db).unwrap();
+    let legacy_before = std::fs::read(&legacy_db).unwrap();
+
+    let mut command = tracedecay_command(home.path(), &project_root);
+    command.arg("status");
+    let output = run_with_timeout(command, cli_timeout());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(
+        !output.status.success(),
+        "status should fail safely\n{stderr}"
+    );
+    assert!(stderr.contains("identity cutover conflict"), "{stderr}");
+    assert!(stderr.contains("proj_status_selected"), "{stderr}");
+    assert!(stderr.contains("proj_status_legacy"), "{stderr}");
+    assert!(
+        stderr.contains("backup-and-consolidate migration"),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("run `tracedecay init`"), "{stderr}");
+    assert_eq!(std::fs::read(selected_db).unwrap(), selected_before);
+    assert_eq!(std::fs::read(legacy_db).unwrap(), legacy_before);
 }
 
 #[cfg(unix)]

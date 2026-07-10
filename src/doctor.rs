@@ -41,23 +41,24 @@ pub async fn run_doctor(agent_filter: Option<&str>) {
     let project_path = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let open_options = TraceDecayOpenOptions::default();
     match resolve_current_project_store(&project_path, &open_options).await {
-        CurrentProjectStore::Resolved(layout) => {
+        Ok(CurrentProjectStore::Resolved(layout)) => {
             dc.pass(&describe_resolved_store(&layout));
             check_database(&mut dc, &project_path, open_options.clone()).await;
         }
-        CurrentProjectStore::LegacyRepoLocal => {
+        Ok(CurrentProjectStore::LegacyRepoLocal) => {
             dc.pass(&format!(
                 "Index found: {}/ (legacy repo-local store)",
                 crate::config::get_tracedecay_dir(&project_path).display()
             ));
             check_database(&mut dc, &project_path, open_options).await;
         }
-        CurrentProjectStore::Uninitialized => {
+        Ok(CurrentProjectStore::Uninitialized) => {
             dc.warn(&format!(
                 "No index found for {} — run `tracedecay init`",
                 project_path.display()
             ));
         }
+        Err(error) => dc.fail(&format!("Project storage resolution failed: {error}")),
     }
 
     check_global_db(&mut dc);
@@ -211,16 +212,16 @@ enum CurrentProjectStore {
 async fn resolve_current_project_store(
     project_path: &Path,
     open_options: &TraceDecayOpenOptions,
-) -> CurrentProjectStore {
+) -> crate::errors::Result<CurrentProjectStore> {
     if let Some(layout) =
-        TraceDecay::initialized_store_layout_with_options(project_path, open_options).await
+        TraceDecay::try_initialized_store_layout_with_options(project_path, open_options).await?
     {
-        return CurrentProjectStore::Resolved(Box::new(layout));
+        return Ok(CurrentProjectStore::Resolved(Box::new(layout)));
     }
     if crate::config::has_project_database(project_path) {
-        return CurrentProjectStore::LegacyRepoLocal;
+        return Ok(CurrentProjectStore::LegacyRepoLocal);
     }
-    CurrentProjectStore::Uninitialized
+    Ok(CurrentProjectStore::Uninitialized)
 }
 
 fn describe_resolved_store(layout: &StoreLayout) -> String {
