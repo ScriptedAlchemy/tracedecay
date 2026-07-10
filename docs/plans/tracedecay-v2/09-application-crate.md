@@ -588,6 +588,7 @@ pub struct DoctorFindingView {
     pub remediation_authority: RemediationAuthority,
     pub evidence: Vec<EvidenceRef>,
     pub legal_actions: Vec<UseCaseId>,
+    pub diagnostic: DiagnosticEnvelopeV1,
 }
 
 pub enum ProviderIntegrationState {
@@ -603,6 +604,8 @@ pub enum ProviderIntegrationState {
 ```
 
 `Info + ForeignOwned + None` cannot become an update nag or actionable repair. Provider names/logos do not imply `Healthy`: each binding reports observed hooks/tools/session coverage, missing pieces, last verified time, and exact repair authority.
+
+Doctor, privacy, code, task/executor, migration, storage, provider, and remediation findings use the one domain `DiagnosticEnvelopeV1` defined by plan 01 and governed by plan 24 §4.11. Application revalidates the envelope's subject/version/scope/catalog/config/evidence and recomputes `legal_actions` at read/command time. It never converts diagnostic prose into a command. Unknown action kinds remain disabled evidence; a stale/expired envelope cannot authorize an action. The specialized view fields above are projections for filtering, not a competing diagnostics schema.
 
 Scope resolution uses domain `ScopeSelectorV2`, `ScopeRootV2`/`ScopeTargetV2`, `ScopeResolutionV2`, and its candidate/retry types unchanged. The exact selector fields are `version`, nonempty `roots`, `exclude`, `time`, `activity_attribution`, `coverage`, `freshness`, `traversal`, `ambiguity`, and `limits`; locators are `ScopeTargetV2::Locator(ScopeLocatorV2)` and canonical IDs are `ScopeTargetV2::Canonical(EntityRef)`. Application adds authorization, request preservation, and use-case validation; it does not define `ScopeExpr`, a transport selector, or another resolution enum.
 

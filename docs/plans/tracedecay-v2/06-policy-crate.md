@@ -1233,8 +1233,8 @@ PR 23 is split into reviewable 23A–23G. Plan 22's PR 23H later lands `src/scou
 - [ ] Run V1 hooks, memory, session correlation, automation scheduler/runner, MCP routing/rendering, dashboard automation/memory, and profile-storage suites named in Section 4. Expected: all compatibility tests pass.
 - [ ] Run policy conformance/eval/calibration corpora and all four benchmarks on the recorded reference machine. Expected: every Section 14 gate passes and outputs contain bundle/corpus/input/watermark versions, p50/p95, peak memory, coverage, and substitutions.
 - [ ] Run `rg -n 'rusqlite|libsql|std::fs|tokio::fs|reqwest|octocrab|git2|std::process|Command::' crates/tracedecay-policy/src`. Expected: no matches.
-- [ ] Run `rg -n 'hermes_bridge|hermes_config_projection|hermes_pending_skills|hermes_skill_inventory' crates/tracedecay-policy docs/superpowers/plans/tracedecay-v2/06-policy-crate.md`. Expected: matches only the V1/incoming-PR migration warning in Section 4, never production paths.
-- [ ] Run `rg -n 'TB[D]|TO[D]O|\bimplement lat[e]r\b|\bfill i[n]\b|\bappropriate erro[r]\b|\bsimilar to Tas[k]\b' docs/superpowers/plans/tracedecay-v2/06-policy-crate.md`. Expected: no matches.
+- [ ] Run `rg -n 'hermes_bridge|hermes_config_projection|hermes_pending_skills|hermes_skill_inventory' crates/tracedecay-policy docs/plans/tracedecay-v2/06-policy-crate.md`. Expected: matches only the V1/incoming-PR migration warning in Section 4, never production paths.
+- [ ] Run `rg -n 'TB[D]|TO[D]O|\bimplement lat[e]r\b|\bfill i[n]\b|\bappropriate erro[r]\b|\bsimilar to Tas[k]\b' docs/plans/tracedecay-v2/06-policy-crate.md`. Expected: no matches.
 - [ ] Inspect dependency graph. Expected: no `tracedecay-policy -> tracedecay-store/projectors/query/application/api/root` edge and no transport/storage/I/O capability in VM/runtime.
 - [ ] Complete exact/recorded/best-effort, concurrent publication, Git drift, missed-capability/human-correction outcome, privacy, shadow parity, cutover, and rollback drills before V2 policy becomes default.
 

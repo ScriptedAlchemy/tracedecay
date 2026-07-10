@@ -743,7 +743,7 @@ Do not delete sanitized native copied-subagent prompt rows under #410; only reti
 - [ ] Run four hook benchmarks and 100-agent load/crash matrix on the recorded reference machine. Expected: every Section 14 gate passes.
 - [ ] Run secret/fuzz/permission/path/symlink corpus. Expected: zero secret-bearing index/metric/fixture/export and no escape.
 - [ ] Run the forbidden-import/dependency commands in Section 6. Expected: no production violations.
-- [ ] Run the placeholder scan using split regex atoms: rg -n 'TB[D]|TO[D]O|\bimplement lat[e]r\b|\bfill i[n]\b|\bappropriate erro[r]\b|\bsimilar to Tas[k]\b' docs/superpowers/plans/tracedecay-v2/07-hooks-crate.md. Expected: no matches.
+- [ ] Run the placeholder scan using split regex atoms: rg -n 'TB[D]|TO[D]O|\bimplement lat[e]r\b|\bfill i[n]\b|\bappropriate erro[r]\b|\bsimilar to Tas[k]\b' docs/plans/tracedecay-v2/07-hooks-crate.md. Expected: no matches.
 - [ ] Inspect every generated host conformance row and deletion receipt. Expected: no unowned event, reply, effect, state, or fallback.
 
 ## 18. Definition of Done

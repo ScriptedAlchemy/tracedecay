@@ -127,7 +127,7 @@
 
 ### 5.1 Hermes kanban import and executor liveness
 
-Cross-product evidence from the Hermes kanban backend (`hermes-agent` @ `732a9ffc5`, read-only). These anchors are **external-repository `file:line` spans**, not TraceDecay `origin/master` PRs or the plan 13 anchor set, and are marked `Hermes cross-product:` accordingly. Plan 24 owns the kanban_db import mapping (D72); plan 12 Section 8 carries the cross-reference inventory row and cites the FM IDs below.
+Cross-product evidence from the Hermes kanban backend (`hermes-agent` @ `732a9ffc5`, read-only). These anchors are **external-repository `file:line` spans**, not TraceDecay `origin/master` PRs or the plan 13 anchor set, and are marked `Hermes cross-product:` accordingly. Plan 24 §16.2 owns the `kanban_db` import mapping; plan 12 Section 8 carries the cross-reference inventory row and cites the FM IDs below.
 
 | ID | Failure | Evidence anchors | Prevention owner | Detection/product state | Recovery | Regression/cutover gate |
 |---|---|---|---|---|---|---|

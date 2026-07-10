@@ -315,10 +315,13 @@ pub struct SuggestionEnvelopeV1 {
     pub expires_at: UtcMicros,
     pub input_watermark: VectorWatermark,
     pub explanation: DecisionExplanation,
+    pub diagnostic: Option<DiagnosticEnvelopeV1>,
 }
 ```
 
 `model_confidence` is diagnostic only and never substitutes for evidence authority. `source_confidence`, scope coverage, anchor freshness, and policy score govern delivery. Model text passes the plan 18 output firewall, bounded-text validation, citation coverage, prohibited-content scan, and compactness check. Prefer deterministic rendering from structured facts; retain custom text only when it adds specific anchored meaning.
+
+When the suggestion carries a recovery/remediation/coordination action, `diagnostic` uses the domain type defined by plan 01 and the shared semantics in plan 24 §4.11. It may contain at most three actions after scout narrowing; each capability/effect/input schema must already be in the exact addressee's current grant/catalog and remains subject to application revalidation. The compact prompt renders at most one enabled action label plus anchors; unknown/disabled kinds remain dashboard/inspector evidence and are never emitted as executable free text. Suggestions without a diagnostic remain valid evidence/retrieval envelopes; no empty diagnostic is fabricated.
 
 ### 4.4 Lifecycle and reason codes
 

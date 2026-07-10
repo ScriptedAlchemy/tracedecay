@@ -105,6 +105,47 @@ Create one ledger in `dashboard/packages/design-system/src/semantic-ledger.ts` a
 
 The ledger is validated in contrast, grayscale, deuteranopia, protanopia, and tritanopia screenshots. Domain categories may choose shapes/icons but cannot repurpose state colors.
 
+### 2.4 Concrete design language and tokens
+
+The visual language is quiet, technical, high-density, and evidence-first: neutral surfaces, one focus color, restrained semantic accents, strong typography, direct labels, and open canvas bands instead of nested card chrome. Both light and dark are first-class; neither is an inversion filter. `tokens.css` publishes primitive values only through semantic aliases, and charts/Canvas/WebGL consume the generated token registry rather than hardcoded colors.
+
+| Family | Required baseline tokens |
+|---|---|
+| Font | UI: `Inter, ui-sans-serif, system-ui, sans-serif` with local/system fallback and no network font dependency; evidence/code: `ui-monospace, SFMono-Regular, Menlo, Consolas, monospace`. Tabular numerals for time/count/cost. |
+| Type scale | `caption 12/16`, `body-sm 13/18`, `body 14/20`, `label 14/18/600`, `title-sm 16/24/600`, `title 20/28/650`, `display-sm 28/36/650`, `display 40/48/650`; no viewport-dependent type below `12 px`. |
+| Spacing | Base `4 px`; named steps `0, 4, 8, 12, 16, 24, 32, 48, 64`. Layout gutters `16/24/32`; evidence-row indentation `16`; no arbitrary one-off spacing without a concept-ledger exception. |
+| Density | `compact=.875`, `comfortable=1`, `spacious=1.125` applied to spacing/row-height tokens; list rows `32/40/48 px`. Pointer targets remain at least `44×44 px` regardless of density and may use invisible hit padding. |
+| Radius | `0` for evidence tables/canvas seams, `4 px` controls, `8 px` sheets/panels, `12 px` dialogs; fully rounded shapes only for a real binary toggle/compact tag, never every label. |
+| Border/elevation | `1 px` semantic border is the default separation. Elevation 0 none; 1 = `0 1px 2px rgb(0 0 0 / .12)`; 2 = `0 8px 24px rgb(0 0 0 / .18)`. Dark mode uses border/luminance before shadow. No floating-card shadow mosaic. |
+| Focus | `2 px` focus ring plus `2 px` offset, tokenized and never clipped; focus color meets 3:1 against adjacent surfaces. Selected and focused are distinct states. |
+| Motion | durations `80 ms` feedback, `140 ms` selection, `220 ms` spatial transition; `cubic-bezier(.2,.8,.2,1)`. Nothing loops. Reduced motion makes state changes immediate while retaining non-motion marks and announcements. |
+
+Palette baselines, subject to automated contrast correction before token freeze:
+
+| Semantic token | Light | Dark |
+|---|---:|---:|
+| `canvas` / `surface` / `surface-raised` | `#f7f8fa` / `#ffffff` / `#ffffff` | `#0b1017` / `#121a24` / `#182330` |
+| `text` / `text-muted` / `border` | `#171a1f` / `#5c6573` / `#d9dee7` | `#edf2f7` / `#a8b3c2` / `#314050` |
+| `focus` / `selection-fill` | `#1457d9` / `color-mix(in srgb, #1457d9 12%, transparent)` | `#79a8ff` / `color-mix(in srgb, #79a8ff 16%, transparent)` |
+| `causal` / `correlation` / `temporal` | `#087f5b` / `#6f42c1` / `#667085` | `#4fd1a8` / `#c4a7ff` / `#98a2b3` |
+| `warning` / `error` / `privacy` | `#a35a00` / `#b42318` / `#7a3e9d` | `#ffb454` / `#ff8078` / `#dda5ff` |
+
+Tinted backgrounds use `color-mix(in srgb, var(--semantic-color) N%, var(--surface))` at registered `8/12/18%` strengths; components do not embed hex/rgba. CI verifies WCAG contrast at every text/icon/border role in both themes and blocks a token version that fails. Theme, density, contrast, and reduced-motion changes update CSS variables without remounting route state or renderers.
+
+### 2.5 Hermes Kanban UI heritage disposition
+
+This is conceptual adaptation from the pinned Hermes source in plan 24, rewritten in React/TypeScript against generated V2 models:
+
+| Hermes pattern | Disposition | V2 result |
+|---|---|---|
+| Task drawer sections: metadata, status/actions, diagnostics, dependencies, attachments, comments, events, worker log, run history | **Port anatomy** | Map into plan-11 `InspectorTabV1` and the task/attempt subpanels in §13.0; preserve one canonical selection and URL, not drawer-local truth. |
+| Structured diagnostic actions with unknown-kind fallback | **Port contract** | Render plan 24 `DiagnosticEnvelopeV1`; unknown actions stay visible/disabled, and generated `legal_capabilities` controls invocation. |
+| Attention strip, server-age rings, progress pill, multi-select | **Adapt** | Use server/projector attention signals, explicit staleness labels, exact completed/total/unknown progress, and batch commands with per-item results. No client clock/status inference. |
+| Theme variables, `color-mix` tints, density multiplier | **Adopt** | Implement §2.4 light/dark semantic tokens and density/accessibility invariants. |
+| Full-board long poll/refetch, single component/store, client-only filtering, unvirtualized columns | **Drop** | Use server `TraceQueryV1` projections, typed SSE deltas, route containers, isolated view instances, and virtualized rows/columns. |
+| Dark-only hardcoded colors, title tooltip as sole explanation, `window.confirm`/`prompt`, emoji status | **Drop** | Both themes, direct text/icon/shape encoding, accessible dialogs/forms, typed confirmation commands, no emoji as evidence/state. |
+| Pre-action confirmation as the only recovery | **Beat** | Reversible ordinary task/view edits expose a bounded undo command; archive/soft-delete retains identity/history. Irreversible external effects use plan-09 confirmation and compensation semantics. Autonomous curation remains fully policy-driven with no per-item undo/apply/reject queue. |
+
 ## 3. Information architecture and route ownership
 
 `dashboard/app/src/routes.tsx` defines route metadata once: path, label, feature owner, required capabilities, lazy import, default renderer, keyboard help, and migration-only legacy paths. Current route metadata/help never advertises a stale name.
@@ -511,6 +552,10 @@ Rules:
 - `packages/data-client` is the only owner of TanStack Query keys, snapshot caching, SSE, IndexedDB cache, and capability gating.
 - `packages/query-state` is the only owner of URL/history/persistence semantics.
 - `packages/renderers`, `brain`, `timeline`, and `charts` own drawing; feature modules supply typed models and callbacks.
+- Every feature has a route/container boundary and pure presenters. Containers call generated-client query/command hooks, translate the one `InvestigationStateV1`, and select a generated read model; presenters accept sealed models plus typed callbacks and never fetch, join endpoints, read URL/storage, inspect raw problems, or infer legal actions.
+- Generated-client hooks are the sole network entry (`useSnapshotQuery`, `useCursorPage`, `useSubscription`, `useCapabilityCommand`, and `useOperation`). A lint forbids feature imports from `fetch`, Axum routes, raw OpenAPI internals, and V1 client modules.
+- Global state is limited to the committed investigation, auth/capability/theme, and query cache. Each open saved-view/render instance owns an isolated `ViewInstanceStateV1` keyed by `(saved_view_id, instance_id)` for draft facets, grouping, column geometry, expansion, local selection gesture, scroll/window cursor, and renderer camera. Closing an instance destroys it; changing one board cannot mutate another instance or a canonical task.
+- Optimistic UI follows one closed state machine: `idle → optimistic_pending → accepted_projection | conflict_reverted | rejected_reverted | operation_pending → accepted_projection | failed_reverted`. The pre-command model/version is retained until an accepted projection arrives. Conflicts render server/current versions and legal retry/rebase actions; partial batch results revert only failed items. This is client-state reconciliation, not a curation preview/apply/rollback workflow.
 - Each renderer creates at most one Canvas/WebGL context and one worker pool. Hidden routes suspend workers and animation frames and release large GPU buffers after a bounded idle period.
 - `features/*` may depend on packages, never another feature's internal files. Shared functionality moves to a package after two proven consumers.
 - No package imports V1 plugin source. Migration adapters live at the route boundary only while the explicit migration flag is active and disappear at cutover.
@@ -853,7 +898,14 @@ Scope and persistence are visible product semantics, not hidden implementation d
 - The canonical selection is initiative/plan-version/work-item/attempt IDs plus frozen/live watermarks. A board is a protected saved `TraceQueryV1` and lens; changing board, repository, agent, executor, or layout never copies or rehomes tasks.
 - Initiative overview shows exact cross-project scope, plan version, dependency/fan-in state, critical-path interval/slack, budgets/deadlines, active agents/executors, costs, outcomes, coverage, and links to Goals/workflows/code/Git/PR/check/release evidence.
 - Plan outline, Kanban, dependency DAG, critical path, timeline, causal, workload, executor-fleet, repository-work, initiative, agent-relevant, and All views preserve identical IDs/counts/selection. This is plan 24's projection vocabulary exactly: §0.21's saved projections plus §12.5's Executor Fleet/Repository Work lens names and §12.7's agent-relevant slice; 11 renders no view name outside that set. Drag/drop invokes only generated legal commands; derived readiness cannot be set directly.
+- One saved view exposes switchable Kanban, DAG, timeline, table, workload, and cross-repository bundle projections over the same authorized `TraceQueryV1`, frozen/live watermark, canonical membership, sort/group specification, and selection. Switching mode preserves filters, selected IDs, exact totals, and per-view camera/column/scroll state; it does not create another saved view or refetch an unbounded board.
+- Kanban is server-grouped and cursor-windowed by derived lane/reason. Columns virtualize horizontally; cards/rows virtualize vertically with at most three viewports overscan. Initial hydration includes IDs, safe labels, readiness/reason, assignment/route summary, attention/progress, and versions only; inspector/detail/artifact bodies hydrate on selection. A 388k-item fixture must keep DOM rows below 600, initial payload below the §19 route budget, and keyboard logical row/column positions exact.
+- Multi-select is an explicit mode with selected count/scope and one generated batch-command preview of effects. Results are keyed per canonical ID as accepted, version-conflict, denied, stale, unavailable, or failed; accepted rows follow their operation/projection, failed rows remain selected with reason and retry eligibility. A partial failure never appears as all-success or rolls accepted rows back.
+- Drag/drop is optional pointer shorthand for a generated legal command, never raw lane mutation. Keyboard/touch users choose “move/change…” then a legal destination/action list with reason, impact, and confirmation requirement. Dependency-blocked/readiness states cannot be overridden by presentation movement.
+- Ordinary reversible edits (title/specification metadata, saved-view membership/filter, assignment/priority when policy permits) return an undo capability with an expiry and expected-version token. Archive is soft-delete/presentation retirement: it preserves canonical identity, relations, attempts, anchors, and audit and can be reopened by versioned command. Worktree deletion, force-affecting Git, merge/release, protected-data deletion, and other irreversible/external effects never masquerade as undoable; plan 09 owns their confirmation/compensation. Curation candidates/effects are excluded from this mechanism and remain autonomous.
 - Task/attempt inspector covers versions, gates, acceptance, assignment/route rationale, requested versus actual host/provider/model/reasoning effort/tools/skills/grants, fenced lease state, packet/omissions, workspace/ref/snapshot, Turns/tools/artifacts/handoffs/outcomes, cancellation/reconciliation, costs, audit, and anchors.
+- Task inspector maps the Hermes-derived anatomy without inventing another tab union: metadata/specification → `summary`/`specification`; status and legal actions → `summary`/`actions`; `DiagnosticEnvelopeV1` list → `evidence`/`actions`; dependencies → `dependencies`; attachments/comments/handoffs → `decisions`; canonical events → `history`; protected worker log → `evidence` with authorization; run history → `attempts`. Attempt selection reuses the same URL/inspector model. Unknown diagnostic action kinds remain visible and disabled with update guidance.
+- Attention is a server-authored ranked strip over plan-06 `AttentionSignalV1`: stale claim/lease, aging blocker, repeated retry, unresolved effect, protocol violation, packet invalidation, critical-path risk, or material sibling change. Server supplies tier/age basis/watermark/evidence; the client never diffs clocks or treats attention as task truth. Staleness rings always include a text tier and exact last evidence time. Progress shows completed/total when both are known, indeterminate otherwise, and never derives percent from status or message volume.
 - Claim-overlap overlay distinguishes authoritative writable-resource reservations, advisory work claims, intentional ensemble/parallel roles, and weak proximity. It shows exact overlap evidence/TTL without sibling prompt text.
 - Agent default is the active attempt plus blockers/parents, material siblings, decisions, acceptance, handoffs, packet entries, and workspace conflicts. All work requires an explicit human authorization/scope expansion.
 - `/work/notifications` owns the plan 24 §12.7 human notification-subscription UI: explicit saved filters/channels with event classes, quiet hours, dedupe, rate budgets, and authorization, edited only through generated preview/apply commands. Task state never auto-subscribes the creating profile/channel, and dashboard toasts, gateway messages, hook hints, and task comments share no accidental notification loop.

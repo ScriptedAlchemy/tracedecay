@@ -1007,9 +1007,9 @@ Required artifacts:
 Plan-file checks before handoff:
 
 ```bash
-test "$(rg -c '^```' docs/superpowers/plans/tracedecay-v2/21-cli-mcp-tool-surface-and-output-unification.md)" -ge 2
-rg -n 'TB[D]|TO[D]O|FIXM[E]|PLACEHOLDE[R]|00x[x]|implement late[r]|fill i[n]' docs/superpowers/plans/tracedecay-v2/21-cli-mcp-tool-surface-and-output-unification.md
-gitleaks dir docs/superpowers/plans/tracedecay-v2 --redact --no-banner
+test "$(rg -c '^```' docs/plans/tracedecay-v2/21-cli-mcp-tool-surface-and-output-unification.md)" -ge 2
+rg -n 'TB[D]|TO[D]O|FIXM[E]|PLACEHOLDE[R]|00x[x]|implement late[r]|fill i[n]' docs/plans/tracedecay-v2/21-cli-mcp-tool-surface-and-output-unification.md
+gitleaks dir docs/plans/tracedecay-v2 --redact --no-banner
 ```
 
 The fence test is supplemented by a parser that requires an even fence count and validates local Markdown links.

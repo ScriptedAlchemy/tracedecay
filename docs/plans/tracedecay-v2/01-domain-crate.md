@@ -478,6 +478,44 @@ Handshake acceptance requires the current exact protocol epoch and compatible cu
 
 `EntityKind` includes every master-plan kind: profile/project/project-set/repository/remote/checkout/worktree/ref/commit/tree/pull-request/check/review/release; provider/host/model/installation/actor/agent/agent-presence/work-claim/session/thread/workflow/run/turn/message/content-part; tool definition/invocation/result/approval/goal/provider-native-task/provider-native-plan; initiative/plan/plan-version/work-item/work-item-version/task-dependency/acceptance-criterion/task-decision/task-assignment/task-lease/execution-attempt/executor-registration/workspace-binding/context-packet/handoff/task-artifact/task-outcome; code snapshot/file and symbol identity/occurrence/diagnostic/test/build; fact/version/knowledge entity/decision/contradiction/retrieval/feedback; policy bundle/evaluation/hint; automation job/run/artifact/skill/skill-package/proposal/doctor-finding/remediation; lifecycle lease/drain/checkpoint/service-state receipt; query/saved view/annotation/export/payload blob. Provider-native task/plan records remain observed entities or aliases until an authorized materialization command creates canonical work.
 
+The shared diagnostic/action family is a domain contract, with product semantics and cross-surface rules owned by plan 24 §4.11:
+
+```rust
+pub struct DiagnosticEnvelopeV1 {
+    pub envelope_id: DiagnosticEnvelopeId,
+    pub schema_version: u16,
+    pub diagnostic_code: DiagnosticCode,
+    pub severity: DiagnosticSeverityV1,
+    pub subject: EntityVersionRef,
+    pub scope: ScopeResolutionId,
+    pub summary: SinkEligible<LogSafeText>,
+    pub state: DiagnosticStateV1,
+    pub evidence: BoundedVec<RetrievalAnchorId, 32>,
+    pub actions: BoundedVec<DiagnosticActionV1, 16>,
+    pub produced_by: ProducerVersionRef,
+    pub config_digest: ManifestDigest,
+    pub catalog_generation: CatalogGenerationId,
+    pub vector_watermark: VectorWatermark,
+    pub observed_at: UtcMicros,
+    pub expires_at: Option<UtcMicros>,
+}
+
+pub struct DiagnosticActionV1 {
+    pub action_id: DiagnosticActionId,
+    pub kind: RegisteredDiagnosticActionKind,
+    pub label: SinkEligible<LogSafeText>,
+    pub capability: Option<CapabilityId>,
+    pub effect: EffectClassV1,
+    pub input_schema: SchemaRef,
+    pub safe_defaults: Option<SchemaBoundValueRef>,
+    pub confirmation: ConfirmationRequirementV1,
+    pub enabled: bool,
+    pub unavailable_reason: Option<ReasonCode>,
+}
+```
+
+`DiagnosticEnvelopeId` and `DiagnosticActionId` are UUIDv7 canonical IDs; `DiagnosticCode`, action-kind code, severity, state, and reason are registered closed vocabularies. `BoundedVec` rejects overflow rather than truncating. Unknown forward action kinds decode to a preserved opaque registered-code representation that can be rendered disabled, never to an executable default. The envelope contains no raw command, shell text, secret, absolute path, or transport instruction.
+
 Coordination contracts are explicit:
 
 ```rust

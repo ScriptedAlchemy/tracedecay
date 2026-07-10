@@ -153,6 +153,25 @@ The two Hermes IDs did not resolve through the registered Hermes project shard d
 | Board, DAG, swarm, worker/run visualizations | Board as source of truth, ambient current board, and all-board notification loops |
 | Triage, verifier, synthesizer patterns | Unanchored model decomposition or silent fallback assignee |
 
+### 2.5 Hermes Kanban heritage disposition
+
+This branch remains plans-only. Implementation may reuse scenario shapes and algorithms under the recorded MIT provenance, but the production code is a reference-guided Rust/React/TypeScript reimplementation against V2 contracts, not a mechanical Python/JavaScript copy.
+
+| Hermes anchor at `732a9ffc572ad2703fbd25cc8a21c9f3f9c10d69` | Disposition | V2 decision |
+|---|---|---|
+| `hermes_cli/kanban_db.py` task/run/event/link kernel | **Adapt** | Keep one transactional semantic kernel and append-only attempt/event history; replace board-local IDs, overloaded task rows, host-PID authority, free JSON, and ambient board selection with canonical IDs, immutable versions, typed relations, explicit revisions, and fence epochs. |
+| `hermes_cli/kanban_db.py::{claim_task,release_stale_claims,detect_crashed_workers,enforce_max_runtime}` | **Port as policy, reimplement as transactions** | Preserve CAS claim, layered stale detection, alive-extend-not-reclaim, maximum runtime, protocol-violation detection, rate-limit sentinel, respawn guard, and breaker semantics; implement them over V2 leases/attempts/evidence in §§5, 8.7, and 9. |
+| `hermes_cli/kanban_swarm.py` and decomposition helpers | **Adapt** | Preserve fan-out → verifier → synthesizer topology and Kahn cycle rejection as ordinary typed work items/edges; replace the comment blackboard with versioned context packets, handoffs, decisions, and artifacts. |
+| `tools/kanban_tools.py` | **Adapt** | Preserve a small worker lifecycle surface and created-child verification; bind every call out of band to the active registration/attempt/epoch/grant and route it through generated application capabilities. |
+| `gateway/kanban_watchers.py` dispatcher/notifier loops | **Reimplement** | Preserve event cursors, single delivery claim, rewind-after-send-failure, and ordered safety-before-start work; replace 60 s/5 s polling and ambient board enumeration with journal wakeups plus bounded repair polling. |
+| `plugins/kanban/dashboard/plugin_api.py`, dashboard SPA, and `kanban_diagnostics.py` | **Adapt** | Preserve inspector anatomy, task/run/event diagnostics, attention/staleness/progress patterns, and structured suggested actions; use the generated V2 client, shared `DiagnosticEnvelopeV1`, saved projections, SSE deltas, and plan-11 UI state. No SQL or plugin-local business rules. |
+| `plugins/kanban/dispatcher.py` and gateway-embedded single-host supervision | **Drop/reimplement** | Drop single-host process ownership and multiple-poller caveats; root composition supervises one scoped canonical scheduler while registered adapters may run on many hosts. |
+| `skills/devops/kanban-worker` and `skills/devops/kanban-orchestrator` | **Adapt** | Preserve explicit show/work/heartbeat/complete/block and orchestration responsibilities; generate host instructions from the active packet/catalog/grants and keep lifecycle termination visible to every active worker. |
+| Board slug/directory databases, global `current`, `t_<hex>` board-local identity, absolute-path attachments, and status-column authority | **Drop** | Boards are `TraceQueryV1` views, attachments are scanned content-addressed artifacts, status is decomposed into typed dimensions, and no current UI/CWD/board value controls ownership or dispatch. |
+| Integrity-check/quarantine-not-recreate, FD ownership, and post-commit invariants | **Port as store regressions** | Plan 02 owns equivalent store/open/recovery tests for the canonical shards; no per-board DB survives. |
+
+The implementation research manifest must pin the exact Hermes commit/file spans again before adapting any algorithm. If upstream behavior differs, tests and source at the pinned revision outrank unversioned prose.
+
 ## 3. Ownership and cross-plan contract
 
 Do not create a monolithic `tracedecay-tasks` crate. The graph is a cross-cutting vertical slice whose semantic owners already exist. Each owner gets cohesive modules; `tracedecay-application` composes them through consumer-owned ports.
@@ -382,6 +401,26 @@ pub struct WorkItemVersionV1 {
 }
 ```
 
+The owner shard also maintains a compact transactional current row; it is a projection over immutable versions/events, not a second history object:
+
+```rust
+pub struct WorkItemCurrentV1 {
+    pub work_item: WorkItemId,
+    pub current_version: WorkItemVersionId,
+    pub current_plan_version: PlanVersionId,
+    pub revision: u64,
+    pub readiness_digest: ManifestDigest,
+    pub current_attempt: Option<ExecutionAttemptId>,
+    pub active_lease: Option<TaskLeaseId>,
+    pub next_fence_epoch: u64,
+    pub disposition: WorkItemDispositionV1,
+    pub resolution: WorkResolutionV1,
+    pub updated_at: UtcMicros,
+}
+```
+
+Every successful claim inserts a new immutable `ExecutionAttemptV1` row and atomically changes `current_attempt`; retry, reclaim, reassign, model change, or packet refresh never overwrites an old attempt. A terminal command must match `current_attempt`, active lease, and fence epoch. A superseded worker's late completion/block/heartbeat is rejected as a no-op, records a bounded `ZombieAttemptProtocolViolation` event against the old attempt, and cannot change the current row, acceptance, artifacts, outcome, or breaker state.
+
 “Task” and “ticket” are presentation labels for `General`, selected by the product vocabulary/configuration without changing identity, readiness, routing, or query semantics. They are not distinct domain kinds.
 
 Mutable-looking fields are changed by emitting a new version plus event. Titles/specifications remain private owner-shard payloads. Catalog and All rollups contain IDs, kinds, timestamps, counts, health, and keyed locators only.
@@ -576,6 +615,7 @@ pub struct ExecutionAttemptV1 {
     pub assignment: AssignmentId,
     pub executor: ExecutorRegistrationId,
     pub executor_instance: ExecutorInstanceId,
+    pub fence_epoch: u64,
     pub requested_route: ExecutorRouteV1,
     pub actual_route: Option<ActualExecutorRouteV1>,
     pub workspace: WorkspaceBindingId,
@@ -588,6 +628,8 @@ pub struct ExecutionAttemptV1 {
     pub outcome: Option<TaskOutcomeId>,
 }
 ```
+
+Attempt rows are immutable except for monotonic lifecycle fields applied by fenced commands; requested route, assignment, executor, workspace, packet, grants, budget, ordinal, and fence epoch are fixed at creation. State history remains append-only in `task_events`; the current attempt row carries only the latest state/version and terminal refs for efficient reads. The `work_items.current_attempt_id` pointer is denormalized and transactionally checked, never reconstructed by `MAX(started_at)`.
 
 Attempt states are closed and monotonic except explicit recovery transitions: `Prepared`, `Leased`, `Starting`, `Running`, `CancellationRequested`, `Stopping`, `Reconciling`, `Blocked`, `Succeeded`, `Failed`, `Cancelled`, `TimedOut`, `Lost`, `Superseded`. Terminal attempts never reopen; retry creates a new attempt.
 
@@ -765,6 +807,46 @@ Invariant checks run in domain validation and owner-shard transactions:
 - artifact/handoff/outcome refs cannot cross privacy domains without an authorized sanitized representation;
 - no event accepts arbitrary JSON extension fields outside a registered schema.
 
+### 4.11 Shared diagnostic and action envelope
+
+Plan 01 owns these domain types; this plan owns the cross-product diagnostic pattern adopted by plan 09 remediation findings, plan 06 policy/hint diagnostics, plan 22 suggestion actions, and task/executor diagnostics here:
+
+```rust
+pub struct DiagnosticEnvelopeV1 {
+    pub envelope_id: DiagnosticEnvelopeId,
+    pub schema_version: u16,
+    pub diagnostic_code: DiagnosticCode,
+    pub severity: DiagnosticSeverityV1,
+    pub subject: EntityVersionRef,
+    pub scope: ScopeResolutionId,
+    pub summary: SinkEligible<LogSafeText>,
+    pub state: DiagnosticStateV1,
+    pub evidence: BoundedVec<RetrievalAnchorId, 32>,
+    pub actions: BoundedVec<DiagnosticActionV1, 16>,
+    pub produced_by: ProducerVersionRef,
+    pub config_digest: ManifestDigest,
+    pub catalog_generation: CatalogGenerationId,
+    pub vector_watermark: VectorWatermark,
+    pub observed_at: UtcMicros,
+    pub expires_at: Option<UtcMicros>,
+}
+
+pub struct DiagnosticActionV1 {
+    pub action_id: DiagnosticActionId,
+    pub kind: RegisteredDiagnosticActionKind,
+    pub label: SinkEligible<LogSafeText>,
+    pub capability: Option<CapabilityId>,
+    pub effect: EffectClassV1,
+    pub input_schema: SchemaRef,
+    pub safe_defaults: Option<SchemaBoundValueRef>,
+    pub confirmation: ConfirmationRequirementV1,
+    pub enabled: bool,
+    pub unavailable_reason: Option<ReasonCode>,
+}
+```
+
+Unknown action kinds remain visible as disabled informational rows with their code, evidence, and update requirement; renderers never drop them, guess a command, or execute free text. `legal_capabilities` and application authorization remain authoritative at invocation time, so an envelope is evidence plus a proposal—not authority, a lease, or an approval queue. Storage retains diagnostic envelopes through their subject/evidence horizon and indexes `(diagnostic_code, observed_at)`, `(subject, state)`, and `expires_at` in the subject's owning shard.
+
 ## 5. Store design and transactions
 
 ### 5.1 One profile activity owner
@@ -852,7 +934,7 @@ External effects happen only after the intent is durable. Git/worktree/process/p
 
 `task_leases` stores `(work_item_id, attempt_id, executor_registration_id, fence_epoch, state, heartbeat_at, heartbeat_sequence, expires_at, expected_work_item_version, grant_digest, packet_digest)`.
 
-`work_items` stores the current row `(work_item_id PRIMARY KEY, current_version_id, disposition, next_fence_epoch INTEGER NOT NULL, readiness_digest BLOB NOT NULL, readiness_updated_event_id, updated_at)` — one row per work item in the activity owner shard, retained for the life of the work item, indexed on `(disposition)`. `readiness_digest` is a deterministic digest over the canonical gating inputs: current work-item version, disposition, gating dependency edge states, gate-expression results, schedule/`NotBefore` marks, and budget-exhaustion flags. It is recomputed inside the same owner-shard transaction as any mutation of those inputs (gating-edge add/remove/satisfy/invalidate, plan-version publish, disposition change, budget event) — canonical transactional state maintained at edge-mutation time, never projector output. The `EffectiveReadinessV1` projection may lag it freely without affecting claim safety.
+`work_items` stores the current row `(work_item_id PRIMARY KEY, current_version_id, current_plan_version_id, revision INTEGER NOT NULL, disposition, resolution, current_attempt_id NULL, active_lease_id NULL, next_fence_epoch INTEGER NOT NULL, readiness_digest BLOB NOT NULL, readiness_updated_event_id, updated_at)` — one row per work item in the activity owner shard, retained for the life of the work item, indexed on `(disposition)`, `(resolution)`, and `(current_attempt_id)`. `current_attempt_id` and `active_lease_id` are nullable foreign keys and must either both name the same nonterminal attempt/lease pair or both be null; terminal commit clears `active_lease_id` but retains `current_attempt_id` for history/navigation until the next attempt. `readiness_digest` is a deterministic digest over the canonical gating inputs: current work-item version, disposition, gating dependency edge states, gate-expression results, schedule/`NotBefore` marks, and budget-exhaustion flags. It is recomputed inside the same owner-shard transaction as any mutation of those inputs (gating-edge add/remove/satisfy/invalidate, plan-version publish, disposition change, budget event) — canonical transactional state maintained at edge-mutation time, never projector output. The `EffectiveReadinessV1` projection may lag it freely without affecting claim safety.
 
 Issuance uses one owner-shard writer transaction:
 
@@ -1094,6 +1176,8 @@ The policy must:
 
 Application validates the proposal and commits an eligible new plan version in one owner-shard transaction. If autonomous decomposition is disabled, policy returns status/explanation only; it does not create an approval queue. A human may issue direct plan-edit commands. Model assistance is optional, versioned, schema-constrained, evidence-bound, privacy/egress authorized, and evaluated against deterministic baselines.
 
+Fan-out, verifier, and synthesizer nodes are ordinary `WorkItemVersionV1` values. Their gating edges are staged as one normalized graph mutation; domain validation runs Kahn topological sorting over the active plan plus staged edges before insert and returns the smallest stable cycle witness on failure. No partial child or edge survives a rejected decomposition. Shared state moves only through typed context-packet entries, decisions, handoffs, artifacts, and outcomes; a free-form blackboard comment is not a machine input.
+
 ### 8.2 Readiness and gate evaluation
 
 `ReadinessPolicyV1` consumes one active work-item version, parent outcomes, gate evidence, schedule, disposition, acceptance prerequisites, scope/workspace state, active lease, executor eligibility, budgets, and explicit clock. It returns one `EffectiveReadinessV1`, all blocking reasons, next transition time, and input manifest.
@@ -1156,6 +1240,59 @@ Circuit breakers exist by task, executor registration, adapter version, provider
 `ContextPacketPolicyV1` and `TaskMaterialityPolicyV1` reuse Plan 15/23 retrieval quality and Plan 22 novelty/silence semantics. Positive evidence includes direct dependency, shared decision/acceptance, explicit handoff, direct file/symbol/test/PR overlap, plan relation, changed workspace base, or new authoritative result. Temporal proximity, same repository, same title, broad embedding similarity, or copied prompt alone is insufficient.
 
 Planned redundant research/review/ensemble work is marked and not warned as accidental duplication. When accidental overlap is material, policy emits a bounded candidate only: exact affected attempts/agents, materiality features, safe-summary eligibility, retrieval anchors, and suppression hints. Plan 22's `ScoutDecisionV1` is the sole delivery decider and owns summary/anchor selection (at most one envelope with no more than three anchors), dedupe, and pair/category/anchor cooldown. Policy cannot cancel, reassign, lock, message, or deliver.
+
+### 8.7 Layered attempt-liveness and sentinel policy
+
+No single timeout means “dead.” `AttemptLivenessPolicyV1` receives a frozen attempt/lease, monotonic clock, last explicit heartbeat, last accepted provider/tool/Turn activity, executor registration state, optional adapter liveness probe, process evidence when local, runtime budget, cancellation state, breaker state, and effect-reconciliation state. It returns exactly one typed proposal:
+
+```rust
+pub enum AttemptLivenessDecisionV1 {
+    Healthy,
+    ExtendAlive { new_expiry: UtcMicros, evidence: LivenessEvidenceRef },
+    AwaitProbe { retry_at: UtcMicros },
+    RequeueRateLimited { retry_at: UtcMicros, sentinel: RateLimitSentinelV1 },
+    RequestCancellation { reason: AttemptStopReasonV1, deadline: UtcMicros },
+    FenceAndReconcile { reason: AttemptLossReasonV1 },
+    ProtocolViolation { code: ProtocolViolationCodeV1 },
+}
+
+pub struct RateLimitSentinelV1 {
+    pub attempt: ExecutionAttemptId,
+    pub executor: ExecutorRegistrationId,
+    pub provider: Option<ProviderId>,
+    pub observed_code: RegisteredExitOrProviderCode,
+    pub retry_after: Option<Duration>,
+    pub evidence: RetrievalAnchorId,
+    pub observed_at: UtcMicros,
+}
+```
+
+Baseline plan-20 descriptors and defaults are explicit and versioned:
+
+| Config key | Default | Rule |
+|---|---:|---|
+| `scheduler.attempt_liveness.lease_ttl` | `5m` | Authority expires unless a current-epoch CAS extends it; minimum `30s`, maximum `30m`. |
+| `scheduler.attempt_liveness.heartbeat_expected` | `60s` | Missing one heartbeat changes visibility only; provider/tool/Turn activity may satisfy liveness through an adapter receipt. |
+| `scheduler.attempt_liveness.heartbeat_stale_backstop` | `60m` | A nominally alive worker with no accepted heartbeat or activity by this bound is wedged and enters cancel/reconcile. |
+| `scheduler.attempt_liveness.probe_timeout` | `2s` | Probe failure is `Unknown`, not `Dead`; probes are cached/rate-limited and never run in the writer transaction. |
+| `scheduler.attempt_liveness.alive_extension` | `2m` | Expired TTL plus positive current probe/activity extends the same epoch, bounded by max runtime; it never reclaims or spawns a duplicate. |
+| `scheduler.attempt_liveness.default_max_runtime` | `4h` | Attempt may override within authorized `5m..24h`; reaching it requests cancel, then fences/reconciles after the configured grace. |
+| `scheduler.attempt_liveness.cancel_grace` | `30s` | Adapter-specific longer grace must be explicit in its manifest and capped by policy. |
+| `scheduler.rate_limit.default_backoff` | `2m` | Used only when no bounded provider `Retry-After` is available. |
+| `scheduler.rate_limit.max_backoff` | `1h` | Sentinel requeue cannot exceed the attempt deadline/budget and emits the next exact wake time. |
+| `scheduler.repair_poll_interval` | `30s` | Repair fallback for missed journal wakeups/checkpoint gaps, not normal dispatch cadence. |
+
+Rules, in order:
+
+1. Current cancellation, terminal state, noncurrent attempt, or epoch mismatch wins and rejects activity.
+2. Maximum runtime cannot be extended by heartbeat or PID/process evidence.
+3. Positive adapter/activity evidence with an expired TTL returns `ExtendAlive` for the same attempt/epoch; it never mints a replacement lease.
+4. A negative authenticated remote probe plus expired TTL may propose fence/reconcile; missing, timed-out, or unsupported probe stays `Unknown` until the heartbeat backstop or other evidence resolves it.
+5. Registered rate-limit signals, including POSIX `EX_TEMPFAIL`/75 where the adapter declares that mapping, close the current attempt as `DeferredRateLimit`, release capacity safely, and requeue after backoff without incrementing task-quality/consecutive-failure counters. They neither reset an existing failure breaker nor become success.
+6. A worker/process/provider exit reported successful while the attempt lacks a fenced terminal command is a first-occurrence `ProtocolViolation`, not success; it enters reconciliation and the protocol breaker.
+7. Crash, timeout, authorization, capability, acceptance, cancellation, rate-limit, and protocol classes maintain separate counters and denominators. Only an accepted successful terminal outcome resets the task consecutive-failure breaker.
+
+Application re-reads all referenced versions and evidence before applying a proposal. Policy never probes a process, extends a lease, kills a worker, requeues work, or increments counters itself.
 
 ---
 
@@ -1236,7 +1373,9 @@ Ordinary task/plan mutations commit directly after validation. Destructive exter
 
 ### 9.3 Scheduler tick
 
-The scheduler is an application worker consuming owner-shard outbox/time events. It does not scan every project database or board.
+The scheduler is an application worker consuming owner-shard journal/outbox events plus registered exact-time wakeups. It does not scan every project database or board. Committed owner-shard mutations signal an in-process/cross-process notifier only after commit; the notifier carries a sequence range, never task payload or authority. The scheduler drains from its durable checkpoint, so a lost/coalesced notification loses latency but not work. A plan-20 `scheduler.repair_poll_interval=30s` fallback compares the journal high watermark, scheduled-wakeup heap, lease deadlines, and checkpoint only when no notification arrived or a gap is detected; it never becomes Hermes's ambient 60-second board scan.
+
+Latency gates at the reference corpus are: commit-to-eligible scheduler observation p95 ≤ `1s`, terminal/cancellation safety event observation p95 ≤ `250ms`, eligible-to-offer p95 ≤ `2s` when capacity is available, dashboard subscription delta p95 ≤ `1s`, and missed-notification recovery ≤ one `30s` repair interval. Benchmarks inject dropped/coalesced notifier messages to prove the durable journal is authoritative. Hermes's historical 60 s dispatcher, 5 s notifier, and 300 ms dashboard polls remain comparison fixtures, not V2 constants.
 
 One tick:
 
@@ -1250,7 +1389,7 @@ One tick:
 8. assemble and seal a context packet from authorized current snapshots;
 9. issue lease/create attempt/reserve capacity and budget atomically;
 10. enqueue adapter start intent after commit;
-11. record all selected and material nonselected decision reasons, update checkpoint, and schedule the next exact wakeup.
+11. record all selected and material nonselected decision reasons, atomically advance the consumed journal checkpoint, and register the next exact schedule/backoff/lease/probe wakeup.
 
 No tick holds the DB writer while resolving Git, querying a model, spawning a process, calling a remote adapter, or assembling a large packet. Decomposition/model planning runs as a separately budgeted workflow before the item becomes a start candidate.
 
@@ -1316,6 +1455,8 @@ Claim issuance is a CAS over the expected work-item revision, plan version, read
 
 Heartbeat is a small constant-cost CAS. It validates executor, attempt, lease/epoch, monotonic sequence (the lease's `heartbeat_sequence`, which every heartbeat must strictly increase), expiry grace, and cancellation state, then appends or coalesces a safe liveness event. Heartbeat cannot change task spec, plan, route, tools, workspace, packet, acceptance, or budget.
 
+Accepted provider/Turn/tool activity may invoke the same application-owned heartbeat bridge with a source event ref; adapters cannot mutate the lease directly. The bridge deduplicates by source observation and never extends beyond the attempt maximum runtime. Expired TTL with authenticated positive liveness follows §8.7 `ExtendAlive` on the same epoch. Negative/unknown probes never reclaim inside this command. A noncurrent attempt or stale epoch receives a stable stale-attempt problem and a bounded protocol event; repeated zombie traffic is coalesced by `(attempt, epoch, code, window)` so it cannot flood the journal.
+
 Progress is optional structured telemetry with phase, bounded safe status, completed/total units, current artifact/tool refs, cost delta, and next checkpoint. It is sampled/coalesced for dashboards and cannot substitute for artifacts or acceptance. Raw worker logs use the protected log stream.
 
 ### 9.6 Completion and blocking protocol
@@ -1354,6 +1495,8 @@ Cancellation workflow:
 Cancellation of a plan/initiative is a bounded descendant workflow, not a broad SQL status update. Already terminal work remains historical. Shared work items require explicit membership/ownership analysis before cancellation.
 
 Stale lease recovery uses heartbeat TTL plus adapter/host/session/provider evidence. Local PID death may strengthen `Lost`; remote absence/timeout alone remains uncertain. The old epoch is fenced before a new lease, but non-idempotent effects remain blocked until reconciliation proves safe.
+
+Recovery executes §8.7's decision transactionally: `ExtendAlive` preserves the attempt and epoch; `RequeueRateLimited` records a non-failure deferred terminal attempt and exact retry wakeup; cancellation first fences new grants/effects and observes the adapter grace; `FenceAndReconcile` increments `next_fence_epoch` before any replacement claim. A zombie completion after supersession is never silently discarded: application returns stale-attempt, appends/coalesces `ZombieAttemptProtocolViolation`, and leaves current attempt, breaker, outcome, and dependencies unchanged.
 
 ### 9.8 Workspace, branch, commit, and PR workflows
 
@@ -1960,13 +2103,17 @@ Classify each source as canonical candidate, external observed entity, alias, pr
 - do not import raw secrets/logs/attachments before Plan 18 scanning/classification;
 - duplicate rows/boards/store backups are clustered as observations, not separate canonical work items, until identity evidence resolves them.
 
+The importer reads each source in one frozen manifest order: `tasks`, `task_links`, `task_runs`, `task_events`, `task_comments`, `task_attachments`, notification subscriptions, then dispatcher metadata. Every source record receives exactly one plan-12 disposition—`retained`, `skipped`, `quarantined`, `redacted`, or `deleted`—with reason, source key, sanitizer receipt, target refs, and import watermark; no row disappears behind a count. `deleted` is legal only when the source itself contains a witnessed deletion/tombstone, never as an import cleanup choice.
+
+Hermes `blocked` is polysemous. Import replays each task's ordered `task_events` and associated run IDs to classify the last effective transition as `StickyWorkerOrOperatorBlock`, `CircuitBreakerGaveUp`, `DependencyBlock`, or `AmbiguousLegacyBlock`. A status column without a consistent event path produces `AmbiguousLegacyBlock` and quarantine/diagnostic evidence; it never fabricates readiness or a retry counter. Historical run rows become immutable nonauthoritative attempts with `fence_epoch=0` and `LegacyImported` authority class, while in-flight claim/PID/current-run fields are skipped and can never become a live lease. Attachments are content-read through plan 18 scanning into protected/artifact blobs; missing absolute paths remain unavailable locators. Comments become sanitized comment artifacts, except structured swarm blackboards, which are schema-validated into versioned imported packet/decision evidence or quarantined when invalid.
+
 The audited Hermes `kanban_db` schema (§2.1) maps field-by-field; no field is imported without a listed rule:
 
 | Hermes `kanban_db` evidence | V2 target | Import rule |
 |---|---|---|
-| task/board IDs | aliases on imported `WorkItemId` | canonical IDs are freshly allocated; source DB path/commit/schema version recorded as provenance |
+| task/board IDs | aliases on imported `WorkItemId` | canonical UUIDs are freshly allocated; uniqueness is `(source_manifest_id, board_slug, native_task_id)` and the safe `hermes:<board>:t_<hex>` form is an alias/display locator only; source DB path/commit/schema version recorded as provenance |
 | title/description/comments | `WorkItemVersionV1.title`/`specification` plus comment artifacts | plan 18 sanitizer first; imported as one initial version |
-| status strings (including `scheduled` without `scheduled_at`) | `WorkItemDispositionV1` + `WorkResolutionV1` | no fabricated timestamps or readiness; unmappable states quarantine with diagnostics |
+| status strings (including `scheduled` without `scheduled_at`) | `WorkItemDispositionV1` + `WorkResolutionV1` | replay ordered `task_events` before mapping `blocked`; no fabricated timestamps or readiness; inconsistent/missing event history becomes `AmbiguousLegacyBlock` quarantine with a `DiagnosticEnvelopeV1` |
 | dependency links and promotion records | `TaskDependencyV1` gating edges when acyclic; non-gating relations otherwise | cyclic/ambiguous graphs stay legacy-quarantined |
 | `runs` rows (attempt history, retry counters, runtime/heartbeat fields) | one `ExecutionAttemptV1` per run; retry counters become attempt ordinals | missing provider/model/effort fields import as `Unavailable(reason)`, never defaults; no `ActualExecutorRouteV1` is invented |
 | worktree/branch strings | `WorkspaceBindingV1` locator evidence only | strings are locators, not identity; no live rebinding |

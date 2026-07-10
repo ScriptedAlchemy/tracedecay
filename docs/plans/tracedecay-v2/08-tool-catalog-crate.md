@@ -883,7 +883,7 @@ Never delete raw #410 prompt rows or collapse evidence in the catalog. Retire on
 - [ ] Run #410 filter parity across CLI/MCP/generated HTTP/dashboard/export schemas. Expected: identical semantics and raw-row coverage.
 - [ ] Run benchmark/concurrent-publication/privacy/fuzz gates from Sections 14–15. Expected: all pass.
 - [ ] cargo tree -p tracedecay-tool-catalog --edges normal and forbidden-import scan. Expected: no application/store/query/policy/hook/server/UI execution dependency.
-- [ ] Run the placeholder scan using split regex atoms: rg -n 'TB[D]|TO[D]O|\bimplement lat[e]r\b|\bfill i[n]\b|\bappropriate erro[r]\b|\bsimilar to Tas[k]\b' docs/superpowers/plans/tracedecay-v2/08-tool-catalog-crate.md. Expected: no matches.
+- [ ] Run the placeholder scan using split regex atoms: rg -n 'TB[D]|TO[D]O|\bimplement lat[e]r\b|\bfill i[n]\b|\bappropriate erro[r]\b|\bsimilar to Tas[k]\b' docs/plans/tracedecay-v2/08-tool-catalog-crate.md. Expected: no matches.
 
 ## 19. Definition of Done
 

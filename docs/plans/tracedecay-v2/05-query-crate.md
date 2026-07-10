@@ -1117,7 +1117,7 @@ Program numbering is authoritative: PR 12 is implemented in dependency order as 
 - [ ] Run the V1 session, memory, graph, MCP, CLI, dashboard, and storage suites named in Section 4. Expected: all compatibility tests pass.
 - [ ] Run all four query benchmarks on the recorded reference machine at current and 10x corpora. Expected: every Section 17 gate passes and output includes corpus manifest, N, watermarks, versions, p50/p95, allocations, RSS, and pruning ratio.
 - [ ] Run `rg -n 'rusqlite|libsql|axum|rmcp|clap|dashboard' crates/tracedecay-query/src`. Expected: no matches.
-- [ ] Run `rg -n 'TB[D]|TO[D]O|\bimplement lat[e]r\b|\bfill i[n]\b|\bappropriate erro[r]\b|\bsimilar to Tas[k]\b' docs/superpowers/plans/tracedecay-v2/05-query-crate.md`. Expected: no matches.
+- [ ] Run `rg -n 'TB[D]|TO[D]O|\bimplement lat[e]r\b|\bfill i[n]\b|\bappropriate erro[r]\b|\bsimilar to Tas[k]\b' docs/plans/tracedecay-v2/05-query-crate.md`. Expected: no matches.
 - [ ] Inspect the final dependency graph. Expected: no `tracedecay-query -> tracedecay-store/projectors/application/api/root` edge; adapters depend inward through application contracts.
 - [ ] Record parity, privacy, fault, benchmark, and rollback-drill artifacts in the PR 34/35 manifests before enabling V2 query by default.
 
