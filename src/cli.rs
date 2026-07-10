@@ -737,6 +737,34 @@ pub enum MemoryAction {
 
 #[derive(Subcommand)]
 pub enum MigrateAction {
+    /// Consolidate two non-empty profile shards for one repository identity.
+    #[command(
+        long_about = CONSOLIDATE_LONG_ABOUT,
+        after_help = CONSOLIDATE_AFTER_HELP
+    )]
+    Consolidate {
+        /// Repository path whose git-common-dir identity owns both shards.
+        #[arg(long, default_value = ".")]
+        project: String,
+        /// Legacy/input project id to preserve and merge.
+        #[arg(long = "source-project-id")]
+        source_project_id: String,
+        /// Currently selected project id to use as the merge base.
+        #[arg(long = "target-project-id")]
+        target_project_id: String,
+        /// Profile root containing projects/<project-id> shards.
+        #[arg(long = "profile-root")]
+        profile_root: Option<String>,
+        /// Apply the planned consolidation. Omit for a read-only inventory.
+        #[arg(long)]
+        apply: bool,
+        /// Confirmation token printed by the read-only inventory.
+        #[arg(long = "confirm-token", requires = "apply")]
+        confirm_token: Option<String>,
+        /// Output as JSON.
+        #[arg(long)]
+        json: bool,
+    },
     /// Build a readonly migration inventory or manifest plan
     Plan {
         /// Root directory to scan (repeatable). Defaults to the current directory.

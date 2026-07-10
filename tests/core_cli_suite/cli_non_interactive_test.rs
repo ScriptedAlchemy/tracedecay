@@ -1152,7 +1152,15 @@ async fn status_surfaces_split_identity_conflict_without_suggesting_init() {
     assert!(stderr.contains("proj_status_selected"), "{stderr}");
     assert!(stderr.contains("proj_status_legacy"), "{stderr}");
     assert!(
-        stderr.contains("backup-and-consolidate migration"),
+        stderr.contains("tracedecay migrate consolidate"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("--source-project-id proj_status_legacy"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("--target-project-id proj_status_selected"),
         "{stderr}"
     );
     assert!(!stderr.contains("run `tracedecay init`"), "{stderr}");

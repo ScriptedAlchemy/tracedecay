@@ -353,7 +353,15 @@ async fn current_project_store_surfaces_split_identity_conflict()
     assert!(diagnostic.contains("proj_doctor_selected"), "{diagnostic}");
     assert!(diagnostic.contains("proj_doctor_legacy"), "{diagnostic}");
     assert!(
-        diagnostic.contains("backup-and-consolidate migration"),
+        diagnostic.contains("tracedecay migrate consolidate"),
+        "{diagnostic}"
+    );
+    assert!(
+        diagnostic.contains("--source-project-id proj_doctor_legacy"),
+        "{diagnostic}"
+    );
+    assert!(
+        diagnostic.contains("--target-project-id proj_doctor_selected"),
         "{diagnostic}"
     );
     assert!(diagnostic.contains("no files changed"), "{diagnostic}");

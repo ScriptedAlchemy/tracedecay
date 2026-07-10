@@ -796,7 +796,8 @@ fn should_skip_agent_install_maintenance(command: &Commands) -> bool {
     //     update-plugin contract.
     //   - `Uninstall`: about to remove agent configs — don't reinstall them
     //     first (per the original #84 intent).
-    //   - `Doctor` / `Migrate`: read-only diagnostics — must not mutate agent
+    //   - `Doctor` / `Migrate`: diagnostics and explicitly confirmed storage
+    //     maintenance manage their own lifecycle and must not mutate agent
     //     configs as a side effect.
     //   - `Tool`: per-invocation tool calls are a hot-ish path; skip the
     //     reinstall scan there too.

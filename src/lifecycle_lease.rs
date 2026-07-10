@@ -47,6 +47,22 @@ pub fn acquire_exclusive(operation: &str) -> Result<LifecycleLease> {
     acquire_exclusive_at(&lifecycle_lock_path()?, operation)
 }
 
+/// Acquires the lifecycle lease rooted in an explicit profile. Migration
+/// commands use this instead of ambient HOME so synthetic profiles and
+/// user-selected profile roots cannot accidentally lock a different store.
+pub fn acquire_exclusive_for_profile(
+    profile_root: &Path,
+    operation: &str,
+) -> Result<LifecycleLease> {
+    std::fs::create_dir_all(profile_root).map_err(|error| TraceDecayError::Config {
+        message: format!(
+            "failed to create TraceDecay profile root '{}': {error}",
+            profile_root.display()
+        ),
+    })?;
+    acquire_exclusive_at(&profile_root.join(LIFECYCLE_LOCK_FILENAME), operation)
+}
+
 pub fn acquire_shared(operation: &str) -> Result<LifecycleLease> {
     acquire_shared_at(&lifecycle_lock_path()?, operation)
 }

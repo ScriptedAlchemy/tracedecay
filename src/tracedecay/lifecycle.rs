@@ -267,11 +267,13 @@ impl TraceDecay {
             }
             return Ok(Some(selected));
         }
+        let command =
+            consolidation_dry_run_command(project_root, &candidate_inventory, &selected_inventory);
         Err(identity_cutover_conflict(
             project_root,
             &selected_inventory,
             &candidate_inventory,
-            "run an explicit backup-and-consolidate migration before changing the marker",
+            &format!("run the offline dry-run `{command}` before changing the marker"),
         ))
     }
 
@@ -1112,6 +1114,23 @@ fn identity_cutover_conflict(
             legacy
         ),
     }
+}
+
+fn consolidation_dry_run_command(
+    project_root: &Path,
+    source: &StoreIdentityInventory,
+    target: &StoreIdentityInventory,
+) -> String {
+    format!(
+        "tracedecay migrate consolidate --project {} --source-project-id {} --target-project-id {}",
+        shell_quote(&project_root.to_string_lossy()),
+        source.project_id,
+        target.project_id,
+    )
+}
+
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\"'\"'"))
 }
 
 fn profile_relative(profile_root: &Path, path: &Path) -> Option<String> {

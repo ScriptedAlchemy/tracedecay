@@ -503,7 +503,8 @@ tracedecay dashboard (review UI), tracedecay memory curate.";
 pub(crate) const MIGRATE_LONG_ABOUT: &str = "\
 Plans and executes profile-storage migrations: inventory scans, manifest \
 plans, staged copy + cutover, verification, rollback, and registry cleanup. \
-Mutating steps require the confirmation token printed by `migrate plan`; \
+Explicit split-store consolidation preserves both inputs and builds a new \
+shard before marker cutover. Mutating steps require a dry-run confirmation token; \
 start with plan/verify, which never touch source stores.";
 
 pub(crate) const MIGRATE_AFTER_HELP: &str = "\
@@ -512,9 +513,28 @@ Examples:
   tracedecay migrate plan --manifest plan.json   Write a manifest plan
   tracedecay migrate verify --manifest plan.json Check without mutating
   tracedecay migrate apply --manifest plan.json --confirm-token <token>
+  tracedecay migrate consolidate --source-project-id <old> --target-project-id <current>
   tracedecay migrate registry-gc                 Dry-run stale-registry cleanup
 
 Related: tracedecay projects (registry view), tracedecay wipe.";
+
+pub(crate) const CONSOLIDATE_LONG_ABOUT: &str = "\
+Consolidates exactly two profile shards that belong to one git-common-dir identity. \
+The default is a read-only dry-run: it freezes and inventories both inputs, reports \
+collision semantics, and prints an immutable confirmation token. The complete workflow \
+is offline-only: stop the daemon and all MCP/CLI writers first. Apply builds and verifies a third shard; \
+the two originals and complete backups remain preserved. Registry and repository markers \
+move only after verification succeeds.";
+
+pub(crate) const CONSOLIDATE_AFTER_HELP: &str = "\
+Dry-run:
+  tracedecay migrate consolidate --project . --source-project-id <old> --target-project-id <current>
+
+Apply the exact frozen plan:
+  tracedecay migrate consolidate --project . --source-project-id <old> --target-project-id <current> --apply --confirm-token <immutable-token>
+
+Stop the TraceDecay daemon and all MCP/CLI writers before the dry-run. Rerun it if \
+either input changes; the prior token will be rejected.";
 
 pub(crate) const WIPE_LONG_ABOUT: &str = "\
 Deletes .tracedecay stores (code graph, memory, sessions) for the current \

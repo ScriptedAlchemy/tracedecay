@@ -1174,6 +1174,13 @@ async fn corrupt_nonempty_cutover_store_reports_both_shards_without_switching() 
     assert!(message.contains("sessions=1"), "{message}");
     assert!(message.contains("facts=1"), "{message}");
     assert!(message.contains("no files changed"), "{message}");
+    assert!(
+        message.contains(&format!(
+            "tracedecay migrate consolidate --project '{}' --source-project-id {legacy_project_id} --target-project-id {cutover_project_id}",
+            project.display()
+        )),
+        "{message}"
+    );
     assert_eq!(
         read_repository_identity_marker(&project)
             .unwrap()

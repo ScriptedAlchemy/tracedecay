@@ -3,7 +3,7 @@ use std::fs;
 use std::io;
 use std::path::{Component, Path, PathBuf};
 
-use libsql::{Builder, Connection, OpenFlags, Value};
+use libsql::{Connection, Value};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -1029,31 +1029,28 @@ fn verify_sqlite_artifact_contents(source: &Path, target: &Path) -> io::Result<(
 }
 
 async fn summarize_sqlite_database(path: &Path) -> io::Result<SqliteLogicalSummary> {
-    let db = Builder::new_local(path)
-        .flags(OpenFlags::SQLITE_OPEN_READ_ONLY)
-        .build()
-        .await
-        .map_err(|e| {
-            invalid_manifest(&format!(
-                "failed to open SQLite DB '{}': {e}",
-                path.display()
-            ))
-        })?;
-    let conn = db.connect().map_err(|e| {
+    let snapshot = crate::sqlite_read_snapshot::open(path).await.map_err(|e| {
         invalid_manifest(&format!(
-            "failed to connect to SQLite DB '{}': {e}",
+            "failed to snapshot SQLite DB '{}': {e}",
             path.display()
         ))
     })?;
-    if !sqlite_quick_check(&conn, path).await? {
+    summarize_sqlite_connection(snapshot.connection(), path).await
+}
+
+async fn summarize_sqlite_connection(
+    conn: &Connection,
+    path: &Path,
+) -> io::Result<SqliteLogicalSummary> {
+    if !sqlite_quick_check(conn, path).await? {
         return Err(invalid_manifest(&format!(
             "SQLite quick_check failed for '{}'",
             path.display()
         )));
     }
-    let user_version = sqlite_i64(&conn, "PRAGMA user_version", path).await?;
-    let schema = sqlite_schema_summary(&conn, path).await?;
-    let tables = sqlite_table_summaries(&conn, path).await?;
+    let user_version = sqlite_i64(conn, "PRAGMA user_version", path).await?;
+    let schema = sqlite_schema_summary(conn, path).await?;
+    let tables = sqlite_table_summaries(conn, path).await?;
     Ok(SqliteLogicalSummary {
         user_version,
         schema,

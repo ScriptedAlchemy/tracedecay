@@ -1367,6 +1367,46 @@ fn project_selector_flags_parse_for_cli_read_surfaces() {
 
 #[test]
 fn migrate_commands_parse_manifest_scaffolding_flags() {
+    let consolidate = Cli::try_parse_from([
+        "tracedecay",
+        "migrate",
+        "consolidate",
+        "--project",
+        "/tmp/project",
+        "--profile-root",
+        "/tmp/profile",
+        "--source-project-id",
+        "proj_old",
+        "--target-project-id",
+        "proj_current",
+        "--apply",
+        "--confirm-token",
+        "confirm-123",
+        "--json",
+    ])
+    .expect("migrate consolidate should parse");
+    assert!(matches!(
+        consolidate.command,
+        Some(Commands::Migrate {
+            action:
+                MigrateAction::Consolidate {
+                    project,
+                    profile_root,
+                    source_project_id,
+                    target_project_id,
+                    apply,
+                    confirm_token,
+                    json,
+                }
+        }) if project == "/tmp/project"
+            && profile_root.as_deref() == Some("/tmp/profile")
+            && source_project_id == "proj_old"
+            && target_project_id == "proj_current"
+            && apply
+            && confirm_token.as_deref() == Some("confirm-123")
+            && json
+    ));
+
     let plan = Cli::try_parse_from([
         "tracedecay",
         "migrate",
