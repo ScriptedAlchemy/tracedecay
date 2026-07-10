@@ -135,7 +135,7 @@ async fn verify_table(conn: &Connection, spec: &TableVerification) -> Result<()>
 }
 
 fn verification_specs(offsets: &SessionMergeOffsets) -> Vec<TableVerification> {
-    let turn_message_id = mapped_turn_message_id("s", "source_input");
+    let turn_message_id = mapped_turn_message_id("s");
     let session_metadata = mapped_parent_metadata("s", false);
     let raw_metadata = mapped_parent_metadata("s", true);
     let mut specs = vec![

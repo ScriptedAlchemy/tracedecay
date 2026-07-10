@@ -486,6 +486,49 @@ async fn reject_session_content_collisions(
     Ok(())
 }
 
+pub(super) fn session_variant_family_cte() -> &'static str {
+    "WITH RECURSIVE variant_family(provider, message_id) AS (
+         SELECT provider, original_id FROM consolidation_message_map
+         UNION
+         SELECT edge.provider, edge.child_id
+         FROM variant_family parent
+         JOIN consolidation_parent_edges edge
+           ON edge.provider=parent.provider
+          AND edge.parent_id=parent.message_id
+     )"
+}
+
+pub(super) fn reserved_message_collision_sql() -> &'static str {
+    "SELECT COUNT(*) FROM consolidation_message_map m
+     WHERE EXISTS (
+         SELECT 1 FROM consolidation_reserved_message_ids r
+         WHERE r.message_id=m.mapped_id
+           AND r.provider IN ('', m.provider)
+     )"
+}
+
+fn scalar_parent_rows_sql(schema: &str, table: &str, include_child: bool) -> String {
+    let child_projection = if include_child {
+        ", message_id AS child_id"
+    } else {
+        ""
+    };
+    format!(
+        "SELECT provider, CAST(parent_id AS TEXT) AS parent_id{child_projection}
+         FROM (
+             SELECT provider, message_id,
+                    CASE WHEN json_valid(metadata_json)
+                         THEN json_extract(metadata_json, '$.parent_message_id') END
+                        AS parent_id,
+                    CASE WHEN json_valid(metadata_json)
+                         THEN json_type(metadata_json, '$.parent_message_id') END
+                        AS parent_type
+             FROM {schema}.{table}
+         )
+         WHERE parent_type IN ('text', 'integer', 'real', 'true', 'false')"
+    )
+}
+
 pub(super) async fn build_consolidation_message_map(
     conn: &Connection,
     source_schema: &str,
@@ -502,13 +545,38 @@ pub(super) async fn build_consolidation_message_map(
              raw_content_divergent INTEGER NOT NULL,
              PRIMARY KEY(provider, original_id),
              UNIQUE(provider, mapped_id)
-         );",
+         );
+         CREATE TEMP TABLE IF NOT EXISTS consolidation_parent_edges(
+             provider TEXT NOT NULL,
+             parent_id TEXT NOT NULL,
+             child_id TEXT NOT NULL,
+             PRIMARY KEY(provider, parent_id, child_id)
+         ) WITHOUT ROWID;
+         CREATE TEMP TABLE IF NOT EXISTS consolidation_reserved_message_ids(
+             provider TEXT NOT NULL,
+             message_id TEXT NOT NULL,
+             PRIMARY KEY(message_id, provider)
+         ) WITHOUT ROWID;
+         CREATE TEMP TABLE IF NOT EXISTS consolidation_turn_message_map(
+             session_id TEXT NOT NULL,
+             original_id TEXT NOT NULL,
+             mapped_id TEXT NOT NULL,
+             owner_count INTEGER NOT NULL,
+             PRIMARY KEY(session_id, original_id)
+         ) WITHOUT ROWID;",
     )
     .await
     .map_err(|error| db_error("message_variant_map_init", error))?;
     conn.execute("DELETE FROM temp.consolidation_message_map", ())
         .await
         .map_err(|error| db_error("message_variant_map_reset", error))?;
+    conn.execute_batch(
+        "DELETE FROM temp.consolidation_parent_edges;
+         DELETE FROM temp.consolidation_reserved_message_ids;
+         DELETE FROM temp.consolidation_turn_message_map;",
+    )
+    .await
+    .map_err(|error| db_error("message_lookup_tables_reset", error))?;
     let source = quote_identifier(source_schema);
     let target = quote_identifier(target_schema);
     let sql = format!(
@@ -536,21 +604,20 @@ pub(super) async fn build_consolidation_message_map(
     conn.execute(&sql, params![source_project_id])
         .await
         .map_err(|error| db_error("message_variant_map_fill", error))?;
+    let source_session_parents = scalar_parent_rows_sql(&source, "session_messages", true);
+    let parent_edges_sql = format!(
+        "INSERT OR IGNORE INTO consolidation_parent_edges(provider, parent_id, child_id)
+         SELECT child.provider, child.parent_id, child.child_id
+         FROM ({source_session_parents}) child
+         JOIN {target}.session_messages target_child
+           ON target_child.provider=child.provider
+          AND target_child.message_id=child.child_id"
+    );
+    conn.execute(&parent_edges_sql, ())
+        .await
+        .map_err(|error| db_error("message_parent_edges_fill", error))?;
     let session_family_sql = format!(
-        "WITH RECURSIVE variant_family(provider, message_id) AS (
-             SELECT provider, original_id FROM consolidation_message_map
-             UNION
-             SELECT child.provider, child.message_id
-             FROM {source}.session_messages child
-             JOIN {target}.session_messages target_child
-               ON target_child.provider=child.provider
-              AND target_child.message_id=child.message_id
-             JOIN variant_family parent
-               ON parent.provider=child.provider
-              AND CASE WHEN json_valid(child.metadata_json)
-                       THEN json_extract(child.metadata_json, '$.parent_message_id') END
-                  =parent.message_id
-         )
+        "{}
          INSERT OR IGNORE INTO consolidation_message_map(
              provider, original_id, mapped_id, session_divergent, raw_content_divergent
          )
@@ -558,57 +625,55 @@ pub(super) async fn build_consolidation_message_map(
          FROM variant_family WHERE 1
          ON CONFLICT(provider, original_id) DO UPDATE SET
              session_divergent=MAX(session_divergent, excluded.session_divergent),
-             raw_content_divergent=MAX(raw_content_divergent, excluded.raw_content_divergent)"
+             raw_content_divergent=MAX(raw_content_divergent, excluded.raw_content_divergent)",
+        session_variant_family_cte()
     );
     conn.execute(&session_family_sql, params![source_project_id])
         .await
         .map_err(|error| db_error("message_session_variant_family", error))?;
-    let collision_sql = format!(
-        "SELECT COUNT(*) FROM consolidation_message_map m
-         WHERE EXISTS (SELECT 1 FROM {source}.session_messages x
-                       WHERE x.provider=m.provider AND x.message_id=m.mapped_id)
-            OR EXISTS (SELECT 1 FROM {source}.lcm_raw_messages x
-                       WHERE x.provider=m.provider AND x.message_id=m.mapped_id)
-            OR EXISTS (SELECT 1 FROM {target}.session_messages x
-                       WHERE x.provider=m.provider AND x.message_id=m.mapped_id)
-            OR EXISTS (SELECT 1 FROM {target}.lcm_raw_messages x
-                       WHERE x.provider=m.provider AND x.message_id=m.mapped_id)
-            OR EXISTS (SELECT 1 FROM {source}.lcm_external_payloads x
-                       WHERE x.provider=m.provider AND x.message_id=m.mapped_id)
-            OR EXISTS (SELECT 1 FROM {target}.lcm_external_payloads x
-                       WHERE x.provider=m.provider AND x.message_id=m.mapped_id)
-            OR EXISTS (SELECT 1 FROM {source}.dashboard_token_counts x
-                       WHERE x.provider=m.provider AND x.message_id=m.mapped_id)
-            OR EXISTS (SELECT 1 FROM {target}.dashboard_token_counts x
-                       WHERE x.provider=m.provider AND x.message_id=m.mapped_id)
-            OR EXISTS (SELECT 1 FROM {source}.turns x WHERE x.message_id=m.mapped_id)
-            OR EXISTS (SELECT 1 FROM {target}.turns x WHERE x.message_id=m.mapped_id)
-            OR EXISTS (SELECT 1 FROM {source}.commit_sessions x
-                       WHERE x.provider=m.provider AND x.evidence_message_id=m.mapped_id)
-            OR EXISTS (SELECT 1 FROM {target}.commit_sessions x
-                       WHERE x.provider=m.provider AND x.evidence_message_id=m.mapped_id)
-            OR EXISTS (SELECT 1 FROM {source}.session_messages x
-                       WHERE x.provider=m.provider
-                         AND CASE WHEN json_valid(x.metadata_json)
-                                  THEN json_extract(x.metadata_json, '$.parent_message_id') END
-                             =m.mapped_id)
-            OR EXISTS (SELECT 1 FROM {target}.session_messages x
-                       WHERE x.provider=m.provider
-                         AND CASE WHEN json_valid(x.metadata_json)
-                                  THEN json_extract(x.metadata_json, '$.parent_message_id') END
-                             =m.mapped_id)
-            OR EXISTS (SELECT 1 FROM {source}.lcm_raw_messages x
-                       WHERE x.provider=m.provider
-                         AND CASE WHEN json_valid(x.metadata_json)
-                                  THEN json_extract(x.metadata_json, '$.parent_message_id') END
-                             =m.mapped_id)
-            OR EXISTS (SELECT 1 FROM {target}.lcm_raw_messages x
-                       WHERE x.provider=m.provider
-                         AND CASE WHEN json_valid(x.metadata_json)
-                                  THEN json_extract(x.metadata_json, '$.parent_message_id') END
-                             =m.mapped_id)"
+    let target_session_parents = scalar_parent_rows_sql(&target, "session_messages", false);
+    let source_raw_parents = scalar_parent_rows_sql(&source, "lcm_raw_messages", false);
+    let target_raw_parents = scalar_parent_rows_sql(&target, "lcm_raw_messages", false);
+    let reserved_references_sql = format!(
+        "INSERT OR IGNORE INTO consolidation_reserved_message_ids(provider, message_id)
+             SELECT provider, message_id FROM {source}.session_messages;
+         INSERT OR IGNORE INTO consolidation_reserved_message_ids(provider, message_id)
+             SELECT provider, message_id FROM {target}.session_messages;
+         INSERT OR IGNORE INTO consolidation_reserved_message_ids(provider, message_id)
+             SELECT provider, message_id FROM {source}.lcm_raw_messages;
+         INSERT OR IGNORE INTO consolidation_reserved_message_ids(provider, message_id)
+             SELECT provider, message_id FROM {target}.lcm_raw_messages;
+         INSERT OR IGNORE INTO consolidation_reserved_message_ids(provider, message_id)
+             SELECT provider, message_id FROM {source}.lcm_external_payloads;
+         INSERT OR IGNORE INTO consolidation_reserved_message_ids(provider, message_id)
+             SELECT provider, message_id FROM {target}.lcm_external_payloads;
+         INSERT OR IGNORE INTO consolidation_reserved_message_ids(provider, message_id)
+             SELECT provider, message_id FROM {source}.dashboard_token_counts;
+         INSERT OR IGNORE INTO consolidation_reserved_message_ids(provider, message_id)
+             SELECT provider, message_id FROM {target}.dashboard_token_counts;
+         INSERT OR IGNORE INTO consolidation_reserved_message_ids(provider, message_id)
+             SELECT provider, evidence_message_id FROM {source}.commit_sessions
+             WHERE evidence_message_id IS NOT NULL;
+         INSERT OR IGNORE INTO consolidation_reserved_message_ids(provider, message_id)
+             SELECT provider, evidence_message_id FROM {target}.commit_sessions
+             WHERE evidence_message_id IS NOT NULL;
+         INSERT OR IGNORE INTO consolidation_reserved_message_ids(provider, message_id)
+             SELECT provider, parent_id FROM ({source_session_parents});
+         INSERT OR IGNORE INTO consolidation_reserved_message_ids(provider, message_id)
+             SELECT provider, parent_id FROM ({target_session_parents});
+         INSERT OR IGNORE INTO consolidation_reserved_message_ids(provider, message_id)
+             SELECT provider, parent_id FROM ({source_raw_parents});
+         INSERT OR IGNORE INTO consolidation_reserved_message_ids(provider, message_id)
+             SELECT provider, parent_id FROM ({target_raw_parents});
+         INSERT OR IGNORE INTO consolidation_reserved_message_ids(provider, message_id)
+             SELECT '', message_id FROM {source}.turns;
+         INSERT OR IGNORE INTO consolidation_reserved_message_ids(provider, message_id)
+             SELECT '', message_id FROM {target}.turns;"
     );
-    let collisions = query_i64(conn, &collision_sql).await?;
+    conn.execute_batch(&reserved_references_sql)
+        .await
+        .map_err(|error| db_error("message_reserved_references_fill", error))?;
+    let collisions = query_i64(conn, reserved_message_collision_sql()).await?;
     if collisions != 0 {
         return Err(db_message(
             "message_variant_map",
@@ -617,19 +682,27 @@ pub(super) async fn build_consolidation_message_map(
             ),
         ));
     }
+    let turn_message_map_sql = format!(
+        "INSERT INTO consolidation_turn_message_map(
+             session_id, original_id, mapped_id, owner_count
+         )
+         SELECT sm.session_id, sm.message_id, MIN(m.mapped_id), COUNT(*)
+         FROM {source}.session_messages sm
+         LEFT JOIN consolidation_message_map m
+           ON m.provider=sm.provider AND m.original_id=sm.message_id
+         GROUP BY sm.session_id, sm.message_id
+         HAVING COUNT(m.mapped_id) > 0"
+    );
+    conn.execute(&turn_message_map_sql, ())
+        .await
+        .map_err(|error| db_error("turn_message_map_fill", error))?;
     let ambiguous_turns = query_i64(
         conn,
         &format!(
             "SELECT COUNT(*) FROM {source}.turns tr
-             WHERE EXISTS (
-                 SELECT 1 FROM {source}.session_messages sm
-                 JOIN consolidation_message_map m
-                   ON m.provider=sm.provider AND m.original_id=sm.message_id
-                 WHERE sm.message_id=tr.message_id AND sm.session_id=tr.session_id
-             ) AND (
-                 SELECT COUNT(*) FROM {source}.session_messages sm
-                 WHERE sm.message_id=tr.message_id AND sm.session_id=tr.session_id
-             ) != 1"
+             JOIN consolidation_turn_message_map m
+               ON m.session_id=tr.session_id AND m.original_id=tr.message_id
+             WHERE m.owner_count != 1"
         ),
     )
     .await?;
@@ -671,14 +744,12 @@ pub(super) fn mapped_parent_metadata(alias: &str, raw_family_only: bool) -> Stri
     )
 }
 
-pub(super) fn mapped_turn_message_id(alias: &str, source_schema: &str) -> String {
+pub(super) fn mapped_turn_message_id(alias: &str) -> String {
     format!(
         "COALESCE((
              SELECT m.mapped_id
-             FROM {source_schema}.session_messages sm
-             JOIN consolidation_message_map m
-               ON m.provider=sm.provider AND m.original_id=sm.message_id
-             WHERE sm.message_id={alias}.message_id AND sm.session_id={alias}.session_id
+             FROM consolidation_turn_message_map m
+             WHERE m.original_id={alias}.message_id AND m.session_id={alias}.session_id
          ), {alias}.message_id)"
     )
 }
@@ -686,7 +757,7 @@ pub(super) fn mapped_turn_message_id(alias: &str, source_schema: &str) -> String
 async fn merge_sessions_tx(conn: &Connection, offsets: &SessionMergeOffsets) -> Result<()> {
     let session_metadata = mapped_parent_metadata("s", false);
     let raw_metadata = mapped_parent_metadata("s", true);
-    let turn_message_id = mapped_turn_message_id("s", "source");
+    let turn_message_id = mapped_turn_message_id("s");
     conn.execute_batch(&format!(
         "CREATE TEMP TABLE IF NOT EXISTS consolidation_raw_map(
              source_id INTEGER PRIMARY KEY, target_id INTEGER NOT NULL

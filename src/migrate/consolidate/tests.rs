@@ -1232,6 +1232,261 @@ async fn divergent_projection_and_raw_content_preserve_a_linked_source_variant()
 }
 
 #[tokio::test]
+async fn indexed_message_family_materialization_handles_deep_and_wide_graph() {
+    const DEPTH: usize = 128;
+    const WIDTH: usize = 256;
+
+    let fixture = fixture().await;
+    let source = layout_for_id(&fixture.project, &fixture.profile, &fixture.source_id).unwrap();
+    let target = layout_for_id(&fixture.project, &fixture.profile, &fixture.target_id).unwrap();
+    execute_sql(
+        &source.sessions_db_path,
+        "UPDATE session_messages
+         SET message_id='message-current-session', text='source divergent projection'
+         WHERE provider='codex' AND message_id='message-legacy-session';",
+    )
+    .await;
+
+    let mut family_sql = String::from(
+        "INSERT OR IGNORE INTO sessions(provider, session_id, project_key, project_path)
+         VALUES('codex', 'family-session', 'project', '/repo');",
+    );
+    let mut parent = "message-current-session".to_string();
+    for depth in 0..DEPTH {
+        let child = format!("family-depth-{depth}");
+        family_sql.push_str(&format!(
+            "INSERT INTO session_messages(
+                 provider, message_id, session_id, role, ordinal, text, kind, metadata_json
+             ) VALUES(
+                 'codex', '{child}', 'family-session', 'assistant', {ordinal},
+                 'depth {depth}', 'message', '{{\"parent_message_id\":\"{parent}\"}}'
+             );",
+            ordinal = depth + 2,
+        ));
+        parent = child;
+    }
+    for width in 0..WIDTH {
+        let child = format!("family-wide-{width}");
+        family_sql.push_str(&format!(
+            "INSERT INTO session_messages(
+                 provider, message_id, session_id, role, ordinal, text, kind, metadata_json
+             ) VALUES(
+                 'codex', '{child}', 'family-session', 'assistant', {ordinal},
+                 'wide {width}', 'message',
+                 '{{\"parent_message_id\":\"message-current-session\"}}'
+             );",
+            ordinal = DEPTH + width + 2,
+        ));
+    }
+    execute_sql(&source.sessions_db_path, &family_sql).await;
+    execute_sql(&target.sessions_db_path, &family_sql).await;
+    sqlite::plan_session_offsets(&target.sessions_db_path, &source.sessions_db_path)
+        .await
+        .unwrap();
+
+    let target_db = GlobalDb::open_at(&target.sessions_db_path).await.unwrap();
+    target_db
+        .conn()
+        .execute(
+            "ATTACH DATABASE ?1 AS source_input",
+            libsql::params![source.sessions_db_path.to_string_lossy().to_string()],
+        )
+        .await
+        .unwrap();
+    sqlite::build_consolidation_message_map(
+        target_db.conn(),
+        "source_input",
+        "main",
+        &fixture.source_id,
+    )
+    .await
+    .unwrap();
+
+    let mut rows = target_db
+        .conn()
+        .query("SELECT COUNT(*) FROM consolidation_message_map", ())
+        .await
+        .unwrap();
+    assert_eq!(
+        rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap(),
+        (1 + DEPTH + WIDTH) as i64
+    );
+    drop(rows);
+    for original_id in [
+        format!("family-depth-{}", DEPTH - 1),
+        format!("family-wide-{}", WIDTH - 1),
+    ] {
+        let mut rows = target_db
+            .conn()
+            .query(
+                "SELECT mapped_id FROM consolidation_message_map
+                 WHERE provider='codex' AND original_id=?1",
+                [original_id.as_str()],
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            rows.next()
+                .await
+                .unwrap()
+                .unwrap()
+                .get::<String>(0)
+                .unwrap(),
+            format!("consolidated/{}/{original_id}", fixture.source_id)
+        );
+    }
+
+    let family_plan_sql = format!(
+        "{} SELECT COUNT(*) FROM variant_family",
+        sqlite::session_variant_family_cte()
+    );
+    let family_plan = explain_query_plan(target_db.conn(), &family_plan_sql).await;
+    assert!(
+        family_plan
+            .iter()
+            .any(|detail| detail.contains("SEARCH edge USING")),
+        "recursive family lookup must use the parent-edge primary key: {family_plan:?}"
+    );
+    assert!(
+        family_plan
+            .iter()
+            .all(|detail| !detail.contains("session_messages")),
+        "recursive family step must not rescan source session messages: {family_plan:?}"
+    );
+
+    let reserved_plan =
+        explain_query_plan(target_db.conn(), sqlite::reserved_message_collision_sql()).await;
+    assert!(
+        reserved_plan
+            .iter()
+            .any(|detail| detail.contains("SEARCH r USING")),
+        "reserved-reference lookup must use its primary key: {reserved_plan:?}"
+    );
+
+    let turn_lookup = sqlite::mapped_turn_message_id("s");
+    let turn_plan_sql = format!(
+        "SELECT {turn_lookup}
+         FROM (SELECT 'message-current-session' AS message_id,
+                      'legacy-session' AS session_id) s"
+    );
+    let turn_plan = explain_query_plan(target_db.conn(), &turn_plan_sql).await;
+    assert!(
+        turn_plan
+            .iter()
+            .any(|detail| detail.contains("SEARCH m USING")),
+        "turn-owner lookup must use its primary key: {turn_plan:?}"
+    );
+
+    target_db
+        .conn()
+        .execute("DETACH DATABASE source_input", ())
+        .await
+        .unwrap();
+    target_db.close();
+}
+
+#[tokio::test]
+async fn numeric_and_boolean_parent_ids_expand_the_variant_family() {
+    let fixture = fixture().await;
+    let source = layout_for_id(&fixture.project, &fixture.profile, &fixture.source_id).unwrap();
+    let target = layout_for_id(&fixture.project, &fixture.profile, &fixture.target_id).unwrap();
+    execute_sql(
+        &source.sessions_db_path,
+        "UPDATE session_messages
+         SET message_id='7', text='source divergent projection'
+         WHERE provider='codex' AND message_id='message-legacy-session';",
+    )
+    .await;
+    execute_sql(
+        &target.sessions_db_path,
+        "UPDATE session_messages SET message_id='7'
+         WHERE provider='codex' AND message_id='message-current-session';",
+    )
+    .await;
+    let family_sql =
+        "INSERT OR IGNORE INTO sessions(provider, session_id, project_key, project_path)
+         VALUES('codex', 'scalar-family', 'project', '/repo');
+         INSERT INTO session_messages(
+             provider, message_id, session_id, role, ordinal, text, kind, metadata_json
+         ) VALUES(
+             'codex', '1', 'scalar-family', 'assistant', 1, 'numeric child', 'message',
+             '{\"parent_message_id\":7}'
+         );
+         INSERT INTO session_messages(
+             provider, message_id, session_id, role, ordinal, text, kind, metadata_json
+         ) VALUES(
+             'codex', 'boolean-child', 'scalar-family', 'assistant', 2,
+             'boolean child', 'message', '{\"parent_message_id\":true}'
+         );";
+    execute_sql(&source.sessions_db_path, family_sql).await;
+    execute_sql(&target.sessions_db_path, family_sql).await;
+
+    let options = fixture.options();
+    let report = plan(&options).await.unwrap();
+    let applied = apply(&options, &report.confirmation_token).await.unwrap();
+    let sessions = GlobalDb::open_read_only_at(
+        &applied
+            .destination_data_root
+            .join(storage::SESSIONS_DB_FILENAME),
+    )
+    .await
+    .unwrap();
+    let numeric_id = format!("consolidated/{}/1", fixture.source_id);
+    let boolean_id = format!("consolidated/{}/boolean-child", fixture.source_id);
+    let numeric = sessions
+        .get_session_message("codex", &numeric_id)
+        .await
+        .unwrap();
+    let boolean = sessions
+        .get_session_message("codex", &boolean_id)
+        .await
+        .unwrap();
+    let numeric_metadata: serde_json::Value =
+        serde_json::from_str(numeric.metadata_json.as_deref().unwrap()).unwrap();
+    let boolean_metadata: serde_json::Value =
+        serde_json::from_str(boolean.metadata_json.as_deref().unwrap()).unwrap();
+    assert_eq!(
+        numeric_metadata["parent_message_id"],
+        format!("consolidated/{}/7", fixture.source_id)
+    );
+    assert_eq!(boolean_metadata["parent_message_id"], numeric_id);
+    sessions.close();
+}
+
+#[tokio::test]
+async fn synthetic_message_key_parent_reference_collision_fails_before_merge() {
+    let fixture = fixture().await;
+    let source = layout_for_id(&fixture.project, &fixture.profile, &fixture.source_id).unwrap();
+    let synthetic = format!("consolidated/{}/message-current-session", fixture.source_id);
+    let source_db = GlobalDb::open_at(&source.sessions_db_path).await.unwrap();
+    source_db
+        .conn()
+        .execute(
+            "UPDATE session_messages
+             SET message_id='message-current-session', text='source divergent projection',
+                 metadata_json=?1
+             WHERE provider='codex' AND message_id='message-legacy-session'",
+            [format!("{{\"parent_message_id\":\"{synthetic}\"}}")],
+        )
+        .await
+        .unwrap();
+    source_db.checkpoint().await;
+    source_db.close();
+
+    let options = fixture.options();
+    let report = plan(&options).await.unwrap();
+    let error = apply(&options, &report.confirmation_token)
+        .await
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("synthetic consolidation message key collision"),
+        "{error}"
+    );
+}
+
+#[tokio::test]
 async fn synthetic_message_key_collision_fails_before_merge() {
     let fixture = fixture().await;
     let source_sessions = fixture
@@ -2113,6 +2368,18 @@ async fn execute_sql(path: &Path, sql: &str) {
     db.conn().execute_batch(sql).await.unwrap();
     db.checkpoint().await.unwrap();
     db.close();
+}
+
+async fn explain_query_plan(conn: &libsql::Connection, sql: &str) -> Vec<String> {
+    let mut rows = conn
+        .query(&format!("EXPLAIN QUERY PLAN {sql}"), ())
+        .await
+        .unwrap();
+    let mut details = Vec::new();
+    while let Some(row) = rows.next().await.unwrap() {
+        details.push(row.get::<String>(3).unwrap());
+    }
+    details
 }
 
 fn init_repo(path: &Path) {
