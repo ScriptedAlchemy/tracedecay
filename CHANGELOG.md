@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.53](https://github.com/ScriptedAlchemy/tracedecay/compare/v0.0.52...v0.0.53) - 2026-07-10
+
+### Fixed
+
+- *(doctor)* isolate registry diff conflicts ([#440](https://github.com/ScriptedAlchemy/tracedecay/pull/440))
+- *(doctor)* derive orphan stores from registry reconstruction ([#439](https://github.com/ScriptedAlchemy/tracedecay/pull/439))
+- *(storage)* retire applied consolidation inputs ([#438](https://github.com/ScriptedAlchemy/tracedecay/pull/438))
+- *(db)* keep FTS repair out of search reads ([#435](https://github.com/ScriptedAlchemy/tracedecay/pull/435))
+- *(sqlite)* disable graph mmap across peer checkpoints ([#436](https://github.com/ScriptedAlchemy/tracedecay/pull/436))
+
 ## [0.0.52](https://github.com/ScriptedAlchemy/tracedecay/compare/v0.0.51...v0.0.52) - 2026-07-10
 
 ### Fixed
