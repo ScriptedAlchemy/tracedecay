@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.52](https://github.com/ScriptedAlchemy/tracedecay/compare/v0.0.51...v0.0.52) - 2026-07-10
+
+### Fixed
+
+- *(storage)* make registry reconstruction conflict-safe ([#434](https://github.com/ScriptedAlchemy/tracedecay/pull/434))
+- *(hooks)* honor lifecycle quiescence
+
 ## [0.0.51](https://github.com/ScriptedAlchemy/tracedecay/compare/v0.0.50...v0.0.51) - 2026-07-10
 
 ### Other
