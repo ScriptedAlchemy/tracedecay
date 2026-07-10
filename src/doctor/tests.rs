@@ -41,10 +41,14 @@ async fn orphan_reporting_uses_complete_registry_rows_not_token_accounting() {
         .unwrap();
     let profile_root = dir.path().join("profile");
     let eligible_root = dir.path().join("eligible-repo");
+    let conflicting_root = dir.path().join("conflicting-repo");
+    let conflicting_registered_root = dir.path().join("registered-elsewhere");
     let blocked_root = dir.path().join("blocked-repo");
     std::fs::create_dir_all(&eligible_root).unwrap();
+    std::fs::create_dir_all(&conflicting_root).unwrap();
+    std::fs::create_dir_all(&conflicting_registered_root).unwrap();
     std::fs::create_dir_all(&blocked_root).unwrap();
-    for root in [&eligible_root, &blocked_root] {
+    for root in [&eligible_root, &conflicting_root, &blocked_root] {
         let status = std::process::Command::new("git")
             .args(["init", "--quiet"])
             .current_dir(root)
@@ -61,8 +65,18 @@ async fn orphan_reporting_uses_complete_registry_rows_not_token_accounting() {
     )
     .unwrap();
     write_repository_identity_marker(&eligible_root, "proj_eligible").unwrap();
+    write_enrollment_marker(
+        &conflicting_root,
+        &EnrollmentMarker {
+            project_id: "proj_conflict".to_string(),
+            storage_mode: StorageMode::ProfileSharded,
+        },
+    )
+    .unwrap();
+    write_repository_identity_marker(&conflicting_root, "proj_conflict").unwrap();
     for (project_id, project_root) in [
         ("proj_eligible", &eligible_root),
+        ("proj_conflict", &conflicting_root),
         ("proj_blocked", &blocked_root),
     ] {
         let data_root = profile_root.join("projects").join(project_id);
@@ -88,9 +102,24 @@ async fn orphan_reporting_uses_complete_registry_rows_not_token_accounting() {
     let db = crate::global_db::GlobalDb::open_at(&dir.path().join("global.db"))
         .await
         .unwrap();
+    db.upsert_code_project(
+        "proj_conflict",
+        &conflicting_registered_root,
+        None,
+        None,
+        Some("main"),
+    )
+    .await
+    .unwrap();
     let (count, warnings) = orphan_store_manifest_report(&db, &profile_root).await;
 
     assert_eq!(count, 1, "{warnings:?}");
+    assert!(
+        warnings
+            .iter()
+            .any(|warning| warning.contains("proj_conflict")),
+        "{warnings:?}"
+    );
 
     let scan = crate::migrate::registry::scan_profile_store_manifests(&profile_root, 1_800_000_000);
     let eligible = crate::migrate::registry::RegistryReconstructionReport {
@@ -99,10 +128,42 @@ async fn orphan_reporting_uses_complete_registry_rows_not_token_accounting() {
             .into_iter()
             .filter(|plan| {
                 plan.status == crate::migrate::registry::RegistryReconstructionStatus::Eligible
+                    && plan.project.project_id == "proj_eligible"
             })
             .collect(),
         issues: Vec::new(),
     };
+    let mut batch_left = eligible.plans[0].clone();
+    batch_left.project.aliases = vec![dir.path().join("shared-alias")];
+    let mut batch_right = batch_left.clone();
+    batch_right.project.project_id = "proj_batch_other".to_string();
+    batch_right.project.project_root = conflicting_root.clone();
+    batch_right.store.project_id = batch_right.project.project_id.clone();
+    batch_right.store.store_id = "store:proj_batch_other:profile_sharded".to_string();
+    batch_right.store.store_relpath = "projects/proj_batch_other".to_string();
+    batch_right.store.manifest_relpath =
+        Some("projects/proj_batch_other/store_manifest.json".to_string());
+    batch_right.graph_scopes.clear();
+    batch_right.artifacts.clear();
+    batch_left.graph_scopes.clear();
+    batch_left.artifacts.clear();
+    let batch_diff = crate::migrate::registry::diff_registry_reconstruction_report(
+        &db,
+        &crate::migrate::registry::RegistryReconstructionReport {
+            plans: vec![batch_left, batch_right],
+            issues: Vec::new(),
+        },
+    )
+    .await;
+    assert_eq!(batch_diff.missing_plans, 0);
+    assert!(
+        batch_diff
+            .issues
+            .iter()
+            .any(|issue| issue.contains("shared-alias")),
+        "{:?}",
+        batch_diff.issues
+    );
     let applied = crate::migrate::registry::apply_registry_reconstruction_report(&db, &eligible)
         .await
         .unwrap();

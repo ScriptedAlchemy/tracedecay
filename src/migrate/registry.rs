@@ -79,24 +79,54 @@ pub async fn diff_registry_reconstruction_report(
     db: &GlobalDb,
     report: &RegistryReconstructionReport,
 ) -> RegistryReconstructionDiffReport {
-    let eligible = RegistryReconstructionReport {
-        plans: report
-            .plans
-            .iter()
-            .filter(|plan| plan.status == RegistryReconstructionStatus::Eligible)
-            .cloned()
-            .collect(),
-        issues: Vec::new(),
-    };
     let mut diff = RegistryReconstructionDiffReport {
-        issues: preflight_registry_reconstruction(db.conn(), &eligible).await,
+        issues: report.issues.clone(),
         ..RegistryReconstructionDiffReport::default()
     };
-    if !diff.issues.is_empty() {
-        return diff;
+    let mut eligible = Vec::new();
+
+    for plan in report
+        .plans
+        .iter()
+        .filter(|plan| plan.status == RegistryReconstructionStatus::Eligible)
+    {
+        let single = RegistryReconstructionReport {
+            plans: vec![plan.clone()],
+            issues: Vec::new(),
+        };
+        let issues = preflight_registry_reconstruction(db.conn(), &single).await;
+        if !issues.is_empty() {
+            diff.issues.extend(issues);
+            continue;
+        }
+        eligible.push(plan);
     }
 
-    for plan in &eligible.plans {
+    let mut conflicts = vec![false; eligible.len()];
+    for left in 0..eligible.len() {
+        for right in (left + 1)..eligible.len() {
+            let pair = RegistryReconstructionReport {
+                plans: vec![eligible[left].clone(), eligible[right].clone()],
+                issues: Vec::new(),
+            };
+            let issues = preflight_registry_reconstruction(db.conn(), &pair).await;
+            if issues.is_empty() {
+                continue;
+            }
+            conflicts[left] = true;
+            conflicts[right] = true;
+            for issue in issues {
+                if !diff.issues.contains(&issue) {
+                    diff.issues.push(issue);
+                }
+            }
+        }
+    }
+
+    for (index, plan) in eligible.into_iter().enumerate() {
+        if conflicts[index] {
+            continue;
+        }
         match registry_plan_has_missing_rows(db.conn(), plan).await {
             Ok(true) => diff.missing_plans += 1,
             Ok(false) => {}
