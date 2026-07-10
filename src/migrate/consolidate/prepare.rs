@@ -93,6 +93,7 @@ fn preserve_source_branch_graphs(
                     .map(|parent| format!("{prefix}{parent}")),
                 created_at: entry.created_at.clone(),
                 last_synced_at: entry.last_synced_at.clone(),
+                gc_protected: true,
             },
         );
         maybe_stop(stop, PrepareStop::SourceBranch(index + 1))?;
@@ -177,6 +178,7 @@ fn expected_prepared_files(
                     .map(|parent| format!("{prefix}{parent}")),
                 created_at: entry.created_at.clone(),
                 last_synced_at: entry.last_synced_at.clone(),
+                gc_protected: true,
             },
         );
     }

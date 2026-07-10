@@ -23,6 +23,10 @@ pub struct BranchEntry {
     pub created_at: String,
     /// UNIX timestamp (seconds) of last successful sync.
     pub last_synced_at: String,
+    /// Whether automatic branch-store GC must retain this entry even when it
+    /// has no matching git ref.
+    #[serde(default)]
+    pub gc_protected: bool,
 }
 
 /// Top-level branch metadata for a project.
@@ -57,6 +61,7 @@ impl BranchMeta {
                 parent: None,
                 created_at: now.clone(),
                 last_synced_at: now,
+                gc_protected: false,
             },
         );
         Self {
@@ -75,6 +80,7 @@ impl BranchMeta {
                 parent: Some(parent.to_string()),
                 created_at: now.clone(),
                 last_synced_at: now,
+                gc_protected: false,
             },
         );
     }
@@ -257,6 +263,15 @@ mod tests {
         assert!(parse("{not valid json").is_err());
         assert!(parse(r#"{"default_branch": 5}"#).is_err());
         assert!(parse("[]").is_err());
+    }
+
+    #[test]
+    fn parse_old_entry_defaults_gc_protected_to_false() {
+        let meta = parse(
+            r#"{"default_branch":"main","branches":{"main":{"db_file":"tracedecay.db","created_at":"1","last_synced_at":"1"}}}"#,
+        )
+        .unwrap();
+        assert!(!meta.branches["main"].gc_protected);
     }
 
     #[test]
