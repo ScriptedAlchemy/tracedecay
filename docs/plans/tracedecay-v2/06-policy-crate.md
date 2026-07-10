@@ -1,7 +1,5 @@
 # TraceDecay V2 Policy Crate Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use `superpowers:subagent-driven-development` (recommended) or `superpowers:executing-plans` to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
-
 **Goal:** Build a versioned, deterministic, side-effect-free policy runtime that can evaluate and explain hints, retrieval, tool routing, diagnostics, correlation, curation, scheduling, and memory decisions, then replay or compare historical decisions at an explicitly reported fidelity.
 
 **Architecture:** Policy inputs are immutable, content-addressed snapshots; executable policy bundles are canonical manifests plus bounded rule bytecode interpreted by a capability-free VM. Evaluation returns typed decisions, explanations, proposed effects, digests, and outcome-attribution contracts; application services alone may validate and apply proposed effects. Exact replay pins every bundle/input/config/index/memory/tool-catalog/time dependency, recorded replay inspects persisted results, and best-effort replay declares every substitution or missing dependency.
@@ -97,7 +95,7 @@ Policy errors are stable evaluation/fidelity codes. Application owns public retr
 - PR #407, `fix(hermes): use the user TraceDecay profile`, consolidates Hermes onto the user profile and removes Hermes bridge/config/inventory paths. This plan must not introduce dependencies on `src/automation/hermes_bridge.rs`, `hermes_config_projection.rs`, `hermes_pending_skills.rs`, or `hermes_skill_inventory.rs`. Migration routes profile/zero-project/cross-project and unresolved policy/automation history to activity, explicitly project-scoped history to that canonical project shard, and records one source manifest; duplicate copies are reconciled only within the destination privacy domain and quarantined on conflict.
 - PR #410, `fix(sessions): collapse copied subagent prompts`, adds versioned query-time origin/representative semantics without deleting sanitized native rows. Hint/routing policy receives an explicit native/direct-user/subagent/tool-result/protocol classification plus evidence; it must not infer “human” merely from `role=user`, and replay records the classifier/version used.
 - PR #411 supplies one shared foreign-skill ownership predicate and a nonactionable info classification. Diagnostics/curation policy must propose remediation only when the current installation owns the effect and application exposes the matching mutation; foreign/legacy owner evidence produces `NoAction` or explicit manual-user choice, never an update/delete nag.
-- Publication master `3567e31e` (0.0.48) includes merged #418/#425 plus the earlier accepted inputs; only draft plan PR #421 was open at final refresh. #414/#419 require current edit-tool routing metadata, #417/#425 require abstention/visible remediation and accepted consolidation evidence, and #423/#424 retrieval/accounting semantics are accepted policy/evaluation input.
+- The normative publication snapshot is [master §2.6](../2026-07-09-tracedecay-brain-rewrite.md#26-current-master-accepted-changes) plus [plan 13](13-research-provenance-and-context-anchors.md). Policy fixtures include explicit graph/session variants, bounded consolidation lookup, lifecycle fencing, conflict-safe registry repair, read-only search, peer-safe checkpoints, and restart-safe retirement. Refresh all states before implementation.
 - Before PR 23A starts, refresh master/open PRs, regenerate the V1 compatibility inventory, and update only source-path references actually present. Deleted transition paths are not extension points.
 
 ## 5. Exact File and Module Tree
@@ -214,8 +212,8 @@ pub struct PolicyBundleManifest {
     pub vm_version: PolicyVmVersion,
     pub intrinsic_set: IntrinsicSetRef,
     pub artifact: ArtifactRef,
-    pub source_digest: Digest,
-    pub config_digest: Digest,
+    pub source_digest: ManifestDigest,
+    pub config_digest: ManifestDigest,
     pub tool_catalog: Option<CatalogSnapshotRefV1>,
     pub compatible_host_profiles: BTreeSet<HostProfileRef>,
     pub created_at: i64,
@@ -225,12 +223,28 @@ pub struct PolicyBundleManifest {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ArtifactRef {
     pub format: ArtifactFormat,
-    pub digest: Digest,
+    pub digest: ManifestDigest,
     pub byte_len: u64,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum ArtifactFormat { RuleBytecodeV1 }
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct IntrinsicSetRef {
+    pub id: NativeKindCode,
+    pub version: ComponentVersion,
+    pub digest: ManifestDigest,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct RuleBytecodeV1 {
+    pub vm_version: PolicyVmVersion,
+    pub intrinsic_set: IntrinsicSetRef,
+    pub canonical_bytes: Vec<u8>,
+    pub instruction_count: u32,
+    pub digest: ManifestDigest,
+}
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct PolicyBundle {
@@ -268,6 +282,12 @@ pub enum EvaluatorKind {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RecordedEvaluationRef {
+    pub evaluation_id: PolicyEvaluationId,
+    pub record_digest: ManifestDigest,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct EvaluationRequest {
     pub evaluation_id: PolicyEvaluationId,
     pub mode: tracedecay_domain::ReplayMode,
@@ -289,7 +309,7 @@ pub struct EvaluationEnvironment {
     pub index_snapshot: Option<SnapshotRef>,
     pub memory_snapshot: Option<SnapshotRef>,
     pub tool_catalog: Option<CatalogSnapshotRefV1>,
-    pub access_digest: Digest,
+    pub access_digest: AccessPolicyDigest,
     pub budget: EvaluationBudget,
 }
 
@@ -300,14 +320,14 @@ pub struct EvaluationRecord {
     pub requested_mode: tracedecay_domain::ReplayMode,
     pub fidelity: ReplayFidelity,
     pub bundle: PolicyBundleRef,
-    pub input_digest: Digest,
-    pub environment_digest: Digest,
+    pub input_digest: ManifestDigest,
+    pub environment_digest: ManifestDigest,
     pub decision: EvaluationDecision,
     pub explanation: DecisionExplanation,
     pub proposed_effects: Vec<ProposedEffect>,
     pub substitutions: Vec<ReplaySubstitution>,
-    pub decision_digest: Digest,
-    pub explanation_digest: Digest,
+    pub decision_digest: ManifestDigest,
+    pub explanation_digest: ManifestDigest,
     pub duration_micros: u64,
 }
 
@@ -376,14 +396,14 @@ pub enum SnapshotKind { Config, Index, Memory, Skill, HintState, Ledger, Activit
 pub struct SnapshotRef {
     pub kind: SnapshotKind,
     pub snapshot_id: SnapshotId,
-    pub digest: Digest,
+    pub digest: ManifestDigest,
     pub watermark: Option<VectorWatermark>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct InputSnapshot {
     pub reference: SnapshotRef,
-    pub sections: BTreeMap<SectionId, Digest>,
+    pub sections: BTreeMap<SectionId, ManifestDigest>,
     pub body: CanonicalCborBytes, // bounded; hash-verified against reference.digest before use
     pub loaded_at: UtcMicros,
 }
@@ -391,7 +411,7 @@ pub struct InputSnapshot {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct StoredEvaluationRecord {
     pub record: EvaluationRecord,
-    pub request_facts_digest: Digest,
+    pub request_facts_digest: ManifestDigest,
     pub input_refs: Vec<SnapshotRef>,
     pub payload_refs: Vec<PayloadRef>,
     pub outcome_ids: Vec<HintOutcomeId>,
@@ -524,15 +544,18 @@ pub struct RequestFacts {
     pub observed_git: Option<GitEvidenceSnapshot>,
     pub effective_at: i64,
     pub deadline: UtcMicros,
-    pub access_digest: Digest,
+    pub access_digest: AccessPolicyDigest,
     pub sensitivity: DataSensitivity,
     pub watermark: VectorWatermark,
     pub budget: EvaluationBudget,
-    pub facts_digest: Digest, // canonical-CBOR digest over every field above
+    pub facts_digest: ManifestDigest, // canonical-CBOR manifest digest over every field above
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum CandidateSource { Memory, Skill, Lexical, Entity, Vector, Recent }
+
+pub struct CandidateId([u8; 16]);
+pub struct FeatureId(String); // private, grammar-validated policy feature registry token
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PolicyCandidate {
@@ -559,17 +582,19 @@ pub struct ScoredCandidate {
 }
 ```
 
+`CandidateId` is evaluation-local and derives from `PolicyEvaluationId`, candidate source, canonical entity/payload reference, and source ordinal; it is never a durable entity alias. `FeatureId` resolves only through the pinned policy feature registry. Their private fields prevent free-text construction or cross-evaluation correlation.
+
 The `HintDecision` component decisions are equally explicit. `SuppressionReason` is the one closed suppression registry for both delivery engines: its variants are exactly Plan 22 §4.4's `SuggestionSuppressionReasonV1` set (Plan 22 enumerates it; this crate re-exports it), deterministic hints simply never use the scout-only variants, and a new variant is a versioned enum revision recorded here.
 
 ```rust
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum FingerprintKind { Logical, Semantic, Anchor, CoordinationPair }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug)]
 pub struct DedupeDecision {
-    pub duplicate_of: Option<ContentDigest>,
+    pub duplicate_of: Option<PrivacyDomainKeyedFingerprintV1>,
     pub matched_kind: Option<FingerprintKind>,
-    pub inserted: Vec<(FingerprintKind, ContentDigest)>,
+    pub inserted: Vec<(FingerprintKind, PrivacyDomainKeyedFingerprintV1)>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -608,14 +633,14 @@ pub struct HintStateTarget {
     pub thread_id: Option<ThreadId>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug)]
 pub struct HintStateSnapshot {
     pub target: HintStateTarget,
     pub version: EntityVersionId, // the one CAS token; every accepted proposal advances it
-    pub logical_fingerprints: BTreeSet<ContentDigest>,
-    pub semantic_fingerprints: BTreeSet<ContentDigest>,
-    pub anchor_fingerprints: BTreeSet<ContentDigest>,
-    pub coordination_pair_fingerprints: BTreeSet<ContentDigest>,
+    pub logical_fingerprints: BTreeSet<PrivacyDomainKeyedFingerprintV1>,
+    pub semantic_fingerprints: BTreeSet<PrivacyDomainKeyedFingerprintV1>,
+    pub anchor_fingerprints: BTreeSet<PrivacyDomainKeyedFingerprintV1>,
+    pub coordination_pair_fingerprints: BTreeSet<PrivacyDomainKeyedFingerprintV1>,
     pub categories: BTreeMap<HintCategoryId, HintCategoryClock>,
     pub turn_ledger: HintBudgetLedger,
     pub session_ledger: HintBudgetLedger,
@@ -651,12 +676,12 @@ pub struct PendingSuggestionSlot {
     pub claimed_by: Option<HookInvocationId>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug)]
 pub struct HintStateProposal {
     pub target: HintStateTarget,
     pub expected_version: EntityVersionId, // single CAS on HintStateSnapshot.version
-    pub insert_fingerprints: Vec<(FingerprintKind, ContentDigest)>,
-    pub evict_fingerprints: Vec<(FingerprintKind, ContentDigest)>,
+    pub insert_fingerprints: Vec<(FingerprintKind, PrivacyDomainKeyedFingerprintV1)>,
+    pub evict_fingerprints: Vec<(FingerprintKind, PrivacyDomainKeyedFingerprintV1)>,
     pub category_updates: BTreeMap<HintCategoryId, HintCategoryClock>,
     pub turn_debit: u16,
     pub session_debit: u16,
@@ -675,7 +700,7 @@ pub enum PendingSlotOp {
 }
 ```
 
-Category dedupe rides the category clocks; the four fingerprint sets carry the logical/semantic/anchor/coordination-pair keys. Storage envelope, stated here so the owning store plan can land the row: one row per `HintStateTarget`; primary key and uniqueness = the target digest (profile, session, agent, thread); required index on `updated_at` for TTL/idle sweeps; each fingerprint set is bounded at 256 entries with oldest-first eviction recorded through `evict_fingerprints`, keeping a row under 32 KiB; rows live on the activity/session owner shard and expire with session retention. The column-level table schema lands in [`02-store-crate.md`](02-store-crate.md) (hint state is one of its named high-volume table families).
+Category dedupe rides the category clocks; the four fingerprint sets carry plan-01 `PrivacyDomainKeyedFingerprintV1` values with explicit privacy domain/key epoch. Fingerprint-bearing structs deliberately do not derive public `Serialize`/`Deserialize`. Policy's store adapter uses one audited fixed-layout `HintStatePrivateCodecV1` whose encode/decode functions accept/return only these internal types; the codec is unavailable to transport/presentation crates and its bytes live only in the encrypted activity-shard state blob. Public/API/replay views expose counts, category clocks, budgets, decision reasons, and state version—not fingerprint bytes/domain/epoch. Compile-fail tests reject serde/public-view conversion for `PrivacyDomainKeyedFingerprintV1`, `DedupeDecision`, `HintStateSnapshot`, and `HintStateProposal`. Storage envelope: one row per `HintStateTarget`; primary key and uniqueness = the target digest (profile, session, agent, thread); required index on `updated_at`; each set is bounded at 256 entries with oldest-first eviction recorded through `evict_fingerprints`, keeping a row under 32 KiB. Key rotation rebuilds sets from eligible retained evidence or safely forgets them; it never compares epochs. The column-level table schema lands in plan 02.
 
 #### 9.1.3 DeliveryArbiterV1: the one delivery selector
 
@@ -697,6 +722,9 @@ pub struct DeliveryArbitrationV1 {
     pub proposal: HintStateProposal,
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+pub struct DeliveryArbiterV1;
+
 impl DeliveryArbiterV1 {
     pub fn arbitrate(
         &self,
@@ -714,6 +742,8 @@ impl DeliveryArbiterV1 {
     ) -> DeliveryArbitrationV1;
 }
 ```
+
+At arbitration input normalization, a scout candidate receives the same evaluation-local `CandidateId` derivation using its retained `SuggestionCandidateId`; the source ID remains inside `SuggestionCandidateV1`. Suppression rows therefore use one collision-free ID type without discarding source identity or inventing a durable cross-run alias.
 
 Arbitration rules:
 
@@ -784,7 +814,7 @@ pub struct GitEvidenceSnapshot {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum RevisionReconciliation {
-    Aligned { merge_base: CommitId, changed_files_digest: Digest },
+    Aligned { merge_base: CommitId, changed_files_digest: ManifestDigest },
     LocalOnly { reason: CoverageReason },
     LiveOnly { reason: CoverageReason },
     Drifted {
@@ -792,8 +822,8 @@ pub enum RevisionReconciliation {
         live_merge_base: Option<CommitId>,
         local_head: Option<CommitId>,
         live_head: Option<CommitId>,
-        local_changed_files: Option<Digest>,
-        live_changed_files: Option<Digest>,
+        local_changed_files: Option<ManifestDigest>,
+        live_changed_files: Option<ManifestDigest>,
         action: ReconciliationAction,
     },
 }
@@ -1076,7 +1106,7 @@ pub struct PolicyDiffReport {
     pub token_cost: DistributionSummary,
     pub affected_categories: BTreeMap<CategoryId, u64>,
     pub coverage: CorpusCoverage,
-    pub digest: Digest,
+    pub digest: ManifestDigest,
 }
 ```
 
@@ -1216,7 +1246,7 @@ PR 23 is split into reviewable 23A–23G. Plan 22's PR 23H later lands `src/scou
 
 ## 15. Cutover and Rollback
 
-1. Refresh publication base `3567e31e`; record merged #405/#407/#410/#411/#412/#413/#414/#415/#416/#417/#418/#419/#420/#422/#423/#424/#425, regenerate V1 stores/profile/tool/policy inventory, and record actual master binary/schema/protocol/catalog-generation versions. Do not begin backfill from a pre-adoption, Hermes-local, or ownership-ambiguous locator.
+1. Refresh the normative publication snapshot; record all accepted inputs, regenerate the V1 stores/profile/tool/policy inventory, and record actual master binary/schema/protocol/catalog-generation versions. Do not begin backfill from a pre-adoption, Hermes-local, ownership-ambiguous, or unretired-applied-manifest locator.
 2. Compile/hash V1 compatibility bundles and import immutable input/evaluation/state snapshots with source manifests. Dedupe adopted legacy/Hermes data by canonical source/content digest; quarantine conflicts.
 3. Enable `v2_policy_shadow` per evaluator. V1 remains effect owner; V2 evaluates the same captured snapshot without injecting, acquiring locks, mutating memory, writing files, or incrementing counters.
 4. Compare decisions, payloads, state transitions, correlations, schedule reasons, memory proposals, outcome attribution, latency, coverage, and digests. Block cutover on unexplained gaps, privacy failure, bundle/input loss, or drifted identity/profile provenance.

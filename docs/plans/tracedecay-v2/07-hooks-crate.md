@@ -1,7 +1,5 @@
 # TraceDecay V2 Hooks Crate Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (- [ ]) syntax for tracking.
-
 **Goal:** Build a bounded host-hook runtime that losslessly captures provider events, obtains replayable hint decisions, and acknowledges Codex, Claude Code, Cursor, and Kiro without coupling host latency to indexing, projection, cross-project queries, or storage internals.
 
 **Architecture:** tracedecay-hooks owns host wire normalization, hot-path orchestration, deadline and durability policy, reply rendering, and provider conformance. It delegates durable frames to tracedecay-capture, policy/context work to narrow tracedecay-application ports, and capability metadata to tracedecay-tool-catalog; it never opens a database, mutates policy state directly, or implements provider transcript parsing twice.
@@ -92,7 +90,7 @@ Accepted-base inputs refreshed on 2026-07-10:
 - PR #407 user-profile Hermes consolidation. Hermes/curator/reflector/skill-writer activity is actor/workflow evidence inside the user's profile, never a separate hook profile.
 - PR #410 copied-subagent prompt collapse. Hook normalization records native `PromptOrigin` evidence and projectors map it into `tracedecay-domain::MessageOrigin`; every sanitized native observation is retained, while direct_user/subagent/tool_result filters and parent-representative dedupe remain query/projector behavior.
 - PR #411 foreign-skill ownership/remediation. Hook hints and diagnostics must not suggest update/delete when catalog/application says the package is foreign to this installation; the safe route is info/no-action or explicit manual ownership transfer.
-- Publication master `3567e31e` (0.0.48) includes merged #418/#425 plus the earlier accepted inputs; only draft plan PR #421 was open at final refresh. #414/#419 affect generated edit-tool descriptors, #417/#425 make split identity/consolidation explicit coverage and accepted recovery evidence rather than first-candidate routing, and #423/#424 retrieval/accounting behavior is accepted hint-context/outcome-measurement input.
+- The normative publication snapshot is [master §2.6](../2026-07-09-tracedecay-brain-rewrite.md#26-current-master-accepted-changes) plus [plan 13](13-research-provenance-and-context-anchors.md). Hooks must acquire the lifecycle lease before configuration/store startup, never install or repair while an exclusive lifecycle owner exists, drain already accepted input, and expose typed deferral evidence. Identity, retirement, session variants, read-only search, and peer-safe checkpoint behavior remain hint-context/outcome fixtures.
 
 Before PR 24F begins, refresh open PRs, master, installed host versions, hook manifests, application hook-port schema, and catalog digest. Drift becomes a manifest difference, not an undocumented assumption.
 
@@ -376,7 +374,7 @@ pub struct HostWireResponse {
 
 pub struct EvaluationReceipt {
     pub evaluation: PolicyEvaluationId,
-    pub request_facts_digest: Digest,
+    pub request_facts_digest: ManifestDigest,
     pub bundle: PolicyBundleRef,
     pub catalog_snapshot: CatalogSnapshotRefV1,
     pub state_version_before: EntityVersionId,
@@ -538,7 +536,7 @@ Many hook processes may arrive for the same profile, session, worktree, or shard
 - Prompts, tool activity, approvals, edits, visible reasoning markers, agent lifecycle, goals, hint delivery, corrections, and outcomes are never coalesced or dropped.
 - Writer batching is bounded by 1,000 frames, 4 MiB, or 5 ms transaction time. It preserves per-source order while interleaving sources fairly.
 - Read snapshots and policy inputs never hold writer locks. Busy/locked state becomes partial coverage or silence, not an unbounded wait.
-- Disk-full reserves a small emergency receipt area for non-content hashes/status; it does not pretend payload durability.
+- Disk-full reserves a small emergency receipt area for typed manifest/keyed-fingerprint/status fields only; it does not pretend payload durability.
 
 Crash matrix:
 

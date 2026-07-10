@@ -1,7 +1,5 @@
 # TraceDecay V2 API Crate Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use `superpowers:subagent-driven-development` (recommended) or `superpowers:executing-plans` to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
-
 **Goal:** Build `tracedecay-api`, the secure loopback-first Axum HTTP V2 and SSE boundary for the one official contract, with generated OpenAPI/dashboard-client artifacts and semantic parity across HTTP, CLI, MCP, SDKs, dashboard, exports, and live subscriptions.
 
 **Architecture:** HTTP handlers authenticate, validate bounded transport inputs, map them to `tracedecay-application` use cases, and map typed results/errors back without changing scope, ordering, coverage, freshness, evidence, command, or replay semantics. Live reads use an authorized subscription resource followed by resumable snapshot/delta SSE; OpenAPI and transport bindings are generated from plan 17's contract IR — itself built from application/domain schemas plus the generated tool catalog — while CLI/MCP remain separate thin adapters tested against the same semantic fixtures.
@@ -65,7 +63,7 @@ Plan 17 declares this same HTTP/OpenAPI surface official and adds the contract I
 
 ### 4.1 Master and incoming changes verified on 2026-07-10
 
-Publication refresh: `origin/master` `3567e31e3a60730400c9b900e32ca02c0bf3bf33` at 0.0.48 includes merged #418 and #425 (`de3d05dc`, final head `d3bb28b5`) plus the earlier accepted inputs. Only draft plan PR #421 was open at final refresh. Regenerate contracts before every API slice; fact ranking, exact analytics, and operator-only split-store consolidation are accepted-base behavior, not autonomous curation.
+The normative publication snapshot is [master §2.6](../2026-07-09-tracedecay-brain-rewrite.md#26-current-master-accepted-changes) plus [plan 13](13-research-provenance-and-context-anchors.md). Regenerate contracts before every API slice; fact ranking, exact analytics, restart-safe applied-manifest retirement, and operator-only split-store consolidation are accepted-base behavior, not autonomous curation.
 
 | Change | API consequence |
 |---|---|
@@ -74,12 +72,12 @@ Publication refresh: `origin/master` `3567e31e3a60730400c9b900e32ca02c0bf3bf33` 
 | PR #407 Hermes user-profile consolidation | No Hermes profile route or compatibility store is introduced. Hermes/curator/reflector/skill-writer actors appear through normal workflow/agent/automation/knowledge APIs in the active profile. |
 | Merged PR #410 message-query dedupe/classification | Message/session/search/export schemas use domain `MessageOrigin`/`MessageView`, plus `representative_for`, rule/version, suppression count, and native expansion cursor. V2 `NativeRows` completely enumerates sanitized rows and preserves retained non-secret structure/semantics. |
 | Merged PR #411 foreign-installation doctor severity | Doctor schemas expose `severity`, observed owner, remediation authority, evidence, and legal actions; foreign/unknown ownership cannot serialize an apply/update action. |
-| Merged PR #414 `tracedecay_move_symbol` | Generate one dry-run-default `code.move_symbol` command schema/binding with impact evidence, confirmation, snapshot/version, applied imports, rollback/reindex operation, and no implicit caller rewrite. |
+| Merged PR #414 `tracedecay_move_symbol` | Preserve V1 dry-run evidence while generating distinct V2 `code.move_symbol.inspect` (read-shaped) and confirmed `code.move_symbol.commit` bindings with impact evidence, snapshot/version, applied imports, recovery/reindex operation, and no implicit caller rewrite. |
 | Merged PR #415 release integrity | Generated OpenAPI/SDK/dashboard artifacts and conformance fixtures require an allowlisted release manifest and tracked-ignored-file guard. |
 | Merged PRs #413/#416/#418 releases v0.0.46/v0.0.47/v0.0.48 | Regenerate server/protocol/catalog/OpenAPI/compatibility fixtures from accepted master; no behavior depends on release-PR layout or implies the planning host upgraded from installed 0.0.47. |
 | Merged PR #417 identity-split visibility | Serialize `identity_split` distinctly from absent index, with safe candidates/evidence and legal backup/consolidation preview; never emit an initialize action. |
 | Merged PR #425 explicit split-store consolidation (`de3d05dc`, final head `d3bb28b5`) | Generate admin-only inspect/plan/start/status/resume/recover bindings for the accepted workflow: two explicit nonempty source identities, path-plus-file/inode holder/freeze/reservation state, backups, per-table/artifact dispositions, staging/verification/cutover ledger, deterministic confirmation, and exact recovery. No raw store path in URLs; no handler opens/merges SQLite; no Settings auto-start or curation binding. |
-| Merged PR #419 race-safe edits | `code.move_symbol` schemas expose exact source/destination identities/versions, same-file/symlink evidence, pre-commit revalidation, and apply/rollback conflict receipts; no generic success hides concurrent drift. |
+| Merged PR #419 race-safe edits | The move-symbol inspect/commit schemas expose exact source/destination identities/versions, same-file/symlink evidence, pre-commit revalidation, and commit/recovery conflict receipts; no generic success hides concurrent drift. |
 | Merged PR #420 daemon proxy/hot swap plus #422 catalog refresh | API/MCP problems and capability metadata distinguish safe per-request reconnect from uncertain-write non-replay and compatible generation-scoped `tools.listChanged` versus incompatible new-session refresh; no adapter opens local stores before authority selection. |
 
 Refresh live master/open PRs before every 24B–24E slice. The OpenAPI source manifest records commit, catalog digest, domain registry digest, application registry digest, and generation tool versions so stale artifacts fail rather than masquerade as current.
@@ -130,6 +128,7 @@ crates/tracedecay-api/
 │   │   ├── scopes.rs
 │   │   ├── query.rs
 │   │   ├── search.rs
+│   │   ├── retrieval_evaluation.rs    # generated plan-15 artifact/run/report/profile routes
 │   │   ├── brain.rs
 │   │   ├── entities.rs
 │   │   ├── graph.rs
@@ -165,6 +164,7 @@ crates/tracedecay-api/
 │   │   │   ├── correlation.rs
 │   │   │   ├── coordination.rs
 │   │   │   ├── scheduler.rs
+│   │   │   ├── orchestration.rs
 │   │   │   ├── memory.rs
 │   │   │   ├── policy_diff.rs
 │   │   │   └── evolution.rs
@@ -185,6 +185,8 @@ crates/tracedecay-api/
 │   │       ├── migrations.rs
 │   │       ├── delivery.rs
 │   │       ├── coordination.rs
+│   │       ├── research.rs
+│   │       ├── retrieval_evaluation.rs
 │   │       ├── exports.rs
 │   │       ├── saved.rs
 │   │       └── labs.rs
@@ -380,12 +382,14 @@ Every route is authenticated except the static HTML/assets and one-time bootstra
 | `GET /api/v2/coverage` | Shard/source/domain coverage. |
 | `GET /api/v2/migrations` / `GET /api/v2/migrations/{id}` | Migration receipts/status. |
 | `GET /api/v2/projections` / `GET /api/v2/projections/{id}` | Projector status/watermarks/dead letters. |
-| `GET /api/v2/privacy/status` / `GET /api/v2/privacy/scans` / `GET /api/v2/privacy/scans/{id}` | Effective policy/safety floor, source/sink/detector coverage and versions, legacy unknowns, restore eligibility, and bounded scan status. |
+| `GET /api/v2/privacy/status` / `GET /api/v2/privacy/scans` / `GET /api/v2/privacy/scans/{id}` / read-shaped `POST /api/v2/privacy/scans:inspect` | Effective policy/safety floor, source/sink/detector coverage and versions, legacy unknowns, restore eligibility, bounded scan status, and protected scope/source inspection without persistence. |
 | `GET /api/v2/privacy/findings` / `GET /api/v2/privacy/findings/{id}` / `GET /api/v2/privacy/detectors` / `POST /api/v2/privacy/detectors:diff` / `GET /api/v2/privacy/remediations/{id}` / `GET /api/v2/privacy/quarantine/status` | Safe finding classes/states, synthetic-only detector comparison, remediation, and elevated quarantine metadata; never candidate content/fingerprint. |
 | `GET /api/v2/daemon` / `GET /api/v2/watchers` / `GET /api/v2/index` | Operational status/freshness only. |
 | `POST /api/v2/settings/effective` / `POST /api/v2/settings/sources` | Effective settings and source/default/owner/restart/reindex/privacy impact for an explicit declared scope; no literals in URLs. |
 | `GET /api/v2/operations` / `GET /api/v2/operations/{id}` | Durable command/job/workflow/export/migration/automation progress and explicit terminal disposition. |
-| `GET /api/v2/anchors/{id}` / `POST /api/v2/anchors:resolve` / `POST /api/v2/retrieval-recipes:execute` | Resolve stable evidence anchors or re-execute protected/versioned retrieval recipes with drift and coverage; no cursor/response handle is accepted as the sole locator. |
+| `POST /api/v2/retrieval-anchors:metadata-batch` | `retrieval_anchors.metadata_batch_get`: bounded safe identity/state/tombstone metadata only; never content or an authorized payload. |
+| `POST /api/v2/retrieval-anchors:resolve` | `retrieval_anchors.resolve`: authorized record/payload resolution for one or more canonical IDs at a frozen watermark, with drift and coverage. |
+| `POST /api/v2/retrieval-recipes:execute` | `retrieval_recipes.execute`: bounded read-only execution of a versioned protected recipe with exact scope/version/watermark and coverage. |
 | `GET /api/v2/openapi.json` | Authenticated deterministic OpenAPI document. |
 | `GET /api/v2/schemas/{digest}/{name}` | Authenticated allowlisted checked JSON Schema artifact for the current protocol. |
 | `POST /api/v2/batch` | Bounded typed multi-invocation per plan 17 §13.2: each item is one catalog-bound read invocation with its own success/problem envelope and caller item ID; no mutation items, no nested batch, no cross-item transactionality. Batch is an API transport multiplexer over existing use cases, not a separate application use case. |
@@ -443,7 +447,6 @@ All graph/timeline inputs require explicit node/edge/event/lane/bucket/page/dept
 | `GET /api/v2/agents` / `GET /api/v2/agents/{id}` | Actors/instances/lifecycle/parents/goals/outcomes. |
 | `GET /api/v2/goals` / `GET /api/v2/goals/{id}` | Codex goals and provider-native objectives with versioned updates, Turns, owners, and terminal evidence. |
 | `GET /api/v2/workflows` / `GET /api/v2/workflows/{id}` | Provider-native and canonical workflow graph. |
-| `POST /api/v2/retrieval-anchors:batch` | Authorized bounded hydration of safe anchor metadata by opaque `RetrievalAnchorId`; results never embed content payloads. |
 | `POST /api/v2/context:assemble` | One canonical bounded context-assembly use case for session/thread/Turn/task selectors with exact manifests, omissions, coverage, and source anchors. |
 | `GET /api/v2/temporal-assertions/{id}/lineage` | Supersession/conflict/authority/evidence lineage with valid-time and observed-time bounds. |
 | `POST /api/v2/coordination/presence` / `POST /api/v2/coordination/nearby` / `POST /api/v2/coordination/overlaps` | Expiring presence/work claims and same/parallel-worktree overlap with evidence class, safe compact summary, stable research anchors/recipe, legal actions, coverage, and no raw sensitive payload. |
@@ -464,13 +467,15 @@ These routes are typed profiles over application/query, not separate service imp
 
 | Family | Routes |
 |---|---|
-| Code | `POST /api/v2/code/search`, `/find-exact-symbol`, `/grep`, `/context`, `/callers`, `/callees`, `/path`, `/impact`, `/affected-tests`, `/test-map`, `/diagnose`; `GET /api/v2/code/files`, `/health`, `/diagnostics`. |
+| Code | `POST /api/v2/code/search`, `/find-exact-symbol`, `/grep`, `/context`, `/callers`, `/callees`, `/path`, `/impact`, `/affected-tests`, `/test-map`, `/diagnose`, `/move-symbol:inspect`; `GET /api/v2/code/files`, `/health`, `/diagnostics`. `move-symbol:inspect` is `EffectClass::Read` despite its protected request body. |
 | Git/delivery | `GET /api/v2/git/branches`; `POST /api/v2/git/branch-search`, `/branch-diff`, `/pr-context`, `/changelog`, `/commit-context`, `/sessions-for`, `/workflows-for`, `/reconcile`; `GET /api/v2/delivery/repositories/{id}`, `/pulls/{id}`, `/checks`, `/reviews`, `/releases`. |
 | Knowledge | `GET /api/v2/knowledge/facts`, `/facts/{id}`, `/entities`, `/entities/{id}`, `/trust-history`, `/conflicts`, `/retrievals`, `/feedback`; `POST /api/v2/knowledge/search`, `/deletion-impact`. |
-| Automation | `GET /api/v2/automation/jobs`, `/jobs/{id}`, `/scheduler`, `/runs`, `/runs/{id}`, `/runs/{id}/artifacts`, `/proposals`, `/proposals/{id}`, `/skills`, `/skills/{id}`, `/outcomes`; `POST /api/v2/automation/workflow-graph`. |
+| Automation | `GET /api/v2/automation/jobs`, `/jobs/{id}`, `/scheduler`, `/runs`, `/runs/{id}`, `/runs/{id}/artifacts`, `/candidates`, `/candidates/{id}`, `/decisions`, `/decisions/{id}`, `/effects`, `/effects/{id}`, `/outcomes`, `/outcomes/{id}`, `/recoveries`, `/recoveries/{id}`, `/history`, `/skills`, `/skills/{id}`; `POST /api/v2/automation/workflow-graph`. Legacy proposals/approvals/applies are labeled records returned only through history. |
+| Research provenance | `GET /api/v2/research/manifests`, `GET /api/v2/research/manifests/{id}`. Manifest routes return immutable `ResearchAnchorId` entry identity and nonempty canonical `RetrievalAnchorId` references; anchor metadata, authorized resolution, and recipe execution use only the three routes inventoried in §8.1. |
+| Search evaluation | `GET /api/v2/retrieval/corpus-versions`, `/corpus-versions/{id}`, `/qrel-versions`, `/qrel-versions/{id}`, `/candidate-pools`, `/candidate-pools/{id}`, `/judgments`, `/judgments/{id}`, `/adjudications`, `/adjudications/{id}`, `/evaluation-runs`, `/evaluation-runs/{id}`, `/evaluation-reports`, `/evaluation-reports/{id}`, `/profiles`, `/profiles/{id}`. These are versioned artifact/operation reads; list metadata is payload-free and protected rationales/examples require an authorized payload policy. |
 | Hints/policy | `GET /api/v2/hints/evaluations`, `/evaluations/{id}`, `/outcomes`, `/opportunities`, `/policy/bundles`, `/policy/bundles/{id}`, `/policy/coverage`. |
 | Accounting/Observatory | `GET /api/v2/accounting/usage`, `/costs`, `/savings`, `/adoption`, `/denominators`, `/api/v2/observatory`. |
-| Tasks/orchestration | `GET /api/v2/initiatives`, `/initiatives/{id}`, `/initiatives/{id}/graph`; `GET /api/v2/plans`, `/plans/{id}/versions/{version}` plus read-shaped `POST /plans:diff`; `GET /api/v2/work-items`, `/work-items/{id}`, `/work-items/{id}/dependencies`, `/work-items/{id}/attempts`, `/work-items/{id}/context`; `POST /api/v2/work-items/query`; `GET /api/v2/execution-attempts/{id}`; `GET /api/v2/executors`, `/executors/{id}`; `POST /api/v2/executors:match` (read-only); `GET /api/v2/task-scheduler/status`; read-shaped `POST /api/v2/task-scheduler:explain`; `GET /api/v2/task-graph/status`; read-shaped `POST /api/v2/task-graph:doctor`; `GET /api/v2/task-views`, `/task-views/{id}`. Semantics are owned by plan 24 §9.1; query/explain/doctor POST bodies carry protected scope/evidence while remaining `EffectClass::Read`; every mutation uses the Section 8.7 command envelope with no `PATCH` route. Catalog capability `task_graph.events` binds to canonical subscription read-model kinds delivered through `POST /api/v2/subscriptions` plus `GET /api/v2/subscriptions/{id}/events`, not a separate `/task-events` stream. |
+| Tasks/orchestration | `GET /api/v2/initiatives`, `/initiatives/{id}`, `/initiatives/{id}/graph`; `GET /api/v2/plans`, `/plans/{id}/versions/{version}` plus read-shaped `POST /plans:diff`; `GET /api/v2/work-items`, `/work-items/{id}`, `/work-items/{id}/dependencies`, `/work-items/{id}/context`; `POST /api/v2/work-items/query`; `GET /api/v2/execution-attempts`, `/execution-attempts/{id}`, `/execution-attempts/{id}/timeline`; `GET /api/v2/task-offers`, `/task-offers/{id}`; `GET /api/v2/context-packets`, `/context-packets/{id}`; `GET /api/v2/task-notifications`, `/task-notifications/{id}`; `GET /api/v2/executors`, `/executors/{id}`; `POST /api/v2/executors:match` (read-only); `GET /api/v2/task-scheduler/status`; read-shaped `POST /api/v2/task-scheduler:explain`; `GET /api/v2/task-graph/status`; read-shaped `POST /api/v2/task-graph:doctor`; `GET /api/v2/task-views`, `/task-views/{id}`. Semantics are owned by plan 24 §9.1; offer reads require the authenticated registration and packet reads require the attempt scope. Query/explain/doctor POST bodies carry protected scope/evidence while remaining `EffectClass::Read`; every mutation uses the Section 8.7 command envelope with no `PATCH` route. Catalog capability `task_graph.events` binds to canonical subscription read-model kinds delivered through `POST /api/v2/subscriptions` plus `GET /api/v2/subscriptions/{id}/events`, not a separate `/task-events` stream. |
 
 Git request/response schemas retain local semantic generation/ref/merge-base/watermark separately from live provider/fetched-at/base/head/changed-file cap/digest. Drift responses cannot serialize a combined impact claim.
 
@@ -514,7 +519,7 @@ Each response includes requested replay mode, actual fidelity, bundle/input/envi
 | `GET /api/v2/exports/{id}/download` | Authorized completed artifact bytes with safe headers. |
 | `POST /api/v2/exports/{id}:cancel` / `POST /api/v2/exports/{id}:delete` | Distinct versioned cancel/delete commands; neither is overloaded by HTTP method. |
 | `POST /api/v2/subscriptions` | Authorize query/read-model body and create finite opaque subscription. |
-| `DELETE /api/v2/subscriptions/{id}` | Revoke subscription. |
+| `POST /api/v2/subscriptions/{id}:revoke` | `subscriptions.revoke`: idempotent command-envelope revocation with ownership/auth/audit receipt. |
 | `GET /api/v2/subscriptions/{id}/events` | SSE with `Last-Event-ID`; the opaque subscription resource was created from a protected request body and contains no query literal. |
 
 ### 8.7 Typed command routes
@@ -529,7 +534,8 @@ POST /api/v2/commands/daemon/{start,stop,drain,restart}
 POST /api/v2/commands/runtime-update/{plan,start,recover}
 POST /api/v2/commands/diagnostics/refresh
 POST /api/v2/commands/doctor/run
-POST /api/v2/commands/repair/{plan,apply}
+POST /api/v2/repair:inspect
+POST /api/v2/commands/repair:start
 POST /api/v2/commands/backups/{create,restore}
 POST /api/v2/storage-consolidation:inspect|plan                       # read-shaped operator preflight with sensitive source refs in body
 POST /api/v2/commands/storage-consolidation/{start,resume,recover}    # operator-only merged-#425 mutations
@@ -542,12 +548,25 @@ POST /api/v2/commands/curation/{pause,resume,run-now,pin,protect,exclude}
 GET  /api/v2/curation/{status,history,decisions,outcomes}
 POST /api/v2/commands/facts/{create,update,delete,feedback,pin,protect,exclude}  # explicit user-authored/admin facts, never candidate approval
 POST /api/v2/commands/policy/{publish,activate,rollback}
-POST /api/v2/config/{set,unset,import}  # exact typed plan-20 configuration contract
+GET  /api/v2/config/catalog
+GET  /api/v2/config/catalog/{key}
+POST /api/v2/config/catalog:search
+POST /api/v2/config/targets:resolve
+POST /api/v2/config/effective:query
+POST /api/v2/config/{explain,diff,validate,status}
+POST /api/v2/config/history:query
+POST /api/v2/config/exports
+POST /api/v2/commands/config/{patch,unset}
+POST /api/v2/commands/config/batch:commit
+POST /api/v2/commands/config/imports:commit
+POST /api/v2/commands/config/history:restore-values
+POST /api/v2/commands/config/credentials/{bind,unbind}
+POST /api/v2/commands/config/drift:reconcile  # exact generated plan-20 inventory; no set/import aliases
 POST /api/v2/commands/payloads/{gc-plan,gc-start}
 POST /api/v2/commands/retention/{plan,start}
 POST /api/v2/commands/holds/{create,release}
 POST /api/v2/commands/entities/{retire-plan,retire-start}
-POST /api/v2/commands/code/move-symbol
+POST /api/v2/commands/code/move-symbol:commit
 POST /api/v2/commands/privacy/scans/{start,cancel}
 POST /api/v2/commands/privacy/remediations/{plan,start,verify}
 POST /api/v2/commands/privacy/quarantine/{hold,release}
@@ -555,7 +574,24 @@ POST /api/v2/commands/projections/{rebuild,pause,resume,publish,rollback}
 POST /api/v2/commands/migrations/{backfill,reconcile,cutover,rollback}
 POST /api/v2/commands/delivery/refresh
 POST /api/v2/commands/coordination/{message,handoff,ack,suppress}
-POST /api/v2/commands/tokens/{create,list,revoke}  # auth.tokens.* over plan 17 §18.2's registry
+POST /api/v2/research/manifests:create-version
+POST /api/v2/retrieval/corpus-versions:create
+POST /api/v2/retrieval/corpus-versions/{id}:freeze
+POST /api/v2/retrieval/qrel-versions:create
+POST /api/v2/retrieval/qrel-versions/{id}:freeze
+POST /api/v2/retrieval/candidate-pools:create
+POST /api/v2/retrieval/judgments:record
+POST /api/v2/retrieval/judgments/{id}:supersede
+POST /api/v2/retrieval/adjudications:record
+POST /api/v2/retrieval/evaluation-runs:run
+POST /api/v2/retrieval/evaluation-runs/{id}:cancel
+POST /api/v2/retrieval/evaluation-reports/{id}:publish
+POST /api/v2/retrieval/fixtures:promote
+POST /api/v2/retrieval/profiles:publish
+POST /api/v2/retrieval/profiles/{id}:activate
+GET  /api/v2/auth/tokens                              # auth.tokens.list; elevated read, no secrets/hashes
+POST /api/v2/commands/auth/tokens:create              # auth.tokens.create over plan 17 §18.2's registry
+POST /api/v2/commands/auth/tokens:revoke              # auth.tokens.revoke; never DELETE/query token material
 POST /api/v2/commands/labs/fixtures/promote
 POST /api/v2/initiatives:create
 POST /api/v2/initiatives/{id}:update|pause|resume|retire   # former GET/PATCH mutation shapes are these commands
@@ -564,24 +600,32 @@ POST /api/v2/plans:diff                                          # read-shaped p
 POST /api/v2/plans/{id}:activate|decompose
 POST /api/v2/work-items:create
 POST /api/v2/work-items/{id}:update|replace|retire|link|unlink|assign|reassign|pause|resume|cancel|reopen|archive|retry
+POST /api/v2/work-items/{id}:record-attestation|record-review|record-decision|record-exception|handoff|reverse-transition
 POST /api/v2/work-items:assign-set
-POST /api/v2/work-items/{id}:acquire-lease                           # authoritative executor admission, not WorkClaim
 POST /api/v2/execution-attempts/{id}:heartbeat|progress|complete|block
+POST /api/v2/task-offers/{id}:accept|decline|revoke
+POST /api/v2/context-packets/{id}:accept
+POST /api/v2/task-notifications:create
+POST /api/v2/task-notifications/{id}:update|delete
 POST /api/v2/executors:register|heartbeat|drain|unregister
 POST /api/v2/task-scheduler:explain                              # EffectClass::Read
 POST /api/v2/task-scheduler:pause|resume|run-once
 POST /api/v2/task-graph:doctor                                   # EffectClass::Read
 POST /api/v2/task-views:create
-POST /api/v2/task-views/{id}:update|delete|share|revoke
+POST /api/v2/task-views/{id}:update|delete|share-plan|share-start|share-revoke
 ```
 
-The task/orchestration `:action` routes are the sole HTTP bindings for plan 24 §9.2's command use cases — no duplicate `/commands/**` aliases and no `PATCH` route exist — and they use the same `CommandHttpRequest` envelope, idempotency, expected version, preview where the catalog declares it, and audit contract. `work-items:assign-set` is one bounded all-or-none owner-shard use case with plan/item expected versions and deterministic per-item receipts; `work-items/{id}:acquire-lease` carries `expected_readiness_digest` and atomically creates the sealed packet/attempt/lease set per plan 24 §5.3. `WorkClaimV1` remains only under coordination reads/events; no task command is named “claim.”
+The task/orchestration `:action` routes are the sole HTTP bindings for plan 24 §9.2's command use cases — no duplicate `/commands/**` aliases and no `PATCH` route exist — and they use the same `CommandHttpRequest` envelope, idempotency, expected version, operation-specific validation, and audit contract. `work-items:assign-set` is one bounded all-or-none owner-shard use case with plan/item expected versions and deterministic per-item receipts. `task-offers/{id}:accept` carries the expected offer/work/plan versions and readiness digest and is the sole public route that invokes the atomic sealed packet/attempt/lease transaction from plan 24 §9.4. Attempt lifecycle and packet acceptance require the active fence; packet acceptance also requires the exact prior packet and safe Turn boundary. Task-notification mutations never create implicit subscriptions. `WorkClaimV1` remains only under coordination reads/events; no task command is named “claim.”
+
+Anchor operation IDs are exactly `retrieval_anchors.metadata_batch_get`, `retrieval_anchors.resolve`, and `retrieval_recipes.execute`, bound only to `POST /api/v2/retrieval-anchors:metadata-batch`, `POST /api/v2/retrieval-anchors:resolve`, and `POST /api/v2/retrieval-recipes:execute`. Research-manifest operations remain `research.manifests.list`, `research.manifests.get`, and `research.manifests.create_version`. Plan 17 generates SDK methods from these OpenAPI operations; no SDK resolves a `ResearchAnchorId`, treats safe metadata as payload authority, invents a research-specific evidence-anchor type, or bypasses the generic resolver.
+
+Search-evaluation mutation routes bind one-to-one to `retrieval.corpus_versions.create/freeze`, `retrieval.qrel_versions.create/freeze`, `retrieval.candidate_pools.create`, `retrieval.judgments.record/supersede`, `retrieval.adjudications.record`, `retrieval.evaluation_runs.run/cancel`, `retrieval.evaluation_reports.publish`, `retrieval.fixtures.promote`, and `retrieval.profiles.publish/activate`. They use the ordinary command envelope and immutable/superseding artifacts: no route edits a frozen corpus/qrel, rewrites a prior judgment, hides source labels during adjudication, publishes private report content, promotes an unscanned fixture, or changes an in-flight query's profile.
 
 The storage-consolidation routes bind only plan 09's operator workflow. `inspect/plan/status` are read-shaped application results; POST is used for inspect/plan because protected source references do not belong in URLs. `start/resume/recover` require administrative capability, exact source IDs, durable operation state, deterministic confirmation where applicable, and fail-closed path-plus-file/inode holder/lease/write-reservation evidence. V1 `preview/apply` names exist only in the compatibility adapter/inventory. These bindings are absent from curation credentials and cannot be invoked by task executors, scheduler, dashboard auto-save, or a generic Settings patch.
 
-The explicit saved-view/collection/annotation and export action routes in Section 8.6 are the sole HTTP bindings for those commands; duplicate `/commands/**` aliases are not added. They still use the same generated application command envelope, idempotency, expected version, preview, and audit contract. Scope-sensitive create bodies require `declared_scope`; existing-target bodies carry the opaque target and the application resolves its canonical owner. No current V1 dashboard mutation may bypass this inventory.
+The explicit saved-view/collection/annotation and export action routes in Section 8.6 are the sole HTTP bindings for those commands; duplicate `/commands/**` aliases are not added. They use the same generated application command envelope, idempotency, expected version, direct validation or operation-specific share plan/start contract, and audit. Scope-sensitive create bodies require `declared_scope`; existing-target bodies carry the opaque target and the application resolves its canonical owner. No current V1 dashboard mutation may bypass this inventory.
 
-Coordination commands carry application preconditions (plan 09 §10) that this API validates as transport shape and surfaces unchanged: an unexpired presence/overlap claim, stable research anchor, explicit target agent/capability, preview digest, idempotency key, and disclosure-safe summary. `message` and `handoff` record attempted delivery separately from target receipt; `ack` requires authorized target evidence; `suppress` is scoped to agent/pair/work-claim plus expiry. The API accepts no arbitrary provider address, hidden prompt payload, free-form tool invocation, or client assertion that delivery succeeded.
+Coordination commands carry application preconditions (plan 09 §10) that this API validates as transport shape and surfaces unchanged: an unexpired presence/overlap claim, stable research anchor, explicit target agent/capability, disclosed-summary/effect digest, idempotency key, and disclosure-safe summary. `message` and `handoff` record attempted delivery separately from target receipt; `ack` requires authorized target evidence; `suppress` is scoped to agent/pair/work-claim plus expiry. The API accepts no arbitrary provider address, hidden prompt payload, free-form tool invocation, or client assertion that delivery succeeded.
 
 ## 9. SSE Snapshot, Delta, Resume, Gap, and Backpressure
 
@@ -591,7 +635,7 @@ Clients post the sensitive query/read-model body to `/subscriptions`. Applicatio
 
 ```rust
 pub struct SubscriptionCreated {
-    pub subscription_id: OpaqueSubscriptionId,
+    pub subscription_id: SubscriptionId,
     pub expires_at: UtcMicros,
     pub snapshot_watermark: VectorWatermark,
     pub replay_retention: Duration,
@@ -783,7 +827,7 @@ Commands run from repository root using checkout-local `target/`; do not set tar
 
 **Files:** remaining `src/http/*.rs` excluding commands/labs/exports; `tests/sessions_messages.rs`; post-#410 fixtures.
 
-- [ ] Add contract cases for no-text list-all sessions/messages, stable cursor pages, every domain `MessageView`, sanitized-native row completeness, representative provenance/native expansion, stable session/thread/message/subagent/workflow/Git anchors and retrieval recipes, same/parallel-worktree nearby-agent claims, expired-presence unknown state, safe coordination summaries, Turn/agent/workflow/goal links, settings source/owner reads, Brain lens bounds, federated Rspack/Rsbuild/React Router provenance and same-name disambiguation, Git drift, lexical/phrase/fuzzy/entity/semantic/graph/recency search stages and caps, locked/partial domain reads, and unknown denominators.
+- [ ] Add contract cases for no-text list-all sessions/messages, stable cursor pages, every domain `MessageView`, sanitized-native row completeness, representative provenance/native expansion, stable session/thread/message/subagent/workflow/Git anchors and retrieval recipes, metadata-batch returning no content, authorized resolution returning the exact record/payload state, recipe execution preserving versions/watermark/coverage, same/parallel-worktree nearby-agent claims, expired-presence unknown state, safe coordination summaries, Turn/agent/workflow/goal links, settings source/owner reads, Brain Work/plan/task/attempt/blocker/lease/acceptance clusters and bounds, federated Rspack/Rsbuild/React Router provenance and same-name disambiguation, Git drift, lexical/phrase/fuzzy/entity/semantic/graph/recency search stages and caps, locked/partial domain reads, and unknown denominators.
 - [ ] Run `cargo test -p tracedecay-api --test sessions_messages --test request_response product -- --nocapture`. Expected: tests fail because routes/schemas are absent.
 - [ ] Implement Sections 8.2–8.4 typed mappings with no business branching beyond extraction and application error mapping.
 - [ ] Re-run the command. Expected: sanitized-native counts/manifest digests match; representative expands exactly; all responses retain metadata and bound sizes.
@@ -796,6 +840,7 @@ Commands run from repository root using checkout-local `target/`; do not set tar
 - [ ] Add tests `command_retry_returns_same_receipt`, `idempotency_conflict_is_409`, `version_conflict_includes_current_version`, `confirmed_operation_requires_current_preflight_token`, `direct_command_rejects_generic_mode_fields`, `scope_sensitive_create_requires_declared_scope`, `route_filter_never_selects_owner`, `daemon_exit_without_drain_receipt_is_not_success`, `update_recovery_is_pollable`, `coordination_target_must_be_unexpired`, `delivery_is_not_ack`, `suppression_is_bounded`, `coordination_lab_cannot_invoke_command`, `share_bundle_preflight_expires`, `lab_has_no_mutating_route`, `evolution_simulation_is_read_only`, `export_rejects_path_fields`, `download_never_exposes_backing_path`, and `incomplete_export_cannot_download`.
 - [ ] Run `cargo test -p tracedecay-api --test commands --test labs --test exports -- --nocapture`. Expected: tests fail because command/lab/export handlers are absent.
 - [ ] Implement Sections 8.5–8.7 and export containment/header mapping; use generated command mapping to avoid handler-specific command semantics.
+- [ ] Add search-evaluation command cases for corpus/qrel create/freeze immutability, pool creation, judgment supersession, adjudication source preservation, durable run/cancel, aggregate-only report publication, unscanned fixture refusal, profile publish/activation CAS, and every read/SDK operation binding; add task attestation/review/decision/exception/handoff/reopen/reverse-transition cases with no derived-state setter or generic undo.
 - [ ] Re-run the command. Expected: all tests pass; application receives exact command envelope; path/symlink/filename attack corpus cannot influence backing path.
 - [ ] Commit `feat(api): expose audited commands and replay labs`.
 

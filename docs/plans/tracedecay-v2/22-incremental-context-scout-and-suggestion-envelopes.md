@@ -248,7 +248,7 @@ pub struct ScoutToolProposalV1 {
 pub struct ScoutToolReceiptV1 {
     pub ordinal: u16,
     pub capability_id: CapabilityId,
-    pub request_digest: ContentDigest,
+    pub request_digest: PrivacyDomainBoundLocatorDigest,
     pub result_anchor_ids: Vec<RetrievalAnchorId>,
     pub coverage: CoverageReportV1, // canonical shared coverage type from 01-domain-crate.md
     pub started_at: UtcMicros,
@@ -404,7 +404,7 @@ pub struct ScoutTurnStateV1 {
     pub active_run_id: Option<ScoutRunId>,
     pub queued_trigger_ids: Vec<EventId>,
     pub prior_category_state: HintStateSnapshot,
-    pub last_envelope_fingerprint: Option<ContentDigest>,
+    pub last_envelope_fingerprint: Option<PrivacyDomainKeyedFingerprintV1>,
     pub closed_at: Option<UtcMicros>,
     pub version: EntityVersionId,
 }
@@ -476,7 +476,7 @@ pub struct ScoutContextDeltaV1 {
     pub current_task_refs: Vec<WorkItemVersionRefV1>,
     pub relevant_task_claim_refs: Vec<WorkClaimRefV1>,
     pub context_packet_refs: Vec<ContextPacketManifestRefV1>,
-    pub prior_suggestion_fingerprints: Vec<ContentDigest>,
+    pub prior_suggestion_fingerprints: Vec<PrivacyDomainKeyedFingerprintV1>,
     pub coverage: CoverageReportV1,
 }
 ```
@@ -568,7 +568,7 @@ pub struct ScoutModelRequestV1 {
     pub session_generation: u64,
     pub input_sequence: u64,
     pub system_prompt_version: SchemaVersion,
-    pub context_digest: ContentDigest,
+    pub context_digest: PrivacyDomainKeyedFingerprintV1,
     pub context_sections: Vec<ModelContextSectionV1>,
     pub allowed_intents: BTreeSet<ScoutToolIntentV1>,
     pub remaining_reads: u8,
@@ -673,7 +673,7 @@ pub struct ScoutModelSessionReceiptV1 {
     pub provider_thread_locator: Option<PrivacyDomainBoundLocatorDigest>,
     pub generation: u64,
     pub last_input_sequence: u64,
-    pub last_input_digest: ContentDigest,
+    pub last_input_digest: PrivacyDomainKeyedFingerprintV1,
     pub model_capability: ModelCapabilityRefV1,
     pub created_at: UtcMicros,
     pub last_used_at: UtcMicros,
@@ -707,7 +707,7 @@ pub struct ScoutDecisionV1 {
     pub silence: Option<SuggestionSuppressionReasonV1>,
     pub state_proposal: HintStateProposal, // plan 6 §9.1.2; the single CAS on the hint-state version
     pub explanation: DecisionExplanation,
-    pub decision_digest: Digest,
+    pub decision_digest: ManifestDigest,
 }
 ```
 
@@ -736,7 +736,7 @@ Policy ordering:
 
 Default presentation budget is 96 tokens; hard maximum is 160. Default delivery is at most one scout suggestion per Turn, four per session, one initial category plus one later evidence-strengthened escalation, and one coordination advisory per unchanged claim pair. Configuration may be stricter. Safety and compactness floors prevent looser values beyond hard caps. The turn/session/token budgets here are the shared plan 6 `HintStateSnapshot` ledgers debited by `DeliveryArbiterV1` for both engines; the four-per-session scout quota is the dedicated scout session ledger inside that same snapshot, not a parallel counter.
 
-Semantic fingerprint inputs are category, intent, exact address/logical message, resolved scope digest, primary entity/anchor set, proposed capability, and normalized bounded payload meaning. Model wording changes alone cannot evade dedupe.
+Semantic fingerprint inputs are category, intent, exact address/logical message, resolved scope digest, primary entity/anchor set, proposed capability, and normalized bounded payload meaning. Every output is a plan-01 `PrivacyDomainKeyedFingerprintV1` bound to the address privacy domain and active key epoch; it is never a generic/public content digest, and key rotation rebuilds or safely forgets state rather than comparing epochs. Model wording changes alone cannot evade dedupe.
 
 ## 10. Many agents, worktrees, repositories, and projects
 
@@ -1049,7 +1049,7 @@ SSE event families include safe `scout_status_changed`, `scout_run_progress`, `s
 - `scout_runs` plus immutable phase receipts/input manifests;
 - `scout_tool_receipts` referencing catalog capabilities and retrieval anchors;
 - `suggestion_candidates` with bounded protected payload refs;
-- `suggestion_envelopes` with sequence/state/expiry/fingerprint;
+- `suggestion_envelopes` with sequence/state/expiry and privacy-domain/key-epoch-bound fingerprint;
 - `suggestion_claims` and `suggestion_delivery_receipts` with uniqueness on invocation/envelope;
 - `suggestion_feedback` and projected outcome refs;
 - canonical foreign keys/refs to task, claim, dependency evidence, and context-packet anchors without copying task bodies;

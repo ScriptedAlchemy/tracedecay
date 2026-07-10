@@ -1,7 +1,5 @@
 # TraceDecay V2 Projectors Crate Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
-
 **Goal:** Build `tracedecay-projectors`, the deterministic framework and complete domain projector registry that turns immutable observations/events into versioned, evidence-bearing, rebuildable activity and project read models.
 
 **Architecture:** A canonical-event projector converts captured observations into immutable typed events; independent domain projectors then consume shard outboxes at least once and commit output rows plus checkpoints atomically. Registry versions, per-shard contiguous checkpoints, vector watermarks, bounded gap handling, dead letters, build generations, validation manifests, and atomic pointer swaps make every projection replayable without stopping capture or corrupting the active generation.
@@ -94,7 +92,7 @@ The dependency boundary is `tracedecay-domain <- tracedecay-projectors`; store i
 | `crates/tracedecay-projectors/src/activity/coordination.rs` | Agent presence, work claims/scopes/anchors, heartbeat/TTL/current status, redundancy declarations, overlap evidence, acknowledgements, handoffs, and outcome counters. |
 | `crates/tracedecay-projectors/src/activity/project_locators.rs` | Evidence-bearing session/activity-to-project/repository/worktree/branch/snapshot locators. |
 | `crates/tracedecay-projectors/src/lcm/mod.rs` | LCM/context projector registration. |
-| `crates/tracedecay-projectors/src/lcm/raw.rs` | Raw-message locators, content parts, source offsets/hashes, and payload coverage. |
+| `crates/tracedecay-projectors/src/lcm/raw.rs` | Raw-message locators, content parts, source positions plus privacy-domain-keyed fingerprints, and payload coverage. |
 | `crates/tracedecay-projectors/src/lcm/dag.rs` | Summary nodes, exact source ranges/messages, fan-in, supersession, and DAG invariants. |
 | `crates/tracedecay-projectors/src/lcm/compression.rs` | Compression decisions/boundaries, context assembly, lifecycle, and replay state. |
 | `crates/tracedecay-projectors/src/lcm/payloads.rs` | Payload refs, range lineage, retention/tombstone/locked/missing state; no blob ownership. |
@@ -245,18 +243,7 @@ impl Projector for CanonicalEventProjector {
 ### Outbox, checkpoints, watermarks, and concurrency
 
 ```rust
-pub struct ProjectionCheckpoint {
-    pub projector: ProjectorId,
-    pub version: ProjectorVersion,
-    pub shard: ShardId,
-    pub last_contiguous_sequence: u64,
-    pub highest_seen_sequence: u64,
-    pub source_watermarks: VectorWatermark,
-    pub schema_version: SchemaVersion,
-    pub builder_version: BuilderVersion,
-    pub generation: ProjectionGenerationId,
-    pub status: CheckpointStatus,
-}
+use tracedecay_domain::{ProjectionCheckpointKeyV1, ProjectionCheckpointV1};
 
 pub struct ProjectionCoordinator<R, S> {
     registry: R,
@@ -272,9 +259,10 @@ impl<R: RegistryPort, S: ProjectorStore> ProjectionCoordinator<R, S> {
 
 `VectorWatermark` above is the domain type, not a projector-local copy. Coordination uses `partial_cmp_components`, `dominates`, and `merge_max`; incomparable vectors stay incomparable and no scalar/global ordering is introduced.
 
-`ProjectionCheckpoint` is the single checkpoint shape in the system. It persists only in plan 02's `projection_checkpoints` table, keyed `(projector, version, shard, generation)`, and advances only through `ProjectionRepository::apply_projection` with a `ProjectionCheckpointRef` compare-and-set ([`02-store-crate.md`](02-store-crate.md)); no crate defines a second checkpoint schema or a side channel that moves one.
+Plan 01's `ProjectionCheckpointV1` is the single checkpoint shape in the system. It persists losslessly only in plan 02's `projection_checkpoints` table, keyed by `ProjectionCheckpointKeyV1`. Plan 02's one `ProjectionRepository` owns lease acquire/renew/release, checkpoint read/initialization, dead-letter read/resolution, and atomic projection application. Initialization requires an absent zero checkpoint; every later advance occurs only through `apply_projection` or an atomic replay resolution with the full expected checkpoint and exact lease epoch ([`02-store-crate.md`](02-store-crate.md)). No crate defines a reduced checkpoint/lease key, directly writes dead-letter state, or moves progress through a side channel.
 
 - One lease exists per `(projector, version, shard, generation)`. Different projectors/shards run concurrently; independent agent sources do not serialize.
+- The worker obtains that exact-key lease through `ProjectionRepository::acquire_lease`, reads/initializes the exact checkpoint, renews before its TTL safety margin, and releases on a clean stop. Store CAS—not host liveness guesses—fences a stale worker.
 - A leased worker reads a bounded batch after `last_contiguous_sequence`. Duplicate outbox rows are idempotent. Missing outbox sequence stops contiguous advancement and records `projector.outbox_gap`; the worker may process only explicitly commutative rows beyond the gap into a nonpublished staging generation.
 - Source-sequenced activity preserves `(producer, sequence)`. Cross-agent display order uses occurred time, ingested time, producer, sequence, and event ID as a deterministic sort, but it does not assert causation.
 - Parent/child, spawn, inter-agent message, handoff, tool-result, and goal-transition relations use provider/host IDs or direct event references. Unresolved targets remain candidate relations; later resolution supersedes the candidate.
@@ -283,63 +271,15 @@ impl<R: RegistryPort, S: ProjectorStore> ProjectionCoordinator<R, S> {
 
 ### Dead letters and advancement policy
 
-```rust
-pub enum DeadLetterReason {
-    UnsupportedSchema,
-    RegistryViolation,
-    InvalidIdentity,
-    MissingRequiredEvidence,
-    SensitivityViolation,
-    PayloadUnavailable,
-    OutboxGap,
-    ProjectionInvariant,
-    CorruptInput,
-    OwnershipConflict,
-}
+Plan 01 is the sole semantic owner of `DeadLetterReasonV1`, `DeadLetterDispositionV1`, `DeadLetterRecordV1`, `DeadLetterAttemptV1`, `DeadLetterResolutionReceiptV1`, `DeadLetterCompactionV1`, and `DeadLetterPageV1`. This crate selects those values; it does not redefine them. Plan 02 is the sole repository/physical owner and derives the operator view's attempt count, next retry, and terminal resolution by joining the immutable record to its append-only attempts/resolution.
 
-pub enum DeadLetterDisposition {
-    BlockCheckpoint,
-    QuarantineAndAdvance,
-    RetryAfter(std::time::Duration),
-}
-
-pub struct DeadLetterRecord {
-    pub id: DeadLetterId,
-    pub projector: ProjectorId,
-    pub version: ProjectorVersion,
-    pub shard: ShardId,
-    pub sequence: u64,
-    pub input_id: ProjectionInputId,
-    pub reason: DeadLetterReason,
-    pub safe_details: LogSafeText,
-    pub disposition: DeadLetterDisposition,
-    pub first_seen_at: UtcMicros,
-    pub attempts: u32,
-}
-
-pub enum DeadLetterResolutionAction {
-    Replayed,
-    QuarantinedOmission,
-    SupersededByRegistryRevision,
-}
-
-pub struct DeadLetterResolutionReceiptV1 {
-    pub resolution_id: ResolutionId,
-    pub dead_letter_id: DeadLetterId,
-    pub action: DeadLetterResolutionAction,
-    pub replay_effect_count: u64,
-    pub resolved_by: ProjectorVersion,
-    pub resolved_at: UtcMicros,
-}
-```
-
-Dead letters persist in plan 02's `dead_letters` table in the owning shard ([`02-store-crate.md`](02-store-crate.md)): `id` primary key, uniqueness on `(projector, version, shard, sequence, input_id)`, indexes on `(reason, first_seen_at)` and `(disposition)`. Resolution receipts persist beside them keyed by `resolution_id` with a unique index on `dead_letter_id` (one terminal resolution per dead letter) and reference the original record; they never modify it. Growth is bounded without deletion of live evidence: resolved dead letters older than the evidence-retention watermark compact into immutable per-`(projector, reason, day)` rollup counts, unresolved blocking records are never compacted, and a per-shard live envelope of 100,000 records or 256 MiB raises backpressure on the offending projector — never silent discard.
+Dead letters persist in plan 02's `dead_letters` family in the owning shard ([`02-store-crate.md`](02-store-crate.md)), keyed by the full `(projector, projector_version, shard, generation)` checkpoint key plus sequence/input. Growth is bounded without deletion of live evidence: resolved dead letters older than the evidence-retention watermark compact into immutable per-`(projector, reason, day)` rollup counts, unresolved blocking records are never compacted, and a per-shard live envelope of 100,000 records or 256 MiB raises backpressure on the offending projector — never silent discard.
 
 Before any `put_row`, graph label/snippet, FTS document, representation source, aggregate label, replay artifact, or emitted outbox payload, `privacy.rs` verifies the source receipt/descendant lineage and requires the corresponding domain sink-eligible wrapper. Receipt verification reads the durable `SanitizationReceiptV1` rows in plan 02's per-shard `sanitization_receipts` table ([`02-store-crate.md`](02-store-crate.md)); capture mints receipts per [`03-capture-crate.md`](03-capture-crate.md), and the table's expiry/revocation state is what "expired" and "revoked" mean here. `privacy.rs` never turns raw/classified text into an eligible value. A missing, incomplete, incompatible, expired, or revoked receipt blocks the checkpoint or emits a non-content coverage row according to the registry; it can never be coerced into empty text and counted as complete.
 
 - Registry, sensitivity, identity, evidence, invariant, corrupt-input, ownership, and outbox-gap failures block by default.
-- `QuarantineAndAdvance` is legal only for a registry-declared optional forensic family whose omission is surfaced in projection coverage; canonical messages, tools, reasoning markers, goals, agents, LCM lineage, Git, and automation cannot use it.
-- Dead-letter replay writes a `DeadLetterResolutionReceiptV1` referencing the original record. Deleting or editing a live dead letter is forbidden; the only removal path is the retention-watermark compaction above, which preserves the rollup counts.
+- `DeadLetterDispositionV1::QuarantineAndAdvance` is legal only for a registry-declared optional forensic family whose omission is surfaced in projection coverage; canonical messages, tools, reasoning markers, goals, agents, LCM lineage, Git, and automation cannot use it.
+- Dead-letter create/attempt/resolution/compaction are typed `DeadLetterMutationV1` values committed by plan 02's projection repository. A blocking failure and unchanged checkpoint commit together; a replay resolution, its registered effects, its receipt, and any now-legal checkpoint advance commit together. Deleting or editing a live dead letter is forbidden; the only removal path is the retention-watermark compaction above, which preserves the rollup counts.
 - Rebuild validation fails on unresolved blocking dead letters and reports quarantined omissions by kind/count/hash.
 
 ### Rebuild and atomic swap
@@ -403,9 +343,9 @@ impl<S: ProjectorStore> ProjectionRebuilder<S> {
 
 The `read_models/{facets,timeline,observatory}` family produces the projected read models plan [`05-query-crate.md`](05-query-crate.md) consumes through query ports (facets, timeline density, observatory status; 05 lists these files as required companions). All three are derived, current-generation-only rows: they rebuild from retained events, carry their full source `VectorWatermark`, and hold no payload text — labels are `CatalogSafeText`/`LogSafeText` sink-eligible values only.
 
-- `facet_rollup_rows(facet_key_id: FacetKeyId, scope_id: ScopeId, entity_kind: RegistryKind, bucket_value_hash: [u8; 32], bucket_label: CatalogSafeText, count: u64, source_watermark: VectorWatermark, projector_version: ProjectorVersion, updated_at: UtcMicros)`. Primary key `(facet_key_id, scope_id, entity_kind, bucket_value_hash)`; required index `(scope_id, entity_kind, count DESC)`. Owning shard: the activity/project shard owning the counted rows; All-scope facets remain `all_scope_rollup_v1` output. Size envelope: at most 1,000 buckets per `(facet_key_id, scope_id, entity_kind)` — plan 05's facet-bucket cap — with an explicit `other` overflow bucket; retention: replaced in place per generation, no history.
-- `timeline_density_rows(scope_id: ScopeId, lane_kind: TimelineLaneKind, time_basis: TimeBasis /* occurred | ingested */, bucket_width: BucketWidth /* minute | hour | day | month */, bucket_start: UtcMicros, event_count: u64, first_event_id: EventId, last_event_id: EventId, source_watermark: VectorWatermark, projector_version: ProjectorVersion, updated_at: UtcMicros)`. Primary key `(scope_id, lane_kind, time_basis, bucket_width, bucket_start)`; required index `(scope_id, bucket_width, bucket_start)`. Owning shard: the shard owning the bucketed events. Size envelope: four widths over the event horizon (bounded by retention), sized for plan 05's server-side density buckets and the dashboard's 250k-density-mark budget; retention: derived, rebuilt, no history.
-- `observatory_status_rows(subsystem: ObservatorySubsystem /* capture | spool | journal | projector | graph | blob | catalog | migration | privacy | provider_integration | daemon */, component_id: ComponentId, scope_id: Option<ScopeId>, status: ObservatoryStatus /* healthy | degraded | stale | blocked | unavailable | foreign_owned | unknown */, lag_events: u64, lag_seconds: u64, open_dead_letters: u64, identity_conflicts: u64, coverage: ProjectionCoverage, evidence_anchors: Vec<RetrievalAnchorId>, last_verified_at: Option<UtcMicros>, source_watermark: VectorWatermark, projector_version: ProjectorVersion, updated_at: UtcMicros)`. Primary key `(subsystem, component_id, scope_id)`; required index `(status, updated_at)`. Owning shard: activity for profile-wide rows, project for per-project rows. Size envelope: one row per live component (thousands, not millions); retention: current view only — history stays in the underlying events. Counts, IDs, and coverage only; it feeds the Observatory surfaces in [`11-dashboard-frontend.md`](11-dashboard-frontend.md) and never renders a metric from missing denominators as zero.
+- `facet_rollup_rows(facet_key_id: FacetKeyId, scope_digest: ScopeSelectorDigest, entity_kind: RegistryKind, bucket_value_hash: PrivacyDomainBoundLocatorDigest, bucket_label: CatalogSafeText, count: u64, source_watermark: VectorWatermark, projector_version: ProjectorVersion, updated_at: UtcMicros)`. Primary key `(facet_key_id, scope_digest, entity_kind, bucket_value_hash)`; required index `(scope_digest, entity_kind, count DESC)`. The scope digest binds the canonical resolved selector recorded by the build manifest; the bucket hash is keyed within the owning privacy domain and cannot correlate scopes/domains. Owning shard: the activity/project shard owning the counted rows; All-scope facets remain `all_scope_rollup_v1` output. Size envelope: at most 1,000 buckets per `(facet_key_id, scope_digest, entity_kind)` — plan 05's facet-bucket cap — with an explicit `other` overflow bucket; retention: replaced in place per generation, no history.
+- `timeline_density_rows(scope_digest: ScopeSelectorDigest, lane_kind: TimelineLaneKind, time_basis: TimeBasis /* occurred | ingested */, bucket_width: BucketWidth /* minute | hour | day | month */, bucket_start: UtcMicros, event_count: u64, first_event_id: EventId, last_event_id: EventId, source_watermark: VectorWatermark, projector_version: ProjectorVersion, updated_at: UtcMicros)`. Primary key `(scope_digest, lane_kind, time_basis, bucket_width, bucket_start)`; required index `(scope_digest, bucket_width, bucket_start)`. Owning shard: the shard owning the bucketed events. Size envelope: four widths over the event horizon (bounded by retention), sized for plan 05's server-side density buckets and the dashboard's 250k-density-mark budget; retention: derived, rebuilt, no history.
+- `observatory_status_rows(subsystem: ObservatorySubsystem /* capture | spool | journal | projector | graph | blob | catalog | migration | privacy | provider_integration | daemon */, component_id: ComponentId, scope_digest: Option<ScopeSelectorDigest>, status: ObservatoryStatus /* healthy | degraded | stale | blocked | unavailable | foreign_owned | unknown */, lag_events: u64, lag_seconds: u64, open_dead_letters: u64, identity_conflicts: u64, coverage: ProjectionCoverage, evidence_anchors: Vec<RetrievalAnchorId>, last_verified_at: Option<UtcMicros>, source_watermark: VectorWatermark, projector_version: ProjectorVersion, updated_at: UtcMicros)`. Primary key `(subsystem, component_id, scope_digest)`; required index `(status, updated_at)`. Owning shard: activity for profile-wide rows, project for per-project rows. Size envelope: one row per live component (thousands, not millions); retention: current view only — history stays in the underlying events. Counts, IDs, and coverage only; it feeds the Observatory surfaces in [`11-dashboard-frontend.md`](11-dashboard-frontend.md) and never renders a metric from missing denominators as zero.
 
 ### Tool surface completeness
 
@@ -465,7 +405,7 @@ Required canonical Turn relations are `part_of_session`, `performed_by`, `contai
 
 Projectors must consume the machine-readable PR 3 compatibility inventory. CI fails when a new V1 structured event kind, provider tool kind, CLI/MCP field, LCM table/sidecar, hook terminal state, or automation artifact kind lacks a registry owner and parity disposition.
 
-Planning began at `99ad19bc`; publication master `3567e31e` (0.0.48) includes merged release #418 and split-store consolidation #425 alongside the earlier accepted inputs. Only draft plan PR #421 was open at final refresh. Identity split/consolidation, edit conflicts, proxy transitions, catalog notifications, fact retrieval, and aggregate-before-sample behavior require projected receipts/status without inferred success or replay. Before each backfill/cutover PR, refresh master/open state, source/projector registry digests, and actual protocol/schema/tool inventories.
+Planning began at `99ad19bc`. The normative publication snapshot is [master §2.6](../2026-07-09-tracedecay-brain-rewrite.md#26-current-master-accepted-changes) plus [plan 13](13-research-provenance-and-context-anchors.md). Identity split/consolidation/retirement, branch/session variant preservation, edit conflicts, proxy and lifecycle transitions, registry repair, FTS maintenance, graph-checkpoint safety, catalog notifications, fact retrieval, and aggregate-before-sample behavior require projected receipts/status without inferred success or replay. Before each backfill/cutover PR, refresh master/open state, source/projector registry digests, and actual protocol/schema/tool inventories.
 
 ## Ownership and identity rules
 
@@ -480,7 +420,7 @@ Planning began at `99ad19bc`; publication master `3567e31e` (0.0.48) includes me
 
 ## Deterministic backfill sequence
 
-1. Freeze a copied V1 inventory watermark at publication base `3567e31e`; record merged #405/#407/#410/#411/#412/#413/#414/#415/#416/#417/#418/#419/#420/#422/#423/#424/#425; run disk preflight and secret scan.
+1. Freeze a copied V1 inventory watermark at the current normative publication snapshot; record every accepted change from master §2.6 and plan 13; run disk preflight and secret scan.
 2. Import identity allocations, profile/repository/project/checkout/worktree/provider/source aliases, legacy adoption manifests, and Hermes migration ledgers; resolve no ambiguous identity automatically.
 3. Project canonical observations to events, then sessions, turns, messages/content, actors/models, tools/results/approvals, exposed reasoning markers, goals/tasks/plans, agent/workflow/handoff/inter-agent events in `activity.db`.
 4. Project LCM raw/source/summary DAG, compression/context assembly, payload state, lifecycle, and tombstones after canonical message IDs exist.
@@ -535,7 +475,7 @@ Each step is independently resumable by `(projector, version, shard, generation,
 
 - [ ] Write failing tests for exact event IDs, correction supersession, unknown future schema, illegal relation endpoints, causal evidence rules, ambiguous alias candidates, moved/symlink/linked-worktree identity, pristine legacy adoption, nonempty split conflict, and Hermes user-profile ownership.
 - [ ] Implement `canonical_event_v1` and `identity_alias_v1` with complete capture payload-kind ownership.
-- [ ] Refresh publication base `3567e31e`, record every merged commit/protocol/schema version including #425 `de3d05dc` and release #418 `3567e31e`, and record any newly open implementation inputs before execution.
+- [ ] Refresh the normative publication snapshot, record every accepted commit/protocol/schema version, and record any newly open implementation inputs before execution.
 - [ ] Run `cargo test -p tracedecay-projectors --test framework_suite`; expected: exit 0 with no unowned capture kind.
 - [ ] Run `cargo test -p tracedecay-projectors --test backfill_parity identity`; expected: one canonical identity per adopted/Hermes fixture and explicit conflict rows for nonempty collisions.
 - [ ] Commit `feat(projectors): project canonical events and identity`.

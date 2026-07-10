@@ -1,12 +1,10 @@
 # TraceDecay V2 Root Compatibility and Migration Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use `superpowers:subagent-driven-development` (recommended) or `superpowers:executing-plans` to implement this plan task-by-task. Every execution PR begins with a refreshed master/open-PR inventory and a failing focused test. Steps use checkbox (`- [ ]`) syntax for tracking.
-
 **Goal:** Turn the existing `tracedecay` package into the stable binary, daemon, composition root, host installer, and bounded migration shell for the V2 crates; preserve inventoried current behavior until its explicit cutover, then expose only current V2 bindings while each context backfills, validates, rolls back data safely, and retires V1 without a flag day.
 
 **Architecture:** The published root package wires immutable V2 crate contracts into process-specific service graphs. A generated migration inventory owns every legacy surface. Typed route modes select one effect owner per bounded context, V1 adapters exist only while that context is pre-cutover or during an explicit operator rollback, shadow comparators use frozen vector watermarks, and signed cutover receipts make data migration reversible. There is no live fallback for stale clients, protocols, plugins, or tool names. The root never becomes a second application layer.
 
-**Tech Stack:** Rust 2024 workspace; existing `tracedecay` binary/package; V2 workspace crates/surfaces from plans 01–24; Clap; Tokio; Axum; JSON-RPC/MCP; generated OpenAPI/SDK and capability catalogs; SQLite V1 readers plus `tracedecay-store`; current provider manifests/installers; Cargo nextest; release-plz; crates.io coordinated workspace publication.
+**Tech Stack:** Rust 2024 workspace; existing `tracedecay` binary/package; V2 workspace crates/surfaces from plans 01–26; Clap; Tokio; Axum; JSON-RPC/MCP; generated OpenAPI/SDK and capability catalogs; SQLite V1 readers plus `tracedecay-store`; current provider manifests/installers; Cargo nextest; release-plz; crates.io coordinated workspace publication.
 
 ---
 
@@ -25,6 +23,8 @@ This document is the execution plan for the “Existing root crate” row in mas
 - Plan 21 owns binding/output semantics. Root supplies thin generated Clap/MCP adapters, stdout/stderr/exit and protocol framing, then deletes handwritten schemas/dispatch allowlists/renderers/aliases after parity; it cannot keep a root-local catalog or error model.
 - Plan 22 owns scout workflow/model-gateway/host-delivery semantics. Root supplies daemon scheduling, optional App Server adapter, and host handshake wiring without putting model/search work on the hook path.
 - Plan 23 owns temporal message/LCM search and context semantics. Root supplies V1 import/shadow adapters and generated bindings, then deletes independent legacy FTS/LCM/ranking/load-routing paths after cutover.
+- Plan 25 owns `tracedecay-code-index`. Root composes its producer with the projector-owned build port and daemon watcher, but neither projectors nor application imports the production indexer.
+- Plan 26 owns accounting/observability contracts, projections, metric registry, and SLO semantics. Root supplies process telemetry sources and transport bindings only.
 
 Program numbering remains authoritative from the master plan. This document refines existing numbers with suffixes; it does not insert or renumber the domain PRs:
 
@@ -90,7 +90,7 @@ tracedecay tool pr_context --args '{"branch":"<each-open-head>","project_path":"
 
 Record local commit, remote head, merge base, fetched-at time, TraceDecay index watermark, direct changed-file set, structural impact set, and any disagreement. GitHub is authoritative for live PR/check/merge state; TraceDecay is authoritative for indexed semantic context only at its named commit/watermark.
 
-Publication refresh observed `origin/master` `3567e31e3a60730400c9b900e32ca02c0bf3bf33` at 0.0.48 with #418 and #425 merged; #425 final head `d3bb28b5` merged as `de3d05dc`. Only draft plan PR #421 was open. The plan branch must be rebased to that or a newer accepted base before final verification; the lead fetches/rebases and refreshes states before every execution slice. The checked-in [research provenance and context anchors](13-research-provenance-and-context-anchors.md) and [historical failure regression matrix](14-historical-failure-regression-matrix.md) are normative planning inputs; every root execution receipt cites their refreshed successors and stable `FM-###` IDs.
+The master plan §2.6 and [plan 13](13-research-provenance-and-context-anchors.md) are the sole versioned publication snapshot. Before every execution slice, fetch current master/open PRs, classify new inputs, rebase the implementation branch, and regenerate actual crate/schema/protocol/tool inventories. The checked-in [research provenance and context anchors](13-research-provenance-and-context-anchors.md) and [historical failure regression matrix](14-historical-failure-regression-matrix.md) are normative planning inputs; every root execution receipt cites their refreshed successors and stable `FM-###` IDs.
 
 The 2026-07-09 planning baseline is:
 
@@ -101,15 +101,26 @@ The 2026-07-09 planning baseline is:
 | PR #407, `fix(hermes): use the user TraceDecay profile` | Merged in publication base `78bfbfbc`; broad migration/removal | Accepted base. Root composition has one user profile. Deleted `src/migrate/hermes.rs` and removed Hermes bridges/config/inventory modules are historical inventory/import rows, never new V2 dependencies. Preserve facts-only migration and collision receipts. |
 | PR #410, `fix(sessions): collapse copied subagent prompts` | Merged | Freeze its `direct_user`, `subagent`, `tool_result`, sanitized-native, and parent-representative behavior across CLI/MCP/LCM/message search. Root only maps bindings; domain/projector/query own semantics. |
 | PR #411, foreign-installation doctor authority | Merged | Inventory one ownership predicate and remediation. Foreign packages are information/preserved state, never update/delete targets. |
-| PRs #414/#419, `tracedecay_move_symbol` and race-safe writes | Merged | Inventory dry-run-default preview/apply semantics, impact report, exact source/destination versions, symlink/same-file/hard-link rejection, atomic sibling renames, last-moment revalidation, conflict-safe rollback, reindex, and all CLI/MCP/API/SDK/dashboard bindings before adapter cutover. |
+| PRs #414/#419, `tracedecay_move_symbol` and race-safe writes | Merged | Inventory the historical dry-run/default execution and rollback evidence, impact report, exact source/destination versions, symlink/same-file/hard-link rejection, atomic sibling renames, last-moment revalidation, conflicts, reindex, and every binding; map V2 to operation-specific edit inspect/commit/recovery before adapter cutover. |
 | PR #415, release-PR integrity | Merged | Preserve trusted-base changed-file allowlist, tracked-ignored-file guard, and clean-worktree enforcement; V2 extends it across generated catalog/schema/API/SDK/dashboard/release inventories. |
 | PR #417, doctor identity-split visibility | Merged | Preserve error-aware split inventory and byte-unchanged candidates; status/doctor must not turn identity conflict into absent index or offer initialization. |
-| PRs #413/#416/#418, releases v0.0.46/v0.0.47/v0.0.48 | All merged; #418 merge `3567e31e` | Packaging/version baselines only. Refresh version, Cargo metadata, release manifest, and checks; no architectural dependency on release PR contents or inference that the local 0.0.47 planning runtime was upgraded. |
+| PRs #413/#416/#418/#427/#429/#431/#433, releases v0.0.46 through v0.0.52 | All merged; v0.0.52 tag `09080e80`, publication head later advanced through #438 to `3bea5ec7` | Packaging/version baselines only. Refresh version, Cargo metadata, release manifest, and checks; no architectural dependency on release PR contents or inference that an earlier 0.0.47 planning probe was upgraded. |
 | PR #420, early daemon proxy/hot swap | Merged | Root chooses proxy/local authority before opening stores, reconnects reads/current calls per request, never replays an uncertain write, and distinguishes safe reconnect from incompatible new host session. Merged #422 adds compatible generation-scoped `tools.listChanged` refresh. |
-| PR #425, explicit split-store consolidation | Merged as `de3d05dc`; final head `d3bb28b5` | Preserve its offline plan/apply boundary, canonical macOS/Linux/Windows paths (`12182510`), final path-plus-file/inode holder identity, source freeze, reservations, dual backups, deterministic confirmation, restartable ledger/staging, table merge/rebuild/reject/collision dispositions, remapped LCM edges (`82cfa9b9`), exhaustive verification, marker/registry cutover, and doctor recovery. Treat it as the accepted V1 anti-corruption seam for V2 reconciliation, not a second canonical merger. |
+| PR #425, explicit split-store consolidation | Merged as `de3d05dc`; final head `d3bb28b5` | Preserve its historical V1 planning/execution boundary (commands currently named plan/apply), canonical macOS/Linux/Windows paths (`12182510`), final path-plus-file/inode holder identity, source freeze, reservations, dual backups, deterministic confirmation, restartable ledger/staging, table merge/rebuild/reject/collision dispositions, remapped LCM edges (`82cfa9b9`), exhaustive verification, marker/registry cutover, and doctor recovery. Map it to operation-specific V2 consolidation inspect/plan/start and treat it as the accepted anti-corruption seam, not a second canonical merger. |
+| PR #426, untracked branch graph recovery | Merged as `96dcedac`; head `6c935e77` | Inventory graph artifacts by verified file identity/fingerprint even when metadata is absent; preserve unmatched branch databases, reconstruct metadata only after proof, and prevent GC or consolidation from discarding the sole branch graph copy. |
+| PR #428, divergent session variants | Merged as `00612894`; head `a9b4f16c` | Compare same-ID sessions by canonical content/provenance. Dedupe only exact duplicates; assign stable variant identities to divergent histories and remap every message, LCM, summary, and source-edge dependency. |
+| PR #430, indexed consolidation-family lookup | Merged as `cc95929c`; head `49acde38` | Materialize normalized indexed lookup tables for consolidation families, verify production SQL plans, prohibit recursive JSON/source rescans in hot loops, and make index construction resumable and bounded. |
+| PR #432, hook lifecycle quiescence | Merged as `22497aa7`; heads `302ce64f`/`b2fd149f` | Every hook acquires the profile lifecycle lease before config/startup/store work, drains provider input when an exclusive owner is active, and performs no agent/plugin installation or local-store fallback during quiescence. |
+| PR #434, conflict-safe registry reconstruction | Merged as `effc146b` | Classify manifest eligibility, refuse path/alias ownership theft or stale/retired resurrection, reconstruct transactionally under lifecycle ownership, retry idempotently, and expose blocked proof through doctor. |
+| PR #435, FTS repair outside search reads | Merged as `4f0d1b42` | Keep every search/query path side-effect free, distinguish FTS-only damage from whole-database corruption, return typed degraded coverage, and route repair through a fenced maintenance command with verification receipts. |
+| PR #436, graph mmap disabled across peer checkpoints | Merged as `accc79f0` | Configure peer-opened graph connections with `mmap_size=0` until immutable generations make mapping safe; retain mixed-page-size and peer-checkpoint regressions in store cutover gates. |
+| PR #437, release v0.0.53 | Merged as `273f50c0` | Publication-only accepted input. Record package/tag/catalog/schema digests and checks; do not infer an installed runtime or architectural change from release state. |
+| PR #438, restart-safe applied-manifest retirement | Merged as `3bea5ec7`; final head `4f7b2b2c` | Import the accepted contract: exclusive lifecycle capability, proof of legacy ownership, transactional retirement of schema-2 `Applied` source/target manifests, original shard data retained, destination canonical, idempotent retry, and fail-closed doctor evidence. |
+| PR #439, derive orphan stores from registry reconstruction | Merged as `974d423b`; final head `de55e376` | Use the authoritative read-only per-manifest registry reconstruction diff for doctor orphan populations; do not retain token-accounting or path-proxy counters. |
+| PR #440, isolate registry reconstruction conflicts | Merged as `0dd1fd7d`; final head `7a56db8e` | Preflight every eligible manifest independently so one conflict remains visible without suppressing unrelated missing rows; migration/doctor share the same per-manifest dispositions. |
 | PR #409, superseded release attempt | Closed without merge | Historical inventory only. Do not require its version or deleted spec. |
 
-#418 and #425 are accepted-base behavior at the pinned merges above. If a new open PR touches an owned V1 seam, add its direct files, checks, and semantic outcome to the execution-slice receipt before coding.
+#418 and #425–#440 above are accepted-base behavior at the pinned publication commit where applicable. Any new open PR touching an owned V1 seam receives a live state/direct-file/check/semantic receipt before coding.
 
 ### Known baseline test behavior
 
@@ -129,7 +140,7 @@ This is a baseline runner-order defect, not a V2 parity waiver:
 | Process | Opens | Owns | Must not do |
 |---|---|---|---|
 | `tracedecay` one-shot read | profile/catalog read handle, bounded V1/V2 read adapters selected by route | request context and output adapter | Start projector/scheduler/writer threads or retain read transactions after response. |
-| `tracedecay` one-shot command | one owning-shard command handle plus explicit workflow/job client | preview/apply, idempotency key, receipt rendering | Hold DB transactions over Git/network/process work. |
+| `tracedecay` one-shot command | one owning-shard command handle plus explicit workflow/job client | operation-specific read-only `inspect` or immutable `plan` followed by separately authorized `start`, idempotency key, receipt rendering | Hold DB transactions over Git/network/process work. |
 | Provider hook command | `tracedecay-hooks`, local spool client, pinned catalog/policy facts or bounded application hook port | normalize, durably queue, evaluate within budget, render one host response | Open graph/dashboard, scan repositories, perform inline backfill, or block on network. |
 | MCP stdio server | root composition plus application/API-independent MCP adapter; same-version daemon client when configured | exact protocol/catalog handshake, tool dispatch, markdown/JSON rendering, response handles | Own domain SQL, hand-maintained tool semantics, or proxy to a stale daemon. |
 | Long-lived daemon | V2 store writers, capture drain, projectors, scheduler/automation workers, catalog publication, MCP socket, watchers | fenced leases, recovery, shutdown/checkpoint, background work | Accept a stale writer epoch or mix profiles across a connection. |
@@ -313,7 +324,7 @@ Every current root module must appear in the PR 3R generated inventory. This tab
 | `src/global_db.rs` and tests | Store activity/catalog repositories, capture/projectors/query/application | `compat::v1::{catalog,activity,accounting}` | Delete table logic only when every table has import/parity/deletion receipt and no V1 route. |
 | `src/db/**`, `branch.rs`, `branch/**`, `branch_meta.rs` | Store graph generations; code/Git projectors/query | `compat::v1::{graph,git_delivery}` | Delete branch DB write/read paths after graph/Git cutovers and packed-generation rollback closure. |
 | `src/project_registry.rs`, `path_scope.rs`, `path_tree.rs`, `worktree.rs` | Domain ownership, catalog, application scope query | bootstrap plus V1 catalog adapter | Remove duplicate identity/scope calculations; retain only OS/Git discovery infrastructure behind ports. |
-| Merged #425 `src/migrate/consolidate/**`, `src/open_store_holders.rs`, `src/sqlite_read_snapshot.rs`, consolidation manifest/CLI/doctor wiring | Store/application reconciliation workflow plus root migration controller | V1 split-store anti-corruption adapter under the shared lifecycle lease | Preserve offline plan/apply/resume/status/verify/recovery and path-plus-file/inode holder semantics through V2 identity migration. Delete the V1 table-specific merger only after PR 33R/33S proves every family/disposition, remapped LCM edge, canonical path, dual backup, collision, and marker-cutover invariant. |
+| Merged #425 `src/migrate/consolidate/**`, `src/open_store_holders.rs`, `src/sqlite_read_snapshot.rs`, consolidation manifest/CLI/doctor wiring | Store/application reconciliation workflow plus root migration controller | V1 split-store anti-corruption adapter under the shared lifecycle lease | Preserve historical behavior through operation-specific V2 consolidation inspect/plan/start/resume/status/verify/recovery and retain path-plus-file/inode holder semantics. Delete the V1 table-specific merger only after PR 33R/33S proves every family/disposition, remapped LCM edge, canonical path, dual backup, collision, and marker-cutover invariant. |
 | `src/extraction/**`, `extraction_worker.rs`, `sync.rs`, `dependency_imports.rs`, `derive_table.rs`, `external_tools.rs` | Capture repository/code source adapter | Root code-source infrastructure port until PR 18 parity | Move scanner/worker/extractor implementation behind capture contracts; worker remains a root process entry, not a store writer. |
 | `src/resolution/**`, `graph/**`, `redundancy.rs`, `ast_grep_search.rs` | Projectors for code evidence; query graph/code operators | V1 graph adapter | Delete V1 DB-bound resolution/query code after code-domain parity; preserve grammar-independent algorithms only in their owning crate. |
 | `src/context/**`, `diagnose.rs`, `diagnostics/**` | Query/application code context and diagnostics observations/projections | V1 operations/query adapters | CLI/MCP names remain; move collection to infrastructure ports and orchestration to application. |
@@ -330,7 +341,7 @@ Every current root module must appear in the PR 3R generated inventory. This tab
 | `src/dashboard/**`, `dashboard/*` legacy plugins | API + frontend plan 11 | Legacy router/plugins nested beside V2 | Delete each plugin only after route, action, URL, accessibility, and data parity plus one release of redirects. |
 | `src/cli.rs`, `src/cli/**`, root `*_cmd.rs`, `commands.rs`, `display.rs`, `status_cmd.rs` | Tool catalog + application | Root CLI adapter | Preserve help/flags/stdout/stderr/exit/JSON; remove command-local business logic after transport parity. |
 | `src/daemon.rs`, `src/daemon/**`, `lifecycle_lease.rs`, `serve.rs`, `shell.rs` | Root process lifecycle; application/hooks/API ports | Root composition | Retain thin lifecycle/IPC and #412 cross-process fencing; remove DB/query/business logic and global background toggles. |
-| `src/migrate/**`, `doctor.rs`, `doctor/**`, `retention.rs` | Store/application operations and root migration controller | V1 operations adapter | Preserve plan/export/apply/verify/reconstruct/rollback/repair/cleanup commands; retire V1-specific implementation after archive window. |
+| `src/migrate/**`, `doctor.rs`, `doctor/**`, `retention.rs` | Store/application operations and root migration controller | V1 operations adapter | Map historical operations onto operation-specific inspect/plan/start/status/resume/verify/reconstruct/rollback/repair/cleanup commands; retire V1-specific implementation after archive window. |
 | `src/upgrade.rs`, `upgrade/**`, `update_cmd.rs`, release workflows | Root release/upgrade | Root | Retain, add V2 preflight/backup/version-skew logic, and verify isolated crates.io install. |
 | `src/git.rs`, `src/text.rs`, `src/resources/**`, `src/startup_tests.rs`, `src/user_config.rs` | Git infrastructure ports (capture/projectors/query), owning-crate text utilities, root embedded resources, root startup self-checks, plan 20 configuration registry (`UserConfig` is already a Section 10 config source) | Root infrastructure and V1 config/catalog adapters | Delete after owning-crate parity; `user_config.rs` legacy readers retire in PR 37G once generated config bindings pass parity. |
 | `src/bench.rs`, benches/evals/tests | Owning crates plus cross-system root gates | Root compatibility harness | Move fixtures/benchmarks with behavior; never delete the only parity oracle with its implementation. |
@@ -345,7 +356,7 @@ Every current root module must appear in the PR 3R generated inventory. This tab
 | Provider transcripts | `src/sessions/**` plus `sessions.db`/global activity rows | profile `activity.db` observations, actors, agents, sessions, turns, messages, tools, goals, workflows | One source head per artifact/generation; preserve native rows and unknown fields; no required project. |
 | LCM raw/summary/payload | `src/sessions/lcm/**` and payload root | activity observations/projections plus privacy-domain blobs | Canonical message content stored once; DAG/source ranges and compression state retain exact lineage. |
 | Hooks/hints/outcomes | hook process writes, analytics DB/JSONL fallback, V1 policy state | activity/project observations, policy/hint projections, catalog/policy digests | V1 is sole effect owner in shadow. Delivery and terminal outcomes never inferred from mere emission. V1 analytics/hook JSONL hint emissions map to plan 06 `HintOutcomeRecordV1` rows, making the historical 1,182-emitted/3-acted join queryable. |
-| Code index/diagnostics/tests | branch `tracedecay.db` files | immutable graph generations and project evidence | Import snapshot identity, extractor/resolver version, diagnostics/test map, and content hashes; branch store is not deleted yet. Per-branch graph DB migration detail lives in `25-code-intelligence-indexing-crate.md`. |
+| Code index/diagnostics/tests | branch `tracedecay.db` files | immutable graph generations and project evidence | Import snapshot identity, extractor/resolver version, diagnostics/test map, and privacy-domain-keyed file fingerprints; branch store is not deleted yet. Per-branch graph DB migration detail lives in `25-code-intelligence-indexing-crate.md`. |
 | Git/delivery | branch/worktree metadata, Git correlation tables, daemon watcher, live remote reads | project events/relations and explicit local/live revisions | Keep direct, impacted, candidate-test, and context-only membership separate; drift blocks joined claims. |
 | Memory/facts | `src/memory/**` tables inside `tracedecay.db` | activity or project histories by `DeclaredScope`; blob refs where needed | Facts/entities/trust/feedback/deletions are durable. Verify row/version/hash/link counts before graph DB archive. |
 | Automation/skills/curation | JSON/JSONL/config/artifact roots and V1 tables | activity/project histories and privacy-domain blobs | Preserve historical proposal/approval/apply evidence, then model V2 candidate/validation/autonomy-decision/automatic-effect/use/outcome/revision/recovery chain. |
@@ -367,14 +378,15 @@ After a source-family capture cutover, V2 is the only canonical source-offset ow
 ```rust
 pub enum BoundedContext {
     Capture,
-    Sessions,
+    ActivityProjections,
     CodeGraph,
     GitDelivery,
     Knowledge,
-    PolicyHints,
-    AutomationSkills,
-    AccountingObservability,
-    ProductReads,
+    PolicyHintsHooks,
+    AutomationSkillsAccounting,
+    SessionTemporalRetrieval,
+    TaskOrchestration,
+    ProductReadsTransports,
 }
 
 pub enum RouteMode {
@@ -445,7 +457,7 @@ Required changes:
 - Emergency environment overrides are limited to operational tuning and diagnostics — timeouts, log verbosity, socket/path selection, offline mode, and read-only diagnostic modes. They cannot select V1 or V2 routing. Rollback requires the typed operator command, lifecycle lease, signed receipt, quiescence, and process restart; environment drift cannot bypass migration gates.
 - Profile selection happens before global/catalog/store opens. PR #407 means Hermes commands/sources use the same active profile.
 - Every client/daemon/plugin handshake exchanges exact root build/protocol version, route generation, schema major, catalog digest, tool-catalog generation, and profile identity. Any mismatch that changes executable bindings rejects the connection before request/store use and reports restart/update/current replacement; there is no older-reader or stale-plugin mode.
-- Configuration patches are application commands with preview, optimistic version, atomic private write, backup, audit event, and restart requirement. Root adapters never directly mutate config from HTTP/MCP.
+- Ordinary configuration patches are direct application commands with inline full-snapshot validation/impact, expected revision, idempotency, atomic private write, backup, audit event, and typed restart/operation requirement. They have no generic preview/apply ceremony. Separately cataloged destructive system effects use an operation-specific inspect or immutable plan followed by separately authorized start. Root adapters never directly mutate config from HTTP/MCP.
 - Existing host-owned config file semantics—JSON, JSONC, TOML, shell hook, permissions, backup/restore, unrelated-key preservation—remain installer responsibilities and have fixture parity.
 
 ## 11. CLI, MCP, HTTP, Dashboard, and Hook Compatibility
@@ -489,10 +501,10 @@ The root remains the infrastructure owner for `src/agents/**`, `plugin/**`, `ser
 Required installer contract:
 
 - One generated host descriptor declares supported hook points, commands, tool bindings, required capabilities, install scope, config file format, backup policy, health check, and uninstall ownership.
-- Discovery is read-only. Install/update/uninstall uses preview, path containment, private temp write, syntax validation, backup, atomic replace, post-read verification, and rollback on failure.
+- Discovery is read-only. Install/update/uninstall uses operation-specific inspect/plan then separately authorized start, path containment, private temp write, syntax validation, backup, atomic replace, post-read verification, and compensation on failure.
 - JSONC/TOML writers retain comments/unknown keys where current behavior promises it; otherwise they make the smallest structural edit and preserve unrelated content byte-for-byte when feasible.
 - Installation is idempotent and distinguishes “already current,” “updated,” “partially installed,” “user customized,” “permission denied,” and “host unavailable.”
-- `tracedecay doctor --agent <host>` reports binary/version, descriptor digest, hook/tool manifest parity, config path/source, daemon reachability, profile identity, route generation, and repair preview.
+- `tracedecay doctor --agent <host>` reports binary/version, descriptor digest, hook/tool manifest parity, config path/source, daemon reachability, profile identity, route generation, and a repair-plan anchor.
 - Managed skill create/update/materialize/archive/recover is driven only by the application curation worker under versioned autonomy configuration. Root materializes a validated, catalog-referenced owned artifact to declared host targets and records the exact checksum/receipt; it exposes no per-item approve/install/rollback command.
 - PR #407-removed Hermes-specific bridge/config/inventory files are not reintroduced. Hermes source/plugin installation uses ordinary profile paths and actor/workflow evidence.
 - Uninstall removes only entries/files owned by an installation receipt. It never deletes profile data, V1/V2 stores, user facts, sessions, artifacts, or backups.
@@ -516,6 +528,7 @@ Required installer contract:
 ### Runtime rules
 
 - One daemon process owns live V2 shard writers through fenced epochs. Other processes submit to spool/IPC and never open a competing writer.
+- Index refresh is a typed daemon-owned operation with its own short-lived fenced epoch, operation ID, heartbeat/progress/checkpoint, canonical worktree, and terminal receipt; the daemon's process lifetime never doubles as an eternal sync lock. Concurrent CLI sync requests join/queue/refuse against that operation through IPC. A stale lock is taken over only after process identity plus epoch death is proven, and no command advises deleting a live owner's lock (FM-115).
 - Doctor acquires a shared lifecycle lease before reading live stores; update/upgrade/migration/rollback/repair/service install-refresh-uninstall acquire exclusive or inherited ownership before stopping the daemon, touching SQLite/WAL, changing binaries, or rewriting service files.
 - The exclusive lease owner first asks the daemon to drain, unlinks/stops admission, waits for client/background activity and writer release, then verifies WAL/lease quiescence. Timeout blocks the operation; it never proceeds against live writers.
 - Worker supervision records start, ready, lag, retry, backoff, stopped, failed, and fenced state without prompt/path content in metric labels.
@@ -535,7 +548,7 @@ Required installer contract:
 5. Passive-checkpoint WALs within the existing 45-second daemon deadline; report busy frames instead of forcing unsafe truncation.
 6. Close transports and service manager readiness.
 
-Kill tests cover every startup/shutdown boundary, stale epoch, partial worker start, daemon upgrade, full disk, corrupt spool tail, locked reader, SIGTERM deadline, inherited lifecycle token, lease-owner death, drain timeout, live WAL, and stopped/disabled/masked service restoration. The checked-in plan 14 lifecycle rows are the minimum case set; the kill-test receipt cites the exact `FM-###` rows it covers (at least FM-001–FM-010, FM-095, and FM-096).
+Kill tests cover every startup/shutdown boundary, stale epoch, partial worker start, daemon upgrade, full disk, corrupt spool tail, locked reader, SIGTERM deadline, inherited lifecycle token, sync-owner/daemon death, PID reuse, drain timeout, live WAL, and stopped/disabled/masked service restoration. The checked-in plan 14 lifecycle rows are the minimum case set; the kill-test receipt cites the exact `FM-###` rows it covers (at least FM-001–FM-010, FM-095, FM-096, and FM-115).
 
 ## 14. Migration, Backfill, Reconciliation, Cutover, and Archive
 
@@ -543,7 +556,7 @@ Kill tests cover every startup/shutdown boundary, stale epoch, partial worker st
 
 `src/migrate/v2/controller.rs` is an orchestration state machine over store/capture/projector/application ports. The PR 33R/33S boundary is fixed: root PR 33R owns orchestration, phase sequencing, cutover/rollback receipts, and operator surfaces; plan 02's store-owned importer executor PR 33S owns storage-side import transactions, checkpoints, and parity counts; plan 02 PR 33S-2 separately owns store cutover support, rollback-window enforcement, and deletion proof; and plan 03's PR 7E capture path owns all V1 parsing plus mandatory sanitization — every V1 byte crosses the capture sanitizer and produces sanitization receipts before the store importer consumes sanitized batches (the capture-owns-V1-sanitize split):
 
-1. **Inventory:** freeze V1 migration surfaces, store, provider, config, sidecar, payload, artifact, graph, session/LCM, memory, automation, #405/#407 identity/profile receipts, #411 ownership decisions, #412 lifecycle state, and any #425 consolidation ledger/table-disposition/collision/remapped-edge evidence at a source cutoff.
+1. **Inventory:** freeze V1 migration surfaces, store, provider, config, sidecar, payload, artifact, graph, session/LCM, memory, automation, #405/#407 identity/profile receipts, #411 ownership decisions, #412/#432 lifecycle state, and #425/#426/#428/#430/#434/#435/#436/#438 consolidation, registry, FTS-maintenance, graph-connection, applied-manifest retirement receipt, and authoritative registry evidence at a source cutoff.
 2. **Preflight:** estimate V2 disk/WAL/blob/backup need with safety margin; normalize canonical platform paths; check permissions, symlinks, key availability, schema versions, unsupported/open holders, active writers, daemon version, and identity conflicts; acquire lifecycle/write reservations before computing the confirmation digest.
 3. **Backup:** freeze each selected and legacy SQLite family without mutating either source; create and verify an independent backup of both families, including correct WAL state plus hashed sidecars/artifacts, and sign one manifest. Never copy a live DB file alone or let a successful backup of one input excuse a failed second backup.
 4. **Identity:** import profile/repository/project/worktree/source aliases and persisted allocations before dependent entities.
@@ -584,6 +597,23 @@ PR 35 uses the master order and these dependencies:
 7. PR 35G automation/skills/accounting after mutation/workflow/lease and outcome parity.
 8. PR 35H product reads/transports after application/API/frontend/V1 action parity.
 
+The route-context mapping is exhaustive and generated into the receipt schema:
+
+| Slice | `BoundedContext` |
+|---|---|
+| 35A | `Capture` |
+| 35B | `ActivityProjections` |
+| 35C | `CodeGraph` |
+| 35D | `Knowledge` |
+| 35E | `GitDelivery` |
+| 35F | `PolicyHintsHooks` |
+| 35G | `AutomationSkillsAccounting` |
+| 35H | `ProductReadsTransports` |
+| 35I | `SessionTemporalRetrieval` |
+| 35J | `TaskOrchestration` |
+
+No slice shares a context or publishes a receipt under a broader surrogate; route snapshots, rollback drills, observation windows, and PR 37 retirement gates use the same exact variant.
+
 Each slice runs V1 -> shadow -> V2-authoritative+compatibility, holds for the plan's observation window, drills rollback, and only then permits the dependent slice.
 
 Master Phase 5 additionally defines PR 35I (plan 23 session/LCM/temporal retrieval cutover) and PR 35J (single scheduler/lease owner cutover, plan 24). PR 35I begins only after 35B and 35F complete their observation windows; PR 35J only after 35F and 35G; PR 35H publishes `V2Authoritative` for product reads/transports only after 35I and 35J complete theirs. Root owns route publication for all ten slices. The Section 8 Hermes kanban board / task-graph import is staged by the PR 33R controller (Section 14.1 phase 6) and its task-graph ownership cuts over inside PR 35J; the board slug/dir layout and single-host dispatcher are dropped, not ported (plan 24 §16.2; FM-097, FM-098, FM-099, FM-102).
@@ -593,7 +623,7 @@ Master Phase 5 additionally defines PR 35I (plan 23 session/LCM/temporal retriev
 - PR 36 makes V2 routes default but performs no V1 deletion.
 - V1 stores become read-only, carry an archive manifest and last authoritative watermark, and remain inspectable only through current-binary migration/archive tooling for one full release. The one-release archive window opens at the PR 36 V2-default release for every store family; a per-context cutover does not start an earlier private window. They are not query backends for live product transports.
 - PR 37 first exports/verifies the complete archive, imports it into a clean temporary V2 profile, and replays the representative parity corpus. It does not boot a stale V1 service.
-- Physical deletion is a separate typed preview/apply command requiring explicit user confirmation, expected archive digest, no active hold, no active rollback receipt, and no retained replay reference.
+- Physical deletion is a separate typed retirement `plan` followed by a separately authorized `start`, requiring explicit user confirmation, expected archive digest, no active hold, no active rollback receipt, and no retained replay reference.
 - Deletion writes a durable receipt before unlink, then removes only manifest-owned paths. Unknown files are reported and preserved.
 - A failed delete is resumable and never marks the archive absent until post-delete verification succeeds.
 
@@ -632,10 +662,11 @@ The root is published to crates.io today, so path-only unpublished dependencies 
 
 1. New V2 crates begin `publish = false` while contracts are experimental and no released root package depends on them.
 2. Before the first released root binary links V2, give every V2 crate the same workspace version as root and publish it as an implementation crate in topological order. Root dependencies use both `path` and exact `=x.y.z` version.
-3. Publication order is domain; store/capture/projectors/query/policy/tool-catalog; application; hooks/API; root. A release job waits for each registry artifact and verifies its checksum before the next.
-4. `release-plz.toml` and workflows generate one coordinated release receipt containing package versions/checksums, lockfile, source commit, Rust toolchain, dashboard asset manifest, plugin manifests, OpenAPI/client/catalog/policy digests, and migration compatibility range.
-5. `cargo package` and isolated `cargo install tracedecay --version <version> --locked` run without workspace paths, Git submodules unavailable at runtime, `node_modules`, or network asset generation.
-6. A trusted-base release integrity job rejects changed files outside the generated release allowlist unless maintainers explicitly approve the exact extras; tracked ignored files, omitted generated contracts/specs, and a dirty release-plz tree block publication.
+3. Generate and freeze one package DAG from `cargo metadata` plus the generated-public-contract edge. Publish `tracedecay-domain`; then the domain-only implementation wave (`tracedecay-store`, `tracedecay-capture`, `tracedecay-projectors`, `tracedecay-code-index`, `tracedecay-query`, `tracedecay-policy`, and `tracedecay-tool-catalog`); then `tracedecay-application`; then `tracedecay-hooks`, `tracedecay-presentation`, and `tracedecay-api`; then the official Rust `tracedecay-client` built from the same frozen public-contract digest; and finally root. Peers may publish concurrently only when the generated DAG proves no dependency edge. The Rust client has no Cargo dependency on domain, application, API implementation, or root.
+4. The release job waits until every artifact in a wave is registry-readable and matches its expected checksum before starting a dependent wave. It package-tests each crate from the registry artifact, not a workspace path, and rejects any manifest edge absent from the generated DAG.
+5. `release-plz.toml` and workflows generate one coordinated release receipt containing the package DAG, package versions/checksums, frozen public-contract digest, lockfile, source commit, Rust toolchain, dashboard asset manifest, plugin manifests, OpenAPI/client/catalog/policy digests, and migration compatibility range.
+6. `cargo package` and isolated `cargo install tracedecay --version <version> --locked` run without workspace paths, Git submodules unavailable at runtime, `node_modules`, or network asset generation.
+7. A trusted-base release integrity job rejects changed files outside the generated release allowlist unless maintainers explicitly approve the exact extras; tracked ignored files, omitted generated contracts/specs, and a dirty release-plz tree block publication.
 
 Upgrade flow:
 
@@ -701,11 +732,13 @@ Commands run from repository root with the checkout-local `target/`. Do not set 
 
 ### PR 24E1–24E8: Thin root adapters
 
+Dependency gates are explicit: plan 25 PR 18B–18F lands `tracedecay-code-index` and PR 18G proves its root/projector/store adapter before the 24E3 code binding can cut over; the plan-21 `tracedecay-presentation` crate lands before the first human renderer moves in 24E1 and every later adapter imports it instead of adding root-local formatting; plan-10/17 contract generation freezes the digest used by `tracedecay-api` and the official `tracedecay-client` before SDK parity is claimed. Root adapters never depend on the official client package or call their own HTTP API in-process.
+
 Each PR starts with catalog parity and failing cross-transport fixtures, then moves one bounded family:
 
 1. **24E1 capability/profile/project/health:** create CLI/MCP adapter bases and composition bootstrap.
 2. **24E2 sessions/messages/LCM/agents/workflows:** preserve #410 filters, sanitized-native expansion, ordering, response handles, and export.
-3. **24E3 code/graph/diagnostics/tests/edits:** preserve project/branch/snapshot/fallback and bounded impact/path semantics plus #414 `move_symbol` preview/apply/rollback/reindex evidence.
+3. **24E3 code/graph/diagnostics/tests/edits:** preserve project/branch/snapshot/fallback and bounded impact/path semantics plus #414 historical `move_symbol` execution/rollback/reindex evidence, mapped to operation-specific V2 inspect/commit/recovery contracts.
 4. **24E4 Git/delivery/context:** preserve semantic Git tools, direct/impact/test/context membership, live/local freshness, and no remote mutation.
 5. **24E5 knowledge/memory/policy/labs:** preserve fact/trust/feedback/curation and read-only replay.
 6. **24E6 automation/skills/accounting:** preserve scheduler/lease semantics and every historical mutation/audit, then expose V2 autonomous curation decision/effect/outcome/recovery parity with no per-item preview/apply binding.
@@ -744,7 +777,7 @@ Companion PR 24G/24H and plan 17 SDK slices add generated scope/anchor/problem b
 
 ### PR 33R: Whole-profile migration controller
 
-**Files:** create `src/migrate/v2/**`, `tests/v2_migration/**`; extend CLI/MCP/API command adapters with preview/apply/status/cancel/resume/rollback/archive.
+**Files:** create `src/migrate/v2/**`, `tests/v2_migration/**`; extend CLI/MCP/API command adapters with operation-specific inspect/plan/start/status/cancel/resume/rollback/archive.
 
 - [ ] Add copied-store fixtures for #405 identity adoption/conflict, #407 Hermes facts-only/session/fact collision, #410 eight-child messages, #411 foreign-skill ownership/remediation, #412 lifecycle/WAL/service-state races, #414 move-symbol inventory, #417 split visibility, merged #425 dual-nonempty consolidation (canonical platform paths, same inode through another path, unsupported holder, reservation race, one-of-two backup failure, confirmation drift, every ledger crash state, table reject/rebuild/merge/collision, remapped LCM source edge, failed exhaustive verify, marker/registry atomicity, exact doctor recovery), graph-resident memory including V11 metadata/vectors, corrupt/missing payload, unsafe summary/response-handle/backup descendants, automation artifacts, branch DBs, live WAL, interrupted import, and insufficient disk.
 - [ ] Implement the ten phases in Section 14 with immutable receipts/checkpoints.
@@ -870,16 +903,16 @@ Rollback never deletes observations, accepted V2 stores, or diagnostic evidence.
 - Root composition is process-specific, lazy, typed, and free of domain business/storage/query/policy logic.
 - All canonical writes, reads, commands, hooks, automations, and product routes are V2-authoritative with proven rollback and explicit coverage.
 - CLI, MCP, HTTP, dashboard, hooks, provider installers, exports, saved views, and labs share catalog/application semantics while preserving declared compatibility.
-- #405 identity adoption, #407 ordinary-profile Hermes consolidation, #410 complete sanitized-native/representative message semantics, #411 foreign-skill ownership, #412 lifecycle fencing, #413/#416/#418 release metadata, #414/#419 race-safe move-symbol semantics, #415 release integrity, #417 identity-split visibility, #420 proxy-before-store/no-write-replay semantics, #422 generation-scoped catalog refresh, #423 FTS/counter semantics, #424 aggregate-before-sample analytics, and #425 split-store consolidation are present in accepted base `3567e31e`; #409 remains historical only.
+- #405 identity adoption, #407 ordinary-profile Hermes consolidation, #410 complete sanitized-native/representative message semantics, #411 foreign-skill ownership, #412 lifecycle fencing, #413/#416/#418/#427/#429/#431/#433/#437 release metadata, #414/#419 race-safe move-symbol semantics, #415 release integrity, #417 identity-split visibility, #420 proxy-before-store/no-write-replay semantics, #422 generation-scoped catalog refresh, #423 FTS/counter semantics, #424 aggregate-before-sample analytics, #425 split-store consolidation, #426 untracked branch-graph recovery, #428 divergent session variants, #430 indexed family lookup, #432 hook lifecycle quiescence, #434 conflict-safe registry reconstruction, #435 explicit FTS maintenance, #436 no-mmap peer checkpoint safety, #438 applied-manifest retirement, and #439/#440 per-manifest doctor/registry reconstruction truth are present in accepted base `273f50c0`; #409 remains historical only.
 - `tracedecay.db` and every V1 sidecar/store are archived and restore-tested; graph-resident durable facts are migrated before any graph DB deletion.
 - Giant V1 modules are removed by bounded deletion PRs after callers, replay, tests, release windows, and archives prove they are unnecessary.
 - V2 implementation crates and root publish/install in dependency order from crates.io; upgrade, daemon skew, backup, restore, rollback, and host refresh pass.
 - Full nextest, plain `session_suite`, dashboard, package, privacy, crash, concurrency, parity, archive-restore, and user-task gates pass with zero unexplained gap.
-- V1 physical data is deleted only by an explicit, previewed, receipt-bound user command after compatibility and archive windows close.
+- V1 physical data is deleted only by an explicit retirement `plan` followed by a separately authorized, receipt-bound `start` command after compatibility and archive windows close.
 
 ## 21. Plan Self-Review Checklist
 
-- [ ] Refresh `origin/master`, #405/#407/#410/#411/#412/#413/#409 state, merge bases, direct files, checks, and TraceDecay semantic snapshots.
+- [ ] Refresh `origin/master`, every accepted row in Section 3, open #421 state, merge bases, direct files, checks, and TraceDecay semantic snapshots; record #409 as historical only.
 - [ ] Verify PR suffixes do not conflict with plans 01–11 or master PR 1–37 ordering.
 - [ ] Verify every `src/lib.rs` module, root binary command module, dashboard plugin, provider integration, config source, store/sidecar, and release artifact appears in inventory ownership.
 - [ ] Verify each create/change/delete path has one phase, owner, failing test, cutover gate, rollback, and deletion criterion.

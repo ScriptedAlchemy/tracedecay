@@ -1,7 +1,5 @@
 # TraceDecay V2 Domain Crate Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
-
 **Goal:** Create a pure `tracedecay-domain` crate that defines the one stable identity, evidence, ownership, scope, privacy/taint, retention, ordering, query, cursor, and optimistic-command vocabulary consumed by every V2 crate and transport.
 
 **Architecture:** The crate contains immutable value types, deterministic ID derivation, validation, and versioned schema/predicate registries; it performs no filesystem, database, network, runtime, or transport work. Exact source identities use deterministic namespaced UUIDs, ambiguous entities use persisted UUIDv7 allocations supplied by `tracedecay-store`, and cross-shard state is represented by vector watermarks rather than a fabricated global sequence.
@@ -72,7 +70,7 @@ This plan is the type authority inside the converged system described by [`19-sy
 | Runtime drain and lifecycle serialization | merged PR #412: `src/lifecycle_lease.rs`, daemon/service/update shutdown changes | Model lease epoch, drain intent, writer quiescence, checkpoint completion, service state, and shutdown receipt as distinct typed evidence. A restart/update may not imply writers drained or WAL checkpointed without the receipt. |
 | Foreign managed-skill ownership and remediation | merged PR #411: `package_is_foreign_to_installation`, `SkillDrift::ForeignOrphan`, doctor/removal agreement | Model installation owner, scope, drift classification, severity, and remediation capability separately. A foreign/legacy package is informative evidence and cannot receive a destructive/update remediation owned by another installation. |
 
-Planning began at `99ad19bc`; publication master `3567e31e` (0.0.48) includes merged #407/#410/#411/#413/#414/#415/#416/#417/#418/#419/#420/#422/#423/#424/#425. PR #425 merged at `de3d05dc` from final head `d3bb28b5`; only draft plan PR #421 was open at final refresh. Immediately before PR 4, regenerate the exact crate/schema/protocol/tool inventory from current master; accepted identity, edit, routing, catalog, retrieval/accounting, release, and split-store consolidation behavior remains fixture input, not a frozen source-layout assumption.
+Planning began at `99ad19bc`. The normative publication snapshot is [master §2.6](../2026-07-09-tracedecay-brain-rewrite.md#26-current-master-accepted-changes) plus [plan 13](13-research-provenance-and-context-anchors.md). Immediately before PR 4, regenerate the exact crate/schema/protocol/tool inventory from current master and classify every newly merged/open PR. Accepted identity, edit, routing, catalog, retrieval/accounting, release, split-store consolidation, branch/session preservation, lifecycle, registry-healing, FTS-maintenance, graph-checkpoint, and restart-safe retirement behavior remains fixture input, not a frozen source-layout assumption.
 
 Merged PR #425 (`de3d05dc`, final head `d3bb28b5`) is not merely CLI implementation detail. V2 domain contracts preserve its safety invariants for consolidating two non-empty profile/store authorities: immutable source-manifest identities; canonical platform store locators; frozen snapshots for both SQLite families; holder identity by path plus file/inode and write-reservation evidence; two independently verified backup refs; deterministic confirmation recomputed under locks/reservations; append-only restartable ledger/checkpoints; identity-allocation/remap records whose LCM summary/source edges retain remapped source IDs; exhaustive row/payload/LCM/fact/feedback/branch/sentinel verification; and a cutover receipt constructible only after every proof passes. Failure, cancellation, or restart before that receipt leaves both inputs and authoritative selection unchanged. These are general migration/identity contracts consumed by plans 02/09/12/20/21, not permission to expose raw paths, holder details, or confirmation material in ordinary output.
 
@@ -194,19 +192,38 @@ pub struct ProjectId(pub EntityId);
 pub struct CheckoutId(pub EntityId);
 pub struct WorktreeId(pub EntityId);
 pub struct RefId(pub EntityId);
+pub struct CommitId(pub EntityId);
 pub struct ProviderId(pub EntityId);
+pub struct HostProfileId(pub EntityId);
 pub struct ProjectorId(String); // private, grammar-validated `projector.<bounded-context>.<name>`
 pub struct ActorId(pub EntityId);
 pub struct AgentId(pub EntityId);
+pub struct AgentInstanceId(pub EntityId);
+pub struct HostInstanceId(pub EntityId);
+pub struct HookProducerId(pub EntityId);
 pub struct SessionId(pub EntityId);
+pub struct NativeSessionId(pub PrivacyDomainBoundLocatorDigest); // provider-native alias, never literal public text
 pub struct ThreadId(pub EntityId);
 pub struct TurnId(pub EntityId);
 pub struct MessageId(pub EntityId);
+pub struct NativeMessageId(pub PrivacyDomainBoundLocatorDigest); // provider-native alias, never literal public text
+pub struct LocationAssertionId(pub uuid::Uuid);
+pub struct WorkflowId(pub EntityId);
+pub struct WorkflowRunId(pub EntityId);
+pub struct WorkflowStepId(pub uuid::Uuid);
+pub struct GoalId(pub EntityId);
+pub struct ToolInvocationId(pub EntityId);
+pub struct ArtifactId(pub EntityId);
+pub struct SkillId(pub EntityId);
+pub struct SourceStoreId(pub uuid::Uuid); // immutable imported/source-store identity, never a filesystem path
+pub struct CodeOccurrenceId(pub uuid::Uuid);
 pub struct ProjectSetId(pub EntityId);
 pub struct ProjectSetVersionId(pub uuid::Uuid);
 pub struct PolicyBundleId(pub EntityId);
 pub struct CapabilityId(String); // private, grammar-validated `capability.<domain>.<noun>`
 pub struct RetrievalAnchorId(pub EntityId);
+pub struct ResearchManifestId(pub EntityId);
+pub struct ResearchAnchorId(pub EntityId); // immutable entry identity inside a research manifest; never an evidence resolver key
 pub struct EntityVersionId(pub uuid::Uuid);
 pub struct ObservationId(pub uuid::Uuid);
 pub struct EventId(pub uuid::Uuid);
@@ -215,23 +232,79 @@ pub struct ProvenanceId(pub uuid::Uuid);
 pub struct ManifestId(pub uuid::Uuid);
 pub struct CommandId(pub uuid::Uuid);
 pub struct QueryId(pub uuid::Uuid);
+pub struct RequestId(pub uuid::Uuid);
+pub struct LeaseId(pub uuid::Uuid);
+pub struct ConsumerInstanceId(pub uuid::Uuid);
+pub struct DeadLetterId(pub uuid::Uuid);
+pub struct DeadLetterAttemptId(pub uuid::Uuid);
+pub struct DeadLetterCompactionId(pub uuid::Uuid);
+pub struct ResolutionId(pub uuid::Uuid);
+pub struct ProjectionInputId(pub uuid::Uuid);
+pub struct AnchorAccessGrantId(pub uuid::Uuid);
+pub struct PolicyEvaluationId(pub EntityId);
+pub struct HintOutcomeId(pub EntityId);
+pub struct CapabilityGrantId(pub EntityId);
+pub struct CapabilityGrantTemplateId(pub EntityId);
+pub struct ApiTokenId(pub uuid::Uuid);
+pub struct SubscriptionId(pub uuid::Uuid);
+pub struct OperationId(pub uuid::Uuid);
+pub struct OperationPreflightId(pub uuid::Uuid);
+pub struct HookInvocationId(pub uuid::Uuid);
+pub struct ToolId(pub EntityId);
+pub struct DiagnosticEnvelopeId(pub uuid::Uuid);
+pub struct DiagnosticActionId(pub uuid::Uuid);
 pub struct GraphGenerationId(pub uuid::Uuid);
 pub struct CodeSnapshotId(pub uuid::Uuid);
 pub struct BlobId(pub [u8; 32]);
 pub struct BlobIntegrityTag(pub [u8; 32]);
 pub struct ContentDigest(pub [u8; 32]);
 pub struct ManifestDigest(pub [u8; 32]);
+pub struct SchemaVersion(pub u32);
+pub struct RegistryManifestDigest(pub ManifestDigest); // canonical schema/predicate/config registry artifact identity
 pub struct NaturalKeyDigest(pub [u8; 32]);
-pub struct KeyedSourceRecordFingerprint(pub [u8; 32]); // privacy-domain-keyed; never a raw content hash
+pub struct KeyedSourceRecordFingerprint {
+    privacy_domain: PrivacyDomainId,
+    key_epoch: u64,
+    keyed_digest: [u8; 32],
+} // private fields; never a raw content hash or public/cross-domain token
 pub struct PrivacyDomainBoundLocatorDigest(pub [u8; 32]);
+pub struct PrivacyDomainKeyedFingerprintV1 {
+    privacy_domain: PrivacyDomainId,
+    key_epoch: u64,
+    keyed_digest: [u8; 32],
+} // internal equality/dedupe token; no Display, public Serialize, cross-domain comparison, or raw-digest accessor
 pub struct AccessPolicyDigest(pub [u8; 32]);
 pub struct NativeEventLocatorDigest(pub PrivacyDomainBoundLocatorDigest);
 pub struct NativeKindCode(String); // bounded grammar-validated registry token, never provider payload text
+pub struct PredicateId(String); // private, grammar-validated predicate registry token
+pub struct HintCategoryId(String); // private, grammar-validated policy category token
+pub struct LanguageId(String); // private, grammar-validated language registry token
+pub struct BindingId(String); // private, grammar-validated generated catalog binding token
+pub struct LocaleId(String); // private, grammar-validated canonical BCP-47 language tag
+pub struct NativeAgentId(pub PrivacyDomainBoundLocatorDigest); // provider-native alias, never literal public text
 pub struct ComponentVersion(String); // bounded ASCII semver/build grammar
 pub struct MediaTypeCode(String); // allowlisted IANA/media grammar, no parameters with literals
 pub struct LegacyBindingCode(String); // bounded historical CLI/MCP/HTTP identifier grammar
 pub struct SanitizationReceiptId(pub uuid::Uuid);
 pub struct ScopeResolutionId(pub uuid::Uuid);
+pub struct CapabilityGrantSetId(pub EntityId);
+pub struct SanitizerFloorId(pub EntityId);
+pub struct IdempotencyKeyV1([u8; 32]); // opaque caller-generated key; no Display/log serialization
+pub struct DurationMicros(pub u64);
+pub struct ActorRef {
+    pub actor_id: ActorId,
+    pub version: Option<EntityVersionId>,
+}
+pub struct HostProfileRef {
+    pub id: HostProfileId,
+    pub version: EntityVersionId,
+    pub manifest_digest: ManifestDigest,
+}
+pub struct SkillVersionRef {
+    pub skill_id: SkillId,
+    pub version: EntityVersionId,
+    pub manifest_digest: ManifestDigest,
+}
 pub struct ScopeSelectorDigest(pub [u8; 32]);
 pub struct DataVersionDigest(pub ManifestDigest); // plan 24's data-version pin; a named view of ManifestDigest, not a new digest family
 pub struct QueryPackDigest(pub ManifestDigest);
@@ -246,6 +319,66 @@ pub struct MessageCopyAssertionId(pub uuid::Uuid);
 pub struct TemporalAssertionId(pub uuid::Uuid);
 pub struct AssertionRelationId(pub uuid::Uuid);
 pub struct SummaryNodeId(pub uuid::Uuid);
+// Plan 15 retrieval-evaluation identities; semantic contracts live in
+// tracedecay-domain::retrieval::evaluation and are lowered by plan 02.
+pub struct CorpusVersionId(pub EntityVersionId);
+pub struct QrelVersionId(pub EntityVersionId);
+pub struct CandidatePoolId(pub EntityId);
+pub struct JudgmentId(pub EntityId);
+pub struct AdjudicationId(pub EntityId);
+pub struct EvaluationRunId(pub EntityId);
+pub struct EvaluationReportId(pub EntityId);
+pub struct RetrievalProfileId(pub EntityId);
+pub struct RetrievalProfileVersionId(pub EntityVersionId);
+pub struct QueryEpisodeId(pub EntityId);
+pub struct FixturePromotionId(pub EntityId);
+
+pub enum EvidenceRef {
+    Observation(ObservationId),
+    Event(EventId),
+    Relation(RelationId),
+    EntityVersion(EntityVersionRef),
+    RetrievalAnchor(RetrievalAnchorId),
+    Manifest(ManifestId),
+    Diagnostic(DiagnosticEnvelopeId),
+    Command(CommandId),
+}
+
+pub struct AliasRef {
+    pub namespace: NativeKindCode,
+    pub value_digest: PrivacyDomainBoundLocatorDigest,
+    pub source_observation: ObservationId,
+    pub confidence: Confidence,
+}
+
+pub struct BindingRef {
+    pub binding_id: BindingId,
+    pub catalog_snapshot: CatalogSnapshotRefV1,
+}
+
+pub struct CanonicalRequestRef {
+    pub request_id: RequestId,
+    pub capability_id: CapabilityId,
+    pub schema: SchemaRef,
+    pub request_digest: PrivacyDomainBoundLocatorDigest,
+    pub protected_payload: Option<PayloadRef>,
+}
+
+pub enum OperationStateV1 { Pending, Running, Completed, Failed, CancelRequested, Cancelled, Expired }
+pub struct OperationRef {
+    pub operation_id: OperationId,
+    pub capability_id: CapabilityId,
+    pub state: OperationStateV1,
+    pub resolved_scope_id: ScopeResolutionId,
+    pub created_at: UtcMicros,
+    pub retain_until: UtcMicros,
+    pub status_anchor: RetrievalAnchorId,
+}
+
+pub struct ProtocolRef {
+    pub protocol: NativeKindCode,
+    pub version: ComponentVersion,
+}
 // Plan 24 task-graph identities are domain contracts in this crate (plan 24 §4.1):
 pub struct InitiativeId(pub EntityId);
 pub struct PlanId(pub EntityId);
@@ -269,12 +402,104 @@ pub struct TaskOutcomeId(pub EntityId);
 pub struct SavedTaskViewId(pub EntityId);
 pub struct CatalogGenerationId(pub u64);
 pub struct ProjectorVersion(pub ComponentVersion);
+pub struct ProjectionGenerationId(pub EntityId);
 pub struct ModelCatalogEntryId(pub EntityId);
 pub struct ModelRevisionId(pub EntityId);
 
 pub struct CatalogSnapshotRefV1 {
     pub generation: CatalogGenerationId,
     pub digest: ManifestDigest,
+}
+
+pub struct ProjectionCheckpointKeyV1 {
+    pub projector: ProjectorId,
+    pub projector_version: ProjectorVersion,
+    pub shard_id: ShardId,
+    pub generation: ProjectionGenerationId,
+}
+
+pub enum ProjectionCheckpointStatusV1 { Active, Blocked, Rebuilding, Quarantined, Complete }
+
+pub struct ProjectionCheckpointV1 {
+    pub key: ProjectionCheckpointKeyV1,
+    pub last_contiguous_sequence: u64,
+    pub highest_seen_sequence: u64,
+    pub source_watermarks: VectorWatermark,
+    pub schema_registry_version: RegistryVersion,
+    pub builder_version: ComponentVersion,
+    pub status: ProjectionCheckpointStatusV1,
+}
+
+pub enum DeadLetterReasonV1 {
+    UnsupportedSchema,
+    RegistryViolation,
+    InvalidIdentity,
+    MissingRequiredEvidence,
+    SensitivityViolation,
+    PayloadUnavailable,
+    OutboxGap,
+    ProjectionInvariant,
+    CorruptInput,
+    OwnershipConflict,
+}
+
+pub enum DeadLetterDispositionV1 {
+    BlockCheckpoint,
+    QuarantineAndAdvance,
+    RetryAfter { not_before: UtcMicros },
+}
+
+pub struct DeadLetterRecordV1 {
+    pub id: DeadLetterId,
+    pub checkpoint_key: ProjectionCheckpointKeyV1,
+    pub sequence: u64,
+    pub input_id: ProjectionInputId,
+    pub reason: DeadLetterReasonV1,
+    pub safe_details: LogSafeText,
+    pub disposition: DeadLetterDispositionV1,
+    pub first_seen_at: UtcMicros,
+}
+
+pub struct DeadLetterAttemptV1 {
+    pub attempt_id: DeadLetterAttemptId,
+    pub dead_letter_id: DeadLetterId,
+    pub ordinal: u32,
+    pub attempted_at: UtcMicros,
+    pub next_retry_at: Option<UtcMicros>,
+    pub outcome: ReasonCode,
+    pub receipt_digest: ManifestDigest,
+}
+
+pub enum DeadLetterResolutionActionV1 {
+    Replayed,
+    QuarantinedOmission,
+    SupersededByRegistryRevision,
+}
+
+pub struct DeadLetterResolutionReceiptV1 {
+    pub resolution_id: ResolutionId,
+    pub dead_letter_id: DeadLetterId,
+    pub action: DeadLetterResolutionActionV1,
+    pub replay_effect_count: u64,
+    pub resolved_by: ProjectorVersion,
+    pub resolved_at: UtcMicros,
+}
+
+pub struct DeadLetterCompactionV1 {
+    pub compaction_id: DeadLetterCompactionId,
+    pub checkpoint_key: ProjectionCheckpointKeyV1,
+    pub reason: DeadLetterReasonV1,
+    pub bucket_day: i32,
+    pub resolution_set_digest: ManifestDigest,
+    pub source_watermark: VectorWatermark,
+    pub receipt_digest: ManifestDigest,
+}
+
+pub struct DeadLetterPageV1 {
+    pub items: Vec<DeadLetterRecordV1>,
+    pub next_after: Option<DeadLetterId>,
+    pub checkpoint: ProjectionCheckpointV1,
+    pub truncated: bool,
 }
 
 pub struct WorkItemVersionRefV1 {
@@ -342,9 +567,7 @@ pub struct ObservationKey {
     pub source_id: SourceInstanceId,
     pub artifact_digest: NaturalKeyDigest,
     pub rewrite_generation: u64,
-    pub offset: u64,
-    pub next_offset: u64,
-    pub source_fingerprint: KeyedSourceRecordFingerprint,
+    pub position: SourcePosition,
 }
 
 pub struct DeterministicEntityKey {
@@ -367,7 +590,8 @@ pub fn derive_exact_entity_id(key: &DeterministicEntityKey) -> EntityId;
 
 Invariants:
 
-- `offset < next_offset`; row-sequence adapters use `next_offset = offset + 1`.
+- `SourcePosition::ByteOffset` requires `start < end`; row/sequence positions are one canonical scalar; object-key positions are privacy-domain-bound locator digests, never strings.
+- `derive_observation_id` hashes only the canonical source/artifact/generation/position tuple. `ObservationEnvelopeV1.source_fingerprint` is separately verified for rewrite/collision detection; key rotation uses `FingerprintEpochContinuityV1` and can never change an observation ID.
 - A source authority is normalized by its adapter, classified, and hashed before entering the domain crate. Raw paths and credentials are forbidden.
 - Exact provider/native identities use `derive_exact_entity_id`. Repository moves, ambiguous aliases, inferred symbol lineages, and entities lacking an exact native key use `AllocationRequest`; `tracedecay-store` atomically insert-or-reads one UUIDv7 and must restore that ledger from backup.
 - A persisted allocation can never change kind or owning shard. A conflicting request returns `DomainError::IdentityAllocationConflict`.
@@ -486,9 +710,12 @@ pub struct PrivateText(Sanitized<String>);
 pub struct SinkEligible<T>(/* private, checked sink-specific conversion */ T);
 pub struct ProtectedSecretRef(/* opaque random quarantine reference */);
 pub struct ProtectedQuarantineIngress(/* private move-only candidate plus detector decision */);
+pub struct ProtectedQuarantineAttachmentV1(
+    /* private move-only staged ref + one-use attachment token + expiry */
+);
 ```
 
-All tuple fields above are private. `Unclassified<T>` is transient capture/parser memory and implements neither `Serialize` nor any repository/transport trait. `Sanitized<T>` is constructible only from a complete `SanitizationReceiptV1` issued by the registered capture sanitizer. `SinkEligible<T>` is constructible only by the plan-18 checked conversion for the requested sink and current access/privacy policy; it is not a blanket `Serialize`, `Display`, search, prompt, export, or log grant. `PrivateText` is eligible only for encrypted owner-shard blob persistence until a separate checked conversion narrows it for another sink. `LogSafeText` remains the only runtime-text wrapper eligible for diagnostic labels/log-safe presentation. The sanitizer alone can consume `Unclassified` content into move-only `ProtectedQuarantineIngress`; it cannot serialize, clone, display, log, index, or cross a general repository/transport port. `ProtectedSecretRef` has no `Display`, public `Serialize`, equality-across-domain, search, prompt, export, or ordinary blob conversion. `PayloadRef` always names sanitized bytes and binds their receipt; protected forensic content uses the separate quarantine port from Plan 18, never `PayloadRef`.
+All tuple fields above are private. `Unclassified<T>` is transient capture/parser memory and implements neither `Serialize` nor any repository/transport trait. `Sanitized<T>` is constructible only from a complete `SanitizationReceiptV1` issued by the registered capture sanitizer. `SinkEligible<T>` is constructible only by the plan-18 checked conversion for the requested sink and current access/privacy policy; it is not a blanket `Serialize`, `Display`, search, prompt, export, or log grant. `PrivateText` is eligible only for encrypted owner-shard blob persistence until a separate checked conversion narrows it for another sink. `LogSafeText` remains the only runtime-text wrapper eligible for diagnostic labels/log-safe presentation. The sanitizer alone can consume `Unclassified` content into move-only `ProtectedQuarantineIngress`; it cannot serialize, clone, display, log, index, or cross a general repository/transport port. `ProtectedSecretRef` and `ProtectedQuarantineAttachmentV1` have no `Display`, public `Serialize`, clone, equality-across-domain, search, prompt, export, or ordinary blob conversion. Only `ObservationJournal::append_transaction` may consume an attachment token into its matching non-content quarantine skeleton; an unused attachment expires inside the protected service. `PayloadRef` always names sanitized bytes and binds its receipt; protected forensic content uses the separate quarantine port from Plan 18, never `PayloadRef`.
 
 Architecture/compile-fail tests forbid raw `String`, `serde_json::Value`, `Vec<u8>`, `Bytes`, or slices at application-to-store, projector-to-index, policy-to-hint, and application-to-transport content ports. Static catalog metadata uses reviewed `CatalogText`, which is not a conversion from runtime content. Safe redaction markers expose class plus random receipt reference only; no original length, prefix/suffix, plaintext digest, or cross-domain fingerprint is public.
 
@@ -517,7 +744,7 @@ pub struct ProtocolEpoch(pub u32);
 
 pub struct RuntimeHandshakeV1 {
     pub protocol_epoch: ProtocolEpoch,
-    pub schema_registry_digest: ManifestDigest,
+    pub schema_registry_digest: RegistryManifestDigest,
     pub tool_catalog: Option<CatalogSnapshotRefV1>,
     pub client_kind: RuntimeClientKind,
     pub client_version: ComponentVersion,
@@ -533,9 +760,67 @@ pub enum ProtocolMismatchRemediation {
 
 Handshake acceptance requires the current exact protocol epoch and compatible current digests. Mismatch returns a typed remediation and current catalog digest; it cannot carry or execute an old tool-name alias/fallback.
 
-`EntityKind` includes every master-plan kind: profile/project/project-set/repository/remote/checkout/worktree/ref/commit/tree/pull-request/check/review/release; provider/host/model/installation/actor/agent/agent-presence/work-claim/session/thread/workflow/run/turn/message/content-part; tool definition/invocation/result/approval/goal/provider-native-task/provider-native-plan; initiative/plan/plan-version/work-item/work-item-version/task-dependency/acceptance-criterion/task-decision/task-assignment/task-offer/task-lease/execution-attempt/executor-registration/workspace-binding/context-packet/handoff/task-artifact/task-outcome; code snapshot/file and symbol identity/occurrence/diagnostic/test/build; fact/version/knowledge entity/decision/contradiction/retrieval/feedback; policy bundle/evaluation/hint; automation job/run/artifact/skill/skill-package/proposal/doctor-finding/remediation; lifecycle lease/drain/checkpoint/service-state receipt; query/saved view/annotation/export/payload blob. Provider-native task/plan records remain observed entities or aliases until an authorized materialization command creates canonical work.
+`EntityKind` includes every master-plan kind: profile/project/project-set/repository/remote/checkout/worktree/ref/commit/tree/pull-request/check/review/release; provider/host/model/installation/actor/agent/agent-presence/work-claim/session/thread/workflow/run/turn/message/content-part; tool definition/invocation/result/approval/goal/provider-native-task/provider-native-plan; initiative/plan/plan-version/work-item/work-item-version/task-dependency/acceptance-criterion/task-decision/task-assignment/task-offer/task-lease/execution-attempt/executor-registration/workspace-binding/context-packet/handoff/task-artifact/task-outcome; research-manifest/research-entry/research-contribution; code snapshot/file and symbol identity/occurrence/diagnostic/test/build; fact/version/knowledge entity/decision/contradiction/retrieval/feedback; policy bundle/evaluation/hint; automation job/run/artifact/skill/skill-package/proposal/doctor-finding/remediation; lifecycle lease/drain/checkpoint/service-state receipt; query/saved view/annotation/export/payload blob. Provider-native task/plan records remain observed entities or aliases until an authorized materialization command creates canonical work.
 
-The shared diagnostic/action family (`DiagnosticEnvelopeV1`/`DiagnosticActionV1`) is a domain contract whose canonical field list, product semantics, and cross-surface rules are defined once in plan 24 §4.11; this crate re-exports those types and their ID/vocabulary members rather than restating their fields.
+The shared diagnostic/action family is defined once in this domain crate; plan 24 §4.11 owns its cross-product use, not a second type definition:
+
+```rust
+pub struct EntityVersionRef {
+    pub entity: EntityRef,
+    pub version: Option<EntityVersionId>,
+}
+pub struct BoundedVec<T, const N: usize>(Vec<T>); // private field; checked constructor rejects >N
+pub struct DiagnosticCode(NativeKindCode);
+pub struct RegisteredDiagnosticActionKind(NativeKindCode);
+pub struct ReasonCode(NativeKindCode);
+pub enum DiagnosticSeverityV1 { Info, Warning, Error, Critical }
+pub enum DiagnosticStateV1 { Active, Superseded, Resolved, Expired, Unknown(NativeKindCode) }
+pub enum EffectClassV1 {
+    Read,
+    DirectMutation,
+    ConfirmedDestructive,
+    ResumableWorkflow,
+    AutonomousPolicyEffect,
+    HostLifecycle,
+}
+pub enum ConfirmationRequirementV1 {
+    None,
+    ExactInspectionDigest(ManifestDigest),
+    CurrentVersionAndGrant,
+}
+
+pub struct DiagnosticEnvelopeV1 {
+    pub envelope_id: DiagnosticEnvelopeId,
+    pub schema_version: u16,
+    pub diagnostic_code: DiagnosticCode,
+    pub severity: DiagnosticSeverityV1,
+    pub subject: EntityVersionRef,
+    pub scope: ScopeResolutionId,
+    pub summary: SinkEligible<LogSafeText>,
+    pub state: DiagnosticStateV1,
+    pub evidence: BoundedVec<RetrievalAnchorId, 32>,
+    pub actions: BoundedVec<DiagnosticActionV1, 16>,
+    pub produced_by: ProducerRef,
+    pub config_digest: ManifestDigest,
+    pub catalog_snapshot: CatalogSnapshotRefV1,
+    pub vector_watermark: VectorWatermark,
+    pub observed_at: UtcMicros,
+    pub expires_at: Option<UtcMicros>,
+}
+
+pub struct DiagnosticActionV1 {
+    pub action_id: DiagnosticActionId,
+    pub kind: RegisteredDiagnosticActionKind,
+    pub label: SinkEligible<LogSafeText>,
+    pub capability: Option<CapabilityId>,
+    pub effect: EffectClassV1,
+    pub input_schema: SchemaRef,
+    pub safe_defaults: Option<SchemaBoundValueRef>,
+    pub confirmation: ConfirmationRequirementV1,
+    pub enabled: bool,
+    pub unavailable_reason: Option<ReasonCode>,
+}
+```
 
 `DiagnosticEnvelopeId` and `DiagnosticActionId` are UUIDv7 canonical IDs; `DiagnosticCode`, action-kind code, severity, state, and reason are registered closed vocabularies. `BoundedVec` rejects overflow rather than truncating. Unknown forward action kinds decode to a preserved opaque registered-code representation that can be rendered disabled, never to an executable default. The envelope contains no raw command, shell text, secret, absolute path, or transport instruction.
 
@@ -596,7 +881,7 @@ pub struct RetrievalAnchorRecordV1 {
     pub immutable_source_refs: Vec<EntityRef>,
     pub source_observations: Vec<ObservationId>,
     pub snapshot: VectorWatermark,
-    pub schema_registry_digest: ManifestDigest,
+    pub schema_registry_digest: RegistryManifestDigest,
     pub capability_catalog: CatalogSnapshotRefV1,
     pub data_version_digest: DataVersionDigest,
     pub projection_version: ComponentVersion,
@@ -609,6 +894,58 @@ pub struct RetrievalAnchorRecordV1 {
     pub retention_class: RetentionClass,
     pub created_at: UtcMicros,
     pub durability: AnchorDurabilityClass,
+}
+
+pub enum RetrievalAnchorRouteStateV1 { Active, Tombstoned, Unavailable }
+pub struct AnchorOwnerRouteV1 {
+    pub anchor_id: RetrievalAnchorId,
+    pub owning_shard_id: ShardId,
+    pub privacy_domain_id: PrivacyDomainId,
+    pub route_version: u64,
+    pub state: RetrievalAnchorRouteStateV1,
+    pub catalog_snapshot: CatalogSnapshotRefV1,
+}
+
+// Minted only after the application/policy layer authorizes this exact
+// anchor/principal/scope/payload mode. Private fields, no public Serialize,
+// Display, Clone, or caller constructor; the store verifies expiry/digests.
+pub struct AuthorizedAnchorReadV1 {
+    grant_id: AnchorAccessGrantId,
+    anchor_id: RetrievalAnchorId,
+    principal_digest: AccessPolicyDigest,
+    resolved_scope_id: ScopeResolutionId,
+    privacy_domain_id: PrivacyDomainId,
+    access_policy_digest: AccessPolicyDigest,
+    permit_payload: bool,
+    issued_at: UtcMicros,
+    expires_at: UtcMicros,
+    receipt_digest: ManifestDigest,
+}
+
+pub enum RetrievalAnchorResolutionStateV1 {
+    Exact,
+    MovedOrAdopted,
+    Redacted,
+    RetentionExpired,
+    Tombstoned,
+    Unavailable,
+    Denied,
+}
+pub struct RetrievalAnchorResolutionV1 {
+    pub anchor_id: RetrievalAnchorId,
+    pub state: RetrievalAnchorResolutionStateV1,
+    pub record: Option<RetrievalAnchorRecordV1>,
+    pub owner_route: AnchorOwnerRouteV1,
+    pub resolved_watermark: VectorWatermark,
+    pub access_receipt_digest: ManifestDigest,
+}
+
+pub enum RetentionTombstoneReasonV1 {
+    PolicyExpired,
+    UserDeletion,
+    PrivacyRemediation,
+    SourceRetired,
+    CorruptOrUnavailable,
 }
 
 // Public responses/deep links expose only RetrievalAnchorId. Resolution loads
@@ -639,13 +976,17 @@ pub struct RetrievalRecipeV1 {
 }
 
 pub struct UseCaseId(String); // grammar-validated `usecase.<domain>.<verb-noun>`; the use-case registry is owned by plan 08
+pub struct UseCaseRef {
+    pub id: UseCaseId,
+    pub version: ComponentVersion,
+}
 pub struct ProtectedContentRef(/* opaque random protected-draft reference; no Display or public Serialize */);
 pub struct InvestigationTime {
     pub window: Option<TimePredicate>,
     pub temporal: Option<TemporalClauseV1>,
 }
 pub struct VersionSet {
-    pub schema_registry_digest: ManifestDigest,
+    pub schema_registry_digest: RegistryManifestDigest,
     pub capability_catalog: CatalogSnapshotRefV1,
     pub ranking: RankingProfileRef,
 }
@@ -761,6 +1102,7 @@ There is no catalog string/literal variant. Display names, aliases, queries, ann
 pub struct ObservationEnvelopeV1 {
     pub observation_id: ObservationId,
     pub source: SourceRecordRef,
+    pub source_fingerprint: KeyedSourceRecordFingerprint, // collision/rewrite verification, not identity input
     pub schema: SchemaRef,
     pub parser_version: ComponentVersion,
     pub occurred_at: Option<UtcMicros>,
@@ -873,14 +1215,14 @@ pub struct PredicateRegistryV1;
 
 impl SchemaRegistryV1 {
     pub fn version() -> RegistryVersion;
-    pub fn digest() -> ContentDigest;
+    pub fn digest() -> RegistryManifestDigest;
     pub fn validate_observation(value: &ObservationEnvelopeV1) -> Result<(), DomainError>;
     pub fn validate_event(value: &CanonicalEventV1) -> Result<(), DomainError>;
 }
 
 impl PredicateRegistryV1 {
     pub fn version() -> RegistryVersion;
-    pub fn digest() -> ContentDigest;
+    pub fn digest() -> RegistryManifestDigest;
     pub fn get(id: PredicateId) -> Option<&'static PredicateSpec>;
     pub fn validate(value: &RelationAssertionV1) -> Result<(), DomainError>;
 }
@@ -921,7 +1263,7 @@ pub enum SourcePosition {
     ByteOffset { start: u64, end: u64 },
     RowId(i64),
     Sequence(u64),
-    ObjectKey(String), // bounded source-internal key that passed adapter normalization; never a filesystem path
+    ObjectKey(PrivacyDomainBoundLocatorDigest), // keyed/bounded source-internal locator; never literal text or a filesystem path
 }
 pub struct SourceRecordRef {
     pub source_id: SourceInstanceId,
@@ -945,7 +1287,11 @@ pub struct CatalogText(&'static str); // build-time reviewed static metadata; ne
 pub struct PrivacyPolicyDigest(pub [u8; 32]);
 pub struct DetectorSetDigest(pub [u8; 32]);
 pub struct ParserDigest(pub [u8; 32]);
-pub struct KeyedPayloadFingerprint(pub [u8; 32]); // privacy-domain-keyed; never a raw content hash
+pub struct KeyedPayloadFingerprint {
+    privacy_domain: PrivacyDomainId,
+    key_epoch: u64,
+    keyed_digest: [u8; 32],
+} // private fields; never a raw content hash or public/cross-domain token
 pub struct SanitizedOutputDigest(pub [u8; 32]);
 pub enum SecretClass { /* closed detector-class registry owned by plan 18 §8 */ }
 pub enum ScanCompleteness { Complete, PartialBudget, PartialTimeout, FailedClosed }
@@ -998,6 +1344,50 @@ pub enum IngressAck {
     DurablyQueued(SpoolReceipt),
 }
 
+pub struct SourceHeadV1 {
+    pub source_id: SourceInstanceId,
+    pub rewrite_generation: u64,
+    pub ordering: SourceOrdering,
+    pub contiguous_offset: Option<u64>,
+    pub last_source_record_fingerprint: Option<KeyedSourceRecordFingerprint>,
+    pub source_cursor: Option<SchemaBoundValueRef>,
+    pub lease_epoch: u64,
+}
+
+pub struct FingerprintEpochContinuityV1 {
+    pub receipt_id: ManifestId,
+    pub source_id: SourceInstanceId,
+    pub rewrite_generation: u64,
+    pub position: Option<SourcePosition>,
+    pub prior: KeyedSourceRecordFingerprint,
+    pub current: KeyedSourceRecordFingerprint,
+    pub policy_digest: PrivacyPolicyDigest,
+    pub verified_at: UtcMicros,
+    pub receipt_digest: ManifestDigest,
+} // protected operational evidence; no public renderer or raw-key material
+
+pub struct ObservationQuarantineDispositionV1 {
+    pub reason: NativeKindCode,
+    pub protected: Option<ProtectedQuarantineAttachmentV1>,
+    pub retry_eligible_after: Option<UtcMicros>,
+}
+
+pub struct ObservationAppendItemV1 {
+    pub envelope: ObservationEnvelopeV1,
+    pub provenance: ProvenanceV1,
+    pub sanitization_receipt: SanitizationReceiptV1,
+    pub quarantine: Option<ObservationQuarantineDispositionV1>,
+}
+
+pub struct ObservationAppendBatchV1 {
+    pub source_id: SourceInstanceId,
+    pub expected_source_head: Option<SourceHeadV1>,
+    pub next_source_head: SourceHeadV1,
+    pub observations: Vec<ObservationAppendItemV1>,
+    pub replay_manifest: SchemaBoundValueRef,
+    pub replay_manifest_digest: ManifestDigest,
+}
+
 pub enum AppendDisposition {
     Inserted,
     Duplicate,
@@ -1019,6 +1409,7 @@ pub struct AppendReceipt {
     pub last_outbox_sequence: Option<u64>,
     pub committed_at: UtcMicros,
     pub watermark: ShardWatermark,
+    pub post_commit_source_head: SourceHeadV1,
 }
 
 pub struct SpoolReceipt {
@@ -1168,7 +1559,7 @@ pub struct ScopeResolutionV2 {
     pub quarantined: Vec<ScopeResolutionCandidateV2>,
     pub missing: Vec<ScopeRootV2>,
     pub defaulted_current: bool,
-    pub profile_catalog_generation: ManifestDigest,
+    pub catalog_snapshot: CatalogSnapshotRefV1,
     pub watermark: VectorWatermark,
 }
 
@@ -1209,7 +1600,7 @@ pub struct CursorClaimsV1 {
     pub query_digest: PrivacyDomainBoundLocatorDigest,
     pub access_digest: AccessPolicyDigest,
     pub scope_digest: ScopeSelectorDigest,
-    pub profile_catalog_generation: ManifestDigest,
+    pub catalog_snapshot: CatalogSnapshotRefV1,
     pub temporal: Option<TemporalClauseV1>,
     pub intent_profile_version: Option<ComponentVersion>,
     pub schema_version: QuerySchemaVersion,
@@ -1275,11 +1666,16 @@ Task/plan/executor reads also use this exact `TraceQueryV1`. `EntityKind`, regis
 | `tracedecay-store` | IDs, ownership, allocations, observations, events, relations, registries, retention, watermarks, command envelopes | Persisted allocations, append receipts, shard/vector watermarks, migration/import receipts |
 | `tracedecay-capture` | source keys/positions, unclassified/classified/sanitized wrappers, receipt and observation contracts | Sanitized observations, receipts, deterministic IDs, and optional protected-quarantine references through a separate port |
 | `tracedecay-projectors` | events, relations, registry, watermarks | Registry-valid entity versions and projections |
+| `tracedecay-code-index` | code snapshot/generation/symbol/evidence IDs, scope resolution, sensitivity/retention, and sink-eligible text | Deterministic extraction/build/lineage/attribution rows consumed only through the projector-owned build port |
 | `tracedecay-query` | `TraceQueryV1`, cursor claims, scopes, predicates, evidence, watermarks | Signed cursor and query response types owned outside this crate |
 | `tracedecay-policy` | immutable input refs, policy entities, evidence/retention | Versioned evaluation events/relations |
+| `tracedecay-hooks` | hook request/receipt identities, safe coordination and suggestion envelopes, protocol/catalog refs | Bounded host events and delivery receipts submitted through application/capture ports |
+| `tracedecay-tool-catalog` | capability/use-case/binding/presentation IDs, schema refs, effects, and safe registry values | Generated catalog/schema artifacts consumed by adapters and presentation |
 | `tracedecay-application` | commands, queries, entity/evidence contracts | Use-case results rendered by adapters |
+| `tracedecay-presentation` | sink-eligible/log-safe values, canonical IDs, anchors, coverage, and safe problem fields embedded in sealed application views | Pure document/terminal/Markdown render values for root CLI/MCP adapters |
+| `tracedecay-api` | generated domain schemas, IDs, cursor/anchor/coverage and error primitives | Public wire-contract artifacts consumed by official clients |
 
-No consumer may duplicate enum spellings or legal predicate matrices. Rust/OpenAPI/TypeScript schemas derive from the registry digest and fail CI on drift.
+No consumer may duplicate enum spellings or legal predicate matrices. Rust/OpenAPI/TypeScript schemas derive from the registry digest and fail CI on drift. The official Rust/TypeScript/Python clients are deliberately not domain consumers: they compile or package the frozen generated public wire contracts and transport runtime only, so no client imports this crate or acquires in-process business behavior.
 
 ## Implementation sequence
 

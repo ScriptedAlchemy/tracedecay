@@ -252,14 +252,24 @@ The same convergence pattern applies to identity, search, policy, config, status
 | Identity allocation and canonical alias evidence | Domain | Application/store repository | Allocation ledger plus activity/project owner shards | Query/application |
 | Keyed alias routing projection | Domain/store route contract | Projector/store | Content-free catalog routes only | Scope resolver |
 | Projections | Projector registry | Projectors | Activity/project/graph stores | Query |
+| Code extraction and immutable graph-generation builds | Domain code/evidence contracts plus plan-25 extractor registry | `tracedecay-code-index`; root only adapts its producer into the projector-owned build port | Store generation writer under the projector transaction | Projector/query/application status; never a direct transport |
 | Query AST/value/schema | Domain | Query parses/validates/canonicalizes | None | Query/application/generated bindings |
 | Query planning/ranking/execution | Query | Query | Query cache/eval artifacts through ports | Application |
+| Retrieval-evaluation truth | Domain retrieval-evaluation contracts plus plan-15 corpus/profile registries | Query evaluation runner under application authorization | Store-owned activity-shard corpus, qrel, pool, judgment, adjudication, run, report, fixture, and profile families | Application, Research Lab, Observatory, and generated bindings |
+| Research manifests and durable anchors | Domain research/anchor contracts | Application manifest use cases plus query anchor resolver | Store owner-shard research manifests, entries, tombstones, and route metadata | Query/application and authorized CLI/MCP/API/SDK/UI views |
+| Session/LCM temporal lineage and answers | Domain message/summary/`TraceQueryV1` temporal contracts | Capture/projectors/query/application in their bounded roles | Activity-shard native message and summary-lineage projections plus privacy-domain blobs | Query/application, Timeline, LCM Lab, and generated bindings |
 | Policy bundles/evaluators | Policy | Policy | Policy artifacts/results through ports | Application/labs |
 | Capability metadata | Tool catalog | Catalog generation/runtime lookup | Generated/catalog snapshots | All transports/UI/docs |
 | Use-case semantics | Application | Application | Injected repositories/job/audit ledger | CLI/MCP/API/SDK/UI/hooks |
-| Human-facing Markdown/terminal presentation | Presentation | Presentation | None | CLI/MCP/root adapters |
-| Protocol envelopes | API or transport-owned generated bindings | Thin adapter | None except safe request audit | Corresponding transport |
-| Effective configuration | Domain schema + application resolver | Application/root bootstrap | Profile/project config repository | Status/settings/all transports |
+| Task/plan graph truth | Domain plan-24 graph/version/event contracts | Application commands and deterministic projectors | Activity-owner task event ledger and current projections | Query/application, Work/Resume, and generated bindings |
+| Scheduling, offers, admission, leases, grants, and writable-resource reservations | Domain plan-24 lifecycle contracts; policy proposes only | Application scheduler/admission transaction and executor adapters | Activity-owner offers, assignments, attempts, fenced leases, grant sets, reservations, and receipts | Executor SPI, status/doctor, task views, and generated bindings |
+| Context scouting and suggestion delivery | Domain suggestion/envelope contracts plus policy delivery arbiter | Application scout worker; hooks claim/deliver only the accepted envelope | Activity-owner candidates, envelopes, claims, delivery/outcome receipts, and checkpoints | Hint Lab, Observatory, status, and generated bindings |
+| Accounting and observability semantics | Domain accounting contracts plus plan-26 metric-descriptor registry | Projectors/accounting services and application SLO monitors | Owner-shard accounting events and versioned accounting/operations/all-scope rollups | Observatory, Costs, status/doctor, and generated bindings |
+| Human-facing Markdown/terminal presentation | `tracedecay-presentation` document/render contracts over catalog descriptors and sealed application views | `tracedecay-presentation` pure renderers | None | CLI/MCP/root adapters |
+| HTTP/SSE protocol envelopes and public contract artifacts | API/generated contract IR | Thin API adapter and generators | None except safe request audit through application ports | HTTP/SSE and official SDK packages |
+| MCP lifecycle, primitives, progress/cancellation/tasks, and framing | Official MCP SDK boundary plus generated tool-catalog bindings | Root MCP adapter only | No protocol state beyond the connection; safe application audit/operation records use their canonical stores | MCP clients through negotiated tools/resources/prompts/completion/notifications/tasks |
+| Official client transport runtimes | Generated public contract IR | Each Rust/TypeScript/Python client package | Client-local ephemeral transport state only | External callers; never in-process store/application access |
+| Effective configuration control plane | Domain config value/provenance contracts plus plan-20 registry | Application resolver/commands; root bootstrap only supplies sources | Profile/project config versions, history, impact, and audit repository | Status/settings/all transports |
 | System status/remediation | Application typed models | Application | Observability projections/audit | All transports/UI |
 | Error semantics | Domain/application error taxonomy | Owning layer | Safe error/audit projection | Generated mapping/rendering |
 | UI information architecture | Frontend | Frontend view models/interactions | Saved-view command only | Browser |
@@ -284,7 +294,7 @@ crates/
 ├── tracedecay-application/     # commands, queries, workflows, ports, typed status/errors
 ├── tracedecay-presentation/    # pure sealed-view -> document/terminal/Markdown rendering (plan 21)
 ├── tracedecay-api/             # HTTP/SSE and generated public contract artifacts
-└── tracedecay-client/          # official Rust client and generated public types
+└── tracedecay-client/          # official Rust transport client over generated public contracts only
 src/                            # root binary, composition, CLI/MCP, host install/update, V1 adapters
 dashboard/                      # workbench using generated TypeScript client
 packages/tracedecay-client/     # official TypeScript client independent of dashboard state
@@ -300,7 +310,7 @@ Do not create a generic `core`, `common`, `utils`, `services`, or `plugin` crate
 - independent tests/benchmarks only when it has independent behavior;
 - an ADR and deletion/migration plan for code it replaces.
 
-### 6.2 Allowed edges
+### 6.2 Compile-time allowed edges
 
 ```mermaid
 flowchart TD
@@ -326,6 +336,9 @@ flowchart TD
     API["tracedecay-api"] --> A
     API --> D
     API --> T
+    CONTRACT["generated public contracts + ApiProblem"]
+    API --> CONTRACT
+    CLIENT["tracedecay-client"] --> CONTRACT
     R["root composition and adapters"] --> A
     R --> API
     R --> S
@@ -337,12 +350,35 @@ flowchart TD
     R --> H
     R --> T
     R --> PR
-    UI["dashboard and SDKs"] --> API
+    TS["generated TypeScript client"] --> CONTRACT
+    PY["generated Python client"] --> CONTRACT
+    UI["dashboard"] --> TS
 ```
 
-The diagram is a deployment/composition view. To preserve testability, repository and executor traits are owned by the consumer: capture owns `ObservationSink`, query owns read capabilities, projectors own projection sinks, and application owns orchestration ports. Concrete cross-crate adapters live in application/root composition, not in the lower-level crates.
+These arrows are compile-time import/generation edges, not network calls. `generated public contracts + ApiProblem` is the plan-17 contract-IR output materialized into each client package; it is not a server facade or a new business crate. The Rust `tracedecay-client` may import only those generated request/response/event/problem definitions and its small client-owned transport/pagination/stream runtime. It has no Cargo dependency on `tracedecay-domain`, `tracedecay-store`, `tracedecay-application`, or the server implementation in `tracedecay-api`. The TypeScript and Python clients have the equivalent package boundary.
 
-### 6.3 Forbidden edges and capabilities
+To preserve testability, repository and executor traits are owned by the consumer: capture owns `ObservationSink`, query owns read capabilities, projectors own projection sinks, and application owns orchestration ports. Concrete cross-crate adapters live in application/root composition, not in the lower-level crates.
+
+### 6.3 Runtime transport flow
+
+```mermaid
+flowchart LR
+    RC["Rust/TypeScript/Python client"] -->|"authenticated UDS or loopback HTTP/SSE"| API["tracedecay-api adapter"]
+    UI["dashboard via TypeScript client"] -->|"authenticated HTTP/SSE"| API
+    API -->|"generated request + caller context"| A["tracedecay-application"]
+    A -->|"typed response/problem/event"| API
+    API -->|"wire envelope"| RC
+    API -->|"wire envelope"| UI
+    ROOT["root CLI/MCP adapters"] -->|"in-process application port; no loopback HTTP"| A
+```
+
+Runtime calls do not create compile dependencies in the opposite direction: application and API never import an SDK, and clients never reach store/domain/application APIs in-process. The optional Rust in-process conformance transport implements the generated client transport trait in test/root composition and still targets the application contract without adding production client-to-server-crate dependencies.
+
+### 6.4 Publication consequences
+
+Plan 12 owns release execution, but its publication manifest must be a topological projection of this DAG: `tracedecay-domain`; then the domain-only implementation crates (`tracedecay-store`, `tracedecay-capture`, `tracedecay-projectors`, `tracedecay-code-index`, `tracedecay-query`, `tracedecay-policy`, and `tracedecay-tool-catalog`); then `tracedecay-application`; then `tracedecay-hooks`, `tracedecay-presentation`, and `tracedecay-api`; then the official `tracedecay-client` from the same frozen generated-contract digest; and finally the root package. Peers in a wave may publish concurrently only when `cargo metadata` and generated-contract edges prove they are independent. Every artifact must become registry-readable with the expected checksum before a dependent wave starts.
+
+### 6.5 Forbidden edges and capabilities
 
 - Domain imports no TraceDecay crate and performs no filesystem, database, network, process, clock, random, or ambient-environment I/O.
 - Store contains no provider parser, ranking, policy, transport, dashboard, or remediation decisions.
@@ -353,6 +389,7 @@ The diagram is a deployment/composition view. To preserve testability, repositor
 - Hooks contain no broad graph scan, migration, indexing, automation, remote request, or direct store/query implementation.
 - Tool catalog contains metadata/validation/generation, never use-case execution.
 - API contains no business mutation, SQL, ranking, policy, provider parsing, or V1 fallback.
+- Client packages contain no domain/store/application/server imports, SQL, scope resolution, routing, retry invention, scheduler logic, or in-process business calls; they serialize generated contracts and invoke the service at runtime.
 - Root contains no new business rules; new behavior lands in its owning crate/application first.
 - Dashboard contains no private endpoint client, SQL-shaped request, capability-name literal registry, or independent error/status semantics.
 
@@ -635,9 +672,9 @@ For split identity/store/session/graph cases:
 - normalize canonical platform paths, reject unsupported/open holders, reserve every source/destination writer, freeze both SQLite families, and capture a signed inventory/watermark (HMAC with the plan 12 §9 profile-local catalog key, `key_id` recorded);
 - create and restore-probe an independent immutable backup of every conflicting source before staging; one successful backup never covers another source;
 - compute a deterministic confirmation over both source manifests, policy/config/catalog versions, target, table dispositions, remapped-edge digest, collisions, backups, and intended marker/registry update, then revalidate it under the same locks immediately before publication;
-- compute entity/observation/projection overlap by stable source hashes and aliases;
+- compute entity/observation/projection overlap by privacy-domain-keyed source fingerprints and proven aliases;
 - classify every table/index/trigger/sidecar and record as merge/rebuild/reject plus unique, duplicate, conflicting, corrupt, unavailable, secret-flagged, or unsupported; preserve remapped LCM summary/source edges explicitly;
-- preview merge/link/keep-separate effects without content disclosure;
+- inspect merge/link/keep-separate effects without content disclosure;
 - append/import idempotently into canonical evidence, never copy projection rows as authority;
 - rebuild projections/representations;
 - compare counts, hashes, coverage, retrieval anchors, and representative queries;
@@ -695,7 +732,7 @@ Add deterministic tests/tools for:
 - public replay result determinism for pinned inputs;
 - privacy sink/canary coverage for every store/index/cache/log/output/fixture/export;
 - semantic conformance across application, CLI, MCP, HTTP, SDKs, hooks, and dashboard client;
-- split-store identity reconciliation preview/apply/rollback/idempotency;
+- split-store identity reconciliation inspect/plan/start/recover/idempotency;
 - cross-repo/worktree/ref scope and graph/search routing;
 - file/function/complexity/public-API/dependency budget deltas.
 

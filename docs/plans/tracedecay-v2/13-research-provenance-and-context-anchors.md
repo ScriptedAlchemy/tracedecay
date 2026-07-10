@@ -24,27 +24,11 @@ V2 must preserve useful uncertainty: “candidate child context recovered by art
 
 ```rust
 pub struct ResearchContextAnchorV1 {
-    pub anchor_id: ResearchAnchorId,
+    pub entry_id: ResearchAnchorId,
+    pub retrieval_anchors: NonEmpty<RetrievalAnchorId>,
     pub purpose: LogSafeText,
-    pub provider: ProviderId,
-    pub host: Option<HostInstanceId>,
-    pub session_id: SessionId,
-    pub thread_id: Option<ThreadId>,
-    pub turn_id: Option<TurnId>,
-    pub message_id: Option<MessageId>,
-    pub source_store_id: Option<SourceStoreId>,
-    pub agent_instance_id: Option<AgentInstanceId>,
-    pub parent_session_id: Option<SessionId>,
-    pub parent_tool_use_id: Option<ToolInvocationId>,
-    pub workflow_run_id: Option<WorkflowRunId>,
-    pub workflow_agent_label: Option<WorkflowAgentLabel>,
-    pub goal_id: Option<GoalId>,
-    pub project_id: Option<ProjectId>,
-    pub repository_id: Option<RepositoryId>,
-    pub worktree_id: Option<WorktreeId>,
-    pub ref_id: Option<RefId>,
-    pub commit_id: Option<CommitId>,
-    pub pull_request_id: Option<PullRequestId>,
+    pub subject: ResearchAnchorSubjectV1,
+    pub related_activity: Option<ActivityResearchFacetV1>,
     pub occurred_window: Option<TimeInterval>,
     pub source_observation_ids: Vec<ObservationId>,
     pub evidence_class: EvidenceClass,
@@ -54,30 +38,105 @@ pub struct ResearchContextAnchorV1 {
     pub snapshot: VectorWatermark,
     pub coverage: CoverageReportV1,
 }
+
+pub enum ResearchAnchorSubjectV1 {
+    Activity(ActivityResearchFacetV1),
+    Git(GitResearchSubjectV1),
+    Delivery(DeliveryResearchSubjectV1),
+    Source(SourceResearchSubjectV1),
+    Web(WebResearchSubjectV1),
+    Document(DocumentResearchSubjectV1),
+}
+
+pub struct ActivityResearchFacetV1 {
+    pub provider: ProviderId,
+    pub host: Option<HostInstanceId>,
+    pub source_store_id: Option<SourceStoreId>,
+    pub session_id: SessionId,
+    pub thread_id: Option<ThreadId>,
+    pub turn_id: Option<TurnId>,
+    pub message_id: Option<MessageId>,
+    pub agent_instance_id: Option<AgentInstanceId>,
+    pub parent_session_id: Option<SessionId>,
+    pub parent_tool_use_id: Option<ToolInvocationId>,
+    pub workflow_run_id: Option<WorkflowRunId>,
+    pub workflow_agent_label: Option<WorkflowAgentLabel>,
+    pub goal_id: Option<GoalId>,
+}
+
+pub struct GitResearchSubjectV1 {
+    pub repository_id: RepositoryId,
+    pub project_id: Option<ProjectId>,
+    pub worktree_id: Option<WorktreeId>,
+    pub ref_id: Option<RefId>,
+    pub commit_id: Option<CommitId>,
+}
+
+pub struct DeliveryResearchSubjectV1 {
+    pub repository_id: RepositoryId,
+    pub delivery_entity: EntityRef, // PR | check | review | release
+}
+
+pub struct SourceResearchSubjectV1 {
+    pub source_store_id: SourceStoreId,
+    pub source_entity: EntityRef,
+    pub source_position: Option<SourcePosition>,
+}
+
+pub struct WebResearchSubjectV1 {
+    pub source_manifest: EntityRef,
+    pub captured_document: Option<EntityRef>,
+}
+
+pub struct DocumentResearchSubjectV1 {
+    pub document: EntityRef,
+    pub version: Option<EntityVersionRef>,
+}
 ```
 
 Rules:
 
-- Provider-native session/message/turn/tool/goal/run IDs remain aliases and retrieval keys; canonical IDs do not erase them.
-- A message anchor requires stable native/message/store identity. Text, timestamp, ordinal, or content hash alone is only a candidate matcher.
+- `subject` is a closed tagged union. Activity identity is required only for `Activity`; Git, delivery, captured-source, web, and document evidence stands on its own canonical subject. `related_activity` is optional correlation evidence for those non-activity variants, never a fabricated owner/session requirement.
+- Provider-native session/message/turn/tool/goal/run IDs remain aliases and retrieval keys inside `ActivityResearchFacetV1`; canonical IDs do not erase them.
+- A message anchor requires stable native/message/store identity. Text, timestamp, ordinal, or a privacy-domain-keyed content fingerprint alone is only a candidate matcher.
 - A subagent-task anchor requires provider-declared parent/tool/agent linkage or an evidence assertion. Copied system text is not direct ownership evidence.
 - Git correlation names produced, observed, encountered, branch-active, or time-overlap relation explicitly.
 - Every anchor stores the captured store/index/ref watermarks and a `CoverageReportV1`. Re-resolution reports drift; it does not mutate the old claim.
 - `CoverageReportV1` and `RetrievalRecipeV1` are plan 01 domain contracts ([01-domain-crate.md](01-domain-crate.md)); this plan embeds them unchanged, so `research.rs` compiles inside the domain crate without depending on query- or application-layer types.
 - Secret/sensitive content is never embedded in the anchor. Authorization is re-evaluated when resolving payloads.
-- `ResearchAnchorId` is durable. Response-handle IDs, browser URLs, search ranks, and temporary filesystem paths are optional hints only.
+- `ResearchAnchorId` identifies one immutable entry inside a versioned research manifest. It is durable manifest structure, but it is never an evidence locator and never resolves a payload directly.
+- Every manifest entry carries a nonempty set of canonical `RetrievalAnchorId`s. Only those IDs resolve through `RetrievalAnchorRecordV1` under current authorization; response-handle IDs, browser URLs, search ranks, and temporary filesystem paths are optional discovery hints only.
+- Manifest creation validates that each referenced `RetrievalAnchorRecordV1` supports the entry's claimed subject/evidence class at the pinned snapshot. The provider-native fields remain versioned assertions with explicit confidence, not an alternate resolver or permission bypass.
+
+### 2.1 Physical lowering invariant
+
+Plan 02 remains the physical-schema owner. Its research family lowers this tagged contract without nullable-column fiction:
+
+- `research_manifest_entries(entry_id PK, manifest_id, ordinal, subject_kind, purpose_ref, evidence_class, confidence, expected_subject_ref, retrieval_recipe_id, snapshot_ref, coverage_ref, occurred_start, occurred_end)` owns common fields and uniqueness `(manifest_id, ordinal)`.
+- Exactly one subject row exists per entry in `research_anchor_activity_subjects`, `research_anchor_git_subjects`, `research_anchor_delivery_subjects`, `research_anchor_source_subjects`, `research_anchor_web_subjects`, or `research_anchor_document_subjects`, each keyed by `entry_id` with a cascading foreign key. Only the activity table requires `provider_id` and `session_id`; the other subtype tables require their own canonical subject IDs.
+- `research_anchor_activity_facets(entry_id PK/FK, provider_id, host_id, source_store_id, session_id, thread_id, turn_id, message_id, agent_instance_id, parent_session_id, parent_tool_use_id, workflow_run_id, workflow_agent_label, goal_id)` is optional and legal only when the primary subject is not `Activity`.
+- `research_entry_retrieval_anchors(entry_id, ordinal, anchor_id, PRIMARY KEY(entry_id, ordinal), UNIQUE(entry_id, anchor_id))` enforces the nonempty canonical resolver set in the same transaction; observation references use the analogous ordinal child table.
+- `research_anchor_tombstones(entry_id PK, reason, occurred_at, subject_kind, subject_skeleton_blob_id, evidence_class, snapshot_blob_id, coverage_blob_id, audit_receipt_blob_id)` retains the safe tagged subject skeleton. It has no unconditional provider/session columns; an activity tombstone's skeleton carries them, while Git/delivery/source/web/document tombstones retain only their own canonical IDs.
+- Append validation rejects zero/multiple subtype rows, a `subject_kind`/subtype mismatch, an activity facet on an activity-primary row, or provider/session columns smuggled into a non-activity subject. Projection diagnostics surface malformed legacy imports; they never invent activity identity to repair them.
 
 ## 3. Research bundle manifest
 
 ```rust
+pub struct PrivateCorpusManifestRef {
+    pub manifest_id: ManifestId,
+    pub manifest_digest: ManifestDigest,
+    pub privacy_domain: PrivacyDomainId,
+    pub source_watermark: VectorWatermark,
+}
+
 pub struct ResearchBundleManifestV1 {
     pub manifest_id: ResearchManifestId,
     pub schema_version: SchemaVersion,
     pub supersedes: Option<ResearchManifestId>,
     pub created_at: UtcMicros,
     pub created_by: ActorRef,
-    pub parent_plan: DocumentRef,
-    pub repository: RepositoryRef,
+    pub parent_plan: EntityRef,
+    pub repository: RepositoryId,
     pub base_commit: CommitId,
     pub plan_commit: Option<CommitId>,
     pub catalog_snapshot: CatalogSnapshotRefV1,
@@ -102,8 +161,8 @@ pub struct ResearchContributionV1 {
     pub contributor: ActorRef,
     pub session_id: Option<SessionId>,
     pub role: ContributionRoleV1, // Authored | Researched | Reviewed | Audited
-    pub outputs: Vec<DocumentRef>,
-    pub anchors: Vec<ResearchAnchorId>,
+    pub outputs: Vec<EntityRef>,
+    pub manifest_entries: Vec<ResearchAnchorId>,
     pub evidence_class: EvidenceClass,
     pub confidence: Confidence,
 }
@@ -124,7 +183,7 @@ pub struct RedactionReport {
 }
 
 pub struct GitTruthManifest {
-    pub repository: RepositoryRef,
+    pub repository: RepositoryId,
     pub head_commit: CommitId,
     pub merge_base: Option<CommitId>,
     pub refs: Vec<(RefId, CommitId)>,
@@ -133,11 +192,11 @@ pub struct GitTruthManifest {
 }
 
 pub struct ResearchAnchorTombstoneV1 {
-    pub anchor_id: ResearchAnchorId,
+    pub entry_id: ResearchAnchorId,
+    pub retrieval_anchors: NonEmpty<RetrievalAnchorId>,
     pub reason: AnchorTombstoneReasonV1, // Deleted | Expired | Redacted
     pub occurred_at: UtcMicros,
-    pub provider: ProviderId,
-    pub session_id: SessionId,
+    pub subject: ResearchAnchorSubjectV1,
     pub evidence_class: EvidenceClass,
     pub snapshot: VectorWatermark,
     pub coverage: CoverageReportV1,
@@ -145,7 +204,7 @@ pub struct ResearchAnchorTombstoneV1 {
 }
 ```
 
-Tombstones are keyed by `anchor_id` (one per anchor), stored with the anchor tables in the owner shard per plan 02, and retained at least as long as any manifest version that references the anchor.
+Tombstones are keyed by `entry_id` (one per manifest entry), stored with the research-manifest tables in the owner shard per plan 02, and retained at least as long as any manifest version that references the entry. The tombstone preserves the entry's canonical `RetrievalAnchorId` references as safe metadata when policy permits; it never becomes a second resolution path.
 
 ## 4. Current planning anchor registry
 
@@ -155,7 +214,7 @@ These are retrieval IDs, not quoted transcript content.
 
 | Purpose | Provider/session anchor | Retrieval |
 |---|---|---|
-| Total rewrite/redesign request, additive user corrections, lead synthesis, plan edits, verification and publication | Codex session `019f4906-a411-7a11-ad3f-0d58deb0e847` | `lcm_load_session` by exact session ID; `message_search` with this `parent_session_id` for child discovery. |
+| Total rewrite/redesign request, additive user corrections, lead synthesis, plan edits, verification and publication | Codex session `019f4906-a411-7a11-ad3f-0d58deb0e847` | `lcm_load_session` by exact session ID; `message_search` with this `parent_session_id` for child discovery. A 2026-07-10 refresh resolved this parent through supported `lcm_describe` with store-ID range `1618548..2389159`; that range is a coverage checkpoint, not an immutable final-session bound. |
 
 ### 4.2 Planning and review child sessions
 
@@ -215,25 +274,45 @@ Recovery recipe: load the main Claude session by exact provider/session ID, enum
 
 Implementation must replace these local locators with durable `RetrievalAnchorId`s whose target is the main session or exact subagent transcript span, including source identity, provider-native child ID, branch/worktree, occurred/ingested range, access/privacy digest, and the plan/artifact relation. A future agent should be able to resolve “who researched this decision?” from a plan section to the exact authorized audit context without copying private text into Git.
 
+### 4.2B Final reconciliation-wave attribution
+
+The final Codex reconciliation wave remains under parent session `019f4906-a411-7a11-ad3f-0d58deb0e847` and parent task path `/root`. The orchestrator exposed the following canonical task paths and bounded artifact scopes during the wave:
+
+| Canonical task path | Bounded contribution/artifact evidence | Attribution status |
+|---|---|---|
+| `/root` | Lead arbitration, shared-diff review, current Git/PR refresh, verification, commit, push, and draft-PR update. | Parent provider session observed; exact lead Turns remain resolvable through the parent session. |
+| `/root/fix_product_surface_contracts` | Reconciled Brain/UI, public API, search-evaluation, saved-view, configuration, and product-surface contracts across plans 09/10/11/13/15/17/23. | Canonical orchestration task path plus bounded artifact/diff result; no durable child provider-session ID was exposed. |
+| `/root/fix_task_executor_contracts` | Reconciled task offers, atomic admission, assignments, leases, packets, executor lifecycle, manual-work commands, views, and orchestration parity in plan 24. | Canonical orchestration task path plus bounded artifact/diff result; no durable child provider-session ID was exposed. |
+| `/root/fix_code_accounting_contracts` | Reconciled code-index generation identity/ownership and normalized accounting/metric dimensions in plans 25 and 26. | Canonical orchestration task path plus bounded artifact/diff result; no durable child provider-session ID was exposed. |
+| `/root/centralize_baselines_deslop` | Centralized stale publication snapshots and removed obsolete skill-header references across its assigned plan files. | Canonical orchestration task path plus bounded artifact/diff result; no durable child provider-session ID was exposed. |
+| `/root/release_dag_ownership` | Reconciled release/ownership DAGs and crate/client ownership in plans 01, 12, and 19. | Canonical orchestration task path plus bounded artifact/diff result; no durable child provider-session ID was exposed. |
+| `/root/cross_plan_gap_deslop_audit` | Independent cross-plan retrieval-surface and plan-quality audit; findings were routed to the lead for owned-file correction. | Canonical orchestration task path plus reported audit result; no durable child provider-session ID was exposed. |
+| `/root/redesign_mcp_surface` | Designed the first-class MCP surface in plans 08/21, reconciled retrieval-operation consistency, then refreshed the private chronological corpus and this provenance plan with current hashes, master/PR state, and attribution gaps. | Canonical orchestration task path plus bounded artifact/diff result; no durable child provider-session ID was exposed. |
+
+This is deliberately weaker than provider-native child attribution. `sessions_for(git_ref="worktree", value="/fast/projects/tracedecay/.worktrees/codex-tracedecay-total-redesign-plan")` returned zero after the parent session became loadable, and raw patch/edit events do not carry durable task-path or child-session linkage. Therefore the task paths above are orchestration retrieval IDs and artifact claims, not proof that a specific provider child authored each changed line. Preserve this as an `AttributionGap` until V2 captures `parent_session_id`, `agent_instance_id`, canonical task path, Turn IDs, edit-event IDs, produced artifact spans, and Git observations in one causal chain.
+
 ### 4.3 Private chronological corpus
 
 The corpus itself remains outside Git:
 
 - Manifest: `/fast/tracedecay-redesign-research/manifest.json`.
-- Secret-scanned/redacted native `role=user` corpus: 34,333 rows; SHA-256 `a4d95d08a75cb04f130087a419fbc805cab6f5ee9a5e06da4e727908d3f7e366`.
-- Secret-scanned/redacted best-effort human subset: 9,969 rows; SHA-256 `35caa1af1095d4a50211e4e590639f493e95862854ff50edb646acd769f7bfea`.
-- Frozen final user-message cutoff: 2026-07-10 02:21:15.411 UTC. The last 28 direct prompts use `codex_rollout_raw_fallback` provenance because the supported TraceDecay replay failed with the documented identity-cutover conflict; internal goal/environment envelopes were excluded.
+- Secret-scanned/redacted native `role=user` corpus: 34,344 rows; SHA-256 `edfe67d6baf9fd87faa9fd49c443a777bbb838c3eb36a79106c06f18a161baff`.
+- Secret-scanned/redacted best-effort human subset: 9,980 rows; SHA-256 `5afb40d25f3fc43b86d620b25daea94a0b4f33ffc4421b5bb20b6a550b8c3bcb`.
+- Frozen refreshed user-message cutoff: 2026-07-10 20:26:39.847 UTC. The active parent contributes 39 direct prompts with `codex_rollout_raw_fallback` provenance: the original 28-record addendum plus 11 post-cutoff prompts. Three post-cutoff internal goal/environment envelopes were excluded.
 - The containing directory is mode `0700`; primary files, byte-identical retained copies, manifest, scanner reports, and helper scripts are mode `0600`.
 - Per-row `content_hash` is SHA-256 of retained sanitized UTF-8 `content`, not a pre-redaction source digest; validation reports zero mismatches, zero duplicate identities, zero missing timestamps, and zero chronological violations.
 
-This is a private corpus reference, not a distributable PR fixture. `gitleaks 8.30.1` and parsed-value credential detectors were run; conservative redaction removed marker/credential-shaped values and examples while preserving row identity/order. An authenticated-URL alert from serialized-line scanning was rejected as a cross-field false positive after parsed-value validation. Phase 0 derives separately reviewed synthetic/minimal-redacted regression fixtures; it never promotes this corpus directly.
+This is a private corpus reference, not a distributable PR fixture. `gitleaks 8.30.1` and parsed-value credential detectors were run; the refreshed broad and human corpora each report zero findings. Conservative redaction removed marker/credential-shaped values and examples while preserving row identity/order. An authenticated-URL alert from serialized-line scanning was rejected as a cross-field false positive after parsed-value validation. Supported LCM now resolves the exact parent, but worktree correlation still returns zero; the refresh is attributed only to parent session `019f4906-a411-7a11-ad3f-0d58deb0e847` and task path `/root`, not to guessed child agents. Phase 0 derives separately reviewed synthetic/minimal-redacted regression fixtures; it never promotes this corpus directly.
 
 ### 4.4 Git and delivery anchors
 
 | Subject | Stable anchor or query | Evidence note |
 |---|---|---|
-| Publication-base master | commit `3567e31e3a60730400c9b900e32ca02c0bf3bf33` | Crate version 0.0.48; includes merged #407/#415/#417/#419/#420/#422/#423/#424, split-store consolidation #425 (`de3d05dc`), and release #418 (`3567e31e`). Only draft plan PR #421 was open at the final refresh. |
-| Final installed usage/health snapshot | installed `tracedecay 0.0.47`; `analytics diagnostics --all --no-sync --json`; `lcm_status(provider=all)`; `health(details=true)`; exact selected/legacy identity error from `lcm_status`, `health`, `automation config get`, and `automation runs list` | Frozen planning values: analytics raw page 10,000 capped events, 102 defined/43 used tools; LCM 418,346 native rows, 1,541 summary nodes, 9.4:1 compression, 12,978,427 estimated tokens; health 6,979/10,000 over 987 files. Identity refusal preserves selected `proj_ceaa713e40fef2b2` (38,510 nodes/987 files/17 facts/2,003 sessions/432,790 messages/419,887 LCM/14 branches/0 automation files/5 payloads/3 responses) and legacy `proj_b4a8bbe4953823c4` (36,596 nodes/989 files/129 facts/4,129 sessions/603,866 messages/592,594 LCM/197 branches/3,470 automation files/1,839 payloads/4 responses). Automation config/runs are unavailable until explicit consolidation, so zero in the selected lane is not a global zero. Values are timestamped evidence, not timeless totals. |
+| Publication-base master | `origin/master` commit `273f50c0372f063b97f4755563a3ded65ef324d5` | Crate version 0.0.53; release PR #437 merged at this commit after #439/#440. At the 2026-07-10 21:16 UTC refresh, draft plan PR #421 was the only open PR. |
+| Current draft plan publication | PR #421; branch `codex/tracedecay-total-redesign-plan`; observed head `a02202afe754cae5814d7533fe06dff451fc9241`; base `master` | Open draft `[WIP] Plan TraceDecay V2 brain rewrite`; the observed head is a mutable publication checkpoint and must be refreshed after this reconciliation commit/push. |
+| Registry-reconstruction doctor fixes | PR #439 head `de55e3760d03882912808fc863a8f4dcb7e56e64`, merge `974d423b408c79a443c5ad758b8cfeaa4aa7264e`; PR #440 final head `7a56db8ea0d4a894d1a5d5ab550a45db7eb576d8`, merge `0dd1fd7d5557e4997adc43f0d5e35ac1964de019` | Merged current-master inputs: derive orphan stores from registry reconstruction, then isolate per-plan registry diff conflicts. |
+| v0.0.53 publication | PR #437; head `0960d0d94157ddd3232f7d2114a25e85d7e2a454`; merge `273f50c0372f063b97f4755563a3ded65ef324d5` | Current source/package baseline containing #439/#440. |
+| Frozen installed usage/health snapshot | installed `tracedecay 0.0.47`; `analytics diagnostics --all --no-sync --json`; `lcm_status(provider=all)`; `health(details=true)`; exact selected/legacy identity error from `lcm_status`, `health`, `automation config get`, and `automation runs list` | Historical planning values, not the current release: analytics raw page 10,000 capped events, 102 defined/43 used tools; LCM 418,346 native rows, 1,541 summary nodes, 9.4:1 compression, 12,978,427 estimated tokens; health 6,979/10,000 over 987 files. Identity refusal preserves selected `proj_ceaa713e40fef2b2` (38,510 nodes/987 files/17 facts/2,003 sessions/432,790 messages/419,887 LCM/14 branches/0 automation files/5 payloads/3 responses) and legacy `proj_b4a8bbe4953823c4` (36,596 nodes/989 files/129 facts/4,129 sessions/603,866 messages/592,594 LCM/197 branches/3,470 automation files/1,839 payloads/4 responses). Automation config/runs were unavailable at that checkpoint, so zero in the selected lane is not a global zero. Values are timestamped evidence, not timeless totals. |
 | Legacy store adoption | PR #405; merge commit `e35279586d6a0886856a26842ef17ce51e83da05` | Current-master migration input. |
 | Hermes user-profile consolidation | PR #407; branch `codex/hermes-user-profile-only`; head `d8ac40f38024c866afd733a891138d2c121f262c`; merge `78bfbfbcd1b33bfb61758ff8d9f51439f97ae07e` | Merged accepted-base input. `sessions_for` returns historical branch-active sessions; latest exemplars include `019f3ff1-7f85-7812-8255-77481331c0a9` and `019f3ff1-d87f-7f40-9cff-275e15bf589a`. |
 | Copied subagent prompt query semantics | PR #410; head `a40b01f714359759b3d0d0ae0c746ad00ef7e72f`; master commit `f4494c3ad7c354637ed5cafde7ad43af8926ca9b` | Merged current-master input; historical `sessions_for`/`workflows` zero remains a capture/correlation coverage fixture. |
@@ -338,12 +417,15 @@ Search query/rank is a recipe, not the anchor.
 
 ## 6. Product and API requirements
 
-- `GET /api/v2/research/manifests/{id}` returns safe metadata, anchor coverage, current resolution state, and authorized payload links.
-- `POST /api/v2/research/anchors/resolve` resolves IDs at a frozen watermark without mutating counters or evidence.
-- `POST /api/v2/research/manifests` is a preview/apply command with classification, secret scan, ownership, and audit receipt.
-- Explorer, Causal Loom, Turn inspector, agent graph, Git/delivery view, Hint Lab, Evolution Studio, and plan inspector can open/copy an anchor.
+- `GET /api/v2/research/manifests` and `GET /api/v2/research/manifests/{id}` bind `research.manifests.list/get` and return safe version metadata, manifest-entry coverage, and canonical retrieval-anchor references. They never resolve `ResearchAnchorId` as evidence.
+- `POST /api/v2/retrieval-anchors:metadata-batch` binds `retrieval_anchors.metadata_batch_get` and returns bounded safe identity/state/tombstone metadata only. It never returns content or grants payload authority.
+- Read-shaped `POST /api/v2/retrieval-anchors:resolve` binds `retrieval_anchors.resolve` and is the sole authorized record/payload resolution path for one or more canonical `RetrievalAnchorId`s at a frozen watermark; it does not mutate counters or evidence.
+- `POST /api/v2/retrieval-recipes:execute` binds `retrieval_recipes.execute` and re-runs one protected/versioned bounded recipe with exact scope, versions, watermark drift, and coverage.
+- `POST /api/v2/research/manifests:create-version` binds `research.manifests.create_version`, validates classification, secret-scan receipt, ownership, predecessor version, and nonempty canonical retrieval-anchor references, then appends one audited manifest version. It is not a generic preview/apply workflow.
+- Plan 08 generates these catalog bindings; plan 10 generates the exact OpenAPI operations; plan 17 SDKs expose `research.manifests.list/get/create_version`, `retrieval_anchors.metadata_batch_get/resolve`, and `retrieval_recipes.execute` from those same operation IDs without another anchor type.
+- Explorer, Causal Loom, Turn inspector, agent graph, Git/delivery view, Hint Lab, Evolution Studio, and plan inspector can open/copy a canonical `RetrievalAnchorId`; research views also show the enclosing immutable manifest-entry ID.
 - A plan/document inspector lists the evidence bundles and agent contributions that produced it, plus unresolved attribution.
-- Export emits anchor IDs, native aliases, source watermarks, evidence class, coverage, and retrieval recipes; payload inclusion is separately authorized.
+- Export emits each `ResearchAnchorId` as manifest-entry identity, its canonical `RetrievalAnchorId` set, native aliases, source watermarks, evidence class, coverage, and retrieval recipes; payload inclusion is separately authorized.
 - If an anchor is deleted/expired/redacted, a `ResearchAnchorTombstoneV1` retains the non-content provenance skeleton and reason.
 - Every plan implementation task starts with “resolve referenced manifest at current state” and records drift before editing code.
 
@@ -385,5 +467,5 @@ Search query/rank is a recipe, not the anchor.
 - The plan set index links this document and its current anchor registry.
 - Master Phase 0 includes PR 2A before implementation contracts harden.
 - Root migration inventory includes legacy/native session IDs, goals, workflow runs, Git correlation, response handles, and anchor coverage.
-- Failure regression matrix references anchor IDs/recipes rather than untraceable prose alone.
+- Failure regression matrix references canonical `RetrievalAnchorId`s/recipes (and optional enclosing research-manifest entry IDs) rather than untraceable prose alone.
 - Current planning worktree remains plan-only; private transcript corpora are not staged.

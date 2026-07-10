@@ -8,7 +8,7 @@
 
 **Decision:** Recency is a feature, never a truth rule. “Current,” “as of,” “show the evolution,” and “forensic/exhaustive” are explicit answer modes. A newer weak mention does not erase an older authoritative decision; an older exact lexical match does not outrank an explicit later correction when the user asks for current state. Contradictions remain visible, and uncertain supersession causes a conflict warning rather than a fabricated winner.
 
-**Current baseline:** The plan was audited on 2026-07-10 against `origin/master` `3567e31e3a60730400c9b900e32ca02c0bf3bf33` at 0.0.48, including merged #418/#425 plus ordinary-profile Hermes, daemon routing, catalog refresh, retrieval rank/counters, and aggregate-before-sample analytics. Only draft plan PR #421 was open. Refresh the source snapshot and live corpus before freezing implementation baselines. Current source anchors and live probe receipts remain historical evidence, not permanent behavior contracts.
+**Publication snapshot:** [master §2.6](../2026-07-09-tracedecay-brain-rewrite.md#26-current-master-accepted-changes) plus [plan 13](13-research-provenance-and-context-anchors.md) are normative. Divergent raw/session variants, bounded indexed consolidation lookup, conflict-safe registry healing, repair-free search reads, peer-safe graph checkpoints, and restart-safe retirement are required temporal-retrieval fixtures. Refresh source, open PRs, and live corpus before freezing implementation baselines.
 
 ---
 
@@ -19,7 +19,7 @@ This file is the session/LCM/temporal specialization of the general retrieval pl
 | Plan | Contract consumed or extended here |
 |---|---|
 | [`01-domain-crate.md`](01-domain-crate.md) | Owns canonical IDs, `ThreadId`, `TurnId`, `RetrievalAnchorId`/`RetrievalAnchorRecordV1`, bitemporal intervals, evidence, confidence, privacy, scope, the extended `CursorClaimsV1`, and the `TraceQueryV1` vocabulary including the optional `temporal` clause (`TemporalClauseV1`: `Current \| AsOf{valid_time, knowledge_time} \| Evolution \| Forensic`). This plan rides that clause and the plan 05 §6.1 registered attributes; it proposes exact session-temporal variants for that owner to define and adds no parallel AST. |
-| [`02-store-crate.md`](02-store-crate.md) | Persists occurrences, logical clusters, temporal assertions, summary horizons, index manifests, judgments, replay receipts, vector watermarks, retention, and tombstones through its dedicated table families for `MessageOccurrenceV1`, `LogicalMessageClusterV1` (with retained revisions), `MessageCopyAssertionV1`, `TemporalAssertionV1`, `SummaryNodeV2`, and the qrel/judgment/replay-receipt evaluation shard; plan 02 reconciles its `message_origin_assertions`/`message_representative_memberships` tables into this vocabulary and defines the keys and indexes. No query transport opens SQLite directly. |
+| [`02-store-crate.md`](02-store-crate.md) | Persists occurrences, logical clusters, temporal assertions, summary horizons, index manifests, judgments, replay receipts, vector watermarks, retention, and tombstones through its dedicated table families for `MessageOccurrenceV1`, `LogicalMessageClusterV1` (with retained revisions), `MessageCopyAssertionV1`, `TemporalAssertionV1`, `SummaryNodeV2`, and the activity shard's protected profile-evaluation family; plan 02 reconciles its `message_origin_assertions`/`message_representative_memberships` tables into this vocabulary and defines the keys and indexes. No query transport opens SQLite directly. |
 | [`03-capture-crate.md`](03-capture-crate.md) | Captures provider-native messages, tool events, goals, locations, parent/child/workflow links, correction markers, and source order as sanitized immutable observations. It does not decide relevance or supersession. |
 | [`04-projectors-crate.md`](04-projectors-crate.md) | Builds typed message/Turn/session/thread documents, occurrence/copy relations, summary/source DAGs, temporal assertion candidates, Git/worktree attribution, and representative-cluster projections with rebuildable lineage. |
 | [`05-query-crate.md`](05-query-crate.md) | Owns parsing, candidate generation, fusion, temporal resolution, ranking, diversity, hydration, context assembly, explanations, pagination, and evaluation execution — all in its §5 module tree, against which §13 below states requirements. There is no second LCM query engine and no session-owned module tree. |
@@ -177,7 +177,7 @@ pub struct MessageOccurrenceV1 {
     pub source_order: SourceOrder,
     pub location_assertions: Vec<LocationAssertionId>,
     pub sanitization_receipt_id: SanitizationReceiptId,
-    pub content_ref: EligibleContentRef,
+    pub content_ref: PayloadRef,
 }
 ```
 
@@ -200,7 +200,7 @@ pub struct LogicalMessageClusterV1 {
 }
 
 pub struct MessageCopyAssertionV1 {
-    pub assertion_id: AssertionId,
+    pub assertion_id: MessageCopyAssertionId,
     pub subject: MessageOccurrenceId,
     pub object: MessageOccurrenceId,
     pub relation: MessageCopyRelation,
@@ -371,7 +371,7 @@ Never compare raw shard BM25 scores as if corpus statistics were shared. Evaluat
 - exact-match tiers before any score normalization;
 - two-stage global candidate fusion and local hydration.
 
-The selected method must prove stable results when the same logical corpus is repartitioned across shards. Adding an unrelated large project cannot arbitrarily change top results for an exact scoped query. The production fusion order is defined once in plan 05 §11.3 — RRF over channels within each shard, then a calibrated cross-shard merge with exact-match tiers first — and the repartition-stability obligation is owned by 05's planner property test (05 §17); this plan contributes the session fixtures and the ablation baselines above.
+The selected method must prove byte-stable results for a fixed shard layout and bounded, explained drift when the same logical corpus is repartitioned. Exact-match tiers remain invariant; other top-k changes must satisfy the locked overlap/nDCG and worst-stratum floors. Adding an unrelated large project cannot arbitrarily change top results for an exact scoped query. The production fusion order is defined once in plan 05 §11.3 — RRF over channels within each shard, then a calibrated cross-shard merge with exact-match tiers first — and plan 05 owns the fixed-layout determinism plus repartition-drift property tests (05 §17); this plan contributes session fixtures and ablation baselines.
 
 ### 5.4 Temporal resolution and ranking
 
@@ -439,6 +439,24 @@ Current mode returns the active task decision/claim and links superseded task in
 LCM is a projection/use case over canonical activity, not a second message store/search product. A summary node records:
 
 ```rust
+pub enum SourceRangeRef {
+    OccurrenceRange {
+        thread_id: ThreadId,
+        source_instance_id: SourceInstanceId,
+        start: SourceOrder,
+        end_exclusive: SourceOrder,
+        source_watermark: VectorWatermark,
+    },
+    SummaryNode {
+        node_id: SummaryNodeId,
+        node_digest: ManifestDigest,
+    },
+    WholeThreadUnverified {
+        thread_id: ThreadId,
+        observed_watermark: VectorWatermark,
+    },
+}
+
 pub struct SummaryNodeV2 {
     pub node_id: SummaryNodeId,
     pub thread_id: ThreadId,
@@ -449,7 +467,7 @@ pub struct SummaryNodeV2 {
     pub summarizer: SummarizerDescriptor,
     pub prompt_version: PromptVersion,
     pub sanitization_receipt_id: SanitizationReceiptId,
-    pub content_ref: EligibleContentRef,
+    pub content_ref: PayloadRef,
     pub claim_refs: Vec<TemporalAssertionId>,
     pub lossiness: SummaryLossiness,
     pub status: SummaryStatus,
@@ -532,7 +550,7 @@ pub struct TemporalSearchResultViewV1 {
 }
 ```
 
-Per plan 01's exposure rule, results carry only the `RetrievalAnchorId`; the safe-metadata `RetrievalAnchorRecordV1` is loaded under current authorization through the batch hydration endpoint (`POST /api/v2/retrieval-anchors:batch`, §10). No result row, deep link, or export embeds the anchor record.
+Per plan 01's exposure rule, results carry only the `RetrievalAnchorId`. `retrieval_anchors.metadata_batch_get` at `POST /api/v2/retrieval-anchors:metadata-batch` loads bounded safe identity/state metadata without content; `retrieval_anchors.resolve` at `POST /api/v2/retrieval-anchors:resolve` performs separately authorized record/payload resolution at a frozen watermark. No result row, deep link, or export embeds the anchor record.
 
 The referenced view types are concrete:
 
@@ -563,7 +581,8 @@ pub struct EvidenceRelation {
 }
 
 pub struct HydrationCapability {
-    pub batch_hydration: bool,
+    pub metadata_batch_get: bool,
+    pub authorized_resolution: bool,
     pub cluster_expansion: bool,
     pub replay: bool,
     pub denied_reason: Option<HydrationDeniedReason>,
@@ -595,7 +614,7 @@ Stable fields include:
 - `caps`, `deduplicated_occurrences`, `warnings`, `no_answer_reason`;
 - `latency`, `token_estimate`, and optional evaluation/profile identifiers.
 
-No compact default includes raw metadata blobs, transcript paths, full message bodies, summary sources, embeddings, or every cluster member. Those use authorized batch hydration by stable anchor.
+No compact default includes raw metadata blobs, transcript paths, full message bodies, summary sources, embeddings, or every cluster member. Safe metadata uses canonical batch-get; content/record loading uses separately authorized canonical resolution by stable anchor.
 
 ### 7.3 Cursor binding
 
@@ -692,7 +711,7 @@ Also label:
 - no-answer correctness;
 - whether the result enabled the next action.
 
-Each judgment is a plan 15 §5.4 `JudgmentRecordV1` row in the protected private evaluation shard (plan 02's judgment table family); this plan only extends the `SecondaryLabel` vocabulary with the session-temporal labels above and defines no second judgment record.
+Each judgment is a plan 15 §5.4 `JudgmentRecordV1` row in the activity shard's protected profile-evaluation family. The labels above map to plan 15's typed `SecondaryLabelsV1` dimensions; this plan defines no second label vocabulary or judgment record.
 
 Adjudication preserves both original labels/rationales. Do not rewrite old qrels silently; publish a superseding judgment version (`supersedes` on the new row).
 
@@ -827,13 +846,13 @@ Lab replay is read-only against frozen inputs. Judgment and corpus updates are e
 
 ## 10. Product surfaces and controls
 
-Exact transport names derive from Plan 08/21's catalog. Required use cases:
+Exact transport names derive from Plan 08/21's catalog. Anchor operations are exclusively `retrieval_anchors.metadata_batch_get`, `retrieval_anchors.resolve`, and `retrieval_recipes.execute`; evaluation operations are the complete plan 15 §0.1 `retrieval.*` family. Required surfaces:
 
 ### CLI
 
 - search messages/Turns/sessions/threads/agents/workflows with mode/scope/as-of/grain and keyset pagination;
 - search/assemble a task packet by `WorkItemId`, initiative, dependency, work claim, thread, or Turn without broad-board leakage;
-- hydrate/expand a retrieval anchor or logical cluster;
+- batch-inspect safe anchor metadata, authorize exact anchor resolution, execute a retrieval recipe, or expand a logical cluster;
 - assemble context from query/anchor/Turn with declared budgets;
 - replay session/thread or one historical query at a frozen cutoff;
 - inspect temporal lineage, rank explanation, coverage, and summary horizon;
@@ -851,13 +870,16 @@ Exact transport names derive from Plan 08/21's catalog. Required use cases:
 ### HTTP and SDK
 
 - `POST /api/v2/search`;
-- `POST /api/v2/retrieval-anchors:batch` for authorized hydration;
+- `POST /api/v2/retrieval-anchors:metadata-batch` for bounded safe metadata only;
+- `POST /api/v2/retrieval-anchors:resolve` for authorized record/payload resolution;
+- `POST /api/v2/retrieval-recipes:execute` for bounded versioned recipe execution;
 - `POST /api/v2/context:assemble`;
 - task/ticket context assembly through the same route with typed task/initiative/dependency/claim selectors;
 - `POST /api/v2/sessions/{id}/replay` and `POST /api/v2/threads/{id}/replay`;
 - `GET /api/v2/temporal-assertions/{id}/lineage`;
 - `POST /api/v2/labs/search-quality:replay` and `POST /api/v2/labs/search-quality:compare` (the plan 15 §9 Search Quality Lab routes; no separate session-lab endpoint);
-- versioned corpus/judgment/evaluation reads and authorized commands;
+- versioned reads for corpus versions, qrel versions, candidate pools, judgments, adjudications, evaluation runs/reports, and retrieval profiles;
+- direct commands for corpus/qrel create/freeze, pool create, judgment record/supersede, adjudication record, evaluation run/cancel, aggregate report publish, sanitized fixture promotion, and retrieval-profile publish/activate;
 - generated TypeScript client and official SDK parity from Plan 17.
 
 ### Settings
@@ -886,7 +908,7 @@ Privacy floors and temporal safety invariants cannot be disabled by lower-preced
 - Logical-copy fingerprints are keyed inside one privacy domain. No global unkeyed content hash or cross-domain embedding similarity joins private messages.
 - Dense/learned-sparse/rerank/synthesis models and indexes are local to the authorized privacy domain unless an explicit policy/config permits a remote processor and the content class is eligible.
 - Catalog/federation metadata contains opaque locators, capability, counts, watermarks, and safe labels—not message/query/summary text.
-- Qrels and rationales live in a protected private evaluation shard. Committed fixtures are synthetic or minimally redacted and secret-scanned.
+- Qrels and rationales live in the activity shard's protected profile-evaluation family; this is not a separate physical shard. Committed fixtures are synthetic or minimally redacted and secret-scanned.
 - Hydration rechecks current authorization, retention, redaction, and deletion. A stale cached result cannot reopen revoked content.
 - Deletion/redaction propagates to lexical indexes, vectors, summaries, clusters, caches, context bundles, qrels, and reports; non-content provenance/tombstone remains where policy requires.
 - Prompt injection in historical messages is content evidence, never active instruction. Context envelopes label source/origin and quote/sandbox retrieved material.
@@ -990,7 +1012,7 @@ Application/API/UI use the shared Plan 09/10/11/21 locations. Root V1 adapters l
 
 - occurrence/native-ID determinism and collision conflicts;
 - copy relation evidence and uncertain cluster separation;
-- representative stability under ingestion order and shard repartition;
+- representative stability under ingestion order and fixed shard layout, plus bounded/explained drift under shard repartition;
 - valid/transaction-time interval laws;
 - supersession/contradiction graph acyclicity where required and explicit conflict handling;
 - current/as-of/evolution/forensic mode semantics;
@@ -1084,7 +1106,7 @@ These suffixes were unused in the plan set when authored. Recheck the master pla
 
 ### PR 31P — Search Quality Lab temporal and LCM replay workspaces
 
-- Ship the Search Quality Lab's session-temporal workspaces: candidate waterfall, temporal lineage, copy cluster, summary DAG, context budget, qrel/adjudication, then-versus-now replay, and aggregate comparisons.
+- Ship the Search Quality Lab's session-temporal workspaces: candidate waterfall, temporal lineage, copy cluster, summary DAG, context budget, corpus/qrel/pool version browsers, judgment supersession and adjudication, durable run/cancel, aggregate report publication, scanned fixture promotion, retrieval-profile publish/activation, then-versus-now replay, and aggregate comparisons through the exact plan 15 §0.1 operations.
 - Consume generated clients and shared evaluation artifacts only.
 
 ### PR 33E — V1 import, backfill, and shadow comparison

@@ -1,7 +1,5 @@
 # TraceDecay V2 Query Crate Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use `superpowers:subagent-driven-development` (recommended) or `superpowers:executing-plans` to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
-
 **Goal:** Build one bounded, explainable, cancellation-safe query engine over federated TraceDecay V2 shards, with stable snapshot pagination and identical semantics for CLI, MCP, HTTP, SSE, dashboard, labs, and exports.
 
 **Architecture:** `tracedecay-domain` owns the transport-neutral `TraceQueryV1` AST; `tracedecay-query` validates and plans it, prunes catalog-described shards, delegates typed fragments through store/projector ports, and deterministically merges bounded pages. The crate returns typed rows, ranking evidence, vector watermarks, coverage, cursors, export chunks, and live-read-model deltas without importing SQLite, Axum, MCP, CLI, or dashboard code.
@@ -96,7 +94,7 @@ The V1 policy-specific seams (`src/hooks/tool_hints*`, correlation scoring, sche
 - PR #407 (`fix(hermes): use the user TraceDecay profile`) consolidates Hermes into the user profile and removes Hermes-local bridge/config/inventory paths. `All` and every cursor bind to the canonical user `ProfileId`; query planning must not open or federate an implicit Hermes profile. Duplicate imported rows are reconciled by the migration manifest before query exposure.
 - PR #410 (`fix(sessions): collapse copied subagent prompts`) is the V1 semantic baseline for query-time parent representative dedupe and `direct_user`/`subagent`/`tool_result` filters. V2 adds raw/native, representative, human/direct-user, subagent, tool-result, and protocol modes with hidden-copy counts, classifier version, and provenance; it never deletes copied native rows.
 - PR #411 (`fix(doctor): report foreign-installation skill packages as info, not update-nag`) makes ownership and remediation agreement query-visible: Observatory/skills queries return owner class, severity, actionable capability, and `no_action_for_this_installation`; they cannot recommend a mutation the current installation refuses.
-- Publication master `3567e31e` (0.0.48) includes merged #418/#425 plus the earlier accepted inputs; only draft plan PR #421 was open at final refresh. #417/#425 split-identity/consolidation behavior is a required scope/coverage fixture, #414/#419 edit capability remains catalog/application behavior rather than a query operator, and #423/#424 retrieval/accounting behavior is accepted regression input.
+- The normative publication snapshot is [master §2.6](../2026-07-09-tracedecay-brain-rewrite.md#26-current-master-accepted-changes) plus [plan 13](13-research-provenance-and-context-anchors.md). Branch/session variant preservation, bounded indexed consolidation lookup, conflict-safe registry healing, strictly read-only search, peer-safe graph checkpoints, and restart-safe retirement are required scope/coverage fixtures. Refresh all states before implementation.
 - Rebase PR 11 onto then-current master, regenerate store/profile/tool inventories, and rerun V1 golden queries. Deleted transition paths are not V2 extension points.
 
 ## 5. Exact File and Module Tree
@@ -381,7 +379,7 @@ pub struct QueryAccess {
     pub allowed_privacy_domains: BTreeSet<PrivacyDomainId>,
     pub allowed_sensitivity: BTreeSet<DataSensitivity>,
     pub payload_access: PayloadAccess,
-    pub access_digest: Digest,
+    pub access_digest: AccessPolicyDigest,
 }
 
 pub trait QueryCancellation: Send + Sync {
@@ -447,6 +445,8 @@ Errors have stable machine codes: `invalid_query`, `resolution_mismatch`, `resol
 ## 8. Plan, Fragment, Budget, and Cancellation Contracts
 
 ```rust
+pub struct QueryPlanId(pub uuid::Uuid);
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct QueryPlan {
     pub plan_id: QueryPlanId,
@@ -563,7 +563,7 @@ struct CursorV1 {
     query_digest: PrivacyDomainBoundLocatorDigest,
     access_digest: AccessPolicyDigest,
     scope_digest: ScopeSelectorDigest,
-    profile_catalog_generation: ManifestDigest,
+    catalog_snapshot: CatalogSnapshotRefV1,
     temporal: Option<TemporalClauseV1>,
     intent_profile_version: Option<ComponentVersion>,
     schema_version: QuerySchemaVersion,
@@ -638,7 +638,7 @@ pub struct QueryResponse {
     pub timing: QueryTiming,
     pub explain: Option<QueryExplain>,
     pub level_of_detail: LevelOfDetailReport,
-    pub retention_watermark: RetentionWatermark,
+    pub retention_watermark: EvidenceRetentionWatermark,
     pub message_view: Option<MessageViewReport>,
 }
 
@@ -668,7 +668,7 @@ pub enum TruncationReason {
 }
 ```
 
-`complete` is true only when no selected shard is stale, unavailable, incompatible, locked, or redacted and no result-level truncation/sampling occurred. `skipped` may still be present for correctly pruned out-of-scope/capability shards and does not make an in-scope result partial. Every `ShardCoverage` includes shard ID/kind, safe project/profile label, requested/captured watermark, schema/capability versions, disposition reason, last successful freshness time, and rows scanned/returned when known.
+Completeness is derived only by `CoverageReportV1::is_complete()` together with response-level truncation/sampling state; this plan serializes no `complete` flag and defines no `ShardCoverage` type. Correctly pruned out-of-scope/capability shards remain named `skipped` dispositions without making an otherwise complete in-scope result partial. Each canonical coverage disposition retains shard ID/kind, safe project/profile label, requested/captured watermark, schema/capability versions, reason, last successful freshness time, and rows scanned/returned when known.
 
 Unknown denominators serialize as `value: null, state: "unknown", reason`, never numeric zero. Partial aggregate results include source-watermark vectors.
 
@@ -695,6 +695,11 @@ Unknown denominators serialize as `value: null, state: "unknown", reason`, never
 Optional embeddings and rerankers are a complete product subsystem, not an implicit library download. Domain owns `RepresentationArtifactManifestV1`; application owns install/activate/deactivate/evict/status workflows and the `ModelArtifactRegistryPort`; root composition implements the local artifact manager; plan 02 persists catalog/state/leases; plan 18 owns input/output/egress privacy; plan 20 owns controls; this plan owns compatibility with indexes/query/ranking and the PR 14E delivery slice.
 
 ```rust
+pub struct NormalizationRef {
+    pub algorithm: NativeKindCode,
+    pub version: ComponentVersion,
+}
+
 pub struct RepresentationArtifactManifestV1 {
     pub artifact_id: RepresentationArtifactId,
     pub purpose: RepresentationPurposeV1, // Embed | LearnedSparse | Rerank
@@ -717,7 +722,7 @@ pub struct RepresentationArtifactManifestV1 {
     pub minimum_ram_bytes: NonZeroU64,
     pub recommended_ram_bytes: NonZeroU64,
     pub allowed_devices: BTreeSet<DeviceClassV1>,
-    pub allowed_residency: BTreeSet<ResidencyClassV1>,
+    pub allowed_residency: BTreeSet<ModelResidencyV1>,
     pub determinism: DeterminismClassV1,
     pub published_at: UtcMicros,
     pub revoked_at: Option<UtcMicros>,
@@ -786,7 +791,7 @@ pub struct ComponentScore {
 ```
 
 - Fusion is defined once, here, for every consumer (plans 15 §4.3 and 23 §5.3 state requirements against it): within each shard, deterministic reciprocal-rank fusion runs over the enabled candidate channels (lexical, fuzzy, entity, vector, learned-sparse, summary-DAG, temporal, graph); then a calibrated cross-shard merge combines the shard lists — exact-match tiers first, then rank-based merging with a per-shard calibration whose method and version are declared in the `RankingProfile`. Raw shard BM25 scores are never compared as if corpus statistics were shared.
-- Repartition stability is owned by this crate's planner: repartitioning the same logical corpus across a different shard layout must not change fused top-k results or explanations. The Section 17 fusion repartition property test enforces it; plan 23 §5.3 supplies session fixtures and evaluates alternative calibration baselines.
+- Fixed-layout determinism is owned by this crate's planner: identical logical inputs, shard layout, generations, candidate budgets, and ranking profile produce byte-identical top-k IDs and explanations. Repartitioning may change bounded candidate recall and rank because fusion is shard-local before calibrated merge; the Section 17 repartition test therefore requires exact-match-tier invariance plus declared minimum top-k overlap/nDCG and explanation of every changed result, not impossible byte identity. Plan 23 §5.3 supplies session fixtures and calibration ablations; a candidate default cannot exceed the locked worst-stratum drift budget.
 - Declared finite weights for recency, trust, graph proximity, and usage apply after fusion, only when those features are present and authorized.
 - Missing features contribute `Absent`, not zero; profiles declare whether to renormalize or preserve fixed weights.
 - NaN/infinite values are rejected at shard boundaries.
@@ -1176,7 +1181,7 @@ Program numbering is authoritative: PR 12 is implemented in dependency order as 
 
 - Differential corpus: exact V1/V2 inclusion for compatibility profiles; every score/order divergence has query, corpus, old/new versions, feature explanation, and disposition.
 - Pagination property test: arbitrary equal scores, shard completion order, page sizes, and interleaved live ingest produce the exact frozen reference set once, in stable order.
-- Fusion repartition property test (planner-owned): repartitioning the same logical corpus across different shard layouts produces identical fused top-k results and explanations; plan 23 §5.3's session fixtures feed it.
+- Fusion determinism/repartition tests (planner-owned): fixed layout is byte-identical; alternate layouts preserve exact-match tiers and satisfy locked top-k-overlap/nDCG drift bounds with per-result layout/calibration explanations. Plan 23 §5.3's session fixtures feed them.
 - Fault matrix: absent, corrupt, locked, stale, incompatible, replaced, retention-crossed, and mid-page-failing shards return required coverage/restart behavior.
 - Budget matrix: page, graph, path, facet, projection, hydration, timeline, export, wall-time, RSS, and shard-concurrency limits reject or truncate only with typed reasons.
 - Performance: current-scale FTS p95 <=150 ms; current registry-N top-k p95 <=800 ms without irrelevant opens; 10x hot facets <=400 ms; 10x text <=750 ms; peak query RSS <=1.5 GiB; at most 32 concurrently open shards.

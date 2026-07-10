@@ -227,6 +227,12 @@ These identifiers are genuinely opaque: inner values are private, and constructi
 Each owning crate exports a static/generated manifest:
 
 ```rust
+pub enum ConfigSensitivityV1 {
+    CatalogSafe,
+    Protected,
+    CredentialReference,
+}
+
 pub struct ConfigDescriptorV1 {
     pub key: ConfigKey,
     pub module_id: ConfigModuleId,
@@ -419,20 +425,56 @@ Add store repositories for:
 The three PR 6E persistence records are fully shaped:
 
 ```rust
-pub enum ConfigRevisionStateV1 { Staged, Activated, Abandoned }
-
 pub struct ConfigLayerRevisionV1 {
     pub revision_id: ConfigRevisionId,
+    pub layer_id: ConfigLayerId,
     pub target: ConfigTargetV1,
     pub parent_revision: Option<ConfigRevisionId>,
     pub registry_version: ConfigRegistryVersion,
     pub registry_digest: ConfigRegistryDigest,
     pub entries: Vec<ConfigRevisionEntryV1>,
-    pub actor: ActorRefV1,
+    pub actor: ActorRef,
     pub reason: Option<CatalogSafeText>,
     pub idempotency_key: IdempotencyKeyV1,
-    pub state: ConfigRevisionStateV1, // Staged | Activated | Abandoned
     pub created_at: UtcMicros,
+}
+
+pub struct ConfigRevisionAbandonmentV1 {
+    pub abandonment_id: ManifestId,
+    pub revision_id: ConfigRevisionId,
+    pub reason: ReasonCode,
+    pub actor: ActorRef,
+    pub abandoned_at: UtcMicros,
+}
+
+pub struct ConfigRevisionPreparationV1 {
+    pub preparation_id: ManifestId,
+    pub activation_id: ConfigActivationId,
+    pub target: ConfigTargetV1,
+    pub owning_shard: ShardId,
+    pub revision_id: ConfigRevisionId,
+    pub revision_digest: ManifestDigest,
+    pub effective_snapshot_id: EffectiveConfigSnapshotId,
+    pub effective_digest: EffectiveConfigDigest,
+    pub lease_epoch: u64,
+    pub expires_at: UtcMicros,
+    pub receipt_digest: ManifestDigest,
+}
+
+pub enum ConfigPreparationReleaseOutcomeV1 {
+    Published,
+    Failed,
+    Superseded,
+    Expired,
+}
+
+pub struct ConfigPreparationReleaseV1 {
+    pub release_id: ManifestId,
+    pub preparation_id: ManifestId,
+    pub outcome: ConfigPreparationReleaseOutcomeV1,
+    pub actor: ActorRef,
+    pub released_at: UtcMicros,
+    pub receipt_digest: ManifestDigest,
 }
 
 pub struct ConfigRevisionEntryV1 {
@@ -447,11 +489,10 @@ pub struct ConfigActivationManifestV1 {
     pub previous_activation: Option<ConfigActivationId>,
     pub registry_version: ConfigRegistryVersion,
     pub registry_digest: ConfigRegistryDigest,
-    pub effective_snapshot_id: EffectiveConfigSnapshotId,
-    pub effective_digest: EffectiveConfigDigest,
+    pub member_set_digest: ManifestDigest,
     pub source_resolution_watermark: VectorWatermark,
     pub members: Vec<ConfigActivationMemberV1>,
-    pub actor: ActorRefV1,
+    pub actor: ActorRef,
     pub idempotency_key: IdempotencyKeyV1,
     pub published_at: UtcMicros,
 }
@@ -463,14 +504,16 @@ pub struct ConfigActivationMemberV1 {
     pub layer_id: ConfigLayerId,
     pub revision_id: ConfigRevisionId,
     pub revision_digest: ManifestDigest,
-    pub staged_state: ConfigRevisionStateV1, // must be Staged at publication validation
+    pub preparation_id: ManifestId,
+    pub effective_snapshot_id: EffectiveConfigSnapshotId,
+    pub effective_digest: EffectiveConfigDigest,
 }
 
 pub struct ConfigConsumerAcknowledgementV1 {
     pub consumer: ConfigConsumerId,
     pub instance: ConsumerInstanceId, // opaque per-process component instance
     pub activation_id: ConfigActivationId,
-    pub effective_digest: EffectiveConfigDigest,
+    pub activation_member_set_digest: ManifestDigest,
     pub runtime: ConfigConsumerRuntimeV1, // component version + safe process identity class
     pub state: ConfigConsumerRuntimeStateV1, // Applied | PendingRestart | PendingOperation | Failed
     pub acknowledged_at: UtcMicros,
@@ -479,9 +522,10 @@ pub struct ConfigConsumerAcknowledgementV1 {
 
 Storage contracts:
 
-- `ConfigLayerRevisionV1`: primary key `revision_id`; uniqueness on `(target, idempotency_key)` and a single legal `Staged -> Activated` or `Staged -> Abandoned` transition per row; indexes on `(target, created_at)` and `state`. Rows referenced by any activation manifest, receipt, export, or replay pin are retained permanently; unreferenced `Staged` rows are garbage-collected after the abandonment window (Section 8.2 step 7). Entry values are bounded by descriptor maximum sizes and one revision stays <=1 MiB canonical encoding. Owning shard follows the target per Section 6: profile shard for Profile/Provider/Host layers, project shard for Project/Repository/Worktree layers.
+- `ConfigLayerRevisionV1`: primary key `revision_id`; uniqueness on `(target, idempotency_key)`; rows are immutable and have no mutable activation state. Activation is derived only from membership in the manifest reached by `config_activation_heads`. Abandonment is a separate immutable `ConfigRevisionAbandonmentV1` event/row with uniqueness on `revision_id`. A revision with an unexpired preparation pin or any manifest membership cannot be abandoned/collected. Rows referenced by any activation manifest, receipt, export, or replay pin are retained permanently; an unreferenced revision can be collected only after a durable abandonment row and the abandonment window. Entry values are bounded by descriptor maximum sizes and one revision stays <=1 MiB canonical encoding. Owning shard follows the target per Section 6.
+- `ConfigRevisionPreparationV1`: primary key `preparation_id`; unique `(activation_id, target)` and `(activation_id, revision_id)`; owner-shard transaction checks revision digest/no abandonment, materializes the target-specific effective snapshot, and pins both until expiry under the lifecycle lease epoch. It is immutable. Publication consumes its exact receipt. Release is a separate immutable `ConfigPreparationReleaseV1`, unique by preparation, whose digest covers the preparation/outcome/actor/time. Effective pin state is derived from preparation expiry, release, and manifest membership; neither preparation nor revision is updated in place. A released/expired loser remains history and makes only unreferenced revisions eligible for later abandonment.
 - `ConfigActivationManifestV1`: primary key `activation_id`; uniqueness of one member per target per manifest and one successor per `previous_activation` (a linear append-only chain); index on `published_at`. Manifests are append-only and retained while any snapshot, receipt, or the rollback window references them; member count is bounded by resolved target count and one manifest stays <=1 MiB. Owning shard: the profile shard, matching the profile-owned publication in Section 8.2.
-- `ConfigActivationMemberV1`: primary key `(activation_id, ordinal)`; unique target digest and `(activation_id, layer_id, revision_id)` within the manifest; exact canonical target, owning-shard, layer, revision digest, and staged-state fields. The target encoding is rehashed on write and `staged_state` must equal `Staged` at publication validation. Members are immutable and retained with their manifest. A manifest with zero members, a duplicate target, a missing/unavailable staged revision, or any target/shard/revision digest mismatch cannot publish.
+- `ConfigActivationMemberV1`: primary key `(activation_id, ordinal)`; unique target digest and `(activation_id, layer_id, revision_id)` within the manifest; exact canonical target, owning-shard, layer, revision/digest, preparation receipt, and target-specific effective snapshot/digest fields. The target encoding is rehashed on write; every unexpired preparation must match the activation/target/revision/snapshot tuple. Members are immutable and retained with their manifest. `member_set_digest` covers the complete sorted member tuples. A manifest with zero members, duplicate target, missing/expired preparation, missing/unavailable/abandoned revision, or any target/shard/revision/snapshot digest mismatch cannot publish.
 - `config_activation_heads`: one row per profile with `(manifest_id, generation)`; advancement is compare-and-swap from `previous_activation` and commits atomically with the new manifest and all member rows. Resolvers read only through this head and reject a missing/member-count-mismatched target instead of scanning for the latest timestamp.
 - `ConfigConsumerAcknowledgementV1`: primary key `(consumer, instance, activation_id)`; the latest acknowledgement per `(consumer, instance)` is authoritative; indexes on `activation_id` and `(consumer, acknowledged_at)`. Retention keeps the current acknowledgement per instance plus history bounded to the activation rollback window; rows are <=4 KiB and contain no values, paths, or consumer error text. Owning shard: the profile shard.
 
@@ -501,15 +545,15 @@ A batch import or policy change can affect multiple owning shards. Implement a d
 
 1. resolve every target at one registry/catalog watermark;
 2. validate the combined effective snapshots and safety constraints;
-3. append staged immutable revisions to each owning shard with expected versions;
-4. verify all staged revision digests and availability;
-5. in one profile-shard transaction, insert the activation manifest plus its complete ordered member set referencing every staged revision by owning shard, layer ID, revision ID, and digest, then advance the profile's current-activation pointer;
+3. append candidate immutable revisions to each owning shard with expected versions;
+4. under one lifecycle lease epoch, create an immutable preparation pin in each owner-shard transaction that checks revision digest/no abandonment, materializes the target-specific effective snapshot/digest, and reserves that tuple through publication expiry;
+5. in one profile-shard transaction, revalidate every unexpired preparation receipt, insert the activation manifest plus its complete ordered member set referencing each preparation/revision/snapshot tuple, verify `member_set_digest`, then advance the profile's current-activation pointer;
 6. emit one activation outbox event and consumer notifications;
-7. leave unactivated staged rows eligible for safe garbage collection if any pre-publication step fails.
+7. append immutable preparation-release receipts after publication acknowledgement or failure; losers may receive abandonment records only after no unexpired/unreleased pin or manifest membership remains, and only those witnessed rows become eligible for safe garbage collection after the configured window.
 
-Resolvers ignore staged revisions until activation publication, so readers observe either the previous manifest or the complete new manifest. This is atomic visibility, not a distributed database transaction. If an activated shard later becomes unavailable, coverage is `Partial/Unavailable`; the resolver never silently falls back to an older layer.
+Resolvers ignore every revision not referenced by the current activation manifest, so readers observe either the previous manifest or the complete new manifest. This is atomic visibility, not a distributed database transaction. If an activated shard later becomes unavailable, coverage is `Partial/Unavailable`; the resolver never silently falls back to an older layer.
 
-The profile-owned current-activation pointer is the single visibility boundary; it can reference a manifest only after all member rows exist in that same transaction, and the manifest never carries a singular `layer_id/revision` shortcut. Plan 02's physical schema is `config_activation_manifests` plus `config_activation_members`. Activation validation proves set equality between the resolved target set, staged revisions, and members before publication.
+The profile-owned current-activation pointer is the single visibility boundary; it can reference a manifest only after all member rows exist in that same transaction, and the manifest never carries a singular layer/revision/snapshot shortcut. Plan 02's physical schema is `config_revision_preparations` plus `config_activation_manifests`/`config_activation_members`. Activation validation proves set equality between resolved targets, preparations, revisions, target-specific snapshots, and members before publication. Later owner-shard unavailability yields typed partial coverage; it never causes fallback to another target's snapshot.
 
 Merged PR #425 (`de3d05dc`, final head `d3bb28b5`) reinforces the boundary between configuration and destructive identity/store workflows. Settings may select policy and show status, but split-store consolidation is a separate offline operation: freeze both canonical store families, identify holders by path plus file/inode, acquire reservations, create and verify dual backups, recompute deterministic confirmation under reservation, execute a restartable ledger/staging workflow, preserve remapped LCM edges, verify the complete destination, and publish cutover only after proof. Saving a configuration key cannot start, bypass, weaken, or mark that workflow effective.
 
@@ -979,6 +1023,7 @@ Evaluation suites measure:
 - stale/partial/ambiguous/foreign/locked behavior;
 - concurrent patch conflict and idempotent retry;
 - activation atomic visibility under crash/fault injection;
+- immutable preparation/release derivation under crash before/after owner pin, manifest publication, acknowledgement, release receipt, expiry, abandonment, and garbage collection; no released/expired pin can be mutated or collected while a manifest still references it;
 - consumer convergence and SSE resync;
 - privacy-floor mutation resistance;
 - no secret/reference leakage in every sink;
@@ -1099,7 +1144,7 @@ These slices extend the master program without forming a separate architecture:
 
 ### PR 6E — Immutable configuration revisions and activation manifests
 
-- Add profile/project repositories, audit/outbox, staged revisions, atomic activation publication, consumer acknowledgements, and fault tests.
+- Add profile/project repositories, audit/outbox, immutable preparations/releases, staged revisions, atomic activation publication, consumer acknowledgements, and fault tests.
 - Store credential references only.
 
 ### PR 22C — Generated configuration registry and capability inventory

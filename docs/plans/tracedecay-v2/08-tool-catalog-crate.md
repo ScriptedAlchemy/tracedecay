@@ -1,10 +1,8 @@
 # TraceDecay V2 Tool Catalog Crate Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (- [ ]) syntax for tracking.
-
 **Goal:** Create one versioned, generated capability catalog that makes every TraceDecay use case discoverable and semantically consistent across MCP, CLI, HTTP, dashboard, skills, hooks, policy routing, documentation, and compatibility migration.
 
-**Architecture:** tracedecay-tool-catalog is a pure metadata/compiler crate. Checked-in typed use-case definitions reference domain schemas and declare ownership, effects, scope, freshness, privacy, cost, evidence, compatibility, and transport bindings; generators emit immutable manifests and adapter metadata, while audit extractors compare every live/legacy surface against the catalog. The crate never executes a use case, performs discovery I/O at runtime, or becomes a second application layer.
+**Architecture:** tracedecay-tool-catalog is a pure metadata/compiler crate. Checked-in typed use-case definitions reference domain schemas and declare ownership, effects, scope, freshness, privacy, cost, evidence, compatibility, and transport bindings; generators emit immutable manifests and adapter metadata, while audit extractors compare every live/legacy surface against the catalog. For MCP, the catalog generates the complete protocol-facing tool/resource/resource-template/prompt/completion manifest, capability requirements, JSON Schema 2020-12 input/output schemas, annotations, task support, and list-generation facts; the root MCP adapter owns protocol lifecycle and invokes application ports. The crate never executes a use case, performs discovery I/O at runtime, negotiates a connection, or becomes a second application layer.
 
 **Tech Stack:** Rust 2024; serde/serde_json; schemars/jsonschema; semver; blake3; thiserror; clap Command introspection in a build/audit binary only; OpenAPI schema fragments; TypeScript/JSON generation; insta/proptest; V2 domain contracts.
 
@@ -14,7 +12,55 @@
 
 This plan owns master-plan PR 22A. It lands before tracedecay-policy PRs 23A–23G so policy bundles can pin a catalog digest, and before hook PR 24F so host descriptors bind to stable capabilities.
 
-Plan [`24-canonical-task-plan-graph-and-multi-agent-executor.md`](24-canonical-task-plan-graph-and-multi-agent-executor.md) contributes initiative/plan/task/query/control/lifecycle, executor registration/protocol, scheduler, packet, and task-view capability families. This catalog owns their audience/effect/scope/grant/privacy/egress/idempotency/output metadata and generated bindings; `all/*` and generic tool grants never enable task mutations implicitly.
+Plan [`24-canonical-task-plan-graph-and-multi-agent-executor.md`](24-canonical-task-plan-graph-and-multi-agent-executor.md) contributes initiative/plan/task/query/control/lifecycle, executor registration/protocol, scheduler, packet, and task-view capability families. This catalog owns their audience/effect/scope/grant/privacy/egress/idempotency/output metadata and generated bindings; `all/*` and generic tool grants never enable task mutations implicitly. The generated inventory imports every plan-24 operation ID and proves a bijection; it cannot retain only task detail while omitting control, executor, scheduler, graph, or protected-share operations:
+
+```text
+initiatives.list|get|graph|create|update|pause|resume|retire
+plans.list|get|diff|create_version|activate|decompose
+work_items.list|get|query|context|dependencies
+work_items.create|update|replace|retire|link|unlink|assign|reassign|assign_set
+work_items.pause|resume|cancel|archive|retry
+work_items.record_attestation|record_review|record_decision|record_exception
+work_items.handoff|reopen|reverse_transition
+attempts.list|get|timeline
+attempts.heartbeat|progress|complete|block
+task_offers.list|get|accept|decline|revoke
+context_packets.list|get|accept
+task_notifications.list|get|create|update|delete
+executors.list|get|match|register|heartbeat|drain|unregister
+scheduler.status|explain|pause|resume|run_once
+task_views.list|get|create|update|delete|share.plan|share.start|share.revoke
+task_graph.status|doctor|events
+```
+
+`task_offers.accept` is the sole public command that may invoke atomic attempt/lease/start admission; no `work_items.acquire_lease` binding exists. `context_packets.accept` is the sole fenced command that may advance an attempt's monotonic accepted-packet pointer; the immutable start packet remains separately visible in attempt detail/timeline. Manual attestation/review/decision/exception/handoff/reopen/reversal remain distinct typed commands, not a generic status setter or rollback. Notification create/update/delete are direct validated commands and have no preview/apply aliases. Each row above has an explicit application, CLI, MCP, HTTP, dashboard, Rust, TypeScript, and Python binding or a reviewed audience-specific unavailability disposition.
+
+Plan [`15-search-quality-evaluation-and-retrieval-research.md`](15-search-quality-evaluation-and-retrieval-research.md) contributes one closed search-evaluation family. These operation IDs are canonical and exhaustive for this slice:
+
+```text
+reads:
+retrieval.corpus_versions.list|get
+retrieval.qrel_versions.list|get
+retrieval.candidate_pools.list|get
+retrieval.judgments.list|get
+retrieval.adjudications.list|get
+retrieval.evaluation_runs.list|get
+retrieval.evaluation_reports.list|get
+retrieval.profiles.list|get
+
+commands:
+retrieval.corpus_versions.create|freeze
+retrieval.qrel_versions.create|freeze
+retrieval.candidate_pools.create
+retrieval.judgments.record|supersede
+retrieval.adjudications.record
+retrieval.evaluation_runs.run|cancel
+retrieval.evaluation_reports.publish
+retrieval.fixtures.promote
+retrieval.profiles.publish|activate
+```
+
+Every read generates catalog, CLI, MCP-tool, MCP-resource/resource-template, HTTP/SDK, and Search Quality UI parity metadata where the surface supports reads; each `get` resource URI resolves the same application view and each `list` remains the semantic list operation rather than abusing MCP `resources/list`. Commands generate CLI/MCP/HTTP/SDK/UI bindings only and never a writable resource. The catalog must not invent `eval`, `benchmark`, `golden`, `retrieval.fixtures.list/get`, or other aliases/use cases absent from the family above; a surface omission requires an explicit reviewed disposition.
 
 - Stable use-case identity is transport-independent. search, tracedecay tool search, a future HTTP route, a dashboard command, and a skill route can be bindings of one use case rather than five implementations.
 - tracedecay-tool-catalog describes use cases and bindings. tracedecay-application implements/orchestrates them. Adapters invoke application ports; the catalog invokes nothing.
@@ -37,6 +83,8 @@ Plan [`24-canonical-task-plan-graph-and-multi-agent-executor.md`](24-canonical-t
 - Assign stable CapabilityId, UseCaseId, IntentId, BindingId, semantic version, owner, lifecycle, and replacement to each.
 - Require domain `ScopeSelectorV2` on every scoped capability/binding; catalog metadata can constrain allowed scope kinds but cannot invent a transport-specific/current-project selector.
 - Generate MCP schemas/descriptions/categories, CLI command metadata/help cross-references, HTTP/OpenAPI operation metadata, dashboard command/panel manifests, skill/tool references, hook routing facts, documentation tables, and TypeScript catalog types from one definition set.
+- Generate MCP tools, resources, resource templates, prompts, completion eligibility, output schemas, effect annotations, task-support declarations, subscription/list-change facts, and protocol-capability requirements from one reviewed binding set; the live adapter may not hand-register an MCP primitive.
+- Generate exact search-evaluation CLI/MCP/resource/UI parity rows from the closed `retrieval.*` operation family above; reject invented aliases, missing reads/commands, and resource bindings that mutate evaluation state.
 - Make read/mutate, manual-versus-autonomous execution, side effects, idempotency, dry-run/preview, confirmation, automatic recovery/compensation, streaming/pagination, cost, latency, freshness, security, privacy, and audit behavior explicit. Curation item effects are autonomous and have no approval/apply binding.
 - Give policy compact, versioned task-to-capability facts without shipping the entire catalog in every hint.
 - Catalog current agent-presence/work-claim publish, heartbeat, nearby-query, overlap acknowledgement/handoff, coordination analytics, and Coordination Lab capabilities with advisory/privacy/TTL/trigger semantics.
@@ -48,7 +96,7 @@ Plan [`24-canonical-task-plan-graph-and-multi-agent-executor.md`](24-canonical-t
 
 ## 3. Non-Goals
 
-- No use-case execution, application orchestration, storage/query/policy logic, provider API call, Git/GitHub call, filesystem scan at runtime, dashboard rendering, MCP transport, CLI parser, or Axum router.
+- No use-case execution, application orchestration, storage/query/policy logic, provider API call, Git/GitHub call, filesystem scan at runtime, dashboard rendering, MCP transport/lifecycle/session state, CLI parser, or Axum router.
 - No dynamic plugin marketplace or remote catalog service in the first V2 default.
 - No guarantee that every transport exposes every capability. Absence requires an explicit binding disposition and rationale.
 - No prose-only routing rules. Prose docs are generated from typed metadata.
@@ -82,8 +130,8 @@ Refreshed implementation inputs:
 - PR #407 user-profile Hermes consolidation: Hermes skill/memory/automation capabilities belong to the normal active user profile. Removed Hermes bridges/config/inventory are migration aliases, not V2 extension points.
 - Merged PR #410 copied-subagent prompt collapse adds direct_user, subagent, tool_result, and parent-representative filters consistently while retaining every sanitized native row and explicit coverage.
 - Merged PR #411 foreign-skill ownership makes doctor/removal/update share one ownership predicate; catalog remediation metadata distinguishes actionable-by-this-installation, manual-user-only, and no-action.
-- Merged PR #414 adds the `move_symbol` edit capability; regenerate the tool/CLI/API inventory and require owner/schema/scope/effect/idempotency/preview/error bindings rather than treating the old 102-name count as current.
-- Merged release PRs #413/#416/#418 and merged #407/#415/#417/#419/#420/#422/#423/#424/#425 contribute current profile, release, identity, consolidation, edit, routing, catalog-generation, retrieval, and analytics inputs at publication master `3567e31e` (0.0.48). Only draft plan PR #421 was open at final refresh; live state is re-read before PR 22A. PR #409 remains closed historical inventory only.
+- Merged PR #414 adds the `move_symbol` edit capability; regenerate the tool/CLI/API inventory and require owner/schema/scope/effect/idempotency/inspect/commit/error bindings rather than treating the old 102-name count as current.
+- Merged release PRs #413/#416/#418 and merged #407/#415/#417/#419/#420/#422/#423/#424/#425 remain historical inputs; PR #409 remains closed historical inventory only. The normative publication snapshot is [master §2.6](../2026-07-09-tracedecay-brain-rewrite.md#26-current-master-accepted-changes) plus [plan 13](13-research-provenance-and-context-anchors.md). Untracked branch-graph recovery, divergent-session preservation, bounded consolidation lookup, lifecycle-lease-safe hooks, conflict-safe registry reconstruction, read-only FTS search, graph peer-checkpoint safety, and proof-gated retirement of applied consolidation manifests remain required catalog fixtures.
 
 The implementation lead refreshes master/open PRs and regenerates all legacy inventories before PR 22A. A changed count is expected; an unexplained capability is not.
 
@@ -307,7 +355,10 @@ crates/tracedecay-tool-catalog/
 ├── generated/
 │   ├── catalog.json
 │   ├── catalog.digest
+│   ├── mcp-protocol.json
 │   ├── mcp-tools.json
+│   ├── mcp-resources.json
+│   ├── mcp-prompts.json
 │   ├── cli-bindings.json
 │   ├── cli-command-tree.json
 │   ├── openapi-operations.json
@@ -329,6 +380,7 @@ crates/tracedecay-tool-catalog/
 │   ├── generation_determinism.rs
 │   ├── complete_inventory.rs
 │   ├── transport_parity.rs
+│   ├── mcp_protocol_generation.rs
 │   ├── git_routing.rs
 │   ├── git_truth_reconciliation.rs
 │   ├── output_semantics.rs
@@ -350,7 +402,7 @@ crates/tracedecay-hooks/src/conformance/manifest.rs
 crates/tracedecay-application/src/registry.rs
 crates/tracedecay-api/src/openapi/generated.json
 dashboard/app/src/generated/{catalog.ts,commands.ts}
-src/mcp/tools/generated_v2.rs
+src/mcp/generated/{protocol.rs,tools.rs,resources.rs,prompts.rs}
 src/cli/generated_v2.rs
 docs/reference/generated-capabilities.md
 ~~~
@@ -467,9 +519,51 @@ pub struct SurfaceBinding {
     pub name_or_route: SurfaceInvocationCode,
     pub request_mapping: MappingRef,
     pub presentation: PresentationId,
+    pub mcp: Option<McpBindingSpecV1>,
     pub availability_override: Option<AvailabilitySpec>,
     pub compatibility: CompatibilityDisposition,
 }
+
+pub struct McpProtocolRevision(CatalogText); // YYYY-MM-DD stable MCP revision
+
+pub struct McpBindingSpecV1 {
+    pub primitive: McpPrimitiveV1,
+    pub protocol_revisions: BTreeSet<McpProtocolRevision>,
+    pub input_schema: Option<SchemaRef>,
+    pub output_schema: Option<SchemaRef>,
+    pub annotations: Option<McpToolAnnotationsV1>,
+    pub content_annotations: Option<McpContentAnnotationsV1>,
+    pub task_support: McpTaskSupportV1,
+    pub completion: McpCompletionEligibilityV1,
+    pub subscription: McpSubscriptionSpecV1,
+    pub list_generation: McpListGenerationKind,
+}
+
+pub enum McpPrimitiveV1 {
+    Tool,
+    Resource,
+    ResourceTemplate,
+    Prompt,
+}
+
+pub struct McpToolAnnotationsV1 {
+    pub read_only: bool,
+    pub destructive: bool,
+    pub idempotent: bool,
+    pub open_world: bool,
+}
+
+pub struct McpContentAnnotationsV1 {
+    pub audience: BTreeSet<McpAudienceV1>,
+    pub priority_millis: Option<u16>, // generated as MCP 0.0..=1.0
+}
+
+pub enum McpAudienceV1 { User, Assistant }
+
+pub enum McpTaskSupportV1 { Forbidden, Optional, Required }
+pub enum McpCompletionEligibilityV1 { None, PromptArguments, ResourceTemplateArguments }
+pub enum McpSubscriptionSpecV1 { NotSubscribable, Immutable, NotifyOnChange }
+pub enum McpListGenerationKind { Tools, Resources, Prompts }
 
 pub enum SurfaceKind {
     Cli,
@@ -513,6 +607,8 @@ pub struct IdempotencySpec {
 
 `SurfaceKind` is the one closed, generated surface vocabulary for binding identity and usage accounting. Stable integer codes and `snake_case` wire names are emitted with the catalog snapshot; plans 21 and 26 consume those generated values and may not maintain SQL-, renderer-, or telemetry-local surface lists. A genuinely new surface requires a catalog-schema version, compatibility disposition, accounting classification, and conformance fixtures before any binding can use it.
 
+`McpBindingSpecV1` exists only when `surface == SurfaceKind::Mcp`. It classifies the binding by the MCP interaction model: model-controlled operations are tools; application-controlled context is a resource or parameterized resource template; user-selected workflow recipes are prompts. Completion is legal only for prompt arguments and resource-template variables, never as a private tool-argument completion protocol. Tool annotations are generated from `EffectSpec`, idempotency, and egress metadata and remain advisory wire hints; authorization never trusts them. `task_support` describes MCP protocol task augmentation for a long-running invocation, not plan 24's canonical `WorkItemId` or `ExecutionAttemptId`.
+
 `ExecutionModeV2` lives in this crate's `effect.rs` and is the only closed effect-mode enum; plan 21 §11.1 consumes it for surface annotations and defines no surface-local variant. `SurfaceInvocationCode` carries the current canonical surface name or route only; V1 names live solely inside `CompatibilityDisposition` (field contract defined in plan 21 §17.1) and `CatalogAlias` provenance rows. `PresentationId` replaces any binding-local view reference; presentation descriptors themselves are plan 21's.
 
 `CatalogAlias` is an intent/search/provenance label inside a snapshot, not a callable MCP/CLI/HTTP/hook binding name. Only `SurfaceBinding` can be invoked, and generation includes only bindings active in the current protocol epoch — `schema_version` plus the exact plan-01 `CatalogSnapshotRefV1` pinned in `ToolCatalogSnapshot` (Section 9).
@@ -531,6 +627,10 @@ Validation fails on:
 - deprecated item without replacement/end window;
 - skill/hook route to unavailable or incompatible host capability;
 - transport-only semantics not represented in the use-case definition;
+- MCP binding without exactly one primitive contract, generated JSON Schema 2020-12 input/output mapping where applicable, compatible protocol revision, and matching capability declaration;
+- completion on a tool, subscription on a mutable resource without an authorization-safe change source, tool task support without an application operation/cancellation/result contract, or an MCP task ID mapped to a plan-24 domain task ID;
+- MCP tool annotations that disagree with effect/idempotency/egress metadata, or authorization/policy that relies on those advisory annotations;
+- search-evaluation binding outside the closed Section 1 `retrieval.*` family, missing CLI/MCP/resource/UI parity metadata, an MCP resource that mutates state, or any alias that creates a second operation identity;
 - scoped binding without `ScopeSelectorV2`, or any current-project/CWD/first-match/base-checkout/current-graph fallback;
 - current inventory item with no owner/parity disposition.
 
@@ -587,7 +687,9 @@ pub struct RouteResolution {
 }
 ~~~
 
-`CatalogSnapshotRefV1 { generation, digest }` is the sole capability-catalog identity and is owned by plan 01. Its generation is the monotonic per-daemon-generation counter negotiated in the MCP handshake exactly as master plan §2.6 (merged #422) and plans 12/21 describe: a daemon increments it whenever it activates a different snapshot digest, clients pin the pair unchanged, and the daemon emits at most one bounded `tools/list_changed` refresh per client per daemon generation. Generated MCP server metadata must declare the `tools.listChanged` capability. A client holding a stale snapshot fails closed with plan 17's typed `client_update_required`/`daemon_restart_required`/`capability_replaced` codes naming the current binding; it never receives a silently different tool set. `config_registry_digest` pins plan 20's registry manifest that this snapshot was built from.
+`CatalogSnapshotRefV1 { generation, digest }` is the sole capability-catalog identity and is owned by plan 01. Its generation is the monotonic per-daemon-generation counter negotiated in the MCP handshake exactly as master plan §2.6 (merged #422) and plans 12/21 describe: a daemon increments it whenever it activates a different snapshot digest, and each MCP session pins the pair unchanged. This crate emits list generations and capability requirements; plan 21's connection actor owns negotiation, refresh, and delivery. It advertises `tools.listChanged`, `resources.listChanged`/`subscribe`, or `prompts.listChanged` only when the corresponding generated primitive and notification implementation exist, and coalesces at most one `notifications/*/list_changed` event per primitive generation per session. A paginated list cursor pins one generation across every page. A client holding a stale snapshot fails closed with plan 17's typed `client_update_required`/`daemon_restart_required`/`capability_replaced` codes naming the current binding; it never receives a silently different tool/resource/prompt set. `config_registry_digest` pins plan 20's registry manifest that this snapshot was built from.
+
+The planning protocol baseline is the current stable MCP revision `2025-11-25`; PR 22A refreshes that revision from the official version registry and pins it in `mcp-protocol.json`. Draft revisions never enter a release artifact implicitly. The V2 live catalog generates no `2024-11-05` compatibility surface: incompatible clients receive the current supported revision during initialization and must reconnect/update before any application or store access.
 
 RouteResolution returns ranked available candidates, unavailable candidates with exact gaps, required freshness/evidence source, safe fallbacks, expected cost/latency, and catalog digest. It does not classify natural language or invoke tools.
 
@@ -613,7 +715,7 @@ Generation pipeline:
 2. Load frozen legacy inventory manifests for MCP/CLI/HTTP/dashboard/skills/hooks/config, plus plan 20's generated `config-registry-v1.json` descriptor manifest; pin its `ConfigRegistryDigest` in the snapshot.
 3. Require owner/use-case/binding/lifecycle mapping for every inventory row.
 4. Canonically sort and encode catalog JSON; compute digest.
-5. Generate MCP definitions, CLI binding metadata/help links, OpenAPI operation metadata, TypeScript types, dashboard commands, hook bindings, compact policy facts, and docs.
+5. Generate the MCP protocol profile plus tool/resource/resource-template/prompt definitions, completion/subscription/list-generation metadata, CLI binding metadata/help links, OpenAPI operation metadata, TypeScript types, dashboard commands, hook bindings, compact policy facts, and docs.
 6. Reparse every artifact and compare semantic schemas/mappings back to the source definitions.
 7. Fail if generated worktree differs in CI.
 
@@ -630,6 +732,8 @@ Semantic parity checks:
 - secret/redaction/export behavior match;
 - direct_user/subagent/tool_result/#410 representative filters match;
 - JSON typed result matches before Markdown/CLI/UI rendering.
+- MCP `inputSchema`/`outputSchema`, `structuredContent`, compact Markdown, tagged tool-error outcome, effect annotations, protocol task support, resource links, and primitive availability all reparse to the same typed use-case/view contracts.
+- MCP tools/resources/prompts list pages bind one catalog generation; completion/subscription/list-change declarations have matching generated handlers and no undeclared notification path.
 
 ## 11. Git Intent, Tool Routing, and Truth Reconciliation
 
@@ -751,6 +855,8 @@ Every accepted drift updates the inventory manifest, definition version, generat
 - At cutover, only current bindings are generated or discoverable. V1 bindings remain historical inventory/replay evidence, not active aliases. Stale clients fail exact protocol/catalog-generation checks with plan 17's typed `client_update_required`/`daemon_restart_required`/`capability_replaced` codes naming the current capability ID/name.
 - Destructive bindings never become available through a read-only host/skill merely because names match.
 - Managed skill references are validated against catalog IDs/versions/host targets at candidate creation, autonomy decision, materialization, use, recovery, and replay; no per-item approval/install binding is emitted.
+- MCP resource URIs, prompt arguments, completion values, annotations, icons, descriptions, and names are catalog-safe metadata. Raw paths, bearer tokens, provider secrets, prompt/session payloads, confirmation material, or credential-bearing URLs cannot appear in a generated definition or list-change notification.
+- MCP principal visibility is generated from grants but enforced by application/policy on every call, resource read, completion, subscription delivery, task poll, and retrieval-anchor resolution. Hidden unauthorized bindings never leak through list counts, completion candidates, or changed notifications.
 
 ## 15. Performance and Quality Gates
 
@@ -797,6 +903,7 @@ Commands run from repository root with checkout-local target directories.
 
 - [ ] Add definitions for all project/code/graph/Git/session/LCM/memory/policy/automation/representation-artifact/observability/operation/lab surfaces and all 104 source MCP definitions with dispositions, including `ast_grep_search` and `move_symbol`; 103 are installed at 0.0.47.
 - [ ] Add current V2 coordination definitions/bindings for presence, claim, heartbeat, nearby work, overlap acknowledgement/handoff, analytics, and Coordination Lab. Fixture-lock parent prefix `019f4906`, four PR #359 child agents, and Cursor session `ebc96a27-b046-4c88-865f-b38d76da9d2d`; these are evidence anchors, never catalog text.
+- [ ] Add the exact Section 1 search-evaluation reads and commands with CLI/MCP/resource/HTTP/SDK/Search Quality UI parity dispositions. Reject all shorthand aliases and do not synthesize fixture reads or writable resources.
 - [ ] Add direct_user/subagent/tool_result/parent-representative schema fixtures for message search, LCM, CLI, MCP, future HTTP/dashboard/export/saved view.
 - [ ] Run tests. Expected: fail until every legacy field/effect/error is mapped.
 - [ ] Complete definitions/mappings and explicit missing-surface dispositions.
@@ -816,21 +923,22 @@ Commands run from repository root with checkout-local target directories.
 
 ### Commit 5: Generate transport, policy, dashboard, and docs artifacts
 
-**Files:** src/generate/*.rs; generated/*; dashboard/app/src/generated/*; docs/reference/generated-capabilities.md; tests/{generation_determinism,transport_parity}.rs.
+**Files:** src/generate/*.rs; generated/*; dashboard/app/src/generated/*; docs/reference/generated-capabilities.md; tests/{generation_determinism,transport_parity,mcp_protocol_generation}.rs.
 
-- [ ] Add golden tests for MCP/CLI/OpenAPI/TypeScript/dashboard/hook/policy/docs outputs and reparse parity.
+- [ ] Add golden tests for MCP protocol/tool/resource/resource-template/prompt/completion/subscription outputs and CLI/OpenAPI/TypeScript/dashboard/hook/policy/docs outputs, then reparse every artifact for parity.
+- [ ] Add one search-evaluation golden matrix asserting every canonical read/command appears exactly once on each supported surface, every `get` resource resolves the same typed view, and no unlisted alias/use case is emitted.
 - [ ] Run tests. Expected: fail before generators exist.
 - [ ] Implement deterministic generation and source-digest headers.
 - [ ] Run generator twice from clean output and compare hashes. Expected: byte-identical.
-- [ ] Re-run tests. Expected: all generated requests/results/effects/errors map losslessly.
+- [ ] Re-run tests. Expected: all generated requests/results/effects/errors map losslessly; every advertised MCP capability, list-change kind, task-support value, completion argument, and subscription has a generated adapter owner.
 - [ ] Commit: feat(catalog): generate capability surfaces from one source.
 
 ### Commit 6: Wire current adapters, internal V1 differential harness, and drift enforcement
 
-**Files:** src/mcp/tools/generated_v2.rs; src/cli/generated_v2.rs; typed legacy route/action/hook registries; CI scripts/workflows; tests/complete_inventory.rs.
+**Files:** src/mcp/generated/{protocol.rs,tools.rs,resources.rs,prompts.rs}; src/cli/generated_v2.rs; typed legacy route/action/hook registries; CI scripts/workflows; tests/complete_inventory.rs.
 
 - [ ] Add CI tests that deliberately register one uncataloged tool/command/route/action/hook and assert a named failure.
-- [ ] Make current surfaces consume generated descriptions/schema/metadata; keep V1 handlers reachable only from the internal differential/shadow harness and never from live dispatch after cutover.
+- [ ] Make current surfaces consume generated descriptions/schema/metadata. MCP registration must contain no hand-written tool/resource/prompt name, schema, annotation, task-support, list-change, or completion allowlist. Keep V1 handlers reachable only from the internal differential/shadow harness and never from live dispatch after cutover.
 - [ ] Run existing MCP/CLI/dashboard/hook/skill/config suites plus catalog drift tests. Expected: all pass.
 - [ ] Regenerate from refreshed master and require clean git diff.
 - [ ] Commit: refactor(catalog): enforce generated capability parity.
@@ -879,16 +987,21 @@ Never delete raw #410 prompt rows or collapse evidence in the catalog. Retire on
 - [ ] Run current MCP, CLI parse/help, dashboard route/action, skill lifecycle, hook/installer, policy routing, project/profile migration, session/LCM search, Git context, renderer, and config mutation suites. Expected: compatibility passes.
 - [ ] Run catalog-gen twice, validate all schemas/artifacts, and git diff --exit-code generated docs/reference. Expected: deterministic clean output.
 - [ ] Compare live inventory to generated catalog. Expected: 100% mapped, zero duplicate/unowned/incompatible row.
+- [ ] Run plan 21's MCP protocol-generation and official-SDK conformance fixtures. Expected: every generated primitive/schema/capability re-parses, no undeclared method or notification exists, and no hand-maintained live definition survives.
 - [ ] Run Git routing/truth/output regression corpus including #410. Expected: correct tool, separated truth, direct/impact/test/context membership, evidence/caps.
 - [ ] Run #410 filter parity across CLI/MCP/generated HTTP/dashboard/export schemas. Expected: identical semantics and raw-row coverage.
+- [ ] Run the closed search-evaluation family parity fixture. Expected: exact canonical operations, read-only MCP resources, complete CLI/MCP/HTTP/SDK/UI mappings, and zero invented aliases.
 - [ ] Run benchmark/concurrent-publication/privacy/fuzz gates from Sections 14–15. Expected: all pass.
 - [ ] cargo tree -p tracedecay-tool-catalog --edges normal and forbidden-import scan. Expected: no application/store/query/policy/hook/server/UI execution dependency.
 - [ ] Run the placeholder scan using split regex atoms: rg -n 'TB[D]|TO[D]O|\bimplement lat[e]r\b|\bfill i[n]\b|\bappropriate erro[r]\b|\bsimilar to Tas[k]\b' docs/plans/tracedecay-v2/08-tool-catalog-crate.md. Expected: no matches.
 
 ## 19. Definition of Done
 
-- Every current and newly merged capability has one stable owner/use case/version and explicit surface/lifecycle mapping; all 104 source MCP definitions carry dispositions (103 installed in the planning runtime at 0.0.47; 102 at the older frozen inventory). Source master 0.0.48 is recorded separately from installed runtime capability counts.
+- Every current and newly merged capability has one stable owner/use case/version and explicit surface/lifecycle mapping; all 104 source MCP definitions carry dispositions (103 installed in the planning runtime at 0.0.47; 102 at the older frozen inventory). The current publication source is referenced through master §2.6/plan 13 and remains separate from those historical installed-runtime capability counts.
 - MCP, CLI, HTTP, dashboard, skills, hooks, policy hints, generated docs, and clients share semantic schemas/effects/errors without copy drift.
+- MCP is generated as a complete primitive surface—not a tool-name list: protocol profile, tools, output schemas, resources/templates, prompts, completion eligibility, annotations, task support, subscriptions, and list generations are catalog-owned while lifecycle/session/transport execution remains in the thin adapter.
+- The canonical search-evaluation family has exact generated CLI/MCP/resource/HTTP/SDK/Search Quality UI parity; no transport invents an alias, fixture read, writable resource, or second semantic operation.
+- Native task bindings include attempt list/get/timeline, registration-scoped offer list/get/accept/decline plus authorized revoke, packet list/get/fenced accept with start-versus-current pointer visibility, and direct notification list/get/create/update/delete across every supported surface; no family is hidden inside generic work-item detail or preview/apply aliases.
 - The right TraceDecay Git capability is discoverable at the right intent, with live/local truth and output membership impossible to confuse.
 - #405/#407 ownership, #410 filtering/dedupe, #411 remediation ownership, and #412 lifecycle prerequisites are cataloged; #413 contributes actual release/protocol version; #409 remains historical only.
 - Missed capability and human correction are replayable evidence, while useful silence remains measurable.

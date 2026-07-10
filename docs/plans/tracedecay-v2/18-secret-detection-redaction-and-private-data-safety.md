@@ -12,7 +12,7 @@ Plans 22–23 add model prompts/outputs, suggestion envelopes, query literals/lo
 
 Plan 24 adds initiative/plan/task text, dependency/acceptance/decision records, executor manifests/routes, capability grants, context packets, sibling summaries, workspaces, logs, handoffs, artifacts, outcomes, costs, adapter streams, task views, and orchestration fixtures as explicit sources/sinks. Lease proofs and credentials are protected control-plane values that never enter ordinary stores, prompts, logs, transports, screenshots, exports, or research anchors.
 
-**Publication baseline (2026-07-10):** source audit is against master `3567e31e` at 0.0.48 with #418/#425 merged; #425 final head `d3bb28b5` merged as `de3d05dc`. Release integrity complements secret scanning; edit requests/diffs/conflicts, split-store diagnostics and path-plus-file/inode holders, proxy/reconnect errors, catalog handshakes, retrieval fixtures, and >10,000-event aggregates are mandatory canary surfaces. Both consolidation source families, backups, ledger/staging, table/collision reports, remapped LCM edges, verification artifacts, commands, and doctor output remain separate privacy sink/canary inputs.
+**Publication snapshot:** [master §2.6](../2026-07-09-tracedecay-brain-rewrite.md#26-current-master-accepted-changes) plus [plan 13](13-research-provenance-and-context-anchors.md) are normative. Branch/session variants, consolidation indexes and retirement ledgers, lifecycle/registry repair diagnostics, FTS maintenance evidence, graph checkpoint artifacts, both source families/backups, and every doctor/command output are separate privacy canary surfaces.
 
 ## 1. Verdict on the current system
 
@@ -124,20 +124,9 @@ The private chronological research corpus remains outside Git and mode `0600`. I
 
 ## 5. Domain contracts
 
-Create `crates/tracedecay-domain/src/privacy.rs` with opaque, validated types:
+Plan 01 §7.5 is the sole definition of the closed `DataSensitivity` enum. This security plan owns its meaning, transition rules, and sink eligibility, while the domain crate publishes that exact shared type. The same module adds opaque, validated detection and receipt types:
 
 ```rust
-pub enum DataSensitivity {
-    CatalogSafe,
-    Normal,
-    Sensitive,
-    SecretLike,
-    SecretConfirmed,
-    Reasoning,
-    RedactedDerived,
-    Unknown,
-}
-
 pub struct DetectionV1 {
     pub detection_id: DetectionId,
     pub rule_id: DetectorRuleId,
@@ -402,7 +391,7 @@ Enumerate with stable IDs and coverage:
 - Catalog, activity, project, graph generations, blobs, quarantine.
 - Session/LCM/message/tool/reasoning/goal/workflow content and metadata.
 - Search/FTS/representation/summary/facet/rank/cache projections.
-- Facts/entities/memories/skills/automation/proposals/annotations/saved content.
+- Facts/entities/memories/skills/automation candidates/decisions/effects, imported legacy proposal evidence, annotations, and saved content.
 - Hooks/analytics/logs/error/crash/support/export/response caches.
 - WAL/SHM/temp/spool/dead-letter files, backups, recovery sets, V1 stores.
 - Repository fixtures/snapshots/docs/generated packages/release assets when scanning a checkout/release.
@@ -462,14 +451,14 @@ Rules:
 - Allowlists are exact keyed-fingerprint/context decisions or narrowly anchored synthetic fixture classes.
 - Regex/string allowlists containing a candidate secret are prohibited.
 - Broad path/project/provider exclusions cannot bypass the mandatory safety floor.
-- Rule changes run dry/shadow scans and measure new/removed findings before apply.
+- Rule changes run read-only shadow scans and measure new/removed findings before activation.
 - Historical observations retain the old receipt; current projection uses the new rule version after controlled rescan/rebuild. Rescans issue superseding `SanitizationReceiptV1` rows that reference the superseded receipt ID; sinks honor the newest non-revoked receipt. The durable home for all receipts is the per-shard `sanitization_receipts` table owned by plan 02 (minted by plan 03, validated by plan 04's sink firewall), including supersession, expiry, and revocation columns.
 - False-positive review UI uses synthetic/structural metadata. Viewing plaintext requires separate quarantine authorization and is not required to mark common safe examples.
 
 Durable detector-registry state (owning shard: profile catalog; contains no secret content):
 
 - `detector_rules(detector_id, rule_version)` PK — enable state, activation source (bundled/config/plugin), complexity-policy verdict, corpus-eval result digest, created/retired timestamps; index on enable state. Retention: retired rows kept for the receipt-audit horizon.
-- `adjudication_records(fingerprint_hmac, rule_version)` PK — the section 13 adjudication fields above; index on expiry for forced re-evaluation sweeps.
+- `adjudication_records(adjudication_id BLOB PRIMARY KEY, privacy_domain_id BLOB NOT NULL, key_epoch INTEGER NOT NULL, fingerprint_hmac BLOB NOT NULL, detector_id TEXT NOT NULL, rule_version INTEGER NOT NULL, field_context_code INTEGER NOT NULL, source_context_code INTEGER NOT NULL, owner_scope_digest BLOB NOT NULL, policy_scope_digest BLOB NOT NULL, state TEXT NOT NULL, safe_reason_code TEXT NOT NULL, reviewer_id BLOB NOT NULL, created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL)` — UNIQUE `(privacy_domain_id, key_epoch, fingerprint_hmac, detector_id, rule_version, field_context_code, source_context_code, owner_scope_digest, policy_scope_digest)` and indexes on expiry/state. One adjudication can authorize only the exact context/owner/policy tuple; key rotation or any context/rule change requires a new row. The opaque ID is the only ordinary-surface locator.
 
 Terminology: capture-side quarantine "skeletons" (plan 03's non-content provenance records) and this plan's section 10 protected quarantine (encrypted forensic payloads) are distinct stores with distinct lifecycles; plans must qualify which one they mean.
 
@@ -479,12 +468,13 @@ Terminology: capture-side quarantine "skeletons" (plan 03's non-content provenan
 
 ```text
 tracedecay privacy status [--scope ...] [--json]
-tracedecay privacy scan --scope current|all|<selector> --dry-run
-tracedecay privacy scan --resume <cursor>
+tracedecay privacy scan inspect --scope current|all|<selector>
+tracedecay privacy scan start --scope current|all|<selector>
+tracedecay privacy scan resume <cursor>
 tracedecay privacy findings list [--class ...] [--state ...]
 tracedecay privacy findings show <safe-finding-id>
-tracedecay privacy remediate preview <finding|scan-id>
-tracedecay privacy remediate apply <preview-id> --confirm
+tracedecay privacy remediate plan <finding|scan-id>
+tracedecay privacy remediate start <plan-id> --confirm
 tracedecay privacy verify <remediation-id>
 tracedecay privacy detectors list|test|diff
 tracedecay privacy quarantine status|hold|release
@@ -494,9 +484,9 @@ Default output contains safe counts/classes/coverage/actions only. JSON has the 
 
 ### 14.2 Official API/MCP
 
-- `GET /api/v2/privacy/status`, `/scans`, `/scans/{id}`, `/findings`, `/findings/{safe-id}`, `/remediations/{id}`, and `/quarantine/status` (the last under elevated authorization).
+- `GET /api/v2/privacy/status`, `/scans`, `/scans/{id}`, `/findings`, `/findings/{safe-id}`, `/remediations/{id}`, and `/quarantine/status` (the last under elevated authorization); read-shaped `POST /api/v2/privacy/scans:inspect` accepts protected scope/source selectors and performs no scan persistence.
 - `GET /api/v2/privacy/detectors` and `POST /api/v2/privacy/detectors:diff` using synthetic caller-supplied fixtures only; the richer synthetic detector run is `POST /api/v2/labs/privacy:test`.
-- Mutations use the same generated command routes as plan 10: `POST /api/v2/commands/privacy/scans/{start,cancel}`, `/commands/privacy/remediations/{preview,apply,verify}`, and `/commands/privacy/quarantine/{hold,release}`.
+- Mutations use the same generated command routes as plan 10: `POST /api/v2/commands/privacy/scans/{start,cancel}`, `/commands/privacy/remediations/{plan,start,verify}`, and `/commands/privacy/quarantine/{hold,release}`.
 - SSE emits safe scan/remediation progress and gaps, never findings content.
 
 MCP exposes bounded read-only status/scan-result tools by default. Mutations require explicit current capability, exact scope, preview, idempotency, optimistic version, elevated user authorization, and audit receipt.

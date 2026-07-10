@@ -6,7 +6,7 @@
 
 **Purpose:** make multi-repository, multi-project, multi-checkout, and multi-worktree use a native TraceDecay behavior rather than a sequence of registry lookups, path guesses, store switches, and retries.
 
-**Publication baseline (2026-07-10):** `origin/master` `3567e31e` at 0.0.48 includes merged #418/#425; only draft plan PR #421 was open. Merged #417 split-store visibility remains an explicit resolver/doctor regression input. Merged #425 (`de3d05dc`, final head `d3bb28b5`) supplies accepted offline consolidation semantics: canonical paths, path-plus-file/inode holders, dual backups, remapped LCM edges, exhaustive verification, and atomic marker/registry cutover. Merged #420 makes daemon proxy authority precede local store open; #422 adds generation-scoped refresh. Historical failed worktree/root PR-context and branch/session lookups remain cross-domain partial/fallback fixtures even though the implementation is now accepted.
+**Publication snapshot:** [master §2.6](../2026-07-09-tracedecay-brain-rewrite.md#26-current-master-accepted-changes) plus [plan 13](13-research-provenance-and-context-anchors.md) are normative. Untracked branch graphs and divergent session variants are first-class identities; consolidation uses bounded indexed family lookups; registry healing cannot steal aliases/paths or resurrect retired owners; search reads never repair; graph peers disable mmap; applied-manifest retirement is restart-safe and lifecycle-fenced. Historical failed explicit-worktree/root PR context, zero-file search, and branch/session lookup remain required cross-domain partial/fallback fixtures.
 
 ## 1. Product invariant
 
@@ -20,7 +20,7 @@ An agent or person must be able to ask one question about one named repository, 
 6. A compact answer by default and full provenance on demand.
 7. Plan 22's Context Scout may expand across projects only through a pinned authorized project-set version; a model cannot turn current scope into All, and sibling task/agent activity is silent without a material typed relation.
 8. Plan 23's temporal search and context assembly use the same resolved scope before ranking and return stable cross-shard anchors; current/as-of logic cannot repair a wrong project/worktree/ref after retrieval.
-9. Plan 24's initiative/plan/work-item graph pins one authorized project-set version and exact workspace binding per attempt. A board, executor, agent, CWD, current checkout, or task title cannot add a repository, change the primary writable worktree/ref/snapshot, or copy a task to repair scope after dispatch.
+9. Plan 24's initiative/plan/work-item graph pins one authorized project-set version and exactly one writable workspace binding per attempt. Other repositories are read-only; a required multi-repository write decomposes into one fenced child work item per writable target plus explicit integration gates. A board, executor, agent, CWD, current checkout, or task title cannot add a repository, change the primary writable worktree/ref/snapshot, or copy a task to repair scope after dispatch.
 
 “Current project” remains a convenient default. It is never an invisible constraint and never overrides an explicit repository, worktree, path, PR, branch, session, or agent reference in the request.
 
@@ -76,27 +76,7 @@ Do not expose storage topology as product scope. Use these identities:
 
 ## 4. `ScopeSelectorV2`
 
-Every transport generates or consumes the exact plan 01 domain selector:
-
-```rust
-pub struct ScopeSelectorV2 {
-    pub version: u16,
-    pub roots: Vec<ScopeRootV2>, // validated nonempty
-    pub exclude: Vec<ScopeRootV2>,
-    pub time: Option<TimePredicate>,
-    pub activity_attribution: ActivityAttributionModeV2,
-    pub coverage: ScopeCoveragePolicyV2,
-    pub freshness: ScopeFreshnessPolicyV2,
-    pub traversal: ScopeTraversalV2,
-    pub ambiguity: ScopeAmbiguityPolicyV2,
-    pub limits: ScopeLimitsV2,
-}
-
-pub enum ScopeTargetV2 {
-    Canonical(EntityRef),
-    Locator(ScopeLocatorV2),
-}
-```
+Every transport generates or consumes the exact `ScopeSelectorV2`, `ScopeRootV2`, and `ScopeTargetV2` definitions owned by plan 01 §14. This plan adds resolution, federation, and UX requirements but defines no second selector type; compile-time schema-digest tests fail if any transport or SDK copy diverges.
 
 The human-readable JSON below shows a two-repository plus worktree-locator request with the exact field set; the contract generator freezes the final discriminated-union spelling. `include`, `ScopeExpr`, root-local snapshot fields, and transport-specific `project_key` do not exist:
 

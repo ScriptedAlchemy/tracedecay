@@ -8,7 +8,7 @@
 
 **Initial deployment:** Local-first. A user-owned Unix-domain socket or authenticated loopback HTTP endpoint is supported. Remote or hosted service operation is not assumed by this plan and must not weaken the local trust, privacy, or authorization contract.
 
-**Publication baseline (2026-07-10):** `origin/master` `3567e31e` at 0.0.48 includes merged #418/#425 plus the earlier accepted inputs; only draft plan PR #421 was open. Regenerate contract/capability fixtures before implementation. The official surface includes ordinary-profile Hermes, current message views, doctor authority, race-safe `move_symbol`, typed identity split and merged consolidation (`de3d05dc`), release-integrity gates, proxy/reconnect/no-write-replay, negotiated catalog refresh, fact rank/counters, exact analytics, and operator-only consolidation/recovery.
+**Publication snapshot:** [master §2.6](../2026-07-09-tracedecay-brain-rewrite.md#26-current-master-accepted-changes) plus [plan 13](13-research-provenance-and-context-anchors.md) are normative. Historical 0.0.47/0.0.48 fixture counts remain version-labelled evidence, not the current surface. The official surface includes ordinary-profile Hermes, current message views, doctor authority, race-safe `move_symbol`, typed identity split and merged consolidation (`de3d05dc`), release-integrity gates, proxy/reconnect/no-write-replay, negotiated catalog refresh, fact rank/counters, exact analytics, untracked/divergent data recovery, lifecycle-safe maintenance, restart-safe applied-manifest retirement, and operator-only consolidation/recovery.
 
 ---
 
@@ -30,7 +30,7 @@ This plan complements, rather than replaces, the following ownership:
 - `21-cli-mcp-tool-surface-and-output-unification.md` owns the generated binding and presentation parity contract; public SDK JSON shares its sealed views, typed outcomes, pages, retrieval anchors, notices, freshness, and provenance without scraping human Markdown or CLI envelopes.
 - `22-incremental-context-scout-and-suggestion-envelopes.md` owns scout status/replay/feedback/system-control and suggestion-envelope semantics; SDKs cannot trigger delivery or bypass read-only lab guards.
 - `23-session-lcm-temporal-retrieval-and-evaluation.md` owns temporal search/context/lineage/replay/evaluation semantics; SDK modes, anchors, cursors, coverage, no-answer reasons, and hydration are generated from that same contract.
-- `24-canonical-task-plan-graph-and-multi-agent-executor.md` owns initiative/plan/work-item/executor/scheduler/context-packet semantics and the many-host adapter protocol; this plan generates supported orchestration/monitoring clients without turning an SDK into a task query engine, scheduler, route selector, event journal, lease authority, or board database. Task reads use registered entity/attribute/traversal/projection values inside canonical `TraceQueryV1`; `WorkClaimV1` is advisory and `work_items.acquire_lease` is authoritative. The read/command surface is the inventory in plan 09 §§9–10 and plan 10 §8: reads are GET/query POST, every mutation is a POST command envelope, and task deltas use the ordinary subscription protocol rather than `/task-events`.
+- `24-canonical-task-plan-graph-and-multi-agent-executor.md` owns initiative/plan/work-item/executor/scheduler/context-packet semantics and the many-host adapter protocol; this plan generates supported orchestration/monitoring clients without turning an SDK into a task query engine, scheduler, route selector, event journal, lease authority, or board database. Task reads use registered entity/attribute/traversal/projection values inside canonical `TraceQueryV1`; `WorkClaimV1` is advisory and `task_offers.accept` is the sole public command that invokes atomic execution admission. The read/command surface is the inventory in plan 09 §§9–10 and plan 10 §8: reads are GET/query POST, every mutation is a POST command envelope, and task deltas use the ordinary subscription protocol rather than `/task-events`.
 - This plan owns the declaration that the HTTP contract is an **official public integration surface**, agent-oriented discovery and documentation, first-party Rust/TypeScript/Python packages, direct-client lifecycle, compatibility policy, and public conformance program.
 
 There is no independent "SDK API" business layer. SDKs serialize generated request types, call the official transport, deserialize generated response types, and provide bounded ergonomics such as pagination and reconnect helpers. They may not recreate ranking, scope resolution, command authorization, replay classification, or retry policy by guesswork.
@@ -48,10 +48,10 @@ An agent should be able to:
 7. Enumerate large stores and cross-project results using opaque resumable cursors rather than result caps or ephemeral response handles.
 8. Subscribe to authorized changes, reconnect deterministically, detect gaps, and resynchronize.
 9. Replay a historical or synthetic hint/search decision in a no-write lab and compare historical versus current policy without altering live analytics, facts, counters, claims, or outcomes.
-10. Preview and, only with explicit mutation authority, execute a supported command with idempotency, optimistic version checks, audit, and a durable operation receipt.
+10. Inspect an operation-specific preflight when required and, only with explicit mutation authority, execute its named command with idempotency, optimistic version checks, audit, and a durable operation receipt.
 11. Recover from every typed error using a machine-readable retry/restart/current-binding directive rather than prose parsing.
 12. Cite stable TraceDecay retrieval anchors in its own plan, report, PR, or handoff so a later agent can recover the exact evidence.
-13. Query or operate one cross-repository initiative, call transactional `work_items.assign_set` to assign bounded work sets to Codex and Claude routes with explicit provider/model/reasoning-effort/tool/budget constraints, inspect dependencies/packets/attempts/outcomes, and subscribe to canonical task read-model deltas without MCP, dashboard mediation, or a separate task-event stream.
+13. Query or operate one cross-repository initiative, call transactional `work_items.assign_set` to assign bounded work sets to Codex and Claude routes with explicit provider/model/reasoning-effort/tool/budget constraints, inspect attempt list/detail/timeline and start-versus-current accepted packet state, list/accept/decline addressed offers, administer offers through an authorized revoke command, manage direct task notifications, and subscribe to canonical task read-model deltas without MCP, dashboard mediation, or a separate task-event stream.
 
 Human developers should be able to accomplish the same work with `curl`, generated documentation, or an SDK without learning MCP wire details or reverse-engineering the dashboard.
 
@@ -249,7 +249,7 @@ tracedecay api openapi --output <path>
 tracedecay api docs
 ```
 
-`api status --json` returns only safe discovery material: endpoint kind, socket path or loopback origin, server/protocol version, health, catalog/schema digest, authentication method, docs/OpenAPI path, and current profile ID. It never returns bearer/session/CSRF secrets. `api token create|list|revoke` bind the audited application commands `auth.tokens.create/list/revoke` (plan 09 §10); the per-launch bootstrap bearer may execute only `auth.tokens.create` for the initial admin-class token (plan 10 §10.2).
+`api status --json` returns only safe discovery material: endpoint kind, socket path or loopback origin, server/protocol version, health, catalog/schema digest, authentication method, docs/OpenAPI path, and current profile ID. It never returns bearer/session/CSRF secrets. `api token create|revoke` bind audited application commands; `api token list` binds the elevated read use case `auth.tokens.list` and returns metadata only. The per-launch bootstrap bearer may execute only `auth.tokens.create` for the initial admin-class token (plan 10 §10.2).
 
 Discovery precedence for SDKs is explicit:
 
@@ -322,33 +322,80 @@ The conformance gate compares the complete generated inventory with:
 
 Missing, duplicated, or semantically divergent binding blocks release.
 
+### 8.1 Native task orchestration client lock
+
+The following public bindings are a generated client-parity lock over plan 24's canonical application/catalog entries. They are exhaustive for these families; an SDK cannot collapse them into `get_work_item`, invent a client-side packet pointer update, or implement an offer/notification workflow locally. The HTTP column is a generated mirror for conformance examples; plan 10 §8 remains the sole router inventory and any mismatch fails generation.
+
+| Capability | Official HTTP binding | Rust | TypeScript | Python |
+|---|---|---|---|---|
+| `attempts.list` | `GET /api/v2/execution-attempts` | `list_execution_attempts` | `listExecutionAttempts` | `list_execution_attempts` |
+| `attempts.get` | `GET /api/v2/execution-attempts/{id}` | `get_execution_attempt` | `getExecutionAttempt` | `get_execution_attempt` |
+| `attempts.timeline` | `GET /api/v2/execution-attempts/{id}/timeline` | `get_execution_attempt_timeline` | `getExecutionAttemptTimeline` | `get_execution_attempt_timeline` |
+| `attempts.heartbeat` | `POST /api/v2/execution-attempts/{id}:heartbeat` | `heartbeat_execution_attempt` | `heartbeatExecutionAttempt` | `heartbeat_execution_attempt` |
+| `attempts.progress` | `POST /api/v2/execution-attempts/{id}:progress` | `report_execution_attempt_progress` | `reportExecutionAttemptProgress` | `report_execution_attempt_progress` |
+| `attempts.complete` | `POST /api/v2/execution-attempts/{id}:complete` | `complete_execution_attempt` | `completeExecutionAttempt` | `complete_execution_attempt` |
+| `attempts.block` | `POST /api/v2/execution-attempts/{id}:block` | `block_execution_attempt` | `blockExecutionAttempt` | `block_execution_attempt` |
+| `task_offers.list` | `GET /api/v2/task-offers` | `list_task_offers` | `listTaskOffers` | `list_task_offers` |
+| `task_offers.get` | `GET /api/v2/task-offers/{id}` | `get_task_offer` | `getTaskOffer` | `get_task_offer` |
+| `task_offers.accept` | `POST /api/v2/task-offers/{id}:accept` | `accept_task_offer` | `acceptTaskOffer` | `accept_task_offer` |
+| `task_offers.decline` | `POST /api/v2/task-offers/{id}:decline` | `decline_task_offer` | `declineTaskOffer` | `decline_task_offer` |
+| `task_offers.revoke` | `POST /api/v2/task-offers/{id}:revoke` | `revoke_task_offer` | `revokeTaskOffer` | `revoke_task_offer` |
+| `context_packets.list` | `GET /api/v2/context-packets` | `list_context_packets` | `listContextPackets` | `list_context_packets` |
+| `context_packets.get` | `GET /api/v2/context-packets/{id}` | `get_context_packet` | `getContextPacket` | `get_context_packet` |
+| `context_packets.accept` | `POST /api/v2/context-packets/{id}:accept` | `accept_context_packet` | `acceptContextPacket` | `accept_context_packet` |
+| `task_notifications.list` | `GET /api/v2/task-notifications` | `list_task_notifications` | `listTaskNotifications` | `list_task_notifications` |
+| `task_notifications.get` | `GET /api/v2/task-notifications/{id}` | `get_task_notification` | `getTaskNotification` | `get_task_notification` |
+| `task_notifications.create` | `POST /api/v2/task-notifications:create` | `create_task_notification` | `createTaskNotification` | `create_task_notification` |
+| `task_notifications.update` | `POST /api/v2/task-notifications/{id}:update` | `update_task_notification` | `updateTaskNotification` | `update_task_notification` |
+| `task_notifications.delete` | `POST /api/v2/task-notifications/{id}:delete` | `delete_task_notification` | `deleteTaskNotification` | `delete_task_notification` |
+| `task_views.share.plan` | `POST /api/v2/task-views/{id}:share-plan` | `plan_task_view_share` | `planTaskViewShare` | `plan_task_view_share` |
+| `task_views.share.start` | `POST /api/v2/task-views/{id}:share-start` | `start_task_view_share` | `startTaskViewShare` | `start_task_view_share` |
+| `task_views.share.revoke` | `POST /api/v2/task-views/{id}:share-revoke` | `revoke_task_view_share` | `revokeTaskViewShare` | `revoke_task_view_share` |
+| `executors.list/get` | `GET /api/v2/executors`, `GET /api/v2/executors/{id}` | `list_executors`, `get_executor` | `listExecutors`, `getExecutor` | `list_executors`, `get_executor` |
+| `executors.match` | `POST /api/v2/executors:match` | `match_executors` | `matchExecutors` | `match_executors` |
+| `executors.register` | `POST /api/v2/executors:register` | `register_executor` | `registerExecutor` | `register_executor` |
+| `executors.heartbeat` | `POST /api/v2/executors:heartbeat` | `heartbeat_executor` | `heartbeatExecutor` | `heartbeat_executor` |
+| `executors.drain` | `POST /api/v2/executors:drain` | `drain_executor` | `drainExecutor` | `drain_executor` |
+| `executors.unregister` | `POST /api/v2/executors:unregister` | `unregister_executor` | `unregisterExecutor` | `unregister_executor` |
+| `scheduler.status/explain` | `GET /api/v2/task-scheduler/status`, `POST /api/v2/task-scheduler:explain` | `get_scheduler_status`, `explain_scheduler` | `getSchedulerStatus`, `explainScheduler` | `get_scheduler_status`, `explain_scheduler` |
+| `task_graph.status/doctor/events` | `GET /api/v2/task-graph/status`, `POST /api/v2/task-graph:doctor`, canonical subscription operations | `get_task_graph_status`, `diagnose_task_graph`, `subscribe_task_graph_events` | `getTaskGraphStatus`, `diagnoseTaskGraph`, `subscribeTaskGraphEvents` | `get_task_graph_status`, `diagnose_task_graph`, `subscribe_task_graph_events` |
+| `work_items.record_attestation` | `POST /api/v2/work-items/{id}:record-attestation` | `record_work_item_attestation` | `recordWorkItemAttestation` | `record_work_item_attestation` |
+| `work_items.record_review` | `POST /api/v2/work-items/{id}:record-review` | `record_work_item_review` | `recordWorkItemReview` | `record_work_item_review` |
+| `work_items.record_decision` | `POST /api/v2/work-items/{id}:record-decision` | `record_work_item_decision` | `recordWorkItemDecision` | `record_work_item_decision` |
+| `work_items.record_exception` | `POST /api/v2/work-items/{id}:record-exception` | `record_work_item_exception` | `recordWorkItemException` | `record_work_item_exception` |
+| `work_items.handoff` | `POST /api/v2/work-items/{id}:handoff` | `handoff_work_item` | `handoffWorkItem` | `handoff_work_item` |
+| `work_items.reopen` | `POST /api/v2/work-items/{id}:reopen` | `reopen_work_item` | `reopenWorkItem` | `reopen_work_item` |
+| `work_items.reverse_transition` | `POST /api/v2/work-items/{id}:reverse-transition` | `reverse_work_item_transition` | `reverseWorkItemTransition` | `reverse_work_item_transition` |
+
+Attempt detail/timeline return both immutable `context_packet` (start authority) and monotonic `accepted_context_packet`. `accept_context_packet` carries the current attempt/lease/fence, expected accepted packet, higher candidate packet, explicit safe Turn boundary, and idempotency key; no SDK exposes a general packet-pointer setter. Offer list is registration-scoped for executors, accept is the only offer command that may atomically yield a lease/start manifest, decline yields no authority, and revoke requires scheduler/admin authority. Notification mutations are direct expected-version/idempotent commands with ordinary receipts—never preview/apply pairs. Attestation, review, decision, exception, and handoff append typed evidence and cannot directly set derived readiness/acceptance; reopen creates a new work-item version; reverse-transition is a cataloged compensating transition over exact versions, never a generic undo or terminal-attempt reopen.
+
+### 8.2 Search-evaluation client lock
+
+The generated clients expose the complete plan 15 §0.1 family. These methods are absent from search-read credentials unless their distinct write grants are present.
+
+| Capability family | Official HTTP bindings | Rust / TypeScript / Python methods |
+|---|---|---|
+| `retrieval.corpus_versions.list/get` | `GET /api/v2/retrieval/corpus-versions`, `GET /api/v2/retrieval/corpus-versions/{id}` | `list_corpus_versions` / `listCorpusVersions` / `list_corpus_versions`; `get_corpus_version` / `getCorpusVersion` / `get_corpus_version` |
+| `retrieval.qrel_versions.list/get` | `GET /api/v2/retrieval/qrel-versions`, `GET /api/v2/retrieval/qrel-versions/{id}` | `list_qrel_versions` / `listQrelVersions` / `list_qrel_versions`; `get_qrel_version` / `getQrelVersion` / `get_qrel_version` |
+| `retrieval.candidate_pools.list/get` | `GET /api/v2/retrieval/candidate-pools`, `GET /api/v2/retrieval/candidate-pools/{id}` | `list_candidate_pools` / `listCandidatePools` / `list_candidate_pools`; `get_candidate_pool` / `getCandidatePool` / `get_candidate_pool` |
+| `retrieval.judgments.list/get`, `retrieval.adjudications.list/get` | `GET /api/v2/retrieval/judgments`, `GET /api/v2/retrieval/judgments/{id}`, `GET /api/v2/retrieval/adjudications`, `GET /api/v2/retrieval/adjudications/{id}` | `list_judgments` / `listJudgments` / `list_judgments`; `get_judgment` / `getJudgment` / `get_judgment`; `list_adjudications` / `listAdjudications` / `list_adjudications`; `get_adjudication` / `getAdjudication` / `get_adjudication` |
+| `retrieval.evaluation_runs.list/get` | `GET /api/v2/retrieval/evaluation-runs`, `GET /api/v2/retrieval/evaluation-runs/{id}` | `list_evaluation_runs` / `listEvaluationRuns` / `list_evaluation_runs`; `get_evaluation_run` / `getEvaluationRun` / `get_evaluation_run` |
+| `retrieval.evaluation_reports.list/get` | `GET /api/v2/retrieval/evaluation-reports`, `GET /api/v2/retrieval/evaluation-reports/{id}` | `list_evaluation_reports` / `listEvaluationReports` / `list_evaluation_reports`; `get_evaluation_report` / `getEvaluationReport` / `get_evaluation_report` |
+| `retrieval.profiles.list/get` | `GET /api/v2/retrieval/profiles`, `GET /api/v2/retrieval/profiles/{id}` | `list_retrieval_profiles` / `listRetrievalProfiles` / `list_retrieval_profiles`; `get_retrieval_profile` / `getRetrievalProfile` / `get_retrieval_profile` |
+| corpus/qrel/pool writes | `POST /api/v2/retrieval/corpus-versions:create`, `/corpus-versions/{id}:freeze`, `/qrel-versions:create`, `/qrel-versions/{id}:freeze`, `/candidate-pools:create` | `create_corpus_version`, `freeze_corpus_version`, `create_qrel_version`, `freeze_qrel_version`, `create_candidate_pool` with idiomatic casing per SDK |
+| judgment/adjudication writes | `POST /api/v2/retrieval/judgments:record`, `/judgments/{id}:supersede`, `/adjudications:record` | `record_judgment`, `supersede_judgment`, `record_adjudication` with idiomatic casing per SDK |
+| run/report writes | `POST /api/v2/retrieval/evaluation-runs:run`, `/evaluation-runs/{id}:cancel`, `/evaluation-reports/{id}:publish` | `run_evaluation`, `cancel_evaluation_run`, `publish_evaluation_report` with idiomatic casing per SDK |
+| fixture/profile promotion | `POST /api/v2/retrieval/fixtures:promote`, `/profiles:publish`, `/profiles/{id}:activate` | `promote_retrieval_fixture`, `publish_retrieval_profile`, `activate_retrieval_profile` with idiomatic casing per SDK |
+
+Every mutation is an ordinary expected-version/idempotent command or durable operation. Frozen versions and prior judgments remain immutable; reports expose only authorized aggregate/redacted material; fixture promotion requires sanitization and secret-scan receipts; profile activation is CAS-pinned and cannot alter an in-flight query.
+
 ## 9. Typed ScopeSelectorV2
 
 Scope must be identical across API, SDKs, CLI, MCP, dashboard, saved views, exports, and retrieval anchors. `project_key` and a process's active checkout are internal/provider locators, not the public identity model.
 
 ### 9.1 Selector model
 
-```rust
-pub struct ScopeSelectorV2 {
-    pub version: u16,
-    pub roots: Vec<ScopeRootV2>, // validated nonempty
-    pub exclude: Vec<ScopeRootV2>,
-    pub time: Option<TimePredicate>,
-    pub activity_attribution: ActivityAttributionModeV2,
-    pub coverage: ScopeCoveragePolicyV2,
-    pub freshness: ScopeFreshnessPolicyV2,
-    pub traversal: ScopeTraversalV2,
-    pub ambiguity: ScopeAmbiguityPolicyV2,
-    pub limits: ScopeLimitsV2,
-}
-
-pub enum ScopeTargetV2 {
-    Canonical(EntityRef),
-    Locator(ScopeLocatorV2),
-}
-```
-
-This is the exact plan 01 domain type, not an SDK variant. `ScopeRootV2` variants are `CurrentInvocation`, `AllAuthorized { profile_id }`, `Profile`, `ProjectSet`, `Collection`, `Repository`, `Project`, `Checkout`, `Worktree`, `Ref`, `Commit`, `CodeSnapshot`, `GraphGeneration`, `PullRequest`, `Session`, `Thread`, `Turn`, `Agent`, `Goal`, `Workflow`, `Initiative`, `Plan`, `WorkItem`, `ExecutionAttempt`, `Executor`, `AutomationRun`, `SavedView`, and `GraphNeighborhood`; targeted variants use `ScopeTargetV2`. The `Initiative`/`Plan`/`WorkItem`/`ExecutionAttempt`/`Executor` roots match plans 01 and 16 and target plan 24's canonical task graph through the plan 09 §§9–10 / plan 10 §8 inventories. `ScopeLocatorV2` is the separate tagged locator union for safe name/path/remote/worktree/ref/PR/provider identifiers. Resolution returns the canonical selector and candidates before query planning.
+Plan 01 §14 solely defines `ScopeSelectorV2`, `ScopeRootV2`, `ScopeTargetV2`, and `ScopeLocatorV2`; plan 16 owns their federation and resolution behavior. The official contract IR imports their generated schema digest unchanged rather than restating a client variant. The task roots `Initiative`/`Plan`/`WorkItem`/`ExecutionAttempt`/`Executor` target plan 24's canonical task graph through the plan 09 §§9–10 / plan 10 §8 inventories. Resolution returns the canonical selector and candidates before query planning.
 
 ### 9.2 Resolution rules
 
@@ -389,13 +436,21 @@ Domain `RetrievalAnchorRecordV1`, keyed by opaque `RetrievalAnchorId`, contains 
 - evidence/provenance links and redaction/retention state;
 - creation time and a declared durability class.
 
+| Capability | Official HTTP binding | Rust | TypeScript | Python |
+|---|---|---|---|---|
+| `retrieval_anchors.metadata_batch_get` | `POST /api/v2/retrieval-anchors:metadata-batch` | `get_retrieval_anchor_metadata_batch` | `getRetrievalAnchorMetadataBatch` | `get_retrieval_anchor_metadata_batch` |
+| `retrieval_anchors.resolve` | `POST /api/v2/retrieval-anchors:resolve` | `resolve_retrieval_anchors` | `resolveRetrievalAnchors` | `resolve_retrieval_anchors` |
+| `retrieval_recipes.execute` | `POST /api/v2/retrieval-recipes:execute` | `execute_retrieval_recipe` | `executeRetrievalRecipe` | `execute_retrieval_recipe` |
+
 Rules:
 
 - Ephemeral response handles, page cursors, bearer tokens, event subscription IDs, and browser state are never the only retrieval citation.
-- A copied anchor can be resolved with `GET /api/v2/anchors/{id}` or `POST /api/v2/anchors:resolve` under current authorization.
+- `retrieval_anchors.metadata_batch_get` is bound only to `POST /api/v2/retrieval-anchors:metadata-batch` and returns bounded safe identity/state/tombstone metadata without content.
+- `retrieval_anchors.resolve` is bound only to `POST /api/v2/retrieval-anchors:resolve` and performs authorized exact record/payload resolution at a frozen watermark.
+- `retrieval_recipes.execute` is bound only to `POST /api/v2/retrieval-recipes:execute` and performs bounded versioned recipe execution with scope/version/watermark drift and coverage.
 - Resolution returns exact, moved/adopted identity, retained-but-redacted, expired-by-retention, unavailable-store, or denied. It never silently points to a similar row.
 - Deep links contain an anchor ID or saved-view ID, not sensitive query text. Authorization is always rechecked.
-- SDK result types surface `anchor` directly and provide `resolve_anchor`; convenience `.data` access must not hide it.
+- SDK result types surface `anchor` directly and provide only the generated methods in the table above; convenience `.data` access must not hide it or conflate metadata with payload authority.
 - Export manifests include anchors and hashes so a later agent can verify the source snapshot.
 
 ## 11. Request, Response, Coverage, and Consistency Envelopes
@@ -453,27 +508,7 @@ pub struct ApiMeta {
 
 ## 12. Error and Machine-Actionable Retry Contract
 
-Errors use RFC 9457-compatible `application/problem+json` plus stable fields:
-
-```rust
-pub struct ApiProblem {
-    pub problem_type: ProblemType,
-    pub title: CatalogSafeText,
-    pub status: u16,
-    pub code: ApplicationErrorCode,
-    pub detail: Option<CatalogSafeText>,
-    pub instance: RequestId,
-    pub retry: RetryDirective,
-    pub current_version: Option<AggregateVersion>,
-    pub restart: Option<RestartDirective>,
-    pub current_binding: Option<BindingRef>,
-    pub candidates: Vec<SafeCandidate>,
-    pub invalid: Vec<InvalidField>,
-    pub operation: Option<OperationRef>,
-}
-```
-
-This is byte-semantic with plan 10's generated `ApiProblem`. `ApplicationErrorCode` and retry/restart/candidate/version/operation meaning come from application/domain; HTTP adds status/RFC 9457 fields. Language SDKs preserve unknown safe problem extensions but do not define a competing code/status hierarchy.
+Errors use the exact RFC 9457-compatible `application/problem+json` `ApiProblem` shape owned by plan 10 §7.2. The public contract IR imports that schema and digest unchanged; generated language SDKs preserve unknown safe problem extensions but define neither a competing struct nor a code/status hierarchy. `ApplicationErrorCode` and retry/restart/candidate/version/operation meaning still come from application/domain, while HTTP alone supplies status and RFC 9457 fields.
 
 Stable classes include authentication/authorization, scope not found/ambiguous/denied, capability unavailable, invalid request/query, budget/rate/deadline, cursor mismatch/expired/schema/ranking/index/retention, snapshot unavailable, partial-all-unavailable, conflict/expected version/idempotency, operation pending/failed, payload redacted/unavailable, stale client (`client_update_required`, `daemon_restart_required`, `capability_replaced`), stream gap/resync, and safe internal invariant. The stale-client error registry is defined once in this plan's contract IR; plans 09, 10, 12, and 21 use exactly those three codes and mint no variants.
 
@@ -552,6 +587,7 @@ The official live contract is snapshot plus typed delta over SSE:
 1. `POST /api/v2/subscriptions` submits the sensitive typed canonical query (including its explicit scope) and returns a session-bound subscription ID, initial snapshot reference, expiry, and stream path.
 2. `GET /api/v2/subscriptions/{id}/events` emits the matching snapshot first, then ordered deltas/progress/coverage/operation/gap events.
 3. `Last-Event-ID` uses an authenticated opaque event cursor bound to subscription, authorization, protocol, and sequence.
+4. `POST /api/v2/subscriptions/{id}:revoke` invokes canonical `subscriptions.revoke`; disconnect never substitutes for the idempotent audit/release receipt.
 
 Rules:
 
@@ -644,7 +680,7 @@ Replay never injects a hint, invokes a tool, publishes presence/claim, modifies 
 - coverage, no-answer decision, latency/resource measurements;
 - relevance judgments only when authorized and never as hidden live labels.
 
-Experiments can compare named retrieval profiles over a frozen local evaluation manifest. They cannot silently switch a live agent's retrieval profile, write judgments, or send private queries to a network model. Applying a new profile is a separate versioned policy command with preview, gates, audit, and rollback.
+Experiments can compare named retrieval profiles over a frozen local evaluation manifest. They cannot silently switch a live agent's retrieval profile, write judgments, or send private queries to a network model. Publishing and activating a profile use the direct immutable/CAS commands in §8.2 with locked gates and audit; prior versions remain available for an explicit later activation, not a fictional mutation rollback.
 
 ## 17. Commands and Mutation Safety
 
@@ -656,20 +692,25 @@ Every command request includes:
 - explicit canonical scope and declared owner scope for created state;
 - idempotency key;
 - expected aggregate/config version;
-- preview digest where meaningful;
+- operation-specific inspection or confirmation digest where meaningful;
 - authorization grant and approval provenance;
 - bounded deadline/resource policy;
 - optional client correlation ID.
 
 Every result includes effect/audit receipt, current/new version, compensation/rollback availability, and either terminal output or durable operation/workflow ID.
 
-Destructive or broad non-curation operations such as wipe, retention deletion, payload GC, migration apply, external delivery, policy activation, and automation enablement require a capability-specific grant and preview/confirmation. A generic `write` token is insufficient.
+Destructive or broad non-curation operations such as wipe, retention deletion, payload GC, migration cutover, external delivery, policy activation, and automation enablement require a capability-specific grant and their cataloged operation-specific inspect/plan plus confirmation contract. A generic `write` token is insufficient.
 
 Merged #425's split-store consolidation is one such operator workflow. The public/admin contract exposes typed inspect/plan/start/status/resume/recover methods over two explicit source identities, path-plus-file/inode holder/freeze/reservation evidence, backup/staging/verification/cutover receipts, deterministic confirmation, per-table/artifact dispositions, and exact recovery. SDKs never accept arbitrary raw store paths, implement merge logic, or automatically retry an uncertain start. These methods appear only on `AdminClient`; task-executor and curation-service grants cannot discover or invoke them.
 
-Fact/memory/managed-skill/profile curation is not exposed as item-level approve/apply/install/rollback endpoints. A dedicated least-privilege curation service grant plus versioned autonomy configuration authorizes the application worker to apply only owned, policy-eligible effects after transactional revalidation; every effect/outcome/recovery is audited. Public clients can read status/history/decisions/outcomes, configure policy, pause/resume/run-now, pin/protect/exclude, and submit feedback. Unsafe/foreign/out-of-authority candidates are automatically rejected/deferred/quarantined, never converted into a human approval endpoint.
+Fact/memory/managed-skill/profile curation is not exposed as item-level approve/apply/install/rollback endpoints. A dedicated least-privilege curation service grant plus versioned autonomy configuration authorizes the application worker to execute only owned, policy-eligible effects after transactional revalidation; every effect/outcome/recovery is audited. Public clients can read status/history/decisions/outcomes, configure policy, pause/resume/run-now, pin/protect/exclude, and submit feedback. Unsafe/foreign/out-of-authority candidates are automatically rejected/deferred/quarantined, never converted into a human approval endpoint.
 
-Current `code.move_symbol` is a first-class edit command, not a generic filesystem mutation: generated clients expose preview by default, exact source/destination/snapshot/version, impact classes and applied imports, confirmation digest, repository/worktree edit grant, destination-first rollback/reindex operation, and no automatic caller rewrite. Raw paths/source/diffs use protected/eligible fields and never enter URLs or client logs.
+Move-symbol is a first-class two-operation edit workflow, not a generic filesystem mutation: generated clients expose read-shaped `code.move_symbol.inspect` and separately authorized `code.move_symbol.commit`. Inspect returns exact source/destination/snapshot/version, impact classes, proposed imports, and a confirmation digest without writing; commit consumes that digest, revalidates both endpoints, requires the repository/worktree edit grant, and returns commit/recovery/reindex receipts with no automatic caller rewrite. Raw paths/source/diffs use protected/eligible fields and never enter URLs or client logs.
+
+| Operation | HTTP | Rust | TypeScript | Python |
+|---|---|---|---|---|
+| `code.move_symbol.inspect` | `POST /api/v2/code/move-symbol:inspect` | `inspect_move_symbol` | `inspectMoveSymbol` | `inspect_move_symbol` |
+| `code.move_symbol.commit` | `POST /api/v2/commands/code/move-symbol:commit` | `commit_move_symbol` | `commitMoveSymbol` | `commit_move_symbol` |
 
 SDKs separate `ReadClient` and `AdminClient` surfaces where the language permits. Mutation methods do not appear on a read-only typed client. Raw HTTP still enforces the same server-side grant.
 
@@ -752,12 +793,12 @@ The generic invocation API accepts a `UseCaseId` and schema-validated typed/JSON
 
 ### 20.2 Rust
 
-- `tracedecay-client` exposes async traits and a default client runtime without depending on server/store crates.
+- `tracedecay-client` exposes async traits and a default client runtime that imports only generated public request/response/event schemas, canonical `ApiProblem`, and its own transport/pager/stream runtime. It has no dependency on domain, store, application, or server implementation crates and reaches TraceDecay only through an injected transport at runtime.
 - Support Unix socket and loopback HTTP transports behind features.
-- Generated domain/schema module is public; hand-written client/pager/stream/operation code is small and reviewable.
+- Generated public contract/schema module is public; hand-written client/pager/stream/operation code is small and reviewable.
 - Errors preserve `ApiProblem`; `Debug`/`Display` redact credentials and sensitive bodies.
 - Compile examples and MSRV/toolchain policy are release gates.
-- Optional in-process transport exists only for TraceDecay workspace composition/tests and invokes the same application contract; it is not a different semantic API.
+- Optional in-process transport exists only as a test/root-composition adapter implementing the public client transport trait; that external adapter invokes the same application contract without adding any application/server dependency to the client crate or defining a different semantic API.
 
 ### 20.3 TypeScript
 
@@ -892,13 +933,15 @@ Compare canonical semantic JSON after removing only declared transport fields su
 - Partial/locked/corrupt/stale/unavailable/redacted store coverage and zero-result truthfulness.
 - Graph high-fanout/cycle/depth/path/LOD/cluster/partial/privacy and worktree-snapshot identity fixtures.
 - Search/hint exact/recorded/current replay, missing artifact, no-write, privacy, grouping, ranking explanation, and current-versus-historical diff fixtures.
+- Anchor-operation separation: metadata batch returns no content, resolve rechecks authorization and returns exact state/payload, recipe execute preserves protected input/version/watermark/coverage, and every stale GET/`anchors:*`/combined-hydration alias is absent from route and SDK manifests.
+- Search-evaluation parity: every corpus/qrel/pool/judgment/adjudication/run/report/profile read and create/freeze/record/supersede/adjudicate/run/cancel/publish/promote/activate command matches application, HTTP, all SDKs, CLI, MCP, and dashboard; frozen artifacts remain immutable and private report/fixture content cannot publish.
 - Auth/token/Unix socket/Host/Origin/CSRF/DNS rebinding/revocation/expiry/scope/sensitivity and constant-time handling tests.
 - Rate/body/decompression/header/URI/JSON depth/batch/export/stream queue/deadline/cancellation tests.
 - SSE duplicate/out-of-order/resume/expiry/gap/resync/coalescing/slow client/auth change/protocol cutoff tests.
-- Command idempotency/version conflict/preview/approval/operation recovery/audit/destructive grant tests.
+- Command idempotency/version conflict/operation-specific inspection/confirmation/recovery/audit/destructive-grant tests.
 - Unix-domain socket transport conformance: ownership/mode checks, peer-credential mismatch, token authentication over the socket, and browser-credential rejection (listener built by plan 10 §10.1).
 - Executor-adapter compatibility/security matrix from plan 24 as a dedicated conformance lane: provider/model/route constraint enforcement, fenced lease-acquisition/heartbeat/terminal transitions, advisory-claim separation, broker/grant revocation, non-preemptible-effect quarantine, and workspace-safety refusals.
-- Task orchestration parity lane: canonical `DependencyId`/`WorkClaimRefV1`/manifest-ID+ordinal+digest `ContextPacketManifestRefV1`, canonical `TraceQueryV1`, complete saved-view round trip/share revoke, transactional assignment-set receipt, fully anchored packet entries, journal-sequence subscription deltas with no `/task-events`, and plan-26 workload/fleet accounting attribution.
+- Task orchestration parity lane: canonical `DependencyId`/`WorkClaimRefV1`/manifest-ID+ordinal+digest `ContextPacketManifestRefV1`, canonical `TraceQueryV1`, complete saved-view round trip/share revoke, transactional assignment-set receipt, fully anchored packet entries, attempt list/get/timeline with immutable start plus current accepted packet, registration-scoped offer list/get/accept/decline and admin revoke, fenced packet accept, direct notification list/get/create/update/delete with no preview/apply alias, journal-sequence subscription deltas with no `/task-events`, and plan-26 workload/fleet accounting attribution. Every operation must match application/HTTP/Rust/TypeScript/Python/CLI/MCP manifests.
 - Operator storage lane for merged #425: AdminClient-only consolidation discovery, deterministic plan/confirmation, path-plus-file/inode holder/freeze/backup/stage/verify/cutover/resume/recover state, uncertain-write non-replay, exact recovery action, and proof that curation/task credentials cannot discover or invoke it.
 - Secret corpus across source, generated artifacts, examples, logs, errors, cursors, anchors, exports, docs, source maps, and telemetry.
 - SDK compile/type/lint/unit/integration examples on supported Rust/Node/browser/Python matrices.
@@ -1020,9 +1063,10 @@ For each application domain, after plan 10's adapter parity passes:
 - [ ] Large enumeration and graph/search/timeline results page/stream/export without hidden caps; incomplete coverage is truthful.
 - [ ] Stable retrieval anchors resolve or fail with an exact reason; no response handle, page cursor, token, or UI URL is the sole citation.
 - [ ] Graph-of-Graphs queries preserve evidence, confidence, time, worktree/snapshot identity, LOD, bounds, privacy, and partial coverage.
+- [ ] Attempt list/get/timeline, offer list/get/accept/decline/revoke, packet list/get/fenced accept, and direct notification list/get/create/update/delete have generated Rust/TypeScript/Python methods and exact HTTP/CLI/MCP semantic parity, including immutable start-versus-current accepted packet state.
 - [ ] Hint/search replay is reproducible at declared fidelity, explainable, privacy-safe, and demonstrably no-write.
 - [ ] Direct-agent credentials are least-privilege, scoped, expiring, auditable, revocable, and never leaked by SDK/docs/errors/logs.
-- [ ] Commands require explicit authority, idempotency, versions, preview/approval where applicable, and durable audit/operation receipts.
+- [ ] Commands require explicit authority, idempotency, versions, operation-specific inspection/confirmation where applicable, and durable audit/operation receipts.
 - [ ] Errors provide stable machine codes and exact retry/restart/update/scope-resolution payloads.
 - [ ] API/SDK load cannot starve hook capture or concurrent event writers; limits and fairness pass current and 10x reference scenarios.
 - [ ] Official docs explain the mental model and every example runs against the synthetic sandbox.

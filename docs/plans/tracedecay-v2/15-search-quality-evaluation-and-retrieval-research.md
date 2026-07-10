@@ -6,7 +6,7 @@
 
 **Decision:** Keep exact phrase/BM25 as the mandatory baseline. Evaluate character-fuzzy, entity/graph, local dense, learned-sparse, fusion, late interaction, cross-encoder reranking, expansion, recency, clustering, and diversification as independently removable stages. No neural component becomes default without measured real-world gains.
 
-**Publication baseline (2026-07-10):** `origin/master` `3567e31e` at 0.0.48 includes merged #418/#425 plus the earlier accepted inputs; only draft plan PR #421 was open. Refresh before corpus freeze. Treat origin/representative views, `move_symbol` safety, split identity/consolidation, proxy/store authority, catalog refresh, direction-preserving FTS5/counters, and aggregate-before-sample analytics as current behavior; retain pre-fix failures as labeled regressions.
+**Publication snapshot:** [master §2.6](../2026-07-09-tracedecay-brain-rewrite.md#26-current-master-accepted-changes) plus [plan 13](13-research-provenance-and-context-anchors.md) are normative. Refresh before corpus freeze. Treat divergent session variants, bounded indexed consolidation lookup, conflict-safe registry healing, repair-free search reads, peer-safe graph checkpoints, and restart-safe manifest retirement as accepted behavior; retain every pre-fix failure as a labeled regression.
 
 ## 0. Boundary and contract integration
 
@@ -17,7 +17,24 @@
 - Plan 18 is authoritative for sanitizer/taint wrappers. Queries enter evaluation as protected refs or `Unclassified<T>` that are sanitized before persistence; candidates, qrels, summaries, embeddings, explanations, reports, problems, and exports contain only eligible wrappers or explicit redacted/unknown states.
 - Plan 23 is the normative message/session/LCM temporal specialization and contributes logical-copy, summary-horizon, current/as-of/evolution/forensic, supersession, and context-assembly strata to this shared corpus/evaluation program. Plan 22 consumes promoted retrieval profiles through bounded anchored reads for the optional Context Scout; scout outcomes never become relevance truth automatically.
 - Plan 24 consumes promoted retrieval profiles for task query, decomposition evidence, temporally correct context packets, prior-attempt recovery, and sibling-materiality selection. Task completion, route success, or a model's use of a packet is outcome evidence, never an automatic relevance label; packet qrels include mandatory, useful, redundant, stale, forbidden, and missing-with-coverage classes.
-- Search replay and corpus evaluation are read-only. Creating/updating a private qrel, promoting a synthetic fixture, or activating a retrieval profile is a separate typed command with preview, expected version, sanitization receipt, audit, and rollback.
+- Evaluation rows carry canonical `RetrievalAnchorId`s. Safe bulk labels use `retrieval_anchors.metadata_batch_get` at `POST /api/v2/retrieval-anchors:metadata-batch`; exact evidence inspection uses separately authorized `retrieval_anchors.resolve` at `POST /api/v2/retrieval-anchors:resolve`; a replayable recipe uses `retrieval_recipes.execute` at `POST /api/v2/retrieval-recipes:execute`. Evaluation code defines no alias, GET-by-anchor route, or combined metadata/payload hydration operation.
+- Search replay and corpus evaluation are read-only. Creating/freezing a corpus or qrel version, recording/superseding a judgment, adjudicating, promoting a synthetic fixture, publishing a profile, or activating it is a separate direct typed command with expected version, idempotency, sanitization evidence where applicable, and an audit receipt. Immutable versions are superseded, never edited or fictionally rolled back.
+
+### 0.1 Canonical evaluation operation family
+
+Plan 09 owns these application operations; plans 10/17 generate HTTP and SDK bindings from the same catalog entries, and plan 11 renders them. No lab-local action or query-engine helper is another mutation path.
+
+| Class | Canonical operations | Contract |
+|---|---|---|
+| Artifact reads | `retrieval.corpus_versions.list/get`, `retrieval.qrel_versions.list/get`, `retrieval.candidate_pools.list/get`, `retrieval.judgments.list/get`, `retrieval.adjudications.list/get` | Return immutable version/cutoff/owner/member digests, supersession/adjudication lineage, protected-payload availability, and coverage; list metadata contains no query/rationale text. |
+| Run/report reads | `retrieval.evaluation_runs.list/get`, `retrieval.evaluation_reports.list/get` | Return frozen inputs, operation state, metrics/strata/denominators, privacy/resource receipts, regressions, and publication state. |
+| Profile reads | `retrieval.profiles.list/get` | Return immutable ranking/config/model/index manifests, promotion evidence, activation history, compatibility, and typed unavailable state. |
+| Corpus/qrel commands | `retrieval.corpus_versions.create/freeze`, `retrieval.qrel_versions.create/freeze`, `retrieval.candidate_pools.create` | Create a new draft version or freeze its exact membership/cutoff/digest. Freeze is one-way; later evidence creates a successor. |
+| Ground-truth commands | `retrieval.judgments.record/supersede`, `retrieval.adjudications.record` | Append human or explicitly secondary labels; correction points to the prior judgment; adjudication retains every source label/rationale and never rewrites disagreement. |
+| Evaluation commands | `retrieval.evaluation_runs.run/cancel`, `retrieval.evaluation_reports.publish` | Start/cancel a durable frozen run and publish only a reviewed aggregate/redacted report whose metric rows bind the exact run and artifact versions. Cancellation cannot erase completed work. |
+| Promotion commands | `retrieval.fixtures.promote`, `retrieval.profiles.publish/activate` | Promote only synthetic or reviewed sanitized fixtures with source/secret-scan receipts; publish an immutable profile; activate only after locked gates and expected active-version CAS. Running queries remain pinned. |
+
+Each command returns one ordinary command/operation receipt. Permission to label, adjudicate, run, publish reports, promote fixtures, publish profiles, and activate profiles is separate; a broad search-read grant conveys none of them.
 
 ## 1. Current supported-surface probe
 
@@ -93,7 +110,7 @@ Each channel returns a bounded candidate list with channel rank/score, matching 
 
 ### 4.3 Fusion, noise control, and diversity
 
-- Start with the fusion contract defined once in plan 05 §11.3: deterministic RRF over declared channels within each shard, then the calibrated cross-shard merge with exact-match tiers first; repartition stability is owned by 05's planner property tests. Learned fusion is a later ablation requiring feature/version explanation.
+- Start with the fusion contract defined once in plan 05 §11.3: deterministic RRF over declared channels within each shard, then the calibrated cross-shard merge with exact-match tiers first. Plan 05 owns byte determinism for a fixed layout and bounded repartition-drift tests (exact-match-tier invariance plus locked top-k-overlap/nDCG floors with explanations), not impossible byte-identical output after arbitrary repartition. Learned fusion is a later ablation requiring feature/version explanation.
 - Cluster copied parent prompts, provider protocol/tool echoes, same-content cross-store rows, summary/source lineage, and repeated assistant status messages.
 - Select representative by requested audience/origin/kind and evidence quality; report hidden counts and exact sanitized-native expansion.
 - Penalize the active query/tool command echo, inventory listings, protocol notifications, and same-session repetition unless requested explicitly.
@@ -162,21 +179,103 @@ Also label duplicate/echo/protocol noise, wrong project/provider/time/origin, st
 
 A substantial stratified subset is independently double-labeled. Report raw agreement and an ordinal agreement statistic; adjudicate disagreement while retaining both labels/rationales. Ambiguous cases remain distributions/unknown, not forced truth.
 
-The judgment record is concrete, not deferred:
+The judgment record is concrete, not deferred. These contracts land in plan 01's `tracedecay-domain::retrieval::evaluation`; this plan owns their semantics and plan 02 lowers them without replacement aliases:
 
 ```rust
+pub enum JudgeRefV1 {
+    Human(ActorRef),
+    ModelSecondary {
+        model: ModelCatalogEntryId,
+        revision: ModelRevisionId,
+        prompt_manifest: ManifestId,
+    },
+}
+
+pub enum JudgeKindV1 { Human, LlmSecondary }
+pub struct RelevanceGradeV1(u8); // constructor accepts only 0..=3
+
+pub enum NoiseLabelV1 {
+    Duplicate,
+    QueryEcho,
+    ToolEcho,
+    ProtocolNoise,
+    CopyOnly,
+    SummaryOnly,
+    StaleSummary,
+}
+pub enum ScopeAssessmentV1 {
+    InScope,
+    WrongProject,
+    WrongRepository,
+    WrongWorktree,
+    WrongRef,
+    WrongProvider,
+    WrongThreadOrAgent,
+    WrongOrigin,
+    Ambiguous,
+    Unknown,
+}
+pub enum TemporalAssessmentV1 {
+    Current,
+    HistoricalValid,
+    Stale,
+    Superseded,
+    Revoked,
+    Conflicted,
+    FutureLeak,
+    Unknown,
+}
+pub enum PrivacyAssessmentV1 { Eligible, RedactedUseful, Ineligible, Locked, Unknown }
+pub enum EvidenceAssessmentV1 {
+    Sufficient,
+    MissingRequiredRelation,
+    WrongRelation,
+    CandidateOnly,
+    Unknown,
+}
+pub enum NextActionAssessmentV1 { Enables, DoesNotEnable, Unknown }
+pub enum NoAnswerAssessmentV1 {
+    NotApplicable,
+    CorrectAbstention,
+    FalsePositiveResult,
+    FalseAbstention,
+    Unknown,
+}
+pub enum AnchorGrainV1 {
+    Message,
+    Turn,
+    Session,
+    Agent,
+    Goal,
+    WorkClaim,
+    Workflow,
+    CommitOrPullRequest,
+    Fact,
+    CodeEntity,
+    EvidenceBundle,
+}
+pub struct SecondaryLabelsV1 {
+    pub noise: BTreeSet<NoiseLabelV1>,
+    pub scope: ScopeAssessmentV1,
+    pub temporal: TemporalAssessmentV1,
+    pub privacy: PrivacyAssessmentV1,
+    pub evidence: EvidenceAssessmentV1,
+    pub next_action: NextActionAssessmentV1,
+    pub no_answer: NoAnswerAssessmentV1,
+}
+
 pub struct JudgmentRecordV1 {
     pub judgment_id: JudgmentId,                     // primary key
-    pub corpus_version: CorpusVersion,
-    pub qrel_version: QrelVersion,
+    pub corpus_version: CorpusVersionId,
+    pub qrel_version: QrelVersionId,
     pub query_episode_id: QueryEpisodeId,
     pub anchor_id: RetrievalAnchorId,
-    pub judge: JudgeRef,                             // human judge ID, or model+prompt+version for secondary LLM labels
-    pub judge_kind: JudgeKind,                       // Human | LlmSecondary
-    pub grade: RelevanceGrade,                       // 0..=3 exactly as above
-    pub secondary_labels: BTreeSet<SecondaryLabel>,  // the noise/scope/staleness/privacy/next-action labels above
-    pub smallest_sufficient_grain: AnchorGrain,
-    pub rationale_ref: Option<EligibleContentRef>,
+    pub judge: JudgeRefV1,
+    pub judge_kind: JudgeKindV1,
+    pub grade: RelevanceGradeV1,
+    pub secondary_labels: SecondaryLabelsV1,
+    pub smallest_sufficient_grain: AnchorGrainV1,
+    pub rationale_ref: Option<PayloadRef>,            // sanitized/private, receipt-bound
     pub labeled_at: UtcMicros,
     pub supersedes: Option<JudgmentId>,
 }
@@ -184,8 +283,8 @@ pub struct JudgmentRecordV1 {
 
 - Uniqueness: `(qrel_version, query_episode_id, anchor_id, judge)`; required indexes: `(query_episode_id, anchor_id)`, `(corpus_version, qrel_version)`, and `(judge_kind, labeled_at)`.
 - Retention/size envelope: append-only and never edited — corrections publish a superseding row via `supersedes`; at least 5,000 rows for the initial gate and tens of thousands over the program's life.
-- Owning shard: the protected private evaluation shard, persisted through plan [`02-store-crate.md`](02-store-crate.md)'s qrel/judgment table family; committed fixtures remain redacted/synthetic only.
-- Plan 23 §8.3 extends only the `SecondaryLabel` vocabulary with session-temporal labels; it defines no second judgment record.
+- Owning store: the active profile's activity shard, inside plan [`02-store-crate.md`](02-store-crate.md)'s protected evaluation table family. This is a privacy/authorization family, not another physical shard; committed fixtures remain redacted/synthetic only.
+- Plan 23 §8.3 consumes the typed `SecondaryLabelsV1` dimensions above for session-temporal cases and defines no second label or judgment record.
 
 ## 6. Metrics
 
@@ -267,7 +366,7 @@ Outputs:
 - Per-query labels/metrics plus aggregate/per-stratum comparison and inspected regressions.
 - Equivalent CLI/MCP/HTTP request and deterministic aggregate/redacted evaluation receipt.
 
-Lab mode is read-only. Label/create-corpus/fixture promotion is a separately authorized command with stable anchors, secret scan, optimistic version, and audit.
+Lab mode is read-only. The canonical commands in §0.1 perform corpus/qrel creation and freeze, judgment/supersession/adjudication, run/cancel, aggregate report publication, sanitized fixture promotion, and profile publish/activation with stable anchors, optimistic versions, and audit.
 
 ## 9. Implementation file plan
 
@@ -299,9 +398,9 @@ Companion ownership:
 - Projectors build typed search documents, representative clusters, entities, summaries, and relation indexes.
 - Store owns privacy-domain representation bytes/manifests and immutable eval artifacts.
 - Policy chooses an approved retrieval profile for hints/memory/coordination; it does not execute search.
-- Application owns Search/Explorer/lab/eval use cases and label commands.
-- API exposes `POST /api/v2/search`, `/search/benchmark`, `/labs/search-quality:replay`, and `/labs/search-quality:compare` plus generated types; CLI/MCP/SDK bindings derive from the same catalog entries.
-- Dashboard owns Search Quality Lab, qrel review, explanations, and aggregate charts/tables.
+- Application owns Search/Explorer/lab/eval reads and every §0.1 command.
+- API exposes `POST /api/v2/search`, `/search/benchmark`, `/labs/search-quality:replay`, and `/labs/search-quality:compare` plus the complete versioned evaluation read/command family in plan 10 §8; CLI/MCP/SDK bindings derive from the same catalog entries.
+- Dashboard owns Search Quality Lab, corpus/pool/qrel/judgment/adjudication/run/report/profile workspaces, explanations, and aggregate charts/tables. It invokes only generated operations and never edits an artifact locally.
 
 ## 10. PR sequence
 
@@ -335,7 +434,7 @@ Companion ownership:
 
 ### PR 31J: Search Quality Lab and qrel review
 
-- Ship profile comparison, per-stage waterfall, labels/disagreement, metrics/strata/regressions, aggregate export, and fixture promotion.
+- Ship corpus/qrel version and candidate-pool browsers; append-only judgment/supersession/adjudication review; durable evaluation run/cancel; profile comparison; per-stage waterfall; labels/disagreement; metrics/strata/regressions; reviewed aggregate report publication; sanitized fixture promotion; and immutable retrieval-profile publish/activation through the exact §0.1 generated operations.
 - Consume the shared plan 09 lab result and plan 10/17 generated client; do not add a dashboard-only evaluator, qrel store, scope parser, or replay endpoint.
 
 ## 11. Verification commands and artifacts

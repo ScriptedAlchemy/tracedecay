@@ -1,10 +1,8 @@
 # TraceDecay V2 Code Intelligence Indexing Crate Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
-
 **Goal:** Build `tracedecay-code-index`, the deterministic code-intelligence indexing crate that owns language extraction (a versioned tree-sitter parser/grammar registry), watcher intake planning, incremental indexing with bounded dirty overlays, immutable packed snapshot/generation builds, symbol identity/lineage computation, and diagnostics/test-attribution mapping — the production side of the master plan's Code Intelligence bounded context (master §5.2 #6) whose write owner the master names in §7.7 ("Code indexer owns graph snapshots").
 
-**Architecture:** Repository content enters exactly once through plan 03's `code_snapshot` extractor adapter, crosses the one mandatory Plan 18 sanitizer, and lands as immutable receipt-bound snapshot/file observations. The indexer library consumes only those sanitized observations: it parses receipt-bound file content with registered versioned grammars, derives symbol occurrences, code edges, diagnostics, and test attributions, and plans deterministic packed-generation builds. Plan 04's `code_evidence_v1` projector executes each build transactionally through a projector-owned port over plan 02's `GraphGenerationRepository`; plan 05 queries the published generations. One packed generation set plus bounded overlays and movable ref pointers replaces V1's physical database per branch.
+**Architecture:** Repository content enters exactly once through plan 03's `code_snapshot` extractor adapter, crosses the one mandatory Plan 18 sanitizer, and lands as immutable receipt-bound snapshot/file observations. The indexer library consumes only those sanitized observations: it parses receipt-bound file content with registered versioned grammars, derives symbol occurrences, code edges, diagnostics, and test attributions, and plans deterministic packed-generation builds. V1 migration follows the same boundary: plan 02's store-owned read-only importer and the root migration adapter discover/open legacy SQLite families and emit receipt-bound logical graph-import batches; this crate never opens a V1 database. Plan 04's `code_evidence_v1` projector executes each build transactionally through a projector-owned port over plan 02's `GraphGenerationRepository`; plan 05 queries the published generations. One packed generation set plus bounded overlays and movable ref pointers replaces V1's physical database per branch.
 
 **Tech Stack:** Rust workspace; `tracedecay-domain` contracts; `tree-sitter` 0.26-line runtime with bundled grammar crates pinned per release; deterministic canonical row encoding and SHA-256 digests; store `GenerationWriter`/manifest ports supplied by `tracedecay-store`; property, differential, copied-store, crash/disk-full, and Criterion tests.
 
@@ -22,13 +20,13 @@ Plan [`16-cross-project-repository-worktree-scope.md`](16-cross-project-reposito
 - Keep symbol identity stable across renames, moves, splits, and merges through evidence-bearing lineage candidates; prefer a visible uncertain relationship over a silent incorrect merge (master §6.6).
 - Map compiler/LSP diagnostics and test definitions/runs to snapshot occurrences with explicit evidence classes; attribution without evidence remains a candidate, never a fact.
 - Choose incremental reuse over full rebuild by declared policy, and force full rebuilds only for declared reasons (schema bump, identity-rule change, privacy invalidation, corruption quarantine).
-- Migrate the V1 branch graph stores under plan 12's controller with per-entity dispositions and receipts; retire the V1 graph stack under plan 19's deletion waves.
+- Migrate every V1 branch graph store under plan 12's controller, including merged-#426 metadata-less `branches/*.db` artifacts absent from `branch_meta.json`, with per-entity dispositions and receipts; retire the V1 graph stack under plan 19's deletion waves.
 
 ## Non-goals
 
 - No source discovery, framing, sanitization, or observation-journal writes; plan 03 owns the `code_snapshot` adapter and the one sanitizer.
 - No canonical event creation, projector checkpointing, or read-model transactions; plan 04's `code_evidence_v1` remains the transactional executor and registry owner.
-- No SQL connections, physical generation publication, compaction execution, or blob I/O; plan 02's `GraphGenerationRepository` owns physical storage and atomic swaps.
+- No SQL connections (including V1 import), physical generation publication, compaction execution, or blob I/O; plan 02's store connection factory/`V1Importer` owns read-only legacy opens and plan 02's `GraphGenerationRepository` owns physical V2 storage and atomic swaps.
 - No query parsing, ranking, federation planning, or transport rendering; plan 05 owns code queries and plan 16 owns federated scope behavior.
 - No per-branch physical databases, no mutable published generation, and no in-place historical rewrite.
 - No secret detection or redaction; extraction consumes sanitizer output and can only propagate or narrow eligibility, never widen it.
@@ -57,6 +55,7 @@ Adding this crate satisfies the plan 19 §6.1 new-crate criteria explicitly: two
 - `tracedecay-domain`: `EntityRef`, `CodeSnapshotId`, `GraphGenerationId`, symbol identity/occurrence/diagnostic/test entity kinds, code lineage/change/impact predicates, `RelationAssertionV1`, `ScopeSelectorV2`/`ScopeResolutionV2`, `VectorWatermark`, `CoverageReportV1`, sensitivity/retention classes, and sink-eligible text wrappers.
 - Plan 03 outputs: sanitized `code.snapshot_observed`/`code.file_observed` observation families from the `code_snapshot` adapter, each binding one complete `SanitizationReceiptV1` (minted by capture, persisted per shard in plan 02's `sanitization_receipts` table), plus plan 03's fixed quarantine vocabulary (including `ownership_conflict` and `identity_collision`).
 - Plan 02 ports, only behind plan 04's projector-owned integration: `GenerationWriter` staging, manifest verification, `open_resolved_snapshot`, and the storage ADR pack/overlay constants ("Graph generation store": 32/64/128 snapshots per pack, 512 MiB/1 GiB/2 GiB targets, overlay depth 2/4/8).
+- Plan 02/root migration output: bounded `V1GraphImportBatchV1` logical rows plus `V1GraphSourceManifestV1`. The source manifest carries `ManifestId`, adopted repository identity, optional branch identity, metadata state, schema version, table/count digests, and `PrivacyDomainKeyedFingerprintV1` file identity (domain + key epoch + keyed digest); it never exposes a raw database hash or path to this crate.
 - Identity ledger results: symbol entities without an exact native key allocate through the store's `AllocationRequest` path exactly as plan 01 specifies; this crate proposes, it never mints UUIDs.
 
 ### Produces
@@ -93,12 +92,12 @@ The dependency boundary is `tracedecay-domain <- tracedecay-code-index`; root co
 | `crates/tracedecay-code-index/src/lineage.rs` | `LineageCandidateV1` computation: rename/move/split/merge evidence and confidence. |
 | `crates/tracedecay-code-index/src/diagnostics.rs` | `DiagnosticAttributionV1`: diagnostic-to-occurrence mapping with evidence and coverage. |
 | `crates/tracedecay-code-index/src/test_attribution.rs` | `TestAttributionV1`: static candidate mapping plus recorded-run exact evidence. |
-| `crates/tracedecay-code-index/src/migrate_v1.rs` | V1 branch-graph-store readers as parity fixtures and disposition inputs for PR 33G. |
+| `crates/tracedecay-code-index/src/migrate_v1.rs` | Validation and differential lowering of bounded logical `V1GraphImportBatchV1` rows; no SQLite/path/file API. Physical discovery/read ownership stays in plan 02's importer and `src/v2_adapters/v1_graph_import.rs`. |
 | `crates/tracedecay-code-index/tests/extraction_conformance.rs` | Per-language redacted golden fixtures, determinism, error-range and redaction-marker behavior. |
 | `crates/tracedecay-code-index/tests/incremental_suite.rs` | Reuse keys, invalidation matrix, overlay bounds, intake debounce/storm cases. |
 | `crates/tracedecay-code-index/tests/generation_suite.rs` | Canonical ordering, digest determinism, plan/port contracts, schema conformance. |
 | `crates/tracedecay-code-index/tests/lineage_attribution_suite.rs` | Rename/move/split/merge cases, diagnostic/test mapping evidence classes. |
-| `crates/tracedecay-code-index/tests/migration_parity.rs` | Copied V1 branch-store differential parity, disposition manifests, disk math. |
+| `crates/tracedecay-code-index/tests/migration_parity.rs` | Sanitized logical V1 graph batches, differential parity, disposition manifests, and disk math. Store/root integration tests own copied SQLite fixtures. |
 | `crates/tracedecay-code-index/benches/code_index.rs` | Parse/extract throughput, incremental latency, generation build, digest, 10× symbol scale. |
 
 ## Public API and fixed signatures
@@ -182,7 +181,7 @@ pub fn derive_occurrence_id(
     file: &EntityRef,
     range: ByteRange,
     kind: SymbolKind,
-) -> OccurrenceId;
+) -> CodeOccurrenceId;
 ```
 
 ```rust
@@ -226,9 +225,35 @@ impl CodeIndexBuilderV1 {
 }
 ```
 
+```rust
+pub enum V1BranchMetadataStateV1 {
+    Tracked,
+    RecoveredMetadataLess,
+}
+
+pub struct V1GraphSourceManifestV1 {
+    pub source_manifest_id: ManifestId,
+    pub repository: EntityRef,
+    pub branch: Option<EntityRef>,
+    pub metadata_state: V1BranchMetadataStateV1,
+    pub schema_version: SchemaVersion,
+    pub source_file_fingerprint: PrivacyDomainKeyedFingerprintV1,
+    pub logical_inventory_digest: ManifestDigest,
+}
+
+pub struct V1GraphImportBatchV1 {
+    pub source_manifest_id: ManifestId,
+    pub ordinal: u64,
+    pub rows: Vec<V1GraphLogicalRowV1>,
+    pub terminal: bool,
+}
+```
+
 - `ExtractionUnit.content` is the only content input and is receipt-bound sanitized text; the crate has no constructor for content from paths, readers, or raw bytes. Redaction markers are explicit spans so parse recovery can keep structural identity for redacted files (plan 18 §11.2); a file whose markers break parsing degrades to `RedactedStructural`/`RedactedOpaque` coverage, never to a raw-content retry.
 - `ExtractorRegistryV1::validate` fails on duplicate language ownership, ABI mismatch with the pinned tree-sitter runtime, missing query-pack digest, or a plugin-tier extractor without the plan 19 §7.3 isolated-subprocess declaration.
 - Plan 04's adapter implements `CanonicalRowSinkV1` over the transaction's plan-02 `GenerationWriter`; plan 02 verifies the emitted manifest against `GenerationDigest` before sealing. This crate never stages/seals a store handle, opens a database, or calls `publish_generation`; publication/atomic swap remain plan 02's sequence executed under plan 04's projector transaction.
+- The plan-02/root V1 adapter is the only constructor of `V1GraphSourceManifestV1`/`V1GraphImportBatchV1`. It discovers tracked and metadata-less graph files, opens each SQLite family read-only through the store connection factory with effective `PRAGMA mmap_size=0` read back and enforced, runs integrity/schema checks, sanitizes through plan 03, and emits bounded logical rows. This crate can compare/lower those rows but has no raw path, SQLite handle, database bytes, or raw digest.
+- Import replay keys are `(source_manifest_id, ordinal)`. `source_file_fingerprint` is private evidence with explicit privacy domain and key epoch, not a canonical ID or public equality token. Historical manifests remain immutable across key rotation; plan 02 records a signed successor/continuity receipt between old-epoch and new-epoch source manifests instead of changing an existing row or computing an unkeyed digest.
 - Ordering: plan 04 PR 18 first lands the projector-owned consumer contract, transaction, and fake builder without a production dependency. PR 18B–18F then land and prove this crate. Plan 04 PR 18G, after plan 02 PR 6C and PRs 18B–18F, adapts the real `CodeIndexBuilderV1` into that already-tested projector transaction. Projector framework tests retain the fake builder so the stack remains bisectable.
 
 ### Consumed observation families and derived-row lineage
@@ -236,7 +261,7 @@ impl CodeIndexBuilderV1 {
 The `code_snapshot` adapter (plan 03) commits these sanitized observation payload kinds; they are the crate's only content inputs and the payload families plan 04's registry must show owned by `code_evidence_v1`:
 
 - `code.snapshot_observed` — repository/checkout/worktree/ref tuple, snapshot kind (commit or dirty overlay base), source watermark.
-- `code.file_observed` — file path, language hint, keyed content fingerprint, receipt-bound sanitized content reference, redaction-marker spans.
+- `code.file_observed` — file path, language hint, `PrivacyDomainKeyedFingerprintV1` (privacy domain + key epoch + keyed digest), receipt-bound sanitized content reference, redaction-marker spans.
 - `code.file_removed` — deletion evidence for incremental planning.
 - `code.diagnostic_observed` / `code.build_observed` / `code.test_run_observed` — tool outputs framed by capture from compiler/LSP/test processes.
 
@@ -248,7 +273,7 @@ Every row this crate derives (occurrence, edge, diagnostic mapping, test attribu
 - Occurrence identity is `(snapshot, file, byte range, kind)` — deterministic, snapshot-scoped, and independent of allocation order.
 - Canonical row ordering is total and fixed: files by path bytes, occurrences by `(file, byte_start, kind, qualified_path)`, edges by `(source_occurrence, kind, target)`, diagnostics by `(file, byte_start, tool, code)`, test-map rows by `(test, covered_entity)`. The generation digest is computed over the canonical uncompressed ordered rows plus `BuildInputDigests`; compression, page layout, and physical file boundaries are excluded.
 - Same sanitized source rows + same `BuildInputDigests` ⇒ same `GenerationDigest`, on any machine, in any parallelism configuration. Two consecutive builds asserting digest equality is a release gate.
-- Content fingerprints stored in generation tables are privacy-domain-keyed fingerprints carried from capture; no unkeyed hash of file content is computed or stored in this crate (the master's sanitize-before-persist and keyed-fingerprint invariant).
+- Content fingerprints stored in generation tables are the full privacy-domain-keyed identity tuple carried from capture — privacy domain, key epoch, and keyed digest — never a bare digest. No unkeyed hash of file content is computed or stored in this crate (the master's sanitize-before-persist and keyed-fingerprint invariant).
 
 ### Watcher intake and incremental indexing
 
@@ -362,12 +387,12 @@ pub struct DiagnosticAttributionV1 {
     pub snapshot: CodeSnapshotId,
     pub file: EntityRef,
     pub range: ByteRange,
-    pub mapped_occurrence: Option<OccurrenceId>,
+    pub mapped_occurrence: Option<CodeOccurrenceId>,
     pub mapping: MappingEvidence,
 }
 
 pub struct TestAttributionV1 {
-    pub test_occurrence: OccurrenceId,
+    pub test_occurrence: CodeOccurrenceId,
     pub covered_entity: EntityRef,
     pub evidence_class: AttributionEvidenceClass,
     pub run_ref: Option<EventId>,
@@ -383,20 +408,20 @@ pub enum AttributionEvidenceClass { RecordedRunExact, StaticInferred }
 
 ## Packed generation and overlay schema
 
-Plan 02 owns the physical `GraphGenerationRepository`, pack/overlay ADR constants, publication, and manifest mapping. This plan owns the generation-internal logical schema (plan 02's schema-ownership rule applies: these column-level schemas land in the owning implementation PR — PR 18D — before code). All tables live inside packed generation files in the project/privacy-domain graph store; every content-bearing row binds a sanitization receipt ID resolvable in the owning shard's `sanitization_receipts` table (plan 02's schema, minted only by plan 03's sanitizer).
+Plan 02 owns the physical `GraphGenerationRepository`, every SQL column/migration/trigger, pack/overlay ADR constants, publication, and manifest mapping; those physical schemas land in plan 02 PR 6C. This plan owns only the generation-internal logical row IR emitted by PR 18D and the invariants the store lowering must preserve. All rows lower into packed generation files in the project/privacy-domain graph store; every content-bearing row binds a sanitization receipt ID resolvable in the owning shard's `sanitization_receipts` table (plan 02's schema, minted only by plan 03's sanitizer).
 
 | Table | Schema (fields, PK, uniqueness, indexes, retention/size) |
 |---|---|
 | `generation_manifest` | `generation_id TEXT PK (UUIDv7)`, `repository_entity TEXT NOT NULL`, `privacy_domain TEXT NOT NULL`, `generation_schema_version INTEGER NOT NULL`, `extractor_set_digest BLOB(32) NOT NULL`, `grammar_set_digest BLOB(32) NOT NULL`, `resolver_version TEXT NOT NULL`, `build_plan_digest BLOB(32) NOT NULL`, `content_digest BLOB(32) NOT NULL`, `snapshot_count INTEGER`, `file_count INTEGER`, `symbol_count INTEGER`, `edge_count INTEGER`, `source_watermark BLOB NOT NULL`, `built_at INTEGER NOT NULL`. UNIQUE `(repository_entity, content_digest)`. Index `(repository_entity, built_at)`. One row per generation; retained while the generation is referenced by plan 02's manifest or rollback window. |
 | `gen_snapshots` | `snapshot_id TEXT PK`, `kind TEXT CHECK (kind IN ('commit','dirty_overlay')) NOT NULL`, `base_snapshot_id TEXT NULL`, `commit_entity TEXT NULL`, `worktree_entity TEXT NULL`, `source_watermark BLOB NOT NULL`. Index `(base_snapshot_id)`. Bounded by pack size (32/64/128 snapshots per ADR candidate). |
-| `gen_file_payload_refs` | `content_key BLOB(32) PK` (privacy-domain-keyed fingerprint), `payload_blob_id BLOB NOT NULL`, `sanitized_byte_len INTEGER NOT NULL`, `sanitization_receipt_id TEXT NOT NULL`. The matching owner-shard `blob_refs` row reconstructs the complete plan-02 `PayloadRef` and is committed before generation publication. No pre-redaction/original length crosses this boundary. The generation never embeds source bytes; the privacy-domain content-addressed blob store performs deduplication, encryption, retention, hold, revocation, and garbage collection. |
-| `gen_files` | `(snapshot_id, file_id) PK`, `path TEXT NOT NULL`, `language TEXT NOT NULL`, `content_key BLOB(32) NOT NULL REFERENCES gen_file_payload_refs`, `size_bytes INTEGER NOT NULL`, `extractor_version TEXT NOT NULL`, `coverage TEXT NOT NULL`. UNIQUE `(snapshot_id, path)`. Indexes `(content_key)`, `(language)`. ~978 rows/snapshot currently; 10× gate rows stay cursor-paged. |
+| `gen_file_payload_refs` | Logical key `PrivacyDomainKeyedFingerprintV1 { privacy_domain, key_epoch, keyed_digest }`, plus `payload_blob_id`, `sanitized_byte_len`, and `sanitization_receipt_id`. Plan 02 PR 6C lowers all three identity fields and enforces their composite uniqueness/FKs; a bare 32-byte digest is forbidden. The matching owner-shard `blob_refs` row reconstructs the complete plan-02 `PayloadRef` and is committed before generation publication. No pre-redaction/original length crosses this boundary. The generation never embeds source bytes; the privacy-domain content-addressed blob store performs deduplication, encryption, retention, hold, revocation, and garbage collection. |
+| `gen_files` | Logical key `(snapshot_id, file_id)`; path, language, the complete `PrivacyDomainKeyedFingerprintV1` payload-reference key, sanitized size, extractor version, and coverage. UNIQUE `(snapshot_id, path)`; indexes on the full keyed fingerprint tuple and language. Plan 02 PR 6C owns the physical composite FK. ~978 rows/snapshot currently; 10× gate rows stay cursor-paged. |
 | `gen_symbol_occurrences` | `(snapshot_id, occurrence_id) PK`, `symbol_entity TEXT NOT NULL`, `file_id TEXT NOT NULL`, `byte_start INTEGER NOT NULL`, `byte_end INTEGER NOT NULL`, `kind TEXT NOT NULL`, `qualified_name TEXT NOT NULL`, `signature TEXT NULL`, `visibility TEXT NULL`, `extractor_version TEXT NOT NULL`, `sanitization_receipt_id TEXT NOT NULL`. UNIQUE `(snapshot_id, file_id, byte_start, kind)`. Indexes `(symbol_entity, snapshot_id)`, `(file_id)`. Current scale 36k+/branch; 1M-symbol 10× gate. |
 | `gen_edges` | `(snapshot_id, edge_id) PK`, `source_occurrence TEXT NOT NULL`, `target_occurrence TEXT NULL`, `target_symbol_entity TEXT NULL`, `kind TEXT NOT NULL`, `byte_start INTEGER`, `byte_end INTEGER`, `resolver_version TEXT NOT NULL`, `confidence INTEGER NULL`. CHECK: exactly one of `target_occurrence`/`target_symbol_entity`/unresolved marker. Indexes `(source_occurrence)`, `(target_symbol_entity, kind)`. Current scale 71k+/branch. |
 | `gen_diagnostics` | `(snapshot_id, diagnostic_id) PK`, `file_id`, `byte_start`, `byte_end`, `severity TEXT`, `tool TEXT`, `tool_version TEXT`, `code TEXT NULL`, `mapped_occurrence TEXT NULL`, `mapping_evidence TEXT NOT NULL`, `sanitization_receipt_id TEXT NOT NULL`. Indexes `(file_id)`, `(mapped_occurrence)`. Retention follows the generation. |
 | `gen_tests` / `gen_test_map` | `gen_tests`: `(snapshot_id, test_occurrence) PK`, `framework TEXT`, `test_name TEXT NOT NULL`. `gen_test_map`: `(snapshot_id, test_occurrence, covered_entity) PK`, `evidence_class TEXT CHECK (evidence_class IN ('recorded_run_exact','static_inferred'))`, `run_ref TEXT NULL`, `confidence INTEGER NULL`. Reverse index `(covered_entity)`. |
-| `overlay_journal` / `overlay_files` | `overlay_journal`: `overlay_id TEXT PK`, `base_snapshot_id TEXT NOT NULL`, `worktree_entity TEXT NOT NULL`, `depth INTEGER NOT NULL`, `created_at INTEGER`. `overlay_files`: `(overlay_id, file_id) PK`, `change_kind TEXT CHECK (change_kind IN ('added','modified','deleted'))`, `content_key BLOB(32) NULL`. Index `(base_snapshot_id)`. Retention: overlays are pruned at compaction; depth bounded by the ADR constant. |
-| `gen_fts`, `gen_fingerprints`, `gen_complexity`, `gen_redundancy` | Rebuildable auxiliary families keyed by `(snapshot_id, occurrence_id \| file_id)` with the extractor/resolver version that produced them. Per plan 02's rule for remaining table families: one-line key+index envelope here; column-level schema must land in the owning implementation PR (18D/18F) before code. FTS indexes only receipt-bound `SearchEligibleText`. |
+| `overlay_journal` / `overlay_files` | Logical `overlay_journal`: overlay ID, base snapshot, worktree entity, depth, created time. Logical `overlay_files`: `(overlay_id, file_id)`, change kind, and optional complete `PrivacyDomainKeyedFingerprintV1` for added/modified content. Plan 02 PR 6C owns its SQL and indexes; a bare `content_key` digest is forbidden. Retention: overlays are pruned at compaction; depth bounded by the ADR constant. |
+| `gen_fts`, `gen_fingerprints`, `gen_complexity`, `gen_redundancy` | Rebuildable auxiliary logical families keyed by `(snapshot_id, occurrence_id \| file_id)` with the extractor/resolver version that produced them. Their SQL columns, indexes, migrations, and triggers land only in plan 02 PR 6C; PR 18D/18F supply logical rows and conformance fixtures. FTS indexes only receipt-bound `SearchEligibleText`. |
 
 ## Scale envelope and physical policy
 
@@ -411,8 +436,8 @@ Plan 02 owns the physical `GraphGenerationRepository`, pack/overlay ADR constant
 |---|---|---|
 | `src/extraction/*_extractor.rs` (~60 per-language tree-sitter extractors), `src/extraction/{common,basic_common,batch_extractor,annotations,complexity}.rs` | `src/extract/**`, `src/registry.rs` | Declarative query packs + shared driver replace per-language imperative extractors; V1 outputs become differential fixtures; unknown-language behavior becomes explicit `Unsupported` coverage. |
 | `src/extraction_worker.rs`, `src/sync.rs` (read/hash/change detection) | `src/intake.rs`, `src/incremental.rs`, plan 03 `code_snapshot` adapter | Ingest-side reading/hashing moves behind capture's sanitizer; reuse planning replaces rescan heuristics; UTF-16/BOM handling is adapter framing. |
-| `src/db/{nodes,edges,files,fingerprints,coverage,search,unresolved,redundancy_pairs}.rs`, `src/db/migrations.rs` (`LATEST_VERSION`, currently 17) | Generation schema above + plan 02 "Graph generation store" | Mutable per-branch tables become immutable packed generation tables; V1 schema version and DB hash become import-manifest fields exactly as plan 01's migration seam table states. |
-| `src/branch.rs`, `src/branch_meta.rs`, per-branch DB layout in `src/storage.rs` | Plan 02 manifests + ref pointers | A branch is a movable ref naming a snapshot/generation; no branch owns a database. Retirement under plan 12 §15 PR 37C. |
+| `src/db/{nodes,edges,files,fingerprints,coverage,search,unresolved,redundancy_pairs}.rs`, `src/db/migrations.rs` (`LATEST_VERSION`, currently 17) | Logical generation IR above + plan 02 "Graph generation store" and store-owned V1 importer | Mutable per-branch tables become immutable packed generation tables; V1 schema version, logical inventory digest, and domain+epoch keyed source-file fingerprint become import-manifest evidence. No raw database hash crosses the adapter. |
+| `src/branch.rs`, `src/branch_meta.rs`, per-branch DB layout in `src/storage.rs` | Plan 02 manifests + ref pointers + merged-#426 metadata-less discovery | A branch is a movable ref naming a snapshot/generation; no branch owns a database. Store/root inventory scans confined `branches/*.db` artifacts as well as metadata, assigns deterministic recovered source manifests, preserves them from GC until disposition, and never treats absent metadata as unreachable. Retirement under plan 12 §15 PR 37C. |
 | `src/graph/{queries,traversal,scc}.rs`, `src/graph/health/**` (incl. `test_risk.rs`) | Plan 05 §11.4 operators over published generations | Query semantics move to the query crate; this crate supplies the data and the differential fixtures. |
 | `src/diagnostics/{rust,python,typescript}.rs`, `src/diagnostics/lsp/**`, `src/diagnostics/{cache,fingerprint}.rs` | `src/diagnostics.rs` + capture diagnostic observations | Tool output is captured/sanitized once; mapping is deterministic against the diagnosed snapshot; caches become rebuildable derived state. |
 | `src/daemon/git_watch.rs` index-trigger behavior | `src/intake.rs` hosted by root daemon (plan 12 §13) | Watcher events become typed intake events with debounce/coalesce/storm policy and explicit scope. |
@@ -454,20 +479,20 @@ The V1 graph tool surface survives as plan 05 query semantics over published gen
 
 ## Migration from V1 branch graph stores
 
-Coordinated with plan 12 (§14 controller phases, §15 retirement map row PR 37C) and consuming plan 12 PR 3R's inventory as the single source of the store list:
+Coordinated with plan 12 (§14 controller phases, §15 retirement map row PR 37C); plan 12 PR 3R owns the resulting inventory ledger, while plan 02/root must populate it from both metadata and confined physical discovery:
 
-1. **Inventory:** enumerate every locally tracked V1 branch graph DB per repository from the PR 3R ledger with size, schema version (`LATEST_VERSION` lineage), branch ref, last-write time, and adoption identity from PR #405 manifests.
+1. **Inventory:** plan 02/root enumerates every V1 graph DB per repository from both the PR 3R ledger/branch metadata and a confined physical `branches/*.db` sweep. A metadata-less artifact becomes `RecoveredMetadataLess`, receives a stable source manifest and `PrivacyDomainKeyedFingerprintV1` file identity (domain + active key epoch + keyed digest), remains GC-protected until disposition, and is never silently dropped. Inventory records size, schema version (`LATEST_VERSION` lineage), optional branch ref, last-write time, and adoption identity from PR #405 manifests without exposing raw paths or database bytes to this crate.
 2. **Durable-data carve-out:** graph-resident durable rows (memory/fact tables inside `tracedecay.db`-era layouts) are migrated by the knowledge migration owner before any graph DB archive — plan 12 §15's PR 37C precondition; this plan never deletes a store containing unmigrated durable rows.
-3. **Re-index-first policy:** where the branch's commit is still resolvable, V2 re-extracts deterministically from source at that snapshot and the V1 store is used only as a differential parity fixture; imported V1 rows are never trusted as canonical. Where the commit is unresolvable (orphaned branch, pruned objects), the V1 store's rows import as evidence-class `derived-exact` rows with `v1_import` provenance and the V1 DB hash in the import manifest.
+3. **Re-index-first policy:** where the branch's commit is still resolvable, V2 re-extracts deterministically from source at that snapshot and the V1 store is used only as a differential parity fixture; imported V1 rows are never trusted as canonical. Where the commit is unresolvable (orphaned branch, pruned objects, or metadata-less store), store/root emits sanitized logical rows that import as evidence-class `derived-exact` rows with `v1_import` provenance; the source manifest binds schema version, logical inventory digest, and the domain+epoch keyed source-file fingerprint, never a raw DB hash.
 4. **Dispositions:** every V1 store and every carved family receives exactly one plan 12 backfill-manifest disposition — `retained | skipped | quarantined | redacted | deleted` (plan 12's backfill-manifest vocabulary; plan 12 owns the schema) — and the receipt binds the relevant plan 14 `FM-###` row IDs for the #269/#371 identity and #406 corruption classes.
 5. **Disk math:** the PR 33G receipt records before/after bytes (14 stores × ~140–150 MB vs packed generations + overlays) and proves the master §26 migration disk-amplification ≤ 2.25× gate.
 6. **Retirement:** after parity receipts and one read-only release window, PR 37C deletes the V1 branch-store stack under plan 19 §12.3's deletion waves; the adapter-free end state is plan 19's convergence gate, not this plan's.
 
-Import receipts are durable rows (G4), written by PR 33G in the owning project shard:
+Import receipts are durable rows (G4), written through plan 02 PR 33S storage ownership by PR 33G orchestration in the owning project shard. This plan fixes their logical shape; plan 02 owns the SQL lowering, migrations, indexes, and retention enforcement:
 
 | Table | Schema |
 |---|---|
-| `v1_graph_import_receipts` | `receipt_id TEXT PK (UUIDv7)`, `v1_store_path_alias TEXT NOT NULL` (adopted-identity alias, not a raw path), `v1_db_hash BLOB(32) NOT NULL`, `v1_schema_version INTEGER NOT NULL`, `branch_ref_entity TEXT NULL`, `strategy TEXT CHECK (strategy IN ('reindexed','imported','dropped')) NOT NULL`, `disposition TEXT CHECK (disposition IN ('retained','skipped','quarantined','redacted','deleted')) NOT NULL`, `target_generation TEXT NULL`, `bytes_before INTEGER NOT NULL`, `bytes_after INTEGER NULL`, `signature BLOB NOT NULL` (HMAC, profile-local signing key per plan 12's receipt mechanism), `created_at INTEGER NOT NULL`. UNIQUE `(v1_db_hash)`. Index `(strategy, disposition)`. Retained for the full rollback/evidence window; never deleted with the store it describes. |
+| `v1_graph_import_receipts` | Logical fields: `receipt_id`, unique `source_manifest_id`, adopted repository identity, optional branch entity, `metadata_state`, `source_file_fingerprint: PrivacyDomainKeyedFingerprintV1`, `v1_schema_version`, `logical_inventory_digest`, `strategy`, `disposition`, optional target generation, before/after bytes, signed receipt, and creation time. The keyed fingerprint's privacy domain, key epoch, and keyed digest all survive physical lowering; it is private integrity evidence, not an idempotency key or public token. Idempotency is by immutable `source_manifest_id`; a re-inventory under a new key epoch creates a successor manifest joined by plan 02's signed continuity receipt. Retained for the full rollback/evidence window and never deleted with the source store. |
 | `v1_graph_import_receipt_failures` | `(receipt_id, fm_row_id) PK`, both `TEXT NOT NULL`; `receipt_id` references the receipt logically and `fm_row_id` must resolve to a registered plan-14 `FM-###` fixture. Reverse index `(fm_row_id, receipt_id)`. This normalized relation preserves every applicable failure class without comma-separated identifiers or an arbitrary one-row cap. |
 
 ## Fault matrix
@@ -482,6 +507,8 @@ Import receipts are durable rows (G4), written by PR 33G in the owning project s
 | Watcher event storm | Lane rate window | `RejectStorm` with dropped-event count visible in coverage | Storm fixture: 10k events/s, bounded memory |
 | Stale/ambiguous scope at intake | `ScopeSelectorV2` resolution | Coverage/candidates per plan 01; never CWD/base fallback | Shared scope regression corpus (plan 16 §18) |
 | Corrupt V1 store during migration | Reader checksum/open failure | `quarantined` disposition + receipt; migration continues | Copied corrupt-store fixture |
+| Metadata-less V1 graph omitted | Compare confined `branches/*.db` discovery with branch metadata/PR 3R ledger | Create `RecoveredMetadataLess` source manifest, protect from GC, and require disposition | Merged-#426 untracked DB fixture: its unique graph row imports, its embedded fact reaches the knowledge carve-out, and neither is lost |
+| V1 reader maps live/peer pages | Store connection factory reads back nonzero `PRAGMA mmap_size` | Refuse the source open before import; no code-index fallback reader | Merged-#436 mixed-page checkpoint fixture covers tracked and metadata-less graphs |
 
 ## PR and task sequence
 
@@ -509,7 +536,7 @@ Import receipts are durable rows (G4), written by PR 33G in the owning project s
 - [ ] Run `cargo bench -p tracedecay-code-index --bench code_index -- incremental`; expected: report records single-file-change re-index p95 at current scale and the reused/reparsed file counts.
 - [ ] Commit `feat(code-index): add intake and incremental planning`.
 
-### PR 18D: Generation build plans, canonical rows, digests, and packed schema
+### PR 18D: Generation build plans, canonical row IR, and digests
 
 **Ordering:** after plan 04 PR 18's fake consumer contract; defines and tests the producer without a store dependency. Plan 04 PR 18G, after this plan's PRs 18B–18F and plan 02 PR 6C, performs the production wiring.
 
@@ -517,7 +544,7 @@ Import receipts are durable rows (G4), written by PR 33G in the owning project s
 
 - [ ] Write failing tests named `two_builds_same_inputs_same_digest`, `digest_ignores_compression_and_layout`, `row_order_is_total_and_fixed`, `sink_failure_aborts_without_hidden_retry`, `edge_targets_are_exactly_one_of_occurrence_entity_unresolved`, `every_content_row_binds_a_receipt`, `overlay_build_never_mutates_base_generation`, and `parallel_build_matches_serial_digest`.
 - [ ] Implement `GenerationBuildPlanV1`, streaming canonical row emission for every table in the packed schema above, edge resolution with retained unresolved targets, and the generation digest.
-- [ ] Land the column-level generation schema (this PR is the owning implementation PR, per plan 02's schema-ownership rule, for `generation_manifest`, `gen_snapshots`, `gen_file_payload_refs`, `gen_files`, `gen_symbol_occurrences`, `gen_edges`, `gen_diagnostics`, `gen_tests`/`gen_test_map`, `overlay_journal`/`overlay_files`); prove generation files contain no source body bytes and every payload reference resolves through plan 02.
+- [ ] Land the canonical logical row IR for `generation_manifest`, snapshots, file payload refs/files, symbol occurrences, edges, diagnostics, tests/test-map, and overlays. Plan 02 PR 6C alone owns their SQL columns, migrations, triggers, packed files, and publication. A lossless IR→store→IR conformance fixture must prove every logical field survives physical lowering, generation files contain no source body bytes, and every payload reference resolves through plan 02.
 - [ ] Run `cargo test -p tracedecay-code-index --test generation_suite`; expected: exit 0 and identical digests across two full builds and across serial-vs-parallel builds.
 - [ ] Run `cargo bench -p tracedecay-code-index --bench code_index -- build`; expected: current-scale full build and 10× symbol-scale build record throughput, peak RSS, and digest stability.
 - [ ] Commit `feat(code-index): add deterministic generation builds`.
@@ -534,9 +561,9 @@ Import receipts are durable rows (G4), written by PR 33G in the owning project s
 
 ### PR 18F: V1 differential parity, scale benchmarks, and convergence evidence
 
-**Files:** create `tests/migration_parity.rs` (fixture half), extend `tests/{extraction_conformance,generation_suite}.rs`; add copied V1 golden manifests.
+**Files:** create `tests/migration_parity.rs` (logical fixture half), extend `tests/{extraction_conformance,generation_suite}.rs`; add sanitized logical golden manifests produced by the store/root copied-DB harness.
 
-- [ ] Build differential fixtures from copied V1 branch graph stores: node/edge/file counts, qualified names, edge kinds, diagnostics, test-map answers, and `test_risk`-class outputs, classified `exact`, `expected_normalization`, `v1_bug_preserved`, or `unexplained`; `unexplained` fails.
+- [ ] Build differential fixtures from bounded `V1GraphImportBatchV1` streams produced by store/root copied V1 branch graph stores: node/edge/file counts, qualified names, edge kinds, diagnostics, test-map answers, and `test_risk`-class outputs, classified `exact`, `expected_normalization`, `v1_bug_preserved`, or `unexplained`; `unexplained` fails. The crate fixture never opens SQLite.
 - [ ] Assert V1 suites stay green during shadow: run `cargo test --test extraction_suite --test graph_suite`; expected: exit 0 because shadow indexing changes no V1 writes.
 - [ ] Benchmark 2/8/32-repository federated openings against the plan 02 open-generation limit and record per-repository open counts.
 - [ ] Run `cargo test -p tracedecay-code-index --test migration_parity fixtures`; expected: every V1 fixture row has a disposition and zero `unexplained`.
@@ -546,11 +573,11 @@ Import receipts are durable rows (G4), written by PR 33G in the owning project s
 
 **Ordering:** runs inside plan 12's PR 33R controller phases; consumes plan 12 PR 3R inventory; precedes plan 12 §15 PR 37C retirement.
 
-**Files:** create `src/migrate_v1.rs`; extend `tests/migration_parity.rs`; migration receipts land in the execution PR's generated manifests.
+**Files:** create logical importer `src/migrate_v1.rs`, root orchestration `src/v2_adapters/v1_graph_import.rs`, and store/root copied-DB fixture coverage in plan 02 PR 33S; extend `tests/migration_parity.rs`; migration receipts lower through plan 02's schema and land in the execution PR's generated manifests.
 
-- [ ] Write failing tests named `resolvable_commit_prefers_reindex_over_import`, `unresolvable_branch_imports_with_v1_provenance`, `durable_fact_rows_block_store_archive`, `every_store_gets_exactly_one_disposition`, `identity_split_quarantines_not_duplicates`, `corrupt_store_is_quarantined_disposition`, and `disk_amplification_within_gate`.
-- [ ] Implement the re-index-first policy, import readers keyed by V1 schema version lineage, and per-store disposition emission in plan 12's manifest vocabulary (`retained | skipped | quarantined | redacted | deleted`).
-- [ ] Bind receipts to the plan 14 §2 `FM-###` rows for #269/#371 and #406; record V1 DB hashes and PR #405 adoption identities in the import manifest.
+- [ ] Write failing tests named `resolvable_commit_prefers_reindex_over_import`, `unresolvable_branch_imports_with_v1_provenance`, `metadata_less_graph_is_discovered_and_imported`, `metadata_less_unique_graph_row_survives`, `metadata_less_embedded_fact_reaches_knowledge_carveout`, `metadata_less_graph_stays_gc_protected_until_disposition`, `source_fingerprint_binds_domain_and_epoch`, `v1_reader_enforces_mmap_zero`, `durable_fact_rows_block_store_archive`, `every_store_gets_exactly_one_disposition`, `identity_split_quarantines_not_duplicates`, `corrupt_store_is_quarantined_disposition`, and `disk_amplification_within_gate`.
+- [ ] Implement the re-index-first policy over logical import batches keyed by V1 schema-version lineage and emit per-store dispositions in plan 12's manifest vocabulary (`retained | skipped | quarantined | redacted | deleted`). Plan 02/root alone discovers and reads SQLite, enforces `mode=ro`/`query_only`/effective `mmap_size=0`, checks integrity, and produces the batches.
+- [ ] Bind receipts to the plan 14 §2 `FM-###` rows for #269/#371, #406, merged #426, and merged #436; record stable source manifest IDs, logical inventory digests, domain+epoch keyed file fingerprints, metadata state, and PR #405 adoption identities. Record no raw DB/file hash.
 - [ ] Produce the disk-math receipt: total V1 branch-store bytes vs packed generation + overlay bytes, proving ≤ 2.25× migration amplification and the ≤ 1.2× steady-state target at current scale.
 - [ ] Run `cargo test -p tracedecay-code-index --test migration_parity`; expected: exit 0 with a machine-readable disposition manifest covering 100% of inventoried stores.
 - [ ] Commit `feat(code-index): migrate v1 branch graph stores`.
@@ -567,7 +594,7 @@ Import receipts are durable rows (G4), written by PR 33G in the owning project s
 ### Determinism and correctness
 
 - Two full builds at the same inputs produce identical `GenerationDigest`, canonical row streams, counts, and coverage on two different machines; parallel and serial builds match.
-- Second extraction of every fixture yields byte-identical rows; second migration run of every copied store yields zero new imports (idempotent by V1 DB hash + disposition).
+- Second extraction of every fixture yields byte-identical rows; second migration run of every copied store yields zero new imports (idempotent by stable source manifest + batch ordinal + disposition, independent of fingerprint-key rotation).
 - Every generation row that names an occurrence/edge resolves referentially within its snapshot; unresolved edge targets are retained, counted, and queryable, never dropped.
 - Lineage: labeled-corpus F1 at or above 98% (shared gate with plan 04); ambiguous candidates are 100% visible; zero silent merges in the fixture set.
 - V1 differential parity: zero `unexplained` rows across extraction, graph, diagnostics, and test-map fixtures.
@@ -583,7 +610,7 @@ Import receipts are durable rows (G4), written by PR 33G in the owning project s
 
 - The crate consumes only receipt-bound sanitized content; the committed secret corpus yields zero secret-bearing occurrence names, signatures, snippets, FTS rows, or fingerprint inputs across every generation table (plan 18 §11.2 obligations).
 - Redacted files retain structural identity only when zero candidate bytes remain; ignore policies reduce scope but never make included secret content indexable.
-- Generation tables store privacy-domain-keyed fingerprints only; no unkeyed content hash exists in any row, log, or manifest.
+- Generation and import evidence store the complete privacy-domain-keyed fingerprint tuple (domain + key epoch + keyed digest) only; no bare keyed digest or unkeyed content/database hash exists in any row, log, or manifest.
 
 ### Observability
 
@@ -599,5 +626,5 @@ Import receipts are durable rows (G4), written by PR 33G in the owning project s
 - Packed generations + bounded overlays + ref pointers replace per-branch databases; the scale envelope and file-count/open-handle/disk gates hold at current and 10× scale.
 - Symbol identity survives moves/renames through evidence-bearing lineage candidates; identity collisions quarantine per plan 03's vocabulary; the #269/#371 and #406 regression classes have bound `FM-###` receipts.
 - Diagnostics and tests map to exact snapshot occurrences with dual evidence classes preserved end-to-end into plan 05 answers.
-- PR 33G migrated, disposed, and disk-proved every inventoried V1 branch graph store; PR 37C retirement preconditions (durable-row migration, archive restore) are satisfied; plan 19 §12.3 deletion-wave evidence lists the V1 graph stack.
+- PR 33G migrated, disposed, and disk-proved every inventoried V1 branch graph store, including metadata-less merged-#426 discoveries, through the store/root read-only `mmap_size=0` adapter; PR 37C retirement preconditions (durable-row migration, archive restore) are satisfied; plan 19 §12.3 deletion-wave evidence lists the V1 graph stack.
 - All release gates above pass on copied real stores and the redacted fixture corpus, and V1 `extraction_suite`/`graph_suite` remained green throughout the shadow window.

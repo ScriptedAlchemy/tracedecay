@@ -1,7 +1,5 @@
 # TraceDecay V2 Brain Dashboard Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use `superpowers:subagent-driven-development` (recommended) or `superpowers:executing-plans` to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
-
 **Goal:** Replace the project-tab dashboard with one profile-wide investigative workbench whose default Brain, Explorer, Causal Loom, domain workspaces, graph lenses, and replay labs make every captured agent, turn, tool, code, Git, delivery, memory, skill, automation, policy, and outcome relationship inspectable while preserving complete sanitized-native evidence and approved V1 semantics.
 
 **Architecture:** A route-lazy React/TypeScript application consumes generated HTTP V2 read-model and command contracts; one URL-addressable `InvestigationStateV1` coordinates scope, time, query, selection, comparison, renderer, and inspector across every route. Server-side aggregation and frozen vector watermarks bound data, TanStack Query owns snapshot caches, an explicit SSE state machine applies typed deltas, and focused Sigma/ELK/Canvas/ECharts/CodeMirror renderers expose synchronized outline/table fallbacks instead of attempting a universal graph hairball.
@@ -10,11 +8,15 @@
 
 [`20-configuration-control-plane.md`](20-configuration-control-plane.md) is authoritative for `/settings`: its registry generates every form, source chain, validation rule, impact, CLI/API recipe, and drift state. The frontend cannot retain dashboard-only toggles, hidden config, or its own defaults/precedence.
 
+[`18-secret-detection-redaction-and-private-data-safety.md`](18-secret-detection-redaction-and-private-data-safety.md) is authoritative for render/export/clipboard/URL/telemetry eligibility, protected references, redaction controls, and the Privacy workspace. Feature code cannot render an unclassified string or infer safety from a transport shape.
+
 [`21-cli-mcp-tool-surface-and-output-unification.md`](21-cli-mcp-tool-surface-and-output-unification.md) is authoritative for the capability command palette, guided actions, typed output/error/coverage views, and cross-surface examples. The dashboard consumes generated typed views and field descriptors; it never parses MCP Markdown, runs CLI commands, or recreates pagination/rendering semantics.
 
 [`22-incremental-context-scout-and-suggestion-envelopes.md`](22-incremental-context-scout-and-suggestion-envelopes.md) owns Context Scout state, delivery/outcome semantics, Observatory controls, Loom lane, and Hint Lab replay. [`23-session-lcm-temporal-retrieval-and-evaluation.md`](23-session-lcm-temporal-retrieval-and-evaluation.md) owns the Search Quality Lab's temporal/current/as-of/copy/summary-DAG explanations and evaluation contracts; its formerly separate "Search Lab" is folded into the Search Quality Lab and is not a distinct lab or route. The browser only renders those typed views.
 
 [`24-canonical-task-plan-graph-and-multi-agent-executor.md`](24-canonical-task-plan-graph-and-multi-agent-executor.md) owns the Work product semantics: initiative/plan/task/attempt inspectors, boards as saved canonical `TraceQueryV1`, dependency DAG, critical path, timeline/causal/workload/executor/repository/agent/All lenses, advisory-work-claim versus authoritative-lease overlap evidence, context-packet inspection, and Orchestration Lab. The frontend never stores board-local tasks, defines a task query DSL, derives readiness, selects routes, or treats drag/drop as arbitrary status mutation.
+
+UI implementation reading path is fixed: plans 10/17 for generated transport contracts; plan 21 for cross-surface view/rendering semantics; plans 18/20 for safety and effective configuration; plans 22/23/24 for scout, temporal retrieval/evaluation, and Work behavior; plan 26 for accounting/denominators; then this plan for interaction and visualization. Product/design review starts here, then follows those same ownership links before changing behavior. No role may treat this file as a replacement domain contract.
 
 ---
 
@@ -36,7 +38,7 @@ This plan refines master-plan PRs 4A and 25–32. It depends on the V2 domain, q
 12. The shipped UI is code-native. Image-generated concepts are implementation references, not rasterized application screens.
 13. Doctor/provider/daemon branding is evidence-driven: foreign-owned packages are informational, partial integrations are labeled partial, and upgrade completion requires a durable drain/recovery receipt rather than a green icon inferred from process exit.
 
-Publication refresh (2026-07-10): `origin/master` is `3567e31e` at 0.0.48 with #418 and #425 merged; #425 final head `d3bb28b5` merged as `de3d05dc`. Only draft plan PR #421 was open. The UI inventory treats ordinary-profile Hermes, message views, doctor authority, release integrity, identity split/consolidation, race-safe `move_symbol`, proxy/reconnect/no-write-replay, negotiated catalog refresh, rank/counters, exact analytics, and the operator-only consolidation/recovery workflow as accepted planning inputs.
+The normative publication snapshot is [master §2.6](../2026-07-09-tracedecay-brain-rewrite.md#26-current-master-accepted-changes) plus [plan 13](13-research-provenance-and-context-anchors.md). The UI inventory also exposes untracked branch/session variants, bounded consolidation progress, lifecycle deferrals, registry-healing decisions, FTS maintenance health, graph-checkpoint safety, and restart-safe applied-manifest retirement as typed evidence rather than hidden repair.
 
 ## 2. Product model and design direction
 
@@ -49,7 +51,7 @@ profile
   ├─ actors / agents / subagents / delegations / handoffs / workflows
   ├─ tools / code symbols / files / patches / diagnostics / tests / impact
   ├─ facts / decisions / contradictions / retrieval / trust / memory versions
-  └─ schedules / curator-reflector-skill-writer runs / proposals / skills / outcomes
+  └─ schedules / curator-reflector-skill-writer runs / candidates / autonomy decisions / effects / recoveries / skills / outcomes
 
 identity + time + scope + evidence + provenance + coverage connect every lane
 ```
@@ -144,7 +146,7 @@ Plan 13 PR 2A must assess Hermes dashboard files, tests, and interaction flows i
 | Theme variables, `color-mix` tints, density multiplier | **Adopt** | Implement §2.4 light/dark semantic tokens and density/accessibility invariants. |
 | Full-board long poll/refetch, single component/store, client-only filtering, unvirtualized columns | **Drop** | Use server `TraceQueryV1` projections, typed SSE deltas, route containers, isolated view instances, and virtualized rows/columns. |
 | Dark-only hardcoded colors, title tooltip as sole explanation, `window.confirm`/`prompt`, emoji status | **Drop** | Both themes, direct text/icon/shape encoding, accessible dialogs/forms, typed confirmation commands, no emoji as evidence/state. |
-| Pre-action confirmation as the only recovery | **Beat** | Reversible ordinary task/view edits expose a bounded undo command; archive/soft-delete retains identity/history. Irreversible external effects use plan-09 confirmation and compensation semantics. Autonomous curation remains fully policy-driven with no per-item undo/apply/reject queue. |
+| Pre-action confirmation as the only recovery | **Beat** | Ordinary task/view edits commit as versioned commands and expose exact history plus registered reopen or compensating-transition actions where the domain permits; there is no generic undo token. Archive/soft-delete retains identity/history. Irreversible external effects use plan-09 confirmation and compensation semantics. Autonomous curation remains fully policy-driven with no per-item undo/apply/reject queue. |
 
 ## 3. Information architecture and route ownership
 
@@ -260,6 +262,7 @@ Selection, comparison, and inspector semantics:
 - Every selection kind the inspector supports (section 9.2) is a `SelectionV1` variant, so relation, aggregate, time-range, and comparison selections are URL-encodable, shareable, and restorable like entity selections. Selections serialize with sorted keys and default elision and carry only opaque IDs.
 - Period comparison lives in `time.compare` as explicit A/B ranges; entity/aggregate/path/relation/time-range pair comparison is a `comparison` selection. The section 9.1 compare toggle populates exactly one of these two homes; there is no third comparison shape.
 - `InspectorTabV1` is owned here; plan 24 cites it. Plan 24 §12.6's eleven task-inspector tabs map onto the union by a checked table: Overview/specification/constraints→`specification` (`summary` remains the universal landing tab), Dependencies/gates/critical path→`dependencies`, Acceptance/evaluations/exceptions→`acceptance`, Assignments/eligible executors/routing→`assignments`, Attempts/retries/cancellation→`attempts`, Context packets/omissions→`packets`, Decisions/handoffs/artifacts/outcomes→`decisions`, Thread/session/Turn/agent/goal/tool evidence→`evidence`, Code/Git/delivery impact→`impact`, Costs/budgets→`costs`, Audit/provenance/anchors→`audit`. The attempt inspector reuses the same union. Workspaces cannot invent tab values outside this union; non-Work routes ignore Work extension tabs with an explicit "tab unavailable here" state, never a silent reset.
+- The `audit`/`evidence` tabs for plans, documents, initiatives, work items, attempts, agents, and subagents expose versioned research manifests from plan 13: immutable manifest-entry `ResearchAnchorId`, nonempty canonical `RetrievalAnchorId` links, contributor/session/role/output attribution, unresolved attribution gaps, source/catalog/Git watermarks, drift, coverage, redaction state, and retrieval recipe. Selecting an entry resolves evidence only through its canonical retrieval anchors; the UI never treats a research entry ID, response handle, URL, or search rank as payload authority. "Copy evidence" copies the canonical anchor plus optional manifest-entry context.
 - `view.layout` values are registered `<algorithm>@<layoutVersion>` identifiers from the renderer registry; `view.visibleLanes` values come from the generated per-lens lane vocabulary, which is versioned with the application enums above. Restoring a URL whose layout or lane IDs are no longer registered shows an explicit "layout/lanes reset to default" notice and falls back to route defaults — a restored URL never silently no-ops.
 
 ### 4.1 State ownership
@@ -270,7 +273,7 @@ Selection, comparison, and inspector semantics:
 - **Local preferences:** theme, density, keyboard layout, panel geometry, last nonsensitive route, reduced-motion override. Never store entity payloads here.
 - **Renderer-local:** hover, lasso-in-progress, drag state, provisional camera, worker job, GPU buffers. Commit selection/camera only on interaction end.
 
-`ScopeSelectorV2` (defined in plan 16 §4) and `ScopeResolutionV2` (defined in plan 01) are imported from the generated contract transported per plans 10/17; query state does not define another `mode/include/projectIds` selector. URL serialization retains the canonical selector's nonsensitive opaque roots/exclusions/time/policies/limits and the resolution ID; candidate details and safe aliases stay in the bounded cache. `retrievalAnchors` are server-issued domain `RetrievalAnchorId`s for session/thread/Turn/message/agent/subagent/workflow/goal/Git evidence; authorized resolution returns `RetrievalAnchorRecordV1`. They survive cursor, SSE, and migration response-handle expiry. Sensitive retrieval inputs remain behind `protectedDraftId`; copied links, saved views, collections, annotations, exports, and route recovery carry a `RetrievalRecipeV1` (defined in plan 01) or protected recipe ref, never an ephemeral response handle alone.
+`ScopeSelectorV2` (defined in plan 16 §4) and `ScopeResolutionV2` (defined in plan 01) are imported from the generated contract transported per plans 10/17; query state does not define another `mode/include/projectIds` selector. URL serialization retains the canonical selector's nonsensitive opaque roots/exclusions/time/policies/limits and the resolution ID; candidate details and safe aliases stay in the bounded cache. `retrievalAnchors` are server-issued domain `RetrievalAnchorId`s for session/thread/Turn/message/agent/subagent/workflow/goal/Git evidence. The browser uses `retrieval_anchors.metadata_batch_get` for bounded safe identity/state labels, `retrieval_anchors.resolve` only when an authorized inspector requests exact record/payload content, and `retrieval_recipes.execute` for a protected versioned rerun; it never treats metadata as payload authority. Anchors survive cursor, SSE, and migration response-handle expiry. Sensitive retrieval inputs remain behind `protectedDraftId`; copied links, saved views, collections, annotations, exports, and route recovery carry a `RetrievalRecipeV1` (defined in plan 01) or protected recipe ref, never an ephemeral response handle alone.
 
 Scope defaults and ambiguity behavior are fixed:
 
@@ -332,7 +335,7 @@ export interface SavedViewV1 {
   state: InvestigationStateV1;         // embedded; stateVersion checked on restore
   recipeRef: string | null;            // RetrievalRecipeV1 ID (plan 01), never a response handle
   watermark: string;                   // frozen snapshot/vector watermark
-  shareBundleDigest: string | null;    // set by share_apply; cleared by share_revoke
+  shareBundleDigest: string | null;    // set by saved_views.share.start; cleared by saved_views.share.revoke
   expiresAt: string | null;            // local share expiry
   createdAt: string;
   updatedAt: string;
@@ -642,7 +645,7 @@ Abort previous route/brush requests on supersession. Prefetch only the selected 
 
 ### 8.2 SSE state machine
 
-Subscriptions are created by `POST /api/v2/subscriptions` using a protected request body and return `{ subscription_id, expires_at, snapshot_watermark, replay_retention, stream_path }`. The browser opens the returned `GET /api/v2/subscriptions/{id}/events` with `Last-Event-ID` only on resume and deletes the resource through `DELETE /api/v2/subscriptions/{id}` on explicit close when reachable. Query literals never appear in the SSE URL, subscription ID, event ID, or logs.
+Subscriptions are created by `POST /api/v2/subscriptions` using a protected request body and return `{ subscription_id, expires_at, snapshot_watermark, replay_retention, stream_path }`. The browser opens the returned `GET /api/v2/subscriptions/{id}/events` with `Last-Event-ID` only on resume and invokes `subscriptions.revoke` through `POST /api/v2/subscriptions/{id}:revoke` on explicit close when reachable. Query literals never appear in the SSE URL, subscription ID, event ID, or logs.
 
 ```text
 idle → snapshot_loading → live
@@ -681,7 +684,7 @@ The palette is generated from the versioned capability/tool catalog. Each item s
 The inspector works for entity, event, aggregate, path, relation, time range, and comparison selections — each a `SelectionV1` variant (section 4), so every supported selection kind is shareable and restorable through the URL:
 
 - **Summary:** type, label, time/scope, observed/inferred status, coverage, key measures.
-- **Evidence:** supporting observations/events, source offsets/hashes, evidence class, algorithm and confidence.
+- **Evidence:** supporting observations/events, source position and privacy-domain-keyed fingerprint identity, evidence class, algorithm, and confidence.
 - **Relations:** incoming/outgoing typed relations, legal pivots, redacted frontier counts, bounded expansion.
 - **Native:** sanitized native source row, normalized observation, canonical event, projection row, schema/privacy versions; authorization and transcript mode apply. This tab never opens protected-quarantine plaintext.
 - **History:** versions, valid/observed intervals, supersession, corrections, late arrivals.
@@ -696,11 +699,11 @@ Aggregate selection lists exact or sampled membership, denominator, hidden count
 The default Brain answers one question in this reading order:
 
 1. **First-scan claim:** one server-authored, evidence-linked sentence naming the most consequential current activity or health issue plus scope, time, coverage, and confidence.
-2. **Focal topology:** recent project/workflow/agent clusters connected by typed activity, selected to match the claim and current time window.
-3. **Aligned activity:** agent/code/delivery/knowledge/automation lanes below the same time window.
+2. **Focal topology:** recent project/workflow/agent plus initiative/plan/task/attempt clusters connected by typed activity, dependencies, blockers, leases, and acceptance evidence, selected to match the claim and current time window.
+3. **Aligned activity:** work/attempt, agent, code, delivery, knowledge, and automation lanes below the same time window.
 4. **Health guardrail:** compact project × subsystem matrix for ingest, projection, query, storage, privacy, and remote freshness.
 5. **Learning loop:** hint/tool/fact/skill/automation candidate→use→outcome funnel with unresolved horizon.
-6. **Resume:** unfinished workflows, goals, agent runs, and saved investigations.
+6. **Resume:** unfinished initiatives, plans, work items, attempts, blockers, expiring leases, pending acceptance/review, workflows, goals, agent runs, and saved investigations.
 
 This is a spatial reading path, not six equal cards. On desktop the topology dominates; subordinate sections use open bands. On mobile the claim, one focused cluster, and one activity lane appear first; health/learning/resume live in sheets.
 
@@ -713,7 +716,9 @@ All/Brain is federated across the selected repositories/projects/worktrees/refs.
 ```ts
 export interface BrainTile {
   id: string;
-  kind: "profile" | "project" | "workflow" | "agent_cluster" | "domain_cluster";
+  kind: "profile" | "project" | "workflow" | "agent_cluster" | "domain_cluster"
+    | "initiative" | "plan_cluster" | "task_cluster" | "attempt_cluster"
+    | "blocker_cluster" | "lease_cluster" | "acceptance_cluster";
   label: string;
   membership: { exact: boolean; count: number; denominator: number | null; sampled: number | null };
   activity: Readonly<Record<string, number | null>>;
@@ -728,8 +733,8 @@ export interface BrainTile {
 
 Semantic zoom:
 
-- L0 profile: projects/workflows/agents/domain health.
-- L1 project/workflow: worktrees, branches, sessions, runs, memory, code snapshots, delivery.
+- L0 profile: projects/workflows/agents/work/plan/task/attempt/lease/acceptance and domain health.
+- L1 project/workflow/initiative/plan: work items, blockers, attempts, leases, acceptance/review, worktrees, branches, sessions, runs, memory, code snapshots, and delivery.
 - L2 neighborhood: selected entities and bounded typed relations.
 - L3 evidence: exact message, visible reasoning artifact, tool event, diff, diagnostic, fact source, policy evaluation, artifact, or delivery record.
 
@@ -889,7 +894,7 @@ Scope and persistence are visible product semantics, not hidden implementation d
 
 - Every fact, memory version, skill, policy, automation, saved investigation, and annotation shows a plain-text owner line (`profile`, `cross-project`, or named project), privacy domain, and source evidence in its summary/history; this is not a decorative badge.
 - Human-authored non-curation create/import commands and autonomous curation effects require an explicit generated `DeclaredScope`. Opening a project route or filtering All to one project never preselects ownership silently; no fact/memory/skill item proposal/apply control exists.
-- Existing-target actions use the entity's canonical owner and disable with an ownership-conflict explanation if the request state disagrees. Moving ownership opens the dedicated migration preview; it is not an editable field.
+- Existing-target actions use the entity's canonical owner and disable with an ownership-conflict explanation if the request state disagrees. Moving ownership opens the dedicated migration inspect/plan workflow; it is not an editable field.
 - Cross-project use links to one durable source version through evidence relations. The UI never offers “copy to project” as a shortcut for memory, skill, policy, or automation reuse.
 - Mixed All-scope lists group/filter by owner without changing identity. Profile-owned and project-owned histories remain distinguishable in tables, graphs, exports, URLs, and replay manifests.
 
@@ -901,16 +906,21 @@ Scope and persistence are visible product semantics, not hidden implementation d
 - Plan outline, Kanban, dependency DAG, critical path, timeline, causal, workload, executor-fleet, repository-work, initiative, agent-relevant, and All views preserve identical IDs/counts/selection. This is plan 24's projection vocabulary exactly: §0.21's saved projections plus §12.5's Executor Fleet/Repository Work lens names and §12.7's agent-relevant slice; 11 renders no view name outside that set. Drag/drop invokes only generated legal commands; derived readiness cannot be set directly. Workload and Executor Fleet runtime/cost/rate/denominator views consume plan 26/PR 30J generated accounting/liveness projections and retain attempt/work-item/executor/route/model/effort drill-down refs, methodology, watermark, and unknown/capped state; the browser never aggregates its loaded rows into a total.
 - One saved view exposes switchable Kanban, DAG, timeline, table, workload, and cross-repository bundle projections over the same authorized `TraceQueryV1`, frozen/live watermark, canonical membership, sort/group specification, and selection. Switching mode preserves filters, selected IDs, exact totals, and per-view camera/column/scroll state; it does not create another saved view or refetch an unbounded board.
 - Kanban is server-grouped and cursor-windowed by derived lane/reason. Columns virtualize horizontally; cards/rows virtualize vertically with at most three viewports overscan. Initial hydration includes IDs, safe labels, readiness/reason, assignment/route summary, attention/progress, and versions only; inspector/detail/artifact bodies hydrate on selection. A 388k-item fixture must keep DOM rows below 600, initial payload below the §19 route budget, and keyboard logical row/column positions exact.
-- Multi-select is an explicit mode with selected count/scope and one generated batch-command preview of effects. The catalog-generated result discriminant is either `AtomicAllOrNone` (one committed/rejected transaction with deterministic per-item validations) or `PerItemPartial` (per-canonical-ID accepted/version-conflict/denied/stale/unavailable/failed outcomes). Only `PerItemPartial` may advance accepted rows while failed rows remain selected; an atomic rejection advances none. A partial failure never appears as all-success or as an `AtomicAllOrNone` receipt.
+- Multi-select is an explicit mode with selected count/scope and one inline generated batch validation/effect view. The catalog-generated result discriminant is either `AtomicAllOrNone` (one committed/rejected transaction with deterministic per-item validations) or `PerItemPartial` (per-canonical-ID accepted/version-conflict/denied/stale/unavailable/failed outcomes). Only `PerItemPartial` may advance accepted rows while failed rows remain selected; an atomic rejection advances none. A partial failure never appears as all-success or as an `AtomicAllOrNone` receipt.
 - Drag/drop is optional pointer shorthand for a generated legal command, never raw lane mutation. Keyboard/touch users choose “move/change…” then a legal destination/action list with reason, impact, and confirmation requirement. Dependency-blocked/readiness states cannot be overridden by presentation movement.
-- Ordinary reversible edits (title/specification metadata, saved-view membership/filter, assignment/priority when policy permits) return an undo capability with an expiry and expected-version token. Archive is soft-delete/presentation retirement: it preserves canonical identity, relations, attempts, anchors, and audit and can be reopened by versioned command. Worktree deletion, force-affecting Git, merge/release, protected-data deletion, and other irreversible/external effects never masquerade as undoable; plan 09 owns their confirmation/compensation. Curation candidates/effects are excluded from this mechanism and remain autonomous.
-- Multi-select route assignment invokes one generated `work_items.assign_set` command, previews the bounded affected set/constraints, and accepts only an `AtomicAllOrNone` receipt with deterministic per-item validation. The renderer rejects a `PerItemPartial` discriminator for `assign_set`; E2E fixtures cover full commit, one-item validation rejection with zero commits, and malformed mixed results. It never loops singular commands client-side. Shared execution renders an aggregate parent plus independently leased child work items; it never depicts two authoritative leases as co-owners of one task.
+- Ordinary edits (title/specification metadata, saved-view filters, assignment/priority when policy permits) commit directly through the cataloged expected-version command and show version history; the UI invents no generic undo/rollback token. Archive is soft presentation retirement: it preserves canonical identity, relations, attempts, anchors, and audit and can be reopened by the cataloged versioned command. Worktree deletion, force-affecting Git, merge/release, protected-data deletion, and other irreversible/external effects use their operation-specific confirmation/compensation contracts. Curation candidates/effects remain fully autonomous and expose history/outcomes, not proposal controls.
+- Multi-select route assignment invokes one generated `work_items.assign_set` command, shows the bounded affected set/constraints inline before the direct transaction, and accepts only an `AtomicAllOrNone` receipt with deterministic per-item validation. The renderer rejects a `PerItemPartial` discriminator for `assign_set`; E2E fixtures cover full commit, one-item validation rejection with zero commits, and malformed mixed results. It never loops singular commands client-side. Shared execution renders an aggregate parent plus independently leased child work items; it never depicts two authoritative leases as co-owners of one task.
 - Task/attempt inspector covers versions, gates, acceptance, assignment/route rationale, requested versus actual host/provider/model/reasoning effort/tools/skills/grants, fenced lease state, packet/omissions, workspace/ref/snapshot, Turns/tools/artifacts/handoffs/outcomes, cancellation/reconciliation, costs, audit, and anchors.
+- Generated legal actions expose `work_items.record_attestation`, `record_review`, `record_decision`, `record_exception`, `handoff`, `reopen`, and `reverse_transition` exactly. Attestation/review/decision/exception/handoff dialogs require the typed evidence/version/grant fields and cannot set derived readiness/acceptance directly; reopen creates a successor work-item version; reverse-transition shows the exact compensating edge and receipt and is never labeled generic “undo.”
+- Work status/diagnostics/live changes use `task_graph.status`, `task_graph.doctor`, and the `task_graph.events` canonical subscription kind. The UI never polls a second board database or invents `/task-events`.
+- Attempt navigation is a first-class paginated list/detail/timeline over `attempts.list/get/timeline`, not a hidden work-item expansion. It distinguishes every immutable attempt, state event, retry/defer reason, requested/actual route, start packet, current accepted packet, effective Turn boundary, lease/fence, and imported nonauthoritative execution-observation lane.
+- The executor offer inbox uses registration-scoped `task_offers.list/get`. An offer is visibly advisory—never a claim or lease. An authenticated executor may accept (atomically yielding the one attempt/lease/start manifest) or decline; scheduler/admin revoke is separately authorized. Expired/declined/revoked offers never look like failed attempts, and a dashboard observer cannot impersonate an executor.
+- Packet history uses `context_packets.list/get` to compare sealed ordinals, omissions, source/access/config/catalog drift, start/accepted/superseded/expired state, and anchors. Only the active executor capability may invoke fenced `context_packets.accept` with the exact prior packet and safe Turn boundary; the UI has no generic current-packet setter and never rewrites the immutable start packet.
 - Task inspector maps the Hermes-derived anatomy without inventing another tab union: metadata/specification → `summary`/`specification`; status and legal actions → `summary`/`actions`; `DiagnosticEnvelopeV1` list → `evidence`/`actions`; dependencies → `dependencies`; attachments/comments/handoffs → `decisions`; canonical events → `history`; protected worker log → `evidence` with authorization; run history → `attempts`. Attempt selection reuses the same URL/inspector model. Unknown diagnostic action kinds remain visible and disabled with update guidance.
 - Attention is a server-authored ranked strip over plan-06 `AttentionSignalV1`: stale advisory work claim, stale/expiring authoritative lease, aging blocker, repeated retry, unresolved effect, protocol violation, packet invalidation, critical-path risk, or material sibling change. Server supplies tier/age basis/watermark/evidence; the client never diffs clocks or treats attention as task truth. Staleness rings always include a text tier and exact last evidence time. Progress shows completed/total when both are known, indeterminate otherwise, and never derives percent from status or message volume.
 - Overlap overlay distinguishes authoritative leases/writable-resource reservations, advisory `WorkClaimV1`, intentional ensemble/shared-work children/parallel roles, canonical query-scope overlap, and weak proximity. It shows exact overlap evidence/TTL without sibling prompt text and never labels a work claim as execution ownership.
 - Agent default is the active attempt plus blockers/parents, material siblings, decisions, acceptance, handoffs, packet entries, and workspace conflicts. All work requires an explicit human authorization/scope expansion.
-- `/work/notifications` owns the plan 24 §12.7 human notification-subscription UI: explicit saved filters/channels with event classes, quiet hours, dedupe, rate budgets, and authorization, edited only through generated preview/apply commands. Task state never auto-subscribes the creating profile/channel, and dashboard toasts, gateway messages, hook hints, and task comments share no accidental notification loop.
+- `/work/notifications` owns the plan 24 §12.7 human notification-subscription UI: explicit saved filters/channels with event classes, quiet hours, dedupe, rate budgets, and authorization, edited through direct validated `task_notifications.create/update/delete` commands with expected version/idempotency. Task state never auto-subscribes the creating profile/channel, and dashboard toasts, gateway messages, hook hints, and task comments share no accidental notification loop.
 
 ### 13.1 Sessions
 
@@ -931,7 +941,7 @@ Scope and persistence are visible product semantics, not hidden implementation d
 - Presence is an expiring evidence claim with agent/provider/host, same or parallel worktree, repository/ref/revision, workflow/goal/Turn, observed/expires time, source, confidence, and unknown-after-expiry state. A missing row never means “no other agent.”
 - Nearby ranking separates same worktree, parallel worktree/same repository, overlapping ref, direct file/symbol/test/goal/review overlap, and weak temporal proximity. Direct overlap lists evidence and stable research anchors; temporal-only proximity is neutral and never labeled conflict.
 - The main artifact is a ranked overlap ledger synchronized with a compact worktree/agent map. Each row shows recipient-authorized domain `SafeCoordinationSummary` backed by `CatalogSafeText`, exact coverage/freshness, stable retrieval recipe, and legal `inspect/message/handoff/ack/suppress` actions. Prompt injection requires a separate `PromptEligibleText` conversion/policy receipt. The table is the precision/accessibility authority.
-- `message`, `handoff`, `ack`, and `suppress` use generated preview/apply commands. Delivery, acceptance, acknowledgement, suppression, expiry, and resolution are distinct states; a sent message never appears as an acknowledged handoff.
+- `message`, `handoff`, `ack`, and `suppress` use the generated direct/resumable commands with an inline disclosed-summary/effect view, expected claim version, idempotency, and receipt; there is no generic preview/apply pair. Delivery, acceptance, acknowledgement, suppression, expiry, and resolution are distinct states; a sent message never appears as an acknowledged handoff.
 - One dynamic coordination hint may appear in the command/status rail for the highest material actionable overlap. It includes one sentence, one stable anchor, one primary action, “suppress,” and why-now evidence. Per agent/pair/work-claim dedupe, cooldown, acknowledgement, and suppression prevent repeat prompts; lower-ranked overlaps remain in the workspace, not stacked notifications.
 - Analytics show eligible/material/selected/delivered/inspected/messaged/handoff/ack/suppressed/expired/resolved/duplicate-prevented/unresolved with denominators, coverage, and horizon. No outcome is inferred from later code proximity alone.
 
@@ -941,7 +951,7 @@ Scope and persistence are visible product semantics, not hidden implementation d
 - Session/agent ownership overlays labeled direct, inferred, or unknown.
 - Diff graph, dependency matrix, cycles/coupling, diagnostic/test and affected-test overlays.
 - Branch/commit/as-of slider and snapshot comparison; CodeMirror source/diff with exact locations and redaction decorations.
-- `move_symbol` is a generated command, never a browser rewrite helper. Preview is default and shows exact source/destination diff, inserted destination imports, caller/dependency/visibility/collision/module/cycle/orphan/cfg impact, snapshot/version, affected tests, and no caller auto-edit; apply requires confirmation, revalidation, repository/worktree grant, rollback/reindex operation, and durable receipt.
+- `move_symbol` is a generated operation, never a browser rewrite helper. `code.move_symbol.inspect` shows the exact source/destination diff, inserted destination imports, caller/dependency/visibility/collision/module/cycle/orphan/cfg impact, snapshot/version, affected tests, and no caller auto-edit; `code.move_symbol.commit` requires confirmation, revalidation, repository/worktree grant, recovery/reindex operation, and durable receipt.
 
 ### 13.4 Knowledge
 
@@ -990,7 +1000,7 @@ Scope and persistence are visible product semantics, not hidden implementation d
 - Privacy Observatory consumes `PrivacyProtectionStatusV1`: configured policy, effective non-disableable floor, source/sink/detector coverage and versions, last verified scan, sanitized/quarantined/legacy-unscanned/unknown counts, and restore eligibility. It never derives “enabled” from historical lossy rows.
 - The primary artifact is a source × sink × privacy-domain coverage matrix synchronized with safe finding-class/state counts and descendant remediation lineage. Unknown/locked/corrupt/skipped coverage remains visible and prevents a clean claim.
 - Findings show opaque ID, broad class/confidence/state, safe source/sink class, age, remediation/rotation state, and legal actions. No candidate, substring, length, plaintext hash, exact span, secret fingerprint, or raw field path is rendered.
-- Scan/remediation/quarantine actions use generated preview/apply commands and elevated authorization. Rotation/revocation is presented before deletion; restore remains blocked until isolated scan/rebuild/promotion receipts pass.
+- Scan/remediation/quarantine actions use their generated operation-specific inspect/plan/start/status/verify/hold/release commands and elevated authorization. Rotation/revocation is presented before deletion; restore remains blocked until isolated scan/rebuild/promotion receipts pass.
 - The named current gaps—Hermes projection-only ingest, duplicated full-command hook analytics, unscanned bounded MCP failures/summaries, direct response-handle/backup copies, raw unauthenticated dashboard exposure, memory metadata/V11 vectors, and false status inference—each have an inspectable safe regression row.
 
 ## 14. Replay labs and Evolution Studio
@@ -1009,9 +1019,11 @@ Scope and persistence are visible product semantics, not hidden implementation d
 | Coordination | historical presence/work claims, agents/worktrees/refs/goals, overlap evidence, policy/catalog/dedupe/suppression state | proximity classes/ranking, material-overlap decision, safe summary, one-hint selection or suppression, stable anchor/recipe, legal action simulation, outcome attribution/coverage; never sends or acknowledges |
 | Orchestration | initiative/plan/task/attempt/lease/executor/workspace/packet snapshots, policy/config/catalog/model/index versions, explicit time and fault point | decomposition/plan validation, gates/readiness/critical path, route eligibility/fairness/retry, packet ranking/omissions, sibling materiality, advisory-claim/lease-acquisition/fence/cancel/effect reconciliation, requested-vs-actual route/cost/outcome, exact anchors; never acquires leases/spawns/sends/mutates |
 | Scheduler | task, effective config, ledger/activity/lease/policy snapshots, explicit time | due/skip/block tree, config source, watermark, proposed lease/work/effects, revalidation requirements |
-| Memory | candidate/source, sensitivity/transience, entity/fact/conflict/trust/retrieval/retention/autonomy-config snapshot | auto-apply/auto-reject/defer/quarantine/protect/no-change, duplicate/conflict/supersession, trust/retrieval/deletion descendant effects, explanation; never a human decision control |
+| Memory | candidate/source, sensitivity/transience, entity/fact/conflict/trust/retrieval/retention/autonomy-config snapshot | automatic effect/rejection/defer/quarantine/protect/no-change, duplicate/conflict/supersession, trust/retrieval/deletion descendant effects, explanation; never a human decision control |
 | Policy Diff | corpus plus two bundles | changed/unchanged/regression/win/unlabeled, case diff, latency/token distributions, affected categories, coverage/digest |
 | Privacy | reserved/invalid synthetic canary, parser/detector/policy versions, bounded sink matrix | parse/decode tree, safe detection classes, overlap/marker/receipt, sink eligibility, latency/coverage/version diff; never loads a real candidate or mutates live findings/policy |
+
+The Search Quality workspace has generated, capability-gated subviews for corpus versions, qrel versions, candidate pools, judgments and supersession chains, adjudications, evaluation runs, aggregate/redacted reports, fixtures, and retrieval profiles. Reads bind the corresponding `retrieval.*.list/get` operations from plan 15 §0.1. Actions bind only `retrieval.corpus_versions.create/freeze`, `retrieval.qrel_versions.create/freeze`, `retrieval.candidate_pools.create`, `retrieval.judgments.record/supersede`, `retrieval.adjudications.record`, `retrieval.evaluation_runs.run/cancel`, `retrieval.evaluation_reports.publish`, `retrieval.fixtures.promote`, and `retrieval.profiles.publish/activate`. The UI shows immutable lineage, exact frozen inputs, authorization, sanitization/secret-scan receipts, and operation state; it never rewrites a judgment, edits a frozen artifact, publishes private content, or changes a live query's pinned profile.
 
 ### 14.1 Evolution Studio
 
@@ -1072,8 +1084,8 @@ Do not create a graph when a ranked list or matrix answers the question more pre
 | How does work connect to Git/delivery? | commit/ref/PR graph with local/live evidence overlays | revision/PR→sessions/agents/code/checks | Git history/reconciliation table |
 | How does knowledge evolve? | fact/version/provenance DAG, trust line, contradiction pairs | version→source/retrieval/feedback/decision | version/provenance ledger |
 | Which facts/sessions/code are related? | bounded similarity projection and cluster hulls | point/pair→score components/evidence | nearest-neighbor table |
-| How do automations execute? | scheduler swimlane, run waterfall, artifact/proposal lineage | run phase→actor/tool/artifact/decision | run/artifact table |
-| How do skills/memory improve? | Evolution evidence→proposal→version→use→outcome DAG plus effectiveness trends | version/use/outcome→source Turns/evals | lifecycle/version ledger |
+| How do automations execute? | scheduler swimlane, run waterfall, artifact/candidate/decision lineage | run phase→actor/tool/artifact/decision | run/artifact table |
+| How do skills/memory improve? | Evolution evidence→candidate→version→use→outcome DAG plus effectiveness trends | version/use/outcome→source Turns/evals | lifecycle/version ledger |
 | Are hints/tools useful? | eligible→suggested→delivered→used→terminal funnel, category matrix, unresolved-horizon survival line | stage/category→evaluation/payload/action evidence | exact denominator/outcome table |
 | Where do tokens/costs go? | time series, provider/model/tool heatmap, session small multiples | bin/model→Turn/message/tool ledger | exact cost ledger |
 | Is context being compressed safely? | source→summary DAG, depth distribution, compression line, missing-payload markers | node→source ranges/payload/decision | LCM node/source table |
@@ -1257,7 +1269,7 @@ Generate `dashboard/tests/fixtures/v1-surface-inventory.json` from manifests/rou
 | LCM node detail | Sessions/inspector | node metadata, depth/category/compression, message/child-node source expansion, complete reconstruction of retained sanitized structure |
 | LCM timeline | Loom | day/hour/session filters and counts plus richer lanes/coverage |
 | LCM compression | Sessions/Labs | overall/session/node source/summary token ratios and counts, preview/compress/boundary/status/doctor semantics |
-| LCM payload health/GC | Observatory | externalized bytes/counts, reclaimable/orphans/missing/unresolved payload references/tombstones/last outcome, dry-run token preview/apply/audit |
+| LCM payload health/GC | Observatory | externalized bytes/counts, reclaimable/orphans/missing/unresolved payload references/tombstones/last outcome, operation-specific plan/start/status/audit |
 | Code Graph overview | Code | kind/language/connected/largest-file/edge charts, click-through filters/focus, exact tables |
 | Code Graph Canvas | Code/graphs | search, seedless default, kind/language/directory filters, focus/select, progressive neighbors, callers/callees, path mode |
 | Savings overview/ledger | Costs | range, net/lifetime totals, recording gate, per-day/tool/project, methodology and confidence labels |
@@ -1369,7 +1381,7 @@ The phase-4 PR letters in this section are the authoritative sub-split ledger fo
 - Create: `dashboard/features/{observatory,brain}/visual-brief.md`
 - Test: `dashboard/tests/e2e/{observatory,brain-summary}.spec.ts`
 
-- [ ] Write failing tests for first-scan suppression under partial coverage, federated All/repository/project/worktree/ref scope and per-shard provenance, same-name disambiguation, project × subsystem health drill-down, foreign-owner doctor severity/actions, partial/degraded provider branding, daemon drain/update recovery receipts, hint/tool outcome denominators, storage/privacy/ingest states, complete current generated Capability Registry/guided action, learning loop, and resume.
+- [ ] Write failing tests for first-scan suppression under partial coverage, federated All/repository/project/worktree/ref scope and per-shard provenance, same-name disambiguation, Work/initiative/plan/task/attempt/blocker/lease/acceptance first-scan clusters, unfinished-work Resume ordering, project × subsystem health drill-down, foreign-owner doctor severity/actions, partial/degraded provider branding, daemon drain/update recovery receipts, hint/tool outcome denominators, storage/privacy/ingest states, complete current generated Capability Registry/guided action, and learning loop.
 - [ ] Implement matrix/table/aggregate charts before topology, using exact server read models and inspector pivots.
 - [ ] Verify mobile reading order, table parity, offline snapshot, locked store, direct labels, and no equal-weight card grid.
 - [ ] Run feature, accessibility, visual, and data-invariant tests. Expected: pass.
@@ -1424,7 +1436,7 @@ The phase-4 PR letters in this section are the authoritative sub-split ledger fo
 - Create: `dashboard/features/graphs/src/{GraphLensPage,lens-registry,git-lens,code-lens,thread-lens,agent-lens,turn-lens,timeline-lens,memory-lens,automation-lens}.ts(x)`
 - Test: `dashboard/tests/e2e/{brain-semantic-zoom,graph-lenses,git-drift}.spec.ts`
 
-- [ ] Write failing tile truth-contract, semantic zoom, stable expansion, federated multi-repo/worktree/ref scope, same-name node separation, per-shard stale/partial provenance, lens switch, legal edge vocabulary, cross-lens selection, fallback, dense LOD, and Git local/live drift tests.
+- [ ] Write failing tile truth-contract, semantic zoom, stable expansion, federated multi-repo/worktree/ref scope, Work/plan/task/attempt/blocker/lease/acceptance cluster membership and cross-domain pivots, same-name node separation, per-shard stale/partial provenance, lens switch, legal edge vocabulary, cross-lens selection, fallback, dense LOD, and Git local/live drift tests.
 - [ ] Implement Brain topology only after PR 26 contracts pass; implement each of the eight base lens registry rows and its mini-brief (Task 10A's `tasks`/`plans` lenses complete the ten-slug union).
 - [ ] Add generated Git tool actions and explicit semantic/live evidence requirements to Git inspector/palette.
 - [ ] Verify no hairball, aggregate versus evidence edge bundling, mobile focused neighborhood, 50k/200k benchmark, and table/matrix equality.
@@ -1442,8 +1454,8 @@ The phase-4 PR letters in this section are the authoritative sub-split ledger fo
 - [ ] Add the `tasks` and `plans` lens-registry rows (`tasks-lens`/`plans-lens`), completing the ten-slug `graphLens` union; extend the section 4 lens-slug/union/enum fixture and prove `/graphs/tasks` and `/graphs/plans` round-trip through URL state.
 - [ ] Implement initiative/plan/task/attempt routes and inspectors from generated views/legal capabilities, using the section 4 `InspectorTabV1` Work extension tabs for plan 24 §12.6's task/attempt inspector content; board/query/layout state never becomes task or dispatch authority.
 - [ ] Consume reviewed plan-13 PR 2A Hermes UI ledger rows, retaining required notices and source-to-test links for direct/behavioral ports; prove a redesigned interaction passes the named upstream regression before dropping the port candidate.
-- [ ] Implement `/work/notifications` (plan 24 §12.7): saved filters/channels with event classes, quiet hours, dedupe, and rate budgets via generated preview/apply commands; prove task creation never auto-subscribes a channel.
-- [ ] Verify exact Rspack/Rsbuild/React Router scope, one transactional `assign_set` Codex/Claude route partition with all-or-none per-item receipt, fan-out/fan-in/shared-work child gates, fully anchored context-packet entries, advisory-claim-versus-authoritative-lease distinction, query-scope overlap suppression, complete saved-view reopen/share/revoke, workspace/ref/snapshot, requested/actual route, brokered/non-preemptible effects, stale-fence/cancellation status, and canonical subscription deltas with no `/task-events` stream.
+- [ ] Implement `/work/notifications` (plan 24 §12.7): saved filters/channels with event classes, quiet hours, dedupe, and rate budgets via generated direct validated `task_notifications.create/update/delete` commands; prove task creation never auto-subscribes a channel.
+- [ ] Verify exact Rspack/Rsbuild/React Router scope, one transactional `assign_set` Codex/Claude route partition with all-or-none per-item receipt, fan-out/fan-in/shared-work child gates, attempt list/detail/timeline with immutable start/current accepted packet, registration-scoped offer list/get/accept/decline plus authorized revoke, fenced packet accept at a safe Turn, fully anchored packet entries, typed attestation/review/decision/exception/handoff actions, versioned reopen and exact reverse-transition with no generic undo, advisory-claim-versus-authoritative-lease distinction, query-scope overlap suppression, complete saved-view reopen/share/revoke, workspace/ref/snapshot, requested/actual route, brokered/non-preemptible effects, stale-fence/cancellation status, direct notification subscriptions, task-graph status/doctor, and canonical subscription deltas with no `/task-events` stream.
 - [ ] Gate Workload/Executor Fleet implementation on plan 26 PRs 22H/30J and verify cost/runtime/rate/denominator/unknown values and drill-down refs match generated application/CLI/MCP/API/SDK fixtures; no client aggregation.
 - [ ] Prove drag/drop maps to a legal versioned command, blocked work cannot be dragged ready, large graphs aggregate server-side, and every visual has table/mobile/keyboard/export parity.
 - [ ] Commit separately: `feat(dashboard): add canonical work and plan views`; `feat(dashboard): visualize work across the TraceDecay brain`.
@@ -1517,9 +1529,9 @@ The phase-4 PR letters in this section are the authoritative sub-split ledger fo
 - Create: `dashboard/features/settings/src/*`
 - Test: `dashboard/tests/e2e/{activity,saved-views,settings}.spec.ts`
 
-- [ ] Write failing activity live/frozen/filter/coverage, generated activity-model parity, `SavedViewV1`/`SavedTaskViewV1`/`CollectionV1`/`AnnotationV1` complete round-trip and size-envelope rejection (section 4.3), simultaneous overlapping task views, exact frozen-input unavailable state, saved protected-query classification/redaction/share-preview/apply/revoke/expiry, URL restore, declared-owner conflict, #425 identity-split consolidation inspect/preview/apply/status/resume/recover and exact recovery-command fixtures, and full effective-source Settings parity tests (including the `/settings/context-scout` subroute rendering plan 22's scout controls through plan 20's registry forms).
+- [ ] Write failing activity live/frozen/filter/coverage, generated activity-model parity, `SavedViewV1`/`SavedTaskViewV1`/`CollectionV1`/`AnnotationV1` complete round-trip and size-envelope rejection (section 4.3), simultaneous overlapping task views, exact frozen-input unavailable state, saved protected-query classification/redaction/share-plan/start/revoke/expiry, URL restore, declared-owner conflict, #425 identity-split consolidation inspect/plan/start/status/resume/recover and exact recovery-command fixtures, and full effective-source Settings parity tests (including the `/settings/context-scout` subroute rendering plan 22's scout controls through plan 20's registry forms).
 - [ ] Implement cross-domain activity with consequential-event priority, project/domain facets, bounded live paging, inspector, table fallback, and no duplicate hidden counts.
-- [ ] Implement saved-view create/update/open/delete plus generated `share_preview`, `share_apply`, and `share_revoke` commands; protected query literals/annotations remain encrypted, published views expire locally, and sharing requires classification/redaction preview.
+- [ ] Implement saved-view create/update/open/delete plus generated `saved_views.share.plan`, `saved_views.share.start`, and `saved_views.share.revoke` commands; protected query literals/annotations remain encrypted, published views expire locally, and sharing requires classification/redaction planning plus explicit confirmation. Generated binding-ID parity tests cover every CLI/MCP/HTTP/SDK/UI spelling.
 - [ ] Implement profile/project/integration/automation/storage settings reads and commands with explicit `DeclaredScope`, effective source/default, immutable environment source, validation, optimistic conflict, migration/resync/restart impact, and audit receipt. Launch #425 consolidation only through its separate admin workflow surface; Settings may link to an active diagnostic/operation but cannot auto-submit, merge stores, or expose it as curation.
 - [ ] Verify `/activity`, `/saved/:viewId`, and `/settings` direct reload/back/forward/mobile/offline/locked behavior.
 - [ ] Switch Settings to the current V2 route only after read/write parity and rollback drill; remove the old live binding atomically.
@@ -1536,7 +1548,7 @@ Thirteen slug labs ship as PR 31A–31M in the section 14 table order; Evolution
 
 - [ ] First write shared failing tests for fidelity label, immutable manifest, missing input, substitutions, comparison, cancellation, coverage, read-only proof, redaction, export, and separately authorized fixture promotion.
 - [ ] Implement shared `LabWorkbench` and server-enforced side-effect guard.
-- [ ] Implement one lab per PR with the exact panels in section 14; Query Lab reuses Explorer AST/editor, Search Quality owns qrel/benchmark evidence, Scope/Federation reuses the generated selector/resolution/shard-plan models, Correlation reuses Git reconciliation, Coordination reuses proximity/overlap models but has no messaging port, Orchestration reuses plan/task/route/lease/packet views against plan 10 §8.5's generated `labs/orchestration:replay` endpoint but has no scheduling/executor/effect port, Memory reuses Knowledge inspector, and Privacy ("Privacy & Secret Safety Lab") accepts synthetic canaries only.
+- [ ] Implement one lab per PR with the exact panels in section 14; Query Lab reuses Explorer AST/editor; Search Quality consumes generated corpus/qrel/pool/judgment/adjudication/run/report/profile reads and the exact direct commands in §14, including supersession, cancel, aggregate publication, scanned fixture promotion, and profile activation; Scope/Federation reuses the generated selector/resolution/shard-plan models; Correlation reuses Git reconciliation; Coordination reuses proximity/overlap models but has no messaging port; Orchestration reuses plan/task/route/lease/packet views against plan 10 §8.5's generated `labs/orchestration:replay` endpoint but has no scheduling/executor/effect port; Memory reuses Knowledge inspector; and Privacy ("Privacy & Secret Safety Lab") accepts synthetic canaries only.
 - [ ] Run each lab twice and assert exact mode decision/explanation digest equality; recorded mode does not execute; best-effort lists every substitution.
 - [ ] Run Hint Lab fixed-corpus user task “replay then-versus-now and explain exact payload difference <=60 seconds.” Expected: pass.
 - [ ] Commit one feature PR per lab; no omnibus labs merge.

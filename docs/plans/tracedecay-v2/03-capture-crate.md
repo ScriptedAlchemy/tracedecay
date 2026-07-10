@@ -1,7 +1,5 @@
 # TraceDecay V2 Capture Crate Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
-
 **Goal:** Build `tracedecay-capture`, the deterministic, privacy-first boundary that discovers V1 and live provider artifacts, durably spools high-volume hook events, and commits idempotent `ObservationEnvelopeV1` records without owning canonical events or read projections.
 
 **Architecture:** Provider adapters discover, frame, and parse source records into transient `Unclassified` drafts. The single Plan 18 sanitizer classifies structured fields, redacts or drops content, issues `SanitizationReceiptV1`, and creates a `Sanitized` observation before any general spool/blob/journal write. A shared normalizer assigns source identity, rewrite generation, offsets, hashes, privacy/retention, and replay metadata before an `ObservationSink` transaction publishes observations and outbox rows. Hook processes use the same mandatory sanitizer before a bounded append-only spool; asynchronous drainers reuse the same journal path as transcript, Git, LCM, and automation importers.
@@ -144,8 +142,8 @@ pub struct SourceArtifact {
     pub artifact_id: ArtifactId,
     pub privacy_domain: PrivacyDomainId,
     pub locator: SourceLocator,
-    pub identity_fingerprint: [u8; 32],
-    pub head_fingerprint: [u8; 32],
+    pub identity_fingerprint: PrivacyDomainBoundLocatorDigest,
+    pub head_fingerprint: KeyedSourceRecordFingerprint,
     pub observed_len: u64,
     pub observed_modified_at: Option<UtcMicros>,
 }
@@ -155,13 +153,6 @@ pub struct SourceRecord {
     pub occurred_at: OccurredAt,
     pub encoding: RecordEncoding,
     pub bytes: Vec<u8>,
-}
-
-pub enum SourcePosition {
-    ByteOffset { start: u64, end: u64 },
-    RowId(i64),
-    Sequence(u64),
-    ObjectKey(String),
 }
 
 pub struct SourceBatch {
@@ -190,34 +181,25 @@ pub trait ObservationSanitizer: Send + Sync {
 pub struct SanitizedObservation {
     pub envelope: ObservationEnvelopeV1,
     pub receipt: SanitizationReceiptV1,
-    // In-memory routing handle only: persists solely via the store's isolated
-    // quarantine skeleton (plan 02 `quarantined_writes`), never in the envelope.
-    pub protected: Option<ProtectedSecretRef>,
+    // Move-only sanitizer output; capture stages it through the narrow sink
+    // before constructing the append item's private attachment token.
+    pub protected: Option<ProtectedQuarantineIngress>,
 }
 ```
 
 ```rust
 pub trait ObservationSink: Send + Sync {
-    fn source_state(&self, key: &SourceKey) -> Result<Option<CommittedSourceState>, CaptureError>;
-    fn commit(
+    fn source_state(&self, key: &SourceKey) -> Result<Option<SourceHeadV1>, CaptureError>;
+    fn stage_protected(
         &self,
-        expected: Option<&CommittedSourceState>,
-        batch: ObservationCommit,
-    ) -> Result<CaptureCommitReceipt, CaptureError>;
-    fn quarantine(&self, entry: QuarantineEntry) -> Result<QuarantineId, CaptureError>;
-}
-
-pub struct ObservationCommit {
-    pub source_key: SourceKey,
-    pub previous_cursor: SourceCursor,
-    pub next_cursor: SourceCursor,
-    pub envelopes: Vec<ObservationEnvelopeV1>,
-    pub replay_manifest: CaptureReplayManifestV1,
+        request: ProtectedQuarantineWrite,
+        content: ProtectedQuarantineIngress,
+    ) -> Result<ProtectedQuarantineAttachmentV1, CaptureError>;
+    fn commit(&self, batch: ObservationAppendBatchV1) -> Result<CaptureCommitReceipt, CaptureError>;
 }
 
 pub struct CaptureCommitReceipt {
     pub append: tracedecay_domain::AppendReceipt,
-    pub committed_cursor: SourceCursor,
 }
 
 pub struct CaptureRunner<A, S> {
@@ -234,9 +216,9 @@ impl<A: SourceAdapter, S: ObservationSink> CaptureRunner<A, S> {
 
 `CaptureRunner` passes `CaptureRequest.scope` unchanged to discovery and records its canonical digest in the capture manifest. Adapters may emit zero-to-many attributed scope candidates with source-field/record evidence, but cannot replace or narrow the requested repository/project/checkout/worktree/ref/snapshot/generation set. An empty selector is rejected before discovery; ambiguity, stale registry candidates, and missing selected artifacts are report coverage, not a current-CWD fallback.
 
-`ObservationSink::commit` is compare-and-set on the full previous source state. The store implementation inserts observations with `ON CONFLICT(observation_id) DO NOTHING`, inserts one outbox row for each new observation, and advances the cursor in the same transaction. A crash before commit leaves the previous cursor; a crash after commit returns the existing receipt on retry.
+`SourcePosition` is imported from plan 01; adapters are its only constructors and do not redeclare it. `ObservationSink::commit` receives the same plan-01 `ObservationAppendBatchV1` consumed by plan 02. Every item carries its envelope, exact `ProvenanceV1`, exact `SanitizationReceiptV1`, and optional non-content quarantine disposition; the batch carries expected/next `SourceHeadV1` state plus the complete schema-bound replay manifest and its digest. No capture-to-store conversion may drop those fields. The store rehashes the manifest, validates provenance against envelope/source/fingerprint/parser/time, compare-and-sets the full expected source head, inserts provenance plus receipt plus envelope plus quarantine skeleton, derives one registry-authorized outbox intent per new observation, and advances the head in one transaction. `AppendReceipt.post_commit_source_head` is the sole acknowledged cursor authority: `Gap`/`Late` can commit evidence without advancing it. A crash before commit leaves the previous head; a crash after commit returns the existing receipt on retry.
 
-`ObservationSanitizer` is the only implementation permitted to construct `SanitizedObservation` or mint `SanitizationReceiptV1`. Its module layout and detector/plugin/budget semantics are exactly Plan 18 Section 8. Capture mints every receipt; the durable receipt home is the per-shard `sanitization_receipts` table defined in [`02-store-crate.md`](02-store-crate.md) (receipt ID primary key, envelope/observation foreign key, sanitizer/detector versions, taint verdict, expiry/revocation state, observation-ID index), and `ObservationSink::commit` persists each receipt in the same transaction as its envelope. Plan [`04-projectors-crate.md`](04-projectors-crate.md)'s sink firewall validates receipts against that table; [`18-secret-detection-redaction-and-private-data-safety.md`](18-secret-detection-redaction-and-private-data-safety.md) defines the receipt's fields and invariants. Adapters parse and identify structured fields but cannot classify eligibility themselves. `ObservationSink` rejects an envelope whose receipt, output digest, privacy domain, parser/detector/policy digest, or completeness does not match. Incomplete/timeout/unsupported scans commit a non-content coverage/quarantine skeleton; they never commit the draft bytes.
+`ObservationSanitizer` is the only implementation permitted to construct `SanitizedObservation` or mint `SanitizationReceiptV1`. For a protected candidate, `CaptureRunner` moves its non-cloneable `ProtectedQuarantineIngress` through `ObservationSink::stage_protected`, then moves the returned private attachment token into `ObservationQuarantineDispositionV1`; ordinary observations require no staging. It moves every envelope/receipt/disposition intact into `ObservationAppendItemV1`. Capture mints every receipt; the durable receipt home is the per-shard `sanitization_receipts` table defined in [`02-store-crate.md`](02-store-crate.md), and `ObservationSink::commit` persists each receipt in the same transaction as its envelope. Plan [`04-projectors-crate.md`](04-projectors-crate.md)'s sink firewall validates receipts against that table; [`18-secret-detection-redaction-and-private-data-safety.md`](18-secret-detection-redaction-and-private-data-safety.md) defines the receipt's fields and invariants. Adapters parse and identify structured fields but cannot classify eligibility themselves. `ObservationSink` rejects an envelope whose receipt, output digest, privacy domain, parser/detector/policy digest, completeness, or protected attachment token does not match. Incomplete/timeout/unsupported scans become receipt-bearing non-content items inside the same append batch; only unattached encrypted staging can remain after failure, and the protected service retires it without advancing the source head.
 
 ### Deterministic identity, rewrite, offsets, and ordering
 
@@ -246,22 +228,22 @@ pub struct CaptureObservationIdentity {
     pub artifact_id: ArtifactId,
     pub generation: RewriteGeneration,
     pub position: SourcePosition,
-    pub source_fingerprint: KeyedSourceRecordFingerprint,
 }
 
 pub fn lower_observation_key(input: &CaptureObservationIdentity) -> tracedecay_domain::ObservationKey;
 pub fn detect_rewrite(
-    committed: Option<&CommittedSourceState>,
+    committed: Option<&SourceHeadV1>,
     artifact: &SourceArtifact,
 ) -> RewriteDecision;
 ```
 
-`SourceRecord.bytes` and any transient checksum exist only in bounded capture/sanitizer memory and cannot implement `Serialize`, `Display`, logging, repository, or receipt traits. The sanitizer computes `KeyedSourceRecordFingerprint` with the privacy-domain key after parsing/classification; only that fingerprint and the sanitized output digest may enter `CaptureObservationIdentity`, `ObservationKey`, provenance, spools, or stores.
+`SourceRecord.bytes` and any transient checksum exist only in bounded capture/sanitizer memory and cannot implement `Serialize`, `Display`, logging, repository, or receipt traits. The sanitizer computes `KeyedSourceRecordFingerprint` with the privacy-domain key after parsing/classification. The fingerprint enters envelope/provenance/source-head verification fields, never `CaptureObservationIdentity` or `ObservationKey`; observation identity remains stable across key rotation.
 
 - `SourceInstanceId` is a namespaced deterministic ID over profile, host installation, adapter ID, and provider-native source instance.
 - `ArtifactId` is a namespaced deterministic ID over source instance plus the provider-native durable artifact identity; a pathname is only one alias.
-- The adapter normalizes the five `CaptureObservationIdentity` fields into the domain `ObservationKey` canonical field encoding; `derive_observation_id` is the only observation-ID implementation. Capture may not define a second UUID namespace or canonical encoder.
-- `SourcePosition` persists through the offset-lowering columns defined in [`02-store-crate.md`](02-store-crate.md): `observations`/`source_heads` store `(position_kind TEXT, byte_start INTEGER NULL, byte_end INTEGER NULL, object_key TEXT NULL)` with `contiguous_byte_offset` retained for byte-ordered sources. Plan 02 documents the lowering and per-`SourceOrdering` contiguity; capture treats the lowered columns as opaque storage and round-trips every variant, including `ObjectKey(String)` and `ByteOffset{start,end}`.
+- The adapter normalizes the four `CaptureObservationIdentity` fields into the domain `ObservationKey` canonical field encoding; `derive_observation_id` is the only observation-ID implementation. Capture may not define a second UUID namespace or canonical encoder.
+- `SourcePosition` persists through the offset-lowering columns defined in [`02-store-crate.md`](02-store-crate.md): `observations` stores `(position_kind TEXT, byte_start INTEGER NULL, byte_end INTEGER NULL, object_key_digest BLOB NULL)` with `source_heads.contiguous_offset` retained only for byte/row/sequence ordered sources. Capture treats the lowering as opaque and round-trips every variant, including keyed `ObjectKey(PrivacyDomainBoundLocatorDigest)` and `ByteOffset{start,end}`.
+- Key rotation never changes an `ObservationId`. Under the lifecycle lease, the sanitizer/key service can recompute active-source fingerprints with old and new epochs while authorized source bytes are transiently available, append a signed `FingerprintEpochContinuityV1` receipt, and advance only the verification fingerprint/head epoch. If continuity cannot be proven, capture starts a named rewrite generation or quarantines; it never compares raw digests, silently treats an epoch mismatch as a rewrite, or duplicates the prior generation.
 - Append growth with matching artifact and head fingerprints preserves the generation and resumes at the committed cursor.
 - Truncation, head-fingerprint change before the committed offset, SQLite replacement, or native artifact identity change starts `generation + 1`; old observations remain immutable.
 - The final unterminated JSONL line is not acknowledged. Malformed complete records are quarantined and the cursor advances only when the quarantine skeleton and outbox marker commit atomically.
@@ -414,7 +396,7 @@ pub struct ReasoningArtifactDraft {
     pub format: ReasoningArtifactFormat,
     pub visibility: ProviderVisibility,
     pub content: Option<ProviderFieldValue>,
-    pub provider_digest: Option<[u8; 32]>,
+    pub provider_digest: Option<KeyedSourceRecordFingerprint>,
     pub unavailable_reason: Option<UnavailableReason>,
 }
 
@@ -422,15 +404,15 @@ pub struct CaptureReplayManifestV1 {
     pub mode: tracedecay_domain::ReplayMode,
     pub source_artifacts: Vec<ManifestSource>,
     pub observation_ids: Vec<ObservationId>,
-    pub parser_artifact_digest: [u8; 32],
-    pub parser_config_digest: [u8; 32],
+    pub parser_artifact_digest: ManifestDigest,
+    pub parser_config_digest: ManifestDigest,
     pub privacy_policy_digest: PrivacyPolicyDigest,
     pub detector_set_digest: DetectorSetDigest,
     pub sanitization_receipts_digest: ManifestDigest,
     pub provider_schema_versions: Vec<ProviderSchemaVersion>,
-    pub evaluator_bundle_digest: Option<[u8; 32]>,
+    pub evaluator_bundle_digest: Option<ManifestDigest>,
     pub index_watermarks: Vec<ManifestWatermark>,
-    pub memory_manifest_digest: Option<[u8; 32]>,
+    pub memory_manifest_digest: Option<ManifestDigest>,
     pub tool_catalog: Option<CatalogSnapshotRefV1>,
     pub substitutions: Vec<ReplaySubstitution>,
     pub unavailable_inputs: Vec<UnavailableInput>,
@@ -439,7 +421,7 @@ pub struct CaptureReplayManifestV1 {
 
 - `Summary`, `AnalysisText`, and `Structured` content is accepted only when the provider delivered it to the host/user. `Encrypted` records store provider metadata/digest and no decrypted text. `Unavailable` is an explicit coverage marker.
 - Reasoning defaults to 30-day retention and is excluded from FTS, vectors, facts, shares, and exports. Capture sets policy metadata; downstream stores enforce it.
-- Secret-like content is sanitized before the envelope. When explicit policy permits forensic inspection, the store's separate protected-quarantine service encrypts transient bytes under a random `ProtectedSecretRef` with 24-hour expiry. The observation envelope itself carries only a safe marker/receipt, broad reason class, and coverage—never spans, length, prefix/suffix, or candidate digest. The opaque protected reference lives only in the non-content quarantine skeleton row (plan 02's `quarantined_writes.protected_secret_ref`, nullable); that store-internal column, written through `ProtectedQuarantineRepository`, is the single reviewed persistence channel for `ProtectedSecretRef`, which otherwise implements no `Display` or public `Serialize`.
+- Secret-like content is sanitized before the envelope. When explicit policy permits forensic inspection, the store's separate protected-quarantine service first stages encrypted transient bytes under a random `ProtectedSecretRef` with a 24-hour expiry and one-use attachment token. The observation envelope itself carries only a safe marker/receipt, broad reason class, and coverage—never spans, length, prefix/suffix, or candidate digest. The append transaction consumes the attachment token into the non-content `quarantined_writes.protected_secret_ref` skeleton; retry is idempotent by ref/token. A crash or rejected append leaves only an unattached encrypted staging object, which the protected service securely retires after a short grace and never indexes or returns through general reads. This store-internal attachment path is the single reviewed persistence channel for `ProtectedSecretRef`, which otherwise implements no `Display` or public `Serialize`; only the append transaction advances the source head.
 - Exact replay is enabled only when every authorized source slice and the executable parser/config/privacy-policy/detector artifacts and sanitization receipts match their digests. Recorded-result mode exposes stored sanitized observations when executable artifacts are unavailable. Best-effort mode lists every substitution and nondeterministic dependency; it cannot claim byte equality or rehydrate provider-owned raw content.
 - Quarantine reason codes are a closed enum fixed at ten in versioned revision 2: `malformed_record`, `unsupported_schema`, `invalid_utf8`, `secret_like`, `payload_hash_mismatch`, `source_gap`, `spool_corrupt`, `future_version`, `ownership_conflict`, and `identity_collision` (revision 2 adds `identity_collision` for a same-position digest conflict against an already-committed observation identity). This enum grows only by recorded versioned revision here; [`02-store-crate.md`](02-store-crate.md) cites these codes and mints no store-local reason.
 
@@ -462,7 +444,7 @@ pub struct CaptureReplayManifestV1 {
 
 Canonical provider activity, including generic and cross-project sessions, belongs to profile `activity.db`. Project attribution is zero-to-many evidence produced later; project shards receive locators and scoped projections, never duplicate message bodies. Profile/zero-project/cross-project knowledge, skills, policies, and automation also resolve to activity ownership. Project-native Git/code and explicitly project-scoped knowledge/policy/automation evidence belongs to the canonical repository/privacy-domain `project.db`.
 
-Merged PR #405 (`legacy-store-adoption`) is a required pre-backfill seam: source discovery consumes its manifest-backed adopted identity, treats pristine retargeting as the same source, and quarantines nonempty split-identity conflicts instead of minting duplicate artifact IDs. Merged PR #407 keeps `~/.hermes` source-only under the ordinary user profile. Merged #410 remains a semantic fixture: every copied parent/subagent prompt, direct-user row, tool result, and protocol row is captured losslessly. Merged #412 supplies lifecycle drain evidence; merged #411 supplies foreign skill-owner/remediation events. #414/#419 and release PRs #413/#416 add no capture semantics by assumption; merged #415/#417/#420/#422/#423/#424/#425 contribute release, identity, routing, catalog-generation, retrieval-event, accounting, and split-store consolidation evidence. Merged #418 (release v0.0.48) is refreshed before implementation; #417's identity-split visibility is a required discovery/quarantine case. PR #409 remains historical. The conformance manifest records actual merge/base commits and semantics.
+Merged PR #405 (`legacy-store-adoption`) is a required pre-backfill seam: source discovery consumes its manifest-backed adopted identity, treats pristine retargeting as the same source, and quarantines nonempty split-identity conflicts instead of minting duplicate artifact IDs. Merged PR #407 keeps `~/.hermes` source-only under the ordinary user profile. Merged #410 remains a semantic fixture: every copied parent/subagent prompt, direct-user row, tool result, and protocol row is captured losslessly. Merged #412/#432 supply lifecycle drain/early-hook deferral evidence; merged #411 supplies foreign skill-owner/remediation events. Accepted inputs through #425 contribute release, identity, routing, catalog-generation, retrieval-event, accounting, and split-store consolidation evidence; #426 preserves untracked branch graphs, #428 preserves divergent session variants, #430 bounds family lookup, #434 fences registry reconstruction, #435 separates search from repair, and #436 supplies peer-checkpoint fixtures. Incoming #438 retirement never becomes capture-side self-healing. The conformance manifest records actual merge/base/open commits and semantics after a live refresh.
 
 ## Per-provider conformance matrix
 
@@ -493,11 +475,11 @@ The `code_snapshot` adapter is the single sanctioned sanitizer-crossing entry po
 
 **Files:** create `Cargo.toml`, `src/{lib,error,source,identity,normalize,journal,runner,quarantine,replay}.rs`, the exact `src/privacy/**` tree from Plan 18, `tests/{contract_suite,privacy_security}.rs`; modify workspace `Cargo.toml`.
 
-- [ ] Write failing tests named `same_record_has_same_observation_id`, `append_growth_keeps_generation`, `rewrite_increments_generation`, `partial_line_does_not_advance_cursor`, `journal_commit_is_idempotent`, `quarantine_advances_atomically`, `unclassified_cannot_serialize_or_enter_sink`, `complete_receipt_required_for_observation`, `serialized_fields_scan_independently`, `scan_failure_commits_skeleton_not_content`, `exact_replay_rejects_digest_substitution`, `capture_preserves_multi_repo_worktree_generation_scope`, `empty_scope_is_not_current_project`, and `scope_candidates_never_replace_requested_scope`.
+- [ ] Write failing tests named `same_record_has_same_observation_id`, `key_rotation_keeps_observation_id_and_requires_continuity_receipt`, `append_growth_keeps_generation`, `rewrite_increments_generation`, `partial_line_does_not_advance_cursor`, `journal_commit_is_idempotent`, `quarantine_advances_atomically`, `unclassified_cannot_serialize_or_enter_sink`, `complete_receipt_required_for_observation`, `serialized_fields_scan_independently`, `scan_failure_commits_skeleton_not_content`, `exact_replay_rejects_digest_substitution`, `capture_preserves_multi_repo_worktree_generation_scope`, `empty_scope_is_not_current_project`, and `scope_candidates_never_replace_requested_scope`.
 - [ ] Add the public signatures above and exhaustive enums with serde tags fixed to `snake_case`.
 - [ ] Implement canonical identity bytes, compare-and-set source state, record framing, Plan 18's parse-before-scan engine/policy/receipts/bounded detector registry, replay manifests, and runner retry semantics. Make sanitized observation the only journal/spool input; retire message-metadata opt-out semantics.
 - [ ] Add architecture lint that rejects imports matching `tracedecay::sessions`, `tracedecay::hooks`, `tracedecay::automation`, `mcp`, or `dashboard` from the crate.
-- [ ] Run `cargo test -p tracedecay-capture --test contract_suite`; expected: exit 0 and all fourteen named contracts pass.
+- [ ] Run `cargo test -p tracedecay-capture --test contract_suite`; expected: exit 0 and all fifteen named contracts pass.
 - [ ] Run `cargo clippy -p tracedecay-capture --all-targets --all-features -- -D warnings`; expected: exit 0 with no warnings.
 - [ ] Commit `feat(capture): add deterministic observation runner`.
 
