@@ -17,6 +17,9 @@
 //!   system temp directory are purged (the automated equivalent of
 //!   `tracedecay migrate registry-gc --prefix <tmp> --apply`), and only when
 //!   BOTH the canonical and display roots are gone.
+//! - input store manifests from completed schema-2 consolidations are renamed
+//!   out of the canonical discovery path after the applied ledger and both
+//!   repository markers prove the destination identity.
 //!
 //! Those auto-applied remedies are safe precisely because quarantine renames
 //! instead of deleting and the GC removes only temp-rooted registry metadata
@@ -41,6 +44,10 @@ pub struct BranchMetaQuarantine {
 /// Outcome of one post-update health pass.
 #[derive(Debug, Default)]
 pub struct HealthPassReport {
+    /// Input manifests retired from already-applied consolidations.
+    pub retired_consolidation_manifests: Vec<PathBuf>,
+    /// Superseded source/target registry projects removed after validation.
+    pub retired_consolidation_registry_projects: usize,
     pub quarantined_branch_meta: Vec<BranchMetaQuarantine>,
     /// `None` when the global DB could not be opened, so the GC never ran.
     pub purged_temp_registry_rows: Option<usize>,
@@ -50,24 +57,60 @@ pub struct HealthPassReport {
     pub warnings: Vec<String>,
 }
 
-/// Runs the full post-update health pass and prints a doctor-style summary.
-///
-/// Never fails: every error is collected as a warning so a broken store can
-/// never abort `tracedecay update`.
-pub async fn run_post_update_health_pass() -> HealthPassReport {
-    eprintln!("\n\x1b[1mPost-update health pass\x1b[0m (skip with --no-heal)");
-
+#[doc(hidden)]
+pub async fn run_post_update_health_pass_under_lease(
+    lifecycle_lease: &crate::lifecycle_lease::LifecycleLease,
+) -> HealthPassReport {
     let Some(profile_root) = crate::config::user_data_dir() else {
+        return render_missing_profile_report();
+    };
+    if let Some(warning) = health_pass_lease_error(
+        lifecycle_lease,
+        &profile_root,
+        crate::daemon::daemon_reachable(),
+    ) {
         let report = HealthPassReport {
-            warnings: vec!["could not determine the profile data directory".to_string()],
+            warnings: vec![warning],
             ..HealthPassReport::default()
         };
         render_warnings(&report.warnings);
         return report;
-    };
+    }
+    run_post_update_health_pass_for_profile(&profile_root).await
+}
 
-    let report = compute_health_pass_report(&profile_root).await;
+fn health_pass_lease_error(
+    lifecycle_lease: &crate::lifecycle_lease::LifecycleLease,
+    profile_root: &Path,
+    daemon_reachable: bool,
+) -> Option<String> {
+    if !lifecycle_lease.is_exclusive() {
+        return Some("post-update health pass requires an exclusive lifecycle lease".to_string());
+    }
+    if !lifecycle_lease.guards_profile(profile_root) {
+        return Some(format!(
+            "post-update health pass lifecycle lease does not guard profile '{}'",
+            profile_root.display()
+        ));
+    }
+    daemon_reachable.then(|| {
+        "post-update health pass requires the TraceDecay daemon to be unreachable".to_string()
+    })
+}
+
+async fn run_post_update_health_pass_for_profile(profile_root: &Path) -> HealthPassReport {
+    eprintln!("\n\x1b[1mPost-update health pass\x1b[0m (skip with --no-heal)");
+    let report = compute_health_pass_report(profile_root).await;
     render_health_pass_report(&report);
+    report
+}
+
+fn render_missing_profile_report() -> HealthPassReport {
+    let report = HealthPassReport {
+        warnings: vec!["could not determine the profile data directory".to_string()],
+        ..HealthPassReport::default()
+    };
+    render_warnings(&report.warnings);
     report
 }
 
@@ -75,6 +118,10 @@ pub async fn run_post_update_health_pass() -> HealthPassReport {
 /// a [`HealthPassReport`], without printing anything.
 async fn compute_health_pass_report(profile_root: &Path) -> HealthPassReport {
     let mut report = HealthPassReport::default();
+
+    // The post-update command holds the exclusive lifecycle lease around this
+    // entire pass, so manifest retirement cannot race daemon or hook opens.
+    retire_completed_consolidation_manifests(profile_root, &mut report).await;
 
     let (quarantined, warnings) = quarantine_corrupt_branch_meta(profile_root);
     report.quarantined_branch_meta = quarantined;
@@ -117,8 +164,37 @@ async fn compute_health_pass_report(profile_root: &Path) -> HealthPassReport {
     report
 }
 
+async fn retire_completed_consolidation_manifests(
+    profile_root: &Path,
+    report: &mut HealthPassReport,
+) {
+    let retirement =
+        crate::migrate::consolidate::retire_applied_input_manifests(profile_root).await;
+    report.retired_consolidation_manifests = retirement.retired;
+    report.retired_consolidation_registry_projects = retirement.retired_registry_projects;
+    report.warnings.extend(retirement.warnings);
+}
+
 /// Prints the doctor-style summary for a computed report.
 fn render_health_pass_report(report: &HealthPassReport) {
+    if report.retired_consolidation_manifests.is_empty() {
+        eprintln!("  \x1b[32m✔\x1b[0m No completed consolidation manifests to retire");
+    } else {
+        eprintln!(
+            "  \x1b[32m✔\x1b[0m Retired {} completed consolidation input manifest(s):",
+            report.retired_consolidation_manifests.len()
+        );
+        for path in &report.retired_consolidation_manifests {
+            eprintln!("      • {}", path.display());
+        }
+    }
+    if report.retired_consolidation_registry_projects > 0 {
+        eprintln!(
+            "  \x1b[32m✔\x1b[0m Retired {} superseded consolidation registry project(s)",
+            report.retired_consolidation_registry_projects
+        );
+    }
+
     if report.quarantined_branch_meta.is_empty() {
         eprintln!("  \x1b[32m✔\x1b[0m No corrupt branch metadata files");
     } else {
@@ -395,5 +471,227 @@ mod tests {
         let (quarantines, warnings) = quarantine_corrupt_branch_meta(dir.path());
         assert!(quarantines.is_empty());
         assert!(warnings.is_empty());
+    }
+
+    #[test]
+    fn under_lease_health_pass_rejects_shared_wrong_profile_and_reachable_daemon() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let shared = match crate::lifecycle_lease::try_acquire_shared_for_profile(
+            dir.path(),
+            "shared healer test",
+        )
+        .unwrap()
+        {
+            crate::lifecycle_lease::SharedLeaseAttempt::Acquired(lease) => lease,
+            crate::lifecycle_lease::SharedLeaseAttempt::Busy => panic!("unexpected busy lease"),
+        };
+        assert!(
+            health_pass_lease_error(&shared, dir.path(), false)
+                .unwrap()
+                .contains("requires an exclusive lifecycle lease")
+        );
+        drop(shared);
+
+        let guarded_profile = dir.path().join("guarded");
+        let other_profile = dir.path().join("other");
+        let exclusive = crate::lifecycle_lease::acquire_exclusive_for_profile(
+            &guarded_profile,
+            "exclusive healer test",
+        )
+        .unwrap();
+        assert!(
+            health_pass_lease_error(&exclusive, &other_profile, false)
+                .unwrap()
+                .contains("does not guard profile")
+        );
+        assert!(
+            health_pass_lease_error(&exclusive, &guarded_profile, true)
+                .unwrap()
+                .contains("daemon to be unreachable")
+        );
+        assert!(health_pass_lease_error(&exclusive, &guarded_profile, false).is_none());
+    }
+
+    #[tokio::test]
+    async fn post_update_retires_applied_consolidation_manifests_idempotently() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let project = dir.path().join("repo");
+        let profile = dir.path().join("profile");
+        std::fs::create_dir_all(&project).unwrap();
+        let status = std::process::Command::new("git")
+            .args(["init", "--quiet"])
+            .current_dir(&project)
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let project = project.canonicalize().unwrap();
+        let git_common_dir = crate::worktree::git_common_dir(&project).unwrap();
+        let source_id = "proj_heal_source";
+        let target_id = "proj_heal_target";
+        let destination_id = crate::migrate::consolidate::destination_project_id(
+            &git_common_dir,
+            source_id,
+            target_id,
+        );
+        for project_id in [source_id, target_id, destination_id.as_str()] {
+            let layout = crate::storage::profile_sharded_layout(
+                &project,
+                &profile,
+                &crate::storage::EnrollmentMarker {
+                    project_id: project_id.to_string(),
+                    storage_mode: crate::storage::StorageMode::ProfileSharded,
+                },
+            )
+            .unwrap();
+            std::fs::create_dir_all(&layout.data_root).unwrap();
+            crate::storage::write_store_manifest(&layout).unwrap();
+        }
+        crate::storage::write_repository_identity_marker(&project, &destination_id).unwrap();
+        crate::storage::write_enrollment_marker(
+            &project,
+            &crate::storage::EnrollmentMarker {
+                project_id: destination_id.clone(),
+                storage_mode: crate::storage::StorageMode::ProfileSharded,
+            },
+        )
+        .unwrap();
+
+        let migration_id = format!("consolidate_{}", &destination_id[5..]);
+        let ledger_root = profile.join("migration-inventory");
+        std::fs::create_dir_all(&ledger_root).unwrap();
+        std::fs::write(
+            ledger_root.join(format!("{migration_id}.json")),
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "schema_version": 2,
+                "migration_id": migration_id,
+                "confirmation_token": "confirm-healer",
+                "input_fingerprint": "healer-fixture",
+                "source_project_id": source_id,
+                "target_project_id": target_id,
+                "destination_project_id": destination_id.clone(),
+                "project_root": project,
+                "git_common_dir": git_common_dir,
+                "state": "applied",
+                "graph_offsets": [],
+                "session_offsets": null,
+                "preserved_collisions": []
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let global = crate::global_db::GlobalDb::open_at(&profile.join("global.db"))
+            .await
+            .unwrap();
+        for project_id in [source_id, target_id, destination_id.as_str()] {
+            global
+                .upsert_code_project(
+                    project_id,
+                    &project,
+                    Some(&git_common_dir),
+                    None,
+                    Some("main"),
+                )
+                .await
+                .unwrap();
+            global
+                .upsert_store_instance(crate::global_db::StoreInstanceUpsert {
+                    store_id: format!("store:{project_id}:profile_sharded"),
+                    project_id: project_id.to_string(),
+                    store_kind: "code_project".to_string(),
+                    storage_mode: "profile_sharded".to_string(),
+                    store_relpath: format!("projects/{project_id}"),
+                    manifest_relpath: Some(format!(
+                        "projects/{project_id}/{}",
+                        crate::storage::STORE_MANIFEST_FILENAME
+                    )),
+                    last_verified_at: Some(1_800_000_000),
+                    last_write_at: Some(1_800_000_000),
+                })
+                .await
+                .unwrap();
+        }
+        global
+            .upsert_project_alias(&project, &destination_id)
+            .await
+            .unwrap();
+        global.checkpoint().await;
+        global.close();
+
+        let _lease = crate::lifecycle_lease::acquire_exclusive_for_profile(
+            &profile,
+            "post-update healer test",
+        )
+        .unwrap();
+        std::fs::write(
+            profile
+                .join("migration-inventory")
+                .join(".fail-registry-retirement-once"),
+            b"fail once",
+        )
+        .unwrap();
+        let mut interrupted = HealthPassReport::default();
+        retire_completed_consolidation_manifests(&profile, &mut interrupted).await;
+        assert_eq!(interrupted.warnings.len(), 1);
+        assert!(interrupted.warnings[0].contains("synthetic registry retirement failure"));
+        for project_id in [source_id, target_id] {
+            let root = profile.join("projects").join(project_id);
+            assert!(
+                !root.join(crate::storage::STORE_MANIFEST_FILENAME).exists()
+                    && root
+                        .join(format!(
+                            "store_manifest.consolidated-into-{destination_id}.json"
+                        ))
+                        .is_file()
+            );
+        }
+        let global = crate::global_db::GlobalDb::open_at(&profile.join("global.db"))
+            .await
+            .unwrap();
+        assert_eq!(global.list_code_projects(usize::MAX).await.len(), 3);
+        global
+            .conn()
+            .execute(
+                "UPDATE code_projects SET canonical_root=?1 WHERE project_id=?2",
+                libsql::params!["/moved/elsewhere", source_id],
+            )
+            .await
+            .unwrap();
+        global.close();
+        let mut moved = HealthPassReport::default();
+        retire_completed_consolidation_manifests(&profile, &mut moved).await;
+        assert!(moved.warnings.is_empty(), "{:?}", moved.warnings);
+        assert!(moved.retired_consolidation_manifests.is_empty());
+        assert_eq!(moved.retired_consolidation_registry_projects, 1);
+        for project_id in [source_id, target_id] {
+            let root = profile.join("projects").join(project_id);
+            assert!(!root.join(crate::storage::STORE_MANIFEST_FILENAME).exists());
+            assert!(
+                root.join(format!(
+                    "store_manifest.consolidated-into-{destination_id}.json"
+                ))
+                .is_file()
+            );
+        }
+
+        let mut retried = HealthPassReport::default();
+        retire_completed_consolidation_manifests(&profile, &mut retried).await;
+        assert!(retried.warnings.is_empty(), "{:?}", retried.warnings);
+        assert!(retried.retired_consolidation_manifests.is_empty());
+        assert_eq!(retried.retired_consolidation_registry_projects, 0);
+
+        let global = crate::global_db::GlobalDb::open_at(&profile.join("global.db"))
+            .await
+            .unwrap();
+        let owners = global.list_code_projects(usize::MAX).await;
+        assert_eq!(owners.len(), 2);
+        assert!(owners.iter().any(|project| {
+            project.project_id == source_id && project.canonical_root == "/moved/elsewhere"
+        }));
+        assert!(
+            owners
+                .iter()
+                .any(|project| project.project_id == destination_id)
+        );
     }
 }

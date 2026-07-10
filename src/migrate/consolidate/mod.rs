@@ -19,6 +19,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use libsql::params;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -137,6 +138,27 @@ struct ConsolidationLedger {
     preserved_collisions: Vec<PathBuf>,
 }
 
+#[derive(Debug, Default)]
+pub(crate) struct ManifestRetirementReport {
+    pub retired: Vec<PathBuf>,
+    pub retired_registry_projects: usize,
+    pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ManifestRetirementAction {
+    RenameCanonical,
+    RemoveDuplicateCanonical,
+    AlreadyRetired,
+}
+
+struct ManifestRetirementPlan {
+    canonical_path: PathBuf,
+    retired_path: PathBuf,
+    manifest: StoreManifest,
+    action: ManifestRetirementAction,
+}
+
 struct ResolvedPlan {
     report: ConsolidationReport,
     input_fingerprint: String,
@@ -242,6 +264,7 @@ async fn apply_with_faults(
     let mut ledger = load_or_create_ledger(&resolved, &ledger_path)?;
     validate_ledger(&ledger, &resolved)?;
     if ledger.state == ConsolidationState::Applied {
+        finalize_applied_consolidation(&options.profile_root, &ledger).await?;
         let mut report = resolved.report;
         report.state = ConsolidationState::Applied;
         report.dry_run = false;
@@ -301,6 +324,10 @@ async fn apply_with_faults(
         save_ledger(&ledger_path, &ledger)?;
     }
 
+    if ledger.state == ConsolidationState::Applied {
+        finalize_applied_consolidation(&options.profile_root, &ledger).await?;
+    }
+
     let mut report = resolved.report;
     report.state = ledger.state;
     report.dry_run = false;
@@ -344,15 +371,35 @@ async fn resolve_plan_inner(
         .map_err(|error| config_error(format!("could not resolve profile root: {error}")))?;
     let git_common_dir = crate::worktree::git_common_dir(&project_root)
         .ok_or_else(|| config_error("project must be an attached git checkout"))?;
-    let source_layout = layout_for_id(&project_root, &profile_root, &options.source_project_id)?;
-    let target_layout = layout_for_id(&project_root, &profile_root, &options.target_project_id)?;
-    let source_manifest = validate_manifest(&source_layout, &options.source_project_id)?;
-    let target_manifest = validate_manifest(&target_layout, &options.target_project_id)?;
     let destination_project_id = destination_project_id(
         &git_common_dir,
         &options.source_project_id,
         &options.target_project_id,
     );
+    let migration_id = format!("consolidate_{}", &destination_project_id[5..]);
+    let ledger_path = profile_root
+        .join(LEDGER_DIR)
+        .join(format!("{migration_id}.json"));
+    let applied_ledger = load_ledger(&ledger_path)?.filter(|ledger| {
+        ledger.schema_version == LEDGER_SCHEMA_VERSION
+            && ledger.state == ConsolidationState::Applied
+    });
+    let allow_retired_manifests = allow_destination_marker && applied_ledger.is_some();
+    let source_layout = layout_for_id(&project_root, &profile_root, &options.source_project_id)?;
+    let target_layout = layout_for_id(&project_root, &profile_root, &options.target_project_id)?;
+    let source_manifest = validate_input_manifest(
+        &source_layout,
+        &options.source_project_id,
+        &destination_project_id,
+        allow_retired_manifests,
+    )?;
+    let target_manifest = validate_input_manifest(
+        &target_layout,
+        &options.target_project_id,
+        &destination_project_id,
+        allow_retired_manifests,
+    );
+    let target_manifest = target_manifest?;
     let repository_marker = storage::read_repository_identity_marker(&project_root)?
         .ok_or_else(|| config_error("repository identity marker is required"))?;
     let marker_ok = repository_marker.project_id == options.target_project_id
@@ -378,14 +425,16 @@ async fn resolve_plan_inner(
             "source and target manifests do not prove one exact git-common-dir identity",
         ));
     }
-    reject_ambiguous_shards(
-        options,
-        &profile_root,
-        &project_root,
-        &git_common_dir,
-        &target_manifest,
-        &destination_project_id,
-    )?;
+    if applied_ledger.is_none() {
+        reject_ambiguous_shards(
+            options,
+            &profile_root,
+            &project_root,
+            &git_common_dir,
+            &target_manifest,
+            &destination_project_id,
+        )?;
+    }
 
     let mut source_meta = load_required_branch_meta(&source_layout)?;
     let mut target_meta = load_required_branch_meta(&target_layout)?;
@@ -434,15 +483,18 @@ async fn resolve_plan_inner(
     )
     .await?;
     let collisions = collision_summary(&evidence, &source_layout, &target_layout).await?;
-    let input_fingerprint = fingerprint_inputs(&evidence, &source_layout, &target_layout)?;
-    let migration_id = format!("consolidate_{}", &destination_project_id[5..]);
+    let input_fingerprint = fingerprint_inputs(
+        &evidence,
+        &source_layout,
+        &target_layout,
+        applied_ledger
+            .as_ref()
+            .map(|_| destination_project_id.as_str()),
+    )?;
     let confirmation_token = confirmation_token(&input_fingerprint, &migration_id);
     let destination_data_root =
         storage::profile_sharded_data_root(&profile_root, &destination_project_id);
     let backup_root = profile_root.join(BACKUP_DIR).join(&migration_id);
-    let ledger_path = profile_root
-        .join(LEDGER_DIR)
-        .join(format!("{migration_id}.json"));
     let state = load_ledger(&ledger_path)?
         .map(|ledger| ledger.state)
         .unwrap_or(ConsolidationState::Planned);
@@ -492,6 +544,26 @@ fn validate_manifest(layout: &StoreLayout, project_id: &str) -> Result<StoreMani
         .manifest_path
         .as_ref()
         .ok_or_else(|| config_error("profile shard has no store manifest path"))?;
+    validate_manifest_path(path, layout, project_id)
+}
+
+fn validate_input_manifest(
+    layout: &StoreLayout,
+    project_id: &str,
+    destination_project_id: &str,
+    allow_retired: bool,
+) -> Result<StoreManifest> {
+    if !allow_retired {
+        return validate_manifest(layout, project_id);
+    }
+    Ok(inspect_manifest_retirement(layout, project_id, destination_project_id)?.manifest)
+}
+
+fn validate_manifest_path(
+    path: &Path,
+    layout: &StoreLayout,
+    project_id: &str,
+) -> Result<StoreManifest> {
     let manifest = storage::read_store_manifest(path)?;
     if manifest.project_id.as_deref() != Some(project_id)
         || manifest.schema_version != storage::STORE_MANIFEST_SCHEMA_VERSION
@@ -726,7 +798,7 @@ async fn collision_summary(
     })
 }
 
-fn destination_project_id(git_common_dir: &Path, source: &str, target: &str) -> String {
+pub(crate) fn destination_project_id(git_common_dir: &Path, source: &str, target: &str) -> String {
     let mut ids = [source, target];
     ids.sort_unstable();
     let mut hash = Sha256::new();
@@ -756,6 +828,7 @@ fn fingerprint_inputs(
     evidence: &InputReadEvidence,
     source: &StoreLayout,
     target: &StoreLayout,
+    retired_destination_project_id: Option<&str>,
 ) -> Result<String> {
     let mut hash = Sha256::new();
     for (label, root, graph) in [
@@ -763,7 +836,28 @@ fn fingerprint_inputs(
         ("target", &target.data_root, &evidence.target_graph),
     ] {
         hash.update(label.as_bytes());
+        let mut files = BTreeMap::new();
         for (relative, path) in relative_file_map(root)? {
+            let retired_manifest_name = retired_destination_project_id
+                .map(|destination| format!("store_manifest.consolidated-into-{destination}.json"));
+            let relative = retired_destination_project_id
+                .filter(|_| {
+                    retired_manifest_name
+                        .as_deref()
+                        .is_some_and(|name| relative == Path::new(name))
+                })
+                .map(|_| PathBuf::from(storage::STORE_MANIFEST_FILENAME))
+                .unwrap_or(relative);
+            if let Some(existing) = files.insert(relative.clone(), path.clone())
+                && file_digest(&existing)? != file_digest(&path)?
+            {
+                return Err(config_error(format!(
+                    "duplicate normalized consolidation input '{}' diverges",
+                    relative.display()
+                )));
+            }
+        }
+        for (relative, path) in files {
             if is_runtime_lock(&relative) || is_sqlite_sidecar(&relative) {
                 continue;
             }
@@ -881,6 +975,465 @@ fn save_ledger(path: &Path, ledger: &ConsolidationLedger) -> Result<()> {
         serde_json::to_vec_pretty(ledger).map_err(|error| config_error(error.to_string()))?;
     let temp = path.with_extension(format!("json.tmp-{}", std::process::id()));
     PrivateStoreIo::write_file_atomically(path, &temp, &bytes).map_err(io_error)
+}
+
+pub(crate) async fn retire_applied_input_manifests(
+    profile_root: &Path,
+) -> ManifestRetirementReport {
+    let mut report = ManifestRetirementReport::default();
+    let ledger_root = profile_root.join(LEDGER_DIR);
+    let entries = match fs::read_dir(&ledger_root) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return report,
+        Err(error) => {
+            report.warnings.push(format!(
+                "could not read consolidation ledger directory '{}': {error}",
+                ledger_root.display()
+            ));
+            return report;
+        }
+    };
+    let mut ledger_paths = entries
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with("consolidate_"))
+                && path
+                    .extension()
+                    .is_some_and(|extension| extension.eq_ignore_ascii_case("json"))
+        })
+        .collect::<Vec<_>>();
+    ledger_paths.sort();
+
+    for ledger_path in ledger_paths {
+        let ledger = match load_ledger(&ledger_path) {
+            Ok(Some(ledger)) => ledger,
+            Ok(None) => continue,
+            Err(error) => {
+                report.warnings.push(error.to_string());
+                continue;
+            }
+        };
+        if ledger.state != ConsolidationState::Applied {
+            continue;
+        }
+        if ledger.schema_version != LEDGER_SCHEMA_VERSION {
+            report.warnings.push(format!(
+                "applied consolidation ledger '{}' uses schema version {}; expected {}",
+                ledger_path.display(),
+                ledger.schema_version,
+                LEDGER_SCHEMA_VERSION
+            ));
+            continue;
+        }
+        match finalize_applied_consolidation(profile_root, &ledger).await {
+            Ok((retired, registry_projects)) => {
+                report.retired.extend(retired);
+                report.retired_registry_projects = report
+                    .retired_registry_projects
+                    .saturating_add(registry_projects);
+            }
+            Err(error) => report.warnings.push(error.to_string()),
+        }
+    }
+    report
+}
+
+async fn finalize_applied_consolidation(
+    profile_root: &Path,
+    ledger: &ConsolidationLedger,
+) -> Result<(Vec<PathBuf>, usize)> {
+    validate_applied_retirement_authority(profile_root, ledger)?;
+    let source_layout = layout_for_id(
+        &ledger.project_root,
+        profile_root,
+        &ledger.source_project_id,
+    )?;
+    let target_layout = layout_for_id(
+        &ledger.project_root,
+        profile_root,
+        &ledger.target_project_id,
+    )?;
+    let plans = [
+        inspect_manifest_retirement(
+            &source_layout,
+            &ledger.source_project_id,
+            &ledger.destination_project_id,
+        )?,
+        inspect_manifest_retirement(
+            &target_layout,
+            &ledger.target_project_id,
+            &ledger.destination_project_id,
+        )?,
+    ];
+    let mut retired = Vec::new();
+    for plan in plans {
+        let parent = plan
+            .canonical_path
+            .parent()
+            .ok_or_else(|| config_error("input store manifest has no parent directory"))?;
+        match plan.action {
+            ManifestRetirementAction::RenameCanonical => {
+                fs::rename(&plan.canonical_path, &plan.retired_path).map_err(io_error)?;
+                files::sync_parent_directory(parent)?;
+                retired.push(plan.retired_path);
+            }
+            ManifestRetirementAction::RemoveDuplicateCanonical => {
+                fs::remove_file(&plan.canonical_path).map_err(io_error)?;
+                files::sync_parent_directory(parent)?;
+                retired.push(plan.retired_path);
+            }
+            ManifestRetirementAction::AlreadyRetired => {}
+        }
+    }
+    let retired_registry_projects = retire_legacy_registry_owners(profile_root, ledger).await?;
+    Ok((retired, retired_registry_projects))
+}
+
+fn validate_applied_retirement_authority(
+    profile_root: &Path,
+    ledger: &ConsolidationLedger,
+) -> Result<()> {
+    if ledger.schema_version != LEDGER_SCHEMA_VERSION || ledger.state != ConsolidationState::Applied
+    {
+        return Err(config_error(
+            "source manifest retirement requires an applied schema-2 consolidation ledger",
+        ));
+    }
+    for project_id in [
+        &ledger.source_project_id,
+        &ledger.target_project_id,
+        &ledger.destination_project_id,
+    ] {
+        storage::validate_project_id(project_id).map_err(config_error)?;
+    }
+    let expected_destination = destination_project_id(
+        &ledger.git_common_dir,
+        &ledger.source_project_id,
+        &ledger.target_project_id,
+    );
+    let expected_migration = format!("consolidate_{}", &expected_destination[5..]);
+    if ledger.destination_project_id != expected_destination
+        || ledger.migration_id != expected_migration
+    {
+        return Err(config_error(
+            "applied consolidation ledger identity does not match its deterministic destination",
+        ));
+    }
+
+    let repository = storage::read_repository_identity_marker(&ledger.project_root)?
+        .ok_or_else(|| config_error("repository identity marker is missing after consolidation"))?;
+    let enrollment = storage::read_enrollment_marker(&ledger.project_root)?
+        .ok_or_else(|| config_error("enrollment marker is missing after consolidation"))?;
+    if repository.project_id != ledger.destination_project_id
+        || !same_path(
+            Path::new(&repository.git_common_dir),
+            &ledger.git_common_dir,
+        )
+        || enrollment.project_id != ledger.destination_project_id
+        || enrollment.storage_mode != StorageMode::ProfileSharded
+    {
+        return Err(config_error(format!(
+            "consolidation marker mismatch for destination project '{}'",
+            ledger.destination_project_id
+        )));
+    }
+
+    let destination_layout = layout_for_id(
+        &ledger.project_root,
+        profile_root,
+        &ledger.destination_project_id,
+    )?;
+    validate_manifest(&destination_layout, &ledger.destination_project_id)?;
+    Ok(())
+}
+
+async fn retire_legacy_registry_owners(
+    profile_root: &Path,
+    ledger: &ConsolidationLedger,
+) -> Result<usize> {
+    let global_path = profile_root.join("global.db");
+    if !global_path.is_file() {
+        return Err(config_error(format!(
+            "global registry '{}' is missing for applied consolidation",
+            global_path.display()
+        )));
+    }
+    let db = GlobalDb::open_at(&global_path)
+        .await
+        .ok_or_else(|| config_error("could not open global registry for consolidation cleanup"))?;
+    let conn = db.conn();
+    conn.execute("BEGIN IMMEDIATE", ())
+        .await
+        .map_err(|error| config_error(format!("could not begin registry cleanup: {error}")))?;
+
+    #[cfg(test)]
+    {
+        let injected_failure = profile_root
+            .join(LEDGER_DIR)
+            .join(".fail-registry-retirement-once");
+        if injected_failure.is_file() {
+            let _ = fs::remove_file(injected_failure);
+            let _ = conn.execute("ROLLBACK", ()).await;
+            return Err(config_error(
+                "synthetic registry retirement failure after manifest retirement",
+            ));
+        }
+    }
+
+    let result = async {
+        let canonical_root = GlobalDb::canonical_project_key(&ledger.project_root);
+        let mut rows = conn
+            .query(
+                "SELECT canonical_root, COALESCE(git_common_dir, '')
+                 FROM code_projects WHERE project_id=?1",
+                params![ledger.destination_project_id.as_str()],
+            )
+            .await
+            .map_err(|error| {
+                config_error(format!("could not validate destination project: {error}"))
+            })?;
+        let destination = rows
+            .next()
+            .await
+            .map_err(|error| config_error(format!("could not read destination project: {error}")))?
+            .ok_or_else(|| config_error("destination registry project is missing"))?;
+        let registered_root = destination.get::<String>(0).map_err(|error| {
+            config_error(format!("invalid destination canonical root: {error}"))
+        })?;
+        let registered_common = destination.get::<String>(1).map_err(|error| {
+            config_error(format!("invalid destination git common dir: {error}"))
+        })?;
+        if registered_root != canonical_root
+            || registered_common.is_empty()
+            || !same_path(Path::new(&registered_common), &ledger.git_common_dir)
+        {
+            return Err(config_error(
+                "destination registry project does not match the applied consolidation ledger",
+            ));
+        }
+
+        let mut rows = conn
+            .query(
+                "SELECT project_id FROM project_aliases WHERE alias_path=?1",
+                params![canonical_root.as_str()],
+            )
+            .await
+            .map_err(|error| {
+                config_error(format!("could not validate destination alias: {error}"))
+            })?;
+        let alias_owner = rows
+            .next()
+            .await
+            .map_err(|error| config_error(format!("could not read destination alias: {error}")))?
+            .and_then(|row| row.get::<String>(0).ok());
+        if alias_owner.as_deref() != Some(ledger.destination_project_id.as_str()) {
+            return Err(config_error(
+                "destination registry alias does not match the applied consolidation ledger",
+            ));
+        }
+
+        let store_id = format!("store:{}:profile_sharded", ledger.destination_project_id);
+        let store_relpath = format!("projects/{}", ledger.destination_project_id);
+        let manifest_relpath = format!("{store_relpath}/{}", storage::STORE_MANIFEST_FILENAME);
+        let mut rows = conn
+            .query(
+                "SELECT project_id, store_kind, storage_mode, store_relpath,
+                        COALESCE(manifest_relpath, '')
+                 FROM store_instances WHERE store_id=?1",
+                params![store_id.as_str()],
+            )
+            .await
+            .map_err(|error| {
+                config_error(format!("could not validate destination store: {error}"))
+            })?;
+        let store = rows
+            .next()
+            .await
+            .map_err(|error| config_error(format!("could not read destination store: {error}")))?
+            .ok_or_else(|| config_error("destination registry store is missing"))?;
+        let store_values = (0..5)
+            .map(|index| {
+                store.get::<String>(index).map_err(|error| {
+                    config_error(format!("invalid destination store registry row: {error}"))
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        if store_values
+            != vec![
+                ledger.destination_project_id.clone(),
+                "code_project".to_string(),
+                "profile_sharded".to_string(),
+                store_relpath,
+                manifest_relpath,
+            ]
+        {
+            return Err(config_error(
+                "destination registry store does not match the applied consolidation ledger",
+            ));
+        }
+
+        let canonical_common = GlobalDb::canonical_project_key(&ledger.git_common_dir);
+        let mut rows = conn
+            .query(
+                "SELECT project_id FROM code_projects WHERE canonical_root=?1 ORDER BY project_id",
+                params![canonical_root.as_str()],
+            )
+            .await
+            .map_err(|error| {
+                config_error(format!("could not validate canonical owners: {error}"))
+            })?;
+        let mut owners = Vec::new();
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|error| config_error(format!("could not read canonical owner: {error}")))?
+        {
+            owners.push(row.get::<String>(0).map_err(|error| {
+                config_error(format!("invalid canonical owner registry row: {error}"))
+            })?);
+        }
+        let allowed = BTreeSet::from([
+            ledger.source_project_id.clone(),
+            ledger.target_project_id.clone(),
+            ledger.destination_project_id.clone(),
+        ]);
+        if owners.iter().any(|owner| !allowed.contains(owner))
+            || !owners.contains(&ledger.destination_project_id)
+        {
+            return Err(config_error(format!(
+                "canonical root has unexpected registry owners: {owners:?}"
+            )));
+        }
+
+        // Old project IDs can have been rebound to another repository. Match
+        // the full consolidation identity so those moved rows survive.
+        let deleted = conn
+            .execute(
+                "DELETE FROM code_projects
+                 WHERE project_id IN (?1, ?2)
+                   AND canonical_root=?3
+                   AND git_common_dir=?4",
+                params![
+                    ledger.source_project_id.as_str(),
+                    ledger.target_project_id.as_str(),
+                    canonical_root.as_str(),
+                    canonical_common.as_str()
+                ],
+            )
+            .await
+            .map_err(|error| {
+                config_error(format!("could not retire legacy registry owners: {error}"))
+            })?;
+
+        let mut rows = conn
+            .query(
+                "SELECT project_id FROM code_projects WHERE canonical_root=?1 ORDER BY project_id",
+                params![canonical_root.as_str()],
+            )
+            .await
+            .map_err(|error| {
+                config_error(format!("could not verify canonical owner cleanup: {error}"))
+            })?;
+        let remaining = rows
+            .next()
+            .await
+            .map_err(|error| {
+                config_error(format!("could not read remaining canonical owner: {error}"))
+            })?
+            .and_then(|row| row.get::<String>(0).ok());
+        let extra = rows.next().await.map_err(|error| {
+            config_error(format!("could not read extra canonical owner: {error}"))
+        })?;
+        if remaining.as_deref() != Some(ledger.destination_project_id.as_str()) || extra.is_some() {
+            return Err(config_error(
+                "registry cleanup did not leave exactly one destination canonical owner",
+            ));
+        }
+        usize::try_from(deleted)
+            .map_err(|_| config_error("legacy registry cleanup count overflowed usize"))
+    }
+    .await;
+
+    match result {
+        Ok(deleted) => match conn.execute("COMMIT", ()).await {
+            Ok(_) => Ok(deleted),
+            Err(error) => {
+                let _ = conn.execute("ROLLBACK", ()).await;
+                Err(config_error(format!(
+                    "could not commit legacy registry cleanup: {error}"
+                )))
+            }
+        },
+        Err(error) => {
+            let _ = conn.execute("ROLLBACK", ()).await;
+            Err(error)
+        }
+    }
+}
+
+fn inspect_manifest_retirement(
+    layout: &StoreLayout,
+    project_id: &str,
+    destination_project_id: &str,
+) -> Result<ManifestRetirementPlan> {
+    let canonical_path = layout
+        .manifest_path
+        .clone()
+        .ok_or_else(|| config_error("profile shard has no store manifest path"))?;
+    let retired_path = canonical_path.with_file_name(format!(
+        "store_manifest.consolidated-into-{destination_project_id}.json"
+    ));
+    let canonical = read_optional_regular_file(&canonical_path)?;
+    let retired = read_optional_regular_file(&retired_path)?;
+    let (path, action) = match (&canonical, &retired) {
+        (Some(_), None) => (
+            canonical_path.as_path(),
+            ManifestRetirementAction::RenameCanonical,
+        ),
+        (None, Some(_)) => (
+            retired_path.as_path(),
+            ManifestRetirementAction::AlreadyRetired,
+        ),
+        (Some(canonical), Some(retired)) if canonical == retired => (
+            retired_path.as_path(),
+            ManifestRetirementAction::RemoveDuplicateCanonical,
+        ),
+        (Some(_), Some(_)) => {
+            return Err(config_error(format!(
+                "canonical and retired store manifests diverge for project '{project_id}'"
+            )));
+        }
+        (None, None) => {
+            return Err(config_error(format!(
+                "neither canonical nor retired store manifest exists for project '{project_id}'"
+            )));
+        }
+    };
+    let manifest = validate_manifest_path(path, layout, project_id)?;
+    Ok(ManifestRetirementPlan {
+        canonical_path,
+        retired_path,
+        manifest,
+        action,
+    })
+}
+
+fn read_optional_regular_file(path: &Path) -> Result<Option<Vec<u8>>> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(io_error(error)),
+    };
+    if !metadata.is_file() || metadata.file_type().is_symlink() {
+        return Err(config_error(format!(
+            "store manifest '{}' is not a regular file",
+            path.display()
+        )));
+    }
+    fs::read(path).map(Some).map_err(io_error)
 }
 
 fn backup_store(layout: &StoreLayout, backup_root: &Path) -> Result<()> {

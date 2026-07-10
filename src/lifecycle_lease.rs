@@ -24,6 +24,8 @@ enum LeaseHold {
 pub struct LifecycleLease {
     hold: LeaseHold,
     token: Option<String>,
+    lock_path: PathBuf,
+    exclusive: bool,
 }
 
 #[derive(Debug)]
@@ -36,6 +38,19 @@ impl LifecycleLease {
     pub fn token(&self) -> Option<&str> {
         self.token.as_deref()
     }
+
+    pub fn is_exclusive(&self) -> bool {
+        self.exclusive
+    }
+
+    pub fn guards_profile(&self, profile_root: &Path) -> bool {
+        let expected = profile_root.join(LIFECYCLE_LOCK_FILENAME);
+        canonical_or_original(&self.lock_path) == canonical_or_original(&expected)
+    }
+}
+
+fn canonical_or_original(path: &Path) -> PathBuf {
+    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
 }
 
 impl Drop for LifecycleLease {
@@ -109,6 +124,8 @@ fn acquire_shared_or_inherited_at(path: &Path, operation: &str) -> Result<Lifecy
         Ok(()) => Ok(LifecycleLease {
             hold: LeaseHold::File(file),
             token: None,
+            lock_path: path.to_path_buf(),
+            exclusive: false,
         }),
         Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
             let owner = read_owner(&mut file);
@@ -117,6 +134,8 @@ fn acquire_shared_or_inherited_at(path: &Path, operation: &str) -> Result<Lifecy
                 Ok(LifecycleLease {
                     hold: LeaseHold::Inherited,
                     token: None,
+                    lock_path: path.to_path_buf(),
+                    exclusive: false,
                 })
             } else {
                 Err(busy_error(operation, owner.as_deref()))
@@ -132,6 +151,8 @@ fn try_acquire_shared_or_inherited_at(path: &Path, operation: &str) -> Result<Sh
         Ok(()) => Ok(SharedLeaseAttempt::Acquired(LifecycleLease {
             hold: LeaseHold::File(file),
             token: None,
+            lock_path: path.to_path_buf(),
+            exclusive: false,
         })),
         Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
             let owner = read_owner(&mut file);
@@ -140,6 +161,8 @@ fn try_acquire_shared_or_inherited_at(path: &Path, operation: &str) -> Result<Sh
                 Ok(SharedLeaseAttempt::Acquired(LifecycleLease {
                     hold: LeaseHold::Inherited,
                     token: None,
+                    lock_path: path.to_path_buf(),
+                    exclusive: false,
                 }))
             } else {
                 Ok(SharedLeaseAttempt::Busy)
@@ -169,7 +192,7 @@ fn acquire_exclusive_or_inherited_at(
 ) -> Result<LifecycleLease> {
     let mut file = open_lock_file(path)?;
     match fs2::FileExt::try_lock_exclusive(&file) {
-        Ok(()) => own_exclusive(file, operation),
+        Ok(()) => own_exclusive(file, path, operation),
         Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
             let owner = read_owner(&mut file);
             if let Some(token) = inherited.filter(|token| {
@@ -179,6 +202,8 @@ fn acquire_exclusive_or_inherited_at(
                 Ok(LifecycleLease {
                     hold: LeaseHold::Inherited,
                     token: Some(token),
+                    lock_path: path.to_path_buf(),
+                    exclusive: true,
                 })
             } else {
                 Err(busy_error(operation, owner.as_deref()))
@@ -215,7 +240,7 @@ fn lifecycle_lock_path_for_profile(profile_root: &Path) -> Result<PathBuf> {
 fn acquire_exclusive_at(path: &Path, operation: &str) -> Result<LifecycleLease> {
     let file = open_lock_file(path)?;
     match fs2::FileExt::try_lock_exclusive(&file) {
-        Ok(()) => own_exclusive(file, operation),
+        Ok(()) => own_exclusive(file, path, operation),
         Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
             let mut file = file;
             let owner = read_owner(&mut file);
@@ -231,6 +256,8 @@ fn acquire_shared_at(path: &Path, operation: &str) -> Result<LifecycleLease> {
         Ok(()) => Ok(LifecycleLease {
             hold: LeaseHold::File(file),
             token: None,
+            lock_path: path.to_path_buf(),
+            exclusive: false,
         }),
         Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
             let owner = read_owner(&mut file);
@@ -246,6 +273,8 @@ fn try_acquire_shared_at(path: &Path, operation: &str) -> Result<SharedLeaseAtte
         Ok(()) => Ok(SharedLeaseAttempt::Acquired(LifecycleLease {
             hold: LeaseHold::File(file),
             token: None,
+            lock_path: path.to_path_buf(),
+            exclusive: false,
         })),
         Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
             Ok(SharedLeaseAttempt::Busy)
@@ -254,7 +283,7 @@ fn try_acquire_shared_at(path: &Path, operation: &str) -> Result<SharedLeaseAtte
     }
 }
 
-fn own_exclusive(mut file: File, operation: &str) -> Result<LifecycleLease> {
+fn own_exclusive(mut file: File, path: &Path, operation: &str) -> Result<LifecycleLease> {
     let token = lease_token();
     file.set_len(0).map_err(|error| owner_write_error(&error))?;
     file.seek(SeekFrom::Start(0))
@@ -266,6 +295,8 @@ fn own_exclusive(mut file: File, operation: &str) -> Result<LifecycleLease> {
     Ok(LifecycleLease {
         hold: LeaseHold::File(file),
         token: Some(token),
+        lock_path: path.to_path_buf(),
+        exclusive: true,
     })
 }
 
