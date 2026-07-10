@@ -2,7 +2,10 @@ use std::path::Path;
 
 use libsql::Connection;
 
-use super::{SessionMergeOffsets, attach_as, db_error, db_message, query_i64};
+use super::{
+    SessionMergeOffsets, attach_as, build_consolidation_message_map, db_error, db_message,
+    mapped_parent_metadata, mapped_turn_message_id, query_i64,
+};
 use crate::errors::Result;
 
 struct TableVerification {
@@ -17,11 +20,12 @@ pub(in crate::migrate::consolidate) async fn verify_session_union_sql(
     source: &Path,
     target: &Path,
     destination_snapshots: &crate::sqlite_read_snapshot::SnapshotSet,
-    destination: &Path,
     destination_root: &Path,
     offsets: &SessionMergeOffsets,
+    source_project_id: &str,
 ) -> Result<()> {
-    let conn = destination_snapshots.get(destination).map_err(|error| {
+    let destination = destination_root.join(crate::storage::SESSIONS_DB_FILENAME);
+    let conn = destination_snapshots.get(&destination).map_err(|error| {
         db_error(
             "verify_consolidation",
             format!("could not read destination snapshot: {error}"),
@@ -49,6 +53,11 @@ pub(in crate::migrate::consolidate) async fn verify_session_union_sql(
         "target_input",
     )
     .await?;
+    build_consolidation_message_map(conn, "source_input", "target_input", source_project_id)
+        .await?;
+    conn.execute_batch("PRAGMA query_only = ON;")
+        .await
+        .map_err(|error| db_error("verify_consolidation", error))?;
 
     let result = match verify_attached_tables(conn, offsets).await {
         Ok(()) => verify_payload_files(conn, destination_root).await,
@@ -126,6 +135,9 @@ async fn verify_table(conn: &Connection, spec: &TableVerification) -> Result<()>
 }
 
 fn verification_specs(offsets: &SessionMergeOffsets) -> Vec<TableVerification> {
+    let turn_message_id = mapped_turn_message_id("s", "source_input");
+    let session_metadata = mapped_parent_metadata("s", false);
+    let raw_metadata = mapped_parent_metadata("s", true);
     let mut specs = vec![
         custom(
             "project accounting",
@@ -136,11 +148,26 @@ fn verification_specs(offsets: &SessionMergeOffsets) -> Vec<TableVerification> {
                  UNION ALL SELECT path, tokens_saved FROM source_input.projects
              ) GROUP BY path",
         ),
-        target_wins(
+        custom_owned(
             "turn",
             "turns",
             "message_id, project_hash, session_id, model, timestamp, input_tokens, output_tokens, cache_write_tokens, cache_read_tokens, cost_usd, category, tool_names",
-            "t.message_id=s.message_id",
+            format!(
+                "SELECT message_id, project_hash, session_id, model, timestamp,
+                        input_tokens, output_tokens, cache_write_tokens,
+                        cache_read_tokens, cost_usd, category, tool_names
+                 FROM target_input.turns
+                 UNION ALL
+                 SELECT {turn_message_id}, s.project_hash, s.session_id, s.model,
+                        s.timestamp, s.input_tokens, s.output_tokens,
+                        s.cache_write_tokens, s.cache_read_tokens, s.cost_usd,
+                        s.category, s.tool_names
+                 FROM source_input.turns s
+                 WHERE {turn_message_id} != s.message_id OR NOT EXISTS (
+                     SELECT 1 FROM target_input.turns t
+                     WHERE t.message_id=s.message_id
+                 )"
+            ),
         ),
         custom(
             "parse offset",
@@ -212,11 +239,24 @@ fn verification_specs(offsets: &SessionMergeOffsets) -> Vec<TableVerification> {
              FROM source_input.sessions s
              WHERE NOT EXISTS (SELECT 1 FROM target_input.sessions t WHERE t.provider=s.provider AND t.session_id=s.session_id)",
         ),
-        target_wins(
+        custom_owned(
             "session message",
             "session_messages",
             "provider, message_id, session_id, role, timestamp, ordinal, text, kind, model, tool_names, source_path, source_offset, metadata_json",
-            "t.provider=s.provider AND t.message_id=s.message_id",
+            format!("SELECT provider, message_id, session_id, role, timestamp, ordinal, text,
+                    kind, model, tool_names, source_path, source_offset, metadata_json
+             FROM target_input.session_messages
+             UNION ALL
+             SELECT s.provider, COALESCE(m.mapped_id, s.message_id), s.session_id,
+                    s.role, s.timestamp, s.ordinal, s.text, s.kind, s.model,
+                    s.tool_names, s.source_path, s.source_offset, {session_metadata}
+             FROM source_input.session_messages s
+             LEFT JOIN consolidation_message_map m
+               ON m.provider=s.provider AND m.original_id=s.message_id
+             WHERE m.mapped_id IS NOT NULL OR NOT EXISTS (
+                 SELECT 1 FROM target_input.session_messages t
+                 WHERE t.provider=s.provider AND t.message_id=s.message_id
+             )"),
         ),
         custom(
             "session schema migration",
@@ -227,21 +267,53 @@ fn verification_specs(offsets: &SessionMergeOffsets) -> Vec<TableVerification> {
                  UNION ALL SELECT name, version, applied_at FROM source_input.session_schema_migrations
              ) GROUP BY name",
         ),
-        projected_target_wins(
+        custom_owned(
             "LCM raw message",
             "lcm_raw_messages",
             "provider, message_id, session_id, store_id, role, ordinal, timestamp, content, content_hash, storage_kind, payload_ref, snippet_text, index_text, legacy_source, legacy_truncated, metadata_json",
-            &format!(
-                "provider, message_id, session_id, store_id + {}, role, ordinal, timestamp, content, content_hash, storage_kind, payload_ref, snippet_text, index_text, legacy_source, legacy_truncated, metadata_json",
+            format!(
+                "SELECT provider, message_id, session_id, store_id, role, ordinal,
+                        timestamp, content, content_hash, storage_kind, payload_ref,
+                        snippet_text, index_text, legacy_source, legacy_truncated, metadata_json
+                 FROM target_input.lcm_raw_messages
+                 UNION ALL
+                 SELECT s.provider,
+                        CASE WHEN m.raw_content_divergent=1
+                             THEN m.mapped_id ELSE s.message_id END,
+                        s.session_id,
+                        s.store_id + {}, s.role, s.ordinal, s.timestamp, s.content,
+                        s.content_hash, s.storage_kind, s.payload_ref, s.snippet_text,
+                        s.index_text, s.legacy_source, s.legacy_truncated, {raw_metadata}
+                 FROM source_input.lcm_raw_messages s
+                 LEFT JOIN consolidation_message_map m
+                   ON m.provider=s.provider AND m.original_id=s.message_id
+                 WHERE m.raw_content_divergent=1 OR NOT EXISTS (
+                     SELECT 1 FROM target_input.lcm_raw_messages t
+                     WHERE t.provider=s.provider AND t.message_id=s.message_id
+                 )",
                 offsets.raw
             ),
-            "t.provider=s.provider AND t.message_id=s.message_id",
         ),
-        target_wins(
+        custom(
             "LCM external payload",
             "lcm_external_payloads",
             "payload_ref, provider, session_id, message_id, kind, content_hash, byte_count, char_count, created_at, metadata_json",
-            "t.payload_ref=s.payload_ref",
+            "SELECT payload_ref, provider, session_id, message_id, kind, content_hash,
+                    byte_count, char_count, created_at, metadata_json
+             FROM target_input.lcm_external_payloads
+             UNION ALL
+             SELECT s.payload_ref, s.provider, s.session_id,
+                    CASE WHEN m.raw_content_divergent=1
+                         THEN m.mapped_id ELSE s.message_id END,
+                    s.kind, s.content_hash,
+                    s.byte_count, s.char_count, s.created_at, s.metadata_json
+             FROM source_input.lcm_external_payloads s
+             LEFT JOIN consolidation_message_map m
+               ON m.provider=s.provider AND m.original_id=s.message_id
+             WHERE NOT EXISTS (
+                 SELECT 1 FROM target_input.lcm_external_payloads t
+                 WHERE t.payload_ref=s.payload_ref
+             )",
         ),
         target_wins(
             "LCM GC mark",
@@ -350,11 +422,23 @@ fn verification_specs(offsets: &SessionMergeOffsets) -> Vec<TableVerification> {
         commit_sessions(offsets.span),
         max_meta("git correlation metadata", "git_correlation_meta"),
         max_meta("session backfill metadata", "session_backfill_meta"),
-        target_wins(
+        custom(
             "dashboard token count",
             "dashboard_token_counts",
             "store, provider, message_id, text_len, encoder, token_count, computed_at",
-            "t.store=s.store AND t.provider=s.provider AND t.message_id=s.message_id",
+            "SELECT store, provider, message_id, text_len, encoder, token_count, computed_at
+             FROM target_input.dashboard_token_counts
+             UNION ALL
+             SELECT s.store, s.provider, COALESCE(m.mapped_id, s.message_id),
+                    s.text_len, s.encoder, s.token_count, s.computed_at
+             FROM source_input.dashboard_token_counts s
+             LEFT JOIN consolidation_message_map m
+               ON m.provider=s.provider AND m.original_id=s.message_id
+             WHERE m.mapped_id IS NOT NULL OR NOT EXISTS (
+                 SELECT 1 FROM target_input.dashboard_token_counts t
+                 WHERE t.store=s.store AND t.provider=s.provider
+                   AND t.message_id=s.message_id
+             )",
         ),
     ]);
     specs
@@ -465,7 +549,12 @@ fn commit_sessions(span_offset: i64) -> TableVerification {
                     CASE WHEN s.confidence > t.confidence THEN s.relation ELSE t.relation END,
                     CASE WHEN s.confidence > t.confidence THEN s.evidence ELSE t.evidence END,
                     MAX(t.confidence, s.confidence),
-                    CASE WHEN s.confidence > t.confidence THEN s.evidence_message_id ELSE t.evidence_message_id END,
+                    CASE WHEN s.confidence > t.confidence THEN COALESCE(
+                         (SELECT mapped_id FROM consolidation_message_map m
+                          WHERE m.provider=s.provider
+                            AND m.original_id=s.evidence_message_id),
+                         s.evidence_message_id)
+                         ELSE t.evidence_message_id END,
                     t.created_at
              FROM target_input.commit_sessions t
              JOIN source_input.commit_sessions s
@@ -483,7 +572,11 @@ fn commit_sessions(span_offset: i64) -> TableVerification {
              SELECT s.commit_sha, s.provider, s.session_id, s.branch, s.worktree,
                     s.committed_at, s.span_overlap_kind,
                     CASE WHEN s.span_id IS NULL THEN NULL ELSE s.span_id + {span_offset} END,
-                    s.relation, s.evidence, s.confidence, s.evidence_message_id, s.created_at
+                    s.relation, s.evidence, s.confidence, COALESCE(
+                        (SELECT mapped_id FROM consolidation_message_map m
+                         WHERE m.provider=s.provider
+                           AND m.original_id=s.evidence_message_id),
+                        s.evidence_message_id), s.created_at
              FROM source_input.commit_sessions s
              WHERE NOT EXISTS (
                  SELECT 1 FROM target_input.commit_sessions t
@@ -497,8 +590,12 @@ fn remapped_raw_id(expression: &str, offset: i64) -> String {
     format!(
         "(SELECT COALESCE(t.store_id, r.store_id + {offset})
           FROM source_input.lcm_raw_messages r
+          LEFT JOIN consolidation_message_map m
+            ON m.provider=r.provider AND m.original_id=r.message_id
           LEFT JOIN target_input.lcm_raw_messages t
-            ON t.provider=r.provider AND t.message_id=r.message_id
+            ON t.provider=r.provider
+           AND t.message_id=CASE WHEN m.raw_content_divergent=1
+                                 THEN m.mapped_id ELSE r.message_id END
           WHERE r.store_id={expression})"
     )
 }

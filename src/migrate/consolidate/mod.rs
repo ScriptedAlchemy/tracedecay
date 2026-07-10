@@ -41,7 +41,7 @@ use crate::storage::{
     self, EnrollmentMarker, PrivateStoreIo, StorageMode, StoreKind, StoreLayout, StoreManifest,
 };
 
-const LEDGER_SCHEMA_VERSION: u32 = 1;
+const LEDGER_SCHEMA_VERSION: u32 = 2;
 const BACKUP_DIR: &str = "migration-backups";
 const LEDGER_DIR: &str = "migration-inventory";
 const PRESERVED_DIR: &str = "consolidation-preserved";
@@ -88,6 +88,16 @@ pub struct CollisionSummary {
     pub session_overlaps: u64,
     pub message_overlaps: u64,
     pub lcm_message_overlaps: u64,
+    #[serde(default)]
+    pub divergent_lcm_messages: u64,
+    #[serde(default)]
+    pub divergent_lcm_session_ids: u64,
+    #[serde(default)]
+    pub divergent_lcm_content_hashes: u64,
+    #[serde(default)]
+    pub divergent_lcm_storage_kinds: u64,
+    #[serde(default)]
+    pub divergent_lcm_payload_refs: u64,
     pub artifact_path_overlaps: usize,
     pub differing_artifact_paths: Vec<PathBuf>,
     pub semantics: Vec<String>,
@@ -697,12 +707,19 @@ async fn collision_summary(
         session_overlaps: db.sessions,
         message_overlaps: db.messages,
         lcm_message_overlaps: db.lcm_messages,
+        divergent_lcm_messages: db.divergent_lcm_messages,
+        divergent_lcm_session_ids: db.divergent_lcm_session_ids,
+        divergent_lcm_content_hashes: db.divergent_lcm_content_hashes,
+        divergent_lcm_storage_kinds: db.divergent_lcm_storage_kinds,
+        divergent_lcm_payload_refs: db.divergent_lcm_payload_refs,
         artifact_path_overlaps: overlaps.len(),
         differing_artifact_paths: differing,
         semantics: vec![
             "facts: union by content; tags/entities/metadata are merged, counters take maxima, newest trust/category wins, feedback events are deduplicated".to_string(),
             "sessions: union by provider/session id; time bounds widen and non-null target fields win".to_string(),
-            "messages and LCM payload identities: identical rows deduplicate; divergent content is a hard error".to_string(),
+            "session-message projections: the selected target row remains canonical; divergent source rows and their overlapping parent-linked session family are preserved as active consolidated/<source-project-id>/<message-id> variants".to_string(),
+            "LCM raw messages: the selected target row remains canonical; source rows receive active variants only for content-hash divergence, while equal-content representation drift deduplicates to the target raw family".to_string(),
+            "LCM external payloads and summaries: identical identities deduplicate; divergent content is a hard error".to_string(),
             "branch graphs: target branches retain their names; every source branch is preserved under consolidated/<source-id>/...".to_string(),
             "artifact paths: identical files deduplicate; divergent non-reference files are preserved under consolidation-preserved; divergent payload/handle files are a hard error".to_string(),
         ],
@@ -773,7 +790,23 @@ fn fingerprint_inputs(
 }
 
 fn load_or_create_ledger(resolved: &ResolvedPlan, path: &Path) -> Result<ConsolidationLedger> {
-    if let Some(ledger) = load_ledger(path)? {
+    if let Some(mut ledger) = load_ledger(path)? {
+        validate_ledger_inventory(&ledger, resolved)?;
+        if ledger.schema_version == 1 {
+            if !matches!(
+                ledger.state,
+                ConsolidationState::Planned
+                    | ConsolidationState::BackupsReady
+                    | ConsolidationState::DestinationReady
+            ) {
+                return Err(config_error(format!(
+                    "consolidation ledger v1 cannot be migrated safely after database merge state {:?}",
+                    ledger.state
+                )));
+            }
+            ledger.schema_version = LEDGER_SCHEMA_VERSION;
+            save_ledger(path, &ledger)?;
+        }
         return Ok(ledger);
     }
     if resolved.report.destination_data_root.exists() {
@@ -802,13 +835,24 @@ fn load_or_create_ledger(resolved: &ResolvedPlan, path: &Path) -> Result<Consoli
 }
 
 fn validate_ledger(ledger: &ConsolidationLedger, resolved: &ResolvedPlan) -> Result<()> {
-    if ledger.schema_version != LEDGER_SCHEMA_VERSION
-        || ledger.migration_id != resolved.report.migration_id
+    validate_ledger_inventory(ledger, resolved)?;
+    if ledger.schema_version != LEDGER_SCHEMA_VERSION {
+        return Err(config_error(format!(
+            "unsupported consolidation ledger schema version {}; expected {}",
+            ledger.schema_version, LEDGER_SCHEMA_VERSION
+        )));
+    }
+    Ok(())
+}
+
+fn validate_ledger_inventory(ledger: &ConsolidationLedger, resolved: &ResolvedPlan) -> Result<()> {
+    if ledger.migration_id != resolved.report.migration_id
         || ledger.confirmation_token != resolved.report.confirmation_token
         || ledger.input_fingerprint != resolved.input_fingerprint
         || ledger.source_project_id != resolved.report.source.project_id
         || ledger.target_project_id != resolved.report.target.project_id
         || ledger.destination_project_id != resolved.report.destination_project_id
+        || !same_path(&ledger.project_root, &resolved.report.project_root)
         || !same_path(&ledger.git_common_dir, &resolved.report.git_common_dir)
     {
         return Err(config_error(
@@ -881,7 +925,14 @@ async fn merge_databases(resolved: &ResolvedPlan, ledger: &mut ConsolidationLedg
         .session_offsets
         .as_ref()
         .ok_or_else(|| config_error("session merge offsets are missing from the ledger"))?;
-    sqlite::merge_sessions(&target_sessions, &source_sessions, offsets).await?;
+    sqlite::merge_sessions(
+        &target_sessions,
+        &source_sessions,
+        &target_input,
+        &resolved.report.source.project_id,
+        offsets,
+    )
+    .await?;
     Ok(())
 }
 

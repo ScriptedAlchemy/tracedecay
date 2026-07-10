@@ -80,9 +80,9 @@ pub(super) async fn verify_destination(
         &source_input,
         &target_input,
         &destination_snapshots,
-        &sessions,
         destination,
         session_offsets,
+        &resolved.report.source.project_id,
     )
     .await?;
     Ok(())

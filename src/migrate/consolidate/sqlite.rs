@@ -19,6 +19,18 @@ pub(super) use inspect::{
 };
 pub(super) use verify::verify_session_union_sql;
 
+pub(super) const LCM_RAW_MESSAGE_DIVERGENCE_PREDICATE: &str =
+    "t.session_id IS NOT s.session_id OR t.content_hash IS NOT s.content_hash
+     OR t.storage_kind IS NOT s.storage_kind OR t.payload_ref IS NOT s.payload_ref";
+pub(super) const LCM_CONTENT_HASH_DIVERGENCE_PREDICATE: &str =
+    "t.content_hash IS NOT s.content_hash";
+const SESSION_MESSAGE_DIVERGENCE_PREDICATE: &str =
+    "t.session_id IS NOT s.session_id OR t.role IS NOT s.role
+     OR t.timestamp IS NOT s.timestamp OR t.ordinal IS NOT s.ordinal
+     OR t.text IS NOT s.text OR t.kind IS NOT s.kind OR t.model IS NOT s.model
+     OR t.tool_names IS NOT s.tool_names OR t.source_path IS NOT s.source_path
+     OR t.source_offset IS NOT s.source_offset OR t.metadata_json IS NOT s.metadata_json";
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(super) struct GraphMergeOffsets {
     pub source_path: PathBuf,
@@ -311,6 +323,8 @@ pub(super) async fn plan_session_offsets(
 pub(super) async fn merge_sessions(
     target_path: &Path,
     source_path: &Path,
+    target_input_path: &Path,
+    source_project_id: &str,
     offsets: &SessionMergeOffsets,
 ) -> Result<()> {
     normalize_sessions(target_path).await?;
@@ -319,7 +333,8 @@ pub(super) async fn merge_sessions(
         .await
         .ok_or_else(|| db_message("merge_sessions", "could not open target sessions DB"))?;
     attach_as(target.conn(), source_path, "source").await?;
-    reject_session_content_collisions(target.conn()).await?;
+    attach_as(target.conn(), target_input_path, "target_input").await?;
+    reject_session_content_collisions(target.conn(), "source", "target_input").await?;
     target
         .conn()
         .execute("PRAGMA foreign_keys = OFF", ())
@@ -330,7 +345,17 @@ pub(super) async fn merge_sessions(
         .execute("BEGIN IMMEDIATE", ())
         .await
         .map_err(|error| db_error("merge_sessions", error))?;
-    let result = merge_sessions_tx(target.conn(), offsets).await;
+    let result = match build_consolidation_message_map(
+        target.conn(),
+        "source",
+        "target_input",
+        source_project_id,
+    )
+    .await
+    {
+        Ok(()) => merge_sessions_tx(target.conn(), offsets).await,
+        Err(error) => Err(error),
+    };
     match result {
         Ok(()) => target
             .conn()
@@ -340,12 +365,21 @@ pub(super) async fn merge_sessions(
         Err(error) => {
             let _ = target.conn().execute("ROLLBACK", ()).await;
             let _ = target.conn().execute("DETACH DATABASE source", ()).await;
+            let _ = target
+                .conn()
+                .execute("DETACH DATABASE target_input", ())
+                .await;
             return Err(error);
         }
     };
     target
         .conn()
         .execute("DETACH DATABASE source", ())
+        .await
+        .map_err(|error| db_error("merge_sessions", error))?;
+    target
+        .conn()
+        .execute("DETACH DATABASE target_input", ())
         .await
         .map_err(|error| db_error("merge_sessions", error))?;
     crate::sessions::lcm::schema::rebuild_raw_fts(target.conn())
@@ -418,35 +452,26 @@ async fn reject_session_registry_rows(path: &Path) -> Result<()> {
     Ok(())
 }
 
-async fn reject_session_content_collisions(conn: &Connection) -> Result<()> {
+async fn reject_session_content_collisions(
+    conn: &Connection,
+    source_schema: &str,
+    target_schema: &str,
+) -> Result<()> {
+    let source = quote_identifier(source_schema);
+    let target = quote_identifier(target_schema);
+    let external_payloads = format!(
+        "SELECT COUNT(*) FROM {source}.lcm_external_payloads s
+         JOIN {target}.lcm_external_payloads t ON t.payload_ref=s.payload_ref
+         WHERE t.content_hash IS NOT s.content_hash OR t.byte_count IS NOT s.byte_count"
+    );
+    let summary_nodes = format!(
+        "SELECT COUNT(*) FROM {source}.lcm_summary_nodes s
+         JOIN {target}.lcm_summary_nodes t ON t.node_id=s.node_id
+         WHERE t.summary_hash IS NOT s.summary_hash OR t.summary_text IS NOT s.summary_text"
+    );
     for (label, sql) in [
-        (
-            "session message",
-            "SELECT COUNT(*) FROM source.session_messages s
-             JOIN session_messages t ON t.provider=s.provider AND t.message_id=s.message_id
-             WHERE t.session_id IS NOT s.session_id OR t.role IS NOT s.role
-                OR t.ordinal IS NOT s.ordinal OR t.text IS NOT s.text
-                OR t.kind IS NOT s.kind OR t.model IS NOT s.model",
-        ),
-        (
-            "LCM raw message",
-            "SELECT COUNT(*) FROM source.lcm_raw_messages s
-             JOIN lcm_raw_messages t ON t.provider=s.provider AND t.message_id=s.message_id
-             WHERE t.session_id IS NOT s.session_id OR t.content_hash IS NOT s.content_hash
-                OR t.storage_kind IS NOT s.storage_kind OR t.payload_ref IS NOT s.payload_ref",
-        ),
-        (
-            "LCM external payload",
-            "SELECT COUNT(*) FROM source.lcm_external_payloads s
-             JOIN lcm_external_payloads t ON t.payload_ref=s.payload_ref
-             WHERE t.content_hash IS NOT s.content_hash OR t.byte_count IS NOT s.byte_count",
-        ),
-        (
-            "LCM summary node",
-            "SELECT COUNT(*) FROM source.lcm_summary_nodes s
-             JOIN lcm_summary_nodes t ON t.node_id=s.node_id
-             WHERE t.summary_hash IS NOT s.summary_hash OR t.summary_text IS NOT s.summary_text",
-        ),
+        ("LCM external payload", external_payloads.as_str()),
+        ("LCM summary node", summary_nodes.as_str()),
     ] {
         let count = query_i64(conn, sql).await?;
         if count > 0 {
@@ -461,7 +486,207 @@ async fn reject_session_content_collisions(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+pub(super) async fn build_consolidation_message_map(
+    conn: &Connection,
+    source_schema: &str,
+    target_schema: &str,
+    source_project_id: &str,
+) -> Result<()> {
+    conn.execute_batch(
+        "PRAGMA query_only = OFF;
+         CREATE TEMP TABLE IF NOT EXISTS consolidation_message_map(
+             provider TEXT NOT NULL,
+             original_id TEXT NOT NULL,
+             mapped_id TEXT NOT NULL,
+             session_divergent INTEGER NOT NULL,
+             raw_content_divergent INTEGER NOT NULL,
+             PRIMARY KEY(provider, original_id),
+             UNIQUE(provider, mapped_id)
+         );",
+    )
+    .await
+    .map_err(|error| db_error("message_variant_map_init", error))?;
+    conn.execute("DELETE FROM temp.consolidation_message_map", ())
+        .await
+        .map_err(|error| db_error("message_variant_map_reset", error))?;
+    let source = quote_identifier(source_schema);
+    let target = quote_identifier(target_schema);
+    let sql = format!(
+        "INSERT INTO consolidation_message_map(
+             provider, original_id, mapped_id, session_divergent, raw_content_divergent
+         )
+         SELECT provider, message_id, 'consolidated/' || ?1 || '/' || message_id,
+                MAX(session_divergent), MAX(raw_content_divergent)
+         FROM (
+             SELECT s.provider, s.message_id, 1 AS session_divergent,
+                    0 AS raw_content_divergent
+             FROM {source}.session_messages s
+             JOIN {target}.session_messages t
+               ON t.provider=s.provider AND t.message_id=s.message_id
+             WHERE {SESSION_MESSAGE_DIVERGENCE_PREDICATE}
+             UNION
+             SELECT s.provider, s.message_id, 0 AS session_divergent,
+                    1 AS raw_content_divergent
+             FROM {source}.lcm_raw_messages s
+             JOIN {target}.lcm_raw_messages t
+               ON t.provider=s.provider AND t.message_id=s.message_id
+             WHERE {LCM_CONTENT_HASH_DIVERGENCE_PREDICATE}
+         ) GROUP BY provider, message_id"
+    );
+    conn.execute(&sql, params![source_project_id])
+        .await
+        .map_err(|error| db_error("message_variant_map_fill", error))?;
+    let session_family_sql = format!(
+        "WITH RECURSIVE variant_family(provider, message_id) AS (
+             SELECT provider, original_id FROM consolidation_message_map
+             UNION
+             SELECT child.provider, child.message_id
+             FROM {source}.session_messages child
+             JOIN {target}.session_messages target_child
+               ON target_child.provider=child.provider
+              AND target_child.message_id=child.message_id
+             JOIN variant_family parent
+               ON parent.provider=child.provider
+              AND CASE WHEN json_valid(child.metadata_json)
+                       THEN json_extract(child.metadata_json, '$.parent_message_id') END
+                  =parent.message_id
+         )
+         INSERT OR IGNORE INTO consolidation_message_map(
+             provider, original_id, mapped_id, session_divergent, raw_content_divergent
+         )
+         SELECT provider, message_id, 'consolidated/' || ?1 || '/' || message_id, 1, 0
+         FROM variant_family WHERE 1
+         ON CONFLICT(provider, original_id) DO UPDATE SET
+             session_divergent=MAX(session_divergent, excluded.session_divergent),
+             raw_content_divergent=MAX(raw_content_divergent, excluded.raw_content_divergent)"
+    );
+    conn.execute(&session_family_sql, params![source_project_id])
+        .await
+        .map_err(|error| db_error("message_session_variant_family", error))?;
+    let collision_sql = format!(
+        "SELECT COUNT(*) FROM consolidation_message_map m
+         WHERE EXISTS (SELECT 1 FROM {source}.session_messages x
+                       WHERE x.provider=m.provider AND x.message_id=m.mapped_id)
+            OR EXISTS (SELECT 1 FROM {source}.lcm_raw_messages x
+                       WHERE x.provider=m.provider AND x.message_id=m.mapped_id)
+            OR EXISTS (SELECT 1 FROM {target}.session_messages x
+                       WHERE x.provider=m.provider AND x.message_id=m.mapped_id)
+            OR EXISTS (SELECT 1 FROM {target}.lcm_raw_messages x
+                       WHERE x.provider=m.provider AND x.message_id=m.mapped_id)
+            OR EXISTS (SELECT 1 FROM {source}.lcm_external_payloads x
+                       WHERE x.provider=m.provider AND x.message_id=m.mapped_id)
+            OR EXISTS (SELECT 1 FROM {target}.lcm_external_payloads x
+                       WHERE x.provider=m.provider AND x.message_id=m.mapped_id)
+            OR EXISTS (SELECT 1 FROM {source}.dashboard_token_counts x
+                       WHERE x.provider=m.provider AND x.message_id=m.mapped_id)
+            OR EXISTS (SELECT 1 FROM {target}.dashboard_token_counts x
+                       WHERE x.provider=m.provider AND x.message_id=m.mapped_id)
+            OR EXISTS (SELECT 1 FROM {source}.turns x WHERE x.message_id=m.mapped_id)
+            OR EXISTS (SELECT 1 FROM {target}.turns x WHERE x.message_id=m.mapped_id)
+            OR EXISTS (SELECT 1 FROM {source}.commit_sessions x
+                       WHERE x.provider=m.provider AND x.evidence_message_id=m.mapped_id)
+            OR EXISTS (SELECT 1 FROM {target}.commit_sessions x
+                       WHERE x.provider=m.provider AND x.evidence_message_id=m.mapped_id)
+            OR EXISTS (SELECT 1 FROM {source}.session_messages x
+                       WHERE x.provider=m.provider
+                         AND CASE WHEN json_valid(x.metadata_json)
+                                  THEN json_extract(x.metadata_json, '$.parent_message_id') END
+                             =m.mapped_id)
+            OR EXISTS (SELECT 1 FROM {target}.session_messages x
+                       WHERE x.provider=m.provider
+                         AND CASE WHEN json_valid(x.metadata_json)
+                                  THEN json_extract(x.metadata_json, '$.parent_message_id') END
+                             =m.mapped_id)
+            OR EXISTS (SELECT 1 FROM {source}.lcm_raw_messages x
+                       WHERE x.provider=m.provider
+                         AND CASE WHEN json_valid(x.metadata_json)
+                                  THEN json_extract(x.metadata_json, '$.parent_message_id') END
+                             =m.mapped_id)
+            OR EXISTS (SELECT 1 FROM {target}.lcm_raw_messages x
+                       WHERE x.provider=m.provider
+                         AND CASE WHEN json_valid(x.metadata_json)
+                                  THEN json_extract(x.metadata_json, '$.parent_message_id') END
+                             =m.mapped_id)"
+    );
+    let collisions = query_i64(conn, &collision_sql).await?;
+    if collisions != 0 {
+        return Err(db_message(
+            "message_variant_map",
+            format!(
+                "{collisions} synthetic consolidation message key collision(s); inputs and backups were preserved"
+            ),
+        ));
+    }
+    let ambiguous_turns = query_i64(
+        conn,
+        &format!(
+            "SELECT COUNT(*) FROM {source}.turns tr
+             WHERE EXISTS (
+                 SELECT 1 FROM {source}.session_messages sm
+                 JOIN consolidation_message_map m
+                   ON m.provider=sm.provider AND m.original_id=sm.message_id
+                 WHERE sm.message_id=tr.message_id AND sm.session_id=tr.session_id
+             ) AND (
+                 SELECT COUNT(*) FROM {source}.session_messages sm
+                 WHERE sm.message_id=tr.message_id AND sm.session_id=tr.session_id
+             ) != 1"
+        ),
+    )
+    .await?;
+    if ambiguous_turns != 0 {
+        return Err(db_message(
+            "message_variant_map",
+            format!(
+                "{ambiguous_turns} source turn message mapping ambiguity collision(s); inputs and backups were preserved"
+            ),
+        ));
+    }
+    Ok(())
+}
+
+pub(super) fn mapped_parent_metadata(alias: &str, raw_family_only: bool) -> String {
+    let family_filter = if raw_family_only {
+        " AND parent_map.raw_content_divergent=1"
+    } else {
+        ""
+    };
+    format!(
+        "CASE
+             WHEN NOT json_valid({alias}.metadata_json)
+             THEN {alias}.metadata_json
+             ELSE COALESCE((
+                 SELECT json_set(
+                     {alias}.metadata_json,
+                     '$.consolidation_original_parent_message_id',
+                     json_extract({alias}.metadata_json, '$.parent_message_id'),
+                     '$.parent_message_id', parent_map.mapped_id
+                 )
+                 FROM consolidation_message_map parent_map
+                 WHERE parent_map.provider={alias}.provider
+                   AND parent_map.original_id=json_extract(
+                       {alias}.metadata_json, '$.parent_message_id'
+                   ){family_filter}
+             ), {alias}.metadata_json)
+         END"
+    )
+}
+
+pub(super) fn mapped_turn_message_id(alias: &str, source_schema: &str) -> String {
+    format!(
+        "COALESCE((
+             SELECT m.mapped_id
+             FROM {source_schema}.session_messages sm
+             JOIN consolidation_message_map m
+               ON m.provider=sm.provider AND m.original_id=sm.message_id
+             WHERE sm.message_id={alias}.message_id AND sm.session_id={alias}.session_id
+         ), {alias}.message_id)"
+    )
+}
+
 async fn merge_sessions_tx(conn: &Connection, offsets: &SessionMergeOffsets) -> Result<()> {
+    let session_metadata = mapped_parent_metadata("s", false);
+    let raw_metadata = mapped_parent_metadata("s", true);
+    let turn_message_id = mapped_turn_message_id("s", "source");
     conn.execute_batch(&format!(
         "CREATE TEMP TABLE IF NOT EXISTS consolidation_raw_map(
              source_id INTEGER PRIMARY KEY, target_id INTEGER NOT NULL
@@ -478,9 +703,9 @@ async fn merge_sessions_tx(conn: &Connection, offsets: &SessionMergeOffsets) -> 
              message_id, project_hash, session_id, model, timestamp, input_tokens,
              output_tokens, cache_write_tokens, cache_read_tokens, cost_usd,
              category, tool_names
-         ) SELECT message_id, project_hash, session_id, model, timestamp, input_tokens,
-             output_tokens, cache_write_tokens, cache_read_tokens, cost_usd,
-             category, tool_names FROM source.turns;
+         ) SELECT {turn_message_id}, s.project_hash, s.session_id, s.model, s.timestamp,
+             s.input_tokens, s.output_tokens, s.cache_write_tokens, s.cache_read_tokens,
+             s.cost_usd, s.category, s.tool_names FROM source.turns s;
 
          INSERT OR IGNORE INTO parse_offsets(file_path, byte_offset, mtime, file_id)
          SELECT file_path, byte_offset, mtime, file_id FROM source.parse_offsets;
@@ -529,9 +754,12 @@ async fn merge_sessions_tx(conn: &Connection, offsets: &SessionMergeOffsets) -> 
          INSERT OR IGNORE INTO session_messages(
              provider, message_id, session_id, role, timestamp, ordinal, text, kind,
              model, tool_names, source_path, source_offset, metadata_json
-         ) SELECT provider, message_id, session_id, role, timestamp, ordinal, text, kind,
-             model, tool_names, source_path, source_offset, metadata_json
-         FROM source.session_messages;
+         ) SELECT s.provider, COALESCE(m.mapped_id, s.message_id), s.session_id, s.role,
+             s.timestamp, s.ordinal, s.text, s.kind, s.model, s.tool_names,
+             s.source_path, s.source_offset, {session_metadata}
+         FROM source.session_messages s
+         LEFT JOIN consolidation_message_map m
+           ON m.provider=s.provider AND m.original_id=s.message_id;
 
          INSERT OR IGNORE INTO session_schema_migrations(name, version, applied_at)
          SELECT name, version, applied_at FROM source.session_schema_migrations;
@@ -543,19 +771,38 @@ async fn merge_sessions_tx(conn: &Connection, offsets: &SessionMergeOffsets) -> 
              provider, message_id, session_id, store_id, role, ordinal, timestamp,
              content, content_hash, storage_kind, payload_ref, snippet_text, index_text,
              legacy_source, legacy_truncated, metadata_json
-         ) SELECT provider, message_id, session_id, store_id + {raw}, role, ordinal,
-             timestamp, content, content_hash, storage_kind, payload_ref, snippet_text,
-             index_text, legacy_source, legacy_truncated, metadata_json
-         FROM source.lcm_raw_messages;
+         ) SELECT s.provider,
+             CASE WHEN m.raw_content_divergent=1 THEN m.mapped_id ELSE s.message_id END,
+             s.session_id,
+             s.store_id + {raw}, s.role, s.ordinal, s.timestamp, s.content,
+             s.content_hash, s.storage_kind, s.payload_ref, s.snippet_text,
+             s.index_text, s.legacy_source, s.legacy_truncated, {raw_metadata}
+         FROM source.lcm_raw_messages s
+         LEFT JOIN consolidation_message_map m
+           ON m.provider=s.provider AND m.original_id=s.message_id;
          INSERT INTO consolidation_raw_map(source_id, target_id)
          SELECT s.store_id, t.store_id FROM source.lcm_raw_messages s
-         JOIN lcm_raw_messages t ON t.provider=s.provider AND t.message_id=s.message_id;
+         LEFT JOIN consolidation_message_map m
+           ON m.provider=s.provider AND m.original_id=s.message_id
+         JOIN lcm_raw_messages t
+           ON t.provider=s.provider
+          AND t.message_id=CASE WHEN m.raw_content_divergent=1
+                                THEN m.mapped_id ELSE s.message_id END;
 
          INSERT OR IGNORE INTO lcm_external_payloads(
              payload_ref, provider, session_id, message_id, kind, content_hash,
              byte_count, char_count, created_at, metadata_json
-         ) SELECT payload_ref, provider, session_id, message_id, kind, content_hash,
-             byte_count, char_count, created_at, metadata_json FROM source.lcm_external_payloads;
+         ) SELECT s.payload_ref, s.provider, s.session_id,
+             CASE WHEN m.raw_content_divergent=1 THEN m.mapped_id ELSE s.message_id END,
+             s.kind, s.content_hash,
+             s.byte_count, s.char_count, s.created_at, s.metadata_json
+         FROM source.lcm_external_payloads s
+         LEFT JOIN consolidation_message_map m
+           ON m.provider=s.provider AND m.original_id=s.message_id
+         WHERE NOT EXISTS (
+             SELECT 1 FROM target_input.lcm_external_payloads t
+             WHERE t.payload_ref=s.payload_ref
+         );
          INSERT OR IGNORE INTO lcm_gc_marks(payload_ref, state, first_seen_at, updated_at)
          SELECT payload_ref, state, first_seen_at, updated_at FROM source.lcm_gc_marks;
          INSERT OR IGNORE INTO lcm_gc_meta(key, value) SELECT key, value FROM source.lcm_gc_meta;
@@ -644,10 +891,16 @@ async fn merge_sessions_tx(conn: &Connection, offsets: &SessionMergeOffsets) -> 
              commit_sha, provider, session_id, branch, worktree, committed_at,
              span_overlap_kind, span_id, relation, evidence, confidence,
              evidence_message_id, created_at
-         ) SELECT commit_sha, provider, session_id, branch, worktree, committed_at,
-             span_overlap_kind, CASE WHEN span_id IS NULL THEN NULL ELSE span_id + {span} END,
-             relation, evidence, confidence, evidence_message_id, created_at
-         FROM source.commit_sessions;
+         ) SELECT cs.commit_sha, cs.provider, cs.session_id, cs.branch, cs.worktree,
+             cs.committed_at, cs.span_overlap_kind,
+             CASE WHEN cs.span_id IS NULL THEN NULL ELSE cs.span_id + {span} END,
+             cs.relation, cs.evidence, cs.confidence,
+             COALESCE((SELECT mapped_id FROM consolidation_message_map m
+                       WHERE m.provider=cs.provider
+                         AND m.original_id=cs.evidence_message_id),
+                      cs.evidence_message_id),
+             cs.created_at
+         FROM source.commit_sessions cs;
          UPDATE commit_sessions AS t SET
              branch = (SELECT s.branch FROM source.commit_sessions s WHERE s.commit_sha=t.commit_sha AND s.provider=t.provider AND s.session_id=t.session_id),
              worktree = (SELECT s.worktree FROM source.commit_sessions s WHERE s.commit_sha=t.commit_sha AND s.provider=t.provider AND s.session_id=t.session_id),
@@ -657,7 +910,12 @@ async fn merge_sessions_tx(conn: &Connection, offsets: &SessionMergeOffsets) -> 
              relation = (SELECT s.relation FROM source.commit_sessions s WHERE s.commit_sha=t.commit_sha AND s.provider=t.provider AND s.session_id=t.session_id),
              evidence = (SELECT s.evidence FROM source.commit_sessions s WHERE s.commit_sha=t.commit_sha AND s.provider=t.provider AND s.session_id=t.session_id),
              confidence = (SELECT s.confidence FROM source.commit_sessions s WHERE s.commit_sha=t.commit_sha AND s.provider=t.provider AND s.session_id=t.session_id),
-             evidence_message_id = (SELECT s.evidence_message_id FROM source.commit_sessions s WHERE s.commit_sha=t.commit_sha AND s.provider=t.provider AND s.session_id=t.session_id)
+             evidence_message_id = (SELECT COALESCE(
+                 (SELECT mapped_id FROM consolidation_message_map m
+                  WHERE m.provider=s.provider AND m.original_id=s.evidence_message_id),
+                 s.evidence_message_id)
+                 FROM source.commit_sessions s
+                 WHERE s.commit_sha=t.commit_sha AND s.provider=t.provider AND s.session_id=t.session_id)
          WHERE EXISTS (
              SELECT 1 FROM source.commit_sessions s
              WHERE s.commit_sha=t.commit_sha AND s.provider=t.provider AND s.session_id=t.session_id
@@ -677,8 +935,11 @@ async fn merge_sessions_tx(conn: &Connection, offsets: &SessionMergeOffsets) -> 
 
          INSERT OR IGNORE INTO dashboard_token_counts(
              store, provider, message_id, text_len, encoder, token_count, computed_at
-         ) SELECT store, provider, message_id, text_len, encoder, token_count, computed_at
-         FROM source.dashboard_token_counts;",
+         ) SELECT s.store, s.provider, COALESCE(m.mapped_id, s.message_id),
+             s.text_len, s.encoder, s.token_count, s.computed_at
+         FROM source.dashboard_token_counts s
+         LEFT JOIN consolidation_message_map m
+           ON m.provider=s.provider AND m.original_id=s.message_id;",
         raw = offsets.raw,
         span = offsets.span,
         savings = offsets.savings,
