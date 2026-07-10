@@ -324,10 +324,11 @@ impl Database {
         }
     }
 
-    /// Rebuilds the FTS5 index from the content table.
+    /// Maintenance-only: rebuilds the FTS5 index from the content table.
     ///
     /// This fixes FTS-only corruption (e.g. from an interrupted bulk load)
-    /// without requiring a full re-index of the codebase.
+    /// without requiring a full re-index of the codebase. Callers must hold
+    /// exclusive maintenance ownership; read paths must never invoke this.
     pub async fn rebuild_fts(&self) -> Result<()> {
         self.conn
             .execute("INSERT INTO nodes_fts(nodes_fts) VALUES('rebuild')", ())
