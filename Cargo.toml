@@ -142,6 +142,7 @@ self-replace = "1"
 memmap2 = "0.9"
 crossterm = "0.28"
 fs2 = "0.4"
+same-file = "1"
 reflink-copy = "0.1"
 sysinfo = { version = "0.32", default-features = false, features = ["system"] }
 tree-sitter-hlsl = { version = "0.2.0", optional = true }

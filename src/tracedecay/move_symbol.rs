@@ -66,6 +66,19 @@ impl TraceDecay {
         }
 
         let source_abs = self.project_root.join(&source_rel);
+        let dest_abs = self.project_root.join(&dest_rel);
+        validate_write_containment(&self.project_root, &source_abs, "source")?;
+        validate_write_containment(&self.project_root, &dest_abs, "destination")?;
+        if same_existing_file(&source_abs, &dest_abs) {
+            return Ok(fail(
+                format!(
+                    "destination resolves to the symbol's own file ({source_rel}); nothing to move"
+                ),
+                Vec::new(),
+            ));
+        }
+        let source_write_abs = write_path_preserving_final_symlink(&source_abs, "source")?;
+        let dest_write_abs = write_path_preserving_final_symlink(&dest_abs, "destination")?;
         let source = std::fs::read_to_string(&source_abs).map_err(|e| TraceDecayError::Config {
             message: format!("failed to read {source_rel}: {e}"),
         })?;
@@ -135,7 +148,6 @@ impl TraceDecay {
         // destination file) from "exists but unreadable" (e.g. non-UTF8). Only
         // the former is treated as empty; an unreadable existing file must refuse
         // rather than be silently clobbered.
-        let dest_abs = self.project_root.join(&dest_rel);
         let (dest_original, dest_existed) = match std::fs::read_to_string(&dest_abs) {
             Ok(text) => (text, true),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => (String::new(), false),
@@ -209,27 +221,54 @@ impl TraceDecay {
             });
         }
 
-        // Apply: write the destination first (the symbol now exists in both
-        // places — recoverable), then remove it from the source. Reindex both.
-        if let Some(parent) = dest_abs.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| TraceDecayError::Config {
-                message: format!("failed to create destination directory: {e}"),
-            })?;
-        }
-        tokio::fs::write(&dest_abs, &dest_modified)
-            .await
-            .map_err(|e| TraceDecayError::Config {
-                message: format!("failed to write {dest_rel}: {e}"),
-            })?;
-        if let Err(e) = tokio::fs::write(&source_abs, &source_modified).await {
+        // Apply only if both files still match the snapshots used to build the
+        // move. Dependency analysis can take long enough for another agent or
+        // editor to change either file; blindly writing those stale snapshots
+        // would discard unrelated work.
+        ensure_text_unchanged(&source_abs, Some(&source), &source_rel)?;
+        ensure_text_unchanged(
+            &dest_abs,
+            dest_existed.then_some(dest_original.as_str()),
+            &dest_rel,
+        )?;
+
+        // Write each file through an atomic sibling rename. Destination first
+        // deliberately leaves a duplicate symbol (recoverable) rather than a
+        // missing one if the process stops between the two commits.
+        crate::agents::safe_write_text_file(&dest_write_abs, &dest_modified, None)?;
+        if let Err(e) = ensure_text_unchanged(&source_abs, Some(&source), &source_rel)
+            .and_then(|()| ensure_text_unchanged(&dest_abs, Some(&dest_modified), &dest_rel))
+            .and_then(|()| {
+                crate::agents::safe_write_text_file(&source_write_abs, &source_modified, None)
+            })
+        {
             // Roll back so a half-applied move leaves no trace. If the
             // destination existed before, restore its original bytes; if we
             // created it, delete it (and any now-empty parent dirs we created)
-            // rather than leaving an empty file behind.
-            if dest_existed {
-                let _ = tokio::fs::write(&dest_abs, &dest_original).await;
+            // rather than leaving an empty file behind. Never overwrite a
+            // third party's destination edit while rolling back.
+            let rollback = if std::fs::read_to_string(&dest_abs).ok().as_deref()
+                == Some(dest_modified.as_str())
+            {
+                if dest_existed {
+                    crate::agents::safe_write_text_file(&dest_write_abs, &dest_original, None)
+                } else {
+                    std::fs::remove_file(&dest_write_abs).map_err(|remove_error| {
+                        TraceDecayError::Config {
+                            message: format!(
+                                "failed to remove newly-created destination {dest_rel}: {remove_error}"
+                            ),
+                        }
+                    })
+                }
             } else {
-                let _ = tokio::fs::remove_file(&dest_abs).await;
+                Err(TraceDecayError::Config {
+                    message: format!(
+                        "destination {dest_rel} changed concurrently; refusing to overwrite it during rollback"
+                    ),
+                })
+            };
+            if !dest_existed && rollback.is_ok() {
                 let mut dir = dest_abs.parent().map(Path::to_path_buf);
                 while let Some(d) = dir {
                     if d == self.project_root {
@@ -244,7 +283,14 @@ impl TraceDecay {
                 }
             }
             return Err(TraceDecayError::Config {
-                message: format!("failed to write {source_rel}: {e}; destination rolled back"),
+                message: match rollback {
+                    Ok(()) => format!(
+                        "move aborted before writing {source_rel}: {e}; destination rolled back"
+                    ),
+                    Err(rollback_error) => format!(
+                        "move aborted before writing {source_rel}: {e}; rollback incomplete: {rollback_error}"
+                    ),
+                },
             });
         }
         self.reindex_file(&dest_rel).await?;
@@ -545,6 +591,94 @@ impl TraceDecay {
             }
         }
         false
+    }
+}
+
+/// Reject a destination whose existing file or nearest existing parent
+/// resolves outside the canonical project root. This covers both a symlinked
+/// destination file and a symlinked directory component while still allowing
+/// symlinks that stay inside the checkout.
+fn validate_write_containment(project_root: &Path, path: &Path, label: &str) -> Result<()> {
+    let canonical_root = project_root
+        .canonicalize()
+        .map_err(|e| TraceDecayError::Config {
+            message: format!(
+                "failed to canonicalize project root '{}': {e}",
+                project_root.display()
+            ),
+        })?;
+    let mut existing = path;
+    loop {
+        match std::fs::symlink_metadata(existing) {
+            Ok(_) => break,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                existing = existing.parent().ok_or_else(|| TraceDecayError::Config {
+                    message: format!("{label} '{}' has no existing parent", path.display()),
+                })?;
+            }
+            Err(e) => {
+                return Err(TraceDecayError::Config {
+                    message: format!("failed to inspect {label} '{}': {e}", path.display()),
+                });
+            }
+        }
+    }
+    let canonical_existing = existing
+        .canonicalize()
+        .map_err(|e| TraceDecayError::Config {
+            message: format!("failed to resolve {label} '{}': {e}", path.display()),
+        })?;
+    if !canonical_existing.starts_with(&canonical_root) {
+        return Err(TraceDecayError::Config {
+            message: format!(
+                "{label} '{}' escapes project root through '{}'",
+                path.display(),
+                existing.display()
+            ),
+        });
+    }
+    Ok(())
+}
+
+fn same_existing_file(source: &Path, destination: &Path) -> bool {
+    same_file::is_same_file(source, destination).unwrap_or(false)
+}
+
+fn write_path_preserving_final_symlink(path: &Path, label: &str) -> Result<PathBuf> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            path.canonicalize().map_err(|e| TraceDecayError::Config {
+                message: format!("failed to resolve {label} '{}': {e}", path.display()),
+            })
+        }
+        Ok(_) => Ok(path.to_path_buf()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(path.to_path_buf()),
+        Err(e) => Err(TraceDecayError::Config {
+            message: format!("failed to inspect {label} '{}': {e}", path.display()),
+        }),
+    }
+}
+
+fn ensure_text_unchanged(path: &Path, expected: Option<&str>, label: &str) -> Result<()> {
+    match expected {
+        Some(expected) => match std::fs::read_to_string(path) {
+            Ok(current) if current == expected => Ok(()),
+            Ok(_) => Err(TraceDecayError::Config {
+                message: format!("{label} changed while the move was being prepared; retry"),
+            }),
+            Err(e) => Err(TraceDecayError::Config {
+                message: format!("failed to re-read {label} before applying move: {e}"),
+            }),
+        },
+        None => match std::fs::symlink_metadata(path) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Ok(_) => Err(TraceDecayError::Config {
+                message: format!("{label} was created while the move was being prepared; retry"),
+            }),
+            Err(e) => Err(TraceDecayError::Config {
+                message: format!("failed to re-check {label} before applying move: {e}"),
+            }),
+        },
     }
 }
 
@@ -1037,6 +1171,58 @@ fn combined_diff(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn same_existing_file_detects_hard_link() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("source.rs");
+        let alias = dir.path().join("alias.rs");
+        std::fs::write(&source, "fn source() {}\n").unwrap();
+        std::fs::hard_link(&source, &alias).unwrap();
+        assert!(same_existing_file(&source, &alias));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn atomic_write_target_preserves_final_symlink() {
+        use std::os::unix::fs as unix_fs;
+
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("target.rs");
+        let alias = dir.path().join("alias.rs");
+        std::fs::write(&target, "fn old() {}\n").unwrap();
+        unix_fs::symlink(&target, &alias).unwrap();
+
+        let write_path = write_path_preserving_final_symlink(&alias, "test").unwrap();
+        crate::agents::safe_write_text_file(&write_path, "fn new() {}\n", None).unwrap();
+
+        assert!(
+            std::fs::symlink_metadata(&alias)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "fn new() {}\n");
+    }
+
+    #[test]
+    fn optimistic_write_guard_rejects_changed_or_created_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let existing = dir.path().join("existing.rs");
+        let created = dir.path().join("created.rs");
+        std::fs::write(&existing, "fn before() {}\n").unwrap();
+        std::fs::write(&existing, "fn concurrent() {}\n").unwrap();
+        std::fs::write(&created, "fn appeared() {}\n").unwrap();
+
+        let changed = ensure_text_unchanged(&existing, Some("fn before() {}\n"), "source")
+            .unwrap_err()
+            .to_string();
+        assert!(changed.contains("changed while the move was being prepared"));
+        let appeared = ensure_text_unchanged(&created, None, "destination")
+            .unwrap_err()
+            .to_string();
+        assert!(appeared.contains("was created while the move was being prepared"));
+    }
 
     #[test]
     fn rust_module_path_maps_src_layout() {

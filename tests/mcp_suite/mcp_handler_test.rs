@@ -17016,6 +17016,91 @@ async fn test_move_symbol_dot_prefixed_same_file_refuses() {
     );
 }
 
+/// A destination reached through a symlink outside the checkout must be
+/// rejected before either file is written.
+#[cfg(unix)]
+#[tokio::test]
+async fn test_move_symbol_symlink_escape_refuses() {
+    let dir = test_temp_dir();
+    let project = dir.path();
+    move_pricing_fixture(project).await;
+    let outside = tempfile::tempdir().unwrap();
+    unix_fs::symlink(outside.path(), project.join("src/escape")).unwrap();
+    let (cg, _env) = init_test_project(project).await;
+    cg.index_all().await.unwrap();
+
+    let before = fs::read_to_string(project.join("src/pricing.rs")).unwrap();
+    let error = expect_tool_error(
+        handle_tool_call(
+            &cg,
+            "tracedecay_move_symbol",
+            json!({
+                "symbol": "compute_grand_total",
+                "dest_file": "src/escape/grand_total.rs",
+                "dry_run": false
+            }),
+            None,
+            None,
+        )
+        .await,
+    );
+    assert!(
+        error.contains("escapes project root"),
+        "unexpected error: {error}"
+    );
+    assert_eq!(
+        fs::read_to_string(project.join("src/pricing.rs")).unwrap(),
+        before
+    );
+    assert!(!outside.path().join("grand_total.rs").exists());
+}
+
+/// Lexically different destinations that resolve to the source inode (a
+/// symlink or hard link) are the same-file data-loss case too.
+#[cfg(unix)]
+#[tokio::test]
+async fn test_move_symbol_aliases_to_source_refuse() {
+    for hard_link in [false, true] {
+        let dir = test_temp_dir();
+        let project = dir.path();
+        move_pricing_fixture(project).await;
+        let source = project.join("src/pricing.rs");
+        let alias = project.join("src/pricing_alias.rs");
+        if hard_link {
+            fs::hard_link(&source, &alias).unwrap();
+        } else {
+            unix_fs::symlink(&source, &alias).unwrap();
+        }
+        let (cg, _env) = init_test_project(project).await;
+        cg.index_all().await.unwrap();
+
+        let before = fs::read_to_string(&source).unwrap();
+        let result = handle_tool_call(
+            &cg,
+            "tracedecay_move_symbol",
+            json!({
+                "symbol": "src/pricing.rs::compute_grand_total",
+                "dest_file": "src/pricing_alias.rs",
+                "dry_run": false
+            }),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        let payload = move_payload(&result);
+        assert_eq!(payload["success"], false, "payload: {payload}");
+        assert!(
+            payload["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("symbol's own file"),
+            "payload: {payload}"
+        );
+        assert_eq!(fs::read_to_string(&source).unwrap(), before);
+    }
+}
+
 /// A `./`-prefixed different-file destination must behave identically to the
 /// unprefixed form: the path is normalized, the move applies, and the reported
 /// `dest_file` is the canonical `src/grand_total.rs`.
