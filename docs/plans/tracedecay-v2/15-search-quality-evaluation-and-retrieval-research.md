@@ -6,7 +6,7 @@
 
 **Decision:** Keep exact phrase/BM25 as the mandatory baseline. Evaluate character-fuzzy, entity/graph, local dense, learned-sparse, fusion, late interaction, cross-encoder reranking, expansion, recency, clustering, and diversification as independently removable stages. No neural component becomes default without measured real-world gains.
 
-**Publication baseline (2026-07-10):** `origin/master` `6c4b8b91`; #407/#410/#411/#413/#414/#415/#416/#417/#419/#420/#422/#423/#424 merged, #418 open. Refresh before corpus freeze. Treat #410 origin/representative views, #414/#419 `move_symbol` capability/safety text, #417 split identity, #420 proxy/store authority, #422 host-versus-daemon catalog-refresh semantics, #423 direction-preserving FTS5 normalization/exact-operational-evidence/counters, and #424 aggregate-before-sample analytics as current behavior; retain their pre-fix failures as labeled regressions.
+**Publication baseline (2026-07-10):** `origin/master` `3567e31e` at 0.0.48 includes merged #418/#425 plus the earlier accepted inputs; only draft plan PR #421 was open. Refresh before corpus freeze. Treat origin/representative views, `move_symbol` safety, split identity/consolidation, proxy/store authority, catalog refresh, direction-preserving FTS5/counters, and aggregate-before-sample analytics as current behavior; retain pre-fix failures as labeled regressions.
 
 ## 0. Boundary and contract integration
 

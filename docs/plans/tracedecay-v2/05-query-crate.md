@@ -96,7 +96,7 @@ The V1 policy-specific seams (`src/hooks/tool_hints*`, correlation scoring, sche
 - PR #407 (`fix(hermes): use the user TraceDecay profile`) consolidates Hermes into the user profile and removes Hermes-local bridge/config/inventory paths. `All` and every cursor bind to the canonical user `ProfileId`; query planning must not open or federate an implicit Hermes profile. Duplicate imported rows are reconciled by the migration manifest before query exposure.
 - PR #410 (`fix(sessions): collapse copied subagent prompts`) is the V1 semantic baseline for query-time parent representative dedupe and `direct_user`/`subagent`/`tool_result` filters. V2 adds raw/native, representative, human/direct-user, subagent, tool-result, and protocol modes with hidden-copy counts, classifier version, and provenance; it never deletes copied native rows.
 - PR #411 (`fix(doctor): report foreign-installation skill packages as info, not update-nag`) makes ownership and remediation agreement query-visible: Observatory/skills queries return owner class, severity, actionable capability, and `no_action_for_this_installation`; they cannot recommend a mutation the current installation refuses.
-- Publication master `6c4b8b91` includes #407/#410/#411/#413/#414/#415/#416/#417/#419/#420/#422/#423/#424. Open #418 is refreshed before PR 11; #417's split-identity visibility is a required scope/coverage fixture, #414/#419's edit capability is catalog/application behavior rather than a query operator, and #423/#424 retrieval/accounting behaviors are accepted regression inputs. PR #409 remains historical.
+- Publication master `3567e31e` (0.0.48) includes merged #418/#425 plus the earlier accepted inputs; only draft plan PR #421 was open at final refresh. #417/#425 split-identity/consolidation behavior is a required scope/coverage fixture, #414/#419 edit capability remains catalog/application behavior rather than a query operator, and #423/#424 retrieval/accounting behavior is accepted regression input.
 - Rebase PR 11 onto then-current master, regenerate store/profile/tool inventories, and rerun V1 golden queries. Deleted transition paths are not V2 extension points.
 
 ## 5. Exact File and Module Tree
@@ -255,19 +255,15 @@ pub struct TraceQueryV1 {
 ```
 
 ```rust
-pub struct TemporalClauseV1 {
-    pub mode: TemporalModeV1,
-}
-
-pub enum TemporalModeV1 {
+pub enum TemporalClauseV1 {
     Current,
     AsOf { valid_time: UtcMicros, knowledge_time: UtcMicros },
-    Evolution { from: Option<UtcMicros>, to: UtcMicros },
+    Evolution,
     Forensic,
 }
 ```
 
-`TemporalClauseV1` is owned by `tracedecay-domain` ([`01-domain-crate.md`](01-domain-crate.md)); this crate plans and executes it (Section 11.4). `AsOf` requires both `valid_time` and `knowledge_time` — a single-timestamp as-of is rejected at validation, because “what was known then” needs both cutoffs (Section 11.4). Plan [`23-session-lcm-temporal-retrieval-and-evaluation.md`](23-session-lcm-temporal-retrieval-and-evaluation.md) rides this clause for current/as-of/evolution/forensic session retrieval and defines no parallel AST.
+`TemporalClauseV1` is owned by `tracedecay-domain` ([`01-domain-crate.md`](01-domain-crate.md)); this crate re-exports and executes that exact enum (Section 11.4). `AsOf` requires both `valid_time` and `knowledge_time` — a single-timestamp as-of is rejected at validation, because “what was known then” needs both cutoffs (Section 11.4). `Evolution` bounds come only from the enclosing `TraceQueryV1.time` predicate. Plan [`23-session-lcm-temporal-retrieval-and-evaluation.md`](23-session-lcm-temporal-retrieval-and-evaluation.md) rides this clause for current/as-of/evolution/forensic session retrieval and defines no parallel AST.
 
 Grouping, comparison intervals, relation evidence filters, code predicates, sampling/downsampling, and saved-collection expansion are encoded through registered attributes/predicates and query profiles until a versioned domain schema adds fields; the query crate must not fork `TraceQueryV1` to add them.
 
@@ -564,21 +560,21 @@ struct CursorV1 {
     version: u16,
     issued_at: UtcMicros,
     expires_at: UtcMicros,
-    query_digest: KeyedLocatorDigest,
-    access_digest: KeyedLocatorDigest,
-    scope_set_digest: KeyedLocatorDigest,
-    catalog_generation: CatalogGeneration,
+    query_digest: PrivacyDomainBoundLocatorDigest,
+    access_digest: AccessPolicyDigest,
+    scope_digest: ScopeSelectorDigest,
+    profile_catalog_generation: ManifestDigest,
     temporal: Option<TemporalClauseV1>,
-    intent_profile: Option<IntentProfileRef>,
+    intent_profile_version: Option<ComponentVersion>,
     schema_version: QuerySchemaVersion,
     ranking: RankingProfileRef,
     index_versions: BTreeMap<ShardId, IndexVersionSet>,
     snapshot: FrozenSnapshot,
     per_shard_positions: BTreeMap<ShardId, ShardCursorPosition>,
-    shard_dispositions: BTreeMap<ShardId, ShardDisposition>,
+    shard_dispositions: BTreeMap<ShardId, ShardDispositionV1>,
     sort_cutoff: Vec<SortValue>,
     last_entity_id: Option<EntityId>,
-    emitted_ids_digest: KeyedLocatorDigest,
+    emitted_ids_digest: ManifestDigest,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
@@ -587,33 +583,12 @@ pub struct StableSortKey {
     pub entity_id: EntityRef,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct IndexVersionSet {
-    pub schema_version: QuerySchemaVersion,
-    pub fts_index_generation: IndexGeneration,
-    pub vector_index_generation: Option<IndexGeneration>,
-    pub graph_generation: Option<GraphGeneration>,
-    pub cluster_projection_version: Option<ProjectionVersion>,
-    pub summary_projection_version: Option<ProjectionVersion>,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct ShardCursorPosition {
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct QueryShardMergeStateV1 {
     pub last_sort_key: Vec<SortValue>,
     pub last_entity_id: EntityId,
     pub rows_emitted: u64,
     pub exhausted: bool,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub enum ShardDisposition {
-    Searched,
-    Skipped { reason: SkipReason },
-    Stale { last_fresh_at: UtcMicros },
-    Unavailable { reason: UnavailableReason },
-    Incompatible,
-    Locked,
-    Redacted,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -621,19 +596,21 @@ struct LiveDeltaCursorV1 {
     version: u16,
     issued_at: UtcMicros,
     expires_at: UtcMicros,
-    query_digest: KeyedLocatorDigest,
-    access_digest: KeyedLocatorDigest,
+    query_digest: PrivacyDomainBoundLocatorDigest,
+    access_digest: AccessPolicyDigest,
     snapshot: FrozenSnapshot,
     per_shard_outbox: BTreeMap<ShardId, OutboxSequence>,
-    suppression_digest: KeyedLocatorDigest,
+    suppression_digest: PrivacyDomainBoundLocatorDigest,
 }
 ```
 
-`CursorV1` is the query crate's private signing/codec representation of the extended domain `CursorClaimsV1` ([`01-domain-crate.md`](01-domain-crate.md)), which binds scope-set digest, catalog generation, temporal mode and cutoff, intent-profile version, and partial-shard dispositions in addition to the original claim fields; every field maps one-to-one and schema tests compare canonical encodings before authentication. Digest fields are privacy-domain-bound keyed locator digests (`KeyedLocatorDigest`, the plan [`18-secret-detection-redaction-and-private-data-safety.md`](18-secret-detection-redaction-and-private-data-safety.md) keyed-fingerprint contract) — never plain `ContentDigest` content hashes, so no cross-domain equality join is possible on cursor bytes. `StableSortKey` is the in-memory merge key and lowers to `sort_cutoff` plus `last_entity_id` in the claim.
+`IndexVersionSet` and `ShardCursorPosition` are imported unchanged from plan 01. Registered index-family generations (`fts`, `vector`, `graph`, cluster, summary, and future families) occupy the domain `IndexVersionSet` map. `QueryShardMergeStateV1` is private in-memory merge state; the owning store serializes its bounded opaque continuation into domain `ShardCursorPosition.resume` and binds the captured watermark. It never becomes a second public cursor-position shape.
+
+`CursorV1` is the query crate's private signing/codec representation of the domain `CursorClaimsV1` ([`01-domain-crate.md`](01-domain-crate.md)); every field and type maps one-to-one and schema tests compare canonical encodings before authentication. It imports `ShardDispositionV1` unchanged. Query/access/scope digests use `PrivacyDomainBoundLocatorDigest`, `AccessPolicyDigest`, and `ScopeSelectorDigest`; no plain content hash or query literal appears in cursor bytes. `StableSortKey` is the in-memory merge key and lowers to `sort_cutoff` plus `last_entity_id` in the claim.
 
 - Encode canonical CBOR, authenticate with the profile's active cursor HMAC key, then base64url without padding. The envelope prefixes an unauthenticated `key_id` header used only to select the verification key; all claims live inside the authenticated CBOR body. A cursor contains no raw query literal, payload, secret alias, or filesystem path.
-- Cursor signing keys have an explicit lifecycle record persisted in the profile catalog/store (shared with plan [`17-official-public-api-and-sdks.md`](17-official-public-api-and-sdks.md)'s contract IR): `CursorKeyRecordV1 { key_id: CursorKeyId, profile_id: ProfileId, state: Active | Retiring | Revoked, created_at: UtcMicros, retire_after: Option<UtcMicros>, revoked_at: Option<UtcMicros> }`. Exactly one key per profile is `Active`; new cursors are signed only with it. Rotation moves the previous key to `Retiring`, which still verifies until `retire_after` (at least the maximum outstanding cursor expiry, so ≥24 hours after rotation). `Revoked` keys fail immediately with restart reason `cursor_key_revoked`. Because keys persist in the store rather than process memory, cursors remain valid across daemon restart and upgrade; rotation is an application command that produces the cursor-key rotation receipt archived in Section 18.
-- Default expiry is 24 hours. An application may request a shorter duration.
+- Cursor signing keys have an explicit lifecycle record persisted in the profile catalog/store (shared with plan [`17-official-public-api-and-sdks.md`](17-official-public-api-and-sdks.md)'s contract IR): `CursorKeyRecordV1 { key_id: CursorKeyId, profile_id: ProfileId, state: Active | Retiring | Revoked, created_at: UtcMicros, retire_after: Option<UtcMicros>, revoked_at: Option<UtcMicros> }`. Exactly one key per profile is `Active`; new cursors are signed only with it. Rotation moves the previous key to `Retiring`, which still verifies until `retire_after` for at least the maximum outstanding catalog-declared cursor/subscription/export lifetime. `Revoked` keys fail immediately with restart reason `cursor_key_revoked`. Because keys persist in the store rather than process memory, cursors remain valid across daemon restart and upgrade; rotation is an application command that produces the cursor-key rotation receipt archived in Section 18.
+- Interactive expiry is plan 20 descriptor `query.cursor.interactive_ttl`, default 15 minutes. Export/bulk continuations use their catalog-declared job lifetime; no adapter supplies an arbitrary duration.
 - Resume validates MAC, expiry, query fingerprint, access digest, scope-set digest, catalog generation, temporal clause, intent profile, schema, ranking, index generations, retention horizon, and each shard identity before opening a shard.
 - Resuming a fused-rank cursor re-executes every enabled channel over the frozen snapshot (identical index generations and watermarks), re-fuses deterministically, verifies that the re-fused emitted prefix reproduces `emitted_ids_digest`, and then skips past `sort_cutoff`/`last_entity_id`. Per-shard positions bound the rescan work; the recomputation is charged to the resuming request's `CostBudget` and counted in `QueryTiming`. A prefix/digest mismatch returns the typed restart reason `cursor_nondeterministic_resume`.
 - `emitted_ids_digest` is a keyed digest over the ordered, already-emitted canonical `EntityRef`s. It verifies deterministic resume; duplicate suppression comes from deterministic re-fusion plus the cutoff skip, never from the digest alone.
@@ -674,20 +651,9 @@ pub struct MessageViewReport {
     pub classifier: Option<ProducerRef>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct CoverageReportV1 {
-    pub complete: bool,
-    pub searched: Vec<ShardCoverage>,
-    pub skipped: Vec<ShardCoverage>,
-    pub stale: Vec<ShardCoverage>,
-    pub unavailable: Vec<ShardCoverage>,
-    pub incompatible: Vec<ShardCoverage>,
-    pub locked: Vec<ShardCoverage>,
-    pub redacted: Vec<ShardCoverage>,
-}
 ```
 
-`CoverageReportV1` is the canonical shared domain type owned by [`01-domain-crate.md`](01-domain-crate.md), whose definition is finalized from this crate's usage (disposition shard lists plus freshness watermarks and an unknown-coverage flag); this crate consumes and produces it and defines no fork.
+`CoverageReportV1` is imported unchanged from [`01-domain-crate.md`](01-domain-crate.md). Query fills its disposition vectors, freshness, retention watermark, and `unknown_coverage`; consumers derive completeness only through the domain `is_complete()` rule. This crate defines no `complete` field, `ShardCoverage` fork, or alternate coverage shape.
 
 ```rust
 
@@ -1044,7 +1010,7 @@ Program numbering is authoritative: PR 12 is implemented in dependency order as 
 
 **Files:** `src/cursor.rs`, `src/execute/resume.rs`, `tests/cursor_resume.rs`.
 
-- [ ] Add tests `round_trips_cursor_without_plaintext`, `rejects_tampering`, `rejects_query_or_access_mismatch`, `expires_after_24_hours`, `invalidates_replaced_index_and_retention_crossing`, `resume_preserves_missing_shard_position`, and `live_ingest_does_not_change_frozen_pages`.
+- [ ] Add tests `round_trips_cursor_without_plaintext`, `rejects_tampering`, `rejects_query_or_access_mismatch`, `expires_at_configured_interactive_ttl`, `key_retirement_covers_max_declared_lifetime`, `invalidates_replaced_index_and_retention_crossing`, `resume_preserves_missing_shard_position`, and `live_ingest_does_not_change_frozen_pages`.
 - [ ] Run `cargo test -p tracedecay-query --test cursor_resume -- --nocapture`. Expected: compilation fails because `CursorCodec` is absent.
 - [ ] Implement canonical CBOR + HMAC-SHA256 + base64url codec and all validations in Section 9. Fixture clocks and keys are explicit bytes; no ambient time or global key lookup.
 - [ ] Re-run the command. Expected: 7 tests pass; concatenated cursor bytes do not contain the query literal or sensitive path; page union has no duplicates/gaps under interleaved ingest.

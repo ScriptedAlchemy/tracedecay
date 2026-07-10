@@ -38,7 +38,7 @@ Plan [`16-cross-project-repository-worktree-scope.md`](16-cross-project-reposito
 
 This crate is the sole extraction/indexing/generation-build owner in [`19-system-defragmentation-convergence-and-extensibility.md`](19-system-defragmentation-convergence-and-extensibility.md); third-party language support plugs into its registry through the plan 19 §7.2 code extractor/grammar SPI (isolated-subprocess tier for native runtimes, per 19 §7.3). It consumes domain contracts from [`01-domain-crate.md`](01-domain-crate.md), sanitized observations produced by [`03-capture-crate.md`](03-capture-crate.md), and store ports from [`02-store-crate.md`](02-store-crate.md) ("Graph generation store"); it produces builds executed inside [`04-projectors-crate.md`](04-projectors-crate.md) PR 18 and queried by [`05-query-crate.md`](05-query-crate.md) §11.4.
 
-Adding this crate satisfies the plan 19 §6.1 new-crate criteria explicitly: two real consumers (projectors' `code_evidence_v1` build port and root daemon composition's intake planner), a coherent bounded-context boundary (Code Intelligence production side), a dependency direction that only points at `tracedecay-domain`, the public contract and non-goals in this plan, independent tests/benchmarks, and the PR 33G/37C deletion/migration path for the V1 code it replaces. The workspace/dependency-DAG listing gains `tracedecay-code-index` in the plan 19 C0/C1 inventory slices.
+Adding this crate satisfies the plan 19 §6.1 new-crate criteria explicitly: two real consumers in root composition (the production adapter implementing projectors' consumer-owned `code_evidence_v1` build port, and the daemon intake planner), a coherent bounded-context boundary (Code Intelligence production side), a dependency direction that only points at `tracedecay-domain`, the public contract and non-goals in this plan, independent tests/benchmarks, and the PR 33G/37C deletion/migration path for the V1 code it replaces. The workspace/dependency-DAG listing gains `tracedecay-code-index` in the plan 19 C0/C1 inventory slices.
 
 | Boundary | Contract |
 |---|---|
@@ -56,18 +56,18 @@ Adding this crate satisfies the plan 19 §6.1 new-crate criteria explicitly: two
 
 - `tracedecay-domain`: `EntityRef`, `CodeSnapshotId`, `GraphGenerationId`, symbol identity/occurrence/diagnostic/test entity kinds, code lineage/change/impact predicates, `RelationAssertionV1`, `ScopeSelectorV2`/`ScopeResolutionV2`, `VectorWatermark`, `CoverageReportV1`, sensitivity/retention classes, and sink-eligible text wrappers.
 - Plan 03 outputs: sanitized `code.snapshot_observed`/`code.file_observed` observation families from the `code_snapshot` adapter, each binding one complete `SanitizationReceiptV1` (minted by capture, persisted per shard in plan 02's `sanitization_receipts` table), plus plan 03's fixed quarantine vocabulary (including `ownership_conflict` and `identity_collision`).
-- Plan 02 ports, indirectly through the projector-owned build port: `GenerationWriter` staging, manifest verification, `open_resolved_snapshot`, and the storage ADR pack/overlay constants ("Graph generation store": 32/64/128 snapshots per pack, 512 MiB/1 GiB/2 GiB targets, overlay depth 2/4/8).
+- Plan 02 ports, only behind plan 04's projector-owned integration: `GenerationWriter` staging, manifest verification, `open_resolved_snapshot`, and the storage ADR pack/overlay constants ("Graph generation store": 32/64/128 snapshots per pack, 512 MiB/1 GiB/2 GiB targets, overlay depth 2/4/8).
 - Identity ledger results: symbol entities without an exact native key allocate through the store's `AllocationRequest` path exactly as plan 01 specifies; this crate proposes, it never mints UUIDs.
 
 ### Produces
 
 - `ExtractionOutput` rows (occurrences, edges, annotations, per-file coverage) derived from receipt-bound content with descendant lineage intact.
-- `GenerationBuildPlanV1`, canonical ordered generation rows, `GenerationDigest`, overlay plans, and compaction plans consumed by plan 04 PR 18 through `GenerationBuilderPort`.
+- `GenerationBuildPlanV1`, canonical ordered generation rows, the domain-owned `GenerationDigest`, overlay plans, and compaction plans consumed by plan 04 PR 18G through `CodeIndexBuilderV1`.
 - Symbol-entity proposals, `LineageCandidateV1` evidence sets, `DiagnosticAttributionV1`, and `TestAttributionV1` rows for projection as entities/relations.
 - Intake decisions (capture-snapshot triggers with explicit dirty sets) consumed by root daemon composition; the daemon schedules plan 03 capture runs, this crate never invokes providers or the journal.
 - No canonical event, no store row, no query result, no transport payload.
 
-The dependency boundary is `tracedecay-domain <- tracedecay-code-index`, with `tracedecay-projectors -> tracedecay-code-index` and root composition `-> tracedecay-code-index`. Root-composition companion glue is `src/v2_adapters/code_index.rs`: it implements `GenerationBuilderPort` over store generation ports for the projector, and wires the intake planner to the daemon watcher. Neither capture nor query imports this crate; the adapter adds no extraction, identity, or policy semantics.
+The dependency boundary is `tracedecay-domain <- tracedecay-code-index`; root composition depends on code-index, while `tracedecay-projectors` does not. Plan 04 owns `CodeIndexBuildPortV1` and the consumer transaction. Root adapter `src/v2_adapters/code_index.rs` implements that port by composing this crate's `CodeIndexBuilderV1` with plan 02's `GenerationWriter`/`CanonicalRowSinkV1`, and separately wires the intake planner to the daemon watcher. The builder only emits canonical rows and their digest; the adapter adds no extraction, identity, publication, or policy semantics. Neither capture, projectors, nor query imports this crate.
 
 ## Exact crate and module layout
 
@@ -86,7 +86,7 @@ The dependency boundary is `tracedecay-domain <- tracedecay-code-index`, with `t
 | `crates/tracedecay-code-index/src/intake.rs` | Watcher intake planner: debounce, coalescing, per-repository lanes, storm rejection, explicit-scope preservation. |
 | `crates/tracedecay-code-index/src/incremental.rs` | `ReusePlanV1`: per-file reuse keys, language-scoped invalidation, resolver-only refresh, full-rebuild reasons. |
 | `crates/tracedecay-code-index/src/overlay.rs` | Bounded dirty-overlay computation, depth/ratio thresholds, compaction eligibility. |
-| `crates/tracedecay-code-index/src/build/mod.rs` | `GenerationBuildPlanV1`, `GenerationBuilderPort`, staged-build orchestration under the projector transaction. |
+| `crates/tracedecay-code-index/src/build/mod.rs` | `GenerationBuildPlanV1`, concrete `CodeIndexBuilderV1`, and bounded `CanonicalRowSinkV1` emission; no staging/publication ownership. |
 | `crates/tracedecay-code-index/src/build/rows.rs` | Canonical row types and total ordering for every generation table. |
 | `crates/tracedecay-code-index/src/build/digest.rs` | Streaming canonical-row digest; digest excludes compression and physical layout. |
 | `crates/tracedecay-code-index/src/resolve.rs` | Edge resolution (call/type/use/import/impl/annotation), resolver versioning, unresolved-target retention. |
@@ -110,7 +110,7 @@ pub struct GrammarDescriptorV1 {
     pub grammar_crate_version: &'static str,
     pub abi_version: u32,
     pub tier: GrammarTier,
-    pub query_pack_digest: [u8; 32],
+    pub query_pack_digest: QueryPackDigest,
 }
 
 pub enum GrammarTier { Default, Medium, Full, Plugin }
@@ -197,7 +197,7 @@ pub struct GenerationBuildPlanV1 {
 
 pub struct BuildInputDigests {
     pub extractor_set: ExtractorSetDigest,
-    pub grammar_set: [u8; 32],
+    pub grammar_set: GrammarSetDigest,
     pub resolver_version: ResolverVersion,
     pub generation_schema_version: u32,
     pub source_watermark: VectorWatermark,
@@ -209,27 +209,27 @@ pub enum BuildTarget {
     Compaction { merge: Vec<GraphGenerationId> },
 }
 
-pub trait GenerationBuilderPort: Send + Sync {
-    fn stage(&self, plan: &GenerationBuildPlanV1) -> Result<StagedGenerationHandle, CodeIndexError>;
-    fn emit_rows(
-        &self,
-        handle: &mut StagedGenerationHandle,
-        rows: CanonicalRowBatch,
-    ) -> Result<(), CodeIndexError>;
-    fn seal(
-        &self,
-        handle: StagedGenerationHandle,
-        digest: GenerationDigest,
-    ) -> Result<SealedGenerationReceipt, CodeIndexError>;
+pub trait CanonicalRowSinkV1 {
+    fn emit(&mut self, rows: CanonicalRowBatch) -> Result<(), CodeIndexError>;
 }
 
-pub struct GenerationDigest(pub [u8; 32]);
+pub struct CodeIndexBuilderV1 {
+    // extractor registry, resolver, deterministic batching configuration
+}
+
+impl CodeIndexBuilderV1 {
+    pub fn stream_generation(
+        &self,
+        plan: &GenerationBuildPlanV1,
+        sink: &mut dyn CanonicalRowSinkV1,
+    ) -> Result<GenerationDigest, CodeIndexError>;
+}
 ```
 
 - `ExtractionUnit.content` is the only content input and is receipt-bound sanitized text; the crate has no constructor for content from paths, readers, or raw bytes. Redaction markers are explicit spans so parse recovery can keep structural identity for redacted files (plan 18 §11.2); a file whose markers break parsing degrades to `RedactedStructural`/`RedactedOpaque` coverage, never to a raw-content retry.
 - `ExtractorRegistryV1::validate` fails on duplicate language ownership, ABI mismatch with the pinned tree-sitter runtime, missing query-pack digest, or a plugin-tier extractor without the plan 19 §7.3 isolated-subprocess declaration.
-- `GenerationBuilderPort` is implemented over plan 02's `GenerationWriter` by root composition; `seal` fails when the store-verified row manifest disagrees with `GenerationDigest`. This crate never opens a database and never calls `publish_generation`; publication/atomic swap remain plan 02's sequence executed under plan 04's PR 18 transaction.
-- Ordering: plan 04's PR 18 first lands the projector port and fake-builder contract without a production dependency. PR 18B–18D then land this crate and its packed builder; the final PR 18 integration/cutover step consumes that real builder. Projector framework tests keep the in-crate fixture builder so the stack remains bisectable.
+- Plan 04's adapter implements `CanonicalRowSinkV1` over the transaction's plan-02 `GenerationWriter`; plan 02 verifies the emitted manifest against `GenerationDigest` before sealing. This crate never stages/seals a store handle, opens a database, or calls `publish_generation`; publication/atomic swap remain plan 02's sequence executed under plan 04's projector transaction.
+- Ordering: plan 04 PR 18 first lands the projector-owned consumer contract, transaction, and fake builder without a production dependency. PR 18B–18F then land and prove this crate. Plan 04 PR 18G, after plan 02 PR 6C and PRs 18B–18F, adapts the real `CodeIndexBuilderV1` into that already-tested projector transaction. Projector framework tests retain the fake builder so the stack remains bisectable.
 
 ### Consumed observation families and derived-row lineage
 
@@ -302,10 +302,10 @@ pub struct FileReuseRef {
 }
 
 pub struct FileReuseKey {
-    pub content_fingerprint: [u8; 32], // privacy-domain-keyed, carried from capture
+    pub content_fingerprint: KeyedSourceRecordFingerprint, // privacy-domain-keyed, carried from capture
     pub grammar_crate_version: &'static str,
     pub extractor_version: &'static str,
-    pub query_pack_digest: [u8; 32],
+    pub query_pack_digest: QueryPackDigest,
 }
 
 pub enum FullRebuildReason {
@@ -389,7 +389,7 @@ Plan 02 owns the physical `GraphGenerationRepository`, pack/overlay ADR constant
 |---|---|
 | `generation_manifest` | `generation_id TEXT PK (UUIDv7)`, `repository_entity TEXT NOT NULL`, `privacy_domain TEXT NOT NULL`, `generation_schema_version INTEGER NOT NULL`, `extractor_set_digest BLOB(32) NOT NULL`, `grammar_set_digest BLOB(32) NOT NULL`, `resolver_version TEXT NOT NULL`, `build_plan_digest BLOB(32) NOT NULL`, `content_digest BLOB(32) NOT NULL`, `snapshot_count INTEGER`, `file_count INTEGER`, `symbol_count INTEGER`, `edge_count INTEGER`, `source_watermark BLOB NOT NULL`, `built_at INTEGER NOT NULL`. UNIQUE `(repository_entity, content_digest)`. Index `(repository_entity, built_at)`. One row per generation; retained while the generation is referenced by plan 02's manifest or rollback window. |
 | `gen_snapshots` | `snapshot_id TEXT PK`, `kind TEXT CHECK (kind IN ('commit','dirty_overlay')) NOT NULL`, `base_snapshot_id TEXT NULL`, `commit_entity TEXT NULL`, `worktree_entity TEXT NULL`, `source_watermark BLOB NOT NULL`. Index `(base_snapshot_id)`. Bounded by pack size (32/64/128 snapshots per ADR candidate). |
-| `gen_file_payload_refs` | `content_key BLOB(32) PK` (privacy-domain-keyed fingerprint), `payload_blob_id BLOB NOT NULL`, `original_len INTEGER NOT NULL`, `sanitization_receipt_id TEXT NOT NULL`. The matching owner-shard `blob_refs` row reconstructs the complete plan-02 `PayloadRef` and is committed before generation publication. The generation never embeds source bytes; the privacy-domain content-addressed blob store performs deduplication, encryption, retention, hold, revocation, and garbage collection. |
+| `gen_file_payload_refs` | `content_key BLOB(32) PK` (privacy-domain-keyed fingerprint), `payload_blob_id BLOB NOT NULL`, `sanitized_byte_len INTEGER NOT NULL`, `sanitization_receipt_id TEXT NOT NULL`. The matching owner-shard `blob_refs` row reconstructs the complete plan-02 `PayloadRef` and is committed before generation publication. No pre-redaction/original length crosses this boundary. The generation never embeds source bytes; the privacy-domain content-addressed blob store performs deduplication, encryption, retention, hold, revocation, and garbage collection. |
 | `gen_files` | `(snapshot_id, file_id) PK`, `path TEXT NOT NULL`, `language TEXT NOT NULL`, `content_key BLOB(32) NOT NULL REFERENCES gen_file_payload_refs`, `size_bytes INTEGER NOT NULL`, `extractor_version TEXT NOT NULL`, `coverage TEXT NOT NULL`. UNIQUE `(snapshot_id, path)`. Indexes `(content_key)`, `(language)`. ~978 rows/snapshot currently; 10× gate rows stay cursor-paged. |
 | `gen_symbol_occurrences` | `(snapshot_id, occurrence_id) PK`, `symbol_entity TEXT NOT NULL`, `file_id TEXT NOT NULL`, `byte_start INTEGER NOT NULL`, `byte_end INTEGER NOT NULL`, `kind TEXT NOT NULL`, `qualified_name TEXT NOT NULL`, `signature TEXT NULL`, `visibility TEXT NULL`, `extractor_version TEXT NOT NULL`, `sanitization_receipt_id TEXT NOT NULL`. UNIQUE `(snapshot_id, file_id, byte_start, kind)`. Indexes `(symbol_entity, snapshot_id)`, `(file_id)`. Current scale 36k+/branch; 1M-symbol 10× gate. |
 | `gen_edges` | `(snapshot_id, edge_id) PK`, `source_occurrence TEXT NOT NULL`, `target_occurrence TEXT NULL`, `target_symbol_entity TEXT NULL`, `kind TEXT NOT NULL`, `byte_start INTEGER`, `byte_end INTEGER`, `resolver_version TEXT NOT NULL`, `confidence INTEGER NULL`. CHECK: exactly one of `target_occurrence`/`target_symbol_entity`/unresolved marker. Indexes `(source_occurrence)`, `(target_symbol_entity, kind)`. Current scale 71k+/branch. |
@@ -511,11 +511,11 @@ Import receipts are durable rows (G4), written by PR 33G in the owning project s
 
 ### PR 18D: Generation build plans, canonical rows, digests, and packed schema
 
-**Ordering:** consumes plan 02 PR 6C (`GraphGenerationRepository`) through the port; lands before plan 04 PR 18 wires `code_evidence_v1` to the real builder.
+**Ordering:** after plan 04 PR 18's fake consumer contract; defines and tests the producer without a store dependency. Plan 04 PR 18G, after this plan's PRs 18B–18F and plan 02 PR 6C, performs the production wiring.
 
 **Files:** create `src/build/{mod,rows,digest}.rs`, `src/resolve.rs`, `tests/generation_suite.rs`; extend `benches/code_index.rs`.
 
-- [ ] Write failing tests named `two_builds_same_inputs_same_digest`, `digest_ignores_compression_and_layout`, `row_order_is_total_and_fixed`, `seal_rejects_manifest_digest_mismatch`, `edge_targets_are_exactly_one_of_occurrence_entity_unresolved`, `every_content_row_binds_a_receipt`, `overlay_build_never_mutates_base_generation`, and `parallel_build_matches_serial_digest`.
+- [ ] Write failing tests named `two_builds_same_inputs_same_digest`, `digest_ignores_compression_and_layout`, `row_order_is_total_and_fixed`, `sink_failure_aborts_without_hidden_retry`, `edge_targets_are_exactly_one_of_occurrence_entity_unresolved`, `every_content_row_binds_a_receipt`, `overlay_build_never_mutates_base_generation`, and `parallel_build_matches_serial_digest`.
 - [ ] Implement `GenerationBuildPlanV1`, streaming canonical row emission for every table in the packed schema above, edge resolution with retained unresolved targets, and the generation digest.
 - [ ] Land the column-level generation schema (this PR is the owning implementation PR, per plan 02's schema-ownership rule, for `generation_manifest`, `gen_snapshots`, `gen_file_payload_refs`, `gen_files`, `gen_symbol_occurrences`, `gen_edges`, `gen_diagnostics`, `gen_tests`/`gen_test_map`, `overlay_journal`/`overlay_files`); prove generation files contain no source body bytes and every payload reference resolves through plan 02.
 - [ ] Run `cargo test -p tracedecay-code-index --test generation_suite`; expected: exit 0 and identical digests across two full builds and across serial-vs-parallel builds.
@@ -595,7 +595,7 @@ Import receipts are durable rows (G4), written by PR 33G in the owning project s
 
 - `tracedecay-code-index` exists with the exact module layout, passes registry validation for every built-in language tier, and owns extraction/incremental/overlay/build/lineage/attribution semantics with no duplicate implementation left in `src/extraction/**`, `src/db/**` graph paths, or `src/diagnostics/**` after retirement.
 - The sanctioned pipeline is the only repository-content path: plan 03 `code_snapshot` adapter → sanitizer → this indexer → plan 02 generations → plan 05 queries; architecture lints prove no bypass.
-- Generation builds are deterministic, streaming, receipt-bound, and executed only under plan 04's `code_evidence_v1` transaction through `GenerationBuilderPort`.
+- Generation builds are deterministic, streaming, and receipt-bound; production execution occurs only when plan 04 PR 18G drives `CodeIndexBuilderV1` inside the `code_evidence_v1` transaction and adapts plan 02's writer as `CanonicalRowSinkV1`.
 - Packed generations + bounded overlays + ref pointers replace per-branch databases; the scale envelope and file-count/open-handle/disk gates hold at current and 10× scale.
 - Symbol identity survives moves/renames through evidence-bearing lineage candidates; identity collisions quarantine per plan 03's vocabulary; the #269/#371 and #406 regression classes have bound `FM-###` receipts.
 - Diagnostics and tests map to exact snapshot occurrences with dual evidence classes preserved end-to-end into plan 05 answers.

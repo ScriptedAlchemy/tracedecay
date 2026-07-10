@@ -465,7 +465,7 @@ Required canonical Turn relations are `part_of_session`, `performed_by`, `contai
 
 Projectors must consume the machine-readable PR 3 compatibility inventory. CI fails when a new V1 structured event kind, provider tool kind, CLI/MCP field, LCM table/sidecar, hook terminal state, or automation artifact kind lacks a registry owner and parity disposition.
 
-Planning began at `99ad19bc`; publication master `6c4b8b91` includes #407/#410/#411/#413/#414/#415/#416/#417/#419/#420/#422/#423/#424. Open #418 remains a refresh input; #417 identity-split visibility is a mandatory projection/Observatory conflict fixture, while #419 edit conflicts, #420 proxy/reconnect transitions, #422 generation-scoped catalog-refresh notifications, #423 fact retrieval/counter events, and #424 aggregate-before-sample behavior require projected receipts/status without inferred success or replay. PR #409 remains historical. Before each backfill/cutover PR, refresh master/open state, source/projector registry digests, and actual protocol/schema/tool inventories.
+Planning began at `99ad19bc`; publication master `3567e31e` (0.0.48) includes merged release #418 and split-store consolidation #425 alongside the earlier accepted inputs. Only draft plan PR #421 was open at final refresh. Identity split/consolidation, edit conflicts, proxy transitions, catalog notifications, fact retrieval, and aggregate-before-sample behavior require projected receipts/status without inferred success or replay. Before each backfill/cutover PR, refresh master/open state, source/projector registry digests, and actual protocol/schema/tool inventories.
 
 ## Ownership and identity rules
 
@@ -480,7 +480,7 @@ Planning began at `99ad19bc`; publication master `6c4b8b91` includes #407/#410/#
 
 ## Deterministic backfill sequence
 
-1. Freeze a copied V1 inventory watermark at publication base `6c4b8b91`; record merged #405/#407/#410/#411/#412/#413/#414/#415/#416/#417/#419/#420/#422/#423/#424 separately from open-assumed #418; run disk preflight and secret scan.
+1. Freeze a copied V1 inventory watermark at publication base `3567e31e`; record merged #405/#407/#410/#411/#412/#413/#414/#415/#416/#417/#418/#419/#420/#422/#423/#424/#425; run disk preflight and secret scan.
 2. Import identity allocations, profile/repository/project/checkout/worktree/provider/source aliases, legacy adoption manifests, and Hermes migration ledgers; resolve no ambiguous identity automatically.
 3. Project canonical observations to events, then sessions, turns, messages/content, actors/models, tools/results/approvals, exposed reasoning markers, goals/tasks/plans, agent/workflow/handoff/inter-agent events in `activity.db`.
 4. Project LCM raw/source/summary DAG, compression/context assembly, payload state, lifecycle, and tombstones after canonical message IDs exist.
@@ -535,7 +535,7 @@ Each step is independently resumable by `(projector, version, shard, generation,
 
 - [ ] Write failing tests for exact event IDs, correction supersession, unknown future schema, illegal relation endpoints, causal evidence rules, ambiguous alias candidates, moved/symlink/linked-worktree identity, pristine legacy adoption, nonempty split conflict, and Hermes user-profile ownership.
 - [ ] Implement `canonical_event_v1` and `identity_alias_v1` with complete capture payload-kind ownership.
-- [ ] Refresh publication base `6c4b8b91`, record every merged commit/protocol/schema version, and record open #418 as a separate future input whose disposition must be refreshed before execution.
+- [ ] Refresh publication base `3567e31e`, record every merged commit/protocol/schema version including #425 `de3d05dc` and release #418 `3567e31e`, and record any newly open implementation inputs before execution.
 - [ ] Run `cargo test -p tracedecay-projectors --test framework_suite`; expected: exit 0 with no unowned capture kind.
 - [ ] Run `cargo test -p tracedecay-projectors --test backfill_parity identity`; expected: one canonical identity per adopted/Hermes fixture and explicit conflict rows for nonempty collisions.
 - [ ] Commit `feat(projectors): project canonical events and identity`.
@@ -582,8 +582,8 @@ Each step is independently resumable by `(projector, version, shard, generation,
 **Files:** create `src/code/{mod,snapshots,graph,lineage}.rs`; extend `tests/domain_suite.rs` and `tests/backfill_parity.rs`.
 
 - [ ] Write fixtures for immutable snapshots, dirty overlays, file/symbol occurrences, rename/move/split/merge candidates, code edges, diffs, diagnostics, builds, tests/results, coverage/test map, impact evidence, and two refs sharing one immutable snapshot/generation.
-- [ ] Implement `code_evidence_v1` into project rows and packed graph build generations; every row retains the explicit repository/checkout/worktree/ref/snapshot/generation tuple and ambiguous lineage stays candidate evidence.
-- [ ] Validate graph generation manifest, overlay bounds, referential integrity, deterministic atomic swap, and previous-generation rollback.
+- [ ] Define the projector-owned `CodeIndexBuildPortV1` consumer contract and land `code_evidence_v1` against a deterministic fake builder. Project canonical snapshot/file/diagnostic/test evidence into project rows, but do not wire the production language extractor or packed-generation builder in this PR.
+- [ ] Exercise the complete store transaction with the fake builder: stage through plan 02 `GenerationWriter`, stream canonical rows, compare the builder digest with the store-verified manifest, seal/fsync, publish by compare-and-swap, and retain the previous generation for rollback. Every row retains the explicit repository/checkout/worktree/ref/snapshot/generation tuple and ambiguous lineage stays candidate evidence.
 - [ ] Add `ref_move_does_not_mutate_old_snapshot_binding` and prove base snapshot, dirty overlay, and graph generation coverage remain distinguishable.
 - [ ] Run `cargo test -p tracedecay-projectors --test domain_suite code`; expected: exit 0 and graph manifest is deterministic.
 - [ ] Run `cargo test -p tracedecay-projectors --test backfill_parity code`; expected: V1 graph/search/impact/test-map golden cases match or carry explained evidence-version changes.
@@ -600,6 +600,18 @@ Each step is independently resumable by `(projector, version, shard, generation,
 - [ ] Run `cargo test -p tracedecay-projectors --test domain_suite code_federation`; expected: all exact-scope and coverage cases pass.
 - [ ] Run `cargo test -p tracedecay-projectors --test backfill_parity code_federation`; expected: every V1 local graph result has a disposition and no base/current graph fallback appears.
 - [ ] Commit `feat(projectors): federate repository graph generations`.
+
+### PR 18G: Wire the production code-index builder into `code_evidence_v1`
+
+**Ordering:** after plan 25 PRs 18B–18F and plan 02 PR 6C; this is the only post-builder integration step. PR 18 is never reopened or resumed after merge.
+
+**Files:** extend `src/code/{mod,snapshots,graph,lineage}.rs`; create the narrow root composition adapter; extend `tests/domain_suite.rs`, `tests/backfill_parity.rs`, and generation fault tests.
+
+- [ ] Keep projector code dependent only on its consumer-owned `CodeIndexBuildPortV1`. Implement the production port in root `src/v2_adapters/code_index.rs` using plan 25's `CodeIndexBuilderV1` plus plan 02's `GenerationWriter`; no `tracedecay-projectors -> tracedecay-code-index` dependency is permitted. The root adapter adds no extraction, identity, digest, publication, or fallback semantics.
+- [ ] Keep plan 02 `GenerationWriter` ownership in the projector transaction. The production builder receives receipt-bound sanitized inputs and a bounded row sink; it never opens/publishes a store, and the root never implements a semantic builder port.
+- [ ] Require production/fake-builder contract parity, deterministic serial/parallel digests, store-manifest agreement, receipt lineage, fault-safe staging/publication, previous-generation rollback, V1 differential parity, and current/10x performance gates.
+- [ ] Run `cargo test -p tracedecay-projectors --test domain_suite code --test backfill_parity code` plus plan 25's extraction/generation/lineage suites; expected: production integration passes without changing the PR-18 projector contract.
+- [ ] Commit `feat(projectors): integrate production code indexing`.
 
 ### PR 19: Git and delivery evidence
 
@@ -728,7 +740,7 @@ Each step is independently resumable by `(projector, version, shard, generation,
 - PR 17A profile activity/temporal attribution/work claims preserve zero/one/many project relations, per-observation validity, safe coordination anchors, planned redundancy, and current TTL views without copying transcripts or granting agent-control authority.
 - LCM, Git/code/delivery, knowledge/policy, automation/skills, accounting/search/rollups, and the query read-model family (facets, timeline density, observatory status) rebuild deterministically with explicit vector watermarks.
 - Code graph rows and joins are federated by explicit repository/checkout/worktree/ref/snapshot/generation tuples; ambiguity/staleness is coverage and no active-base/current-generation fallback exists.
-- PR 18A/19A cross-repository graph and related-delivery projections preserve both endpoint snapshots, source/freshness, bounded diversity, and distinct direct/impact/test/context/produced/observed roles.
+- PR 18A/18G/19A cross-repository graph, production code-index integration, and related-delivery projections preserve both endpoint snapshots, source/freshness, bounded diversity, and distinct direct/impact/test/context/produced/observed roles.
 - PR #405 identity adoption, PR #407 Hermes user-profile migration, PR #410 native-row/origin/representative behavior, PR #411 ownership/remediation agreement, and PR #412 lifecycle-drain receipts are in the recorded base and parity-tested; #413 contributes its actual release/protocol version only and #409 remains historical.
 - Exact, recorded-result, and best-effort manifests expose substitutions/unavailable inputs and never reconstruct hidden reasoning.
 - Each bounded context has a zero-unexplained-gap shadow receipt, performance/privacy/recovery approval, atomic cutover, and tested one-step rollback.

@@ -72,7 +72,9 @@ This plan is the type authority inside the converged system described by [`19-sy
 | Runtime drain and lifecycle serialization | merged PR #412: `src/lifecycle_lease.rs`, daemon/service/update shutdown changes | Model lease epoch, drain intent, writer quiescence, checkpoint completion, service state, and shutdown receipt as distinct typed evidence. A restart/update may not imply writers drained or WAL checkpointed without the receipt. |
 | Foreign managed-skill ownership and remediation | merged PR #411: `package_is_foreign_to_installation`, `SkillDrift::ForeignOrphan`, doctor/removal agreement | Model installation owner, scope, drift classification, severity, and remediation capability separately. A foreign/legacy package is informative evidence and cannot receive a destructive/update remediation owned by another installation. |
 
-Planning began at `99ad19bc`; publication master `6c4b8b91` includes #407/#410/#411/#413/#414/#415/#416/#417/#419/#420/#422/#423/#424. Open #418 remains a live refresh input. PR #409 was closed unmerged. Immediately before PR 4, regenerate the exact crate/schema/protocol/tool inventory from current master; #414/#419 require a cataloged race-safe move-symbol capability contract, #417 identity-conflict states must remain visible rather than collapsed, and #423/#424 retrieval/accounting semantics are accepted behavior.
+Planning began at `99ad19bc`; publication master `3567e31e` (0.0.48) includes merged #407/#410/#411/#413/#414/#415/#416/#417/#418/#419/#420/#422/#423/#424/#425. PR #425 merged at `de3d05dc` from final head `d3bb28b5`; only draft plan PR #421 was open at final refresh. Immediately before PR 4, regenerate the exact crate/schema/protocol/tool inventory from current master; accepted identity, edit, routing, catalog, retrieval/accounting, release, and split-store consolidation behavior remains fixture input, not a frozen source-layout assumption.
+
+Merged PR #425 (`de3d05dc`, final head `d3bb28b5`) is not merely CLI implementation detail. V2 domain contracts preserve its safety invariants for consolidating two non-empty profile/store authorities: immutable source-manifest identities; canonical platform store locators; frozen snapshots for both SQLite families; holder identity by path plus file/inode and write-reservation evidence; two independently verified backup refs; deterministic confirmation recomputed under locks/reservations; append-only restartable ledger/checkpoints; identity-allocation/remap records whose LCM summary/source edges retain remapped source IDs; exhaustive row/payload/LCM/fact/feedback/branch/sentinel verification; and a cutover receipt constructible only after every proof passes. Failure, cancellation, or restart before that receipt leaves both inputs and authoritative selection unchanged. These are general migration/identity contracts consumed by plans 02/09/12/20/21, not permission to expose raw paths, holder details, or confirmation material in ordinary output.
 
 ## Proposed crate tree
 
@@ -193,6 +195,7 @@ pub struct CheckoutId(pub EntityId);
 pub struct WorktreeId(pub EntityId);
 pub struct RefId(pub EntityId);
 pub struct ProviderId(pub EntityId);
+pub struct ProjectorId(String); // private, grammar-validated `projector.<bounded-context>.<name>`
 pub struct ActorId(pub EntityId);
 pub struct AgentId(pub EntityId);
 pub struct SessionId(pub EntityId);
@@ -231,6 +234,10 @@ pub struct SanitizationReceiptId(pub uuid::Uuid);
 pub struct ScopeResolutionId(pub uuid::Uuid);
 pub struct ScopeSelectorDigest(pub [u8; 32]);
 pub struct DataVersionDigest(pub ManifestDigest); // plan 24's data-version pin; a named view of ManifestDigest, not a new digest family
+pub struct QueryPackDigest(pub ManifestDigest);
+pub struct GrammarSetDigest(pub ManifestDigest);
+pub struct ExtractorSetDigest(pub ManifestDigest);
+pub struct GenerationDigest(pub ManifestDigest);
 pub struct RoutingGenerationId(pub uuid::Uuid);   // catalog alias-route rebuild generation (plan 02 routing tables)
 pub struct RetrievalRecipeId(pub uuid::Uuid);
 pub struct MessageOccurrenceId(pub uuid::Uuid);
@@ -249,6 +256,7 @@ pub struct DependencyId(pub EntityId);
 pub struct AcceptanceCriterionId(pub EntityId);
 pub struct TaskDecisionId(pub EntityId);
 pub struct AssignmentId(pub EntityId);
+pub struct TaskOfferId(pub EntityId);
 pub struct TaskLeaseId(pub EntityId);
 pub struct ExecutionAttemptId(pub EntityId);
 pub struct ExecutorRegistrationId(pub EntityId);
@@ -259,6 +267,66 @@ pub struct HandoffId(pub EntityId);
 pub struct TaskArtifactId(pub EntityId);
 pub struct TaskOutcomeId(pub EntityId);
 pub struct SavedTaskViewId(pub EntityId);
+pub struct CatalogGenerationId(pub u64);
+pub struct ProjectorVersion(pub ComponentVersion);
+pub struct ModelCatalogEntryId(pub EntityId);
+pub struct ModelRevisionId(pub EntityId);
+
+pub struct CatalogSnapshotRefV1 {
+    pub generation: CatalogGenerationId,
+    pub digest: ManifestDigest,
+}
+
+pub struct WorkItemVersionRefV1 {
+    pub work_item_id: WorkItemId,
+    pub version_id: WorkItemVersionId,
+    pub data_version_digest: DataVersionDigest,
+}
+
+pub struct DependencyVersionRefV1 {
+    pub dependency_id: DependencyId,
+    pub version_id: EntityVersionId,
+    pub data_version_digest: DataVersionDigest,
+}
+
+pub struct WorkClaimRefV1 {
+    pub claim: EntityRef,
+    pub observed_event: EventId,
+    pub observed_at: UtcMicros,
+}
+
+pub struct ContextPacketManifestRefV1 {
+    pub packet_id: ContextPacketManifestId,
+    pub ordinal: u64,
+    pub manifest_digest: ManifestDigest,
+}
+
+pub struct PolicyBundleRef {
+    pub bundle_id: PolicyBundleId,
+    pub version: EntityVersionId,
+    pub manifest_digest: ManifestDigest,
+}
+
+pub type PolicyManifestRef = PolicyBundleRef;
+
+pub enum ModelResidencyV1 {
+    InProcess,
+    LocalHost,
+    LocalNetwork,
+    ConfiguredRemote,
+}
+
+pub struct ModelCapabilityRefV1 {
+    pub provider: ProviderId,
+    pub backend: CapabilityId,
+    pub model_id: ModelCatalogEntryId,
+    pub model_revision: Option<ModelRevisionId>,
+    pub context_limit: u32,
+    pub structured_output: bool,
+    pub tool_planning: bool,
+    pub residency: ModelResidencyV1,
+    pub discovered_at: UtcMicros,
+}
 ```
 
 Deterministic derivation uses fixed UUIDv5 namespaces published by `id.rs`. Input encoding is version byte `1`, then big-endian length-prefixed UTF-8 fields and fixed-width hash/integer fields. Enum tags use their registry snake-case names. No locale, platform path syntax, JSON object order, wall clock, or process randomness participates.
@@ -427,11 +495,13 @@ pub struct PromptEligibleText(Sanitized<String>);
 pub struct ExportEligibleText(Sanitized<String>);
 pub struct LogSafeText(Sanitized<String>);
 pub struct ScopeLocatorText(Sanitized<String>);
+pub struct PrivateText(Sanitized<String>);
+pub struct SinkEligible<T>(/* private, checked sink-specific conversion */ T);
 pub struct ProtectedSecretRef(/* opaque random quarantine reference */);
 pub struct ProtectedQuarantineIngress(/* private move-only candidate plus detector decision */);
 ```
 
-All tuple fields above are private. `Unclassified<T>` is transient capture/parser memory and implements neither `Serialize` nor any repository/transport trait. `Sanitized<T>` is constructible only from a complete `SanitizationReceiptV1` issued by the registered capture sanitizer. Sink wrappers require explicit checked conversion from `Sanitized<T>` under the current privacy policy and access context. The sanitizer alone can consume `Unclassified` content into move-only `ProtectedQuarantineIngress`; it cannot serialize, clone, display, log, index, or cross a general repository/transport port. `ProtectedSecretRef` has no `Display`, public `Serialize`, equality-across-domain, search, prompt, export, or ordinary blob conversion. `PayloadRef` always names sanitized bytes and binds their receipt; protected forensic content uses the separate quarantine port from Plan 18, never `PayloadRef`.
+All tuple fields above are private. `Unclassified<T>` is transient capture/parser memory and implements neither `Serialize` nor any repository/transport trait. `Sanitized<T>` is constructible only from a complete `SanitizationReceiptV1` issued by the registered capture sanitizer. `SinkEligible<T>` is constructible only by the plan-18 checked conversion for the requested sink and current access/privacy policy; it is not a blanket `Serialize`, `Display`, search, prompt, export, or log grant. `PrivateText` is eligible only for encrypted owner-shard blob persistence until a separate checked conversion narrows it for another sink. `LogSafeText` remains the only runtime-text wrapper eligible for diagnostic labels/log-safe presentation. The sanitizer alone can consume `Unclassified` content into move-only `ProtectedQuarantineIngress`; it cannot serialize, clone, display, log, index, or cross a general repository/transport port. `ProtectedSecretRef` has no `Display`, public `Serialize`, equality-across-domain, search, prompt, export, or ordinary blob conversion. `PayloadRef` always names sanitized bytes and binds their receipt; protected forensic content uses the separate quarantine port from Plan 18, never `PayloadRef`.
 
 Architecture/compile-fail tests forbid raw `String`, `serde_json::Value`, `Vec<u8>`, `Bytes`, or slices at application-to-store, projector-to-index, policy-to-hint, and application-to-transport content ports. Static catalog metadata uses reviewed `CatalogText`, which is not a conversion from runtime content. Safe redaction markers expose class plus random receipt reference only; no original length, prefix/suffix, plaintext digest, or cross-domain fingerprint is public.
 
@@ -461,7 +531,7 @@ pub struct ProtocolEpoch(pub u32);
 pub struct RuntimeHandshakeV1 {
     pub protocol_epoch: ProtocolEpoch,
     pub schema_registry_digest: ManifestDigest,
-    pub tool_catalog_digest: Option<ManifestDigest>,
+    pub tool_catalog: Option<CatalogSnapshotRefV1>,
     pub client_kind: RuntimeClientKind,
     pub client_version: ComponentVersion,
 }
@@ -476,7 +546,7 @@ pub enum ProtocolMismatchRemediation {
 
 Handshake acceptance requires the current exact protocol epoch and compatible current digests. Mismatch returns a typed remediation and current catalog digest; it cannot carry or execute an old tool-name alias/fallback.
 
-`EntityKind` includes every master-plan kind: profile/project/project-set/repository/remote/checkout/worktree/ref/commit/tree/pull-request/check/review/release; provider/host/model/installation/actor/agent/agent-presence/work-claim/session/thread/workflow/run/turn/message/content-part; tool definition/invocation/result/approval/goal/provider-native-task/provider-native-plan; initiative/plan/plan-version/work-item/work-item-version/task-dependency/acceptance-criterion/task-decision/task-assignment/task-lease/execution-attempt/executor-registration/workspace-binding/context-packet/handoff/task-artifact/task-outcome; code snapshot/file and symbol identity/occurrence/diagnostic/test/build; fact/version/knowledge entity/decision/contradiction/retrieval/feedback; policy bundle/evaluation/hint; automation job/run/artifact/skill/skill-package/proposal/doctor-finding/remediation; lifecycle lease/drain/checkpoint/service-state receipt; query/saved view/annotation/export/payload blob. Provider-native task/plan records remain observed entities or aliases until an authorized materialization command creates canonical work.
+`EntityKind` includes every master-plan kind: profile/project/project-set/repository/remote/checkout/worktree/ref/commit/tree/pull-request/check/review/release; provider/host/model/installation/actor/agent/agent-presence/work-claim/session/thread/workflow/run/turn/message/content-part; tool definition/invocation/result/approval/goal/provider-native-task/provider-native-plan; initiative/plan/plan-version/work-item/work-item-version/task-dependency/acceptance-criterion/task-decision/task-assignment/task-offer/task-lease/execution-attempt/executor-registration/workspace-binding/context-packet/handoff/task-artifact/task-outcome; code snapshot/file and symbol identity/occurrence/diagnostic/test/build; fact/version/knowledge entity/decision/contradiction/retrieval/feedback; policy bundle/evaluation/hint; automation job/run/artifact/skill/skill-package/proposal/doctor-finding/remediation; lifecycle lease/drain/checkpoint/service-state receipt; query/saved view/annotation/export/payload blob. Provider-native task/plan records remain observed entities or aliases until an authorized materialization command creates canonical work.
 
 The shared diagnostic/action family is a domain contract, with product semantics and cross-surface rules owned by plan 24 §4.11:
 
@@ -494,7 +564,7 @@ pub struct DiagnosticEnvelopeV1 {
     pub actions: BoundedVec<DiagnosticActionV1, 16>,
     pub produced_by: ProducerVersionRef,
     pub config_digest: ManifestDigest,
-    pub catalog_generation: CatalogGenerationId,
+    pub catalog_snapshot: CatalogSnapshotRefV1,
     pub vector_watermark: VectorWatermark,
     pub observed_at: UtcMicros,
     pub expires_at: Option<UtcMicros>,
@@ -574,7 +644,7 @@ pub struct RetrievalAnchorRecordV1 {
     pub source_observations: Vec<ObservationId>,
     pub snapshot: VectorWatermark,
     pub schema_registry_digest: ManifestDigest,
-    pub capability_catalog_digest: ManifestDigest,
+    pub capability_catalog: CatalogSnapshotRefV1,
     pub data_version_digest: DataVersionDigest,
     pub projection_version: ComponentVersion,
     pub view_algorithm_version: Option<ComponentVersion>,
@@ -623,7 +693,7 @@ pub struct InvestigationTime {
 }
 pub struct VersionSet {
     pub schema_registry_digest: ManifestDigest,
-    pub capability_catalog_digest: ManifestDigest,
+    pub capability_catalog: CatalogSnapshotRefV1,
     pub ranking: RankingProfileRef,
 }
 pub enum FreshnessRequirement {
@@ -879,6 +949,7 @@ pub struct EntityNamespace(String);   // registry token naming one deterministic
 pub struct RegistryVersion(pub u32);
 pub struct QuerySchemaVersion(pub u16);
 pub struct SchemaRef { pub schema_id: u32, pub schema_version: u16 } // resolves only through SchemaRegistryV1
+pub struct SchemaBoundValueRef { pub schema: SchemaRef, pub payload: PayloadRef, pub canonical_digest: ManifestDigest } // sanitized, schema-validated protected value; never an inline serde_json::Value
 pub enum EventKind { /* closed registry enum generated from SchemaRegistryV1 event declarations; no free-form variant */ }
 pub struct Confidence(f64);           // private; constructor requires a finite value in [0.0, 1.0]
 pub struct ProducerRef { pub component: NativeKindCode, pub version: ComponentVersion }
@@ -1144,7 +1215,7 @@ pub struct ScopeResolutionV2 {
     pub quarantined: Vec<ScopeResolutionCandidateV2>,
     pub missing: Vec<ScopeRootV2>,
     pub defaulted_current: bool,
-    pub catalog_generation: ManifestDigest,
+    pub profile_catalog_generation: ManifestDigest,
     pub watermark: VectorWatermark,
 }
 
@@ -1185,7 +1256,7 @@ pub struct CursorClaimsV1 {
     pub query_digest: PrivacyDomainBoundLocatorDigest,
     pub access_digest: AccessPolicyDigest,
     pub scope_digest: ScopeSelectorDigest,
-    pub catalog_generation: ManifestDigest,
+    pub profile_catalog_generation: ManifestDigest,
     pub temporal: Option<TemporalClauseV1>,
     pub intent_profile_version: Option<ComponentVersion>,
     pub schema_version: QuerySchemaVersion,
@@ -1234,11 +1305,15 @@ pub struct CommandEnvelopeV1<C> {
 }
 ```
 
+`CoverageReportV1::is_complete()` is derived, never stored or serialized: it is true only when `unknown_coverage` is false and `stale`, `unavailable`, `incompatible`, `locked`, `redacted`, and `truncated` are empty. `skipped` contains only shards proven irrelevant by scope pruning; any unproven disposition sets `unknown_coverage`. Consumers must call this derivation instead of inventing a `complete` field.
+
 `ScopeSelectorV2` is the only public scope selector across query, commands, policy, catalog, capture, hooks/application, labs, exports, saved views, and coordination. `roots` must be nonempty; `exclude` can only subtract from resolved roots. `CurrentInvocation` and `AllAuthorized` are explicit roots, never meanings assigned to an empty vector. Human locators are typed, sanitized inputs inside the same selector and resolve to a canonical-selector echo in `ScopeResolutionV2`; no transport invents `project_key`, `project_path`, or stringly `all` semantics. Multi-repository/project/checkout/worktree/ref/snapshot/graph-generation selection is first-class. Resolution never falls back to CWD, `sessions.project_key`, the first Claude CWD, active base checkout, current branch graph, ignored-dependency hint scope, or a stale registry row. Ambiguity is an error or returned candidate set according to the selector, never “pick first.” Each selected code candidate is the explicit repository/checkout/worktree/ref/snapshot/generation tuple actually opened; refs may share a generation, and no ref name owns a database. Core resolution reports selected/candidate/missing/stale/unavailable/quarantined stores plus registry/index/ref watermarks and whether current invocation was deliberately defaulted. Application/query responses join separately authorized cross-project session/activity relation evidence without mutating or narrowing the selector.
 
-Query validation rejects page size above 1,000, unbounded traversal, traversal depth above 5, missing total/operator budgets, text/semantic predicates against secret or reasoning content without an explicit authorized filter, and unregistered attributes/predicates. Cursor claims expire after 24 hours by default. Registry/ranking changes, retention crossing the snapshot, or incompatible shard replacement yield a typed restart reason. Commands require idempotency and compare-and-swap aggregate version; a conflict returns current version without applying the command.
+Query validation rejects page size above 1,000, unbounded traversal, traversal depth above 5, missing total/operator budgets, text/semantic predicates against secret or reasoning content without an explicit authorized filter, and unregistered attributes/predicates. Interactive cursor expiry comes from plan 20's `query.cursor.interactive_ttl` descriptor (default 15 minutes); export/bulk continuations use their catalog-declared job lifetime. Registry/ranking changes, retention crossing the snapshot, or incompatible shard replacement yield a typed restart reason. Commands require idempotency and compare-and-swap aggregate version; a conflict returns current version without applying the command.
 
 `TemporalClauseV1` is the only temporal answer-mode carrier: an absent clause means `Current`, and `AsOf` requires both the valid-time and knowledge-time cutoffs (plan 05 §11.4). Plan 05 plans and executes the clause; plan 23's session/LCM retrieval rides it, and plan 05 specifies the registered-attribute mapping for plan 23's filters — no parallel temporal AST or second answer-mode enum exists. `CursorClaimsV1` binds the resolved scope digest, catalog generation, temporal clause, intent-profile version, and partial-shard dispositions exactly as issued; plans 16/17/21/23 cite these fields rather than restating binding lists. Its digest fields are authoritative types: every adapter (including plan 05's private `CursorV1` encoding) must reuse `PrivacyDomainBoundLocatorDigest`, `AccessPolicyDigest`, and `ManifestDigest` unchanged — an unkeyed `ContentDigest` of query or access material is forbidden by the keyed-digest rule above. `CoverageReportV1` is the one shared coverage vocabulary for query/export/replay responses: plan 05 produces it, plans 07/09/10/13/17/20/22 consume it under this exact name, and `unknown_coverage: true` is mandatory whenever any shard's disposition cannot be proven — coverage never silently reads as complete.
+
+Task/plan/executor reads also use this exact `TraceQueryV1`. `EntityKind`, registered `AttributePredicate`, bounded `TraversalPredicate`, facets/aggregates/projection/sort/page/snapshot fields, and `TemporalClauseV1` express task sources and operators. No `TaskQuery`, `TaskSource`, pipeline DSL, task-local scope/as-of/page/sort/projection carrier, or saved-view scope copy is a public contract. A task-specific facade may only build and canonicalize a `TraceQueryV1` losslessly; saved task views persist that one AST and derive scope from `TraceQueryV1.scope`.
 
 ## Cross-crate consumes/produces contracts
 

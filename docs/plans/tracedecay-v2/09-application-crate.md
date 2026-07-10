@@ -4,7 +4,7 @@
 
 **Goal:** Build `tracedecay-application`, the transport-neutral use-case layer that authorizes and orchestrates every TraceDecay V2 read, command, replay lab, export, migration, and internal parity operation through one auditable contract.
 
-**Architecture:** Queries compose catalog, query, policy, tool-catalog, projector, and immutable archive ports under one captured request context and return explicit snapshot, coverage, freshness, redaction, and provenance. Non-curation commands use typed execution contracts and, when destructive, preview/confirmation; all commands use idempotency, optimistic aggregate versions, one owning-shard unit of work, durable audit/outbox events, and resumable workflows for cross-shard effects. Autonomous curation effects have no per-item command. HTTP, CLI, MCP, hooks, and dashboard adapters only map transport data to these use cases.
+**Architecture:** Queries compose catalog, query, policy, tool-catalog, projector, and immutable archive ports under one captured request context and return explicit snapshot, coverage, freshness, redaction, and provenance. Non-curation commands use typed execution contracts and, when destructive, preview/confirmation; all commands use idempotency, optimistic aggregate versions, one owning-shard unit of work, one authoritative canonical command-event journal, referenced audit/outbox entries, and resumable workflows for cross-shard effects. Autonomous curation effects have no per-item command. HTTP, CLI, MCP, hooks, and dashboard adapters only map transport data to these use cases.
 
 **Tech Stack:** Rust 2024 workspace; `tracedecay-domain`; `tracedecay-query`; `tracedecay-policy`; `tracedecay-tool-catalog`; store/projector traits; `serde`; `schemars`; `thiserror`; `futures`; `tokio` at the composition boundary; `uuid`; property/contract/differential tests.
 
@@ -14,10 +14,10 @@
 
 This plan refines master-plan PR 24A, supplies the application contracts consumed by PRs 24B–24E and 25–32, and owns transport parity until V1 retirement.
 
-Plan [`24-canonical-task-plan-graph-and-multi-agent-executor.md`](24-canonical-task-plan-graph-and-multi-agent-executor.md) adds task/plan query and command use cases, one authoritative scheduler, owner-shard graph transactions, executor registration/route resolution, fenced claim/heartbeat/terminal workflows, context-packet assembly, workspace/cancellation/effect reconciliation, status, and doctor under this application boundary. No root/adapter/dashboard module may become a second scheduler or lease authority. Those task/plan reads and commands are enumerated in the Section 9–10 inventories below; every task mutation is a POST command-envelope use case (plan 10 §8.7) with no PATCH transport shape.
+Plan [`24-canonical-task-plan-graph-and-multi-agent-executor.md`](24-canonical-task-plan-graph-and-multi-agent-executor.md) adds task/plan registered values and builders for canonical `TraceQueryV1`, command use cases, one authoritative scheduler, owner-shard graph transactions, executor registration/route resolution, fenced lease-acquisition/heartbeat/terminal workflows, context-packet assembly, workspace/cancellation/effect reconciliation, status, and doctor under this application boundary. `WorkClaimV1` remains advisory coordination evidence; only `work_items.acquire_lease` issues execution authority. No root/adapter/dashboard module may become a second query engine, scheduler, event journal, or lease authority. Those task/plan reads and commands are enumerated in the Section 9–10 inventories below; every task mutation is a POST command-envelope use case (plan 10 §8.7) with no PATCH transport shape.
 
 - The application crate owns use-case identity, authorization, orchestration, request deadlines, non-curation command execution/confirmation, autonomous curation effect application, idempotency, optimistic versions, audit requirements, export/job lifecycle, and bounded migration dispatch.
-- `tracedecay-domain` owns canonical IDs, scope, evidence, sensitivity, watermarks, query AST, and command envelopes. Application types wrap these contracts; they do not create string substitutes.
+- `tracedecay-domain` owns canonical IDs, scope, evidence, sensitivity, watermarks, the sole `TraceQueryV1` AST, and command envelopes. Application types wrap these contracts; they do not create task selectors, board DSLs, or string substitutes. Task convenience inputs compile losslessly to registered values in `TraceQueryV1` and expose the canonical digest.
 - `tracedecay-query` owns planning, federated reads, ranking, cursors, exports bytes, and live snapshot/delta semantics. Application authorizes and selects query profiles; it does not inspect SQL or re-rank rows.
 - `tracedecay-policy` owns deterministic evaluation and proposed effects. Application assembles immutable inputs, invokes the runtime, and transactionally revalidates effects. The curation worker then autonomously records/applies eligible owned memory/fact/skill/profile-curation effects; it never waits on a per-item preview/approval/apply action.
 - `tracedecay-tool-catalog` owns declarative capability metadata and generated transport mappings. Application implements the stable `UseCaseId`s referenced by that catalog and fails CI on missing or duplicate ownership.
@@ -62,7 +62,7 @@ Plan [`24-canonical-task-plan-graph-and-multi-agent-executor.md`](24-canonical-t
 
 ### 4.1 Master and incoming changes verified on 2026-07-10
 
-Publication refresh: `origin/master` `6c4b8b91dad2efdcaefab0153475287f37c2caee`. PRs #407/#410/#411/#413/#414/#415/#416/#417/#419/#420/#422/#423/#424 are merged; #418 remains open. Re-fetch before implementation because every open-PR state can still change. #420 fixes proxy-before-local-store authority and uncertain-write replay; #422 adds generation-scoped MCP catalog refresh; #423 supplies fact-search ranking/telemetry conformance; #424 supplies exact aggregate-before-sample analytics shared by MCP/dashboard.
+Publication refresh: `origin/master` `3567e31e3a60730400c9b900e32ca02c0bf3bf33` at 0.0.48. PRs #418 and #425 are merged; #425 final head `d3bb28b5` merged as `de3d05dc`. Only draft plan PR #421 was open at final refresh. Proxy routing, catalog refresh, fact ranking, exact analytics, release metadata, and the offline fail-closed resumable two-nonempty-profile-shard consolidation workflow are accepted application inputs; consolidation remains operator administration, not autonomous curation.
 
 | Change | Assumed future behavior | Application consequence |
 |---|---|---|
@@ -71,11 +71,12 @@ Publication refresh: `origin/master` `6c4b8b91dad2efdcaefab0153475287f37c2caee`.
 | PR #407, Hermes user-profile consolidation | Hermes sources/facts/sessions migrate into the ordinary user TraceDecay profile and Hermes-specific bridges are removed. | Hermes, curator, reflector, and skill-writer are actors/workflows inside the active profile. No use case accepts an implicit Hermes-profile switch or calls removed bridge/config/inventory paths. |
 | Merged PR #410, session-query dedupe and author classification | Sanitized native transcript rows remain preserved while query-time parent representative dedupe and direct-user/subagent/tool-result filters are available across message search, LCM, MCP, and CLI. | `ListMessages`, `SearchMessages`, session replay, export, and parity contracts consume domain `MessageOrigin`/`MessageView` unchanged and carry representative provenance, suppression count, and native-row expansion. V2 never treats representative rows as canonical storage. |
 | Merged PR #411, foreign-installation doctor severity | Foreign-owned skill packages are informational, not an update/remediation failure owned by TraceDecay. | Doctor findings carry severity, observed owner, authority, evidence, and legal remediation. Application cannot offer apply/update when ownership is foreign or unknown. |
-| Merged PR #414, `tracedecay_move_symbol` | Current MCP adds a dry-run-by-default symbol relocation with destination-first rollback, import insertion, impact classes, collisions/cycles/module/visibility evidence, and no automatic caller rewrite. | Add one cataloged application command with preview/apply, exact source/destination snapshot/version, filesystem infrastructure port, idempotency, sanitization, impact evidence, rollback receipt, and current CLI/MCP/API/SDK/dashboard bindings; generic query/edit helpers cannot hide it. |
+| Merged PR #414, `tracedecay_move_symbol` | Current MCP adds a dry-run-by-default symbol relocation with destination-first rollback, import insertion, impact classes, collisions/cycles/module/visibility evidence, and no automatic caller rewrite. | Add cataloged `code.move_symbol.inspect` and confirmed `code.move_symbol.commit` use cases with exact source/destination snapshot/version, filesystem port, idempotency, sanitization, impact evidence, recovery receipt, and CLI/MCP/API/SDK/dashboard parity; generic query/edit helpers cannot hide them. |
 | Merged PR #415, release-PR integrity | Trusted-base release guard rejects unexpected files, tracked ignored files, and dirty release-plz generation. | Generated catalog/OpenAPI/SDK/dashboard/release artifacts require an allowlisted deterministic manifest; application fixtures cannot be silently deleted by release packaging. |
-| Merged PRs #413/#416, releases v0.0.46/v0.0.47; open #418 v0.0.48 | Published accepted fixes through 0.0.47; 0.0.48 remains open/unstable. | Regenerate version/catalog/compatibility fixtures from `6c4b8b91`; create no semantic dependency on release-PR layout and require release artifact inventory parity before treating 0.0.48 as available. |
+| Merged PRs #413/#416/#418, releases v0.0.46/v0.0.47/v0.0.48 | Source 0.0.48 merged at `3567e31e`; the frozen planning runtime remained installed 0.0.47. | Regenerate version/catalog/compatibility fixtures from `3567e31e`; create no semantic dependency on release-PR layout and require release artifact inventory parity before claiming a host is upgraded. |
 | Merged PR #417, doctor identity-split visibility | Error-aware store resolution distinguishes split-store conflict from no index and preserves both stores unchanged. | Add a typed `identity_split` health/error state with exact safe candidate inventory and backup/consolidation preview; never offer `init` or claim absent/healthy when identity is ambiguous. |
-| Merged PR #419, race-safe `move_symbol` writes | Revalidates source/destination snapshots and same-file identity, rejects symlink escapes, uses atomic sibling renames, and preserves concurrent rollback edits. | Every edit command has exact identity/version preconditions, last-moment revalidation, race-safe filesystem ports, and typed apply/rollback conflicts; preview success is not permission to overwrite drift. |
+| Merged PR #425, explicit split-store consolidation (`de3d05dc`, final head `d3bb28b5`) | Plan/apply freezes both SQLite families, identifies holders by path plus file/inode, blocks unsupported/open holders, reserves writes, backs up both inputs, stages deterministic merge/rebuild/reject dispositions, verifies exhaustively, cuts markers atomically, and resumes/recovers by durable ledger. | Preserve it as accepted V1 anti-corruption behavior behind a capability-gated operator workflow with two explicit source identities, deterministic confirmation, holder/lease/write-reservation state, backup/staging/verification/cutover receipts, and exact recovery. V2 names operation-specific plan/start/recover use cases rather than creating a universal preview/apply framework. It is never a Settings patch, task command, or autonomous curation effect. |
+| Merged PR #419, race-safe `move_symbol` writes | Revalidates source/destination snapshots and same-file identity, rejects symlink escapes, uses atomic sibling renames, and preserves concurrent rollback edits. | Every edit command has exact identity/version preconditions, last-moment revalidation, race-safe filesystem ports, and typed commit/recovery conflicts; a prior inspection is not permission to overwrite drift. |
 | Merged PR #420, early daemon proxy/hot swap | Chooses managed-daemon authority before local store resolution/open; reconnects per request without replaying writes and requires a new host session for incompatible schemas. | Root/application context declares authority/reconnect state before use-case execution; uncertain writes are never retried, and typed guidance distinguishes reconnect from restart/new-session/tools-list refresh. Merged #422 adds generation-scoped `tools.listChanged` refresh for compatible catalogs. |
 
 Before each PR 24 slice, refresh open PRs, accepted merge bases, catalog digests, and compatibility inventory. If source code or generated inventory differs from this snapshot, update the slice receipt before implementation; never silently bind application semantics to stale branches.
@@ -161,7 +162,7 @@ crates/tracedecay-application/
 │       │   └── deliver.rs             # delivery receipt/terminal-outcome recording
 │       ├── commands/
 │       │   ├── mod.rs
-│       │   ├── runner.rs              # preview/apply pipeline and command receipts
+│       │   ├── runner.rs              # execution-mode dispatch and command receipts
 │       │   ├── projects.rs            # register/alias/unenroll
 │       │   ├── operations.rs          # index/watch/doctor/repair/backup
 │       │   ├── automation.rs          # job CRUD/run/pause/resume/cancel
@@ -288,7 +289,7 @@ pub struct Principal {
 pub struct ApplicationResponse<T> {
     pub request_id: RequestId,
     pub use_case: UseCaseRef,
-    pub catalog_digest: CatalogDigest,
+    pub catalog_snapshot: CatalogSnapshotRefV1,
     pub data: T,
     pub resolved_scope: ScopeResolutionV2,
     pub snapshot: Option<FrozenSnapshot>,
@@ -356,25 +357,19 @@ pub trait QueryUseCase<I, O>: Send + Sync {
     ) -> BoxFuture<'a, Result<ApplicationResponse<O>, ApplicationError>>;
 }
 
-pub trait CommandUseCase<C, P, O>: Send + Sync {
+pub trait CommandUseCase<C, O>: Send + Sync {
     fn id(&self) -> UseCaseId;
-    fn preview<'a>(
+    fn execute<'a>(
         &'a self,
         command: CommandEnvelopeV1<C>,
-        context: &'a RequestContext,
-    ) -> BoxFuture<'a, Result<CommandPreview<P>, ApplicationError>>;
-    fn apply<'a>(
-        &'a self,
-        command: CommandEnvelopeV1<C>,
-        confirmation: ApplyConfirmation,
         context: &'a RequestContext,
     ) -> BoxFuture<'a, Result<CommandReceipt<O>, ApplicationError>>;
 }
 ```
 
 - Queries do not reserve idempotency keys, append audit mutations, update access counters, or apply policy effects. Optional view-access analytics are a separately submitted event after the read and never change the returned snapshot.
-- Commands always have a canonical owner, idempotency key, expected version, authorization decision, and audit schema. Commands whose safe effect is obvious may return a preview with `confirmation_required=false`; they still support dry-run and produce a receipt.
-- `preview` captures aggregate/evidence versions, impact, redactions, required approvals, disk/network/process effects, and `PreviewDigest`. `apply` must present that digest and revalidate every version/capability/hold/freshness dependency.
+- Commands always have a canonical owner, idempotency key, expected version, authorization decision, audit schema, and catalog-owned `ExecutionModeV2`. Direct commits execute once; autonomous policy effects are not public item commands; resumable workflows return an operation; host lifecycle events remain internal. A destructive operation exposes a separately named typed preflight use case and a separately named confirmed domain command (for example `storage.consolidation.plan` then `storage.consolidation.start`) whose payload carries the preflight receipt/token. There is no universal `preview`, `apply`, `dry_run`, or `ApplyConfirmation` method.
+- An operation-specific preflight captures aggregate/evidence versions, impact, redactions, disk/network/process effects, and a typed confirmation token. The confirmed domain command revalidates every version/capability/hold/freshness dependency; operations that do not need this safety boundary do not manufacture a preflight.
 - Retrying an identical completed command returns the stored receipt. Reusing an idempotency key with a different canonical command digest returns `idempotency_conflict` without mutation.
 - Adapters cannot invoke repository operations directly; the use-case registry is the only executable capability surface.
 
@@ -442,6 +437,8 @@ pub trait UnitOfWork: Send {
         -> Result<(), CommandStoreError>;
     fn append_audit(&mut self, audit: AuditEnvelopeV1)
         -> Result<(), CommandStoreError>;
+    fn append_outbox(&mut self, entry: OutboxEntryV1)
+        -> Result<(), CommandStoreError>;
     fn complete_idempotency(&mut self, result: StoredCommandResult)
         -> Result<(), CommandStoreError>;
     fn commit(self: Box<Self>) -> Result<CommandCommitReceipt, CommandStoreError>;
@@ -456,11 +453,13 @@ Transaction order is fixed:
 4. Open one owning-shard unit of work and fence the writer lease.
 5. Reserve idempotency; exact prior completion returns the prior receipt.
 6. Load aggregate and compare expected/preview versions, holds, permissions, and policy/capability digests.
-7. Append immutable domain events/relations, audit event, outbox entries, and stored command result atomically.
+7. Append immutable canonical domain events/relations, audit event, outbox entries that reference their causing canonical event IDs, and stored command result atomically.
 8. Commit and return `CommandReceipt` with resulting aggregate version and shard watermark.
 9. Trigger asynchronous projections or a durable workflow after commit; never claim their completion in the command receipt until their own receipt exists.
 
 No network, process launch, source scan, blob upload, large export encoding, model evaluation, or user wait occurs between steps 4 and 8.
+
+The canonical event journal is authoritative. Current rows and specialized histories are transactionally maintained indexes; projectors, scheduler, replay, and subscriptions advance only from committed canonical event sequence/checkpoints. Outbox entries carry post-commit wakeup or external-effect delivery intent plus causing event IDs; notifier, adapter receipt, audit, SSE, or outbox delivery state cannot create task/domain truth or acknowledge a command that the journal did not commit.
 
 Idempotency records are concrete contracts, not conventions; plan 02 stores them in the owning shard's `command_idempotency` table:
 
@@ -491,15 +490,16 @@ pub struct StoredCommandResult {
 ```
 
 - Key scope and uniqueness: the primary key is `(principal, use_case, key)` in the command's owning shard; the same key under a different principal or use case is a distinct reservation, never a conflict.
-- Retention: completed results are retained at least 7 days (plan 20 configuration, per command class) and never shorter than the longest declared preview/retry window; an index on `retain_until` drives GC. After expiry the key is forgotten and a retry executes as a new command; clients needing longer recovery follow the receipt's `OperationRef`.
+- Retention: completed results are retained at least 7 days (plan 20 configuration, per command class) and never shorter than the longest declared retry/operation-confirmation window; an index on `retain_until` drives GC. After expiry the key is forgotten and a retry executes as a new command; clients needing longer recovery follow the receipt's `OperationRef`.
 - Size: a stored result larger than 256 KiB persists the receipt plus an `OperationRef` instead of inline output; identical retry returns that receipt with the operation pointer.
 
 ### 8.2 Command receipts and conflicts
 
 ```rust
-pub struct CommandPreview<P> {
-    pub command_id: CommandId,
-    pub preview_digest: ContentDigest,
+pub struct OperationPreflightV1<P> {
+    pub preflight_id: OperationPreflightId,
+    pub confirmation_token: ProtectedConfirmationToken,
+    pub operation_kind: UseCaseId,
     pub owner: ShardRef,
     pub based_on: VectorWatermark,
     pub aggregate_versions: BTreeMap<EntityRef, AggregateVersion>,
@@ -511,6 +511,7 @@ pub struct CommandPreview<P> {
 
 pub struct CommandReceipt<O> {
     pub command_id: CommandId,
+    pub execution_mode: ExecutionModeV2,
     pub disposition: CommandDisposition,
     pub result: O,
     pub owner: ShardRef,
@@ -522,9 +523,9 @@ pub struct CommandReceipt<O> {
 }
 ```
 
-`CommandId` is allocated deterministically by the application when the preview is built — a digest over principal, use case, idempotency key, and canonical command digest — so a retried preview is stable and at most one `CommandId` exists per reservation; adapters echo it on apply and never mint their own. `CommandPreview.expires_at` defaults to 10 minutes after `RequestContext.issued_at` (per-command overrides are catalog-declared through plan 20 configuration); an expired preview returns `preview_expired` and requires a new preview.
+`CommandId` is allocated deterministically by the application on first `execute` — a digest over principal, use case, idempotency key, and canonical command digest — so retry is stable and at most one ID exists per reservation; adapters never mint it. `OperationPreflightV1` exists only for catalog-declared confirmed destructive workflows, uses its own idempotency/expiry/authorization contract, and cannot be passed to an unrelated use case. An expired preflight returns `operation_preflight_expired` and requires the same named preflight use case again.
 
-Version conflict returns the current version, changed dependency IDs, safe summary, and a new-preview requirement. It never auto-rebases a destructive command. Idempotent status/run/refresh requests may explicitly declare a merge policy; that policy is versioned in the catalog and fixture-tested.
+Version conflict returns the current version, changed dependency IDs, safe summary, and, only for a confirmed operation, a new-preflight requirement. It never auto-rebases a destructive command. Idempotent status/run/refresh requests may explicitly declare a merge policy; that policy is versioned in the catalog and fixture-tested.
 
 ### 8.3 Cross-shard workflows
 
@@ -697,7 +698,7 @@ pub struct CoordinationOverlapView {
 
 - `ProximityClass` distinguishes same worktree, parallel worktree/same repository, overlapping branch/ref, direct file/symbol/test/goal/review overlap, and weak temporal proximity. Temporal proximity alone is never a conflict claim.
 - Presence expires; missing/expired claims mean unknown, not absent. Safe summaries are bounded, secret-scanned, provenance-bearing, and contain no raw prompts, tool arguments, payloads, sensitive paths, or inferred chain of thought.
-- Overlap actions are exactly `inspect`, `message`, `handoff`, `ack`, and `suppress`. Inspect is a read. The others are typed preview/apply commands with target capability, authority, idempotency, delivery receipt, expiry, and audit; failure to deliver never becomes an acknowledgement.
+- Overlap actions are exactly `inspect`, `message`, `handoff`, `ack`, and `suppress`. Inspect is a read. The others are direct or resumable typed commands with target capability, authority, idempotency, delivery receipt, expiry, and audit; failure to deliver never becomes an acknowledgement.
 - Policy may select at most one dynamic coordination hint per eligible overlap horizon. It requires material overlap, ranks an actionable target, includes one stable anchor/recipe, and applies per-agent/pair/work-claim dedupe, cooldown, acknowledgement, suppression, and terminal-outcome attribution. Repeated hook prompts cannot spam the same unresolved overlap.
 - Coordination analytics distinguish eligible, material, selected, delivered, inspected, messaged, handed off, acknowledged, suppressed, expired, resolved, duplicate-prevented, and unresolved horizons with coverage/denominators.
 
@@ -771,36 +772,37 @@ Current Git tools are not hidden behind the generic query alone: their stable us
 | `labs.hints.evaluate`, `labs.retrieval.evaluate`, `labs.ingest.evaluate`, `labs.query.evaluate`, `labs.correlation.evaluate`, `labs.scheduler.evaluate`, `labs.memory.evaluate`, `labs.policy_diff.evaluate` | Immutable exact/recorded/best-effort input and typed explanation/diff with no writes. |
 | `labs.search_quality.evaluate/compare` / `labs.scope_federation.evaluate` / `labs.privacy.evaluate` | Read-only retrieval-profile/corpus comparison, selector-resolution/shard-plan replay, and reserved/invalid synthetic sanitizer evaluation with exact anchors, versions, coverage, resource costs, and zero live registry/qrel/finding/policy mutation. |
 | `labs.coordination.evaluate` | Replay presence/overlap classification, proximity ranking, one-hint selection/suppression/dedupe, safe summary, legal action set, and outcome attribution with exact versions/coverage; message/handoff/ack/suppress are simulated only. |
-| `labs.orchestration.replay` | Read-only replay of plan 24 scheduler/executor decisions — readiness evaluation, route resolution, claim fencing, and context-packet assembly — against recorded task-graph state with exact versions/coverage; claims, leases, attempts, and boards are never mutated. |
+| `labs.orchestration.replay` | Read-only replay of plan 24 scheduler/executor decisions — readiness evaluation, route resolution, lease-acquisition fencing, and context-packet assembly — against recorded task-graph state with exact versions/coverage; work claims, leases, attempts, and views are never mutated. |
 | `labs.evolution.inspect` / `labs.evolution.simulate` | Evidence collection through curator/reflector/skill-writer graph, proposal/version diff, validation, historical corpus simulation, rollout/rollback prediction. |
 
 Evolution Studio preserves Hermes-style self-improvement as ordinary evidence-bearing actors, goals, turns, tools, artifacts, skills, memories, autonomy decisions, automatic applies, uses, outcomes, revisions, automatic recoveries, archives, and deletions. Simulation is an inspector and never mutates live state; it returns changed decisions/tool routes/outcomes, regressions/wins only where labels exist, unknown horizons, privacy exclusions, and cost/latency deltas. The live autonomous worker does not wait for the inspector.
 
 ## 10. Complete Command Use-Case Inventory
 
-Every non-curation mutation has an explicit typed execution contract and, when destructive/irreversible, preview/confirmation. Curation is deliberately different: it is fully autonomous under versioned configuration and emits no per-item preview/approve/apply/rollback commands. The catalog marks autonomy, authorization, expected versions, side effects, monitoring/recovery behavior, job behavior, and audit.
+Every non-curation mutation has an explicit typed execution contract; destructive/irreversible operations use a separately named preflight and confirmed domain command when required. Curation is deliberately different: it is fully autonomous under versioned configuration and emits no per-item preview/approve/apply/rollback commands. The catalog marks autonomy, authorization, expected versions, side effects, monitoring/recovery behavior, job behavior, and audit.
 
 | Domain | Stable command use cases |
 |---|---|
 | Projects/indexing | `projects.register`, `projects.update_alias`, `projects.unenroll`, `index.refresh`, `index.pause`, `index.resume`, `watchers.start`, `watchers.stop`. Unenroll previews retained evidence and never deletes content implicitly. |
-| Runtime/daemon/update | `daemon.start`, `daemon.stop`, `daemon.drain`, `daemon.restart`, `runtime.update.preview`, `runtime.update.apply`, `runtime.update.recover`. Drain/update are durable workflows carrying lifecycle lease epoch, accepting/draining/stopped state, in-flight work, checkpoint/receipt, restart requirement, takeover, rollback artifact, and current client-binding version. |
+| Runtime/daemon/update | `daemon.start`, `daemon.stop`, `daemon.drain`, `daemon.restart`, `runtime.update.plan`, `runtime.update.start`, `runtime.update.recover`. Drain/update are durable workflows carrying lifecycle lease epoch, accepting/draining/stopped state, in-flight work, checkpoint/receipt, restart requirement, takeover, recovery artifact, and current client-binding version. |
 | Diagnostics/repair | `diagnostics.refresh`, `doctor.run`, `repair.plan`, `repair.apply`, `backup.create`, `backup.restore`. Restore is a durable workflow with preflight and rollback point. |
-| Capture/LCM | `capture.ingest`, `capture.pause`, `capture.resume`, `lcm.compress.preview`, `lcm.compress.apply`, `lcm.boundary.create`, `lcm.lifecycle.preflight`, `lcm.lifecycle.repair`. Source offsets advance only through capture/store receipts. |
+| Store administration | `storage.consolidation.inspect`, `storage.consolidation.plan`, `storage.consolidation.start`, `storage.consolidation.status`, `storage.consolidation.resume`, `storage.consolidation.recover`. This is the operator-only merged-#425 workflow for two nonempty profile shards: fail closed on unsupported/path-or-file-identity holders, freeze/reserve both sources, back up, stage, verify every table/artifact/disposition, cut markers atomically, and return exact recovery. `start` requires the recomputed deterministic confirmation token and administrative grant. It never runs from scheduler, task execution, Settings auto-save, or autonomous curation. V1 `preview/apply` names remain only in the compatibility adapter/inventory. |
+| Capture/LCM | `capture.ingest`, `capture.pause`, `capture.resume`, `lcm.compress.plan`, `lcm.compress.start`, `lcm.boundary.create`, `lcm.lifecycle.preflight`, `lcm.lifecycle.repair`. Source offsets advance only through capture/store receipts. |
 | Automations | `automation.jobs.create/update/delete`, `automation.run`, `automation.cancel`, `automation.pause`, `automation.resume`, `automation.scheduler.enable/disable`. Run revalidates policy/config/activity/lease before fenced acquisition. |
 | Autonomous curation | `curation.run_now`, `curation.pause`, `curation.resume`, `curation.status`, `curation.history`, `curation.pin`, `curation.protect`, `curation.exclude`, `facts.feedback`. Candidate create/update/supersede/archive/quarantine and owned skill validate/materialize/revise/recover are internal autonomous effects, not public per-item commands. Each records artifact/evidence/validation/config/policy/expected-version/staged-monitoring/outcome receipts; foreign-owned targets are skipped. Explicit administrative deletion remains the separate descendant/hold/index/blob workflow. |
 | Policy | `policy.publish`, `policy.activate`, `policy.rollback`. Exact artifact validation and immutable registry CAS are required; activation never changes an in-flight evaluation. |
 | Representation artifacts | `representations.artifacts.install/import/activate/deactivate/evict/verify`, `representations.generations.rebuild`. Plan 05 §11.2A/PR 14E owns lifecycle semantics. Commands pin signed manifest/digest/license/runtime/config, enforce allowlisted egress and disk/RAM/device budgets, stage/verify before publish, preserve active/replay/index pins, and emit operation/audit receipts; query execution never invokes them. |
 | Settings | `settings.profile.patch`, `settings.project.patch`, `settings.integration.patch`, `settings.automation.patch`, `settings.storage.patch`. Preview shows declared owner, source/default, restart/reindex/privacy/migration impact; environment-derived values are read-only and storage relocation is a durable workflow, never an arbitrary path write. |
-| Payload/privacy | `payloads.gc.preview`, `payloads.gc.apply`, `retention.run.preview`, `retention.run.apply`, `holds.create`, `holds.release`, `entities.delete.preview`, `entities.delete.apply`, `privacy.scan.start/cancel`, `privacy.remediation.preview/apply/verify`, `privacy.quarantine.hold/release`. Privacy commands use safe finding/scan IDs, elevated grants where required, durable jobs, and candidate-free audit receipts. |
+| Payload/privacy | `payloads.gc.plan`, `payloads.gc.start`, `retention.run.plan`, `retention.run.start`, `holds.create`, `holds.release`, `entities.retire.plan`, `entities.retire.start`, `privacy.scan.start/cancel`, `privacy.remediation.plan/start/verify`, `privacy.quarantine.hold/release`. Privacy commands use safe finding/scan IDs, elevated grants where required, durable jobs, and candidate-free audit receipts. |
 | Projections/migration | `projections.rebuild`, `projections.pause`, `projections.resume`, `projections.publish`, `projections.rollback`, `migrations.backfill`, `migrations.reconcile`, `migrations.cutover`, `migrations.rollback`. |
 | Delivery refresh | `delivery.refresh`. Read-only remote fetch into captured evidence; repository allowlist, credential capability, rate/cap state, and fetched revision are audited. No PR write command. |
-| Saved investigations | `saved_views.create/update/delete`, `saved_views.share_preview/share_apply/share_revoke`, `collections.create/update/delete`, `annotations.create/update/delete`. Protected content stays with its declared activity/project owner; sharing creates a separately authorized, redacted, expiring local published view readable through `saved_views.get`, never publishes remotely, and never copies source content into catalog metadata. |
+| Saved investigations | `saved_views.create/update/delete`, `saved_views.share.plan/start/revoke`, `collections.create/update/delete`, `annotations.create/update/delete`. Protected content stays with its declared activity/project owner; sharing creates a separately authorized, redacted, expiring local published view readable through `saved_views.get`, never publishes remotely, and never copies source content into catalog metadata. |
 | Agent coordination | `coordination.message`, `coordination.handoff`, `coordination.ack`, `coordination.suppress`. Every command targets one presence/overlap claim and stable anchor, checks host/agent capability and expiry, previews disclosed summary/effects, records delivery/acceptance separately, and cannot mutate another agent's state without an authorized provider action. |
-| Tasks/orchestration | `initiatives.create/update/pause/resume/retire`, `plans.create_version/activate`, `plans.decompose`, `work_items.create/update/replace/retire`, `work_items.link/unlink`, `work_items.assign/reassign`, `work_items.pause/resume/cancel/reopen/archive`, `work_items.claim/heartbeat/progress/complete/block`, `work_items.retry`, `executors.register/heartbeat/drain/unregister`, `scheduler.pause/resume/run_once`, `task_views.create/update/delete/share`. Plan 24 §9.2 owns semantics and module files; every one is a POST command-envelope use case (plan 10 §8.7) — the former `PATCH /initiatives/{id}` / `PATCH /work-items/{id}` transport shapes are the `*.update` commands — and `work_items.claim` CAS-checks `expected_readiness_digest` against the owner-shard `readiness_digest` column (plan 24 §5.3). |
+| Tasks/orchestration | `initiatives.create/update/pause/resume/retire`, `plans.create_version/activate`, `plans.decompose`, `work_items.create/update/replace/retire`, `work_items.link/unlink`, `work_items.assign/reassign/assign_set`, `work_items.pause/resume/cancel/reopen/archive`, `work_items.acquire_lease/heartbeat/progress/complete/block`, `work_items.retry`, `executors.register/heartbeat/drain/unregister`, `scheduler.pause/resume/run_once`, `task_views.create/update/delete/share/revoke`. Plan 24 §9.2 owns semantics and module files; every one is a POST command-envelope use case (plan 10 §8.7) — the former `PATCH /initiatives/{id}` / `PATCH /work-items/{id}` transport shapes are the `*.update` commands. `work_items.assign_set` is one bounded all-or-none owner-shard transaction with plan/item expected versions and per-item receipts; `work_items.acquire_lease` CAS-checks `expected_readiness_digest` and creates the sealed packet/attempt/lease set atomically. It never creates advisory `WorkClaimV1`. Task-view commands preserve the complete protected `TraceQueryV1` (including its scope), projection/group/layout, snapshot/version/watermark, sharing, and revocation contract without copied rows or a second selector. |
 | API tokens | `auth.tokens.create`, `auth.tokens.list`, `auth.tokens.revoke`. Audited commands minting, listing, and revoking the scoped/TTL/revocable tokens of plan 17 §18.2; creation returns the secret exactly once through the secure flow, storage keeps only the hash and token ID, revocation declares stream/operation implications, and the per-launch bootstrap bearer (plan 10 §10.2) may execute only `auth.tokens.create` for the initial admin-class token. |
 | Exports | `exports.create`, `exports.cancel`, `exports.delete`. Create freezes query/access/redaction, stages parts under profile export root, and publishes only after final manifest hash. |
 | Lab promotion | `labs.fixtures.promote`. Requires sanitized redacted payload, secret scan receipt, exact source manifest, explicit confirmation, and repository-write capability outside lab runtime. |
-| Code edits | `code.move_symbol.preview/apply`. Preview is the default binding and returns exact source-removal/destination-insertion diff, applied destination imports, caller/dependency/visibility/collision/module/cycle/orphaned-import/cfg impact, snapshot/version, and affected-test evidence without writing. Apply requires repository/worktree grant, confirmation digest, clean revalidation, destination-first write plus source rollback receipt, reindex operation, and never rewrites callers implicitly. |
+| Code edits | `code.move_symbol.inspect/commit`. Inspect returns exact source-removal/destination-insertion diff, destination imports, caller/dependency/visibility/collision/module/cycle/orphaned-import/cfg impact, snapshot/version, and affected-test evidence without writing. Commit requires repository/worktree grant, typed confirmation, clean revalidation, destination-first write plus source recovery receipt, reindex operation, and never rewrites callers implicitly. |
 
 V1 writable dashboard actions not represented by a row above block V1 retirement. PR 3's generated inventory and the application registry jointly enforce this: each mutation has exactly one V2 use case or an explicit retired-with-replacement decision.
 
@@ -935,18 +937,18 @@ Commands run from the repository root with the checkout-local `target/`; do not 
 
 **Files:** `src/{unit_of_work,idempotency,audit,optimistic}.rs`; `src/ports/{command_store,event_sink}.rs`; `src/use_cases/commands/{mod,runner}.rs`; `tests/{command_pipeline,idempotency_optimistic}.rs`; `benches/commands.rs`.
 
-- [ ] Add tests `identical_retry_returns_stored_receipt`, `changed_payload_same_key_conflicts`, `version_conflict_writes_nothing`, `preview_digest_must_match`, `scope_sensitive_create_requires_declared_scope`, `route_scope_never_selects_owner`, `target_owner_conflict_writes_nothing`, `audit_and_domain_events_commit_atomically`, `external_effect_never_runs_inside_uow`, and `writer_takeover_fences_stale_commit`.
+- [ ] Add tests `identical_retry_returns_stored_receipt`, `changed_payload_same_key_conflicts`, `version_conflict_writes_nothing`, `confirmed_operation_preflight_token_must_match`, `scope_sensitive_create_requires_declared_scope`, `route_scope_never_selects_owner`, `target_owner_conflict_writes_nothing`, `canonical_event_audit_outbox_and_result_commit_atomically`, `outbox_cannot_create_domain_truth`, `external_effect_never_runs_inside_uow`, and `writer_takeover_fences_stale_commit`.
 - [ ] Run `cargo test -p tracedecay-application --test command_pipeline --test idempotency_optimistic -- --nocapture`. Expected: tests fail because command runner/unit-of-work contracts are absent.
 - [ ] Implement Section 8 single-owner pipeline, command receipts, safe error details, preview expiry/revalidation, and audit redaction.
 - [ ] Re-run the command. Expected: all tests pass; crash-before/after-commit fixture yields either no effect or one effect and repeatable receipt.
-- [ ] Run `cargo bench -p tracedecay-application --bench commands -- --save-baseline pr24a5`. Expected: reports preview/apply/idempotent-retry p50/p95 and transaction duration without external I/O.
+- [ ] Run `cargo bench -p tracedecay-application --bench commands -- --save-baseline pr24a5`. Expected: reports preflight/confirmed-commit/direct-commit/idempotent-retry p50/p95 and transaction duration without external I/O.
 - [ ] Commit `feat(application): add audited idempotent commands`.
 
 ### PR 24A6: Resumable workflows and operational commands
 
 **Files:** `src/{jobs}.rs`; `src/ports/{workflow_store,operations,capture,projection,remote_delivery}.rs`; `src/use_cases/operations.rs`; all `src/use_cases/commands/*.rs` except runner; `tests/workflow_recovery.rs`.
 
-- [ ] Add workflow fault cases for process death before/after step effect and receipt, duplicate worker, stale lifecycle lease, drain with active MCP/watch/index work, upgrade process exit before durable drain receipt, update restart/takeover/recovery, version drift, disk pressure, cancelled export, projection publish failure, retention hold, migration ambiguity, remote refresh followed by ref rewrite, coordination target expiry/delivery-without-ack/duplicate handoff/suppression, scope-owner move conflict, share-bundle expiry/revocation, and irreversible delete grace.
+- [ ] Add workflow fault cases for process death before/after step effect and receipt, duplicate worker, stale lifecycle lease, drain with active MCP/watch/index work, upgrade process exit before durable drain receipt, update restart/takeover/recovery, version drift, disk pressure, cancelled export, projection publish failure, retention hold, migration ambiguity, #425 split-store open-holder refusal/freeze/write-reservation/backup/staging/verification/cutover/restart recovery, remote refresh followed by ref rewrite, coordination target expiry/delivery-without-ack/duplicate handoff/suppression, scope-owner move conflict, share-bundle expiry/revocation, and irreversible delete grace.
 - [ ] Run `cargo test -p tracedecay-application --test workflow_recovery -- --nocapture`. Expected: tests fail because workflow runner/definitions are absent.
 - [ ] Implement each Section 10 command descriptor, pollable operation status, and the workflows named in Section 8.3; every external effect is a separately receipted step and every owner transaction is idempotent.
 - [ ] Re-run the command. Expected: every fault fixture reaches one named recoverable/terminal state, no duplicate effect receipt, and unaffected shard reads remain available.
@@ -968,7 +970,7 @@ Plan 18's PR 24H extends these same application registries/ports with privacy st
 
 **Files:** `src/migration.rs`; `tests/{future_master_migration,v1_parity}.rs`; generated post-merge parity fixture.
 
-- [ ] Add copied/redacted fixtures for merged #405 unique/ambiguous legacy adoption, merged #412 daemon drain/update recovery, #407 sessions/facts-only/profile identity, #410 native/origin/representative messages, #411 foreign-owner doctor severity, release-only #413 inventory drift, local/live Git drift, and every V1 writable dashboard action.
+- [ ] Add copied/redacted fixtures for merged #405 unique/ambiguous legacy adoption, merged #412 daemon drain/update recovery, #407 sessions/facts-only/profile identity, #410 native/origin/representative messages, #411 foreign-owner doctor severity, open #425 split-store consolidation manifests/recovery guidance, release-only #413 inventory drift, local/live Git drift, and every V1 writable dashboard action.
 - [ ] Run `cargo test -p tracedecay-application --test future_master_migration --test v1_parity -- --nocapture`. Expected: parity assertions fail before bounded shadow dispatch/receipts are complete.
 - [ ] Implement per-use-case V1/V2 dispatch and `UseCaseParityReceipt`; regenerate inventory from actual accepted master rather than the planning branch snapshots.
 - [ ] Re-run the command. Expected: zero duplicate canonical entities, exact native-message hashes/counts, representative provenance parity, all mutations accounted, and every divergence explained by a checked-in receipt.
@@ -1007,7 +1009,7 @@ Plan 18's PR 24H extends these same application registries/ports with privacy st
 
 1. Ship registry/read contracts behind `v2_application_shadow` with V1 effect ownership unchanged.
 2. Cut over read use cases only after semantic parity, partial-state, privacy, performance, and transport fixtures pass.
-3. Enable command preview while V1 still owns apply; compare validation/impact without mutation.
+3. Enable V2 operation-specific inspection/preflight while V1 still owns mutation; compare validation/impact without mutation.
 4. Cut over each command only after idempotency, audit, workflow recovery, rollback, and side-effect parity receipts pass.
 5. Keep migration dispatch reversible per domain/use case until that domain's V2-default receipt closes; do not retain it as live compatibility afterward.
 6. During bounded migration, rollback may restore V1 ownership from the receipt. After V2 default, terminate incompatible subscriptions/cursors/previews with typed restart and recover through the prior compatible V2/data snapshot without re-enabling stale names.

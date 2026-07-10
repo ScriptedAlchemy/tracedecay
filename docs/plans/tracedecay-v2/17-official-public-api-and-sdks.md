@@ -8,7 +8,7 @@
 
 **Initial deployment:** Local-first. A user-owned Unix-domain socket or authenticated loopback HTTP endpoint is supported. Remote or hosted service operation is not assumed by this plan and must not weaken the local trust, privacy, or authorization contract.
 
-**Publication baseline (2026-07-10):** `origin/master` `6c4b8b91`; #407/#410/#411/#413/#414/#415/#416/#417/#419/#420/#422/#423/#424 merged, #418 open. Regenerate contract/capability fixtures before implementation. The official surface includes ordinary-profile Hermes, current #410 message views, #411 doctor authority, #414/#419 race-safe `move_symbol`, #417 typed identity split, #415 release-integrity gates, #420 proxy-before-store/reconnect/no-write-replay semantics, #422 negotiated `tools.listChanged` daemon-generation refresh, #423 fact-rank/counter semantics, and #424 exact aggregate-before-sample analytics.
+**Publication baseline (2026-07-10):** `origin/master` `3567e31e` at 0.0.48 includes merged #418/#425 plus the earlier accepted inputs; only draft plan PR #421 was open. Regenerate contract/capability fixtures before implementation. The official surface includes ordinary-profile Hermes, current message views, doctor authority, race-safe `move_symbol`, typed identity split and merged consolidation (`de3d05dc`), release-integrity gates, proxy/reconnect/no-write-replay, negotiated catalog refresh, fact rank/counters, exact analytics, and operator-only consolidation/recovery.
 
 ---
 
@@ -30,7 +30,7 @@ This plan complements, rather than replaces, the following ownership:
 - `21-cli-mcp-tool-surface-and-output-unification.md` owns the generated binding and presentation parity contract; public SDK JSON shares its sealed views, typed outcomes, pages, retrieval anchors, notices, freshness, and provenance without scraping human Markdown or CLI envelopes.
 - `22-incremental-context-scout-and-suggestion-envelopes.md` owns scout status/replay/feedback/system-control and suggestion-envelope semantics; SDKs cannot trigger delivery or bypass read-only lab guards.
 - `23-session-lcm-temporal-retrieval-and-evaluation.md` owns temporal search/context/lineage/replay/evaluation semantics; SDK modes, anchors, cursors, coverage, no-answer reasons, and hydration are generated from that same contract.
-- `24-canonical-task-plan-graph-and-multi-agent-executor.md` owns initiative/plan/work-item/executor/scheduler/context-packet semantics and the many-host adapter protocol; this plan generates supported orchestration/monitoring clients without turning an SDK into a scheduler, route selector, lease authority, or board database. The task/executor read and command surface is the inventory in plan 09 §§9–10 and plan 10 §8: reads are GET and every mutation is a POST command envelope.
+- `24-canonical-task-plan-graph-and-multi-agent-executor.md` owns initiative/plan/work-item/executor/scheduler/context-packet semantics and the many-host adapter protocol; this plan generates supported orchestration/monitoring clients without turning an SDK into a task query engine, scheduler, route selector, event journal, lease authority, or board database. Task reads use registered entity/attribute/traversal/projection values inside canonical `TraceQueryV1`; `WorkClaimV1` is advisory and `work_items.acquire_lease` is authoritative. The read/command surface is the inventory in plan 09 §§9–10 and plan 10 §8: reads are GET/query POST, every mutation is a POST command envelope, and task deltas use the ordinary subscription protocol rather than `/task-events`.
 - This plan owns the declaration that the HTTP contract is an **official public integration surface**, agent-oriented discovery and documentation, first-party Rust/TypeScript/Python packages, direct-client lifecycle, compatibility policy, and public conformance program.
 
 There is no independent "SDK API" business layer. SDKs serialize generated request types, call the official transport, deserialize generated response types, and provide bounded ergonomics such as pagination and reconnect helpers. They may not recreate ranking, scope resolution, command authorization, replay classification, or retry policy by guesswork.
@@ -51,7 +51,7 @@ An agent should be able to:
 10. Preview and, only with explicit mutation authority, execute a supported command with idempotency, optimistic version checks, audit, and a durable operation receipt.
 11. Recover from every typed error using a machine-readable retry/restart/current-binding directive rather than prose parsing.
 12. Cite stable TraceDecay retrieval anchors in its own plan, report, PR, or handoff so a later agent can recover the exact evidence.
-13. Query or operate one cross-repository initiative, assign bounded work sets to Codex and Claude routes with explicit provider/model/reasoning-effort/tool/budget constraints, inspect dependencies/packets/runs/outcomes, and subscribe to task events without MCP or dashboard mediation.
+13. Query or operate one cross-repository initiative, call transactional `work_items.assign_set` to assign bounded work sets to Codex and Claude routes with explicit provider/model/reasoning-effort/tool/budget constraints, inspect dependencies/packets/attempts/outcomes, and subscribe to canonical task read-model deltas without MCP, dashboard mediation, or a separate task-event stream.
 
 Human developers should be able to accomplish the same work with `curl`, generated documentation, or an SDK without learning MCP wire details or reverse-engineering the dashboard.
 
@@ -64,6 +64,7 @@ Human developers should be able to accomplish the same work with `curl`, generat
 - No SDK-specific behavior. Rust, TypeScript, Python, raw HTTP, CLI JSON, MCP JSON, dashboard, export, and SSE snapshot must agree before presentation differences.
 - No stale-client behavior emulation. Data migration and rollback may preserve user data; they do not keep obsolete live names, schemas, or semantics executing.
 - No general GraphQL surface in V2. The bounded typed query/graph operations are easier to cost, authorize, version, and replay.
+- No task-specific query language. Generated task helpers build/import the one `TraceQueryV1`, return its canonical digest, and round-trip through generic query, saved views, subscriptions, CLI/MCP, and dashboard without semantic conversion.
 - No WebSocket requirement. Request/response, SSE, bounded NDJSON, and asynchronous operation polling cover the initial official surface.
 - No agent credential minted merely because a local process can connect. Endpoint reachability is not authorization.
 - No "helpful" SDK fallback from an explicit cross-project scope to the current project.
@@ -427,7 +428,7 @@ pub struct ApiMeta {
     pub request_id: RequestId,
     pub use_case: UseCaseRef,
     pub protocol: ProtocolRef,
-    pub catalog_digest: CatalogDigest,
+    pub catalog_snapshot: CatalogSnapshotRefV1,
     pub resolved_scope: ScopeResolutionV2,
     pub snapshot: Option<FrozenSnapshot>,
     pub coverage: CoverageReportV1,
@@ -443,7 +444,7 @@ pub struct ApiMeta {
 
 ### 11.3 Truthful partial results
 
-- Useful rows with one unavailable/stale/locked/redacted shard return success with `coverage.complete=false`.
+- Useful rows with one unavailable/stale/locked/redacted shard return success with `!coverage.is_complete()`.
 - Each shard/source coverage item declares selected/skipped disposition, requested/captured watermark, schema/capability version, freshness, rows considered/returned when known, and safe reason.
 - Zero results plus incomplete coverage is not represented as "no matches".
 - Counts declare exact, lower-bound, estimate, sampled, capped, or unknown.
@@ -460,8 +461,8 @@ pub struct ApiProblem {
     pub title: CatalogSafeText,
     pub status: u16,
     pub code: ApplicationErrorCode,
-    pub instance: RequestId,
     pub detail: Option<CatalogSafeText>,
+    pub instance: RequestId,
     pub retry: RetryDirective,
     pub current_version: Option<AggregateVersion>,
     pub restart: Option<RestartDirective>,
@@ -514,7 +515,7 @@ pub struct CursorPage<T> {
 ```
 
 - All collection endpoints use opaque authenticated cursors.
-- A cursor encodes exactly the domain `CursorClaimsV1` binding set (plan 01, codec owned by plan 05): query fingerprint, caller/access digest, canonical scope digest, catalog generation, schema/ranking/index versions, frozen watermarks and per-shard positions, sort cutoff, temporal mode/cutoff, intent-profile version, partial-shard dispositions, and expiry. Interactive cursors default to a 15-minute expiry; export/bulk continuations last their job lifetime; overrides are catalog-declared only.
+- A cursor encodes exactly the domain `CursorClaimsV1` binding set (plan 01, codec owned by plan 05): query fingerprint, caller/access digest, canonical scope digest, profile-catalog generation, schema/ranking/index versions, frozen watermarks and per-shard positions, sort cutoff, temporal mode/cutoff, intent-profile version, partial-shard dispositions, and expiry. Interactive cursors use plan-20 `query.cursor.interactive_ttl` (default 15 minutes); export/bulk continuations last their catalog-declared job lifetime.
 - Cursor and SSE event-ID authentication uses a persisted profile-local HMAC key set, not the per-launch secret. Each key record is `{key_id (primary key), created_at, activated_at, state: active | retiring | revoked}` stored in the profile catalog shard (plan 02) with at most one `active` key; cursors and event IDs embed `key_id`. Rotation mints a new active key on schedule or on demand; `retiring` keys validate existing tokens for the maximum outstanding cursor/subscription/export lifetime, then become `revoked`. Keys survive server restart, so a restart does not invalidate otherwise-valid cursors; revoking a key invalidates its outstanding tokens with a typed `RestartPagination`/`Resubscribe` directive. Plan 05's cursor codec and plan 10's SSE event IDs consume this one key registry.
 - Frozen snapshots referenced by outstanding cursors/subscriptions are pinned against GC/compaction/projection retirement for the cursor's declared lifetime by the store/query retention contract (plans 02/05); a pin that cannot be honored fails with a typed restart reason, never silently different data.
 - Page bounds are operation-specific; the default interactive maximum is conservative and documented.
@@ -534,6 +535,8 @@ pub struct CursorPage<T> {
 
 Mutating multi-operation workflows use explicit application commands, not generic batch. Atomicity is available only when one named use case declares one transactional owner. Otherwise each command has a separate idempotency key and receipt. `/api/v2/batch` is an API transport multiplexer over existing cataloged read use cases: it appears in plan 10 §8.1's route inventory and, by design, has no entry in plan 09's use-case inventory.
 
+`work_items.assign_set` is the named transactional orchestration exception, not generic batch. Its bounded request pins one initiative/plan version, one owner shard, distinct work-item/assignment expected versions, and an explicit route constraint per item (adapter/provider/model/reasoning effort/tools/budget). Application validates the entire set, rejects cross-owner or active-lease-stealing input, and commits all assignments or none; the result includes deterministic per-item validation plus one transaction receipt. Generated Rust/TypeScript/Python SDKs expose `assign_work_item_set`, not a client-side loop over singular assignment calls.
+
 ### 13.3 Bulk and export
 
 - Bounded NDJSON streams support large canonical row sequences where immediate streaming is useful.
@@ -546,7 +549,7 @@ Mutating multi-operation workflows use explicit application commands, not generi
 
 The official live contract is snapshot plus typed delta over SSE:
 
-1. `POST /api/v2/subscriptions` submits the sensitive typed query/scope and returns a session-bound subscription ID, initial snapshot reference, expiry, and stream path.
+1. `POST /api/v2/subscriptions` submits the sensitive typed canonical query (including its explicit scope) and returns a session-bound subscription ID, initial snapshot reference, expiry, and stream path.
 2. `GET /api/v2/subscriptions/{id}/events` emits the matching snapshot first, then ordered deltas/progress/coverage/operation/gap events.
 3. `Last-Event-ID` uses an authenticated opaque event cursor bound to subscription, authorization, protocol, and sequence.
 
@@ -562,6 +565,7 @@ Rules:
 - an unrecoverable gap emits `resync_required` and closes; SDKs fetch a new snapshot only under explicit reconnect policy;
 - auth revocation, scope loss, privacy change, or protocol cutoff terminates the stream with a typed reason;
 - SDK streams expose snapshot, delta, progress, heartbeat visibility option, gap, reconnect, and terminal events rather than hiding them behind an untyped callback.
+- Task subscriptions are ordinary `TraceQueryV1` read-model subscriptions. Each delta carries the causing canonical task-journal sequence range and projector watermark; there is no `/task-events` endpoint, task-specific cursor, or client-side merge of an outbox/adapter stream into task truth.
 
 ## 15. Graph-of-Graphs API
 
@@ -660,6 +664,8 @@ Every command request includes:
 Every result includes effect/audit receipt, current/new version, compensation/rollback availability, and either terminal output or durable operation/workflow ID.
 
 Destructive or broad non-curation operations such as wipe, retention deletion, payload GC, migration apply, external delivery, policy activation, and automation enablement require a capability-specific grant and preview/confirmation. A generic `write` token is insufficient.
+
+Merged #425's split-store consolidation is one such operator workflow. The public/admin contract exposes typed inspect/plan/start/status/resume/recover methods over two explicit source identities, path-plus-file/inode holder/freeze/reservation evidence, backup/staging/verification/cutover receipts, deterministic confirmation, per-table/artifact dispositions, and exact recovery. SDKs never accept arbitrary raw store paths, implement merge logic, or automatically retry an uncertain start. These methods appear only on `AdminClient`; task-executor and curation-service grants cannot discover or invoke them.
 
 Fact/memory/managed-skill/profile curation is not exposed as item-level approve/apply/install/rollback endpoints. A dedicated least-privilege curation service grant plus versioned autonomy configuration authorizes the application worker to apply only owned, policy-eligible effects after transactional revalidation; every effect/outcome/recovery is audited. Public clients can read status/history/decisions/outcomes, configure policy, pause/resume/run-now, pin/protect/exclude, and submit feedback. Unsafe/foreign/out-of-authority candidates are automatically rejected/deferred/quarantined, never converted into a human approval endpoint.
 
@@ -891,7 +897,9 @@ Compare canonical semantic JSON after removing only declared transport fields su
 - SSE duplicate/out-of-order/resume/expiry/gap/resync/coalescing/slow client/auth change/protocol cutoff tests.
 - Command idempotency/version conflict/preview/approval/operation recovery/audit/destructive grant tests.
 - Unix-domain socket transport conformance: ownership/mode checks, peer-credential mismatch, token authentication over the socket, and browser-credential rejection (listener built by plan 10 §10.1).
-- Executor-adapter compatibility/security matrix from plan 24 as a dedicated conformance lane: provider/model/route constraint enforcement, fenced claim/heartbeat/terminal transitions over the public surface, and workspace-safety refusals.
+- Executor-adapter compatibility/security matrix from plan 24 as a dedicated conformance lane: provider/model/route constraint enforcement, fenced lease-acquisition/heartbeat/terminal transitions, advisory-claim separation, broker/grant revocation, non-preemptible-effect quarantine, and workspace-safety refusals.
+- Task orchestration parity lane: canonical `DependencyId`/`WorkClaimRefV1`/manifest-ID+ordinal+digest `ContextPacketManifestRefV1`, canonical `TraceQueryV1`, complete saved-view round trip/share revoke, transactional assignment-set receipt, fully anchored packet entries, journal-sequence subscription deltas with no `/task-events`, and plan-26 workload/fleet accounting attribution.
+- Operator storage lane for merged #425: AdminClient-only consolidation discovery, deterministic plan/confirmation, path-plus-file/inode holder/freeze/backup/stage/verify/cutover/resume/recover state, uncertain-write non-replay, exact recovery action, and proof that curation/task credentials cannot discover or invoke it.
 - Secret corpus across source, generated artifacts, examples, logs, errors, cursors, anchors, exports, docs, source maps, and telemetry.
 - SDK compile/type/lint/unit/integration examples on supported Rust/Node/browser/Python matrices.
 - Fuzz/property tests for request parsing, cursor/event/anchor IDs, problem decoding, batch, graph limits, replay inputs, and stream events.
@@ -986,7 +994,7 @@ These are companion slices to plan 10's PR 24B–24E work. Renumber during imple
 **Files:** `docs/api/**`; authenticated explorer; generated capability pages; `tests/public_api_conformance/**`; release manifests.
 
 - [ ] Generate and curate quickstarts/concepts/recipes/reference; compile/run every example.
-- [ ] Add authenticated explorer with preview-only mutation UX and metadata/problem visibility.
+- [ ] Add an authenticated read-only explorer that can render operation-specific plan/confirmation request schemas and metadata/problems but cannot execute mutations.
 - [ ] Run the full application/HTTP/SDK/CLI/MCP/dashboard/export/SSE matrix.
 - [ ] Add release automation that blocks partial server/SDK/catalog/schema publication.
 - [ ] Record performance/security/privacy evidence and obtain API, SDK, and security review.

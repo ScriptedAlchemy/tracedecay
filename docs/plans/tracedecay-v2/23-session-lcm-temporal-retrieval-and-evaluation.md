@@ -8,7 +8,7 @@
 
 **Decision:** Recency is a feature, never a truth rule. “Current,” “as of,” “show the evolution,” and “forensic/exhaustive” are explicit answer modes. A newer weak mention does not erase an older authoritative decision; an older exact lexical match does not outrank an explicit later correction when the user asks for current state. Contradictions remain visible, and uncertain supersession causes a conflict warning rather than a fabricated winner.
 
-**Current baseline:** The plan was audited on 2026-07-10 against `origin/master` `6c4b8b91dad2efdcaefab0153475287f37c2caee`, including merged #407 ordinary-profile Hermes ownership, #420 daemon hot-swap routing, #422 tool-list refresh after daemon generation change, #423 retrieval-rank/counters, and #424 aggregate-before-sample analytics; #418 remained open. Refresh the source snapshot and live corpus before freezing implementation baselines. Current source anchors and live probe receipts below are historical evidence, not permanent behavior contracts.
+**Current baseline:** The plan was audited on 2026-07-10 against `origin/master` `3567e31e3a60730400c9b900e32ca02c0bf3bf33` at 0.0.48, including merged #418/#425 plus ordinary-profile Hermes, daemon routing, catalog refresh, retrieval rank/counters, and aggregate-before-sample analytics. Only draft plan PR #421 was open. Refresh the source snapshot and live corpus before freezing implementation baselines. Current source anchors and live probe receipts remain historical evidence, not permanent behavior contracts.
 
 ---
 
@@ -34,7 +34,7 @@ This file is the session/LCM/temporal specialization of the general retrieval pl
 | [`18-secret-detection-redaction-and-private-data-safety.md`](18-secret-detection-redaction-and-private-data-safety.md) | Owns sanitization, protected content, keyed fingerprints, privacy-domain model/index isolation, query-log handling, deletion, and safe outputs. |
 | [`19-system-defragmentation-convergence-and-extensibility.md`](19-system-defragmentation-convergence-and-extensibility.md) | Requires one event/query/config/catalog architecture and deletion of duplicate V1 message/LCM/search implementations after cutover. |
 | [`20-configuration-control-plane.md`](20-configuration-control-plane.md) | Owns typed settings, source/effective provenance, activation, UI/CLI/MCP/API/SDK controls, privacy floors, and replayable configuration revisions. |
-| [`21-cli-mcp-tool-surface-and-output-unification.md`](21-cli-mcp-tool-surface-and-output-unification.md) | Owns generated bindings, typed view models, Markdown-default/explicit-JSON rendering, stable envelopes, handles, pagination, and cross-transport parity. |
+| [`21-cli-mcp-tool-surface-and-output-unification.md`](21-cli-mcp-tool-surface-and-output-unification.md) | Owns generated bindings, presentation/view renderers, Markdown-default/explicit-JSON rendering, stable envelopes, handles, pagination, and cross-transport parity. Plan 09 owns the semantic typed view models that every transport renders. |
 | [`22-incremental-context-scout-and-suggestion-envelopes.md`](22-incremental-context-scout-and-suggestion-envelopes.md) | Consumes bounded retrieval/context envelopes for near-real-time suggestions. It cannot bypass temporal mode, privacy, coverage, attribution, or evaluation gates. |
 | [`24-canonical-task-plan-graph-and-multi-agent-executor.md`](24-canonical-task-plan-graph-and-multi-agent-executor.md) | Owns canonical task/plan/initiative/dependency/work-claim/executor semantics. This plan owns how those typed IDs and relations filter, rank, and assemble temporally correct context without sibling/global-board pollution. |
 
@@ -291,7 +291,7 @@ Authority never crosses scope automatically. A decision for one repository/workt
 
 ### 4.3 Answer modes
 
-Answer modes ride the optional `temporal` clause of `TraceQueryV1`. Plan [`01-domain-crate.md`](01-domain-crate.md) owns the clause type (`TemporalClauseV1` with `mode: Current | AsOf{valid_time, knowledge_time} | Evolution{from, to} | Forensic`); plan [`05-query-crate.md`](05-query-crate.md) §6/§11.4 plans and executes it. This plan defines no parallel `TemporalAnswerMode` AST — it supplies the mode semantics:
+Answer modes ride the optional `temporal` clause of `TraceQueryV1`. Plan [`01-domain-crate.md`](01-domain-crate.md) owns the exact clause type (`TemporalClauseV1::Current | AsOf{valid_time, knowledge_time} | Evolution | Forensic`); plan [`05-query-crate.md`](05-query-crate.md) §6/§11.4 plans and executes it. Evolution bounds, when requested, are expressed only through `TraceQueryV1.time`; the mode never gains a second `from`/`to` field. This plan defines no parallel `TemporalAnswerMode` AST — it supplies the mode semantics:
 
 - `Current`: prefer assertions valid now at the frozen snapshot; collapse confident supersession chains to the current representative, but return a history/conflict warning and lineage anchors.
 - `AsOf { valid_time, knowledge_time }`: evaluate only evidence valid at `valid_time` and known by `knowledge_time`; both timestamps are required per 05 §11.4 — a single-timestamp as-of conflates validity with knowledge and is rejected at validation. This mode supersedes this plan's earlier single-timestamp `Historical` mode. Never leak later corrections into ranking features or summaries.
@@ -416,18 +416,7 @@ After exact-hit preservation:
 
 Task/ticket context packets use the same temporal retrieval engine and the canonical graph from [`24-canonical-task-plan-graph-and-multi-agent-executor.md`](24-canonical-task-plan-graph-and-multi-agent-executor.md). They are not a global-board text dump and do not invent a second task-specific search path.
 
-```rust
-pub struct TaskContextSelectorV1 {
-    pub work_item_ids: Vec<WorkItemId>,
-    pub initiative_ids: Vec<InitiativeId>,
-    pub dependency_ids: Vec<TaskDependencyId>,
-    pub work_claim_ids: Vec<WorkClaimId>,
-    pub thread_ids: Vec<ThreadId>,
-    pub turn_ids: Vec<TurnId>,
-    pub scope: ScopeSelectorV2,
-    pub temporal: TemporalClauseV1,
-}
-```
+There is no `TaskContextSelectorV1`, task query struct, or task-local scope/temporal/page/sort vocabulary. The plan 09 task-context use case accepts canonical `WorkItemVersionRefV1`, `DependencyVersionRefV1`, and `WorkClaimRefV1` values owned by plan 01 and used by plan 24, plus canonical `InitiativeId`, `ThreadId`, and `TurnId` values where needed, and losslessly lowers them into one `TraceQueryV1`: plan 16 produces `scope`, plan 01's `temporal` and `time` fields carry temporal semantics, and plan 05's registered task/relation attributes carry the canonical references. Saved task views persist that one canonical AST and its registry digest, never an application-only selector. Unknown or version-mismatched refs fail validation before candidate generation; they are not weakened to bare text filters.
 
 The context packet contains only evidence relevant through an explained typed relation:
 
@@ -595,7 +584,7 @@ Every result can be hydrated, expanded to cluster members, opened in the Turn/se
 
 ### 7.2 Page envelope
 
-Human-facing Markdown is the default. JSON/NDJSON is explicit. All are rendered from one typed view model owned by Plans 09/21.
+Human-facing Markdown is the default. JSON/NDJSON is explicit. Plan 09 owns the one semantic typed view model; plan 21 owns its presentation/rendering and transport parity.
 
 Stable fields include:
 
@@ -1089,6 +1078,7 @@ These suffixes were unused in the plan set when authored. Recheck the master pla
 
 ### PR 24L — Application, API, CLI, MCP, and SDK bindings
 
+- Ordering: after PR 15C and before plan 22 PR 24O; the scout consumes these authorized temporal retrieval/context views and cannot land a parallel session-search path.
 - Expose search, anchor hydration, temporal lineage, context assembly, session/thread replay, and eval use cases from one catalog/view model.
 - Preserve compact Markdown default, explicit JSON/NDJSON, stable cursor/coverage shapes, and legacy compatibility mappings.
 

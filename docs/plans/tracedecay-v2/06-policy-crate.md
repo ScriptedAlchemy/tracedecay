@@ -97,7 +97,7 @@ Policy errors are stable evaluation/fidelity codes. Application owns public retr
 - PR #407, `fix(hermes): use the user TraceDecay profile`, consolidates Hermes onto the user profile and removes Hermes bridge/config/inventory paths. This plan must not introduce dependencies on `src/automation/hermes_bridge.rs`, `hermes_config_projection.rs`, `hermes_pending_skills.rs`, or `hermes_skill_inventory.rs`. Migration routes profile/zero-project/cross-project and unresolved policy/automation history to activity, explicitly project-scoped history to that canonical project shard, and records one source manifest; duplicate copies are reconciled only within the destination privacy domain and quarantined on conflict.
 - PR #410, `fix(sessions): collapse copied subagent prompts`, adds versioned query-time origin/representative semantics without deleting sanitized native rows. Hint/routing policy receives an explicit native/direct-user/subagent/tool-result/protocol classification plus evidence; it must not infer “human” merely from `role=user`, and replay records the classifier/version used.
 - PR #411 supplies one shared foreign-skill ownership predicate and a nonactionable info classification. Diagnostics/curation policy must propose remediation only when the current installation owns the effect and application exposes the matching mutation; foreign/legacy owner evidence produces `NoAction` or explicit manual-user choice, never an update/delete nag.
-- Publication master `6c4b8b91` includes #407/#410/#411/#413/#414/#415/#416/#417/#419/#420/#422/#423/#424. Open #418 is refreshed before PR 23A; #414/#419 require current edit-tool routing metadata, #417 requires abstention/visible remediation on unresolved identity splits, and #423/#424 retrieval/accounting semantics are accepted policy/evaluation input. PR #409 remains historical.
+- Publication master `3567e31e` (0.0.48) includes merged #418/#425 plus the earlier accepted inputs; only draft plan PR #421 was open at final refresh. #414/#419 require current edit-tool routing metadata, #417/#425 require abstention/visible remediation and accepted consolidation evidence, and #423/#424 retrieval/accounting semantics are accepted policy/evaluation input.
 - Before PR 23A starts, refresh master/open PRs, regenerate the V1 compatibility inventory, and update only source-path references actually present. Deleted transition paths are not extension points.
 
 ## 5. Exact File and Module Tree
@@ -216,7 +216,7 @@ pub struct PolicyBundleManifest {
     pub artifact: ArtifactRef,
     pub source_digest: Digest,
     pub config_digest: Digest,
-    pub tool_catalog_digest: Option<Digest>,
+    pub tool_catalog: Option<CatalogSnapshotRefV1>,
     pub compatible_host_profiles: BTreeSet<HostProfileRef>,
     pub created_at: i64,
     pub build_provenance: BuildProvenance,
@@ -288,7 +288,7 @@ pub struct EvaluationEnvironment {
     pub config_snapshot: SnapshotRef,
     pub index_snapshot: Option<SnapshotRef>,
     pub memory_snapshot: Option<SnapshotRef>,
-    pub tool_catalog: Option<ToolCatalogRef>,
+    pub tool_catalog: Option<CatalogSnapshotRefV1>,
     pub access_digest: Digest,
     pub budget: EvaluationBudget,
 }
@@ -462,7 +462,7 @@ pub struct HintEvaluationInput {
     pub session: SessionId,
     pub scope: ScopeSelectorV2,
     pub scope_resolution: ScopeResolutionSnapshot,
-    pub available_tools: ToolCatalogRef,
+    pub available_tools: CatalogSnapshotRefV1,
     pub memory_candidates: Vec<PolicyCandidate>,
     pub skill_candidates: Vec<PolicyCandidate>,
     pub prior_state: HintStateSnapshot,
@@ -492,7 +492,7 @@ When a hint payload proposes actions rather than plain guidance, those actions a
 
 Scope is preserved end-to-end in evaluation/input/output digests. A tool/skill/dependency hint may narrow only by returning an explicit proposed `ScopeSelectorV2` and showing the change; ignored dependency hints cannot erase the caller's multi-repo/worktree selection. Ambiguous/stale/polluted registry resolution suppresses confident routing/correlation/coordination and exposes the candidate/action needed.
 
-`available_tools` and `EvaluationEnvironment.tool_catalog` must carry the same pinned `ToolCatalogRef`; the catalog snapshot itself is loaded once through `BundleArchivePort`-adjacent reads at evaluation start, so no full-catalog canonical-CBOR digest is computed inside the evaluation stage budget.
+`available_tools` and `EvaluationEnvironment.tool_catalog` must carry the same pinned plan-01 `CatalogSnapshotRefV1`; the catalog snapshot itself is loaded once through `BundleArchivePort`-adjacent reads at evaluation start, so no full-catalog canonical-CBOR digest is computed inside the evaluation stage budget.
 
 #### 9.1.1 Request facts and candidate shapes
 
@@ -511,7 +511,7 @@ pub struct RequestFacts {
     pub scope: ScopeSelectorV2,
     pub scope_resolution: ScopeResolutionSnapshot,
     pub hook_facts: HookFacts,
-    pub tool_catalog: ToolCatalogRef,
+    pub tool_catalog: CatalogSnapshotRefV1,
     pub host_tool_availability: BTreeMap<CapabilityId, bool>,
     pub memory_candidates: Vec<PolicyCandidate>,
     pub skill_candidates: Vec<PolicyCandidate>,
@@ -1216,7 +1216,7 @@ PR 23 is split into reviewable 23A–23G. Plan 22's PR 23H later lands `src/scou
 
 ## 15. Cutover and Rollback
 
-1. Refresh publication base `6c4b8b91`; record merged #405/#407/#410/#411/#412/#413/#414/#415/#416/#417/#419/#420/#422/#423/#424 separately from open-assumed #418, regenerate V1 stores/profile/tool/policy inventory, and record actual master binary/schema/protocol/catalog-generation versions. Do not begin backfill from a pre-adoption, Hermes-local, or ownership-ambiguous locator.
+1. Refresh publication base `3567e31e`; record merged #405/#407/#410/#411/#412/#413/#414/#415/#416/#417/#418/#419/#420/#422/#423/#424/#425, regenerate V1 stores/profile/tool/policy inventory, and record actual master binary/schema/protocol/catalog-generation versions. Do not begin backfill from a pre-adoption, Hermes-local, or ownership-ambiguous locator.
 2. Compile/hash V1 compatibility bundles and import immutable input/evaluation/state snapshots with source manifests. Dedupe adopted legacy/Hermes data by canonical source/content digest; quarantine conflicts.
 3. Enable `v2_policy_shadow` per evaluator. V1 remains effect owner; V2 evaluates the same captured snapshot without injecting, acquiring locks, mutating memory, writing files, or incrementing counters.
 4. Compare decisions, payloads, state transitions, correlations, schedule reasons, memory proposals, outcome attribution, latency, coverage, and digests. Block cutover on unexplained gaps, privacy failure, bundle/input loss, or drifted identity/profile provenance.

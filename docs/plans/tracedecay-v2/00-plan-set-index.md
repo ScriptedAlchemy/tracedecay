@@ -2,7 +2,7 @@
 
 **Status:** navigation and ownership index for the total-rewrite plan. This pull request contains plans only.
 
-**Master plan:** [`../2026-07-09-tracedecay-brain-rewrite.md`](../2026-07-09-tracedecay-brain-rewrite.md)
+**Canonical master plan:** [`../2026-07-09-tracedecay-brain-rewrite.md`](../2026-07-09-tracedecay-brain-rewrite.md). This tracked path is authoritative; there is intentionally no second `docs/architecture/tracedecay-v2-master-plan.md` copy that could drift.
 
 ## 1. Intended outcome
 
@@ -13,7 +13,7 @@ Core product surfaces:
 - All/Brain system view with semantic zoom and coordinated graph-of-graphs lenses.
 - Universal Explorer with typed query, search, facets, pivots, compare, explain, collections, and export.
 - Causal Loom timeline following an agent/Turn/session through tools, subagents, code, worktrees, commits, PRs, checks, memories, hints, and outcomes.
-- Canonical Tasks workspace over one federated initiative/plan/task graph, with saved Kanban/DAG/timeline views, cross-repository work bundles, dependency/critical-path analysis, executor routing, claims/runs, and versioned context packets.
+- Canonical Tasks workspace over one federated initiative/plan/task graph, with saved Kanban/DAG/timeline views, cross-repository work bundles, dependency/critical-path analysis, executor routing, advisory work claims, fenced leases/attempts, and versioned context packets.
 - Git, code, thread, agent, Turn, timeline, holographic-memory, and automation/skill graph lenses with tables and accessible fallbacks.
 - Hint, Retrieval, Search Quality, Coordination, Orchestration, Ingest, Query, Correlation, Scheduler, Memory, Policy Diff, Evolution, Scope/Federation, and Privacy & Secret Safety labs.
 - One official contract shared by API, CLI, MCP, generated SDKs, dashboard, hooks, and tool discovery.
@@ -129,9 +129,9 @@ When documents overlap:
 
 ### Task graph and multi-agent execution lead
 
-1. Plan 24 in full plus plans 01, 02, 04–06, 08–10, 16–17, and 20–23.
-2. Hermes source/transcript anchors, file-level `direct_port`/`behavioral_port`/`redesign`/`drop` dispositions, license provenance, and wrong-board, copied-task, lost-dependency, already-complete-dispatch, and stale-worker regressions in plans 13–14.
-3. Canonical identity, multi-project declared scope, typed dependency edges, versioned context packets, executor capability routes, claims/run fencing, budget/effect grants, task-aware hints, board projections, and replay gates.
+1. Plan 24 in full plus plans 01, 02, 04–06, 08–10, 16–17, 20–23, and 26.
+2. Plan 13 PR 2A owns the pinned Hermes source/test/UI provenance ledger; plan 24 owns and consumes its file-level `direct_port`/`behavioral_port`/`redesign`/`drop` dispositions and source-to-test/license requirements. Plans 13–14 retain the wrong-board, copied-task, lost-dependency, already-complete-dispatch, and stale-worker evidence/regressions.
+3. Canonical identity, multi-project declared scope, typed dependency edges, versioned context packets, executor capability routes, advisory work claims versus authoritative fenced leases/attempts, budget/effect grants, task-aware hints, board projections, and replay gates.
 
 ### Code-intelligence implementer
 
@@ -171,10 +171,10 @@ When documents overlap:
 - One generated capability/binding manifest owns every CLI/MCP/API/SDK/dashboard/hook/skill name, request/default/scope/effect/output/error contract, help entry, availability state, and compatibility cutoff. MCP defaults to compact Markdown, machine callers request canonical typed JSON/NDJSON explicitly, and all human renderers consume sealed typed views rather than raw JSON.
 - The optional daemon Context Scout consumes canonical Turn/task/agent events asynchronously, performs only catalog-authorized bounded reads, optionally uses a capability-selected model such as Spark, and emits at most one evidence-anchored suggestion to an exact Thread/Turn through the shared hint selector. Hooks never wait for its model/tools; useful silence, privacy, expiry, dedupe, and replay gates dominate recall.
 - Session/LCM retrieval distinguishes immutable occurrences, logical copies, summaries, and temporal assertions. Recency is one explained intent feature, not truth; explicit later corrections/supersession and authority determine current answers, historical/as-of replay has zero future leakage, and uncertain conflicts remain visible.
-- One profile-owned federated initiative/plan/task graph is canonical. It is a native TraceDecay product produced by porting proven Hermes Kanban behavior/code where suitable and redesigning it where V2 can do better—not an adapter to a Hermes task service. Boards are named `TraceQueryV1` plus layout/grouping/policy projections; they never create or copy task identity, dependencies, claims, runs, or authority. A task may appear in any number of project, repository, worktree, agent, executor, timeline, Kanban, DAG, or initiative views.
+- One profile-owned federated initiative/plan/task graph is canonical. It is a native TraceDecay product produced by porting proven Hermes Kanban behavior/code where suitable and redesigning it where V2 can do better—not an adapter to a Hermes task service. Plan 13 PR 2A must pin the exact upstream/local commit, file spans, tests, license notice, and `direct_port|behavioral_port|redesign|drop` disposition before implementation code moves. Boards are canonical `TraceQueryV1` plus layout/grouping/policy projections; they never create or copy task identity, dependencies, advisory claims, attempts, leases, or authority. A task may appear in any number of project, repository, worktree, agent, executor, timeline, Kanban, DAG, or initiative views.
 - Executor selection is explicit and typed: host/provider/model/reasoning effort, tool and effect grants, privacy/egress class, cost/time budgets, retry/concurrency policy, and availability resolve to an immutable route receipt. Codex, Claude, Cursor, Hermes, and future executors are adapters, not task owners.
-- Every dispatched run uses a compare-and-swap task revision, TTL/heartbeat claim, artifact/worktree overlap set, idempotency key, and unforgeable run fence. Completion/cancellation revokes stale authority; dependency readiness comes only from current canonical edges.
-- Versioned context packets bind task revision, scope, dependency outcomes, exact Thread/Turn anchors, code/Git/PR state, active claims, retrieval/config versions, source watermarks, visibility policy, budget, and digest. Agents receive only materially relevant, recipient-authorized sibling summaries; neither boards nor long threads become implicit context.
+- Every dispatched attempt acquires one compare-and-swap `TaskLeaseV1` with TTL/heartbeat, artifact/worktree overlap set, idempotency key, and unforgeable fence proof. `WorkClaimV1` is advisory nearby-work evidence only. Completion/cancellation revokes stale lease authority; dependency readiness comes only from current canonical edges.
+- Versioned context packets bind task revision, scope, dependency outcomes, exact Thread/Turn anchors, code/Git/PR state, relevant advisory work claims and the authoritative attempt/lease, retrieval/config versions, source watermarks, visibility policy, budget, and digest. Agents receive only materially relevant, recipient-authorized sibling summaries; neither boards nor long threads become implicit context.
 - `tracedecay-code-index` is the sole production owner of code extraction, grammar registration, watcher intake, incremental reuse, generation construction, lineage, and diagnostic/test attribution. Packed generations reference plan-02 privacy-domain blobs; they never embed a second source-body store.
 - Metric definitions, surface codes, denominators, caps, horizons, pricing/savings methods, and SLOs are registered/versioned contracts. `unknown`, `partial`, and `capped` never render as known zero, and observability cannot create a second event/accounting path.
 
@@ -249,7 +249,7 @@ No broad V2 rewrite lands as one PR. Use the master plan’s Phase 0–5 sequenc
 - Sessions/agents/Turns/tools/goals/workflows and temporal project attribution backfill with parity.
 - Code snapshots/lineage, cross-repo graph, Git/delivery, knowledge, automation/skills, accounting, tool catalog, policy, nearby-agent claims, and replay inputs backfill with evidence manifests.
 - Merged/open PR semantics named in the master/failure matrix are fixtures, not assumptions.
-- Initiative/plan/task identities, dependencies, declared cross-repository scope, executor routes, claims/runs, context packets, outcomes, and task-to-Thread/Turn/code/Git/PR relations backfill into the canonical graph without board-local copies.
+- Initiative/plan/task identities, dependencies, declared cross-repository scope, executor routes, advisory claims, fenced attempts/leases, context packets, outcomes, and task-to-Thread/Turn/code/Git/PR relations backfill into the canonical graph without board-local copies.
 - Wrong-board recovery, dependency preservation, duplicate-work suppression, already-complete artifact detection, stale-run fencing, and recipient-scoped task hints pass transcript-derived replay fixtures.
 
 ### Phase 4 — official product

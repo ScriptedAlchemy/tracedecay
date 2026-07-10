@@ -6,7 +6,7 @@
 
 **Goal:** Turn TraceDecay's captured Threads, Sessions, Turns, Agents, Goals, tools, code, Git, delivery, knowledge, skills, hints, and automation evidence into a durable coordination system that can decompose and execute cross-repository initiatives safely across Codex, Claude, Cursor, Hermes, and custom executors without duplicating work, losing provenance, leaking private context, or forcing every agent to observe a global board.
 
-**Architecture:** The profile activity shard owns an immutable task/plan event stream and current projections. `tracedecay-domain` defines the graph and lifecycle; `tracedecay-store` persists one owner-shard ledger; projectors attach task work to every other graph; query evaluates one task algebra; pure policy proposes decomposition, routing, readiness, fairness, retries, and sibling-materiality decisions; application authorizes and atomically applies effects; executor adapters run attempts through fenced leases and narrow capability grants; generated API/CLI/MCP/SDK/dashboard bindings expose the same use cases and typed views.
+**Architecture:** The profile activity shard owns an immutable task/plan event stream and current projections. `tracedecay-domain` defines the graph and lifecycle; `tracedecay-store` persists one owner-shard ledger; projectors attach task work to every other graph; query evaluates registered task values through the sole `TraceQueryV1` algebra; pure policy proposes decomposition, routing, readiness, fairness, retries, and sibling-materiality decisions; application authorizes and atomically applies effects; executor adapters run attempts through fenced leases and narrow capability grants; generated API/CLI/MCP/SDK/dashboard bindings expose the same use cases and typed views.
 
 **Decision:** A task is not a card row, an assignee string, a provider prompt, an automation run, a Git branch, or a work-claim heartbeat. Those are related entities with distinct identity and authority. `WorkItemId` is the canonical schedulable identity; `ExecutionAttemptId` is one try; `TaskLeaseId + fence_epoch` is execution authority; `WorkClaimV1` remains advisory coordination evidence; `ContextPacketManifestId` pins exactly what an executor was allowed to know.
 
@@ -46,6 +46,9 @@ This is the plan for a **native TraceDecay port-and-redesign of Hermes Kanban**,
 28. Hidden chain-of-thought is never requested or inferred. Only provider-exposed reasoning artifacts, messages, summaries, decisions, tool events, and evidence are linkable.
 29. Every query/result states scope resolution, graph/plan versions, watermarks, authorization coverage, partial/unavailable components, and anchorability. Empty never means “no work exists” when coverage is incomplete.
 30. Migration ends with one scheduler, one lease authority, one context-packet assembler, one task query engine, one public capability catalog, and one dashboard state model. Compatibility adapters are bounded and deleted after receipts prove cutover.
+31. Task reads use registered `EntityKind`, attribute, traversal, facet, aggregate, projection, and sort values inside the one domain `TraceQueryV1`; `TaskQueryV1`, `TaskContextSelectorV1`, board filter DSLs, and transport-specific task query bodies are forbidden. Convenience selectors compile losslessly to `TraceQueryV1` and expose the canonical digest.
+32. Every accepted task command appends one canonical `task_graph_events` record and its projection/external-effect outbox entries in the same owner-shard transaction. Projectors, scheduler checkpoints, subscriptions, audit views, and replay consume that committed journal; notifier/SSE/outbox delivery is never a second event truth.
+33. `RedundancyMode::SharedExecution` is coordination intent, not permission for two authoritative executors on one work item. Concurrent collaborators are explicit child work items under an aggregate parent; provider-internal subagents remain attached to the one primary attempt and use only its brokered grants.
 
 ## 1. Product objective and non-goals
 
@@ -56,7 +59,7 @@ TraceDecay should expose work as part of the same “brain” as conversations, 
 - a user creates or discovers one initiative, such as a coordinated Rspack/Rsbuild/React Router change;
 - TraceDecay resolves the exact authorized repository/project/worktree set and current evidence;
 - deterministic or model-assisted decomposition proposes a versioned task subgraph;
-- the application validates and records independently claimable work with typed dependencies and acceptance criteria;
+- the application validates and records independently leasable work with typed dependencies and acceptance criteria;
 - routing policy selects eligible Codex, Claude, Cursor, Hermes, or custom executor classes without overloading an assignee string;
 - workers receive narrow context packets and capability grants, execute in isolated exact workspaces, and publish structured handoffs/artifacts/outcomes;
 - verifier and synthesizer work items join parallel research before implementation tasks unlock;
@@ -116,7 +119,7 @@ The local audit also found `scheduled` as a state without local `scheduled_at`, 
 | [Official Kanban documentation](https://hermes-agent.nousresearch.com/docs/user-guide/features/kanban) | Durable board, CLI/slash/tool/dashboard surfaces, dependency graphs, worker context, runs, scheduling, model/workspace controls, notifications, and current limitations. |
 | [Official worker-lane contract](https://hermes-agent.nousresearch.com/docs/user-guide/features/kanban-worker-lanes) | Separates lifecycle truth from executor lanes and documents spawn/lifecycle/log requirements. TraceDecay generalizes this into a typed executor SPI and fenced attempts. |
 | [Official toolset reference](https://hermes-agent.nousresearch.com/docs/reference/toolsets-reference) | Kanban is opt-in and excluded from wildcard tool grants. TraceDecay keeps deny-by-default mutation capabilities and attempt-scoped grants. |
-| [Hermes v0.15 release notes](https://github.com/NousResearch/hermes-agent/blob/main/RELEASE_v0.15.0.md) | Records 104 Kanban PRs and evolution toward decomposition, swarm topology, schedules, worktrees, per-task models, retries, and worker visibility. This supports incremental, test-led delivery rather than one omnibus implementation. |
+| [Hermes v0.15 release](https://github.com/NousResearch/hermes-agent/releases/tag/v2026.5.28) | Records the Kanban maturation wave and evolution toward decomposition, swarm topology, schedules, worktrees, per-task models, retries, and worker visibility. This supports incremental, test-led delivery rather than one omnibus implementation. |
 | [Ambient board ownership issue #21877](https://github.com/NousResearch/hermes-agent/issues/21877) | Official issue documents cross-bot dispatch/write/token/notification confusion from global current-board state and all-board scanning. This is a must-not-regress fixture. |
 | [MIT license](https://github.com/NousResearch/hermes-agent/blob/main/LICENSE) | Concepts may be adapted; any substantial copied code must retain license/copyright notice. Prefer clean typed design in TraceDecay and record provenance for borrowed algorithms or fixtures. |
 | [GitHub Projects](https://docs.github.com/en/issues/planning-and-tracking-with-projects/learning-about-projects/about-projects) | Official docs model table, board, and roadmap as customizable views over linked issues/PRs. TraceDecay adopts the “many saved views over stable items” lesson, not GitHub as task authority or a dependency. |
@@ -172,7 +175,7 @@ This branch remains plans-only. The implementation phase performs a file-and-fea
 | Board slug/directory databases, global `current`, `t_<hex>` board-local identity, absolute-path attachments, and status-column authority | **Drop** | Boards are `TraceQueryV1` views, attachments are scanned content-addressed artifacts, status is decomposed into typed dimensions, and no current UI/CWD/board value controls ownership or dispatch. |
 | Integrity-check/quarantine-not-recreate, FD ownership, and post-commit invariants | **Port as store regressions** | Plan 02 owns equivalent store/open/recovery tests for the canonical shards; no per-board DB survives. |
 
-The implementation research manifest must pin the exact Hermes commit/file spans and record `direct_port`, `behavioral_port`, `redesign`, or `drop` for every audited subsystem before code moves. Directly copied or translated code carries required license/copyright notices and provenance; behavior-preserving ports carry source-to-test traceability. If upstream behavior differs, tests and source at the pinned revision outrank unversioned prose.
+Plan 13 PR 2A owns the implementation heritage ledger. Before code moves it must pin the exact official and local Hermes commit/file/test/UI spans and record `direct_port`, `behavioral_port`, `redesign`, or `drop` for every audited subsystem, including backend algorithms/schema tests, worker lifecycle tools, dashboard components/interactions, and diagnostics. Each row records license/copyright disposition, destination owner/PR, source-to-test traceability, divergence rationale, and the regression that proves the replacement is at least as strong. Directly copied or translated code carries required notices; behavior-preserving ports carry source-to-test traceability. If upstream behavior differs, tests and source at the pinned revision outrank unversioned prose. PRs 4E, 6G, 24M, 24N, and 25G may prototype against fixtures but cannot merge implementation until their applicable PR 2A ledger rows are reviewed.
 
 ## 3. Ownership and cross-plan contract
 
@@ -184,7 +187,7 @@ Do not create a monolithic `tracedecay-tasks` crate. The graph is a cross-cuttin
 | [02-store-crate.md](./02-store-crate.md) | Owns activity-shard schema, immutable event/history storage, transactions, fenced leases, outbox, blobs, retention, backup/restore, and repositories. |
 | [03-capture-crate.md](./03-capture-crate.md) | Captures provider-native goals/plans/workflows/tool events, locations, external tasks, Git/delivery facts, and executor observations without granting task authority. |
 | [04-projectors-crate.md](./04-projectors-crate.md) | Builds current task/plan/attempt/dependency/critical-path/workload/context-materiality projections and links them to every graph. |
-| [05-query-crate.md](./05-query-crate.md) | Extends `TraceQueryV1` with typed task sources/operators, deterministic traversal, aggregation, explanation, pagination, and context assembly. No second query engine. |
+| [05-query-crate.md](./05-query-crate.md) | Registers task entity kinds, attributes, predicates, traversal relations, facets, projections, and saved profiles consumed through the unchanged `TraceQueryV1`; it supplies deterministic traversal, aggregation, explanation, pagination, and context assembly. No task-specific source/operator vocabulary or second query engine. |
 | [06-policy-crate.md](./06-policy-crate.md) | Owns pure decomposition validation, routing, readiness, priority/fairness, retry/circuit-breaker, packet relevance, and sibling-materiality decisions. |
 | [07-hooks-crate.md](./07-hooks-crate.md) | Receives only validated plan-22 suggestion envelopes and bounded task lifecycle signals at supported host boundaries; it never schedules or claims work. |
 | [08-tool-catalog-crate.md](./08-tool-catalog-crate.md) | Declares task capabilities, effect/scope/privacy/cost metadata, executor adapter manifests, grant eligibility, generated schemas, and bindings. |
@@ -200,9 +203,10 @@ Do not create a monolithic `tracedecay-tasks` crate. The graph is a cross-cuttin
 | [18-secret-detection-redaction-and-private-data-safety.md](./18-secret-detection-redaction-and-private-data-safety.md) | Owns sanitizer/taint types, protected payloads, logs/artifacts/packets, secret scanning, quarantine, egress, retention, and deletion. |
 | [19-system-defragmentation-convergence-and-extensibility.md](./19-system-defragmentation-convergence-and-extensibility.md) | Enforces the allowed dependency DAG, one canonical activity graph, SPI rules, entropy budget, and deletion of parallel systems. |
 | [20-configuration-control-plane.md](./20-configuration-control-plane.md) | Exclusively owns typed task/executor/scheduler/model/budget/grant/privacy settings, precedence, history, activation, status, and all configuration UIs/bindings. |
-| [21-cli-mcp-tool-surface-and-output-unification.md](./21-cli-mcp-tool-surface-and-output-unification.md) | Owns generated semantic bindings, typed view models, Markdown-default/explicit-JSON rendering, stable pagination/handles/errors, and parity. |
+| [21-cli-mcp-tool-surface-and-output-unification.md](./21-cli-mcp-tool-surface-and-output-unification.md) | Owns generated semantic bindings, the pure `tracedecay-presentation` renderer/document model, Markdown-default/explicit-JSON rules, stable pagination/handles/errors, and parity; plan 09 owns semantic typed view models. |
 | [22-incremental-context-scout-and-suggestion-envelopes.md](./22-incremental-context-scout-and-suggestion-envelopes.md) | Consumes task events/context-packet refs as evidence and delivers at most one material, deduped, privacy-safe advisory to an exact Thread/Turn/Agent. |
 | [23-session-lcm-temporal-retrieval-and-evaluation.md](./23-session-lcm-temporal-retrieval-and-evaluation.md) | Owns temporal retrieval, logical-message copies, current/as-of semantics, source horizons, representative selection, and packet context assembly quality. |
+| [26-observability-accounting-and-usage.md](./26-observability-accounting-and-usage.md) | Owns generated task/executor accounting descriptors, liveness/scheduler rollups, attempt/work-item/executor/route/model/effort attribution, SLOs, unknown/cap semantics, and Observatory/Costs view contracts consumed here. |
 
 ### 3.1 Allowed architecture
 
@@ -302,9 +306,23 @@ pub struct VersionPin<T> {
     pub version: EntityVersionId,
     pub data_version_digest: DataVersionDigest,
 }
+
+pub struct WorkClaimRefV1 {
+    pub claim: EntityRef,
+    pub observed_event: EventId,
+    pub observed_at: UtcMicros,
+}
+
+pub struct ContextPacketManifestRefV1 {
+    pub packet_id: ContextPacketManifestId,
+    pub ordinal: u64,
+    pub manifest_digest: ManifestDigest,
+}
 ```
 
 IDs are allocated under the deterministic/native allocation rules in Plan 01. Provider task IDs, GitHub issue numbers, external board IDs, Codex goal IDs, Claude workflow IDs, and automation run IDs become aliases or related entities with evidence; they never replace canonical IDs. Every public ref includes owner shard, version, and safe label projection where authorized.
+
+`DependencyId`, `WorkClaimRefV1`, and `ContextPacketManifestRefV1` are the only task dependency/advisory-claim/packet reference shapes. Their canonical definitions live in plan 01; the matching forms above are an integration excerpt, not a second owner. Other plans and generated bindings import them unchanged; names such as `TaskDependencyId`, `TaskClaimRefV1`, `WorkClaimId`, `ContextPacketRefV1`, or a packet `EntityVersionId` are invalid. Work claims are immutable observations referenced by event/time, while packets are immutable sealed manifests referenced by ordinal/digest.
 
 `ScopeResolutionId` and `ScopeResolutionV2` are plan 01 scope contracts ([01-domain-crate.md](01-domain-crate.md)), not task-graph identities: wherever this plan pins a resolved scope (plan versions, context packets, capability grants), the record carries the `ScopeResolutionId` of one immutable plan 01 `ScopeResolutionV2`. No `Ref`/`Resolved` renaming of that type exists.
 
@@ -343,8 +361,9 @@ pub struct PlanVersionV1 {
     pub gates: Vec<PlanGateV1>,
     pub scope_resolution: ScopeResolutionId,
     pub policy_manifest: Option<PolicyManifestRef>,
-    pub config_revision: ConfigRevisionId,
-    pub catalog_generation: CatalogGenerationId,
+    pub effective_config_snapshot_id: EffectiveConfigSnapshotId,
+    pub effective_config_digest: EffectiveConfigDigest,
+    pub catalog_snapshot: CatalogSnapshotRefV1,
     pub evidence: Vec<RetrievalAnchorId>,
     pub created_by: ActorRef,
     pub created_at: UtcMicros,
@@ -449,7 +468,7 @@ pub enum EffectiveReadinessV1 {
 }
 ```
 
-`EffectiveReadinessV1` is a projector/policy result with reason codes and input versions. No command sets it directly. A board column maps this derived state to presentation lanes. Claim fencing never reads this projection: the owner shard separately maintains a transactional `readiness_digest` column on the work-item current row (§5.3), and `ClaimWorkItemCommandV1.expected_readiness_digest` CAS-checks that column in-transaction.
+`EffectiveReadinessV1` is a projector/policy result with reason codes and input versions. No command sets it directly. A board column maps this derived state to presentation lanes. Lease-acquisition fencing never reads this projection: the owner shard separately maintains a transactional `readiness_digest` column on the work-item current row (§5.3), and `AcquireTaskLeaseCommandV1.expected_readiness_digest` CAS-checks that column in-transaction.
 
 ### 4.4 Dependencies, gates, cycles, and critical path
 
@@ -592,7 +611,7 @@ pub struct TaskLeaseV1 {
     pub expires_at: UtcMicros,
     pub state: LeaseStateV1,
     pub grant_set: CapabilityGrantSetId,
-    pub context_packet: ContextPacketManifestId,
+    pub context_packet: ContextPacketManifestRefV1,
 }
 
 pub struct TaskLeaseProofV1 {
@@ -621,7 +640,7 @@ pub struct ExecutionAttemptV1 {
     pub requested_route: ExecutorRouteV1,
     pub actual_route: Option<ActualExecutorRouteV1>,
     pub workspace: WorkspaceBindingId,
-    pub context_packet: ContextPacketManifestId,
+    pub context_packet: ContextPacketManifestRefV1,
     pub capability_grants: CapabilityGrantSetId,
     pub budget: AttemptBudgetV1,
     pub state: AttemptStateV1,
@@ -631,9 +650,11 @@ pub struct ExecutionAttemptV1 {
 }
 ```
 
-Attempt rows are immutable except for monotonic lifecycle fields applied by fenced commands; requested route, assignment, executor, workspace, packet, grants, budget, ordinal, and fence epoch are fixed at creation. State history remains append-only in `task_events`; the current attempt row carries only the latest state/version and terminal refs for efficient reads. The `work_items.current_attempt_id` pointer is denormalized and transactionally checked, never reconstructed by `MAX(started_at)`.
+Attempt rows are immutable except for monotonic lifecycle fields applied by fenced commands; requested route, assignment, executor, workspace, packet, grants, budget, ordinal, and fence epoch are fixed at creation. State history remains append-only in the canonical `task_graph_events` journal; the current attempt row carries only the latest state/version and terminal refs for efficient reads. The `work_items.current_attempt_id` pointer is denormalized and transactionally checked, never reconstructed by `MAX(started_at)`.
 
 Attempt states are closed and monotonic except explicit recovery transitions: `Prepared`, `Leased`, `Starting`, `Running`, `CancellationRequested`, `Stopping`, `Reconciling`, `Blocked`, `Succeeded`, `Failed`, `Cancelled`, `TimedOut`, `Lost`, `Superseded`. Terminal attempts never reopen; retry creates a new attempt.
+
+One work item has at most one active lease and one primary executor. When a user or decomposition policy requests `RedundancyMode::SharedExecution`, application atomically creates independently leasable child work items with explicit `ExpandsTo`/dependency/handoff relations and makes the parent an aggregate gate; it never issues participant leases against one work item. A provider may spawn internal subagents inside the primary attempt, but they are related Agent/Thread/Turn evidence, inherit only the primary attempt's brokered capabilities, and cannot obtain an independent lease, budget, writable reservation, or terminal authority. Sequential handoff between agents creates a new attempt/epoch unless it stays inside one adapter-owned attempt under the same primary authority. UI/API/SDK describe this as a shared-work group, not “multiple owners of one task.”
 
 ### 4.7 Executor registration and route
 
@@ -666,7 +687,7 @@ pub struct ExecutorRouteV1 {
     pub model: ModelCapabilityRefV1,
     pub reasoning_effort: ReasoningEffortV1,
     pub skills: Vec<SkillVersionRef>,
-    pub tool_catalog_generation: CatalogGenerationId,
+    pub tool_catalog: CatalogSnapshotRefV1,
     pub grant_template: CapabilityGrantTemplateId,
     pub fallback_policy: ExecutorFallbackPolicyV1,
 }
@@ -721,8 +742,9 @@ pub struct ContextPacketManifestV1 {
     pub visibility_digest: AccessPolicyDigest,
     pub sanitizer_floor: SanitizerFloorId,
     pub policy_manifest: PolicyManifestRef,
-    pub config_revision: ConfigRevisionId,
-    pub catalog_generation: CatalogGenerationId,
+    pub effective_config_snapshot_id: EffectiveConfigSnapshotId,
+    pub effective_config_digest: EffectiveConfigDigest,
+    pub catalog_snapshot: CatalogSnapshotRefV1,
     pub max_tokens: u32,
     pub actual_tokens: u32,
     pub tokenization_digest: ManifestDigest,
@@ -731,20 +753,37 @@ pub struct ContextPacketManifestV1 {
     pub manifest_digest: ManifestDigest,
 }
 
-pub enum ContextPacketEntryV1 {
-    Objective(RetrievalAnchorId),
+pub struct ContextPacketEntryV1 {
+    pub ordinal: u32,
+    pub kind: ContextPacketEntryKindV1,
+    pub subjects: BoundedVec<EntityRef, 16>,
+    pub anchors: BoundedVec<RetrievalAnchorId, 16>, // validation requires 1..=16
+    pub evidence_class: EvidenceClass,
+    pub valid_from: Option<UtcMicros>,
+    pub valid_to: Option<UtcMicros>,
+    pub observed_from: UtcMicros,
+    pub observed_to: Option<UtcMicros>,
+    pub access_policy_digest: AccessPolicyDigest,
+    pub sanitizer_receipt: SanitizerReceiptId,
+    pub token_cost: u32,
+    pub relevance_micros: i32, // registered fixed-point scale; no float serialization
+    pub inclusion_reason: ContextInclusionReasonV1,
+}
+
+pub enum ContextPacketEntryKindV1 {
+    Objective,
     ParentHandoff(HandoffId),
     RelevantSiblingSummary { work_item: WorkItemId, handoff: Option<HandoffId>, decision: Option<TaskDecisionId> },
-    DependencyState { dependency: DependencyId, evidence: Vec<RetrievalAnchorId> },
+    DependencyState(DependencyId),
     Acceptance(AcceptanceCriterionId),
     Decision(TaskDecisionId),
-    Constraint(RetrievalAnchorId),
+    Constraint,
     ScopeEntity(EntityRef),
     WorkspaceBinding(WorkspaceBindingId),
-    CodeOrGitEvidence(RetrievalAnchorId),
+    CodeOrGitEvidence,
     PriorAttempt(HandoffId),
     MemoryOrSkill(EntityRef),
-    Contradiction(RetrievalAnchorId),
+    Contradiction,
 }
 
 pub struct AgentAddressV1 {
@@ -759,6 +798,10 @@ pub struct AgentAddressV1 {
 
 `AgentAddressV1` addresses the executor bound to one attempt; native session/thread identities attach once the host starts the worker and reports them. It is distinct from plan 22's `SuggestionAddressV1`, whose fields are all mandatory live Thread/Turn delivery coordinates: plan 22 derives its own addressee from attempt/packet evidence and never treats a packet address as delivery authority.
 
+Packet/attempt creation is one atomic protocol, not a nullable cycle. Application preallocates `ExecutionAttemptId`, `ContextPacketManifestId`, and `TaskLeaseId` in memory, builds a `PreparedContextPacketV1` against the frozen candidate manifest without persisting it, then opens one owner-shard transaction that revalidates all inputs and inserts the sealed packet manifest/entries, immutable attempt, lease, grants, reservations, canonical event, outbox rows, and idempotency result together. A validation/CAS failure persists none of them. Canonical packet rows therefore require non-null `attempt_id`; nullable legacy/import rows are nonauthoritative evidence and cannot be attached to a V2 lease. Recovery quarantines any pre-cutover orphan rather than guessing a link.
+
+The sealed physical lowering owned by plan 02/PR 6G must retain every manifest field above: addressee, plan/work-item versions, scope/workspace/acceptance refs, query/access/visibility/sanitizer/policy/config/catalog digests, source watermark, token budget/actual/tokenization digest, timestamps/expiry, ordinal, state, and manifest digest. Every entry row retains its typed kind payload, canonical subjects, at least one anchor, evidence class, valid/observed time, access/sanitizer refs, token cost, relevance, and inclusion reason; normalized child tables or protected typed blobs are allowed, but dropping a field is not. Domain↔store→projector→API round-trip fixtures compare the complete sealed manifest digest.
+
 Packet assembly is deterministic for a frozen input manifest:
 
 1. resolve exact task/plan/scope/workspace/access versions;
@@ -772,11 +815,11 @@ Packet assembly is deterministic for a frozen input manifest:
 9. record every omitted class/reason and coverage gap;
 10. seal canonical query, config, catalog, policy, visibility/access, sanitizer, scope/workspace/snapshot, vector watermark, tokenization, entry, anchor, omission, and expiry digests before executor start.
 
-An updated packet never rewrites the packet an attempt started with. It creates a new ordinal. The executor may explicitly claim it at a safe boundary; Plan 22 may deliver a small advisory pointing to it when the exact current Turn is materially affected. Raw prompts, hidden reasoning, unrestricted sibling logs, credentials, and unrelated board text are ineligible.
+An updated packet never rewrites the packet an attempt started with. It creates a new ordinal. The executor may explicitly accept it at a safe boundary; Plan 22 may deliver a small advisory pointing to it when the exact current Turn is materially affected. Raw prompts, hidden reasoning, unrestricted sibling logs, credentials, and unrelated board text are ineligible.
 
 ### 4.10 Canonical event vocabulary and invariants
 
-Every mutation emits a sanitized versioned event with correlation/causation, actor, owning profile shard, task/plan versions, policy/config/catalog digests, and audit ref. Event families include:
+`task_graph_events` is the authoritative command-event journal for this bounded context. Every accepted mutation appends one or more sanitized versioned canonical events with correlation/causation, actor, owning profile shard, task/plan versions, policy/config/catalog digests, and audit ref in the same transaction as current rows, idempotency result, and outbox entries. `execution_attempt_events`, lease-event tables, and other specialized histories are typed index/detail lowerings of those event IDs, never independently authored lifecycle truth. Projectors, scheduler checkpoints, query/as-of replay, subscription read models, and audit consume the journal in sequence order; post-commit notifier, SSE, and external-effect outbox records carry journal ranges/refs and cannot invent or acknowledge canonical state. Event families include:
 
 - initiative created/updated/paused/resumed/retired;
 - plan version created/activated/superseded/rejected-by-invariant;
@@ -785,12 +828,12 @@ Every mutation emits a sanitized versioned event with correlation/causation, act
 - acceptance criterion added/evaluated/satisfied/failed/excepted;
 - decision recorded/superseded/invalidated;
 - assignment proposed/accepted/replaced/expired;
-- task offer issued/claimed/declined/expired/revoked;
+- task offer issued/accepted/declined/expired/revoked;
 - advisory work claim observed/heartbeat/completed/expired;
 - executor registered/heartbeat/draining/expired/quarantined;
 - lease issued/heartbeat/extended/revoked/expired/fenced;
 - attempt prepared/started/progressed/blocking/cancelled/timed-out/lost/terminal;
-- context packet built/claimed/superseded/expired;
+- context packet built/accepted/superseded/expired;
 - handoff/artifact/outcome/cost published/reconciled;
 - workspace reserved/bound/drifted/conflicted/released;
 - scheduler/policy decision and no-action reason;
@@ -808,6 +851,7 @@ Invariant checks run in domain validation and owner-shard transactions:
 - a cancelled/retired task cannot become ready without a versioned reopen command;
 - artifact/handoff/outcome refs cannot cross privacy domains without an authorized sanitized representation;
 - no event accepts arbitrary JSON extension fields outside a registered schema.
+- every specialized task/lease/attempt history row and every outbox entry references an existing canonical journal event in the same commit; replaying the journal rebuilds all current/projection state without consuming SSE, notifier, or adapter delivery history as authority.
 
 ### 4.11 Shared diagnostic and action envelope
 
@@ -827,7 +871,7 @@ pub struct DiagnosticEnvelopeV1 {
     pub actions: BoundedVec<DiagnosticActionV1, 16>,
     pub produced_by: ProducerVersionRef,
     pub config_digest: ManifestDigest,
-    pub catalog_generation: CatalogGenerationId,
+    pub catalog_snapshot: CatalogSnapshotRefV1,
     pub vector_watermark: VectorWatermark,
     pub observed_at: UtcMicros,
     pub expires_at: Option<UtcMicros>,
@@ -923,29 +967,29 @@ Owner-shard transactions must support:
 
 - create initiative + first plan/version + initial work items/dependencies + events + outbox atomically;
 - publish a new plan version after expected-version, cycle, scope, grant, budget, and validator checks;
-- issue lease + create attempt + reserve budget + pin route/workspace/packet/grants + event/outbox atomically;
+- allocate IDs, insert one fully sealed packet plus entries, create attempt, issue lease, reserve budget/capacity/resources, pin route/workspace/grants, and append canonical event/outbox/idempotency rows atomically;
 - heartbeat compare-and-swap by lease ID/epoch/executor with bounded expiry extension;
 - terminal attempt + acceptance/outcome/handoff/artifact refs + cost reservation release + lease release + dependent invalidation/readiness event atomically;
 - cancellation request + lease state + workflow step idempotency atomically;
 - executor registration heartbeat/expiry and capacity reservation without scanning all attempts;
 - save/update/delete an authorized view without copying result rows.
 
-External effects happen only after the intent is durable. Git/worktree/process/provider/PR/message operations use an outbox/workflow step with idempotency key, expected fence epoch, effect receipt, and reconciliation. No SQL transaction remains open across network, process, filesystem, Git, or model calls.
+External effects happen only after the canonical intent event and outbox step commit. Git/worktree/process/provider/PR/message operations use that outbox/workflow step with idempotency key, expected fence epoch, effect receipt, and reconciliation; the outbox is delivery intent, not a second event stream. No SQL transaction remains open across network, process, filesystem, Git, or model calls.
 
 ### 5.3 Fencing and concurrent writers
 
-`task_leases` stores `(work_item_id, attempt_id, executor_registration_id, fence_epoch, state, heartbeat_at, heartbeat_sequence, expires_at, expected_work_item_version, grant_digest, packet_digest)`.
+`task_leases` stores `(work_item_id, attempt_id, executor_registration_id, fence_epoch, state, heartbeat_at, heartbeat_sequence, expires_at, expected_work_item_version, grant_digest, packet_id, packet_ordinal, packet_manifest_digest)`. The last three fields are the exact `ContextPacketManifestRefV1`; a digest-only packet pointer is forbidden.
 
 `work_items` stores the current row `(work_item_id PRIMARY KEY, current_version_id, current_plan_version_id, revision INTEGER NOT NULL, disposition, resolution, current_attempt_id NULL, active_lease_id NULL, next_fence_epoch INTEGER NOT NULL, readiness_digest BLOB NOT NULL, readiness_updated_event_id, updated_at)` — one row per work item in the activity owner shard, retained for the life of the work item, indexed on `(disposition)`, `(resolution)`, and `(current_attempt_id)`. `current_attempt_id` and `active_lease_id` are nullable foreign keys and must either both name the same nonterminal attempt/lease pair or both be null; terminal commit clears `active_lease_id` but retains `current_attempt_id` for history/navigation until the next attempt. `readiness_digest` is a deterministic digest over the canonical gating inputs: current work-item version, disposition, gating dependency edge states, gate-expression results, schedule/`NotBefore` marks, and budget-exhaustion flags. It is recomputed inside the same owner-shard transaction as any mutation of those inputs (gating-edge add/remove/satisfy/invalidate, plan-version publish, disposition change, budget event) — canonical transactional state maintained at edge-mutation time, never projector output. The `EffectiveReadinessV1` projection may lag it freely without affecting claim safety.
 
 Issuance uses one owner-shard writer transaction:
 
-1. verify current versions and CAS-check `ClaimWorkItemCommandV1.expected_readiness_digest` against the stored `work_items.readiness_digest` in the same transaction (recomputing from canonical gating tables only to produce a typed mismatch diagnosis);
+1. verify current versions and CAS-check `AcquireTaskLeaseCommandV1.expected_readiness_digest` against the stored `work_items.readiness_digest` in the same transaction (recomputing from canonical gating tables only to produce a typed mismatch diagnosis);
 2. expire/reconcile an old lease only when policy and application evidence allow;
 3. increment the work item's durable `next_fence_epoch`;
-4. insert the new lease and attempt;
+4. insert the preallocated sealed packet/entries, attempt, and lease as one non-null referential set;
 5. reserve executor/provider/project/initiative capacity and budget;
-6. commit event/outbox and return the sealed start manifest.
+6. commit canonical journal event, specialized index rows, outbox, idempotency result, and return the sealed start manifest.
 
 Every mutating attempt call includes lease ID, epoch, attempt ID, executor ID, idempotency key, and expected work-item version. A stale writer receives `task_lease_fenced` and a safe stop directive. Lease expiry marks authority unavailable; it does not prove external work stopped. Recovery enters `Reconciling`, queries the adapter when possible, and only then requeues or quarantines. Unknown external state blocks effects that are not safely idempotent.
 
@@ -1042,44 +1086,18 @@ Candidate includes exact target work item/attempt/Agent/Thread/Turn if known, ev
 
 ### 7.1 One typed algebra
 
-Extend `TraceQueryV1`; do not introduce dashboard-only filters or a second task query language.
+Use the exact plan-01 `TraceQueryV1`; do not introduce `TaskQuery`, `TaskSource`, `TaskOperator`, `TaskContextSelectorV1`, dashboard-only filters, or a pipeline DSL. Plan 01's existing fields carry the task contract:
 
-```rust
-pub enum TaskSourceV1 {
-    Initiatives,
-    Plans,
-    PlanVersions,
-    WorkItems,
-    Dependencies,
-    Assignments,
-    Leases,
-    Attempts,
-    Executors,
-    ContextPackets,
-    Handoffs,
-    Artifacts,
-    Outcomes,
-    TaskEvents,
-}
+| `TraceQueryV1` field | Registered task use |
+|---|---|
+| `entity_kinds` | Initiative, Plan, PlanVersion, WorkItem, Dependency, Assignment, WorkClaim, TaskLease, ExecutionAttempt, Executor, ContextPacket, Handoff, Artifact, Outcome, CanonicalEvent. |
+| `scope` / `temporal` / `time` | Exact `ScopeSelectorV2`; current, bitemporal as-of, evolution, or forensic task state. |
+| `attributes` | IDs/aliases, lifecycle/readiness/reason, gates, acceptance, assignment/route/provider/model/effort, lease/attempt/outcome/retry, packet, budget/cost, and graph relation filters through registered attribute IDs. |
+| `traversal` | Bounded parents/children/blockers/critical path/agent/Turn/evidence/Git/delivery traversal through registered predicates. |
+| `facets` / `aggregates` / `projection` / `sort` | Registered task groupings, workload/accounting aggregates, sealed view projection, and stable ordering. |
+| `page_size` / `snapshot` / `explain` / `budget` | Shared bounds, frozen/current semantics, explanations, and cost controls. |
 
-pub enum TaskOperatorV1 {
-    Filter(TaskPredicateV1),
-    ResolveScope(ScopeSelectorV2),
-    AtVersion(EntityVersionId),
-    AsOf(UtcMicros),
-    Traverse(TaskTraversalV1),
-    DependencyClosure { direction: DirectionV1, depth: BoundedDepth },
-    CriticalPath(CriticalPathModeV1),
-    MatchExecutor(ExecutorConstraintV1),
-    RelevantToAgent { agent: AgentId, attempt: Option<ExecutionAttemptId> },
-    JoinEvidence(EvidenceJoinV1),
-    Group(TaskGroupV1),
-    Aggregate(TaskAggregateV1),
-    Sort(Vec<TaskSortV1>),
-    Page(AuthenticatedCursorV1),
-    Project(TaskProjectionV1),
-}
-```
+`work_items.query`, saved task views, SDK helpers, and UI builders accept or construct this same struct, canonicalize it through plan 05, and expose its canonical digest. A task facade may provide typed builder methods only; serialization and execution remain `TraceQueryV1`.
 
 Predicates cover IDs/aliases, initiative/plan/version, kind, lifecycle/readiness/reason, dependency/gate, acceptance, priority/schedule/deadline, assignment/executor/provider/model/effort, lease/attempt/outcome/retry, scope entity, actor/agent/session/Turn/goal, tool, file/symbol/diagnostic/test, Git/delivery entity, artifact/handoff, budget/cost, packet status, event/time/evidence, and text search under Plan 23 semantics.
 
@@ -1106,37 +1124,20 @@ Traversal operators are typed and bounded:
 
 ### 7.3 Required query examples
 
-```text
-# Cross-repository initiative critical path
-source WorkItems
-| initiative <id>
-| scope project-set <rspack-rsbuild-react-router-version>
-| critical_path remaining
-| join attempts,workspaces,pull_requests,checks
-| sort slack asc
+Golden `TraceQueryV1` fixtures cover:
 
-# Compact exact agent slice
-source WorkItems
-| relevant_to_agent <agent> attempt <attempt>
-| include parents,material_siblings,decisions,acceptance,packet_status
-| project compact_agent_view
+- cross-repository initiative critical path: `entity_kinds=[WorkItem]`, exact project-set `scope`, registered initiative attribute, bounded dependency traversal, remaining-critical-path aggregate/projection, attempt/workspace/PR/check evidence joins, slack sort;
+- compact exact agent slice: `entity_kinds=[WorkItem]`, registered relevant-agent/attempt attributes, bounded parent/material-sibling traversal, compact agent projection;
+- executor fleet pressure: `entity_kinds=[ExecutionAttempt]`, registered starting/running/reconciling attributes, executor/provider/model/effort facets, count/runtime/cost/lease-expiry/retry aggregates;
+- stale lease recovery: `entity_kinds=[TaskLease]`, expiry attribute, bounded attempt/executor/workspace/last-effect traversal, recovery projection.
 
-# Executor fleet pressure
-source Attempts
-| state starting,running,reconciling
-| group executor,provider,model,reasoning_effort
-| aggregate count,p95_runtime,cost,lease_expiry,retry_rate
-
-# Stale lease recovery candidates
-source Leases
-| expires_before now
-| join attempt,executor,workspace,last_effect
-| project recovery_status
-```
+Fixtures serialize through generic query, task convenience endpoint, saved view, subscription, CLI JSON, MCP JSON, SDKs, and dashboard and must produce one canonical digest/result; no fixture is parsed from the prose above.
 
 ### 7.4 Saved authorized projections
 
-`SavedTaskViewV1` stores an encrypted canonical query AST, explicit `ScopeSelectorV2`, projection/lens spec, layout preferences, owner, sharing policy, config/catalog/schema versions, and timestamps. It stores no copied result set. Opening it reauthorizes and replans against current or explicitly frozen versions.
+`SavedTaskViewV1` stores an encrypted canonical `TraceQueryV1` with its mandatory explicit `query.scope`, canonical query/scope digests, projection/lens and grouping/sort specs, layout/presentation preferences, owner, sharing policy/grants, live-versus-frozen mode, frozen plan/entity/projection versions plus vector watermark when selected, config/catalog/schema versions, optimistic view version, timestamps, and revocation state. It stores no copied result set and no second scope selector. Opening it reauthorizes and replans against current or exactly pinned frozen versions; a missing retired frozen input is explicit unavailable coverage, never silent current fallback.
+
+Plan 02/PR 6G lowers those fields losslessly: `saved_task_views` retains protected query ref/digest, derived scope digest, lens/projection/group/sort/layout blobs, owner/sharing refs, snapshot mode and frozen manifest/watermark refs, config/catalog/schema generations, version, timestamps, and revocation; `task_view_shares` retains grant version, grantee, classification, expiry, and revocation event. The same sealed model powers reopen, simultaneous overlapping board instances, API/SDK/CLI/MCP reads, and migration fixtures.
 
 Built-in lenses:
 
@@ -1165,7 +1166,7 @@ Add pure modules under `crates/tracedecay-policy/src/task_graph/` with explicit 
 
 The policy must:
 
-- prefer independently claimable units with explicit deliverables and acceptance;
+- prefer independently leasable units with explicit deliverables and acceptance;
 - retain cross-repository dependencies rather than copy the same task into each repository;
 - express fan-out/fan-in, verifier, synthesizer, review, and delivery work as ordinary typed work items;
 - avoid decomposing below useful coordination granularity or above configured graph/packet/budget limits;
@@ -1214,7 +1215,7 @@ Scheduling computes a stable score from:
 - bounded cost/budget pressure;
 - planned ensemble/diversity constraints.
 
-Use hierarchical weighted fair queues across profile → initiative/project-set → executor/provider → task, with reserved minimum progress for old eligible work. One large initiative cannot starve unrelated projects; one slow/rate-limited profile cannot consume the global queue; cheap tasks do not permanently outrank important expensive tasks. Policy returns component scores, selected/nonselected candidates, and reason codes. The atomic claim transaction revalidates the chosen item.
+Use hierarchical weighted fair queues across profile → initiative/project-set → executor/provider → task, with reserved minimum progress for old eligible work. One large initiative cannot starve unrelated projects; one slow/rate-limited profile cannot consume the global queue; cheap tasks do not permanently outrank important expensive tasks. Policy returns component scores, selected/nonselected candidates, and reason codes. The atomic lease-acquisition transaction revalidates the chosen item.
 
 ### 8.5 Retry, backoff, and circuit breakers
 
@@ -1239,7 +1240,7 @@ Circuit breakers exist by task, executor registration, adapter version, provider
 
 ### 8.6 Context relevance and sibling materiality
 
-`ContextPacketPolicyV1` and `TaskMaterialityPolicyV1` reuse Plan 15/23 retrieval quality and Plan 22 novelty/silence semantics. Positive evidence includes direct dependency, shared decision/acceptance, explicit handoff, direct file/symbol/test/PR overlap, plan relation, changed workspace base, or new authoritative result. Temporal proximity, same repository, same title, broad embedding similarity, or copied prompt alone is insufficient.
+`ContextPacketPolicyV1` and `TaskMaterialityPolicyV1` reuse Plan 15/23 retrieval quality and Plan 22 novelty/silence semantics. Positive evidence includes direct dependency, shared decision/acceptance, explicit handoff, direct file/symbol/test/PR overlap, plan relation, changed workspace base, new authoritative result, or a matching canonical `query_scope`/query digest under the same resolved scope plus shared goal/anchor evidence. Query overlap remains advisory and requires the registered high-threshold feature combination; temporal proximity, same repository, same title, broad embedding similarity, or copied prompt alone is insufficient.
 
 Planned redundant research/review/ensemble work is marked and not warned as accidental duplication. When accidental overlap is material, policy emits a bounded candidate only: exact affected attempts/agents, materiality features, safe-summary eligibility, retrieval anchors, and suppression hints. Plan 22's `ScoutDecisionV1` is the sole delivery decider and owns summary/anchor selection (at most one envelope with no more than three anchors), dedupe, and pair/category/anchor cooldown. Policy cannot cancel, reassign, lock, message, or deliver.
 
@@ -1258,6 +1259,43 @@ pub enum AttemptLivenessDecisionV1 {
     ProtocolViolation { code: ProtocolViolationCodeV1 },
 }
 
+pub enum TaskLivenessEventClassV1 {
+    LeaseIssued,
+    Heartbeat,
+    AliveExtended,
+    LeaseExpired,
+    LeaseFenced,
+    LeaseRevoked,
+    AttemptReclaimed,
+    ReplacementStarted,
+    Requeued,
+    ProbePositive,
+    ProbeNegative,
+    ProbeUnknown,
+    ProbeTimeout,
+    ProbeUnsupported,
+    RateLimitSentinel,
+    RateLimitDeferred,
+    RateLimitRequeued,
+    ProtocolViolation,
+    ExecutorCrash,
+    StaleWriteRejected,
+    ZombieCompletionRejected,
+    MaximumRuntimeStop,
+    HeartbeatBackstopStop,
+    CancellationRequested,
+    CancellationTerminal,
+    ExternalEffectUnknown,
+    ReconciliationStarted,
+    ReconciliationTerminal,
+    TerminalSucceeded,
+    TerminalFailed,
+    TerminalCancelled,
+    TerminalTimedOut,
+    TerminalLost,
+    ImportedUnknown,
+}
+
 pub struct RateLimitSentinelV1 {
     pub attempt: ExecutionAttemptId,
     pub executor: ExecutorRegistrationId,
@@ -1268,6 +1306,8 @@ pub struct RateLimitSentinelV1 {
     pub observed_at: UtcMicros,
 }
 ```
+
+Every lease/attempt/probe/sentinel/reconciliation event emitted by application maps to one closed `TaskLivenessEventClassV1` variant in the same transaction. Plan 26 generates an exhaustive variant-to-rollup mapping; it has no wildcard arm, and imported unknown evidence remains the visible `ImportedUnknown` class.
 
 Baseline plan-20 descriptors and defaults are explicit and versioned:
 
@@ -1298,7 +1338,7 @@ Application re-reads all referenced versions and evidence before applying a prop
 
 ---
 
-> **Part B — Scheduler and executor SPI.** Sections 9–10: application use cases, the authoritative scheduler, fenced claim/lease/heartbeat workflows, and the executor adapter SPI/many-host protocol (§13.4 secures it; §§17.4/17.6 verify it).
+> **Part B — Scheduler and executor SPI.** Sections 9–10: application use cases, the authoritative scheduler, fenced lease-acquisition/heartbeat workflows, and the executor adapter SPI/many-host protocol (§13.4 secures it; §§17.4/17.6 verify it).
 
 ## 9. Application use cases and scheduler/executor workflows
 
@@ -1344,7 +1384,7 @@ crates/tracedecay-application/src/
 | `initiatives.list/get` | Authorized profile/cross-project enumeration and exact detail with current plan, scope, progress, cost, outcome, health, versions, coverage, and anchors. |
 | `initiatives.graph` | Bounded graph-of-graphs view with plan/work/evidence layers, legal edge kinds, semantic zoom, watermarks, and cursor. |
 | `plans.list/get/diff` | Immutable plan versions, normalized structural diff, work-item replacement lineage, dependency/gate/acceptance changes, and active-attempt impact. |
-| `work_items.list/get/query` | One task algebra; compact default plus explicit hydration of spec, dependencies, criteria, assignments, attempts, packets, artifacts, Git/delivery, and evidence. |
+| `work_items.list/get/query` | Registered task variants of canonical `TraceQueryV1`; compact default plus explicit hydration of spec, dependencies, criteria, assignments, attempts, packets, artifacts, Git/delivery, and evidence. The convenience endpoint accepts/returns the same AST/digest and defines no task-only selector. |
 | `work_items.context` | Current or exact-attempt packet view with source/omission/access/expiry status; never assembles with ambient CWD or current board. |
 | `work_items.dependencies` | Parents/children/blockers/unblockable/closure/path/cycle witness/critical-path and gate explanations. |
 | `attempts.list/get/timeline` | Requested/actual route, lease, packet, workspace, tools, Turns, costs, events, outcome, cancellation/reconciliation, and evidence. |
@@ -1364,18 +1404,19 @@ Queries use read ports only. They cannot create anchors by mutating during a nom
 | `work_items.create/update/replace/retire` | New typed version, exact plan membership, expected versions, relation/acceptance validation, and affected-attempt decision. |
 | `work_items.link/unlink` | Gating versus non-gating kind explicit; cycle and active-plan checks; graph version receipt. |
 | `work_items.assign/reassign` | Target and route constraints explicit; revalidate executor eligibility; never kill/steal an active attempt implicitly. |
+| `work_items.assign_set` | Bounded all-or-none assignment of distinct work-item versions under one plan/owner shard to explicit route constraints. CAS-check plan plus every item/assignment version, validate every provider/model/effort/tool/budget constraint before writing, refuse active-lease theft, and return one transaction receipt with deterministic per-item results. Cross-owner input is rejected rather than partially applied. |
 | `work_items.pause/resume/cancel/reopen/archive` | Closed lifecycle transitions; cancellation starts a durable workflow; reopen creates a new version and never reopens terminal attempts. |
-| `work_items.claim/heartbeat/progress/complete/block` | Executor-only lifecycle subset requiring registration, current lease epoch, attempt/work-item versions, packet/grant digest, idempotency, and typed evidence. |
+| `work_items.acquire_lease/heartbeat/progress/complete/block` | Executor-only lifecycle subset requiring registration, current lease epoch, attempt/work-item versions, packet/grant digest, idempotency, and typed evidence. `acquire_lease` is authoritative execution admission; it never creates or updates advisory `WorkClaimV1`. |
 | `work_items.retry` | New attempt under retry policy/budget; never mutates prior attempt; unknown effects reconcile first. |
 | `executors.register/heartbeat/drain/unregister` | Authenticated adapter/host manifest and TTL; drain stops new leases but preserves existing recovery. |
 | `scheduler.pause/resume/run_once` | Scoped operational control with receipts. `run_once` reuses the same scheduler path and cannot bypass policy or concurrency. |
-| `task_views.create/update/delete/share` | Protected AST/lens, explicit scope, ownership, classification, expiry/revoke, and no result-row copy. |
+| `task_views.create/update/delete/share/revoke` | Protected canonical `TraceQueryV1`/lens with mandatory `query.scope`, ownership, grouping/layout/snapshot/version/watermark, classification, expiry/revoke, and no result-row copy or second scope selector. Revoke invalidates the exact share grant/version and active subscriptions without deleting the owner view. |
 
 Ordinary task/plan mutations commit directly after validation. Destructive external consequences—worktree deletion, force-affecting Git operation, PR merge, deployment, release, protected-data deletion—remain separate plan-09 commands with explicit confirmation/authorization and receipts. They are never hidden inside `work_items.complete`.
 
 ### 9.3 Scheduler tick
 
-The scheduler is an application worker consuming owner-shard journal/outbox events plus registered exact-time wakeups. It does not scan every project database or board. Committed owner-shard mutations signal an in-process/cross-process notifier only after commit; the notifier carries a sequence range, never task payload or authority. The scheduler drains from its durable checkpoint, so a lost/coalesced notification loses latency but not work. A plan-20 `scheduler.repair_poll_interval=30s` fallback compares the journal high watermark, scheduled-wakeup heap, lease deadlines, and checkpoint only when no notification arrived or a gap is detected; it never becomes Hermes's ambient 60-second board scan.
+The scheduler is an application worker consuming canonical `task_graph_events` journal ranges plus registered exact-time wakeups. The outbox carries only post-commit wakeup/external-effect delivery intents that reference those journal events; the scheduler never treats outbox delivery state as task truth. It does not scan every project database or board. Committed owner-shard mutations signal an in-process/cross-process notifier only after commit; the notifier carries a sequence range, never task payload or authority. The scheduler drains from its durable journal checkpoint, so a lost/coalesced notifier or outbox wakeup loses latency but not work. A plan-20 `scheduler.repair_poll_interval=30s` fallback compares the journal high watermark, scheduled-wakeup heap, lease deadlines, and checkpoint only when no notification arrived or a gap is detected; it never becomes Hermes's ambient 60-second board scan.
 
 Latency gates at the reference corpus are: commit-to-eligible scheduler observation p95 ≤ `1s`, terminal/cancellation safety event observation p95 ≤ `250ms`, eligible-to-offer p95 ≤ `2s` when capacity is available, dashboard subscription delta p95 ≤ `1s`, and missed-notification recovery ≤ one `30s` repair interval. Benchmarks inject dropped/coalesced notifier messages to prove the durable journal is authoritative. Hermes's historical 60 s dispatcher, 5 s notifier, and 300 ms dashboard polls remain comparison fixtures, not V2 constants.
 
@@ -1404,12 +1445,12 @@ Backpressure:
 - expose queue age and skipped reason rather than silently cap;
 - use exact next schedule/backoff/lease expiry rather than idle polling where possible.
 
-### 9.4 Claim and start handshake
+### 9.4 Lease acquisition and start handshake
 
 The scheduler may push an offer to an executor or an executor may pull eligible offers. Both use the same application command:
 
 ```rust
-pub struct ClaimWorkItemCommandV1 {
+pub struct AcquireTaskLeaseCommandV1 {
     pub work_item: WorkItemVersionRefV1,
     pub executor: ExecutorRegistrationId,
     pub offer: Option<TaskOfferId>,
@@ -1427,7 +1468,7 @@ pub struct TaskStartManifestV1 {
     pub plan_version: PlanVersionId,
     pub route: ExecutorRouteV1,
     pub workspace: WorkspaceBindingId,
-    pub context_packet: ContextPacketManifestId,
+    pub context_packet: ContextPacketManifestRefV1,
     pub grants: CapabilityGrantSetId,
     pub deadlines: AttemptDeadlinesV1,
     pub budget: AttemptBudgetV1,
@@ -1445,13 +1486,13 @@ pub struct TaskOfferV1 {
     pub offered_readiness_digest: ManifestDigest,
     pub issued_at: UtcMicros,
     pub expires_at: UtcMicros,
-    pub state: TaskOfferStateV1, // Open | Claimed | Declined | Expired | Revoked
+    pub state: TaskOfferStateV1, // Open | Accepted | Declined | Expired | Revoked
 }
 ```
 
-`task_offers` (activity owner shard) is keyed by `id` (primary key) with at most one `Open` offer per `(work_item, executor)` (partial unique index) and an expiry index on `(state, expires_at)`; rows are compacted shortly after terminal state because offers are advisory routing, never authority. Offer lifecycle events join the §4.10 vocabulary. An offer carries the `readiness_digest` observed at offer time; the executor echoes it as `expected_readiness_digest`, so an offer raced by a graph change fails the claim CAS instead of starting stale work.
+`task_offers` (activity owner shard) is keyed by `id` (primary key) with at most one `Open` offer per `(work_item, executor)` (partial unique index) and an expiry index on `(state, expires_at)`; rows are compacted shortly after terminal state because offers are advisory routing, never authority. Offer lifecycle events join the §4.10 vocabulary. An offer carries the `readiness_digest` observed at offer time; the executor echoes it as `expected_readiness_digest`, so an offer raced by a graph change fails lease acquisition instead of starting stale work.
 
-Claim issuance is a CAS over the expected work-item revision, plan version, readiness digest (the transactionally maintained `work_items.readiness_digest` column of §5.3, never a projection read), active lease, executor capacity, budget, workspace generation, and writable-resource reservation set. Application derives the attempt's writable artifacts/resources from scope, workspace, grants, and acceptance, then checks active task leases and evidence-backed work claims for overlapping worktree/branch/file/symbol/test/artifact targets. An incompatible active authoritative reservation blocks the claim; an advisory overlap triggers policy review/materiality but cannot itself steal authority. Explicit planned-parallel/read-only/ensemble relations may permit compatible overlap and are recorded in the start manifest.
+Lease acquisition is a CAS over the expected work-item revision, plan version, readiness digest (the transactionally maintained `work_items.readiness_digest` column of §5.3, never a projection read), active lease, executor capacity, budget, workspace generation, and writable-resource reservation set. Application derives the attempt's writable artifacts/resources from scope, workspace, grants, and acceptance, then checks active task leases and evidence-backed work claims for overlapping worktree/branch/file/symbol/test/artifact targets **plus** `WorkClaimScopeV1.query_scope` identity/digest, resolved scope, shared retrieval anchors, and explicit goal evidence. Query/goal similarity is advisory and thresholded; a direct authoritative resource reservation blocks, while a query-only overlap triggers materiality review and cannot steal authority. `DeliberateEnsemble`, diverse review, planned parallel, and read-only relations suppress accidental-duplication warnings and are recorded in the start manifest.
 
 ### 9.5 Heartbeat and progress
 
@@ -1477,7 +1518,7 @@ Progress is optional structured telemetry with phase, bounded safe status, compl
 
 Application revalidates and atomically closes attempt, lease, reservations, outcome, handoff, and dependent events. A successful provider/process exit without this command becomes `ProtocolViolation`; policy decides whether to retry, block, or fail.
 
-Completion revokes the lease proof, releases writable-resource reservations, and closes any executor-owned advisory work claim in the same canonical outcome sequence. Cancellation fences/revokes them before a replacement attempt can commit. A process, provider session, or worker that remains alive after manual completion/cancellation is stale: it may be terminated/reconciled, but every later heartbeat, artifact, tool effect, and terminal write is rejected by proof/epoch/version checks.
+Completion revokes the lease proof/grants/credentials, releases writable-resource reservations, and closes any executor-owned advisory work claim in the same canonical outcome sequence. Cancellation fences/revokes them before a replacement attempt can commit. A process, provider session, or worker that remains alive after manual completion/cancellation is stale: every later canonical heartbeat, artifact, brokered tool effect, and terminal write is rejected by proof/epoch/version checks. An already-issued unmediated/non-preemptible external effect is quarantined as effect-unknown and blocks replacement on the affected resource until stop/reconciliation; it is never falsely described as rejected.
 
 `BlockAttemptCommandV1` uses typed classes: dependency, decision/input, capability, authorization, workspace/conflict, transient provider, external-effect unknown, acceptance/review, budget, or other registered safe reason. Dependency blocks create explicit gating evidence rather than a human-notification loop. Repeated same-cause unblock/reblock feeds a loop breaker and may return the task to triage.
 
@@ -1619,6 +1660,7 @@ The lifecycle toolset is stable and small. Other task-specific tools are granted
 
 ```rust
 pub struct CapabilityGrantV1 {
+    pub grant_id: CapabilityGrantId,
     pub capability: CapabilityId,
     pub effect: EffectClassV1,
     pub allowed_scope: ScopeResolutionId,
@@ -1627,21 +1669,25 @@ pub struct CapabilityGrantV1 {
     pub credential_ref: Option<ProtectedCredentialRef>,
     pub issued_to: ExecutorRegistrationId,
     pub attempt: ExecutionAttemptId,
+    pub lease: TaskLeaseId,
     pub lease_epoch: u64,
+    pub revocation_epoch: u64,
     pub issued_at: UtcMicros,
     pub expires_at: UtcMicros,
-    pub catalog_generation: CatalogGenerationId,
+    pub catalog_snapshot: CatalogSnapshotRefV1,
     pub grant_digest: ManifestDigest,
 }
 ```
 
-Grant calculation intersects safe floors, actor/initiative/project/repository/worktree policy, executor capability, provider/model policy, task requirements, and request-specific restrictions. Explicit denies and privacy floors win. Grants are attempt/lease-bound and expire. Credentials remain opaque references resolved only by an authorized adapter at the moment of use; they never enter packets, logs, events, prompts, or tool output.
+Grant calculation intersects safe floors, actor/initiative/project/repository/worktree policy, executor capability, provider/model policy, task requirements, and request-specific restrictions. Explicit denies and privacy floors win. Grants are attempt/lease-bound, revocable, and expire. Every broker invocation CAS-checks the current grant/lease/revocation epoch. Credentials remain opaque short-lived references resolved only by the authorized effect broker at the moment of use; cancellation/terminal/fence revokes or rotates them before replacement. They never enter packets, logs, events, prompts, tool output, process environments, or reusable provider configuration.
 
 Required distinct effect classes include read local, read protected, read remote, write workspace files, execute process, mutate Git worktree, mutate remote Git/delivery, external message, configuration, automation, curation, secret access, and administrative/destructive. A task can request a class but cannot grant it to itself.
 
+Consequential effects are host-mediated, not trusted merely because an adapter once received a start manifest. Remote Git/delivery/message/provider calls and privileged local operations go through an application-owned effect broker carrying `TaskLeaseProofV1`, `grant_id`, revocation epoch, canonical scope/resource, idempotency key, and preconditions on every call. Local agent processes run in a per-attempt process group and scoped workspace namespace with no inherited broad credentials. Where a provider/runtime cannot broker or revoke a write after start, its manifest declares that effect `NonPreemptible`; cancellation fences canonical writes immediately, quarantines that workspace/effect, attempts process-group termination/reconciliation, and forbids a replacement writer until stop or an explicit effect-unknown resolution is durable. TraceDecay therefore never promises to reject an unmediated byte already issued outside its boundary.
+
 ### 10.6 Tool and side-effect idempotency
 
-Every consequential tool call records invocation, attempt/lease epoch, capability/grant, scope, idempotency key, request digest, result/effect receipt, external correlation ID, and reconciliation state. Adapter reconnect replays events by cursor and deduplicates canonical ingestion.
+Every consequential tool call records invocation, attempt/lease/revocation epoch, capability/grant, scope, idempotency key, request digest, result/effect receipt, external correlation ID, and reconciliation state. Broker denial after fence is a typed stale-effect event. Adapter reconnect replays events by cursor and deduplicates canonical ingestion.
 
 TraceDecay does not claim exactly-once external execution. It guarantees at-most-one active canonical lease, idempotent command/result recording, and explicit external-effect reconciliation. Provider/GitHub APIs with native idempotency keys use them. File/Git operations record preconditions and before/after identities. Unknown result blocks unsafe repetition.
 
@@ -1659,9 +1705,9 @@ Plan 08 owns generated definitions. Add semantic families:
 initiatives.list|get|graph|create|update|pause|resume|retire
 plans.list|get|diff|create_version|activate|decompose
 work_items.list|get|query|context|dependencies|attempts
-work_items.create|update|replace|link|unlink|assign|reassign
+work_items.create|update|replace|retire|link|unlink|assign|reassign|assign_set
 work_items.pause|resume|cancel|reopen|archive|retry
-work_items.claim|heartbeat|progress|complete|block
+work_items.acquire_lease|heartbeat|progress|complete|block
 executors.list|get|match|register|heartbeat|drain|unregister
 scheduler.status|explain|pause|resume|run_once
 task_views.list|get|create|update|delete|share|revoke
@@ -1695,7 +1741,7 @@ Generated CLI groups:
 tracedecay initiative list|show|graph|create|update|pause|resume|retire
 tracedecay plan list|show|diff|version|activate|decompose
 tracedecay task list|show|query|context|deps|attempts
-tracedecay task create|update|replace|link|unlink|assign|reassign
+tracedecay task create|update|replace|retire|link|unlink|assign|reassign|assign-set
 tracedecay task pause|resume|cancel|reopen|archive|retry
 tracedecay executor list|show|match|drain
 tracedecay scheduler status|explain|pause|resume|run-once
@@ -1719,33 +1765,49 @@ The model never receives raw CLI syntax, store paths, bearer tokens, fence token
 
 ### 11.5 HTTP/SSE and public SDKs
 
-Plan 10 routes:
+Plan 10 generates these bindings from the same catalog entries used by CLI/MCP/SDK; this list is exhaustive, not an independently maintained router inventory:
 
 ```text
-GET/POST        /api/v2/initiatives
+GET             /api/v2/initiatives
 GET             /api/v2/initiatives/{id}
+POST            /api/v2/initiatives:create
 POST            /api/v2/initiatives/{id}:update|pause|resume|retire
 GET             /api/v2/initiatives/{id}/graph
-GET/POST        /api/v2/plans
+GET             /api/v2/plans
+POST            /api/v2/plans:create-version
+POST            /api/v2/plans:diff
 GET             /api/v2/plans/{id}/versions/{version}
 POST            /api/v2/plans/{id}:activate
 POST            /api/v2/plans/{id}:decompose
-GET/POST        /api/v2/work-items
+GET             /api/v2/work-items
+POST            /api/v2/work-items:create
+POST            /api/v2/work-items/query
 GET             /api/v2/work-items/{id}
-POST            /api/v2/work-items/{id}:update|replace
-POST            /api/v2/work-items/{id}:cancel|retry|assign|archive
+POST            /api/v2/work-items/{id}:update|replace|retire|link|unlink|assign|reassign|pause|resume|cancel|reopen|archive|retry
+POST            /api/v2/work-items:assign-set
 GET             /api/v2/work-items/{id}/dependencies|attempts|context
 GET             /api/v2/execution-attempts/{id}
+POST            /api/v2/work-items/{id}:acquire-lease
 POST            /api/v2/execution-attempts/{id}:heartbeat|progress|complete|block
 GET             /api/v2/executors
-POST            /api/v2/executors:register|heartbeat|drain
+GET             /api/v2/executors/{id}
+POST            /api/v2/executors:match
+POST            /api/v2/executors:register|heartbeat|drain|unregister
 GET             /api/v2/task-scheduler/status
+POST            /api/v2/task-scheduler:explain
 POST            /api/v2/task-scheduler:pause|resume|run-once
-GET/POST        /api/v2/task-views
-GET             /api/v2/task-events
+GET             /api/v2/task-views
+GET             /api/v2/task-views/{id}
+POST            /api/v2/task-views:create
+POST            /api/v2/task-views/{id}:update|delete|share|revoke
+GET             /api/v2/task-graph/status
+POST            /api/v2/task-graph:doctor
+POST/GET         /api/v2/subscriptions, /api/v2/subscriptions/{id}/events
 ```
 
-Exact HTTP design follows Plan 10 conventions (plan 10 §§8.6–8.7): reads are GET and every mutation is a POST command envelope (`CommandHttpRequest`) — no PATCH/PUT routes exist; commands use idempotency and expected-version headers/body fields, typed problems, operation refs for workflows, authenticated cursors, and no hidden write during GET. SSE sends snapshot/delta/gap/heartbeat with sequence, scope/auth digest, graph versions, and reconnect cursor. Slow clients receive a gap/resync directive, not unbounded buffering.
+Exact HTTP design follows Plan 10 conventions (plan 10 §§8.6–8.7): reads are GET and every mutation is a POST command envelope (`CommandHttpRequest`) — no PATCH/PUT routes exist; commands use idempotency and expected-version headers/body fields, typed problems, operation refs for workflows, authenticated cursors, and no hidden write during GET. There is no `/task-events` route or second task SSE protocol. Clients create an authorized canonical `TraceQueryV1` subscription whose task read-model variants emit snapshot/delta/gap/heartbeat with journal sequence, scope/auth digest, graph versions, and reconnect cursor. Slow clients receive a gap/resync directive, not unbounded buffering.
+
+`scheduler.explain` and `task_graph.doctor` are read-shaped POSTs because their protected scope/evidence bodies do not belong in URLs. `task_graph.events` binds only to a canonical task read-model subscription; no `/task-events` route exists. Plan 08 generates a bijection test over every capability above and its CLI, MCP, HTTP operation, Rust/TypeScript/Python SDK method, application use case, auth/effect metadata, and view/problem type. A missing or extra binding, including scheduler explain/status/doctor/events or any work-item mutation, blocks release.
 
 Plan 17 generates Rust/TypeScript/Python clients and examples for human orchestration, read-only monitoring, and custom executor adapters. Executor registration/start/event protocol is documented separately from ordinary task CRUD and has a stricter compatibility/security matrix.
 
@@ -1997,6 +2059,8 @@ Rules:
 
 Metrics are low-cardinality and safe. IDs, titles, paths, prompts, branch names, raw model names where policy treats them private, and error text do not become labels. Detailed drill-down uses authorized queries and correlation IDs.
 
+Plan 26 is the sole accounting/observability owner. Task events and `task_cost_events` project into its generated descriptors and rollups with canonical `initiative_id`, `work_item_id`, `attempt_id`, executor registration/adapter/provider/model/reasoning-effort route, pricing/methodology version, source event, and unknown-component state available for authorized drill-down; low-cardinality public aggregates use safe dimensions/digests only. Workload and Executor Fleet views consume plan 26's task-execution runtime/cost/liveness/scheduler projections for p50/p95, rates, denominators, caps, and unknowns rather than aggregate browser rows or invent a second ledger. Every displayed number links to the underlying attempt/cost/journal evidence and declares frozen/current watermark.
+
 ### 14.2 Doctor rules
 
 Doctor detects:
@@ -2049,9 +2113,9 @@ flowchart LR
     X --> D["Delivery/PR/check/release tasks"]
 ```
 
-Triage tasks are independently claimable and intentionally diverse. Example routing must cover separate Codex, Claude, Cursor, and Hermes/custom registrations with explicit provider/model/effort/tool grants. Verifier consumes all required handoffs, flags scope/source disagreements, and cannot pass on simple majority. Synthesizer creates decisions, acceptance criteria, and implementation dependencies. Implementation tasks bind distinct worktrees/branches and cannot mutate sibling repos without grants. Integration verifier runs exact affected/ecosystem tests at pinned commits. Delivery work is separately authorized.
+Triage tasks are independently leasable and intentionally diverse. Example routing must cover separate Codex, Claude, Cursor, and Hermes/custom registrations with explicit provider/model/effort/tool grants. Verifier consumes all required handoffs, flags scope/source disagreements, and cannot pass on simple majority. Synthesizer creates decisions, acceptance criteria, and implementation dependencies. Implementation tasks bind distinct worktrees/branches and cannot mutate sibling repos without grants. Integration verifier runs exact affected/ecosystem tests at pinned commits. Delivery work is separately authorized.
 
-The fixture must also exercise a realistic manual partition: the user pins a handful of Rspack/plugin work items to eligible Codex routes, a different handful of Rsbuild/integration items to eligible Claude routes, leaves two discovery tasks policy-routable, and later rebalances one unstarted item. Assignment is a versioned route constraint, not board membership; provider queue views are projections over requested/actual route receipts. Rebalancing cannot steal a live lease, change an attempt's start manifest, expose sibling prompts, or erase the original decision. An agent active in two initiatives receives two distinct attempt packets and task-aware slices, never the union of both boards.
+The fixture must also exercise a realistic manual partition: one bounded transactional `work_items.assign_set` pins a handful of Rspack/plugin work items to eligible Codex routes and a different handful of Rsbuild/integration items to eligible Claude routes, leaves two discovery tasks policy-routable, and later rebalances one unstarted item. Assignment is a versioned route constraint, not board membership; provider queue views are projections over requested/actual route receipts. The set command is all-or-none under the owner plan/version and returns deterministic per-item receipts. Rebalancing cannot steal a live lease, change an attempt's start manifest, expose sibling prompts, or erase the original decision. An agent active in two initiatives receives two distinct attempt packets and task-aware slices, never the union of both boards.
 
 ### 15.2 Context and notification expectations
 
@@ -2069,6 +2133,8 @@ Context packets and hints distinguish shared initiative context from provider pa
 - search/load/context follow stable anchors across registered project shards;
 - planned diverse triage is not flagged duplicate;
 - accidental duplicate research with direct overlap is detected once;
+- matching `query_scope`/query digest plus scope/goal/anchor evidence detects duplicate research once, while declared ensemble/shared-work children suppress it;
+- shared execution materializes independently leased child work under one aggregate parent; two authoritative executors never lease the same work item;
 - verifier does not unlock before all required gates or authorized exception;
 - packet versions reflect parent/sibling decisions without leaking unrelated content;
 - executor routes record requested/actual model/provider/effort/grants;
@@ -2217,7 +2283,7 @@ Do not use aggregate success rate alone. Report per project, executor adapter, p
 
 - deterministic replay digest for identical input manifests;
 - oracle comparison for readiness/gates/topological/critical path;
-- pairwise and scenario labels for decomposition quality, independently claimable units, missing dependencies, acceptance quality, over/under-decomposition;
+- pairwise and scenario labels for decomposition quality, independently leasable units, missing dependencies, acceptance quality, over/under-decomposition;
 - route eligibility precision before ranking quality;
 - task completion quality/cost/latency by route, with selection-bias caveats;
 - fairness/starvation simulation under bursty multi-project workloads;
@@ -2231,7 +2297,7 @@ Model-assisted decomposition/routing/summary is promoted only if it beats determ
 
 Run deterministic and soak tests with many hosts/processes competing for the same and different work items:
 
-- claim CAS races at 2/8/64/256 contenders;
+- lease-acquisition CAS races at 2/8/64/256 contenders;
 - heartbeat versus expiry/revoke/cancel/complete races;
 - scheduler crash before/after lease, packet, outbox, adapter start, terminal commit;
 - adapter start acknowledgement lost, duplicate event page, sequence gap, reconnect, host restart;
@@ -2243,7 +2309,7 @@ Run deterministic and soak tests with many hosts/processes competing for the sam
 - projector/query lag while scheduler owns current truth;
 - config/catalog/policy/sanitizer generation change mid-attempt.
 
-Property assert at most one active lease, epoch monotonicity, event/outbox/idempotency consistency, terminal/lease bijection, no unauthorized effect, no orphaned reservation, and replay convergence after restart. Projector/query lag is resolved, not tolerated-by-luck: because `readiness_digest` is maintained transactionally on the work-item row (§5.3), claim admission is projector-independent — with the readiness projector arbitrarily stalled, the `expected_readiness_digest` CAS still accepts only current claims and rejects stale ones; lag may only delay candidate discovery.
+Property assert at most one active lease, epoch monotonicity, event/outbox/idempotency consistency, terminal/lease bijection, no unauthorized effect, no orphaned reservation, and replay convergence after restart. Projector/query lag is resolved, not tolerated-by-luck: because `readiness_digest` is maintained transactionally on the work-item row (§5.3), lease admission is projector-independent — with the readiness projector arbitrarily stalled, the `expected_readiness_digest` CAS still accepts only current lease requests and rejects stale ones; lag may only delay candidate discovery.
 
 ### 17.5 Domain/store/projector/query tests
 
@@ -2297,13 +2363,14 @@ Host-native diagnostics run after adapter repair, separately from TraceDecay doc
 
 ## 18. Reviewable PR slices
 
-These suffixes were checked against plans 01–23. Plan 20 owns `4C/6E/22C/24I/25E/31N/33C/37G`; Plan 22 owns `4D/6F/10D/22D/23H/24J/24K/25F/31O/33D/37H`; Plan 23 owns `13D/13E/14D/15C/24L/31P/33E/35I/37I`. `17B` already belongs to Plan 04, so this plan uses `17C`. Dashboard `30A–30H` are already assigned, so this plan uses `30I`.
+These suffixes were checked against plans 01–26. Plan 13 owns prerequisite heritage/research PR `2A`; Plan 20 owns `4C/6E/22C/24I/25E/31N/33C/37G`; Plan 22 owns `4F/6F/10D/10F/22D/23H/24O/24P/25F/31O/33D/37H`; Plan 23 owns `13D/13E/14D/15C/24L/31P/33E/35I/37I`; Plan 26 owns `22F/22G/22H/30J/33H`; plan 11 owns privacy/scout integration `30L`. `17B` already belongs to Plan 04, so this plan uses `17C`. Dashboard `30A–30H` and accounting contract `30J` are assigned, so this plan uses dependency-ordered `30K`.
 
 ### PR 4E — Canonical initiative, plan, task, executor, lease, and packet domain contracts
 
 **Files:** `crates/tracedecay-domain/src/task_graph/**/*`; schema registry fixtures; architecture tests.
 
 - Add IDs, versions, initiative/plan/work-item/dependency/gate/acceptance/decision/assignment/lease/executor/attempt/workspace/packet/handoff/artifact/outcome/budget/cost/event/query/view/status/error types.
+- Consume reviewed PR 2A Hermes heritage rows for every domain type/algorithm/test being directly or behaviorally ported; carry license/source-to-test metadata into the implementation manifest.
 - Property-test state machines, plan versioning, cycle/gate validation, epoch monotonicity, typed extension rejection, privacy wrappers, and schema round trips.
 - Add compile-time dependency/import boundaries and generated schema fixtures.
 - Commit: `feat(domain): define canonical task and execution graph`.
@@ -2312,8 +2379,8 @@ These suffixes were checked against plans 01–23. Plan 20 owns `4C/6E/22C/24I/2
 
 **Files:** activity migrations; `crates/tracedecay-store/src/repositories/task_graph/**/*`; store tests.
 
-- Add canonical/history/current-index tables, blobs/anchors/outbox/idempotency/reservations, repositories, and backup/restore manifests.
-- Implement plan activation, lease/attempt issuance, heartbeat, terminal commit, cancellation intent, saved-view, and event transactions.
+- Add canonical/history/current-index tables, complete sealed packet/entry fields, blobs/anchors, one authoritative `task_graph_events` journal, referenced outbox/idempotency/reservations, repositories, and backup/restore manifests.
+- Implement plan activation, atomic packet+attempt+lease issuance, heartbeat, terminal commit, cancellation intent, complete saved-view/share/revoke, and journal/index/outbox transactions.
 - Fault-inject writer/kill/disk/busy/restart paths; prove one owner, monotonic fencing, referential integrity, retention, and corruption quarantine.
 - Commit: `feat(store): persist the fenced profile task graph`.
 
@@ -2366,7 +2433,7 @@ These suffixes were checked against plans 01–23. Plan 20 owns `4C/6E/22C/24I/2
 
 **Files:** application task ports/use cases/workers/workflows; daemon composition; tests.
 
-- Implement queries/commands, graph transactions, scheduler tick, readiness revalidation, capacity/budget reservation, offer/claim/heartbeat/terminal workflows, status, and doctor.
+- Implement canonical `TraceQueryV1` task registry values/builders, commands including transactional `assign_set`, graph transactions, scheduler tick, readiness revalidation, capacity/budget reservation, offer/lease-acquisition/heartbeat/terminal workflows, status, and doctor.
 - Add hierarchical fairness/backpressure/checkpoints/lifecycle lease and one-owner enforcement.
 - Use fake workspace/executor/delivery ports first; pass concurrency/fault corpus.
 - Commit: `feat(application): orchestrate the canonical task graph`.
@@ -2376,7 +2443,7 @@ These suffixes were checked against plans 01–23. Plan 20 owns `4C/6E/22C/24I/2
 **Files:** `src/v2_adapters/task_executors/**/*`; workspace/delivery adapters; API routes; generated root CLI/MCP/SDK adapters; conformance tests.
 
 - Implement Codex, Claude, Cursor, Hermes, and custom protocol adapters behind the SPI with registration/start/status/cancel/collect.
-- Implement exact workspace/worktree/branch binding, safe cleanup, effect reconciliation, and requested/actual route receipts.
+- Implement exact workspace/worktree/branch binding, brokered consequential effects, revocable credentials/grants, non-preemptible-effect quarantine, safe cleanup, effect reconciliation, and requested/actual route receipts.
 - Expose versioned HTTP/SSE and generated CLI/MCP/SDK surfaces with auth/idempotency/cursors/errors/output parity.
 - Commit: `feat(executors): run fenced work across agent hosts`.
 
@@ -2384,15 +2451,15 @@ These suffixes were checked against plans 01–23. Plan 20 owns `4C/6E/22C/24I/2
 
 **Files:** `dashboard/features/work/**/*`; generated client integration; E2E/visual/accessibility tests.
 
-- Add routes, saved scope/view shell, initiative/plan/task/attempt inspectors, plan outline, board projection, DAG, legal commands, and table parity.
+- Consume the PR 2A UI ledger, directly/behaviorally port compatible Hermes interactions/tests under provenance, and add routes, complete saved scope/view shell, initiative/plan/task/attempt inspectors, plan outline, board projection, DAG, legal commands, and table parity.
 - Prove drag operations map to domain commands, no ambient current board, no dashboard business logic, and exact selection/version/coverage state.
 - Commit: `feat(dashboard): add canonical work and plan views`.
 
-### PR 30I — Timeline, causal, critical-path, workload, executor, repository, and All lenses
+### PR 30K — Timeline, causal, critical-path, workload, executor, repository, and All lenses
 
 **Files:** advanced Work/Brain/Loom graph lenses; performance/export tests.
 
-- Add linked lenses, graph-of-graphs pivots, semantic zoom, critical intervals/slack, workload/fairness, executor health/cost, repository/Git/delivery, agent slice, and lazy All view.
+- After plan 26 PR 30J contracts land, add linked lenses, graph-of-graphs pivots, semantic zoom, critical intervals/slack, workload/fairness, executor health/cost, repository/Git/delivery, agent slice, and lazy All view from its generated accounting/liveness projections.
 - Preserve graph/list/matrix equality, authorized hydration, causal evidence classes, large-data performance, mobile/accessibility, and deterministic exports.
 - Commit: `feat(dashboard): visualize work across the TraceDecay brain`.
 
@@ -2434,31 +2501,29 @@ These suffixes were checked against plans 01–23. Plan 20 owns `4C/6E/22C/24I/2
 ## 19. Implementation dependency order
 
 ```text
-4E domain
-  → 6G store
-  → 10E projectors
-  → 17C cross-graph relations
-  → 21A handoff/artifact/packet lineage
-  → 22E catalog and SPI schemas
-  → 23I pure policies
-  → 24M application and scheduler
-  → 24N adapters, workspace, cancellation, transports
-  → 25G core Work UI
-  → 30I advanced graph lenses
-  → 31Q lab and evaluation
-  → 33F import/shadow
-  → 35J scoped cutover
-  → 37J deletion
+2A Hermes/research heritage ledger → 4E domain → 6G store → 10E projectors
+10E → 17C cross-graph relations → 21A packet lineage → 22E catalog/SPI → 23I policy → 24M application/scheduler → 24N adapters/transports
+4E → 22F accounting descriptors
+6G + 10E + 22F → 22G task/accounting projections
+24M + 22G → 22H liveness/scheduler/SLO/outcome rollups
+24N + 22H → 25G core Work UI
+22H → 30J Observatory/Costs contracts
+25G + 30J → 30K advanced graph lenses → 31Q lab/evaluation
+24N + 22H → 33F task import/shadow
+22G + 33F → 33H analytics/accounting migration parity
+31Q + 33F + 33H → 35J scoped cutover → 37J deletion
 ```
 
 Parallelism is allowed only after owning contracts land:
 
 - 10E and initial 22E schema work may proceed after 4E/6G fixtures stabilize;
+- no task implementation slice merges before its applicable PR 2A source/license/test disposition is reviewed;
 - executor adapter stubs may be developed against generated 22E protocol while 23I/24M use fakes;
 - 25G concepts/tests may use read-only V1/synthetic fixtures but cannot invent API/view schemas;
 - 31Q corpus/judgment work can begin early, but live replay waits for 23I/24M manifests;
 - migration inventory can begin read-only before 33F; no live import writes before privacy/store gates;
-- no scheduler cutover before aggregate multi-host, cancellation, workspace, privacy, transport, and dashboard verification is stable.
+- 22F may begin after 4E; 22G requires 6G/10E journal/cost fixtures; 22H requires 24M liveness/scheduler events; 30K consumes 30J rather than inventing accounting views;
+- no scheduler cutover before 22H/30J/33H observability and migration conformance plus aggregate multi-host, cancellation, workspace, privacy, transport, and dashboard verification are stable.
 
 Each PR must stay within its listed owner/files, update generated inventories, add focused tests first, run affected/architecture/schema checks, and record research anchors/manifest versions. Subagents receive exact files and acceptance commands; the lead reviews diffs before force-adding ignored plan artifacts or publishing implementation branches.
 
@@ -2469,13 +2534,15 @@ Architecture:
 - [ ] Exactly one profile activity-shard initiative/plan/work-item event graph owns task truth across every project/repository/worktree/provider.
 - [ ] No board/project/plugin/executor database, ambient current selector, CWD, or route owns dispatch or mutation scope.
 - [ ] Domain/store/projector/query/policy/catalog/application/API/root/UI dependency boundaries and architecture tests pass.
-- [ ] All plans 01–23 integrations in section 3 are implemented without duplicate identity, query, config, output, privacy, or scheduler paths.
+- [ ] All plans 01–26 integrations in section 3 are implemented without duplicate identity, query, config, output, privacy, accounting, or scheduler paths.
 
 Domain and persistence:
 
 - [ ] Initiative/Plan/PlanVersion/WorkItem/dependency/gate/acceptance/decision/assignment/lease/attempt/executor/workspace/packet/handoff/artifact/outcome/cost contracts and versions are complete.
+- [ ] `DependencyId`, `WorkClaimRefV1`, and manifest-ID/ordinal/digest `ContextPacketManifestRefV1` are the only generated refs; all task reads compile to canonical `TraceQueryV1`.
 - [ ] Gating DAG cycle checks, graph-of-graphs expansion, plan diffs/replacements, readiness, and critical-path reference parity pass.
 - [ ] Owner-shard transactions prove one active lease, monotonic fencing, atomic terminal/release, idempotency, outbox, recovery, retention, backup/restore, and corruption quarantine.
+- [ ] One transaction inserts the complete sealed packet/entries, attempt, lease, reservations, canonical journal event, referenced outbox, and idempotency result; no canonical nullable/orphan packet is possible.
 - [ ] Advisory `WorkClaimV1` and authoritative `TaskLeaseV1` remain distinct in schema, policy, UI, API, and tests.
 
 Execution:
@@ -2483,13 +2550,14 @@ Execution:
 - [ ] Codex, Claude, Cursor, Hermes, and custom adapters pass one versioned conformance suite and truthful coverage reporting.
 - [ ] Requested/actual executor/provider/model/reasoning-effort/tools/skills/grants/host/workspace/budget/cost are pinned and receipted per attempt.
 - [ ] Capability deny/scope/privacy/residency/egress/credential floors cannot be widened by task/model/adapter/config fallback.
-- [ ] Many-host claim/heartbeat/expiry/fence/cancel/retry/reconnect/fault tests show zero double effects or stale terminal writes.
+- [ ] Many-host lease-acquisition/heartbeat/expiry/fence/cancel/retry/reconnect tests plus effect-broker/revocation/non-preemptible quarantine tests show zero double canonical effects or stale terminal writes.
 - [ ] Workspace/worktree/branch/commit/PR safety preserves user work and never auto-stashes/resets/force-pushes/merges/cleans without authority.
 - [ ] Cancellation and unknown external effects reconcile to explicit terminal or blocked states; retry never blindly repeats them.
 
 Context and coordination:
 
 - [ ] Every attempt receives a compact versioned sanitized packet with objective, parents, material siblings, decisions, anchors, scope/workspace/dependencies/acceptance, prior failures, omissions, and manifests.
+- [ ] Every packet entry carries at least one durable anchor plus evidence/time/access/sanitizer/token/relevance fields and round-trips through store/projector/API without digest loss.
 - [ ] Packet assembly meets temporal retrieval/relevance/privacy/token/latency gates and never includes hidden reasoning, secrets, or unrelated global-board content.
 - [ ] Material sibling/blocker/handoff/invalidation events target the exact active Thread/Turn/Agent through Plan 22 with dedupe/cooldown/budgets; unchanged noise remains silent.
 - [ ] Planned ensemble/review work is not mislabeled duplicate, while real duplicate work fixtures receive one evidence-backed advisory.
@@ -2508,6 +2576,7 @@ Privacy, operations, and convergence:
 - [ ] Secret canaries have zero forbidden sink occurrences across stores/indexes/events/logs/metrics/prompts/tools/packets/APIs/exports; sanitizer and descendant invalidation receipts are complete.
 - [ ] Config is fully navigable/editable through Plan 20 UI/CLI/MCP/API/SDK with declared owner/effective source/history/impact and safe floors.
 - [ ] Status/doctor expose scheduler, graph, leases, attempts, executors, packets, workspaces, costs, privacy, lag, coverage, and exact recovery evidence.
+- [ ] Transactional `work_items.assign_set`, `task_views.revoke`, canonical subscription task deltas, complete saved-view state, and plan-26 workload/fleet accounting pass generated CLI/MCP/API/SDK/UI parity.
 - [ ] Rspack/Rsbuild/React Router cross-repository initiative passes decomposition → diverse parallel triage → verifier → synthesizer → isolated implementation → integration → delivery fixtures.
 - [ ] Hermes strengths are preserved and every rejected weakness in section 2.4 is absent from live architecture.
 - [ ] Migration/import/shadow/cutover/rollback receipts prove one live scheduler/lease owner and no unauthorized materialization of provider/external work.

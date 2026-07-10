@@ -80,7 +80,7 @@ pub struct ResearchBundleManifestV1 {
     pub repository: RepositoryRef,
     pub base_commit: CommitId,
     pub plan_commit: Option<CommitId>,
-    pub catalog_digest: CatalogDigest,
+    pub catalog_snapshot: CatalogSnapshotRefV1,
     pub store_watermarks: VectorWatermark,
     pub private_corpus: Option<PrivateCorpusManifestRef>,
     pub git_snapshot: GitTruthManifest,
@@ -220,10 +220,11 @@ Implementation must replace these local locators with durable `RetrievalAnchorId
 The corpus itself remains outside Git:
 
 - Manifest: `/fast/tracedecay-redesign-research/manifest.json`.
-- Secret-scanned/redacted native `role=user` corpus: 34,333 rows; SHA-256 `81192fea28fdc5921fc86b186e0f1959aeda801cf17cfed6734deb5cd6bbf8e7`.
-- Secret-scanned/redacted best-effort human subset: 9,969 rows; SHA-256 `cdbdb237e4dd5929366b555c8b523b0462c639de1a753c2f2a770aeff7092e7a`.
+- Secret-scanned/redacted native `role=user` corpus: 34,333 rows; SHA-256 `a4d95d08a75cb04f130087a419fbc805cab6f5ee9a5e06da4e727908d3f7e366`.
+- Secret-scanned/redacted best-effort human subset: 9,969 rows; SHA-256 `35caa1af1095d4a50211e4e590639f493e95862854ff50edb646acd769f7bfea`.
 - Frozen final user-message cutoff: 2026-07-10 02:21:15.411 UTC. The last 28 direct prompts use `codex_rollout_raw_fallback` provenance because the supported TraceDecay replay failed with the documented identity-cutover conflict; internal goal/environment envelopes were excluded.
-- Both primary files and manifest are mode `0600`.
+- The containing directory is mode `0700`; primary files, byte-identical retained copies, manifest, scanner reports, and helper scripts are mode `0600`.
+- Per-row `content_hash` is SHA-256 of retained sanitized UTF-8 `content`, not a pre-redaction source digest; validation reports zero mismatches, zero duplicate identities, zero missing timestamps, and zero chronological violations.
 
 This is a private corpus reference, not a distributable PR fixture. `gitleaks 8.30.1` and parsed-value credential detectors were run; conservative redaction removed marker/credential-shaped values and examples while preserving row identity/order. An authenticated-URL alert from serialized-line scanning was rejected as a cross-field false positive after parsed-value validation. Phase 0 derives separately reviewed synthetic/minimal-redacted regression fixtures; it never promotes this corpus directly.
 
@@ -231,7 +232,8 @@ This is a private corpus reference, not a distributable PR fixture. `gitleaks 8.
 
 | Subject | Stable anchor or query | Evidence note |
 |---|---|---|
-| Publication-base master | commit `6c4b8b91dad2efdcaefab0153475287f37c2caee` | Includes merged #407/#415/#417/#419/#420/#422/#423/#424 at crate version 0.0.47; the plan branch is rebased to this or a newer accepted base before final checks. |
+| Publication-base master | commit `3567e31e3a60730400c9b900e32ca02c0bf3bf33` | Crate version 0.0.48; includes merged #407/#415/#417/#419/#420/#422/#423/#424, split-store consolidation #425 (`de3d05dc`), and release #418 (`3567e31e`). Only draft plan PR #421 was open at the final refresh. |
+| Final installed usage/health snapshot | installed `tracedecay 0.0.47`; `analytics diagnostics --all --no-sync --json`; `lcm_status(provider=all)`; `health(details=true)`; exact selected/legacy identity error from `lcm_status`, `health`, `automation config get`, and `automation runs list` | Frozen planning values: analytics raw page 10,000 capped events, 102 defined/43 used tools; LCM 418,346 native rows, 1,541 summary nodes, 9.4:1 compression, 12,978,427 estimated tokens; health 6,979/10,000 over 987 files. Identity refusal preserves selected `proj_ceaa713e40fef2b2` (38,510 nodes/987 files/17 facts/2,003 sessions/432,790 messages/419,887 LCM/14 branches/0 automation files/5 payloads/3 responses) and legacy `proj_b4a8bbe4953823c4` (36,596 nodes/989 files/129 facts/4,129 sessions/603,866 messages/592,594 LCM/197 branches/3,470 automation files/1,839 payloads/4 responses). Automation config/runs are unavailable until explicit consolidation, so zero in the selected lane is not a global zero. Values are timestamped evidence, not timeless totals. |
 | Legacy store adoption | PR #405; merge commit `e35279586d6a0886856a26842ef17ce51e83da05` | Current-master migration input. |
 | Hermes user-profile consolidation | PR #407; branch `codex/hermes-user-profile-only`; head `d8ac40f38024c866afd733a891138d2c121f262c`; merge `78bfbfbcd1b33bfb61758ff8d9f51439f97ae07e` | Merged accepted-base input. `sessions_for` returns historical branch-active sessions; latest exemplars include `019f3ff1-7f85-7812-8255-77481331c0a9` and `019f3ff1-d87f-7f40-9cff-275e15bf589a`. |
 | Copied subagent prompt query semantics | PR #410; head `a40b01f714359759b3d0d0ae0c746ad00ef7e72f`; master commit `f4494c3ad7c354637ed5cafde7ad43af8926ca9b` | Merged current-master input; historical `sessions_for`/`workflows` zero remains a capture/correlation coverage fixture. |
@@ -241,12 +243,13 @@ This is a private corpus reference, not a distributable PR fixture. `gitleaks 8.
 | Semantic move-symbol capability | PR #414 merge `cd5ef58ccb165fb1df84f98a31a1db880957e299` | Generated capability/tool/API parity and safety/preview/impact fixture. |
 | Release PR integrity guard | PR #415; merge `6b339ea06878e2c8fce703c839184a5bd21c7159` | Merged publication-integrity base input. |
 | Identity split visibility | PR #417; merge `bccb6bea38adf18dfb0cf0f8987c144fc73f6a37` | Merged status/reconciliation base input; matches the plan-19 live split-store probe. |
-| Pending 0.0.48 publication | PR #418; branch `release-plz-2026-07-10T01-03-19Z`; head `e870c4b8478205bf4ce2c00e366953d8830ff6b3` | Open/`UNSTABLE` publication snapshot for merged #414/#411 changes; import only after merge, tag, package, and digest verification. |
+| 0.0.48 publication | PR #418; branch `release-plz-2026-07-10T01-03-19Z`; final head `c6dd2d1a512bb652e4459aa466c715558c92b6ba`; merge `3567e31e3a60730400c9b900e32ca02c0bf3bf33` | Merged source/package baseline. Release manifests still verify tag/package/catalog/schema digests and distinguish merged source from the installed 0.0.47 planning runtime. |
 | Race-safe move-symbol writes | PR #419; head `109d31c3698fbd6a4b50324afd2b30feff8309f3`; merge `66584b4dbdee920204cbcf4cf42d0dbc308559e4` | Merged command/precondition/filesystem/rollback base input. |
 | MCP daemon hot-swap routing | PR #420; head `7f84436ca7ab18732ff344ac9a93169e83813a68`; merge `6b05327f67cefb8e11b0ad8bca60e0f921c524e1` | Merged composition/lifecycle/current-client input: proxy authority before local store open, per-request reconnect, no uncertain write replay, and explicit new-session/tool-schema refresh boundary. |
 | MCP generation-scoped tool refresh | PR #422; head `9487230ceaa46ca57aee01c45406c7bf24e29ddc`; merge `9f7a110805edf226bb0d665d6f4ff5c4f03c6163` | Merged input: negotiate `tools.listChanged`, notify a long-lived client once per daemon generation including same-version restarts, bound non-evicting client dedupe, and direct recovery at the stale host or daemon. |
 | Memory FTS direction and retrieval telemetry | PR #423; branch `codex/fact-retrieval-ranking-telemetry`; head `b4aa14a26ed777c5d83e0cc127e3c0bddd053457`; base `9f7a110805edf226bb0d665d6f4ff5c4f03c6163`; merge `59003e656b1058191cb57882a07999e3bc8e96b5` | Merged accepted-base input. Replaces absolute-value FTS5-rank conversion with monotonic negated-BM25 normalization; adds exact operational evidence versus unrelated V2-plan facts, rare-term coverage, explicit-search counters, untracked context enrichment, and analytics assertions. TraceDecay `pr_context` could not inspect it because both explicit worktree/root requests hit the selected-versus-legacy identity cutover conflict; live GitHub plus bounded Git diff supplied the fallback evidence. |
 | Analytics aggregate-before-sample correction | PR #424; branch `codex/analytics-section-aggregation`; head `04d8d2de40beff5c638034e2b0a2254262c1cbce`; base `59003e656b1058191cb57882a07999e3bc8e96b5`; merge `6c4b8b91dad2efdcaefab0153475287f37c2caee` | Merged accepted-base input. Computes exact event totals and DB-side tool/hint rollups before rendering, removes the generic latest-10,000 aggregate cap, adds project/time indexes, and tests >10,000 events. A TraceDecay-first `pr_context` attempt still hit the selected-versus-legacy identity conflict after #407/#423 merged; GitHub metadata plus bounded patch supplied the evidence. |
+| Explicit split-store consolidation | PR #425; branch `codex/explicit-store-consolidation`; base `6c4b8b91dad2efdcaefab0153475287f37c2caee`; final head `d3bb28b57bef6f7fa513ff4b0645ce5e31a97872`; merge `de3d05dc8f7f75028d8721b7d65c487459c5f170`; relevant commits include `12182510` canonical macOS paths, `82cfa9b9` remapped LCM source edges, and final holder identity by file/inode | Merged accepted-base input. GitHub metadata/body/files/checks and bounded commit evidence anchor the offline plan/apply workflow, frozen SQLite families, path-plus-inode holder refusal, reservations, dual backup, deterministic confirmation, restartable ledger/staging, explicit table dispositions/collisions, exhaustive verification, marker/registry cutover, and doctor recovery. Linux/macOS/build/format/clippy and other checks passed; Windows shard failures persisted on #425 and release #418 and remain a named base failure. Historical `sessions_for(git_ref="branch", value="codex/explicit-store-consolidation")` and `message_search(project_scope="all_registered")` stopped at the selected-versus-legacy conflict, so no branch/session ID is fabricated; after real consolidation, rerun those exact recipes and supersede the gap with a durable session/Turn anchor. |
 
 ### 4.5 Cross-project and worktree failure anchors
 
@@ -270,7 +273,7 @@ The current planning replay added one direct contract failure: `message_search(p
 |---|---|---|
 | Registered local Hermes source | TraceDecay project `proj_99472b542e35cdb6`; root `/fast/projects/hermes-agent`; commit `732a9ffc572ad2703fbd25cc8a21c9f3f9c10d69`; package `0.16.0` | Local source/test audit anchor. It is a fork snapshot and differs materially from current upstream; do not infer latest behavior from it. |
 | Official Hermes source/provenance | [NousResearch/hermes-agent](https://github.com/NousResearch/hermes-agent); audited upstream head `540f90190f50f9518bf36632a724e0e58877a10b`; MIT license/Nous Research notice | Pin repository/commit/file/access date before adapting code. Preserve license notice for copied material; prefer contract-level clean implementation where designs diverge. |
-| Official Kanban reference | [Kanban feature reference](https://github.com/NousResearch/hermes-agent/blob/main/website/docs/user-guide/features/kanban.md); [v0.15 Kanban maturation record](https://github.com/NousResearch/hermes-agent/blob/main/RELEASE_v0.15.0.md) | Durable task/attempt/handoff/claim/retry/model/worktree/decomposition/swarm/dashboard behavior and evolution. Documentation is evidence, not a substitute for pinned source/tests. |
+| Official Kanban reference | [Kanban feature reference](https://github.com/NousResearch/hermes-agent/blob/main/website/docs/user-guide/features/kanban.md); [v0.15 Kanban maturation release](https://github.com/NousResearch/hermes-agent/releases/tag/v2026.5.28) | Durable task/attempt/handoff/claim/retry/model/worktree/decomposition/swarm/dashboard behavior and evolution. Documentation is evidence, not a substitute for pinned source/tests. |
 | Ambient-board ownership failure | [Hermes issue #21877](https://github.com/NousResearch/hermes-agent/issues/21877) | Documents global current-board selection causing cross-profile dispatch, writes, token spend, and notifications. TraceDecay forbids ambient board ownership and per-board canonical stores. |
 | Cross-repository fan-out/fan-in usage | Hermes session `20260617_210811_5cd728` | Rspack/Rsbuild/React Router plugin evidence: five parallel triage tickets, synthesis fan-in, implementation children, multiple executor/model routes, dependencies, blockers, and board/assignee ambiguity. |
 | Board/store/current-selection confusion | Hermes session `20260617_020912_188f3e` | Multiple board DBs/backups/recovery artifacts and unset board selectors; migration, scope, corruption, and UI mental-model regression anchor. |
@@ -352,6 +355,7 @@ Search query/rank is a recipe, not the anchor.
 
 - Create `crates/tracedecay-domain/src/research.rs`.
 - Create redacted `tests/fixtures/v2/research-anchor-manifest.json`.
+- Create `docs/research/hermes-kanban-port-ledger.yaml` from a generated, schema-validated private working ledger; it contains no transcript payloads.
 - Create `tests/v2_corpus_suite/research_anchors.rs`.
 - Extend compatibility inventory with session/message/agent/workflow/Git anchor capabilities.
 
@@ -362,6 +366,10 @@ Search query/rank is a recipe, not the anchor.
 - [ ] Prove no secret/payload/query literal enters catalog or safe anchor export.
 - [ ] Add manifest digest, supersession, redaction, retention, and deletion skeleton tests.
 - [ ] Add current planning anchor manifest as a private local artifact; commit only the sanitized schema/fixture.
+- [ ] Pin the official repository, local source checkout, commit `732a9ffc572ad2703fbd25cc8a21c9f3f9c10d69`, and MIT license/copyright evidence for every Hermes Kanban subsystem audited by plan 24 §2.5.
+- [ ] For every source file/symbol/UI/test span, record exact line or symbol bounds, source digest, `direct_port|behavioral_port|redesign|drop`, rationale, destination owner and PR, required notice, source test(s), and the V2 regression(s) that prove equal-or-stronger behavior. No subsystem-level summary row may stand in for file/feature dispositions.
+- [ ] Generate a completeness test that fails on an unclassified source/test/UI span, missing license decision, missing destination, missing source-to-regression mapping, stale source digest, or dependent implementation PR without reviewed applicable ledger rows.
+- [ ] Gate plans 01/02/09/10/11 PRs 4E, 6G, 24M, 24N, and 25G on the reviewed ledger slice; fixtures/prototypes may precede the gate, implementation merge may not.
 
 ## 8. Acceptance gates
 

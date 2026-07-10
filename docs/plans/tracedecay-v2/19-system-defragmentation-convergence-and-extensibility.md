@@ -38,6 +38,10 @@ This is the architecture problem in miniature:
 4. Health is reported per shard, but the user needs a reconciliation decision for the logical system.
 5. The safe behavior—preserve both and demand consolidation—is correct, but the recovery is not yet a first-class application workflow with a typed plan, preview, receipt, and postcondition.
 
+The final 0.0.47 refusal quantified the fragmentation. Selected `proj_ceaa713e40fef2b2` was healthy with 38,510 nodes, 987 files, 17 facts, 2,003 sessions, 432,790 messages, 419,887 LCM rows, 14 branches, `automation_files=0`, five payload files, and three response files. Legacy `proj_b4a8bbe4953823c4` was also healthy with 36,596 nodes, 989 files, 129 facts, 4,129 sessions, 603,866 messages, 592,594 LCM rows, 197 branches, 3,470 automation files, 1,839 payload files, and four response files. The missing automation lane in selected and large legacy-only lane are coverage, not evidence that either shard is globally current.
+
+Merged PR #425 (`de3d05dc`, final head `d3bb28b5`) is accepted V1 behavior: offline plan/apply, canonical platform paths, frozen SQLite families, final path-plus-file/inode holder refusal, reservations, dual backups, deterministic confirmation, restartable ledger/staging, explicit table dispositions/collisions, remapped LCM edges, exhaustive verification, marker/registry cutover, and doctor recovery. V2 absorbs and generalizes those invariants behind operation-specific plan/start/recover use cases; it does not keep a second consolidation authority or generic preview/apply framework.
+
 V2 must retain the safe refusal while making ambiguity inspectable and repairable through the same canonical identity, command, status, and receipt contracts used by CLI, MCP, API, SDKs, and dashboard.
 
 ### 2.2 Fragmentation inventory
@@ -253,6 +257,7 @@ The same convergence pattern applies to identity, search, policy, config, status
 | Policy bundles/evaluators | Policy | Policy | Policy artifacts/results through ports | Application/labs |
 | Capability metadata | Tool catalog | Catalog generation/runtime lookup | Generated/catalog snapshots | All transports/UI/docs |
 | Use-case semantics | Application | Application | Injected repositories/job/audit ledger | CLI/MCP/API/SDK/UI/hooks |
+| Human-facing Markdown/terminal presentation | Presentation | Presentation | None | CLI/MCP/root adapters |
 | Protocol envelopes | API or transport-owned generated bindings | Thin adapter | None except safe request audit | Corresponding transport |
 | Effective configuration | Domain schema + application resolver | Application/root bootstrap | Profile/project config repository | Status/settings/all transports |
 | System status/remediation | Application typed models | Application | Observability projections/audit | All transports/UI |
@@ -277,6 +282,7 @@ crates/
 ├── tracedecay-hooks/           # bounded host event/delivery adapters
 ├── tracedecay-tool-catalog/    # capability IR, validation, generators, runtime snapshot
 ├── tracedecay-application/     # commands, queries, workflows, ports, typed status/errors
+├── tracedecay-presentation/    # pure sealed-view -> document/terminal/Markdown rendering (plan 21)
 ├── tracedecay-api/             # HTTP/SSE and generated public contract artifacts
 └── tracedecay-client/          # official Rust client and generated public types
 src/                            # root binary, composition, CLI/MCP, host install/update, V1 adapters
@@ -315,6 +321,8 @@ flowchart TD
     A --> P
     A --> T
     H --> A
+    PR["tracedecay-presentation"] --> A
+    PR --> D
     API["tracedecay-api"] --> A
     API --> D
     API --> T
@@ -328,6 +336,7 @@ flowchart TD
     R --> P
     R --> H
     R --> T
+    R --> PR
     UI["dashboard and SDKs"] --> API
 ```
 
@@ -623,14 +632,17 @@ An adapter cannot survive beyond its `delete_in_pr` merely because it is conveni
 
 For split identity/store/session/graph cases:
 
-- freeze writers and capture a signed inventory/watermark (HMAC with the plan 12 §9 profile-local catalog key, `key_id` recorded);
+- normalize canonical platform paths, reject unsupported/open holders, reserve every source/destination writer, freeze both SQLite families, and capture a signed inventory/watermark (HMAC with the plan 12 §9 profile-local catalog key, `key_id` recorded);
+- create and restore-probe an independent immutable backup of every conflicting source before staging; one successful backup never covers another source;
+- compute a deterministic confirmation over both source manifests, policy/config/catalog versions, target, table dispositions, remapped-edge digest, collisions, backups, and intended marker/registry update, then revalidate it under the same locks immediately before publication;
 - compute entity/observation/projection overlap by stable source hashes and aliases;
-- classify unique, duplicate, conflicting, corrupt, unavailable, secret-flagged, and unsupported records;
+- classify every table/index/trigger/sidecar and record as merge/rebuild/reject plus unique, duplicate, conflicting, corrupt, unavailable, secret-flagged, or unsupported; preserve remapped LCM summary/source edges explicitly;
 - preview merge/link/keep-separate effects without content disclosure;
 - append/import idempotently into canonical evidence, never copy projection rows as authority;
 - rebuild projections/representations;
 - compare counts, hashes, coverage, retrieval anchors, and representative queries;
-- publish route atomically and emit a reconciliation receipt;
+- checkpoint restartable ledger/staging states at every durable boundary; status/doctor emits the exact resume/recover action;
+- publish marker plus registry route atomically only after exhaustive verification and emit a reconciliation receipt;
 - retain old store read-only for the bounded rollback/evidence window;
 - securely retire WAL/temp/cache/backups as required by plan 18.
 
@@ -713,6 +725,7 @@ These slices are program gates mapped into the master plan’s PRs, not a compet
 - Add ADRs for canonical planes, ownership, DAG, config/error/status governance, extension tiers, complexity budgets, and adapter expiry.
 - Baseline convergence scorecard and historical failure links (plan 14 `FM-###` row IDs).
 - Freeze representative semantic parity fixtures without private content.
+- Import #425's table-disposition/collision/canonical-path/holder/reservation/dual-backup/confirmation/ledger/remapped-edge/marker/doctor inventory as the V1 reconciliation seam and assign each behavior one V2 owner and deletion gate.
 - Gate: every V1 surface/store/implementation has owner, target, disposition, and retrieval anchor.
 
 ### C1 — Pure canonical contracts (`PR 4`, `PR 4A`)
@@ -766,6 +779,7 @@ These slices are program gates mapped into the master plan’s PRs, not a compet
 ### C8 — Backfill, reconcile, cut over (`PR 33–36`)
 
 - Run resumable evidence imports, identity/store reconciliations, projection rebuilds, privacy rescans, and shadow comparisons.
+- Require the #425-derived dual-nonempty-store matrix: canonical macOS/Linux/Windows paths, holder/reservation races, every crash checkpoint, one-of-two backup failure, confirmation drift, table collision/rebuild/reject, remapped LCM source edges, verification mismatch, and atomic marker/registry publication.
 - Cut bounded contexts one effect owner at a time with signed receipts and rollback drills.
 - Reject stale clients/obsolete protocols/names before store use.
 - Gate: no unexplained parity gap, unscanned private descendant, or split authoritative identity remains.
@@ -805,6 +819,7 @@ These slices are program gates mapped into the master plan’s PRs, not a compet
 - [ ] Sessions and LCM reconcile as activity plus context lineage with one identity/retrieval-anchor model.
 - [ ] One identity/scope resolver handles profile/repository/project/checkout/worktree/ref/session/agent/all-system scope on every surface.
 - [ ] Split legacy/selected stores are discoverable, previewable, reconcilable, verifiable, and safely retireable through typed application workflows.
+- [ ] #425/V2 reconciliation freezes and backs up both sources, preserves remapped LCM source edges, accounts for every table/collision, resumes every ledger state, revalidates confirmation under locks, and publishes marker/registry state only after exhaustive proof; doctor exposes one executable recovery action.
 - [ ] One query/search/graph plane serves CLI, MCP, API, SDKs, dashboard, policy, and labs with pinned scope, coverage, freshness, explain, and anchors.
 - [ ] One policy/replay plane evaluates hints, retrieval, coordination, curation, memory, diagnostics, and scheduling without hidden I/O or effects.
 - [ ] One capability catalog generates every public binding and discovery surface; drift tests pass.

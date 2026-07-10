@@ -22,7 +22,7 @@
 14. Existing deterministic hint classifiers remain a candidate source during migration, then move behind the same policy contract. There is one delivery selector at cutover: plan 6's `DeliveryArbiterV1` ([06-policy-crate.md](./06-policy-crate.md) §9.1.3), which arbitrates deterministic and scout `DeliveryCandidateV1` submissions under one `HintStateSnapshot` version compare-and-swap.
 15. Canonical initiative/task/ticket/dependency/claim/context-packet events are eligible evidence, not a broadcast feed. A sibling-task change reaches an exact Thread/Turn only when evidence proves material overlap, a blocker, a handoff, or an invalidated assumption.
 
-This plan extends the contracts in [01-domain-crate.md](./01-domain-crate.md), [06-policy-crate.md](./06-policy-crate.md), [07-hooks-crate.md](./07-hooks-crate.md), and [09-application-crate.md](./09-application-crate.md). Configuration is exclusively owned by [20-configuration-control-plane.md](./20-configuration-control-plane.md); capability and rendering parity are exclusively owned by [21-cli-mcp-tool-surface-and-output-unification.md](./21-cli-mcp-tool-surface-and-output-unification.md).
+This plan extends the contracts in [01-domain-crate.md](./01-domain-crate.md), [06-policy-crate.md](./06-policy-crate.md), [07-hooks-crate.md](./07-hooks-crate.md), and [09-application-crate.md](./09-application-crate.md). Configuration is exclusively owned by [20-configuration-control-plane.md](./20-configuration-control-plane.md); plan 09 owns semantic response views while capability, binding, rendering, and format parity are exclusively owned by [21-cli-mcp-tool-surface-and-output-unification.md](./21-cli-mcp-tool-surface-and-output-unification.md); every message/LCM/context read and current/as-of decision is owned by [23-session-lcm-temporal-retrieval-and-evaluation.md](./23-session-lcm-temporal-retrieval-and-evaluation.md) through the sole `TraceQueryV1` path; canonical task refs/events are owned by [24-canonical-task-plan-graph-and-multi-agent-executor.md](./24-canonical-task-plan-graph-and-multi-agent-executor.md).
 
 ## 2. Product objective and non-goals
 
@@ -69,8 +69,8 @@ Do not create a new crate. Scouting has one deployment consumer, and its invaria
 | Model gateway contract | application consumer-owned port | root adapter, initially Codex app-server optional | automation-backend reuse by import |
 | Safe delivery handshake | hooks/application | host adapter plus daemon session | fake user messages |
 | HTTP/SSE/OpenAPI | API | thin generated transport | private dashboard routes |
-| CLI/MCP/SDK presentation | plan 21 generated bindings | thin root/public adapters | scout-specific renderer |
-| Dashboard interaction | Brain frontend | generated client and typed views | browser-side ranking |
+| CLI/MCP/SDK presentation | plan 21 generated bindings/renderers over plan 09 typed views | thin root/public adapters | scout-specific renderer |
+| Dashboard interaction | Brain frontend | generated client and plan 09 typed views | browser-side ranking |
 
 ```mermaid
 flowchart LR
@@ -122,12 +122,10 @@ pub struct SuggestionEnvelopeId(pub uuid::Uuid);
 pub struct SuggestionDeliveryId(pub uuid::Uuid);
 pub struct ModelInvocationId(pub uuid::Uuid);
 pub struct LogicalMessageId(pub EntityId);
-pub struct ScoutConsumerId(pub CatalogValue);
+pub struct ScoutConsumerId(pub NativeKindCode);
 
-// Owned by the canonical task/ticket graph contract; repeated here as refs.
-pub struct TaskRefV1 { pub work_item_id: WorkItemId, pub version: WorkItemVersionId }
-pub struct TaskClaimRefV1 { pub claim_id: EntityId, pub version: EntityVersionId }
-pub struct ContextPacketRefV1 { pub packet_id: ContextPacketManifestId, pub version: EntityVersionId }
+// Imported unchanged from tracedecay-domain; this plan defines no task-local refs:
+// WorkItemVersionRefV1, WorkClaimRefV1, ContextPacketManifestRefV1.
 
 pub struct SuggestionAddressV1 {
     pub profile_id: ProfileId,
@@ -172,7 +170,8 @@ pub enum ScoutTriggerKindV1 {
     WorkClaimChanged,
     TaskChanged,
     TaskDependencyChanged,
-    TaskClaimChanged,
+    TaskOfferChanged,
+    TaskLeaseChanged,
     ContextPacketPublished,
     TaskHandoffObserved,
     ScopeChanged,
@@ -204,13 +203,15 @@ pub struct ScoutInputManifestV1 {
     pub access_policy_digest: AccessPolicyDigest,
     pub config_snapshot_id: EffectiveConfigSnapshotId,
     pub policy_bundle_id: PolicyBundleId,
-    pub tool_catalog: ToolCatalogRef,
+    pub tool_catalog: CatalogSnapshotRefV1,
     pub hint_state_version: EntityVersionId,
     pub model_capability: Option<ModelCapabilityRefV1>,
     pub evaluation_time: UtcMicros,
     pub deadline: UtcMicros,
 }
 ```
+
+`WorkClaimChanged` is advisory agent-presence evidence; `TaskOfferChanged` is non-authoritative routing; `TaskLeaseChanged` is fenced execution authority. No trigger or classifier uses the ambiguous name `TaskClaimChanged`. Schema generation and replay exhaustively map every closed plan-24 offer/lease/claim event class or fail the build.
 
 The input manifest references authorized, sanitized data; it does not inline prompts, tool arguments/results, paths, environment values, or model credentials. Every input lane reports complete/partial/stale/locked/redacted/unavailable coverage.
 
@@ -239,7 +240,7 @@ pub struct ScoutToolProposalV1 {
     pub ordinal: u16,
     pub intent: ScoutToolIntentV1,
     pub capability_id: CapabilityId,
-    pub typed_request: CatalogValue,
+    pub typed_request: SchemaBoundValueRef,
     pub expected_information_gain: ScoreMicros,
     pub rationale_code: ScoutRationaleCode,
 }
@@ -472,9 +473,9 @@ pub struct ScoutContextDeltaV1 {
     pub observed_capability_events: Vec<EventId>,
     pub changed_scope_refs: Vec<ScopeResolutionId>,
     pub current_work_claim_refs: Vec<EntityRef>,
-    pub current_task_refs: Vec<TaskRefV1>,
-    pub relevant_task_claim_refs: Vec<TaskClaimRefV1>,
-    pub context_packet_refs: Vec<ContextPacketRefV1>,
+    pub current_task_refs: Vec<WorkItemVersionRefV1>,
+    pub relevant_task_claim_refs: Vec<WorkClaimRefV1>,
+    pub context_packet_refs: Vec<ContextPacketManifestRefV1>,
     pub prior_suggestion_fingerprints: Vec<ContentDigest>,
     pub coverage: CoverageReportV1,
 }
@@ -555,17 +556,9 @@ Application owns a provider-neutral consumer port:
 ```rust
 pub enum ModelPurposeV1 { IncrementalContextScout }
 
-pub struct ModelCapabilityRefV1 {
-    pub provider: ProviderId,
-    pub backend: CapabilityId,
-    pub model_id: CatalogValue,
-    pub model_revision: Option<CatalogValue>,
-    pub context_limit: u32,
-    pub structured_output: bool,
-    pub tool_planning: bool,
-    pub residency: ModelResidencyV1,
-    pub discovered_at: UtcMicros,
-}
+// ModelCapabilityRefV1 and ModelResidencyV1 are generic domain/catalog
+// contracts from plan 01. Scout consumes them unchanged; plan 24 executor
+// routing and future model-backed subsystems never depend on this scout plan.
 
 pub struct ScoutModelRequestV1 {
     pub invocation_id: ModelInvocationId,
@@ -780,13 +773,13 @@ Project membership, common initiative membership, chronological proximity, share
 
 ```rust
 pub struct MaterialTaskChangeV1 {
-    pub current_task: TaskRefV1,
-    pub changed_task: TaskRefV1,
+    pub current_task: WorkItemVersionRefV1,
+    pub changed_task: WorkItemVersionRefV1,
     pub relation: TaskRelevanceKindV1,
     pub dependency_path: Vec<EvidenceRef>,
-    pub current_claim: Option<TaskClaimRefV1>,
-    pub sibling_claim: Option<TaskClaimRefV1>,
-    pub context_packets: Vec<ContextPacketRefV1>,
+    pub current_claim: Option<WorkClaimRefV1>,
+    pub sibling_claim: Option<WorkClaimRefV1>,
+    pub context_packets: Vec<ContextPacketManifestRefV1>,
     pub retrieval_anchor_ids: Vec<RetrievalAnchorId>,
     pub materiality: ScoreMicros,
     pub coverage: CoverageReportV1,
@@ -988,7 +981,7 @@ Settings route: `/settings/context-scout`. It shows target/layer/effective prove
 
 ## 15. CLI, MCP, API, SDK, and rendering contract
 
-All bindings originate in the catalog/application manifest and follow [21-cli-mcp-tool-surface-and-output-unification.md](./21-cli-mcp-tool-surface-and-output-unification.md): human CLI default, Markdown MCP default, explicit JSON/NDJSON, typed views, stable coverage, retrieval anchors, no scattered renderers.
+All bindings originate in the catalog/application manifest and follow [21-cli-mcp-tool-surface-and-output-unification.md](./21-cli-mcp-tool-surface-and-output-unification.md): plan 09 owns semantic typed views; plan 21 renders them with human CLI default, Markdown MCP default, explicit JSON/NDJSON, stable coverage, retrieval anchors, and no scattered renderers.
 
 ### 15.1 Semantic use cases
 
@@ -1213,10 +1206,11 @@ Compatibility work belongs to [12-root-compatibility-migration.md](./12-root-com
 
 ## 21. Reviewable PR slices
 
-Numbers extend the existing program without colliding with plans 1–21.
+Numbers extend the existing program without colliding with plans 1–24. Canonical dependencies determine order; no scout PR defines a temporary task ref or temporal retrieval implementation.
 
-### PR 4D — Scout and suggestion domain contracts
+### PR 4F — Scout and suggestion domain contracts
 
+- **Ordering:** after plan 01/24 PR 4E publishes canonical task refs and plan 01 publishes generic model-capability refs.
 - Add IDs, address/logical-message, trigger, run, tool, candidate, envelope, delivery, outcome, checkpoint, status, and reason schemas.
 - Add registry fixtures, deterministic ID tests, bounded-text/privacy compile gates, and dependency rules.
 
@@ -1230,6 +1224,12 @@ Numbers extend the existing program without colliding with plans 1–21.
 - Project trigger eligibility, logical origins, lifecycle, delivery/outcome, status, and low-cardinality metrics.
 - Add rebuild/dead-letter/determinism and self-event exclusion fixtures.
 
+### PR 10F — Canonical task-materiality projection integration
+
+- **Ordering:** after plan 24 PR 10E and PR 4F; consumes canonical task/dependency/claim/packet refs and materiality candidates without copying task state.
+- Join task materiality to exact active Agent/Thread/Turn addresses, emit bounded scout triggers, and prove nonmaterial board traffic stays silent.
+- Add cross-repository dependency/handoff/overlap and missing/partial task-projection fixtures.
+
 ### PR 22D — Scout capability eligibility and generated bindings
 
 - Extend catalog effect/egress/model/tool eligibility and inventory every allowed/forbidden capability.
@@ -1240,20 +1240,22 @@ Numbers extend the existing program without colliding with plans 1–21.
 - Implement fixed-point features, suppression, logical/category/anchor dedupe, cooldown, budgets, expiry, and explanation in `tracedecay-policy/src/scout.rs` (`EvaluatorKind::Scout`, reserved in plan 6's module tree behind its extension seam).
 - Add deterministic replay fixtures from current hint evals and multi-agent scenarios.
 
-### PR 24J — Application worker, incremental context, and model gateway
+### PR 24O — Application worker, incremental context, and model gateway
 
+- **Ordering:** after plan 23 PR 24L and plan 24 PRs 24M–24N; consumes their application reads/refs and never creates a scout-local retrieval or executor service.
 - Implement outbox scheduling, coalescing/cancellation/backpressure/fairness, snapshots, bounded tool executor, model port, run receipts, and status.
 - Add provider-neutral fake gateway and Codex app-server adapter with capability selection, Spark-if-advertised support, structured output, cancellation, and circuit breaker.
 
-### PR 24K — Host suggestion handshake and single delivery selector
+### PR 24P — Host suggestion handshake and single delivery selector
 
+- **Ordering:** after PR 24O and the plan-07 hook delivery port.
 - Add pending claim/revalidation (a plan 6 `DeliveryArbiterV1` operation), delivery modes, timing/expiry, receipts, provider conformance, and no-hook-wait benchmarks.
 - Shadow current delivery before selecting one V2 owner.
 
 ### PR 25F — Context Scout Observatory and Turn timeline
 
 - Add subsystem status/funnels, queue/model/tool/host/privacy/cost/quality views and Loom Scout lane/inspector.
-- Add Settings navigation using plan 20 generated descriptors and plan 21 views.
+- Add Settings navigation using plan 20 generated descriptors, plan 09 configuration views, and plan 21 presentation components.
 
 ### PR 31O — Incremental Scout Hint Lab and evaluation harness
 
@@ -1351,7 +1353,7 @@ Each run publishes a sanitized manifest with corpus/query labels, cutoff, inclus
 - Canonical task/ticket graph changes reach an exact Turn only for evidence-backed dependencies, overlaps, blockers, handoffs, context packets, or invalidated assumptions; task/claim anchors explain relevance and high-volume global-board activity remains silent.
 - Outcome attribution uses linked evidence and correct denominators; adjacency alone never means adoption or prevented work.
 - Observatory, Causal Loom, Hint Lab/playground, Settings, CLI, MCP, API, SDKs, status, and doctor expose the same typed state and controls.
-- Plan 20 owns every setting and safety floor; plan 21 owns every binding/view/renderer/format rule.
+- Plan 20 owns every setting and safety floor; plan 09 owns semantic typed views; plan 21 owns every binding/renderer/format rule and may not duplicate those views.
 - Offline, session replay, shadow, and controlled A/B gates meet the precision/silence/noise/token/latency/cost/privacy/idempotency targets before staged delivery.
 - There is no generic availability boilerplate, no per-item curation approval/apply/rollback UI, no historical delivery backfill, and no permanent second hint/delivery engine.
 - Migration ends with generated inventory parity, one delivery owner, V1 deletion receipts, and architecture tests proving the dependency DAG.

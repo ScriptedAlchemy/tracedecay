@@ -6,7 +6,7 @@
 
 **Purpose:** make multi-repository, multi-project, multi-checkout, and multi-worktree use a native TraceDecay behavior rather than a sequence of registry lookups, path guesses, store switches, and retries.
 
-**Publication baseline (2026-07-10):** `origin/master` `6c4b8b91`; #407/#410/#411/#413/#414/#415/#416/#417/#419/#420/#422/#423/#424 merged, #418 open. Refresh before implementation. Merged #417 split-store visibility is an explicit resolver/doctor regression input: identity conflict remains candidates/unavailable coverage and never becomes absent index/current-project fallback. Merged #420 makes reachable managed-daemon proxy authority precede any local project/store resolution/open; #422 adds generation-scoped catalog refresh for long-lived hosts. The failed explicit-worktree/root `pr_context` attempt for #423 and repeated explicit-root attempt for #424 are fresh cross-domain partial/fallback fixtures.
+**Publication baseline (2026-07-10):** `origin/master` `3567e31e` at 0.0.48 includes merged #418/#425; only draft plan PR #421 was open. Merged #417 split-store visibility remains an explicit resolver/doctor regression input. Merged #425 (`de3d05dc`, final head `d3bb28b5`) supplies accepted offline consolidation semantics: canonical paths, path-plus-file/inode holders, dual backups, remapped LCM edges, exhaustive verification, and atomic marker/registry cutover. Merged #420 makes daemon proxy authority precede local store open; #422 adds generation-scoped refresh. Historical failed worktree/root PR-context and branch/session lookups remain cross-domain partial/fallback fixtures even though the implementation is now accepted.
 
 ## 1. Product invariant
 
@@ -41,6 +41,7 @@ The following sessions are regression fixtures, not anecdotes:
 | `session:019f2538-0fd9-7362-a50b-96e36130643b` | Session search remained constrained through `sessions.project_key`, making provider-local attribution act like a public project boundary. | Provider keys remain provenance aliases only; profile activity owns canonical session discovery and zero/one/many repository attribution. |
 | `session:019f2524-534d-7bd1-a3b1-675f242dcc0e` | Claude’s first CWD could misattribute later cross-worktree messages. | Location is an interval-valued observation per Turn/message; no session-wide first-CWD overwrite. |
 | `session:019f1204-5575-72a1-a2d1-ab5c6d1b310d` | “No project index found” guidance suppressed otherwise available session and memory capabilities. | Capability availability is domain-specific; absent code graph does not disable profile activity, messages, memory, Git, or registry discovery. |
+| PR #425 / unresolved historical session anchor: branch `codex/explicit-store-consolidation`, final head `d3bb28b57bef6f7fa513ff4b0645ce5e31a97872`, merge `de3d05dc` | At the planning snapshot, explicit root/worktree/branch lookup stopped before semantic Git/session analysis because the same checkout had healthy selected and legacy stores. The selected lane reported zero automation files while the legacy lane reported 3,470; path/current-project selection could not decide authority. | Resolution returns both candidates and typed coverage. The now-merged consolidation freezes/backs up both, identifies holders by file identity, preserves aliases/remapped LCM edges, reconciles every table/collision, verifies exhaustively, and publishes marker/registry atomically before the exact recipe is retried; no CWD/path/newest-mtime/empty-lane inference. |
 
 Current supported-surface reproduction also exposed a composability break: `tracedecay_message_search(project_scope="all_registered")` can return a session from another registered project, but `tracedecay_lcm_load_session` is active-project-only and rejects project selectors. Search-to-exact-retrieval must therefore be a required end-to-end conformance test, not two independently green tools.
 
@@ -538,6 +539,12 @@ Metrics:
 
 Integrate these into the parent PR sequence; do not create a second parallel roadmap.
 
+### Companion requirements for PR 3R/33R — Split-store identity reconciliation
+
+- Import #425's canonical path, source-family freeze, holder/write-reservation, dual-backup, deterministic-confirmation, table-disposition/collision, remapped-LCM-edge, verification, ledger, marker/registry, and doctor-recovery fixtures under the one plan-12 controller.
+- Prove an explicit repository/project/worktree/ref/session selector returns both conflicting candidates plus per-domain coverage until the reconciliation receipt publishes; it never bypasses the conflict by choosing the current path or an empty lane.
+- After atomic cutover, replay the exact branch/session/search-to-load recipes and preserve old store/project IDs as routed aliases/tombstones rather than orphaning their retrieval anchors.
+
 ### Companion requirements for PR 8A — Canonical scope resolver
 
 - Add `ScopeSelectorV2`, repository/project/checkout/worktree/project-set IDs, aliases, match evidence, ambiguity, and typed errors to domain/catalog.
@@ -592,6 +599,7 @@ Integrate these into the parent PR sequence; do not create a second parallel roa
 - [ ] Code queries name exact repository/worktree/ref/snapshot and expose stale/dirty/partial state.
 - [ ] Cross-repository edges are typed, versioned, evidence-backed, bounded, and explainable.
 - [ ] Same-name, moved, deleted, duplicate-store, no-index, corrupt-shard, and unauthorized cases pass.
+- [ ] #425/V2 split-store consolidation preserves both backups and remapped edges, publishes one verified marker/registry route, then resolves every former selected/legacy ID and exact session/branch recipe without CWD/path guessing.
 - [ ] CLI, MCP, HTTP, generated SDK, dashboard, and hook capability metadata pass conformance snapshots.
 - [ ] Errors include candidates and one executable retry request; impossible remediation is prohibited.
 - [ ] All scope is bounded, cancellable, resumable, and truthful about searched/skipped/unavailable/redacted coverage.

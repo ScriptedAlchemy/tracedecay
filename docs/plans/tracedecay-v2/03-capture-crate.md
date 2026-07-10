@@ -431,7 +431,7 @@ pub struct CaptureReplayManifestV1 {
     pub evaluator_bundle_digest: Option<[u8; 32]>,
     pub index_watermarks: Vec<ManifestWatermark>,
     pub memory_manifest_digest: Option<[u8; 32]>,
-    pub tool_catalog_digest: Option<[u8; 32]>,
+    pub tool_catalog: Option<CatalogSnapshotRefV1>,
     pub substitutions: Vec<ReplaySubstitution>,
     pub unavailable_inputs: Vec<UnavailableInput>,
 }
@@ -539,7 +539,7 @@ The `code_snapshot` adapter is the single sanctioned sanitizer-crossing entry po
 
 **Files:** create `src/adapters/{lcm_v1,git,automation,v1_sessions}.rs`; add copied-store fixture manifests; extend `tests/provider_conformance.rs` and `tests/shadow_parity.rs`.
 
-PR 7E owns V1 parse and sanitize: every byte of V1 import content passes the mandatory sanitizer here and produces `SanitizationReceiptV1` records before any batch leaves capture. The storage-side transaction executor that consumes these sanitized batches is plan 02's PR 33S-2 importer, which adds no parsing, classification, or redaction of its own ([`02-store-crate.md`](02-store-crate.md); [`12-root-compatibility-migration.md`](12-root-compatibility-migration.md) references this split).
+PR 7E owns V1 parse and sanitize: every byte of V1 import content passes the mandatory sanitizer here and produces `SanitizationReceiptV1` records before any batch leaves capture. The storage-side transaction executor that consumes these sanitized batches is plan 02's PR 33S importer, which adds no parsing, classification, or redaction of its own; PR 33S-2 is cutover/rollback-window/deletion-proof support, not an importer ([`02-store-crate.md`](02-store-crate.md); [`12-root-compatibility-migration.md`](12-root-compatibility-migration.md) references this split).
 
 - [ ] Capture every LCM raw/summary/source/compression/payload/lifecycle/tombstone family, session/message/analytics row, Git/worktree/ref/commit observation, hook/hint terminal row, and automation family listed in the seam map.
 - [ ] Add the provider-global backfill-marker regression: a completed marker for one provider/source artifact cannot suppress scanning another provider or cause every source to reparse. Checkpoints are keyed by `(adapter, source instance, artifact, rewrite generation)` and report per-provider reparsed/skipped counts.

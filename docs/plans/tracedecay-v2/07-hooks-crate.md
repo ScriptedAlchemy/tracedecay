@@ -92,7 +92,7 @@ Base/future-master inputs refreshed on 2026-07-10:
 - PR #407 user-profile Hermes consolidation. Hermes/curator/reflector/skill-writer activity is actor/workflow evidence inside the user's profile, never a separate hook profile.
 - PR #410 copied-subagent prompt collapse. Hook normalization records native `PromptOrigin` evidence and projectors map it into `tracedecay-domain::MessageOrigin`; every sanitized native observation is retained, while direct_user/subagent/tool_result filters and parent-representative dedupe remain query/projector behavior.
 - PR #411 foreign-skill ownership/remediation. Hook hints and diagnostics must not suggest update/delete when catalog/application says the package is foreign to this installation; the safe route is info/no-action or explicit manual ownership transfer.
-- Publication master `6c4b8b91` includes #407/#410/#411/#413/#414/#415/#416/#417/#419/#420/#422/#423/#424. Open #418 is refreshed before PR 24F; #414/#419 affect generated edit-tool descriptors, #417 makes split identity explicit coverage/silence rather than first-candidate routing, and #423/#424 retrieval/accounting behavior is accepted hint-context/outcome-measurement input. PR #409 remains historical.
+- Publication master `3567e31e` (0.0.48) includes merged #418/#425 plus the earlier accepted inputs; only draft plan PR #421 was open at final refresh. #414/#419 affect generated edit-tool descriptors, #417/#425 make split identity/consolidation explicit coverage and accepted recovery evidence rather than first-candidate routing, and #423/#424 retrieval/accounting behavior is accepted hint-context/outcome-measurement input.
 
 Before PR 24F begins, refresh open PRs, master, installed host versions, hook manifests, application hook-port schema, and catalog digest. Drift becomes a manifest difference, not an undocumented assumption.
 
@@ -348,7 +348,7 @@ pub struct HookEvaluationRequest {
     pub request_facts: HookFacts,
     pub captured_observation: ObservationId,
     pub access: HookAccess,
-    pub requested_catalog: ToolCatalogRef,
+    pub requested_catalog: CatalogSnapshotRefV1,
     pub deadline: HookDeadline,
 }
 
@@ -378,7 +378,7 @@ pub struct EvaluationReceipt {
     pub evaluation: PolicyEvaluationId,
     pub request_facts_digest: Digest,
     pub bundle: PolicyBundleRef,
-    pub catalog_digest: Digest,
+    pub catalog_snapshot: CatalogSnapshotRefV1,
     pub state_version_before: EntityVersionId,
     pub state_version_after: Option<EntityVersionId>, // None when no transition was proposed or the CAS lost
     pub committed: bool,

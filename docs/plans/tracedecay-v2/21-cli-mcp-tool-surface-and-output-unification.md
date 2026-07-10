@@ -47,7 +47,9 @@ Primary current paths inspected:
 - `src/mcp/response_handles.rs`, `project_route.rs`, and `dispatch_policy.rs`;
 - existing V2 plans 08–10 and 12, 16–20.
 
-Publication refresh is `origin/master` `6c4b8b91dad2efdcaefab0153475287f37c2caee`: merged #407 removes Hermes-local profile/tool silos, #420 makes daemon-proxy authority precede local store open and preserves per-request reconnect/no-write-replay semantics, #422 negotiates MCP `tools.listChanged` with bounded per-generation refresh, #423 fixes fact-rank/counters, and #424 shares exact analytics aggregates across MCP/dashboard. Open #418 remains a refresh input. V2 absorbs these into generated bindings/handshakes/views rather than adding adapter-local inventories or renderers.
+Publication refresh is `origin/master` `3567e31e3a60730400c9b900e32ca02c0bf3bf33` at 0.0.48. #418 and #425 are merged; #425 final head `d3bb28b5` merged as `de3d05dc`. Only draft plan PR #421 was open. V2 absorbs ordinary-profile Hermes, proxy-before-store, bounded catalog refresh, fact rank/counters, exact analytics, release, and consolidation/recovery into generated bindings/handshakes/views rather than adapter-local inventories or renderers.
+
+Merged #425 requires one cataloged offline split-store-consolidation workflow, not transport-local migration flags: status/plan, deterministic confirmation challenge, start/resume/status/cancel-before-cutover, verification report, and recovery. CLI/MCP/API render the same typed view for canonical platform identities, path-plus-file/inode holder/reservation coverage, dual backup receipts, restartable ledger/staging, row/payload/LCM/fact/feedback dispositions, remapped-edge verification, and proof-gated cutover. Ordinary output never reveals holder command lines, unauthorized raw paths, backup secrets, confirmation material, or quarantined content; no surface can skip verification or silently initialize/select a store.
 
 ### 2.2 Current registry drift
 
@@ -159,14 +161,13 @@ The inventory must detect the full set, not only the names printed by `tracedeca
 Use plan 08's identity model without surface-derived business identity:
 
 ```rust
-pub struct CapabilityId(ValidatedId); // capability.code.search
-pub struct UseCaseId(ValidatedId);    // usecase.code.search-symbols
+// CapabilityId and UseCaseId are imported unchanged from plan 01.
 pub struct IntentId(ValidatedId);     // intent.code.find-symbol
 pub struct BindingId(ValidatedId);    // binding.mcp.search
 pub struct PresentationId(ValidatedId); // presentation.code.search-results
 ```
 
-All five ID kinds follow plan 08 §8's grammar exactly — `usecase.<domain>.<verb-noun>`, `intent.<domain>.<task>`, `binding.<surface>.<stable-name>`, and `presentation.<domain>.<view>` (registered in plan 08's `id.rs`). Versions are separate SemVer fields; IDs never embed v1/v2 or transport names except BindingId.
+All five ID kinds follow plan 08 §8's grammar exactly — `capability.<domain>.<noun>`, `usecase.<domain>.<verb-noun>`, `intent.<domain>.<task>`, `binding.<surface>.<stable-name>`, and `presentation.<domain>.<view>` (registered in plan 08's `id.rs`). Capability/use-case storage types remain the plan-01 definitions; versions are separate SemVer fields, and IDs never embed v1/v2 or transport names except BindingId.
 
 One use case may have native CLI, generic CLI bridge, MCP, HTTP, SDK, dashboard, hook, and skill bindings. A binding declares only transport syntax and presentation support. It cannot alter default scope, query semantics, ordering, coverage, effect, or errors.
 
@@ -266,7 +267,7 @@ domain schemas + application use cases + reviewed presentation specs
 
 ### 6.1 `tracedecay-presentation` scope
 
-Add a small pure crate only because CLI, MCP, documentation snapshots, and the conformance runner need byte-identical human rendering without importing root transport code:
+Add the small pure crate below. This is a locked deployment choice, not an implementation-time crate-versus-root option: CLI, MCP, documentation snapshots, and the conformance runner are independent consumers and need byte-identical human rendering without importing root transport code.
 
 ```text
 crates/tracedecay-presentation/
@@ -295,7 +296,7 @@ Allowed imports: domain safe value types, application public view types, generat
 
 Forbidden imports: stores, queries, policy execution, hooks, providers, Axum, rmcp, clap parsing, SQL, Git/network clients, filesystem/process access, environment/time reads, and `serde_json::Value` in public renderer APIs.
 
-If implementation proves the root binary is the only renderer consumer, keep the same boundary as a sealed root module rather than adding a crate. The API and ownership remain identical; no second presenter is allowed.
+Plan 19's target workspace and allowed-edge DAG must include `tracedecay-presentation -> tracedecay-domain` and `tracedecay-presentation -> tracedecay-application` public view contracts; root CLI/MCP adapters depend on presentation. The presentation crate has no edge to store/capture/projectors/query/policy/hooks/API implementations. No root-local presenter is permitted after this crate lands.
 
 ## 7. Typed view and presentation model
 
@@ -598,7 +599,9 @@ Expose only policy/configuration, schedule, budgets, authority, quality floors, 
 
 ### 11.4 Confirmed destructive operations
 
-Wipe, source cleanup, protected-data retirement, unsafe migration cutover, or external side effects can require an explicit confirmation token and current-version revalidation. Their names and receipts must describe the real effect. “Apply” and “rollback” are not generic framework verbs; use a domain command such as `migration cutover`, `migration recover`, or `project retire` where that is the actual operation. Edit use cases such as `usecase.code.move-symbol` follow the same rule: they declare one binding whose semantic request carries a typed preview input under their declared execution mode, so plan 09's preview/commit wording maps onto that single binding rather than separate generic `preview`/`apply` verbs.
+Wipe, source cleanup, protected-data retirement, unsafe migration cutover, or external side effects can require an explicit confirmation token and current-version revalidation. Their names and receipts must describe the real effect. “Apply” and “rollback” are not generic framework verbs; use a domain command such as `migration cutover`, `migration recover`, or `project retire` where that is the actual operation. Edit use cases such as `usecase.code.move-symbol` follow the same rule: the catalog declares an operation-specific inspection/preflight read and one confirmed mutation input where needed; both call plan 09's single `execute` boundary and never select a transport-generic preview/apply mode.
+
+Split-store consolidation follows the stricter plan-01/02/#425 workflow. The confirmation challenge binds both frozen source manifests, canonical platform locators, reservations, dual backup receipts, disposition plan, and destination. Start/resume never accepts an ambient current store; cutover is unavailable until the exhaustive verification view reports all required proofs, including remapped LCM source-edge integrity. Cancellation after an uncertain external/cutover effect enters typed reconciliation instead of claiming rollback.
 
 ## 12. Errors, status, stdout, stderr, and exit codes
 
@@ -640,7 +643,7 @@ Human output leads with the problem and exact next action. JSON returns only the
 | 70 | internal invariant | safe correlation ID only |
 | 130 | cancelled | user cancellation/interrupt |
 
-Useful partial results return 0 with `coverage.complete=false` unless the caller requests `--require-complete`, in which case the same response is written and exit 5 communicates the unmet contract. Empty complete and empty incomplete remain different in output.
+Useful partial results return 0 with `!coverage.is_complete()` unless the caller requests `--require-complete`, in which case the same response is written and exit 5 communicates the unmet contract. Empty complete and empty incomplete remain different in output.
 
 ### 12.3 Stream contract
 
@@ -664,7 +667,7 @@ pub struct CursorPage<T> {
     pub next_cursor: Option<OpaqueCursor>,
     pub truncation: Option<TruncationReason>,
     pub count_semantics: CountSemantics,
-    pub ordering: OrderingReceipt,
+    pub ordering: OrderingContract,
 }
 ```
 
@@ -961,7 +964,7 @@ These are sub-slices of existing PRs, not a separate architecture track.
 
 ### PR 24E1–24E8 companion — pure presentation plus generated adapters
 
-- Land `tracedecay-presentation` boundary or equivalent sealed root module.
+- Land the mandatory `tracedecay-presentation` crate and its plan-19 DAG edge; delete root-local human renderers as each domain cuts over.
 - Cut CLI and MCP domains over one at a time with semantic/presentation differential tests.
 - Normalize stdout/stderr/exits, format switches, scope builders, help, cursors, and retrieval anchors.
 

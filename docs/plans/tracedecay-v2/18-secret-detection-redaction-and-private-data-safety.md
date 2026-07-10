@@ -12,7 +12,7 @@ Plans 22–23 add model prompts/outputs, suggestion envelopes, query literals/lo
 
 Plan 24 adds initiative/plan/task text, dependency/acceptance/decision records, executor manifests/routes, capability grants, context packets, sibling summaries, workspaces, logs, handoffs, artifacts, outcomes, costs, adapter streams, task views, and orchestration fixtures as explicit sources/sinks. Lease proofs and credentials are protected control-plane values that never enter ordinary stores, prompts, logs, transports, screenshots, exports, or research anchors.
 
-**Publication baseline (2026-07-10):** source audit is against master through `6c4b8b91`; #407/#410/#411/#413/#414/#415/#416/#417/#419/#420/#422/#423/#424 merged and #418 open. Refresh before implementation. Merged #415 release integrity is complementary, not a replacement for secret scanning; #414/#419 edit requests/diffs/impact/rollback conflicts, #417 safe split-store diagnostics, #420 proxy/reconnect/errors, #422 catalog-generation notifications/handshakes, #423 retrieval fixtures, and #424's >10,000-event aggregate fixture are mandatory input/output canary surfaces and must never copy private operational text from a live store.
+**Publication baseline (2026-07-10):** source audit is against master `3567e31e` at 0.0.48 with #418/#425 merged; #425 final head `d3bb28b5` merged as `de3d05dc`. Release integrity complements secret scanning; edit requests/diffs/conflicts, split-store diagnostics and path-plus-file/inode holders, proxy/reconnect errors, catalog handshakes, retrieval fixtures, and >10,000-event aggregates are mandatory canary surfaces. Both consolidation source families, backups, ledger/staging, table/collision reports, remapped LCM edges, verification artifacts, commands, and doctor output remain separate privacy sink/canary inputs.
 
 ## 1. Verdict on the current system
 
@@ -159,7 +159,7 @@ pub struct SanitizationReceiptV1 {
     pub input_domain: PrivacyDomainId,
     pub input_fingerprint: KeyedPayloadFingerprint,
     pub output_digest: SanitizedOutputDigest,
-    pub findings_by_class: BTreeMap<SecretClass, u64>,
+    pub findings_by_class: std::collections::BTreeMap<SecretClass, u64>,
     pub structured_fields_scanned: u64,
     pub raw_fallback_used: bool,
     pub decode_depth: u8,
@@ -446,6 +446,8 @@ Every backup/V1 rollback restore lands in an isolated non-serving staging profil
 
 No “emergency restore” may bypass this gate and silently reindex secrets.
 
+For #425/V2 split-store consolidation, the selected and legacy families remain separate privacy authorities until reconciliation proves otherwise. The workflow creates two independent encrypted/restricted backup manifests, scans both plus WAL/SHM/temp/ledger/staging/table-report/collision/remapped-edge descendants, and records unknown/unsupported coverage without copying candidate values into the plan or doctor output. A clean result for one family cannot authorize the other. Deterministic confirmation binds both source manifests, privacy policy/detector versions, table dispositions, edge-remap digest, backups, and intended marker/registry change; any drift invalidates confirmation. Marker/registry publication is forbidden until both backup restore probes and the fully rebuilt candidate pass current sanitizer/canary/parity verification.
+
 ## 13. False positives, adjudication, and rule evolution
 
 Finding states:
@@ -700,6 +702,7 @@ Integrate these slices into the master Phase 0–5 sequence.
 ### PR 33A — Retroactive V1/V2 audit, containment, rebuild, and restore gate
 
 - Scan every named sink/store/artifact/backup with complete coverage manifests.
+- Include both #425 split-store source families, canonical-path aliases, WAL/SHM/temp files, backups, consolidation ledger/staging/table/collision reports, remapped LCM source edges, doctor commands/errors, and candidate rebuilt store as separate coverage rows; neither family inherits the other’s clean status.
 - Block flagged descendants, guide rotation, rebuild sanitized generations, retire old WAL/DB/cache/export artifacts, rescan, and issue verification receipts.
 - Cutover requires zero forbidden-sink canary hits and zero unexplained serving unknowns.
 
@@ -760,6 +763,7 @@ Reports never contain candidate values, raw snippets, or secret fingerprints.
 - [ ] A finding immediately blocks descendants; rotation precedes sanitized rebuild/purge verification.
 - [ ] SQLite/WAL/temp/cache/vector/summary/graph/export/backup descendants are rebuilt/retired, not assumed clean after row deletion.
 - [ ] Every restore is isolated, migrated, scanned, rebuilt, and receipt-gated before serving.
+- [ ] Split-store consolidation preserves two independently verified backups, exposes complete privacy coverage for every source/derived artifact, invalidates confirmation on detector/manifest drift, and cannot publish marker/registry state before both restore probes and the candidate store pass.
 - [ ] Privacy Observatory reports complete/unknown coverage and remediation state without previews.
 - [ ] Secret Safety Lab uses synthetic values only and cannot mutate live policy/findings/analytics.
 - [ ] Real local stores are never copied to fixtures; committed corpus and plan set pass pinned secret scans.

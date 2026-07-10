@@ -83,7 +83,7 @@ Refreshed implementation inputs:
 - Merged PR #410 copied-subagent prompt collapse adds direct_user, subagent, tool_result, and parent-representative filters consistently while retaining every sanitized native row and explicit coverage.
 - Merged PR #411 foreign-skill ownership makes doctor/removal/update share one ownership predicate; catalog remediation metadata distinguishes actionable-by-this-installation, manual-user-only, and no-action.
 - Merged PR #414 adds the `move_symbol` edit capability; regenerate the tool/CLI/API inventory and require owner/schema/scope/effect/idempotency/preview/error bindings rather than treating the old 102-name count as current.
-- Merged release PRs #413/#416 and merged #407/#415/#417/#419/#420/#422/#423/#424 contribute current profile, release, identity, edit, routing, catalog-generation, retrieval, and analytics inputs. Open #418 is a refresh input; its live state must be re-read immediately before PR 22A rather than frozen here. PR #409 remains closed historical inventory only.
+- Merged release PRs #413/#416/#418 and merged #407/#415/#417/#419/#420/#422/#423/#424/#425 contribute current profile, release, identity, consolidation, edit, routing, catalog-generation, retrieval, and analytics inputs at publication master `3567e31e` (0.0.48). Only draft plan PR #421 was open at final refresh; live state is re-read before PR 22A. PR #409 remains closed historical inventory only.
 
 The implementation lead refreshes master/open PRs and regenerates all legacy inventories before PR 22A. A changed count is expected; an unexplained capability is not.
 
@@ -515,7 +515,7 @@ pub struct IdempotencySpec {
 
 `ExecutionModeV2` lives in this crate's `effect.rs` and is the only closed effect-mode enum; plan 21 §11.1 consumes it for surface annotations and defines no surface-local variant. `SurfaceInvocationCode` carries the current canonical surface name or route only; V1 names live solely inside `CompatibilityDisposition` (field contract defined in plan 21 §17.1) and `CatalogAlias` provenance rows. `PresentationId` replaces any binding-local view reference; presentation descriptors themselves are plan 21's.
 
-`CatalogAlias` is an intent/search/provenance label inside a snapshot, not a callable MCP/CLI/HTTP/hook binding name. Only `SurfaceBinding` can be invoked, and generation includes only bindings active in the current protocol epoch — the `(schema_version, catalog_generation)` pair pinned in `ToolCatalogSnapshot` (Section 9).
+`CatalogAlias` is an intent/search/provenance label inside a snapshot, not a callable MCP/CLI/HTTP/hook binding name. Only `SurfaceBinding` can be invoked, and generation includes only bindings active in the current protocol epoch — `schema_version` plus the exact plan-01 `CatalogSnapshotRefV1` pinned in `ToolCatalogSnapshot` (Section 9).
 
 Validation fails on:
 
@@ -540,7 +540,7 @@ Validation fails on:
 pub struct ToolCatalogSnapshot {
     pub schema_version: CatalogSchemaVersion,
     pub catalog_version: Version,
-    pub catalog_generation: CatalogGeneration,
+    pub snapshot_ref: CatalogSnapshotRefV1,
     pub built_from_commit: CommitDigest,
     pub definitions: BTreeMap<CapabilityId, CapabilityDefinition>,
     pub use_cases: BTreeMap<UseCaseId, UseCaseDefinition>,
@@ -548,7 +548,6 @@ pub struct ToolCatalogSnapshot {
     pub intent_routes: BTreeMap<IntentId, Vec<RouteCandidate>>,
     pub source_manifests: Vec<InventoryManifestRef>,
     pub config_registry_digest: ConfigRegistryDigest,
-    pub digest: ContentDigest,
 }
 
 pub struct AvailabilityContext {
@@ -584,11 +583,11 @@ pub struct RouteResolution {
     pub selected: Option<RouteCandidate>,
     pub alternatives: Vec<RouteCandidate>,
     pub unavailable: Vec<RouteCandidate>,
-    pub catalog_digest: ContentDigest,
+    pub catalog_snapshot: CatalogSnapshotRefV1,
 }
 ~~~
 
-`catalog_generation` is the monotonic per-daemon-generation counter negotiated in the MCP handshake exactly as master plan §2.6 (merged #422) and plans 12/21 describe: a daemon increments it whenever it activates a different snapshot digest, clients pin the `(digest, catalog_generation)` pair, and the daemon emits at most one bounded `tools/list_changed` refresh per client per daemon generation. Generated MCP server metadata must declare the `tools.listChanged` capability. A client holding a stale generation fails closed with plan 17's typed `client_update_required`/`daemon_restart_required`/`capability_replaced` codes naming the current binding; it never receives a silently different tool set. `config_registry_digest` pins plan 20's registry manifest that this snapshot was built from.
+`CatalogSnapshotRefV1 { generation, digest }` is the sole capability-catalog identity and is owned by plan 01. Its generation is the monotonic per-daemon-generation counter negotiated in the MCP handshake exactly as master plan §2.6 (merged #422) and plans 12/21 describe: a daemon increments it whenever it activates a different snapshot digest, clients pin the pair unchanged, and the daemon emits at most one bounded `tools/list_changed` refresh per client per daemon generation. Generated MCP server metadata must declare the `tools.listChanged` capability. A client holding a stale snapshot fails closed with plan 17's typed `client_update_required`/`daemon_restart_required`/`capability_replaced` codes naming the current binding; it never receives a silently different tool set. `config_registry_digest` pins plan 20's registry manifest that this snapshot was built from.
 
 RouteResolution returns ranked available candidates, unavailable candidates with exact gaps, required freshness/evidence source, safe fallbacks, expected cost/latency, and catalog digest. It does not classify natural language or invoke tools.
 
@@ -888,7 +887,7 @@ Never delete raw #410 prompt rows or collapse evidence in the catalog. Retire on
 
 ## 19. Definition of Done
 
-- Every current and incoming-master capability has one stable owner/use case/version and explicit surface/lifecycle mapping; all 104 source MCP definitions carry dispositions (103 installed at 0.0.47; 102 at the older frozen inventory).
+- Every current and newly merged capability has one stable owner/use case/version and explicit surface/lifecycle mapping; all 104 source MCP definitions carry dispositions (103 installed in the planning runtime at 0.0.47; 102 at the older frozen inventory). Source master 0.0.48 is recorded separately from installed runtime capability counts.
 - MCP, CLI, HTTP, dashboard, skills, hooks, policy hints, generated docs, and clients share semantic schemas/effects/errors without copy drift.
 - The right TraceDecay Git capability is discoverable at the right intent, with live/local truth and output membership impossible to confuse.
 - #405/#407 ownership, #410 filtering/dedupe, #411 remediation ownership, and #412 lifecycle prerequisites are cataloged; #413 contributes actual release/protocol version; #409 remains historical only.

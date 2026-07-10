@@ -57,13 +57,14 @@ This plan is the single owner of accounting/metric semantics in [`19-system-defr
 - Plan 06 §10: `HintOutcomeRecordV1` rows (stored per plan 02's hint state/outcome tables) with terminal states, horizons, and attribution evidence.
 - Plan 05: list intents, aggregate reads, frozen-snapshot cursors, and `CoverageReportV1` on every answer this plan's surfaces serve.
 - Plan 20: typed descriptors for sampling windows, rollup retention, SLO thresholds, pricing table versions, and Observatory refresh cadence; no hidden tunable.
+- Plan 24: canonical `ExecutorAdapterKindV1` and `WorkItemKindV1` dimensions plus task lease/liveness/scheduler events; accounting normalizes and aggregates them but does not define executor or task semantics.
 - Plan 03/07: capture and hook latency/coverage metrics (spool depth, ack lag, backpressure, budget exhaustion) as sanitized observations.
 
 ### Produces
 
 - The generated metric-descriptor registry (artifact + catalog rows) and the domain accounting/metric contract modules.
 - Rollup, SLO, adoption, hint-outcome, data-quality, lag, and cap-truncation table schemas (G4, below) and their projector requirements.
-- Typed Observatory/Costs view models consumed by plan 11 and rendered by plan 21's sealed presentation traits.
+- Semantic Observatory/Costs view models owned by plan 09, consumed by plan 11, and rendered by the mandatory plan 21 presentation crate.
 - Migration parity manifests for V1 analytics/hook JSONL with plan 12 dispositions.
 - No canonical event of its own invention: every accounting event family is registered in plan 01/04's registries like any other event.
 
@@ -87,6 +88,92 @@ This plan is the single owner of accounting/metric semantics in [`19-system-defr
 ## Contract inventory and fixed signatures
 
 ```rust
+pub struct MetricId(String); // private; grammar `metric.<domain>.<measure>`
+pub struct SloId(String); // private; grammar `slo.<domain>.<objective>`
+pub struct CapEventId(pub EntityId);
+pub struct MetricDimensionDigest(pub ManifestDigest);
+
+pub enum MetricWindowKindV1 { Minute, Hour, Day, Week, Rolling }
+
+pub struct MetricWindow {
+    pub kind: MetricWindowKindV1,
+    pub start_inclusive: UtcMicros,
+    pub end_exclusive: UtcMicros,
+}
+
+pub enum MetricUnit {
+    Count,
+    RatioPartsPerMillion,
+    DurationMicros,
+    Bytes,
+    Tokens,
+    CurrencyMicros,
+}
+
+pub enum UnknownPopulationReason {
+    SourceUnavailable,
+    SourceNotBackfilled,
+    CoverageIncomplete,
+    DescriptorUnavailable,
+    PricingUnavailable,
+    AuthorizationFiltered,
+    CorruptOrQuarantined,
+}
+
+pub enum MetricValue {
+    Count(u64),
+    RatioPartsPerMillion(u32),
+    DurationMicros(u64),
+    Bytes(u64),
+    Tokens(u64),
+    CurrencyMicros(u64),
+    Unknown { reason: UnknownPopulationReason },
+}
+
+pub enum MetricDimensionKeyV1 {
+    Provider,
+    Model,
+    UseCase,
+    Surface,
+    Projector,
+    ExecutorAdapter,
+    WorkItemKind,
+    FailureClass,
+    Sensitivity,
+}
+
+pub struct ModelDimensionRefV1 {
+    pub provider: ProviderId,
+    pub backend: CapabilityId,
+    pub model_id: ModelCatalogEntryId,
+    pub model_revision: Option<ModelRevisionId>,
+}
+
+pub enum AccountingFailureClassV1 {
+    UserInput,
+    PolicyDenied,
+    Unavailable,
+    Timeout,
+    Cancelled,
+    Provider,
+    Storage,
+    Internal,
+    Unknown,
+}
+
+pub struct MetricDimensionSetV1 {
+    pub provider: Option<ProviderId>,
+    pub model: Option<ModelDimensionRefV1>,
+    pub use_case: Option<UseCaseId>,
+    pub surface: Option<SurfaceKind>,
+    pub projector: Option<ProjectorId>,
+    pub executor_adapter: Option<ExecutorAdapterKindV1>,
+    pub work_item_kind: Option<WorkItemKindV1>,
+    pub failure_class: Option<AccountingFailureClassV1>,
+    pub sensitivity: Option<SensitivityClass>,
+    pub digest: MetricDimensionDigest,
+}
+
 pub enum AccountingEventKind {
     TokenUsageObserved,      // provider/model tokens in/out/cached per turn or invocation
     ModelInvocationObserved, // latency, model, provider, surface
@@ -110,6 +197,7 @@ pub struct MetricDescriptorV1 {
     pub unknown_semantics: UnknownSemantics,
     pub sensitivity: SensitivityClass,
     pub owner_use_case: Option<UseCaseId>,
+    pub allowed_dimensions: Vec<MetricDimensionKeyV1>,
 }
 
 pub struct PopulationSpecV1 {
@@ -121,7 +209,7 @@ pub struct PopulationSpecV1 {
 pub enum DenominatorState {
     Known(u64),
     Capped { observed: u64, cap: u64 },
-    Partial { watermark: VectorWatermark },
+    Partial { watermark: VectorWatermark, reasons: Vec<UnknownPopulationReason> },
     Unknown { reason: UnknownPopulationReason },
 }
 
@@ -129,10 +217,13 @@ pub struct MetricPointV1 {
     pub metric: MetricId,
     pub metric_version: u32,
     pub window: MetricWindow,
-    pub scope_digest: ScopeDigest,
+    pub scope_digest: ScopeSelectorDigest,
+    pub dimensions: MetricDimensionSetV1,
     pub numerator: u64,
     pub denominator: DenominatorState,
-    pub value: MetricValue, // Count | Ratio | DurationUs | Bytes | Unknown { reason }
+    pub value: MetricValue,
+    pub effective_config_snapshot_id: EffectiveConfigSnapshotId,
+    pub effective_config_digest: EffectiveConfigDigest,
     pub watermark: VectorWatermark,
     pub cap_events: Vec<CapEventId>,
 }
@@ -145,7 +236,7 @@ pub struct SloDescriptorV1 {
     pub stage: Option<SloStage>,    // e.g. prompt-eval evaluation stage <= 14 ms
     pub source_metric: MetricId,
     pub window: MetricWindow,
-    pub threshold_source: ConfigDescriptorRef, // plan 20 descriptor; master §26 defaults
+    pub threshold_source: ConfigDescriptorRefV1, // plan 20 descriptor; master §26 defaults
 }
 
 pub struct SavingsMethodologyV1 {
@@ -168,6 +259,8 @@ pub struct CapTruncationRecordV1 {
 
 `SurfaceKind` is plan 08's generated closed vocabulary (`cli`, `mcp`, `http`, `sdk`, `dashboard`, `hook`, `skill`, `automation`, `executor`, `context_scout`, `internal_host`). Accounting consumes its stable generated code/name pair; it does not define an analytics-local enum. This makes direct SDK calls, executor attempts, scout work, host lifecycle, hooks, and human surfaces comparable without collapsing them into `api` or dropping them.
 
+`MetricWindow` is always a non-empty half-open UTC interval. Fixed minute/hour/day/week windows must align to their UTC boundary; `Rolling` width comes from a plan-20 descriptor and is never inferred from request time. `MetricDimensionSetV1.digest` is the domain-separated digest of the canonical field-tag/value encoding in the enum order above. Empty and absent are distinct, each key occurs at most once, a model's provider must equal `provider` when both exist, and a metric point rejects any populated key absent from its descriptor's `allowed_dimensions`. No free-form label, display name, path, prompt, model alias, or failure message can become a dimension; new dimensions require a domain enum/schema version and a cardinality review.
+
 ```rust
 pub struct AdoptionRowV1 {
     pub capability: UseCaseId,
@@ -181,7 +274,7 @@ pub struct AdoptionRowV1 {
 }
 
 pub struct HintOutcomeRowV1 {
-    pub policy_version: PolicyBundleVersion,
+    pub policy_version: PolicyBundleRef,
     pub category: HintCategory,
     pub horizon_bucket: HorizonBucket,
     pub eligible: u64,
@@ -205,7 +298,9 @@ pub struct SloWindowViewV1 {
     pub observed_p99_us: Option<u64>,
     pub sample_count: u64,
     pub sample_state: SampleState, // Complete | Capped | Partial
-    pub threshold_ref: ConfigDescriptorRef,
+    pub threshold_ref: ConfigDescriptorRefV1,
+    pub effective_config_snapshot_id: EffectiveConfigSnapshotId,
+    pub effective_config_digest: EffectiveConfigDigest,
     pub breach: Option<BreachReason>,
 }
 
@@ -223,6 +318,8 @@ pub struct LagSampleV1 {
 ### Denominator and unknown-population law
 
 - Every ratio-valued metric computes from `numerator` plus `DenominatorState`; there is no f64-only ratio type anywhere in the contract. `Unknown`, `Capped`, and `Partial` propagate through rollups: a weekly rollup over one unknown day is `Partial`, never a silently smaller denominator.
+- Rollups merge only rows with identical `(metric_id, metric_version, scope_digest, dimension_digest, unit, effective_config_digest)` and adjacent child windows declared by the descriptor. Numerators and additive values use checked integer addition. Ratios/percentiles are recomputed from retained counts or bounded sample references; they are never averaged. A configuration boundary produces separate points instead of laundering two definitions into one value.
+- Denominator merge is total: all-`Known` children sum to `Known`; `Known`/`Capped` children with complete coverage sum observed and effective caps into `Capped`; any mix containing `Partial` or an `Unknown` child plus observed children becomes `Partial` with the merged source watermark and sorted/deduplicated reasons; a window with no observed population remains `Unknown`. Overflow, non-adjacent windows, dimension mismatch, or incompatible descriptor versions fails the projection instead of emitting a point.
 - Renderers (CLI tables, MCP markdown, dashboard panels, API JSON) receive `MetricPointV1` and must render the state. The misreporting lint bans converting `Unknown` to `0`, `Capped` to a whole-population percentage, or an empty result set to "no events" when coverage says shards were skipped/unavailable — the exact V1 defect where `message_count` printed `0` against 388k+ stored rows.
 - Every answer carries its `VectorWatermark` and `CoverageReportV1`; a stale watermark renders as stale. "Fresh-looking stale data" is a named regression, not a cosmetic issue.
 - Population definitions are part of the descriptor, so two surfaces can never disagree about what "sessions with hints" counts — the plan 21 parity gates hold because the number is computed once.
@@ -272,6 +369,8 @@ Plan 24 owns liveness decisions and plan 02 owns attempt/lease/liveness/sentinel
 
 Thrash is a typed derived episode: two or more attempts for one work item within the configured window where a prior attempt had positive liveness or a later stale worker event. It always reports the definition/version/window/evidence; temporal proximity alone cannot blame the scheduler. Cardinality dimensions are bounded to adapter/provider/model/decision class and opaque scope digest—never task title, path, prompt, or raw error.
 
+The projector consumes the closed plan-24 `TaskLivenessEventClassV1` registry through a generated exhaustive match: every variant maps to exactly one primary liveness column and may additionally contribute to explicitly declared orthogonal episode/latency columns. There is no wildcard/default arm. Schema-generation tests fail when plan 24 adds or renames a lease, probe, revocation, replacement, requeue, crash, cancellation, reconciliation, effect-unknown, or terminal class without a column and fixture; unknown imported V1 classes increment a visible `imported_unknown` column and never masquerade as zero.
+
 ### SLO monitors
 
 Registered SLO descriptors at minimum (thresholds are plan 20 descriptors defaulting to master §26/§5.3 values):
@@ -296,13 +395,15 @@ Rollup and telemetry tables are derived, rebuildable state (plan 02's schema-own
 
 | Table | Schema (fields, PK, uniqueness, indexes, retention/size) |
 |---|---|
-| `metric_descriptors` | `metric_id TEXT`, `version INTEGER`, `unit TEXT`, `population_kind TEXT`, `population_rule TEXT`, `denominator_source TEXT`, `default_horizon TEXT`, `cap_policy TEXT`, `watermark_requirement TEXT`, `unknown_semantics TEXT`, `sensitivity TEXT`, `owner_use_case TEXT NULL`. PK `(metric_id, version)`. Catalog shard; regenerated from the registry artifact; drift against the artifact fails CI. |
+| `metric_descriptors` | `metric_id TEXT`, `version INTEGER`, `unit TEXT`, `population_kind TEXT`, `population_rule TEXT`, `denominator_source TEXT`, `default_horizon TEXT`, `cap_policy TEXT`, `watermark_requirement TEXT`, `unknown_semantics TEXT`, `sensitivity TEXT`, `owner_use_case TEXT NULL`, `allowed_dimension_mask INTEGER NOT NULL`. PK `(metric_id, version)`. Catalog shard; regenerated from the registry artifact; drift against the artifact fails CI. |
 | `usage_ledger` | `row_id TEXT PK (UUIDv7)`, `occurred_day INTEGER NOT NULL`, `provider TEXT`, `model TEXT NULL`, `capability_id TEXT NULL`, `surface_code INTEGER NOT NULL`, `session_locator TEXT NULL`, `tokens_in INTEGER NULL`, `tokens_out INTEGER NULL`, `tokens_cached INTEGER NULL`, `latency_us INTEGER NULL`, `cost_micros INTEGER NULL`, `pricing_version TEXT NULL`, `methodology_version TEXT NULL`, `source_event_id TEXT NOT NULL`, `watermark BLOB NOT NULL`. `surface_code` is generated from plan 08's `SurfaceKind`; projection rejects/quarantines a code absent from its bound catalog generation. UNIQUE `(source_event_id)` (idempotent projection). Indexes `(occurred_day)`, `(capability_id, occurred_day)`, `(surface_code, occurred_day)`, `(provider, model, occurred_day)`. Volume tracks the hook/tool stream; append-only; retention follows event retention. |
-| `metric_rollups` | PK `(metric_id, metric_version, scope_digest, window_kind, window_start)`; `numerator INTEGER NOT NULL`, `denominator_state TEXT CHECK (denominator_state IN ('known','capped','partial','unknown')) NOT NULL`, mutually exclusive payload columns `denominator_known_value INTEGER NULL`, `denominator_observed_value INTEGER NULL`, `denominator_cap_value INTEGER NULL`, `denominator_partial_watermark_blob_id BLOB NULL`, `denominator_unknown_reason TEXT NULL`, plus `value_kind TEXT NOT NULL`, `cap_count INTEGER DEFAULT 0`, `truncation_count INTEGER DEFAULT 0`, `watermark BLOB NOT NULL`, `built_by TEXT NOT NULL`. State-shape CHECKs make the row a lossless lowering of `DenominatorState`: `known` requires only known value; `capped` requires observed+cap; `partial` requires its source vector; `unknown` requires a reason. Index `(metric_id, window_start)`. Day windows retained 2 years by default (plan 20 descriptor); hour windows 90 days; fully rebuildable. |
-| `slo_window_records` | PK `(slo_id, window_start)`; `observed_p50_us INTEGER`, `observed_p95_us INTEGER`, `observed_p99_us INTEGER`, `sample_count INTEGER NOT NULL`, `sample_state TEXT NOT NULL`, `threshold_ref TEXT NOT NULL`, `breach INTEGER NOT NULL`, `breach_reason TEXT NULL`, `watermark BLOB NOT NULL`. Index `(slo_id, breach, window_start)`. Retained 1 year. |
+| `task_execution_usage` | `row_id TEXT PRIMARY KEY REFERENCES usage_ledger(row_id)`, nullable exact refs `initiative_id`, `plan_version_id`, `work_item_id`, `attempt_id`, `executor_registration_id`, plus `adapter_code INTEGER`, `provider_id BLOB`, `model_entry_id BLOB`, `model_revision_id BLOB NULL`, `reasoning_effort_code INTEGER`, `route_manifest_digest BLOB`, `work_item_kind_code INTEGER`, `source_event_id TEXT NOT NULL UNIQUE`. Indexes `(work_item_id, row_id)`, `(attempt_id, row_id)`, `(executor_registration_id, row_id)`, `(provider_id, model_entry_id, reasoning_effort_code, row_id)`. This protected high-cardinality child is the authorized drill-down/join projection for Workload, Executor Fleet, task/attempt/cost, and source-event views. Canonical IDs never enter metric labels or `metric_dimension_sets`; deleting/retiring task evidence follows plan-18 lineage and removes or tombstones this join consistently with the source ledger. |
+| `metric_dimension_sets` | `dimension_digest BLOB(32) PK`, nullable typed columns `provider_id`, `model_ref_blob_id`, `use_case_id`, `surface_code`, `projector_id`, `executor_adapter_code`, `work_item_kind_code`, `failure_class_code`, `sensitivity_code`, plus `canonical_blob_id BLOB NOT NULL`, `registry_digest BLOB(32) NOT NULL`. CHECKs enforce registered closed-enum codes and provider/model consistency; digest is reverified from canonical bytes on write. UNIQUE over the canonical typed tuple. No display labels or free-form values. Indexes `(provider_id)`, `(use_case_id, surface_code)`, `(projector_id)`, `(executor_adapter_code, work_item_kind_code)`. Rebuildable with rollups. |
+| `metric_rollups` | PK `(metric_id, metric_version, scope_digest, dimension_digest, window_kind, window_start)` with FK `dimension_digest -> metric_dimension_sets`; `window_end INTEGER NOT NULL`, `numerator INTEGER NOT NULL`, `denominator_state TEXT CHECK (denominator_state IN ('known','capped','partial','unknown')) NOT NULL`, mutually exclusive payload columns `denominator_known_value INTEGER NULL`, `denominator_observed_value INTEGER NULL`, `denominator_cap_value INTEGER NULL`, `denominator_partial_watermark_blob_id BLOB NULL`, `denominator_reason_set_blob_id BLOB NULL`, `denominator_unknown_reason TEXT NULL`, plus mutually exclusive typed value columns `value_kind TEXT NOT NULL`, `value_u64 INTEGER NULL`, `value_ratio_ppm INTEGER NULL`, `value_unknown_reason TEXT NULL`, `effective_config_snapshot_id BLOB NOT NULL`, `effective_config_digest BLOB(32) NOT NULL`, `cap_count INTEGER DEFAULT 0`, `truncation_count INTEGER DEFAULT 0`, `watermark BLOB NOT NULL`, `built_by TEXT NOT NULL`. State-shape/value CHECKs make the row a lossless lowering of `DenominatorState` and `MetricValue`; fixed windows are half-open/aligned, and descriptor unit/dimension masks are checked on projection. A rollup cannot combine children with different effective-config digests; a config boundary creates separate points. Indexes `(metric_id, dimension_digest, window_start)` and `(scope_digest, window_start)`. Day windows retained 2 years by default (plan 20 descriptor); hour windows 90 days; fully rebuildable. |
+| `slo_window_records` | PK `(slo_id, window_start, effective_config_digest)`; `observed_p50_us INTEGER`, `observed_p95_us INTEGER`, `observed_p99_us INTEGER`, `sample_count INTEGER NOT NULL`, `sample_state TEXT NOT NULL`, `threshold_ref TEXT NOT NULL`, `effective_config_snapshot_id BLOB NOT NULL`, `breach INTEGER NOT NULL`, `breach_reason TEXT NULL`, `watermark BLOB NOT NULL`. Index `(slo_id, breach, window_start)`. A threshold change splits the window rather than retroactively reinterpreting samples. Retained 1 year. |
 | `adoption_rollups` | PK `(capability_id, surface, provider, scope_digest, window_start)`; `invocations INTEGER NOT NULL`, `distinct_sessions INTEGER NOT NULL`, `eligible_population INTEGER NULL`, `population_state TEXT NOT NULL`, `watermark BLOB NOT NULL`. Index `(capability_id, window_start)`. Rebuildable; day windows. |
 | `hint_outcome_rollups` | PK `(policy_version, hint_category, horizon_bucket, scope_digest, window_start)`; lifecycle counts `eligible, emitted, delivered, observed, acted, ignored, corrected, missed_capability, unresolvable` and terminal counts `prevented_duplicate_work, human_helpful, human_not_helpful, human_incorrect, human_too_late, human_repeated, human_too_verbose` all `INTEGER NOT NULL`; `denominator_state TEXT NOT NULL`, `watermark BLOB NOT NULL`. Index `(policy_version, window_start)`. Source rows are plan 06 §10 records; rollups rebuildable; schema-generation tests require one terminal column/mapping per closed `OutcomeTerminalV2` variant. |
-| `task_liveness_rollups` | PK `(adapter_kind, provider, decision_class, scope_digest, window_start)`; counts `lease_issued, heartbeat, alive_extended, expired, fenced, reclaimed, probe_positive, probe_negative, probe_unknown, rate_limit_sentinel, deferred_rate_limit, protocol_violation, stale_write_rejected, zombie_completion_rejected, max_runtime_stop, heartbeat_backstop_stop, reconciliation_started, reconciliation_terminal, thrash_episode` all `INTEGER NOT NULL`; latency histograms/quantile inputs are referenced by bounded `sample_set_id`, `definition_version TEXT NOT NULL`, `watermark BLOB NOT NULL`. Indexes `(decision_class, window_start)`, `(adapter_kind, window_start)`. Day windows 2 years; rebuildable from plan-02 canonical rows. |
+| `task_liveness_rollups` | PK `(adapter_kind, provider, model_entry_id, model_revision_id, reasoning_effort_code, decision_class, scope_digest, window_start)`; counts `lease_issued, heartbeat, alive_extended, expired, fenced, revoked, reclaimed, replacement_started, requeued, probe_positive, probe_negative, probe_unknown, probe_timeout, probe_unsupported, rate_limit_sentinel, deferred_rate_limit, rate_limit_requeued, protocol_violation, crash, stale_write_rejected, zombie_completion_rejected, max_runtime_stop, heartbeat_backstop_stop, cancellation_requested, cancellation_terminal, effect_unknown, reconciliation_started, reconciliation_terminal, terminal_succeeded, terminal_failed, terminal_cancelled, terminal_timed_out, terminal_lost, thrash_episode, imported_unknown` all `INTEGER NOT NULL`; latency histograms/quantile inputs are referenced by bounded `sample_set_id`, `definition_version TEXT NOT NULL`, `watermark BLOB NOT NULL`. Model/revision use plan-01 opaque canonical IDs; raw labels never become metric labels. Indexes `(decision_class, window_start)`, `(adapter_kind, window_start)`, `(provider, model_entry_id, reasoning_effort_code, window_start)`. Day windows 2 years; rebuildable from plan-02 canonical rows. Generated enum-to-column fixtures require every plan-24 liveness class to map and prove unknown imports stay visible. |
 | `scheduler_rollups` | PK `(scheduler_generation, scope_digest, window_start)`; `journal_events, notifications, notifications_coalesced, repair_poll_recoveries, checkpoint_gaps, offers, starts, deferred, no_eligible_executor, fairness_deferrals, starvation_preventions INTEGER NOT NULL`; latency distribution refs for commit→observe, observe→offer, queue age, wakeup error; `watermark BLOB NOT NULL`. Index `(scheduler_generation, window_start)`. Hour windows 90 days/day windows 2 years. |
 | `cap_truncation_events` | `cap_event_id TEXT PK`, `surface TEXT NOT NULL`, `cap_kind TEXT NOT NULL`, `limit_value INTEGER NOT NULL`, `observed_value INTEGER NULL`, `observed_state TEXT NOT NULL`, `retrieval_anchor_id TEXT NULL`, `safe_fingerprint TEXT NULL`, `occurred_at INTEGER NOT NULL`. Index `(surface, occurred_at)`. Retained 180 days; anchors ID-only. |
 | `lag_snapshots` | PK `(shard_id, projector_id, sampled_at)`; `outbox_head INTEGER`, `contiguous_sequence INTEGER`, `lag_us INTEGER NOT NULL`, `watermark BLOB NOT NULL`. Index `(projector_id, sampled_at)`. Retained 90 days. |
@@ -378,7 +479,7 @@ pub struct SloPanelV1 {
 - `CostsPanelV1`: usage/cost/savings series by provider/model/capability with pricing/methodology versions visible; satisfies plan 11 §13.8 and the master §15 Costs workspace. A savings figure always names its `SavingsMethodologyV1` version and baseline event class.
 - `AdoptionPanelV1` and `HintOutcomePanelV1`: the adoption and hint rollups above with denominators, horizons, caps, and unresolved buckets; plan 11's "Analytics hints/usage/underused" parity row (exact counts, denominators, sample/caps, policy version, unresolved horizon) binds to these models.
 - `SloPanelV1` and `DataQualityPanelV1`: SLO windows with thresholds/sources and quality drill-downs to source events via plan 05 queries.
-- All view models are sealed typed views rendered through plan 21's presentation traits (Markdown-default MCP, canonical JSON on request); CLI `tracedecay analytics`-successor commands and the dashboard consume identical models, closing the V1 class of divergent CLI-vs-MCP analytics answers.
+- Plan 09 owns these sealed semantic typed views. The mandatory plan 21 `tracedecay-presentation` crate renders them (Markdown-default MCP, canonical JSON on request); CLI `tracedecay analytics`-successor commands and the dashboard consume identical models, closing the V1 class of divergent CLI-vs-MCP analytics answers. Plan 21 may add presentation metadata but cannot redefine metric semantics or duplicate a view model.
 - SSE: lag/SLO/data-quality panels subscribe through plan 05 §13's snapshot/delta contract; no push path invents its own aggregation.
 
 ## Configuration
@@ -418,11 +519,11 @@ Migration is coordinated with plan 12's controller (its §14 phases) and gated b
 
 ### PR 22F: Accounting/metric domain contracts and descriptor registry
 
-**Ordering:** lands before plan 04's PR 22 so `accounting_v1` projects against these contracts.
+**Ordering:** after plan 24 PR 4E publishes the canonical executor/work-item dimension enums and before plan 04's PR 22 so `accounting_v1` projects against these contracts.
 
 **Files:** create `crates/tracedecay-domain/src/accounting/{mod,events,metrics,slo}.rs`, registry generator under the plan 08 artifact pipeline, `generated/metric-registry.json`; extend domain schema tests.
 
-- [ ] Write failing tests named `every_metric_requires_registered_descriptor`, `denominator_state_is_closed_and_total`, `unknown_never_renders_as_zero`, `capped_rollup_stays_capped_upward`, `partial_propagates_through_windows`, `ratio_type_without_denominator_state_does_not_compile` (compile-fail), `pricing_binding_is_versioned`, and `savings_requires_recorded_baseline`.
+- [ ] Write failing tests named `every_metric_requires_registered_descriptor`, `denominator_state_is_closed_and_total`, `unknown_never_renders_as_zero`, `capped_rollup_stays_capped_upward`, `partial_propagates_through_windows`, `ratio_type_without_denominator_state_does_not_compile` (compile-fail), `dimension_digest_is_order_independent_and_domain_separated`, `unregistered_dimension_does_not_compile` (compile-fail), `model_dimension_provider_must_match`, `window_is_half_open_and_aligned`, `pricing_binding_is_versioned`, and `savings_requires_recorded_baseline`.
 - [ ] Add the fixed signatures above with serde tags `snake_case`; register `AccountingEventKind` families in the schema/predicate registry with sensitivity/retention rules.
 - [ ] Generate the metric-descriptor registry artifact and its drift gate; seed descriptors for every metric named in master §21's list.
 - [ ] Run `cargo test -p tracedecay-domain accounting`; expected: exit 0 and stable registry digest across two generations.
@@ -432,9 +533,9 @@ Migration is coordinated with plan 12's controller (its §14 phases) and gated b
 
 **Ordering:** extends plan 04 PR 22's projector slice; consumes its `accounting_v1`/`operations_v1` outputs.
 
-**Files:** create `crates/tracedecay-projectors/tests/accounting_semantics.rs`; land the `usage_ledger`, `metric_rollups`, `lag_snapshots`, `data_quality_rollups`, and `cap_truncation_events` schemas (this is their owning implementation PR per plan 02's schema-ownership rule); extend `aggregates.rs` requirements.
+**Files:** create `crates/tracedecay-projectors/tests/accounting_semantics.rs`; land the `usage_ledger`, `metric_dimension_sets`, `metric_rollups`, `lag_snapshots`, `data_quality_rollups`, and `cap_truncation_events` schemas (this is their owning implementation PR per plan 02's schema-ownership rule); extend `aggregates.rs` requirements.
 
-- [ ] Write failing tests named `ledger_is_idempotent_by_source_event`, `rollup_carries_full_source_vector`, `lag_series_matches_checkpoint_positions`, `dead_letters_appear_in_data_quality`, `cap_event_binds_optional_retrieval_anchor`, `anchor_is_id_only_in_rows`, and `all_scope_rollup_requires_complete_vector`.
+- [ ] Write failing tests named `ledger_is_idempotent_by_source_event`, `rollup_carries_full_source_vector`, `rollup_never_merges_dimension_sets`, `rollup_recomputes_ratio_instead_of_averaging`, `unknown_child_makes_observed_parent_partial`, `rollup_checked_add_rejects_overflow`, `lag_series_matches_checkpoint_positions`, `dead_letters_appear_in_data_quality`, `cap_event_binds_optional_retrieval_anchor`, `anchor_is_id_only_in_rows`, and `all_scope_rollup_requires_complete_vector`.
 - [ ] Implement rollup building inside plan 04's transaction discipline; windows are deterministic and rebuildable; two rebuilds at one watermark produce identical rows.
 - [ ] Wire the cutover lag gate (projection lag < 2 s for 24 h) to read exclusively from `lag_snapshots`.
 - [ ] Run `cargo test -p tracedecay-projectors --test accounting_semantics`; expected: exit 0; replay-twice inserts zero rows.

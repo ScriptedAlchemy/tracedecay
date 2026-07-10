@@ -14,7 +14,7 @@
 
 [`22-incremental-context-scout-and-suggestion-envelopes.md`](22-incremental-context-scout-and-suggestion-envelopes.md) and [`23-session-lcm-temporal-retrieval-and-evaluation.md`](23-session-lcm-temporal-retrieval-and-evaluation.md) own scout and temporal-search semantics. This crate exposes their generated status/replay/search/context/lineage/evaluation routes and SSE events without embedding model orchestration, ranking, temporal resolution, or delivery selection.
 
-[`24-canonical-task-plan-graph-and-multi-agent-executor.md`](24-canonical-task-plan-graph-and-multi-agent-executor.md) owns task/plan/executor semantics and the stricter many-host adapter protocol. This crate exposes generated `/api/v2/initiatives`, plans, work-items, attempts, executors, scheduler, task views/events, idempotent commands, and SSE without implementing readiness, routing, fencing, packet assembly, workspace safety, or board logic.
+[`24-canonical-task-plan-graph-and-multi-agent-executor.md`](24-canonical-task-plan-graph-and-multi-agent-executor.md) owns task/plan/executor semantics and the stricter many-host adapter protocol. This crate exposes generated `/api/v2/initiatives`, plans, work-items, attempts, executors, scheduler, task views, idempotent commands, and canonical subscription read-model deltas without implementing readiness, routing, fencing, packet assembly, workspace safety, event truth, or board logic. There is no separate task query AST or `/task-events` stream.
 
 ---
 
@@ -26,10 +26,12 @@ Plan 17 declares this same HTTP/OpenAPI surface official and adds the contract I
 
 - Axum handlers depend on `tracedecay-application` use cases and generated catalog bindings. They contain no SQL, shard selection, ranking, policy, Git/GitHub, source ingest, migration, command ownership, or dashboard business logic.
 - HTTP does not define a second domain model. Rust request/response schemas reference domain/application types or explicit transport wrappers whose lossless mapping is fixture-tested.
+- Task list/query/context and saved-board bodies use the one domain `TraceQueryV1` plus `ScopeSelectorV2`; convenience routes compile to the same canonical request/digest and cannot define `TaskQueryV1`, `TaskContextSelectorV1`, or a board-filter DSL.
 - `POST` carries all text queries, saved content, policy inputs, exports, and mutations. URLs contain only nonsensitive enum filters, bounded time/number parameters, opaque IDs, and authenticated cursors/subscription IDs.
-- A partial application result is a successful typed response with `coverage.complete=false`; it is not transformed into an empty success or generic server error.
-- Every mutation routes to an application command with idempotency, expected version, preview/apply semantics, audit, and optional durable workflow. An HTTP retry cannot create a second semantic effect.
+- A partial application result is a successful typed response with `!coverage.is_complete()`; it is not transformed into an empty success or generic server error.
+- Every mutation routes to one application `execute` command with catalog-owned `ExecutionModeV2`, idempotency, expected version, audit, and optional durable workflow. Confirmed destructive operations use separately named preflight and start/cutover/retire commands; there is no transport-generic preview/apply mode. An HTTP retry cannot create a second semantic effect.
 - SSE begins from one frozen application snapshot, then maps query-owned ordered deltas/progress/gap/resync events. API owns wire framing, heartbeats, browser resume, and transport backpressure only.
+- Canonical command events commit in the owning journal before API visibility. SSE/subscriptions project those journal sequences after commit; HTTP acceptance, outbox/notifier delivery, or an SSE event can never create or acknowledge domain truth independently.
 - Browser auth, CSRF, Host/Origin checks, CSP, export containment, and body/decompression limits are mandatory even on loopback. No capability is unauthenticated merely because it binds localhost.
 - OpenAPI operation identity comes from `tracedecay-tool-catalog` `BindingId`/`UseCaseId`. The catalog is the registry of record; plan 17's contract IR is its frozen public projection and the single generation source (Section 11). Generated client drift and missing/duplicate route bindings fail CI.
 - CLI and MCP do not call HTTP by requirement and do not depend on this crate. Their adapters call application in-process or through daemon composition; parity tests compare typed semantics before CLI/markdown rendering.
@@ -63,7 +65,7 @@ Plan 17 declares this same HTTP/OpenAPI surface official and adds the contract I
 
 ### 4.1 Master and incoming changes verified on 2026-07-10
 
-Publication refresh: `origin/master` `6c4b8b91dad2efdcaefab0153475287f37c2caee`; #407/#410/#411/#413/#414/#415/#416/#417/#419/#420/#422/#423/#424 are merged, while #418 remains open. Regenerate contracts from that or a newer accepted base before every API slice; #423's fact-ranking/counter fixtures and #424's exact aggregate-before-sample analytics contract are accepted-base behavior.
+Publication refresh: `origin/master` `3567e31e3a60730400c9b900e32ca02c0bf3bf33` at 0.0.48 includes merged #418 and #425 (`de3d05dc`, final head `d3bb28b5`) plus the earlier accepted inputs. Only draft plan PR #421 was open at final refresh. Regenerate contracts before every API slice; fact ranking, exact analytics, and operator-only split-store consolidation are accepted-base behavior, not autonomous curation.
 
 | Change | API consequence |
 |---|---|
@@ -74,8 +76,9 @@ Publication refresh: `origin/master` `6c4b8b91dad2efdcaefab0153475287f37c2caee`;
 | Merged PR #411 foreign-installation doctor severity | Doctor schemas expose `severity`, observed owner, remediation authority, evidence, and legal actions; foreign/unknown ownership cannot serialize an apply/update action. |
 | Merged PR #414 `tracedecay_move_symbol` | Generate one dry-run-default `code.move_symbol` command schema/binding with impact evidence, confirmation, snapshot/version, applied imports, rollback/reindex operation, and no implicit caller rewrite. |
 | Merged PR #415 release integrity | Generated OpenAPI/SDK/dashboard artifacts and conformance fixtures require an allowlisted release manifest and tracked-ignored-file guard. |
-| Merged PRs #413/#416 releases v0.0.46/v0.0.47 | Regenerate server/protocol/catalog/OpenAPI/compatibility fixtures from accepted master; no behavior depends on release-PR layout. |
+| Merged PRs #413/#416/#418 releases v0.0.46/v0.0.47/v0.0.48 | Regenerate server/protocol/catalog/OpenAPI/compatibility fixtures from accepted master; no behavior depends on release-PR layout or implies the planning host upgraded from installed 0.0.47. |
 | Merged PR #417 identity-split visibility | Serialize `identity_split` distinctly from absent index, with safe candidates/evidence and legal backup/consolidation preview; never emit an initialize action. |
+| Merged PR #425 explicit split-store consolidation (`de3d05dc`, final head `d3bb28b5`) | Generate admin-only inspect/plan/start/status/resume/recover bindings for the accepted workflow: two explicit nonempty source identities, path-plus-file/inode holder/freeze/reservation state, backups, per-table/artifact dispositions, staging/verification/cutover ledger, deterministic confirmation, and exact recovery. No raw store path in URLs; no handler opens/merges SQLite; no Settings auto-start or curation binding. |
 | Merged PR #419 race-safe edits | `code.move_symbol` schemas expose exact source/destination identities/versions, same-file/symlink evidence, pre-commit revalidation, and apply/rollback conflict receipts; no generic success hides concurrent drift. |
 | Merged PR #420 daemon proxy/hot swap plus #422 catalog refresh | API/MCP problems and capability metadata distinguish safe per-request reconnect from uncertain-write non-replay and compatible generation-scoped `tools.listChanged` versus incompatible new-session refresh; no adapter opens local stores before authority selection. |
 
@@ -286,7 +289,7 @@ pub struct ApiMeta {
     pub request_id: RequestId,
     pub use_case: UseCaseRef,
     pub protocol: ProtocolRef,
-    pub catalog_digest: CatalogDigest,
+    pub catalog_snapshot: CatalogSnapshotRefV1,
     pub resolved_scope: ScopeResolutionV2,
     pub snapshot: Option<FrozenSnapshot>,
     pub coverage: CoverageReportV1,
@@ -298,7 +301,7 @@ pub struct ApiMeta {
 }
 ```
 
-`CoverageReportV1` is plan 01's canonical shared coverage type. The mapper is exhaustive over `ApplicationResponse<T>`. Compile tests fail if application adds metadata without an API disposition. `coverage.complete=false` remains HTTP 200 when useful data exists. An application top-level error maps to a problem response; a partial shard failure already represented in coverage does not become 500.
+`CoverageReportV1` is plan 01's canonical shared coverage type. The mapper is exhaustive over `ApplicationResponse<T>`. Compile tests fail if application adds metadata without an API disposition. `!coverage.is_complete()` remains HTTP 200 when useful data exists. An application top-level error maps to a problem response; a partial shard failure already represented in coverage does not become 500.
 
 List responses use the single page envelope defined in plan 17's contract IR (plan 17 §13.1) and serialized here unchanged; plan 21's CLI/MCP pages are the same type:
 
@@ -312,7 +315,7 @@ pub struct CursorPage<T> {
 }
 ```
 
-Cursor strings are authenticated, opaque, URL-safe, size-limited to 8 KiB, and never decoded client-side; they encode exactly the domain `CursorClaimsV1` binding set (plan 01, codec owned by plan 05): query fingerprint, caller/access digest, canonical scope digest, catalog generation, schema/ranking/index versions, frozen watermarks and per-shard positions, sort cutoff, temporal mode/cutoff, intent-profile version, partial-shard dispositions, and expiry. Interactive cursors default to a 15-minute expiry; export/bulk continuations last their job lifetime; overrides are catalog-declared only. Cursor and SSE event-ID authentication uses the persisted profile-local HMAC key set of plan 17 §13.1 (key ID plus rotation), so a server restart does not invalidate otherwise-valid cursors. Frozen snapshots referenced by outstanding cursors/subscriptions are pinned against GC/compaction/projection retirement for the cursor's lifetime by the store/query retention contract (plans 02/05); a pin that cannot be honored fails with a typed `RestartPagination` reason, never silently different data. A cursor mismatch/expiry returns typed restart instructions.
+Cursor strings are authenticated, opaque, URL-safe, size-limited to 8 KiB, and never decoded client-side; they encode exactly the domain `CursorClaimsV1` binding set (plan 01, codec owned by plan 05): query fingerprint, caller/access digest, canonical scope digest, profile-catalog generation, schema/ranking/index versions, frozen watermarks and per-shard positions, sort cutoff, temporal mode/cutoff, intent-profile version, partial-shard dispositions, and expiry. Interactive cursors use plan-20 `query.cursor.interactive_ttl` (default 15 minutes); export/bulk continuations last their catalog-declared job lifetime. Cursor and SSE event-ID authentication uses the persisted profile-local HMAC key set of plan 17 §13.1 (key ID plus rotation), so a server restart does not invalidate otherwise-valid cursors. Frozen snapshots referenced by outstanding cursors/subscriptions are pinned against GC/compaction/projection retirement for the cursor's lifetime by the store/query retention contract (plans 02/05); a pin that cannot be honored fails with a typed `RestartPagination` reason, never silently different data. A cursor mismatch/expiry returns typed restart instructions.
 
 ### 7.2 Errors
 
@@ -477,9 +480,11 @@ These routes are typed profiles over application/query, not separate service imp
 | Automation | `GET /api/v2/automation/jobs`, `/jobs/{id}`, `/scheduler`, `/runs`, `/runs/{id}`, `/runs/{id}/artifacts`, `/proposals`, `/proposals/{id}`, `/skills`, `/skills/{id}`, `/outcomes`; `POST /api/v2/automation/workflow-graph`. |
 | Hints/policy | `GET /api/v2/hints/evaluations`, `/evaluations/{id}`, `/outcomes`, `/opportunities`, `/policy/bundles`, `/policy/bundles/{id}`, `/policy/coverage`. |
 | Accounting/Observatory | `GET /api/v2/accounting/usage`, `/costs`, `/savings`, `/adoption`, `/denominators`, `/api/v2/observatory`. |
-| Tasks/orchestration | `GET /api/v2/initiatives`, `/initiatives/{id}`, `/initiatives/{id}/graph`; `GET /api/v2/plans`, `/plans/{id}/versions/{version}`; `GET /api/v2/work-items`, `/work-items/{id}`, `/work-items/{id}/dependencies`, `/work-items/{id}/attempts`, `/work-items/{id}/context`; `POST /api/v2/work-items/query`; `GET /api/v2/execution-attempts/{id}`; `GET /api/v2/executors`, `/executors/{id}`; `POST /api/v2/executors:match` (read-only); `GET /api/v2/task-scheduler/status`; `GET /api/v2/task-views`, `/task-views/{id}`. Semantics are owned by plan 24 §9.1; reads are `GET` (query-shaped reads `POST` per Section 1), every mutation uses the Section 8.7 command envelope with no `PATCH` route, and task events are subscription read-model kinds delivered through `POST /api/v2/subscriptions` plus `GET /api/v2/subscriptions/{id}/events`, not a separate `/task-events` stream. |
+| Tasks/orchestration | `GET /api/v2/initiatives`, `/initiatives/{id}`, `/initiatives/{id}/graph`; `GET /api/v2/plans`, `/plans/{id}/versions/{version}` plus read-shaped `POST /plans:diff`; `GET /api/v2/work-items`, `/work-items/{id}`, `/work-items/{id}/dependencies`, `/work-items/{id}/attempts`, `/work-items/{id}/context`; `POST /api/v2/work-items/query`; `GET /api/v2/execution-attempts/{id}`; `GET /api/v2/executors`, `/executors/{id}`; `POST /api/v2/executors:match` (read-only); `GET /api/v2/task-scheduler/status`; read-shaped `POST /api/v2/task-scheduler:explain`; `GET /api/v2/task-graph/status`; read-shaped `POST /api/v2/task-graph:doctor`; `GET /api/v2/task-views`, `/task-views/{id}`. Semantics are owned by plan 24 §9.1; query/explain/doctor POST bodies carry protected scope/evidence while remaining `EffectClass::Read`; every mutation uses the Section 8.7 command envelope with no `PATCH` route. Catalog capability `task_graph.events` binds to canonical subscription read-model kinds delivered through `POST /api/v2/subscriptions` plus `GET /api/v2/subscriptions/{id}/events`, not a separate `/task-events` stream. |
 
 Git request/response schemas retain local semantic generation/ref/merge-base/watermark separately from live provider/fetched-at/base/head/changed-file cap/digest. Drift responses cannot serialize a combined impact claim.
+
+Task-view schemas import the complete plan-24 `SavedTaskViewV1`: protected canonical `TraceQueryV1`/query and derived-scope digests, projection/lens/group/sort/layout, owner/share grants, live versus exact frozen manifests/watermarks, config/catalog/schema versions, optimistic view version, timestamps, and revocation. API mapping may not drop fields, copy result rows, add a second scope selector, or silently reopen a frozen view as current.
 
 ### 8.5 Replay labs and Evolution Studio
 
@@ -511,10 +516,10 @@ Each response includes requested replay mode, actual fidelity, bundle/input/envi
 | Method and path | Contract |
 |---|---|
 | `GET /api/v2/saved-views` / `GET /api/v2/saved-views/{id}` | List/read authorized views. |
-| `POST /api/v2/saved-views:create` / `POST /api/v2/saved-views/{id}:update` / `:delete` | Typed preview/apply command bindings with idempotency and expected version. |
-| `POST /api/v2/saved-views/{id}:share-preview` / `:share-apply` / `:share-revoke` | Classification/redaction/expiry preview, local share-bundle creation, and revocation; no remote publication. |
+| `POST /api/v2/saved-views:create` / `POST /api/v2/saved-views/{id}:update` / `:delete` | Direct typed commands with idempotency and expected version. |
+| `POST /api/v2/saved-views/{id}:share-plan` / `:share-start` / `:share-revoke` | Classification/redaction/expiry plan, confirmed local share-bundle creation, and revocation; no remote publication. |
 | Equivalent explicit read and typed command routes for `/collections` and `/annotations` | Protected investigation content, declared owner, and versions. |
-| `POST /api/v2/exports:create` | Preview/apply-style create of frozen export job; no path field. |
+| `POST /api/v2/exports:create` | Resumable workflow command that creates a frozen export job and operation receipt; no path field. |
 | `GET /api/v2/exports` / `GET /api/v2/exports/{id}` | Status/manifest/coverage. |
 | `GET /api/v2/exports/{id}/download` | Authorized completed artifact bytes with safe headers. |
 | `POST /api/v2/exports/{id}:cancel` / `POST /api/v2/exports/{id}:delete` | Distinct versioned cancel/delete commands; neither is overloaded by HTTP method. |
@@ -524,18 +529,21 @@ Each response includes requested replay mode, actual fidelity, bundle/input/envi
 
 ### 8.7 Typed command routes
 
-Every command accepts `CommandHttpRequest<C> { command_id, idempotency_key, scope, expected_version, preview_digest, confirmation, payload }`. A request with `mode=preview` invokes preview; `mode=apply` requires the returned digest when confirmation is required. Field mapping onto the application `CommandEnvelopeV1<C>` is fixed and fixture-tested: `command_id` is server-allocated at preview (omitted on the first preview, echoed on apply; at most one exists per principal/use-case/idempotency-key reservation, plan 09 §8.2), `idempotency_key` maps to the plan 09 §8.1 reservation key, `scope` to the declared/canonical scope, `expected_version` to the optimistic aggregate version, `preview_digest` plus `confirmation` to `ApplyConfirmation`, and `payload` to the typed command body. The route set covers every application command:
+Every command accepts `CommandHttpRequest<C> { idempotency_key, scope, expected_version, payload }`. Field mapping onto the application `CommandEnvelopeV1<C>` is fixed and fixture-tested: application deterministically allocates `command_id`; `idempotency_key` maps to the plan 09 §8.1 reservation key; `scope` maps to declared/canonical scope; `expected_version` is the optimistic aggregate version; and `payload` is the typed command body. A catalog-declared confirmed destructive command has a distinct input type containing its operation-specific `OperationPreflightId` and protected confirmation token. Direct, autonomous, workflow, and internal modes have no inert preview fields. The route set covers every application command:
 
 ```text
 POST /api/v2/commands/projects/{register,update-alias,unenroll}
 POST /api/v2/commands/index/{refresh,pause,resume}
 POST /api/v2/commands/watchers/{start,stop}
 POST /api/v2/commands/daemon/{start,stop,drain,restart}
-POST /api/v2/commands/runtime-update/{preview,apply,recover}
+POST /api/v2/commands/runtime-update/{plan,start,recover}
 POST /api/v2/commands/diagnostics/refresh
 POST /api/v2/commands/doctor/run
 POST /api/v2/commands/repair/{plan,apply}
 POST /api/v2/commands/backups/{create,restore}
+POST /api/v2/storage-consolidation:inspect|plan                       # read-shaped operator preflight with sensitive source refs in body
+POST /api/v2/commands/storage-consolidation/{start,resume,recover}    # operator-only merged-#425 mutations
+GET  /api/v2/storage-consolidation/operations/{id}                   # status/receipts/exact recovery
 POST /api/v2/commands/capture/{ingest,pause,resume}
 POST /api/v2/commands/lcm/{compress,boundary,lifecycle-preflight,lifecycle-repair}
 POST /api/v2/commands/automation/jobs/{create,update,delete,run,cancel,pause,resume}
@@ -545,13 +553,13 @@ GET  /api/v2/curation/{status,history,decisions,outcomes}
 POST /api/v2/commands/facts/{create,update,delete,feedback,pin,protect,exclude}  # explicit user-authored/admin facts, never candidate approval
 POST /api/v2/commands/policy/{publish,activate,rollback}
 POST /api/v2/config/{set,unset,import}  # exact typed plan-20 configuration contract
-POST /api/v2/commands/payloads/{gc-preview,gc-apply}
-POST /api/v2/commands/retention/{preview,apply}
+POST /api/v2/commands/payloads/{gc-plan,gc-start}
+POST /api/v2/commands/retention/{plan,start}
 POST /api/v2/commands/holds/{create,release}
-POST /api/v2/commands/entities/{delete-preview,delete-apply}
+POST /api/v2/commands/entities/{retire-plan,retire-start}
 POST /api/v2/commands/code/move-symbol
 POST /api/v2/commands/privacy/scans/{start,cancel}
-POST /api/v2/commands/privacy/remediations/{preview,apply,verify}
+POST /api/v2/commands/privacy/remediations/{plan,start,verify}
 POST /api/v2/commands/privacy/quarantine/{hold,release}
 POST /api/v2/commands/projections/{rebuild,pause,resume,publish,rollback}
 POST /api/v2/commands/migrations/{backfill,reconcile,cutover,rollback}
@@ -562,17 +570,24 @@ POST /api/v2/commands/labs/fixtures/promote
 POST /api/v2/initiatives:create
 POST /api/v2/initiatives/{id}:update|pause|resume|retire   # former GET/PATCH mutation shapes are these commands
 POST /api/v2/plans:create-version
+POST /api/v2/plans:diff                                          # read-shaped protected comparison body
 POST /api/v2/plans/{id}:activate|decompose
 POST /api/v2/work-items:create
 POST /api/v2/work-items/{id}:update|replace|retire|link|unlink|assign|reassign|pause|resume|cancel|reopen|archive|retry
-POST /api/v2/work-items/{id}:claim|heartbeat|progress|complete|block   # executor lifecycle, plan 24 §9.2
+POST /api/v2/work-items:assign-set
+POST /api/v2/work-items/{id}:acquire-lease                           # authoritative executor admission, not WorkClaim
+POST /api/v2/execution-attempts/{id}:heartbeat|progress|complete|block
 POST /api/v2/executors:register|heartbeat|drain|unregister
+POST /api/v2/task-scheduler:explain                              # EffectClass::Read
 POST /api/v2/task-scheduler:pause|resume|run-once
+POST /api/v2/task-graph:doctor                                   # EffectClass::Read
 POST /api/v2/task-views:create
-POST /api/v2/task-views/{id}:update|delete|share
+POST /api/v2/task-views/{id}:update|delete|share|revoke
 ```
 
-The task/orchestration `:action` routes are the sole HTTP bindings for plan 24 §9.2's command use cases — no duplicate `/commands/**` aliases and no `PATCH` route exist — and they use the same `CommandHttpRequest` envelope, idempotency, expected version, preview, and audit contract; `work-items/{id}:claim` carries `expected_readiness_digest` per plan 24 §5.3.
+The task/orchestration `:action` routes are the sole HTTP bindings for plan 24 §9.2's command use cases — no duplicate `/commands/**` aliases and no `PATCH` route exist — and they use the same `CommandHttpRequest` envelope, idempotency, expected version, preview where the catalog declares it, and audit contract. `work-items:assign-set` is one bounded all-or-none owner-shard use case with plan/item expected versions and deterministic per-item receipts; `work-items/{id}:acquire-lease` carries `expected_readiness_digest` and atomically creates the sealed packet/attempt/lease set per plan 24 §5.3. `WorkClaimV1` remains only under coordination reads/events; no task command is named “claim.”
+
+The storage-consolidation routes bind only plan 09's operator workflow. `inspect/plan/status` are read-shaped application results; POST is used for inspect/plan because protected source references do not belong in URLs. `start/resume/recover` require administrative capability, exact source IDs, durable operation state, deterministic confirmation where applicable, and fail-closed path-plus-file/inode holder/lease/write-reservation evidence. V1 `preview/apply` names exist only in the compatibility adapter/inventory. These bindings are absent from curation credentials and cannot be invoked by task executors, scheduler, dashboard auto-save, or a generic Settings patch.
 
 The explicit saved-view/collection/annotation and export action routes in Section 8.6 are the sole HTTP bindings for those commands; duplicate `/commands/**` aliases are not added. They still use the same generated application command envelope, idempotency, expected version, preview, and audit contract. Scope-sensitive create bodies require `declared_scope`; existing-target bodies carry the opaque target and the application resolves its canonical owner. No current V1 dashboard mutation may bypass this inventory.
 
@@ -612,7 +627,7 @@ pub enum ApiStreamEvent {
 }
 ```
 
-`SubscriptionSnapshot` and `SubscriptionDelta` are generated tagged unions for the authorized query/read-model kind. `OperationProgress` covers command, job, workflow, export, migration, and automation state with stable operation/event/audit refs and an explicit terminal disposition. A command apply returns HTTP `200` when its semantic effect is complete and `202` with the same `CommandReceipt` when a durable operation/workflow/job remains; clients follow the operation event and can recover through `GET /operations/{id}`, never infer completion from transport acceptance.
+`SubscriptionSnapshot` and `SubscriptionDelta` are generated tagged unions for the authorized canonical `TraceQueryV1` read-model kind. Task deltas include the causing canonical `task_graph_events` sequence range plus projector watermark; they never expose a parallel task event identifier or accept writes. `OperationProgress` covers command, job, workflow, export, migration, and automation state with stable operation/event/audit refs and an explicit terminal disposition. A command apply returns HTTP `200` when its semantic effect is complete and `202` with the same `CommandReceipt` when a durable operation/workflow/job remains; clients follow the operation event and can recover through `GET /operations/{id}`, never infer completion from transport acceptance.
 
 - The first semantic event is `snapshot` unless a valid `Last-Event-ID` resumes after it.
 - Every semantic event has `id: <authenticated-opaque-event-id>`, `event: <stable-name>`, one canonical JSON `data:` payload, and no server-generated retry that exceeds client policy.
@@ -788,7 +803,7 @@ Commands run from repository root using checkout-local `target/`; do not set tar
 
 **Files:** `src/http/{commands/**,labs/**,saved,exports}.rs`; `tests/{commands,labs,exports}.rs`.
 
-- [ ] Add tests `command_retry_returns_same_receipt`, `idempotency_conflict_is_409`, `version_conflict_includes_current_version`, `apply_requires_preview_digest`, `scope_sensitive_create_requires_declared_scope`, `route_filter_never_selects_owner`, `daemon_exit_without_drain_receipt_is_not_success`, `update_recovery_is_pollable`, `coordination_target_must_be_unexpired`, `delivery_is_not_ack`, `suppression_is_bounded`, `coordination_lab_cannot_invoke_command`, `share_bundle_requires_redaction_preview_and_expires`, `lab_has_no_mutating_route`, `evolution_simulation_is_read_only`, `export_rejects_path_fields`, `download_never_exposes_backing_path`, and `incomplete_export_cannot_download`.
+- [ ] Add tests `command_retry_returns_same_receipt`, `idempotency_conflict_is_409`, `version_conflict_includes_current_version`, `confirmed_operation_requires_current_preflight_token`, `direct_command_rejects_generic_mode_fields`, `scope_sensitive_create_requires_declared_scope`, `route_filter_never_selects_owner`, `daemon_exit_without_drain_receipt_is_not_success`, `update_recovery_is_pollable`, `coordination_target_must_be_unexpired`, `delivery_is_not_ack`, `suppression_is_bounded`, `coordination_lab_cannot_invoke_command`, `share_bundle_preflight_expires`, `lab_has_no_mutating_route`, `evolution_simulation_is_read_only`, `export_rejects_path_fields`, `download_never_exposes_backing_path`, and `incomplete_export_cannot_download`.
 - [ ] Run `cargo test -p tracedecay-api --test commands --test labs --test exports -- --nocapture`. Expected: tests fail because command/lab/export handlers are absent.
 - [ ] Implement Sections 8.5–8.7 and export containment/header mapping; use generated command mapping to avoid handler-specific command semantics.
 - [ ] Re-run the command. Expected: all tests pass; application receives exact command envelope; path/symlink/filename attack corpus cannot influence backing path.
@@ -819,7 +834,7 @@ Commands run from repository root using checkout-local `target/`; do not set tar
 
 **Files:** `src/openapi/*.rs` including `src/openapi/generated.json`; `packages/tracedecay-client/**`; `tests/openapi_drift.rs`.
 
-- [ ] Add tests `every_route_has_catalog_operation`, `every_operation_declares_auth_and_problems`, `schemas_preserve_domain_message_origin_and_view`, `coordination_claim_summary_anchor_and_actions_are_typed`, `search_stage_caps_and_group_membership_are_typed`, `sse_union_includes_operation_and_projection`, `pending_receipt_has_pollable_operation`, `commands_require_idempotency_version_and_declared_scope`, `generation_is_byte_deterministic`, `utoipa_reflection_equals_ir_generated_document`, and `typescript_round_trip_matches_rust`.
+- [ ] Add tests `every_route_has_catalog_operation`, `every_operation_declares_auth_and_problems`, `schemas_preserve_domain_message_origin_and_view`, `coordination_claim_summary_anchor_and_actions_are_typed`, `search_stage_caps_and_group_membership_are_typed`, `task_query_uses_trace_query_v1`, `canonical_task_refs_round_trip`, `sealed_context_packet_round_trips_every_field_and_anchor`, `no_task_events_route_or_stream`, `task_assignment_set_and_view_revoke_have_full_parity`, `sse_union_includes_operation_and_projection`, `task_delta_cites_canonical_journal_range`, `pending_receipt_has_pollable_operation`, `commands_require_idempotency_version_and_declared_scope`, `storage_consolidation_is_admin_only_and_not_curation`, `generation_is_byte_deterministic`, `utoipa_reflection_equals_ir_generated_document`, and `typescript_round_trip_matches_rust`.
 - [ ] Run `cargo test -p tracedecay-api --test openapi_drift -- --nocapture` and the package client tests. Expected: fail because artifacts/client do not exist.
 - [ ] Implement Section 11 generators, metadata extensions, TypeScript schema/client/problem/SSE runtime, and digest headers.
 - [ ] Re-run generation in write mode, then check mode and all tests. Expected: no diff after second generation; Rust/OpenAPI/TypeScript semantic fixtures round-trip.
@@ -868,7 +883,7 @@ Commands run from repository root using checkout-local `target/`; do not set tar
 1. Serve `/api/v2` disabled except authenticated contract probes; V1 remains default.
 2. Enable read routes per domain in shadow/explicit-client mode and compare typed semantics against application/V1 fixtures.
 3. Enable V2 dashboard client for one read-only vertical slice while the legacy shell remains available only under the bounded migration flag.
-4. Enable command preview, then apply per domain only after application command parity/recovery receipts and API security tests pass.
+4. Enable each command's catalog-declared execution mode per domain only after application parity/recovery receipts and API security tests pass; never stage a universal preview/apply layer.
 5. Enable SSE after snapshot parity, finite replay, gap/backpressure, and reconnect E2E pass under load.
 6. Switch CLI/MCP bindings per domain to the current generated application contract; remove old names from live help/hints/catalog at the same cutover.
 7. During bounded migration only, an operator rollback may restore the V1 owner from its receipt. After V2 default, rollback uses a prior compatible V2 artifact/data snapshot, closes streams with typed restart, and never revives stale clients/names.
@@ -887,4 +902,4 @@ Commands run from repository root using checkout-local `target/`; do not set tar
 - [ ] Run HTTP/SSE benchmarks at current and 10x bounded corpora. Expected: Section 15 gates pass with reference machine, corpus, watermarks, p50/p95, bytes, connection count, allocations, and peak RSS recorded.
 - [ ] Run `rg -n 'rusqlite|libsql|git2|octocrab|reqwest|sessions::|memory::store|global_db|db::connection' crates/tracedecay-api/src`. Expected: no matches.
 - [ ] Inspect router/catalog/OpenAPI sets. Expected: one-to-one bindings, no `ANY` V2 gateway, no anonymous operation, no unbounded list/query/graph/timeline/export route, and no missing command.
-- [ ] Complete #405/#407/#410 ownership/message migration, #411 doctor authority, #412 drain/update recovery, #413 inventory refresh, stable research anchor/recipe, DNS rebinding/Origin/CSRF/CSP, cursor/event tamper, SSE gap/slow client, export containment, SPA history, stale-client failure, cutover, and rollback drills before V2 API becomes default.
+- [ ] Complete #405/#407/#410 ownership/message migration, #411 doctor authority, #412 drain/update recovery, open #425 operator consolidation contract/recovery fixtures, #413 inventory refresh, stable research anchor/recipe, DNS rebinding/Origin/CSRF/CSP, cursor/event tamper, SSE gap/slow client, export containment, SPA history, stale-client failure, cutover, and rollback drills before V2 API becomes default.

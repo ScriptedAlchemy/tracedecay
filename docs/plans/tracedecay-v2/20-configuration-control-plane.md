@@ -118,17 +118,39 @@ Do not create a broad `tracedecay-config` crate initially. The convergence contr
 Create `crates/tracedecay-domain/src/config.rs` with opaque validated identifiers and exhaustive enums:
 
 ```rust
-pub struct ConfigKey(CatalogValue);
-pub struct ConfigModuleId(CatalogValue);
+pub struct ConfigKey(NativeKindCode);
+pub struct ConfigModuleId(NativeKindCode);
 pub struct ConfigRegistryVersion(u64);
 pub struct ConfigRegistryDigest(ManifestDigest);
+pub struct ConfigDescriptorRefV1 {
+    pub key: ConfigKey,
+    pub registry_digest: ConfigRegistryDigest,
+}
 pub struct ConfigLayerId(EntityId);
 pub struct ConfigRevisionId(EntityId);
 pub struct ConfigActivationId(EntityId);
 pub struct EffectiveConfigSnapshotId(EntityId);
 pub struct EffectiveConfigDigest(ManifestDigest);
-pub struct ConfigConsumerId(CatalogValue);
+pub struct ConfigConsumerId(NativeKindCode);
 pub struct CredentialRefId(EntityId);
+
+pub enum ConfigValueV1 {
+    Boolean(bool),
+    SignedInteger(i64),
+    UnsignedInteger(u64),
+    DecimalMicros(i64),
+    DurationMicros(u64),
+    ByteSize(u64),
+    Text(SchemaBoundValueRef),
+    Enum(NativeKindCode),
+    StringSet(SchemaBoundValueRef),
+    OrderedList(SchemaBoundValueRef),
+    TypedMap(SchemaBoundValueRef),
+    Scope(ScopeSelectorV2),
+    Entity(EntityRef),
+    Credential(CredentialRefId),
+    Structured(SchemaBoundValueRef),
+}
 
 pub enum ConfigValueKindV1 {
     Boolean,
@@ -210,7 +232,7 @@ pub struct ConfigDescriptorV1 {
     pub module_id: ConfigModuleId,
     pub schema_id: SchemaId,
     pub value_kind: ConfigValueKindV1,
-    pub default: CatalogValue,
+    pub default: ConfigValueV1,
     pub allowed_layers: Vec<ConfigLayerKindV1>,
     pub precedence: Vec<ConfigLayerKindV1>,
     pub merge: ConfigMergeStrategyV1,
@@ -227,7 +249,7 @@ pub struct ConfigDescriptorV1 {
 
 pub struct ConfigModuleManifestV1 {
     pub module_id: ConfigModuleId,
-    pub owner_crate: CatalogValue,
+    pub owner_crate: NativeKindCode,
     pub version: SchemaVersion,
     pub descriptors: Vec<ConfigDescriptorV1>,
     pub cross_field_constraints: Vec<ConfigConstraintProgramV1>,
@@ -320,7 +342,7 @@ Environment variables become typed `EnvironmentObservation` layers only for boot
 ```rust
 pub struct EffectiveConfigValueV1 {
     pub key: ConfigKey,
-    pub value: CatalogValue,
+    pub value: ConfigValueV1,
     pub source: ConfigSourceRefV1,
     pub source_chain: Vec<ConfigSourceStepV1>,
     pub registry_version: ConfigRegistryVersion,
@@ -387,7 +409,8 @@ Add store repositories for:
 
 - immutable `ConfigLayerRevisionV1` records keyed by canonical target and layer;
 - immutable normalized key/value entries plus sanitization receipts;
-- `ConfigActivationManifestV1` pointing to exact layer revision IDs;
+- `ConfigActivationManifestV1` pointing through ordered `ConfigActivationMemberV1` rows to every exact `(owning_shard, layer_id, revision_id, revision_digest)` member;
+- one profile-owned `config_activation_heads` compare-and-swap pointer that makes only a complete manifest/member set resolver-visible;
 - `EffectiveConfigSnapshotV1` metadata/digests where a durable pin is required;
 - `ConfigConsumerAcknowledgementV1` by component instance/generation;
 - audit/outbox events, migration receipts, drift observations, and operation links;
@@ -396,6 +419,8 @@ Add store repositories for:
 The three PR 6E persistence records are fully shaped:
 
 ```rust
+pub enum ConfigRevisionStateV1 { Staged, Activated, Abandoned }
+
 pub struct ConfigLayerRevisionV1 {
     pub revision_id: ConfigRevisionId,
     pub target: ConfigTargetV1,
@@ -413,7 +438,7 @@ pub struct ConfigLayerRevisionV1 {
 pub struct ConfigRevisionEntryV1 {
     pub key: ConfigKey,
     pub operation: ConfigEntryOperationV1, // Set | Unset
-    pub value: Option<CatalogValue>,       // canonical typed value for Set
+    pub value: Option<ConfigValueV1>,      // canonical typed value for Set
     pub sanitization_receipt: Option<SanitizationReceiptId>, // content-bearing values only
 }
 
@@ -422,6 +447,9 @@ pub struct ConfigActivationManifestV1 {
     pub previous_activation: Option<ConfigActivationId>,
     pub registry_version: ConfigRegistryVersion,
     pub registry_digest: ConfigRegistryDigest,
+    pub effective_snapshot_id: EffectiveConfigSnapshotId,
+    pub effective_digest: EffectiveConfigDigest,
+    pub source_resolution_watermark: VectorWatermark,
     pub members: Vec<ConfigActivationMemberV1>,
     pub actor: ActorRefV1,
     pub idempotency_key: IdempotencyKeyV1,
@@ -429,9 +457,13 @@ pub struct ConfigActivationManifestV1 {
 }
 
 pub struct ConfigActivationMemberV1 {
+    pub ordinal: u32,
     pub target: ConfigTargetV1,
+    pub owning_shard: ShardId,
+    pub layer_id: ConfigLayerId,
     pub revision_id: ConfigRevisionId,
     pub revision_digest: ManifestDigest,
+    pub staged_state: ConfigRevisionStateV1, // must be Staged at publication validation
 }
 
 pub struct ConfigConsumerAcknowledgementV1 {
@@ -449,6 +481,8 @@ Storage contracts:
 
 - `ConfigLayerRevisionV1`: primary key `revision_id`; uniqueness on `(target, idempotency_key)` and a single legal `Staged -> Activated` or `Staged -> Abandoned` transition per row; indexes on `(target, created_at)` and `state`. Rows referenced by any activation manifest, receipt, export, or replay pin are retained permanently; unreferenced `Staged` rows are garbage-collected after the abandonment window (Section 8.2 step 7). Entry values are bounded by descriptor maximum sizes and one revision stays <=1 MiB canonical encoding. Owning shard follows the target per Section 6: profile shard for Profile/Provider/Host layers, project shard for Project/Repository/Worktree layers.
 - `ConfigActivationManifestV1`: primary key `activation_id`; uniqueness of one member per target per manifest and one successor per `previous_activation` (a linear append-only chain); index on `published_at`. Manifests are append-only and retained while any snapshot, receipt, or the rollback window references them; member count is bounded by resolved target count and one manifest stays <=1 MiB. Owning shard: the profile shard, matching the profile-owned publication in Section 8.2.
+- `ConfigActivationMemberV1`: primary key `(activation_id, ordinal)`; unique target digest and `(activation_id, layer_id, revision_id)` within the manifest; exact canonical target, owning-shard, layer, revision digest, and staged-state fields. The target encoding is rehashed on write and `staged_state` must equal `Staged` at publication validation. Members are immutable and retained with their manifest. A manifest with zero members, a duplicate target, a missing/unavailable staged revision, or any target/shard/revision digest mismatch cannot publish.
+- `config_activation_heads`: one row per profile with `(manifest_id, generation)`; advancement is compare-and-swap from `previous_activation` and commits atomically with the new manifest and all member rows. Resolvers read only through this head and reject a missing/member-count-mismatched target instead of scanning for the latest timestamp.
 - `ConfigConsumerAcknowledgementV1`: primary key `(consumer, instance, activation_id)`; the latest acknowledgement per `(consumer, instance)` is authoritative; indexes on `activation_id` and `(consumer, acknowledged_at)`. Retention keeps the current acknowledgement per instance plus history bounded to the activation rollback window; rows are <=4 KiB and contain no values, paths, or consumer error text. Owning shard: the profile shard.
 
 ### 8.1 Revision semantics
@@ -469,11 +503,15 @@ A batch import or policy change can affect multiple owning shards. Implement a d
 2. validate the combined effective snapshots and safety constraints;
 3. append staged immutable revisions to each owning shard with expected versions;
 4. verify all staged revision digests and availability;
-5. publish one profile-owned activation manifest that references every staged revision;
+5. in one profile-shard transaction, insert the activation manifest plus its complete ordered member set referencing every staged revision by owning shard, layer ID, revision ID, and digest, then advance the profile's current-activation pointer;
 6. emit one activation outbox event and consumer notifications;
 7. leave unactivated staged rows eligible for safe garbage collection if any pre-publication step fails.
 
 Resolvers ignore staged revisions until activation publication, so readers observe either the previous manifest or the complete new manifest. This is atomic visibility, not a distributed database transaction. If an activated shard later becomes unavailable, coverage is `Partial/Unavailable`; the resolver never silently falls back to an older layer.
+
+The profile-owned current-activation pointer is the single visibility boundary; it can reference a manifest only after all member rows exist in that same transaction, and the manifest never carries a singular `layer_id/revision` shortcut. Plan 02's physical schema is `config_activation_manifests` plus `config_activation_members`. Activation validation proves set equality between the resolved target set, staged revisions, and members before publication.
+
+Merged PR #425 (`de3d05dc`, final head `d3bb28b5`) reinforces the boundary between configuration and destructive identity/store workflows. Settings may select policy and show status, but split-store consolidation is a separate offline operation: freeze both canonical store families, identify holders by path plus file/inode, acquire reservations, create and verify dual backups, recompute deterministic confirmation under reservation, execute a restartable ledger/staging workflow, preserve remapped LCM edges, verify the complete destination, and publish cutover only after proof. Saving a configuration key cannot start, bypass, weaken, or mark that workflow effective.
 
 ### 8.3 Desired, activated, effective, and observed
 
@@ -718,8 +756,9 @@ Plan 24 §8.7 owns the liveness/sentinel policy semantics; this registry is the 
 | `scheduler.rate_limit.default_backoff` | duration / `2m` | `1s..1h`; used only without valid provider `Retry-After`. |
 | `scheduler.rate_limit.max_backoff` | duration / `1h` | `>= default_backoff`, `<=24h`; bounded by attempt deadline/budget. |
 | `scheduler.repair_poll_interval` | duration / `30s` | `5s..5m`; repair-only journal/checkpoint fallback, never normal board/task scanning. |
+| `query.cursor.interactive_ttl` | duration / `15m` | `1m..24h`; catalog-bound interactive cursors only. Export/bulk continuations use their declared job lifetime; key retirement covers the maximum outstanding declared lifetime. |
 
-All ten descriptors are profile defaults with optional initiative/executor/provider narrowing only where the descriptor declares that scope. Deny/safety floors win. Settings shows desired/activated/effective/observed values, source, generation, affected active-attempt count, and whether activation is hot, next-heartbeat, or workflow-mediated. Tests compare the generated registry values to plan-24 policy fixtures so a renamed key, unit drift, or conflicting default blocks both PRs.
+The ten liveness descriptors plus the cursor-lifetime descriptor are profile defaults with optional initiative/executor/provider narrowing only where the descriptor declares that scope. Deny/safety floors win. Settings shows desired/activated/effective/observed values, source, generation, affected active-attempt count, and whether activation is hot, next-heartbeat, or workflow-mediated. Tests compare generated liveness values to plan-24 fixtures and cursor expiry/rotation values to plans 01/05/10/17 so a renamed key, unit drift, or conflicting default blocks both PRs.
 
 ## 14. Privacy, redactor, detector, and credential controls
 
@@ -772,7 +811,7 @@ Use a narrow protected key service/keyring port:
 ```rust
 pub struct CredentialReferenceViewV1 {
     pub reference_id: CredentialRefId,
-    pub provider_kind: CatalogValue,
+    pub provider_kind: NativeKindCode,
     pub availability: CredentialAvailabilityV1,
     pub owner: ConfigTargetV1,
     pub created_at: UtcMicros,
