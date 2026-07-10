@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.48](https://github.com/ScriptedAlchemy/tracedecay/compare/v0.0.47...v0.0.48) - 2026-07-10
+
+### Added
+
+- *(mcp)* refresh tools after daemon generation change ([#422](https://github.com/ScriptedAlchemy/tracedecay/pull/422))
+
+### Fixed
+
+- *(storage)* add explicit split-store consolidation ([#425](https://github.com/ScriptedAlchemy/tracedecay/pull/425))
+- *(analytics)* aggregate sections before sampling ([#424](https://github.com/ScriptedAlchemy/tracedecay/pull/424))
+- *(memory)* preserve FTS5 relevance direction ([#423](https://github.com/ScriptedAlchemy/tracedecay/pull/423))
+- *(hermes)* use the user TraceDecay profile ([#407](https://github.com/ScriptedAlchemy/tracedecay/pull/407))
+- *(runtime)* proxy MCP before opening local stores ([#420](https://github.com/ScriptedAlchemy/tracedecay/pull/420))
+- *(edit)* make move_symbol writes race-safe ([#419](https://github.com/ScriptedAlchemy/tracedecay/pull/419))
+- *(doctor)* surface identity split conflicts ([#417](https://github.com/ScriptedAlchemy/tracedecay/pull/417))
+
+### Other
+
+- Merge pull request #414 from ScriptedAlchemy/codex/move-symbol
+- Merge pull request #411 from ScriptedAlchemy/codex/doctor-foreign-skills
+
 ## [0.0.47](https://github.com/ScriptedAlchemy/tracedecay/compare/v0.0.46...v0.0.47) - 2026-07-10
 
 ### Fixed
