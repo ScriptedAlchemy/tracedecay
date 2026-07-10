@@ -97,7 +97,7 @@ Policy errors are stable evaluation/fidelity codes. Application owns public retr
 - PR #407, `fix(hermes): use the user TraceDecay profile`, consolidates Hermes onto the user profile and removes Hermes bridge/config/inventory paths. This plan must not introduce dependencies on `src/automation/hermes_bridge.rs`, `hermes_config_projection.rs`, `hermes_pending_skills.rs`, or `hermes_skill_inventory.rs`. Migration routes profile/zero-project/cross-project and unresolved policy/automation history to activity, explicitly project-scoped history to that canonical project shard, and records one source manifest; duplicate copies are reconciled only within the destination privacy domain and quarantined on conflict.
 - PR #410, `fix(sessions): collapse copied subagent prompts`, adds versioned query-time origin/representative semantics without deleting sanitized native rows. Hint/routing policy receives an explicit native/direct-user/subagent/tool-result/protocol classification plus evidence; it must not infer “human” merely from `role=user`, and replay records the classifier/version used.
 - PR #411 supplies one shared foreign-skill ownership predicate and a nonactionable info classification. Diagnostics/curation policy must propose remediation only when the current installation owns the effect and application exposes the matching mutation; foreign/legacy owner evidence produces `NoAction` or explicit manual-user choice, never an update/delete nag.
-- Publication master `9f7a1108` later merged #410/#411/#413/#414/#415/#416/#417/#419/#420/#422. Open #407/#418/#423 are refreshed before PR 23A; #414/#419 require current edit-tool routing metadata, #417 requires abstention/visible remediation on unresolved identity splits, and #423's fact-rank/counter semantics are future policy/evaluation input until merge. PR #409 remains historical.
+- Publication master `6c4b8b91` includes #407/#410/#411/#413/#414/#415/#416/#417/#419/#420/#422/#423/#424. Open #418 is refreshed before PR 23A; #414/#419 require current edit-tool routing metadata, #417 requires abstention/visible remediation on unresolved identity splits, and #423/#424 retrieval/accounting semantics are accepted policy/evaluation input. PR #409 remains historical.
 - Before PR 23A starts, refresh master/open PRs, regenerate the V1 compatibility inventory, and update only source-path references actually present. Deleted transition paths are not extension points.
 
 ## 5. Exact File and Module Tree
@@ -488,6 +488,8 @@ pub struct HintDecision {
 
 The exact injected payload is part of the decision digest. Application atomically records evaluation + accepted state transition before transport injection when possible; if injection fails, it records `delivery_failed` and does not claim emitted/adopted.
 
+When a hint payload proposes actions rather than plain guidance, those actions are carried as the structured action set of `DiagnosticEnvelopeV1` — the shared diagnostics action-envelope family defined in Plan [`24`](24-canonical-task-plan-graph-and-multi-agent-executor.md) — not as free-text instructions: each action is a typed entry, and a renderer that meets an unrecognized action kind falls back to a safe disabled/info row rather than dropping or guessing it. `RenderedHintPayload`, the coordination advisory (§9.5), and the diagnostic action proposal (§9.6) all render through this one envelope family, so plan 6 hints, Plan [`22`](22-incremental-context-scout-and-suggestion-envelopes.md) scout suggestions (§9.1.3), and Plan 24 task diagnostics share one forward-compatible action contract instead of three ad-hoc shapes.
+
 Scope is preserved end-to-end in evaluation/input/output digests. A tool/skill/dependency hint may narrow only by returning an explicit proposed `ScopeSelectorV2` and showing the change; ignored dependency hints cannot erase the caller's multi-repo/worktree selection. Ambiguous/stale/polluted registry resolution suppresses confident routing/correlation/coordination and exposes the candidate/action needed.
 
 `available_tools` and `EvaluationEnvironment.tool_catalog` must carry the same pinned `ToolCatalogRef`; the catalog snapshot itself is loaded once through `BundleArchivePort`-adjacent reads at evaluation start, so no full-catalog canonical-CBOR digest is computed inside the evaluation stage budget.
@@ -842,7 +844,7 @@ The evaluator considers only the five triggers above. It preserves the exact rep
 
 ### 9.6 Diagnostics and curation
 
-Diagnostics input contains captured compiler/tool diagnostic, mapped symbol candidates, source snapshot, and available tool catalog. Output classifies compiler/type versus behavioral/test failure, routes to the correct diagnose/test workflow, and never runs a command. Curation input contains immutable artifact/candidate/evidence/validation/usage/outcome/config snapshots; output is `AutoApply`, `AutoReject`, `DeferForEvidence`, `Quarantine`, `Protect`, `Archive`, or `NoChange`, with exact gates, expected versions, rollout scope, monitoring horizon, and automatic recovery threshold. `NeedsHuman`, per-item approval, preview, and manual apply are not legal curation decisions.
+Diagnostics input contains captured compiler/tool diagnostic, mapped symbol candidates, source snapshot, and available tool catalog. Output classifies compiler/type versus behavioral/test failure, routes to the correct diagnose/test workflow, and never runs a command. Every proposed diagnostic action is a `DiagnosticEnvelopeV1` structured action (Plan [`24`](24-canonical-task-plan-graph-and-multi-agent-executor.md)) with forward-compatible unknown-kind rendering, never free-text remediation prose. Curation input contains immutable artifact/candidate/evidence/validation/usage/outcome/config snapshots; output is `AutoApply`, `AutoReject`, `DeferForEvidence`, `Quarantine`, `Protect`, `Archive`, or `NoChange`, with exact gates, expected versions, rollout scope, monitoring horizon, and automatic recovery threshold. `NeedsHuman`, per-item approval, preview, and manual apply are not legal curation decisions.
 
 ### 9.7 Scheduler
 
@@ -872,6 +874,42 @@ Schedule/cron parsing, due time, no-new-activity, pause, last-success/non-skippe
 ### 9.8 Memory
 
 Input contains an already `Sanitized`/sink-eligible proposed content reference plus receipt, sensitivity/transience classification, entity candidates, fact versions, similarity/conflict candidates, trust/feedback events, source provenance, retrieval consequences, retention/hold state, and deletion descendants at one watermark. Output contains accept/reject/quarantine and an eligibility-preserving canonical proposal reference, duplicate/conflict/supersession relations, entity links, trust change proposal, retrieval impact, deletion/tombstone/FTS/vector/blob descendant plan, and explanation. Policy never scans, redacts, or mints a sanitization/eligibility proof. Secret-like content cannot be promoted into a fact/fixture/vector; reasoning is excluded by default.
+
+### 9.9 Attention and staleness scoring inputs
+
+Hermes's board-level attention strip and server-computed staleness rings (the backend precomputes `task.age`; the client never diffs clocks) generalize into a deterministic policy input family. Attention signals are projector-computed inputs — a read-model family projected by [`04-projectors-crate.md`](04-projectors-crate.md) and stored per [`02-store-crate.md`](02-store-crate.md) — pinned into the evaluation input snapshot at a vector watermark; the hint (§9.1), coordination (§9.5), diagnostics (§9.6), and scheduler (§9.7) evaluators consume them as fixed-point features and never recompute staleness from an ambient clock.
+
+```rust
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub enum AttentionSignalKindV1 {
+    StaleClaim,           // an advisory claim/lease past its Plan 24 liveness budget (§9.7; Plan 24 §5.3)
+    AgingBlockedTask,     // a blocked/gated work item past its age tier
+    UnresolvedOutcome,    // a hint/coordination outcome horizon open past expected (Section 10)
+    SilentCapabilityMiss, // an observed action where a capability opportunity went unhinted (Section 10)
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
+pub enum AttentionAgeTier { Fresh, Amber, Red } // computed from typed per-kind age thresholds, not a color
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AttentionSignalV1 {
+    pub signal_id: AttentionSignalId,   // primary key
+    pub kind: AttentionSignalKindV1,
+    pub subject: EntityRef,             // claim, work item, outcome, or opportunity
+    pub scope_digest: ScopeSelectorDigest,
+    pub severity: ScoreMicros,          // deterministic fixed-point score
+    pub age_tier: AttentionAgeTier,
+    pub evidence: Vec<EvidenceRef>,     // bounded, <=16 refs
+    pub first_observed_at: UtcMicros,
+    pub computed_at: UtcMicros,
+    pub coverage: CoverageReportV1,     // canonical shared coverage type owned by 01-domain-crate.md
+    pub watermark: VectorWatermark,
+}
+```
+
+`AttentionSignalV1` storage envelope: primary key `signal_id`; uniqueness on `(kind, subject, scope_digest)` so each subject carries one current signal per kind (idempotent recompute); required indexes on `(kind, computed_at)` for attention-strip rollups and on `subject` for inspector joins; rows are derived and rebuildable, ~200 bytes plus bounded evidence, live on the activity/session owner shard, and expire when their subject leaves the attention window. The column-level table schema lands in [`02-store-crate.md`](02-store-crate.md) (attention signals are one of its named derived read-model families); the staleness/attention rollups are observed by [`26-observability-accounting-and-usage.md`](26-observability-accounting-and-usage.md).
+
+Age tiers are computed from typed per-kind thresholds (mirroring Hermes's per-status `ready/running/blocked/todo` age tables), configured as Plan [`20`](20-configuration-control-plane.md) descriptors; the evaluator reads the tier, never a wall clock. A `StaleClaim` or `AgingBlockedTask` signal is advisory evidence for a bounded hint or coordination advisory, never an automatic reclaim, cancellation, or reassignment — those remain application/store transactions per Section 1.
 
 ## 10. Hint Outcome and Human-Correction Contract
 
@@ -1178,7 +1216,7 @@ PR 23 is split into reviewable 23A–23G. Plan 22's PR 23H later lands `src/scou
 
 ## 15. Cutover and Rollback
 
-1. Refresh publication base `9f7a1108`; record merged #405/#410/#411/#412/#413/#414/#415/#416/#417/#419/#420/#422 separately from open-assumed #407/#418/#423, regenerate V1 stores/profile/tool/policy inventory, and record actual master binary/schema/protocol/catalog-generation versions. Do not begin backfill from a pre-adoption, Hermes-local, or ownership-ambiguous locator.
+1. Refresh publication base `6c4b8b91`; record merged #405/#407/#410/#411/#412/#413/#414/#415/#416/#417/#419/#420/#422/#423/#424 separately from open-assumed #418, regenerate V1 stores/profile/tool/policy inventory, and record actual master binary/schema/protocol/catalog-generation versions. Do not begin backfill from a pre-adoption, Hermes-local, or ownership-ambiguous locator.
 2. Compile/hash V1 compatibility bundles and import immutable input/evaluation/state snapshots with source manifests. Dedupe adopted legacy/Hermes data by canonical source/content digest; quarantine conflicts.
 3. Enable `v2_policy_shadow` per evaluator. V1 remains effect owner; V2 evaluates the same captured snapshot without injecting, acquiring locks, mutating memory, writing files, or incrementing counters.
 4. Compare decisions, payloads, state transitions, correlations, schedule reasons, memory proposals, outcome attribution, latency, coverage, and digests. Block cutover on unexplained gaps, privacy failure, bundle/input loss, or drifted identity/profile provenance.

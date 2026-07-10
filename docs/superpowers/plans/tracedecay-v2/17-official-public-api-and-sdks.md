@@ -8,7 +8,7 @@
 
 **Initial deployment:** Local-first. A user-owned Unix-domain socket or authenticated loopback HTTP endpoint is supported. Remote or hosted service operation is not assumed by this plan and must not weaken the local trust, privacy, or authorization contract.
 
-**Publication baseline (2026-07-10):** `origin/master` `9f7a1108`; #410/#411/#413/#414/#415/#416/#417/#419/#420/#422 merged, #407/#418/#423 open. Regenerate contract/capability fixtures before implementation. The official surface includes current #410 message views, #411 doctor authority, #414/#419 race-safe `move_symbol`, #417 typed identity split, #415 release-integrity gates, #420 proxy-before-store/reconnect/no-write-replay semantics, and #422 negotiated `tools.listChanged` daemon-generation refresh; #423's fact-rank/counter shape is a future conformance input until merged.
+**Publication baseline (2026-07-10):** `origin/master` `6c4b8b91`; #407/#410/#411/#413/#414/#415/#416/#417/#419/#420/#422/#423/#424 merged, #418 open. Regenerate contract/capability fixtures before implementation. The official surface includes ordinary-profile Hermes, current #410 message views, #411 doctor authority, #414/#419 race-safe `move_symbol`, #417 typed identity split, #415 release-integrity gates, #420 proxy-before-store/reconnect/no-write-replay semantics, #422 negotiated `tools.listChanged` daemon-generation refresh, #423 fact-rank/counter semantics, and #424 exact aggregate-before-sample analytics.
 
 ---
 

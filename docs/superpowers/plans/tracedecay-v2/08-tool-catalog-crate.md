@@ -82,7 +82,7 @@ Refreshed implementation inputs:
 - Merged PR #410 copied-subagent prompt collapse adds direct_user, subagent, tool_result, and parent-representative filters consistently while retaining every sanitized native row and explicit coverage.
 - Merged PR #411 foreign-skill ownership makes doctor/removal/update share one ownership predicate; catalog remediation metadata distinguishes actionable-by-this-installation, manual-user-only, and no-action.
 - Merged PR #414 adds the `move_symbol` edit capability; regenerate the tool/CLI/API inventory and require owner/schema/scope/effect/idempotency/preview/error bindings rather than treating the old 102-name count as current.
-- Merged release PRs #413/#416 and merged #415/#417/#419/#420/#422 contribute current release, identity, edit, routing, and catalog-generation inputs. Open #407/#418/#423 are refresh inputs; their live state must be re-read immediately before PR 22A rather than frozen here. PR #409 remains closed historical inventory only.
+- Merged release PRs #413/#416 and merged #407/#415/#417/#419/#420/#422/#423/#424 contribute current profile, release, identity, edit, routing, catalog-generation, retrieval, and analytics inputs. Open #418 is a refresh input; its live state must be re-read immediately before PR 22A rather than frozen here. PR #409 remains closed historical inventory only.
 
 The implementation lead refreshes master/open PRs and regenerates all legacy inventories before PR 22A. A changed count is expected; an unexplained capability is not.
 
@@ -470,6 +470,20 @@ pub struct SurfaceBinding {
     pub compatibility: CompatibilityDisposition,
 }
 
+pub enum SurfaceKind {
+    Cli,
+    Mcp,
+    Http,
+    Sdk,
+    Dashboard,
+    Hook,
+    Skill,
+    Automation,
+    Executor,
+    ContextScout,
+    InternalHost,
+}
+
 pub enum ExecutionModeV2 {
     ReadOnly,
     DirectCommit,
@@ -495,6 +509,8 @@ pub struct IdempotencySpec {
     pub retry_receipt: RetryReceiptPolicy,
 }
 ~~~
+
+`SurfaceKind` is the one closed, generated surface vocabulary for binding identity and usage accounting. Stable integer codes and `snake_case` wire names are emitted with the catalog snapshot; plans 21 and 26 consume those generated values and may not maintain SQL-, renderer-, or telemetry-local surface lists. A genuinely new surface requires a catalog-schema version, compatibility disposition, accounting classification, and conformance fixtures before any binding can use it.
 
 `ExecutionModeV2` lives in this crate's `effect.rs` and is the only closed effect-mode enum; plan 21 §11.1 consumes it for surface annotations and defines no surface-local variant. `SurfaceInvocationCode` carries the current canonical surface name or route only; V1 names live solely inside `CompatibilityDisposition` (field contract defined in plan 21 §17.1) and `CatalogAlias` provenance rows. `PresentationId` replaces any binding-local view reference; presentation descriptors themselves are plan 21's.
 

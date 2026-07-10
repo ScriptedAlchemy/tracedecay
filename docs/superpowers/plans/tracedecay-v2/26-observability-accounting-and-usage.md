@@ -166,6 +166,8 @@ pub struct CapTruncationRecordV1 {
 }
 ```
 
+`SurfaceKind` is plan 08's generated closed vocabulary (`cli`, `mcp`, `http`, `sdk`, `dashboard`, `hook`, `skill`, `automation`, `executor`, `context_scout`, `internal_host`). Accounting consumes its stable generated code/name pair; it does not define an analytics-local enum. This makes direct SDK calls, executor attempts, scout work, host lifecycle, hooks, and human surfaces comparable without collapsing them into `api` or dropping them.
+
 ```rust
 pub struct AdoptionRowV1 {
     pub capability: UseCaseId,
@@ -243,6 +245,7 @@ Legal renderings per state, enforced across every surface by the shared conforma
 
 - Any surface that applies a cap (query page/budget, hint token budget, export bound, traversal depth, analytics sample) emits `CapApplied` with a `CapTruncationRecordV1`. Where the truncated population is retained evidence, the record carries a `RetrievalAnchorId` routing to the exact frozen result (anchors are ID-only in rows; hydration goes through the anchor endpoint per plan 01's rule).
 - Cap events aggregate into `metric_rollups.cap_count` and are drillable: "this 30-day adoption panel is computed over a 10k-event sample cap" is one click from the panel, satisfying plan 11's Observatory row for exact counts/denominators/caps.
+- Merged PR #424 is accepted-base behavior: exact event totals and tool/hint aggregates execute in storage over the entire declared scope/window before any presentation sample; raw event lists remain cursor-paged and capped separately. The >10,000-event regression joins plan 14 `FM-086`. V2 generalizes the correction through registered metric descriptors and shared read models rather than preserving three bespoke SQL helpers.
 
 ### Per-capability adoption analytics
 
@@ -280,14 +283,15 @@ Rollup and telemetry tables are derived, rebuildable state (plan 02's schema-own
 | Table | Schema (fields, PK, uniqueness, indexes, retention/size) |
 |---|---|
 | `metric_descriptors` | `metric_id TEXT`, `version INTEGER`, `unit TEXT`, `population_kind TEXT`, `population_rule TEXT`, `denominator_source TEXT`, `default_horizon TEXT`, `cap_policy TEXT`, `watermark_requirement TEXT`, `unknown_semantics TEXT`, `sensitivity TEXT`, `owner_use_case TEXT NULL`. PK `(metric_id, version)`. Catalog shard; regenerated from the registry artifact; drift against the artifact fails CI. |
-| `usage_ledger` | `row_id TEXT PK (UUIDv7)`, `occurred_day INTEGER NOT NULL`, `provider TEXT`, `model TEXT NULL`, `capability_id TEXT NULL`, `surface TEXT CHECK (surface IN ('hook','mcp','cli','api','dashboard','automation'))`, `session_locator TEXT NULL`, `tokens_in INTEGER NULL`, `tokens_out INTEGER NULL`, `tokens_cached INTEGER NULL`, `latency_us INTEGER NULL`, `cost_micros INTEGER NULL`, `pricing_version TEXT NULL`, `methodology_version TEXT NULL`, `source_event_id TEXT NOT NULL`, `watermark BLOB NOT NULL`. UNIQUE `(source_event_id)` (idempotent projection). Indexes `(occurred_day)`, `(capability_id, occurred_day)`, `(provider, model, occurred_day)`. Volume tracks the hook/tool stream; append-only; retention follows event retention. |
-| `metric_rollups` | PK `(metric_id, metric_version, scope_digest, window_kind, window_start)`; `numerator INTEGER NOT NULL`, `denominator INTEGER NULL`, `denominator_state TEXT CHECK (denominator_state IN ('known','capped','partial','unknown')) NOT NULL`, `unknown_reason TEXT NULL`, `value_kind TEXT NOT NULL`, `cap_count INTEGER DEFAULT 0`, `truncation_count INTEGER DEFAULT 0`, `watermark BLOB NOT NULL`, `built_by TEXT NOT NULL`. Index `(metric_id, window_start)`. Day windows retained 2 years by default (plan 20 descriptor); hour windows 90 days; fully rebuildable. |
+| `usage_ledger` | `row_id TEXT PK (UUIDv7)`, `occurred_day INTEGER NOT NULL`, `provider TEXT`, `model TEXT NULL`, `capability_id TEXT NULL`, `surface_code INTEGER NOT NULL`, `session_locator TEXT NULL`, `tokens_in INTEGER NULL`, `tokens_out INTEGER NULL`, `tokens_cached INTEGER NULL`, `latency_us INTEGER NULL`, `cost_micros INTEGER NULL`, `pricing_version TEXT NULL`, `methodology_version TEXT NULL`, `source_event_id TEXT NOT NULL`, `watermark BLOB NOT NULL`. `surface_code` is generated from plan 08's `SurfaceKind`; projection rejects/quarantines a code absent from its bound catalog generation. UNIQUE `(source_event_id)` (idempotent projection). Indexes `(occurred_day)`, `(capability_id, occurred_day)`, `(surface_code, occurred_day)`, `(provider, model, occurred_day)`. Volume tracks the hook/tool stream; append-only; retention follows event retention. |
+| `metric_rollups` | PK `(metric_id, metric_version, scope_digest, window_kind, window_start)`; `numerator INTEGER NOT NULL`, `denominator_state TEXT CHECK (denominator_state IN ('known','capped','partial','unknown')) NOT NULL`, mutually exclusive payload columns `denominator_known_value INTEGER NULL`, `denominator_observed_value INTEGER NULL`, `denominator_cap_value INTEGER NULL`, `denominator_partial_watermark_blob_id BLOB NULL`, `denominator_unknown_reason TEXT NULL`, plus `value_kind TEXT NOT NULL`, `cap_count INTEGER DEFAULT 0`, `truncation_count INTEGER DEFAULT 0`, `watermark BLOB NOT NULL`, `built_by TEXT NOT NULL`. State-shape CHECKs make the row a lossless lowering of `DenominatorState`: `known` requires only known value; `capped` requires observed+cap; `partial` requires its source vector; `unknown` requires a reason. Index `(metric_id, window_start)`. Day windows retained 2 years by default (plan 20 descriptor); hour windows 90 days; fully rebuildable. |
 | `slo_window_records` | PK `(slo_id, window_start)`; `observed_p50_us INTEGER`, `observed_p95_us INTEGER`, `observed_p99_us INTEGER`, `sample_count INTEGER NOT NULL`, `sample_state TEXT NOT NULL`, `threshold_ref TEXT NOT NULL`, `breach INTEGER NOT NULL`, `breach_reason TEXT NULL`, `watermark BLOB NOT NULL`. Index `(slo_id, breach, window_start)`. Retained 1 year. |
 | `adoption_rollups` | PK `(capability_id, surface, provider, scope_digest, window_start)`; `invocations INTEGER NOT NULL`, `distinct_sessions INTEGER NOT NULL`, `eligible_population INTEGER NULL`, `population_state TEXT NOT NULL`, `watermark BLOB NOT NULL`. Index `(capability_id, window_start)`. Rebuildable; day windows. |
 | `hint_outcome_rollups` | PK `(policy_version, hint_category, horizon_bucket, scope_digest, window_start)`; counts `eligible, emitted, delivered, observed, acted, ignored, corrected, missed, unresolvable` all `INTEGER NOT NULL`, `denominator_state TEXT NOT NULL`, `watermark BLOB NOT NULL`. Index `(policy_version, window_start)`. Source rows are plan 06 §10 records; rollups rebuildable. |
 | `cap_truncation_events` | `cap_event_id TEXT PK`, `surface TEXT NOT NULL`, `cap_kind TEXT NOT NULL`, `limit_value INTEGER NOT NULL`, `observed_value INTEGER NULL`, `observed_state TEXT NOT NULL`, `retrieval_anchor_id TEXT NULL`, `safe_fingerprint TEXT NULL`, `occurred_at INTEGER NOT NULL`. Index `(surface, occurred_at)`. Retained 180 days; anchors ID-only. |
 | `lag_snapshots` | PK `(shard_id, projector_id, sampled_at)`; `outbox_head INTEGER`, `contiguous_sequence INTEGER`, `lag_us INTEGER NOT NULL`, `watermark BLOB NOT NULL`. Index `(projector_id, sampled_at)`. Retained 90 days. |
-| `data_quality_rollups` | PK `(quality_kind, scope_digest, window_start)`; `count INTEGER NOT NULL`, `sample_refs TEXT NULL` (safe IDs only), `watermark BLOB NOT NULL`. Retained 1 year; rebuildable from dead letters/coverage/quarantine rows. |
+| `data_quality_rollups` | PK `(quality_kind, scope_digest, window_start)`; `count INTEGER NOT NULL`, `watermark BLOB NOT NULL`. Retained 1 year; rebuildable from dead letters/coverage/quarantine rows. |
+| `data_quality_rollup_samples` | `(quality_kind, scope_digest, window_start, ordinal) PK`, `sample_ref TEXT NOT NULL`; FK is the composite rollup key and UNIQUE `(quality_kind, scope_digest, window_start, sample_ref)`. Safe opaque IDs only, bounded by the metric descriptor's sample cap, retained/rebuilt with the parent. No delimited reference lists. |
 
 ### Seed metric inventory
 
@@ -368,6 +372,7 @@ Every tunable is a plan 20 typed descriptor: rollup windows and retention, SLO t
 | V1 seam | V2 owner | Result |
 |---|---|---|
 | `src/analytics.rs`, `src/analytics_bridge.rs` | Descriptor registry + `metric_rollups` + plan 05 reads | Ad-hoc counting with silent-zero denominators becomes registered denominator-safe metrics; the `message_count=0` defect class is structurally impossible. |
+| Merged PR #424 `src/global_db.rs`, MCP/dashboard analytics handlers | Plan-26 projector/query/application contracts | Keep aggregate-before-sample and upgrade-safe access-path lessons; replace global-DB bespoke aggregate helpers and surface-specific shaping with registered rollups and one sealed view after parity receipts. |
 | `src/accounting/{classifier,metrics,parser,pricing}.rs` | Domain accounting contracts + `usage_ledger` | Token/cost parsing becomes captured events; pricing becomes versioned config; classification evidence retained. |
 | `src/hooks/analytics.rs`, `src/hooks/hint_outcomes.rs` + hook JSONL | Plan 06 §10 records + `hint_outcome_rollups` | Weak JSONL joins become typed outcome records with horizons; rollups are rebuildable. |
 | `src/cost_cmd.rs`, analytics CLI/MCP surfaces | Plan 09 §9.4 use cases + plan 21 sealed views | One computation, every surface; disposition rows in plan 21's inventory. |
@@ -429,7 +434,7 @@ Migration is coordinated with plan 12's controller (its §14 phases) and gated b
 - [ ] Run `cargo test -p tracedecay-projectors --test slo_adoption_suite`; expected: exit 0 with denominator/horizon present on every emitted rate.
 - [ ] Commit `feat(projectors): add slo and adoption rollups`.
 
-### PR 30H: Observatory and Costs data contracts
+### PR 30J: Observatory and Costs data contracts
 
 **Ordering:** with plan 04's read-model family and before plan 11's PR 26B/30G consume the models.
 

@@ -6,7 +6,7 @@
 
 **Purpose:** make multi-repository, multi-project, multi-checkout, and multi-worktree use a native TraceDecay behavior rather than a sequence of registry lookups, path guesses, store switches, and retries.
 
-**Publication baseline (2026-07-10):** `origin/master` `9f7a1108`; #410/#411/#413/#414/#415/#416/#417/#419/#420/#422 merged, #407/#418/#423 open. Refresh before implementation. Merged #417 split-store visibility is an explicit resolver/doctor regression input: identity conflict remains candidates/unavailable coverage and never becomes absent index/current-project fallback. Merged #420 makes reachable managed-daemon proxy authority precede any local project/store resolution/open; #422 adds generation-scoped catalog refresh for long-lived hosts. The failed explicit-worktree/root `pr_context` attempt for #423 is a fresh cross-domain partial/fallback fixture.
+**Publication baseline (2026-07-10):** `origin/master` `6c4b8b91`; #407/#410/#411/#413/#414/#415/#416/#417/#419/#420/#422/#423/#424 merged, #418 open. Refresh before implementation. Merged #417 split-store visibility is an explicit resolver/doctor regression input: identity conflict remains candidates/unavailable coverage and never becomes absent index/current-project fallback. Merged #420 makes reachable managed-daemon proxy authority precede any local project/store resolution/open; #422 adds generation-scoped catalog refresh for long-lived hosts. The failed explicit-worktree/root `pr_context` attempt for #423 and repeated explicit-root attempt for #424 are fresh cross-domain partial/fallback fixtures.
 
 ## 1. Product invariant
 
@@ -538,30 +538,30 @@ Metrics:
 
 Integrate these into the parent PR sequence; do not create a second parallel roadmap.
 
-### PR 8A — Canonical scope resolver
+### Companion requirements for PR 8A — Canonical scope resolver
 
 - Add `ScopeSelectorV2`, repository/project/checkout/worktree/project-set IDs, aliases, match evidence, ambiguity, and typed errors to domain/catalog.
 - Import legacy identity/adoption fixtures.
 - Add token-aware and relationship-aware registry resolver with generated CLI/MCP/API schemas.
 
-### PR 12B — Federated planner and routed retrieval
+### Companion requirements for PR 12B — Federated planner and routed retrieval
 
 - Resolve selectors to domain shards/snapshots.
 - Add shard pruning, partial/stale coverage, deterministic distributed cursor, and global stable-ID routing.
 - Prove All-search result to exact session/message/entity load across project boundaries.
 
-### PR 17A — Profile activity and temporal attribution
+### Companion requirements for PR 17A — Profile activity and temporal attribution
 
 - Remove public query dependence on provider `project_key`.
 - Project per-observation CWD/worktree/ref/explicit-query attribution and activity evidence roles.
 - Backfill without duplicating transcript bodies across project shards.
 
-### PR 18A — Code graph generation federation
+### Companion requirements for PR 18A — Code graph generation federation
 
 - Add snapshot selection, working-tree overlay state, cross-repository edge contracts, normalized merge, and source/freshness explanations.
 - Ship the Rspack/Rsbuild/React Router code-query fixtures.
 
-### PR 19A — Delivery and project-system relations
+### Companion requirements for PR 19A — Delivery and project-system relations
 
 - Relate worktrees, branches, commits, PRs, forks, support repos, benchmarks, published artifacts, and upstream/downstream project sets.
 

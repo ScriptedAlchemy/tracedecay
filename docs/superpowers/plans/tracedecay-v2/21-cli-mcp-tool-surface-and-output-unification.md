@@ -47,7 +47,7 @@ Primary current paths inspected:
 - `src/mcp/response_handles.rs`, `project_route.rs`, and `dispatch_policy.rs`;
 - existing V2 plans 08–10 and 12, 16–20.
 
-Publication refresh is `origin/master` `9f7a110805edf226bb0d665d6f4ff5c4f03c6163`: merged #420 makes daemon-proxy authority precede local store open and preserves per-request reconnect/no-write-replay semantics; merged #422 negotiates MCP `tools.listChanged`, carries client/catalog generation across proxy connections, and emits one bounded refresh per client per daemon generation. V2 absorbs both into the generated catalog-generation handshake/status contract rather than adding another daemon-local tool inventory.
+Publication refresh is `origin/master` `6c4b8b91dad2efdcaefab0153475287f37c2caee`: merged #407 removes Hermes-local profile/tool silos, #420 makes daemon-proxy authority precede local store open and preserves per-request reconnect/no-write-replay semantics, #422 negotiates MCP `tools.listChanged` with bounded per-generation refresh, #423 fixes fact-rank/counters, and #424 shares exact analytics aggregates across MCP/dashboard. Open #418 remains a refresh input. V2 absorbs these into generated bindings/handshakes/views rather than adding adapter-local inventories or renderers.
 
 ### 2.2 Current registry drift
 

@@ -63,7 +63,7 @@ Plan 17 declares this same HTTP/OpenAPI surface official and adds the contract I
 
 ### 4.1 Master and incoming changes verified on 2026-07-10
 
-Publication refresh: `origin/master` `9f7a110805edf226bb0d665d6f4ff5c4f03c6163`; #410/#411/#413/#414/#415/#416/#417/#419/#420/#422 are merged, while #407/#418/#423 remain open. Regenerate contracts from that or a newer accepted base before every API slice; #423 adds future fact-ranking/counter fixtures, not accepted-base behavior yet.
+Publication refresh: `origin/master` `6c4b8b91dad2efdcaefab0153475287f37c2caee`; #407/#410/#411/#413/#414/#415/#416/#417/#419/#420/#422/#423/#424 are merged, while #418 remains open. Regenerate contracts from that or a newer accepted base before every API slice; #423's fact-ranking/counter fixtures and #424's exact aggregate-before-sample analytics contract are accepted-base behavior.
 
 | Change | API consequence |
 |---|---|
@@ -439,6 +439,7 @@ All graph/timeline inputs require explicit node/edge/event/lane/bucket/page/dept
 | `POST /api/v2/sessions/search` | Text/semantic session search. |
 | `GET /api/v2/sessions/{id}` | Summary, participants, goals/workflows, snapshots, coverage. |
 | `POST /api/v2/sessions/{id}/replay` | Read-only historical assembly and replay fidelity. |
+| `POST /api/v2/threads/{id}/replay` | Read-only thread assembly across its authorized session/Turn lineage. |
 | `GET /api/v2/sessions/{id}/context-lineage` | LCM source/summary DAG, compression decisions, payload coverage and source ranges. |
 | `GET /api/v2/sessions/{id}/turns` | Bounded first-class Turns. |
 | `GET /api/v2/turns/{id}` | Turn hub with authorized linked evidence. |
@@ -449,6 +450,9 @@ All graph/timeline inputs require explicit node/edge/event/lane/bucket/page/dept
 | `GET /api/v2/agents` / `GET /api/v2/agents/{id}` | Actors/instances/lifecycle/parents/goals/outcomes. |
 | `GET /api/v2/goals` / `GET /api/v2/goals/{id}` | Codex goals and provider-native objectives with versioned updates, Turns, owners, and terminal evidence. |
 | `GET /api/v2/workflows` / `GET /api/v2/workflows/{id}` | Provider-native and canonical workflow graph. |
+| `POST /api/v2/retrieval-anchors:batch` | Authorized bounded hydration of safe anchor metadata by opaque `RetrievalAnchorId`; results never embed content payloads. |
+| `POST /api/v2/context:assemble` | One canonical bounded context-assembly use case for session/thread/Turn/task selectors with exact manifests, omissions, coverage, and source anchors. |
+| `GET /api/v2/temporal-assertions/{id}/lineage` | Supersession/conflict/authority/evidence lineage with valid-time and observed-time bounds. |
 | `POST /api/v2/coordination/presence` / `POST /api/v2/coordination/nearby` / `POST /api/v2/coordination/overlaps` | Expiring presence/work claims and same/parallel-worktree overlap with evidence class, safe compact summary, stable research anchors/recipe, legal actions, coverage, and no raw sensitive payload. |
 
 Allowed non-content message query parameters use the domain enum unchanged:
@@ -821,7 +825,7 @@ Commands run from repository root using checkout-local `target/`; do not set tar
 - [ ] Re-run generation in write mode, then check mode and all tests. Expected: no diff after second generation; Rust/OpenAPI/TypeScript semantic fixtures round-trip.
 - [ ] Commit `feat(api): generate OpenAPI and official TypeScript client core`.
 
-### PR 24E series: CLI/MCP adapters and cross-transport parity
+### Companion requirements for PR 24E series: CLI/MCP adapters and cross-transport parity
 
 **Files:** companion adapter/parity files in Section 5 and one V1 handler family per PR.
 

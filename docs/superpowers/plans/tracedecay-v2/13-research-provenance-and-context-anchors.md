@@ -194,9 +194,9 @@ The initial domain/store author session is not assigned here with false precisio
 The corpus itself remains outside Git:
 
 - Manifest: `/fast/tracedecay-redesign-research/manifest.json`.
-- Secret-scanned/redacted native `role=user` corpus: 34,305 rows; SHA-256 `ff55fb9158a111a7ad28e2c448784f0d942987cd505576c4d03643a2a74a4429`.
-- Secret-scanned/redacted best-effort human subset: 9,941 rows; SHA-256 `18fa47e16340177d2996674018d66e81625d234f12c25eadbb4d904dec6aa458`.
-- Frozen cutoff: 2026-07-09 23:15:42 UTC.
+- Secret-scanned/redacted native `role=user` corpus: 34,333 rows; SHA-256 `81192fea28fdc5921fc86b186e0f1959aeda801cf17cfed6734deb5cd6bbf8e7`.
+- Secret-scanned/redacted best-effort human subset: 9,969 rows; SHA-256 `cdbdb237e4dd5929366b555c8b523b0462c639de1a753c2f2a770aeff7092e7a`.
+- Frozen final user-message cutoff: 2026-07-10 02:21:15.411 UTC. The last 28 direct prompts use `codex_rollout_raw_fallback` provenance because the supported TraceDecay replay failed with the documented identity-cutover conflict; internal goal/environment envelopes were excluded.
 - Both primary files and manifest are mode `0600`.
 
 This is a private corpus reference, not a distributable PR fixture. `gitleaks 8.30.1` and parsed-value credential detectors were run; conservative redaction removed marker/credential-shaped values and examples while preserving row identity/order. An authenticated-URL alert from serialized-line scanning was rejected as a cross-field false positive after parsed-value validation. Phase 0 derives separately reviewed synthetic/minimal-redacted regression fixtures; it never promotes this corpus directly.
@@ -205,9 +205,9 @@ This is a private corpus reference, not a distributable PR fixture. `gitleaks 8.
 
 | Subject | Stable anchor or query | Evidence note |
 |---|---|---|
-| Publication-base master | commit `9f7a110805edf226bb0d665d6f4ff5c4f03c6163` | Includes merged #415/#417/#419/#420/#422 at crate version 0.0.47; the plan branch is rebased to this or a newer accepted base before final checks. |
+| Publication-base master | commit `6c4b8b91dad2efdcaefab0153475287f37c2caee` | Includes merged #407/#415/#417/#419/#420/#422/#423/#424 at crate version 0.0.47; the plan branch is rebased to this or a newer accepted base before final checks. |
 | Legacy store adoption | PR #405; merge commit `e35279586d6a0886856a26842ef17ce51e83da05` | Current-master migration input. |
-| Hermes user-profile consolidation | PR #407; branch `codex/hermes-user-profile-only` | Open future-master input. `sessions_for` returns historical branch-active sessions; latest exemplars include `019f3ff1-7f85-7812-8255-77481331c0a9` and `019f3ff1-d87f-7f40-9cff-275e15bf589a`. |
+| Hermes user-profile consolidation | PR #407; branch `codex/hermes-user-profile-only`; head `d8ac40f38024c866afd733a891138d2c121f262c`; merge `78bfbfbcd1b33bfb61758ff8d9f51439f97ae07e` | Merged accepted-base input. `sessions_for` returns historical branch-active sessions; latest exemplars include `019f3ff1-7f85-7812-8255-77481331c0a9` and `019f3ff1-d87f-7f40-9cff-275e15bf589a`. |
 | Copied subagent prompt query semantics | PR #410; head `a40b01f714359759b3d0d0ae0c746ad00ef7e72f`; master commit `f4494c3ad7c354637ed5cafde7ad43af8926ca9b` | Merged current-master input; historical `sessions_for`/`workflows` zero remains a capture/correlation coverage fixture. |
 | Foreign skill ownership/remediation | PR #411; head `35350972439090f6a5279e521a3c70d59427967f`; merge `e0b3cc36a355b1fcddf87b0b08f49a69ded8585d` | Merged current-master input. |
 | Safe daemon upgrade drain | PR #412; merge commit `99ad19bc12b817f9959f740c40f0dbd5e286f16c` | Current-master lifecycle invariant. |
@@ -219,7 +219,8 @@ This is a private corpus reference, not a distributable PR fixture. `gitleaks 8.
 | Race-safe move-symbol writes | PR #419; head `109d31c3698fbd6a4b50324afd2b30feff8309f3`; merge `66584b4dbdee920204cbcf4cf42d0dbc308559e4` | Merged command/precondition/filesystem/rollback base input. |
 | MCP daemon hot-swap routing | PR #420; head `7f84436ca7ab18732ff344ac9a93169e83813a68`; merge `6b05327f67cefb8e11b0ad8bca60e0f921c524e1` | Merged composition/lifecycle/current-client input: proxy authority before local store open, per-request reconnect, no uncertain write replay, and explicit new-session/tool-schema refresh boundary. |
 | MCP generation-scoped tool refresh | PR #422; head `9487230ceaa46ca57aee01c45406c7bf24e29ddc`; merge `9f7a110805edf226bb0d665d6f4ff5c4f03c6163` | Merged input: negotiate `tools.listChanged`, notify a long-lived client once per daemon generation including same-version restarts, bound non-evicting client dedupe, and direct recovery at the stale host or daemon. |
-| Memory FTS direction and retrieval telemetry | PR #423; branch `codex/fact-retrieval-ranking-telemetry`; head `c3b7780ea741806bf551629eed91e9323637b89a`; base `9f7a110805edf226bb0d665d6f4ff5c4f03c6163` | Open future-master input at final audit. Replaces absolute-value FTS5-rank conversion with monotonic negated-BM25 normalization; adds exact operational evidence versus unrelated V2-plan facts, rare-term coverage, explicit-search counters, untracked context enrichment, and analytics assertions. Refresh merge/CI state before implementation. TraceDecay `pr_context` could not inspect it because both explicit worktree/root requests hit the selected-versus-legacy identity cutover conflict; live GitHub plus bounded Git diff supplied the fallback evidence. |
+| Memory FTS direction and retrieval telemetry | PR #423; branch `codex/fact-retrieval-ranking-telemetry`; head `b4aa14a26ed777c5d83e0cc127e3c0bddd053457`; base `9f7a110805edf226bb0d665d6f4ff5c4f03c6163`; merge `59003e656b1058191cb57882a07999e3bc8e96b5` | Merged accepted-base input. Replaces absolute-value FTS5-rank conversion with monotonic negated-BM25 normalization; adds exact operational evidence versus unrelated V2-plan facts, rare-term coverage, explicit-search counters, untracked context enrichment, and analytics assertions. TraceDecay `pr_context` could not inspect it because both explicit worktree/root requests hit the selected-versus-legacy identity cutover conflict; live GitHub plus bounded Git diff supplied the fallback evidence. |
+| Analytics aggregate-before-sample correction | PR #424; branch `codex/analytics-section-aggregation`; head `04d8d2de40beff5c638034e2b0a2254262c1cbce`; base `59003e656b1058191cb57882a07999e3bc8e96b5`; merge `6c4b8b91dad2efdcaefab0153475287f37c2caee` | Merged accepted-base input. Computes exact event totals and DB-side tool/hint rollups before rendering, removes the generic latest-10,000 aggregate cap, adds project/time indexes, and tests >10,000 events. A TraceDecay-first `pr_context` attempt still hit the selected-versus-legacy identity conflict after #407/#423 merged; GitHub metadata plus bounded patch supplied the evidence. |
 
 ### 4.5 Cross-project and worktree failure anchors
 

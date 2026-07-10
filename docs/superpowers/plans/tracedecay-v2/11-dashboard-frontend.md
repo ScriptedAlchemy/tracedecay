@@ -36,7 +36,7 @@ This plan refines master-plan PRs 4A and 25–32. It depends on the V2 domain, q
 12. The shipped UI is code-native. Image-generated concepts are implementation references, not rasterized application screens.
 13. Doctor/provider/daemon branding is evidence-driven: foreign-owned packages are informational, partial integrations are labeled partial, and upgrade completion requires a durable drain/recovery receipt rather than a green icon inferred from process exit.
 
-Publication refresh (2026-07-10): `origin/master` was `9f7a1108`; #410/#411/#413/#414/#415/#416/#417/#419/#420/#422 were merged and #407/#418/#423 were open. The implementation lead must refresh again. The UI inventory treats #410 message views, #411 doctor authority, #415 release integrity, #417 identity split, #414/#419 race-safe `move_symbol` execution/conflict receipts, #420 proxy-before-store/reconnect/no-write-replay behavior, and #422 negotiated tool-list refresh per daemon generation/stale-host-versus-daemon recovery as current; #423's rank direction/explanation/counter behavior remains a future input until merge.
+Publication refresh (2026-07-10): `origin/master` was `6c4b8b91`; #407/#410/#411/#413/#414/#415/#416/#417/#419/#420/#422/#423/#424 were merged and #418 was open. The implementation lead must refresh again. The UI inventory treats ordinary-profile Hermes, #410 message views, #411 doctor authority, #415 release integrity, #417 identity split, #414/#419 race-safe `move_symbol` execution/conflict receipts, #420 proxy-before-store/reconnect/no-write-replay behavior, #422 negotiated tool-list refresh, #423 rank direction/explanation/counters, and #424 exact aggregate-before-sample analytics as current.
 
 ## 2. Product model and design direction
 
@@ -1578,7 +1578,7 @@ Expected: all pass. Before executing Rust compiler/check commands, use TraceDeca
 ## 24. Plan self-review checklist
 
 - [ ] Master-plan routes, Brain, Explorer, Loom, domain workspaces, labs, visualization, privacy, parity, performance, and deletion are each mapped to tasks/tests.
-- [ ] Merged #405/#410/#411/#412/#413/#414/#415/#416/#417/#419/#420/#422 semantics, open #407/#418/#423 inputs, and closed #409 history are reflected in identity/profile, message/fact views and ranking explanations, doctor authority, race-safe move-symbol parity, daemon/proxy/update recovery, generation-scoped inventory refresh, release state, and stale-client behavior.
+- [ ] Merged #405/#407/#410/#411/#412/#413/#414/#415/#416/#417/#419/#420/#422/#423/#424 semantics, open #418 input, and closed #409 history are reflected in identity/profile, message/fact views and ranking explanations, denominator-safe exact analytics, doctor authority, race-safe move-symbol parity, daemon/proxy/update recovery, generation-scoped inventory refresh, release state, and stale-client behavior.
 - [ ] Generated application/API/hook/tool-catalog contracts are consumed without browser-owned business logic.
 - [ ] Every graph lens names legal nodes/edges/layout/fallback/evidence.
 - [ ] Agent proximity/coordination preserves expiring claim evidence, same/parallel-worktree semantics, safe summary/anchor/recipe, audited actions, one-hint dedupe, Coordination Lab, and analytics.

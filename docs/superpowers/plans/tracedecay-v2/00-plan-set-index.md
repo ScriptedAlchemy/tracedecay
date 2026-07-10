@@ -63,7 +63,7 @@ When documents overlap:
 
 1. Master sections 1–9, 18–24.
 2. Plans 01, 02, 05, 06, 09, and 12.
-3. Plans 13–24 as non-negotiable evidence/scope/API/privacy/convergence/task-execution gates.
+3. Plans 13–26 as non-negotiable evidence/scope/API/privacy/convergence/task-execution/code-indexing/observability gates.
 
 ### Storage and migration implementer
 
@@ -104,7 +104,7 @@ When documents overlap:
 
 ### Test/evaluation lead
 
-1. Plans 13–16 and 22–24.
+1. Plans 13–16 and 22–26.
 2. Every plan’s Definition of Done and verification sections.
 3. Master phase/PR gates and SLO section.
 
@@ -132,6 +132,16 @@ When documents overlap:
 1. Plan 24 in full plus plans 01, 02, 04–06, 08–10, 16–17, and 20–23.
 2. Hermes source/transcript anchors and wrong-board, copied-task, lost-dependency, already-complete-dispatch, and stale-worker regressions in plans 13–14.
 3. Canonical identity, multi-project declared scope, typed dependency edges, versioned context packets, executor capability routes, claims/run fencing, budget/effect grants, task-aware hints, board projections, and replay gates.
+
+### Code-intelligence implementer
+
+1. Plan 25 in full plus plans 01–05, 12, 14, 16, 18, and 19.
+2. Parser/grammar registry, capture-sanitized payload references, watcher intake, deterministic incremental reuse, packed generations/overlays, symbol lineage, diagnostics/test attribution, V1 graph-store dispositions, and 10× scale gates.
+
+### Observability/accounting implementer
+
+1. Plan 26 in full plus plans 01–06, 08–12, 15, 20–24.
+2. Generated surface vocabulary, denominator-safe metric descriptors/rollups, cap/truncation anchors, adoption and hint outcomes, SLOs, pricing/savings methodology, replay exclusion, Observatory contracts, and V1 analytics receipts.
 
 ## 4. Locked architectural decisions
 
@@ -165,6 +175,8 @@ When documents overlap:
 - Executor selection is explicit and typed: host/provider/model/reasoning effort, tool and effect grants, privacy/egress class, cost/time budgets, retry/concurrency policy, and availability resolve to an immutable route receipt. Codex, Claude, Cursor, Hermes, and future executors are adapters, not task owners.
 - Every dispatched run uses a compare-and-swap task revision, TTL/heartbeat claim, artifact/worktree overlap set, idempotency key, and unforgeable run fence. Completion/cancellation revokes stale authority; dependency readiness comes only from current canonical edges.
 - Versioned context packets bind task revision, scope, dependency outcomes, exact Thread/Turn anchors, code/Git/PR state, active claims, retrieval/config versions, source watermarks, visibility policy, budget, and digest. Agents receive only materially relevant, recipient-authorized sibling summaries; neither boards nor long threads become implicit context.
+- `tracedecay-code-index` is the sole production owner of code extraction, grammar registration, watcher intake, incremental reuse, generation construction, lineage, and diagnostic/test attribution. Packed generations reference plan-02 privacy-domain blobs; they never embed a second source-body store.
+- Metric definitions, surface codes, denominators, caps, horizons, pricing/savings methods, and SLOs are registered/versioned contracts. `unknown`, `partial`, and `capped` never render as known zero, and observability cannot create a second event/accounting path.
 
 ## 5. Dependency and implementation order
 
@@ -193,6 +205,10 @@ flowchart TD
     P --> T
     T --> A
     T --> UI
+    S --> O["Accounting and observability projections"]
+    Q --> O
+    A --> O
+    O --> UI
     M --> X["Bounded cutovers, V2 default, V1 retirement"]
 ```
 

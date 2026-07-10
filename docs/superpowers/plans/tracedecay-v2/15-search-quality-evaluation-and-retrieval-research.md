@@ -6,7 +6,7 @@
 
 **Decision:** Keep exact phrase/BM25 as the mandatory baseline. Evaluate character-fuzzy, entity/graph, local dense, learned-sparse, fusion, late interaction, cross-encoder reranking, expansion, recency, clustering, and diversification as independently removable stages. No neural component becomes default without measured real-world gains.
 
-**Publication baseline (2026-07-10):** `origin/master` `9f7a1108`; #410/#411/#413/#414/#415/#416/#417/#419/#420/#422 merged, #407/#418/#423 open. Refresh before corpus freeze. Treat #410 origin/representative views, #414/#419 `move_symbol` capability/safety text, #417 split identity, #420 proxy/store authority, and #422 host-versus-daemon catalog-refresh semantics as current searchable kinds; split identity is a hard wrong-scope/unsafe-remediation regression, not “no index.” Treat #423's direction-preserving FTS5 normalization and exact-operational-evidence/counter fixture as incoming future-master behavior until merge/green CI, while retaining the absolute-rank reversal as a labeled regression.
+**Publication baseline (2026-07-10):** `origin/master` `6c4b8b91`; #407/#410/#411/#413/#414/#415/#416/#417/#419/#420/#422/#423/#424 merged, #418 open. Refresh before corpus freeze. Treat #410 origin/representative views, #414/#419 `move_symbol` capability/safety text, #417 split identity, #420 proxy/store authority, #422 host-versus-daemon catalog-refresh semantics, #423 direction-preserving FTS5 normalization/exact-operational-evidence/counters, and #424 aggregate-before-sample analytics as current behavior; retain their pre-fix failures as labeled regressions.
 
 ## 0. Boundary and contract integration
 
@@ -119,7 +119,7 @@ Each channel returns a bounded candidate list with channel rank/score, matching 
 
 The private qrel store belongs to the active profile and is never committed. A redacted/synthetic subset plus aggregate metrics is checked in.
 
-The frozen research corpus this program draws on is pinned by its owner, plan [`13-research-provenance-and-context-anchors.md`](13-research-provenance-and-context-anchors.md): path set `/fast/tracedecay-redesign-research/*`, file mode `0600`, capture cutoff `2026-07-09T23:15:42Z`, integrity verified against plan 13's manifest hashes. Evaluation inputs derived from it cite that manifest, and no private content from it enters the repository.
+The frozen research corpus this program draws on is pinned by its owner, plan [`13-research-provenance-and-context-anchors.md`](13-research-provenance-and-context-anchors.md): path set `/fast/tracedecay-redesign-research/*`, file mode `0600`, final user-message cutoff `2026-07-10T02:21:15.411Z`, integrity verified against plan 13's manifest hashes. The manifest distinguishes the broad supported-surface capture from the 28-record active-session raw-rollout fallback. Evaluation inputs derived from it cite that manifest, and no private content from it enters the repository.
 
 ### 5.1 Query sources
 
@@ -305,31 +305,31 @@ Companion ownership:
 
 ## 10. PR sequence
 
-### PR 13A: Time-safe real-world eval harness and current baselines
+### Companion requirements for PR 13A: Time-safe real-world eval harness and current baselines
 
 - Implement the private corpus/qrel stores per the §5.4 `JudgmentRecordV1` contract, stable anchors, time cutoff, strata, pooling, labels, metrics, agreement, aggregate/redacted reports.
 - Capture the six-query probe plus exact identifier, typo, no-answer, cross-project, provider, Git, memory, and nearby-agent fixtures.
 - Benchmark current production and fielded BM25 without changing default search.
 
-### PR 13B: Exact/phrase/BM25, origin/kind fields, self-echo, clustering
+### Companion requirements for PR 13B: Exact/phrase/BM25, origin/kind fields, self-echo, clustering
 
 - Implement query understanding, exact preservation, fielded BM25, origin/audience/kind filters, query/tool-echo penalty, representative cluster, hidden counts, rank explanation.
 - Prove native expansion and exact technical regression gates.
 
-### PR 13C: Fuzzy/typo and diversity
+### Companion requirements for PR 13C: Fuzzy/typo and diversity
 
 - Add character channel, alias handling, MMR/session-project-provider diversity, adversarial typo corpus, and resource caps.
 
-### PR 14A: Optional dense and learned-sparse channels
+### Companion requirements for PR 14A: Optional dense and learned-sparse channels
 
 - Benchmark local dense and SPLADE-style candidates inside privacy domains; version model/dimension/tokenizer/index.
 - Keep both disabled by default until gates pass.
 
-### PR 14B: Hybrid fusion, bounded graph, and hard-negative loop
+### Companion requirements for PR 14B: Hybrid fusion, bounded graph, and hard-negative loop
 
 - Add RRF profiles, typed bounded graph expansion, hard-negative mining, cross-project/provider/time holdouts, and ablations.
 
-### PR 14C: Optional late interaction/cross-encoder rerank
+### Companion requirements for PR 14C: Optional late interaction/cross-encoder rerank
 
 - Compare no rerank, late interaction, and local cross-encoder on a bounded pool; include warm/cold/resource measurements and deterministic fallback.
 

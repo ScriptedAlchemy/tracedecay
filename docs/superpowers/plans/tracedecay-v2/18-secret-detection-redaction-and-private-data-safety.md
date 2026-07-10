@@ -12,7 +12,7 @@ Plans 22–23 add model prompts/outputs, suggestion envelopes, query literals/lo
 
 Plan 24 adds initiative/plan/task text, dependency/acceptance/decision records, executor manifests/routes, capability grants, context packets, sibling summaries, workspaces, logs, handoffs, artifacts, outcomes, costs, adapter streams, task views, and orchestration fixtures as explicit sources/sinks. Lease proofs and credentials are protected control-plane values that never enter ordinary stores, prompts, logs, transports, screenshots, exports, or research anchors.
 
-**Publication baseline (2026-07-10):** source audit is against master through `9f7a1108`; #410/#411/#413/#414/#415/#416/#417/#419/#420/#422 merged and #407/#418/#423 open. Refresh before implementation. Merged #415 release integrity is complementary, not a replacement for secret scanning; #414/#419 edit requests/diffs/impact/rollback conflicts, #417 safe split-store diagnostics, #420 proxy/reconnect/errors, and #422 catalog-generation notifications/handshakes are mandatory input/output canary surfaces. #423's new fact fixture is also a secret-scan input before merge because retrieval tests must never copy private operational text from a live store.
+**Publication baseline (2026-07-10):** source audit is against master through `6c4b8b91`; #407/#410/#411/#413/#414/#415/#416/#417/#419/#420/#422/#423/#424 merged and #418 open. Refresh before implementation. Merged #415 release integrity is complementary, not a replacement for secret scanning; #414/#419 edit requests/diffs/impact/rollback conflicts, #417 safe split-store diagnostics, #420 proxy/reconnect/errors, #422 catalog-generation notifications/handshakes, #423 retrieval fixtures, and #424's >10,000-event aggregate fixture are mandatory input/output canary surfaces and must never copy private operational text from a live store.
 
 ## 1. Verdict on the current system
 
@@ -68,7 +68,7 @@ These are named regression rows in PR 2B/7A/10A/24H/33A. A generic “secret sca
 | `session:bb6a2927-0ae6-46ed-9aed-b2e5928eb20a` | Parity review found quoted multi-word password behavior diverged across implementations. | One canonical detector/redactor implementation and conformance corpus serve every provider/transport. |
 | Current planning parent `session:019f4906-a411-7a11-ad3f-0d58deb0e847` | Plan/corpus secret scan found default scanner false positives on private-key markers; parsed-value validation rejected a serialized-JSON cross-field URL alert; conservative sanitization was required. | Parse structured fields before scanning; never run permissive credential regex across serialized record boundaries; report no candidate content. |
 
-The private chronological research corpus remains outside Git and mode `0600`. Its sanitized canonical files contain 34,305 native `role=user` rows and 9,941 best-effort human rows; `gitleaks 8.30.1` reports zero findings after conservative redaction. The corpus is still not a fixture and must never be ingested into a TraceDecay test/profile store.
+The private chronological research corpus remains outside Git and mode `0600`. Its sanitized canonical files contain 34,333 native `role=user` rows and 9,969 best-effort human rows, including a manifest-labeled 28-record root-rollout fallback after supported replay failed; `gitleaks 8.30.1` reports zero findings after conservative redaction. The corpus is still not a fixture and must never be ingested into a TraceDecay test/profile store.
 
 ## 3. Non-negotiable security invariants
 
@@ -657,26 +657,26 @@ Integrate these slices into the master Phase 0–5 sequence.
 - Add `Unclassified` -> `Classified` -> `Sanitized` -> sink-eligible conversions and compile-fail architecture tests.
 - Remove secret lengths/unkeyed content digests from public marker contracts.
 
-### PR 6B — Sanitized blob storage, protected quarantine, and key service
+### Companion requirements for PR 6B — Sanitized blob storage, protected quarantine, and key service
 
 - Add isolated random-ID encrypted blobs, per-record DEK wrapping, OS-keyring profile KEK, private I/O, TTL/holds, access audit, cryptographic deletion, and recovery tests.
 - Prove unavailable keyring fails to sanitized-only/drop without plaintext fallback.
 
-### PR 7A — Mandatory structured sanitizer and provider conformance
+### Companion requirements for PR 7A — Mandatory structured sanitizer and provider conformance
 
 - Implement parse-before-scan engine, built-ins, bounded decoding, span merge/replacement, policy precedence, receipts, and fail-closed budgets.
 - Wrap providers/hooks one at a time in shadow/differential mode, then make sanitized observation the only journal input.
 - Retire message-metadata opt-out; source metadata may only strengthen policy.
 - Route Hermes/legacy projection-only ingest, post-model summaries, response-handle payload preparation, and bounded transport-error detail through the same taint-state boundary.
 
-### PR 10A — Projector sink firewalls and descendant lineage
+### Companion requirements for PR 10A — Projector sink firewalls and descendant lineage
 
 - Require sink-eligible types for session/FTS/vector/code/knowledge/policy/automation/analytics/cache projectors.
 - Record sanitized descendants so one finding can preview/block/rebuild every derivative.
 - Remove secret candidate previews from memory curation and equivalent inspection paths.
 - Reject direct V11 fact/vector inserts, raw memory tag/entity/source/metadata projection, duplicate-command hook analytics, and content-bearing backup/response-handle filesystem writes at architecture and sink-canary gates.
 
-### PR 12C — Privacy-aware query and global containment
+### Companion requirements for PR 12C — Privacy-aware query and global containment
 
 - Enforce authorization, safe markers, blocked/redacted/unknown coverage, no content fingerprints, cache invalidation, and cross-shard containment.
 - Prove an unsafe shard/entity cannot leak through search, graph expansion, aggregation, ranking explanation, cursor, or exact-load routing.

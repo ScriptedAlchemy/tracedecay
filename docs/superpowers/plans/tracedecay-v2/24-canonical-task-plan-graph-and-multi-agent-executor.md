@@ -1453,7 +1453,7 @@ Executor registrations are host/runtime instances, not durable personas. Actor/a
 
 Provider coverage is truthful. If a host cannot expose an exact Turn, actual model, effort, tool event, cancellation receipt, or usage, the field is `Unavailable(reason)` and related claims remain partial. No adapter synthesizes fake native IDs.
 
-Hermes reconciliation (cited by master §2.6 row #407): TraceDecay gives Hermes exactly two V2 roles. First, during migration, Hermes is a capture source and import-evidence provider — under the PR #407 user-profile consolidation its transcripts and historical Kanban stores are read as external evidence sources feeding the §16 import rules and the plan 13 evidence registry. Second, at execution time, Hermes is one executor adapter behind the §10.1 SPI, registered, fenced, and receipted exactly like Codex, Claude, Cursor, and custom adapters. The Hermes executor adapter is a new SPI implementation: it does not revive or depend on the bridges/config/inventory that #407 removes, and enabling it presupposes the #407 consolidation ledger (still open at the 2026-07-10 baseline; refresh before implementation). In neither role does Hermes own tasks — there is never a parallel Hermes task-owning silo, shared Kanban DB authority, or Hermes-side scheduler for canonical work.
+Hermes reconciliation (cited by master §2.6 row #407): TraceDecay gives Hermes exactly two V2 roles. First, during migration, Hermes is a capture source and import-evidence provider — under merged PR #407's user-profile consolidation, its transcripts and historical Kanban stores are read as external evidence sources feeding the §16 import rules and the plan 13 evidence registry. Second, at execution time, Hermes is one executor adapter behind the §10.1 SPI, registered, fenced, and receipted exactly like Codex, Claude, Cursor, and custom adapters. The Hermes executor adapter is a new SPI implementation: it does not revive or depend on the bridges/config/inventory that #407 removed, and enabling it requires #407's accepted consolidation ledger. In neither role does Hermes own tasks — there is never a parallel Hermes task-owning silo, shared Kanban DB authority, or Hermes-side scheduler for canonical work.
 
 ### 10.4 Worker start and prompt/tool contract
 
@@ -1693,6 +1693,8 @@ Kanban columns derive from `EffectiveReadinessV1`/resolution and are labeled wit
 
 Board selector is a saved-view query. There is no persisted global current board and no all-board dispatcher. Cross-project writes display the exact initiative/scope and require authorization.
 
+Saved views may overlap deliberately. A user can keep `Initiative: runtime change — All`, `Rspack`, `Rsbuild`, `React Router plugin`, `Codex queue`, `Claude queue`, `Integration fan-in`, and `My blocked work` open at once; each stores only a versioned `TraceQueryV1`, presentation/grouping, and authorization policy. Moving an item between lanes changes canonical work only through the legal command named above; adding/removing a saved-view filter changes no task, dependency, route, claim, or subscription. One work item can therefore appear simultaneously on a repository board, a provider workload board, and the initiative DAG without copies or competing status.
+
 ### 12.4 DAG, critical path, timeline, and causal lenses
 
 - **DAG:** legal gating edges, fan-in/out, gate expressions, cycle witness, collapsed subplans, semantic zoom, table fallback.
@@ -1904,11 +1906,15 @@ flowchart LR
 
 Triage tasks are independently claimable and intentionally diverse. Example routing must cover separate Codex, Claude, Cursor, and Hermes/custom registrations with explicit provider/model/effort/tool grants. Verifier consumes all required handoffs, flags scope/source disagreements, and cannot pass on simple majority. Synthesizer creates decisions, acceptance criteria, and implementation dependencies. Implementation tasks bind distinct worktrees/branches and cannot mutate sibling repos without grants. Integration verifier runs exact affected/ecosystem tests at pinned commits. Delivery work is separately authorized.
 
+The fixture must also exercise a realistic manual partition: the user pins a handful of Rspack/plugin work items to eligible Codex routes, a different handful of Rsbuild/integration items to eligible Claude routes, leaves two discovery tasks policy-routable, and later rebalances one unstarted item. Assignment is a versioned route constraint, not board membership; provider queue views are projections over requested/actual route receipts. Rebalancing cannot steal a live lease, change an attempt's start manifest, expose sibling prompts, or erase the original decision. An agent active in two initiatives receives two distinct attempt packets and task-aware slices, never the union of both boards.
+
 ### 15.2 Context and notification expectations
 
 Each triage packet includes only its repository scope plus initiative objective, shared acceptance, relevant historical anchors, and read-only sibling-repository interface evidence. It does not dump all sessions or sibling prompts. Verifier packet includes triage handoffs/contradictions. Implementation packets include accepted synthesis decisions, exact parent artifacts, relevant sibling interfaces, tests, worktree/base bindings, and residual risk.
 
 If the Rspack task changes an interface used by Rsbuild, projector emits a material event. Plan 22 may deliver one exact advisory to the active Rsbuild implementation Turn with safe summary + anchors. Unchanged heartbeat/progress, unrelated file edits, or planned parallel benchmarking produces no hint. Dashboard updates the shared projection without messaging every agent.
+
+Context packets and hints distinguish shared initiative context from provider partitioning. Every worker gets the common objective, acceptance contract, dependency decisions, and exact cross-repository interface anchors needed for its work, plus only material sibling deltas since its packet watermark. It never receives “Claude is on board X” as ambient prose: it receives a typed related-work summary naming canonical work-item/attempt IDs, safe status, relation/materiality reason, affected interface/resource, and retrieval anchors. The same record powers the dashboard overlap lens, `find-nearby-work`, packet refresh, and useful-silence replay so coordination cannot fork into four inconsistent awareness systems.
 
 ### 15.3 Required assertions
 
@@ -1936,7 +1942,7 @@ Before migration, inventory:
 - current TraceDecay goals, tasks, workflows, work claims, agent presence, automation jobs/runs/artifacts, scheduler decisions, and coordination events;
 - provider-native Codex goals/plans, Claude workflows, Cursor/Hermes agent runs, subagent/delegation relations, and provider task-like metadata;
 - Git branches/worktrees/commits/PRs/checks/releases associated with work;
-- external issue/task systems and optional Hermes Kanban stores configured as capture sources (after the PR #407 user-profile consolidation these arrive through the user-profile capture source; refresh #407 merge state before import);
+- external issue/task systems and optional Hermes Kanban stores configured as capture sources (after merged PR #407, these arrive through the ordinary user-profile capture source; refresh the recorded source/merge manifest before import);
 - dashboard/private plugin task state, CLI/MCP commands, config keys, logs, and notification subscriptions.
 
 Classify each source as canonical candidate, external observed entity, alias, projection, artifact, or obsolete duplicate. Observation does not automatically materialize schedulable work.

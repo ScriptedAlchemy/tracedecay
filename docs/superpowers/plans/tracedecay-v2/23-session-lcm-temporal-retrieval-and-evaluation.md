@@ -8,7 +8,7 @@
 
 **Decision:** Recency is a feature, never a truth rule. “Current,” “as of,” “show the evolution,” and “forensic/exhaustive” are explicit answer modes. A newer weak mention does not erase an older authoritative decision; an older exact lexical match does not outrank an explicit later correction when the user asks for current state. Contradictions remain visible, and uncertain supersession causes a conflict warning rather than a fabricated winner.
 
-**Current baseline:** The plan was audited on 2026-07-10 against `origin/master` `9f7a110805edf226bb0d665d6f4ff5c4f03c6163`, including merged #420 daemon hot-swap routing and #422 tool-list refresh after daemon generation change; #407, #418, and retrieval-ranking PR #423 remained open. Refresh the source snapshot and live corpus before freezing implementation baselines. Current source anchors and live probe receipts below are historical evidence, not permanent behavior contracts.
+**Current baseline:** The plan was audited on 2026-07-10 against `origin/master` `6c4b8b91dad2efdcaefab0153475287f37c2caee`, including merged #407 ordinary-profile Hermes ownership, #420 daemon hot-swap routing, #422 tool-list refresh after daemon generation change, #423 retrieval-rank/counters, and #424 aggregate-before-sample analytics; #418 remained open. Refresh the source snapshot and live corpus before freezing implementation baselines. Current source anchors and live probe receipts below are historical evidence, not permanent behavior contracts.
 
 ---
 
@@ -648,7 +648,7 @@ Build a private, sanitized, versioned corpus from authorized local history:
 
 Queries are frozen at an `available_at` cutoff. Candidates, summaries, branches, facts, corrections, and labels created later cannot enter a historical replay. Replay also rebuilds index statistics (for example BM25 document frequencies) from the frozen `available_at < t` corpus, so ranking features cannot leak future corpus statistics.
 
-The frozen research corpus this program draws on is pinned by its owner, plan [`13-research-provenance-and-context-anchors.md`](13-research-provenance-and-context-anchors.md): path set `/fast/tracedecay-redesign-research/*`, file mode `0600`, capture cutoff `2026-07-09T23:15:42Z`, integrity verified against plan 13's manifest hashes. Session-temporal evaluation inputs derived from it cite that manifest, and no private content from it enters the repository.
+The frozen research corpus this program draws on is pinned by its owner, plan [`13-research-provenance-and-context-anchors.md`](13-research-provenance-and-context-anchors.md): path set `/fast/tracedecay-redesign-research/*`, file mode `0600`, final user-message cutoff `2026-07-10T02:21:15.411Z`, integrity verified against plan 13's manifest hashes. The manifest distinguishes the broad supported-surface capture from the 28-record active-session raw-rollout fallback. Session-temporal evaluation inputs derived from it cite that manifest, and no private content from it enters the repository.
 
 ### 8.2 Minimum evidence gates
 
@@ -865,7 +865,7 @@ Exact transport names derive from Plan 08/21's catalog. Required use cases:
 - `POST /api/v2/retrieval-anchors:batch` for authorized hydration;
 - `POST /api/v2/context:assemble`;
 - task/ticket context assembly through the same route with typed task/initiative/dependency/claim selectors;
-- `POST /api/v2/session-replay` and `POST /api/v2/thread-replay`;
+- `POST /api/v2/sessions/{id}/replay` and `POST /api/v2/threads/{id}/replay`;
 - `GET /api/v2/temporal-assertions/{id}/lineage`;
 - `POST /api/v2/labs/search-quality:replay` and `POST /api/v2/labs/search-quality:compare` (the plan 15 §9 Search Quality Lab routes; no separate session-lab endpoint);
 - versioned corpus/judgment/evaluation reads and authorized commands;

@@ -465,7 +465,7 @@ Required canonical Turn relations are `part_of_session`, `performed_by`, `contai
 
 Projectors must consume the machine-readable PR 3 compatibility inventory. CI fails when a new V1 structured event kind, provider tool kind, CLI/MCP field, LCM table/sidecar, hook terminal state, or automation artifact kind lacks a registry owner and parity disposition.
 
-Planning began at `99ad19bc`; publication master `9f7a1108` includes #410/#411/#413/#414/#415/#416/#417/#419/#420/#422. Open #407/#418/#423 remain refresh inputs; #417 identity-split visibility is a mandatory projection/Observatory conflict fixture, while #419 edit conflicts, #420 proxy/reconnect transitions, #422 generation-scoped catalog-refresh notifications, and #423 fact retrieval/counter events require projected receipts/status without inferred success or replay. PR #409 remains historical. Before each backfill/cutover PR, refresh master/open state, source/projector registry digests, and actual protocol/schema/tool inventories.
+Planning began at `99ad19bc`; publication master `6c4b8b91` includes #407/#410/#411/#413/#414/#415/#416/#417/#419/#420/#422/#423/#424. Open #418 remains a refresh input; #417 identity-split visibility is a mandatory projection/Observatory conflict fixture, while #419 edit conflicts, #420 proxy/reconnect transitions, #422 generation-scoped catalog-refresh notifications, #423 fact retrieval/counter events, and #424 aggregate-before-sample behavior require projected receipts/status without inferred success or replay. PR #409 remains historical. Before each backfill/cutover PR, refresh master/open state, source/projector registry digests, and actual protocol/schema/tool inventories.
 
 ## Ownership and identity rules
 
@@ -480,7 +480,7 @@ Planning began at `99ad19bc`; publication master `9f7a1108` includes #410/#411/#
 
 ## Deterministic backfill sequence
 
-1. Freeze a copied V1 inventory watermark at publication base `9f7a1108`; record merged #405/#410/#411/#412/#413/#414/#415/#416/#417/#419/#420/#422 separately from open-assumed #407/#418/#423; run disk preflight and secret scan.
+1. Freeze a copied V1 inventory watermark at publication base `6c4b8b91`; record merged #405/#407/#410/#411/#412/#413/#414/#415/#416/#417/#419/#420/#422/#423/#424 separately from open-assumed #418; run disk preflight and secret scan.
 2. Import identity allocations, profile/repository/project/checkout/worktree/provider/source aliases, legacy adoption manifests, and Hermes migration ledgers; resolve no ambiguous identity automatically.
 3. Project canonical observations to events, then sessions, turns, messages/content, actors/models, tools/results/approvals, exposed reasoning markers, goals/tasks/plans, agent/workflow/handoff/inter-agent events in `activity.db`.
 4. Project LCM raw/source/summary DAG, compression/context assembly, payload state, lifecycle, and tombstones after canonical message IDs exist.
@@ -535,7 +535,7 @@ Each step is independently resumable by `(projector, version, shard, generation,
 
 - [ ] Write failing tests for exact event IDs, correction supersession, unknown future schema, illegal relation endpoints, causal evidence rules, ambiguous alias candidates, moved/symlink/linked-worktree identity, pristine legacy adoption, nonempty split conflict, and Hermes user-profile ownership.
 - [ ] Implement `canonical_event_v1` and `identity_alias_v1` with complete capture payload-kind ownership.
-- [ ] Refresh publication base `9f7a1108`, record every merged commit/protocol/schema version, and record open #407/#418/#423 as separate future inputs whose disposition must be refreshed before execution.
+- [ ] Refresh publication base `6c4b8b91`, record every merged commit/protocol/schema version, and record open #418 as a separate future input whose disposition must be refreshed before execution.
 - [ ] Run `cargo test -p tracedecay-projectors --test framework_suite`; expected: exit 0 with no unowned capture kind.
 - [ ] Run `cargo test -p tracedecay-projectors --test backfill_parity identity`; expected: one canonical identity per adopted/Hermes fixture and explicit conflict rows for nonempty collisions.
 - [ ] Commit `feat(projectors): project canonical events and identity`.
