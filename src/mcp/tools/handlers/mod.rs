@@ -1059,11 +1059,12 @@ mod tests {
         // host CLI capabilities they need; agents should never see a tool that
         // will instantly fail. The count and per-tool checks below adapt to
         // the host's capability set.
-        let expected_total = 102 + usize::from(super::super::definitions::ast_grep_available());
+        let expected_total = 103 + usize::from(super::super::definitions::ast_grep_available());
         assert_eq!(tools.len(), expected_total);
 
         let tool_names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
         assert!(tool_names.contains(&"tracedecay_search"));
+        assert!(tool_names.contains(&"tracedecay_move_symbol"));
         assert!(tool_names.contains(&"tracedecay_analytics"));
         assert!(tool_names.contains(&"tracedecay_retrieve"));
         assert!(tool_names.contains(&"tracedecay_context"));
