@@ -1315,7 +1315,7 @@ Modes:
 - Show evidence windows, exact supporting events, confidence features, conflicts, and alternative matches.
 - Promote labeled cases into correlation evals.
 
-### 16.6 Scheduler and Automation Lab
+### 16.6 Scheduler Lab
 
 - Re-run schedule/lock/no-new-activity/apply-policy decisions as-of a historical time.
 - Show effective config source, input watermarks, skip reason, lease/lock owner, proposed work, and mutations that would occur.
@@ -1357,7 +1357,7 @@ This is the product home for Hermes-style self-improvement across managed skills
 - Include the Hermes wrong-board/copy/lost-dependency/already-complete/stale-worker regression and the multi-repository Rspack/Rsbuild/React Router Codex/Claude fan-out/fan-in fixture.
 - Never claim, lease, schedule, spawn, send, consume budget, change a circuit breaker, publish a work item, or mutate analytics/curation; the application-level side-effect guard fails closed.
 
-### 16.11 Message Search Quality Lab
+### 16.11 Search Quality Lab
 
 - Run one query or a frozen multi-project corpus through lexical, phrase, fuzzy, entity/graph, dense, recency, fusion, clustering/diversity, and reranking stages independently or together.
 - Show candidates per stage, component ranks/scores, matched fields/entities/relations, duplicate/echo cluster, audience/origin, exclusions, privacy, coverage, latency, and final explanation.

@@ -271,6 +271,7 @@ crates/
 ├── tracedecay-store/           # repository implementations, migrations, journal, blobs
 ├── tracedecay-capture/         # source SPIs/adapters, normalization, privacy engine, spools
 ├── tracedecay-projectors/      # deterministic observation -> projection handlers
+├── tracedecay-code-index/      # code extraction, incremental indexing, packed graph-generation builds (plan 25)
 ├── tracedecay-query/           # TraceQueryV1 parser/execution, federation, search, graph/time, explain
 ├── tracedecay-policy/          # pure versioned evaluators and replay
 ├── tracedecay-hooks/           # bounded host event/delivery adapters
@@ -301,6 +302,7 @@ flowchart TD
     S["tracedecay-store"] --> D
     C["tracedecay-capture"] --> D
     J["tracedecay-projectors"] --> D
+    CI["tracedecay-code-index"] --> D
     Q["tracedecay-query"] --> D
     P["tracedecay-policy"] --> D
     T["tracedecay-tool-catalog"] --> D
@@ -321,6 +323,7 @@ flowchart TD
     R --> S
     R --> C
     R --> J
+    R --> CI
     R --> Q
     R --> P
     R --> H
@@ -369,7 +372,7 @@ Every SPI has:
 | SPI | Owner | Extension can do | Extension cannot do |
 |---|---|---|---|
 | Source adapter/parser | Capture | Discover declared source, frame records, parse into observation drafts | Allocate canonical IDs independently, write stores, weaken privacy, make policy decisions |
-| Code extractor/grammar | Capture/projectors | Produce typed syntax/symbol/edge observations for a snapshot | Query live project stores or publish graph generations directly |
+| Code extractor/grammar | Code index crate (plan 25), fed by capture-sanitized content | Produce typed syntax/symbol/edge observations for a snapshot | Query live project stores or publish graph generations directly |
 | Secret detector | Capture privacy engine | Return protected spans/classes/confidence under sandbox and budgets | Emit candidate content, use network/filesystem, bypass mandatory built-ins |
 | Projector | Projectors | Consume declared observation kinds and emit typed projection mutations | Read ambient state, call transports, mutate unrelated projections |
 | Query operator | Query | Add a typed bounded operator with cost/coverage/explain implementation | Bypass scope/access/budget, return unanchored evidence, mutate state |

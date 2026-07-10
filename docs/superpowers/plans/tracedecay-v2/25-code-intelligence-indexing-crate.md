@@ -479,7 +479,7 @@ Import receipts are durable rows (G4), written by PR 33G in the owning project s
 | Identity seed collision | Ledger conflict on allocation | `identity_collision` quarantine + candidate relation; no silent reuse | #269/#371-class moved/linked-worktree fixtures |
 | Overlay depth/ratio exceeded | Overlay planner thresholds | Compaction-eligible marker; bounded overlay refused beyond ADR depth | Overlay bound property test |
 | Watcher event storm | Lane rate window | `RejectStorm` with dropped-event count visible in coverage | Storm fixture: 10k events/s, bounded memory |
-| Stale/ambiguous scope at intake | `ScopeSelectorV2` resolution | Coverage/candidates per plan 01; never CWD/base fallback | Shared scope regression corpus (plan 16 §10.2) |
+| Stale/ambiguous scope at intake | `ScopeSelectorV2` resolution | Coverage/candidates per plan 01; never CWD/base fallback | Shared scope regression corpus (plan 16 §18) |
 | Corrupt V1 store during migration | Reader checksum/open failure | `quarantined` disposition + receipt; migration continues | Copied corrupt-store fixture |
 
 ## PR and task sequence
