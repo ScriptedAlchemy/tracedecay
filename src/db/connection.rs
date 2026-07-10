@@ -45,6 +45,8 @@ pub(crate) fn platform_safe_mmap_size(mmap: u64) -> u64 {
     if cfg!(windows) { 0 } else { mmap }
 }
 
+const GRAPH_STORE_MMAP_SIZE: u64 = 0;
+
 /// Env var that, when set to `1`, switches every `TraceDecay` `SQLite`
 /// connection to `journal_mode=MEMORY` + `synchronous=OFF` on all platforms.
 ///
@@ -344,8 +346,12 @@ impl Database {
     /// `cache_size` and `mmap_size` are scaled to the on-disk DB size so
     /// small projects don't pay the 320 MB baseline of a large project.
     async fn apply_pragmas(conn: &Connection, db_file_size: u64) -> Result<()> {
-        let (cache_kb, mmap) = adaptive_cache_sizes(db_file_size);
-        let mmap = platform_safe_mmap_size(mmap);
+        let (cache_kb, _) = adaptive_cache_sizes(db_file_size);
+        // Keep graph stores on ordinary file I/O. The daemon intentionally
+        // holds one connection open while watcher and hook processes open and
+        // close peers; mmap-backed peers can otherwise retain stale page views
+        // across WAL checkpoints, especially for legacy 4 KiB databases.
+        let mmap = GRAPH_STORE_MMAP_SIZE;
         let journal_mode = platform_safe_journal_mode();
         let synchronous = platform_safe_synchronous_mode();
         conn.execute_batch(&format!(
@@ -367,8 +373,10 @@ impl Database {
     }
 
     async fn apply_read_only_pragmas(conn: &Connection, db_file_size: u64) -> Result<()> {
-        let (cache_kb, mmap) = adaptive_cache_sizes(db_file_size);
-        let mmap = platform_safe_mmap_size(mmap);
+        let (cache_kb, _) = adaptive_cache_sizes(db_file_size);
+        // Read-only graph handles may overlap a writer/checkpointer too, so
+        // they must use the same non-mmap access invariant.
+        let mmap = GRAPH_STORE_MMAP_SIZE;
         conn.execute_batch(&format!(
             "PRAGMA mmap_size = {mmap};
              PRAGMA foreign_keys = ON;

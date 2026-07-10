@@ -420,6 +420,71 @@ async fn interrupted_apply_retries_without_duplicates_and_cuts_over_last() {
 }
 
 #[tokio::test]
+async fn mixed_page_destination_survives_overlapping_watcher_opens() {
+    let fixture = fixture().await;
+    let source = layout_for_id(&fixture.project, &fixture.profile, &fixture.source_id).unwrap();
+    let target = layout_for_id(&fixture.project, &fixture.profile, &fixture.target_id).unwrap();
+    rewrite_page_size(&source.graph_db_path, 8192).await;
+    rewrite_page_size(&target.graph_db_path, 4096).await;
+    assert_eq!(database_page_size(&source.graph_db_path).await, 8192);
+    assert_eq!(database_page_size(&target.graph_db_path).await, 4096);
+
+    let options = fixture.options();
+    let planned = plan(&options).await.unwrap();
+    let applied = apply(&options, &planned.confirmation_token).await.unwrap();
+    let destination = applied
+        .destination_data_root
+        .join(crate::config::DB_FILENAME);
+    assert_eq!(database_page_size(&destination).await, 4096);
+
+    let open_options = TraceDecayOpenOptions {
+        profile_root: Some(fixture.profile.clone()),
+        global_db_path: Some(fixture.profile.join("global.db")),
+    };
+    let cached = TraceDecay::open_with_options(&fixture.project, open_options.clone())
+        .await
+        .unwrap();
+
+    for round in 0..2 {
+        fs::write(
+            fixture.project.join("lib.rs"),
+            format!("pub fn fixture() -> usize {{ {round} }}\n"),
+        )
+        .unwrap();
+        let watcher = TraceDecay::open_with_options(&fixture.project, open_options.clone())
+            .await
+            .unwrap();
+        watcher
+            .sync_if_stale_silent(&["lib.rs".to_string()])
+            .await
+            .unwrap();
+        drop(watcher);
+
+        assert!(storage::has_sqlite_database_header(&destination).unwrap());
+        let (verification, _) = Database::open_read_only(&destination).await.unwrap();
+        let mut mmap_rows = verification
+            .conn()
+            .query("PRAGMA mmap_size", ())
+            .await
+            .unwrap();
+        assert_eq!(
+            mmap_rows
+                .next()
+                .await
+                .unwrap()
+                .unwrap()
+                .get::<i64>(0)
+                .unwrap(),
+            0
+        );
+        drop(mmap_rows);
+        assert!(verification.quick_check().await.unwrap());
+        verification.close();
+        cached.get_all_files().await.unwrap();
+    }
+}
+
+#[tokio::test]
 async fn destination_preparation_restarts_after_every_publish_boundary() {
     for stop in [
         prepare::PrepareStop::TargetCopy,
@@ -2368,6 +2433,26 @@ async fn execute_sql(path: &Path, sql: &str) {
     db.conn().execute_batch(sql).await.unwrap();
     db.checkpoint().await.unwrap();
     db.close();
+}
+
+async fn rewrite_page_size(path: &Path, page_size: i64) {
+    let (db, _) = Database::open(path).await.unwrap();
+    db.checkpoint().await.unwrap();
+    db.conn()
+        .execute_batch(&format!(
+            "PRAGMA journal_mode = DELETE; PRAGMA page_size = {page_size}; VACUUM;"
+        ))
+        .await
+        .unwrap();
+    db.close();
+}
+
+async fn database_page_size(path: &Path) -> i64 {
+    let (db, _) = Database::open_read_only(path).await.unwrap();
+    let mut rows = db.conn().query("PRAGMA page_size", ()).await.unwrap();
+    let page_size = rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap();
+    db.close();
+    page_size
 }
 
 async fn explain_query_plan(conn: &libsql::Connection, sql: &str) -> Vec<String> {
