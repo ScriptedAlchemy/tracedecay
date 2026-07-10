@@ -32,8 +32,8 @@ fn format_bytes_boundaries() {
     assert_eq!(format_bytes(1024 * 1024 * 1024 * 2), "2.0 GB");
 }
 
-#[test]
-fn orphan_reporting_counts_only_eligible_and_surfaces_blocked_reasons() {
+#[tokio::test]
+async fn orphan_reporting_uses_complete_registry_rows_not_token_accounting() {
     let base = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
     let dir = tempfile::Builder::new()
         .prefix("doctor-orphans-")
@@ -44,6 +44,14 @@ fn orphan_reporting_counts_only_eligible_and_surfaces_blocked_reasons() {
     let blocked_root = dir.path().join("blocked-repo");
     std::fs::create_dir_all(&eligible_root).unwrap();
     std::fs::create_dir_all(&blocked_root).unwrap();
+    for root in [&eligible_root, &blocked_root] {
+        let status = std::process::Command::new("git")
+            .args(["init", "--quiet"])
+            .current_dir(root)
+            .status()
+            .unwrap();
+        assert!(status.success());
+    }
     write_enrollment_marker(
         &eligible_root,
         &EnrollmentMarker {
@@ -52,6 +60,7 @@ fn orphan_reporting_counts_only_eligible_and_surfaces_blocked_reasons() {
         },
     )
     .unwrap();
+    write_repository_identity_marker(&eligible_root, "proj_eligible").unwrap();
     for (project_id, project_root) in [
         ("proj_eligible", &eligible_root),
         ("proj_blocked", &blocked_root),
@@ -76,14 +85,60 @@ fn orphan_reporting_counts_only_eligible_and_surfaces_blocked_reasons() {
         .unwrap();
     }
 
-    let (count, warnings) = orphan_store_manifest_report(&profile_root, &[]);
+    let db = crate::global_db::GlobalDb::open_at(&dir.path().join("global.db"))
+        .await
+        .unwrap();
+    let (count, warnings) = orphan_store_manifest_report(&db, &profile_root).await;
 
-    assert_eq!(count, 1);
-    assert!(
-        warnings
-            .iter()
-            .any(|warning| warning.contains("no repository identity or enrollment marker"))
+    assert_eq!(count, 1, "{warnings:?}");
+
+    let scan = crate::migrate::registry::scan_profile_store_manifests(&profile_root, 1_800_000_000);
+    let eligible = crate::migrate::registry::RegistryReconstructionReport {
+        plans: scan
+            .plans
+            .into_iter()
+            .filter(|plan| {
+                plan.status == crate::migrate::registry::RegistryReconstructionStatus::Eligible
+            })
+            .collect(),
+        issues: Vec::new(),
+    };
+    let applied = crate::migrate::registry::apply_registry_reconstruction_report(&db, &eligible)
+        .await
+        .unwrap();
+    assert_eq!(applied.projects, 1);
+    assert_eq!(
+        orphan_store_manifest_report(&db, &profile_root).await.0,
+        0,
+        "a complete reconstruction registry is healthy without a legacy projects.path row"
     );
+    assert_eq!(
+        crate::migrate::registry::apply_registry_reconstruction_report(&db, &eligible)
+            .await
+            .unwrap(),
+        crate::migrate::registry::RegistryReconstructionApplyReport::default()
+    );
+
+    db.conn()
+        .execute(
+            "DELETE FROM store_artifacts WHERE store_id=?1",
+            libsql::params![eligible.plans[0].store.store_id.as_str()],
+        )
+        .await
+        .unwrap();
+    assert_eq!(orphan_store_manifest_report(&db, &profile_root).await.0, 1);
+    crate::migrate::registry::apply_registry_reconstruction_report(&db, &eligible)
+        .await
+        .unwrap();
+
+    db.conn()
+        .execute(
+            "DELETE FROM store_instances WHERE store_id=?1",
+            libsql::params![eligible.plans[0].store.store_id.as_str()],
+        )
+        .await
+        .unwrap();
+    assert_eq!(orphan_store_manifest_report(&db, &profile_root).await.0, 1);
 }
 
 #[test]

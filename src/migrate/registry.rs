@@ -67,6 +67,139 @@ pub struct RegistryReconstructionApplyReport {
     pub artifacts: usize,
 }
 
+/// Read-only view of eligible reconstruction plans that would insert at least
+/// one registry row. This uses the same conflict preflight as apply.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RegistryReconstructionDiffReport {
+    pub missing_plans: usize,
+    pub issues: Vec<String>,
+}
+
+pub async fn diff_registry_reconstruction_report(
+    db: &GlobalDb,
+    report: &RegistryReconstructionReport,
+) -> RegistryReconstructionDiffReport {
+    let eligible = RegistryReconstructionReport {
+        plans: report
+            .plans
+            .iter()
+            .filter(|plan| plan.status == RegistryReconstructionStatus::Eligible)
+            .cloned()
+            .collect(),
+        issues: Vec::new(),
+    };
+    let mut diff = RegistryReconstructionDiffReport {
+        issues: preflight_registry_reconstruction(db.conn(), &eligible).await,
+        ..RegistryReconstructionDiffReport::default()
+    };
+    if !diff.issues.is_empty() {
+        return diff;
+    }
+
+    for plan in &eligible.plans {
+        match registry_plan_has_missing_rows(db.conn(), plan).await {
+            Ok(true) => diff.missing_plans += 1,
+            Ok(false) => {}
+            Err(issue) => diff.issues.push(issue),
+        }
+    }
+    diff
+}
+
+async fn registry_plan_has_missing_rows(
+    conn: &Connection,
+    plan: &RegistryReconstructionPlan,
+) -> std::result::Result<bool, String> {
+    let project = &plan.project;
+    let root = GlobalDb::canonical_project_key(&project.project_root);
+    if query_optional_text(
+        conn,
+        "SELECT canonical_root FROM code_projects WHERE project_id=?1",
+        params![project.project_id.as_str()],
+    )
+    .await?
+    .as_deref()
+        != Some(root.as_str())
+    {
+        return Ok(true);
+    }
+    for alias in &project.aliases {
+        if query_optional_text(
+            conn,
+            "SELECT project_id FROM project_aliases WHERE alias_path=?1",
+            params![GlobalDb::canonical_project_key(alias)],
+        )
+        .await?
+        .as_deref()
+            != Some(project.project_id.as_str())
+        {
+            return Ok(true);
+        }
+    }
+
+    let store_identity = serde_json::to_string(&(
+        &plan.store.project_id,
+        &plan.store.store_kind,
+        &plan.store.storage_mode,
+        &plan.store.store_relpath,
+        &plan.store.manifest_relpath,
+    ))
+    .unwrap_or_default();
+    if query_optional_text(
+        conn,
+        "SELECT json_array(project_id, store_kind, storage_mode, store_relpath, manifest_relpath)
+         FROM store_instances WHERE store_id=?1",
+        params![plan.store.store_id.as_str()],
+    )
+    .await?
+    .as_deref()
+        != Some(store_identity.as_str())
+    {
+        return Ok(true);
+    }
+
+    for scope in &plan.graph_scopes {
+        let scope_identity = serde_json::to_string(&(
+            &scope.project_id,
+            &scope.store_id,
+            &scope.branch_name,
+            &scope.db_relpath,
+            &scope.parent_scope_id,
+        ))
+        .unwrap_or_default();
+        if query_optional_text(
+            conn,
+            "SELECT json_array(project_id, store_id, branch_name, db_relpath, parent_scope_id)
+             FROM graph_scopes WHERE graph_scope_id=?1",
+            params![scope.graph_scope_id.as_str()],
+        )
+        .await?
+        .as_deref()
+            != Some(scope_identity.as_str())
+        {
+            return Ok(true);
+        }
+    }
+    for artifact in &plan.artifacts {
+        if query_optional_text(
+            conn,
+            "SELECT store_id FROM store_artifacts
+             WHERE store_id=?1 AND artifact_kind=?2 AND relpath=?3",
+            params![
+                artifact.store_id.as_str(),
+                artifact.artifact_kind.as_str(),
+                artifact.relpath.as_str(),
+            ],
+        )
+        .await?
+        .is_none()
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 pub async fn apply_registry_reconstruction_report(
     db: &GlobalDb,
     report: &RegistryReconstructionReport,

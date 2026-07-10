@@ -408,7 +408,7 @@ async fn check_stale_stores(dc: &mut DoctorCounters) {
         }
     }
 
-    check_orphan_store_manifests(dc, &project_paths);
+    check_orphan_store_manifests(dc, &gdb).await;
     check_stale_code_projects(dc, &gdb).await;
     if let Some(profile_root) = profile_root.as_deref() {
         let drift = registry_drift::registry_drift_findings(&gdb, profile_root).await;
@@ -691,11 +691,14 @@ fn registry_profile_roots(profile_root: &Path) -> Vec<PathBuf> {
     roots
 }
 
-fn check_orphan_store_manifests(dc: &mut DoctorCounters, project_paths: &[String]) {
+async fn check_orphan_store_manifests(
+    dc: &mut DoctorCounters,
+    global_db: &crate::global_db::GlobalDb,
+) {
     let Some(profile_root) = crate::config::user_data_dir() else {
         return;
     };
-    let (orphan_count, issues) = orphan_store_manifest_report(&profile_root, project_paths);
+    let (orphan_count, issues) = orphan_store_manifest_report(global_db, &profile_root).await;
     for issue in issues.iter().take(10) {
         dc.warn(&format!("Store manifest issue: {issue}"));
     }
@@ -710,29 +713,17 @@ fn check_orphan_store_manifests(dc: &mut DoctorCounters, project_paths: &[String
 /// Counts profile store manifests with no matching registry row, plus any
 /// manifest scan issues. Shared between `doctor` and the post-update health
 /// pass.
-pub(crate) fn orphan_store_manifest_report(
+pub(crate) async fn orphan_store_manifest_report(
+    global_db: &crate::global_db::GlobalDb,
     profile_root: &Path,
-    project_paths: &[String],
 ) -> (usize, Vec<String>) {
-    let registered: std::collections::HashSet<String> = project_paths
-        .iter()
-        .map(|path| crate::global_db::GlobalDb::canonical_project_key(std::path::Path::new(path)))
-        .collect();
     let report = crate::migrate::registry::scan_profile_store_manifests(
         profile_root,
         crate::tracedecay::current_timestamp(),
     );
-    let mut orphan_count = 0;
-    let mut warnings = report.issues;
-    for plan in report.plans {
-        let key = crate::global_db::GlobalDb::canonical_project_key(&plan.project.project_root);
-        if registered.contains(&key) {
-            continue;
-        }
+    let mut warnings = report.issues.clone();
+    for plan in &report.plans {
         match plan.status {
-            crate::migrate::registry::RegistryReconstructionStatus::Eligible => {
-                orphan_count += 1;
-            }
             crate::migrate::registry::RegistryReconstructionStatus::Blocked => {
                 warnings.push(format!(
                     "blocked store manifest '{}': {}",
@@ -740,11 +731,15 @@ pub(crate) fn orphan_store_manifest_report(
                     plan.status_reason.as_deref().unwrap_or("not eligible")
                 ));
             }
-            crate::migrate::registry::RegistryReconstructionStatus::Stale
+            crate::migrate::registry::RegistryReconstructionStatus::Eligible
+            | crate::migrate::registry::RegistryReconstructionStatus::Stale
             | crate::migrate::registry::RegistryReconstructionStatus::Retired => {}
         }
     }
-    (orphan_count, warnings)
+    let diff =
+        crate::migrate::registry::diff_registry_reconstruction_report(global_db, &report).await;
+    warnings.extend(diff.issues);
+    (diff.missing_plans, warnings)
 }
 
 /// Reports git-metadata watcher health (design D3/D5).

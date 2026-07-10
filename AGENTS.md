@@ -33,6 +33,13 @@ cargo test-all
 - When orchestrating parallel agents, the lead dictates exact scoped edits, subagents execute, and the lead reviews diffs before any push.
 - Subagents should not invent scope beyond what the lead dictated.
 
+## Git
+
+- Every non-merge commit subject must pass `scripts/check-conventional-commits.sh` before push.
+- Use `<type>: <subject>` or `<type>(<scope>): <subject>` with one of:
+  `build`, `chore`, `ci`, `docs`, `feat`, `fix`, `perf`, `refactor`, `revert`, `style`, `test`.
+- Keep the subject at 72 characters or fewer. Example: `fix(doctor): avoid false orphan warnings`.
+
 ## Learned Workspace Facts
 
 - Parallel branch work uses git worktrees under `.worktrees/` in the repo root (for example `.worktrees/codex-cli-args-stdin`).

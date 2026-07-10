@@ -347,9 +347,8 @@ async fn collect_remaining_findings(
     remaining_registry_drift_count: usize,
 ) -> (Vec<String>, Vec<String>) {
     let mut findings = Vec::new();
-    let project_paths = global_db.list_project_paths().await;
     let (orphan_count, warnings) =
-        super::orphan_store_manifest_report(profile_root, &project_paths);
+        super::orphan_store_manifest_report(global_db, profile_root).await;
     if orphan_count > 0 {
         findings.push(format!(
             "{orphan_count} orphan profile store manifest(s) can reconstruct registry rows"
