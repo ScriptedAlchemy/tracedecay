@@ -1339,13 +1339,8 @@ fn project_selector_flags_parse_for_cli_read_surfaces() {
     assert!(matches!(
         sessions.command,
         Some(Commands::Sessions {
-            action:
-                SessionsAction::Search {
-                    project_id,
-                    project_path,
-                    ..
-                }
-        }) if project_id.as_deref() == Some("proj_123") && project_path.is_none()
+            action: SessionsAction::Search(args)
+        }) if args.project_id.as_deref() == Some("proj_123") && args.project_path.is_none()
     ));
 }
 
@@ -1554,30 +1549,21 @@ fn parses_sessions_ingest_and_search_commands() {
     .unwrap();
     match search.command {
         Some(Commands::Sessions {
-            action:
-                SessionsAction::Search {
-                    query,
-                    provider,
-                    limit,
-                    project_id,
-                    project_path,
-                    since,
-                    until,
-                    branch,
-                    worktree,
-                    commit,
-                },
+            action: SessionsAction::Search(args),
         }) => {
-            assert_eq!(query, "needle");
-            assert_eq!(provider.as_deref(), Some("codex"));
-            assert_eq!(limit, 5);
-            assert!(project_id.is_none());
-            assert!(project_path.is_none());
-            assert!(since.is_none());
-            assert!(until.is_none());
-            assert!(branch.is_none());
-            assert!(worktree.is_none());
-            assert!(commit.is_none());
+            assert_eq!(args.query, "needle");
+            assert_eq!(args.provider.as_deref(), Some("codex"));
+            assert_eq!(args.scope, "all");
+            assert_eq!(args.message_type, "all");
+            assert!(args.parent_session_id.is_none());
+            assert_eq!(args.limit, 5);
+            assert!(args.project_id.is_none());
+            assert!(args.project_path.is_none());
+            assert!(args.since.is_none());
+            assert!(args.until.is_none());
+            assert!(args.branch.is_none());
+            assert!(args.worktree.is_none());
+            assert!(args.commit.is_none());
         }
         _ => panic!("expected sessions search command"),
     }
@@ -1595,10 +1581,10 @@ fn parses_sessions_ingest_and_search_commands() {
     .unwrap();
     match time_filtered_search.command {
         Some(Commands::Sessions {
-            action: SessionsAction::Search { since, until, .. },
+            action: SessionsAction::Search(args),
         }) => {
-            assert_eq!(since.as_deref(), Some("last hour"));
-            assert_eq!(until.as_deref(), Some("2026-07-04T00:00:00Z"));
+            assert_eq!(args.since.as_deref(), Some("last hour"));
+            assert_eq!(args.until.as_deref(), Some("2026-07-04T00:00:00Z"));
         }
         _ => panic!("expected sessions search command"),
     }
@@ -1607,18 +1593,34 @@ fn parses_sessions_ingest_and_search_commands() {
         Cli::try_parse_from(["tracedecay", "sessions", "search", "needle"]).unwrap();
     match all_provider_search.command {
         Some(Commands::Sessions {
-            action:
-                SessionsAction::Search {
-                    query,
-                    provider,
-                    limit,
-                    ..
-                },
+            action: SessionsAction::Search(args),
         }) => {
-            assert_eq!(query, "needle");
-            assert!(provider.is_none());
-            assert_eq!(limit, 10);
+            assert_eq!(args.query, "needle");
+            assert!(args.provider.is_none());
+            assert_eq!(args.limit, 10);
         }
         _ => panic!("expected sessions search command"),
     }
+
+    let filtered_search = Cli::try_parse_from([
+        "tracedecay",
+        "sessions",
+        "search",
+        "needle",
+        "--scope",
+        "subagents_only",
+        "--message-type",
+        "direct_user",
+        "--parent-session-id",
+        "parent-1",
+    ])
+    .unwrap();
+    assert!(matches!(
+        filtered_search.command,
+        Some(Commands::Sessions {
+            action: SessionsAction::Search(args)
+        }) if args.scope == "subagents_only"
+            && args.message_type == "direct_user"
+            && args.parent_session_id.as_deref() == Some("parent-1")
+    ));
 }

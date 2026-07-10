@@ -24,13 +24,13 @@ use crate::sessions::lcm::compression_decision::{self, AssemblyCapInput};
 use crate::sessions::lcm::{
     LCM_EXPAND_QUERY_SYNTHESIS_SYSTEM_PROMPT, LcmCleanConfig, LcmCompressionRequest,
     LcmContentSlice, LcmDescribeRequest, LcmDescribeTarget, LcmExpandQueryRequest,
-    LcmExpandRequest, LcmExpandTarget, LcmGcConfig, LcmGrepRequest, LcmGrepSort,
+    LcmExpandRequest, LcmExpandTarget, LcmGcConfig, LcmGrepFilters, LcmGrepRequest, LcmGrepSort,
     LcmLoadSessionRequest, LcmPreflightRequest, LcmScope, LcmSessionBoundaryRequest,
     LcmSummarizerMode,
 };
 use crate::sessions::{
-    ProviderScope, SessionMessageSearchResult, SessionSearchFilters, SessionSearchScope,
-    SessionSearchTimeRange,
+    ProviderScope, SessionMessageSearchResult, SessionMessageType, SessionSearchFilters,
+    SessionSearchScope, SessionSearchTimeRange,
 };
 use crate::timeutil::SearchTimeBound;
 use crate::tracedecay::{TraceDecay, current_timestamp};
@@ -383,6 +383,7 @@ struct MessageSearchRequest<'a> {
     include_subagents: bool,
     catch_up: bool,
     scope: SessionSearchScope,
+    message_type: SessionMessageType,
     limit: usize,
     git_filter: GitScopeFilter,
     time_range: SessionSearchTimeRange,
@@ -443,6 +444,7 @@ fn parse_message_search_request(args: &Value) -> Result<MessageSearchRequest<'_>
             .and_then(Value::as_bool)
             .unwrap_or(true),
         scope,
+        message_type: parse_session_message_type(args)?,
         limit: args
             .get("limit")
             .and_then(Value::as_u64)
@@ -461,6 +463,7 @@ fn parse_message_search_request(args: &Value) -> Result<MessageSearchRequest<'_>
 fn message_search_filters<'a>(request: &MessageSearchRequest<'a>) -> SessionSearchFilters<'a> {
     SessionSearchFilters {
         scope: request.scope,
+        message_type: request.message_type,
         parent_session_id: request.parent_session_id,
         time_range: request.time_range,
     }
@@ -563,11 +566,8 @@ fn message_search_payload(
         "catch_up": request.catch_up,
         "catch_up_performed": catch_up_performed,
         "catch_up_provider": request.provider_scope.response_label(),
-        "scope": match request.scope {
-            SessionSearchScope::All => "all",
-            SessionSearchScope::ParentsOnly => "parents_only",
-            SessionSearchScope::SubagentsOnly => "subagents_only",
-        },
+        "scope": request.scope.as_str(),
+        "message_type": request.message_type.as_str(),
         "since": request.time_range.start_time,
         "until": request.time_range.end_time,
         "query": request.query,
@@ -2073,14 +2073,32 @@ fn parse_message_search_scope(args: &Value) -> Result<SessionSearchScope> {
     let Some(value) = args.get("scope") else {
         return Ok(SessionSearchScope::All);
     };
-    match value.as_str().map(str::trim) {
-        Some("all") => Ok(SessionSearchScope::All),
-        Some("parents_only") => Ok(SessionSearchScope::ParentsOnly),
-        Some("subagents_only") => Ok(SessionSearchScope::SubagentsOnly),
-        _ => Err(argument_error(
-            "scope must be one of all, parents_only, subagents_only",
-        )),
-    }
+    value
+        .as_str()
+        .and_then(SessionSearchScope::parse)
+        .ok_or_else(|| argument_error("scope must be one of all, parents_only, subagents_only"))
+}
+
+fn parse_session_message_type(args: &Value) -> Result<SessionMessageType> {
+    let Some(value) = args.get("message_type") else {
+        return Ok(SessionMessageType::All);
+    };
+    value
+        .as_str()
+        .and_then(SessionMessageType::parse)
+        .ok_or_else(|| argument_error("message_type must be one of all, direct_user, tool_result"))
+}
+
+fn parse_lcm_relationship_scope(args: &Value) -> Result<SessionSearchScope> {
+    let Some(value) = args.get("relationship_scope") else {
+        return Ok(SessionSearchScope::All);
+    };
+    value
+        .as_str()
+        .and_then(SessionSearchScope::parse)
+        .ok_or_else(|| {
+            argument_error("relationship_scope must be one of all, parents_only, subagents_only")
+        })
 }
 
 fn parse_message_search_provider_scope(args: &Value) -> Result<ProviderScope> {
@@ -2723,37 +2741,45 @@ pub(super) async fn handle_lcm_grep(
     // Validate scope before opening storage so argument errors are reported
     // even when the sessions DB does not exist yet.
     let scope = parse_lcm_scope(&args)?;
+    let relationship_scope = parse_lcm_relationship_scope(&args)?;
+    let message_type = parse_session_message_type(&args)?;
     let provider = lcm_grep_provider_arg(&args);
     let git_filter = parse_git_scope_filter(&args)?;
     let git_filter_applied = !git_filter.is_empty();
     let storage = lcm_open_storage_ro!(context, &args);
     let hits = storage
         .db
-        .lcm_grep(LcmGrepRequest {
-            provider: provider.to_string(),
-            query: query.to_string(),
-            scope,
-            session_id: string_arg(&args, "session_id").map(str::to_string),
-            include_summaries: args
-                .get("include_summaries")
-                .and_then(Value::as_bool)
-                .unwrap_or(true),
-            limit: bounded_usize_arg(&args, "limit", 1, MAX_LCM_RESULT_LIMIT)?.unwrap_or(10),
-            sort: parse_lcm_grep_sort(&args)?,
-            source: string_arg(&args, "source").map(str::to_string),
-            role: string_arg(&args, "role").map(str::to_string),
-            start_time: non_negative_timestamp_arg_aliases(
-                &args,
-                &["since", "start_time", "time_from"],
-                SearchTimeBound::Start,
-            )?,
-            end_time: non_negative_timestamp_arg_aliases(
-                &args,
-                &["until", "end_time", "time_to"],
-                SearchTimeBound::End,
-            )?,
-            git_filter: git_filter.clone(),
-        })
+        .lcm_grep_filtered(
+            LcmGrepRequest {
+                provider: provider.to_string(),
+                query: query.to_string(),
+                scope,
+                session_id: string_arg(&args, "session_id").map(str::to_string),
+                include_summaries: args
+                    .get("include_summaries")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(true),
+                limit: bounded_usize_arg(&args, "limit", 1, MAX_LCM_RESULT_LIMIT)?.unwrap_or(10),
+                sort: parse_lcm_grep_sort(&args)?,
+                source: string_arg(&args, "source").map(str::to_string),
+                role: string_arg(&args, "role").map(str::to_string),
+                start_time: non_negative_timestamp_arg_aliases(
+                    &args,
+                    &["since", "start_time", "time_from"],
+                    SearchTimeBound::Start,
+                )?,
+                end_time: non_negative_timestamp_arg_aliases(
+                    &args,
+                    &["until", "end_time", "time_to"],
+                    SearchTimeBound::End,
+                )?,
+                git_filter: git_filter.clone(),
+            },
+            LcmGrepFilters {
+                relationship_scope,
+                message_type,
+            },
+        )
         .await
         .map_err(lcm_error)?;
     let crate::sessions::lcm::LcmGrepOutcome {
@@ -2767,6 +2793,8 @@ pub(super) async fn handle_lcm_grep(
         "count": hits.len(),
         "hits": hits,
         "sort": string_arg(&args, "sort").unwrap_or("relevance"),
+        "relationship_scope": string_arg(&args, "relationship_scope").unwrap_or("all"),
+        "message_type": string_arg(&args, "message_type").unwrap_or("all"),
     });
     if !capped_sessions.is_empty() {
         if let Some(map) = payload.as_object_mut() {

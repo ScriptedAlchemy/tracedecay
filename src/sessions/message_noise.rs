@@ -15,10 +15,112 @@
 //! inventory hits below substantive ones, then truncate to the caller's limit,
 //! so a downranked hit still surfaces when it is the only match.
 
+use std::collections::HashMap;
+
 /// Over-fetch multiplier applied before the deterministic re-rank so that
 /// substantive hits buried below inventory/listing noise in the raw ranking
 /// order can still surface within the caller's `limit`.
 pub(crate) const RERANK_OVERFETCH_FACTOR: usize = 4;
+
+/// Stable identity for transcript content copied between a parent session and
+/// its child agents. Providers preserve punctuation but may change surrounding
+/// whitespace while forwarding the prompt, so identity ignores case and runs
+/// of whitespace without otherwise rewriting the message.
+pub(crate) fn normalized_content_identity(text: &str) -> String {
+    text.split_whitespace()
+        .map(str::to_lowercase)
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+pub(crate) struct RelatedMessageCopyIdentity<'a> {
+    pub(crate) provider: &'a str,
+    pub(crate) family_session_id: &'a str,
+    pub(crate) session_id: &'a str,
+    pub(crate) is_subagent: bool,
+    pub(crate) content: &'a str,
+}
+
+/// Collapse copies shared by different sessions in one parent/child family.
+/// Repeated rows inside one session and identical content in unrelated parent
+/// sessions remain distinct. If a parent row appears after a child copy, the
+/// parent replaces that copy in place without disturbing page order.
+pub(crate) fn dedupe_related_message_copies<T>(
+    rows: Vec<T>,
+    identity: impl for<'a> Fn(&'a T) -> RelatedMessageCopyIdentity<'a>,
+) -> Vec<T> {
+    let mut family_rows: HashMap<(String, String, String), usize> = HashMap::new();
+    let mut representative_meta: Vec<(String, bool)> = Vec::with_capacity(rows.len());
+    let mut kept = Vec::with_capacity(rows.len());
+    for row in rows {
+        let row_identity = identity(&row);
+        let normalized = normalized_content_identity(row_identity.content);
+        if normalized.is_empty() {
+            representative_meta.push((
+                row_identity.session_id.to_string(),
+                row_identity.is_subagent,
+            ));
+            kept.push(row);
+            continue;
+        }
+        let key = (
+            row_identity.provider.to_string(),
+            row_identity.family_session_id.to_string(),
+            normalized,
+        );
+        let session_id = row_identity.session_id.to_string();
+        let is_subagent = row_identity.is_subagent;
+        let Some(&existing_index) = family_rows.get(&key) else {
+            family_rows.insert(key, kept.len());
+            representative_meta.push((session_id, is_subagent));
+            kept.push(row);
+            continue;
+        };
+        let (existing_session_id, existing_is_subagent) = &representative_meta[existing_index];
+        if existing_session_id == &session_id {
+            representative_meta.push((session_id, is_subagent));
+            kept.push(row);
+        } else if *existing_is_subagent && !is_subagent {
+            representative_meta[existing_index] = (session_id, is_subagent);
+            kept[existing_index] = row;
+        }
+    }
+    kept
+}
+
+/// SQL predicate for provider-neutral direct-user/tool-result filtering.
+/// Tool results are recognized by role, explicit kind, or bounded tool-event
+/// metadata because Claude stores many tool results as role `user` messages.
+pub(crate) fn message_type_predicate_sql(
+    alias: &str,
+    has_kind_column: bool,
+    message_type: crate::sessions::SessionMessageType,
+) -> Option<String> {
+    use crate::sessions::SessionMessageType;
+
+    if matches!(message_type, SessionMessageType::All) {
+        return None;
+    }
+    let kind_clause = if has_kind_column {
+        format!(" OR lower(COALESCE({alias}.kind, '')) IN ('tool_result', 'tool_output')")
+    } else {
+        String::new()
+    };
+    let tool_result = format!(
+        "({alias}.role = 'tool'{kind_clause} \
+         OR CASE WHEN json_valid(COALESCE({alias}.metadata_json, '')) \
+              THEN EXISTS (SELECT 1 FROM json_each({alias}.metadata_json, '$.tool_events') event \
+                           WHERE json_extract(event.value, '$.type') = 'tool_result') \
+              ELSE 0 END)"
+    );
+    Some(match message_type {
+        SessionMessageType::All => unreachable!(),
+        SessionMessageType::DirectUser => {
+            format!("({alias}.role = 'user' AND NOT {tool_result})")
+        }
+        SessionMessageType::ToolResult => tool_result,
+    })
+}
 
 /// Fetch budget before the re-rank stage: over-fetch by
 /// [`RERANK_OVERFETCH_FACTOR`], capped at `max_fetch` but never below the
@@ -183,6 +285,18 @@ mod tests {
         assert_eq!(super::rerank_fetch_limit(10, 200), 40);
         assert_eq!(super::rerank_fetch_limit(80, 200), 200);
         assert_eq!(super::rerank_fetch_limit(0, 200), 0);
+    }
+
+    #[test]
+    fn normalized_content_identity_ignores_case_and_whitespace_only() {
+        assert_eq!(
+            normalized_content_identity("  Open pull\n requests TO fix. "),
+            "open pull requests to fix."
+        );
+        assert_ne!(
+            normalized_content_identity("open pull requests to fix"),
+            normalized_content_identity("open pull requests to review")
+        );
     }
 
     use super::*;

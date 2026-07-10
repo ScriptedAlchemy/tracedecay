@@ -803,6 +803,7 @@ async fn cursor_subagent_ingestion_is_incremental_per_file() {
             10,
             SessionSearchFilters {
                 scope: SessionSearchScope::SubagentsOnly,
+                message_type: Default::default(),
                 parent_session_id: Some("parent-session"),
                 time_range: SessionSearchTimeRange::default(),
             },

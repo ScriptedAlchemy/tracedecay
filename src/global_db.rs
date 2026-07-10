@@ -3451,7 +3451,17 @@ impl GlobalDb {
         &self,
         request: crate::sessions::lcm::LcmGrepRequest,
     ) -> Result<crate::sessions::lcm::LcmGrepOutcome, crate::sessions::lcm::LcmError> {
-        crate::sessions::lcm::query::grep(&self.conn, request).await
+        self.lcm_grep_filtered(request, crate::sessions::lcm::LcmGrepFilters::default())
+            .await
+    }
+
+    /// Searches LCM with query-only relationship and semantic message filters.
+    pub async fn lcm_grep_filtered(
+        &self,
+        request: crate::sessions::lcm::LcmGrepRequest,
+        filters: crate::sessions::lcm::LcmGrepFilters,
+    ) -> Result<crate::sessions::lcm::LcmGrepOutcome, crate::sessions::lcm::LcmError> {
+        crate::sessions::lcm::query::grep(&self.conn, request, filters).await
     }
 
     /// Expands a raw message, summary node, or external payload with content range metadata.
@@ -4261,6 +4271,13 @@ impl GlobalDb {
             query_params.push(Value::Text(parent_session_id.to_string()));
             let _ = write!(sql, " AND s.parent_session_id = ?{}", query_params.len());
         }
+        if let Some(predicate) = crate::sessions::message_noise::message_type_predicate_sql(
+            "m",
+            true,
+            filters.message_type,
+        ) {
+            let _ = write!(sql, " AND {predicate}");
+        }
         if let Some(start_time) = filters.time_range.start_time {
             query_params.push(Value::Integer(start_time));
             let _ = write!(
@@ -4365,6 +4382,20 @@ impl GlobalDb {
                 score,
             });
         }
+        results =
+            crate::sessions::message_noise::dedupe_related_message_copies(results, |result| {
+                crate::sessions::message_noise::RelatedMessageCopyIdentity {
+                    provider: &result.session.provider,
+                    family_session_id: result
+                        .session
+                        .parent_session_id
+                        .as_deref()
+                        .unwrap_or(&result.session.session_id),
+                    session_id: &result.session.session_id,
+                    is_subagent: result.session.is_subagent,
+                    content: &result.message.text,
+                }
+            });
         downrank_inventory_messages(&mut results);
         results.truncate(limit);
         results

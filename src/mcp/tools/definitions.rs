@@ -2701,6 +2701,16 @@ fn def_lcm_grep() -> ToolDefinition {
                     "enum": ["current", "session", "all"],
                     "description": "Search scope. current/session require session_id; all is the default."
                 },
+                "relationship_scope": {
+                    "type": "string",
+                    "enum": ["all", "parents_only", "subagents_only"],
+                    "description": "Optional parent/subagent relationship filter across sessions. Default: all."
+                },
+                "message_type": {
+                    "type": "string",
+                    "enum": ["all", "direct_user", "tool_result"],
+                    "description": "Semantic raw-message filter. direct_user excludes provider-mislabeled tool results; tool_result recognizes role, kind, and tool-event metadata. Default: all."
+                },
                 "session_id": {
                     "type": "string",
                     "description": "Session id used when scope is current or session."

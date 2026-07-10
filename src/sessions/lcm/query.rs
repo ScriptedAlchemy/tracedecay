@@ -18,7 +18,7 @@ use super::{
     LcmExpandQueryContextBlock, LcmExpandQueryMatch, LcmExpandQueryPagination,
     LcmExpandQueryRequest, LcmExpandQueryResponse, LcmExpandQuerySynthesisPrompt, LcmExpandRequest,
     LcmExpandResponse, LcmExpandSourcePagination, LcmExpandTarget, LcmExpandedSummarySource,
-    LcmGcConfig, LcmGrepHit, LcmGrepRequest, LcmGrepSort, LcmLoadSessionMessage,
+    LcmGcConfig, LcmGrepFilters, LcmGrepHit, LcmGrepRequest, LcmGrepSort, LcmLoadSessionMessage,
     LcmLoadSessionPage, LcmLoadSessionRequest, LcmRawMessage, LcmRawMessageOverview,
     LcmRecentSession, LcmReplayMessage, LcmReplaySummaryNode, LcmScope, LcmSessionReplayRequest,
     LcmSessionReplaySlice, LcmSourceRef, LcmStatus, LcmStorageKind, LcmStoreStatus,
@@ -371,6 +371,7 @@ fn bounded_replay_snippet(text: &str, max_chars: usize) -> (String, bool) {
 pub(crate) async fn grep(
     conn: &Connection,
     request: LcmGrepRequest,
+    retrieval_filters: LcmGrepFilters,
 ) -> Result<LcmGrepOutcome, LcmError> {
     let query_plan = grep_query_plan(&request.query);
     if query_plan.is_empty() {
@@ -388,16 +389,37 @@ pub(crate) async fn grep(
         return Ok(LcmGrepOutcome::default());
     }
 
-    let raw_only_filters =
-        request.role.is_some() || request.start_time.is_some() || request.end_time.is_some();
+    let raw_only_filters = request.role.is_some()
+        || request.start_time.is_some()
+        || request.end_time.is_some()
+        || !matches!(
+            retrieval_filters.message_type,
+            crate::sessions::SessionMessageType::All
+        );
     // Over-fetch so the deterministic re-rank below can promote substantive
     // hits above inventory/listing noise and still fill the caller's `limit`.
     let fetch_limit = rerank_fetch_limit(limit);
-    let mut hits = raw_grep_hits(conn, &request, session_filter, &query_plan, fetch_limit).await?;
+    let mut hits = raw_grep_hits(
+        conn,
+        &request,
+        &retrieval_filters,
+        session_filter,
+        &query_plan,
+        fetch_limit,
+    )
+    .await?;
     if request.include_summaries && !raw_only_filters && hits.len() < fetch_limit {
         let remaining = fetch_limit - hits.len();
         hits.extend(
-            summary_grep_hits(conn, &request, session_filter, &query_plan, remaining).await?,
+            summary_grep_hits(
+                conn,
+                &request,
+                &retrieval_filters,
+                session_filter,
+                &query_plan,
+                remaining,
+            )
+            .await?,
         );
     }
     sort_hits(&mut hits, request.sort);
@@ -653,6 +675,7 @@ pub(crate) async fn expand_query(
                 let summary_hits = summary_grep_hits(
                     conn,
                     &grep_request,
+                    &LcmGrepFilters::default(),
                     Some(&request.session_id),
                     &query_plan,
                     max_results,
@@ -677,6 +700,7 @@ pub(crate) async fn expand_query(
                     let raw_hits = raw_grep_hits(
                         conn,
                         &grep_request,
+                        &LcmGrepFilters::default(),
                         Some(&request.session_id),
                         &query_plan,
                         remaining,
@@ -1687,17 +1711,32 @@ fn push_grep_provider_filter(
 async fn raw_grep_hits(
     conn: &Connection,
     request: &LcmGrepRequest,
+    retrieval_filters: &LcmGrepFilters,
     session_id: Option<&str>,
     query_plan: &GrepQueryPlan,
     limit: usize,
 ) -> Result<Vec<LcmGrepHit>, LcmError> {
     if query_plan.requires_like_fallback {
-        return raw_like_grep_hits(conn, request, session_id, query_plan, limit).await;
+        return raw_like_grep_hits(
+            conn,
+            request,
+            retrieval_filters,
+            session_id,
+            query_plan,
+            limit,
+        )
+        .await;
     }
     let mut values = vec![Value::Text(query_plan.fts_query.clone())];
     let mut filters = Vec::new();
     push_grep_provider_filter(request, "r.provider", &mut filters, &mut values);
-    push_raw_grep_filters(request, session_id, &mut filters, &mut values);
+    push_raw_grep_filters(
+        request,
+        *retrieval_filters,
+        session_id,
+        &mut filters,
+        &mut values,
+    );
     values.push(Value::Integer(limit as i64));
     let filter_sql = if filters.is_empty() {
         String::new()
@@ -1710,9 +1749,12 @@ async fn raw_grep_hits(
         Some(RAW_ROLE_PENALTY_CASE),
     );
     let sql = format!(
-        "SELECT r.provider, r.session_id, r.message_id, r.store_id, r.snippet_text, r.role
+        "SELECT r.provider, r.session_id, r.message_id, r.store_id, r.snippet_text, r.role,
+                COALESCE(NULLIF(s.parent_session_id, ''), r.session_id),
+                COALESCE(s.is_subagent, 0)
          FROM lcm_raw_messages_fts
          JOIN lcm_raw_messages r ON r.store_id = lcm_raw_messages_fts.rowid
+         LEFT JOIN sessions s ON s.provider = r.provider AND s.session_id = r.session_id
          WHERE lcm_raw_messages_fts MATCH ?
            {filter_sql}
          ORDER BY {order_by}
@@ -1720,27 +1762,42 @@ async fn raw_grep_hits(
     );
     let mut rows = conn.query(&sql, values).await?;
 
-    let mut hits = Vec::new();
+    let mut candidates = Vec::new();
     while let Some(row) = rows.next().await? {
-        hits.push(raw_hit_from_row(&row, &query_plan.like_terms)?);
+        candidates.push(raw_hit_candidate_from_row(&row, &query_plan.like_terms)?);
     }
-    Ok(hits)
+    Ok(dedupe_related_raw_hits(candidates))
 }
 
 async fn summary_grep_hits(
     conn: &Connection,
     request: &LcmGrepRequest,
+    retrieval_filters: &LcmGrepFilters,
     session_id: Option<&str>,
     query_plan: &GrepQueryPlan,
     limit: usize,
 ) -> Result<Vec<LcmGrepHit>, LcmError> {
     if query_plan.requires_like_fallback {
-        return summary_like_grep_hits(conn, request, session_id, query_plan, limit).await;
+        return summary_like_grep_hits(
+            conn,
+            request,
+            retrieval_filters,
+            session_id,
+            query_plan,
+            limit,
+        )
+        .await;
     }
     let mut values = vec![Value::Text(query_plan.fts_query.clone())];
     let mut filters = Vec::new();
     push_grep_provider_filter(request, "n.provider", &mut filters, &mut values);
-    push_summary_grep_filters(request, session_id, &mut filters, &mut values);
+    push_summary_grep_filters(
+        request,
+        *retrieval_filters,
+        session_id,
+        &mut filters,
+        &mut values,
+    );
     values.push(Value::Integer(limit as i64));
     let filter_sql = if filters.is_empty() {
         String::new()
@@ -1769,6 +1826,7 @@ async fn summary_grep_hits(
 async fn raw_like_grep_hits(
     conn: &Connection,
     request: &LcmGrepRequest,
+    retrieval_filters: &LcmGrepFilters,
     session_id: Option<&str>,
     query_plan: &GrepQueryPlan,
     limit: usize,
@@ -1781,7 +1839,13 @@ async fn raw_like_grep_hits(
     let mut values = Vec::new();
     let mut filters = Vec::new();
     push_grep_provider_filter(request, "r.provider", &mut filters, &mut values);
-    push_raw_grep_filters(request, session_id, &mut filters, &mut values);
+    push_raw_grep_filters(
+        request,
+        *retrieval_filters,
+        session_id,
+        &mut filters,
+        &mut values,
+    );
 
     let like_sql = like_predicate_sql(
         query_plan.like_terms.len(),
@@ -1803,18 +1867,22 @@ async fn raw_like_grep_hits(
         Some(RAW_ROLE_PENALTY_CASE),
     );
     let sql = format!(
-        "SELECT r.provider, r.session_id, r.message_id, r.store_id, r.snippet_text, r.role, 0.0 AS rank
+        "SELECT r.provider, r.session_id, r.message_id, r.store_id, r.snippet_text, r.role,
+                COALESCE(NULLIF(s.parent_session_id, ''), r.session_id),
+                COALESCE(s.is_subagent, 0), 0.0 AS rank
          FROM lcm_raw_messages r
+         LEFT JOIN sessions s ON s.provider = r.provider AND s.session_id = r.session_id
          WHERE {}
          ORDER BY {order_by}
          LIMIT ?",
         filters.join(" AND "),
     );
     let mut rows = conn.query(&sql, values).await?;
-    let mut hits = Vec::new();
+    let mut candidates = Vec::new();
     while let Some(row) = rows.next().await? {
-        hits.push(raw_hit_from_row(&row, &query_plan.like_terms)?);
+        candidates.push(raw_hit_candidate_from_row(&row, &query_plan.like_terms)?);
     }
+    let mut hits = dedupe_related_raw_hits(candidates);
     if hits.len() > limit {
         hits.truncate(limit);
     }
@@ -1824,6 +1892,7 @@ async fn raw_like_grep_hits(
 async fn summary_like_grep_hits(
     conn: &Connection,
     request: &LcmGrepRequest,
+    retrieval_filters: &LcmGrepFilters,
     session_id: Option<&str>,
     query_plan: &GrepQueryPlan,
     limit: usize,
@@ -1836,7 +1905,13 @@ async fn summary_like_grep_hits(
     let mut values = Vec::new();
     let mut filters = Vec::new();
     push_grep_provider_filter(request, "n.provider", &mut filters, &mut values);
-    push_summary_grep_filters(request, session_id, &mut filters, &mut values);
+    push_summary_grep_filters(
+        request,
+        *retrieval_filters,
+        session_id,
+        &mut filters,
+        &mut values,
+    );
 
     filters.push(like_predicate_sql(
         query_plan.like_terms.len(),
@@ -1869,6 +1944,7 @@ async fn summary_like_grep_hits(
 
 fn push_raw_grep_filters(
     request: &LcmGrepRequest,
+    retrieval_filters: LcmGrepFilters,
     session_id: Option<&str>,
     filters: &mut Vec<String>,
     values: &mut Vec<Value>,
@@ -1906,7 +1982,39 @@ fn push_raw_grep_filters(
         filters.push("r.timestamp <= ?".to_string());
         values.push(Value::Integer(end_time));
     }
+    if let Some(predicate) = crate::sessions::message_noise::message_type_predicate_sql(
+        "r",
+        false,
+        retrieval_filters.message_type,
+    ) {
+        filters.push(predicate);
+    }
+    push_grep_relationship_scope_filter(
+        retrieval_filters.relationship_scope,
+        "r.provider",
+        "r.session_id",
+        filters,
+    );
     push_grep_git_scope_filter(request, "r.session_id", filters, values);
+}
+
+fn push_grep_relationship_scope_filter(
+    scope: crate::sessions::SessionSearchScope,
+    provider_column: &str,
+    session_column: &str,
+    filters: &mut Vec<String>,
+) {
+    let is_subagent = match scope {
+        crate::sessions::SessionSearchScope::All => return,
+        crate::sessions::SessionSearchScope::ParentsOnly => 0,
+        crate::sessions::SessionSearchScope::SubagentsOnly => 1,
+    };
+    filters.push(format!(
+        "EXISTS (SELECT 1 FROM sessions scoped_session \
+         WHERE scoped_session.provider = {provider_column} \
+           AND scoped_session.session_id = {session_column} \
+           AND scoped_session.is_subagent = {is_subagent})"
+    ));
 }
 
 /// Appends the request's git-scope constraint (branch/worktree/commit) as an
@@ -1931,6 +2039,7 @@ fn push_grep_git_scope_filter(
 
 fn push_summary_grep_filters(
     request: &LcmGrepRequest,
+    retrieval_filters: LcmGrepFilters,
     session_id: Option<&str>,
     filters: &mut Vec<String>,
     values: &mut Vec<Value>,
@@ -1960,22 +2069,58 @@ fn push_summary_grep_filters(
         values.push(Value::Text(source.to_string()));
         values.push(Value::Text(format!("%\"source\":\"{source}\"%")));
     }
+    push_grep_relationship_scope_filter(
+        retrieval_filters.relationship_scope,
+        "n.provider",
+        "n.session_id",
+        filters,
+    );
     push_grep_git_scope_filter(request, "n.session_id", filters, values);
 }
 
-fn raw_hit_from_row(row: &libsql::Row, like_terms: &[String]) -> Result<LcmGrepHit, LcmError> {
+struct RawGrepCandidate {
+    hit: LcmGrepHit,
+    family_session_id: String,
+    is_subagent: bool,
+    content: String,
+}
+
+fn raw_hit_candidate_from_row(
+    row: &libsql::Row,
+    like_terms: &[String],
+) -> Result<RawGrepCandidate, LcmError> {
     let snippet: String = row.get(4)?;
     let role: Option<String> = row.get::<Option<String>>(5).unwrap_or(None);
-    Ok(LcmGrepHit {
-        kind: "raw_message".to_string(),
-        provider: row.get(0)?,
-        session_id: row.get(1)?,
-        message_id: Some(row.get(2)?),
-        node_id: None,
-        store_id: Some(row.get(3)?),
-        role: role.filter(|r| !r.is_empty()),
-        snippet: match_centered_snippet(&snippet, like_terms),
+    Ok(RawGrepCandidate {
+        hit: LcmGrepHit {
+            kind: "raw_message".to_string(),
+            provider: row.get(0)?,
+            session_id: row.get(1)?,
+            message_id: Some(row.get(2)?),
+            node_id: None,
+            store_id: Some(row.get(3)?),
+            role: role.filter(|r| !r.is_empty()),
+            snippet: match_centered_snippet(&snippet, like_terms),
+        },
+        family_session_id: row.get(6)?,
+        is_subagent: row.get::<i64>(7).unwrap_or_default() != 0,
+        content: snippet,
     })
+}
+
+fn dedupe_related_raw_hits(candidates: Vec<RawGrepCandidate>) -> Vec<LcmGrepHit> {
+    crate::sessions::message_noise::dedupe_related_message_copies(candidates, |candidate| {
+        crate::sessions::message_noise::RelatedMessageCopyIdentity {
+            provider: &candidate.hit.provider,
+            family_session_id: &candidate.family_session_id,
+            session_id: &candidate.hit.session_id,
+            is_subagent: candidate.is_subagent,
+            content: &candidate.content,
+        }
+    })
+    .into_iter()
+    .map(|candidate| candidate.hit)
+    .collect()
 }
 
 fn summary_hit_from_row(row: &libsql::Row, like_terms: &[String]) -> Result<LcmGrepHit, LcmError> {

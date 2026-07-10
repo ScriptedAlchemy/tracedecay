@@ -2663,6 +2663,74 @@ async fn grep_caps_hits_per_session_in_cross_session_scope() {
 }
 
 #[tokio::test]
+async fn grep_collapses_parent_prompt_copies_from_eight_subagents() {
+    let tmp = TempDir::new().unwrap();
+    let db = open_lcm_db(&tmp).await;
+    let prompt = "Open pull requests to fix any issues.";
+    insert_session(&db, "codex", "parent").await;
+    assert!(
+        db.upsert_session_message(&raw_message_with_role_source_timestamp(
+            "codex",
+            "parent-prompt",
+            "parent",
+            1,
+            "user",
+            "codex_rollout",
+            1_715_000_001,
+            prompt,
+        ))
+        .await
+    );
+
+    for index in 0..8 {
+        let session_id = format!("agent-worker-{index}");
+        let child = SessionRecord {
+            session_id: session_id.clone(),
+            parent_session_id: Some("parent".to_string()),
+            is_subagent: true,
+            agent_id: Some(format!("worker-{index}")),
+            ..sample_session("codex", &session_id)
+        };
+        assert!(db.upsert_session(&child).await);
+        assert!(
+            db.upsert_session_message(&raw_message_with_role_source_timestamp(
+                "codex",
+                &format!("child-prompt-{index}"),
+                &session_id,
+                index + 2,
+                "user",
+                "codex_rollout",
+                1_715_000_002 + index,
+                prompt,
+            ))
+            .await
+        );
+    }
+
+    let hits = db
+        .lcm_grep(LcmGrepRequest {
+            provider: "codex".into(),
+            query: "open pull requests".into(),
+            scope: LcmScope::All,
+            session_id: None,
+            include_summaries: false,
+            limit: 10,
+            sort: LcmGrepSort::Relevance,
+            source: None,
+            role: Some("user".into()),
+            start_time: None,
+            end_time: None,
+            git_filter: Default::default(),
+        })
+        .await
+        .expect("grep should succeed")
+        .hits;
+
+    assert_eq!(hits.len(), 1, "copied child prompts must collapse");
+    assert_eq!(hits[0].session_id, "parent");
+}
+
+#[tokio::test]
 async fn grep_disclosed_cap_reserves_a_tool_slot_for_capped_sessions() {
     let tmp = TempDir::new().unwrap();
     let db = open_lcm_db(&tmp).await;

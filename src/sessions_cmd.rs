@@ -1,6 +1,9 @@
 use std::path::Path;
 
-use crate::{cli::SessionsAction, resolve_cli_project_root};
+use crate::{
+    cli::{SessionsAction, SessionsSearchArgs},
+    resolve_cli_project_root,
+};
 use tracedecay::sessions::{ProviderScope, SessionSearchFilters, SessionSearchTimeRange};
 use tracedecay::timeutil::SearchTimeBound;
 
@@ -29,18 +32,22 @@ pub(crate) async fn handle_sessions_action(
                 stats.sessions_upserted, stats.messages_upserted
             );
         }
-        SessionsAction::Search {
-            query,
-            provider,
-            limit,
-            since,
-            until,
-            project_id,
-            project_path,
-            branch,
-            worktree,
-            commit,
-        } => {
+        SessionsAction::Search(args) => {
+            let SessionsSearchArgs {
+                query,
+                provider,
+                scope,
+                message_type,
+                parent_session_id,
+                limit,
+                since,
+                until,
+                project_id,
+                project_path,
+                branch,
+                worktree,
+                commit,
+            } = *args;
             let project_path = resolve_cli_project_root(None, project_id, project_path).await?;
             let db = tracedecay::sessions::cursor::open_project_session_db(&project_path)
                 .await
@@ -51,6 +58,18 @@ pub(crate) async fn handle_sessions_action(
                     ),
                 })?;
             let provider_scope = session_provider_scope(provider.as_deref())?;
+            let scope =
+                tracedecay::sessions::SessionSearchScope::parse(&scope).ok_or_else(|| {
+                    tracedecay::errors::TraceDecayError::Config {
+                        message: "scope must be one of all, parents_only, subagents_only"
+                            .to_string(),
+                    }
+                })?;
+            let message_type = tracedecay::sessions::SessionMessageType::parse(&message_type)
+                .ok_or_else(|| tracedecay::errors::TraceDecayError::Config {
+                    message: "message_type must be one of all, direct_user, tool_result"
+                        .to_string(),
+                })?;
             let git_filter = tracedecay::sessions::git_correlation::GitScopeFilter::from_args(
                 branch.as_deref(),
                 worktree.as_deref(),
@@ -87,8 +106,9 @@ pub(crate) async fn handle_sessions_action(
                     &query,
                     limit,
                     SessionSearchFilters {
-                        scope: tracedecay::sessions::SessionSearchScope::All,
-                        parent_session_id: None,
+                        scope,
+                        message_type,
+                        parent_session_id: parent_session_id.as_deref(),
                         time_range,
                     },
                     &git_filter,
@@ -101,8 +121,9 @@ pub(crate) async fn handle_sessions_action(
                     &query,
                     limit,
                     SessionSearchFilters {
-                        scope: tracedecay::sessions::SessionSearchScope::All,
-                        parent_session_id: None,
+                        scope,
+                        message_type,
+                        parent_session_id: parent_session_id.as_deref(),
                         time_range,
                     },
                 )
@@ -113,8 +134,9 @@ pub(crate) async fn handle_sessions_action(
                     &query,
                     limit,
                     SessionSearchFilters {
-                        scope: tracedecay::sessions::SessionSearchScope::All,
-                        parent_session_id: None,
+                        scope,
+                        message_type,
+                        parent_session_id: parent_session_id.as_deref(),
                         time_range,
                     },
                 )

@@ -12279,6 +12279,129 @@ async fn message_search_preserves_provider_project_parent_scope_shape_after_lcm(
     assert_eq!(payload["results"].as_array().unwrap().len(), 1);
     assert!(payload["results"][0]["message"].get("text").is_some());
     assert_eq!(payload["results"][0]["session"]["is_subagent"], true);
+
+    for (message_id, session_id, text, metadata_json) in [
+        (
+            "parent-direct",
+            "parent",
+            "persimmon retrieval parent",
+            None,
+        ),
+        ("child-direct", "child", "persimmon retrieval direct", None),
+        (
+            "child-tool-result",
+            "child",
+            "persimmon retrieval tool output",
+            Some(json!({"tool_events":[{"type":"tool_result","call_id":"call-1"}]}).to_string()),
+        ),
+    ] {
+        assert!(
+            db.upsert_session_message(&SessionMessageRecord {
+                provider: "cursor".to_string(),
+                message_id: message_id.to_string(),
+                session_id: session_id.to_string(),
+                role: "user".to_string(),
+                timestamp: Some(10),
+                ordinal: 10,
+                text: text.to_string(),
+                kind: Some("message".to_string()),
+                model: Some("test-model".to_string()),
+                tool_names: None,
+                source_path: Some(format!("{session_id}.jsonl")),
+                source_offset: Some(10),
+                metadata_json,
+            })
+            .await
+        );
+    }
+
+    let direct = handle_tool_call(
+        &cg,
+        "tracedecay_message_search",
+        json!({
+            "query": "persimmon retrieval",
+            "provider": "cursor",
+            "scope": "subagents_only",
+            "message_type": "direct_user",
+            "catch_up": false,
+            "limit": 10
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let direct: Value = serde_json::from_str(extract_text(&direct.value)).unwrap();
+    assert_eq!(direct["count"], 1);
+    assert_eq!(
+        direct["results"][0]["message"]["message_id"],
+        "child-direct"
+    );
+
+    let tool_result = handle_tool_call(
+        &cg,
+        "tracedecay_message_search",
+        json!({
+            "query": "persimmon retrieval",
+            "provider": "cursor",
+            "scope": "subagents_only",
+            "message_type": "tool_result",
+            "catch_up": false,
+            "limit": 10
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let tool_result: Value = serde_json::from_str(extract_text(&tool_result.value)).unwrap();
+    assert_eq!(tool_result["count"], 1);
+    assert_eq!(
+        tool_result["results"][0]["message"]["message_id"],
+        "child-tool-result"
+    );
+
+    let parent_lcm = handle_tool_call(
+        &cg,
+        "tracedecay_lcm_grep",
+        json!({
+            "query": "persimmon retrieval",
+            "provider": "cursor",
+            "scope": "all",
+            "relationship_scope": "parents_only",
+            "message_type": "direct_user",
+            "include_summaries": false,
+            "limit": 10
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let parent_lcm: Value = serde_json::from_str(extract_text(&parent_lcm.value)).unwrap();
+    assert_eq!(parent_lcm["count"], 1);
+    assert_eq!(parent_lcm["hits"][0]["message_id"], "parent-direct");
+
+    let child_tool_lcm = handle_tool_call(
+        &cg,
+        "tracedecay_lcm_grep",
+        json!({
+            "query": "persimmon retrieval",
+            "provider": "cursor",
+            "scope": "all",
+            "relationship_scope": "subagents_only",
+            "message_type": "tool_result",
+            "include_summaries": false,
+            "limit": 10
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let child_tool_lcm: Value = serde_json::from_str(extract_text(&child_tool_lcm.value)).unwrap();
+    assert_eq!(child_tool_lcm["count"], 1);
+    assert_eq!(child_tool_lcm["hits"][0]["message_id"], "child-tool-result");
 }
 
 #[cfg(unix)]
@@ -13121,6 +13244,23 @@ fn message_search_provider_schema_matches_ingested_providers() {
         message_search.input_schema["properties"]
             .get("include_subagents")
             .is_some()
+    );
+    assert_eq!(
+        message_search.input_schema["properties"]["message_type"]["enum"],
+        serde_json::json!(["all", "direct_user", "tool_result"])
+    );
+
+    let lcm_grep = tools
+        .iter()
+        .find(|tool| tool.name == "tracedecay_lcm_grep")
+        .expect("tracedecay_lcm_grep definition");
+    assert_eq!(
+        lcm_grep.input_schema["properties"]["relationship_scope"]["enum"],
+        serde_json::json!(["all", "parents_only", "subagents_only"])
+    );
+    assert_eq!(
+        lcm_grep.input_schema["properties"]["message_type"]["enum"],
+        serde_json::json!(["all", "direct_user", "tool_result"])
     );
 }
 
@@ -15430,6 +15570,20 @@ async fn lcm_grep_rejects_invalid_scope() {
         err.contains("scope must be one of current, session, all"),
         "unexpected error: {err}"
     );
+    let err = expect_tool_error(
+        handle_tool_call(
+            &cg,
+            "tracedecay_lcm_grep",
+            json!({"query": "anything", "relationship_scope": "children"}),
+            None,
+            None,
+        )
+        .await,
+    );
+    assert!(
+        err.contains("relationship_scope must be one of all, parents_only, subagents_only"),
+        "unexpected error: {err}"
+    );
 }
 
 /// Same contract for `tracedecay_message_search`: invalid scope values fail
@@ -15468,6 +15622,21 @@ async fn message_search_rejects_invalid_scope() {
     assert!(
         err.contains("unknown session provider 'unknown-agent'"),
         "unexpected provider error: {err}"
+    );
+
+    let err = expect_tool_error(
+        handle_tool_call(
+            &cg,
+            "tracedecay_message_search",
+            json!({"query": "anything", "message_type": "promptish"}),
+            None,
+            None,
+        )
+        .await,
+    );
+    assert!(
+        err.contains("message_type must be one of all, direct_user, tool_result"),
+        "unexpected message_type error: {err}"
     );
 }
 

@@ -610,6 +610,48 @@ pub enum AnalyticsAction {
     Sync,
 }
 
+#[derive(clap::Args)]
+pub(crate) struct SessionsSearchArgs {
+    /// Full-text query to search for
+    pub(crate) query: String,
+    /// Optional explicit result scope; omit or use all for unified cross-provider search
+    #[arg(long)]
+    pub(crate) provider: Option<String>,
+    /// Relationship scope: all, parents_only, or subagents_only
+    #[arg(long, default_value = "all", value_parser = ["all", "parents_only", "subagents_only"])]
+    pub(crate) scope: String,
+    /// Semantic message type: all, direct_user, or tool_result
+    #[arg(long, default_value = "all", value_parser = ["all", "direct_user", "tool_result"])]
+    pub(crate) message_type: String,
+    /// Only child sessions belonging to this parent session
+    #[arg(long)]
+    pub(crate) parent_session_id: Option<String>,
+    /// Maximum number of matches
+    #[arg(long, default_value_t = 10)]
+    pub(crate) limit: usize,
+    /// Inclusive minimum message timestamp. Accepts Unix seconds, RFC3339, YYYY-MM-DD, or relative time like "last hour"
+    #[arg(long, alias = "time-from", alias = "start-time")]
+    pub(crate) since: Option<String>,
+    /// Inclusive maximum message timestamp. Accepts Unix seconds, RFC3339, YYYY-MM-DD, or relative time like "last hour"
+    #[arg(long, alias = "time-to", alias = "end-time")]
+    pub(crate) until: Option<String>,
+    /// Registered project id whose session store should be searched
+    #[arg(long)]
+    pub(crate) project_id: Option<String>,
+    /// Registered project root path or alias whose session store should be searched
+    #[arg(long, conflicts_with = "project_id")]
+    pub(crate) project_path: Option<String>,
+    /// Only sessions correlated with this git branch
+    #[arg(long)]
+    pub(crate) branch: Option<String>,
+    /// Only sessions correlated with this worktree path
+    #[arg(long)]
+    pub(crate) worktree: Option<String>,
+    /// Only sessions that produced this commit (full or >=6-char prefix)
+    #[arg(long)]
+    pub(crate) commit: Option<String>,
+}
+
 #[derive(Subcommand)]
 pub enum SessionsAction {
     /// Ingest all supported transcript providers into the project session DB
@@ -625,37 +667,7 @@ pub enum SessionsAction {
         project_path: Option<String>,
     },
     /// Search previously ingested session messages
-    Search {
-        /// Full-text query to search for
-        query: String,
-        /// Optional explicit result scope; omit or use all for unified cross-provider search
-        #[arg(long)]
-        provider: Option<String>,
-        /// Maximum number of matches
-        #[arg(long, default_value_t = 10)]
-        limit: usize,
-        /// Inclusive minimum message timestamp. Accepts Unix seconds, RFC3339, YYYY-MM-DD, or relative time like "last hour"
-        #[arg(long, alias = "time-from", alias = "start-time")]
-        since: Option<String>,
-        /// Inclusive maximum message timestamp. Accepts Unix seconds, RFC3339, YYYY-MM-DD, or relative time like "last hour"
-        #[arg(long, alias = "time-to", alias = "end-time")]
-        until: Option<String>,
-        /// Registered project id whose session store should be searched
-        #[arg(long)]
-        project_id: Option<String>,
-        /// Registered project root path or alias whose session store should be searched
-        #[arg(long, conflicts_with = "project_id")]
-        project_path: Option<String>,
-        /// Only sessions correlated with this git branch
-        #[arg(long)]
-        branch: Option<String>,
-        /// Only sessions correlated with this worktree path
-        #[arg(long)]
-        worktree: Option<String>,
-        /// Only sessions that produced this commit (full or >=6-char prefix)
-        #[arg(long)]
-        commit: Option<String>,
-    },
+    Search(Box<SessionsSearchArgs>),
     /// Backfill the session↔git correlation index from historical session,
     /// analytics, and reflog signals
     GitBackfill {

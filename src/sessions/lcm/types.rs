@@ -258,6 +258,24 @@ pub struct LcmGrepRequest {
     pub git_filter: crate::sessions::git_correlation::GitScopeFilter,
 }
 
+/// Query-only filters layered over the raw LCM request. Kept separate so
+/// compression/replay callers retain their existing request construction while
+/// interactive retrieval can select parent/subagent and semantic message type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LcmGrepFilters {
+    pub relationship_scope: crate::sessions::SessionSearchScope,
+    pub message_type: crate::sessions::SessionMessageType,
+}
+
+impl Default for LcmGrepFilters {
+    fn default() -> Self {
+        Self {
+            relationship_scope: crate::sessions::SessionSearchScope::All,
+            message_type: crate::sessions::SessionMessageType::All,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct LcmGrepHit {
     pub kind: String,

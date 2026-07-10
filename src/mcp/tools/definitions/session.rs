@@ -49,6 +49,11 @@ pub(super) fn def_message_search() -> ToolDefinition {
                     "description": "Relationship scope for search results (default: all).",
                     "enum": ["all", "parents_only", "subagents_only"]
                 },
+                "message_type": {
+                    "type": "string",
+                    "description": "Semantic message filter. direct_user excludes provider-mislabeled tool results; tool_result includes role-, kind-, and metadata-identified tool output. Default: all.",
+                    "enum": ["all", "direct_user", "tool_result"]
+                },
                 "limit": {
                     "type": "number",
                     "description": "Maximum number of messages to return (default: 10, max: 50)."

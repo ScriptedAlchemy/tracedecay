@@ -861,6 +861,7 @@ async fn search_session_messages_git_scoped_by_branch_with_hyphen_term() {
 
     let filters = SessionSearchFilters {
         scope: SessionSearchScope::All,
+        message_type: Default::default(),
         parent_session_id: None,
         time_range: SessionSearchTimeRange::default(),
     };
@@ -936,6 +937,7 @@ async fn search_session_messages_filters_by_message_timestamp() {
             10,
             SessionSearchFilters {
                 scope: SessionSearchScope::All,
+                message_type: Default::default(),
                 parent_session_id: None,
                 time_range: SessionSearchTimeRange {
                     start_time: Some(15),
@@ -1054,6 +1056,7 @@ async fn search_session_messages_filters_parent_and_subagent_scope() {
             10,
             SessionSearchFilters {
                 scope: SessionSearchScope::ParentsOnly,
+                message_type: Default::default(),
                 parent_session_id: None,
                 time_range: SessionSearchTimeRange::default(),
             },
@@ -1070,6 +1073,7 @@ async fn search_session_messages_filters_parent_and_subagent_scope() {
             10,
             SessionSearchFilters {
                 scope: SessionSearchScope::SubagentsOnly,
+                message_type: Default::default(),
                 parent_session_id: Some("parent"),
                 time_range: SessionSearchTimeRange::default(),
             },
@@ -1081,6 +1085,43 @@ async fn search_session_messages_filters_parent_and_subagent_scope() {
         subagents_only[0].session.parent_session_id.as_deref(),
         Some("parent")
     );
+}
+
+#[tokio::test]
+async fn search_session_messages_collapses_parent_prompt_copies_from_eight_subagents() {
+    let tmp = TempDir::new().unwrap();
+    let db = open_isolated_db(&tmp).await;
+    let prompt = "Open pull requests to fix any issues.";
+    let parent = sample_session("codex", "parent", "project-a");
+    db.upsert_session(&parent).await;
+    db.upsert_session_message(&sample_message("codex", "parent-prompt", "parent", prompt))
+        .await;
+
+    for index in 0..8 {
+        let session_id = format!("agent-worker-{index}");
+        let child = SessionRecord {
+            session_id: session_id.clone(),
+            parent_session_id: Some("parent".to_string()),
+            is_subagent: true,
+            agent_id: Some(format!("worker-{index}")),
+            ..sample_session("codex", &session_id, "project-a")
+        };
+        db.upsert_session(&child).await;
+        db.upsert_session_message(&sample_message(
+            "codex",
+            &format!("child-prompt-{index}"),
+            &session_id,
+            prompt,
+        ))
+        .await;
+    }
+
+    let results = db
+        .search_session_messages("codex", Some("project-a"), "open pull requests", 10)
+        .await;
+
+    assert_eq!(results.len(), 1, "copied child prompts must collapse");
+    assert_eq!(results[0].session.session_id, "parent");
 }
 
 // ---------------------------------------------------------------------------
