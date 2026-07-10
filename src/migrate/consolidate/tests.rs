@@ -670,6 +670,125 @@ async fn identity_survives_symlink_and_repository_move() {
 }
 
 #[tokio::test]
+async fn untracked_branch_databases_are_recovered_into_the_destination() {
+    const SOURCE_ORPHAN_FACT: &str = "fact unique to the source orphan branch";
+    const TARGET_ORPHAN_FACT: &str = "fact unique to the target orphan branch";
+    let fixture = fixture().await;
+    let source = layout_for_id(&fixture.project, &fixture.profile, &fixture.source_id).unwrap();
+    let target = layout_for_id(&fixture.project, &fixture.profile, &fixture.target_id).unwrap();
+    add_untracked_branch(&source, "orphan-source", SOURCE_ORPHAN_FACT).await;
+    add_untracked_branch(&target, "orphan-target", TARGET_ORPHAN_FACT).await;
+
+    let options = fixture.options();
+    let planned = plan(&options).await.unwrap();
+    assert_eq!(planned.source.graph_databases, 2);
+    assert_eq!(planned.target.graph_databases, 2);
+    assert_eq!(planned.source.branches, 2);
+    assert_eq!(planned.target.branches, 2);
+
+    let applied = apply(&options, &planned.confirmation_token).await.unwrap();
+    let meta = branch_meta::load_branch_meta(&applied.destination_data_root).unwrap();
+    let recovered = meta
+        .branches
+        .iter()
+        .filter(|(name, _)| name.contains("orphan-source-") || name.contains("orphan-target-"))
+        .map(|(name, entry)| {
+            assert!(entry.gc_protected);
+            (name.clone(), entry.db_file.clone())
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(recovered.len(), 2);
+    assert!(recovered.iter().any(|(name, db_file)| {
+        name.starts_with("recovered/orphan-target-") && db_file == "branches/orphan-target.db"
+    }));
+    assert!(recovered.iter().any(|(name, db_file)| {
+        name.starts_with(&format!(
+            "consolidated/{}/recovered/orphan-source-",
+            fixture.source_id
+        )) && applied.destination_data_root.join(db_file).is_file()
+    }));
+
+    let gc = crate::branch::gc_dead_branch_stores(
+        &fixture.project,
+        &applied.destination_data_root,
+        0,
+        0,
+    );
+    assert!(gc.removed_tracked.is_empty());
+    let reloaded = branch_meta::load_branch_meta(&applied.destination_data_root).unwrap();
+    for (name, db_file) in recovered {
+        assert!(reloaded.branches[&name].gc_protected);
+        let path = applied.destination_data_root.join(db_file);
+        assert!(path.is_file());
+        let expected = if name.contains("orphan-source-") {
+            SOURCE_ORPHAN_FACT
+        } else {
+            TARGET_ORPHAN_FACT
+        };
+        let (db, _) = Database::open_read_only(&path).await.unwrap();
+        let facts = MemoryStore::new(db.conn())
+            .list_facts(None, Some(0.0), 100)
+            .await
+            .unwrap();
+        assert!(
+            facts.iter().any(|fact| fact.content == expected),
+            "recovered branch '{name}' lost its unique fact"
+        );
+        db.close();
+    }
+}
+
+#[tokio::test]
+async fn corrupt_untracked_branch_database_is_rejected_before_mutation() {
+    let fixture = fixture().await;
+    let source = layout_for_id(&fixture.project, &fixture.profile, &fixture.source_id).unwrap();
+    add_untracked_branch(&source, "corrupt-orphan", "fact in corrupt orphan").await;
+    let corrupt = source.data_root.join("branches/corrupt-orphan.db");
+    let file = fs::OpenOptions::new().write(true).open(&corrupt).unwrap();
+    file.set_len(fs::metadata(&corrupt).unwrap().len() / 2)
+        .unwrap();
+    drop(file);
+    let before = full_tree_snapshot(&fixture.profile);
+
+    let error = plan(&fixture.options()).await.unwrap_err();
+
+    assert!(error.to_string().contains("quick_check"), "{error}");
+    assert_eq!(
+        full_tree_snapshot(&fixture.profile),
+        before,
+        "corrupt-input planning mutated the profile"
+    );
+}
+
+#[tokio::test]
+async fn branch_metadata_paths_cannot_escape_the_profile_shard() {
+    let fixture = fixture().await;
+    let source = layout_for_id(&fixture.project, &fixture.profile, &fixture.source_id).unwrap();
+    let outside = fixture.profile.join("outside.db");
+    fs::copy(&source.graph_db_path, &outside).unwrap();
+    let mut meta = branch_meta::load_branch_meta(&source.data_root).unwrap();
+
+    for db_file in [
+        "../outside.db".to_string(),
+        outside.to_string_lossy().to_string(),
+    ] {
+        meta.branches.insert(
+            "unsafe".to_string(),
+            BranchEntry {
+                db_file,
+                parent: Some(meta.default_branch.clone()),
+                created_at: "0".to_string(),
+                last_synced_at: "0".to_string(),
+                gc_protected: false,
+            },
+        );
+        branch_meta::save_branch_meta(&source.data_root, &meta).unwrap();
+        let error = plan(&fixture.options()).await.unwrap_err();
+        assert!(error.to_string().contains("store-relative path"), "{error}");
+    }
+}
+
+#[tokio::test]
 async fn a_third_matching_shard_is_rejected_as_ambiguous() {
     let fixture = fixture().await;
     create_shard(
@@ -1158,6 +1277,31 @@ fn add_branch_links(fixture: &Fixture, project_id: &str, count: usize) {
         meta.add_branch(&name, &relative, "main");
     }
     branch_meta::save_branch_meta(&layout.data_root, &meta).unwrap();
+}
+
+async fn add_untracked_branch(layout: &StoreLayout, name: &str, fact_content: &str) {
+    let branches = layout.data_root.join("branches");
+    fs::create_dir_all(&branches).unwrap();
+    let path = branches.join(format!("{name}.db"));
+    fs::copy(&layout.graph_db_path, &path).unwrap();
+    let (db, _) = Database::open(&path).await.unwrap();
+    MemoryStore::new(db.conn())
+        .add_fact(
+            AddFactRequest {
+                content: fact_content.to_string(),
+                category: MemoryCategory::Project,
+                source: Some("untracked-branch-test".to_string()),
+                tags: vec![name.to_string()],
+                entities: vec!["TraceDecay".to_string()],
+                trust: Some(0.8),
+                metadata: json!({"branch": name}),
+            },
+            0.5,
+        )
+        .await
+        .unwrap();
+    db.checkpoint().await.unwrap();
+    db.close();
 }
 
 fn sqlite_family_bytes(path: &Path) -> u64 {

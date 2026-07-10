@@ -663,10 +663,11 @@ fn now_unix_secs() -> u64 {
 /// Two independent sweeps, both age-gated so an in-flight branch that has not
 /// yet synced or a just-deleted-then-recreated ref is never collected:
 ///
-/// (a) **Tracked, ref-gone branches** — for each tracked non-default branch
-///     whose git ref no longer exists AND whose `last_synced_at` is older than
-///     `branch_gc_days`, remove its DB files and metadata entry. The default
-///     branch is never removed.
+/// (a) **Tracked, ref-gone branches** — for each unprotected tracked
+///     non-default branch whose git ref no longer exists AND whose
+///     `last_synced_at` is older than `branch_gc_days`, remove its DB files and
+///     metadata entry. The default branch and GC-protected entries are never
+///     removed.
 /// (b) **Orphan DBs** — `branches/*.db` files not referenced by any meta entry
 ///     whose mtime is older than `orphan_db_gc_days` are deleted along with
 ///     their `-wal`/`-shm` sidecars.
@@ -698,7 +699,7 @@ pub fn gc_dead_branch_stores(
         let candidates: Vec<(String, PathBuf, u64)> = meta
             .branches
             .iter()
-            .filter(|(name, _)| **name != default_branch)
+            .filter(|(name, entry)| **name != default_branch && !entry.gc_protected)
             .map(|(name, entry)| {
                 (
                     name.clone(),

@@ -34,7 +34,7 @@ use finalize::{cut_over_markers, register_destination, verify_destination};
 use preflight::{acquire_store_locks, ensure_profile_offline, preflight_disk_space};
 use prepare::prepare_destination;
 
-use crate::branch_meta::{self, BranchMeta};
+use crate::branch_meta::{self, BranchEntry, BranchMeta};
 use crate::errors::{Result, TraceDecayError};
 use crate::global_db::{GlobalDb, GraphScopeUpsert, StoreArtifactUpsert, StoreInstanceUpsert};
 use crate::storage::{
@@ -377,8 +377,10 @@ async fn resolve_plan_inner(
         &destination_project_id,
     )?;
 
-    let source_meta = load_required_branch_meta(&source_layout)?;
-    let target_meta = load_required_branch_meta(&target_layout)?;
+    let mut source_meta = load_required_branch_meta(&source_layout)?;
+    let mut target_meta = load_required_branch_meta(&target_layout)?;
+    recover_untracked_branch_graphs(&source_layout, &mut source_meta)?;
+    recover_untracked_branch_graphs(&target_layout, &mut target_meta)?;
     let source_graphs = graph_db_paths(&source_layout, &source_meta)?;
     let target_graphs = graph_db_paths(&target_layout, &target_meta)?;
     let session_paths = vec![
@@ -581,6 +583,53 @@ fn load_required_branch_meta(layout: &StoreLayout) -> Result<BranchMeta> {
             layout.branch_meta_path.display()
         ))
     })
+}
+
+fn recover_untracked_branch_graphs(layout: &StoreLayout, meta: &mut BranchMeta) -> Result<()> {
+    for (relative, path) in relative_file_map(&layout.data_root)? {
+        if !relative.starts_with("branches") || !is_sqlite_database(&relative) {
+            continue;
+        }
+        if meta
+            .branches
+            .values()
+            .any(|entry| same_path(&layout.data_root.join(&entry.db_file), &path))
+        {
+            continue;
+        }
+        let db_file = relative.to_str().ok_or_else(|| {
+            config_error(format!(
+                "untracked branch graph '{}' cannot be represented in branch metadata",
+                path.display()
+            ))
+        })?;
+        let base = relative
+            .file_stem()
+            .and_then(|value| value.to_str())
+            .map(crate::branch::sanitize_branch_name)
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| "branch".to_string());
+        let mut hash = Sha256::new();
+        hash.update(relative.as_os_str().as_encoded_bytes());
+        let name = format!("recovered/{base}-{}", &hex::encode(hash.finalize())[..16]);
+        if meta.branches.contains_key(&name) {
+            return Err(config_error(format!(
+                "recovered branch name collision for '{}'",
+                path.display()
+            )));
+        }
+        meta.branches.insert(
+            name,
+            BranchEntry {
+                db_file: db_file.to_string(),
+                parent: Some(meta.default_branch.clone()),
+                created_at: "0".to_string(),
+                last_synced_at: "0".to_string(),
+                gc_protected: true,
+            },
+        );
+    }
+    Ok(())
 }
 
 async fn inventory_store(
@@ -927,13 +976,7 @@ fn graph_db_paths_for_root(root: &Path, meta: &BranchMeta) -> Result<Vec<PathBuf
     let main = root.join(crate::config::DB_FILENAME);
     let mut paths = BTreeSet::new();
     for entry in meta.branches.values() {
-        let path = root.join(&entry.db_file);
-        if !path.is_file() {
-            return Err(config_error(format!(
-                "branch graph '{}' is missing",
-                path.display()
-            )));
-        }
+        let path = confined_branch_graph_path(root, &entry.db_file)?;
         paths.insert(path);
     }
     if !paths.remove(&main) {
@@ -943,6 +986,42 @@ fn graph_db_paths_for_root(root: &Path, meta: &BranchMeta) -> Result<Vec<PathBuf
         )));
     }
     Ok(std::iter::once(main).chain(paths).collect())
+}
+
+fn confined_branch_graph_path(root: &Path, db_file: &str) -> Result<PathBuf> {
+    let relative = Path::new(db_file);
+    if relative.as_os_str().is_empty()
+        || relative.is_absolute()
+        || relative
+            .components()
+            .any(|component| !matches!(component, std::path::Component::Normal(_)))
+    {
+        return Err(config_error(format!(
+            "branch graph path '{db_file}' is not a normalized store-relative path"
+        )));
+    }
+    let path = root.join(relative);
+    let canonical_root = root.canonicalize().map_err(io_error)?;
+    let canonical_path = path.canonicalize().map_err(|error| {
+        config_error(format!(
+            "branch graph '{}' is missing: {error}",
+            path.display()
+        ))
+    })?;
+    if !canonical_path.starts_with(&canonical_root) {
+        return Err(config_error(format!(
+            "branch graph '{}' escapes profile shard '{}'",
+            path.display(),
+            root.display()
+        )));
+    }
+    if !canonical_path.is_file() {
+        return Err(config_error(format!(
+            "branch graph '{}' is not a file",
+            path.display()
+        )));
+    }
+    Ok(path)
 }
 
 fn same_path(left: &Path, right: &Path) -> bool {

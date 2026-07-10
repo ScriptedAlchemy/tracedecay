@@ -177,6 +177,7 @@ async fn capture_graph_evidence(
         {
             peak_scratch_bytes = peak_scratch_bytes.max(snapshot.copied_bytes());
         }
+        sqlite::quick_check_connection(snapshot.connection(), path).await?;
         sqlite::extend_graph_identities(snapshot.connection(), &mut identities).await?;
         let fingerprint =
             crate::sqlite_read_snapshot::family_fingerprint(path).map_err(io_error)?;

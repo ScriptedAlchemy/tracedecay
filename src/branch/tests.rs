@@ -234,6 +234,25 @@ fn gc_keeps_fresh_dead_branch() {
 }
 
 #[test]
+fn gc_keeps_protected_ref_gone_stale_branch() {
+    let (_base, project_root, td) = setup_repo_with_meta();
+    let db = add_tracked_branch(&project_root, &td, "recovered/orphan", 0, false);
+    let mut meta = crate::branch_meta::load_branch_meta(&td).unwrap();
+    meta.branches
+        .get_mut("recovered/orphan")
+        .unwrap()
+        .gc_protected = true;
+    crate::branch_meta::save_branch_meta(&td, &meta).unwrap();
+
+    let report = gc_dead_branch_stores(&project_root, &td, 0, 0);
+
+    assert!(report.removed_tracked.is_empty());
+    assert!(db.exists());
+    let reloaded = crate::branch_meta::load_branch_meta(&td).unwrap();
+    assert!(reloaded.branches["recovered/orphan"].gc_protected);
+}
+
+#[test]
 fn gc_keeps_branch_with_live_ref() {
     let (_base, project_root, td) = setup_repo_with_meta();
     // Ref exists AND stale: still keep it, ref presence wins.
