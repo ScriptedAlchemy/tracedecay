@@ -18,15 +18,15 @@ This file is the session/LCM/temporal specialization of the general retrieval pl
 
 | Plan | Contract consumed or extended here |
 |---|---|
-| [`01-domain-crate.md`](01-domain-crate.md) | Owns canonical IDs, `ThreadId`, `TurnId`, `RetrievalAnchorId`/`RetrievalAnchorRecordV1`, bitemporal intervals, evidence, confidence, privacy, scope, cursor, and `TraceQueryV1` vocabulary. This plan proposes exact session-temporal variants for that owner to define. |
-| [`02-store-crate.md`](02-store-crate.md) | Persists occurrences, logical clusters, temporal assertions, summary horizons, index manifests, judgments, replay receipts, vector watermarks, retention, and tombstones. No query transport opens SQLite directly. |
+| [`01-domain-crate.md`](01-domain-crate.md) | Owns canonical IDs, `ThreadId`, `TurnId`, `RetrievalAnchorId`/`RetrievalAnchorRecordV1`, bitemporal intervals, evidence, confidence, privacy, scope, the extended `CursorClaimsV1`, and the `TraceQueryV1` vocabulary including the optional `temporal` clause (`TemporalClauseV1`: `Current | AsOf{valid_time, knowledge_time} | Evolution | Forensic`). This plan rides that clause and the plan 05 §6.1 registered attributes; it proposes exact session-temporal variants for that owner to define and adds no parallel AST. |
+| [`02-store-crate.md`](02-store-crate.md) | Persists occurrences, logical clusters, temporal assertions, summary horizons, index manifests, judgments, replay receipts, vector watermarks, retention, and tombstones through its dedicated table families for `MessageOccurrenceV1`, `LogicalMessageClusterV1` (with retained revisions), `MessageCopyAssertionV1`, `TemporalAssertionV1`, `SummaryNodeV2`, and the qrel/judgment/replay-receipt evaluation shard; plan 02 reconciles its `message_origin_assertions`/`message_representative_memberships` tables into this vocabulary and defines the keys and indexes. No query transport opens SQLite directly. |
 | [`03-capture-crate.md`](03-capture-crate.md) | Captures provider-native messages, tool events, goals, locations, parent/child/workflow links, correction markers, and source order as sanitized immutable observations. It does not decide relevance or supersession. |
 | [`04-projectors-crate.md`](04-projectors-crate.md) | Builds typed message/Turn/session/thread documents, occurrence/copy relations, summary/source DAGs, temporal assertion candidates, Git/worktree attribution, and representative-cluster projections with rebuildable lineage. |
-| [`05-query-crate.md`](05-query-crate.md) | Owns parsing, candidate generation, fusion, temporal resolution, ranking, diversity, hydration, context assembly, explanations, pagination, and evaluation execution. There is no second LCM query engine. |
+| [`05-query-crate.md`](05-query-crate.md) | Owns parsing, candidate generation, fusion, temporal resolution, ranking, diversity, hydration, context assembly, explanations, pagination, and evaluation execution — all in its §5 module tree, against which §13 below states requirements. There is no second LCM query engine and no session-owned module tree. |
 | [`08-tool-catalog-crate.md`](08-tool-catalog-crate.md) | Declares one generated search/context/replay/eval capability surface and effect/output metadata. Legacy `message_search`/`lcm_*` commands become compatibility bindings, not independent semantics. |
 | [`09-application-crate.md`](09-application-crate.md) | Owns authorized search, context assembly, session replay, corpus/judgment, compare, and evaluation use cases; coordinates owner shards and partial coverage. |
 | [`10-api-crate.md`](10-api-crate.md) | Exposes those use cases through versioned typed routes, cursors, subscriptions, problems, and generated schemas. |
-| [`11-dashboard-frontend.md`](11-dashboard-frontend.md) | Owns Search Lab, session/Turn explorer, summary-DAG and temporal lineage views, result explanations, judgments, comparisons, and saved investigations. |
+| [`11-dashboard-frontend.md`](11-dashboard-frontend.md) | Owns the Search Quality Lab's session-temporal workspaces (§9), session/Turn explorer, summary-DAG and temporal lineage views, result explanations, judgments, comparisons, and saved investigations. |
 | [`13-research-provenance-and-context-anchors.md`](13-research-provenance-and-context-anchors.md) | Owns durable research manifests and anchor resolution. This plan records native IDs and expiring response handles only as legacy discovery evidence until V2 anchors exist. |
 | [`14-historical-failure-regression-matrix.md`](14-historical-failure-regression-matrix.md) | Owns the program-level failure ledger. Every failure class in this file gets a stable case ID and cutover receipt there. |
 | [`15-search-quality-evaluation-and-retrieval-research.md`](15-search-quality-evaluation-and-retrieval-research.md) | Owns shared recall channels, qrels, metrics, ablations, and general Search Quality Lab. This plan adds session-temporal strata and gates. |
@@ -185,6 +185,7 @@ pub struct MessageOccurrenceV1 {
 - Multiple source observations can attest to one provider event. They remain separate occurrences linked to one logical message.
 - One occurrence can be copied/forwarded into another session. The receiving occurrence remains addressable and carries its own session/Turn/audience context.
 - A provider-native ID collision across source instances is conflict evidence, not an `INSERT OR REPLACE` instruction.
+- Occurrence storage — uniqueness over `(source_instance_id, source_observation_id, source_order)`, keys, and indexes — is defined by plan [`02-store-crate.md`](02-store-crate.md)'s occurrence table family; this plan owns only the semantics above.
 
 ### 3.2 Logical clusters are versioned assertions
 
@@ -211,6 +212,8 @@ pub struct MessageCopyAssertionV1 {
 ```
 
 `MessageCopyRelation` includes `same_provider_event`, `forwarded_prompt`, `parent_child_copy`, `workflow_delegation_copy`, `compaction_replay_copy`, `store_replica_copy`, `summary_quotes_source`, and `possible_duplicate`. Only high-confidence identity relations share a logical representative. `possible_duplicate` is a ranking/diversity hint and never destroys independent evidence.
+
+Cluster revisions are retained and queryable by transaction time: plan 02's cluster table family keeps prior revisions, so as-of replay of cluster-dependent features (copy-noise penalty, representative selection) reads the revision current at the knowledge-time cutoff rather than today's clustering.
 
 Representative selection is query-dependent:
 
@@ -288,17 +291,10 @@ Authority never crosses scope automatically. A decision for one repository/workt
 
 ### 4.3 Answer modes
 
-```rust
-pub enum TemporalAnswerMode {
-    Current { as_of: UtcMicros },
-    Historical { as_of: UtcMicros },
-    Evolution { from: Option<UtcMicros>, to: UtcMicros },
-    Forensic,
-}
-```
+Answer modes ride the optional `temporal` clause of `TraceQueryV1`. Plan [`01-domain-crate.md`](01-domain-crate.md) owns the clause type (`TemporalClauseV1` with `mode: Current | AsOf{valid_time, knowledge_time} | Evolution{from, to} | Forensic`); plan [`05-query-crate.md`](05-query-crate.md) §6/§11.4 plans and executes it. This plan defines no parallel `TemporalAnswerMode` AST — it supplies the mode semantics:
 
-- `Current`: prefer assertions valid at `as_of`; collapse confident supersession chains to the current representative, but return a history/conflict warning and lineage anchors.
-- `Historical`: evaluate only evidence visible and valid at the requested cutoff; never leak later corrections into ranking features or summaries.
+- `Current`: prefer assertions valid now at the frozen snapshot; collapse confident supersession chains to the current representative, but return a history/conflict warning and lineage anchors.
+- `AsOf { valid_time, knowledge_time }`: evaluate only evidence valid at `valid_time` and known by `knowledge_time`; both timestamps are required per 05 §11.4 — a single-timestamp as-of conflates validity with knowledge and is rejected at validation. This mode supersedes this plan's earlier single-timestamp `Historical` mode. Never leak later corrections into ranking features or summaries.
 - `Evolution`: rank change points and relation chains, not one winning document.
 - `Forensic`: preserve occurrences and weak/contradictory evidence with minimal dedup; useful for audits and implementation archaeology.
 
@@ -330,7 +326,7 @@ Every time feature states its source (`occurred`, `observed`, `ingested`, `valid
 
 ### 5.1 Intent classes
 
-`TraceQueryV1` adds a versioned, inspectable session-retrieval intent profile:
+The session-retrieval intent profile rides `TraceQueryV1` unchanged: temporal mode and cutoff use the first-class optional `temporal` clause (§4.3; plan 01 owns `TemporalClauseV1`), and intent profile, grain, origin/audience/kind, provider, evidence-relation, assertion-status, and summary-freshness filters use the registered attribute keys specified in plan 05 §6.1. No parallel AST, fork, or session-only query type exists. The versioned, inspectable intent classes are:
 
 - `exact_literal_or_identifier` — errors, paths, API/tool/config names, session/message/Turn IDs, branch/commit/PR identifiers;
 - `original_user_request` — direct human prompt or correction, not copied child prompts/tool results;
@@ -360,8 +356,8 @@ Candidate generation is independently bounded and ablatable:
 7. summary-DAG documents with source horizon/coverage;
 8. optional privacy-domain local dense retrieval;
 9. optional learned-sparse retrieval;
-10. optional bounded local reranker;
-11. explicit recent-activity listing channel for listing intent only.
+10. optional bounded local reranker — a post-fusion stage executed by plan 05's `rank/rerank.rs` (15 §4.4), listed here for ablation completeness rather than as a candidate channel;
+11. explicit recent-activity listing channel for listing intent only — the `list_sessions`/`list_messages` list intents defined in plan 05 §6.2.
 
 Each candidate carries channel rank, native score, normalized/calibrated score if available, matched fields/terms/entities, owner shard, index/profile/model versions, source/summary horizon, privacy eligibility, watermark, cap/truncation, and latency.
 
@@ -375,7 +371,7 @@ Never compare raw shard BM25 scores as if corpus statistics were shared. Evaluat
 - exact-match tiers before any score normalization;
 - two-stage global candidate fusion and local hydration.
 
-The selected method must prove stable results when the same logical corpus is repartitioned across shards. Adding an unrelated large project cannot arbitrarily change top results for an exact scoped query.
+The selected method must prove stable results when the same logical corpus is repartitioned across shards. Adding an unrelated large project cannot arbitrarily change top results for an exact scoped query. The production fusion order is defined once in plan 05 §11.3 — RRF over channels within each shard, then a calibrated cross-shard merge with exact-match tiers first — and the repartition-stability obligation is owned by 05's planner property test (05 §17); this plan contributes the session fixtures and the ablation baselines above.
 
 ### 5.4 Temporal resolution and ranking
 
@@ -429,7 +425,7 @@ pub struct TaskContextSelectorV1 {
     pub thread_ids: Vec<ThreadId>,
     pub turn_ids: Vec<TurnId>,
     pub scope: ScopeSelectorV2,
-    pub temporal_mode: TemporalAnswerMode,
+    pub temporal: TemporalClauseV1,
 }
 ```
 
@@ -445,7 +441,7 @@ The context packet contains only evidence relevant through an explained typed re
 
 An unrelated global board row, similarly worded ticket, stale sibling plan, or other project initiative is a hard negative. Project/repository/worktree/ref scope and task/claim/dependency filters apply before ranking. A claimed task defaults to its own current context; broader initiative/global context is opt-in and visibly separated. If two agents claim overlapping artifacts, coordination evidence can surface compactly, but unrelated sibling work cannot consume the task context budget.
 
-Current mode returns the active task decision/claim and links superseded task instructions. Historical mode reconstructs what the task packet contained at the cutoff without later status, dependency, branch, or sibling-summary leakage. Evaluation must include Rspack/Rsbuild/React Router initiatives whose tasks cross repository boundaries, same-title tickets in unrelated projects, stale board decisions, overlapping agents, and sibling summaries that are relevant by vocabulary but unrelated by typed dependency/scope.
+Current mode returns the active task decision/claim and links superseded task instructions. As-of (`AsOf`) mode reconstructs what the task packet contained at the cutoff without later status, dependency, branch, or sibling-summary leakage. Evaluation must include Rspack/Rsbuild/React Router initiatives whose tasks cross repository boundaries, same-title tickets in unrelated projects, stale board decisions, overlapping agents, and sibling summaries that are relevant by vocabulary but unrelated by typed dependency/scope.
 
 ## 6. LCM summary DAG and context assembly redesign
 
@@ -472,6 +468,7 @@ pub struct SummaryNodeV2 {
 ```
 
 - DAG sources are exact raw ranges or prior summary nodes; cycles and missing source coverage fail validation.
+- `SummaryStatus` includes `imported_unverified` for §12.1 V1 imports whose source coverage cannot be proven: such a node carries a single whole-thread `SourceRangeRef` marked unverified, is stale for current mode by default, may navigate/expand, and never satisfies a source-coverage proof; DAG validation accepts missing provable coverage only in this status.
 - New raw/correction evidence after the node horizon does not mutate the node. It marks the node stale for current mode and creates a successor summary if policy allows.
 - Deleted/redacted/locked sources update eligibility and coverage; a non-content tombstone remains.
 - Summary embeddings/indexes use the same privacy domain and versioned horizon.
@@ -491,7 +488,7 @@ pub struct SummaryNodeV2 {
 - privacy/output capability;
 - deterministic, recorded-result, or current-best-effort replay mode.
 
-The assembler selects, in order:
+The assembler executes in plan 05's `context/assembler.rs` (05 §5); plan 09 composes and authorizes the assembly use case and owns packet publication, and plan 24 supplies task-graph selectors only. The assembler selects, in order:
 
 1. decisive source anchor(s) and current/conflict lineage;
 2. containing Turn and minimal adjacent messages;
@@ -511,7 +508,7 @@ Retrieval and context assembly always return the same typed evidence envelope. O
 - `recorded_synthesis`: replay the historical answer/model result;
 - `no_synthesis`: return result/context view only.
 
-A synthesis failure never discards retrieved evidence. `NoAnswerReason` distinguishes:
+A synthesis failure never discards retrieved evidence. `NoAnswerReason` is a closed, versioned enum carried in the §7.2 page envelope's `no_answer_reason` field with exactly these variants:
 
 - `no_relevant_evidence`;
 - `scope_resolved_empty`;
@@ -529,7 +526,7 @@ A synthesis failure never discards retrieved evidence. `NoAnswerReason` distingu
 
 ```rust
 pub struct TemporalSearchResultViewV1 {
-    pub anchor: RetrievalAnchorRecordV1,
+    pub anchor: RetrievalAnchorId,
     pub grain: RetrievalGrain,
     pub representative: SafeResultSummary,
     pub logical_cluster_id: Option<LogicalMessageClusterId>,
@@ -545,6 +542,54 @@ pub struct TemporalSearchResultViewV1 {
     pub hydration: HydrationCapability,
 }
 ```
+
+Per plan 01's exposure rule, results carry only the `RetrievalAnchorId`; the safe-metadata `RetrievalAnchorRecordV1` is loaded under current authorization through the batch hydration endpoint (`POST /api/v2/retrieval-anchors:batch`, §10). No result row, deep link, or export embeds the anchor record.
+
+The referenced view types are concrete:
+
+```rust
+pub enum RetrievalGrain { Message, Turn, Session, Thread, AgentSlice, WorkflowSlice, EvidenceBundle }
+
+pub struct SafeResultSummary {
+    pub title: SafeLabel,
+    pub snippet: Option<EligibleSnippet>,
+    pub matched_fields: Vec<FieldId>,
+    pub provider: ProviderId,
+    pub origin: MessageOrigin,
+}
+
+pub struct OccurrenceCounts {
+    pub total_hidden: u32,
+    pub by_provider: BTreeMap<ProviderId, u32>,
+    pub by_session: u32,
+    pub by_project: BTreeMap<SafeProjectLabel, u32>,
+}
+
+pub enum TemporalResultState { Current, HistoricalValid, Superseded, Revoked, Conflicted, Unknown }
+
+pub struct EvidenceRelation {
+    pub kind: EvidenceRelationKind, // produced | observed | proposed | copied | ...
+    pub evidence: Vec<EvidenceRef>,
+    pub confidence: Confidence,
+}
+
+pub struct HydrationCapability {
+    pub batch_hydration: bool,
+    pub cluster_expansion: bool,
+    pub replay: bool,
+    pub denied_reason: Option<HydrationDeniedReason>,
+}
+
+pub struct RankExplanationViewV1 {
+    pub profile: RankingProfileRef,
+    pub final_score: FiniteF64,
+    pub components: Vec<ComponentScoreView>, // id, version, normalized, weight, contribution, state
+    pub hard_exclusions: Vec<ExclusionReason>,
+    pub temporal_features: TemporalFeatureSummary,
+}
+```
+
+`RankExplanationViewV1` is the plan 09/21-rendered safe view of plan 05's `RankExplanation`/`ComponentScore` (05 §11.3); it adds no scores of its own and exposes no secret text, hidden reasoning, or raw hashes.
 
 Every result can be hydrated, expanded to cluster members, opened in the Turn/session/thread/timeline, and used as a new query/context anchor without project/CWD switching.
 
@@ -565,7 +610,7 @@ No compact default includes raw metadata blobs, transcript paths, full message b
 
 ### 7.3 Cursor binding
 
-The signed cursor binds:
+The signed cursor is plan 05 §9's encoding of the extended domain `CursorClaimsV1` (plan 01) — this plan defines no parallel cursor type. For session-temporal queries those claims bind:
 
 - canonical query digest and intent/profile version;
 - temporal mode/cutoff;
@@ -601,7 +646,9 @@ Build a private, sanitized, versioned corpus from authorized local history:
 14. hint-engine retrieval envelopes and background-intelligence proposals from Plan 22;
 15. task/ticket context packets, initiatives, dependencies, work claims, and relevant-versus-irrelevant sibling summaries, including cross-repository Rspack/Rsbuild/React Router work.
 
-Queries are frozen at an `available_at` cutoff. Candidates, summaries, branches, facts, corrections, and labels created later cannot enter a historical replay.
+Queries are frozen at an `available_at` cutoff. Candidates, summaries, branches, facts, corrections, and labels created later cannot enter a historical replay. Replay also rebuilds index statistics (for example BM25 document frequencies) from the frozen `available_at < t` corpus, so ranking features cannot leak future corpus statistics.
+
+The frozen research corpus this program draws on is pinned by its owner, plan [`13-research-provenance-and-context-anchors.md`](13-research-provenance-and-context-anchors.md): path set `/fast/tracedecay-redesign-research/*`, file mode `0600`, capture cutoff `2026-07-09T23:15:42Z`, integrity verified against plan 13's manifest hashes. Session-temporal evaluation inputs derived from it cite that manifest, and no private content from it enters the repository.
 
 ### 8.2 Minimum evidence gates
 
@@ -656,7 +703,9 @@ Also label:
 - no-answer correctness;
 - whether the result enabled the next action.
 
-Adjudication preserves both original labels/rationales. Do not rewrite old qrels silently; publish a superseding judgment version.
+Each judgment is a plan 15 §5.4 `JudgmentRecordV1` row in the protected private evaluation shard (plan 02's judgment table family); this plan only extends the `SecondaryLabel` vocabulary with the session-temporal labels above and defines no second judgment record.
+
+Adjudication preserves both original labels/rationales. Do not rewrite old qrels silently; publish a superseding judgment version (`supersedes` on the new row).
 
 ### 8.4 Systems compared
 
@@ -732,13 +781,13 @@ Calibrate thresholds on frozen development data, then lock before test evaluatio
 - stable-anchor hydration success: `1.00` for non-deleted eligible results;
 - duplicate logical result rate in top 10: below `0.05` overall and no cluster may occupy more than one default slot;
 - every partial/unavailable shard reflected in coverage: `1.00`;
-- V2 must improve predeclared Precision@3/nDCG@10/first-useful rank over strong lexical and V1 baselines on untouched test without material worst-stratum regression.
+- V2 must improve predeclared Precision@3/nDCG@10/first-useful rank over strong lexical and V1 baselines on untouched test without material worst-stratum regression, where “material” uses plan 15 §7.1's numeric definition: a worst-stratum nDCG@10 drop greater than `max(2 points absolute, 5% relative)` versus the locked baseline, or any no-answer-precision drop greater than 2 points.
 
 Latency/token/model thresholds are hardware/profile-specific and live in Plan 20 configuration plus the frozen benchmark manifest, not hard-coded into ranking logic.
 
-## 9. Search and Temporal Retrieval Lab
+## 9. Search Quality Lab: session-temporal workspaces
 
-The dashboard adds one coherent Search Lab rather than separate message, LCM, memory, and hint debug pages.
+This plan's replay/lineage/copy/summary/evaluation surfaces are workspaces inside the one Search Quality Lab (plan 15 §8) — not a separate Search Lab and not separate message, LCM, memory, and hint debug pages.
 
 ### 9.1 Query workspace
 
@@ -818,7 +867,7 @@ Exact transport names derive from Plan 08/21's catalog. Required use cases:
 - task/ticket context assembly through the same route with typed task/initiative/dependency/claim selectors;
 - `POST /api/v2/session-replay` and `POST /api/v2/thread-replay`;
 - `GET /api/v2/temporal-assertions/{id}/lineage`;
-- `POST /api/v2/labs/search:replay` and `POST /api/v2/labs/search:compare`;
+- `POST /api/v2/labs/search-quality:replay` and `POST /api/v2/labs/search-quality:compare` (the plan 15 §9 Search Quality Lab routes; no separate session-lab endpoint);
 - versioned corpus/judgment/evaluation reads and authorized commands;
 - generated TypeScript client and official SDK parity from Plan 17.
 
@@ -866,7 +915,10 @@ Import read-only, idempotently:
 - current eval fixture and live probe recipes;
 - duplicate/identity-conflict stores as separate observed sources until explicit consolidation.
 
-Each imported row gets source/store identity, sanitization status, occurrence ID, owner route, temporal fields, and parity receipt. Missing provenance becomes `unknown`, not guessed.
+Each imported row gets source/store identity, sanitization status, occurrence ID, owner route, temporal fields, and parity receipt. Missing provenance becomes `unknown`, not guessed. Two explicit escape hatches keep the import honest:
+
+- V1 summary nodes whose source ranges cannot be proven import as `SummaryStatus::imported_unverified` (§6.1) rather than failing DAG validation or fabricating coverage; they stay stale for current mode until re-summarization over verified sources.
+- Mandatory `sanitization_receipt_id`s for the ~388k imported raw rows (master-plan scale envelope) are minted by capture's bulk sanitizer path (plan [`03-capture-crate.md`](03-capture-crate.md)) as a costed, restartable backfill stage with its own throughput budget and progress watermark — never per interactive read.
 
 ### 12.2 Backfill
 
@@ -904,11 +956,12 @@ crates/tracedecay-domain/src/
   activity/thread.rs
   temporal/assertion.rs
   temporal/relation.rs
-  temporal/answer_mode.rs
   retrieval/grain.rs
   retrieval/result.rs
   retrieval/context_assembly.rs
 ```
+
+The temporal answer-mode carrier is `TemporalClauseV1` in plan 01's query vocabulary (§4.3); this plan proposes no separate answer-mode domain file.
 
 Projectors:
 
@@ -924,27 +977,21 @@ crates/tracedecay-projectors/src/
   search/session_document_projector.rs
 ```
 
-Query:
+Query: this plan adds no query-crate modules of its own — plan 05 §5 is the single module authority for ranking, fusion, session/temporal, context-assembly, and evaluation-metrics code. Session/LCM requirements land in these 05-owned modules:
 
-```text
-crates/tracedecay-query/src/
-  session/intent.rs
-  session/candidates.rs
-  session/federation.rs
-  session/representative.rs
-  session/temporal_resolver.rs
-  session/ranker.rs
-  session/diversity.rs
-  session/explain.rs
-  session/hydrate.rs
-  context/assembler.rs
-  context/summary_horizon.rs
-  context/token_budget.rs
-  eval/session_corpus.rs
-  eval/temporal_qrels.rs
-  eval/replay.rs
-  eval/metrics.rs
-```
+| Requirement (this plan) | Plan 05 module |
+|---|---|
+| Intent profiles (§5.1) | `session/intent.rs` |
+| Candidate channels (§5.2) | `operators/{filter,fts,fuzzy,entity,vector,learned_sparse,graph,summary,time}.rs` |
+| Federated fusion (§5.3) | `rank/rrf.rs` + `execute/merge.rs` (defined once in 05 §11.3) |
+| Copy clustering and representative selection (§3.2, §5.5) | `rank/cluster.rs` |
+| Temporal resolution (§4) | `session/temporal_resolver.rs` |
+| Rank features and diversity (§5.4–§5.5) | `rank/{features,diversity}.rs` |
+| Optional rerank stage (§5.2 item 10) | `rank/rerank.rs` |
+| Explanations (§7.1) | `rank/explain.rs` + `explain.rs` |
+| Hydration (§7.1) | `operators/hydrate.rs` |
+| Context assembly (§6.2) | `context/{assembler,summary_horizon,token_budget}.rs` |
+| Session corpus, temporal qrels, replay, metrics (§8) | `eval/{corpus,qrels,replay,metrics}.rs` — `eval/metrics.rs` is the single shared metrics implementation (plan 15 §9) |
 
 Application/API/UI use the shared Plan 09/10/11/21 locations. Root V1 adapters live only under plan 12 compatibility paths and are deleted at retirement.
 
@@ -957,7 +1004,7 @@ Application/API/UI use the shared Plan 09/10/11/21 locations. Root V1 adapters l
 - representative stability under ingestion order and shard repartition;
 - valid/transaction-time interval laws;
 - supersession/contradiction graph acyclicity where required and explicit conflict handling;
-- current/historical/evolution/forensic mode semantics;
+- current/as-of/evolution/forensic mode semantics;
 - cursor/query/scope/watermark binding;
 - taint/privacy wrappers cannot enter unsafe indexes/results.
 
@@ -1004,7 +1051,7 @@ Application/API/UI use the shared Plan 09/10/11/21 locations. Root V1 adapters l
 - Codex, Claude, Cursor, Hermes, and remaining provider fixtures normalize origin, role, Turn, parent/child, and tool results consistently;
 - CLI/MCP/API/SDK produce equivalent typed JSON and Markdown default behavior;
 - Markdown and JSON disclose limit/truncation/cursor/coverage/conflict/stale state;
-- Search Lab then-versus-now replay is read-only and visually/accessibly testable;
+- Search Quality Lab session-temporal then-versus-now replay is read-only and visually/accessibly testable;
 - Settings changes produce versioned effective-config provenance and deterministic replay.
 
 ### Performance/security tests
@@ -1045,9 +1092,9 @@ These suffixes were unused in the plan set when authored. Recheck the master pla
 - Expose search, anchor hydration, temporal lineage, context assembly, session/thread replay, and eval use cases from one catalog/view model.
 - Preserve compact Markdown default, explicit JSON/NDJSON, stable cursor/coverage shapes, and legacy compatibility mappings.
 
-### PR 31P — Search Lab temporal and LCM replay workspace
+### PR 31P — Search Quality Lab temporal and LCM replay workspaces
 
-- Ship candidate waterfall, temporal lineage, copy cluster, summary DAG, context budget, qrel/adjudication, then-versus-now replay, and aggregate comparisons.
+- Ship the Search Quality Lab's session-temporal workspaces: candidate waterfall, temporal lineage, copy cluster, summary DAG, context budget, qrel/adjudication, then-versus-now replay, and aggregate comparisons.
 - Consume generated clients and shared evaluation artifacts only.
 
 ### PR 33E — V1 import, backfill, and shadow comparison
@@ -1070,7 +1117,7 @@ These suffixes were unused in the plan set when authored. Recheck the master pla
 - One query/temporal/context engine serves message, Turn, session, thread, agent, workflow, LCM, dashboard, hooks, CLI, MCP, API, and SDKs.
 - Every result has a durable retrieval anchor and can hydrate/replay across projects without CWD/store switching.
 - Raw source occurrences remain immutable/addressable; logical copies collapse only through evidence-backed versioned assertions.
-- Current mode follows explicit valid-time/supersession/authority evidence; historical mode has zero future leakage; evolution and forensic modes preserve history/conflict.
+- Current mode follows explicit valid-time/supersession/authority evidence; as-of mode has zero future leakage; evolution and forensic modes preserve history/conflict.
 - Recency is intent-scoped, bounded, explained, and never the sole truth rule.
 - Raw, summary, entity, semantic, graph, and time candidates have source horizons, versions, ablations, and rank explanations.
 - Cross-shard ranking does not compare uncalibrated BM25 scores or hide skipped/conflicted stores.
@@ -1078,7 +1125,7 @@ These suffixes were unused in the plan set when authored. Recheck the master pla
 - At least 500 real query episodes and 5,000 manually grounded judgments satisfy the coverage gates; human labels remain authoritative.
 - nDCG/MRR/Recall/precision, temporal accuracy, supersession safety, duplicate rate, abstention/calibration, coverage, latency, tokens, and cost are reported per project/provider/intent/time/scope stratum.
 - TD-SR-001 through TD-SR-012 are regression fixtures with stable anchors or explicit unavailable-coverage receipts.
-- Search Lab explains one result, one temporal lineage, one copy cluster, one summary DAG, one context assembly, and one then-versus-now replay without mutating production state.
+- The Search Quality Lab's session-temporal workspaces explain one result, one temporal lineage, one copy cluster, one summary DAG, one context assembly, and one then-versus-now replay without mutating production state.
 - Task packets use canonical task/initiative/dependency/work-claim/thread/Turn filters, surface current-versus-superseded decisions, and exclude unrelated global-board or sibling work from the default context budget.
 - All retrieval/config/privacy/model settings are visible and controllable through Settings plus generated CLI/MCP/API/SDK surfaces.
 - Optional embeddings, learned sparse retrieval, rerankers, synthesizers, and background intelligence remain removable and cannot bypass lexical exactness, temporal safety, privacy, or replay evaluation.

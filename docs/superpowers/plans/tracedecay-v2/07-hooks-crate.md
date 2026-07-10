@@ -25,14 +25,14 @@ Plan [`24-canonical-task-plan-graph-and-multi-agent-executor.md`](24-canonical-t
 - tracedecay-store and tracedecay-projectors are behind capture/application ports. This crate has no SQL, connection, migration, projection, blob, Git, network, or filesystem implementation.
 - Exact replay mode names are domain `ReplayMode::ExactDeterministic`, `ReplayMode::RecordedResult`, and `ReplayMode::CurrentBestEffort`.
 - A host acknowledgement is not an observation commit, hint emission, or acted outcome. Each has a separate typed receipt/event.
-- Deterministic candidates and incremental-scout candidates enter one application/policy delivery selector, dedupe/cooldown/budget state, and outcome model. A host invocation cannot receive both engines' duplicate advice.
+- Deterministic candidates and incremental-scout candidates enter one application/policy delivery selector — `DeliveryArbiterV1` in [`06-policy-crate.md`](06-policy-crate.md) §9.1.3, which arbitrates both as `DeliveryCandidateV1` submissions under one `HintStateSnapshot` version compare-and-swap — plus one dedupe/cooldown/budget state and one outcome model. A host invocation cannot receive both engines' duplicate advice and receives at most one `InjectContext`.
 - Provider source rows remain provider-owned and unchanged at their native source. TraceDecay hooks retain privacy-domain-bound locators/fingerprints plus sanitized observations; query-time human-message classification from merged PR #410 is a projection/filter concern, and hooks never delete sanitized copied-subagent observations.
 
 ## 2. Goals
 
 - Keep notification-only hook added latency p95 at or below 10 ms and prompt-evaluation hook p95 at or below 25 ms on the versioned reference corpus.
 - Capture direct user prompts, copied parent prompts, subagent instructions, protocol tool results, model output notifications, tool calls/results, approvals, edits, shell events, compaction, workspace/session lifecycle, agent lifecycle, handoffs, goals, and host errors with explicit origin/coverage.
-- Capture and refresh privacy-safe agent presence/work claims with parent/goal, repo/worktree/ref/PR/file/symbol/query scopes, intent, optional <=160-character classified summary, anchors, TTL/status, and declared redundancy.
+- Capture and refresh privacy-safe agent presence/work claims with parent/goal, repo/worktree/ref/PR/file/symbol/query scopes, intent, optional <=160-character classified summary (a character cap, distinct from the 160-token hint payload cap), anchors, TTL/status, and declared redundancy.
 - Use deterministic observation/idempotency inputs when the host exposes native IDs/offsets and persisted allocation when it does not.
 - Make durability explicit: accepted in memory, queued, fsynced locally, committed to the observation journal, and projected are different states.
 - Never silently drop canonical prompt, tool, approval, edit, reasoning-visibility, agent, goal, or outcome events under concurrency or backpressure.
@@ -357,7 +357,7 @@ pub struct HookEvaluationResponse {
     pub response: HookResponseV1,
     pub state_transition: Option<HintStateProposal>,
     pub input_vector: VectorWatermark,
-    pub coverage: CoverageReport,
+    pub coverage: CoverageReportV1,
 }
 
 pub struct HostInvocationContext {
@@ -373,7 +373,28 @@ pub struct HostWireResponse {
     pub bytes: Bytes,
     pub digest: SanitizedOutputDigest,
 }
+
+pub struct EvaluationReceipt {
+    pub evaluation: PolicyEvaluationId,
+    pub request_facts_digest: Digest,
+    pub bundle: PolicyBundleRef,
+    pub catalog_digest: Digest,
+    pub state_version_before: EntityVersionId,
+    pub state_version_after: Option<EntityVersionId>, // None when no transition was proposed or the CAS lost
+    pub committed: bool,
+    pub recorded_at: UtcMicros,
+}
+
+pub struct HostAcknowledgementReceipt {
+    pub invocation_id: HookInvocationId,
+    pub durability: AppendState,
+    pub response_digest: Option<SanitizedOutputDigest>,
+    pub degraded: Vec<HookDegradation>,
+    pub acknowledged_at: UtcMicros,
+}
 ~~~
+
+`HintStateProposal`/`HintStateSnapshot` field definitions and the version compare-and-swap token are owned by [`06-policy-crate.md`](06-policy-crate.md) §9.1.2; `CoverageReportV1` is the canonical shared coverage type owned by [`01-domain-crate.md`](01-domain-crate.md).
 
 HookFacts is a tagged union of PromptFacts, ToolActivityFacts, AgentFacts, CoordinationFacts, WorkspaceFacts, and LifecycleFacts from src/facts. `CoordinationFacts` carries presence/claim/heartbeat/TTL/status/redundancy and safe scope anchors; raw prompt/task text is never a coordination summary. DeliveryReceipt records invocation/evaluation/response digest, attempt ordinal, provider acknowledgement ID when available, status, timestamp, and error code without raw payload text.
 
@@ -413,7 +434,7 @@ pub trait HookApplicationPort: Send + Sync {
 }
 ~~~
 
-HookApplicationPort returns one pinned application result containing RequestFacts digest, policy bundle, catalog digest, config/index/memory/skill snapshots, vector watermark, decision/explanation digests, state-transition proposal, exact rendered payload reference, coverage, and substitutions. Hooks never assemble these by reading services separately.
+HookApplicationPort returns one pinned application result containing RequestFacts digest, policy bundle, catalog digest, config/index/memory/skill snapshots, vector watermark, decision/explanation digests, state-transition proposal, exact rendered payload reference, coverage, and substitutions. Hooks never assemble these by reading services separately. `RequestFacts` is the typed digestable snapshot defined in [`06-policy-crate.md`](06-policy-crate.md) §9.1.1; `evaluate` routes deterministic candidates and any pending scout envelope through plan 06's `DeliveryArbiterV1` (§9.1.3), so one invocation yields at most one `InjectContext` under one hint-state compare-and-swap.
 
 ## 8. Durability, Acknowledgement, and Idempotency
 
@@ -443,6 +464,8 @@ pub struct HookAppendReceipt {
 }
 ~~~
 
+Domain `SpoolReceipt` is the one spool-receipt vocabulary: capture's spool client returns it directly, so `AppendState::Fsynced` embeds it without an adapter type (there is no separate hook spool receipt).
+
 Defaults:
 
 | Event class | Required before host acknowledgement | Degradation |
@@ -457,7 +480,7 @@ Idempotency:
 - Prefer provider event/call/message IDs plus source generation and content digest.
 - When only an offset exists, use source artifact, rewrite generation, [offset,next_offset), and record digest.
 - When neither exists, application insert-or-reads a persisted allocation keyed by host/session/hook-point/native digest. Random process-local IDs cannot determine duplicate identity.
-- The host retry of one invocation returns the stored render/delivery receipt when its policy/catalog/environment digest still matches; it does not re-evaluate or redeliver.
+- The host retry of one invocation returns the stored render/delivery receipt when its policy/catalog/environment digest still matches; a digest mismatch returns a typed `stale_environment` error with no re-evaluation and no redelivery (plan 22 §11 envelope-claim retries follow the same rule).
 - A transcript rewrite increments generation, emits RewriteDetected, and appends superseding observations. It never overwrites old evidence.
 - Late records retain occurred/ingested times and source continuity. They do not renumber established Turns or imply causation.
 
@@ -490,7 +513,8 @@ Budget defaults:
 - notification: total 10 ms target, 50 ms hard deadline; capture 8 ms, no evaluation;
 - prompt: total 25 ms target, 100 ms hard deadline; capture 8 ms, evaluation 14 ms, render 3 ms;
 - explicit pre-tool block: 25 ms target, 100 ms hard deadline;
-- compaction/session catch-up: synchronous envelope remains 25 ms; heavy work is scheduled.
+- compaction/session catch-up: synchronous envelope remains 25 ms; heavy work is scheduled;
+- hint tokens: `max_hint_tokens` defaults to 96 rendered tokens with a 160-token hard cap — the same token ledger plan 06's `DeliveryArbiterV1` debits for scout payloads (plan 22 §9), so sync hints and scout envelopes share one budget.
 
 Hard timeout behavior:
 
@@ -531,7 +555,7 @@ Crash matrix:
 
 ## 11. Hint Request Facts, Replay, and Outcomes
 
-Hook RequestFacts are immutable, minimal, and content-referenced:
+Hook RequestFacts are immutable, minimal, and content-referenced; the typed shape is [`06-policy-crate.md`](06-policy-crate.md) §9.1.1's `RequestFacts`, and this list is its field inventory:
 
 - provider/host/hook point/version;
 - prompt origin and direct-user/subagent/protocol evidence from #410;
@@ -557,7 +581,8 @@ Outcomes:
 - human_correction references the exact user event, corrected intent/route/scope/target and prior evaluation when present; it is evidence, not automatically a negative label;
 - acted requires a linked invocation/capability event; temporal adjacency alone is heuristic;
 - ignored is not emitted merely because the horizon ended; terminal names remain Observed, Unobserved, or Unresolvable with evidence/coverage;
-- delivery_failed and delivery_unknown cannot enter the emitted denominator.
+- delivery_failed and delivery_unknown cannot enter the emitted denominator;
+- each eligible evaluation persists as exactly one plan 06 `HintOutcomeRecordV1` row keyed by evaluation, carrying horizon, denominator-eligibility flags, and attribution evidence joins.
 
 Hint Lab receives the stored HookRequestV1 ref, RequestFacts snapshot, bundle/catalog/config/index/memory/skill refs, exact delivery record, and outcome refs. ExactDeterministic refuses missing/redacted artifacts; RecordedResult verifies stored digests without running; CurrentBestEffort lists every substitution and performs no write.
 

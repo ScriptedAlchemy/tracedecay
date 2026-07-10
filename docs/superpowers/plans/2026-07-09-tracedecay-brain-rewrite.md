@@ -28,7 +28,7 @@
 - `All` means the active TraceDecay profile by default. Additional profiles are federated only through explicit profile selection/collections and never mixed implicitly.
 - Canonical provider transcripts live in a profile activity/session shard because a session may touch zero, one, or many projects. Project shards own scoped projections and locators, not duplicate canonical messages.
 - Data migration and shadow parity are mandatory; stale live CLI/MCP/daemon/plugin protocols and obsolete tool names are not emulated after their domain cutover. Version mismatch fails with restart/update and the current replacement.
-- V1 stores remain read-only for one release after verified cutover. Deletion is an explicit later operation, never part of migration.
+- V1 stores remain read-only from their domain's verified cutover until one full release of V2-default operation completes (the rollback/evidence window). Deletion is an explicit later operation, never part of migration.
 - The plan PR contains only this master plan and its linked per-crate/frontend plan documents. Research exports remain untracked outside the repository.
 
 ---
@@ -41,7 +41,7 @@ TraceDecay has accumulated the pieces of an agent intelligence system, but those
 
 The redesign will make that question native.
 
-The selected strategy is a strangler rewrite around four foundations:
+The selected strategy is a strangler rewrite around five foundations:
 
 1. **Canonical identity:** stable entities and aliases across providers, projects, worktrees, branches, sessions, messages, agents, code snapshots, symbols, facts, artifacts, and delivery systems.
 2. **Immutable evidence:** observations, typed events, bitemporal relation assertions, provenance, confidence, sensitivity, and algorithm versions.
@@ -69,7 +69,7 @@ The audit was run on 2026-07-09/10 UTC from a clean worktree created from and re
 | LCM compression ratio | 10.8:1 | Compression health is useful, but must link to exact source coverage and replay. |
 | Hook calls | 59,618 | Hooks are a high-volume event stream and need cheap append paths. |
 | MCP tool calls in sampled analytics | 522 | Hook-to-tool adoption is weak and must be measurable by category and session. |
-| Installed MCP-equivalent TraceDecay tool names | 102 at the frozen compatibility inventory | Capability exists but is hard to discover and scattered; one generated catalog must own use-case IDs and every transport binding. |
+| Installed MCP-equivalent TraceDecay tool names | 102 at the older frozen compatibility inventory; plan 21's generated audit at commit `9f7a1108` is the arbiter and counts 104 source MCP tool definitions with 103 installed at 0.0.47 | Capability exists but is hard to discover and scattered; one generated catalog must own use-case IDs and every transport binding. |
 | Hints emitted | 1,182 | Hint policy needs replay, explanation, and outcome attribution. |
 | Hint outcomes measured as acted | 3 | The current feedback loop is mostly unresolved and cannot support confident optimization. |
 | Analytics event sample | capped at 10,000 | Every list/aggregate API needs stable pagination and explicit cap semantics. |
@@ -166,7 +166,7 @@ The plan treats merged fixes as required base semantics and assumes every open P
 | `#405` merged — legacy identity-store adoption | Expands legacy identity-store discovery/adoption and lifecycle migration coverage. | Preserve aliases and adoption receipts in the catalog migration; never create a second canonical project because a legacy directory or hash moved. Import resolver fixtures into V2 identity/backfill conformance tests. |
 | `#406` merged — corrupt database recovery sets | Preserves corrupt database families instead of overwriting/destroying forensic recovery inputs. | Detect non-SQLite/corrupt/torn stores before open, quarantine the whole WAL/SHM/database family, preserve a signed recovery set, keep healthy shards available, and make repair preview/apply auditable. |
 | `#412` merged — safe daemon drain during upgrades | Serializes update/upgrade/doctor lifecycle, drains in-flight requests/background writers, checkpoints after writer stop, and preserves systemd/launchd stopped/disabled/masked state. | V2 needs one fenced lifecycle coordinator across daemon, store, watcher, updater, doctor, migration, backup, and service manager; no environment bypass or unconditional restart. |
-| `#407` open — Hermes user profile | Consolidates Hermes onto the user's active profile, removes Hermes-specific bridges/config/inventory, and migrates legacy Hermes project identities/facts. | Profile is the durable isolation boundary; Hermes is an actor/automation/tool identity inside it, not a parallel product silo. Migration must retain fact provenance and record moved identities without copying content across privacy domains silently. |
+| `#407` open — Hermes user profile | Consolidates Hermes onto the user's active profile, removes Hermes-specific bridges/config/inventory, and migrates legacy Hermes project identities/facts. | Profile is the durable isolation boundary; Hermes is an actor/automation/tool identity inside it, not a parallel product silo. Plan 24's Hermes reconciliation is normative: Hermes is a capture source/import-evidence provider during migration and an executor adapter through the SPI, never a parallel task-owning silo. Migration must retain fact provenance and record moved identities without copying content across privacy domains silently. |
 | `#410` merged — collapse copied subagent prompts | Preserves native transcript rows, but adds query-time parent-representative dedupe and `direct_user`/`subagent`/`tool_result` filters across message search, LCM, CLI, and MCP. | V2 must preserve sanitized native rows and explicit message-origin classification while offering representative/human views with hidden-copy counts and provenance. Import its eight-child regression corpus and never make UI dedupe an irreversible ingest rule. |
 | `#411` merged — foreign-installation skills are info | Aligns doctor with the remove path so it does not prescribe `update` for project skill packages this installation refuses to delete. | Health/remediation uses one shared typed predicate with the command precondition; every finding declares owner, severity, safe action, whether automation can execute it, and proof that the advertised remediation is actually applicable. |
 | `#413` merged — release v0.0.46; `#416` merged — release v0.0.47 | Packages the audited storage/runtime/session/doctor/tool fixes into published release versions. | Record actual merge/release/catalog/schema versions in compatibility/import manifests; architecture must not depend on release-PR file layout or infer availability from source only. |
@@ -223,7 +223,7 @@ Current message search is therefore useful for rare exact terms and high-recall 
 
 The final live audit made the temporal failure concrete. Broad all-registered searches returned 81K–311K semantic payloads behind expiring response handles and were frequently dominated by tool definitions/calls, current-query echoes, generated inventories, and copied session rows. TraceDecay context found one logical parent message replicated under twelve session/store IDs. More importantly, a retained `memory-ranking-supersession` fixture proves an obsolete exact “use npm” fact can still outrank the newer “use pnpm” correction; current message/LCM search has no general authority, correction, contradiction, supersession, or valid-time resolver. Current `message_search` is FTS/BM25 plus filters/downranking, while `lcm_grep` has distinct raw/summary and relevance/hybrid/recency semantics; raw BM25 scores are also compared across independent project shards without a shared calibration guarantee.
 
-V2 therefore separates immutable message occurrences, evidence-backed logical-copy clusters, summary DAGs with exact source horizons, and temporal assertions with typed `corrects`/`replaces`/`contradicts`/`revokes` relations. Query mode is explicit: current, historical as-of, evolution, or forensic. Recency is an explained bounded feature, never a truth rule; direct human corrections, Git/check/command evidence, scope, validity, and authority decide current state, while uncertain conflicts expose both sides. Before promotion, at least 500 real query episodes and 5,000 human-grounded judgments span projects/providers, exact IDs, paraphrases, copies, summaries, corrections, cross-project work, no-answer/partial states, and task-context pollution. The source audit, twelve seed regressions, qrel schema, metrics, Search Lab, and cutover live in [`tracedecay-v2/23-session-lcm-temporal-retrieval-and-evaluation.md`](tracedecay-v2/23-session-lcm-temporal-retrieval-and-evaluation.md).
+V2 therefore separates immutable message occurrences, evidence-backed logical-copy clusters, summary DAGs with exact source horizons, and temporal assertions with typed `corrects`/`replaces`/`contradicts`/`revokes` relations. Query mode is explicit: current, historical as-of, evolution, or forensic. Recency is an explained bounded feature, never a truth rule; direct human corrections, Git/check/command evidence, scope, validity, and authority decide current state, while uncertain conflicts expose both sides. Before promotion, at least 500 real query episodes and 5,000 human-grounded judgments span projects/providers, exact IDs, paraphrases, copies, summaries, corrections, cross-project work, no-answer/partial states, and task-context pollution. The source audit, twelve seed regressions, qrel schema, metrics, Search Quality Lab extension (folded into that lab, not a separate Search Lab), and cutover live in [`tracedecay-v2/23-session-lcm-temporal-retrieval-and-evaluation.md`](tracedecay-v2/23-session-lcm-temporal-retrieval-and-evaluation.md).
 
 ### 2.9 Cross-project, store, session, and code-graph scope probe
 
@@ -380,13 +380,13 @@ V2 starts as one Rust binary with internal traits and ports for capture, project
 3. **Evidence Ledger:** canonical events, temporal relation assertions, provenance, confidence, sensitivity, algorithm versions.
 4. **Agent Execution:** turns, messages, content parts, tool invocations/results, visible reasoning summaries, goals, parent/subagent trees, workflows, handoffs.
 5. **Work Orchestration:** initiatives, immutable plan versions, canonical work items, typed dependency gates, assignments, executor routes, fenced leases/attempts, context packets, workspaces, handoffs, artifacts, acceptance, outcomes, and costs.
-6. **Code Intelligence:** snapshots, files, symbol entities/occurrences, edges, diffs, diagnostics, tests, impact, ownership.
+6. **Code Intelligence:** snapshots, files, symbol entities/occurrences, edges, diffs, diagnostics, tests, impact, ownership. The production extraction/watcher/incremental-indexing pipeline is owned by [`tracedecay-v2/25-code-intelligence-indexing-crate.md`](tracedecay-v2/25-code-intelligence-indexing-crate.md).
 7. **Delivery:** Git refs, commits, worktrees, PRs, checks, reviews, releases, remotes, fetched-at state.
 8. **Context Intelligence:** LCM summary DAG, compression decisions, context assembly, external payload lineage, replay.
 9. **Knowledge:** versioned facts/claims, entities, decisions, contradictions, trust evidence, retrieval, feedback, curation.
 10. **Policy Runtime:** hints, retrieval, routing, diagnostics, correlation, curation, scheduling, policy bundles, deterministic evaluations.
 11. **Automation:** jobs, schedules, scheduler decisions, runs, agents, artifacts, curation candidates/autonomy decisions/effects/recovery, skills, outcomes, plus imported historical approval evidence.
-12. **Observability and Accounting:** usage, latency, errors, caps, savings, cost, ingest/projection lag, data quality, privacy events.
+12. **Observability and Accounting:** usage, latency, errors, caps, savings, cost, ingest/projection lag, data quality, privacy events. This context is owned by [`tracedecay-v2/26-observability-accounting-and-usage.md`](tracedecay-v2/26-observability-accounting-and-usage.md).
 13. **Capability Catalog:** stable use-case definitions, transport/skill/hook/dashboard bindings, availability, safety, cost, discovery, compatibility, and generated inventories.
 14. **Query and Projection:** `TraceQueryV1`, planners, read models, rankers, saved views, subscriptions, exports.
 15. **Privacy Safety:** mandatory structured sanitizer, taint/sink eligibility, detector registry, protected quarantine, privacy scans/findings/remediation, and restore eligibility. This is one cross-cutting boundary owned by plans 01–04/18, not a detector reimplemented in each domain.
@@ -445,7 +445,7 @@ The compatibility inventory must include every current capability family: projec
 
 Discovery is itself observable. For each eligible prompt, the policy runtime records capabilities considered, suggested, used, unavailable, or missed; whether a fallback was chosen; and user correction evidence. The dashboard exposes coverage/drift by intent category without turning every prompt into a noisy catalog advertisement.
 
-The complete current surface and output audit lives in [`tracedecay-v2/21-cli-mcp-tool-surface-and-output-unification.md`](tracedecay-v2/21-cli-mcp-tool-surface-and-output-unification.md). Its generated inventory must cover all 104 source MCP definitions, 60 current top-level CLI variants plus nested/hidden paths, runtime capability filtering, 83 current dashboard routes, every alias/allowlist/default/format/effect/error, and the installed-versus-source catalog digest. One sealed typed application view feeds canonical JSON and a pure presentation model; MCP defaults to compact Markdown, CLI defaults to deterministic human output, machine formats are explicit, and no renderer traverses arbitrary JSON or silently drops fields.
+The complete current surface and output audit lives in [`tracedecay-v2/21-cli-mcp-tool-surface-and-output-unification.md`](tracedecay-v2/21-cli-mcp-tool-surface-and-output-unification.md). Its generated inventory must cover all 104 source MCP tool definitions (103 installed at 0.0.47; 102 at the older frozen inventory — plan 21's generated audit at commit `9f7a1108` arbitrates these counts), the complete recursive top-level/nested/hidden CLI command tree, runtime capability filtering, every current dashboard route, every alias/allowlist/default/format/effect/error, and the installed-versus-source catalog digest; CLI and dashboard-route counts are frozen by that generated inventory, never hand-maintained numbers. One sealed typed application view feeds canonical JSON and a pure presentation model; MCP defaults to compact Markdown, CLI defaults to deterministic human output, machine formats are explicit, and no renderer traverses arbitrary JSON or silently drops fields.
 
 ### 5.5 Agent proximity, work claims, and non-redundant coordination
 
@@ -453,9 +453,9 @@ TraceDecay should make agents lightly aware of nearby work without turning the h
 
 ```text
 AgentPresence(agent, session, parent, provider, host, profile, heartbeat, expires)
-WorkClaim(agent, goal/task, repo, worktree, ref/PR, files/symbols/query/domain,
-          read-or-write intent, planned artifact, safe summary, redundancy mode,
-          status, version, started, heartbeat, expires, retrieval anchors)
+WorkClaimV1(agent, goal/task, repo, worktree, ref/PR, files/symbols/query/domain,
+            read-or-write intent, planned artifact, safe summary, redundancy mode,
+            status, version, started, heartbeat, expires, retrieval anchors)
 ```
 
 `redundancy_mode` distinguishes accidental overlap from deliberate best-of-N, diverse review roles, paired/shared implementation, sequential handoff, and explicitly disjoint work. An advisory claim never grants write ownership. Existing store/file/Git/lifecycle leases remain the authority for mutations that require exclusion.
@@ -621,7 +621,7 @@ Each event carries:
 - Owning activity/project shard plus actor, session, run, and snapshot references when resolved; project attribution is zero-to-many evidence relations, never one implicit primary project.
 - `correlation_id` for grouping and `causation_id` only when direct causation is supported.
 - Source observation IDs and provenance ID.
-- Payload reference and typed indexed attributes.
+- Payload reference; full attributes live in one content-addressed blob (`attrs_blob_id`), and registry-promoted attributes are additionally indexed through the store's `event_attr_index` tables (plan 02).
 - Sensitivity and retention class.
 
 ### 6.4 `RelationAssertion`
@@ -677,7 +677,7 @@ Owns the minimum metadata required to plan queries without opening every shard:
 - Opaque saved-view/export IDs and manifests.
 - Projection/outbox watermarks and migration receipts.
 
-The catalog does not store message/query literals, annotations, payloads, sensitive alias values, or raw project content. Saved-view state and annotations live in encrypted profile content storage; the catalog retains opaque IDs and safe locators.
+The catalog does not store message/query literals, annotations, payloads, sensitive alias values, or raw project content. Saved-view state and annotations live as encrypted saved-view/annotation content rows in the activity shard (plan 02), not a separate store; the catalog retains opaque IDs and safe locators.
 
 ### 7.2 `activity.db` per profile
 
@@ -714,7 +714,7 @@ Projects, checkouts, worktrees, and monorepo subprojects are scoped views over a
 
 ### 7.4 Immutable graph snapshot generations
 
-Do not create one tiny SQLite file for every commit. Use packed immutable generations with deduplicated file/symbol content, a manifest mapping snapshot IDs to generation/overlay, bounded dirty overlays, background compaction, retention, and atomic generation swaps. Benchmark the pack size/file-count threshold before fixing it in the storage ADR.
+Do not create one tiny SQLite file for every commit. Use packed immutable generations with deduplicated file/symbol content, a manifest mapping snapshot IDs to generation/overlay, bounded dirty overlays, background compaction, retention, and atomic generation swaps. Physically, a generation is a packed immutable SQLite Generation DB as defined by plan 02; plan 25 owns the indexing pipeline that builds generations. Benchmark the pack size/file-count threshold before fixing it in the storage ADR; the benchmark lands with PR 6C's staged/sealed pack implementation.
 
 Graph generations own:
 
@@ -742,7 +742,7 @@ Replace separate LCM payload, response-handle, and automation-artifact conventio
 
 ### 7.6 Deferred analytical segments
 
-Parquet/DuckDB is not part of the first V2 default. A later ADR may add rebuildable analytical segments only if measured SQLite aggregate projections miss a named performance gate.
+Parquet/DuckDB is not part of the first V2 default. A later ADR may add rebuildable analytical segments only if measured SQLite aggregate projections miss a named performance gate. The vector/ANN index structure for `representations` is likewise a deferred ADR: PR 14A benchmarks candidates, and no ANN structure is fixed before its gate evidence.
 
 ### 7.7 Write ownership and consistency
 
@@ -751,7 +751,7 @@ Parquet/DuckDB is not part of the first V2 default. A later ADR may add rebuilda
 - Read services use bounded read-only connection pools and SQLite snapshot transactions. They never wait behind background compaction/migration without returning an explicit busy/partial state.
 - Capture owns observation appends.
 - Identity service owns canonical IDs and aliases.
-- Code indexer owns graph snapshots.
+- Code indexer owns graph snapshots; plan 25 owns its extraction/watcher/incremental-indexing crate.
 - Knowledge service owns fact/trust/version mutations.
 - Automation service owns jobs/runs/approvals.
 - Blob service owns files and refs.
@@ -776,7 +776,7 @@ The exact migrations are produced in Phase 1, but the model is fixed by this pla
 - `identity_allocations(allocation_key, entity_id, entity_kind, created_at, source_manifest_id)` in the immutable identity ledger.
 - `identity_aliases(namespace, value_keyed_digest, entity_id, valid_from, valid_to, resolver_version, status, confidence, provenance_id)` in the owning activity/project shard; literal eligible alias values remain encrypted owner-shard payloads.
 - `observations(observation_id, source fields, privacy-domain-keyed source fingerprint, sanitized-output digest, occurred_at, ingested_at, schema/parser versions, payload_ref, sensitivity, idempotency_key)`.
-- `events(event_id, owning_shard_id, session_id, actor_id, kind, occurred_at, ingested_at, correlation_id, causation_id, provenance_id, payload_ref, attrs)`; project attribution lives in relation assertions.
+- `events(event_id, owning_shard_id, session_id, actor_id, kind, occurred_at, ingested_at, correlation_id, causation_id, provenance_id, payload_ref, attrs_blob_id)`; full attributes live in the content-addressed attrs blob, registry-promoted attributes are indexed in `event_attr_index(attr_key_id, value_hash, event_id)` plus typed value columns for range-queryable keys (plan 02); project attribution lives in relation assertions.
 - `relation_assertions(edge_id, src_id, dst_id, kind, scope_id, valid interval, observed interval, evidence_class, confidence, confidence_reason_code, optional eligible rationale blob ref, producer_version, provenance_id, attrs)`.
 - `schema_registry` and `predicate_registry` define typed attributes, legal endpoints, cardinality, inverse, evidence, sensitivity, retention, and index promotion.
 - `provenance(provenance_id, provider, privacy-domain-bound source locator digest, keyed source fingerprint, parser/version, ingested_at)`.
@@ -840,6 +840,8 @@ Read-only retrieval never increments counters inside the query transaction. Retr
 - Provenance, provider, model, role, kind, sensitivity, retention, policy version.
 - Facets, grouping, aggregation, projection fields, sort, stable page size.
 - Explain and sampling/downsampling controls.
+
+New operator families are added only through plan 19 §7.2's versioned query-operator SPI plus a `TraceQueryV1` schema revision; transports and projectors never introduce ad-hoc operators.
 
 ### 9.2 Planner
 
@@ -944,12 +946,12 @@ HTTP V2 is an official supported public integration surface, not only a dashboar
 - `GET /api/v2/sessions` and `GET /api/v2/messages` — cursor enumeration without text predicates.
 - `GET /api/v2/sessions/{id}` — session summary, coverage, participants, snapshots.
 - `GET /api/v2/agents/nearby` and `GET /api/v2/work-claims` — freshness/coverage-bounded agent proximity with stable retrieval anchors.
-- `GET/POST /api/v2/initiatives`, `GET/PATCH /api/v2/initiatives/{id}`, and `GET /api/v2/initiatives/{id}/graph` — canonical cross-project work ownership and bounded graph-of-graphs views.
+- `GET/POST /api/v2/initiatives`, `GET /api/v2/initiatives/{id}` plus typed POST initiative update commands (all mutations use the POST command envelope), and `GET /api/v2/initiatives/{id}/graph` — canonical cross-project work ownership and bounded graph-of-graphs views.
 - `GET/POST /api/v2/plans`, `GET /api/v2/plans/{id}/versions/{version}`, `POST /api/v2/plans/{id}:activate`, and `:decompose` — immutable plan versions, validated graph activation, and authority-bounded decomposition.
-- `GET/POST /api/v2/work-items`, `GET/PATCH /api/v2/work-items/{id}`, task dependency/attempt/context subresources, and typed assign/cancel/retry/archive commands.
+- `GET/POST /api/v2/work-items`, `GET /api/v2/work-items/{id}` plus typed POST work-item update commands, task dependency/attempt/context subresources, and typed assign/cancel/retry/archive commands.
 - `GET /api/v2/execution-attempts/{id}`, executor-authenticated lifecycle commands, `GET /api/v2/executors`, registration/heartbeat/drain, task-scheduler status/control, saved task views, and task-event SSE — the plan-24 fenced multi-host execution protocol.
 - `POST /api/v2/replay/session` — read-only historical assembly.
-- `POST /api/v2/labs/hints`, `/retrieval`, `/search-quality`, `/coordination`, `/ingest`, `/query`, `/correlation`, `/scheduler`, `/memory`, `/policy-diff`, `/evolution`, `/secret-safety`.
+- `POST /api/v2/labs/hints`, `/retrieval`, `/search-quality`, `/coordination`, `/orchestration`, `/ingest`, `/query`, `/correlation`, `/scheduler`, `/memory`, `/policy-diff`, `/evolution`, `/scope-federation`, `/privacy`.
 - `GET/POST/PATCH /api/v2/saved-views` and `/annotations`.
 - `POST /api/v2/exports` and `GET /api/v2/exports/{id}`.
 - `GET /api/v2/health`, `/coverage`, `/migrations`, `/projections`, `/privacy`.
@@ -992,7 +994,7 @@ SSE is scope-filtered and authorized. It uses `Last-Event-ID`/sequence cursors, 
 - `/automations`, `/skills`, `/proposals`.
 - `/observatory` — health, ingest, storage, diagnostics, data quality, privacy.
 - `/costs` — tokens, latency, models, tools, savings, methodology.
-- `/playgrounds/hints`, `/retrieval`, `/search-quality`, `/coordination`, `/orchestration`, `/ingest`, `/query`, `/correlation`, `/scheduler`, `/memory`, `/policy-diff`, `/evolution`, `/secret-safety`.
+- `/playgrounds/hints`, `/retrieval`, `/search-quality`, `/coordination`, `/orchestration`, `/ingest`, `/query`, `/correlation`, `/scheduler`, `/memory`, `/policy-diff`, `/evolution`, `/scope-federation`, `/privacy`.
 - `/saved/:viewId`.
 - `/settings`.
 
@@ -1035,7 +1037,7 @@ Persistence ownership is explicit:
 - URL: nonsensitive scope IDs, time bounds, view mode, selected opaque entity IDs, and saved-view ID.
 - Local preferences: panel widths/geometry, theme, density, recent nonsensitive views.
 - IndexedDB: local drafts, bounded caches, and offline last-known-good data.
-- Encrypted profile content storage: saved queries with literals, annotations, collections, and protected views.
+- Encrypted saved-view/annotation content rows in the activity shard (plan 02): saved queries with literals, annotations, collections, and protected views.
 - Remote/shared saved view: only after classification/redaction and explicit share action.
 
 Sensitive query text never enters a URL, browser history, analytics event, clipboard link, or catalog row. Browser back/forward traverses investigation states, not just tabs.
@@ -1091,7 +1093,7 @@ The Brain is best understood as coordinated graph lenses over shared identity, t
 - **Holographic memory graph:** facts/versions, entities, decisions, contradictions, source evidence, trust, retrieval, feedback, and curation.
 - **Automation and skill graph:** jobs, schedules, Claude workflow runs, Codex goals, Hermes-style curator/reflector/skill-writer agents, candidates, artifacts, autonomy decisions, automatic effects, usage, outcomes, revisions/recovery, and clearly labeled historical approval/apply events.
 
-A `Turn` is a first-class interval/entity, not just a message index. It owns the user/agent exchange boundary and links the context visible at its start, provider-exposed reasoning artifacts, messages, tools/results, file/code evidence, goals, hints/memory/retrieval, costs, and state produced by its end. Provider-native meanings are preserved: a Claude workflow run, Codex goal, host thread, and TraceDecay automation run are related canonical entities, not flattened into one ambiguous “run.”
+A `Turn` is a first-class interval/entity, not just a message index. Per-provider Turn boundary rules — what opens and closes a Turn — are owned by plan 23 §3.3. It owns the user/agent exchange boundary and links the context visible at its start, provider-exposed reasoning artifacts, messages, tools/results, file/code evidence, goals, hints/memory/retrieval, costs, and state produced by its end. Provider-native meanings are preserved: a Claude workflow run, Codex goal, host thread, and TraceDecay automation run are related canonical entities, not flattened into one ambiguous “run.”
 
 Selecting an entity in any lens keeps the same investigation state and reveals evidence-bearing cross-links into the others. Each lens has its own legal nodes, edges, layout, aggregation, and fallback table. The UI never implies that a memory-similarity edge, call edge, temporal correlation, and Git ancestry edge share the same semantics merely because all can be drawn as lines.
 
@@ -1364,13 +1366,20 @@ This is the product home for Hermes-style self-improvement across managed skills
 - Allow explicit relevance/noise/privacy labels and disagreement; lab reads do not mutate production usage/retrieval counters.
 - Export an aggregate/redacted evaluation receipt and a separately confirmed safe regression fixture.
 
-### 16.12 Secret Safety Lab and Privacy Observatory
+### 16.12 Privacy & Secret Safety Lab and Privacy Observatory
 
 - Run only invalid synthetic canaries or already-sanitized minimal fixtures through structured parsing, decoded layers, detector rules, span merge, marker output, sink eligibility, policy versions, and latency/resource budgets.
 - Compare current/candidate detector profiles and false-positive adjudication without displaying or accepting a live finding value.
 - Observatory shows source/store/sink/detector coverage, sanitized/quarantined/legacy-unscanned/unknown counts, finding/remediation state, descendant rebuild graph, backup/restore eligibility, policy/rule versions, and scan progress.
 - Finding cards contain safe class/reason/receipt/state only; no candidate preview, prefix/suffix, exact length, raw hash, source context, URL, header, query parameter, command, or low-cardinality fingerprint.
 - Replay/lab reads never mutate findings, allowlists, facts, analytics, policy, quarantine, or serving projections. Apply flows use separate preview/command authorization.
+
+### 16.13 Scope/Federation Lab
+
+- Replay `ScopeSelectorV2` resolution, candidate channels, shard planning/pruning, graph-generation snapshot selection, and distributed cursor assembly against frozen catalog/scope-set generations.
+- Explain searched/skipped/unavailable/stale/redacted coverage, explicit-target refusals, and partial/stale policy decisions; compare resolver/planner/catalog versions.
+- Include the Rspack/Rsbuild/React Router multi-repository regression corpus plus the moved-repo, duplicate-store, stale-registry, and same-name fixtures from plan 16.
+- Export equivalent CLI/MCP/HTTP requests; lab reads never mutate the registry, catalog, claims, or scope-set membership.
 
 ## 17. Visualization System
 
@@ -1545,6 +1554,7 @@ Create bounded crates beside the V1 crate and move behavior only after parity:
 - `crates/tracedecay-store/` — catalog/project/graph/blob repositories, migrations, transactions, outbox, backup/repair.
 - `crates/tracedecay-capture/` — source contracts, provider adapters, classification/redaction, idempotent observation journal.
 - `crates/tracedecay-projectors/` — identity, sessions, code/delivery, knowledge, policy, automation, observability projections.
+- Code-intelligence indexing crate (plan 25 fixes its final crate name) — tree-sitter parser registry, watcher intake, incremental indexing, packed graph-generation builds, symbol lineage, diagnostics/test-attribution mapping.
 - `crates/tracedecay-query/` — planner, shard coordinator, FTS/vector/rank, graph/time operators, cursors, explain, exports.
 - `crates/tracedecay-policy/` — versioned deterministic hint/retrieval/correlation/scheduler/memory evaluation.
 - `crates/tracedecay-hooks/` — host hook request normalization, durable spool client, latency budgets, hint envelope rendering, provider acknowledgements; no direct domain SQL.
@@ -1627,6 +1637,8 @@ Cross-cutting contract companions, in dependency order:
 | 4D | Incremental scout trigger/checkpoint/model-plan/suggestion-address/envelope/delivery/outcome contracts (plan 22). |
 | 4E | Initiative, immutable plan/work-item versions, gates, executor routes, fenced leases/attempts, context packets, artifacts/outcomes, and task views (plan 24). |
 
+Lettered PR suffixes are stable identifiers ordered by dependency, not lexical order: PR 4B's privacy taint contracts intentionally precede the PR 4A prototype so no concept build renders unclassified real data.
+
 #### PR 1: Architecture decision records
 
 **Files:**
@@ -1646,6 +1658,7 @@ Cross-cutting contract companions, in dependency order:
 - [ ] Lock canonical planes/owner matrix, crate dependency DAG, extension tiers/SPIs, config/status/error governance, complexity budgets, anti-corruption adapter contract, convergence scorecard, and deletion waves from plan 19.
 - [ ] Select the dashboard bundler after a measured Rsbuild-versus-Vite comparison.
 - [ ] Add architecture lint tests for dependency direction and transport isolation.
+- [ ] Lock the hermetic-test-infrastructure contract from the §2.7 flaky-test row: no process-global mutable test state, hermetic clocks/env/ports/stores, declared nextest/libtest contract, deterministic shutdown, and platform matrix.
 
 #### PR 2: Redacted golden corpus and manifest
 
@@ -1658,6 +1671,7 @@ Cross-cutting contract companions, in dependency order:
 - [ ] Cover every provider and source-record family, subagents, tools, reasoning summaries, goals, Git, rewrites, truncation, malformed/partial input, Unicode, missing timestamps, and secrets.
 - [ ] Add secret scan and deterministic hash manifest.
 - [ ] Prove fixtures preserve all intended non-secret structure/semantics after normalization, contain only synthetic/minimal-redacted content, and are safe to commit.
+- [ ] Build the §26 benchmark harness: recorded reference-machine manifest and the 10× synthetic corpus generator that later performance gates cite.
 
 #### PR 2A: Research provenance and durable context anchors
 
@@ -1884,7 +1898,7 @@ Cross-cutting intelligence companions:
 
 #### PR 18: Code snapshots and lineage
 
-- Project snapshot-scoped files/symbols/edges, durable lineage, diffs, diagnostics, tests, and impact.
+- Project snapshot-scoped files/symbols/edges, durable lineage, diffs, diagnostics, tests, and impact; plan 25 owns the extraction/watcher/incremental-indexing pipeline that produces these inputs.
 - [ ] Differential-test V1 graph/search/impact/test-map results.
 - [ ] Backfill this domain immediately with manifests and shadow parity.
 
@@ -1918,7 +1932,7 @@ Cross-cutting intelligence companions:
 
 #### PR 22: Accounting and observability
 
-- Project tokens, latency, model/tool usage, costs, savings methodology, hint/tool/fact/skill adoption, and data-quality signals with provenance.
+- Project tokens, latency, model/tool usage, costs, savings methodology, hint/tool/fact/skill adoption, and data-quality signals with provenance; plan 26 owns this bounded context, including the metrics pipeline, denominator/unknown-population registry, savings methodology, per-capability adoption analytics, hint outcome rollups, and SLO monitors.
 - [ ] Backfill with denominator/cap/source semantics and shadow current analytics.
 
 #### PR 22A: Generated capability and tool catalog
@@ -1956,7 +1970,7 @@ Cross-cutting official-product companions:
 | 25F | Scout Observatory, queue/currentness/delivery/feedback views, and exact Turn timeline integration (plan 22). |
 | 25G | Work workspace, initiative/plan/task/attempt inspectors, Kanban projection, dependency DAG, legal actions, and table parity (plan 24). |
 | 30I | Task timeline/causal/critical-path/workload/executor/repository/agent/All lenses and claim-overlap visualization (plan 24). |
-| 31N–31Q | Configuration/autonomy, scout/hints, temporal search/LCM, and full orchestration replay labs with read-only side-effect guards (plans 20, 22, 23, 24). |
+| 31N–31Q | Configuration/autonomy and scout/hints lab slices, plan 23's temporal search/LCM replay extending the Search Quality Lab (not a separate Search Lab), and the full Orchestration Lab with read-only side-effect guards (plans 20, 22, 23, 24). |
 
 #### PR 24 series: Application services, HTTP V2, SSE, generated client, adapters
 
@@ -2028,8 +2042,8 @@ Cross-cutting official-product companions:
 
 #### PR 31 series: Replay labs
 
-- Ship Hint, Retrieval, Ingest, Query, Correlation, Scheduler, Memory, Policy Diff, Evolution Studio, Coordination, Search Quality, Scope/Federation, and Secret Safety labs as separate PRs.
-- PR 31J owns Search Quality Lab/qrel review; PR 31K owns Coordination Lab; PR 31L owns scope resolution, shard plan, snapshot selection, and cross-project transport replay; PR 31M owns Privacy Observatory/Secret Safety Lab with synthetic values only.
+- Ship the canonical fourteen labs — Hint, Retrieval, Search Quality, Coordination, Orchestration, Ingest, Query, Correlation, Scheduler, Memory, Policy Diff, Evolution Studio, Scope/Federation, and Privacy & Secret Safety — as separate PRs.
+- PR 31J owns Search Quality Lab/qrel review; PR 31K owns Coordination Lab; PR 31L owns the Scope/Federation Lab (scope resolution, shard plan, snapshot selection, and cross-project transport replay, §16.13); PR 31M owns the Privacy Observatory/Privacy & Secret Safety Lab with synthetic values only; PR 31P extends the Search Quality Lab with plan 23's temporal corpus rather than shipping a separate Search Lab; PR 31Q owns the Orchestration Lab (§16.10A).
 - Each PR includes exact/recorded/best-effort modes, read-only guarantees, accessibility, and safe fixture-promotion flow.
 
 #### PR 32: Accessibility, responsive, export, visual QA
@@ -2055,7 +2069,8 @@ Cross-cutting migration companions:
 #### PR 33: Resumable V1 backfill
 
 - Reconcile the domain backfills already shipped with PRs 17–23 and import any remaining registry/sidecar data.
-- PR 33S is the store-owned read-only importer/checkpoint/parity slice; PR 33R is the root migration controller. Neither reuses reserved privacy slice PR 33A.
+- PR 33S is the store-owned read-only importer/checkpoint/parity slice (its importer-executor sub-slice is PR 33S-2, plan 02); PR 33R is the root migration controller. Neither reuses reserved privacy slice PR 33A.
+- [ ] Import the 14 per-branch V1 graph stores (about 140–150 MB each) as immutable packed generations, or record a documented drop-with-receipt per store, following plan 25's migration slice with plan 12; record the disk math against the ≤ 2.25× migration amplification gate.
 - [ ] Produce final whole-system manifests, counts, hashes, orphan/quarantine report, checkpoints, disk preflight, repair mode, and zero unexplained omissions.
 
 #### PR 33A: Retroactive privacy audit, containment, rebuild, and restore gate
@@ -2071,8 +2086,9 @@ Cross-cutting migration companions:
 
 #### PR 35: Bounded-context cutovers
 
-- Cut over capture, sessions, graph, knowledge, policy, automation, accounting, then product reads independently.
-- [ ] Require feature flag, migration receipt, rollback drill, and telemetry gate per context.
+- Cut over capture, sessions, graph, Git/delivery (plan 12's slice PR 35E), knowledge, policy, automation, accounting, then product reads independently, following plan 12's PR 35A–35H slice order.
+- Companion cutovers are sequenced explicitly: 35I (one temporal session/message/LCM path, plan 23) lands only after the sessions-context slice, and 35J (single canonical scheduler/lease owner, plan 24) lands only after the policy and automation slices; plan 12's route controller publishes every slice.
+- [ ] Require feature flag, migration receipt, rollback drill, telemetry gate, and current-client/catalog handshake per context.
 
 #### PR 36: V2 default and live-client cutoff
 
@@ -2085,7 +2101,8 @@ Cross-cutting migration companions:
 - [ ] Require one full release of V2-default operation with parity/health gates satisfied.
 - [ ] Export/archive before any explicit deletion.
 - [ ] Remove storage/plugin/query internals only after rollback is no longer required.
-- [ ] Regenerate convergence inventory/scorecard; require zero live V1 routes/writers/readers, zero expired/waived anti-corruption adapters, zero duplicate semantic authorities, zero obsolete names/config/docs/tests/dependencies, and no serving unscanned privacy descendant.
+- [ ] Regenerate convergence inventory/scorecard; require zero live V1 routes/writers/readers, zero duplicate semantic authorities, zero obsolete names/config/docs/tests/dependencies, and no serving unscanned privacy descendant.
+- [ ] PR 37 completes with zero live compatibility adapters; every waiver has an expiry that precedes PR 37, and expired waivers block CI (plan 19 §12.3/§16 state the same end state).
 
 ## 25. Verification Strategy
 
@@ -2149,7 +2166,8 @@ Cross-cutting migration companions:
 
 Record the reference machine and corpus in benchmark output. Test current scale and 10× scale: 100 projects, 5M messages/events, 1M symbols in a large project, hundreds of branches, large tool/reasoning payloads.
 
-- Hook synchronous capture p95 ≤ 10 ms.
+- Notification-only hook synchronous path p95 ≤ 10 ms total added wall time (no evaluation stage runs).
+- Prompt-evaluation hook synchronous path p95 ≤ 25 ms total added wall time, with ≤ 14 ms in the evaluation stage (§5.3, plan 07's stage decomposition).
 - Projected event visibility p95 ≤ 2 seconds.
 - Ingest append p95 ≤ 20 ms excluding blob I/O.
 - Scoped FTS p95 ≤ 150 ms at current scale.
@@ -2164,7 +2182,7 @@ Record the reference machine and corpus in benchmark output. Test current scale 
 - Graph interaction ≥ 55 FPS at 50k loaded/GPU-managed nodes and 200k edges while LOD caps labeled/interactive topology by legibility budgets; larger results cluster.
 - Timeline interaction ≥ 55 FPS at 250k density/LOD marks; inspectable event count remains bounded and declared.
 - Peak query RSS ≤ 1.5 GB at 10× corpus; migration disk amplification ≤ 2.25× source data; WAL ≤ 1 GB per shard before checkpoint; catalog ≤ 5% of canonical content size; one query opens ≤ 32 shards concurrently; graph generation/overlay files ≤ 10,000 per profile after compaction; GC reclaims ≥ 95% of eligible bytes per scheduled pass.
-- Retrieval nDCG@10 ≥ 0.85 and recall@20 ≥ 0.90 on the versioned intent corpus; release regression ≤ 0.02.
+- Retrieval gates are calibrate-then-lock relative gates, not absolute single-number targets: after the PR 13A corpus freeze, the lexical baseline's per-stratum metrics are locked; a candidate profile releases only if it beats the locked baseline on the predeclared primary metrics (§9.6) with no material worst-stratum regression, defined in plan 15 §7.1 as a worst-stratum nDCG@10 drop greater than max(2 points absolute, 5% relative) versus the locked baseline, or any no-answer-precision drop greater than 2 points.
 - Repository/session/message alias precision ≥ 99.5% and recall ≥ 99%; abstention/conflict rates are reported and 100% of unresolved identities remain visible.
 - Labeled symbol-lineage F1 ≥ 98%.
 - Git/PR/code relation precision and recall are reported per evidence class; inferred confidence expected calibration error ≤ 0.05 on a labeled corpus, with mandatory abstention below the display threshold selected by the calibration set.

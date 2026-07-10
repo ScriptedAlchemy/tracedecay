@@ -86,12 +86,14 @@ Every result carries a domain `RetrievalAnchorId` resolving to `RetrievalAnchorR
 7. Optional privacy-domain local dense representation.
 8. Optional learned-sparse/SPLADE representation.
 9. Explicit recency/time-distance feature only when query/time profile warrants it.
+10. Temporal-assertion/current-state index channel for session-temporal intents (specified in plan 23 §5.2; executed by plan 05's `session/temporal_resolver.rs`).
+11. Explicit recent-activity listing channel for listing intents only — the `list_sessions`/`list_messages` list intents defined in plan 05 §6.2.
 
 Each channel returns a bounded candidate list with channel rank/score, matching fields/terms/entities, index watermark, truncation, and latency.
 
 ### 4.3 Fusion, noise control, and diversity
 
-- Start with deterministic RRF over declared channels. Learned fusion is a later ablation requiring feature/version explanation.
+- Start with the fusion contract defined once in plan 05 §11.3: deterministic RRF over declared channels within each shard, then the calibrated cross-shard merge with exact-match tiers first; repartition stability is owned by 05's planner property tests. Learned fusion is a later ablation requiring feature/version explanation.
 - Cluster copied parent prompts, provider protocol/tool echoes, same-content cross-store rows, summary/source lineage, and repeated assistant status messages.
 - Select representative by requested audience/origin/kind and evidence quality; report hidden counts and exact sanitized-native expansion.
 - Penalize the active query/tool command echo, inventory listings, protocol notifications, and same-session repetition unless requested explicitly.
@@ -116,6 +118,8 @@ Each channel returns a bounded candidate list with channel rank/score, matching 
 ## 5. Real local multi-project evaluation corpus
 
 The private qrel store belongs to the active profile and is never committed. A redacted/synthetic subset plus aggregate metrics is checked in.
+
+The frozen research corpus this program draws on is pinned by its owner, plan [`13-research-provenance-and-context-anchors.md`](13-research-provenance-and-context-anchors.md): path set `/fast/tracedecay-redesign-research/*`, file mode `0600`, capture cutoff `2026-07-09T23:15:42Z`, integrity verified against plan 13's manifest hashes. Evaluation inputs derived from it cite that manifest, and no private content from it enters the repository.
 
 ### 5.1 Query sources
 
@@ -158,15 +162,40 @@ Also label duplicate/echo/protocol noise, wrong project/provider/time/origin, st
 
 A substantial stratified subset is independently double-labeled. Report raw agreement and an ordinal agreement statistic; adjudicate disagreement while retaining both labels/rationales. Ambiguous cases remain distributions/unknown, not forced truth.
 
+The judgment record is concrete, not deferred:
+
+```rust
+pub struct JudgmentRecordV1 {
+    pub judgment_id: JudgmentId,                     // primary key
+    pub corpus_version: CorpusVersion,
+    pub qrel_version: QrelVersion,
+    pub query_episode_id: QueryEpisodeId,
+    pub anchor_id: RetrievalAnchorId,
+    pub judge: JudgeRef,                             // human judge ID, or model+prompt+version for secondary LLM labels
+    pub judge_kind: JudgeKind,                       // Human | LlmSecondary
+    pub grade: RelevanceGrade,                       // 0..=3 exactly as above
+    pub secondary_labels: BTreeSet<SecondaryLabel>,  // the noise/scope/staleness/privacy/next-action labels above
+    pub smallest_sufficient_grain: AnchorGrain,
+    pub rationale_ref: Option<EligibleContentRef>,
+    pub labeled_at: UtcMicros,
+    pub supersedes: Option<JudgmentId>,
+}
+```
+
+- Uniqueness: `(qrel_version, query_episode_id, anchor_id, judge)`; required indexes: `(query_episode_id, anchor_id)`, `(corpus_version, qrel_version)`, and `(judge_kind, labeled_at)`.
+- Retention/size envelope: append-only and never edited — corrections publish a superseding row via `supersedes`; at least 5,000 rows for the initial gate and tens of thousands over the program's life.
+- Owning shard: the protected private evaluation shard, persisted through plan [`02-store-crate.md`](02-store-crate.md)'s qrel/judgment table family; committed fixtures remain redacted/synthetic only.
+- Plan 23 §8.3 extends only the `SecondaryLabel` vocabulary with session-temporal labels; it defines no second judgment record.
+
 ## 6. Metrics
 
 ### Retrieval quality
 
 - Precision@1/3/5.
-- Recall@10/20.
+- Recall@5/10/20.
 - MRR and first-useful rank.
 - nDCG@10 using 0–3 grades.
-- Correct abstention/no-answer accuracy and calibration.
+- Correct abstention/no-answer accuracy and calibration (Brier score and expected calibration error, shared with plan 23 §8.5).
 - Success within configured result/token/byte budget.
 - Judged coverage and unjudged rate.
 
@@ -197,6 +226,9 @@ Report macro and micro results, confidence intervals, every primary stratum, and
 - Every added channel has an ablation and resource profile.
 - Exact ID and exact phrase Precision@1/Recall cannot regress beyond an explicitly reviewed case.
 - Candidate default must improve predeclared Precision@3, nDCG@10, first-useful rank, and duplicate rate on dev and untouched test, with no material worst-stratum/privacy/no-answer regression.
+- Gates are calibrated on frozen development data, then locked before test evaluation; no absolute corpus-independent nDCG/recall floor is pre-committed. Plans 05 §11.3/§17, 06, 23 §8.6, and the master gate list cite this regime.
+- **Material worst-stratum regression, numeric definition (cited by every other plan):** a worst-stratum nDCG@10 drop greater than `max(2 points absolute, 5% relative)` versus the locked baseline, or any no-answer-precision drop greater than 2 points.
+- **Promotion evidence minimums (this plan owns the shared corpus; matching plan 23 §8.2, the regression matrix, and the master gates):** at least 500 real query episodes, and candidate pools plus manual labels sufficient for at least 5,000 human-grounded judgments, with independent double labels on at least 20% of judgments. A promotion claim on a smaller corpus is invalid regardless of scores.
 
 ### 7.2 Rolling local evaluation
 
@@ -239,35 +271,28 @@ Lab mode is read-only. Label/create-corpus/fixture promotion is a separately aut
 
 ## 9. Implementation file plan
 
-Extend `crates/tracedecay-query/`:
+This plan owns no module tree. Ranking, fusion, and evaluation-metrics code lives only in plan 05's `crates/tracedecay-query` tree (05 §5); there is no `src/retrieval/` directory and no second `eval/metrics.rs`. The capabilities this plan specifies are requirements on these 05-owned modules:
 
-```text
-src/retrieval/
-  query_understanding.rs
-  exact.rs
-  bm25.rs
-  fuzzy.rs
-  entity.rs
-  graph.rs
-  summary.rs
-  dense.rs
-  learned_sparse.rs
-  fusion.rs
-  cluster.rs
-  diversity.rs
-  rerank.rs
-  explain.rs
-src/eval/
-  corpus.rs
-  cutoff.rs
-  pool.rs
-  qrels.rs
-  metrics.rs
-  strata.rs
-  agreement.rs
-  ablation.rs
-  report.rs
-```
+| Capability (this plan) | Plan 05 module |
+|---|---|
+| Query understanding (§4.1) | `ast.rs` parse/canonicalize, `operators/entity.rs` alias resolution, `session/intent.rs` intent detection |
+| Exact ID/phrase channel (§4.2.1) | `operators/filter.rs` + `operators/fts.rs` |
+| Fielded BM25 channel (§4.2.2) | `operators/fts.rs` + `rank/lexical.rs` |
+| Character fuzzy channel (§4.2.3) | `operators/fuzzy.rs` |
+| Entity channel (§4.2.4) | `operators/entity.rs` |
+| Graph seeds and bounded expansion (§4.2.5, §4.5) | `operators/graph.rs` |
+| Summary-DAG channel (§4.2.6) | `operators/summary.rs` |
+| Optional dense channel (§4.2.7) | `operators/vector.rs` |
+| Optional learned-sparse channel (§4.2.8) | `operators/learned_sparse.rs` |
+| Recency feature (§4.2.9) | `rank/features.rs` |
+| Temporal-assertion channel (§4.2.10) | `session/temporal_resolver.rs` |
+| Listing channel (§4.2.11) | the 05 §6.2 list intents |
+| Fusion (§4.3) | `rank/rrf.rs` + `execute/merge.rs`, defined once in 05 §11.3 |
+| Copy clustering/representative selection (§4.3) | `rank/cluster.rs` |
+| Diversity (§4.3) | `rank/diversity.rs` |
+| Bounded rerank stage (§4.4) | `rank/rerank.rs` |
+| Explanations (§8) | `rank/explain.rs` + `explain.rs` |
+| Corpus/cutoff/pool/qrels/metrics/strata/agreement/ablation/report (§§5–7, §11) | `eval/{corpus,cutoff,pool,qrels,metrics,strata,agreement,ablation,report}.rs` — `eval/metrics.rs` is the single metrics implementation, shared with plan 23 §8.5 |
 
 Companion ownership:
 
@@ -282,7 +307,7 @@ Companion ownership:
 
 ### PR 13A: Time-safe real-world eval harness and current baselines
 
-- Build private corpus/qrel schemas, stable anchors, time cutoff, strata, pooling, labels, metrics, agreement, aggregate/redacted reports.
+- Implement the private corpus/qrel stores per the §5.4 `JudgmentRecordV1` contract, stable anchors, time cutoff, strata, pooling, labels, metrics, agreement, aggregate/redacted reports.
 - Capture the six-query probe plus exact identifier, typo, no-answer, cross-project, provider, Git, memory, and nearby-agent fixtures.
 - Benchmark current production and fielded BM25 without changing default search.
 

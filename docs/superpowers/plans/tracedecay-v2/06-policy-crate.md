@@ -23,6 +23,7 @@ Plan [`24-canonical-task-plan-graph-and-multi-agent-executor.md`](24-canonical-t
 - All evaluators consume the exact domain `ScopeSelectorV2` plus resolution candidates/coverage. Policy never replaces missing/ambiguous scope with current project, CWD, first project/CWD, active base checkout, or current branch graph.
 - Projectors persist policy bundles, evaluations, outcomes, and read models. Store supplies immutable archives. Policy does not import either concrete implementation.
 - Executable artifacts are bounded `RuleBytecodeV1`, not arbitrary native code, dynamic libraries, shell, Python, or general-purpose WebAssembly. The bytecode VM has a versioned intrinsic allowlist and no I/O capability.
+- Deterministic hint candidates and Plan 22 scout suggestion envelopes are selected by exactly one arbiter: `DeliveryArbiterV1` (Section 9.1.3) receives both as `DeliveryCandidateV1` submissions and proposes one `HintStateProposal` compare-and-swap. There is no second delivery selector and no scout-private hint state.
 - Shared replay mode names are exactly domain `ReplayMode::ExactDeterministic`, `ReplayMode::RecordedResult`, and `ReplayMode::CurrentBestEffort`.
 - A decision/explanation digest is reproducible only in `ExactDeterministic`; `RecordedResult` verifies stored digests without executing; `CurrentBestEffort` records substitutions and must not be displayed as historical truth.
 - Exact historical execution is disabled when the artifact, VM/intrinsic ABI, input snapshot, policy/config, index/memory/tool catalog, redaction-authorized payload, or watermark is unavailable.
@@ -41,7 +42,7 @@ Plan [`24-canonical-task-plan-graph-and-multi-agent-executor.md`](24-canonical-t
 - Version advisory agent-proximity policy over presence/work claims: material overlap, deliberate redundancy, one compact hint at bounded workflow gates, dedupe/cooldown/ack/suppress/handoff, and false-positive attribution.
 - Make scheduler decisions deterministic from effective config, ledger/activity/lock snapshots, watermarks, and explicit time; actual lease/lock acquisition remains transactional application/store work.
 - Version memory proposal, secret/transience checks, duplicate/conflict detection, entity extraction, trust/supersession, retrieval consequence, and deletion-impact policy.
-- Record missed-tool suggestions, observed tool choices, human corrections, and terminal attribution as evidence-bearing hint outcomes without treating user correction as model failure by default.
+- Record missed-capability suggestions, observed tool choices, human corrections, and terminal attribution as evidence-bearing hint outcomes without treating user correction as model failure by default.
 - Support exact/recorded/best-effort Hint, Retrieval, Correlation, Scheduler, Memory, and Policy Diff labs plus compatible external Ingest/Query lab results.
 - Allow immutable bundles and evaluations to be read concurrently while a new bundle is atomically published, without changing decisions already in flight.
 
@@ -59,7 +60,7 @@ Plan [`24-canonical-task-plan-graph-and-multi-agent-executor.md`](24-canonical-t
 
 ### 3.1 Convergence boundary
 
-Policy is the sole deterministic decision/evaluation owner inside [`19-system-defragmentation-convergence-and-extensibility.md`](19-system-defragmentation-convergence-and-extensibility.md). It consumes immutable domain/query/catalog inputs from Plans [`01`](01-domain-crate.md), [`05`](05-query-crate.md), and [`08`](08-tool-catalog-crate.md), follows Plan [`18`](18-secret-detection-redaction-and-private-data-safety.md) eligibility without implementing sanitization, and supplies application/hooks/labs with proposals rather than effects. Plan [`22`](22-incremental-context-scout-and-suggestion-envelopes.md) adds the optional scout candidate/silence/delivery policy profile; Plan [`23`](23-session-lcm-temporal-retrieval-and-evaluation.md) adds temporal/current/as-of retrieval features. Neither may introduce a model-owned truth or side-effect path inside this crate.
+Policy is the sole deterministic decision/evaluation owner inside [`19-system-defragmentation-convergence-and-extensibility.md`](19-system-defragmentation-convergence-and-extensibility.md). It consumes immutable domain/query/catalog inputs from Plans [`01`](01-domain-crate.md), [`05`](05-query-crate.md), and [`08`](08-tool-catalog-crate.md), follows Plan [`18`](18-secret-detection-redaction-and-private-data-safety.md) eligibility without implementing sanitization, and supplies application/hooks/labs with proposals rather than effects. Plan [`22`](22-incremental-context-scout-and-suggestion-envelopes.md) adds the optional scout candidate/silence/delivery policy profile (`EvaluatorKind::Scout` in `src/scout.rs`, landed by Plan 22 PR 23H under this section's extension seam); Plan [`23`](23-session-lcm-temporal-retrieval-and-evaluation.md) adds temporal/current/as-of retrieval features. Neither may introduce a model-owned truth or side-effect path inside this crate.
 
 | Boundary | Contract |
 |---|---|
@@ -88,7 +89,7 @@ Policy errors are stable evaluation/fidelity codes. Application owns public retr
 | `src/automation/scheduler.rs` (`AutomationSchedule`, `SessionActivity`, `AutomationScheduleDecision`, `AutomationTaskLock`, `schedule_decision`, `cron_is_due`, `stale_lock_secs`) | Schedule parsing, due/skip decisions, activity gate, lock acquisition/staleness | Policy keeps pure parse/due/skip/proposal logic. Application/store own lock compare-and-swap, PID/liveness observation, lease, revalidation, and run launch. |
 | `src/automation/{apply_policy,artifact_policy,memory_curator,memory_digest,session_reflector,skill_writer}.rs` | Curation/apply rules mixed with runner/files/artifacts | Extract deterministic eligibility/proposal decisions. Runner and artifact writes remain application/automation responsibilities. |
 | `src/mcp/tools/dispatch_policy.rs`, tool definitions, and dynamic hook hints | Tool discovery/routing and safety classification near transport | Publish a versioned `ToolCatalogSnapshot`; route in `RoutingEvaluator`; handlers only enforce transport/mutation authorization declared by application/domain contracts. |
-| Analytics/hook JSONL fallback and hint outcome records | Emitted/followed/ignored/suppressed counts with weak joins | Project typed opportunity, evaluation, injected payload, observed action, human correction, attribution horizon, and terminal outcome events with supporting evidence. |
+| Analytics/hook JSONL fallback and hint outcome records | Emitted/followed/ignored/suppressed counts with weak joins | Project typed opportunity, evaluation, injected payload, observed action, human correction, attribution horizon, and terminal outcome events with supporting evidence into `HintOutcomeRecordV1` rows (Section 10); Plan [`12`](12-root-compatibility-migration.md) owns the V1 JSONL field mapping. |
 
 ### 4.1 Base and incoming-master prerequisites refreshed on 2026-07-10
 
@@ -115,6 +116,8 @@ crates/tracedecay-policy/
 │   ├── context.rs                   # explicit clock, seed, budget, access, watermarks
 │   ├── decision.rs                  # EvaluationRecord, ProposedEffect, explanations
 │   ├── outcome.rs                   # opportunity/action/correction/terminal attribution
+│   ├── delivery.rs                  # DeliveryArbiterV1 single delivery selector (Section 9.1.3)
+│   ├── scout.rs                     # scout ranking/silence/dedupe policy (Plan 22 PR 23H)
 │   ├── concurrent.rs                # pinned immutable registry snapshot/publication contract
 │   ├── vm/
 │   │   ├── mod.rs                   # deterministic bounded VM
@@ -259,6 +262,7 @@ pub enum EvaluatorKind {
     Curation,
     Scheduler,
     Memory,
+    Scout,
     Ingest,
     Query,
 }
@@ -360,6 +364,44 @@ pub trait RecordedEvaluationPort: Send + Sync {
 
 These ports have no store/publish/update/delete methods. Recording a new live evaluation is an application/projector event after runtime return, never a hidden runtime write.
 
+`EvaluatorKind::Scout` is the Plan [`22`](22-incremental-context-scout-and-suggestion-envelopes.md) profile: its registered input schema is the pinned scout input manifest plus candidates/receipts/prior `HintStateSnapshot`, and its registered output schema is Plan 22's `ScoutDecisionV1`.
+
+The pinned-reference and record types those ports return are explicit; `SnapshotRef` is the one pinned-ref family across Plans 06/07/22 — `EffectiveConfigSnapshotId`, index/memory/skill snapshot IDs, and hint-state versions ride inside it, `PolicyBundleRef` pins bundle identity, and replay records across the three planes join on exactly these two families:
+
+```rust
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub enum SnapshotKind { Config, Index, Memory, Skill, HintState, Ledger, Activity, Lease, Candidate }
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct SnapshotRef {
+    pub kind: SnapshotKind,
+    pub snapshot_id: SnapshotId,
+    pub digest: Digest,
+    pub watermark: Option<VectorWatermark>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct InputSnapshot {
+    pub reference: SnapshotRef,
+    pub sections: BTreeMap<SectionId, Digest>,
+    pub body: CanonicalCborBytes, // bounded; hash-verified against reference.digest before use
+    pub loaded_at: UtcMicros,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct StoredEvaluationRecord {
+    pub record: EvaluationRecord,
+    pub request_facts_digest: Digest,
+    pub input_refs: Vec<SnapshotRef>,
+    pub payload_refs: Vec<PayloadRef>,
+    pub outcome_ids: Vec<HintOutcomeId>,
+    pub retention_watermark: EvidenceRetentionWatermark,
+    pub stored_at: UtcMicros,
+}
+```
+
+`StoredEvaluationRecord` storage envelope: primary key and uniqueness = `record.evaluation_id`; required indexes on `(evaluator, stored_at)` and on bundle ID for diff/GC scans; rows live on the activity/session owner shard and are retained through the outcome horizon plus the data rollback window (column-level schema lands in [`02-store-crate.md`](02-store-crate.md)).
+
 Stable errors include `bundle_missing`, `artifact_digest_mismatch`, `manifest_incompatible`, `vm_unsupported`, `intrinsic_unsupported`, `input_missing`, `input_redacted`, `snapshot_watermark_mismatch`, `tool_catalog_missing`, `exact_replay_unavailable`, `source_fingerprint_mismatch`, `evaluation_budget_exceeded`, `cancelled`, `access_denied`, `external_evaluator_missing`, and `internal_invariant`.
 
 ## 8. Determinism, Replay, and Concurrency
@@ -420,7 +462,7 @@ pub struct HintEvaluationInput {
     pub session: SessionId,
     pub scope: ScopeSelectorV2,
     pub scope_resolution: ScopeResolutionSnapshot,
-    pub available_tools: ToolCatalogSnapshot,
+    pub available_tools: ToolCatalogRef,
     pub memory_candidates: Vec<PolicyCandidate>,
     pub skill_candidates: Vec<PolicyCandidate>,
     pub prior_state: HintStateSnapshot,
@@ -448,9 +490,241 @@ The exact injected payload is part of the decision digest. Application atomicall
 
 Scope is preserved end-to-end in evaluation/input/output digests. A tool/skill/dependency hint may narrow only by returning an explicit proposed `ScopeSelectorV2` and showing the change; ignored dependency hints cannot erase the caller's multi-repo/worktree selection. Ambiguous/stale/polluted registry resolution suppresses confident routing/correlation/coordination and exposes the candidate/action needed.
 
+`available_tools` and `EvaluationEnvironment.tool_catalog` must carry the same pinned `ToolCatalogRef`; the catalog snapshot itself is loaded once through `BundleArchivePort`-adjacent reads at evaluation start, so no full-catalog canonical-CBOR digest is computed inside the evaluation stage budget.
+
+#### 9.1.1 Request facts and candidate shapes
+
+`RequestFacts` is the typed, digestable input snapshot the application assembles for every evaluative hook invocation; Plan [`07`](07-hooks-crate.md) §11's fact inventory is exactly this structure, `HintEvaluationInput` is its evaluator-facing decode (same `facts_digest`), and Hint Lab and `HookApplicationPort` reference it by digest.
+
+```rust
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RequestFacts {
+    pub schema: SchemaVersion,
+    pub invocation_id: HookInvocationId,
+    pub host: HostProfileRef,
+    pub hook_point: HookPoint,
+    pub prompt_origin: Option<PromptOrigin>,
+    pub session: SessionId,
+    pub agent: Option<AgentId>,
+    pub scope: ScopeSelectorV2,
+    pub scope_resolution: ScopeResolutionSnapshot,
+    pub hook_facts: HookFacts,
+    pub tool_catalog: ToolCatalogRef,
+    pub host_tool_availability: BTreeMap<CapabilityId, bool>,
+    pub memory_candidates: Vec<PolicyCandidate>,
+    pub skill_candidates: Vec<PolicyCandidate>,
+    pub query_candidates: Vec<PolicyCandidate>,
+    pub prior_state: HintStateSnapshot,
+    pub pending_suggestion: Option<PendingSuggestionSlot>,
+    pub presence: Option<AgentPresenceV1>,
+    pub work_claim: Option<WorkClaimV1>,
+    pub coordination_state: Option<CoordinationHintState>,
+    pub observed_git: Option<GitEvidenceSnapshot>,
+    pub effective_at: i64,
+    pub deadline: UtcMicros,
+    pub access_digest: Digest,
+    pub sensitivity: DataSensitivity,
+    pub watermark: VectorWatermark,
+    pub budget: EvaluationBudget,
+    pub facts_digest: Digest, // canonical-CBOR digest over every field above
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub enum CandidateSource { Memory, Skill, Lexical, Entity, Vector, Recent }
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PolicyCandidate {
+    pub candidate_id: CandidateId,
+    pub source: CandidateSource,
+    pub entity: EntityRef,
+    pub payload: Option<PayloadRef>,
+    pub component_scores: BTreeMap<FeatureId, ScoreMicros>,
+    pub sensitivity: DataSensitivity,
+    pub anchor: Option<RetrievalAnchorId>,
+    pub produced_at: VectorWatermark,
+    pub coverage: CoverageReportV1, // canonical shared coverage type owned by 01-domain-crate.md
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ScoredCandidate {
+    pub candidate_id: CandidateId,
+    pub eligible: bool,
+    pub rejection: Option<SuppressionReason>,
+    pub feature_contributions: BTreeMap<FeatureId, ScoreMicros>,
+    pub score: ScoreMicros,
+    pub rank: u16,
+    pub payload_tokens: u32,
+}
+```
+
+The `HintDecision` component decisions are equally explicit. `SuppressionReason` is the one closed suppression registry for both delivery engines: its variants are exactly Plan 22 §4.4's `SuggestionSuppressionReasonV1` set (Plan 22 enumerates it; this crate re-exports it), deterministic hints simply never use the scout-only variants, and a new variant is a versioned enum revision recorded here.
+
+```rust
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub enum FingerprintKind { Logical, Semantic, Anchor, CoordinationPair }
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct DedupeDecision {
+    pub duplicate_of: Option<ContentDigest>,
+    pub matched_kind: Option<FingerprintKind>,
+    pub inserted: Vec<(FingerprintKind, ContentDigest)>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CooldownDecision {
+    pub category: Option<HintCategoryId>,
+    pub active_until: Option<UtcMicros>,
+    pub started: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct EscalationDecision {
+    pub stage_before: u8,
+    pub stage_after: u8,
+    pub evidence: Vec<EvidenceRef>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct HintBudgetDecision {
+    pub turn_used: u16,
+    pub session_used: u16,
+    pub tokens_used: u32,
+    pub exhausted: Option<SuppressionReason>,
+}
+```
+
+#### 9.1.2 Hint state snapshot and proposal
+
+`HintStateSnapshot` is the single shared transactional state Plans 06/07/22 all read and propose against; `HintStateProposal` is the only way to change it.
+
+```rust
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct HintStateTarget {
+    pub profile_id: ProfileId,
+    pub session_id: SessionId,
+    pub agent_id: Option<AgentId>,
+    pub thread_id: Option<ThreadId>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct HintStateSnapshot {
+    pub target: HintStateTarget,
+    pub version: EntityVersionId, // the one CAS token; every accepted proposal advances it
+    pub logical_fingerprints: BTreeSet<ContentDigest>,
+    pub semantic_fingerprints: BTreeSet<ContentDigest>,
+    pub anchor_fingerprints: BTreeSet<ContentDigest>,
+    pub coordination_pair_fingerprints: BTreeSet<ContentDigest>,
+    pub categories: BTreeMap<HintCategoryId, HintCategoryClock>,
+    pub turn_ledger: HintBudgetLedger,
+    pub session_ledger: HintBudgetLedger,
+    pub scout_session_ledger: HintBudgetLedger, // scout engine cap (default limit 4/session)
+    pub token_ledger: TokenBudgetLedger,
+    pub pending_suggestion: Option<PendingSuggestionSlot>,
+    pub watermark: VectorWatermark,
+    pub updated_at: UtcMicros,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct HintCategoryClock {
+    pub last_emitted_at: Option<UtcMicros>,
+    pub cooldown_until: Option<UtcMicros>,
+    pub escalation_stage: u8,
+    pub emitted_this_session: u16,
+    pub acknowledged: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct HintBudgetLedger { pub used: u16, pub limit: u16 }
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct TokenBudgetLedger { pub used_tokens: u32, pub limit_tokens: u32 }
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PendingSuggestionSlot {
+    pub envelope_id: SuggestionEnvelopeId,
+    pub envelope_sequence: u64,
+    pub payload_tokens: u32,
+    pub eligible_at: UtcMicros,
+    pub expires_at: UtcMicros,
+    pub claimed_by: Option<HookInvocationId>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct HintStateProposal {
+    pub target: HintStateTarget,
+    pub expected_version: EntityVersionId, // single CAS on HintStateSnapshot.version
+    pub insert_fingerprints: Vec<(FingerprintKind, ContentDigest)>,
+    pub evict_fingerprints: Vec<(FingerprintKind, ContentDigest)>,
+    pub category_updates: BTreeMap<HintCategoryId, HintCategoryClock>,
+    pub turn_debit: u16,
+    pub session_debit: u16,
+    pub scout_session_debit: u16,
+    pub token_debit: u32,
+    pub pending_slot: PendingSlotOp,
+    pub reason_codes: Vec<StableReasonCode>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum PendingSlotOp {
+    Keep,
+    Set(PendingSuggestionSlot),
+    Claim { invocation: HookInvocationId },
+    Clear { reason: SuppressionReason },
+}
+```
+
+Category dedupe rides the category clocks; the four fingerprint sets carry the logical/semantic/anchor/coordination-pair keys. Storage envelope, stated here so the owning store plan can land the row: one row per `HintStateTarget`; primary key and uniqueness = the target digest (profile, session, agent, thread); required index on `updated_at` for TTL/idle sweeps; each fingerprint set is bounded at 256 entries with oldest-first eviction recorded through `evict_fingerprints`, keeping a row under 32 KiB; rows live on the activity/session owner shard and expire with session retention. The column-level table schema lands in [`02-store-crate.md`](02-store-crate.md) (hint state is one of its named high-volume table families).
+
+#### 9.1.3 DeliveryArbiterV1: the one delivery selector
+
+`DeliveryArbiterV1` (`src/delivery.rs`) is the single delivery selector for deterministic hints and Plan 22 scout suggestion envelopes. Plans [`07`](07-hooks-crate.md) and [`22`](22-incremental-context-scout-and-suggestion-envelopes.md) cite this section instead of restating selection rules.
+
+```rust
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum DeliveryCandidateV1 {
+    Deterministic(ScoredCandidate),
+    Scout(SuggestionCandidateV1), // Plan 22 §4.3
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct DeliveryArbitrationV1 {
+    pub invocation_id: HookInvocationId,
+    pub winner: Option<DeliveryCandidateV1>,
+    pub suppressed: Vec<(CandidateId, SuppressionReason)>,
+    pub payload: Option<RenderedHintPayload>,
+    pub proposal: HintStateProposal,
+}
+
+impl DeliveryArbiterV1 {
+    pub fn arbitrate(
+        &self,
+        facts: &RequestFacts,
+        candidates: &[DeliveryCandidateV1],
+        state: &HintStateSnapshot,
+        now: UtcMicros,
+    ) -> DeliveryArbitrationV1;
+
+    pub fn claim_pending_suggestion(
+        &self,
+        request: &PendingSuggestionRequestV1, // Plan 22 §11
+        state: &HintStateSnapshot,
+        now: UtcMicros,
+    ) -> DeliveryArbitrationV1;
+}
+```
+
+Arbitration rules:
+
+- Exactly one arbitration per evaluative hook invocation: deterministic `ScoredCandidate`s and the pending scout envelope (if any) enter the same call and compete under the same dedupe/cooldown/escalation/ledger state.
+- At most one winner, therefore at most one `InjectContext` per invocation. A deterministic hint and a scout envelope can never both deliver in one invocation; the loser records a `SuppressionReason`.
+- Atomicity and ordering: the arbiter emits one `HintStateProposal` whose `expected_version` is the pinned `HintStateSnapshot.version`; the application commits it with a single compare-and-swap on that version (row owned by [`02-store-crate.md`](02-store-crate.md)). Concurrent `evaluate` and claim paths serialize on this token — the loser observes the advanced version and re-arbitrates or stays silent; it never double-delivers.
+- Plan 22's `claim_pending_suggestion` is a `DeliveryArbiterV1` operation, not a parallel CAS: revalidation and the pending-slot claim ride the same version token, and there is no scout-side hint state.
+- Ledgers are engine-agnostic: turn/session/token debits apply to both engines; the scout additionally debits `scout_session_ledger` (default limit 4), so the scout per-session quota shares — never bypasses — the common budget state.
+- The arbiter is pure: it proposes; application revalidates and applies, exactly like every other evaluator in this crate.
+
 ### 9.2 Retrieval
 
-Input contains canonical query intent, scope, query-produced lexical/entity/vector/recent candidates with component scores and exclusions, facts/versions/trust/feedback snapshots, index/model/ranking refs, coverage, and counter state as data. Output contains eligible/rejected/deduped candidates, fixed-point feature contributions, final order, reasons, authorized payload slices, and a retrieval-event proposal. Debug/lab mode omits the event proposal and cannot increment counters.
+Input contains canonical query intent, scope, query-produced lexical/entity/vector/recent candidates with component scores and exclusions, facts/versions/trust/feedback snapshots, index/model/ranking refs, coverage, and counter state as data. Input also carries the optional temporal clause of domain `TraceQueryV1` (`Current`, `AsOf` with both valid-time and knowledge-time cutoffs, `Evolution`, `Forensic`; the type is owned by [`01-domain-crate.md`](01-domain-crate.md) and executed by [`05-query-crate.md`](05-query-crate.md)), so Plan [`23`](23-session-lcm-temporal-retrieval-and-evaluation.md)'s as-of/evolution retrieval features evaluate under policy rather than beside it; adding this field is the worked example of a versioned `input_schema` revision, never an unversioned edit. Output contains eligible/rejected/deduped candidates, fixed-point feature contributions, final order, reasons, authorized payload slices, and a retrieval-event proposal. Debug/lab mode omits the event proposal and cannot increment counters.
 
 ### 9.3 Routing and Git intent
 
@@ -605,9 +879,9 @@ Input contains an already `Sanitized`/sink-eligible proposed content reference p
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum HintOpportunityOutcome {
     SuggestedBeforeAction { evaluation: PolicyEvaluationId, tool: ToolId },
-    MissedToolSuggestion {
+    MissedCapability {
         opportunity: ObservationId,
-        recommended_tool: ToolId,
+        capability_id: CapabilityId,
         observed_action: EventId,
         detected_at: i64,
     },
@@ -627,9 +901,71 @@ pub enum OutcomeTerminal {
 }
 ```
 
+`missed_capability{capability_id}` is the canonical outcome name across Plans 06/07/14 and the master plan; no policy or projector emits a tool-keyed missed-suggestion variant.
+
+Outcome enum v2 — the explicit versioned revision through which Plan [`22`](22-incremental-context-scout-and-suggestion-envelopes.md)'s variants join this closed contract (closed enums grow only through a revision recorded here; there is no other extension path):
+
+```rust
+// Schema version 2 of the shared plan 6/7 outcome vocabulary.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum OutcomeTerminalV2 {
+    Observed { evidence: Vec<EventId>, attribution: AttributionClass },
+    Unobserved { horizon_ended_at: i64 },
+    Unresolvable { reason: OutcomeUnresolvableReason },
+    // Requires linked claim/handoff/task-change evidence after delivery; adjacency is never enough.
+    PreventedDuplicateWork { evidence: Vec<EventId> },
+}
+
+// Explicit human feedback evidence; never a silent training label and never a terminal state by itself.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum HintFeedbackV2 {
+    HumanHelpful { feedback_event: EventId },
+    HumanNotHelpful { feedback_event: EventId },
+    HumanIncorrect { feedback_event: EventId },
+    HumanTooLate { feedback_event: EventId },
+    HumanRepeated { feedback_event: EventId },
+    HumanTooVerbose { feedback_event: EventId },
+}
+```
+
+Every eligible evaluation persists as exactly one `HintOutcomeRecordV1` row — the join that makes outcome denominators queryable instead of the V1 1,182-emitted/3-acted weak-join situation:
+
+```rust
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub enum DeliveryEngine { Deterministic, Scout }
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub enum DenominatorExclusion { DeliveryFailed, DeliveryUnknown, Suppressed, Shadow, Lab }
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct HintOutcomeRecordV1 {
+    pub outcome_id: HintOutcomeId,            // primary key
+    pub evaluation_id: PolicyEvaluationId,    // unique: one record per evaluation
+    pub engine: DeliveryEngine,
+    pub envelope_id: Option<SuggestionEnvelopeId>,
+    pub category: Option<HintCategoryId>,
+    pub capability_id: Option<CapabilityId>,
+    pub opportunity: Option<HintOpportunityOutcome>,
+    pub eligible_for_denominator: bool,
+    pub exclusion: Option<DenominatorExclusion>,
+    pub horizon_started_at: UtcMicros,
+    pub horizon_ends_at: UtcMicros,
+    pub terminal: Option<OutcomeTerminalV2>,  // None until the projector reaches a terminal state
+    pub feedback: Vec<HintFeedbackV2>,
+    pub attribution_evidence: Vec<EventId>,   // bounded, <=32 refs
+    pub attribution_class: Option<AttributionClass>, // LegacyHeuristic reserved for V1 imports
+    pub scope_digest: ScopeSelectorDigest,
+    pub watermark: VectorWatermark,
+    pub schema: SchemaVersion,
+    pub recorded_at: UtcMicros,
+}
+```
+
+`HintOutcomeRecordV1` storage envelope: primary key `outcome_id`; uniqueness on `evaluation_id` (repeated projector runs stay idempotent); required indexes on `(terminal IS NULL, horizon_ends_at)` for horizon sweeps and on `(category, recorded_at)` and `(capability_id, recorded_at)` for rollups; rows are ~300 bytes plus bounded evidence refs, live on the activity/session owner shard beside their evaluation, and are retained through the analytics window plus the data rollback window. The column-level table schema lands in [`02-store-crate.md`](02-store-crate.md) (hint outcomes are one of its named high-volume table families). [`12-root-compatibility-migration.md`](12-root-compatibility-migration.md)'s migration inventory owns the V1 mapping: V1 analytics/hook JSONL `emitted/followed/ignored/suppressed` evidence becomes `HintOutcomeRecordV1` rows with the `LegacyHeuristic` attribution class, so historical denominators are queryable and honestly labeled rather than merely excluded.
+
 Domain `CoordinationOutcome` supplies eligible/emitted/suppressed/acted/handoff/duplicate-avoided/false-positive/unresolved terminal vocabulary; policy explanations add the typed suppression reason. Coordination denominators are separate from generic hints. `Acted`, `HandedOff`, and `DuplicateAvoided` require linked claim/ack/handoff/scope-change evidence; temporal proximity alone is not enough. Planned redundancy suppression is success, not a missed warning. False-positive labels require explicit user/agent feedback or a labeled fixture.
 
-- A missed-tool suggestion is recorded only when a versioned intent evaluator identifies a tool opportunity after an observed alternative action; it is not counted as emitted or ignored.
+- A missed-capability suggestion is recorded only when a versioned intent evaluator identifies a capability opportunity after an observed alternative action; it is not counted as emitted or ignored.
 - Human correction references the exact captured user event and derived intent/route. Secret/redacted text remains behind authorized payload refs; analytics uses categories/digests.
 - Correction is evidence that the previous route, scope, target, or intent may be wrong; it is not automatically negative model outcome. Attribution policy decides with supporting events.
 - Each eligible hint evaluation reaches one terminal `Observed`, `Unobserved`, or `Unresolvable` state within its configured horizon. Repeated projector runs are idempotent.
@@ -639,7 +975,7 @@ Domain `CoordinationOutcome` supplies eligible/emitted/suppressed/acted/handoff/
 
 ## 11. Replay Lab Contracts
 
-All lab methods require `ReadOnlyLabContext`; its ports expose only immutable loads/query snapshots. Fixture promotion is a separate application command after secret scan and explicit confirmation.
+All lab methods require `ReadOnlyLabContext`; its ports expose only immutable loads/query snapshots — the ports structurally lack write methods, which is the replay-isolation mechanism every replay surface (including Plan 22's scout Hint Lab) cites. Lab and replay outputs that must persist — policy diff reports, A/B artifacts, adjudication relabels, counterfactual runs — land only in the dedicated `replay_artifacts` store, a separate artifact family on its own shard (column-level schema in [`02-store-crate.md`](02-store-crate.md)); they never write analytics, facts, claims, policies, hints, or live coordination state. Fixture promotion is a separate application command after secret scan and explicit confirmation.
 
 ### Hint Lab
 
@@ -732,7 +1068,7 @@ Dependency direction remains `tracedecay-domain <- tracedecay-policy <- tracedec
 
 ## 13. PR and TDD Execution Plan
 
-PR 23 is split into reviewable 23A–23G. PR 31 adds application/API/UI shells over these headless contracts. Commands run from repository root with checkout-local `target/` and no target/data-dir override unless Cargo reports target-lock contention.
+PR 23 is split into reviewable 23A–23G. Plan 22's PR 23H later lands `src/scout.rs` (`EvaluatorKind::Scout`) behind the Section 3.1 extension seam. PR 31 adds application/API/UI shells over these headless contracts. Commands run from repository root with checkout-local `target/` and no target/data-dir override unless Cargo reports target-lock contention.
 
 ### PR 23A: Bundle manifest, bytecode VM, immutable registry, and deterministic runtime
 
@@ -756,15 +1092,16 @@ PR 23 is split into reviewable 23A–23G. PR 31 adds application/API/UI shells o
 
 ### PR 23C: Hint evaluation, Git/tool discovery, agent coordination, and outcome attribution
 
-**Files:** `src/evaluators/{hint,routing,coordination}.rs`, `src/git/{mod,catalog}.rs`, `src/outcome.rs`, V1 hint bundles, `tests/{hint_parity,git_tool_routing,coordination_policy,outcome_attribution}.rs`.
+**Files:** `src/evaluators/{hint,routing,coordination}.rs`, `src/git/{mod,catalog}.rs`, `src/{outcome,delivery}.rs`, V1 hint bundles, `tests/{hint_parity,git_tool_routing,coordination_policy,outcome_attribution}.rs`.
 
 - [ ] Port hint/routing fixtures plus multi-repo/worktree scope preservation, `sessions.project_key` conflict, Claude first-CWD ambiguity, active-base-versus-PR-worktree graph mismatch, ignored dependency hint retaining scope, stale registry pollution, trusted failure evidence, repeated generic-search prompts, useful silence, and noisy-hint rejection.
-- [ ] Add outcome tests `missed_tool_is_not_counted_emitted`, `human_correction_references_evidence`, `correction_does_not_imply_negative_outcome`, `acted_requires_linked_tool_event`, and `projector_terminal_state_is_idempotent`.
+- [ ] Add outcome tests `missed_capability_is_not_counted_emitted`, `human_correction_references_evidence`, `correction_does_not_imply_negative_outcome`, `acted_requires_linked_tool_event`, and `projector_terminal_state_is_idempotent`.
+- [ ] Add delivery-arbiter tests `one_winner_per_invocation`, `scout_and_deterministic_never_both_deliver`, `lost_cas_never_double_delivers`, and `claim_rides_the_same_version_token` against Section 9.1.3.
 - [ ] Add coordination cases for the five allowed triggers, same/parallel worktrees, file/symbol/query overlap, deliberate redundancy suppression, unchanged-scope cooldown, acknowledgement/handoff, false positive, partial claims, one-compact-hint maximum, and the exact parent/PR #359/Cursor anchors from Section 9.5.
 - [ ] Run `cargo test -p tracedecay-policy --test hint_parity --test git_tool_routing --test coordination_policy --test outcome_attribution -- --nocapture`. Expected: compatibility/route/coordination/digest assertions fail before evaluators/bundles exist.
 - [ ] Implement Hint/Routing/Coordination contracts and compile checked-in compatibility bundles with manifests/artifacts/digests. Add distinct tool-hint and coordination outcome proposals; application/projectors persist them later.
 - [ ] Re-run the command. Expected: compatibility cases match exact category/payload/state digest; every Git intent routes as Section 9.3; coordination never emits outside allowed triggers or for planned redundancy; outcome denominators remain distinct.
-- [ ] Run `cargo bench -p tracedecay-policy --bench hint -- --save-baseline pr23c`. Expected: synchronous evaluator p95 leaves total hook capture under the master gate of 10 ms.
+- [ ] Run `cargo bench -p tracedecay-policy --bench hint -- --save-baseline pr23c`. Expected: synchronous hint-evaluation p95 stays within the 14 ms evaluation stage of the 25 ms total prompt-evaluation hook gate (master plan §5.3; Plan 07 Section 9). The 10 ms gate is notification-only hooks, which run no evaluation.
 - [ ] Commit `feat(policy): version hints and Git tool routing`.
 
 ### PR 23D: Retrieval policy
@@ -830,10 +1167,10 @@ PR 23 is split into reviewable 23A–23G. PR 31 adds application/API/UI shells o
 - Bundle compatibility: every manifest/artifact/input/output/VM/intrinsic version combination has accept/reject fixtures; unsupported exact replay fails closed and offers recorded inspection when available.
 - Hint parity/trust: every V1 category/priority/dedupe/cooldown/escalation/budget/renderer/host case is covered; typed trusted compiler/tool evidence routes correctly; adversarial user/log text cannot promote itself; noise/repetition/useful-silence regressions require labeled fixture, bundle IDs, and explanation.
 - Git routing: every required tool route and overlap case passes; missing capabilities are explicit; local/live truth never loses source/freshness; merge-base/changed-file drift blocks joined conclusions.
-- Retrieval: versioned nDCG@10 >=0.85, recall@20 >=0.90, regression <=0.02; V1 compatibility bundle separately preserves eligible V1 ordering.
+- Retrieval: calibrate-then-lock relative gates per [`15-search-quality-evaluation-and-retrieval-research.md`](15-search-quality-evaluation-and-retrieval-research.md)'s methodology replace absolute thresholds; a material worst-stratum regression is a worst-stratum nDCG@10 drop > max(2 points absolute, 5% relative) versus the locked baseline, or any no-answer-precision drop >2 points (Plan 15 owns the numeric definition); V1 compatibility bundle separately preserves eligible V1 ordering.
 - Correlation: precision/recall by evidence class; inferred expected calibration error <=0.05; ambiguity/abstention rates reported; no heuristic edge uses causal language.
-- Outcomes: >=90% eligible hint evaluations reach a terminal state; false attribution <1%; missed-tool suggestions and human corrections have separate denominators and drill-down evidence.
-- Performance: synchronous hint evaluation keeps total hook p95 <=10 ms; policy evaluation budgets/cancellation are enforced; Policy Diff streams bounded corpus batches and reports peak RSS.
+- Outcomes: >=90% eligible hint evaluations reach a terminal state; false attribution <1%; missed-capability suggestions and human corrections have separate denominators and drill-down evidence.
+- Performance: synchronous hint evaluation keeps its evaluation-stage p95 <=14 ms so prompt-evaluation hooks meet their 25 ms total p95 gate (master plan §5.3; Plan 07); notification-only hooks (10 ms total) run no evaluation and are unaffected; policy evaluation budgets/cancellation are enforced; Policy Diff streams bounded corpus batches and reports peak RSS.
 - Privacy: zero secret-bearing bundle fixture, FTS/vector/fact/log/export hit; raw query/message/correction content excluded from manifests/metrics; reasoning excluded by default; locked/redacted inputs disable exact.
 - Security: fuzz manifest/bytecode/CBOR, instruction/stack/output exhaustion, integer overflow, digest confusion, path-like strings, malicious renderer text, corrupt archive, and access mismatch. No I/O intrinsic or arbitrary code execution.
 - Compatibility: V1 hint/memory/scheduler/correlation state remains authoritative only until each bounded cutover and remains internal rollback evidence afterward. Live CLI/MCP/hook boundaries require the current protocol/catalog; stale clients and old tool names fail closed. V1 stores remain read-only through the data rollback window.
@@ -861,7 +1198,7 @@ PR 23 is split into reviewable 23A–23G. PR 31 adds application/API/UI shells o
 - [ ] Run `rg -n 'hermes_bridge|hermes_config_projection|hermes_pending_skills|hermes_skill_inventory' crates/tracedecay-policy docs/superpowers/plans/tracedecay-v2/06-policy-crate.md`. Expected: matches only the V1/incoming-PR migration warning in Section 4, never production paths.
 - [ ] Run `rg -n 'TB[D]|TO[D]O|\bimplement lat[e]r\b|\bfill i[n]\b|\bappropriate erro[r]\b|\bsimilar to Tas[k]\b' docs/superpowers/plans/tracedecay-v2/06-policy-crate.md`. Expected: no matches.
 - [ ] Inspect dependency graph. Expected: no `tracedecay-policy -> tracedecay-store/projectors/query/application/api/root` edge and no transport/storage/I/O capability in VM/runtime.
-- [ ] Complete exact/recorded/best-effort, concurrent publication, Git drift, missed-tool/human-correction outcome, privacy, shadow parity, cutover, and rollback drills before V2 policy becomes default.
+- [ ] Complete exact/recorded/best-effort, concurrent publication, Git drift, missed-capability/human-correction outcome, privacy, shadow parity, cutover, and rollback drills before V2 policy becomes default.
 
 ## 17. Definition of Done
 

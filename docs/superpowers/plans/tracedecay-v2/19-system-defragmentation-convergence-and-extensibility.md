@@ -46,7 +46,7 @@ The Phase 0 inventory generator must produce this table from source, schemas, ro
 
 | Area | Existing fragmentation to inventory | Canonical V2 owner | Required retirement proof |
 |---|---|---|---|
-| Physical stores | Global/session databases, project stores, LCM stores, code graph stores, analytics tables, payload directories, automation artifacts, legacy identity shards, WAL/recovery generations | `tracedecay-store` physical layout plus catalog/activity/project/graph/blob ownership rules | Every discovered store classified as migrated, retained read-only, quarantined, disposable, or deleted; no unowned store opens after cutover |
+| Physical stores | Global/session databases, project stores, LCM stores, code graph stores, analytics tables, payload directories, automation artifacts, legacy identity shards, WAL/recovery generations | `tracedecay-store` physical layout plus catalog/activity/project/graph/blob ownership rules | Every discovered store carries a plan 12 §14.1 disposition (`retained` — including read-only archives — `skipped`, `quarantined`, `redacted`, or `deleted`) plus a plan 12 PR 3R route status; no unowned store opens after cutover |
 | Sessions and LCM | Provider transcript ingestion, global session/message projection, V1 LCM native rows, summary DAGs, compression payloads, search tables, workflow/subagent ingestion | Sanitized capture observations plus profile activity projections; LCM is context lineage, not a second session authority | V1 session and LCM readers removed after parity and rollback window; one entity/retrieval ID loads sanitized-native message, summary lineage, and projection; protected plaintext is quarantine-only |
 | Tasks, plans, boards, and execution | Provider goals/plans/workflows, automation jobs, advisory work claims, Hermes board DBs/current selector, per-repo tickets, assignee strings, host processes, worktrees/branches, executor queues, task-like dashboard/plugin state | One profile activity-shard initiative/plan/work-item event graph plus typed dependencies, assignments, fenced leases/attempts, executor SPI/routes, context packets, evidence relations, and saved query projections from plan 24 | One scheduler/lease owner; boards copy no task rows; ambient board/CWD never routes; every stale epoch is rejected; external/provider task evidence is linked or explicitly materialized; legacy dispatch/current-file/direct-DB paths are deleted |
 | Provider capture | Per-provider scanners, hook records, workflow ingestion, Git correlation, automation import, ad hoc backfill markers | `tracedecay-capture` adapter registry and one observation journal | Every adapter passes one conformance suite; direct canonical writes and provider-specific redaction/store logic deleted |
@@ -81,6 +81,8 @@ Phase 0 generates `target/tracedecay-v2-inventory/` artifacts, never hand-edited
 - `adapter-ledger.json`: every anti-corruption adapter with owner, creation PR, traffic, parity gate, rollback dependency, and deletion PR;
 - `convergence-scorecard.json`: metrics in Section 13 with baseline and target;
 - `inventory.md`: safe human summary with no store content or secret candidates.
+
+Plan 12's PR 3R compatibility-inventory generator is the single inventory generator; the artifacts above are generated views of that same run, and this plan consumes them — it does not build a second generator. Per-entity/store dispositions use plan 12 §14.1's five-value vocabulary (`retained | skipped | quarantined | redacted | deleted`); route/migration status uses PR 3R's six-value status axis (`v1_only` … `retired`). This authority relation is stated identically in plan 12 §17 PR 3R.
 
 The inventory records symbols and schema names, not private content. It uses supported readers and manifests; it does not crawl raw databases as an implementation shortcut.
 
@@ -594,11 +596,11 @@ Adapters may translate types/calls/results. They may not add policy, query plann
 2. **Contract:** land V2 types/ports/catalog definition with no route change.
 3. **Import/shadow:** capture/import V1 evidence and execute V2 read/decision path without effects.
 4. **Compare:** explain mismatches against pinned watermarks; resolve or explicitly approve intentional differences.
-5. **Cut over one effect owner:** route writes/commands to V2, retain V1 read-only data for declared rollback.
+5. **Cut over one effect owner:** route writes/commands to V2, retain V1 read-only data for declared rollback, and record a plan 12 §9 `CutoverReceiptV1` (HMAC-signed with the profile-local catalog key per plan 12 §9).
 6. **Cut over reads:** V2 becomes default; no live fallback to stale clients/protocols/names.
 7. **Rollback drill:** current binary can restore declared data route without reactivating obsolete client semantics.
 8. **Retire:** remove route flag, adapter, direct readers/writers, schema migration code no longer required, config/metrics/docs/tests for obsolete behavior.
-9. **Delete/securely archive:** remove disposable stores/artifacts after retention/privacy gates; preserve signed manifests/receipts and minimal redacted fixtures.
+9. **Delete/securely archive:** remove stores/artifacts whose plan 12 §14.1 disposition is `deleted` after retention/privacy gates; preserve signed manifests/receipts and minimal redacted fixtures.
 
 ### 12.3 Mandatory deletion waves
 
@@ -612,13 +614,13 @@ Adapters may translate types/calls/results. They may not add policy, query plann
 | D5: legacy dashboard | PR 25–32 | Old per-project shell, bespoke endpoints, duplicated filter/action state after route/deep-link/table/export/accessibility parity |
 | D6: V1 live system | PR 33–37 | V1 writers, live readers, route flags, adapters, old tool names/protocols, duplicate stores eligible for retirement, obsolete tests/config/docs |
 
-An adapter cannot survive beyond its `delete_in_pr` merely because it is convenient. Extension requires an ADR, evidence of an unmet rollback/parity obligation, a new bounded expiry, and scorecard visibility. PR 37 cannot complete with a non-waived V1 adapter, live V1 store route, or duplicated semantic owner.
+An adapter cannot survive beyond its `delete_in_pr` merely because it is convenient. Extension requires an ADR, evidence of an unmet rollback/parity obligation, a new bounded expiry that still precedes PR 37, and scorecard visibility. The single program-wide adapter end state, stated identically here, in Section 16, in plan 12, and in the master plan: **PR 37 completes with zero live compatibility adapters; every waiver has an expiry that precedes PR 37; expired waivers block CI.** PR 37 also cannot complete with a live V1 store route or duplicated semantic owner. Enforcement is mechanical, not aspirational: the §12.1 adapter registry is the ledger of record; the §13.2 architecture lint counts call sites per `adapter_id` at HEAD and fails any PR that adds a new call site to a registered adapter (or otherwise increases its count) without a ledger amendment; and every adapter row must link its deletion PR before its wave gate closes.
 
 ### 12.4 Reconciliation workflows before deletion
 
 For split identity/store/session/graph cases:
 
-- freeze writers and capture a signed inventory/watermark;
+- freeze writers and capture a signed inventory/watermark (HMAC with the plan 12 §9 profile-local catalog key, `key_id` recorded);
 - compute entity/observation/projection overlap by stable source hashes and aliases;
 - classify unique, duplicate, conflicting, corrupt, unavailable, secret-flagged, and unsupported records;
 - preview merge/link/keep-separate effects without content disclosure;
@@ -654,8 +656,12 @@ For split identity/store/session/graph cases:
 | Complexity debt | Non-waived hard file/function/complexity violations introduced by V2 | 0 |
 | Replayability | Policy/query/capture cases with pinned artifacts and declared substitutions | 100% for supported exact paths |
 | Coverage truth | Responses/status that omit required partial/stale/unknown declarations | 0 known cases |
+| Hook budget conformance | Hook points meeting plan 07's canonical-path notification/prompt-evaluation p95 budgets | 100% |
+| Projector rebuild determinism | Registered projections passing the §13.2 rebuild-determinism test for pinned observation ranges | 100% |
 
 Scores are published per PR and as trends. A high aggregate score cannot mask a security, durability, identity, or silent-data-loss violation; critical invariants are hard gates.
+
+Every metric names an automated detector in `convergence-scorecard.json`; a metric without one cannot be reported green. Judgment-shaped metrics get explicit procedures: duplicate authority count is computed from `stores.json`/`tables.json` owner analysis (two structures declaring canonical ownership of one inventoried concept); policy decision implementations from the `semantic-implementations.json` source scan for evaluator entry points outside registered policy bundles; coverage truth from transport-conformance fixtures asserting the required partial/stale/unknown declarations plus a known-case ledger — a newly discovered undeclared-coverage case reopens the metric.
 
 ### 13.2 Architecture tests
 
@@ -668,7 +674,7 @@ Add deterministic tests/tools for:
 - capability/use-case/transport/SDK/dashboard bijection;
 - generated OpenAPI/JSON Schema/MCP/CLI/SDK/UI drift;
 - error/status/config mapping exhaustiveness;
-- adapter ledger completeness, expiry, traffic, and deletion PR;
+- adapter ledger completeness, waiver expiry preceding PR 37, per-`adapter_id` call-site counts at HEAD (a PR that adds a call site to a registered adapter or increases its count without a ledger amendment fails), traffic, and deletion-PR link;
 - projection registry uniqueness and rebuild determinism;
 - schema compatibility/migration fixtures;
 - public replay result determinism for pinned inputs;
@@ -690,7 +696,7 @@ Expose a read-only `Architecture`/`Convergence` view in Observatory and CLI/API:
 - adapter burn-down and live traffic;
 - complexity and public-surface trends;
 - reconciliation jobs/receipts and blockers;
-- exact retrieval anchors to safe evidence and plan/failure rows.
+- exact retrieval anchors to safe evidence and plan 14 `FM-###` failure rows.
 
 This view cannot expose private data, raw SQL, secret candidates, or filesystem details outside the caller’s access scope.
 
@@ -702,7 +708,7 @@ These slices are program gates mapped into the master plan’s PRs, not a compet
 
 - Generate the inventories in Section 2.3 from the accepted master base.
 - Add ADRs for canonical planes, ownership, DAG, config/error/status governance, extension tiers, complexity budgets, and adapter expiry.
-- Baseline convergence scorecard and historical failure links.
+- Baseline convergence scorecard and historical failure links (plan 14 `FM-###` row IDs).
 - Freeze representative semantic parity fixtures without private content.
 - Gate: every V1 surface/store/implementation has owner, target, disposition, and retrieval anchor.
 
@@ -779,7 +785,7 @@ These slices are program gates mapped into the master plan’s PRs, not a compet
 | Plugin sandbox is falsely trusted | Capability-deny default, WASM/subprocess isolation, resource limits, no-content findings, threat-model tests |
 | Embedded shards create distributed-system bugs | Local transaction boundaries, journal/outbox, vector watermarks, partial-state responses, reconciliation receipts |
 | Strangler doubles complexity indefinitely | Adapter ledger, traffic metrics, delete-by PR, CI expiry, PR 37 zero-adapter gate |
-| Parity preserves known bad behavior | Historical failures classify intended fix vs parity; ADR records deliberate semantic changes and new fixtures |
+| Parity preserves known bad behavior | Historical failures (plan 14 `FM-###` rows) classify intended fix vs parity; ADR records deliberate semantic changes and new fixtures |
 | Reconciliation merges unrelated identities | Evidence-backed candidate model, preview, human confirmation for ambiguity, reversible publish, preserved sources |
 | Reconciliation loses unique evidence | Append/import observations, manifests/hashes/counts/anchors, rebuild projections, idempotent resume, rollback drill |
 | Scope convenience reintroduces implicit routing | Resolve once; explicit selectors bypass CWD; response echoes resolved scope; conformance corpus |
@@ -805,7 +811,7 @@ These slices are program gates mapped into the master plan’s PRs, not a compet
 - [ ] Extension SPIs are bounded, versioned, budgeted, provenance-rich, sandboxed by trust tier, and incapable of bypassing scope/privacy/effect rules.
 - [ ] Crate dependency DAG has zero cycles and zero non-waived forbidden edges.
 - [ ] File/function/complexity/public-API budgets have no non-waived V2-default violations.
-- [ ] Every temporary adapter has been deleted or has an approved bounded rollback obligation; PR 37 closes with zero live V1 adapters.
+- [ ] PR 37 completes with zero live compatibility adapters; every waiver has an expiry that precedes PR 37; expired waivers block CI. Each retired adapter's ledger row links its deletion PR, and any earlier bounded rollback obligation was discharged before PR 37, never carried past it.
 - [ ] Generated schema/catalog/client/docs artifacts are reproducible, privacy-scanned, and current with the binary handshake.
 - [ ] Convergence scorecard reaches every hard target; critical privacy/durability/identity/coverage gates cannot be averaged away.
 - [ ] Brain/All, Explorer, Causal Loom, graphs, workspaces, labs, and Observatory all expose the same reconciled system rather than separate stores/products.

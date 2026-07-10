@@ -15,7 +15,7 @@ Core product surfaces:
 - Causal Loom timeline following an agent/Turn/session through tools, subagents, code, worktrees, commits, PRs, checks, memories, hints, and outcomes.
 - Canonical Tasks workspace over one federated initiative/plan/task graph, with saved Kanban/DAG/timeline views, cross-repository work bundles, dependency/critical-path analysis, executor routing, claims/runs, and versioned context packets.
 - Git, code, thread, agent, Turn, timeline, holographic-memory, and automation/skill graph lenses with tables and accessible fallbacks.
-- Hint, Retrieval, Search Quality, Coordination, Ingest, Query, Correlation, Scheduler, Memory, Policy Diff, Evolution, and Scope/Federation labs.
+- Hint, Retrieval, Search Quality, Coordination, Orchestration, Ingest, Query, Correlation, Scheduler, Memory, Policy Diff, Evolution, Scope/Federation, and Privacy & Secret Safety labs.
 - One official contract shared by API, CLI, MCP, generated SDKs, dashboard, hooks, and tool discovery.
 
 ## 2. Plan documents and authority
@@ -45,14 +45,16 @@ Core product surfaces:
 | [`20-configuration-control-plane.md`](20-configuration-control-plane.md) | One typed configuration registry/resolver/history across Settings, CLI, MCP, API, SDKs, runtimes, and every subsystem, including visible redactor/privacy controls and autonomous-curation policy. |
 | [`21-cli-mcp-tool-surface-and-output-unification.md`](21-cli-mcp-tool-surface-and-output-unification.md) | Exhaustive CLI/MCP/tool inventory and disposition, one generated binding taxonomy, sealed typed views, shared safe human rendering, canonical JSON, errors/exits, cursors/handles, and every-surface semantic parity. |
 | [`22-incremental-context-scout-and-suggestion-envelopes.md`](22-incremental-context-scout-and-suggestion-envelopes.md) | Optional asynchronous daemon context scout, capability-selected Spark/model path, bounded read-only exploration, evidence-anchored suggestion envelopes, exact Thread/Turn delivery, silence/dedupe/privacy budgets, observability, replay, and hint integration. |
-| [`23-session-lcm-temporal-retrieval-and-evaluation.md`](23-session-lcm-temporal-retrieval-and-evaluation.md) | Current message/LCM source audit, logical-copy and summary-DAG lineage, temporal truth/supersession, current/as-of/evolution/forensic retrieval, stable context assembly, real local qrels/replay, and Search Lab. |
+| [`23-session-lcm-temporal-retrieval-and-evaluation.md`](23-session-lcm-temporal-retrieval-and-evaluation.md) | Current message/LCM source audit, logical-copy and summary-DAG lineage, temporal truth/supersession, current/as-of/evolution/forensic retrieval, stable context assembly, real local qrels/replay, and the Search Quality Lab temporal extension. |
 | [`24-canonical-task-plan-graph-and-multi-agent-executor.md`](24-canonical-task-plan-graph-and-multi-agent-executor.md) | One profile-owned federated initiative/plan/task graph; boards as saved projections; cross-project work bundles; typed dependencies; Codex/Claude/Cursor/Hermes/custom executor routes; fenced claims/runs; context packets; task-aware hints; graph-of-graphs UI; replay/evaluation. |
+| [`25-code-intelligence-indexing-crate.md`](25-code-intelligence-indexing-crate.md) | Code extraction (tree-sitter parser registry), watcher intake, incremental indexing, immutable packed snapshot/generation builds, symbol lineage, diagnostics/test-attribution mapping, and V1 per-branch graph-store migration. |
+| [`26-observability-accounting-and-usage.md`](26-observability-accounting-and-usage.md) | Usage/cost/savings accounting, ingest/projection lag, data-quality metrics, denominator/unknown-population semantics, cap/truncation telemetry with retrieval anchors, per-capability adoption analytics, hint outcome rollups, SLO monitors, and Observatory data contracts. |
 
 When documents overlap:
 
 1. The master plan owns outcome, global constraints, dependency order, and cutover gates.
 2. A numbered crate/surface plan owns implementation details in its boundary.
-3. Plans 13–24 own cross-cutting evidence, regression, retrieval, scope, public-contract, privacy, convergence, configuration, tool/output, incremental-context, temporal-session, and task/executor requirements; bounded crates must satisfy them rather than reimplement them.
+3. Plans 13–24 and 26 own cross-cutting evidence, regression, retrieval, scope, public-contract, privacy, convergence, configuration, tool/output, incremental-context, temporal-session, task/executor, and observability/accounting requirements; bounded crates must satisfy them rather than reimplement them.
 4. An implementation decision that changes a locked domain contract requires an ADR and coordinated plan update before code diverges.
 
 ## 3. Reading paths
@@ -69,6 +71,7 @@ When documents overlap:
 2. Plan 12.
 3. Plan 14 storage/identity/durability rows.
 4. Plan 16 registry/activity/routing sections.
+5. Plan 25 for code extraction, incremental indexing, and V1 per-branch graph-store migration.
 
 ### Search/query implementer
 
@@ -97,6 +100,7 @@ When documents overlap:
 2. Plan 11 in full.
 3. Plans 15–17 for labs, All/system scope, explanations, and official client contracts.
 4. Plan 14 dashboard/API/observability regressions.
+5. Plan 26 for usage/cost/savings accounting and Observatory data contracts.
 
 ### Test/evaluation lead
 
@@ -134,7 +138,7 @@ When documents overlap:
 - Start as one Rust binary with bounded internal crates/ports; allow later daemon/query split without changing contracts.
 - Use one profile catalog, one canonical profile activity journal/projection, project/privacy-domain shards, immutable packed graph generations, and privacy-domain content-addressed blobs.
 - SQLite/rusqlite is the initial local engine; libSQL/remote federation is a future evaluated option, not an assumption.
-- Capture immutable native observations before canonical projection; retain source hashes/offsets/parser versions and unknown fields.
+- Capture immutable sanitized-native observations before canonical projection; retain keyed source fingerprints/offsets/parser versions and unknown sanitized fields. Sanitize-before-persist is mandatory; no raw source hash of secret-bearing content is stored.
 - Run one mandatory parse-before-scan sanitizer before the observation journal; secret plaintext never reaches general stores/indexes/outputs, while optional protected raw retention is isolated/encrypted/short-lived.
 - Model bitemporal evidence relations and confidence/provenance; never convert correlation into causal language silently.
 - Provider-visible reasoning summaries may be retained according to sensitivity/retention; hidden chain-of-thought is neither captured nor reconstructed.
@@ -167,7 +171,7 @@ When documents overlap:
 ```mermaid
 flowchart TD
     E["Evidence corpus, anchors, failure/privacy/convergence matrices"] --> D["Domain, scope, privacy, and extension contracts"]
-    D --> S["Sanitized capture, store, identity, projections"]
+    D --> S["Sanitized capture, store, identity, code indexing, projections"]
     S --> Q["Query, retrieval evaluation, federated routing"]
     D --> C["Capability catalog"]
     Q --> P["Policy runtime and replay"]
@@ -192,6 +196,8 @@ flowchart TD
     M --> X["Bounded cutovers, V2 default, V1 retirement"]
 ```
 
+Arrows in this diagram are data-flow/build-order edges, not the crate dependency DAG; the hooks crate reaches storage only through capture's spool and narrow application ports (master section 22).
+
 No broad V2 rewrite lands as one PR. Use the master plan’s Phase 0–5 sequence and sub-PRs. The first end-to-end vertical slice proves one provider/project session/tool/subagent investigation through capture -> identity -> projection -> query -> API -> timeline/table/inspector before broad domain expansion.
 
 ## 6. Phase gates
@@ -199,7 +205,7 @@ No broad V2 rewrite lands as one PR. Use the master plan’s Phase 0–5 sequenc
 ### Phase 0 — truth and contracts
 
 - ADRs lock logical architecture, evidence language, scope/store ownership, privacy/retention, API/query/cursor semantics, frontend rendering, and stale-client cutoff.
-- The complete configuration inventory maps every public file/flag/env/toggle/default to one typed descriptor or marks it read-only/non-configurable with rationale; generated Settings/CLI/MCP/API schemas are frozen.
+- Typed configuration descriptor/layer/activation contracts are locked (master PR 4C), and the configuration inventory maps the frozen-schema subset of public files/flags/envs/toggles/defaults to typed descriptors or marks them read-only/non-configurable with rationale; complete registry generation and generated Settings/CLI/MCP/API schemas land with PR 22C in Phase 3.
 - Redacted corpus and private manifest are reproducible and secret-scanned.
 - Research anchors route to exact context or explicit tombstone.
 - Synthetic secret corpus/sink inventory and system convergence inventory are complete; no private transcript/store becomes a fixture.
@@ -234,18 +240,18 @@ No broad V2 rewrite lands as one PR. Use the master plan’s Phase 0–5 sequenc
 
 - Application, HTTP/SSE, API contracts, CLI/MCP, the one official TypeScript client plus thin dashboard binding, Rust/Python SDKs, docs/sandbox, and exports pass semantic conformance.
 - Brain Settings and `tracedecay config` expose the complete registry/effective-source/history/impact/drift model, including all privacy/redactor and autonomy controls, with generated MCP/API/SDK parity.
-- Privacy status/scan/remediation/verify and convergence/capability status share application contracts; Secret Safety Lab uses synthetic values only.
+- Privacy status/scan/remediation/verify and convergence/capability status share application contracts; the Privacy & Secret Safety Lab uses synthetic values only.
 - Brain/All, Observatory, Explorer, Loom, graphs, workspaces, and labs pass desktop/mobile/accessibility/table/export/partial-state acceptance.
 - Rspack/Rsbuild/React Router multi-repository workflows complete without manual registry/store choreography.
 - One initiative can decompose work across Rspack, Rsbuild, and React Router repositories, assign separate bounded task sets to Codex and Claude routes, display each set as focused boards or one dependency graph, and keep every worker current through versioned packets and material task-aware suggestions.
 
 ### Phase 5 — migration and retirement
 
-- Resumable backfill manifests account for every retained, skipped, quarantined, redacted, and deleted entity.
+- Resumable backfill manifests account for every retained, skipped, quarantined, redacted, and deleted entity; the per-entity disposition schema is defined in plan 12.
 - Retroactive privacy audit/rotation-first remediation/rebuild/restore gates account for every sink/backup; superseded V1/parallel paths have verified deletion receipts.
 - Shadow parity has no unexplained gaps and stable projection lag.
 - Every bounded-context cutover has feature flag, receipt, rollback drill, telemetry gate, and current-client/catalog handshake.
-- V1 data remains read-only for the declared rollback/evidence window; V1 live adapters and obsolete names are removed.
+- V1 data remains read-only for the declared rollback/evidence window (until one full release of V2-default operation completes, per master PR 37 and plan 12); PR 37 completes with zero live compatibility adapters, every waiver has an expiry that precedes PR 37, expired waivers block CI, and obsolete names are removed.
 
 ## 7. Evidence and privacy boundary
 

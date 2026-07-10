@@ -461,8 +461,15 @@ Rules:
 - Regex/string allowlists containing a candidate secret are prohibited.
 - Broad path/project/provider exclusions cannot bypass the mandatory safety floor.
 - Rule changes run dry/shadow scans and measure new/removed findings before apply.
-- Historical observations retain the old receipt; current projection uses the new rule version after controlled rescan/rebuild.
+- Historical observations retain the old receipt; current projection uses the new rule version after controlled rescan/rebuild. Rescans issue superseding `SanitizationReceiptV1` rows that reference the superseded receipt ID; sinks honor the newest non-revoked receipt. The durable home for all receipts is the per-shard `sanitization_receipts` table owned by plan 02 (minted by plan 03, validated by plan 04's sink firewall), including supersession, expiry, and revocation columns.
 - False-positive review UI uses synthetic/structural metadata. Viewing plaintext requires separate quarantine authorization and is not required to mark common safe examples.
+
+Durable detector-registry state (owning shard: profile catalog; contains no secret content):
+
+- `detector_rules(detector_id, rule_version)` PK — enable state, activation source (bundled/config/plugin), complexity-policy verdict, corpus-eval result digest, created/retired timestamps; index on enable state. Retention: retired rows kept for the receipt-audit horizon.
+- `adjudication_records(fingerprint_hmac, rule_version)` PK — the section 13 adjudication fields above; index on expiry for forced re-evaluation sweeps.
+
+Terminology: capture-side quarantine "skeletons" (plan 03's non-content provenance records) and this plan's section 10 protected quarantine (encrypted forensic payloads) are distinct stores with distinct lifecycles; plans must qualify which one they mean.
 
 ## 14. Product surfaces
 
@@ -538,7 +545,7 @@ Every report declares population, horizon, detector/policy version, source water
 - Per-record/field/decode/archive budgets; bounded overlap for chunk/multiline detection.
 - Incremental scan changed sources/records by sanitized source generation, not full profile on every ingest.
 - Detector registry orders cheap exact/structured rules before entropy/decoding/plugins.
-- Hook target: mandatory runtime floor remains inside the existing prompt-hook p95 budget; if not, spool encrypted input or block content and emit no hint rather than bypass scanning.
+- Hook target: mandatory runtime floor remains inside the existing prompt-hook p95 budget; on timeout or overrun the hook blocks the content, emits a durable non-content receipt, and produces no hint (plan 03's hook contract is canonical). Pre-scan content is never spooled for deferred scanning; the only permitted forensic retention is the section 10 protected quarantine ingress under its own TTL, keying, and mandatory-scan policy.
 - Async transcript target: >= 50 MiB/s on current corpus for built-ins without encoded recursion; report cold/warm/hardware.
 - Offline full-profile audit is cancellable/resumable with stable cursor and bounded concurrent shard readers.
 - Regex stress, huge field, malformed Unicode, archive bomb, decode bomb, plugin hang/crash, disk full, process death, and locked keyring fail closed without plaintext persistence.

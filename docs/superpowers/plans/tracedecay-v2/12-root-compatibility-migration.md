@@ -39,11 +39,11 @@ Program numbering remains authoritative from the master plan. This document refi
 | PR 24F | PR 24FR host/daemon hook compatibility wiring after PR 24A establishes `HookApplicationPort` |
 | PR 24G/24H | Root scope/agent ergonomics and privacy CLI/MCP/API/lifecycle bindings over the same application/catalog contracts |
 | PR 25 | PR 25R API/router/static-shell coexistence |
-| PR 33 | PR 33R whole-profile migration controller |
+| PR 33 | PR 33R whole-profile migration controller (root orchestration/receipts beside plan 02's PR 33S/33S-2 store importer executor) |
 | PR 34 | PR 34R parity runner and operator dashboard binding |
-| PR 35 | PR 35A–35H bounded-context routing cutovers |
+| PR 35 | PR 35A–35J bounded-context routing cutovers |
 | PR 36 | PR 36R V2-default release and V1 data archive window |
-| PR 37 | PR 37A–37F V1 code/store/dashboard retirement |
+| PR 37 | PR 37A–37J V1 code/store/dashboard retirement |
 
 No V2 crate may import the root crate. Root adapters may import both V1 modules and public V2 contracts. A compatibility adapter cannot contain policy, query planning, projection, business mutation, or SQL beyond invoking a V1 repository that remains authoritative for that route.
 
@@ -56,7 +56,7 @@ No V2 crate may import the root crate. Root adapters may import both V1 modules 
 - Preserve V1 external behavior only while its bounded context is V1-authoritative or in non-effecting shadow; at cutover, current clients switch atomically to V2 and stale clients fail closed. Keep V1 stores read-only for one full release solely for verified data rollback/archive.
 - Ensure one canonical effect owner at all times. Shadow execution may compare results but may not inject a second hint, advance a second source head, apply a second mutation, or launch a second automation run.
 - Backfill from read-only V1 sources, compare at fixed watermarks, cut over by bounded context, and roll back by route/lease changes without deleting V2 evidence.
-- Make migration resumable, private, hash-manifested, observable, and explicit about skipped, corrupt, ambiguous, redacted, or unavailable inputs.
+- Make migration resumable, private, hash-manifested, observable, and explicit about every input's disposition — `retained`, `skipped` (with reason `corrupt`, `ambiguous`, or `unavailable`), `quarantined`, `redacted`, or `deleted` — using the Section 14.1 per-entity manifest schema.
 - Split `src/global_db.rs`, `src/mcp/server.rs`, `src/mcp/tools/definitions.rs`, `src/sessions/lcm/query.rs`, `src/agents/mod.rs`, and other giant modules by deleting migrated responsibilities, not by copying them into new monoliths.
 - Preserve agent host install/update/uninstall semantics, safe config merge/backups, plugin manifests, daemon service management, self-update, release assets, and package installation.
 - Make an older binary, running daemon/MCP process, plugin protocol, or stale tool name fail before service/store use with an exact restart/update/current-replacement error; it must never downgrade, silently fall back, or corrupt a store.
@@ -90,7 +90,7 @@ tracedecay tool pr_context --args '{"branch":"<each-open-head>","project_path":"
 
 Record local commit, remote head, merge base, fetched-at time, TraceDecay index watermark, direct changed-file set, structural impact set, and any disagreement. GitHub is authoritative for live PR/check/merge state; TraceDecay is authoritative for indexed semantic context only at its named commit/watermark.
 
-Publication refresh observed `origin/master` `9f7a110805edf226bb0d665d6f4ff5c4f03c6163`; #410/#411/#413/#414/#415/#416/#417/#419/#420/#422 were merged, while #407/#418/#423 were open. The plan branch must be rebased to that or a newer accepted base before final verification; the lead fetches/rebases and refreshes these states before every execution slice. The checked-in [research provenance and context anchors](13-research-provenance-and-context-anchors.md) and [historical failure regression matrix](14-historical-failure-regression-matrix.md) are normative planning inputs; every root execution receipt references their refreshed successors rather than relying on prose recollection.
+Publication refresh observed `origin/master` `9f7a110805edf226bb0d665d6f4ff5c4f03c6163`; #410/#411/#413/#414/#415/#416/#417/#419/#420/#422 were merged, while #407/#418/#423 were open. The plan branch must be rebased to that or a newer accepted base before final verification; the lead fetches/rebases and refreshes these states before every execution slice. The checked-in [research provenance and context anchors](13-research-provenance-and-context-anchors.md) and [historical failure regression matrix](14-historical-failure-regression-matrix.md) are normative planning inputs; every root execution receipt references their refreshed successors and cites plan 14 rows by their stable `FM-###` IDs rather than relying on prose recollection.
 
 The 2026-07-09 planning baseline is:
 
@@ -330,6 +330,7 @@ Every current root module must appear in the PR 3R generated inventory. This tab
 | `src/daemon.rs`, `src/daemon/**`, `lifecycle_lease.rs`, `serve.rs`, `shell.rs` | Root process lifecycle; application/hooks/API ports | Root composition | Retain thin lifecycle/IPC and #412 cross-process fencing; remove DB/query/business logic and global background toggles. |
 | `src/migrate/**`, `doctor.rs`, `doctor/**`, `retention.rs` | Store/application operations and root migration controller | V1 operations adapter | Preserve plan/export/apply/verify/reconstruct/rollback/repair/cleanup commands; retire V1-specific implementation after archive window. |
 | `src/upgrade.rs`, `upgrade/**`, `update_cmd.rs`, release workflows | Root release/upgrade | Root | Retain, add V2 preflight/backup/version-skew logic, and verify isolated crates.io install. |
+| `src/git.rs`, `src/text.rs`, `src/resources/**`, `src/startup_tests.rs`, `src/user_config.rs` | Git infrastructure ports (capture/projectors/query), owning-crate text utilities, root embedded resources, root startup self-checks, plan 20 configuration registry (`UserConfig` is already a Section 10 config source) | Root infrastructure and V1 config/catalog adapters | Delete after owning-crate parity; `user_config.rs` legacy readers retire in PR 37G once generated config bindings pass parity. |
 | `src/bench.rs`, benches/evals/tests | Owning crates plus cross-system root gates | Root compatibility harness | Move fixtures/benchmarks with behavior; never delete the only parity oracle with its implementation. |
 
 `src/lib.rs` inventory CI fails if any public module/file is absent from this matrix or the generated machine-readable disposition.
@@ -341,15 +342,20 @@ Every current root module must appear in the PR 3R generated inventory. This tab
 | Repository/profile identity | #405-aware `src/storage.rs`, `GlobalDb` registry, manifests | `catalog.db` identity allocations/shards/aliases/receipts | Import all candidates and receipts first; ambiguity blocks project cutover. |
 | Provider transcripts | `src/sessions/**` plus `sessions.db`/global activity rows | profile `activity.db` observations, actors, agents, sessions, turns, messages, tools, goals, workflows | One source head per artifact/generation; preserve native rows and unknown fields; no required project. |
 | LCM raw/summary/payload | `src/sessions/lcm/**` and payload root | activity observations/projections plus privacy-domain blobs | Canonical message content stored once; DAG/source ranges and compression state retain exact lineage. |
-| Hooks/hints/outcomes | hook process writes, analytics DB/JSONL fallback, V1 policy state | activity/project observations, policy/hint projections, catalog/policy digests | V1 is sole effect owner in shadow. Delivery and terminal outcomes never inferred from mere emission. |
-| Code index/diagnostics/tests | branch `tracedecay.db` files | immutable graph generations and project evidence | Import snapshot identity, extractor/resolver version, diagnostics/test map, and content hashes; branch store is not deleted yet. |
+| Hooks/hints/outcomes | hook process writes, analytics DB/JSONL fallback, V1 policy state | activity/project observations, policy/hint projections, catalog/policy digests | V1 is sole effect owner in shadow. Delivery and terminal outcomes never inferred from mere emission. V1 analytics/hook JSONL hint emissions map to plan 06 `HintOutcomeRecordV1` rows, making the historical 1,182-emitted/3-acted join queryable. |
+| Code index/diagnostics/tests | branch `tracedecay.db` files | immutable graph generations and project evidence | Import snapshot identity, extractor/resolver version, diagnostics/test map, and content hashes; branch store is not deleted yet. Per-branch graph DB migration detail lives in `25-code-intelligence-indexing-crate.md`. |
 | Git/delivery | branch/worktree metadata, Git correlation tables, daemon watcher, live remote reads | project events/relations and explicit local/live revisions | Keep direct, impacted, candidate-test, and context-only membership separate; drift blocks joined claims. |
 | Memory/facts | `src/memory/**` tables inside `tracedecay.db` | activity or project histories by `DeclaredScope`; blob refs where needed | Facts/entities/trust/feedback/deletions are durable. Verify row/version/hash/link counts before graph DB archive. |
 | Automation/skills/curation | JSON/JSONL/config/artifact roots and V1 tables | activity/project histories and privacy-domain blobs | Preserve historical proposal/approval/apply evidence, then model V2 candidate/validation/autonomy-decision/automatic-effect/use/outcome/revision/recovery chain. |
 | Hermes legacy | #407 `src/migrate/hermes.rs`, `~/.hermes` sources/ledgers | ordinary user profile; activity/project chosen by declared scope | Never create a Hermes profile. Facts-only stores and collision receipts are mandatory. |
-| Analytics/accounting | analytics DB, hook logs, session usage, pricing config | accounting/observability events and projections | Unknown denominator remains unknown; caps/sample windows/source versions are first-class. |
+| Analytics/accounting | analytics DB, hook logs, session usage, pricing config | accounting/observability events and projections | Unknown denominator remains unknown; caps/sample windows/source versions are first-class. V1 analytics migration rows live in `26-observability-accounting-and-usage.md`. |
 | Dashboard/settings/provider manifests | project/user JSON/TOML/JSONC and host-owned config files | effective config read model plus config/installer audit events; external file remains authoritative where required | Preview/merge/backup/restore is idempotent. Never overwrite unrelated user config. |
-| Response handles/artifacts/backups | response-handle root, LCM payload root, automation artifacts, V1 backup files | privacy-domain blobs, immutable export/backup manifests | Hash and permissions verify before publication; compatibility handle remains until clients migrate. |
+| Response handles/artifacts/backups | response-handle root, LCM payload root, automation artifacts, V1 backup files | privacy-domain blobs, immutable export/backup manifests | Hash and permissions verify before publication; the compatibility response-handle binding remains for exactly one full release after its domain cutover (the same bound as the V1 read-only window), then fails typed with the durable anchor/export replacement. |
+| Retention/GC bookkeeping | `src/retention.rs` state, GC ledgers/markers inside V1 stores | store operations events and retention projections | Import retention decisions/holds as immutable evidence; V2 GC never re-runs from stale V1 bookkeeping after cutover. |
+| Runtime/daemon logs, crash, and telemetry files | daemon/hook log files, `runtime_telemetry.rs` on-disk output, crash reports | accounting/observability events plus log-safe archives | Sanitizer-scanned before archive; never imported as canonical activity; secret canaries block publication. |
+| Lifecycle-lease and service-unit state | `lifecycle_lease.rs` on-disk lease files, systemd/launchd service units and state | root lifecycle receipts and service-state snapshots | Inventoried as on-disk artifacts; exact pre-operation service state restorable; #412 semantics preserved. |
+
+This table is family-level by design. PR 3R additionally emits a file-level path/glob appendix for every family in the generated inventory, so store completeness is auditable against the tree before the migration controller exists.
 
 After a source-family capture cutover, V2 is the only canonical source-offset owner. During pre-cutover shadow only, the parity harness may derive V1-shaped comparison rows from V2 events. No post-cutover old transport is served. V1 may not continue independently parsing the same source; that would create split-brain even if IDs usually dedupe.
 
@@ -396,12 +402,26 @@ Rules:
 - `RouteSnapshot` is validated as a whole. Product reads cannot become V2-default before their required projections/query/application routes are V2-authoritative. All long-running processes pin its protocol/catalog generation and terminate/restart when it changes incompatibly.
 - Shadow calls receive the same normalized request and captured time/vector watermark. A live drift marker is not a parity mismatch.
 - Read shadow may execute both paths. Mutation/hook/automation shadow executes V1 only and computes a non-effecting V2 preview/evaluation.
-- Each comparison class is `exact`, `expected_normalization`, `redacted`, `quarantined`, `v1_bug_compat`, `late_after_watermark`, `unavailable`, or `unexplained`. `unexplained` blocks transition.
-- A cutover receipt records binary/commit, V1 inventory and store manifests, V2 schema/registry/catalog/policy/projector digests, source/vector watermarks, counts/hashes, accepted differences, feature route, lease epochs, backup, and tested rollback.
+- Each comparison class is `exact`, `expected_normalization`, `redacted`, `quarantined`, `v1_bug_compat`, `late_after_watermark`, `unavailable`, or `unexplained`. `unexplained` blocks transition. Comparison classes describe shadow parity results only; per-entity backfill accounting uses the Section 14.1 disposition vocabulary.
+- A cutover receipt (`CutoverReceiptV1`, allocated in the `ManifestId` space; plan 19 §12.2 step 5 records this same schema) records binary/commit, V1 inventory and store manifests, V2 schema/registry/catalog/policy/projector digests, source/vector watermarks, counts/hashes, accepted differences, feature route, lease epochs, backup, tested rollback, the plan 18 PR 33A retroactive-privacy-audit remediation/restore-eligibility receipt for the context (zero synthetic canary hits), and the plan 14 `FM-###` rows whose gates the cutover satisfies.
 - Route publication uses stage -> validate -> fsync -> atomic rename/CAS generation. Every process rejects a partial or digest-mismatched route set.
-- At V2 cutover, V1 public routing and stale tool/protocol bindings are removed atomically. A stale client receives a typed `restart_required`, `update_required`, or `capability_replaced` error naming the current replacement; the server never executes a legacy alias or opens V1 on its behalf.
+- At V2 cutover, V1 public routing and stale tool/protocol bindings are removed atomically. A stale client receives a typed `client_update_required`, `daemon_restart_required`, or `capability_replaced{current_binding}` error from plan 17's stale-client error-code registry, naming the current replacement; the server never executes a legacy alias or opens V1 on its behalf.
 - Before PR 36 only, rollback is an explicit current-binary operator workflow: quiesce all processes under the lifecycle lease, fence V2 writers/effect owners, restore the V1 source position/owner recorded by the receipt, publish one lower route generation, restart current clients, and retain V2 evidence read-only. It is not an always-on fallback.
 - After PR 36, rollback means a prior compatible V2 binary/schema or restore/reimport of non-disposable data into V2. The read-only V1 archive protects source data and evidence but can never be re-enabled as a live transport/store owner. Its expiry controls physical deletion, not protocol compatibility.
+
+**Receipt signing.** “Signed” means HMAC-SHA-256 with a profile-local signing key stored in the profile catalog (`catalog.db` key table: `key_id` primary key, OS-protected key-material reference, `created_at`, `retired_at`), not asymmetric PKI. Every receipt, route snapshot, and rollback record carries its `key_id`; rotation is a typed operator command that mints a new key and retains retired keys for verification until every artifact referencing them is superseded or archived. Route load re-verifies the HMAC before use; verification failure is a typed fail-closed error that rejects the entire route set. Plan 19's signed inventories/receipts reuse this mechanism by reference.
+
+**Rollback drill record.** Every drill and every real rollback writes a `RollbackDrillRecordV1`:
+
+- `drill_id: ManifestId` — primary key;
+- `context: BoundedContext` and `receipt_id: ManifestId` — the `CutoverReceiptV1` exercised;
+- `is_drill: bool` — real rollbacks record `false`;
+- `restored_watermark: VectorWatermark` and `epoch_fence_evidence` — pre/post fenced lease epochs proving no stale writer survived;
+- `started_at`/`completed_at` timestamps and measured downtime;
+- `data_difference: none | expected_normalization | unexplained` — `unexplained` blocks the gate;
+- operator principal and signing `key_id`.
+
+Uniqueness `(context, receipt_id, started_at)`; indexes on `(context, is_drill)` and `receipt_id`; one row per drill/rollback, stored in the profile catalog migration-receipt tables beside the receipt it exercises and retained until that receipt's archive window closes. A gate requiring a “tested rollback” is satisfied only by a matching `RollbackDrillRecordV1` with `data_difference != unexplained`.
 
 ## 10. Configuration, Environment, Profile, and Runtime Identity
 
@@ -419,7 +439,7 @@ Required changes:
 
 - `EffectiveConfigSnapshot` stores value source, validation result, sensitivity, restart impact, and digest; secrets are capability-presence only.
 - Add persisted per-context V2 route config under the active user profile. Defaults remain V1 until a signed receipt exists.
-- Emergency environment overrides cannot select V1 or V2 routing. Rollback requires the typed operator command, lifecycle lease, signed receipt, quiescence, and process restart; environment drift cannot bypass migration gates.
+- Emergency environment overrides are limited to operational tuning and diagnostics — timeouts, log verbosity, socket/path selection, offline mode, and read-only diagnostic modes. They cannot select V1 or V2 routing. Rollback requires the typed operator command, lifecycle lease, signed receipt, quiescence, and process restart; environment drift cannot bypass migration gates.
 - Profile selection happens before global/catalog/store opens. PR #407 means Hermes commands/sources use the same active profile.
 - Every client/daemon/plugin handshake exchanges exact root build/protocol version, route generation, schema major, catalog digest, tool-catalog generation, and profile identity. Any mismatch that changes executable bindings rejects the connection before request/store use and reports restart/update/current replacement; there is no older-reader or stale-plugin mode.
 - Configuration patches are application commands with preview, optimistic version, atomic private write, backup, audit event, and restart requirement. Root adapters never directly mutate config from HTTP/MCP.
@@ -437,7 +457,7 @@ Required changes:
 
 ### 11.2 MCP
 
-- Generated catalog definitions replace `src/mcp/tools/definitions.rs` groups. Existing names/arguments/rendering are parity fixtures before cutover; the cutover catalog contains only current bindings. Retired names and stale schema generations fail with `capability_replaced` or `client_update_required` and never route to a fallback handler.
+- Generated catalog definitions replace `src/mcp/tools/definitions.rs` groups. Existing names/arguments/rendering are parity fixtures before cutover; the cutover catalog contains only current bindings. Retired names and stale schema generations fail with `capability_replaced{current_binding}` or `client_update_required` from plan 17's stale-client error-code registry and never route to a fallback handler.
 - `src/mcp/v2_adapter/dispatch.rs` performs catalog lookup and invokes application; domain adapters map typed results to renderer view models.
 - `McpServer` shrinks to connection/request context, catalog snapshot, application handle, renderer registry, response-handle compatibility, and transport. It owns no domain repository/service fields.
 - Project/template discovery degradation, initialization root routing, multi-MCP coordination, timing, and daemon transport tests remain mandatory. Protocol/catalog/version degradation is forbidden: mismatch terminates initialization.
@@ -512,13 +532,13 @@ Required installer contract:
 5. Passive-checkpoint WALs within the existing 45-second daemon deadline; report busy frames instead of forcing unsafe truncation.
 6. Close transports and service manager readiness.
 
-Kill tests cover every startup/shutdown boundary, stale epoch, partial worker start, daemon upgrade, full disk, corrupt spool tail, locked reader, SIGTERM deadline, inherited lifecycle token, lease-owner death, drain timeout, live WAL, and stopped/disabled/masked service restoration. The checked-in plan 14 lifecycle matrix is the minimum case set.
+Kill tests cover every startup/shutdown boundary, stale epoch, partial worker start, daemon upgrade, full disk, corrupt spool tail, locked reader, SIGTERM deadline, inherited lifecycle token, lease-owner death, drain timeout, live WAL, and stopped/disabled/masked service restoration. The checked-in plan 14 lifecycle rows are the minimum case set; the kill-test receipt cites the exact `FM-###` rows it covers (at least FM-001–FM-010, FM-095, and FM-096).
 
 ## 14. Migration, Backfill, Reconciliation, Cutover, and Archive
 
 ### 14.1 PR 33R controller phases
 
-`src/migrate/v2/controller.rs` is an orchestration state machine over store/capture/projector/application ports:
+`src/migrate/v2/controller.rs` is an orchestration state machine over store/capture/projector/application ports. The PR 33R/33S boundary is fixed: root PR 33R owns orchestration, phase sequencing, cutover/rollback receipts, and operator surfaces; plan 02's store-owned importer executor (PR 33S, refined by PR 33S-2) owns the storage-side import transactions, checkpoints, and parity counts; and plan 03's PR 7E capture path owns all V1 parsing plus mandatory sanitization — every V1 byte crosses the capture sanitizer and produces sanitization receipts before the store importer consumes sanitized batches (the capture-owns-V1-sanitize split):
 
 1. **Inventory:** freeze V1 migration surfaces, store, provider, config, sidecar, payload, artifact, graph, session/LCM, memory, automation, #405/#407 identity/profile receipts, #411 ownership decisions, and #412 lifecycle state at a source cutoff.
 2. **Preflight:** estimate V2 disk/WAL/blob/backup need with safety margin; check permissions, symlinks, key availability, schema versions, active writers, daemon version, and identity conflicts.
@@ -532,6 +552,21 @@ Kill tests cover every startup/shutdown boundary, stale epoch, partial worker st
 10. **Receipt:** publish signed import/parity/checkpoint manifests with every accepted difference and quarantine item.
 
 Every phase is idempotent by source manifest/digest and has `not_started`, `running`, `complete`, `blocked`, `failed_retryable`, `failed_terminal`, or `rolled_back` state. Restart resumes the last committed checkpoint. Cancellation stops after the current atomic batch and leaves V1 authoritative.
+
+Per-entity accounting uses exactly one disposition vocabulary across the plan set. Each phase manifest contains one `MigrationEntityDispositionRecordV1` per source entity:
+
+- `manifest_id: ManifestId` — owning phase manifest;
+- `source_digest: ContentDigest` — deterministic digest of the source entity;
+- `source_family` — the Section 8 family;
+- `entity_kind` — typed entity discriminant;
+- `disposition: retained | skipped | quarantined | redacted | deleted` — the only per-entity disposition values anywhere in the plan set; the 00-index Phase 5 gate and plan 19 §§2.2–2.3 cite this schema rather than minting variants;
+- `skip_reason: corrupt | ambiguous | unavailable` — required exactly when `disposition = skipped`;
+- `target_ref` — canonical V2 ID/retrieval anchor, required for `retained`/`redacted`;
+- `quarantine_ref`/`receipt_id` — required for `quarantined`/`deleted`.
+
+Primary key `(manifest_id, source_digest)`; uniqueness one record per source entity per manifest; indexes `(manifest_id, disposition)` and `(source_family, disposition)`; one row per inventoried entity, bounded by the preflight estimate; stored in the profile catalog migration shard beside its manifest and retained until the run's receipt archive window closes.
+
+Resumability is carried by `MigrationCheckpointRecordV1`: `checkpoint_id` (primary key), `run_id`, `phase`, `phase_state`, `batch_cursor` (opaque ordered cursor into the frozen source manifest), `source_manifest_digest`, `entities_processed: u64`, `committed_at`. Uniqueness `(run_id, phase, batch_cursor)`; index `(run_id, phase)`; same shard and retention as the disposition records. A batch commits atomically with its disposition records; restart resumes strictly after the last committed cursor, and a partially processed batch re-runs idempotently by `source_digest`.
 
 ### 14.2 Per-domain cutover order
 
@@ -548,10 +583,12 @@ PR 35 uses the master order and these dependencies:
 
 Each slice runs V1 -> shadow -> V2-authoritative+compatibility, holds for the plan's observation window, drills rollback, and only then permits the dependent slice.
 
+Master Phase 5 additionally defines PR 35I (plan 23 session/LCM/temporal retrieval cutover) and PR 35J (single scheduler/lease owner cutover, plan 24). PR 35I begins only after 35B and 35F complete their observation windows; PR 35J only after 35F and 35G; PR 35H publishes `V2Authoritative` for product reads/transports only after 35I and 35J complete theirs. Root owns route publication for all ten slices.
+
 ### 14.3 Archive and physical deletion
 
 - PR 36 makes V2 routes default but performs no V1 deletion.
-- V1 stores become read-only, carry an archive manifest and last authoritative watermark, and remain inspectable only through current-binary migration/archive tooling for one full release. They are not query backends for live product transports.
+- V1 stores become read-only, carry an archive manifest and last authoritative watermark, and remain inspectable only through current-binary migration/archive tooling for one full release. The one-release archive window opens at the PR 36 V2-default release for every store family; a per-context cutover does not start an earlier private window. They are not query backends for live product transports.
 - PR 37 first exports/verifies the complete archive, imports it into a clean temporary V2 profile, and replays the representative parity corpus. It does not boot a stale V1 service.
 - Physical deletion is a separate typed preview/apply command requiring explicit user confirmation, expected archive digest, no active hold, no active rollback receipt, and no retained replay reference.
 - Deletion writes a durable receipt before unlink, then removes only manifest-owned paths. Unknown files are reported and preserved.
@@ -567,6 +604,10 @@ Each slice runs V1 -> shadow -> V2-authoritative+compatibility, holds for the pl
 | PR 37D, sessions/LCM/memory/automation | V1 implementations under `src/sessions/**`, `src/memory/**`, `src/automation/**`, `src/retention.rs`, replaced migration code | Native provider/LCM/knowledge/automation evidence parity, zero live V1 adapters after cutover, one-release read-only store archive/evidence window, no executable replay dependency. |
 | PR 37E, hooks and legacy dashboard | V1 hook implementations, legacy dashboard API modules, `dashboard/{holographic,lcm,graph,savings,code-diagnostics,settings,hermes-wrapper}` | Per-hook installer/host conformance and rollback closure; every view/action/URL/accessibility/export parity row; redirects retained separately. |
 | PR 37F, façade and dependency cleanup | `TraceDecay` all-in-one façade, unused root command/service helpers, direct `libsql` root dependency, obsolete build includes/vendor patch if no longer referenced | All call sites use application/composition; package/install tests pass; V2 driver/link ADR confirms whether `libsql-rusqlite` still requires any vendor component. |
+| PR 37G, legacy configuration plane | V1 config file/env/flag readers, dashboard settings mutation paths, provider/hook/daemon setting duplicates replaced by plan 20 bindings | Owner: plan 20. Generated config registry parity for every Section 10 inventory row; every effective value served by the resolver with source/precedence; config audit receipts; rollback closure. |
+| PR 37H, legacy scout/hint paths | Ad hoc suggestion/second-hint engines and duplicate delivery state replaced by plan 22 envelopes | Owner: plan 22. Delivery-arbiter and outcome-attribution parity, hook-latency budgets held, host conformance, rollback closure. |
+| PR 37I, legacy session/LCM/search paths | Independent legacy FTS/LCM/ranking/load-routing code replaced by plan 23 retrieval | Owner: plan 23. PR 35I cutover receipts, plan 15/23 evaluation gates, anchor-hydration and export parity. |
+| PR 37J, legacy board/scheduler/output paths | Hermes board/current-file dispatch remnants, duplicate scheduler/lease owners, legacy task output paths replaced by plan 24 | Owner: plan 24. PR 35J single scheduler/lease receipts, board-projection parity, fenced-epoch closure. |
 
 Before deletion, run `rg` and TraceDecay impact/call tools over each symbol/file; copy test fixtures to the owning crate; produce a deletion receipt listing removed public exports, callers, replacement use case, archive dependency, and release window. No deletion PR combines more than one row above.
 
@@ -620,7 +661,9 @@ Commands run from repository root with the checkout-local `target/`. Do not set 
 
 - [ ] Write failing tests that every lib module, CLI command/flag, MCP tool/schema, HTTP route/action, dashboard panel/action, provider hook, config/env/default, store/table/index/trigger/sidecar, installer mutation, doctor/repair/migrate command, and release asset has one disposition/owner.
 - [ ] Add a fresh-child-process probe for `structured_backfill_one_shot_process_never_spawns`; prove plain libtest and nextest no longer disagree.
-- [ ] Generate deterministic JSON plus human report with binary/commit/time/watermark/digests and statuses `v1_only`, `v2_shadow`, `parity_proven`, `v2_default`, `migration_only`, `retired`.
+- [ ] Generate deterministic JSON plus human report with binary/commit/time/watermark/digests and statuses `v1_only`, `v2_shadow`, `parity_proven`, `v2_default`, `migration_only`, `retired` — the route-status axis, distinct from the Section 14.1 per-entity disposition vocabulary.
+- [ ] Emit the file-level path/glob appendix for every Section 8 source family.
+- [ ] Establish PR 3R as the single inventory generator: plan 19 §2.3's `target/tracedecay-v2-inventory/*` artifacts are generated views of this same inventory run (one generator, one vocabulary per axis); no second generator may be created.
 - [ ] Run `cargo test --test session_suite structured_backfill_one_shot_process_never_spawns -- --exact`; expected: pass independent of suite order.
 - [ ] Run inventory twice and compare hashes; expected: byte-identical after excluding explicit snapshot metadata.
 - [ ] Commit `test(compat): freeze root v1 surface inventory`.
@@ -701,6 +744,7 @@ Companion PR 24G/24H and plan 17 SDK slices add generated scope/anchor/problem b
 
 - [ ] Add copied-store fixtures for #405 identity adoption/conflict, #407 Hermes facts-only/session/fact collision, #410 eight-child messages, #411 foreign-skill ownership/remediation, #412 lifecycle/WAL/service-state races, #414 move-symbol inventory, #417 split visibility, graph-resident memory including V11 metadata/vectors, corrupt/missing payload, unsafe summary/response-handle/backup descendants, automation artifacts, branch DBs, live WAL, interrupted import, and insufficient disk.
 - [ ] Implement the ten phases in Section 14 with immutable receipts/checkpoints.
+- [ ] Execute storage-side import transactions only through plan 02's PR 33S/33S-2 importer executor consuming capture-sanitized batches (plan 03 PR 7E); root owns phases, receipts, and operator surfaces only.
 - [ ] Kill at every phase boundary and resume; second complete run inserts zero canonical duplicates.
 - [ ] Restore backup/archive into a clean profile and run parity corpus.
 - [ ] Commit `feat(migrate): orchestrate resumable v1 to v2 migration`.
@@ -714,11 +758,13 @@ Companion PR 24G/24H and plan 17 SDK slices add generated scope/anchor/problem b
 - [ ] Require 24-hour continuous capture/projection/latency/continuity observation where plans specify it.
 - [ ] Commit `feat(compat): prove bounded v1 v2 parity`.
 
-### PR 35A–35H: Bounded-context cutovers
+### PR 35A–35J: Bounded-context cutovers
 
 **Files:** route receipts/config only plus the exact compatibility adapter whose context changes.
 
-- [ ] For each Section 14.2 context, verify inventory, backup, parity, load/privacy, host/transport behavior, and no conflicting open-PR seam.
+- [ ] For each Section 14.2 context (including 35I/35J in their declared order), verify inventory, backup, parity, load/privacy, host/transport behavior, and no conflicting open-PR seam.
+- [ ] Require the plan 18 PR 33A retroactive-privacy-audit remediation/restore-eligibility receipt for the context; zero synthetic canary hits is a per-context cutover precondition.
+- [ ] Pass the explicit telemetry gate: delivery/outcome/error/latency counters at the cutover watermark plus the current-client catalog handshake are green before the slice is declared complete.
 - [ ] Under the exclusive lifecycle lease, quiesce processes, publish `V2Authoritative`, restart current clients/hosts, observe, drill the explicit operator rollback, resume to a new epoch, then republish V2.
 - [ ] Do not delete code/store data in these PRs.
 - [ ] Commit one bounded context per PR.
@@ -733,13 +779,13 @@ Companion PR 24G/24H and plan 17 SDK slices add generated scope/anchor/problem b
 - [ ] Run upgrade, daemon skew, host refresh, dashboard package, backup/restore, and rollback drills.
 - [ ] Commit `release: make v2 the tracedecay default`.
 
-### PR 37A–37F: Retirement
+### PR 37A–37J: Retirement
 
 **Files:** exact deletion groups in Section 15; compatibility inventory status updates; archive/deletion receipts.
 
 - [ ] Before each deletion PR, prove no active route/caller/host manifest/replay requires the code, move fixtures to the owner, and run impact/test mapping.
 - [ ] Delete only one Section 15 row per PR and rerun full compatibility/archive restore.
-- [ ] Remove retired tool/argument aliases at cutover. Keep only human browser navigation redirects and current-binary archive readers until their separately declared data/UI window closes.
+- [ ] Remove retired tool/argument aliases at cutover. Keep only human browser navigation redirects and current-binary archive readers for exactly one full release after the owning retirement slice merges — that is the declared data/UI window; when it closes they fail typed with the current replacement.
 - [ ] Physical user-store deletion remains an explicit command after code retirement; repository cleanup does not touch profile data.
 
 ## 18. Verification Matrix and Release Gates

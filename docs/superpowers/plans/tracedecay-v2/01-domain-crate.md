@@ -230,6 +230,35 @@ pub struct LegacyBindingCode(String); // bounded historical CLI/MCP/HTTP identif
 pub struct SanitizationReceiptId(pub uuid::Uuid);
 pub struct ScopeResolutionId(pub uuid::Uuid);
 pub struct ScopeSelectorDigest(pub [u8; 32]);
+pub struct DataVersionDigest(pub ManifestDigest); // plan 24's data-version pin; a named view of ManifestDigest, not a new digest family
+pub struct RoutingGenerationId(pub uuid::Uuid);   // catalog alias-route rebuild generation (plan 02 routing tables)
+pub struct RetrievalRecipeId(pub uuid::Uuid);
+pub struct MessageOccurrenceId(pub uuid::Uuid);
+pub struct LogicalMessageClusterId(pub uuid::Uuid);
+pub struct MessageCopyAssertionId(pub uuid::Uuid);
+pub struct TemporalAssertionId(pub uuid::Uuid);
+pub struct AssertionRelationId(pub uuid::Uuid);
+pub struct SummaryNodeId(pub uuid::Uuid);
+// Plan 24 task-graph identities are domain contracts in this crate (plan 24 §4.1):
+pub struct InitiativeId(pub EntityId);
+pub struct PlanId(pub EntityId);
+pub struct PlanVersionId(pub EntityVersionId);
+pub struct WorkItemId(pub EntityId);
+pub struct WorkItemVersionId(pub EntityVersionId);
+pub struct DependencyId(pub EntityId);
+pub struct AcceptanceCriterionId(pub EntityId);
+pub struct TaskDecisionId(pub EntityId);
+pub struct AssignmentId(pub EntityId);
+pub struct TaskLeaseId(pub EntityId);
+pub struct ExecutionAttemptId(pub EntityId);
+pub struct ExecutorRegistrationId(pub EntityId);
+pub struct ExecutorInstanceId(pub EntityId);
+pub struct WorkspaceBindingId(pub EntityId);
+pub struct ContextPacketManifestId(pub EntityId);
+pub struct HandoffId(pub EntityId);
+pub struct TaskArtifactId(pub EntityId);
+pub struct TaskOutcomeId(pub EntityId);
+pub struct SavedTaskViewId(pub EntityId);
 ```
 
 Deterministic derivation uses fixed UUIDv5 namespaces published by `id.rs`. Input encoding is version byte `1`, then big-endian length-prefixed UTF-8 fields and fixed-width hash/integer fields. Enum tags use their registry snake-case names. No locale, platform path syntax, JSON object order, wall clock, or process randomness participates.
@@ -508,7 +537,7 @@ pub struct RetrievalAnchorRecordV1 {
     pub snapshot: VectorWatermark,
     pub schema_registry_digest: ManifestDigest,
     pub capability_catalog_digest: ManifestDigest,
-    pub data_version_digest: ManifestDigest,
+    pub data_version_digest: DataVersionDigest,
     pub projection_version: ComponentVersion,
     pub view_algorithm_version: Option<ComponentVersion>,
     pub view: RetrievalViewV1,
@@ -530,6 +559,40 @@ pub struct RetrievalAnchorRecordV1 {
 // recipient/scope. Prompt injection performs a separate checked conversion to
 // PromptEligibleText and records the policy/receipt; catalog-safe display
 // eligibility alone is not prompt eligibility.
+
+// The portable multi-anchor recipe is a domain contract owned here. Plan 09
+// produces and consumes it; plans 11 and 13 cite this definition rather than
+// defining their own. Recipes contain no literal prompt/query/path secret,
+// cursor, response-handle token, or remote credential.
+pub struct RetrievalRecipeV1 {
+    pub recipe_id: RetrievalRecipeId,
+    pub use_case: UseCaseId,
+    pub anchors: Vec<RetrievalAnchorId>,
+    pub protected_input: Option<ProtectedContentRef>,
+    pub canonical_input_digest: PrivacyDomainBoundLocatorDigest,
+    pub scope: ScopeSelectorV2,
+    pub time: InvestigationTime,
+    pub message_view: Option<MessageView>,
+    pub schema_catalog_ranking: VersionSet,
+    pub freshness: FreshnessRequirement,
+}
+
+pub struct UseCaseId(String); // grammar-validated `usecase.<domain>.<verb-noun>`; the use-case registry is owned by plan 08
+pub struct ProtectedContentRef(/* opaque random protected-draft reference; no Display or public Serialize */);
+pub struct InvestigationTime {
+    pub window: Option<TimePredicate>,
+    pub temporal: Option<TemporalClauseV1>,
+}
+pub struct VersionSet {
+    pub schema_registry_digest: ManifestDigest,
+    pub capability_catalog_digest: ManifestDigest,
+    pub ranking: RankingProfileRef,
+}
+pub enum FreshnessRequirement {
+    AsRecorded,
+    BestEffort,
+    RequireCurrent { max_age_seconds: u64 },
+}
 
 pub struct WorkClaimScopeV1 {
     pub repositories: Vec<EntityRef>,
@@ -605,6 +668,8 @@ pub struct MessageOriginAssertion {
 ```
 
 `HumanBestEffort` is never represented as an observed fact unless the provider explicitly marks the author. Representative membership is versioned evidence, not a tombstone or content rewrite. Query responses always report native-row count, returned representative count, hidden-copy count, unknown-origin count, and classifier version.
+
+Plan 23's `MessageOccurrenceV1`, `LogicalMessageClusterV1`, and `MessageCopyAssertionV1` are the one canonical copied-message vocabulary; their identifier newtypes live in this crate and plan 23 owns the product semantics. `MessageOriginAssertion` classifies exactly one native occurrence's origin, and representative membership is expressed as logical-cluster membership at a `representative_policy_version` — there is no second membership vocabulary. Plan 02 §11.4 owns the persisted table shapes for this family.
 
 Catalog-safe fields use dedicated types:
 
@@ -687,7 +752,7 @@ Validation rules:
 - `source_observations` is nonempty and sorted/deduplicated.
 - `causation_id` is accepted only for registry event kinds that support direct causation and must differ from `event_id`; projectors also enforce graph acyclicity.
 - Corrections create a new event with `supersedes`; no immutable event body is overwritten.
-- Provider extension JSON is stored through `PayloadRef`. Only attributes declared by `SchemaRegistryV1` may enter `indexed_attrs`.
+- Provider extension JSON is stored through `PayloadRef`, and the full attribute set stays lossless in the content-addressed payload blob. `indexed_attrs` carries only registry-declared `AttrKeyId` entries; the store materializes exactly those entries into its registered-attribute index tables (`event_attr_index`, plan 02 §11.3). There is no inline transport attribute shape — blob-complete payload plus registry-indexed attributes is the one shape.
 - Canonical provider activity uses an activity owner. Project attribution is expressed through registered relations, never by mutating event ownership.
 
 ## Relation and registry contracts
@@ -723,6 +788,12 @@ pub enum ConfidenceReasonCode {
     HumanAdjudication,
 }
 
+pub enum RelationScope {
+    SubjectOwner,
+    ObjectOwner,
+    Declared(ShardRef),
+}
+
 pub struct PredicateSpec {
     pub id: PredicateId,
     pub owner: BoundedContext,
@@ -732,7 +803,7 @@ pub struct PredicateSpec {
     pub cardinality: Cardinality,
     pub minimum_evidence: EvidenceClass,
     pub temporal_requirement: TemporalRequirement,
-    pub default_sensitivity: Sensitivity,
+    pub default_sensitivity: DataSensitivity,
     pub default_retention: RetentionClass,
 }
 
@@ -756,7 +827,69 @@ impl PredicateRegistryV1 {
 
 `EvidenceClass` orders authority as `Heuristic < Inferred < DerivedExact < UserDeclared < ProviderDeclared < Observed`; the registry compares minimum authority but never converts one class into another. `Confidence` is finite and within `[0.0, 1.0]`. Observed/provider/user declarations use confidence `1.0`; derived/inferred/heuristic assertions require a nonempty rationale and producer version.
 
+`RelationScope` names the shard that owns the assertion row: the subject's owner shard, the object's owner shard, or an explicitly declared owner that must equal one endpoint's owner shard. The predicate registry fixes each predicate's scope — activity-to-project attribution predicates are `SubjectOwner`, which is why session-to-project assertions live in activity — and a cross-shard endpoint's non-owning shard holds at most a content-free locator row, never a second copy of the assertion.
+
 The initial predicate set includes explicit activity attribution (`activity_related_to_project`, `activity_related_to_repository`, `activity_observed_in_worktree`, `activity_observed_on_ref`, `activity_used_snapshot`), agent/session/workflow relations, code lineage/change/impact relations, Git/delivery relations, knowledge provenance, policy evaluation/outcome, automation lineage, and blob ownership. Legal endpoints, inverse, cardinality, evidence, sensitivity, and retention are fixture-locked.
+
+## Supporting vocabulary contracts
+
+These names appear throughout this plan and its consumers; they are exact public contracts, not placeholders. Enum variant registries marked plan-owned grow only through a versioned registry revision in the owning plan.
+
+```rust
+pub struct SourceSystem(String);      // registry token naming one source family (codex, claude, cursor, git, hooks, lcm_v1, ...)
+pub struct EntityNamespace(String);   // registry token naming one deterministic-key namespace
+pub struct RegistryVersion(pub u32);
+pub struct QuerySchemaVersion(pub u16);
+pub struct SchemaRef { pub schema_id: u32, pub schema_version: u16 } // resolves only through SchemaRegistryV1
+pub enum EventKind { /* closed registry enum generated from SchemaRegistryV1 event declarations; no free-form variant */ }
+pub struct Confidence(f64);           // private; constructor requires a finite value in [0.0, 1.0]
+pub struct ProducerRef { pub component: NativeKindCode, pub version: ComponentVersion }
+pub struct AttrKeyId(pub u32);        // SchemaRegistryV1-issued indexed-attribute key
+pub enum TypedAttrValue { I64(i64), U64(u64), Bool(bool), Time(UtcMicros), Token(NativeKindCode), Digest(ContentDigest), Id(EntityId) }
+pub struct TypedAttrs(std::collections::BTreeMap<AttrKeyId, TypedAttrValue>);
+pub struct ResolutionHints {          // advisory resolver routing only; never canonical evidence
+    pub session: Option<EntityRef>,
+    pub thread: Option<EntityRef>,
+    pub actor: Option<EntityRef>,
+    pub repository: Option<EntityRef>,
+    pub provider_kind: Option<NativeKindCode>,
+}
+pub enum MissingTimeReason { SourceOmitted, SourceUnparseable, ClockDomainUnknown, ImportedWithoutTime }
+pub enum SourcePosition {
+    ByteOffset { start: u64, end: u64 },
+    RowId(i64),
+    Sequence(u64),
+    ObjectKey(String), // bounded source-internal key that passed adapter normalization; never a filesystem path
+}
+pub struct SourceRecordRef {
+    pub source_id: SourceInstanceId,
+    pub artifact_digest: NaturalKeyDigest,
+    pub rewrite_generation: u64,
+    pub position: SourcePosition,
+}
+pub struct IndexVersionSet(pub std::collections::BTreeMap<NativeKindCode, ComponentVersion>); // one entry per registered index family (fts, vector, attr, graph)
+pub struct ShardCursorPosition { pub watermark: ShardWatermark, pub resume: Vec<u8> } // resume bytes are the store's opaque StoreResumePosition
+pub enum SortValue { I64(i64), U64(u64), Time(UtcMicros), F64Bits(u64), Digest(ContentDigest), Id(EntityId) } // floats travel as canonical bit patterns for cross-platform determinism
+pub struct AggregateVersion(pub u64);
+pub struct RankingProfileRef { pub id: NativeKindCode, pub version: ComponentVersion }
+pub enum ShardHealth { Healthy, Degraded, Quarantined, Missing, Incompatible }
+pub struct EvidenceRetentionWatermark {
+    pub evaluated_at: UtcMicros,
+    pub cutoffs: std::collections::BTreeMap<RetentionClass, UtcMicros>,
+}
+pub struct CatalogText(&'static str); // build-time reviewed static metadata; never constructed from runtime content
+
+// Plan 18 owns the security semantics of these; the exact value contracts live here:
+pub struct PrivacyPolicyDigest(pub [u8; 32]);
+pub struct DetectorSetDigest(pub [u8; 32]);
+pub struct ParserDigest(pub [u8; 32]);
+pub struct KeyedPayloadFingerprint(pub [u8; 32]); // privacy-domain-keyed; never a raw content hash
+pub struct SanitizedOutputDigest(pub [u8; 32]);
+pub enum SecretClass { /* closed detector-class registry owned by plan 18 §8 */ }
+pub enum ScanCompleteness { Complete, PartialBudget, PartialTimeout, FailedClosed }
+```
+
+`SourcePosition` is constructed only by plan 03's adapters — no adapter invents a second position vocabulary — and lowers into storage columns exactly as plan 02 §11.2 documents. `TypedAttrs`/`AttrKeyId` are the sole indexed-attribute carrier; `IndexVersionSet` values are produced by the store's read surface (plan 02 §9) so cursor claims can bind them.
 
 ## Ordering, concurrency-visible state, and watermarks
 
@@ -841,7 +974,7 @@ Rules:
 - Stable display order is `(occurred_at or ingested_at, ingested_at, shard_id, outbox_sequence, entity_id)` and is labeled render order.
 - Duplicate observation IDs with the same record/payload digest are successful no-ops. A matching source position with a different digest is a rewrite conflict and enters quarantine.
 - Late observations are retained with both occurred and ingested time. Gaps remain visible until closed; a frozen snapshot never silently reorders after capture.
-- Only `IngressAck::Committed` authorizes advancing the canonical V2 source cursor. `DurablyQueued` proves private spool durability but not journal visibility; replay remains idempotent.
+- Only `IngressAck::Committed` authorizes advancing the canonical V2 source cursor. `DurablyQueued` proves durability in the capture-owned spool — plan 03 owns the one spool, its frame format, and its drainer, and `SpoolReceipt` is the only spool receipt type (no crate defines a local variant) — but not journal visibility; replay remains idempotent.
 - Cursor and export completeness always name the vector watermark, skipped/unavailable shards, gaps, late counts, and redactions.
 
 ## Time and retention semantics
@@ -977,12 +1110,20 @@ pub struct ScopeResolutionV2 {
     pub watermark: VectorWatermark,
 }
 
+pub enum TemporalClauseV1 {
+    Current,
+    AsOf { valid_time: UtcMicros, knowledge_time: UtcMicros },
+    Evolution,
+    Forensic,
+}
+
 pub struct TraceQueryV1 {
     pub query_id: QueryId,
     pub scope: ScopeSelectorV2,
     pub entity_kinds: Vec<EntityKind>,
     pub message_view: Option<MessageView>,
     pub time: Option<TimePredicate>,
+    pub temporal: Option<TemporalClauseV1>,
     pub attributes: Vec<AttributePredicate>,
     pub text: Option<TextPredicate>,
     pub semantic: Option<SemanticPredicate>,
@@ -1005,14 +1146,44 @@ pub struct CursorClaimsV1 {
     pub expires_at: UtcMicros,
     pub query_digest: PrivacyDomainBoundLocatorDigest,
     pub access_digest: AccessPolicyDigest,
+    pub scope_digest: ScopeSelectorDigest,
+    pub catalog_generation: ManifestDigest,
+    pub temporal: Option<TemporalClauseV1>,
+    pub intent_profile_version: Option<ComponentVersion>,
     pub schema_version: QuerySchemaVersion,
     pub ranking: RankingProfileRef,
     pub index_versions: std::collections::BTreeMap<ShardId, IndexVersionSet>,
     pub snapshot: FrozenSnapshot,
     pub per_shard_positions: std::collections::BTreeMap<ShardId, ShardCursorPosition>,
+    pub shard_dispositions: std::collections::BTreeMap<ShardId, ShardDispositionV1>,
     pub sort_cutoff: Vec<SortValue>,
     pub last_entity_id: Option<EntityId>,
     pub emitted_ids_digest: ManifestDigest,
+}
+
+pub enum ShardDispositionV1 {
+    Searched,
+    Skipped,
+    Stale,
+    Unavailable,
+    Incompatible,
+    Locked,
+    Redacted,
+    Truncated,
+}
+
+pub struct CoverageReportV1 {
+    pub searched: Vec<ShardId>,
+    pub skipped: Vec<ShardId>,
+    pub stale: Vec<ShardId>,
+    pub unavailable: Vec<ShardId>,
+    pub incompatible: Vec<ShardId>,
+    pub locked: Vec<ShardId>,
+    pub redacted: Vec<ShardId>,
+    pub truncated: Vec<ShardId>,
+    pub freshness: std::collections::BTreeMap<ShardId, ShardWatermark>,
+    pub retention_watermark: Option<EvidenceRetentionWatermark>,
+    pub unknown_coverage: bool,
 }
 
 pub struct CommandEnvelopeV1<C> {
@@ -1028,6 +1199,8 @@ pub struct CommandEnvelopeV1<C> {
 `ScopeSelectorV2` is the only public scope selector across query, commands, policy, catalog, capture, hooks/application, labs, exports, saved views, and coordination. `roots` must be nonempty; `exclude` can only subtract from resolved roots. `CurrentInvocation` and `AllAuthorized` are explicit roots, never meanings assigned to an empty vector. Human locators are typed, sanitized inputs inside the same selector and resolve to a canonical-selector echo in `ScopeResolutionV2`; no transport invents `project_key`, `project_path`, or stringly `all` semantics. Multi-repository/project/checkout/worktree/ref/snapshot/graph-generation selection is first-class. Resolution never falls back to CWD, `sessions.project_key`, the first Claude CWD, active base checkout, current branch graph, ignored-dependency hint scope, or a stale registry row. Ambiguity is an error or returned candidate set according to the selector, never “pick first.” Each selected code candidate is the explicit repository/checkout/worktree/ref/snapshot/generation tuple actually opened; refs may share a generation, and no ref name owns a database. Core resolution reports selected/candidate/missing/stale/unavailable/quarantined stores plus registry/index/ref watermarks and whether current invocation was deliberately defaulted. Application/query responses join separately authorized cross-project session/activity relation evidence without mutating or narrowing the selector.
 
 Query validation rejects page size above 1,000, unbounded traversal, traversal depth above 5, missing total/operator budgets, text/semantic predicates against secret or reasoning content without an explicit authorized filter, and unregistered attributes/predicates. Cursor claims expire after 24 hours by default. Registry/ranking changes, retention crossing the snapshot, or incompatible shard replacement yield a typed restart reason. Commands require idempotency and compare-and-swap aggregate version; a conflict returns current version without applying the command.
+
+`TemporalClauseV1` is the only temporal answer-mode carrier: an absent clause means `Current`, and `AsOf` requires both the valid-time and knowledge-time cutoffs (plan 05 §11.4). Plan 05 plans and executes the clause; plan 23's session/LCM retrieval rides it, and plan 05 specifies the registered-attribute mapping for plan 23's filters — no parallel temporal AST or second answer-mode enum exists. `CursorClaimsV1` binds the resolved scope digest, catalog generation, temporal clause, intent-profile version, and partial-shard dispositions exactly as issued; plans 16/17/21/23 cite these fields rather than restating binding lists. Its digest fields are authoritative types: every adapter (including plan 05's private `CursorV1` encoding) must reuse `PrivacyDomainBoundLocatorDigest`, `AccessPolicyDigest`, and `ManifestDigest` unchanged — an unkeyed `ContentDigest` of query or access material is forbidden by the keyed-digest rule above. `CoverageReportV1` is the one shared coverage vocabulary for query/export/replay responses: plan 05 produces it, plans 07/09/10/13/17/20/22 consume it under this exact name, and `unknown_coverage: true` is mandatory whenever any shard's disposition cannot be proven — coverage never silently reads as complete.
 
 ## Cross-crate consumes/produces contracts
 
@@ -1130,7 +1303,7 @@ git commit -m "feat(domain): define stable v2 identity"
 
 - [ ] **Step 1: Write failing boundary tests**
 
-Assert activity ownership for canonical messages; project ownership for Git/code; activity ownership for profile-scoped facts/skills/policy/automation; project ownership for project-scoped equivalents; rejection of missing/ambiguous declared scope; catalog rejection of literal strings; blob-domain inequality across privacy/key/retention domains; half-open time behavior; exact-cutoff retention; hold precedence; and the six content-horizon defaults.
+Assert activity ownership for canonical messages; project ownership for Git/code; activity ownership for profile-scoped facts/skills/policy/automation; project ownership for project-scoped equivalents; rejection of missing/ambiguous declared scope; catalog rejection of literal strings; blob-domain inequality across privacy/key/retention domains; half-open time behavior; exact-cutoff retention; hold precedence; and the seven content-horizon defaults.
 
 - [ ] **Step 2: Verify failure**
 
@@ -1287,7 +1460,7 @@ git commit -m "feat(domain): model concurrent source progress"
 
 - [ ] **Step 1: Write failing query/command tests**
 
-Cover every master-plan scope; multi-repo/project/checkout/worktree/ref/snapshot/graph-generation selectors; explicit `AllAuthorized`; empty-selector rejection; candidate-versus-error ambiguity; exact repository/checkout/worktree/ref/snapshot/generation tuple preservation; no CWD/current-project/first-row fallback; occurred/ingested/valid/as-of time; registry predicates; lexical/semantic filters; evidence traversal; facets/aggregates; page-size/depth/budget bounds; cursor expiry/invalidation; sensitivity; idempotency; and optimistic conflicts.
+Cover every master-plan scope; multi-repo/project/checkout/worktree/ref/snapshot/graph-generation selectors; explicit `AllAuthorized`; empty-selector rejection; candidate-versus-error ambiguity; exact repository/checkout/worktree/ref/snapshot/generation tuple preservation; no CWD/current-project/first-row fallback; occurred/ingested/valid/as-of time; temporal clause modes with both `AsOf` cutoffs required; registry predicates; lexical/semantic filters; evidence traversal; facets/aggregates; page-size/depth/budget bounds; cursor expiry/invalidation; cursor claims binding scope digest, catalog generation, temporal clause, intent-profile version, and shard dispositions; sensitivity; idempotency; and optimistic conflicts.
 
 - [ ] **Step 2: Verify failure**
 

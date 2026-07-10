@@ -4,9 +4,9 @@
 
 **Goal:** Build `tracedecay-api`, the secure loopback-first Axum HTTP V2 and SSE boundary for the one official contract, with generated OpenAPI/dashboard-client artifacts and semantic parity across HTTP, CLI, MCP, SDKs, dashboard, exports, and live subscriptions.
 
-**Architecture:** HTTP handlers authenticate, validate bounded transport inputs, map them to `tracedecay-application` use cases, and map typed results/errors back without changing scope, ordering, coverage, freshness, evidence, command, or replay semantics. Live reads use an authorized subscription resource followed by resumable snapshot/delta SSE; OpenAPI and transport bindings derive from application/domain schemas plus the generated tool catalog, while CLI/MCP remain separate thin adapters tested against the same semantic fixtures.
+**Architecture:** HTTP handlers authenticate, validate bounded transport inputs, map them to `tracedecay-application` use cases, and map typed results/errors back without changing scope, ordering, coverage, freshness, evidence, command, or replay semantics. Live reads use an authorized subscription resource followed by resumable snapshot/delta SSE; OpenAPI and transport bindings are generated from plan 17's contract IR — itself built from application/domain schemas plus the generated tool catalog — while CLI/MCP remain separate thin adapters tested against the same semantic fixtures.
 
-**Tech Stack:** Rust 2024 workspace; Axum; Tower/Tower HTTP; `serde`; `schemars`; `utoipa` with Axum integration; `tracedecay-domain`; `tracedecay-application`; `tracedecay-tool-catalog`; HMAC-SHA256 authenticated cursors/event IDs; SSE; `openapi-typescript`; TypeScript `fetch` runtime; contract/property/fuzz/E2E tests.
+**Tech Stack:** Rust 2024 workspace; Axum; Tower/Tower HTTP; `serde`; `schemars`; `utoipa` with Axum integration (validation-only reflection against the IR-generated OpenAPI, Section 11); `tracedecay-domain`; `tracedecay-application`; `tracedecay-tool-catalog`; HMAC-SHA256 authenticated cursors/event IDs; SSE; `openapi-typescript`; TypeScript `fetch` runtime; contract/property/fuzz/E2E tests.
 
 [`20-configuration-control-plane.md`](20-configuration-control-plane.md) owns configuration keys, precedence, effective-state, history, and impact semantics. This API exposes only generated application use cases and OpenAPI/SSE bindings for that contract; it cannot maintain a parallel `/settings` model.
 
@@ -20,7 +20,7 @@
 
 ## 1. Contract Lock
 
-This plan refines master-plan PRs 24B–24E and owns the V2 HTTP/SSE boundary, OpenAPI artifact, generated core of the one official TypeScript client, and cross-transport semantic parity harness. Plan 17 completes and publishes that same client; the dashboard adds only a browser-auth binding.
+This plan refines master-plan PRs 24B–24E and owns the V2 HTTP/SSE boundary and cross-transport semantic parity harness; it hosts the checked OpenAPI artifact and the generated core of the one official TypeScript client, whose single generation source is plan 17's contract IR (Section 11). Plan 17 completes and publishes that same client; the dashboard adds only a browser-auth binding.
 
 Plan 17 declares this same HTTP/OpenAPI surface official and adds the contract IR, public docs/explorer/sandbox, and Rust/transport-independent TypeScript/Python SDKs. It does not create another server or envelope. Plan 18 owns the sanitizer/taint types and privacy workflows; API extraction/output may map eligible wrappers but cannot classify content or invent a weaker “safe string.”
 
@@ -31,7 +31,7 @@ Plan 17 declares this same HTTP/OpenAPI surface official and adds the contract I
 - Every mutation routes to an application command with idempotency, expected version, preview/apply semantics, audit, and optional durable workflow. An HTTP retry cannot create a second semantic effect.
 - SSE begins from one frozen application snapshot, then maps query-owned ordered deltas/progress/gap/resync events. API owns wire framing, heartbeats, browser resume, and transport backpressure only.
 - Browser auth, CSRF, Host/Origin checks, CSP, export containment, and body/decompression limits are mandatory even on loopback. No capability is unauthenticated merely because it binds localhost.
-- OpenAPI operation identity comes from `tracedecay-tool-catalog` `BindingId`/`UseCaseId`. Generated client drift and missing/duplicate route bindings fail CI.
+- OpenAPI operation identity comes from `tracedecay-tool-catalog` `BindingId`/`UseCaseId`. The catalog is the registry of record; plan 17's contract IR is its frozen public projection and the single generation source (Section 11). Generated client drift and missing/duplicate route bindings fail CI.
 - CLI and MCP do not call HTTP by requirement and do not depend on this crate. Their adapters call application in-process or through daemon composition; parity tests compare typed semantics before CLI/markdown rendering.
 - V1 routes/tools exist only inside the bounded migration/shadow harness. At V2 cutover, stale live routes, names, schemas, and clients fail with a typed incompatible-version problem carrying restart/update/current-route guidance; they are never silently proxied to V1.
 - Session/message endpoints completely enumerate sanitized native transcript rows and are lossless for retained non-secret structure/semantics. They expose domain `MessageOrigin` and `MessageView` unchanged, including native, representative, human-best-effort, direct-user, delegated-agent, tool-result, and provider-protocol views with exact representative provenance from merged PR #410.
@@ -111,7 +111,8 @@ crates/tracedecay-api/
 │   │   ├── launch.rs                  # per-launch secret and one-time bootstrap nonce
 │   │   ├── session.rs                 # browser session/bearer lifecycle
 │   │   ├── csrf.rs                    # mutation token validation/rotation
-│   │   └── token.rs                   # constant-time token digest/expiry/revocation
+│   │   ├── token.rs                   # constant-time token digest/expiry/revocation
+│   │   └── uds.rs                     # user-owned Unix-domain socket listener and peer-credential checks
 │   ├── security/
 │   │   ├── mod.rs
 │   │   ├── host.rs                    # strict Host and forwarded-header rejection
@@ -194,7 +195,7 @@ crates/tracedecay-api/
 │   │   ├── heartbeat.rs               # comment heartbeat without semantic sequence
 │   │   └── backpressure.rs             # slow-client termination/resync
 │   ├── openapi/
-│   │   ├── mod.rs                     # utoipa document assembly
+│   │   ├── mod.rs                     # IR-generated document hosting and utoipa validation reflection
 │   │   ├── schemas.rs                 # transport wrappers and domain refs
 │   │   ├── security.rs                # auth/CSRF schemes and headers
 │   │   ├── validate.rs                # catalog/route/schema parity
@@ -232,10 +233,8 @@ Companion generated/client and adapter files:
 packages/tracedecay-client/
 ├── package.json
 ├── src/generated/schema.ts
-├── src/client.ts
-├── src/errors.ts
-├── src/sse.ts
-└── test/{contract,sse}.test.ts
+├── src/{client,pager,events,operation,error}.ts
+└── test/{contract,live-fixture,examples}.test.ts   # module/test layout owned by plan 17 §4
 
 dashboard/packages/api-client/
 ├── package.json
@@ -290,7 +289,7 @@ pub struct ApiMeta {
     pub catalog_digest: CatalogDigest,
     pub resolved_scope: ScopeResolutionV2,
     pub snapshot: Option<FrozenSnapshot>,
-    pub coverage: CoverageReport,
+    pub coverage: CoverageReportV1,
     pub freshness: FreshnessReport,
     pub redactions: RedactionReport,
     pub retention: EvidenceRetentionWatermark,
@@ -299,19 +298,21 @@ pub struct ApiMeta {
 }
 ```
 
-The mapper is exhaustive over `ApplicationResponse<T>`. Compile tests fail if application adds metadata without an API disposition. `coverage.complete=false` remains HTTP 200 when useful data exists. An application top-level error maps to a problem response; a partial shard failure already represented in coverage does not become 500.
+`CoverageReportV1` is plan 01's canonical shared coverage type. The mapper is exhaustive over `ApplicationResponse<T>`. Compile tests fail if application adds metadata without an API disposition. `coverage.complete=false` remains HTTP 200 when useful data exists. An application top-level error maps to a problem response; a partial shard failure already represented in coverage does not become 500.
 
-List responses use:
+List responses use the single page envelope defined in plan 17's contract IR (plan 17 §13.1) and serialized here unchanged; plan 21's CLI/MCP pages are the same type:
 
 ```rust
-pub struct Page<T> {
+pub struct CursorPage<T> {
     pub items: Vec<T>,
     pub next_cursor: Option<OpaqueCursor>,
     pub truncation: Option<TruncationReason>,
+    pub count_semantics: CountSemantics, // exact | lower_bound | estimate | sampled | capped | unknown
+    pub ordering: OrderingContract,      // declared sort keys, direction, and tie-break rule
 }
 ```
 
-Cursor strings are authenticated, opaque, URL-safe, size-limited to 8 KiB, bound to access/query/schema/ranking/index/watermark/expiry, and never decoded client-side. A cursor mismatch/expiry returns typed restart instructions.
+Cursor strings are authenticated, opaque, URL-safe, size-limited to 8 KiB, and never decoded client-side; they encode exactly the domain `CursorClaimsV1` binding set (plan 01, codec owned by plan 05): query fingerprint, caller/access digest, canonical scope digest, catalog generation, schema/ranking/index versions, frozen watermarks and per-shard positions, sort cutoff, temporal mode/cutoff, intent-profile version, partial-shard dispositions, and expiry. Interactive cursors default to a 15-minute expiry; export/bulk continuations last their job lifetime; overrides are catalog-declared only. Cursor and SSE event-ID authentication uses the persisted profile-local HMAC key set of plan 17 §13.1 (key ID plus rotation), so a server restart does not invalidate otherwise-valid cursors. Frozen snapshots referenced by outstanding cursors/subscriptions are pinned against GC/compaction/projection retirement for the cursor's lifetime by the store/query retention contract (plans 02/05); a pin that cannot be honored fails with a typed `RestartPagination` reason, never silently different data. A cursor mismatch/expiry returns typed restart instructions.
 
 ### 7.2 Errors
 
@@ -335,7 +336,7 @@ pub struct ApiProblem {
 }
 ```
 
-This is the same `ApiProblem` generated for plan 17's SDKs and consumed by plan 11. `ApplicationErrorCode`, `RetryDirective`, `RestartDirective`, scope candidates, version, binding, invalid-field, and operation semantics come from application/domain contracts. HTTP supplies only RFC 9457 fields and status; SDKs/transports do not define an `ApiErrorCode` fork or infer recovery from status.
+This is the same `ApiProblem` generated for plan 17's SDKs and consumed by plan 11. `ApplicationErrorCode`, `RetryDirective`, `RestartDirective`, scope candidates, version, binding, invalid-field, and operation semantics come from application/domain contracts. HTTP supplies only RFC 9457 fields and status; SDKs/transports do not define an `ApiErrorCode` fork or infer recovery from status. Plan 21's `SurfaceProblemV2` is exactly this shared shape plus its exit-class mapping table — same field names, `restart` and `current_binding` included. Stale-client codes are exactly plan 17 §12's contract-IR registry: `client_update_required`, `daemon_restart_required`, and `capability_replaced { current_binding }`.
 
 Status mapping is fixed:
 
@@ -348,7 +349,7 @@ Status mapping is fixed:
 | Method mismatch | 405 |
 | Query/body/media limits | 413 |
 | Unsupported media/schema version | 415 |
-| Stale client/binding requiring restart or update | 426 |
+| Stale client/binding requiring restart or update (`client_update_required`, `daemon_restart_required`, `capability_replaced`) | 426 |
 | Version/idempotency/preview/revalidation or storage-identity split conflict | 409 |
 | Expired cursor/preview/subscription replay | 410 |
 | Validation with field details | 422 |
@@ -363,7 +364,7 @@ Transport-created reasons—including JSON/schema failures, bounded/truncated MC
 ### 7.3 Versioning and content negotiation
 
 - All new routes live under `/api/v2`; path version changes only for incompatible transport contracts.
-- Request/response bodies are UTF-8 JSON with `Content-Type: application/json`; exports/downloads use declared formats. Unknown body fields follow each schema's explicit forward-compatibility rule and are never silently promoted into query semantics.
+- Request/response bodies are UTF-8 JSON with `Content-Type: application/json`; exports/downloads use declared formats. Operations whose catalog entry declares bulk support also stream the same canonical rows as bounded NDJSON under `Accept: application/x-ndjson`, equal to paged rows at the same frozen watermark (plan 17 §13.3). Request schemas are closed: unknown named body fields are rejected, and forward-compatible request additions travel only in the declared bounded `extensions` slot per plan 17 §6.2 — never silently promoted into query semantics.
 - OpenAPI records schema/registry/catalog/application versions. Response `Vary` includes only headers that truly affect representation; no cache varies on bearer token values.
 - Immutable public-within-session manifests/bundles may use private ETag revalidation. Payload-bearing, query, lab, message, export-status, and command responses use `Cache-Control: no-store`.
 
@@ -394,12 +395,13 @@ Every route is authenticated except the static HTML/assets and one-time bootstra
 | `GET /api/v2/anchors/{id}` / `POST /api/v2/anchors:resolve` / `POST /api/v2/retrieval-recipes:execute` | Resolve stable evidence anchors or re-execute protected/versioned retrieval recipes with drift and coverage; no cursor/response handle is accepted as the sole locator. |
 | `GET /api/v2/openapi.json` | Authenticated deterministic OpenAPI document. |
 | `GET /api/v2/schemas/{digest}/{name}` | Authenticated allowlisted checked JSON Schema artifact for the current protocol. |
+| `POST /api/v2/batch` | Bounded typed multi-invocation per plan 17 §13.2: each item is one catalog-bound read invocation with its own success/problem envelope and caller item ID; no mutation items, no nested batch, no cross-item transactionality. Batch is an API transport multiplexer over existing use cases, not a separate application use case. |
 
 Scope query parameters are bounded opaque IDs/enums and pagination only. Project search text uses `POST /api/v2/projects/search` so literal text does not enter URLs. Every binding has a catalog-declared default that is inserted as an explicit canonical selector request: Brain/Observatory use `AllAuthorized { profile_id }`; code-local bindings may use `CurrentInvocation`. Handlers never infer cwd, last project, route, or referrer independently.
 
 Domain `ScopeSelectorV2` and `ScopeResolutionV2` are serialized unchanged. The selector is exactly `version`, nonempty `roots`, `exclude`, `time`, `activity_attribution`, `coverage`, `freshness`, `traversal`, `ambiguity`, and `limits`; canonical/locator targets use `ScopeTargetV2`. Resolution includes `resolution_id`, selector digest/canonical selector, selected/ambiguous/stale/unavailable/quarantined/missing sets, `defaulted_current`, catalog generation, and watermark. A client resubmits the preserved canonical request plus selected candidate once; query/filter/time/message-view bodies are not reconstructed client-side. CLI/MCP/API/SDK/dashboard parity fixtures require identical candidate identity/order, resolution, provenance, and errors.
 
-Doctor/provider payloads use generated `DoctorFindingView` and `ProviderIntegrationState`. `severity`, `observed_owner`, `remediation_authority`, evidence, legal actions, hook/tool/session coverage, missing pieces, and last verified time are required. The serializer refuses an apply/update action for foreign or unknown ownership and never maps `Partial`/`Degraded` to healthy branding.
+Doctor/provider payloads use generated `DoctorFindingView` and `ProviderIntegrationState`. `severity`, `observed_owner`, `remediation_authority`, evidence, legal actions, hook/tool/session coverage, missing pieces, and last verified time are required. An apply/update action for foreign or unknown ownership is unrepresentable in the application view itself (plan 09 §9.1); this serializer adds no second gate and cannot express one, and it never maps `Partial`/`Degraded` to healthy branding.
 
 ### 8.2 Query, Brain, graph, timeline, and inspector
 
@@ -425,7 +427,7 @@ Doctor/provider payloads use generated `DoctorFindingView` and `ProviderIntegrat
 | `POST /api/v2/timeline/compare` | Aligned comparison anchors and deltas. |
 | `POST /api/v2/activity/events` / `POST /api/v2/activity/facets` | Consequential cross-domain activity and facets over one frozen/live event model; routine-noise counts remain explicit. |
 
-All graph/timeline inputs require explicit node/edge/event/lane/bucket/page/depth/byte budgets within query hard limits. Federated inputs accept explicit multi-repository/project/worktree/ref scope, preserve each node/edge's repository/snapshot provenance and per-shard freshness/coverage, and reject same-name collapse. The API rejects missing bounds before calling application.
+All graph/timeline inputs require explicit node/edge/event/lane/bucket/page/depth/byte budgets within query hard limits. Federated inputs accept explicit multi-repository/project/worktree/ref scope, preserve each node/edge's repository/snapshot provenance and per-shard freshness/coverage, and reject same-name collapse. The API rejects missing bounds before calling application. Read POST bodies carry the application `ReadRequirementsV1` envelope (consistency, budget, payload policy; plan 09 §7.2) as a top-level `read` object; GET enumerations accept only its bounded enum/watermark forms as query parameters.
 
 `POST /search` accepts generated exact-token/field, phrase, fuzzy, entity/alias, semantic, graph-neighborhood, and recency profile controls plus origin/kind/provider/session/agent/repository/project/worktree/ref/time filters and grouping/dedupe policy. It returns per-stage candidates/caps/exclusions/versions, final score components, missing features, grouping membership, native expansion, repository/snapshot provenance, coverage, and benchmark-profile ID. “Semantic” is never an implicit default: clients request a versioned evaluated profile, and the server may disable vector contribution when unavailable or regression-gated. The benchmark endpoint includes the named Rspack/Rsbuild/React Router cross-repo disambiguation slice.
 
@@ -457,7 +459,7 @@ provider=<opaque-or-enum>&role=<enum>&kind=<enum>&time_start=<utc>&time_end=<utc
 cursor=<opaque>&page_size=1..1000
 ```
 
-Representative responses always include represented entity IDs, source observations, algorithm/rule version, suppression count, and native expansion cursor. A client obtains sanitized native rows through that cursor or a second `view=native_rows` request bound to the same snapshot; the API does not invent a combined “both” count. Export defaults to the complete sanitized-native enumeration unless the caller explicitly requests another `MessageView` and the manifest declares that projection.
+Representative responses always include represented entity IDs, source observations, algorithm/rule version, suppression count, and native expansion cursor. A client obtains sanitized native rows through that cursor or a second `view=native_rows` request bound to the same snapshot; the API does not invent a combined “both” count. The catalog-declared export default — owned by application/catalog metadata, not by this transport — is the complete sanitized-native enumeration; a caller may explicitly request another `MessageView`, and the manifest declares that projection.
 
 ### 8.4 Domain workspace reads
 
@@ -471,6 +473,7 @@ These routes are typed profiles over application/query, not separate service imp
 | Automation | `GET /api/v2/automation/jobs`, `/jobs/{id}`, `/scheduler`, `/runs`, `/runs/{id}`, `/runs/{id}/artifacts`, `/proposals`, `/proposals/{id}`, `/skills`, `/skills/{id}`, `/outcomes`; `POST /api/v2/automation/workflow-graph`. |
 | Hints/policy | `GET /api/v2/hints/evaluations`, `/evaluations/{id}`, `/outcomes`, `/opportunities`, `/policy/bundles`, `/policy/bundles/{id}`, `/policy/coverage`. |
 | Accounting/Observatory | `GET /api/v2/accounting/usage`, `/costs`, `/savings`, `/adoption`, `/denominators`, `/api/v2/observatory`. |
+| Tasks/orchestration | `GET /api/v2/initiatives`, `/initiatives/{id}`, `/initiatives/{id}/graph`; `GET /api/v2/plans`, `/plans/{id}/versions/{version}`; `GET /api/v2/work-items`, `/work-items/{id}`, `/work-items/{id}/dependencies`, `/work-items/{id}/attempts`, `/work-items/{id}/context`; `POST /api/v2/work-items/query`; `GET /api/v2/execution-attempts/{id}`; `GET /api/v2/executors`, `/executors/{id}`; `POST /api/v2/executors:match` (read-only); `GET /api/v2/task-scheduler/status`; `GET /api/v2/task-views`, `/task-views/{id}`. Semantics are owned by plan 24 §9.1; reads are `GET` (query-shaped reads `POST` per Section 1), every mutation uses the Section 8.7 command envelope with no `PATCH` route, and task events are subscription read-model kinds delivered through `POST /api/v2/subscriptions` plus `GET /api/v2/subscriptions/{id}/events`, not a separate `/task-events` stream. |
 
 Git request/response schemas retain local semantic generation/ref/merge-base/watermark separately from live provider/fetched-at/base/head/changed-file cap/digest. Drift responses cannot serialize a combined impact claim.
 
@@ -489,6 +492,7 @@ All evaluation routes are `POST` and read-only:
 /api/v2/labs/correlation:replay
 /api/v2/labs/coordination:replay
 /api/v2/labs/scheduler:replay
+/api/v2/labs/orchestration:replay
 /api/v2/labs/memory:replay
 /api/v2/labs/policy-diff:compare
 /api/v2/labs/privacy:test
@@ -516,7 +520,7 @@ Each response includes requested replay mode, actual fidelity, bundle/input/envi
 
 ### 8.7 Typed command routes
 
-Every command accepts `CommandHttpRequest<C> { command_id, idempotency_key, scope, expected_version, preview_digest, confirmation, payload }`. A request with `mode=preview` invokes preview; `mode=apply` requires the returned digest when confirmation is required. The route set covers every application command:
+Every command accepts `CommandHttpRequest<C> { command_id, idempotency_key, scope, expected_version, preview_digest, confirmation, payload }`. A request with `mode=preview` invokes preview; `mode=apply` requires the returned digest when confirmation is required. Field mapping onto the application `CommandEnvelopeV1<C>` is fixed and fixture-tested: `command_id` is server-allocated at preview (omitted on the first preview, echoed on apply; at most one exists per principal/use-case/idempotency-key reservation, plan 09 §8.2), `idempotency_key` maps to the plan 09 §8.1 reservation key, `scope` to the declared/canonical scope, `expected_version` to the optimistic aggregate version, `preview_digest` plus `confirmation` to `ApplyConfirmation`, and `payload` to the typed command body. The route set covers every application command:
 
 ```text
 POST /api/v2/commands/projects/{register,update-alias,unenroll}
@@ -549,12 +553,26 @@ POST /api/v2/commands/projections/{rebuild,pause,resume,publish,rollback}
 POST /api/v2/commands/migrations/{backfill,reconcile,cutover,rollback}
 POST /api/v2/commands/delivery/refresh
 POST /api/v2/commands/coordination/{message,handoff,ack,suppress}
+POST /api/v2/commands/tokens/{create,list,revoke}  # auth.tokens.* over plan 17 §18.2's registry
 POST /api/v2/commands/labs/fixtures/promote
+POST /api/v2/initiatives:create
+POST /api/v2/initiatives/{id}:update|pause|resume|retire   # former GET/PATCH mutation shapes are these commands
+POST /api/v2/plans:create-version
+POST /api/v2/plans/{id}:activate|decompose
+POST /api/v2/work-items:create
+POST /api/v2/work-items/{id}:update|replace|retire|link|unlink|assign|reassign|pause|resume|cancel|reopen|archive|retry
+POST /api/v2/work-items/{id}:claim|heartbeat|progress|complete|block   # executor lifecycle, plan 24 §9.2
+POST /api/v2/executors:register|heartbeat|drain|unregister
+POST /api/v2/task-scheduler:pause|resume|run-once
+POST /api/v2/task-views:create
+POST /api/v2/task-views/{id}:update|delete|share
 ```
+
+The task/orchestration `:action` routes are the sole HTTP bindings for plan 24 §9.2's command use cases — no duplicate `/commands/**` aliases and no `PATCH` route exist — and they use the same `CommandHttpRequest` envelope, idempotency, expected version, preview, and audit contract; `work-items/{id}:claim` carries `expected_readiness_digest` per plan 24 §5.3.
 
 The explicit saved-view/collection/annotation and export action routes in Section 8.6 are the sole HTTP bindings for those commands; duplicate `/commands/**` aliases are not added. They still use the same generated application command envelope, idempotency, expected version, preview, and audit contract. Scope-sensitive create bodies require `declared_scope`; existing-target bodies carry the opaque target and the application resolves its canonical owner. No current V1 dashboard mutation may bypass this inventory.
 
-Coordination commands require an unexpired presence/overlap claim, stable research anchor, explicit target agent/capability, preview digest, idempotency key, and disclosure-safe summary. `message` and `handoff` record attempted delivery separately from target receipt; `ack` requires authorized target evidence; `suppress` is scoped to agent/pair/work-claim plus expiry. The API accepts no arbitrary provider address, hidden prompt payload, free-form tool invocation, or client assertion that delivery succeeded.
+Coordination commands carry application preconditions (plan 09 §10) that this API validates as transport shape and surfaces unchanged: an unexpired presence/overlap claim, stable research anchor, explicit target agent/capability, preview digest, idempotency key, and disclosure-safe summary. `message` and `handoff` record attempted delivery separately from target receipt; `ack` requires authorized target evidence; `suppress` is scoped to agent/pair/work-claim plus expiry. The API accepts no arbitrary provider address, hidden prompt payload, free-form tool invocation, or client assertion that delivery succeeded.
 
 ## 9. SSE Snapshot, Delta, Resume, Gap, and Backpressure
 
@@ -583,7 +601,7 @@ pub enum ApiStreamEvent {
     Delta { watermark: VectorWatermark, changes: Vec<SubscriptionDelta> },
     Operation(OperationProgress),
     Projection(ProjectionProgress),
-    Coverage(CoverageReport),
+    Coverage(CoverageReportV1),
     Gap { expected: VectorWatermark, available_from: VectorWatermark },
     ResyncRequired { reason: ResyncReason, restart: RestartDirective },
     ServerNotice { code: NoticeCode, retry_after_ms: Option<u64> },
@@ -617,6 +635,7 @@ pub enum ApiStreamEvent {
 - Non-loopback bind requires explicit protected-mode configuration, TLS, an architecture/security review, and is outside first-default support.
 - Accept only exact configured authorities: `127.0.0.1:<port>`, `[::1]:<port>`, and `localhost:<port>` when enabled. Reject missing, malformed, multiple, userinfo, trailing-dot, wildcard, unexpected port, and untrusted `Forwarded`/`X-Forwarded-*` headers.
 - Absolute-form request targets and proxy mode are rejected by default, preventing DNS-rebinding/proxy confusion.
+- A user-owned Unix-domain socket listener is a first-class transport built by this crate (plan 17 §18.1 prefers it for local nonbrowser clients; plan 17 §24 owns its conformance suite). The socket directory and file are owner-only (`0700`/`0600`), peer credentials (`SO_PEERCRED`/`getpeereid`) must match the profile owner, and application token authentication still applies. Cookie, CSRF, and Host/Origin rules are HTTP-listener browser rules and neither apply to nor weaken over the socket; browser sessions are not accepted on it.
 
 ### 10.2 Launch, browser session, and bearer authentication
 
@@ -624,7 +643,7 @@ pub enum ApiStreamEvent {
 2. Static HTML receives one single-use, 60-second bootstrap nonce in a nonce-authorized bootstrap script/meta block. It is not placed in URL, referer, local storage, analytics, logs, or cache.
 3. Browser posts the nonce to `POST /api/v2/auth/session` under strict Host/Origin. Server consumes it and creates an HttpOnly, SameSite=Strict, Path `/api/v2` session cookie; `Secure` is required whenever HTTPS is used and loopback HTTP is the only permitted exception.
 4. Response returns a separate CSRF token held in page memory. Every cookie-authenticated state-changing request supplies `X-TraceDecay-CSRF`; token is session/method-family bound, rotates on login/privilege change, and compares constant-time.
-5. CLI/MCP/daemon clients use an `Authorization: Bearer` launch token obtained from an owner-only (`0600`) runtime endpoint/file managed by composition. Token never appears in a query parameter or command output.
+5. The per-launch `Authorization: Bearer` token obtained from the owner-only (`0600`) runtime endpoint/file managed by composition is a bootstrap credential, not the operating credential: its only permitted operation is `auth.tokens.create` (plan 09 §10), which mints the initial admin-class entry in plan 17 §18.2's token registry. CLI/MCP/daemon clients then authenticate with scoped, TTL-bounded, revocable registry tokens. No token appears in a query parameter or command output.
 6. Sessions expire at process exit and after bounded idle/absolute lifetimes; logout/restart revokes them. Authentication failures reveal no token validity detail.
 
 All cookie-authenticated unsafe methods require valid CSRF, exact Origin, `Sec-Fetch-Site: same-origin` when supplied, JSON content type, and authenticated principal. Bearer clients do not require CSRF but still cannot bypass Host, method, schema, authorization, or limits. CORS is disabled by default; no wildcard origin or credentials response exists.
@@ -662,7 +681,8 @@ No `unsafe-inline` or `unsafe-eval`. Bootstrap nonce authorizes only the minimal
 
 ### 11.1 Source and generation
 
-- `utoipa` derives route schemas/operations from transport wrappers referencing `schemars`/domain/application schemas. The checked-in document uses deterministic key/path/schema ordering and strips nondeterministic build timestamps.
+- Generation authority (single source): plan 17's contract IR is the only source of generated public contract artifacts. Pipeline: domain schemas + application use-case registry + plan 08 capability catalog → canonical contract IR snapshot (`crates/tracedecay-api/contract/tracedecay-contract-ir.v1.json`, owned by plan 17) → generated OpenAPI 3.1 (`crates/tracedecay-api/src/openapi/generated.json`, hosted by plan 10), the review rendering `crates/tracedecay-api/openapi/tracedecay-v2.yaml`, and the public JSON Schemas (`crates/tracedecay-api/schemas/*.schema.json`) → plan 10's Axum adapters conform to the IR-generated document, with utoipa reflection retained as validation only (CI regenerates the utoipa-derived document and fails unless it is semantically identical to the IR-generated artifact) → the generated TypeScript schema core at `packages/tracedecay-client/src/generated/` is produced from the IR-generated OpenAPI and hosted per plan 10, while plan 17 owns SDK packaging and conformance. The capability catalog remains the registry of record for capability/binding identity; the contract IR is its frozen public projection, and no plan or adapter maintains a second route registry.
+- The checked-in document uses deterministic key/path/schema ordering and strips nondeterministic build timestamps.
 - Operation ID equals the current catalog HTTP `BindingId`; extension fields carry canonical `UseCaseId`, capability ID/version, read/mutate, idempotency, preview, streaming, freshness, privacy, and cost/latency. Old/migration bindings never enter shipped OpenAPI.
 - Security schemes describe browser cookie + CSRF header and bearer auth. Every operation declares one valid scheme and required scopes; no accidental anonymous operation.
 - The generator validates method/path uniqueness, request/response/error schema mappings, status sets, cursor/page semantics, command headers/body, SSE event union, and catalog parity.
@@ -672,7 +692,7 @@ No `unsafe-inline` or `unsafe-eval`. Bootstrap nonce authorizes only the minimal
 Generation command:
 
 ```bash
-cargo run -p tracedecay-api --bin generate-openapi -- --check
+cargo run -p tracedecay-api --bin generate-openapi -- --check   # regenerate from the contract IR; assert utoipa-reflection equality
 pnpm --dir packages/tracedecay-client generate
 pnpm --dir packages/tracedecay-client test
 ```
@@ -719,8 +739,9 @@ MCP markdown and CLI text may differ only in checked presentation fixtures. JSON
 ## 13. Static SPA, History Fallback, and Bounded Migration Paths
 
 - `/` and known V2 product routes serve release HTML; hashed `/assets/*` serves only assets. Missing asset paths return 404, never HTML.
+- The authenticated API explorer and docs shell (plan 17 §22) are served by this same static_app under `/docs` with identical CSP/bootstrap/auth rules; its "try" calls use ordinary authenticated `/api/v2` routes, and the fixture-backed sandbox (plan 17 §22.3) is a separate process/profile, never a production route family.
 - History fallback recognizes the route manifest generated by the dashboard build. Unknown `/api/*`, dotted paths, traversal, encoded separators, NUL/control characters, and unsupported methods never fall through to SPA.
-- While the explicit migration flag is active, legacy `?tab=` and plugin URLs may issue a safe same-origin redirect to equivalent V2 state using opaque IDs. After cutover, stale paths return `client_version_incompatible` with the current route/update action and never silently redirect or revive a stale name.
+- While the explicit migration flag is active, legacy `?tab=` and plugin URLs may issue a safe same-origin redirect to equivalent V2 state using opaque IDs. After cutover, stale paths return `client_update_required` — or `capability_replaced` with the current binding — plus the current route/update action, and never silently redirect or revive a stale name.
 - Direct reload, base path, back/forward, embedded asset, stale asset hash, CSP nonce, service-worker absence, and host-wrapped dashboard are contract-tested.
 - Old and new shells may coexist only behind explicit migration feature state until every V1 view/action parity row passes. Cutover removes old live route/name resolution atomically; retained plugin assets, if still needed for rollback evidence, are not served as a fallback.
 
@@ -794,7 +815,7 @@ Commands run from repository root using checkout-local `target/`; do not set tar
 
 **Files:** `src/openapi/*.rs` including `src/openapi/generated.json`; `packages/tracedecay-client/**`; `tests/openapi_drift.rs`.
 
-- [ ] Add tests `every_route_has_catalog_operation`, `every_operation_declares_auth_and_problems`, `schemas_preserve_domain_message_origin_and_view`, `coordination_claim_summary_anchor_and_actions_are_typed`, `search_stage_caps_and_group_membership_are_typed`, `sse_union_includes_operation_and_projection`, `pending_receipt_has_pollable_operation`, `commands_require_idempotency_version_and_declared_scope`, `generation_is_byte_deterministic`, and `typescript_round_trip_matches_rust`.
+- [ ] Add tests `every_route_has_catalog_operation`, `every_operation_declares_auth_and_problems`, `schemas_preserve_domain_message_origin_and_view`, `coordination_claim_summary_anchor_and_actions_are_typed`, `search_stage_caps_and_group_membership_are_typed`, `sse_union_includes_operation_and_projection`, `pending_receipt_has_pollable_operation`, `commands_require_idempotency_version_and_declared_scope`, `generation_is_byte_deterministic`, `utoipa_reflection_equals_ir_generated_document`, and `typescript_round_trip_matches_rust`.
 - [ ] Run `cargo test -p tracedecay-api --test openapi_drift -- --nocapture` and the package client tests. Expected: fail because artifacts/client do not exist.
 - [ ] Implement Section 11 generators, metadata extensions, TypeScript schema/client/problem/SSE runtime, and digest headers.
 - [ ] Re-run generation in write mode, then check mode and all tests. Expected: no diff after second generation; Rust/OpenAPI/TypeScript semantic fixtures round-trip.
@@ -847,7 +868,7 @@ Commands run from repository root using checkout-local `target/`; do not set tar
 5. Enable SSE after snapshot parity, finite replay, gap/backpressure, and reconnect E2E pass under load.
 6. Switch CLI/MCP bindings per domain to the current generated application contract; remove old names from live help/hints/catalog at the same cutover.
 7. During bounded migration only, an operator rollback may restore the V1 owner from its receipt. After V2 default, rollback uses a prior compatible V2 artifact/data snapshot, closes streams with typed restart, and never revives stale clients/names.
-8. At each domain cutover, revoke old live API/plugin/tool bindings. Stale clients receive `client_version_incompatible` with restart/update/current operation/path; current help/hints/catalog never advertise old names.
+8. At each domain cutover, revoke old live API/plugin/tool bindings. Stale clients receive the plan 17 §12 stale-client codes — `client_update_required`, `daemon_restart_required`, or `capability_replaced` with the current binding — plus restart/update/current operation/path; current help/hints/catalog never advertise old names.
 9. Remove retained route/handler code after archived parity/security/backfill/rollback receipts prove data safety. Store preservation is receipt-bounded and independent from live transport fallback.
 
 ## 17. Final Verification

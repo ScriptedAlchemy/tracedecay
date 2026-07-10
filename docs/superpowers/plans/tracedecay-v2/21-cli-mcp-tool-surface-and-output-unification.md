@@ -160,26 +160,26 @@ Use plan 08's identity model without surface-derived business identity:
 
 ```rust
 pub struct CapabilityId(ValidatedId); // capability.code.search
-pub struct UseCaseId(ValidatedId);    // query.code.search.v2
-pub struct IntentId(ValidatedId);     // intent.find.symbol
-pub struct BindingId(ValidatedId);    // binding.mcp.search.v2
-pub struct PresentationId(ValidatedId); // presentation.code.search.v1
+pub struct UseCaseId(ValidatedId);    // usecase.code.search-symbols
+pub struct IntentId(ValidatedId);     // intent.code.find-symbol
+pub struct BindingId(ValidatedId);    // binding.mcp.search
+pub struct PresentationId(ValidatedId); // presentation.code.search-results
 ```
+
+All five ID kinds follow plan 08 §8's grammar exactly — `usecase.<domain>.<verb-noun>`, `intent.<domain>.<task>`, `binding.<surface>.<stable-name>`, and `presentation.<domain>.<view>` (registered in plan 08's `id.rs`). Versions are separate SemVer fields; IDs never embed v1/v2 or transport names except BindingId.
 
 One use case may have native CLI, generic CLI bridge, MCP, HTTP, SDK, dashboard, hook, and skill bindings. A binding declares only transport syntax and presentation support. It cannot alter default scope, query semantics, ordering, coverage, effect, or errors.
 
 ### 5.2 Canonical generated artifacts
 
-Add generated artifacts under the plan-08 catalog output:
+Plan 08 §6's `generated/` filename set is the single canonical artifact home; this plan renders only from those files and adds its surface artifacts to that same set:
 
 ```text
-generated/
-├── capability-catalog.json
-├── use-cases.json
+generated/                  # canonical home and names: plan 08 §6
+├── catalog.json            # capabilities + use cases
 ├── cli-bindings.json
 ├── cli-command-tree.json
-├── mcp-bindings.json
-├── mcp-tool-definitions.json
+├── mcp-tools.json          # MCP binding rows + emitted tool definitions
 ├── presentations.json
 ├── output-formats.json
 ├── errors-and-exit-codes.json
@@ -188,6 +188,8 @@ generated/
 ├── effect-bindings.json
 └── parity-matrix.json
 ```
+
+Earlier drafts of this plan named variants `capability-catalog.json`/`use-cases.json` (the same artifact as `catalog.json`) and `mcp-bindings.json`/`mcp-tool-definitions.json` (the same artifact as `mcp-tools.json`); those variant names are removed — there is exactly one generator (plan 08's catalog-gen) and one filename per artifact. Configuration metadata inside these files comes only from plan 20's `config-registry-v1.json` descriptor manifest consumed by the plan 08 catalog build; this plan emits no config surface metadata of its own.
 
 Each CLI/MCP row records:
 
@@ -460,6 +462,8 @@ tracedecay invoke      generated direct binding bridge
 tracedecay help        catalog-backed discovery
 ```
 
+The `system` group also exposes the generated `api token create`, `api token list`, and `api token revoke` bindings for plan 17's scoped, TTL-bound, revocable local API tokens, mapping plan 09's token-management command use cases; plan 10's per-launch bearer remains only the bootstrap credential that mints the initial admin token.
+
 This taxonomy is a target navigation model, not authorization to rename everything at once. Each current path receives an alias/cutoff migration, generated replacement, and differential fixture. Frequently used native paths may stay short when their meaning is already canonical.
 
 ### 9.2 Help and discovery
@@ -547,6 +551,8 @@ Repeated basenames use a safe parent-path/common-directory or explicit registry 
 
 ### 11.1 Effect classes
 
+The closed effect enum is owned by plan 08's `effect.rs` as `EffectSpec.execution_mode`; this plan consumes it and defines no surface-local effect mode:
+
 ```rust
 pub enum ExecutionModeV2 {
     ReadOnly,
@@ -581,25 +587,27 @@ Expose only policy/configuration, schedule, budgets, authority, quality floors, 
 
 ### 11.4 Confirmed destructive operations
 
-Wipe, source cleanup, protected-data retirement, unsafe migration cutover, or external side effects can require an explicit confirmation token and current-version revalidation. Their names and receipts must describe the real effect. “Apply” and “rollback” are not generic framework verbs; use a domain command such as `migration cutover`, `migration recover`, or `project retire` where that is the actual operation.
+Wipe, source cleanup, protected-data retirement, unsafe migration cutover, or external side effects can require an explicit confirmation token and current-version revalidation. Their names and receipts must describe the real effect. “Apply” and “rollback” are not generic framework verbs; use a domain command such as `migration cutover`, `migration recover`, or `project retire` where that is the actual operation. Edit use cases such as `usecase.code.move-symbol` follow the same rule: they declare one binding whose semantic request carries a typed preview input under their declared execution mode, so plan 09's preview/commit wording maps onto that single binding rather than separate generic `preview`/`apply` verbs.
 
 ## 12. Errors, status, stdout, stderr, and exit codes
 
 ### 12.1 One problem model
 
-Application owns stable error codes. CLI and MCP map `ApplicationError` without parsing messages:
+Application owns stable error codes. CLI and MCP map `ApplicationError` without parsing messages. `SurfaceProblemV2` is exactly the shared plan 09/10/17 problem shape — plan 10 §7.2's `ApiProblem` minus the transport-supplied RFC 9457 `problem_type`/`status` fields — with no field dropped or renamed; this plan adds only the Section 12.2 exit-class mapping:
 
 ```rust
 pub struct SurfaceProblemV2 {
     pub code: ApplicationErrorCode,
     pub title: CatalogSafeText,
     pub detail: Option<CatalogSafeText>,
+    pub instance: RequestId,
     pub retry: RetryDirective,
+    pub restart: Option<RestartDirective>,
+    pub current_binding: Option<BindingRef>,
     pub candidates: Vec<SafeCandidate>,
-    pub invalid_fields: Vec<InvalidField>,
+    pub invalid: Vec<InvalidField>,
     pub current_version: Option<AggregateVersion>,
     pub operation: Option<OperationRef>,
-    pub correlation_id: RequestId,
 }
 ```
 
@@ -637,18 +645,19 @@ Useful partial results return 0 with `coverage.complete=false` unless the caller
 
 ### 13.1 Collections
 
-All bounded collections use:
+All bounded collections use the one page envelope defined in plan 17's contract IR; plan 10's `Page<T>` and this plan's `CursorPage<T>` are that same type, not variants:
 
 ```rust
 pub struct CursorPage<T> {
     pub items: Vec<T>,
     pub next_cursor: Option<OpaqueCursor>,
-    pub returned: u32,
-    pub count: CountSemantics,
+    pub truncation: Option<TruncationReason>,
+    pub count_semantics: CountSemantics,
     pub ordering: OrderingReceipt,
-    pub page_limits: AppliedPageLimits,
 }
 ```
+
+The earlier draft's `returned` and `page_limits` fields fold into this shape without information loss: returned-row counts are part of `count_semantics`, and the applied default/hard page limits travel in the `truncation` receipt.
 
 Opaque authenticated cursors bind the canonical request fingerprint, access digest, resolved scope, schema/ranking/index/catalog versions, frozen watermarks, expiry, ordering cutoff, and per-shard positions. CLI exposes `--cursor`; SDKs expose bounded pagers. `--all-pages` is allowed only with explicit maximum pages/items/bytes/deadline. No SQLite transaction spans client think time.
 
@@ -764,6 +773,30 @@ Benchmarks separately measure application execution, view construction, renderin
 - hidden provider commands are versioned internal bindings, not user aliases;
 - current `query -> search`, `claude-install`, `claude-uninstall`, and `update-plugins` behavior receives explicit disposition;
 - `removeall` is normalized with a cutoff rather than kept as permanent naming debt.
+
+This plan owns the `CompatibilityDisposition` field contract that plan 08 embeds in every `SurfaceBinding` and plan 12 consumes in cutover receipts:
+
+```rust
+pub struct CompatibilityDisposition {
+    pub action: CompatibilityActionV2,
+    pub v1_surface: SurfaceKind,
+    pub v1_names: BTreeSet<CatalogAlias>,   // every legacy name/alias/route this row covers
+    pub replacement: Option<BindingId>,     // required for Replace
+    pub alias_window: Option<AliasWindowV2>, // introduced / warn-from / cutoff protocol epochs
+    pub differential_fixture: FixtureRef,   // V1/V2 semantic + presentation differential
+    pub deletion_receipt: Option<ReceiptRef>, // set once the V1 surface is removed
+    pub rationale: CatalogSafeText,
+}
+
+pub enum CompatibilityActionV2 {
+    Keep,    // current name is already canonical; no alias window
+    Rename,  // same semantics under a new canonical name; alias_window required
+    Replace, // superseded by a different use case/binding; replacement required
+    Remove,  // retired with no successor; deletion_receipt required at cutoff
+}
+```
+
+Constraints: exactly one disposition exists per `(v1_surface, legacy name)` inventory row, and every frozen inventory row must reference exactly one; catalog validation rejects `Rename` without `alias_window`, `Replace` without `replacement`, `Remove` without a cutoff `deletion_receipt`, and any two dispositions claiming the same legacy name. Dispositions are catalog metadata: they live inside immutable `ToolCatalogSnapshot`s, are retained with them, and add no runtime store rows.
 
 ### 17.2 Cutover sequence
 

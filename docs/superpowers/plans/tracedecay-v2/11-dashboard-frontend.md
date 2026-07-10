@@ -12,7 +12,7 @@
 
 [`21-cli-mcp-tool-surface-and-output-unification.md`](21-cli-mcp-tool-surface-and-output-unification.md) is authoritative for the capability command palette, guided actions, typed output/error/coverage views, and cross-surface examples. The dashboard consumes generated typed views and field descriptors; it never parses MCP Markdown, runs CLI commands, or recreates pagination/rendering semantics.
 
-[`22-incremental-context-scout-and-suggestion-envelopes.md`](22-incremental-context-scout-and-suggestion-envelopes.md) owns Context Scout state, delivery/outcome semantics, Observatory controls, Loom lane, and Hint Lab replay. [`23-session-lcm-temporal-retrieval-and-evaluation.md`](23-session-lcm-temporal-retrieval-and-evaluation.md) owns Search Lab's temporal/current/as-of/copy/summary-DAG explanations and evaluation contracts. The browser only renders those typed views.
+[`22-incremental-context-scout-and-suggestion-envelopes.md`](22-incremental-context-scout-and-suggestion-envelopes.md) owns Context Scout state, delivery/outcome semantics, Observatory controls, Loom lane, and Hint Lab replay. [`23-session-lcm-temporal-retrieval-and-evaluation.md`](23-session-lcm-temporal-retrieval-and-evaluation.md) owns the Search Quality Lab's temporal/current/as-of/copy/summary-DAG explanations and evaluation contracts; its formerly separate "Search Lab" is folded into the Search Quality Lab and is not a distinct lab or route. The browser only renders those typed views.
 
 [`24-canonical-task-plan-graph-and-multi-agent-executor.md`](24-canonical-task-plan-graph-and-multi-agent-executor.md) owns the Work product semantics: initiative/plan/task/attempt inspectors, boards as saved queries, dependency DAG, critical path, timeline/causal/workload/executor/repository/agent/All lenses, claim-overlap evidence, context-packet inspection, and Orchestration Lab. The frontend never stores board-local tasks, derives readiness, selects routes, or treats drag/drop as arbitrary status mutation.
 
@@ -117,7 +117,7 @@ The ledger is validated in contrast, grayscale, deuteranopia, protanopia, and tr
 | `/timeline` | What happened, in what order, and what did it affect? | `features/causal-loom` | density + virtualized causal lanes |
 | `/sessions`, `/sessions/:id`, `/turns/:id` | What context and work occurred in this thread/Turn? | `features/sessions` | session list / Turn evidence outline |
 | `/agents`, `/agents/:id` | Which agents collaborated and with what outcomes? | `features/agents` | delegation tree + Turn sequence |
-| `/work`, `/work/initiatives/:id`, `/work/plans/:id/versions/:version`, `/work/tasks/:id`, `/work/attempts/:id`, `/work/executors`, `/work/scheduler`, `/work/views/:id` | What work exists, how is it gated/routed/executed, and what context/outcomes connect it to the Brain? | `features/work` | initiative/plan outline + saved Kanban/DAG/task/attempt projection |
+| `/work`, `/work/initiatives/:id`, `/work/plans/:id/versions/:version`, `/work/tasks/:id`, `/work/attempts/:id`, `/work/executors`, `/work/scheduler`, `/work/views/:id`, `/work/notifications` | What work exists, how is it gated/routed/executed, and what context/outcomes connect it to the Brain? | `features/work` | initiative/plan outline + saved Kanban/DAG/task/attempt projection |
 | `/coordination` | Which nearby agents may overlap, and what safe action is warranted? | `features/coordination` | evidence-ranked presence/overlap ledger + worktree map |
 | `/goals/:id` | How did this Codex goal or provider-native objective evolve and finish? | `features/agents` | versioned goal/plan/Turn evidence ledger |
 | `/workflows/:id`, `/automation/runs/:id` | How did the captured workflow/run execute? | `features/automations` | run waterfall + artifact lineage |
@@ -133,11 +133,13 @@ The ledger is validated in contrast, grayscale, deuteranopia, protanopia, and tr
 | `/playgrounds/:lab` | What would this versioned engine decide, and why? | `features/playgrounds` | shared replay workbench |
 | `/playgrounds/evolution` | How do skills, memories, policies, and automations evolve? | `features/evolution` | version/use/outcome lineage |
 | `/saved/:viewId` | Reopen a classified saved investigation | `features/saved-views` | saved route + state |
-| `/settings` | Which effective settings and capabilities govern behavior? | `features/settings` | scoped settings form + source labels |
+| `/settings`, `/settings/context-scout` | Which effective settings and capabilities govern behavior? | `features/settings` | scoped settings form + source labels; the context-scout subroute renders plan 22's scout target/layer/effective-provenance controls through plan 20's generated registry forms |
 
-Legal `:lens` values are `git`, `code`, `threads`, `agents`, `turns`, `tasks`, `plans`, `timeline`, `memory`, and `automation`. Legal `:lab` values are `hints`, `retrieval`, `ingest`, `query`, `search-quality`, `scope-federation`, `correlation`, `coordination`, `orchestration`, `scheduler`, `memory`, `policy-diff`, and `privacy`; Hint Lab includes deterministic and incremental-scout replay, Search Quality includes temporal session/LCM retrieval, and Orchestration replays plan/task/executor/context/lease decisions. Evolution has a named route because it is both a lab and a product workspace.
+Legal `:lens` values are `git`, `code`, `threads`, `agents`, `turns`, `tasks`, `plans`, `timeline`, `memory`, and `automation`. Legal `:lab` values are `hints`, `retrieval`, `ingest`, `query`, `search-quality`, `scope-federation`, `correlation`, `coordination`, `orchestration`, `scheduler`, `memory`, `policy-diff`, and `privacy`; together with the named `/playgrounds/evolution` route these thirteen slugs form the canonical fourteen-lab inventory: Hint, Retrieval, Search Quality, Coordination, Orchestration, Ingest, Query, Correlation, Scheduler, Memory, Policy Diff, Evolution, Scope/Federation, and Privacy. The `privacy` slug displays as "Privacy & Secret Safety Lab" and supersedes the retired `secret-safety` route name; plan 23's temporal "Search Lab" content is folded into the Search Quality Lab, not a separate lab. Hint Lab includes deterministic and incremental-scout replay, Search Quality includes temporal session/LCM retrieval, and Orchestration replays plan/task/executor/context/lease decisions at `/playgrounds/orchestration` (the only route spelling) against plan 10 §8.5's generated `POST /api/v2/labs/orchestration:replay` endpoint. Evolution has a named route because it is both a lab and a product workspace.
 
 Route changes do not clear scope/time/query/selection unless the destination cannot represent the selected entity. In that case, the selection stays pinned in the inspector and the main view explains the unsupported relation. Browser back/forward restores complete committed investigation states, not only route names.
+
+Superseded route names are recorded here so no ledger dangles: the master plan's `/threads` and bare `/turns` list views are served by `/sessions` and the `threads`/`turns` lenses; `/agents/nearby` became `/coordination`; `/proposals` is retired by the no-approval-queue autonomy model and its content lives under `/evolution`; `/secret-safety` became `/playgrounds/privacy`. Bounded migration-only mappings live in `migration-paths.ts` and disappear at cutover; no current route metadata advertises the stale names.
 
 ## 4. Shared investigation state
 
@@ -153,6 +155,25 @@ export type TranscriptMode =
   | "tool_results"
   | "provider_protocol";
 
+export type ComparableSelectionV1 =
+  | { kind: "entity"; id: string }
+  | { kind: "event"; id: string }
+  | { kind: "relation"; edgeKind: string; sourceId: string; targetId: string }
+  | { kind: "path"; nodeIds: readonly string[] }
+  | { kind: "aggregate"; tileId: string; memberCursor: string | null }
+  | { kind: "time_range"; from: string; to: string; laneIds: readonly string[] };
+
+export type SelectionV1 =
+  | ComparableSelectionV1
+  | { kind: "comparison"; a: ComparableSelectionV1; b: ComparableSelectionV1 };
+
+export type InspectorTabV1 =
+  // universal tabs (every workspace)
+  | "summary" | "evidence" | "relations" | "native" | "history" | "actions"
+  // Work-workspace extension tabs (plan 24 §12.6 task/attempt inspectors)
+  | "specification" | "dependencies" | "acceptance" | "assignments" | "attempts"
+  | "packets" | "decisions" | "impact" | "costs" | "audit";
+
 export interface InvestigationStateV1 {
   version: 1;
   profileId: string;
@@ -164,7 +185,7 @@ export interface InvestigationStateV1 {
     occurred: { from: string; to: string };
     knowledgeAsOf: string | null;
     live: boolean;
-    compare: null | { from: string; to: string; label: "A" | "B" };
+    compare: null | { a: { from: string; to: string }; b: { from: string; to: string } };
   };
   query: {
     queryFingerprint: string | null;
@@ -173,7 +194,7 @@ export interface InvestigationStateV1 {
     transcriptMode: TranscriptMode;
   };
   focus: {
-    selected: string | null;
+    selected: SelectionV1 | null;
     retrievalAnchors: readonly string[];
     retrievalRecipeId: string | null;
     pinned: readonly string[];
@@ -182,26 +203,33 @@ export interface InvestigationStateV1 {
   };
   view: {
     renderer: "graph" | "timeline" | "table" | "matrix" | "distribution" | "small_multiples";
-    graphLens: "git" | "code" | "threads" | "agents" | "turns" | "timeline" | "memory" | "automation";
-    layout: string;
-    visibleLanes: readonly string[];
+    graphLens: "git" | "code" | "threads" | "agents" | "turns" | "tasks" | "plans" | "timeline" | "memory" | "automation";
+    layout: string; // registered "<algorithm>@<layoutVersion>" from the renderer registry
+    visibleLanes: readonly string[]; // generated per-lens lane-vocabulary IDs only
     levelOfDetail: "auto" | "aggregate" | "neighborhood" | "evidence";
   };
-  inspector: { tab: "summary" | "evidence" | "relations" | "native" | "history" | "actions" };
+  inspector: { tab: InspectorTabV1 };
 }
 ```
 
-Route lens slugs map explicitly to generated application enums: `git→Git`, `code→Code`, `threads→Thread`, `agents→Agent`, `turns→Turn`, `tasks→Task`, `plans→Plan`, `timeline→Timeline`, `memory→Memory`, and `automation→AutomationSkill`. This mapping is generated/fixture-tested; feature code never title-cases or guesses an enum.
+Route lens slugs map explicitly to generated application enums: `git→Git`, `code→Code`, `threads→Thread`, `agents→Agent`, `turns→Turn`, `tasks→Task`, `plans→Plan`, `timeline→Timeline`, `memory→Memory`, and `automation→AutomationSkill`. This mapping is generated/fixture-tested; the fixture asserts that the route `:lens` slug list, the `view.graphLens` union members, and the generated application enum stay identical (ten entries each) so a lens can never be routable but URL-unrepresentable. Feature code never title-cases or guesses an enum.
+
+Selection, comparison, and inspector semantics:
+
+- Every selection kind the inspector supports (section 9.2) is a `SelectionV1` variant, so relation, aggregate, time-range, and comparison selections are URL-encodable, shareable, and restorable like entity selections. Selections serialize with sorted keys and default elision and carry only opaque IDs.
+- Period comparison lives in `time.compare` as explicit A/B ranges; entity/aggregate/path/relation/time-range pair comparison is a `comparison` selection. The section 9.1 compare toggle populates exactly one of these two homes; there is no third comparison shape.
+- `InspectorTabV1` is owned here; plan 24 cites it. Plan 24 §12.6's eleven task-inspector tabs map onto the union by a checked table: Overview/specification/constraints→`specification` (`summary` remains the universal landing tab), Dependencies/gates/critical path→`dependencies`, Acceptance/evaluations/exceptions→`acceptance`, Assignments/eligible executors/routing→`assignments`, Attempts/retries/cancellation→`attempts`, Context packets/omissions→`packets`, Decisions/handoffs/artifacts/outcomes→`decisions`, Thread/session/Turn/agent/goal/tool evidence→`evidence`, Code/Git/delivery impact→`impact`, Costs/budgets→`costs`, Audit/provenance/anchors→`audit`. The attempt inspector reuses the same union. Workspaces cannot invent tab values outside this union; non-Work routes ignore Work extension tabs with an explicit "tab unavailable here" state, never a silent reset.
+- `view.layout` values are registered `<algorithm>@<layoutVersion>` identifiers from the renderer registry; `view.visibleLanes` values come from the generated per-lens lane vocabulary, which is versioned with the application enums above. Restoring a URL whose layout or lane IDs are no longer registered shows an explicit "layout/lanes reset to default" notice and falls back to route defaults — a restored URL never silently no-ops.
 
 ### 4.1 State ownership
 
-- **URL:** route; opaque profile/repository/project/worktree/ref/entity/saved-view IDs; non-sensitive time bounds; renderer/lens/layout; selected opaque ID; facet IDs; transcript mode. Serialize arrays in stable sorted order and omit defaults.
+- **URL:** route; opaque profile/repository/project/worktree/ref/entity/saved-view IDs; non-sensitive time bounds; renderer/lens/layout; the committed `SelectionV1` (every variant, carrying only opaque IDs); facet IDs; transcript mode. Serialize arrays in stable sorted order and omit defaults.
 - **Encrypted profile storage:** query literals, annotations, collections, protected saved views, replay input payload references, redaction decisions. URLs hold only an opaque `protectedDraftId` scoped to the local profile.
 - **IndexedDB:** versioned bounded response cache, local uncommitted annotation drafts, route recovery checkpoint, deterministic layout coordinates keyed by snapshot/query/layout version. Payloads obey server sensitivity and retention metadata; locked/profile-sign-out purges protected records.
 - **Local preferences:** theme, density, keyboard layout, panel geometry, last nonsensitive route, reduced-motion override. Never store entity payloads here.
 - **Renderer-local:** hover, lasso-in-progress, drag state, provisional camera, worker job, GPU buffers. Commit selection/camera only on interaction end.
 
-`ScopeSelectorV2` and `ScopeResolutionV2` are imported from the generated plan 01/10 contract; query state does not define another `mode/include/projectIds` selector. URL serialization retains the canonical selector's nonsensitive opaque roots/exclusions/time/policies/limits and the resolution ID; candidate details and safe aliases stay in the bounded cache. `retrievalAnchors` are server-issued domain `RetrievalAnchorId`s for session/thread/Turn/message/agent/subagent/workflow/goal/Git evidence; authorized resolution returns `RetrievalAnchorRecordV1`. They survive cursor, SSE, and migration response-handle expiry. Sensitive retrieval inputs remain behind `protectedDraftId`; copied links, saved views, collections, annotations, exports, and route recovery carry a `RetrievalRecipeV1` or protected recipe ref, never an ephemeral response handle alone.
+`ScopeSelectorV2` (defined in plan 16 §4) and `ScopeResolutionV2` (defined in plan 01) are imported from the generated contract transported per plans 10/17; query state does not define another `mode/include/projectIds` selector. URL serialization retains the canonical selector's nonsensitive opaque roots/exclusions/time/policies/limits and the resolution ID; candidate details and safe aliases stay in the bounded cache. `retrievalAnchors` are server-issued domain `RetrievalAnchorId`s for session/thread/Turn/message/agent/subagent/workflow/goal/Git evidence; authorized resolution returns `RetrievalAnchorRecordV1`. They survive cursor, SSE, and migration response-handle expiry. Sensitive retrieval inputs remain behind `protectedDraftId`; copied links, saved views, collections, annotations, exports, and route recovery carry a `RetrievalRecipeV1` (defined in plan 01) or protected recipe ref, never an ephemeral response handle alone.
 
 Scope defaults and ambiguity behavior are fixed:
 
@@ -211,11 +239,11 @@ Scope defaults and ambiguity behavior are fixed:
 - Name/path/alias input calls generated scope resolution. Ambiguity opens a keyboard/touch-accessible candidate list; choosing one resubmits the preserved canonical request with its signed retry token in one step. The UI does not rebuild the query, guess by cwd, or ask the user to retype it.
 - CLI/MCP/API equivalents exported from the workbench use the same opaque IDs and resolution token; scope semantics, candidates/order, provenance, coverage, and errors must match exactly.
 
-`dashboard/packages/query-state/src/url.test.ts` must prove canonical round trips, default elision, back/forward, unknown-version refusal, and absence of sensitive literal fixtures. `history.ts` debounces replace-state during brushing but pushes selection, route, compare, and committed time changes.
+`dashboard/packages/query-state/src/url.test.ts` must prove canonical round trips (including every `SelectionV1` variant and A/B compare ranges), default elision, back/forward, unknown-version refusal, the lens-slug/union/enum equality fixture, unknown layout/lane-ID reset behavior, and absence of sensitive literal fixtures. `history.ts` debounces replace-state during brushing but pushes selection, route, compare, and committed time changes.
 
 ### 4.2 Transcript modes and #410 seam
 
-Every transcript/session/Turn/search surface shows a persistent mode control with the six `TranscriptMode` values. Each response includes:
+Every transcript/session/Turn/search surface shows a persistent mode control with the seven `TranscriptMode` values. Each response includes the generated `TranscriptVisibility` block — a plan 10/17 schema type re-exported through `packages/contracts`, reproduced here for reference and never redefined as a local interface:
 
 ```ts
 export interface TranscriptVisibility {
@@ -246,6 +274,59 @@ export interface TranscriptVisibility {
 The exact generated wire values are `view=native_rows|representative_rows|human_best_effort|direct_user|delegated_agents|tool_results|provider_protocol`; frontend aliases are mapped by a checked generated table and never serialized by title-casing or guesswork.
 
 No empty state says “no messages” when another mode contains records. It says, for example, “0 direct-user messages; 18 delegated prompts and 42 protocol/tool rows are available.” Exports record mode, native/visible/hidden counts, representative membership, algorithm version, and privacy-domain-bound source fingerprints.
+
+### 4.3 Saved-view, collection, and annotation records
+
+These are the shareability deliverables, so they have explicit shapes. All three are generated in the plan 10/17 schema (routes in plan 10 §8.6) and re-exported through `packages/contracts`; the browser defines no parallel record. Reference shapes:
+
+```ts
+export interface SavedViewV1 {
+  id: string;                          // PK: opaque server-issued ID
+  version: number;                     // optimistic-concurrency token
+  name: string;                        // unique per (ownerScope, name)
+  ownerScope: DeclaredScope;           // profile | cross-project | named project
+  classification: "private" | "profile" | "shareable";
+  redactionState: "none" | "redacted" | "pending_review";
+  route: string;
+  state: InvestigationStateV1;         // embedded; stateVersion checked on restore
+  recipeRef: string | null;            // RetrievalRecipeV1 ID (plan 01), never a response handle
+  watermark: string;                   // frozen snapshot/vector watermark
+  shareBundleDigest: string | null;    // set by share_apply; cleared by share_revoke
+  expiresAt: string | null;            // local share expiry
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface CollectionV1 {
+  id: string;                          // PK
+  version: number;
+  name: string;                        // unique per (ownerScope, name)
+  ownerScope: DeclaredScope;
+  memberAnchors: readonly string[];    // RetrievalAnchorId only; no embedded records
+  memberRefs: readonly { kind: "entity" | "event" | "relation"; id: string }[];
+  recipeRef: string | null;
+  watermark: string;
+  annotationRefs: readonly string[];   // AnnotationV1 IDs
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface AnnotationV1 {
+  id: string;                          // PK
+  version: number;
+  ownerScope: DeclaredScope;
+  target:
+    | { kind: "anchor"; anchorId: string }
+    | { kind: "range"; laneId: string; from: string; to: string };
+  bodyRef: string;                     // encrypted-profile-storage ref; plaintext never leaves it
+  classification: "private" | "profile" | "shareable";
+  redactionState: "none" | "redacted" | "pending_review";
+  createdAt: string;
+  updatedAt: string;
+}
+```
+
+Keys, indexes, retention, and size envelopes: primary key is `id` for all three; uniqueness is `(ownerScope, name)` for saved views and collections; the server indexes saved views by owner/route/expiry, collections by owner, and annotations by target anchor. The owning store is the server-side saved-view/collection/annotation store behind plan 10 §8.6; the browser holds them only in the bounded IndexedDB cache (section 8.1), with annotation bodies and protected query literals confined to encrypted profile storage. Size envelopes: a serialized `SavedViewV1` is `<= 32 KiB` (state plus refs; no payload text); a `CollectionV1` holds `<= 10,000` member anchors/refs and serializes to `<= 256 KiB`; an `AnnotationV1` body is `<= 4 KiB`. Records over-envelope are rejected by the command preview with the exceeded bound, not truncated silently. Embedded `InvestigationStateV1` restores through the same versioned codec as URLs: unknown versions are refused with an explicit incompatible state.
 
 ## 5. Frontend repository and package structure
 
@@ -393,11 +474,14 @@ dashboard/
 │   ├── sessions/
 │   ├── agents/
 │   ├── coordination/
+│   ├── work/
 │   ├── code/
 │   ├── knowledge/
 │   ├── delivery/
 │   ├── automations/
 │   ├── observatory/
+│   ├── hints/
+│   ├── privacy/
 │   ├── costs/
 │   ├── playgrounds/
 │   ├── evolution/
@@ -430,10 +514,11 @@ Rules:
 - Each renderer creates at most one Canvas/WebGL context and one worker pool. Hidden routes suspend workers and animation frames and release large GPU buffers after a bounded idle period.
 - `features/*` may depend on packages, never another feature's internal files. Shared functionality moves to a package after two proven consumers.
 - No package imports V1 plugin source. Migration adapters live at the route boundary only while the explicit migration flag is active and disappear at cutover.
+- The `dashboard/` workspace uses exactly one package manager: npm with the committed `package-lock.json` (`npm ci` in CI). Root `packages/tracedecay-client` is a separately managed workspace whose generation/test commands run under its own toolchain; the dashboard consumes only its built artifact. No pnpm lockfile, script, or command appears under `dashboard/`.
 
 ## 6. Bundler ADR and embedded-asset boundary
 
-Create `docs/adr/dashboard-v2-bundler.md` before choosing a config filename. Measure the current Rsbuild/Rspack pipeline against a Vite prototype using the same shell route and lazy graph chunk.
+Create `docs/adr/dashboard-v2-bundler.md` before choosing a config filename. Measure the current Rsbuild/Rspack pipeline against a Vite prototype using the same shell route and lazy graph chunk. The ADR (benchmark evidence, decision, rollback path) lands as its own reviewable PR and merges before any bundler config file or implementation commit; Task 2's application-shell work starts from the merged decision so the ADR gate stays independent of the winning bundler's implementation.
 
 The ADR matrix records:
 
@@ -472,7 +557,7 @@ export type ReadModelEnvelope<T> = ApiResponse<T>;
 
 `ApiResponse.meta` always includes request/use-case, protocol, catalog digest, `ScopeResolutionV2`, snapshot, coverage, freshness, redactions, retention, applied limits, and warnings. Feature code cannot construct a smaller meta object.
 
-Paged feature data uses generated `Page<T> { items, next_cursor, truncation }`; Brain/graph/timeline data carries its own generated LOD and allowed-action fields. `CoverageStatusLine` renders all nonempty dispositions, sampling/truncation, freshness, redactions, retention, warnings, and a “why?” link. A feature may specialize the copy but cannot return `data` alone or drop `meta`.
+Paged feature data uses the one generated `CursorPage<T> { items, next_cursor, truncation, count_semantics, ordering }` defined in plan 17's contract IR; Brain/graph/timeline data carries its own generated LOD and allowed-action fields. `CoverageStatusLine` renders all nonempty dispositions, sampling/truncation, freshness, redactions, retention, warnings, and a “why?” link. A feature may specialize the copy but cannot return `data` alone or drop `meta`.
 
 Problems use the one generated `application/problem+json` `ApiProblem { problem_type, title, status, code, detail, instance, retry, current_version, restart, current_binding, candidates, invalid, operation }`. `packages/api-client/src/errors.ts` preserves these fields while redacting response/token bodies from logs. Invalid fields bind to form controls; `current_version` opens conflict review; `current_binding` supports cutoff recovery; candidates drive scope disambiguation; `operation` opens durable status; `restart` invalidates cursor/subscription/snapshot as directed. Retry never guesses from HTTP status alone.
 
@@ -544,11 +629,11 @@ Left to right:
 - save, share, and export actions;
 - command palette and settings.
 
-The palette is generated from the versioned capability/tool catalog. Each item shows intent, read/mutate class, evidence source (`local semantic`, `live delivery`, `joined`), required scope, estimated cost, and unavailable reason. Git-intent searches offer `branch_list`, `branch_search`, `branch_diff`, `pr_context`, `changelog`, `commit_context`, `sessions_for`, and `workflows` guided inputs. Joined GitHub/local actions display both freshnesses and a reconciliation state; drift never looks like a unified truth.
+The palette is generated from the versioned capability/tool catalog. Each item shows intent, read/mutate class, evidence source (`local semantic`, `live delivery`, `joined`), required scope, estimated cost, and unavailable reason. Git-intent searches offer the catalog-generated guided inputs for branch listing/search/diff, PR and commit context, changelog, session lookup, and workflow capabilities; the palette enumerates these entries from the versioned catalog at build/run time and never hardcodes a V1 tool-name list that could fossilize. Joined GitHub/local actions display both freshnesses and a reconciliation state; drift never looks like a unified truth.
 
 ### 9.2 Universal inspector
 
-The inspector works for entity, event, aggregate, path, relation, time range, and comparison selections:
+The inspector works for entity, event, aggregate, path, relation, time range, and comparison selections — each a `SelectionV1` variant (section 4), so every supported selection kind is shareable and restorable through the URL:
 
 - **Summary:** type, label, time/scope, observed/inferred status, coverage, key measures.
 - **Evidence:** supporting observations/events, source offsets/hashes, evidence class, algorithm and confidence.
@@ -578,6 +663,8 @@ All/Brain is federated across the selected repositories/projects/worktrees/refs.
 
 ### 10.1 Brain aggregate tile contract
 
+`BrainTile` is the generated plan 10/17 aggregate-tile read model re-exported through `packages/contracts`; the browser never declares it as a local interface. Reference shape:
+
 ```ts
 export interface BrainTile {
   id: string;
@@ -601,7 +688,7 @@ Semantic zoom:
 - L2 neighborhood: selected entities and bounded typed relations.
 - L3 evidence: exact message, visible reasoning artifact, tool event, diff, diagnostic, fact source, policy evaluation, artifact, or delivery record.
 
-Expansion preserves existing positions, requests only child tiles/neighborhood, and animates no more than 250 ms unless reduced motion is set. If topology exceeds legibility budgets, the UI increases aggregation or switches to matrix/outline; it never merely hides labels.
+Expansion preserves existing positions, requests only child tiles/neighborhood, and animates no more than 250 ms unless reduced motion is set. The legibility budget is numeric: at most `250` labeled marks in the viewport, at most `2` overlapping label pairs per `100` labels, and no effective label smaller than `11 px` after zoom. If topology exceeds any of these bounds, the UI increases aggregation or switches to matrix/outline; it never merely hides labels. The performance suite asserts the bounds against the fixture corpus.
 
 ### 10.2 Graph-of-graphs lens contracts
 
@@ -649,7 +736,7 @@ Explorer's checked benchmark panel runs the versioned redacted corpus by slice: 
 
 One mandatory cross-repo slice spans Rspack, Rsbuild, and React Router repositories/worktrees/benchmarks with same-name files, symbols, branches, sessions, and known dependency/PR evidence. It verifies repo disambiguation, federated graph links, scope candidates, ranking relevance, provenance, and stale/partial labels across CLI/MCP/API/dashboard outputs.
 
-Collections retain stable research anchors plus entity/event/relation refs, retrieval recipe, snapshot/watermark, and annotation refs. Compare aligns by stable entity identity, Turn boundary, commit, or explicit anchor; unaligned items remain visible. Expired page cursors/response handles never invalidate a collection.
+Collections retain stable research anchors plus entity/event/relation refs, retrieval recipe, snapshot/watermark, and annotation refs — the `CollectionV1` record of section 4.3. Compare aligns by stable entity identity, Turn boundary, commit, or explicit anchor; unaligned items remain visible. Expired page cursors/response handles never invalidate a collection.
 
 ## 12. Causal Loom
 
@@ -709,6 +796,48 @@ Reasoning is excluded from search, embeddings, export, and saved annotations by 
 - Scrub as-of: project/worktree/ref/snapshot, visible messages/context, fact/memory versions, hint/policy/config/tool catalog, open goals/tasks/workflows, and observed delivery state.
 - Exact replay requires immutable artifact/config/candidate/index/memory/catalog manifest; recorded replay verifies stored result; best-effort lists substitutions.
 
+### 12.5 Timeline windowing contract
+
+The Loom's client data contract for large corpora is typed, generated in the plan 10/17 schema (density-bin fields lifted from master plan §14.2 into schema), and re-exported through `packages/contracts`:
+
+```ts
+export interface DensityBinV1 {
+  laneId: string;
+  bucketStart: string;               // occurred time; half-open [bucketStart, bucketEnd)
+  bucketEnd: string;
+  exactCount: number | null;         // exactly one of exactCount/sampledCount is set
+  sampledCount: number | null;
+  denominator: number | null;
+  hiddenCount: number;
+  lateCount: number;
+  coverage: CoverageSummary;
+  aggregationVersion: string;
+  firstEventCursor: string | null;   // bin → EventPageV1 linkage for drill-down
+}
+
+export interface LaneWindowV1 {
+  laneId: string;
+  window: { from: string; to: string };
+  totalLogicalRows: number;          // server total; drives virtualized row count (§16.1)
+  loadedPageCursors: readonly string[];
+  evictionWatermark: string | null;
+}
+
+export interface EventPageV1 {
+  pageCursor: string;                // PK within (laneId, window)
+  laneId: string;
+  events: readonly string[];         // canonical event IDs; rows hydrate via generated read models
+  nextCursor: string | null;
+}
+```
+
+Keys, envelopes, and paging policy:
+
+- A density bin is keyed by `(laneId, bucketStart, aggregationVersion)`. One density request returns at most `2,000` bins; if the requested window/zoom would exceed that, the server raises aggregation and reports it in `coverage` — the client never bins events itself.
+- An event page holds at most `500` events and `<= 1 MiB`; the client prefetches at most one page ahead and one behind the viewport and evicts by LRU beyond `12` retained pages per lane, deleting payload chunks before metadata (same policy as section 8.1).
+- Virtualized transcript/table row counts and scroll positions derive from `LaneWindowV1.totalLogicalRows` (the accessibility row-count source of section 16.1), never from loaded-page length; unloaded rows render as fetchable placeholders with position preserved.
+- Size envelope: the recorded fixture corpus pins `388,000+` messages and the 250k-density-mark budget; at hour buckets that is ~8,760 bins per lane-year, so ~28 lane-years fit the mark budget before the server must raise aggregation. `dashboard/tests/performance/timeline` includes a 388k-message fixture exercising binning, paging, prefetch, and eviction at this scale.
+
 ## 13. Domain workspaces
 
 Scope and persistence are visible product semantics, not hidden implementation detail:
@@ -723,10 +852,11 @@ Scope and persistence are visible product semantics, not hidden implementation d
 
 - The canonical selection is initiative/plan-version/work-item/attempt IDs plus frozen/live watermarks. A board is a protected saved `TraceQueryV1` and lens; changing board, repository, agent, executor, or layout never copies or rehomes tasks.
 - Initiative overview shows exact cross-project scope, plan version, dependency/fan-in state, critical-path interval/slack, budgets/deadlines, active agents/executors, costs, outcomes, coverage, and links to Goals/workflows/code/Git/PR/check/release evidence.
-- Plan outline, Kanban, dependency DAG, critical path, timeline, causal, workload, executor-fleet, repository-work, agent-relevant, and All views preserve identical IDs/counts/selection. Drag/drop invokes only generated legal commands; derived readiness cannot be set directly.
+- Plan outline, Kanban, dependency DAG, critical path, timeline, causal, workload, executor-fleet, repository-work, initiative, agent-relevant, and All views preserve identical IDs/counts/selection. This is plan 24's projection vocabulary exactly: §0.21's saved projections plus §12.5's Executor Fleet/Repository Work lens names and §12.7's agent-relevant slice; 11 renders no view name outside that set. Drag/drop invokes only generated legal commands; derived readiness cannot be set directly.
 - Task/attempt inspector covers versions, gates, acceptance, assignment/route rationale, requested versus actual host/provider/model/reasoning effort/tools/skills/grants, fenced lease state, packet/omissions, workspace/ref/snapshot, Turns/tools/artifacts/handoffs/outcomes, cancellation/reconciliation, costs, audit, and anchors.
 - Claim-overlap overlay distinguishes authoritative writable-resource reservations, advisory work claims, intentional ensemble/parallel roles, and weak proximity. It shows exact overlap evidence/TTL without sibling prompt text.
 - Agent default is the active attempt plus blockers/parents, material siblings, decisions, acceptance, handoffs, packet entries, and workspace conflicts. All work requires an explicit human authorization/scope expansion.
+- `/work/notifications` owns the plan 24 §12.7 human notification-subscription UI: explicit saved filters/channels with event classes, quiet hours, dedupe, rate budgets, and authorization, edited only through generated preview/apply commands. Task state never auto-subscribes the creating profile/channel, and dashboard toasts, gateway messages, hook hints, and task comments share no accidental notification loop.
 
 ### 13.1 Sessions
 
@@ -941,7 +1071,7 @@ Target WCAG 2.2 AA and completion of every primary workflow by keyboard and scre
 - Timeline has lane list, previous/next consequential event, next Turn, jump to time, expand noise, and read selected chain commands.
 - Keyboard shortcuts are discoverable, remappable, disabled while typing, and never single-character-only without a modifier except standard spatial navigation.
 - Focus is restored after route lazy-load, sheet/dialog close, inspector close, mutation result, and renderer fallback.
-- Errors and coverage changes announce once; streaming rows do not flood live regions.
+- Errors and coverage changes announce once; live-region announcements are coalesced to at most one per 2 seconds per region, verified with a fake-SSE burst fixture, so streaming rows cannot flood live regions.
 - Tables use real headers, sort state, captions, row labels, and pagination. Virtualization preserves logical row count/position.
 
 ### 16.2 Mobile and touch
@@ -1018,26 +1148,28 @@ Visual fixtures use a committed redacted corpus, fixed UTC time, fixed fonts, fi
 4. updates `dashboard/design/fidelity-ledger.md` with mismatch and fix;
 5. fails on unapproved visible copy, generic substituted icons, clipped content, overflow, unreadable chart text, empty Canvas, or concept drift.
 
+A mismatch is **material** — and must be fixed or explicitly waived with rationale in the fidelity ledger — when it changes copy text, changes a semantic color/mark meaning from the section 2.3 ledger, adds or removes a UI element, breaks the stated screen anatomy (section 2.2), or shifts spacing/alignment by more than `8 px` at `1440×1000`. Anything below those thresholds is recordable but non-blocking; the reviewer applies the threshold list, not taste.
+
 Manual browser QA uses the in-app Browser first. Playwright Chromium/WebKit/Firefox supplies repeatable CI and mobile emulation, not visual taste approval.
 
 ## 19. Performance budgets and degradation
 
-Record reference machine, corpus manifest, build mode, browser/GPU, viewport, and five-run median/p95.
+Record reference machine, corpus manifest, build mode, browser/GPU, viewport, and five-run median/p95. Every latency/FPS/heap gate runs against the pinned fixture corpus manifest at `dashboard/tests/performance/corpus-manifest.json` (388,000+ messages, 36,000+ code-graph nodes, 71,000+ edges); changing the corpus requires re-baselining every budget in the same PR, so the gates cannot drift silently release to release.
 
 | Budget | Gate |
 |---|---|
 | Initial shell JS/CSS | `<= 250 KiB` gzip JS; `<= 80 KiB` gzip CSS |
-| Localhost first contentful paint | `<= 1.5 s` current corpus |
-| First useful evidence | `<= 2 s` current corpus |
-| Graph/timeline render-ready | `<= 3 s` current corpus |
+| Localhost first contentful paint | `<= 1.5 s` on the pinned corpus manifest |
+| First useful evidence | `<= 2 s` to the route's `first-evidence` performance mark: the first committed data row/mark painted from a non-cache response; each route registers exactly one such mark, asserted in its e2e test |
+| Graph/timeline render-ready | `<= 3 s` on the pinned corpus manifest |
 | Local interaction response | `<= 100 ms` excluding fetch |
-| Main-thread long task | none `> 50 ms` in primary workflows |
+| Main-thread long task | none `> 50 ms` (PerformanceObserver `longtask` entries) during the eight scripted section 22.2 tasks, which define the primary workflows |
 | Worker progressive layout | first stable partial `<= 500 ms` |
-| Graph | `>= 55 FPS` at 50k loaded nodes/200k edges with declared LOD |
-| Timeline | `>= 55 FPS` at 250k density marks; inspectable sanitized native/canonical events bounded |
+| Graph | `>= 55 FPS` at 50k loaded nodes/200k edges rendered at `aggregate` LOD, and `>= 55 FPS` at `neighborhood` LOD with 2k visible marks; the benchmark records the LOD level each run passed at |
+| Timeline | `>= 55 FPS` at 250k density marks; native/canonical event hydration bounded by `EventPageV1` (section 12.5: `<= 500` events and `<= 1 MiB` per page, one page prefetch each direction) |
 | Default response payload | `<= 1 MiB`; page/stream larger authorized payloads |
-| Mobile route heap | `<= 300 MiB`; hidden routes stop work |
-| Route lazy chunk | route budget recorded and fails on >10% unexplained growth |
+| Mobile route heap | `<= 300 MiB` JS heap measured via CDP `Performance.getMetrics` `JSHeapUsedSize` under Playwright 390×844 emulation, sampled 5 s after render-ready, median of five runs; hidden routes stop work |
+| Route lazy chunk | per-route budget recorded in a committed budget file; CI fails any chunk `> 10%` over its recorded budget unless the same PR updates the budget entry with a linked justification — an unamended budget file is the definition of "unexplained" |
 
 Degradation order is semantic, not merely graphical:
 
@@ -1087,6 +1219,8 @@ Every V1 write has an explicit V2 command parity test before the migration switc
 
 Each numbered task is independently reviewable. A task starts by writing failing tests against fixtures/contracts, implements the minimum complete slice, verifies focused and full frontend gates, updates inventories/visual briefs, and commits. Do not combine domain workspaces or labs into one hairball PR.
 
+The phase-4 PR letters in this section are the authoritative sub-split ledger for dashboard work: the master plan tracks the top-level PR numbers (4A, 24–32, 35–37) and global release gates, and defers letter-level dashboard splits to this plan. Where a master letter and a letter here disagree, this ledger is the tracking truth for dashboard sub-PRs.
+
 ### Task 1: PR 4A — V1-backed read-only concept workbench
 
 **Files:**
@@ -1102,7 +1236,7 @@ Each numbered task is independently reviewable. A task starts by writing failing
 - [ ] Record exact tokens, typography, component/container families, icons/marks, allowed copy, viewport composition, responsive continuation, and motion in `extraction-ledger.md`.
 - [ ] Write Playwright tests that expect the Brain claim, central bounded topology driven by real V1 aggregate data, activity rail, health strip, inspector selection, keyboard outline, and mobile sheets. Expected before implementation: route/locators fail.
 - [ ] Implement a feature-flagged, read-only workbench using existing V1 APIs with explicit unavailable/partial joins; it must not pretend project-scoped APIs are All data.
-- [ ] Compare browser screenshots to concepts with `view_image`, fix every material mismatch, and record the fidelity ledger.
+- [ ] Compare browser screenshots to concepts with `view_image`, fix every material mismatch per the section 18 threshold list, and record the fidelity ledger.
 - [ ] Run `cd dashboard && npm test && npm run build && npx playwright test tests/visual/brain-concept.spec.ts tests/accessibility/brain-concept.spec.ts`. Expected: pass.
 - [ ] Commit: `docs(ui): lock Brain workbench product contract` for design/reference artifacts and `feat(ui): prototype V1-backed Brain workbench` for the guarded prototype.
 
@@ -1117,13 +1251,13 @@ Each numbered task is independently reviewable. A task starts by writing failing
 - Test: `dashboard/tests/contract/{generated-drift,asset-manifest,history-fallback}.test.ts`
 - Test: `tests/dashboard_api_test/api.rs`
 
-- [ ] Benchmark Rsbuild and Vite with the exact matrix in section 6 and commit measurements/decision/rollback in the ADR.
+- [ ] Benchmark Rsbuild and Vite with the exact matrix in section 6 and land measurements/decision/rollback in the ADR as its own PR (PR 24D) that merges before any bundler config file or implementation commit in this task.
 - [ ] Write failing generated-client drift, content-hashed asset manifest, CSP, base-path, lazy-chunk, history-fallback, `/api` non-fallback, two-clean-build determinism, and packaged-asset tests.
-- [ ] Run `cargo run -p tracedecay-api --bin generate-openapi -- --check`, `pnpm --dir packages/tracedecay-client generate`, `pnpm --dir packages/tracedecay-client test`, and the dashboard browser-binding tests; expose only official typed HTTP/problem/SSE methods plus UI-safe contract aliases.
+- [ ] Run `cargo run -p tracedecay-api --bin generate-openapi -- --check`, then the root client workspace's own generate/test commands for `packages/tracedecay-client` (that workspace's toolchain, per the section 5 package-manager rule — the dashboard itself remains npm-only), and the dashboard browser-binding tests; expose only official typed HTTP/problem/SSE methods plus UI-safe contract aliases.
 - [ ] Implement one React root, router, providers, route-lazy error boundary, selected bundler, asset manifest, and Axum history fallback.
 - [ ] Preserve old shell/plugins only under the migration feature flag while parity work is active; direct old/new URLs work in that mode, and a cutover fixture proves old live routes/names stop resolving afterward.
 - [ ] Run `cd dashboard && npm ci && npm test && npm run build`; run `cargo test --test dashboard_api_test`; run `cargo package --allow-dirty --no-verify` followed by the repository package verification command. Expected: pass and no second-build diff.
-- [ ] Commit: `build(dashboard): establish generated V2 application shell`.
+- [ ] Commit separately: `docs(adr): select dashboard V2 bundler` (PR 24D, first) and `build(dashboard): establish generated V2 application shell` (PR 25A).
 
 ### Task 3: PR 25B — Investigation state, shell, persistence, and design system
 
@@ -1236,7 +1370,7 @@ Each numbered task is independently reviewable. A task starts by writing failing
 - Test: `dashboard/tests/e2e/{brain-semantic-zoom,graph-lenses,git-drift}.spec.ts`
 
 - [ ] Write failing tile truth-contract, semantic zoom, stable expansion, federated multi-repo/worktree/ref scope, same-name node separation, per-shard stale/partial provenance, lens switch, legal edge vocabulary, cross-lens selection, fallback, dense LOD, and Git local/live drift tests.
-- [ ] Implement Brain topology only after PR 26 contracts pass; implement each lens registry row and its mini-brief.
+- [ ] Implement Brain topology only after PR 26 contracts pass; implement each of the eight base lens registry rows and its mini-brief (Task 10A's `tasks`/`plans` lenses complete the ten-slug union).
 - [ ] Add generated Git tool actions and explicit semantic/live evidence requirements to Git inspector/palette.
 - [ ] Verify no hairball, aggregate versus evidence edge bundling, mobile focused neighborhood, 50k/200k benchmark, and table/matrix equality.
 - [ ] Commit: `feat(dashboard): connect the graph-of-graphs Brain`.
@@ -1245,11 +1379,14 @@ Each numbered task is independently reviewable. A task starts by writing failing
 
 **Files:**
 - Create: `dashboard/features/work/src/**/*`
+- Create: `dashboard/features/graphs/src/{tasks-lens,plans-lens}.ts(x)`
 - Extend: `dashboard/features/{brain,graphs,causal-loom}/src/*`
-- Test: `dashboard/tests/e2e/{work-initiative-plan,work-kanban-dag,work-attempt-packet,work-executor-critical-path}.spec.ts`
+- Test: `dashboard/tests/e2e/{work-initiative-plan,work-kanban-dag,work-attempt-packet,work-executor-critical-path,work-notifications}.spec.ts`
 
-- [ ] Write failing one-canonical-ID/count/selection tests across initiative outline, saved Kanban, dependency DAG, critical path, timeline, causal, workload, executor, repository, agent, and All projections.
-- [ ] Implement initiative/plan/task/attempt routes and inspectors from generated views/legal capabilities; board/query/layout state never becomes task or dispatch authority.
+- [ ] Write failing one-canonical-ID/count/selection tests across initiative outline, saved Kanban, dependency DAG, critical path, timeline, causal, workload, executor-fleet, repository-work, initiative, agent-relevant, and All projections.
+- [ ] Add the `tasks` and `plans` lens-registry rows (`tasks-lens`/`plans-lens`), completing the ten-slug `graphLens` union; extend the section 4 lens-slug/union/enum fixture and prove `/graphs/tasks` and `/graphs/plans` round-trip through URL state.
+- [ ] Implement initiative/plan/task/attempt routes and inspectors from generated views/legal capabilities, using the section 4 `InspectorTabV1` Work extension tabs for plan 24 §12.6's task/attempt inspector content; board/query/layout state never becomes task or dispatch authority.
+- [ ] Implement `/work/notifications` (plan 24 §12.7): saved filters/channels with event classes, quiet hours, dedupe, and rate budgets via generated preview/apply commands; prove task creation never auto-subscribes a channel.
 - [ ] Verify exact Rspack/Rsbuild/React Router scope, Codex/Claude route partitions, fan-out/fan-in gates, context-packet omissions, claim-versus-lease distinction, workspace/ref/snapshot, requested/actual route, and stale-fence/cancellation status.
 - [ ] Prove drag/drop maps to a legal versioned command, blocked work cannot be dragged ready, large graphs aggregate server-side, and every visual has table/mobile/keyboard/export parity.
 - [ ] Commit separately: `feat(dashboard): add canonical work and plan views`; `feat(dashboard): visualize work across the TraceDecay brain`.
@@ -1299,6 +1436,22 @@ Each numbered task is independently reviewable. A task starts by writing failing
 - [ ] Switch each domain to its current V2 route only after read/write parity and rollback drill; remove the old live binding atomically.
 - [ ] Commit three reviewable PRs with feature-specific titles.
 
+### Task 13A: PR 25F/30J — Privacy workspace and Context Scout Observatory
+
+**Files:**
+- Create: `dashboard/features/privacy/src/*`
+- Create: `dashboard/features/hints/src/*`
+- Create: `dashboard/features/observatory/src/ContextScoutPage.tsx`
+- Create: `dashboard/features/{privacy,hints}/visual-brief.md`
+- Test: `dashboard/tests/e2e/{privacy-observatory,context-scout}.spec.ts`
+
+- [ ] Write failing `/privacy` tests: `PrivacyProtectionStatusV1` rendering, source × sink × privacy-domain coverage matrix, unknown/locked/corrupt/skipped coverage blocking a clean claim, finding rows exposing only opaque ID/class/confidence/state (a fixture with candidate/substring/span/fingerprint fields must fail to render), elevated-auth scan/remediation previews, restore blocked until isolated scan/rebuild/promotion receipts, and each named current-gap regression row from section 13.9.
+- [ ] Write failing `/observatory/context-scout` tests: trigger/silence/envelope/delivery/outcome funnel with denominators and horizon, queue/model/tool/host state, suppression/dedupe/cooldown evidence, and deep links to Hint Lab replay and `/settings/context-scout`.
+- [ ] Implement `features/privacy` per section 13.9 and plan 18 §14.3 semantics, and `features/hints` plus the Observatory scout page per plan 22's Observatory controls, all from generated read models and commands.
+- [ ] Verify direct reload/back-forward, mobile sheets, table parity, keyboard/screen-reader paths, and locked/offline/partial states on both routes.
+- [ ] Run `cd dashboard && npm test && npx playwright test tests/e2e/privacy-observatory.spec.ts tests/e2e/context-scout.spec.ts`. Expected: pass.
+- [ ] Commit separate PRs: `feat(dashboard): add privacy observatory workspace`; `feat(dashboard): add context scout observatory`.
+
 ### Task 14: PR 25D/30H — Activity, saved views, and Settings
 
 **Files:**
@@ -1307,7 +1460,7 @@ Each numbered task is independently reviewable. A task starts by writing failing
 - Create: `dashboard/features/settings/src/*`
 - Test: `dashboard/tests/e2e/{activity,saved-views,settings}.spec.ts`
 
-- [ ] Write failing activity live/frozen/filter/coverage, generated activity-model parity, saved protected-query classification/redaction/share-preview/apply/revoke/expiry, URL restore, declared-owner conflict, and full effective-source Settings parity tests.
+- [ ] Write failing activity live/frozen/filter/coverage, generated activity-model parity, `SavedViewV1`/`CollectionV1`/`AnnotationV1` round-trip and size-envelope rejection (section 4.3), saved protected-query classification/redaction/share-preview/apply/revoke/expiry, URL restore, declared-owner conflict, and full effective-source Settings parity tests (including the `/settings/context-scout` subroute rendering plan 22's scout controls through plan 20's registry forms).
 - [ ] Implement cross-domain activity with consequential-event priority, project/domain facets, bounded live paging, inspector, table fallback, and no duplicate hidden counts.
 - [ ] Implement saved-view create/update/open/delete plus generated `share_preview`, `share_apply`, and `share_revoke` commands; protected query literals/annotations remain encrypted, published views expire locally, and sharing requires classification/redaction preview.
 - [ ] Implement profile/project/integration/automation/storage settings reads and commands with explicit `DeclaredScope`, effective source/default, immutable environment source, validation, optimistic conflict, migration/resync/restart impact, and audit receipt.
@@ -1315,7 +1468,9 @@ Each numbered task is independently reviewable. A task starts by writing failing
 - [ ] Switch Settings to the current V2 route only after read/write parity and rollback drill; remove the old live binding atomically.
 - [ ] Commit independently: `feat(dashboard): add cross-domain activity`; `feat(dashboard): add protected saved investigations`; `feat(dashboard): add effective Settings workspace`.
 
-### Task 15: PR 31A–31Q — One replay lab per PR
+### Task 15: PR 31A–31M — One replay lab per PR
+
+Thirteen slug labs ship as PR 31A–31M in the section 14 table order; Evolution Studio (the fourteenth canonical lab) ships its product workspace in Task 13 and reuses the generated `labs/evolution:inspect`/`labs/evolution:simulate` bindings, so it needs no letter here. This letter mapping follows the section 21 tracking-truth rule.
 
 **Files:**
 - Complete: `dashboard/packages/labs/src/*`
@@ -1324,7 +1479,7 @@ Each numbered task is independently reviewable. A task starts by writing failing
 
 - [ ] First write shared failing tests for fidelity label, immutable manifest, missing input, substitutions, comparison, cancellation, coverage, read-only proof, redaction, export, and separately authorized fixture promotion.
 - [ ] Implement shared `LabWorkbench` and server-enforced side-effect guard.
-- [ ] Implement one lab per PR with the exact panels in section 14; Query Lab reuses Explorer AST/editor, Search Quality owns qrel/benchmark evidence, Scope/Federation reuses the generated selector/resolution/shard-plan models, Correlation reuses Git reconciliation, Coordination reuses proximity/overlap models but has no messaging port, Orchestration reuses plan/task/route/lease/packet views but has no scheduling/executor/effect port, Memory reuses Knowledge inspector, and Privacy accepts synthetic canaries only.
+- [ ] Implement one lab per PR with the exact panels in section 14; Query Lab reuses Explorer AST/editor, Search Quality owns qrel/benchmark evidence, Scope/Federation reuses the generated selector/resolution/shard-plan models, Correlation reuses Git reconciliation, Coordination reuses proximity/overlap models but has no messaging port, Orchestration reuses plan/task/route/lease/packet views against plan 10 §8.5's generated `labs/orchestration:replay` endpoint but has no scheduling/executor/effect port, Memory reuses Knowledge inspector, and Privacy ("Privacy & Secret Safety Lab") accepts synthetic canaries only.
 - [ ] Run each lab twice and assert exact mode decision/explanation digest equality; recorded mode does not execute; best-effort lists every substitution.
 - [ ] Run Hint Lab fixed-corpus user task “replay then-versus-now and explain exact payload difference <=60 seconds.” Expected: pass.
 - [ ] Commit one feature PR per lab; no omnibus labs merge.
@@ -1336,7 +1491,7 @@ Each numbered task is independently reviewable. A task starts by writing failing
 - Complete: `dashboard/design/fidelity-ledger.md`
 - Modify: feature/package files only for audited defects
 
-- [ ] Run automated axe and manual keyboard/screen-reader/contrast/grayscale/color-deficiency/reduced-motion/table parity audits for every route.
+- [ ] Run automated axe (`@axe-core/playwright`, zero serious/critical violations per route) and manual keyboard/screen-reader/contrast/grayscale/color-deficiency/reduced-motion/table-parity audits for every route against a fixed per-route checklist derived from the section 16.1 requirements, on NVDA + Firefox (Windows) and VoiceOver + Safari (macOS and iOS); record pass/fail per checklist row in `dashboard/tests/accessibility/manual-audit.md` — an audit without a completed checklist does not count as passed.
 - [ ] Run desktop/laptop/mobile portrait/mobile landscape/200% text zoom fixtures and every sheet/gesture/orientation/focus path in sections 16 and 18.
 - [ ] Compare each route screenshot against its accepted concept with `view_image`; fix every reviewable mismatch and close the fidelity ledger.
 - [ ] Run deterministic JSON/Markdown/SVG/PNG export twice and compare manifests/hashes; verify WebGL fallback and no hover-only data.
@@ -1375,6 +1530,8 @@ Each numbered task is independently reviewable. A task starts by writing failing
 
 ### 22.2 User-task gates on the fixed corpus
 
+Each user task is a scripted Playwright scenario with a fixed step script and deterministic fixtures — not a human trial. Timing is measured from navigation start to the scenario's final assertion pass on the recorded reference machine, median of five runs. These eight scenarios define the "primary workflows" referenced by the section 19 long-task budget. "Survive typo/role ambiguity" is concrete: the script submits a fixed misspelled query and an ambiguous role facet and passes only if the disambiguation flow completes to the target result without a dead end or manual query retyping.
+
 - Find an exact historical direct-user prompt, expand its copied/delegated/native set, and prove sanitized source identity/export in `<= 30 s`.
 - Follow a parent agent through subagents and direct code/test/commit/PR impact in `<= 60 s`.
 - Inspect an inferred relation and find its evidence/confidence/algorithm in `<= 30 s`.
@@ -1403,7 +1560,7 @@ Expected: all pass. Before executing Rust compiler/check commands, use TraceDeca
 ## 23. Release gates and definition of done
 
 - `/` opens a truthful All/Brain view across the active profile; project selection is a filter, not another app.
-- All/repository/project/worktree/ref scopes are intuitive, explicit, ambiguity-safe, and semantically identical across dashboard/CLI/MCP/API; federated Rspack/Rsbuild/React Router fixtures retain same-name disambiguation and per-shard provenance/stale/partial state.
+- All/repository/project/worktree/ref scopes are explicit and ambiguity-safe — the section 22.2 scope task and its typo/ambiguity script complete without dead ends — and semantically identical across dashboard/CLI/MCP/API; federated Rspack/Rsbuild/React Router fixtures retain same-name disambiguation and per-shard provenance/stale/partial state.
 - Git, code, thread, agent, Turn, timeline, memory, and automation/skill graph lenses preserve distinct semantics and coordinated state.
 - Causal Loom follows agents/sessions/Turns through context, visible reasoning, tools, code, tests, Git/delivery, hints/memory, goals, and outcomes with evidence-class connectors.
 - Claude workflows, Codex goals, and Hermes-style curator/reflector/skill-writer actors are captured and visible as typed related entities.
@@ -1414,7 +1571,7 @@ Expected: all pass. Before executing Rust compiler/check commands, use TraceDeca
 - Every V1 read, filter, state, action, capability, route, and error behavior is inventoried and parity-proven or documented as an approved semantic change before retirement.
 - Every view has loading/empty/stale/partial/offline/locked/redacted/incompatible/error behavior, table/outline parity, desktop/mobile behavior, keyboard/screen-reader support, reduced motion, and deterministic export.
 - Initial bundle, response, render, FPS, main-thread, heap, and user-task budgets pass on the recorded corpus/reference machine.
-- Approved concepts and final browser screenshots pass `view_image` fidelity review with no material mismatch.
+- Approved concepts and final browser screenshots pass `view_image` fidelity review with no material mismatch, as defined by the section 18 threshold list (copy, semantic color/mark, element add/remove, anatomy, `> 8 px` spacing at `1440×1000`).
 - Legacy plugins retire independently after bounded migration/rollback receipts close; no stale live name/fallback survives V2 default, and no frontend cutover deletes user data or backend evidence.
 - No production frontend file exceeds `800` lines and no route/application component becomes a feature, data, and renderer hairball.
 

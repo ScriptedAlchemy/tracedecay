@@ -19,7 +19,7 @@ Plan [`24-canonical-task-plan-graph-and-multi-agent-executor.md`](24-canonical-t
 - Make an observation deterministic from source instance, artifact identity, rewrite generation, record offset/sequence, and privacy-domain-keyed source fingerprint; any raw checksum is transient/non-serializable inside sanitizer memory.
 - Acknowledge a source offset only in the same commit that persists the observation and its outbox row.
 - Preserve late, duplicate, rewritten, malformed, partial, unknown-version, and out-of-order evidence without silent loss or fabricated order.
-- Keep hook synchronous capture p95 at or below 10 ms while many parent/subagents emit concurrently.
+- Keep hook synchronous capture p95 at or below 8 ms — plan 07's capture sub-budget inside its 10 ms notification-hook total — while many parent/subagents emit concurrently; the 10 ms spool deadline remains the hard synchronous cutoff.
 - Parse, classify, and sanitize through one versioned engine before any general persistence, FTS, vectors, facts, fixtures, exports, logs, policy/hint input, or projector input can see content.
 - Represent only provider/host-exposed reasoning artifacts; never infer, decrypt, or reconstruct hidden chain-of-thought.
 - Produce replay manifests using domain `ReplayMode::{ExactDeterministic, RecordedResult, CurrentBestEffort}` unchanged; exact replay, recorded-result inspection, and current best-effort rerun cannot silently degrade into one another.
@@ -95,6 +95,7 @@ The dependency boundary is `tracedecay-domain <- tracedecay-capture`; store impl
 | `crates/tracedecay-capture/src/adapters/hook_events.rs` | Codex/Claude/Cursor/Kiro hook event framing and producer/session/agent identity hints. |
 | `crates/tracedecay-capture/src/adapters/lcm_v1.rs` | V1 raw-message, summary DAG, source range, compression, lifecycle, payload, and tombstone observations. |
 | `crates/tracedecay-capture/src/adapters/git.rs` | Repository/worktree/ref/commit and fetched delivery evidence snapshots. |
+| `crates/tracedecay-capture/src/adapters/code_snapshot.rs` | Code-snapshot extractor: frames tracked-file text and bounded dirty overlays at explicit repository/checkout/worktree/ref/snapshot tuples so repository content crosses the capture sanitizer before the [`25-code-intelligence-indexing-crate.md`](25-code-intelligence-indexing-crate.md) indexer consumes it. |
 | `crates/tracedecay-capture/src/adapters/automation.rs` | Config, scheduler, run ledger, artifacts, proposals, approvals, skills, facts, and outcome files. |
 | `crates/tracedecay-capture/src/adapters/v1_sessions.rs` | V1 global session/message/parse-offset/analytics backfill rows. |
 | `crates/tracedecay-capture/tests/contract_suite.rs` | Source identity, rewrite, offset, commit, replay, quarantine, and adapter-registry contracts. |
@@ -189,6 +190,8 @@ pub trait ObservationSanitizer: Send + Sync {
 pub struct SanitizedObservation {
     pub envelope: ObservationEnvelopeV1,
     pub receipt: SanitizationReceiptV1,
+    // In-memory routing handle only: persists solely via the store's isolated
+    // quarantine skeleton (plan 02 `quarantined_writes`), never in the envelope.
     pub protected: Option<ProtectedSecretRef>,
 }
 ```
@@ -233,7 +236,7 @@ impl<A: SourceAdapter, S: ObservationSink> CaptureRunner<A, S> {
 
 `ObservationSink::commit` is compare-and-set on the full previous source state. The store implementation inserts observations with `ON CONFLICT(observation_id) DO NOTHING`, inserts one outbox row for each new observation, and advances the cursor in the same transaction. A crash before commit leaves the previous cursor; a crash after commit returns the existing receipt on retry.
 
-`ObservationSanitizer` is the only implementation permitted to construct `SanitizedObservation` or mint `SanitizationReceiptV1`. Its module layout and detector/plugin/budget semantics are exactly Plan 18 Section 8. Adapters parse and identify structured fields but cannot classify eligibility themselves. `ObservationSink` rejects an envelope whose receipt, output digest, privacy domain, parser/detector/policy digest, or completeness does not match. Incomplete/timeout/unsupported scans commit a non-content coverage/quarantine skeleton; they never commit the draft bytes.
+`ObservationSanitizer` is the only implementation permitted to construct `SanitizedObservation` or mint `SanitizationReceiptV1`. Its module layout and detector/plugin/budget semantics are exactly Plan 18 Section 8. Capture mints every receipt; the durable receipt home is the per-shard `sanitization_receipts` table defined in [`02-store-crate.md`](02-store-crate.md) (receipt ID primary key, envelope/observation foreign key, sanitizer/detector versions, taint verdict, expiry/revocation state, observation-ID index), and `ObservationSink::commit` persists each receipt in the same transaction as its envelope. Plan [`04-projectors-crate.md`](04-projectors-crate.md)'s sink firewall validates receipts against that table; [`18-secret-detection-redaction-and-private-data-safety.md`](18-secret-detection-redaction-and-private-data-safety.md) defines the receipt's fields and invariants. Adapters parse and identify structured fields but cannot classify eligibility themselves. `ObservationSink` rejects an envelope whose receipt, output digest, privacy domain, parser/detector/policy digest, or completeness does not match. Incomplete/timeout/unsupported scans commit a non-content coverage/quarantine skeleton; they never commit the draft bytes.
 
 ### Deterministic identity, rewrite, offsets, and ordering
 
@@ -258,6 +261,7 @@ pub fn detect_rewrite(
 - `SourceInstanceId` is a namespaced deterministic ID over profile, host installation, adapter ID, and provider-native source instance.
 - `ArtifactId` is a namespaced deterministic ID over source instance plus the provider-native durable artifact identity; a pathname is only one alias.
 - The adapter normalizes the five `CaptureObservationIdentity` fields into the domain `ObservationKey` canonical field encoding; `derive_observation_id` is the only observation-ID implementation. Capture may not define a second UUID namespace or canonical encoder.
+- `SourcePosition` persists through the offset-lowering columns defined in [`02-store-crate.md`](02-store-crate.md): `observations`/`source_heads` store `(position_kind TEXT, byte_start INTEGER NULL, byte_end INTEGER NULL, object_key TEXT NULL)` with `contiguous_byte_offset` retained for byte-ordered sources. Plan 02 documents the lowering and per-`SourceOrdering` contiguity; capture treats the lowered columns as opaque storage and round-trips every variant, including `ObjectKey(String)` and `ByteOffset{start,end}`.
 - Append growth with matching artifact and head fingerprints preserves the generation and resumes at the committed cursor.
 - Truncation, head-fingerprint change before the committed offset, SQLite replacement, or native artifact identity change starts `generation + 1`; old observations remain immutable.
 - The final unterminated JSONL line is not acknowledged. Malformed complete records are quarantined and the cursor advances only when the quarantine skeleton and outbox marker commit atomically.
@@ -294,7 +298,9 @@ pub struct WorkClaimDraft {
     pub goal_hint: Option<AliasRef>,
     pub scope: WorkClaimScopeDraft,
     pub intent: WorkIntent,
-    pub summary: Option<SafeCoordinationSummary>,
+    // Pre-sanitizer candidate text; only the sanitizer validates it into
+    // `SafeCoordinationSummary` after scanning.
+    pub summary: Option<ProviderFieldValue>,
     pub retrieval_anchors: Vec<RetrievalAnchorId>,
     pub redundancy: RedundancyMode,
     pub status: WorkClaimStatus,
@@ -327,19 +333,22 @@ impl HookSpool {
         &self,
         observation: &SanitizedHookObservation,
         deadline: std::time::Instant,
-    ) -> Result<HookSpoolReceipt, HookSpoolError>;
+    ) -> Result<tracedecay_domain::SpoolReceipt, HookSpoolError>;
     pub fn acknowledge(&self, ack: HookAck) -> Result<(), HookSpoolError>;
     pub fn recover(&self) -> Result<SpoolRecoveryReport, HookSpoolError>;
 }
 ```
 
-`RawHookObservationDraft` exists only in adapter memory. The hook adapter parses and sanitizes it through the same `ObservationSanitizer` before constructing `SanitizedHookObservation`; only that sanitized wrapper can serialize into a spool frame. A scanner timeout or unavailable privacy policy produces a non-content receipt and no hint/content frame. This is the mandatory-security tradeoff defined by Plan 18, not a provider-specific fast-path bypass.
+Capture owns the one hook spool and its drainer. There is exactly one spool implementation, one hash-chained frame format (below), and one always-spool ingress protocol; the store exposes only append transactions and never runs a handoff-first or fallback ingress spool of its own ([`02-store-crate.md`](02-store-crate.md) drains capture's spool through `ObservationJournal` appends). Plan [`07-hooks-crate.md`](07-hooks-crate.md) hook hosts write exclusively through capture's spool client (`spool/client.rs`) and receive durability acks carrying the domain `SpoolReceipt` from [`01-domain-crate.md`](01-domain-crate.md); no crate mints a spool-receipt variant.
+
+`RawHookObservationDraft` exists only in adapter memory. Plan 07's wire shape `Unclassified<RawHookRequestV1>` decodes one-to-one into `RawHookObservationDraft` at the capture client boundary; no second pre-sanitizer hook shape exists. The hook adapter parses and sanitizes it through the same `ObservationSanitizer` before constructing `SanitizedHookObservation`; only that sanitized wrapper can serialize into a spool frame. A scanner timeout or unavailable privacy policy fails closed with no content retention: it produces a non-content receipt and no hint/content frame, and no encrypted or deferred-scan copy of the input is spooled anywhere outside the store's isolated protected-quarantine service. This fail-closed no-content-retention rule is the canonical statement for the plan set; Plan 18's hook target restates it. It is the mandatory-security tradeoff defined by Plan 18, not a provider-specific fast-path bypass.
 
 - The producer lane is `(profile, host, provider, native session, native agent, process nonce)`. One locked lane allocator assigns a monotonic `sequence`; unrelated agents never share a lock.
-- Each append writes a length-delimited frame with version, producer, sequence, payload length, CRC32, SHA-256, and previous-frame hash to a private segment, then calls `fdatasync` before returning `Durable`.
-- The 10 ms deadline bounds synchronous lock/flush time. Contention rotates to a unique pending segment via atomic create; it does not wait on the main lane. Disk-full/permission failures return `Unavailable` to the hook adapter and emit a visible stderr/host diagnostic; they are never reported as captured.
-- Backpressure thresholds are 64 MiB per producer and 2 GiB per profile by default. Crossing the soft threshold returns `DeferredBackpressure` and wakes the drainer; crossing the hard threshold rejects content-bearing frames but reserves a 1 MiB metadata lane for one `capture.spool_overflow` marker per producer/hour.
+- Each append writes a length-delimited frame with version, producer, sequence, payload length, CRC32, SHA-256, and previous-frame hash to a private segment, then calls `fdatasync` before returning the domain `SpoolReceipt`; a successful receipt is the `Durable` ack.
+- The 10 ms deadline bounds synchronous lock/flush time. Contention rotates to a unique pending segment via atomic create; it does not wait on the main lane. Disk-full/permission failures return `HookSpoolError::Unavailable` to the hook adapter and emit a visible stderr/host diagnostic; they are never reported as captured.
+- Backpressure thresholds are 64 MiB per producer and 2 GiB per profile by default. Crossing the soft threshold still appends durably but flags `DeferredBackpressure` on the receipt and wakes the drainer; crossing the hard threshold rejects content-bearing frames but reserves a 1 MiB metadata lane for one `capture.spool_overflow` marker per producer/hour.
 - The drainer verifies the hash chain and CRC, merges lanes by `(occurred_at, producer, sequence)` only for display, commits each producer sequence independently, and writes contiguous acks only after the observation/outbox commit.
+- Ack durability uses the store's spool-acknowledgement port with one row shape, `SpoolAckRecordV1 { producer_lane: ProducerLaneId, segment_id: SpoolSegmentId, contiguous_sequence: u64, drainer_lease_epoch: u64, acked_at: UtcMicros }`: primary key `(producer_lane, segment_id)`, compare-and-set on `drainer_lease_epoch`, index on `acked_at` for grace-period compaction, owned by the profile activity shard, and retained only until its segment is deleted after the 24-hour grace.
 - Segment deletion requires every sequence in the segment to be durably acknowledged plus a 24-hour recovery grace. Multiple drainers use leases and compare-and-set acks; duplicate reads are harmless.
 - Parent/child, inter-agent, tool, goal, and hint relationships remain hints in observations. Projectors establish provider-declared or evidence-bearing relations; capture does not infer them from timing.
 
@@ -363,7 +372,7 @@ pub enum AgentActivityDraft {
         native_claim_id: Option<String>,
         scope: WorkClaimScopeDraft,
         intent: WorkIntent,
-        summary: Option<SafeCoordinationSummary>,
+        summary: Option<ProviderFieldValue>,
         retrieval_anchors: Vec<RetrievalAnchorId>,
         redundancy: RedundancyMode,
         status: WorkClaimStatus,
@@ -387,7 +396,7 @@ pub enum AgentActivityDraft {
 - Claude workflow/run/roster/journal semantics remain `WorkflowRunObserved` records with their native status and agent IDs; they are not coerced into Codex goal states.
 - Codex goal create/update/complete/blocked events retain native goal ID, objective, status, budget, and event type; they are not reduced to workflow-run status.
 - Hermes host/user/automation actor hints and curation/self-improvement records preserve historical proposal/validation/approval/apply kinds as `LegacyCurationObserved`, while V2 emits candidate/autonomy-decision/automatic-effect/outcome/recovery observations. Actor or outcome attribution remains a projector decision backed by these observations; capture never turns a legacy approval into a V2 gate.
-- Presence/work-claim drafts preserve agent/session/parent/goal aliases; repository/worktree/ref/PR/file/symbol/query scope; read/write intent; optional validated safe summary; retrieval anchors; heartbeat/TTL/status; and declared redundancy mode. Capture never infers material overlap, cancels work, or copies raw task/prompt text into the summary.
+- Presence/work-claim drafts preserve agent/session/parent/goal aliases; repository/worktree/ref/PR/file/symbol/query scope; read/write intent; an optional summary candidate that only the sanitizer validates into `SafeCoordinationSummary`; retrieval anchors; heartbeat/TTL/status; and declared redundancy mode. Capture never infers material overlap, cancels work, or copies raw task/prompt text into the summary.
 - File/Git/memory links retain exact tool/event/source references so projectors can cross-link Turn graphs to timeline, code snapshots, worktrees/commits/PRs, facts/retrieval, and automation without temporal guessing.
 
 ### Privacy, reasoning, quarantine, and replay
@@ -430,9 +439,9 @@ pub struct CaptureReplayManifestV1 {
 
 - `Summary`, `AnalysisText`, and `Structured` content is accepted only when the provider delivered it to the host/user. `Encrypted` records store provider metadata/digest and no decrypted text. `Unavailable` is an explicit coverage marker.
 - Reasoning defaults to 30-day retention and is excluded from FTS, vectors, facts, shares, and exports. Capture sets policy metadata; downstream stores enforce it.
-- Secret-like content is sanitized before the envelope. When explicit policy permits forensic inspection, the store's separate protected-quarantine service encrypts transient bytes under a random `ProtectedSecretRef` with 24-hour expiry; the observation contains only a safe marker/receipt, broad reason class, coverage, and protected reference—never spans, length, prefix/suffix, or candidate digest.
+- Secret-like content is sanitized before the envelope. When explicit policy permits forensic inspection, the store's separate protected-quarantine service encrypts transient bytes under a random `ProtectedSecretRef` with 24-hour expiry. The observation envelope itself carries only a safe marker/receipt, broad reason class, and coverage—never spans, length, prefix/suffix, or candidate digest. The opaque protected reference lives only in the non-content quarantine skeleton row (plan 02's `quarantined_writes.protected_secret_ref`, nullable); that store-internal column, written through `ProtectedQuarantineRepository`, is the single reviewed persistence channel for `ProtectedSecretRef`, which otherwise implements no `Display` or public `Serialize`.
 - Exact replay is enabled only when every authorized source slice and the executable parser/config/privacy-policy/detector artifacts and sanitization receipts match their digests. Recorded-result mode exposes stored sanitized observations when executable artifacts are unavailable. Best-effort mode lists every substitution and nondeterministic dependency; it cannot claim byte equality or rehydrate provider-owned raw content.
-- Quarantine reason codes are fixed: `malformed_record`, `unsupported_schema`, `invalid_utf8`, `secret_like`, `payload_hash_mismatch`, `source_gap`, `spool_corrupt`, `future_version`, and `ownership_conflict`.
+- Quarantine reason codes are a closed enum fixed at ten in versioned revision 2: `malformed_record`, `unsupported_schema`, `invalid_utf8`, `secret_like`, `payload_hash_mismatch`, `source_gap`, `spool_corrupt`, `future_version`, `ownership_conflict`, and `identity_collision` (revision 2 adds `identity_collision` for a same-position digest conflict against an already-committed observation identity). This enum grows only by recorded versioned revision here; [`02-store-crate.md`](02-store-crate.md) cites these codes and mints no store-local reason.
 
 ## V1 seam map and ownership
 
@@ -472,8 +481,11 @@ Merged PR #405 (`legacy-store-adoption`) is a required pre-backfill seam: source
 | Coordination | Presence/claim/heartbeat/scope/ack/handoff events; every redundancy mode; safe-summary and anchor privacy; same and parallel worktrees; TTL expiry source evidence; current-parent prefix `019f4906` resolved to its unique full session ID; PR #359 duplicate-review children `agent-ac3ce9b1ebf998cfb`, `agent-a245d2442cefc621d`, `agent-a96d21dc6391ceba8`, `agent-a6661fd133491631c`; shared-worktree Cursor session `ebc96a27-b046-4c88-865f-b38d76da9d2d`. |
 | V1 LCM | Raw/source/summary DAG hashes and ranges; payload references; compression boundary/decision; lifecycle/tombstone; redaction and missing payload quarantine. |
 | V1 automation | Config source; schedule/lock/skip; run events; roster agents; artifacts and hashes; proposals/approvals; skill versions; fact/skill outcomes. |
+| Code snapshot | Tracked-file framing at explicit repository/checkout/worktree/ref/snapshot tuples; bounded dirty overlays; large-blob/binary/generated-file scan budgets with explicit skip coverage; secret-bearing repository fixtures proving sanitizer conformance and zero plaintext leakage; rewrite generation on checkout/ref switch; deterministic snapshot manifest hashes consumed by the plan 25 indexer. |
 
 All provider fixtures assert the normalized envelope JSON, source key/generation/position/hash, sensitivity/retention, replay manifest, and second-ingest result of zero inserted observations.
+
+The `code_snapshot` adapter is the single sanctioned sanitizer-crossing entry point for repository text: repo content flows `code_snapshot` adapter → capture sanitizer → sanitized observations → [`25-code-intelligence-indexing-crate.md`](25-code-intelligence-indexing-crate.md) indexer → plan 02 graph generations → plan 05 queries. No indexer, watcher, or snippet/label/embedding builder reads repository files around capture.
 
 ## PR and task sequence
 
@@ -485,7 +497,7 @@ All provider fixtures assert the normalized envelope JSON, source key/generation
 - [ ] Add the public signatures above and exhaustive enums with serde tags fixed to `snake_case`.
 - [ ] Implement canonical identity bytes, compare-and-set source state, record framing, Plan 18's parse-before-scan engine/policy/receipts/bounded detector registry, replay manifests, and runner retry semantics. Make sanitized observation the only journal/spool input; retire message-metadata opt-out semantics.
 - [ ] Add architecture lint that rejects imports matching `tracedecay::sessions`, `tracedecay::hooks`, `tracedecay::automation`, `mcp`, or `dashboard` from the crate.
-- [ ] Run `cargo test -p tracedecay-capture --test contract_suite`; expected: exit 0 and all seven named contracts pass.
+- [ ] Run `cargo test -p tracedecay-capture --test contract_suite`; expected: exit 0 and all fourteen named contracts pass.
 - [ ] Run `cargo clippy -p tracedecay-capture --all-targets --all-features -- -D warnings`; expected: exit 0 with no warnings.
 - [ ] Commit `feat(capture): add deterministic observation runner`.
 
@@ -497,7 +509,7 @@ All provider fixtures assert the normalized envelope JSON, source key/generation
 - [ ] Implement framed hash-chained segments, pending-lane rotation, contiguous acks, lease/CAS drain, recovery scan, soft/hard backpressure, and diagnostics stated above.
 - [ ] Assert parent/child/inter-agent/tool/hint fields survive spool/recovery as byte-identical sanitized structures with receipt bindings and are not inferred from process order; raw provider bytes never enter a general spool segment.
 - [ ] Run `cargo test -p tracedecay-capture --test hook_spool_suite`; expected: exit 0; recovery yields no lost acknowledged frame and no duplicate observation.
-- [ ] Run `cargo bench -p tracedecay-capture --bench capture -- hook_append`; expected: benchmark report records reference machine, concurrency, p50/p95/p99, and p95 at or below 10 ms at 128 producers.
+- [ ] Run `cargo bench -p tracedecay-capture --bench capture -- hook_append`; expected: benchmark report records reference machine, concurrency, p50/p95/p99, and p95 at or below 8 ms at 128 producers.
 - [ ] Commit `feat(capture): add durable concurrent hook spool`.
 
 ### PR 7C: Codex and Claude adapters
@@ -513,10 +525,11 @@ All provider fixtures assert the normalized envelope JSON, source key/generation
 
 ### PR 7D: Cursor family and remaining provider adapters
 
-**Files:** create `src/adapters/{cursor,cursor_composer,cline_like,hermes,kiro,vibe}.rs`; add matching fixture directories; extend `tests/provider_conformance.rs`.
+**Files:** create `src/adapters/{cursor,cursor_composer,cline_like,hermes,kiro,vibe,code_snapshot}.rs`; add matching fixture directories; extend `tests/provider_conformance.rs`.
 
 - [ ] Implement Cursor agent/Composer read-only framing, dispatch/subagent/presence/claim evidence, SQLite replacement detection, and bounded blob traversal; include shared-worktree session `ebc96a27-b046-4c88-865f-b38d76da9d2d`.
 - [ ] Implement Cline-like, Hermes, Kiro, and Vibe adapters with every matrix assertion.
+- [ ] Implement the `code_snapshot` extractor adapter with explicit repository/checkout/worktree/ref/snapshot tuple identity, bounded dirty overlays, large-blob/binary budgets with skip coverage, and secret-bearing repository fixtures proving sanitizer conformance for the plan 25 pipeline.
 - [ ] Refresh after PR #407 merges, regenerate the Hermes fixture manifest, and prove `~/.hermes` is source-only while sessions/LCM are activity-owned and scope-sensitive histories retain `DeclaredScope` for activity/project routing.
 - [ ] Run `cargo test -p tracedecay-capture --test provider_conformance`; expected: exit 0 for every adapter registered in `adapters/mod.rs` and no untested registry entry.
 - [ ] Run `cargo test --test transcript_ingest_suite`; expected: existing V1 provider suite remains green because shadow capture does not change V1 writes.
@@ -525,6 +538,8 @@ All provider fixtures assert the normalized envelope JSON, source key/generation
 ### PR 7E: V1 LCM, Git, sessions, hooks, and automation backfill adapters
 
 **Files:** create `src/adapters/{lcm_v1,git,automation,v1_sessions}.rs`; add copied-store fixture manifests; extend `tests/provider_conformance.rs` and `tests/shadow_parity.rs`.
+
+PR 7E owns V1 parse and sanitize: every byte of V1 import content passes the mandatory sanitizer here and produces `SanitizationReceiptV1` records before any batch leaves capture. The storage-side transaction executor that consumes these sanitized batches is plan 02's PR 33S-2 importer, which adds no parsing, classification, or redaction of its own ([`02-store-crate.md`](02-store-crate.md); [`12-root-compatibility-migration.md`](12-root-compatibility-migration.md) references this split).
 
 - [ ] Capture every LCM raw/summary/source/compression/payload/lifecycle/tombstone family, session/message/analytics row, Git/worktree/ref/commit observation, hook/hint terminal row, and automation family listed in the seam map.
 - [ ] Add the provider-global backfill-marker regression: a completed marker for one provider/source artifact cannot suppress scanning another provider or cause every source to reparse. Checkpoints are keyed by `(adapter, source instance, artifact, rewrite generation)` and report per-provider reparsed/skipped counts.
@@ -540,7 +555,7 @@ All provider fixtures assert the normalized envelope JSON, source key/generation
 
 - [ ] Persist a migration receipt containing source key, V1 cursor, V2 cursor, freeze watermark, adapter/parser/privacy-policy/detector/receipt digests, inserted/duplicate/sanitized/quarantine/unknown counts, and rollback owner.
 - [ ] Dual-read each source while V1 remains authoritative; compare per-provider session/message/tool/reasoning/goal/subagent/LCM/Git/hook/automation counts, privacy-domain-keyed source fingerprints, and sanitized-output/manifest digests.
-- [ ] Require zero unexplained parity gaps, no corrupt spool segment, projection lag below two seconds for 24 hours, hook p95 at or below 10 ms, and secret-corpus zero leakage before capture cutover.
+- [ ] Require zero unexplained parity gaps, no corrupt spool segment, projection lag below two seconds for 24 hours, hook p95 at or below 8 ms, and secret-corpus zero leakage before capture cutover.
 - [ ] Cut over source-offset ownership by bounded source family; stop V1 advancement only after the freeze watermark is journaled.
 - [ ] Drill rollback by disabling V2 capture, restoring V1 offset ownership from the receipt, draining neither side past the freeze watermark, and proving the next V1 ingest is duplicate-free.
 - [ ] Run `cargo test -p tracedecay-capture --test shadow_parity`; expected: exit 0 with a machine-readable zero-unexplained-gap receipt.
@@ -566,7 +581,7 @@ All provider fixtures assert the normalized envelope JSON, source key/generation
 
 ### Performance and concurrency
 
-- Hook synchronous capture p95 at or below 10 ms at 128 concurrent producers; p99 and rejected/deferred counts are reported.
+- Hook synchronous capture p95 at or below 8 ms at 128 concurrent producers, fitting plan 07's capture sub-budget inside its 10 ms notification-hook total; p99 and rejected/deferred counts are reported.
 - Journal append p95 at or below 20 ms excluding blob I/O.
 - Backfill sustained throughput at least 10,000 messages/second excluding embeddings.
 - Projected visibility is measured end-to-end by the projector plan and must be at or below two seconds p95 before cutover.

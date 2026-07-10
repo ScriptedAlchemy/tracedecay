@@ -14,7 +14,7 @@
 
 This plan refines master-plan PR 24A, supplies the application contracts consumed by PRs 24B–24E and 25–32, and owns transport parity until V1 retirement.
 
-Plan [`24-canonical-task-plan-graph-and-multi-agent-executor.md`](24-canonical-task-plan-graph-and-multi-agent-executor.md) adds task/plan query and command use cases, one authoritative scheduler, owner-shard graph transactions, executor registration/route resolution, fenced claim/heartbeat/terminal workflows, context-packet assembly, workspace/cancellation/effect reconciliation, status, and doctor under this application boundary. No root/adapter/dashboard module may become a second scheduler or lease authority.
+Plan [`24-canonical-task-plan-graph-and-multi-agent-executor.md`](24-canonical-task-plan-graph-and-multi-agent-executor.md) adds task/plan query and command use cases, one authoritative scheduler, owner-shard graph transactions, executor registration/route resolution, fenced claim/heartbeat/terminal workflows, context-packet assembly, workspace/cancellation/effect reconciliation, status, and doctor under this application boundary. No root/adapter/dashboard module may become a second scheduler or lease authority. Those task/plan reads and commands are enumerated in the Section 9–10 inventories below; every task mutation is a POST command-envelope use case (plan 10 §8.7) with no PATCH transport shape.
 
 - The application crate owns use-case identity, authorization, orchestration, request deadlines, non-curation command execution/confirmation, autonomous curation effect application, idempotency, optimistic versions, audit requirements, export/job lifecycle, and bounded migration dispatch.
 - `tracedecay-domain` owns canonical IDs, scope, evidence, sensitivity, watermarks, query AST, and command envelopes. Application types wrap these contracts; they do not create string substitutes.
@@ -178,6 +178,7 @@ crates/tracedecay-application/
 │       │   ├── delivery.rs            # read-only remote evidence refresh
 │       │   ├── coordination.rs        # message/handoff/ack/suppress overlap actions
 │       │   ├── exports.rs             # create/cancel/publish/delete export jobs
+│       │   ├── tokens.rs              # auth.tokens.create/list/revoke over plan 17 §18.2's registry
 │       │   ├── saved.rs               # save/share/update/delete investigation state
 │       │   └── labs.rs                # sanitized fixture-promotion command only
 │       └── labs/
@@ -192,6 +193,7 @@ crates/tracedecay-application/
 │           ├── correlation.rs
 │           ├── coordination.rs
 │           ├── scheduler.rs
+│           ├── orchestration.rs
 │           ├── memory.rs
 │           ├── policy_diff.rs
 │           └── evolution.rs
@@ -290,7 +292,7 @@ pub struct ApplicationResponse<T> {
     pub data: T,
     pub resolved_scope: ScopeResolutionV2,
     pub snapshot: Option<FrozenSnapshot>,
-    pub coverage: CoverageReport,
+    pub coverage: CoverageReportV1,
     pub freshness: FreshnessReport,
     pub redactions: RedactionReport,
     pub retention: EvidenceRetentionWatermark,
@@ -299,9 +301,46 @@ pub struct ApplicationResponse<T> {
 }
 ```
 
-The context captures time once. Relative query times, command expiry, cursor validity, policy effective time, audit time, and authorization decisions derive from that value. No use case reads the ambient clock.
+The context captures time once. Relative query times, command expiry, cursor validity, policy effective time, audit time, and authorization decisions derive from that value. No use case reads the ambient clock. `CoverageReportV1` is plan 01's canonical shared coverage type, consumed unchanged.
 
-`ApplicationError` stable codes include `invalid_input`, `client_version_incompatible`, `not_authenticated`, `scope_not_found`, `scope_ambiguous`, `scope_denied`, `identity_split`, `ownership_unresolved`, `payload_denied`, `payload_redacted`, `capability_unavailable`, `freshness_required`, `version_conflict`, `idempotency_conflict`, `preview_expired`, `revalidation_failed`, `workflow_in_progress`, `workflow_failed`, `read_only_lab`, `partial_result_disallowed`, `deadline_exceeded`, `cancelled`, `retention_crossed`, and `internal_invariant`. It carries only the canonical safe problem inputs: code, `CatalogSafeText`, retry/restart/current-binding directive, correlation ID, safe scope candidates, invalid fields, optional current aggregate version, and optional operation ref. `identity_split` includes safe candidate/adoption evidence and legal backup/consolidation preview but never maps to “initialize.” Transport status/formatting is plan 10's mapping; no transport creates another semantic error enum. Bounded failure reasons and compatibility errors cross the output-safety seal and never include raw request, command, query, summary, provider error, or secret content.
+`AuthenticationClass` and `GrantSet` are concrete contracts, not open strings:
+
+```rust
+pub enum AuthenticationClass {
+    BrowserSession,                       // plan 10 §10.2 cookie + CSRF
+    BearerToken { token_id: ApiTokenId }, // scoped/TTL/revocable registry token, plan 17 §18.2
+    BootstrapLaunch,                      // per-launch secret; only legal command is auth.tokens.create
+    LocalProcess { os_user: OsUserRef },  // in-process CLI/MCP composition
+    InternalWorker,                       // curation/workflow/scheduler actors with recorded provenance
+}
+
+pub struct GrantSet {
+    pub capabilities: BTreeSet<CapabilityGrant>, // Read | Preview | Mutate | Admin | named destructive grants
+    pub scope_constraints: Vec<ScopeSelectorV2>,
+    pub sensitivity: SensitivityGrantSet,
+    pub expires_at: Option<UtcMicros>,
+}
+```
+
+Composition mints the in-process `Principal` for CLI and MCP adapters: it verifies the invoking OS user against the profile owner, resolves the operator's local token grants, and constructs `LocalProcess` principals explicitly. CLI inherits the operator token's grants; local MCP agent hosts default to Read+Preview and receive Mutate/Admin only from an explicit scoped token (plan 17 §17's read-only default for direct agent credentials). No adapter constructs an ambient admin principal, and the per-launch bootstrap bearer (plan 10 §10.2) authenticates only `auth.tokens.create` for the initial admin-class token.
+
+`ApplicationError` stable codes include `invalid_input`, `client_update_required`, `daemon_restart_required`, `capability_replaced`, `not_authenticated`, `scope_not_found`, `scope_ambiguous`, `scope_denied`, `identity_split`, `ownership_unresolved`, `payload_denied`, `payload_redacted`, `capability_unavailable`, `freshness_required`, `version_conflict`, `idempotency_conflict`, `preview_expired`, `revalidation_failed`, `workflow_in_progress`, `workflow_failed`, `read_only_lab`, `partial_result_disallowed`, `deadline_exceeded`, `cancelled`, `retention_crossed`, and `internal_invariant`. It carries only the canonical safe problem inputs: code, `CatalogSafeText`, retry/restart/current-binding directive, correlation ID, safe scope candidates, invalid fields, optional current aggregate version, and optional operation ref. `identity_split` includes safe candidate/adoption evidence and legal backup/consolidation preview but never maps to “initialize.” Transport status/formatting is plan 10's mapping; no transport creates another semantic error enum. Bounded failure reasons and compatibility errors cross the output-safety seal and never include raw request, command, query, summary, provider error, or secret content.
+
+Stale-client codes are exactly the plan 17 §12 contract-IR registry — `client_update_required`, `daemon_restart_required`, and `capability_replaced { current_binding }` — with no locally minted variants. `error.rs` also owns the retry classes: `RetryDirective` is the tagged union below (with `RestartDirective` as its restart payload); plan 17 §12 reproduces it verbatim for SDKs and adds no variants.
+
+```rust
+pub enum RetryDirective {
+    Never,
+    SameRequestAfter { delay: DurationMicros, condition: RetryCondition },
+    RetryWith { canonical_request: CanonicalRequestRef },
+    RestartPagination { request_without_cursor: CanonicalRequestRef, reason: CursorRestartReason },
+    PollOperation { operation_id: OperationRef, after: DurationMicros },
+    RefreshAuth { method: AuthMethodRef },
+    UpdateClient { minimum_protocol: ProtocolRef, current_binding: BindingRef, command: CatalogSafeText },
+    ResolveScope { candidates: Vec<SafeCandidate>, canonical_request_template: CanonicalRequestRef },
+    Resubscribe { snapshot_request: CanonicalRequestRef, reason: ResubscribeReason },
+}
+```
 
 `ApplicationResponse<T>` requires a sealed `TransportEligibleView` implemented only by generated structs whose content fields use plan 18's `CatalogSafeText`, `SearchEligibleText`, `PromptEligibleText`, `ExportEligibleText`, or explicit redacted/denied/unknown variants. Raw `String`, `serde_json::Value`, and bytes cannot satisfy it. This is a compile-time boundary plus a runtime sanitization receipt check, not a convention left to each use case.
 
@@ -338,6 +377,18 @@ pub trait CommandUseCase<C, P, O>: Send + Sync {
 - `preview` captures aggregate/evidence versions, impact, redactions, required approvals, disk/network/process effects, and `PreviewDigest`. `apply` must present that digest and revalidate every version/capability/hold/freshness dependency.
 - Retrying an identical completed command returns the stored receipt. Reusing an idempotency key with a different canonical command digest returns `idempotency_conflict` without mutation.
 - Adapters cannot invoke repository operations directly; the use-case registry is the only executable capability surface.
+
+Query inputs embed one typed read envelope; adapters map it losslessly instead of inventing per-transport consistency semantics:
+
+```rust
+pub struct ReadRequirementsV1 {
+    pub consistency: ReadConsistency,   // Eventual | Frozen | AtLeastWatermark(VectorWatermark)
+    pub budget: ResourceBudget,         // row/byte/shard/time caps within catalog hard limits
+    pub payload: RequestedPayloadPolicy,
+}
+```
+
+This is plan 17 §11.1's per-request consistency/budget/payload contract. HTTP read POST bodies carry it as a top-level `read` object and GET enumerations accept only its bounded enum/watermark forms (plan 10 §8); the request deadline itself stays in `RequestContext`.
 
 ### 7.3 Authorization and privacy
 
@@ -411,6 +462,38 @@ Transaction order is fixed:
 
 No network, process launch, source scan, blob upload, large export encoding, model evaluation, or user wait occurs between steps 4 and 8.
 
+Idempotency records are concrete contracts, not conventions; plan 02 stores them in the owning shard's `command_idempotency` table:
+
+```rust
+pub struct IdempotencyReservation {
+    pub key: IdempotencyKey,              // caller-supplied, <=128 bytes
+    pub principal: ActorRef,
+    pub use_case: UseCaseId,
+    pub command_digest: ContentDigest,    // canonical CommandEnvelopeV1 digest
+    pub reserved_at: UtcMicros,
+    pub retain_until: UtcMicros,
+}
+
+pub enum IdempotencyDisposition {
+    Reserved,
+    Completed(StoredCommandResult),
+    ConflictingDigest { stored_digest: ContentDigest },
+}
+
+pub struct StoredCommandResult {
+    pub key: IdempotencyKey,
+    pub command_id: CommandId,
+    pub receipt_digest: ContentDigest,
+    pub receipt: BoundedReceiptBytes,     // canonical CommandReceipt encoding, <=256 KiB
+    pub completed_at: UtcMicros,
+    pub retain_until: UtcMicros,
+}
+```
+
+- Key scope and uniqueness: the primary key is `(principal, use_case, key)` in the command's owning shard; the same key under a different principal or use case is a distinct reservation, never a conflict.
+- Retention: completed results are retained at least 7 days (plan 20 configuration, per command class) and never shorter than the longest declared preview/retry window; an index on `retain_until` drives GC. After expiry the key is forgotten and a retry executes as a new command; clients needing longer recovery follow the receipt's `OperationRef`.
+- Size: a stored result larger than 256 KiB persists the receipt plus an `OperationRef` instead of inline output; identical retry returns that receipt with the operation pointer.
+
 ### 8.2 Command receipts and conflicts
 
 ```rust
@@ -438,6 +521,8 @@ pub struct CommandReceipt<O> {
     pub workflow: Option<WorkflowRef>,
 }
 ```
+
+`CommandId` is allocated deterministically by the application when the preview is built — a digest over principal, use case, idempotency key, and canonical command digest — so a retried preview is stable and at most one `CommandId` exists per reservation; adapters echo it on apply and never mint their own. `CommandPreview.expires_at` defaults to 10 minutes after `RequestContext.issued_at` (per-command overrides are catalog-declared through plan 20 configuration); an expired preview returns `preview_expired` and requires a new preview.
 
 Version conflict returns the current version, changed dependency IDs, safe summary, and a new-preview requirement. It never auto-rebases a destructive command. Idempotent status/run/refresh requests may explicitly declare a merge policy; that policy is versioned in the catalog and fixture-tested.
 
@@ -574,22 +659,7 @@ pub struct GraphLensResponse {
 }
 ```
 
-Stable investigation handoff exposes domain `RetrievalAnchorId`; the owning store resolves it to domain `RetrievalAnchorRecordV1` under current authorization. Plan 13's research bundle/context manifest cites those IDs. Application defines the portable multi-anchor recipe below, not a second anchor record:
-
-```rust
-pub struct RetrievalRecipeV1 {
-    pub recipe_id: RetrievalRecipeId,
-    pub use_case: UseCaseId,
-    pub anchors: Vec<RetrievalAnchorId>,
-    pub protected_input: Option<ProtectedContentRef>,
-    pub canonical_input_digest: PrivacyDomainBoundLocatorDigest,
-    pub scope: ScopeSelectorV2,
-    pub time: InvestigationTime,
-    pub message_view: Option<MessageView>,
-    pub schema_catalog_ranking: VersionSet,
-    pub freshness: FreshnessRequirement,
-}
-```
+Stable investigation handoff exposes domain `RetrievalAnchorId`; the owning store resolves it to domain `RetrievalAnchorRecordV1` under current authorization. Plan 13's research bundle/context manifest cites those IDs. Application consumes plan 01's portable multi-anchor `RetrievalRecipeV1` unchanged — recipe ID, owning use case, anchor list, optional protected input ref, privacy-domain-bound canonical input digest, scope selector, investigation time, optional message view, schema/catalog/ranking version set, and freshness requirement — and defines neither a second recipe type nor a second anchor record.
 
 Every session/thread/Turn/message/agent/subagent/workflow/goal/Git result exposes at least one `RetrievalAnchorId` and a safe recipe or protected recipe ref. Research bundles use `ResearchContextAnchorV1` only for implementation provenance; it is not a parallel result-citation model. Recipes contain no literal prompt/query/path secret, cursor, response-handle token, or remote credential. Resolution loads `RetrievalAnchorRecordV1` and returns current identity, source evidence, drift from recorded versions/watermarks, and coverage. Cursors remain page mechanics; V1 response handles may bridge a migration renderer but are never the sole research locator or saved/exported reference.
 
@@ -681,6 +751,7 @@ pub struct MessageReadModel {
 | Delivery truth | `delivery.repositories.get`, `delivery.pull.get`, `delivery.checks.list`, `delivery.reviews.list`, `delivery.releases.list`, `delivery.reconcile`. Live state carries provider/fetched-at/ETag/base/head/cap/coverage separately from local semantic state. |
 | Knowledge | `knowledge.facts.list/get/search`, `knowledge.entities.list/get`, `knowledge.trust.history`, `knowledge.conflicts.list`, `knowledge.retrieval.history`, `knowledge.feedback.history`, `knowledge.deletion_impact`. |
 | Automation | `automation.jobs.list/get`, `automation.scheduler.status`, `automation.runs.list/get`, `automation.artifacts.get`, `automation.proposals.list/get`, `automation.skills.list/get`, `automation.outcomes.get`, `automation.workflow_graph.get`. |
+| Tasks/orchestration | `initiatives.list/get`, `initiatives.graph`, `plans.list/get/diff`, `work_items.list/get/query`, `work_items.context`, `work_items.dependencies`, `attempts.list/get/timeline`, `executors.list/get/match`, `scheduler.status/explain`, `task_views.list/get`. Plan 24 §9.1 owns semantics and module files: reads use read ports only, `executors.match` is read-only, and task events are subscription read-model kinds under `subscriptions.create`, never a second stream vocabulary. |
 | Hints and policy | `hints.evaluations.list/get`, `hints.outcomes.get`, `hints.opportunities.get`, `policy.bundles.list/get`, `policy.coverage.get`. |
 | Accounting | `accounting.usage.get`, `accounting.costs.get`, `accounting.savings.get`, `accounting.adoption.get`, `accounting.denominators.get`. Unknown/capped denominators are typed, never zero. |
 
@@ -696,6 +767,7 @@ Current Git tools are not hidden behind the generic query alone: their stable us
 | `labs.hints.evaluate`, `labs.retrieval.evaluate`, `labs.ingest.evaluate`, `labs.query.evaluate`, `labs.correlation.evaluate`, `labs.scheduler.evaluate`, `labs.memory.evaluate`, `labs.policy_diff.evaluate` | Immutable exact/recorded/best-effort input and typed explanation/diff with no writes. |
 | `labs.search_quality.evaluate/compare` / `labs.scope_federation.evaluate` / `labs.privacy.evaluate` | Read-only retrieval-profile/corpus comparison, selector-resolution/shard-plan replay, and reserved/invalid synthetic sanitizer evaluation with exact anchors, versions, coverage, resource costs, and zero live registry/qrel/finding/policy mutation. |
 | `labs.coordination.evaluate` | Replay presence/overlap classification, proximity ranking, one-hint selection/suppression/dedupe, safe summary, legal action set, and outcome attribution with exact versions/coverage; message/handoff/ack/suppress are simulated only. |
+| `labs.orchestration.replay` | Read-only replay of plan 24 scheduler/executor decisions — readiness evaluation, route resolution, claim fencing, and context-packet assembly — against recorded task-graph state with exact versions/coverage; claims, leases, attempts, and boards are never mutated. |
 | `labs.evolution.inspect` / `labs.evolution.simulate` | Evidence collection through curator/reflector/skill-writer graph, proposal/version diff, validation, historical corpus simulation, rollout/rollback prediction. |
 
 Evolution Studio preserves Hermes-style self-improvement as ordinary evidence-bearing actors, goals, turns, tools, artifacts, skills, memories, autonomy decisions, automatic applies, uses, outcomes, revisions, automatic recoveries, archives, and deletions. Simulation is an inspector and never mutates live state; it returns changed decisions/tool routes/outcomes, regressions/wins only where labels exist, unknown horizons, privacy exclusions, and cost/latency deltas. The live autonomous worker does not wait for the inspector.
@@ -719,6 +791,8 @@ Every non-curation mutation has an explicit typed execution contract and, when d
 | Delivery refresh | `delivery.refresh`. Read-only remote fetch into captured evidence; repository allowlist, credential capability, rate/cap state, and fetched revision are audited. No PR write command. |
 | Saved investigations | `saved_views.create/update/delete`, `saved_views.share_preview/share_apply/share_revoke`, `collections.create/update/delete`, `annotations.create/update/delete`. Protected content stays with its declared activity/project owner; sharing creates a separately authorized, redacted, expiring local published view readable through `saved_views.get`, never publishes remotely, and never copies source content into catalog metadata. |
 | Agent coordination | `coordination.message`, `coordination.handoff`, `coordination.ack`, `coordination.suppress`. Every command targets one presence/overlap claim and stable anchor, checks host/agent capability and expiry, previews disclosed summary/effects, records delivery/acceptance separately, and cannot mutate another agent's state without an authorized provider action. |
+| Tasks/orchestration | `initiatives.create/update/pause/resume/retire`, `plans.create_version/activate`, `plans.decompose`, `work_items.create/update/replace/retire`, `work_items.link/unlink`, `work_items.assign/reassign`, `work_items.pause/resume/cancel/reopen/archive`, `work_items.claim/heartbeat/progress/complete/block`, `work_items.retry`, `executors.register/heartbeat/drain/unregister`, `scheduler.pause/resume/run_once`, `task_views.create/update/delete/share`. Plan 24 §9.2 owns semantics and module files; every one is a POST command-envelope use case (plan 10 §8.7) — the former `PATCH /initiatives/{id}` / `PATCH /work-items/{id}` transport shapes are the `*.update` commands — and `work_items.claim` CAS-checks `expected_readiness_digest` against the owner-shard `readiness_digest` column (plan 24 §5.3). |
+| API tokens | `auth.tokens.create`, `auth.tokens.list`, `auth.tokens.revoke`. Audited commands minting, listing, and revoking the scoped/TTL/revocable tokens of plan 17 §18.2; creation returns the secret exactly once through the secure flow, storage keeps only the hash and token ID, revocation declares stream/operation implications, and the per-launch bootstrap bearer (plan 10 §10.2) may execute only `auth.tokens.create` for the initial admin-class token. |
 | Exports | `exports.create`, `exports.cancel`, `exports.delete`. Create freezes query/access/redaction, stages parts under profile export root, and publishes only after final manifest hash. |
 | Lab promotion | `labs.fixtures.promote`. Requires sanitized redacted payload, secret scan receipt, exact source manifest, explicit confirmation, and repository-write capability outside lab runtime. |
 | Code edits | `code.move_symbol.preview/apply`. Preview is the default binding and returns exact source-removal/destination-insertion diff, applied destination imports, caller/dependency/visibility/collision/module/cycle/orphaned-import/cfg impact, snapshot/version, and affected-test evidence without writing. Apply requires repository/worktree grant, confirmation digest, clean revalidation, destination-first write plus source rollback receipt, reindex operation, and never rewrites callers implicitly. |

@@ -52,7 +52,7 @@ pub struct ResearchContextAnchorV1 {
     pub expected_subject: LogSafeText,
     pub retrieval_recipe_id: RetrievalRecipeId,
     pub snapshot: VectorWatermark,
-    pub coverage: CoverageReport,
+    pub coverage: CoverageReportV1,
 }
 ```
 
@@ -62,7 +62,8 @@ Rules:
 - A message anchor requires stable native/message/store identity. Text, timestamp, ordinal, or content hash alone is only a candidate matcher.
 - A subagent-task anchor requires provider-declared parent/tool/agent linkage or an evidence assertion. Copied system text is not direct ownership evidence.
 - Git correlation names produced, observed, encountered, branch-active, or time-overlap relation explicitly.
-- Every anchor stores the captured store/index/ref watermarks and a coverage report. Re-resolution reports drift; it does not mutate the old claim.
+- Every anchor stores the captured store/index/ref watermarks and a `CoverageReportV1`. Re-resolution reports drift; it does not mutate the old claim.
+- `CoverageReportV1` and `RetrievalRecipeV1` are plan 01 domain contracts ([01-domain-crate.md](01-domain-crate.md)); this plan embeds them unchanged, so `research.rs` compiles inside the domain crate without depending on query- or application-layer types.
 - Secret/sensitive content is never embedded in the anchor. Authorization is re-evaluated when resolving payloads.
 - `ResearchAnchorId` is durable. Response-handle IDs, browser URLs, search ranks, and temporary filesystem paths are optional hints only.
 
@@ -72,6 +73,7 @@ Rules:
 pub struct ResearchBundleManifestV1 {
     pub manifest_id: ResearchManifestId,
     pub schema_version: SchemaVersion,
+    pub supersedes: Option<ResearchManifestId>,
     pub created_at: UtcMicros,
     pub created_by: ActorRef,
     pub parent_plan: DocumentRef,
@@ -91,7 +93,59 @@ pub struct ResearchBundleManifestV1 {
 }
 ```
 
-The manifest is append-only/versioned. A later implementation agent adds a new version when sessions are backfilled, PRs merge, refs move, or attribution improves. It never edits an earlier evidence class from inferred to observed without a superseding assertion.
+The manifest is append-only/versioned. A later implementation agent adds a new version when sessions are backfilled, PRs merge, refs move, or attribution improves; the new version records its predecessor in `supersedes`. It never edits an earlier evidence class from inferred to observed without a superseding assertion.
+
+Referenced record shapes (finalized in PR 2A):
+
+```rust
+pub struct ResearchContributionV1 {
+    pub contributor: ActorRef,
+    pub session_id: Option<SessionId>,
+    pub role: ContributionRoleV1, // Authored | Researched | Reviewed | Audited
+    pub outputs: Vec<DocumentRef>,
+    pub anchors: Vec<ResearchAnchorId>,
+    pub evidence_class: EvidenceClass,
+    pub confidence: Confidence,
+}
+
+pub struct AttributionGap {
+    pub subject: LogSafeText,
+    pub candidate_sessions: Vec<SessionId>,
+    pub reason: AttributionGapReasonV1, // MissingParentToolUse | CopiedCoordinationText | CaptureGap | AmbiguousArtifact
+    pub repair_recipe: Option<RetrievalRecipeId>,
+}
+
+pub struct RedactionReport {
+    pub sanitizer_version: ComponentVersion,
+    pub scanned: u64,
+    pub redacted: u64,
+    pub rejected: u64,
+    pub receipts: Vec<SanitizationReceiptId>, // plan 18 sanitization receipts
+}
+
+pub struct GitTruthManifest {
+    pub repository: RepositoryRef,
+    pub head_commit: CommitId,
+    pub merge_base: Option<CommitId>,
+    pub refs: Vec<(RefId, CommitId)>,
+    pub dirty: bool,
+    pub captured_at: UtcMicros,
+}
+
+pub struct ResearchAnchorTombstoneV1 {
+    pub anchor_id: ResearchAnchorId,
+    pub reason: AnchorTombstoneReasonV1, // Deleted | Expired | Redacted
+    pub occurred_at: UtcMicros,
+    pub provider: ProviderId,
+    pub session_id: SessionId,
+    pub evidence_class: EvidenceClass,
+    pub snapshot: VectorWatermark,
+    pub coverage: CoverageReportV1,
+    pub receipt: AuditReceiptRef,
+}
+```
+
+Tombstones are keyed by `anchor_id` (one per anchor), stored with the anchor tables in the owner shard per plan 02, and retained at least as long as any manifest version that references the anchor.
 
 ## 4. Current planning anchor registry
 
@@ -260,7 +314,7 @@ Search query/rank is a recipe, not the anchor.
 - Explorer, Causal Loom, Turn inspector, agent graph, Git/delivery view, Hint Lab, Evolution Studio, and plan inspector can open/copy an anchor.
 - A plan/document inspector lists the evidence bundles and agent contributions that produced it, plus unresolved attribution.
 - Export emits anchor IDs, native aliases, source watermarks, evidence class, coverage, and retrieval recipes; payload inclusion is separately authorized.
-- If an anchor is deleted/expired/redacted, the non-content provenance skeleton and reason remain.
+- If an anchor is deleted/expired/redacted, a `ResearchAnchorTombstoneV1` retains the non-content provenance skeleton and reason.
 - Every plan implementation task starts with “resolve referenced manifest at current state” and records drift before editing code.
 
 ## 7. Phase 0 implementation task

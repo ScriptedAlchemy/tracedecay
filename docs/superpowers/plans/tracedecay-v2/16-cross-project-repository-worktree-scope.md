@@ -14,7 +14,7 @@ An agent or person must be able to ask one question about one named repository, 
 
 1. Results from the intended scopes, never a silent fallback to the active checkout.
 2. One stable identity for every repository, checkout, worktree, ref snapshot, session, message, agent, and code entity.
-3. Explicit coverage: searched, skipped, unavailable, stale, truncated, redacted, and permission-denied scopes.
+3. Explicit coverage: searched, skipped, unavailable, stale, truncated, redacted, and permission-denied scopes, carried as one typed record — plan 01's `CoverageReportV1` (shard dispositions, freshness watermarks, unknown-coverage flag) — rather than per-transport prose.
 4. A direct retrieval path from a summary/search hit to the exact underlying object, even when the object lives in another project shard.
 5. The same selector, error, cursor, and response semantics in the official API, CLI, MCP, dashboard, hooks, and generated SDKs.
 6. A compact answer by default and full provenance on demand.
@@ -174,6 +174,8 @@ worktree: /.../dev-rebuild-optimizations (branch codex/dev-rebuild, head abc1234
 ## 6. Registry and store architecture
 
 `catalog.db` owns store manifests, stable entity-to-owner routes, and versioned privacy-domain-keyed exact/token/ngram alias-routing digests. Canonical alias values/history remain in authorized `activity.db` or project owners. `activity.db` owns canonical provider activity. Project shards own repository/project-scoped code, delivery, knowledge, and policy projections.
+
+Alias-routing digests are versioned records, not bare hashes: every digest row carries the privacy-domain key epoch/ID, tokenizer/normalizer version, digest algorithm version, and catalog generation, so key rotation or tokenizer change re-derives routes instead of silently corrupting resolution. Plan 02 owns the storage schema for these route tables.
 
 Required behavior:
 
@@ -488,6 +490,8 @@ Create redacted fixtures for:
 8. “Resolve `rsbuild rspack` despite token separation.”
 9. “Distinguish `react-router`, `rsbuild-plugin-react-router`, and generated fixture copies.”
 10. “Query a dirty feature worktree, not the main checkout graph.”
+
+Fixture promotion runs plan 18 secret scanning and plan 15's sanitization-receipted promotion command; raw private transcript or corpus content is never committed.
 
 ### 18.2 Scope resolution labels
 

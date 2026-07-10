@@ -17,9 +17,9 @@
 9. Read-only is the default and V2 launch maximum effect class. Local query/search/memory/LCM/code/Git/coordination reads are eligible only through cataloged application use cases. Remote read/egress requires an explicit grant and remains separately labeled.
 10. Suggestions are compact, specific, and non-overbearing. Static capability boilerplate, repeated categories, restated user prompts, vague advice, and uncited generated claims are invalid output.
 11. Late, stale, expired, superseded, redacted, or already-observed suggestions are recorded with a disposition and never silently injected into a later logical message.
-12. The scout shares the canonical hint state, policy, catalog, configuration, presentation, delivery receipt, and outcome pipeline. It does not create parallel counters, renderers, model settings, or dashboard-only state.
+12. The scout shares the canonical hint state (plan 6's `HintStateSnapshot`, fields in [06-policy-crate.md](./06-policy-crate.md) §9.1.2), policy, catalog, configuration, presentation, delivery receipt, and outcome pipeline. It does not create parallel counters, renderers, model settings, or dashboard-only state.
 13. Replay, shadow, A/B evaluation, and “what would happen now?” are read-only. They never deliver, mutate counters, affect dedupe, or create per-item approval/apply/rollback flows.
-14. Existing deterministic hint classifiers remain a candidate source during migration, then move behind the same policy contract. There is one delivery selector at cutover.
+14. Existing deterministic hint classifiers remain a candidate source during migration, then move behind the same policy contract. There is one delivery selector at cutover: plan 6's `DeliveryArbiterV1` ([06-policy-crate.md](./06-policy-crate.md) §9.1.3), which arbitrates deterministic and scout `DeliveryCandidateV1` submissions under one `HintStateSnapshot` version compare-and-swap.
 15. Canonical initiative/task/ticket/dependency/claim/context-packet events are eligible evidence, not a broadcast feed. A sibling-task change reaches an exact Thread/Turn only when evidence proves material overlap, a blocker, a handoff, or an invalidated assumption.
 
 This plan extends the contracts in [01-domain-crate.md](./01-domain-crate.md), [06-policy-crate.md](./06-policy-crate.md), [07-hooks-crate.md](./07-hooks-crate.md), and [09-application-crate.md](./09-application-crate.md). Configuration is exclusively owned by [20-configuration-control-plane.md](./20-configuration-control-plane.md); capability and rendering parity are exclusively owned by [21-cli-mcp-tool-surface-and-output-unification.md](./21-cli-mcp-tool-surface-and-output-unification.md).
@@ -96,7 +96,7 @@ Allowed edges remain those in [19-system-defragmentation-convergence-and-extensi
 
 ## 4. Domain contracts
 
-Add pure contracts under `crates/tracedecay-domain/src/scout/` and export them through the versioned schema registry. IDs follow the deterministic encoding and privacy-domain rules in [01-domain-crate.md](./01-domain-crate.md).
+Add pure contracts under `crates/tracedecay-domain/src/scout/` and export them through the versioned schema registry. IDs follow the deterministic encoding and privacy-domain rules in [01-domain-crate.md](./01-domain-crate.md), and `CoverageReportV1` is the canonical shared coverage type owned there.
 
 ```text
 crates/tracedecay-domain/src/scout/
@@ -127,7 +127,7 @@ pub struct ScoutConsumerId(pub CatalogValue);
 // Owned by the canonical task/ticket graph contract; repeated here as refs.
 pub struct TaskRefV1 { pub work_item_id: WorkItemId, pub version: WorkItemVersionId }
 pub struct TaskClaimRefV1 { pub claim_id: EntityId, pub version: EntityVersionId }
-pub struct ContextPacketRefV1 { pub packet_id: EntityId, pub version: EntityVersionId }
+pub struct ContextPacketRefV1 { pub packet_id: ContextPacketManifestId, pub version: EntityVersionId }
 
 pub struct SuggestionAddressV1 {
     pub profile_id: ProfileId,
@@ -249,7 +249,7 @@ pub struct ScoutToolReceiptV1 {
     pub capability_id: CapabilityId,
     pub request_digest: ContentDigest,
     pub result_anchor_ids: Vec<RetrievalAnchorId>,
-    pub coverage: CoverageReport,
+    pub coverage: CoverageReportV1, // canonical shared coverage type from 01-domain-crate.md
     pub started_at: UtcMicros,
     pub completed_at: UtcMicros,
     pub status: ScoutToolStatusV1,
@@ -297,6 +297,8 @@ pub struct SuggestionEnvelopeV1 {
     pub envelope_id: SuggestionEnvelopeId,
     pub address: SuggestionAddressV1,
     pub sequence: u64,
+    pub state: SuggestionEnvelopeStateV1,
+    pub version: EntityVersionId, // claim CAS fields; the Section 16 store row transacts on state/version
     pub kind: SuggestionKindV1,
     pub category: HintCategoryId,
     pub payload: PromptEligibleText,
@@ -373,7 +375,7 @@ pub enum SuggestionSuppressionReasonV1 {
 }
 ```
 
-Reason codes are closed, cataloged, safely rendered, and metric dimensions. Arbitrary model explanations never become status codes.
+Reason codes are closed, cataloged, safely rendered, and metric dimensions. Arbitrary model explanations never become status codes. `SuggestionSuppressionReasonV1` is the one suppression registry for both delivery engines: plan 6's `SuppressionReason` re-exports exactly this set, so deterministic hints and scout envelopes suppress with the same codes and a new variant is a versioned enum revision recorded in [06-policy-crate.md](./06-policy-crate.md).
 
 ## 5. Event stream, checkpoints, and incremental scheduler
 
@@ -403,6 +405,8 @@ pub struct ScoutTurnStateV1 {
     pub version: EntityVersionId,
 }
 ```
+
+`prior_category_state` is the shared `HintStateSnapshot` of [06-policy-crate.md](./06-policy-crate.md) §9.1.2 — it carries the full logical/semantic/anchor/coordination-pair fingerprint sets, per-category cooldown clocks, turn/session/scout/token ledgers, pending-suggestion slot, and CAS version token. `last_envelope_fingerprint` is only a fast-path check on the most recent payload, never the dedupe state itself.
 
 ### 5.1 Trigger eligibility
 
@@ -469,7 +473,7 @@ pub struct ScoutContextDeltaV1 {
     pub relevant_task_claim_refs: Vec<TaskClaimRefV1>,
     pub context_packet_refs: Vec<ContextPacketRefV1>,
     pub prior_suggestion_fingerprints: Vec<ContentDigest>,
-    pub coverage: CoverageReport,
+    pub coverage: CoverageReportV1,
 }
 ```
 
@@ -497,7 +501,7 @@ All values are configuration descriptors with floors/ceilings, not constants dup
 
 ## 7. Tool sandbox and effect policy
 
-Catalog metadata from [08-tool-catalog-crate.md](./08-tool-catalog-crate.md) adds:
+Catalog metadata from [08-tool-catalog-crate.md](./08-tool-catalog-crate.md) adds the following struct; plan 8 owns and reserves `ScoutCapabilityPolicyV1` in its catalog crate, and this section states its required fields:
 
 ```rust
 pub struct ScoutCapabilityPolicyV1 {
@@ -558,6 +562,45 @@ pub struct ModelCapabilityRefV1 {
     pub tool_planning: bool,
     pub residency: ModelResidencyV1,
     pub discovered_at: UtcMicros,
+}
+
+pub struct ScoutModelRequestV1 {
+    pub invocation_id: ModelInvocationId,
+    pub run_id: ScoutRunId,
+    pub address: SuggestionAddressV1,
+    pub session_mode: ModelSessionModeV1,
+    pub session_generation: u64,
+    pub input_sequence: u64,
+    pub system_prompt_version: SchemaVersion,
+    pub context_digest: ContentDigest,
+    pub context_sections: Vec<ModelContextSectionV1>,
+    pub allowed_intents: BTreeSet<ScoutToolIntentV1>,
+    pub remaining_reads: u8,
+    pub max_output_tokens: u32,
+    pub deadline: UtcMicros,
+}
+
+pub enum ScoutContextSectionKindV1 {
+    Goal,
+    TurnDelta,
+    ToolReceipts,
+    Anchors,
+    PriorSuggestions,
+    ScopeHealth,
+}
+
+pub struct ModelContextSectionV1 {
+    pub section: ScoutContextSectionKindV1,
+    pub anchors: Vec<RetrievalAnchorId>,
+    pub sanitized_excerpt: Option<PromptEligibleText>,
+    pub tokens: u32,
+}
+
+// Closed response schema (Section 8.1): silent, request_reads, or candidate. Nothing else parses.
+pub enum ScoutModelResponseV1 {
+    Silent { rationale_code: ScoutRationaleCode },
+    RequestReads { proposals: Vec<ScoutToolProposalV1> },
+    Candidate { candidate: SuggestionCandidateV1, planning_tokens_used: u32 },
 }
 
 pub trait ModelGatewayPort: Send + Sync {
@@ -654,7 +697,23 @@ pub struct ScoutModelSessionReceiptV1 {
 
 ## 9. Pure ranking, relevance, and silence policy
 
-`tracedecay-policy/src/scout.rs` consumes only the pinned input manifest, candidates, receipts, prior hint state, configuration values, and an explicit clock. It returns a `ScoutDecisionV1` with selected envelope proposal or silence plus reason codes.
+`tracedecay-policy/src/scout.rs` (`EvaluatorKind::Scout`, reserved in plan 6's module tree and evaluator registry) consumes only the pinned input manifest, candidates, receipts, prior hint state, configuration values, and an explicit clock. It returns a `ScoutDecisionV1` with selected envelope proposal or silence plus reason codes, following plan 6's evaluator patterns (registered input/output schemas, fixed-point scores, decision/explanation digests):
+
+```rust
+pub struct ScoutDecisionV1 {
+    pub run_id: ScoutRunId,
+    pub evaluation_id: PolicyEvaluationId,
+    pub input_manifest_id: ManifestId,
+    pub scored: Vec<ScoredCandidate>, // plan 6 shape; one entry per SuggestionCandidateV1
+    pub selected: Option<SuggestionCandidateId>,
+    pub envelope_proposal: Option<SuggestionEnvelopeV1>, // Pending state; unpersisted until the CAS commits
+    pub suppressions: Vec<(SuggestionCandidateId, SuggestionSuppressionReasonV1)>,
+    pub silence: Option<SuggestionSuppressionReasonV1>,
+    pub state_proposal: HintStateProposal, // plan 6 §9.1.2; the single CAS on the hint-state version
+    pub explanation: DecisionExplanation,
+    pub decision_digest: Digest,
+}
+```
 
 Fixed-point feature groups:
 
@@ -679,7 +738,7 @@ Policy ordering:
 6. render at most one envelope with no more than three anchors;
 7. propose one atomic hint-state transition and envelope write.
 
-Default presentation budget is 96 tokens; hard maximum is 160. Default delivery is at most one scout suggestion per Turn, four per session, one initial category plus one later evidence-strengthened escalation, and one coordination advisory per unchanged claim pair. Configuration may be stricter. Safety and compactness floors prevent looser values beyond hard caps.
+Default presentation budget is 96 tokens; hard maximum is 160. Default delivery is at most one scout suggestion per Turn, four per session, one initial category plus one later evidence-strengthened escalation, and one coordination advisory per unchanged claim pair. Configuration may be stricter. Safety and compactness floors prevent looser values beyond hard caps. The turn/session/token budgets here are the shared plan 6 `HintStateSnapshot` ledgers debited by `DeliveryArbiterV1` for both engines; the four-per-session scout quota is the dedicated scout session ledger inside that same snapshot, not a parallel counter.
 
 Semantic fingerprint inputs are category, intent, exact address/logical message, resolved scope digest, primary entity/anchor set, proposed capability, and normalized bounded payload meaning. Model wording changes alone cannot evade dedupe.
 
@@ -727,7 +786,7 @@ pub struct MaterialTaskChangeV1 {
     pub context_packets: Vec<ContextPacketRefV1>,
     pub retrieval_anchor_ids: Vec<RetrievalAnchorId>,
     pub materiality: ScoreMicros,
-    pub coverage: CoverageReport,
+    pub coverage: CoverageReportV1,
     pub watermark: VectorWatermark,
     pub expires_at: UtcMicros,
 }
@@ -782,7 +841,7 @@ pub struct PendingSuggestionRequestV1 {
 }
 ```
 
-`HookApplicationPort` gains a narrow `claim_pending_suggestion` operation. The claim is one transactional compare-and-swap that revalidates address, logical message, scope/access digest, expiry, current hint state, payload budget, host mode, and envelope sequence. It performs no query or model work.
+`HookApplicationPort` gains a narrow `claim_pending_suggestion` operation. The claim is a `DeliveryArbiterV1` operation ([06-policy-crate.md](./06-policy-crate.md) §9.1.3), not a parallel scout-side CAS: one transactional compare-and-swap on the `HintStateSnapshot` version token that revalidates address, logical message, scope/access digest, expiry, current hint state, payload budget, host mode, and envelope sequence, and claims the pending-suggestion slot. Deterministic candidates arbitrated in the same invocation ride the same version token, so at most one engine delivers. It performs no query or model work.
 
 Timing rules:
 
@@ -802,7 +861,7 @@ Claim and delivery are separate:
 2. host adapter renders and attempts delivery;
 3. adapter records delivered, failed, rejected, or unknown receipt;
 4. claim timeout returns envelope to eligible only if no host acknowledgement could have occurred; uncertain delivery is never retried automatically;
-5. retries by the same invocation return the stored receipt and do not duplicate injection.
+5. retries by the same invocation return the stored receipt while its policy/catalog/environment digest still matches and do not duplicate injection; a digest mismatch returns a typed stale-environment error rather than re-evaluating or redelivering (the plan 7 §8 retry rule).
 
 ## 12. Feedback and outcome attribution
 
@@ -814,7 +873,7 @@ trigger -> run -> reads -> candidates -> policy/silence -> envelope
         -> terminal outcome with evidence and coverage
 ```
 
-Outcomes extend the shared plan 6/7 hint contract:
+Outcomes extend the shared plan 6/7 hint contract through plan 6's recorded outcome enum v2 revision ([06-policy-crate.md](./06-policy-crate.md) §10 — the only legal extension path for those closed enums) and persist as plan 6 `HintOutcomeRecordV1` rows:
 
 - `Observed`: directly linked retrieval-anchor open, suggested capability invocation, scope recovery, handoff/coordination action, or accepted host acknowledgement plus corroborating action;
 - `Unobserved`: horizon closed with adequate capture coverage but no linked action; not automatically “bad”;
@@ -870,7 +929,7 @@ The inspector may show authorized sanitized evidence snippets on demand. It must
 
 Hint Lab accepts any authorized message, Turn, session position, event, suggestion, or retrieval anchor and supports:
 
-- exact historical replay with original artifacts;
+- exact historical replay with original artifacts — for model-assisted runs, `ExactDeterministic` scopes to policy-over-recorded-candidates only; the model-planning stage replays solely as `RecordedResult` (a live model has no counterpart to plan 6's evaluation seed), and a mixed run reports its weakest stage fidelity, never a blanket exact label;
 - recorded-result verification;
 - current-best-effort “what would the scout suggest now?” with every substituted config/policy/catalog/index/model/memory/tool snapshot listed;
 - A/B deterministic-only versus model-assisted, old versus new bundle, model capability, budget, threshold, debounce, and tool-grant variants;
@@ -881,7 +940,7 @@ Hint Lab accepts any authorized message, Turn, session position, event, suggesti
 - outcome relabeling workflow with adjudicator identity and agreement, never production delivery;
 - fixture promotion as a separate explicit test-artifact command.
 
-The lab is read-only and sets a server-enforced side-effect guard. It cannot claim/deliver an envelope, mutate live hint state, invoke mutation tools, or approve/apply/rollback curation.
+The lab is read-only by construction: it runs on plan 6's write-free lab ports (`ReadOnlyLabContext`; the ports structurally lack write methods — [06-policy-crate.md](./06-policy-crate.md) §11), not a runtime flag, and its only persistence surface is the dedicated `replay_artifacts` store named there — outcome-relabeling adjudications (with adjudicator identity and agreement) and A/B artifacts land in that store, never in live analytics, facts, claims, policies, hints, or coordination state. It cannot claim/deliver an envelope, mutate live hint state, invoke mutation tools, or approve/apply/rollback curation. A current-best-effort replay that invokes a live model is a separately metered egress action requiring an explicit grant and budget; such calls are non-reproducible and are excluded from the deterministic replay gates in Section 19.
 
 ### 13.4 Controls and feedback
 
@@ -1114,7 +1173,7 @@ Replay entire sessions, not isolated prompts, so dedupe, cooldown, budgets, logi
 | payload size | median <=64 tokens, p95 <=96, hard <=160 |
 | hook incremental overhead | pending lookup/revalidation p95 <=2 ms, p99 <=5 ms; no model/tool/network wait |
 | warm deterministic trigger-to-envelope | p50 <=250 ms, p95 <=1 s |
-| warm model-assisted trigger-to-envelope | p50 <=1.5 s, p95 <=5 s, p99 <=12 s; host/provider strata reported |
+| warm model-assisted trigger-to-envelope | p50 <=1.5 s, p95 <=5 s, p99 <=12 s (trigger-to-envelope includes up to 750 ms coalesce wait, queue delay, and at most one superseded re-run; a single run's wall clock stays within the Section 6 2 s soft/8 s hard limits); host/provider strata reported |
 | bounded exploration | <=4 reads and <=8,192 input/256 output tokens per run; zero mutation effects |
 | cost | within configured per-profile/day cap; cost per materially useful delivery and silent run reported |
 | crash/idempotency | zero duplicate delivery across retry/restart/lease takeover fault matrix |
@@ -1134,12 +1193,12 @@ Precision gates dominate recall. A variant that increases recall by emitting mor
 
 1. Freeze current source inventories: hook points, deterministic hint classifiers, dedupe state, analytics, app-server adapters, automation model configuration, daemon queues, MCP/CLI/API/dashboard surfaces, and relevant incoming-master changes.
 2. Add domain/store/projector contracts and replay-only ingestion of historical hint/delivery/outcome evidence.
-3. Move deterministic `tool_hints` classifier outputs behind `SuggestionCandidateV1` and pure plan 6 policy without changing delivery.
+3. Move deterministic `tool_hints` classifier outputs behind pure plan 6 policy as the `DeliveryCandidateV1::Deterministic(ScoredCandidate)` arm of `DeliveryArbiterV1` without changing delivery; scout candidates enter the same union as `DeliveryCandidateV1::Scout(SuggestionCandidateV1)`.
 4. Implement the scout worker in shadow against canonical outbox events. It writes runs/candidates/suppression but no deliverable envelope.
 5. Add provider-neutral model gateway and Codex app-server adapter behind capability/config selection. Do not reuse automation config or `TRACEDECAY_CODEX_SUMMARY_*` as scout defaults.
 6. Run frozen/offline and rolling shadow evaluation; fix logical-message origin, scope, privacy, latency, and dedupe regressions.
 7. Add durable envelopes and host handshake. Differential-test render bytes/state receipts while keeping V1 as sole delivery owner.
-8. Enable V2 deterministic delivery for one host/scope; enforce a single delivery selector and compare outcome denominators.
+8. Enable V2 deterministic delivery for one host/scope; enforce plan 6's `DeliveryArbiterV1` as the single delivery selector and compare outcome denominators.
 9. Enable optional model-assisted delivery only for eligible strata that pass gates.
 10. Migrate CLI/MCP/API/UI to generated use cases and typed views; preserve bounded aliases only where plan 21 requires them.
 11. Backfill historical scout-evaluation evidence for labs only. Never create or deliver historical pending suggestions.
@@ -1175,7 +1234,7 @@ Numbers extend the existing program without colliding with plans 1–21.
 
 ### PR 23H — Pure scout ranking, silence, dedupe, and replay policy
 
-- Implement fixed-point features, suppression, logical/category/anchor dedupe, cooldown, budgets, expiry, and explanation.
+- Implement fixed-point features, suppression, logical/category/anchor dedupe, cooldown, budgets, expiry, and explanation in `tracedecay-policy/src/scout.rs` (`EvaluatorKind::Scout`, reserved in plan 6's module tree behind its extension seam).
 - Add deterministic replay fixtures from current hint evals and multi-agent scenarios.
 
 ### PR 24J — Application worker, incremental context, and model gateway
@@ -1185,7 +1244,7 @@ Numbers extend the existing program without colliding with plans 1–21.
 
 ### PR 24K — Host suggestion handshake and single delivery selector
 
-- Add pending claim/revalidation, delivery modes, timing/expiry, receipts, provider conformance, and no-hook-wait benchmarks.
+- Add pending claim/revalidation (a plan 6 `DeliveryArbiterV1` operation), delivery modes, timing/expiry, receipts, provider conformance, and no-hook-wait benchmarks.
 - Shadow current delivery before selecting one V2 owner.
 
 ### PR 25F — Context Scout Observatory and Turn timeline
@@ -1196,11 +1255,11 @@ Numbers extend the existing program without colliding with plans 1–21.
 ### PR 31O — Incremental Scout Hint Lab and evaluation harness
 
 - Add exact/recorded/current-best-effort replay, session-level state, A/B/shadow, counterfactual timing, qrels, corpus metrics, exports, and fixture promotion.
-- Verify read-only side-effect guard and zero live counter/delivery mutations.
+- Verify plan 6's write-free lab ports and zero live counter/delivery mutations; assert relabel and A/B artifacts land only in the dedicated `replay_artifacts` store.
 
 ### PR 33D — Historical evidence migration and shadow parity
 
-- Import historical hint/delivery/outcome evidence, run time-safe corpus, and generate parity/coverage receipts.
+- Import historical hint/delivery/outcome evidence, run time-safe corpus, and generate parity/coverage receipts; V1 JSONL `emitted/followed/ignored/suppressed` evidence maps into plan 6 `HintOutcomeRecordV1` rows with the legacy-heuristic attribution class per [12-root-compatibility-migration.md](./12-root-compatibility-migration.md)'s migration inventory.
 - Do not backfill live pending suggestions.
 
 ### PR 37H — Scout convergence and V1 deletion gate
@@ -1217,7 +1276,7 @@ Numbers extend the existing program without colliding with plans 1–21.
 | [03-capture-crate.md](./03-capture-crate.md) | provider-native origin, Turn/tool/file/Git/agent/worktree events, continuity, sanitizer receipts |
 | [04-projectors-crate.md](./04-projectors-crate.md) | trigger/logical-message/lifecycle/outcome/status projections and rebuild determinism |
 | [05-query-crate.md](./05-query-crate.md) | canonical bounded query/search/graph/time execution; no scout-local search |
-| [06-policy-crate.md](./06-policy-crate.md) | pure pinned selection, silence, dedupe/cooldown/budgets, replay, outcome semantics |
+| [06-policy-crate.md](./06-policy-crate.md) | pure pinned selection via `DeliveryArbiterV1`/`DeliveryCandidateV1`, shared `HintStateSnapshot`/`HintStateProposal` state, silence, dedupe/cooldown/budgets, write-free replay ports, `HintOutcomeRecordV1` outcome semantics |
 | [07-hooks-crate.md](./07-hooks-crate.md) | bounded pending claim/render/delivery, provider handshake, zero model/tool wait, host conformance |
 | [08-tool-catalog-crate.md](./08-tool-catalog-crate.md) | model/tool capability eligibility, effect/egress/cost/privacy metadata, generated binding inventory |
 | [09-application-crate.md](./09-application-crate.md) | workflow ownership, authorization, frozen snapshots, tool/model ports, transactions, status/use cases |
@@ -1269,7 +1328,7 @@ Numbers extend the existing program without colliding with plans 1–21.
 - every MCP tool defaults to compact Markdown and explicit JSON decodes to the same typed view; no double encoding or giant model transcripts;
 - SSE tests snapshot/resume/gap/backpressure/resync and never drop semantic state silently;
 - browser tests cover Observatory, Loom, Hint Lab, Settings, keyboard/screen-reader, responsive, empty/silent/stale/partial/offline/overload/privacy states;
-- Hint Lab server guard proves zero envelope claims, deliveries, counters, feedback, config, curation, or tool mutations.
+- Hint Lab tests prove plan 6's write-free lab ports admit zero envelope claims, deliveries, counters, feedback, config, curation, or tool mutations, and that lab persistence reaches only the `replay_artifacts` store.
 
 ### 23.5 Evaluation artifacts
 

@@ -118,17 +118,17 @@ Do not create a broad `tracedecay-config` crate initially. The convergence contr
 Create `crates/tracedecay-domain/src/config.rs` with opaque validated identifiers and exhaustive enums:
 
 ```rust
-pub struct ConfigKey(pub CatalogValue);
-pub struct ConfigModuleId(pub CatalogValue);
-pub struct ConfigRegistryVersion(pub u64);
-pub struct ConfigRegistryDigest(pub ManifestDigest);
-pub struct ConfigLayerId(pub EntityId);
-pub struct ConfigRevisionId(pub EntityId);
-pub struct ConfigActivationId(pub EntityId);
-pub struct EffectiveConfigSnapshotId(pub EntityId);
-pub struct EffectiveConfigDigest(pub ManifestDigest);
-pub struct ConfigConsumerId(pub CatalogValue);
-pub struct CredentialRefId(pub EntityId);
+pub struct ConfigKey(CatalogValue);
+pub struct ConfigModuleId(CatalogValue);
+pub struct ConfigRegistryVersion(u64);
+pub struct ConfigRegistryDigest(ManifestDigest);
+pub struct ConfigLayerId(EntityId);
+pub struct ConfigRevisionId(EntityId);
+pub struct ConfigActivationId(EntityId);
+pub struct EffectiveConfigSnapshotId(EntityId);
+pub struct EffectiveConfigDigest(ManifestDigest);
+pub struct ConfigConsumerId(CatalogValue);
+pub struct CredentialRefId(EntityId);
 
 pub enum ConfigValueKindV1 {
     Boolean,
@@ -196,7 +196,9 @@ pub enum ConfigImpactKindV1 {
 }
 ```
 
-`ConfigKey` uses stable dotted IDs such as `privacy.detectors.runtime.enabled`, `hooks.hints.max_per_turn`, and `query.search.lexical.max_candidates`. Display labels are localized metadata, never identity. Renames retain aliases and an explicit migration; a key cannot be silently reused for a different type or meaning.
+These identifiers are genuinely opaque: inner values are private, and construction goes only through validated `parse`/`TryFrom` constructors, so no crate can mint an unvalidated key or ID.
+
+`ConfigKey` uses stable dotted IDs such as `privacy.detectors.runtime.enabled`, `hooks.hints.max_per_turn`, and `query.search.lexical.max_candidates`. Display labels are localized metadata, never identity. Renames retain aliases and an explicit migration; a key cannot be silently reused for a different type or meaning. When a key leaves the registry entirely, stored layer revisions that still contain it remain immutable history: the resolver excludes the orphaned entries from effective resolution and surfaces them as typed `orphaned_key` items in `config.status`, `config.history`, and `config.diff` with migration guidance; they are never silently dropped, reinterpreted, or revived by re-registering the same name with different semantics. Extension-owned orphans additionally follow Section 19.
 
 ### 5.1 Module descriptor
 
@@ -237,7 +239,7 @@ Rules:
 
 - Defaults are typed canonical values, not JSON snippets or values parsed independently by each consumer.
 - Constraints are deterministic, bounded, side-effect-free programs with stable reason codes.
-- A descriptor explicitly lists legal layers and a total precedence for the dimensions it accepts. Repository, worktree, provider, and host are not assigned an accidental global order.
+- A descriptor explicitly lists legal layers and a total precedence for the dimensions it accepts, subordinate to the normative Section 6.1 skeleton: the `precedence` vector orders only the step 3 dimension layers. Repository, worktree, provider, and host are not assigned an accidental global order.
 - Merge strategies are closed enums. Arbitrary code callbacks cannot make effective resolution nondeterministic.
 - `String` and structured text descriptors declare maximum sizes and pass plan 18 sanitization before persistence, history, rendering, or export.
 - `CredentialReference` stores only an opaque reference and safe provider/status metadata.
@@ -246,7 +248,7 @@ Rules:
 
 ### 5.2 Registry generation and validation
 
-The build generator combines all manifests into `generated/config-registry-v1.json`, JSON Schema, OpenAPI fragments, CLI metadata, MCP schemas, SDK types, dashboard form metadata, docs, and conformance fixtures.
+The build generator combines all manifests into one registry artifact, `generated/config-registry-v1.json`: typed descriptors, JSON Schema fragments, and the `ConfigRegistryDigest`. The pipeline runs in exactly one direction from there: plan 08's catalog build consumes that file as an input manifest, pins `ConfigRegistryDigest` in `ToolCatalogSnapshot`, and is the sole emitter of config surface metadata — OpenAPI fragments, CLI metadata, MCP schemas, SDK types, dashboard form metadata, docs, and conformance fixtures; plan 21 renders only from those plan 08 catalog artifacts. The registry generator emits no second surface-metadata set. Registry generation is byte-identical across platforms, path syntax, time zones, locales, and map insertion order; CI runs the generator twice from a clean tree and compares digests. In program order, PR 22A lands the catalog consuming the frozen Phase-0 registry subset; PR 22C completes the registry, and every registry change regenerates the plan 08 catalog in the same commit — registry before catalog in every build.
 
 Generation fails when:
 
@@ -307,6 +309,8 @@ The resolver evaluates, for each key, only layers declared by its descriptor:
 6. cross-field constraints validate the complete snapshot;
 7. runtime compatibility can hold a desired value pending rather than pretending it is effective.
 
+This seven-step skeleton is normative. A descriptor's `precedence` vector orders only the step 3 dimension layers it accepts (`Host`, `Provider`, `Project`, `Repository`, `Worktree`); it cannot reorder `BuiltInDefault`, `Profile`, `RequestOverride`, the safety floor, or cross-field validation, and the generator rejects a vector that lists a layer outside step 3 or leaves an allowed step 3 pair ambiguously ordered. `EnvironmentObservation` layers evaluate at the end of step 3 — after every persisted scope layer and before `RequestOverride` — and only for keys whose descriptor allows the layer; `RequestOverride` is always step 4.
+
 The safety floor is logically highest authority even though it validates last. A source chain distinguishes `selected`, `merged`, `shadowed`, `clamped`, `invalid`, `pending`, and `ignored_not_applicable`. Every discarded value has a stable reason.
 
 Environment variables become typed `EnvironmentObservation` layers only for bootstrap and automation compatibility. They are visible with process/host provenance, cannot contain secrets in returned views, and cannot be the sole supported control for user behavior. Persistent UI/CLI edits create an explicit writable override; they do not rewrite the parent process environment.
@@ -340,6 +344,8 @@ pub struct EffectiveConfigSnapshotV1 {
     pub coverage: CoverageReportV1,
 }
 ```
+
+`coverage` is the canonical `CoverageReportV1` defined in plan 01's domain contracts (searched/skipped/unavailable/stale/truncated/redacted shard lists, freshness watermarks, and the unknown-coverage flag); this plan consumes that shared type unchanged rather than forking a config-local variant. `EffectiveConfigDigest` is computed over the canonical sorted encoding of `registry_digest`, `activation_id`, the target-resolution identity, and every `(key, value, selected source)` tuple; `snapshot_id` and `generated_at` are excluded from the digest, so identical effective states produce identical digests regardless of when they are materialized.
 
 Every value view answers:
 
@@ -386,6 +392,64 @@ Add store repositories for:
 - `ConfigConsumerAcknowledgementV1` by component instance/generation;
 - audit/outbox events, migration receipts, drift observations, and operation links;
 - credential-reference metadata only, never secret material.
+
+The three PR 6E persistence records are fully shaped:
+
+```rust
+pub struct ConfigLayerRevisionV1 {
+    pub revision_id: ConfigRevisionId,
+    pub target: ConfigTargetV1,
+    pub parent_revision: Option<ConfigRevisionId>,
+    pub registry_version: ConfigRegistryVersion,
+    pub registry_digest: ConfigRegistryDigest,
+    pub entries: Vec<ConfigRevisionEntryV1>,
+    pub actor: ActorRefV1,
+    pub reason: Option<CatalogSafeText>,
+    pub idempotency_key: IdempotencyKeyV1,
+    pub state: ConfigRevisionStateV1, // Staged | Activated | Abandoned
+    pub created_at: UtcMicros,
+}
+
+pub struct ConfigRevisionEntryV1 {
+    pub key: ConfigKey,
+    pub operation: ConfigEntryOperationV1, // Set | Unset
+    pub value: Option<CatalogValue>,       // canonical typed value for Set
+    pub sanitization_receipt: Option<SanitizationReceiptId>, // content-bearing values only
+}
+
+pub struct ConfigActivationManifestV1 {
+    pub activation_id: ConfigActivationId,
+    pub previous_activation: Option<ConfigActivationId>,
+    pub registry_version: ConfigRegistryVersion,
+    pub registry_digest: ConfigRegistryDigest,
+    pub members: Vec<ConfigActivationMemberV1>,
+    pub actor: ActorRefV1,
+    pub idempotency_key: IdempotencyKeyV1,
+    pub published_at: UtcMicros,
+}
+
+pub struct ConfigActivationMemberV1 {
+    pub target: ConfigTargetV1,
+    pub revision_id: ConfigRevisionId,
+    pub revision_digest: ManifestDigest,
+}
+
+pub struct ConfigConsumerAcknowledgementV1 {
+    pub consumer: ConfigConsumerId,
+    pub instance: ConsumerInstanceId, // opaque per-process component instance
+    pub activation_id: ConfigActivationId,
+    pub effective_digest: EffectiveConfigDigest,
+    pub runtime: ConfigConsumerRuntimeV1, // component version + safe process identity class
+    pub state: ConfigConsumerRuntimeStateV1, // Applied | PendingRestart | PendingOperation | Failed
+    pub acknowledged_at: UtcMicros,
+}
+```
+
+Storage contracts:
+
+- `ConfigLayerRevisionV1`: primary key `revision_id`; uniqueness on `(target, idempotency_key)` and a single legal `Staged -> Activated` or `Staged -> Abandoned` transition per row; indexes on `(target, created_at)` and `state`. Rows referenced by any activation manifest, receipt, export, or replay pin are retained permanently; unreferenced `Staged` rows are garbage-collected after the abandonment window (Section 8.2 step 7). Entry values are bounded by descriptor maximum sizes and one revision stays <=1 MiB canonical encoding. Owning shard follows the target per Section 6: profile shard for Profile/Provider/Host layers, project shard for Project/Repository/Worktree layers.
+- `ConfigActivationManifestV1`: primary key `activation_id`; uniqueness of one member per target per manifest and one successor per `previous_activation` (a linear append-only chain); index on `published_at`. Manifests are append-only and retained while any snapshot, receipt, or the rollback window references them; member count is bounded by resolved target count and one manifest stays <=1 MiB. Owning shard: the profile shard, matching the profile-owned publication in Section 8.2.
+- `ConfigConsumerAcknowledgementV1`: primary key `(consumer, instance, activation_id)`; the latest acknowledgement per `(consumer, instance)` is authoritative; indexes on `activation_id` and `(consumer, acknowledged_at)`. Retention keeps the current acknowledgement per instance plus history bounded to the activation rollback window; rows are <=4 KiB and contain no values, paths, or consumer error text. Owning shard: the profile shard.
 
 ### 8.1 Revision semantics
 
@@ -805,6 +869,13 @@ Inventory and import:
 - data directory, backup, update, and migration flags;
 - plugin/extension manifests and host-owned foreign state.
 
+Named V1 anchors (a human audit anchor in the plan 08 §5 style; plan 12's generated root inventory is authoritative and the Phase-0 inventory generator is validated against these names):
+
+- project `.tracedecay/config.json` and profile `~/.tracedecay/config.json` (`CONFIG_FILENAME` under `TRACEDECAY_DIR`, relocated by `TRACEDECAY_DATA_DIR`);
+- project `.tracedecay/enrollment.json` and legacy settings rows in project/profile `.tracedecay/tracedecay.db` (dashboard project/user settings, automation config, branch autotrack state);
+- environment reads including `TRACEDECAY_DATA_DIR`, `TRACEDECAY_GLOBAL_DB`, `TRACEDECAY_SYNC_*`, `TRACEDECAY_DIAGNOSTICS_PREWARM`, `TRACEDECAY_OFFLINE`, `TRACEDECAY_TOOLS`, and `TRACEDECAY_MEMORY_INJECTION`; internal worker/test variables are classified as non-config runtime observations, not user settings;
+- provider/host hook and MCP installation metadata: Claude `settings.json` hook/MCP entries, Codex `config.toml` entries, Cursor hook configuration, and Kiro hook entries as foreign-observed state.
+
 For each legacy input record source, owner, parser version, value classification, mapped key, target resolution, selected precedence, semantic difference, and import receipt. Secrets are converted to keyring references or quarantined; they never enter V2 layer history. Ambiguous ownership is `ImportUnresolved` and cannot become effective.
 
 Run V1 and V2 resolution against a sanitized fixture corpus, compare effective values and operational behavior, explicitly accept intentional differences, then cut over one module at a time. Remove old readers, env-only code paths, direct dashboard mutations, provider-local defaults, and file watchers after parity. Stale clients receive typed registry/version guidance, not a live V1 fallback.
@@ -999,6 +1070,7 @@ These slices extend the master program without forming a separate architecture:
 
 ### PR 33C — Legacy configuration import and cutoff
 
+- Execute the configuration slice of plan 12's PR 33 family: plan 12's root inventory generator produces the V1 file/flag/environment source inventory; this PR runs the import itself through the Section 8.2 staged revision/activation workflow and reports receipts into plan 12's cutover checklists.
 - Import every V1 config source with provenance, scope, secret conversion, and differential receipts.
 - Cut over one module at a time and delete live legacy readers, hidden environment-only controls, direct dashboard mutations, and provider-local default forks.
 

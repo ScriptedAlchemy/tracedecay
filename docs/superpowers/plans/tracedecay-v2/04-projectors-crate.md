@@ -61,7 +61,7 @@ Projector errors are stable internal reason codes and safe fields only. Applicat
 ### Produces
 
 - Immutable canonical events and superseding correction events.
-- `EntityVersionV1` rows, aliases/candidates, bitemporal `RelationAssertionV1` rows, activity/project domain tables, search/representation source rows, facets/rollups, and safe catalog locators.
+- `EntityVersionV1` rows, aliases/candidates, bitemporal `RelationAssertionV1` rows, activity/project domain tables, search/representation source rows, facets/rollups, the `read_models` family (facet rollups, timeline density, observatory status) consumed by plan 05, and safe catalog locators.
 - Per-projector/shard checkpoints, vector watermarks, lag metrics, dead letters, rebuild manifests, active-generation receipts, and rollback pointers.
 - Query-ready data consumed by `tracedecay-query`, `tracedecay-application`, CLI/MCP/HTTP adapters, dashboard workspaces, exports, and replay labs.
 
@@ -114,6 +114,10 @@ The dependency boundary is `tracedecay-domain <- tracedecay-projectors`; store i
 | `crates/tracedecay-projectors/src/search.rs` | Redaction-gated lexical documents and representation eligibility/source metadata. |
 | `crates/tracedecay-projectors/src/privacy.rs` | Plan 18 sink firewall, receipt validation, descendant lineage, and checked conversions to `SearchEligibleText`/other sink types; never scans or redacts. |
 | `crates/tracedecay-projectors/src/aggregates.rs` | Project/day/kind/provider/model/tool/hint/automation/health/cost rollups with source watermarks. |
+| `crates/tracedecay-projectors/src/read_models/mod.rs` | Query read-model family registration (facets, timeline density, observatory status) consumed by [`05-query-crate.md`](05-query-crate.md) through query ports. |
+| `crates/tracedecay-projectors/src/read_models/facets.rs` | Precomputed per-scope facet bucket rows behind plan 05 facet requests. |
+| `crates/tracedecay-projectors/src/read_models/timeline.rs` | Bitemporal timeline density buckets behind plan 05 timeline pages and the dashboard density brush. |
+| `crates/tracedecay-projectors/src/read_models/observatory.rs` | Subsystem health/lag/conflict status rows behind the dashboard Observatory. |
 | `crates/tracedecay-projectors/tests/framework_suite.rs` | Registry, checkpoint, outbox, dead-letter, concurrency, rebuild, and atomic-swap contracts. |
 | `crates/tracedecay-projectors/tests/activity_suite.rs` | Provider/session/tool/reasoning/goal/agent/LCM domain fixtures. |
 | `crates/tracedecay-projectors/tests/domain_suite.rs` | Git/code/knowledge/policy/automation/accounting/search/aggregate fixtures. |
@@ -208,7 +212,11 @@ pub struct ProjectorRegistry;
 impl ProjectorRegistry {
     pub fn builtin() -> Result<Self, RegistryError>;
     pub fn register(&mut self, projector: Box<dyn Projector>) -> Result<(), RegistryError>;
-    pub fn validate(&self, schema: &SchemaPredicateRegistry) -> Result<RegistryReport, RegistryError>;
+    pub fn validate(
+        &self,
+        schema: &SchemaRegistryV1,
+        predicates: &PredicateRegistryV1,
+    ) -> Result<RegistryReport, RegistryError>;
     pub fn plan(&self, changed: &[RegistryKind]) -> Result<ProjectionPlan, RegistryError>;
 }
 
@@ -229,7 +237,7 @@ impl Projector for CanonicalEventProjector {
 }
 ```
 
-- Registry validation fails for duplicate projector ID/version, dependency cycle, unknown input/output kind, illegal target ownership, missing sensitivity/retention rule, or any captured structured family with no canonical-event owner.
+- Registry validation runs against plan 01's `SchemaRegistryV1` and `PredicateRegistryV1` (the two registries are distinct types; this crate defines no combined registry) and fails for duplicate projector ID/version, dependency cycle, unknown input/output kind, illegal target ownership, missing sensitivity/retention rule, or any captured structured family with no canonical-event owner.
 - Unknown forward schema is dead-lettered as `unsupported_schema` and blocks that projector checkpoint; it is never coerced into a known event.
 - Corrections append a superseding canonical event and bitemporal relation; they do not mutate an earlier event.
 - `causation_id` is accepted only from direct/provider-declared evidence that passes predicate rules. Temporal proximity yields no causal edge.
@@ -263,6 +271,8 @@ impl<R: RegistryPort, S: ProjectorStore> ProjectionCoordinator<R, S> {
 ```
 
 `VectorWatermark` above is the domain type, not a projector-local copy. Coordination uses `partial_cmp_components`, `dominates`, and `merge_max`; incomparable vectors stay incomparable and no scalar/global ordering is introduced.
+
+`ProjectionCheckpoint` is the single checkpoint shape in the system. It persists only in plan 02's `projection_checkpoints` table, keyed `(projector, version, shard, generation)`, and advances only through `ProjectionRepository::apply_projection` with a `ProjectionCheckpointRef` compare-and-set ([`02-store-crate.md`](02-store-crate.md)); no crate defines a second checkpoint schema or a side channel that moves one.
 
 - One lease exists per `(projector, version, shard, generation)`. Different projectors/shards run concurrently; independent agent sources do not serialize.
 - A leased worker reads a bounded batch after `last_contiguous_sequence`. Duplicate outbox rows are idempotent. Missing outbox sequence stops contiguous advancement and records `projector.outbox_gap`; the worker may process only explicitly commutative rows beyond the gap into a nonpublished staging generation.
@@ -306,13 +316,30 @@ pub struct DeadLetterRecord {
     pub first_seen_at: UtcMicros,
     pub attempts: u32,
 }
+
+pub enum DeadLetterResolutionAction {
+    Replayed,
+    QuarantinedOmission,
+    SupersededByRegistryRevision,
+}
+
+pub struct DeadLetterResolutionReceiptV1 {
+    pub resolution_id: ResolutionId,
+    pub dead_letter_id: DeadLetterId,
+    pub action: DeadLetterResolutionAction,
+    pub replay_effect_count: u64,
+    pub resolved_by: ProjectorVersion,
+    pub resolved_at: UtcMicros,
+}
 ```
 
-Before any `put_row`, graph label/snippet, FTS document, representation source, aggregate label, replay artifact, or emitted outbox payload, `privacy.rs` verifies the source receipt/descendant lineage and requires the corresponding domain sink-eligible wrapper. It never turns raw/classified text into an eligible value. A missing, incomplete, incompatible, expired, or revoked receipt blocks the checkpoint or emits a non-content coverage row according to the registry; it can never be coerced into empty text and counted as complete.
+Dead letters persist in plan 02's `dead_letters` table in the owning shard ([`02-store-crate.md`](02-store-crate.md)): `id` primary key, uniqueness on `(projector, version, shard, sequence, input_id)`, indexes on `(reason, first_seen_at)` and `(disposition)`. Resolution receipts persist beside them keyed by `resolution_id` with a unique index on `dead_letter_id` (one terminal resolution per dead letter) and reference the original record; they never modify it. Growth is bounded without deletion of live evidence: resolved dead letters older than the evidence-retention watermark compact into immutable per-`(projector, reason, day)` rollup counts, unresolved blocking records are never compacted, and a per-shard live envelope of 100,000 records or 256 MiB raises backpressure on the offending projector — never silent discard.
+
+Before any `put_row`, graph label/snippet, FTS document, representation source, aggregate label, replay artifact, or emitted outbox payload, `privacy.rs` verifies the source receipt/descendant lineage and requires the corresponding domain sink-eligible wrapper. Receipt verification reads the durable `SanitizationReceiptV1` rows in plan 02's per-shard `sanitization_receipts` table ([`02-store-crate.md`](02-store-crate.md)); capture mints receipts per [`03-capture-crate.md`](03-capture-crate.md), and the table's expiry/revocation state is what "expired" and "revoked" mean here. `privacy.rs` never turns raw/classified text into an eligible value. A missing, incomplete, incompatible, expired, or revoked receipt blocks the checkpoint or emits a non-content coverage row according to the registry; it can never be coerced into empty text and counted as complete.
 
 - Registry, sensitivity, identity, evidence, invariant, corrupt-input, ownership, and outbox-gap failures block by default.
 - `QuarantineAndAdvance` is legal only for a registry-declared optional forensic family whose omission is surfaced in projection coverage; canonical messages, tools, reasoning markers, goals, agents, LCM lineage, Git, and automation cannot use it.
-- Dead-letter replay writes a resolution receipt referencing the original record. Deleting or editing a dead letter is forbidden.
+- Dead-letter replay writes a `DeadLetterResolutionReceiptV1` referencing the original record. Deleting or editing a live dead letter is forbidden; the only removal path is the retention-watermark compaction above, which preserves the rollup counts.
 - Rebuild validation fails on unresolved blocking dead letters and reports quarantined omissions by kind/count/hash.
 
 ### Rebuild and atomic swap
@@ -368,6 +395,17 @@ impl<S: ProjectorStore> ProjectionRebuilder<S> {
 | `accounting_v1` | Token/context/latency/model/tool/cost/savings/cap/error/data-quality events | Evidence-bearing ledgers and denominator-aware accounting rows in activity or project according to source/scope, with All rollups separate. |
 | `search_document_v1` | Eligible entity/message/code/knowledge/automation event versions | Redaction-gated `search_documents` and representation eligibility/source metadata in the canonical entity owner only. |
 | `all_scope_rollup_v1` | Domain outboxes above | Project/day/kind/provider/model/tool/hint/automation/health/cost facets with full vector watermark. |
+| `read_model_facets_v1` | Domain outboxes above | Per-scope `facet_rollup_rows` in the owning shard for plan 05 facet requests. |
+| `read_model_timeline_v1` | Canonical events and gap/late markers | Bitemporal `timeline_density_rows` in the owning shard for plan 05 timeline pages. |
+| `read_model_observatory_v1` | Checkpoint/lag/dead-letter/identity-conflict/coverage/operations events | `observatory_status_rows` (activity for profile-wide, project for per-project) for the dashboard Observatory. |
+
+### Query read models: facets, timeline density, and observatory status
+
+The `read_models/{facets,timeline,observatory}` family produces the projected read models plan [`05-query-crate.md`](05-query-crate.md) consumes through query ports (facets, timeline density, observatory status; 05 lists these files as required companions). All three are derived, current-generation-only rows: they rebuild from retained events, carry their full source `VectorWatermark`, and hold no payload text — labels are `CatalogSafeText`/`LogSafeText` sink-eligible values only.
+
+- `facet_rollup_rows(facet_key_id: FacetKeyId, scope_id: ScopeId, entity_kind: RegistryKind, bucket_value_hash: [u8; 32], bucket_label: CatalogSafeText, count: u64, source_watermark: VectorWatermark, projector_version: ProjectorVersion, updated_at: UtcMicros)`. Primary key `(facet_key_id, scope_id, entity_kind, bucket_value_hash)`; required index `(scope_id, entity_kind, count DESC)`. Owning shard: the activity/project shard owning the counted rows; All-scope facets remain `all_scope_rollup_v1` output. Size envelope: at most 1,000 buckets per `(facet_key_id, scope_id, entity_kind)` — plan 05's facet-bucket cap — with an explicit `other` overflow bucket; retention: replaced in place per generation, no history.
+- `timeline_density_rows(scope_id: ScopeId, lane_kind: TimelineLaneKind, time_basis: TimeBasis /* occurred | ingested */, bucket_width: BucketWidth /* minute | hour | day | month */, bucket_start: UtcMicros, event_count: u64, first_event_id: EventId, last_event_id: EventId, source_watermark: VectorWatermark, projector_version: ProjectorVersion, updated_at: UtcMicros)`. Primary key `(scope_id, lane_kind, time_basis, bucket_width, bucket_start)`; required index `(scope_id, bucket_width, bucket_start)`. Owning shard: the shard owning the bucketed events. Size envelope: four widths over the event horizon (bounded by retention), sized for plan 05's server-side density buckets and the dashboard's 250k-density-mark budget; retention: derived, rebuilt, no history.
+- `observatory_status_rows(subsystem: ObservatorySubsystem /* capture | spool | journal | projector | graph | blob | catalog | migration | privacy | provider_integration | daemon */, component_id: ComponentId, scope_id: Option<ScopeId>, status: ObservatoryStatus /* healthy | degraded | stale | blocked | unavailable | foreign_owned | unknown */, lag_events: u64, lag_seconds: u64, open_dead_letters: u64, identity_conflicts: u64, coverage: ProjectionCoverage, evidence_anchors: Vec<RetrievalAnchorId>, last_verified_at: Option<UtcMicros>, source_watermark: VectorWatermark, projector_version: ProjectorVersion, updated_at: UtcMicros)`. Primary key `(subsystem, component_id, scope_id)`; required index `(status, updated_at)`. Owning shard: activity for profile-wide rows, project for per-project rows. Size envelope: one row per live component (thousands, not millions); retention: current view only — history stays in the underlying events. Counts, IDs, and coverage only; it feeds the Observatory surfaces in [`11-dashboard-frontend.md`](11-dashboard-frontend.md) and never renders a metric from missing denominators as zero.
 
 ### Tool surface completeness
 
@@ -608,12 +646,13 @@ Each step is independently resumable by `(projector, version, shard, generation,
 - [ ] Run `cargo test -p tracedecay-projectors --test backfill_parity automation`; expected: config/run/artifact/candidate/autonomy/effect/recovery/skill/outcome manifests reconcile and legacy approvals remain evidence-only.
 - [ ] Commit `feat(projectors): project automation lifecycle`.
 
-### PR 22: Accounting, privacy-gated search, and All-scope rollups
+### PR 22: Accounting, privacy-gated search, query read models, and All-scope rollups
 
-**Files:** create `src/{accounting,operations,search,aggregates}.rs`; extend `tests/domain_suite.rs`, `tests/backfill_parity.rs`, and `benches/projectors.rs`.
+**Files:** create `src/{accounting,operations,search,aggregates}.rs`, `src/read_models/{mod,facets,timeline,observatory}.rs`; extend `tests/domain_suite.rs`, `tests/backfill_parity.rs`, and `benches/projectors.rs`.
 
 - [ ] Write fixtures for tokens/context/compression/latency/model/tool/cost/savings methodology, missing denominator, caps, hook/hint/tool/fact/skill/automation adoption, coordination eligible/emitted/suppressed/acted/handoff/duplicate-avoided/false-positive/unresolved outcomes, #411 foreign/self-owned/legacy skill findings and remediation agreement, #412 lifecycle drain/checkpoint/service-state order, malformed/partial sources, sensitivity/retention changes, and cross-shard vector watermarks.
 - [ ] Implement `accounting_v1`, `operations_v1`, `search_document_v1`, and `all_scope_rollup_v1`; numeric ratios require a known denominator and every rollup stores its full source vector.
+- [ ] Implement `read_model_facets_v1`, `read_model_timeline_v1`, and `read_model_observatory_v1` with the exact `facet_rollup_rows`/`timeline_density_rows`/`observatory_status_rows` shapes above; assert bucket caps with `other` overflow, occurred/ingested density parity against canonical events, and observatory rows that report unknown denominators as unknown, never zero.
 - [ ] Prove secret, reasoning-default, locked, quarantined, and deleted content creates no search document or representation eligibility row; deletion rebuild removes descendants within one minute.
 - [ ] Run `cargo test -p tracedecay-projectors --test domain_suite`; expected: exit 0 with zero forbidden index rows and explicit unknown denominators.
 - [ ] Run `cargo bench -p tracedecay-projectors --bench projectors -- visibility`; expected: p95 observation-to-projected visibility at or below two seconds under concurrent capture and current-scale corpus.
@@ -687,7 +726,7 @@ Each step is independently resumable by `(projector, version, shard, generation,
 - Canonical activity and project ownership matches the master architecture; canonical transcript bodies exist only in profile activity storage.
 - Concurrent parent/subagents, inter-agent messages, tools/results, goals, hooks/hints, and outcome correlations preserve direct ordering/evidence without fabricated causation.
 - PR 17A profile activity/temporal attribution/work claims preserve zero/one/many project relations, per-observation validity, safe coordination anchors, planned redundancy, and current TTL views without copying transcripts or granting agent-control authority.
-- LCM, Git/code/delivery, knowledge/policy, automation/skills, accounting/search/rollups rebuild deterministically with explicit vector watermarks.
+- LCM, Git/code/delivery, knowledge/policy, automation/skills, accounting/search/rollups, and the query read-model family (facets, timeline density, observatory status) rebuild deterministically with explicit vector watermarks.
 - Code graph rows and joins are federated by explicit repository/checkout/worktree/ref/snapshot/generation tuples; ambiguity/staleness is coverage and no active-base/current-generation fallback exists.
 - PR 18A/19A cross-repository graph and related-delivery projections preserve both endpoint snapshots, source/freshness, bounded diversity, and distinct direct/impact/test/context/produced/observed roles.
 - PR #405 identity adoption, PR #407 Hermes user-profile migration, PR #410 native-row/origin/representative behavior, PR #411 ownership/remediation agreement, and PR #412 lifecycle-drain receipts are in the recorded base and parity-tested; #413 contributes its actual release/protocol version only and #409 remains historical.

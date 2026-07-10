@@ -23,9 +23,9 @@ Plan [`24-canonical-task-plan-graph-and-multi-agent-executor.md`](24-canonical-t
 - `tracedecay-api` owns HTTP/OpenAPI/SSE framing, `Last-Event-ID`, heartbeat bytes, and bearer/CSRF/CSP enforcement. It maps query snapshot/delta/gap types without changing semantics.
 - Exact public replay mode names shared with capture and policy are `ReplayMode::ExactDeterministic`, `ReplayMode::RecordedResult`, and `ReplayMode::CurrentBestEffort`. Query Lab uses the query engine's own versioned plan/index/ranker references; policy evaluators use the policy crate.
 - A frozen query never observes rows above its captured per-shard high-watermarks. A live query starts with the same frozen snapshot and then emits ordered deltas.
-- A missing, corrupt, stale, incompatible, locked, or redacted shard never disappears silently. Its disposition is present in `CoverageReport`.
+- A missing, corrupt, stale, incompatible, locked, or redacted shard never disappears silently. Its disposition is present in `CoverageReportV1`, the shared domain type owned by [`01-domain-crate.md`](01-domain-crate.md).
 - Read-only execution never updates usage, retrieval, hint, ranking, or memory counters. Adoption/feedback is recorded later as an explicit application/domain event.
-- [`23-session-lcm-temporal-retrieval-and-evaluation.md`](23-session-lcm-temporal-retrieval-and-evaluation.md) is the normative session/LCM specialization: this crate owns its occurrence/logical-copy/summary-DAG candidate channels, temporal current/as-of/evolution/forensic resolver, authority/supersession features, federated fusion, context assembly, explanations, and evaluation execution. No legacy `message_search` or LCM binding retains independent rank semantics.
+- [`23-session-lcm-temporal-retrieval-and-evaluation.md`](23-session-lcm-temporal-retrieval-and-evaluation.md) is the normative session/LCM specialization: this crate owns its occurrence/logical-copy/summary-DAG candidate channels, temporal current/as-of/evolution/forensic resolver, authority/supersession features, federated fusion, context assembly, explanations, and evaluation execution — all inside this crate's Section 5 module tree (`session/`, `context/`, `eval/`), which is the single home for ranking, fusion, and evaluation-metrics code; plans 15 and 23 state requirements against these modules and declare no parallel `retrieval/` or `session/` trees. Context assembly executes here in `context/assembler.rs`; [`09-application-crate.md`](09-application-crate.md) composes and authorizes assembly/packet use cases, and [`24-canonical-task-plan-graph-and-multi-agent-executor.md`](24-canonical-task-plan-graph-and-multi-agent-executor.md) supplies task-graph selectors only. No legacy `message_search` or LCM binding retains independent rank semantics.
 
 ## 2. Goals
 
@@ -125,15 +125,18 @@ crates/tracedecay-query/
 │   ├── execute/
 │   │   ├── mod.rs                # QueryEngine orchestration
 │   │   ├── coordinator.rs        # bounded parallel shard execution and cancellation
-│   │   ├── merge.rs              # global sort/top-k/facet/aggregate merge
+│   │   ├── merge.rs              # calibrated cross-shard merge: global sort/top-k/facet/aggregate (Section 11.3)
 │   │   └── resume.rs             # per-shard resume and unavailable-shard preservation
 │   ├── operators/
 │   │   ├── mod.rs                # typed OperatorPlan/ShardOperator vocabulary
 │   │   ├── filter.rs             # typed scalar/entity/evidence filters
 │   │   ├── fts.rs                # phrase/prefix/tokenizer/fallback contract
 │   │   ├── fuzzy.rs              # bounded typo/alias candidate generation after exact/token channels
+│   │   ├── entity.rs             # entity/alias candidate channel (plan 15 §4.2 requirement)
 │   │   ├── vector.rs             # metric/model/version/exact-fallback contract
+│   │   ├── learned_sparse.rs     # optional learned-sparse channel behind RepresentationQueryPort (plan 15 §4.2)
 │   │   ├── graph.rs              # bounded neighborhood/path/impact/affected-tests contract
+│   │   ├── summary.rs            # summary-DAG channel with source horizon/coverage (plan 23 §6)
 │   │   ├── coordination.rs       # nearby agents, claim overlap, TTL/redundancy contract
 │   │   ├── time.rs               # event windows and bitemporal/as-of contract
 │   │   ├── aggregate.rs          # facets/grouping/unknown denominators
@@ -142,11 +145,33 @@ crates/tracedecay-query/
 │   │   ├── mod.rs                # RankingProfile and Ranker
 │   │   ├── lexical.rs            # shard BM25 normalization
 │   │   ├── vector.rs             # distance-to-score normalization
-│   │   ├── rrf.rs                # deterministic reciprocal-rank fusion
+│   │   ├── rrf.rs                # deterministic RRF over channels within a shard (Section 11.3)
+│   │   ├── cluster.rs            # logical-copy clustering and representative selection (plans 15 §4.3, 23 §5.5)
 │   │   ├── features.rs           # recency/trust/graph/usage feature application
 │   │   ├── diversity.rs          # deterministic MMR and explicit multi-repository diversity
 │   │   ├── rerank.rs             # optional bounded local reranker and exact fallback
 │   │   └── explain.rs            # per-result component explanation
+│   ├── session/
+│   │   ├── mod.rs                # session/LCM specialization surface (plan 23 requirements)
+│   │   ├── intent.rs             # session-retrieval intent profiles (plan 23 §5.1 via Section 6.1 attributes)
+│   │   └── temporal_resolver.rs  # current/as-of/evolution/forensic resolution (plan 23 §4)
+│   ├── context/
+│   │   ├── mod.rs                # context assembly entry points
+│   │   ├── assembler.rs          # plan 23 §6.2 assembly-profile execution
+│   │   ├── summary_horizon.rs    # summary freshness/coverage checks (plan 23 §6.1)
+│   │   └── token_budget.rs       # tokenizer-descriptor token/byte accounting (plan 23 §6.2)
+│   ├── eval/
+│   │   ├── mod.rs                # shared evaluation execution for plans 15 and 23
+│   │   ├── corpus.rs             # corpus loading and versioning (plan 15 §5, plan 23 §8.1)
+│   │   ├── cutoff.rs             # time-safe cutoff enforcement (plan 15 §5.1)
+│   │   ├── pool.rs               # candidate pooling and hard negatives (plan 15 §5.3)
+│   │   ├── qrels.rs              # JudgmentRecordV1 qrel access (plan 15 §5.4)
+│   │   ├── metrics.rs            # single metrics implementation shared by plans 15 §6 and 23 §8.5
+│   │   ├── strata.rs             # per-stratum reporting (plan 15 §5.2)
+│   │   ├── agreement.rs          # double-label agreement statistics (plan 15 §5.4)
+│   │   ├── ablation.rs           # channel/feature ablation harness (plan 15 §7.1)
+│   │   ├── replay.rs             # frozen replay including session-temporal cases (plan 23 §8)
+│   │   └── report.rs             # aggregate/redacted report generation (plan 15 §11)
 │   ├── export/
 │   │   ├── mod.rs                # ExportRequest and bounded stream orchestration
 │   │   ├── jsonl.rs              # canonical JSONL row/manifest encoding
@@ -183,22 +208,26 @@ crates/tracedecay-query/
     └── graph.rs
 ```
 
+This tree is the single module authority for ranking, fusion, session/temporal, context-assembly, and evaluation-metrics code. Plan [`15-search-quality-evaluation-and-retrieval-research.md`](15-search-quality-evaluation-and-retrieval-research.md) §9 and plan [`23-session-lcm-temporal-retrieval-and-evaluation.md`](23-session-lcm-temporal-retrieval-and-evaluation.md) §13 state requirements against these modules; neither plan declares a parallel `retrieval/` or `session/` tree or a second `eval/metrics.rs`.
+
 Required companion files, owned by other plans/PRs:
 
 ```text
-crates/tracedecay-domain/src/query/{mod.rs,predicate.rs,scope.rs,text.rs,semantic.rs,relation.rs,time.rs,aggregate.rs,sort.rs}.rs
+crates/tracedecay-domain/src/query/{mod.rs,predicate.rs,scope.rs,text.rs,semantic.rs,relation.rs,time.rs,aggregate.rs,sort.rs}
 src/v2_adapters/query_store/{mod.rs,catalog.rs,sqlite_shard.rs,fts.rs,vector.rs,graph.rs,time.rs,coordination.rs}
-crates/tracedecay-projectors/src/read_models/{facets.rs,timeline.rs,observatory.rs}.rs
-crates/tracedecay-application/src/use_cases/{query.rs,search.rs,graph.rs,timeline.rs,export.rs,subscribe.rs}.rs
-crates/tracedecay-api/src/http/{query.rs,search.rs,graph.rs,timeline.rs,exports.rs}.rs
-crates/tracedecay-api/src/sse/{mod.rs,resume.rs}.rs
+crates/tracedecay-projectors/src/read_models/{facets.rs,timeline.rs,observatory.rs}
+crates/tracedecay-application/src/use_cases/{query.rs,search.rs,graph.rs,timeline.rs,export.rs,subscribe.rs}
+crates/tracedecay-api/src/http/{query.rs,search.rs,graph.rs,timeline.rs,exports.rs}
+crates/tracedecay-api/src/sse/{mod.rs,resume.rs}
 ```
+
+Plan [`04-projectors-crate.md`](04-projectors-crate.md) owns the `read_models/{facets,timeline,observatory}` projector family named above and defines those read models; this crate only consumes them through query ports.
 
 The root composition crate owns `src/v2_adapters/query_store/**`; application owns only the use-case/query ports. Query and application never import `rusqlite`, graph files, or another concrete store.
 
 ## 6. Canonical AST Consumed from `tracedecay-domain`
 
-PR 4 must land these names before PR 11. `tracedecay-query::ast` re-exports `TraceQueryV1`, `ScopeSelectorV2`, `MessageView`, `TimePredicate`, `AttributePredicate`, `TextPredicate`, `SemanticPredicate`, `TraversalPredicate`, `ProvenancePredicate`, `SensitivityFilter`, `FacetRequest`, `AggregateRequest`, `FieldProjection`, `SortKey`, `PageSize`, `SnapshotMode`, `ExplainMode`, `QueryBudget`, `CursorClaimsV1`, `FrozenSnapshot`, and `VectorWatermark` unchanged.
+PR 4 must land these names before PR 11. `tracedecay-query::ast` re-exports `TraceQueryV1`, `ScopeSelectorV2`, `MessageView`, `TimePredicate`, `TemporalClauseV1`, `AttributePredicate`, `TextPredicate`, `SemanticPredicate`, `TraversalPredicate`, `ProvenancePredicate`, `SensitivityFilter`, `FacetRequest`, `AggregateRequest`, `FieldProjection`, `SortKey`, `PageSize`, `SnapshotMode`, `ExplainMode`, `QueryBudget`, `CursorClaimsV1`, `FrozenSnapshot`, and `VectorWatermark` unchanged.
 
 ```rust
 pub struct TraceQueryV1 {
@@ -207,6 +236,7 @@ pub struct TraceQueryV1 {
     pub entity_kinds: Vec<EntityKind>,
     pub message_view: Option<MessageView>,
     pub time: Option<TimePredicate>,
+    pub temporal: Option<TemporalClauseV1>,
     pub attributes: Vec<AttributePredicate>,
     pub text: Option<TextPredicate>,
     pub semantic: Option<SemanticPredicate>,
@@ -224,9 +254,71 @@ pub struct TraceQueryV1 {
 }
 ```
 
+```rust
+pub struct TemporalClauseV1 {
+    pub mode: TemporalModeV1,
+}
+
+pub enum TemporalModeV1 {
+    Current,
+    AsOf { valid_time: UtcMicros, knowledge_time: UtcMicros },
+    Evolution { from: Option<UtcMicros>, to: UtcMicros },
+    Forensic,
+}
+```
+
+`TemporalClauseV1` is owned by `tracedecay-domain` ([`01-domain-crate.md`](01-domain-crate.md)); this crate plans and executes it (Section 11.4). `AsOf` requires both `valid_time` and `knowledge_time` — a single-timestamp as-of is rejected at validation, because “what was known then” needs both cutoffs (Section 11.4). Plan [`23-session-lcm-temporal-retrieval-and-evaluation.md`](23-session-lcm-temporal-retrieval-and-evaluation.md) rides this clause for current/as-of/evolution/forensic session retrieval and defines no parallel AST.
+
 Grouping, comparison intervals, relation evidence filters, code predicates, sampling/downsampling, and saved-collection expansion are encoded through registered attributes/predicates and query profiles until a versioned domain schema adds fields; the query crate must not fork `TraceQueryV1` to add them.
 
 Validation limits are explicit constants in `validate.rs`: page size `1..=1000`; graph depth `0..=5`; path alternatives `1..=20`; facet buckets `1..=1000`; projected scalar fields `1..=128`; payload slice `0..=1 MiB` per page; export rows `1..=5_000_000`; export bytes `1..=10 GiB`; timeline raw-event page `1..=10_000`. Application may impose lower limits but cannot raise them.
+
+### 6.1 Registered attributes for the session/LCM specialization
+
+Plan 23's session/LCM filters ride `TraceQueryV1` through these registered attribute keys; temporal mode itself uses the first-class `temporal` clause above, never a registered attribute:
+
+| Registered attribute key | Value type | Operators | Carries (plan 23) |
+|---|---|---|---|
+| `session.intent_profile` | `IntentProfileRef { id, version }` | equals | Session-retrieval intent profile selection (23 §5.1) |
+| `retrieval.grain` | `RetrievalGrain` enum | equals, in | Requested result grain (message/Turn/session/thread/agent slice/workflow slice/evidence bundle) |
+| `activity.role` | `MessageRole` enum | in | Role filters, including `list_sessions` `role` and `list_messages` `roles` |
+| `activity.kind` | `MessageKind` enum | in | Message-kind filters, including `list_messages` `kinds` |
+| `activity.origin` | `MessageOrigin` enum | in | Direct-user/subagent/tool/protocol origin filters (23 §5.1) |
+| `activity.audience` | `MessageAudience` enum | in | Audience filters for representative selection (23 §3.2) |
+| `activity.provider` | `ProviderId` | in | Provider filters |
+| `evidence.relation` | `EvidenceRelationKind` enum (`produced`, `observed`, `proposed`, `copied`, …) | in | Required evidence relation (23 §5.4) |
+| `temporal.assertion_status` | `AssertionStatus` enum | in | Current/superseded/conflicted assertion filters (23 §4.1) |
+| `summary.freshness` | enum `{ fresh, stale, imported_unverified }` | in | Summary-horizon freshness filters (23 §6.1) |
+
+Each key is registered in the domain schema/predicate registries with its value type and operator set; the planner lowers registered-attribute predicates to shard operators exactly like built-in predicates, and unsupported keys fail validation with `invalid_query`.
+
+### 6.2 Session and message list intents
+
+`list_sessions` and `list_messages` (master plan §2.4) are first-class named `TraceQueryV1` list intents, not separate APIs:
+
+```rust
+pub struct ListSessionsIntentV1 {
+    pub scope: ScopeSelectorV2,
+    pub role: Option<MessageRole>,
+    pub provider: Option<ProviderId>,
+    pub time: Option<TimePredicate>,
+    pub cursor: Option<OpaqueCursor>,
+}
+
+pub struct ListMessagesIntentV1 {
+    pub scope: ScopeSelectorV2,
+    pub roles: Vec<MessageRole>,
+    pub kinds: Vec<MessageKind>,
+    pub provider: Option<ProviderId>,
+    pub time: Option<TimePredicate>,
+    pub cursor: Option<OpaqueCursor>,
+}
+```
+
+- Each lowers to `TraceQueryV1` with `entity_kinds = [Session]` / `[Message]` and no `text` or `semantic` predicate: no-text-predicate enumeration is a valid, bounded query. Role/kind/provider map to the Section 6.1 registered attributes; `time` passes through unchanged.
+- Default sort is occurred-time descending, then ingested-time descending, with canonical `EntityRef` tie-break; pagination uses Section 9 cursors.
+- Enumeration exports use Section 12 manifest semantics (counts, hashes, coverage, redaction, completeness); Section 12's “no text predicate is required for session/message enumeration” rule is this contract.
+- Plan [`08-tool-catalog-crate.md`](08-tool-catalog-crate.md) catalogs both intents as named query profiles; plan 23 §5.2's recent-activity listing channel is exactly these intents; the V1 `recent_sessions` seam (Section 4) retires into `list_sessions`.
 
 ## 7. Public Query API and Ports
 
@@ -425,16 +517,21 @@ struct CursorV1 {
     version: u16,
     issued_at: UtcMicros,
     expires_at: UtcMicros,
-    query_digest: ContentDigest,
-    access_digest: ContentDigest,
+    query_digest: KeyedLocatorDigest,
+    access_digest: KeyedLocatorDigest,
+    scope_set_digest: KeyedLocatorDigest,
+    catalog_generation: CatalogGeneration,
+    temporal: Option<TemporalClauseV1>,
+    intent_profile: Option<IntentProfileRef>,
     schema_version: QuerySchemaVersion,
     ranking: RankingProfileRef,
     index_versions: BTreeMap<ShardId, IndexVersionSet>,
     snapshot: FrozenSnapshot,
     per_shard_positions: BTreeMap<ShardId, ShardCursorPosition>,
+    shard_dispositions: BTreeMap<ShardId, ShardDisposition>,
     sort_cutoff: Vec<SortValue>,
     last_entity_id: Option<EntityId>,
-    emitted_ids_digest: ContentDigest,
+    emitted_ids_digest: KeyedLocatorDigest,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
@@ -442,18 +539,63 @@ pub struct StableSortKey {
     pub components: Vec<SortValue>,
     pub entity_id: EntityRef,
 }
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct IndexVersionSet {
+    pub schema_version: QuerySchemaVersion,
+    pub fts_index_generation: IndexGeneration,
+    pub vector_index_generation: Option<IndexGeneration>,
+    pub graph_generation: Option<GraphGeneration>,
+    pub cluster_projection_version: Option<ProjectionVersion>,
+    pub summary_projection_version: Option<ProjectionVersion>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ShardCursorPosition {
+    pub last_sort_key: Vec<SortValue>,
+    pub last_entity_id: EntityId,
+    pub rows_emitted: u64,
+    pub exhausted: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub enum ShardDisposition {
+    Searched,
+    Skipped { reason: SkipReason },
+    Stale { last_fresh_at: UtcMicros },
+    Unavailable { reason: UnavailableReason },
+    Incompatible,
+    Locked,
+    Redacted,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct LiveDeltaCursorV1 {
+    version: u16,
+    issued_at: UtcMicros,
+    expires_at: UtcMicros,
+    query_digest: KeyedLocatorDigest,
+    access_digest: KeyedLocatorDigest,
+    snapshot: FrozenSnapshot,
+    per_shard_outbox: BTreeMap<ShardId, OutboxSequence>,
+    suppression_digest: KeyedLocatorDigest,
+}
 ```
 
-`CursorV1` is the query crate's private signing/codec representation of domain `CursorClaimsV1`; every field maps one-to-one and schema tests compare canonical encodings before authentication. `StableSortKey` is the in-memory merge key and lowers to `sort_cutoff` plus `last_entity_id` in the claim.
+`CursorV1` is the query crate's private signing/codec representation of the extended domain `CursorClaimsV1` ([`01-domain-crate.md`](01-domain-crate.md)), which binds scope-set digest, catalog generation, temporal mode and cutoff, intent-profile version, and partial-shard dispositions in addition to the original claim fields; every field maps one-to-one and schema tests compare canonical encodings before authentication. Digest fields are privacy-domain-bound keyed locator digests (`KeyedLocatorDigest`, the plan [`18-secret-detection-redaction-and-private-data-safety.md`](18-secret-detection-redaction-and-private-data-safety.md) keyed-fingerprint contract) — never plain `ContentDigest` content hashes, so no cross-domain equality join is possible on cursor bytes. `StableSortKey` is the in-memory merge key and lowers to `sort_cutoff` plus `last_entity_id` in the claim.
 
-- Encode canonical CBOR, authenticate with per-profile HMAC key, then base64url without padding. A cursor contains no raw query literal, payload, secret alias, or filesystem path.
+- Encode canonical CBOR, authenticate with the profile's active cursor HMAC key, then base64url without padding. The envelope prefixes an unauthenticated `key_id` header used only to select the verification key; all claims live inside the authenticated CBOR body. A cursor contains no raw query literal, payload, secret alias, or filesystem path.
+- Cursor signing keys have an explicit lifecycle record persisted in the profile catalog/store (shared with plan [`17-official-public-api-and-sdks.md`](17-official-public-api-and-sdks.md)'s contract IR): `CursorKeyRecordV1 { key_id: CursorKeyId, profile_id: ProfileId, state: Active | Retiring | Revoked, created_at: UtcMicros, retire_after: Option<UtcMicros>, revoked_at: Option<UtcMicros> }`. Exactly one key per profile is `Active`; new cursors are signed only with it. Rotation moves the previous key to `Retiring`, which still verifies until `retire_after` (at least the maximum outstanding cursor expiry, so ≥24 hours after rotation). `Revoked` keys fail immediately with restart reason `cursor_key_revoked`. Because keys persist in the store rather than process memory, cursors remain valid across daemon restart and upgrade; rotation is an application command that produces the cursor-key rotation receipt archived in Section 18.
 - Default expiry is 24 hours. An application may request a shorter duration.
-- Resume validates MAC, expiry, query fingerprint, access digest, schema, ranking, index generations, retention horizon, and each shard identity before opening a shard.
-- Retention crossing a frozen watermark, an incompatible shard replacement, or changed ranking/schema returns a typed restart reason.
-- A newly unavailable shard is marked unavailable while other stored positions resume. A shard newly registered after the snapshot is excluded.
+- Resume validates MAC, expiry, query fingerprint, access digest, scope-set digest, catalog generation, temporal clause, intent profile, schema, ranking, index generations, retention horizon, and each shard identity before opening a shard.
+- Resuming a fused-rank cursor re-executes every enabled channel over the frozen snapshot (identical index generations and watermarks), re-fuses deterministically, verifies that the re-fused emitted prefix reproduces `emitted_ids_digest`, and then skips past `sort_cutoff`/`last_entity_id`. Per-shard positions bound the rescan work; the recomputation is charged to the resuming request's `CostBudget` and counted in `QueryTiming`. A prefix/digest mismatch returns the typed restart reason `cursor_nondeterministic_resume`.
+- `emitted_ids_digest` is a keyed digest over the ordered, already-emitted canonical `EntityRef`s. It verifies deterministic resume; duplicate suppression comes from deterministic re-fusion plus the cutoff skip, never from the digest alone.
+- `SortValue` cutoff comparisons use canonical total-order byte encodings (integers and canonical finite `f64` bit patterns; NaN/infinite values are rejected at shard boundaries), so cursor comparisons are platform-deterministic. The `1e-9` tolerance in Section 16 applies only to explain-arithmetic reconstruction, never to cursor cutoffs.
+- Retention crossing a frozen watermark, an incompatible shard replacement, or changed ranking/schema/catalog generation returns a typed restart reason.
+- A newly unavailable shard is marked unavailable in `shard_dispositions` while other stored positions resume. A shard newly registered after the snapshot is excluded.
 - Frozen mode filters every shard at `row.sequence <= captured_watermark.sequence` (or its equivalent immutable generation).
 - Equal user-visible sort values are broken by canonical `EntityRef`; ranks never depend on arrival order, SQLite row ID, hash-map iteration, or shard-open order.
-- Live delta cursors are distinct from page cursors and carry last per-shard outbox sequence plus duplicate-suppression digest.
+- Live delta cursors (`LiveDeltaCursorV1`) are distinct from page cursors and carry the last per-shard outbox sequence plus a duplicate-suppression digest; they share the same key lifecycle and envelope rules.
 
 ## 10. Coverage and Response Contract
 
@@ -468,7 +610,7 @@ pub struct QueryResponse {
     pub aggregates: Vec<AggregateResult>,
     pub next_cursor: Option<OpaqueCursor>,
     pub truncation: Option<TruncationReason>,
-    pub coverage: CoverageReport,
+    pub coverage: CoverageReportV1,
     pub timing: QueryTiming,
     pub explain: Option<QueryExplain>,
     pub level_of_detail: LevelOfDetailReport,
@@ -486,7 +628,7 @@ pub struct MessageViewReport {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct CoverageReport {
+pub struct CoverageReportV1 {
     pub complete: bool,
     pub searched: Vec<ShardCoverage>,
     pub skipped: Vec<ShardCoverage>,
@@ -496,6 +638,11 @@ pub struct CoverageReport {
     pub locked: Vec<ShardCoverage>,
     pub redacted: Vec<ShardCoverage>,
 }
+```
+
+`CoverageReportV1` is the canonical shared domain type owned by [`01-domain-crate.md`](01-domain-crate.md), whose definition is finalized from this crate's usage (disposition shard lists plus freshness watermarks and an unknown-coverage flag); this crate consumes and produces it and defines no fork.
+
+```rust
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum TruncationReason {
@@ -549,13 +696,28 @@ pub struct RankExplanation {
     pub components: Vec<ComponentScore>,
     pub stable_sort_key: StableSortKey,
 }
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ComponentScore {
+    pub component: RankComponentId,
+    pub version: SemVer,
+    pub channel: Option<ChannelId>,
+    pub raw: FiniteF64,
+    pub normalized: FiniteF64,
+    pub normalization: NormalizationRef,
+    pub weight: FiniteF64,
+    pub contribution: FiniteF64,
+    pub state: ComponentState, // Applied | Absent | Excluded { reason: ExclusionReason }
+}
 ```
 
-- Initial V2 fusion is reciprocal-rank fusion over lexical and semantic lists, followed by declared finite weights for recency, trust, graph proximity, and usage only when those features are present and authorized.
+- Fusion is defined once, here, for every consumer (plans 15 §4.3 and 23 §5.3 state requirements against it): within each shard, deterministic reciprocal-rank fusion runs over the enabled candidate channels (lexical, fuzzy, entity, vector, learned-sparse, summary-DAG, temporal, graph); then a calibrated cross-shard merge combines the shard lists — exact-match tiers first, then rank-based merging with a per-shard calibration whose method and version are declared in the `RankingProfile`. Raw shard BM25 scores are never compared as if corpus statistics were shared.
+- Repartition stability is owned by this crate's planner: repartitioning the same logical corpus across a different shard layout must not change fused top-k results or explanations. The Section 17 fusion repartition property test enforces it; plan 23 §5.3 supplies session fixtures and evaluates alternative calibration baselines.
+- Declared finite weights for recency, trust, graph proximity, and usage apply after fusion, only when those features are present and authorized.
 - Missing features contribute `Absent`, not zero; profiles declare whether to renormalize or preserve fixed weights.
 - NaN/infinite values are rejected at shard boundaries.
 - Compatibility profile `v1-memory-2026-07` reproduces `FactRetriever` scoring/order for eligible V1 facts. V2 default is separately versioned.
-- nDCG@10 must be at least 0.85, recall@20 at least 0.90, and release regression no worse than 0.02 on the versioned intent corpus.
+- Release gates use the calibrate-then-lock relative regime owned by plan 15 §7.1: a candidate default must improve predeclared Precision@3, nDCG@10, and first-useful rank over the locked baselines on the untouched test split, with no material worst-stratum regression as numerically defined in plan 15 §7.1 and no plan 23 §8.6 safety-floor breach. This crate pre-commits no absolute corpus-independent nDCG/recall threshold.
 
 ### 11.4 Graph and time
 
@@ -565,7 +727,8 @@ pub struct RankExplanation {
 - Git/code result roles are disjoint and explicit: `directly_changed`, `structurally_impacted`, `candidate_test`, and `context_only`. Each row carries the producing edge/path/profile, evidence/confidence, truncation, and source/index watermark; transitive/file-level fan-out cannot increment the direct-change count or render as “modified.”
 - Traversal stops at privacy-domain/sensitivity boundaries and reports redacted frontier counts without leaking hidden IDs.
 - Time predicates distinguish occurred, ingested, valid, observed, and comparison intervals.
-- As-of state uses `valid_from <= t < valid_to` and `observed_from <= knowledge_time < observed_to`; callers must provide both when asking “what was known then.”
+- The AST carrier for answer modes is the `TraceQueryV1.temporal` clause (Section 6): the planner lowers `Current`, `AsOf`, `Evolution`, and `Forensic` to shard operators with plan 23 §4.3 semantics; plan 23 rides this clause and defines no parallel AST.
+- As-of state uses `valid_from <= t < valid_to` and `observed_from <= knowledge_time < observed_to`; `AsOf` therefore requires both `valid_time` and `knowledge_time` — callers must provide both when asking “what was known then,” and validation rejects a single-timestamp as-of.
 - Timeline density uses server-side buckets. Sanitized native/canonical events are never returned unbounded for wide intervals.
 - In-memory CSR acceleration is permitted only behind the same bounded operator contract and must produce the same entity/edge set as the store reference implementation.
 
@@ -651,7 +814,7 @@ pub enum ExportFrame {
 - Formats are canonical JSONL and typed Parquet. JSONL orders object keys and uses RFC 3339 UTC timestamps; Parquet schema metadata records domain/query schema versions.
 - The engine captures one frozen vector watermark, streams bounded row batches, hashes uncompressed canonical row bytes, and emits final counts only after successful completion.
 - Manifest includes export/query/schema/ranking/index/redaction versions; created time; query fingerprint; scope; source watermarks; searched/skipped/stale/unavailable/incompatible/locked/redacted coverage; rows/bytes; payload inclusion; redaction counts/reasons; per-part BLAKE3 hashes; and completeness.
-- Human-authored versus provider-protocol messages is an explicit exported field. No text predicate is required for session/message enumeration.
+- Human-authored versus provider-protocol messages is an explicit exported field. No text predicate is required for session/message enumeration (the Section 6.2 `list_sessions`/`list_messages` intents).
 - Provider-exposed reasoning is excluded unless policy, retention, authorization, and explicit request all permit it; exclusion is counted in the redaction report.
 - Export sink path containment, private permissions, atomic publication, encryption, and job IDs are application/store responsibilities. Query emits bytes only through `ExportStream`.
 - Cancellation or sink failure yields no completed manifest and no published artifact; application removes staged parts.
@@ -672,7 +835,7 @@ pub enum QueryStreamEvent {
 pub enum RowDelta {
     Upsert { row: QueryRow, stable_sort_key: StableSortKey },
     Remove { entity: EntityRef, cause: RemovalCause },
-    CoverageChanged(CoverageReport),
+    CoverageChanged(CoverageReportV1),
 }
 ```
 
@@ -765,7 +928,7 @@ Program numbering is authoritative: PR 12 is implemented in dependency order as 
 
 - [ ] Add tests `limits_concurrent_shard_opens_to_32`, `propagates_cancel_to_store_and_stops_merge`, `returns_healthy_rows_when_one_shard_fails`, `all_unavailable_is_typed_error`, and `equal_scores_order_by_entity_id_not_arrival`.
 - [ ] Run `cargo test -p tracedecay-query --test budgets_cancellation --test partial_coverage -- --nocapture`. Expected: tests fail because coordinator/coverage types are absent.
-- [ ] Implement bounded futures, cancellation checkpoints, shard-error classification, merge batches, `CoverageReport`, unknown-denominator semantics, and deterministic tie breaks.
+- [ ] Implement bounded futures, cancellation checkpoints, shard-error classification, merge batches, `CoverageReportV1`, unknown-denominator semantics, and deterministic tie breaks.
 - [ ] Re-run the command. Expected: all tests pass; fixture peak concurrency equals 32; cancelled run produces no cursor.
 - [ ] Commit `feat(query): coordinate shards with explicit partial coverage`.
 
@@ -794,7 +957,7 @@ Program numbering is authoritative: PR 12 is implemented in dependency order as 
 **Files:** extend `src/planner/{scope,shards,hydrate}.rs`, `src/execute/{coordinator,resume}.rs`, `src/cursor.rs`, `src/coverage.rs`, `tests/{planner_pruning,cursor_resume,partial_coverage}.rs`; add globally routed retrieval fixtures shared with the scope plan.
 
 - [ ] Add failing tests `search_hit_routes_to_exact_cross_project_turn`, `adjacent_context_needs_no_cwd_or_store_switch`, `cursor_binds_catalog_scope_set_generation`, `saved_system_opens_exact_member_generations`, `all_reports_locked_corrupt_migrating_stale_unauthorized_incompatible`, `globally_routed_ref_never_uses_current_project`, and `related_scope_is_proposed_not_silently_added`.
-- [ ] Bind the full `ScopeSelectorV2`, catalog/saved-set generation, exact repository/checkout/worktree/ref/snapshot/graph-generation tuple, per-shard snapshots/watermarks, authorization digest, and partial/stale policy into `QueryPlan` and `CursorClaimsV1`.
+- [ ] Bind the full `ScopeSelectorV2`, catalog/saved-set generation, exact repository/checkout/worktree/ref/snapshot/graph-generation tuple, per-shard snapshots/watermarks, authorization digest, and partial/stale policy into `QueryPlan` and the extended domain `CursorClaimsV1` (Section 9; plan 01 owns the claim fields).
 - [ ] Implement opaque globally routable entity/retrieval refs so a result can hydrate exact session/message/Turn/entity, adjacent context, source observation, and export row through query-owned ports without exposing a store path or requiring caller-side project switching.
 - [ ] Preserve per-domain capability: unavailable code graph cannot suppress healthy profile activity, memory, Git, automation, or catalog results. Missing/stale/incompatible tuple members remain coverage and cursor state; no alternate current/base generation is opened.
 - [ ] Run `cargo test -p tracedecay-query --test planner_pruning --test cursor_resume --test partial_coverage federated_scope`; expected: one-project, saved-system, and explicit-All fixtures pass with deterministic results and complete coverage dispositions.
@@ -819,7 +982,7 @@ Program numbering is authoritative: PR 12 is implemented in dependency order as 
 
 - [ ] Build private real-prompt-derived and synthetic hard-case pools with chronological cutoff, train/dev/test and cross-project/provider/time holdouts, origin/audience/kind labels, hidden representative membership, exact technical identifiers, typo/alias cases, and secret/reasoning exclusions.
 - [ ] Require blinded labels, adjudication, per-intent query IDs, agreement metrics, pool depth/source, candidate-generation recall, and immutable corpus/query/qrel digests. Copied workflows and representative prompt clusters cannot count as independent judgments.
-- [ ] Run the current V1 and empty/new V2 baselines; record Recall@20, nDCG@10, MRR, exact-identifier success, zero-result rate, latency, memory, per-intent/per-provider/per-project slices, confidence intervals, and failure examples without private literal leakage.
+- [ ] Run the current V1 and empty/new V2 baselines; record Recall@5/10/20, nDCG@10, MRR, exact-identifier success, zero-result rate, latency, memory, per-intent/per-provider/per-project slices, confidence intervals, and failure examples without private literal leakage.
 - [ ] Add leakage tests proving no post-cutoff data, same representative cluster, or test qrel informs training/tuning; missing judgments are unjudged, not negative.
 - [ ] Run `cargo test -p tracedecay-query --test search_quality_eval baseline`; expected: manifest/label/leakage contracts pass and the baseline artifact is reproducible from pinned inputs.
 - [ ] Commit `test(query): freeze time-safe retrieval evaluation`.
@@ -853,7 +1016,7 @@ Program numbering is authoritative: PR 12 is implemented in dependency order as 
 
 - [ ] Compare lexical-only against privacy-domain local dense and learned-sparse candidate generation on the untouched PR 13A test split. Pin model/tokenizer/dimension/metric/normalization/index builder/hardware/runtime manifests and separate cold/warm measurements.
 - [ ] Add tests `rejects_mixed_representation_dimensions`, `exact_fallback_matches_reference_topk`, `secret_fixture_never_reaches_vector_port`, `representation_never_crosses_privacy_or_key_domain`, `missing_model_is_explicit_coverage`, and `disabled_profile_never_opens_vector_port`.
-- [ ] Measure Recall@20/nDCG@10/MRR, per-intent regressions, build/update time, index bytes, p50/p95, peak RSS/VRAM, energy/runtime when available, and deterministic exact fallback. Both candidate types remain disabled until quality/privacy/resource gates pass.
+- [ ] Measure Recall@5/10/20, nDCG@10, MRR, per-intent regressions, build/update time, index bytes, p50/p95, peak RSS/VRAM, energy/runtime when available, and deterministic exact fallback. Both candidate types remain disabled until quality/privacy/resource gates pass.
 - [ ] Run `cargo test -p tracedecay-query --test hybrid_ranking --test security_privacy --test search_quality_eval representation`; expected: privacy/fallback/manifests pass whether optional representation profiles are accepted or rejected.
 - [ ] Commit `feat(query): add gated representation candidates` only for profiles that pass; otherwise commit the benchmark and explicit disabled disposition without dormant production routing.
 
@@ -926,10 +1089,11 @@ Program numbering is authoritative: PR 12 is implemented in dependency order as 
 
 - Differential corpus: exact V1/V2 inclusion for compatibility profiles; every score/order divergence has query, corpus, old/new versions, feature explanation, and disposition.
 - Pagination property test: arbitrary equal scores, shard completion order, page sizes, and interleaved live ingest produce the exact frozen reference set once, in stable order.
+- Fusion repartition property test (planner-owned): repartitioning the same logical corpus across different shard layouts produces identical fused top-k results and explanations; plan 23 §5.3's session fixtures feed it.
 - Fault matrix: absent, corrupt, locked, stale, incompatible, replaced, retention-crossed, and mid-page-failing shards return required coverage/restart behavior.
 - Budget matrix: page, graph, path, facet, projection, hydration, timeline, export, wall-time, RSS, and shard-concurrency limits reject or truncate only with typed reasons.
 - Performance: current-scale FTS p95 <=150 ms; current registry-N top-k p95 <=800 ms without irrelevant opens; 10x hot facets <=400 ms; 10x text <=750 ms; peak query RSS <=1.5 GiB; at most 32 concurrently open shards.
-- Ranking: nDCG@10 >=0.85; recall@20 >=0.90; regression <=0.02; exact-fallback and approximate recall are reported separately.
+- Ranking: the calibrate-then-lock relative regime per plan 15 §7.1 — improvement on predeclared Precision@3/nDCG@10/first-useful rank over locked baselines on the untouched test split, no material worst-stratum regression per plan 15 §7.1's numeric definition, and no plan 23 §8.6 safety-floor breach; exact-fallback and approximate recall are reported separately.
 - Privacy: secret corpus yields zero FTS/vector/fact/export/log/cursor hits; locked stores expose metadata coverage only; redacted graph frontiers leak no hidden IDs/counts below approved aggregate thresholds.
 - Security: cursor tamper/fuzz tests, query parser fuzzing, decompression/size limits, malicious field/path strings, export schema injection, NaN/inf scores, and access-digest mismatch all fail closed.
 - Compatibility: current CLI/MCP/HTTP/dashboard/export results share typed semantic fixtures. V1 tools exist only in internal differential/shadow harnesses; stale live clients and retired names fail protocol/catalog checks.
