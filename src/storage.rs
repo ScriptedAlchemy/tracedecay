@@ -50,7 +50,6 @@ pub enum StorageMode {
 #[serde(rename_all = "snake_case")]
 pub enum StoreKind {
     CodeProject,
-    HermesProfile,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

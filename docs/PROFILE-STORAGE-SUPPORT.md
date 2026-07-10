@@ -13,7 +13,11 @@ User-level project storage is the default:
 - Legacy projects with `.tracedecay/` continue to use that directory in place when `.tracedecay/` is absent.
 - `~/.tracedecay/global.db` remains user-level accounting/registry state, not the canonical graph DB.
 
-Profile-sharded stores contain graph DBs, sessions, payloads, response handles, branch DBs, and dashboard sidecars. Hermes agents use the same user-level project store as other adapters; unpinned Hermes profiles use the profile home as their project identity.
+Profile-sharded stores contain graph DBs, sessions, payloads, response handles,
+branch DBs, and dashboard sidecars. Hermes uses the same user-level project
+store as every other adapter. A Hermes home or profile directory is host-owned
+state, never a TraceDecay project identity; the project is an explicit runtime
+root or the current working directory's Git project.
 
 ## Planned Support Bundle Privacy
 
@@ -44,7 +48,9 @@ Reusable fixtures should cover:
 - Repo-local `.tracedecay/` stores with graph DB, sessions DB, branch metadata, response handles, and dashboard sidecars.
 - Legacy `.tracedecay/` stores that remain active in place.
 - Profile-sharded code-project stores with a repo enrollment marker and private profile shard.
-- Hermes profile-home project identities resolved through the user-level store.
+- Legacy Hermes-local stores whose target project is provable from a historical
+  pin or durable session metadata. Fixtures must verify one-time migration,
+  idempotency, and preservation/reporting when no unique target is provable.
 - Stale or unregistered registry rows, moved repos, worktrees, symlinked roots, dirty sentinels, sync locks, and `.branch-add.lock`.
 - Seeded `lcm-payloads/`, response handles, curation artifacts, WAL/SHM sidecars, and `TRACEDECAY_GLOBAL_DB` overrides.
 

@@ -15,14 +15,15 @@ use serde_json::Value;
 use std::fmt::Write as _;
 
 pub use definitions::{
-    ast_grep_available, ast_grep_diagnostics_json, ast_grep_outline_available, context_description,
-    explore_call_budget, format_capable_tool_names, get_tool_definitions,
-    get_tool_definitions_with_budget, tool_defaults_to_markdown,
+    ALWAYS_REGISTERED_TOOL_COUNT, ast_grep_available, ast_grep_diagnostics_json,
+    ast_grep_outline_available, context_description, explore_call_budget,
+    format_capable_tool_names, get_tool_definitions, get_tool_definitions_with_budget,
+    tool_defaults_to_markdown,
 };
 pub(crate) use dispatch_policy::tool_dispatches_registered_project_reader;
 pub use handlers::{
-    ToolCallRegistryOptions, handle_profile_scoped_lcm_tool_call, handle_tool_call,
-    handle_tool_call_with_registry, handle_tool_call_with_registry_and_implicit_project,
+    ToolCallRegistryOptions, handle_tool_call, handle_tool_call_with_registry,
+    handle_tool_call_with_registry_and_implicit_project,
 };
 
 /// Maximum character length for a tool response before truncation.

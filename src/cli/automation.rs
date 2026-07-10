@@ -1,5 +1,3 @@
-use std::path::PathBuf;
-
 use clap::{Subcommand, ValueEnum};
 
 #[allow(clippy::large_enum_variant)]
@@ -203,12 +201,6 @@ pub enum AutomationRunAction {
         /// Maximum LCM evidence snippets included in the backend review request.
         #[arg(long, default_value_t = 20)]
         evidence_limit: usize,
-        /// LCM storage scope: project_local or hermes_profile.
-        #[arg(long, default_value = "project_local")]
-        storage_scope: String,
-        /// Absolute Hermes profile home directory when --storage-scope hermes_profile.
-        #[arg(long)]
-        hermes_home: Option<PathBuf>,
         /// LCM grep scope: all, session, or current.
         #[arg(long, default_value = "all")]
         scope: String,
@@ -255,12 +247,6 @@ pub enum AutomationRunAction {
         /// Maximum LCM evidence snippets included in the backend review request.
         #[arg(long, default_value_t = 20)]
         evidence_limit: usize,
-        /// LCM storage scope: project_local or hermes_profile.
-        #[arg(long, default_value = "project_local")]
-        storage_scope: String,
-        /// Absolute Hermes profile home directory when --storage-scope hermes_profile.
-        #[arg(long)]
-        hermes_home: Option<PathBuf>,
         /// Project path (default: current directory, with discovery).
         #[arg(short, long)]
         path: Option<String>,

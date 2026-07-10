@@ -41,8 +41,8 @@ use tracedecay::daemon::DaemonHandshake;
 use tracedecay::daemon::call_default_tool;
 use tracedecay::errors::{Result, TraceDecayError};
 use tracedecay::mcp::tools::{
-    RESERVED_FLAGS_FOOTER, ToolDefinition, get_tool_definitions,
-    handle_profile_scoped_lcm_tool_call, render_tool_cli_help, short_tool_name,
+    RESERVED_FLAGS_FOOTER, ToolDefinition, get_tool_definitions, render_tool_cli_help,
+    short_tool_name,
 };
 
 mod args;
@@ -52,29 +52,9 @@ use args::{edit_distance, finalize_arrays, parse_invocation_with_stdin};
 #[cfg(test)]
 use serde_json::Map;
 
-const PROFILE_SCOPED_LCM_TOOLS: &[&str] = &[
-    "tracedecay_lcm_status",
-    "tracedecay_lcm_doctor",
-    "tracedecay_lcm_load_session",
-    "tracedecay_lcm_grep",
-    "tracedecay_lcm_describe",
-    "tracedecay_lcm_expand",
-    "tracedecay_lcm_expand_query",
-    "tracedecay_lcm_preflight",
-    "tracedecay_lcm_compress",
-    "tracedecay_lcm_session_boundary",
-];
-// Maintenance note: this CLI allowlist must match the MCP registry's
-// profile-scoped LCM schemas (tools with `storage_scope` including
-// `hermes_profile`) and the daemon's projectless dispatch path; update it
-// alongside the handler lockstep tests so profile-scoped calls do not silently
-// route through project initialization.
-/// Profile-store tools the generated Hermes plugin anchors at the Hermes
-/// home (`--project <hermes_home>`). The store is created on first touch —
-/// a fresh profile has no `.tracedecay` until the first fact lands — instead
-/// of demanding a manual `tracedecay init` of the profile directory. Gated on
-/// an explicit `--project` so a bare invocation from an uninitialised cwd
-/// still gets the "run tracedecay init" guidance rather than a silent store.
+/// Tools allowed to initialize an explicitly targeted project on first touch.
+/// Bare invocations from an uninitialized cwd still get the
+/// "run tracedecay init" guidance rather than a silent store.
 const FIRST_TOUCH_STORE_TOOLS: &[&str] = &[
     "tracedecay_fact_store",
     "tracedecay_fact_feedback",
@@ -138,16 +118,6 @@ pub(crate) async fn run(
         return Ok(());
     }
 
-    if is_profile_scoped_lcm_dispatch(&def.name, &tool_args) {
-        return dispatch_daemon_tool(
-            DaemonToolDispatch::profile_scoped(),
-            &def.name,
-            tool_args,
-            raw_json,
-        )
-        .await;
-    }
-
     let explicit_project = project.or(parsed_project);
     dispatch_daemon_tool(
         DaemonToolDispatch::project_scoped(explicit_project, &def.name),
@@ -158,29 +128,12 @@ pub(crate) async fn run(
     .await
 }
 
-fn is_profile_scoped_lcm_dispatch(tool_name: &str, tool_args: &Value) -> bool {
-    PROFILE_SCOPED_LCM_TOOLS.contains(&tool_name)
-        && tool_args
-            .get("storage_scope")
-            .and_then(Value::as_str)
-            .is_some_and(|scope| scope == "hermes_profile")
-}
-
 struct DaemonToolDispatch {
     project_path: Option<PathBuf>,
     allow_init: bool,
-    allow_profile_scoped_fallback: bool,
 }
 
 impl DaemonToolDispatch {
-    fn profile_scoped() -> Self {
-        Self {
-            project_path: None,
-            allow_init: false,
-            allow_profile_scoped_fallback: true,
-        }
-    }
-
     fn project_scoped(explicit_project: Option<String>, tool_name: &str) -> Self {
         // Same resolution as `tracedecay sync`/`status`/`serve`: an explicit
         // --project wins; otherwise walk up from cwd to the nearest initialised
@@ -192,7 +145,6 @@ impl DaemonToolDispatch {
         Self {
             project_path: Some(project_path),
             allow_init,
-            allow_profile_scoped_fallback: false,
         }
     }
 
@@ -213,17 +165,13 @@ impl DaemonToolDispatch {
     }
 
     async fn fallback(&self, tool_name: &str, tool_args: Value) -> Result<Option<Value>> {
-        if !self.allow_profile_scoped_fallback {
-            let handshake = self.handshake()?;
-            if handshake.project_path.is_none() {
-                return Ok(None);
-            }
-            return Ok(Some(
-                call_in_process_tool(&handshake, tool_name, tool_args).await?,
-            ));
+        let handshake = self.handshake()?;
+        if handshake.project_path.is_none() {
+            return Ok(None);
         }
-        let result = handle_profile_scoped_lcm_tool_call(tool_name, tool_args).await?;
-        Ok(Some(result.value))
+        Ok(Some(
+            call_in_process_tool(&handshake, tool_name, tool_args).await?,
+        ))
     }
 }
 
@@ -236,8 +184,7 @@ async fn call_in_process_tool(
         .project_path
         .as_ref()
         .ok_or_else(|| TraceDecayError::Config {
-            message: "profile-scoped daemon tool dispatch requires daemon socket support"
-                .to_string(),
+            message: "tool dispatch requires an initialized project".to_string(),
         })?;
     let open_options = tracedecay::tracedecay::TraceDecayOpenOptions {
         profile_root: Some(handshake.client_identity.profile_root.clone()),

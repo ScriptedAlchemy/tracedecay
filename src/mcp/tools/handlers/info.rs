@@ -265,7 +265,6 @@ fn storage_mode_name(mode: &StorageMode) -> &'static str {
 fn store_kind_name(kind: &StoreKind) -> &'static str {
     match kind {
         StoreKind::CodeProject => "code_project",
-        StoreKind::HermesProfile => "hermes_profile",
     }
 }
 

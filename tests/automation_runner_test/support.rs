@@ -34,7 +34,6 @@ pub(crate) use tracedecay::automation::runner::{
 pub(crate) use tracedecay::errors::TraceDecayError;
 pub(crate) use tracedecay::global_db::GlobalDb;
 pub(crate) use tracedecay::memory::encoding::HolographicEncoder;
-pub(crate) use tracedecay::sessions::cursor::resolve_hermes_profile_session_db_path;
 pub(crate) use tracedecay::sessions::lcm::{LcmGrepSort, LcmScope};
 pub(crate) use tracedecay::sessions::{SessionMessageRecord, SessionRecord};
 pub(crate) use tracedecay::tracedecay::{TraceDecay, current_timestamp};
@@ -553,15 +552,19 @@ impl AgentTaskBackend for InspectSessionEvidenceBackend {
             "facts",
         );
         let evidence = &request.context["session_reflection_evidence"];
-        assert_eq!(evidence["storage_scope"], json!("hermes_profile"));
-        assert!(evidence["hermes_home"].as_str().is_some());
+        assert!(evidence.get("storage_scope").is_none());
+        assert!(evidence.get("hermes_home").is_none());
         assert_eq!(evidence["provider"], json!("cursor"));
-        assert_eq!(evidence["query"], json!("profile-only banana"));
+        assert!(
+            evidence["query"]
+                .as_str()
+                .is_some_and(|query| query.contains("banana"))
+        );
         assert_eq!(evidence["scope"], json!("session"));
-        assert_eq!(evidence["session_id"], json!("hermes-reflect-1"));
+        assert_eq!(evidence["session_id"], json!("project-reflect-1"));
         assert_eq!(evidence["include_summaries"], json!(false));
         assert_eq!(evidence["sort"], json!("relevance"));
-        assert_eq!(evidence["source"], json!("hermes_profile_lcm"));
+        assert_eq!(evidence["source"], json!("project_lcm"));
         assert_eq!(evidence["role"], json!("assistant"));
         assert_eq!(evidence["start_time"], json!(1_715_100_000_i64));
         assert_eq!(evidence["end_time"], json!(1_715_100_010_i64));
@@ -569,12 +572,11 @@ impl AgentTaskBackend for InspectSessionEvidenceBackend {
         assert_eq!(evidence["recent_session_slices"], json!(null));
         let hits = evidence["hits"].as_array().expect("hits array");
         assert_eq!(hits.len(), 1);
-        assert_eq!(hits[0]["session_id"], json!("hermes-reflect-1"));
+        assert_eq!(hits[0]["session_id"], json!("project-reflect-1"));
         assert!(
             hits[0]["snippet"]
                 .as_str()
-                .unwrap()
-                .contains("profile-only banana")
+                .is_some_and(|text| !text.is_empty())
         );
         Ok(AgentTaskResponse {
             run_id: request.run_id.clone(),

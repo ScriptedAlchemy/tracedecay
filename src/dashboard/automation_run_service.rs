@@ -1,5 +1,3 @@
-use std::path::PathBuf;
-
 use serde_json::{Value, json};
 
 use super::DashboardState;
@@ -219,8 +217,6 @@ pub(crate) struct SessionReflectionRunRequest {
     pub provider: Option<String>,
     pub query: Option<String>,
     pub evidence_limit: Option<usize>,
-    pub storage_scope: Option<String>,
-    pub hermes_home: Option<PathBuf>,
     pub scope: Option<LcmScope>,
     pub session_id: Option<String>,
     pub include_summaries: Option<bool>,
@@ -235,8 +231,6 @@ pub(crate) struct SkillWritingRunRequest {
     pub provider: Option<String>,
     pub query: Option<String>,
     pub evidence_limit: Option<usize>,
-    pub storage_scope: Option<String>,
-    pub hermes_home: Option<PathBuf>,
 }
 
 pub(crate) async fn session_reflection_run_payload_with_run_id(
@@ -282,12 +276,6 @@ pub(crate) async fn session_reflection_run_payload_with_run_id(
     }
     if let Some(evidence_limit) = request.evidence_limit {
         options.evidence_limit = evidence_limit;
-    }
-    if let Some(storage_scope) = request.storage_scope {
-        options.storage_scope = storage_scope;
-    }
-    if let Some(hermes_home) = request.hermes_home {
-        options.hermes_home = Some(hermes_home);
     }
     if let Some(scope) = request.scope {
         options.scope = scope;
@@ -381,12 +369,6 @@ pub(crate) async fn skill_writing_run_payload_with_run_id(
     }
     if let Some(evidence_limit) = request.evidence_limit {
         options.evidence_limit = evidence_limit;
-    }
-    if let Some(storage_scope) = request.storage_scope {
-        options.storage_scope = storage_scope;
-    }
-    if let Some(hermes_home) = request.hermes_home {
-        options.hermes_home = Some(hermes_home);
     }
     let run = match run_skill_writer_with_backend(
         &run_context.cg,

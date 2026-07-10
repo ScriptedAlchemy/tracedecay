@@ -118,7 +118,6 @@ pub async fn build_inventory(options: MigrationInventoryOptions) -> Result<Migra
     }
     let include_default_hermes_home = options.roots.is_empty() && !explicit_global_db_path;
     scan_hermes_sources(
-        &options.roots,
         include_default_hermes_home,
         options.follow_symlinks,
         &mut seen_data_dirs,
@@ -385,7 +384,13 @@ async fn inspect_project_store(
         });
     }
 
-    if statuses.is_empty() {
+    // A TraceDecay store historically nested under a Hermes profile cannot
+    // be treated as a code-project store. Its target must first be proven by
+    // the dedicated legacy migration; the generic manifest copier must not
+    // route it by the profile directory.
+    if role == StoreRole::HermesProfileStore {
+        statuses.push(StoreStatus::NeedsManualReview);
+    } else if statuses.is_empty() {
         statuses.push(StoreStatus::Ok);
     }
 
@@ -403,7 +408,6 @@ async fn inspect_project_store(
 }
 
 async fn scan_hermes_sources(
-    roots: &[PathBuf],
     include_default_home: bool,
     follow_symlinks: bool,
     seen_data_dirs: &mut HashSet<PathBuf>,
@@ -412,7 +416,7 @@ async fn scan_hermes_sources(
 ) -> Result<()> {
     let mut seen_profiles = HashSet::new();
     let mut seen_state_dbs = HashSet::new();
-    for hermes_home in hermes_home_candidates(roots, include_default_home) {
+    for hermes_home in hermes_home_candidates(include_default_home) {
         inspect_hermes_profile_dir(
             &hermes_home,
             follow_symlinks,
@@ -794,19 +798,10 @@ fn canonicalize_lossy(path: &Path) -> PathBuf {
     path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
 }
 
-fn hermes_home_candidates(roots: &[PathBuf], include_default_home: bool) -> Vec<PathBuf> {
+fn hermes_home_candidates(include_default_home: bool) -> Vec<PathBuf> {
     let mut seen = HashSet::new();
     let mut candidates = Vec::new();
-    let mut has_env_home = false;
-    if roots.is_empty() {
-        if let Some(env_home) = std::env::var_os("HERMES_HOME") {
-            if !env_home.is_empty() {
-                has_env_home = true;
-                push_unique_path(&mut candidates, &mut seen, PathBuf::from(env_home));
-            }
-        }
-    }
-    if include_default_home && !has_env_home {
+    if include_default_home {
         let Some(home) = std::env::var_os("HOME")
             .filter(|home| !home.is_empty())
             .map(PathBuf::from)
@@ -815,12 +810,6 @@ fn hermes_home_candidates(roots: &[PathBuf], include_default_home: bool) -> Vec<
             return candidates;
         };
         push_unique_path(&mut candidates, &mut seen, home.join(".hermes"));
-    }
-    for root in roots {
-        if root.file_name().is_some_and(|name| name == ".hermes") {
-            push_unique_path(&mut candidates, &mut seen, root.clone());
-        }
-        push_unique_path(&mut candidates, &mut seen, root.join(".hermes"));
     }
     candidates
 }

@@ -204,7 +204,6 @@ tracedecay install --agent opencode    # OpenCode
 tracedecay install --agent codex       # OpenAI Codex CLI
 tracedecay install --agent gemini      # Gemini CLI
 tracedecay install --agent hermes      # Hermes Agent
-tracedecay install --agent hermes --profile work
 tracedecay install --agent copilot     # GitHub Copilot CLI
 tracedecay install --agent cursor      # Cursor
 tracedecay install --agent zed         # Zed
@@ -219,20 +218,17 @@ tracedecay install --agent vibe        # Mistral Vibe
 
 Each agent gets the configuration its host supports: MCP registration or native plugin tools, permissions where available, and prompt rules where applicable.
 
-- Hermes installs a native profile plugin through Hermes' plugin API.
+- Hermes installs one native user plugin through Hermes' plugin API.
 - Cursor installs a local plugin in `~/.cursor/plugins/local/tracedecay` that bundles MCP, hooks, and the tracedecay rule.
 - Codex uses Codex's plugin source, marketplace, and installed-cache flow: TraceDecay writes the source bundle and marketplace entry, then `codex plugin add tracedecay@personal` installs Codex's cache from that source. The plugin owns MCP, hooks, and skills. Codex global install does not write `~/.codex/AGENTS.md` or `~/.codex/hooks.json`.
 
-Hermes setup writes a `tracedecay` plugin into the selected Hermes profile and
-enables it in that profile's `config.yaml` under `plugins.enabled`. Without
-`--profile`, tracedecay writes `~/.hermes/plugins/tracedecay/` and
-`~/.hermes/config.yaml`; with `--profile work`, it writes
-`~/.hermes/profiles/work/plugins/tracedecay/` and
-`~/.hermes/profiles/work/config.yaml`. Profile names are normalized to lowercase
-and must match `[a-z0-9][a-z0-9_-]{0,63}`. Use
-`tracedecay uninstall --agent hermes --profile work` to remove a named profile
-install. `tracedecay reinstall` and `tracedecay doctor --agent hermes` currently
-operate on the default Hermes profile only.
+Hermes setup writes the single user integration to
+`~/.hermes/plugins/tracedecay/` and enables it in `~/.hermes/config.yaml` under
+`plugins.enabled`. `install`, `update-plugin`, `reinstall`, `doctor`, and
+`uninstall` all target that same integration. Hermes may use its own home for
+host-owned config, plugins, and transcripts, but named Hermes profiles,
+project-local `.hermes` directories, and `HERMES_HOME` never select a
+TraceDecay installation, store, or project identity.
 
 The plugin registers one Hermes-native wrapper per tracedecay tool, adds a
 lightweight `pre_llm_call` steering hook, registers a `/tracedecay_status` slash
@@ -240,23 +236,19 @@ command when the installed Hermes version supports plugin commands, and bundles
 a `tracedecay:tracedecay` plugin skill. It also registers a `tracedecay` memory
 provider (holographic facts via `fact_store` / `fact_feedback` /
 `memory_status`) and a `tracedecay` context engine that compresses long
-conversations into a plugin-local LCM session database. The context engine exposes native
+conversations into the active code project's user-profile session store. The
+context engine exposes native
 `lcm_grep`, `lcm_load_session`, `lcm_describe`, `lcm_expand`,
 `lcm_expand_query`, `lcm_status`, and `lcm_doctor` tools (backed by the
-`tracedecay_lcm_*` MCP tools), stores sessions under the active Hermes home for
-profile installs or under the project for project-local installs, and honors
-the documented `LCM_*` environment knobs over host config defaults. The
-wrappers call `tracedecay tool <name> --json --args <json>` from Hermes'
-current working directory, with a 600-second timeout and truncated
-stdout/stderr in error JSON. Passing an explicit project root is a future
-improvement once Hermes exposes a reliable root to plugins.
-Project-local Hermes install without `--profile` writes only project files:
-`.hermes/plugins/tracedecay/` and `.hermes/config.yaml`. Launch Hermes with
-`HERMES_HOME=<project>/.hermes` so it reads the project-local plugin, memory
-provider config, and LCM session storage. If you pass
-`--profile` together with `--local --agent hermes`, tracedecay intentionally
-targets the named profile instead of the project plugin directory; use this when
-you want to run the command from a project but update a Hermes profile.
+`tracedecay_lcm_*` MCP tools) and uses the same user-profile project session
+store as every other host. The wrappers call
+`tracedecay tool <name> --json --args <json>` with a real project root from the
+host context or working directory when available, with a 600-second timeout
+and truncated stdout/stderr in error JSON. Hermes configuration paths remain
+host-owned inputs for plugin behavior; they never become TraceDecay storage
+identities. Removed Hermes install flags (`--profile`, `--all-profiles`, and
+`--project-root`) and removed MCP routing fields (`storage_scope` and
+`hermes_home`) are errors, not compatibility aliases.
 
 #### Verifying Hermes plugin and context-engine changes
 
@@ -303,7 +295,7 @@ tracedecay install --local --agent cursor
 tracedecay install --local --agent copilot
 ```
 
-Local installs write workspace files instead of user-level agent config. Supported local targets are Claude Code, Codex, Gemini, Hermes, Kiro, OpenCode, GitHub Copilot / VS Code, Cursor, Zed, Roo Code, Kimi, Kilo, and Mistral Vibe. Examples include `.mcp.json`, `.claude/settings.json`, `.vscode/mcp.json`, `.kiro/settings/mcp.json`, `.hermes/plugins/tracedecay/`, `plugins/tracedecay`, `.agents/plugins/marketplace.json`, `opencode.json`, `.roo/mcp.json`, `.kimi-code/mcp.json`, `kilo.json`, and `.vibe/config.toml`. Hermes project-local plugins are loaded by launching Hermes with `HERMES_HOME=<project>/.hermes`. Passing `--profile <name>` with `--local --agent hermes` is a deliberate mixed-scope mode: it installs into the named Hermes profile instead of the project plugin directory.
+Local installs write workspace files instead of user-level agent config. Supported local targets are Claude Code, Codex, Gemini, Kiro, OpenCode, GitHub Copilot / VS Code, Cursor, Zed, Roo Code, Kimi, Kilo, and Mistral Vibe. Examples include `.mcp.json`, `.claude/settings.json`, `.vscode/mcp.json`, `.kiro/settings/mcp.json`, `plugins/tracedecay`, `.agents/plugins/marketplace.json`, `opencode.json`, `.roo/mcp.json`, `.kimi-code/mcp.json`, `kilo.json`, and `.vibe/config.toml`. Hermes always uses its user-level plugin bundle.
 
 Cursor install is plugin-based:
 
@@ -372,7 +364,7 @@ If anything goes wrong (a typo, an unexpected rewrite, an unknown bug), restore 
 ```bash
 tracedecay uninstall                   # remove Claude Code integration
 tracedecay uninstall --agent codex     # remove Codex integration
-tracedecay uninstall --agent hermes --profile work
+tracedecay uninstall --agent hermes
 ```
 
 ---

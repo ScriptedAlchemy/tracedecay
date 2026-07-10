@@ -10,12 +10,32 @@ use serde_json::json;
 use tempfile::TempDir;
 use tracedecay::sessions::SessionRecord;
 use tracedecay::sessions::cursor::open_project_session_db;
-use tracedecay::sessions::hermes::ingest_homes;
+use tracedecay::sessions::hermes::{ingest_for_project, ingest_homes};
 use tracedecay::sessions::lcm::LcmPreflightRequest;
 
 use crate::support::{assert_metadata_path_eq, create_git_repo_with_linked_worktree};
 
 const SESSION_ID: &str = "20260101_000000_abc123";
+
+#[tokio::test]
+async fn hermes_home_env_cannot_redirect_runtime_session_discovery() {
+    let _lock = crate::common::PROCESS_ENV_LOCK.lock().await;
+    let tmp = TempDir::new().unwrap();
+    let (standard_hermes_home, project) = setup(&tmp);
+    let user_home = standard_hermes_home.parent().unwrap();
+    let redirected = tmp.path().join("redirected-hermes");
+    write_hermes_profile(&redirected, "work", Some(&project)).await;
+    let _home = crate::common::EnvVarGuard::set("HOME", user_home);
+    let _userprofile = crate::common::EnvVarGuard::set("USERPROFILE", user_home);
+    let _hermes_home = crate::common::EnvVarGuard::set("HERMES_HOME", &redirected);
+    let db = open_project_session_db(&project).await.unwrap();
+
+    let stats = ingest_for_project(&db, &project).await;
+
+    assert_eq!(stats.messages_upserted, 0);
+    assert_eq!(stats.sessions_upserted, 0);
+    assert!(db.get_session("hermes", SESSION_ID).await.is_none());
+}
 
 /// Like [`crate::support::setup`], but returns the Hermes home
 /// (`<home>/.hermes`) instead of the plain test home.
@@ -539,7 +559,7 @@ async fn sweep_reads_legacy_stores_without_active_or_reasoning_columns() {
 }
 
 #[tokio::test]
-async fn unpinned_profile_maps_to_its_own_home_store() {
+async fn unpinned_profile_never_maps_to_its_own_home_store() {
     let tmp = TempDir::new().unwrap();
     let (hermes_home, unrelated_project) = setup(&tmp);
     write_hermes_profile(&hermes_home, "test", None).await;
@@ -550,8 +570,7 @@ async fn unpinned_profile_maps_to_its_own_home_store() {
     let stats = ingest_homes(&db, std::slice::from_ref(&hermes_home), &unrelated_project).await;
     assert_eq!(stats.messages_upserted, 0);
 
-    // Sweeping the profile home itself ingests into the user-level tracedecay
-    // store for that profile-home project identity.
+    // A Hermes profile directory is not a code project identity.
     let profile_db = open_project_session_db(&profile_dir).await.unwrap();
     let stats = ingest_homes(
         &profile_db,
@@ -559,11 +578,36 @@ async fn unpinned_profile_maps_to_its_own_home_store() {
         &profile_dir,
     )
     .await;
+    assert_eq!(stats.messages_upserted, 0);
+    assert_eq!(stats.sessions_upserted, 0);
+    assert!(profile_db.get_session("hermes", SESSION_ID).await.is_none());
+}
+
+#[tokio::test]
+async fn unpinned_profile_uses_session_cwd_as_project_provenance() {
+    let tmp = TempDir::new().unwrap();
+    let (hermes_home, project) = setup(&tmp);
+    let state_db = write_hermes_profile(&hermes_home, "test", None).await;
+    let conn = open_state_db(&state_db).await;
+    conn.execute(
+        "UPDATE sessions SET cwd = ?1 WHERE id = ?2",
+        libsql::params![project.to_string_lossy().as_ref(), SESSION_ID],
+    )
+    .await
+    .unwrap();
+
+    let db = open_project_session_db(&project).await.unwrap();
+    let stats = ingest_homes(&db, std::slice::from_ref(&hermes_home), &project).await;
     assert_eq!(stats.messages_upserted, 4);
-    assert_eq!(stats.sessions_upserted, 1);
-    let session = profile_db
+    let session = db
         .get_session("hermes", SESSION_ID)
         .await
-        .expect("unpinned profile history should land in its own home store");
-    assert_eq!(session.title.as_deref(), Some("Billing pipeline fix"));
+        .expect("session cwd should prove project association");
+    let metadata: serde_json::Value =
+        serde_json::from_str(session.metadata_json.as_deref().unwrap()).unwrap();
+    assert_eq!(
+        metadata["hermes_session_location_provenance"],
+        "session_cwd"
+    );
+    assert_metadata_path_eq(&metadata["hermes_session_cwd"], &project);
 }

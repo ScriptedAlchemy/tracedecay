@@ -1,11 +1,9 @@
 use axum::extract::{Path as AxumPath, State};
 use axum::http::StatusCode;
 use axum::response::Json;
-use std::future::Future;
-use std::path::PathBuf;
-
 use serde::Deserialize;
 use serde_json::{Value, json};
+use std::future::Future;
 
 use super::DashboardState;
 use super::automation_run_service::{
@@ -59,8 +57,6 @@ pub(crate) struct SessionReflectionRunBody {
     provider: Option<String>,
     query: Option<String>,
     evidence_limit: Option<usize>,
-    storage_scope: Option<String>,
-    hermes_home: Option<PathBuf>,
     scope: Option<LcmScope>,
     session_id: Option<String>,
     include_summaries: Option<bool>,
@@ -77,8 +73,6 @@ impl From<SessionReflectionRunBody> for SessionReflectionRunRequest {
             provider: body.provider,
             query: body.query,
             evidence_limit: body.evidence_limit,
-            storage_scope: body.storage_scope,
-            hermes_home: body.hermes_home,
             scope: body.scope,
             session_id: body.session_id,
             include_summaries: body.include_summaries,
@@ -97,8 +91,6 @@ pub(crate) struct SkillWritingRunBody {
     provider: Option<String>,
     query: Option<String>,
     evidence_limit: Option<usize>,
-    storage_scope: Option<String>,
-    hermes_home: Option<PathBuf>,
 }
 
 impl From<SkillWritingRunBody> for SkillWritingRunRequest {
@@ -107,8 +99,6 @@ impl From<SkillWritingRunBody> for SkillWritingRunRequest {
             provider: body.provider,
             query: body.query,
             evidence_limit: body.evidence_limit,
-            storage_scope: body.storage_scope,
-            hermes_home: body.hermes_home,
         }
     }
 }

@@ -95,13 +95,16 @@ blocks, Codex marketplace entries named `tracedecay`, Antigravity
 `plugins/tracedecay.json`, Claude hook/config legacy shapes, and generated entries in
 Zed/Cline/Kimi/OpenCode/Gemini/Kiro/Roo/Kilo/Copilot agent configs.
 
-### B2. Hermes plugin/profile configuration aliases
+### B2. Hermes generated configuration cleanup
 
-Hermes config migration must treat these legacy values as old generated state and
-move them to canonical TraceDecay configuration:
+Hermes integration refresh may recognize old generated state only to remove or
+replace it safely. It must not retain runtime aliases, profile-local installs,
+or project-pin routing. A historical `plugins.tracedecay.project_root` value
+may be read as provenance to prove the target of a one-time legacy-store
+migration; it is never copied into current runtime configuration.
 
-- `plugins.tracedecay.project_root` -> `plugins.tracedecay.project_root` when no
-  current key exists.
+Generated state includes:
+
 - `plugins: ["tracedecay"]` -> `plugins: ["tracedecay"]` when enabling/refreshing.
 - `provider: tracedecay` and context-engine `engine: tracedecay` -> the corresponding
   `tracedecay` provider/engine.
@@ -269,7 +272,7 @@ Every audited surface maps to exactly one policy category below.
 | `TRACEDECAY_ENABLE_GLOBAL_DB` / `TRACEDECAY_DISABLE_GLOBAL_DB` | C | Accept fallback with warning; keep test hermeticity for both names. |
 | Hook/extraction env fallbacks (`TRACEDECAY_RESEARCH_BLOCK_REASON`, `TRACEDECAY_PLUGIN_SUBAGENTS`, `TRACEDECAY_PROJECT_ROOT`, `TRACEDECAY_DISABLE_SUBPROCESS`) | C | Accept fallback with warning; new names win. |
 | Savings pricing env fallbacks (`TRACEDECAY_OFFLINE`, `TRACEDECAY_MODEL_PRICES_PATH`) | C | Accept fallback with warning; do not leak values in logs. |
-| Hermes `plugins.tracedecay.project_root` | B | Migrate to/read as `plugins.tracedecay.project_root` when no current pin exists. |
+| Hermes historical project pins | B | Read only as one-time migration provenance, then remove generated routing state; never use as a runtime fallback. |
 | Hermes plugin list, memory provider, and context-engine aliases named `tracedecay` | B | Rewrite/remove to canonical `tracedecay` behavior. |
 | `$TRACEDECAY_PLUGIN_PATH` and `.tracedecay/plugins/` docs claim | C | Warn/accept only where implemented; otherwise document as pending compatibility. |
 | Generic agent config server key `tracedecay` | B | Reconcile generated old entries to one canonical `tracedecay` entry. |

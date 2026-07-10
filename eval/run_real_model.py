@@ -38,12 +38,10 @@ SCENARIO_DIR = EVAL_DIR / "scenarios"
 RUNS_DIR = EVAL_DIR / "runs"
 
 DEFAULT_HERMES_DIR = Path.home() / "hermes-agent"
-DEFAULT_PROFILE = "tracedecay-eval"
 DEFAULT_MODEL = "gpt-5.4-mini"
 
-# Provider API keys forwarded from the root ~/.hermes/.env into the eval
-# profile's process environment (the profile has its own HERMES_HOME and
-# therefore does not read the root .env). Keys only — never logged.
+# Provider API keys forwarded from the real user's ~/.hermes/.env into the
+# isolated eval HOME. Keys only — never logged.
 PROVIDER_ENV_KEYS = (
     "GLM_API_KEY",
     "ZAI_API_KEY",
@@ -103,21 +101,6 @@ def parse_args(argv):
         help="Hermes checkout to `uv run` from.",
     )
     parser.add_argument(
-        "--profile",
-        help=(
-            "Hermes profile name used for the eval. By default the runner creates "
-            "a unique temporary Hermes home instead of writing to ~/.hermes."
-        ),
-    )
-    parser.add_argument(
-        "--hermes-home",
-        type=Path,
-        help=(
-            "Explicit HERMES_HOME/profile directory to use. Passing this or "
-            "--profile opts into user-managed Hermes storage."
-        ),
-    )
-    parser.add_argument(
         "--tracedecay-bin",
         type=Path,
         help="tracedecay binary (default: target/debug/tracedecay if built, else PATH).",
@@ -128,19 +111,6 @@ def parse_args(argv):
         help="Keep the throwaway fixture project for inspection.",
     )
     return parser.parse_args(argv)
-
-
-@dataclass
-class HermesProfileSelection:
-    profile: str
-    profile_dir: Path
-    install_home: Path | None = None
-    _temp_dir: tempfile.TemporaryDirectory | None = None
-
-    def cleanup(self):
-        if self._temp_dir is not None:
-            self._temp_dir.cleanup()
-            self._temp_dir = None
 
 
 @dataclass
@@ -179,6 +149,8 @@ def create_eval_environment(scenario_id):
     env["XDG_CONFIG_HOME"] = str(home / ".config")
     env["TRACEDECAY_DATA_DIR"] = str(data_dir)
     env["TRACEDECAY_GLOBAL_DB"] = str(global_db)
+    env.pop("HERMES_HOME", None)
+    env.pop("HERMES_PROFILE", None)
     return EvalEnvironment(
         root=root,
         home=home,
@@ -186,28 +158,6 @@ def create_eval_environment(scenario_id):
         global_db=global_db,
         env=env,
         _temp_dir=temp_dir,
-    )
-
-
-def resolve_hermes_profile(args):
-    profile = args.profile or DEFAULT_PROFILE
-    if args.hermes_home is not None:
-        return HermesProfileSelection(profile=profile, profile_dir=args.hermes_home)
-    if args.profile:
-        home = Path.home()
-        return HermesProfileSelection(
-            profile=profile,
-            profile_dir=home / ".hermes/profiles" / profile,
-            install_home=home,
-        )
-
-    temp_home = tempfile.TemporaryDirectory(prefix="tracedecay-eval-hermes-")
-    home = Path(temp_home.name)
-    return HermesProfileSelection(
-        profile=profile,
-        profile_dir=home / ".hermes/profiles" / profile,
-        install_home=home,
-        _temp_dir=temp_home,
     )
 
 
@@ -328,11 +278,10 @@ def provider_env_passthrough(env):
             env[key] = value.strip().strip('"').strip("'")
 
 
-def ensure_hermes_profile(selection, model, provider, tracedecay_bin, fixture, eval_env):
-    profile = selection.profile
-    profile_dir = selection.profile_dir
-    profile_dir.mkdir(parents=True, exist_ok=True)
-    config_path = profile_dir / "config.yaml"
+def ensure_hermes_install(model, provider, tracedecay_bin, fixture, eval_env):
+    hermes_home = Path(eval_env["HOME"]) / ".hermes"
+    hermes_home.mkdir(parents=True, exist_ok=True)
+    config_path = hermes_home / "config.yaml"
     config_path.write_text(
         "model:\n"
         f"  default: {model}\n"
@@ -340,49 +289,31 @@ def ensure_hermes_profile(selection, model, provider, tracedecay_bin, fixture, e
         "agent:\n"
         "  max_turns: 16\n"
     )
-    if selection.install_home is not None:
-        install_env = dict(eval_env)
-        install_env["HOME"] = str(selection.install_home)
-        install_env["USERPROFILE"] = str(selection.install_home)
-        run(
-            [
-                tracedecay_bin,
-                "install",
-                "--agent",
-                "hermes",
-                "--profile",
-                profile,
-                "--project-root",
-                str(fixture),
-                "--no-dashboard",
-            ],
-            cwd=fixture,
-            env=install_env,
-            timeout=120,
-        )
-    else:
-        print(
-            f"[warn] --hermes-home was explicit; assuming tracedecay plugin is already installed in {profile_dir}",
-            file=sys.stderr,
-        )
-    return profile_dir
+    run(
+        [tracedecay_bin, "install", "--agent", "hermes", "--no-dashboard"],
+        cwd=fixture,
+        env=eval_env,
+        timeout=120,
+    )
+    return hermes_home
 
 
 def drive_hermes(args, scenario, fixture, log_dir, eval_env):
-    profile_dir = ensure_hermes_profile(
-        args.hermes_profile, args.model, args.provider, args.tracedecay_bin, fixture, eval_env
+    hermes_home = ensure_hermes_install(
+        args.model, args.provider, args.tracedecay_bin, fixture, eval_env
     )
     max_turns = args.max_turns or scenario["real_model"].get("max_turns", 8)
     env = dict(eval_env)
-    env["HERMES_HOME"] = str(profile_dir)
     provider_env_passthrough(env)
     transcripts = []
     for index, prompt in enumerate(scenario["real_model"]["prompts"], start=1):
         cmd = [
             "uv",
             "run",
+            "--project",
+            str(args.hermes_dir),
             "python",
-            "cli.py",
+            str(args.hermes_dir / "cli.py"),
             "-q",
             prompt,
             "--model",
@@ -393,7 +324,7 @@ def drive_hermes(args, scenario, fixture, log_dir, eval_env):
         if args.provider:
             cmd += ["--provider", args.provider]
         started = datetime.datetime.now(datetime.timezone.utc)
-        result = run(cmd, cwd=args.hermes_dir, env=env, timeout=900, check=False)
+        result = run(cmd, cwd=fixture, env=env, timeout=900, check=False)
         elapsed = (datetime.datetime.now(datetime.timezone.utc) - started).total_seconds()
         log_path = log_dir / f"{scenario['id']}-prompt{index}.log"
         log_path.write_text(result.stdout)
@@ -404,7 +335,7 @@ def drive_hermes(args, scenario, fixture, log_dir, eval_env):
                 "seconds": round(elapsed, 1),
                 "log": str(log_path.relative_to(RUNS_DIR.parent)),
                 "turn_valid": turn_is_valid(result),
-                "usage": read_hermes_usage(profile_dir, started.timestamp()),
+                "usage": read_hermes_usage(hermes_home, started.timestamp()),
                 "token_hints": extract_token_hints(result.stdout),
             }
         )
@@ -657,7 +588,6 @@ def main(argv):
     overall_ok = True
     for scenario in scenarios:
         eval_env = create_eval_environment(scenario["id"])
-        args.hermes_profile = resolve_hermes_profile(args)
         fixture = None
         try:
             fixture, db_path = build_fixture(scenario, args.tracedecay_bin, eval_env.env)
@@ -696,7 +626,6 @@ def main(argv):
                         f"{outcome['op']} expected {outcome['expected']}"
                     )
         finally:
-            args.hermes_profile.cleanup()
             cleanup_eval_artifacts(args, fixture, eval_env)
 
     report["status"] = "pass" if overall_ok else "fail"

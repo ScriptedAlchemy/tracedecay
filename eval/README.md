@@ -27,10 +27,9 @@ python3 eval/run_real_model.py --scenario memory-no-pollution \
     --agent-turn --i-understand-model-cost
 ```
 
-By default the real-model runner creates a unique temporary Hermes profile home
-for each run, so it does not write to `~/.hermes/profiles/tracedecay-eval`.
-Pass `--profile` or `--hermes-home` only when you intentionally want to use a
-user-managed Hermes profile.
+The real-model runner creates a unique temporary user home for each run and
+installs the normal user-level Hermes integration there. It never selects a
+named Hermes profile or uses `HERMES_HOME` as TraceDecay storage.
 
 Run reports land under `eval/runs/<timestamp>/` (gitignored).
 

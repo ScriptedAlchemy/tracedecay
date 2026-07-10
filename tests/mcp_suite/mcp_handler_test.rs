@@ -1647,31 +1647,15 @@ fn lcm_tool_schemas_are_registered_with_stable_names() {
             .iter()
             .find(|tool| tool.name == scoped)
             .unwrap_or_else(|| panic!("{scoped} definition"));
-        let storage_scope = &tool.input_schema["properties"]["storage_scope"];
-        assert_eq!(
-            storage_scope["enum"],
-            json!(["project_local", "hermes_profile"]),
-            "{scoped} must advertise supported storage scopes"
+        assert!(
+            tool.input_schema["properties"]
+                .get("storage_scope")
+                .is_none(),
+            "{scoped} must use only the active project session store"
         );
         assert!(
-            storage_scope["description"]
-                .as_str()
-                .unwrap_or_default()
-                .contains("hermes_home"),
-            "{scoped} storage_scope should document hermes_profile requirements"
-        );
-        let hermes_home = &tool.input_schema["properties"]["hermes_home"];
-        assert_eq!(
-            hermes_home["type"],
-            json!("string"),
-            "{scoped} must expose hermes_home"
-        );
-        assert!(
-            hermes_home["description"]
-                .as_str()
-                .unwrap_or_default()
-                .contains("absolute"),
-            "{scoped} hermes_home should document absolute path requirements"
+            tool.input_schema["properties"].get("hermes_home").is_none(),
+            "{scoped} must not expose a Hermes-owned storage path"
         );
     }
 
@@ -9113,12 +9097,6 @@ async fn seed_lcm_session_message_with_role_source_timestamp(
     );
 }
 
-async fn open_hermes_profile_session_db(hermes_home: &Path) -> GlobalDb {
-    GlobalDb::open_at(&hermes_home.join(".tracedecay/sessions.db"))
-        .await
-        .expect("profile-local session db should open")
-}
-
 async fn seed_lcm_session_message_in_db(
     db: &GlobalDb,
     project_path: &Path,
@@ -10253,48 +10231,25 @@ async fn lcm_doctor_retention_reports_candidates_without_deleting() {
 }
 
 #[tokio::test]
-async fn lcm_doctor_uses_explicit_hermes_profile_session_db() {
+async fn lcm_tools_reject_removed_storage_routing_arguments() {
     let dir = test_temp_dir();
     let (cg, _env) = init_test_project(dir.path()).await;
-    seed_lcm_session_message(
-        &cg,
-        "lcm-doctor-profile",
-        "lcm-doctor-profile-project",
-        "project-local doctor should not be counted",
-        1,
-    )
-    .await;
-
-    let hermes_home = test_temp_dir();
-    let profile_db = open_hermes_profile_session_db(hermes_home.path()).await;
-    seed_lcm_session_message_in_db(
-        &profile_db,
-        hermes_home.path(),
-        "lcm-doctor-profile",
-        "lcm-doctor-profile-message",
-        "profile-local doctor should be counted",
-        1,
-    )
-    .await;
-
-    let result = handle_tool_call(
-        &cg,
-        "tracedecay_lcm_doctor",
-        json!({
-            "provider": "cursor",
-            "storage_scope": "hermes_profile",
-            "hermes_home": hermes_home.path().to_string_lossy()
-        }),
-        None,
-        None,
-    )
-    .await
-    .unwrap();
-    let payload: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
-
-    assert_eq!(payload["status"], "ok");
-    assert_eq!(payload["storage_scope"], "hermes_profile");
-    assert_eq!(payload["diagnostics"]["raw_message_count"], 1);
+    for (removed, value) in [
+        ("storage_scope", json!("hermes_profile")),
+        ("hermes_home", json!("/tmp/hermes")),
+    ] {
+        let mut args = json!({"provider": "cursor"});
+        args.as_object_mut()
+            .unwrap()
+            .insert(removed.to_string(), value);
+        let error = expect_tool_error(
+            handle_tool_call(&cg, "tracedecay_lcm_status", args, None, None).await,
+        );
+        assert!(
+            error.contains(&format!("unknown parameter `{removed}`")),
+            "removed argument should fail clearly: {error}"
+        );
+    }
 }
 
 #[tokio::test]
@@ -11081,8 +11036,7 @@ async fn lcm_status_response_is_valid_json_and_omits_payload_secrets() {
         "tracedecay_lcm_status",
         json!({
             "provider": "cursor",
-            "session_id": "lcm-status-session",
-            "storage_scope": "project_local"
+            "session_id": "lcm-status-session"
         }),
         None,
         None,
@@ -11093,7 +11047,7 @@ async fn lcm_status_response_is_valid_json_and_omits_payload_secrets() {
     let payload: Value = serde_json::from_str(text).expect("LCM status response must be JSON");
 
     assert_eq!(payload["status"], "ok");
-    assert_eq!(payload["lcm"]["storage_scope"], "project_local");
+    assert!(payload["lcm"].get("storage_scope").is_none());
     assert_eq!(payload["lcm"]["payload"]["externalized_count"], 1);
     assert_eq!(payload["lcm"]["payload"]["missing_count"], 0);
     assert_eq!(payload["lcm"]["payload"]["unreferenced_count"], 0);
@@ -11102,7 +11056,7 @@ async fn lcm_status_response_is_valid_json_and_omits_payload_secrets() {
 }
 
 #[tokio::test]
-async fn lcm_status_reports_lifecycle_fields_and_resolved_storage_scope() {
+async fn lcm_status_reports_lifecycle_fields_from_active_project() {
     let dir = test_temp_dir();
     let (cg, _env) = init_test_project(dir.path()).await;
     seed_lcm_session_message(
@@ -11152,8 +11106,7 @@ async fn lcm_status_reports_lifecycle_fields_and_resolved_storage_scope() {
         "tracedecay_lcm_status",
         json!({
             "provider": "cursor",
-            "session_id": "lcm-status-frontier",
-            "storage_scope": "project_local"
+            "session_id": "lcm-status-frontier"
         }),
         None,
         None,
@@ -11163,7 +11116,7 @@ async fn lcm_status_reports_lifecycle_fields_and_resolved_storage_scope() {
     let payload: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
 
     assert_eq!(payload["status"], "ok");
-    assert_eq!(payload["lcm"]["storage_scope"], "project_local");
+    assert!(payload["lcm"].get("storage_scope").is_none());
     assert_eq!(payload["lcm"]["raw_message_count"], 2);
     assert_eq!(
         payload["lcm"]["lifecycle"]["current_session_id"],
@@ -11182,27 +11135,6 @@ async fn lcm_status_reports_lifecycle_fields_and_resolved_storage_scope() {
         first.store_id
     );
     assert_eq!(payload["lcm"]["lifecycle"]["maintenance_debt_count"], 1);
-
-    let profile_result = handle_tool_call(
-        &cg,
-        "tracedecay_lcm_status",
-        json!({
-            "provider": "cursor",
-            "session_id": "lcm-status-frontier",
-            "storage_scope": "hermes_profile"
-        }),
-        None,
-        None,
-    )
-    .await
-    .unwrap();
-    let profile_payload: Value = serde_json::from_str(extract_text(&profile_result.value)).unwrap();
-    assert_eq!(profile_payload["status"], "unavailable");
-    assert_eq!(profile_payload["storage_scope"], "hermes_profile");
-    assert!(
-        profile_payload.get("lcm").is_none(),
-        "hermes_profile requests must not return project-local LCM counts"
-    );
 }
 
 #[tokio::test]
@@ -11608,298 +11540,6 @@ async fn message_search_filters_by_time_aliases() {
         payload["results"][0]["message"]["message_id"],
         "search-time-target"
     );
-}
-
-#[tokio::test]
-async fn lcm_status_uses_explicit_hermes_profile_session_db() {
-    let dir = test_temp_dir();
-    let (cg, _env) = init_test_project(dir.path()).await;
-    seed_lcm_session_message(
-        &cg,
-        "lcm-profile-status",
-        "lcm-profile-status-project",
-        "project-local distractor status",
-        1,
-    )
-    .await;
-
-    let hermes_home = test_temp_dir();
-    let profile_db = open_hermes_profile_session_db(hermes_home.path()).await;
-    seed_lcm_session_message_in_db(
-        &profile_db,
-        hermes_home.path(),
-        "lcm-profile-status",
-        "lcm-profile-status-profile-1",
-        "profile-local status seed one",
-        1,
-    )
-    .await;
-    seed_lcm_session_message_in_db(
-        &profile_db,
-        hermes_home.path(),
-        "lcm-profile-status",
-        "lcm-profile-status-profile-2",
-        "profile-local status seed two",
-        2,
-    )
-    .await;
-
-    let result = handle_tool_call(
-        &cg,
-        "tracedecay_lcm_status",
-        json!({
-            "provider": "cursor",
-            "session_id": "lcm-profile-status",
-            "storage_scope": "hermes_profile",
-            "hermes_home": hermes_home.path()
-        }),
-        None,
-        None,
-    )
-    .await
-    .unwrap();
-    let payload: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
-
-    assert_eq!(payload["status"], "ok");
-    assert_eq!(payload["lcm"]["storage_scope"], "hermes_profile");
-    assert_eq!(payload["lcm"]["raw_message_count"], 2);
-    assert!(hermes_home.path().join(".tracedecay/sessions.db").exists());
-    #[cfg(windows)]
-    let _ = hermes_home.keep();
-}
-
-#[tokio::test]
-async fn lcm_load_and_grep_use_explicit_hermes_profile_session_db() {
-    let (cg, _env, _dir) = setup_empty_project().await;
-    seed_lcm_session_message(
-        &cg,
-        "lcm-profile-read",
-        "lcm-profile-read-project",
-        "project-local distractor profile query",
-        1,
-    )
-    .await;
-
-    let hermes_home = test_temp_dir();
-    let profile_db = open_hermes_profile_session_db(hermes_home.path()).await;
-    seed_lcm_session_message_in_db(
-        &profile_db,
-        hermes_home.path(),
-        "lcm-profile-read",
-        "lcm-profile-read-profile",
-        "profile-local pear evidence",
-        1,
-    )
-    .await;
-
-    let loaded = handle_tool_call(
-        &cg,
-        "tracedecay_lcm_load_session",
-        json!({
-            "provider": "cursor",
-            "session_id": "lcm-profile-read",
-            "storage_scope": "hermes_profile",
-            "hermes_home": hermes_home.path()
-        }),
-        None,
-        None,
-    )
-    .await
-    .unwrap();
-    let loaded_payload: Value = serde_json::from_str(extract_text(&loaded.value)).unwrap();
-    assert_eq!(loaded_payload["status"], "ok");
-    assert_eq!(loaded_payload["messages"].as_array().unwrap().len(), 1);
-    assert_eq!(
-        loaded_payload["messages"][0]["content"],
-        "profile-local pear evidence"
-    );
-
-    let grep = handle_tool_call(
-        &cg,
-        "tracedecay_lcm_grep",
-        json!({
-            "provider": "cursor",
-            "query": "profile-local pear",
-            "session_id": "lcm-profile-read",
-            "storage_scope": "hermes_profile",
-            "hermes_home": hermes_home.path(),
-            "limit": 5
-        }),
-        None,
-        None,
-    )
-    .await
-    .unwrap();
-    let grep_payload: Value = serde_json::from_str(extract_text(&grep.value)).unwrap();
-    assert_eq!(grep_payload["status"], "ok");
-    assert_eq!(grep_payload["count"], 1);
-    assert_eq!(grep_payload["hits"][0]["session_id"], "lcm-profile-read");
-    assert!(
-        grep_payload["hits"][0]["snippet"]
-            .as_str()
-            .unwrap()
-            .contains("profile-local pear evidence")
-    );
-
-    let expanded = handle_tool_call(
-        &cg,
-        "tracedecay_lcm_expand_query",
-        json!({
-            "provider": "cursor",
-            "prompt": "Explain profile pear evidence",
-            "query": "profile-local pear",
-            "session_id": "lcm-profile-read",
-            "storage_scope": "hermes_profile",
-            "hermes_home": hermes_home.path(),
-            "context_max_tokens": 1024,
-            "max_tokens": 128
-        }),
-        None,
-        None,
-    )
-    .await
-    .unwrap();
-    let expanded_payload: Value = serde_json::from_str(extract_text(&expanded.value)).unwrap();
-    assert_eq!(expanded_payload["status"], "ok");
-    assert_eq!(expanded_payload["storage_scope"], "hermes_profile");
-    assert_eq!(expanded_payload["needs_synthesis"], true);
-    assert!(
-        expanded_payload["context_blocks"][0]["content"]
-            .as_str()
-            .unwrap()
-            .contains("profile-local pear evidence")
-    );
-}
-
-#[tokio::test]
-async fn lcm_hermes_profile_requires_explicit_valid_home_without_fallback() {
-    let (cg, _env, _dir) = setup_empty_project().await;
-    seed_lcm_session_message(
-        &cg,
-        "lcm-profile-missing-home",
-        "lcm-profile-missing-home-project",
-        "project-local must not leak without hermes home",
-        1,
-    )
-    .await;
-
-    let status = handle_tool_call(
-        &cg,
-        "tracedecay_lcm_status",
-        json!({
-            "provider": "cursor",
-            "session_id": "lcm-profile-missing-home",
-            "storage_scope": "hermes_profile"
-        }),
-        None,
-        None,
-    )
-    .await
-    .unwrap();
-    let status_payload: Value = serde_json::from_str(extract_text(&status.value)).unwrap();
-    assert_eq!(status_payload["status"], "unavailable");
-    assert_eq!(status_payload["storage_scope"], "hermes_profile");
-    assert!(
-        status_payload["message"]
-            .as_str()
-            .unwrap()
-            .contains("hermes_home")
-    );
-    assert!(status_payload.get("lcm").is_none());
-
-    let loaded = handle_tool_call(
-        &cg,
-        "tracedecay_lcm_load_session",
-        json!({
-            "provider": "cursor",
-            "session_id": "lcm-profile-missing-home",
-            "storage_scope": "hermes_profile",
-            "hermes_home": "relative-hermes-home"
-        }),
-        None,
-        None,
-    )
-    .await
-    .unwrap();
-    let loaded_payload: Value = serde_json::from_str(extract_text(&loaded.value)).unwrap();
-    assert_eq!(loaded_payload["status"], "unavailable");
-    assert_eq!(loaded_payload["storage_scope"], "hermes_profile");
-    assert!(
-        loaded_payload["message"]
-            .as_str()
-            .unwrap()
-            .contains("absolute hermes_home")
-    );
-    assert!(loaded_payload.get("messages").is_none());
-}
-
-#[cfg(unix)]
-#[tokio::test]
-async fn lcm_hermes_profile_rejects_symlinked_tracedecay_dir_escape() {
-    let (cg, _env, _dir) = setup_empty_project().await;
-    let hermes_home = test_temp_dir();
-    let outside = test_temp_dir();
-    unix_fs::symlink(outside.path(), hermes_home.path().join(".tracedecay")).unwrap();
-
-    let result = handle_tool_call(
-        &cg,
-        "tracedecay_lcm_status",
-        json!({
-            "provider": "cursor",
-            "storage_scope": "hermes_profile",
-            "hermes_home": hermes_home.path()
-        }),
-        None,
-        None,
-    )
-    .await
-    .unwrap();
-    let payload: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
-
-    assert_eq!(payload["status"], "unavailable");
-    assert_eq!(payload["storage_scope"], "hermes_profile");
-    assert!(
-        payload["message"].as_str().unwrap().contains(".tracedecay"),
-        "rejection should identify the unsafe profile storage component: {payload}"
-    );
-    assert!(
-        !outside.path().join("sessions.db").exists(),
-        "profile DB must not be created through a symlink escape"
-    );
-}
-
-#[tokio::test]
-async fn lcm_hermes_profile_rejects_non_directory_home() {
-    let (cg, _env, _dir) = setup_empty_project().await;
-    let dir = test_temp_dir();
-    let hermes_home = dir.path().join("hermes-home-file");
-    fs::write(&hermes_home, "not a directory").unwrap();
-
-    let result = handle_tool_call(
-        &cg,
-        "tracedecay_lcm_status",
-        json!({
-            "provider": "cursor",
-            "storage_scope": "hermes_profile",
-            "hermes_home": hermes_home
-        }),
-        None,
-        None,
-    )
-    .await
-    .unwrap();
-    let payload: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
-
-    assert_eq!(payload["status"], "unavailable");
-    assert_eq!(payload["storage_scope"], "hermes_profile");
-    assert!(
-        payload["message"]
-            .as_str()
-            .unwrap()
-            .contains("not a directory"),
-        "non-directory hermes_home should be rejected clearly: {payload}"
-    );
-    assert!(payload.get("lcm").is_none());
 }
 
 #[tokio::test]
@@ -12447,87 +12087,6 @@ async fn lcm_status_cli_bridge_accepts_json_args() {
     );
 }
 
-#[cfg(unix)]
-#[tokio::test]
-async fn lcm_status_cli_profile_scope_dispatches_without_initialized_project() {
-    let env_lock = GLOBAL_DB_ENV_LOCK.lock().await;
-    let home = test_temp_dir();
-    let _home_guard = HomeEnvGuard::set(home.path());
-    let _global_db_guard = GlobalDbEnvGuard::set(&home.path().join(".tracedecay/global.db"));
-    let outside_cwd = test_temp_dir();
-    let hermes_home = test_temp_dir();
-    let profile_db = open_hermes_profile_session_db(hermes_home.path()).await;
-    seed_lcm_session_message_in_db(
-        &profile_db,
-        hermes_home.path(),
-        "lcm-cli-profile",
-        "lcm-cli-profile-message-1",
-        "profile-only status message",
-        1,
-    )
-    .await;
-    let profile_args = json!({
-        "provider": "cursor",
-        "session_id": "lcm-cli-profile",
-        "storage_scope": "hermes_profile",
-        "hermes_home": hermes_home.path(),
-        "format": "json",
-    })
-    .to_string();
-    let _daemon = common::spawn_tracedecay_daemon(home.path());
-    let mut profile_command = std::process::Command::new(env!("CARGO_BIN_EXE_tracedecay"));
-    common::apply_tracedecay_home_env(&mut profile_command, home.path());
-    let profile_output = profile_command
-        .current_dir(outside_cwd.path())
-        .args([
-            "tool",
-            "tracedecay_lcm_status",
-            "--json",
-            "--args",
-            profile_args.as_str(),
-        ])
-        .output()
-        .unwrap();
-
-    assert!(
-        profile_output.status.success(),
-        "profile-scoped tracedecay tool should not require an initialized cwd project\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&profile_output.stdout),
-        String::from_utf8_lossy(&profile_output.stderr)
-    );
-    let profile_json: Value = serde_json::from_slice(&profile_output.stdout).unwrap();
-    let profile_payload = extract_first_json_content(&profile_json);
-    assert_eq!(profile_payload["status"], "ok");
-    assert_eq!(profile_payload["lcm"]["storage_scope"], "hermes_profile");
-    assert_eq!(profile_payload["lcm"]["raw_message_count"], 1);
-
-    let mut project_command = std::process::Command::new(env!("CARGO_BIN_EXE_tracedecay"));
-    common::apply_tracedecay_home_env(&mut project_command, home.path());
-    let project_output = project_command
-        .current_dir(outside_cwd.path())
-        .args([
-            "tool",
-            "tracedecay_lcm_status",
-            "--json",
-            "--args",
-            r#"{"provider":"cursor","storage_scope":"project_local"}"#,
-        ])
-        .output()
-        .unwrap();
-    assert!(
-        !project_output.status.success(),
-        "project-local tool calls without an initialized cwd should still fail\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&project_output.stdout),
-        String::from_utf8_lossy(&project_output.stderr)
-    );
-    let stderr = String::from_utf8_lossy(&project_output.stderr);
-    assert!(
-        stderr.contains("no TraceDecay index found") && stderr.contains("tracedecay init"),
-        "project-local failure should report the missing cwd project:\n{stderr}"
-    );
-    drop(env_lock);
-}
-
 #[test]
 fn memory_tool_definitions_include_hermes_payload_fields() {
     let tools = get_tool_definitions();
@@ -12642,27 +12201,28 @@ fn managed_skill_tool_definitions_are_read_only() {
         .iter()
         .find(|tool| tool.name == "tracedecay_skill_view")
         .expect("tracedecay_skill_view definition");
-    let hermes_bridge = tools
-        .iter()
-        .find(|tool| tool.name == "tracedecay_hermes_skill_bridge")
-        .expect("tracedecay_hermes_skill_bridge definition");
-
     assert_eq!(artifact.annotations.as_ref().unwrap()["readOnlyHint"], true);
     assert_eq!(artifact.input_schema["required"], json!(["run_id", "kind"]));
     assert_eq!(list.annotations.as_ref().unwrap()["readOnlyHint"], true);
     assert_eq!(view.annotations.as_ref().unwrap()["readOnlyHint"], true);
     assert_eq!(
-        hermes_bridge.annotations.as_ref().unwrap()["readOnlyHint"],
-        true
-    );
-    assert_eq!(
         list.input_schema["properties"]["state"]["enum"],
         json!(["pending_approval", "active", "disabled", "archived"])
     );
     assert_eq!(view.input_schema["required"], json!(["id"]));
-    assert_eq!(
-        hermes_bridge.input_schema["required"],
-        json!(["hermes_home"])
+    let hermes_skills = tools
+        .iter()
+        .find(|tool| tool.name == "tracedecay_hermes_skill_bridge")
+        .expect("standard Hermes skill inventory definition");
+    assert!(
+        hermes_skills.input_schema["properties"]
+            .get("hermes_home")
+            .is_none()
+    );
+    assert!(
+        hermes_skills.input_schema["properties"]
+            .get("storage_scope")
+            .is_none()
     );
 }
 
@@ -13012,203 +12572,6 @@ async fn managed_skill_mcp_tools_list_and_view_profile_store() {
 
     close_test_graph(cg).await;
     drop(env_lock);
-}
-
-#[tokio::test]
-async fn hermes_skill_bridge_mcp_tool_reads_host_owned_profile_state() {
-    let dir = TempDir::new().unwrap();
-    let project = dir.path().join("repo");
-    fs::create_dir_all(project.join("src")).unwrap();
-    fs::write(project.join("src/lib.rs"), "pub fn fixture() {}\n").unwrap();
-    let cg = TestTraceDecay::new(fixture::init_project_from_template(&project).await.unwrap());
-
-    let hermes_home = dir.path().join("hermes");
-    let skills_dir = hermes_home.join("skills");
-    let skill_dir = skills_dir.join("repo-hygiene");
-    fs::create_dir_all(&skill_dir).unwrap();
-    fs::write(
-        skill_dir.join("SKILL.md"),
-        "---\nname: repo-hygiene\ndescription: Keep repositories tidy\n---\n\nRun focused checks.\n",
-    )
-    .unwrap();
-    fs::write(
-        skills_dir.join(".usage.json"),
-        r#"{"repo-hygiene":{"created_by":"agent","use_count":3}}"#,
-    )
-    .unwrap();
-    let pending_dir = hermes_home.join("pending").join("skills");
-    fs::create_dir_all(&pending_dir).unwrap();
-    fs::write(
-        pending_dir.join("pending1.json"),
-        r#"{"id":"pending1","action":"patch","summary":"improve repo hygiene","origin":"background_review","payload":{"action":"patch","name":"repo-hygiene"}}"#,
-    )
-    .unwrap();
-    fs::write(
-        hermes_home.join("config.json"),
-        r#"{"projectRoot":"/workspace/repo","memory":{"write_approval":true},"skills":{"write_approval":"json-pending"}}"#,
-    )
-    .unwrap();
-    fs::write(
-        hermes_home.join("config.yaml"),
-        r#"
-plugins:
-  tracedecay:
-    project_root: /workspace/repo-from-yaml
-curator:
-  enabled: true
-  auxiliary:
-    provider: openai
-    model: gpt-test
-    api_key: secret-value
-memory:
-  nudge_interval: 14
-  write_approval: manual
-skills:
-  creation_nudge_interval: 16
-  write_approval: pending
-"#,
-    )
-    .unwrap();
-    fs::write(
-        skills_dir.join(".curator_state"),
-        r#"{"paused":false,"run_count":7,"last_run_summary":"reviewed skills"}"#,
-    )
-    .unwrap();
-    fs::write(hermes_home.join("state.db"), b"").unwrap();
-
-    let result = handle_tool_call(
-        &cg,
-        "tracedecay_hermes_skill_bridge",
-        json!({
-            "hermes_home": hermes_home,
-            "include_skill_bodies": true
-        }),
-        None,
-        None,
-    )
-    .await
-    .unwrap();
-    let payload = extract_json(&result.value);
-    assert_eq!(payload["status"], "ok");
-    assert_eq!(payload["bridge"]["contracts"]["lifecycle_owner"], "hermes");
-    assert_eq!(payload["bridge"]["config"]["exists"], true);
-    assert_eq!(payload["bridge"]["config"]["config_yaml_exists"], true);
-    assert_eq!(payload["bridge"]["config"]["config_format"], "yaml");
-    assert_eq!(
-        payload["bridge"]["config"]["project_root_pin"],
-        json!("/workspace/repo-from-yaml")
-    );
-    assert_eq!(
-        payload["bridge"]["config"]["curator"]["enabled"],
-        json!(true)
-    );
-    assert_eq!(
-        payload["bridge"]["config"]["self_improvement"]["memory_nudge_interval"],
-        json!(14)
-    );
-    assert_eq!(
-        payload["bridge"]["config"]["self_improvement"]["skill_creation_nudge_interval"],
-        json!(16)
-    );
-    assert_eq!(
-        payload["bridge"]["config"]["write_approval"]["memory"],
-        json!("manual")
-    );
-    assert_eq!(
-        payload["bridge"]["config"]["write_approval"]["memory_enabled"],
-        json!(false)
-    );
-    assert_eq!(
-        payload["bridge"]["config"]["write_approval"]["skills"],
-        json!("pending")
-    );
-    assert_eq!(
-        payload["bridge"]["config"]["write_approval"]["skills_enabled"],
-        json!(false)
-    );
-    assert_eq!(
-        payload["bridge"]["config"]["auxiliary_curator"]["api_key_configured"],
-        json!(true)
-    );
-    assert!(
-        !serde_json::to_string(&payload)
-            .unwrap()
-            .contains("secret-value"),
-        "Hermes bridge must not expose auxiliary secrets"
-    );
-    assert_eq!(payload["bridge"]["state"]["exists"], true);
-    assert_eq!(
-        payload["bridge"]["state"]["raw_lcm_owner"],
-        "hermes_runtime"
-    );
-    assert_eq!(
-        payload["bridge"]["state"]["hermes_state_owner"],
-        "hermes_runtime"
-    );
-    assert_eq!(
-        payload["bridge"]["state"]["trace_decay_lcm_store_owner"],
-        "tracedecay_hermes_plugin"
-    );
-    assert_eq!(
-        payload["bridge"]["state"]["trace_decay_lcm_role"],
-        "hermes_profile_session_store"
-    );
-    assert_eq!(
-        payload["bridge"]["state"]["trace_decay_ingest_role"],
-        "read_only_session_message_projector"
-    );
-    assert_eq!(payload["bridge"]["curator"]["owner"], "hermes");
-    assert_eq!(
-        payload["bridge"]["curator"]["trace_decay_role"],
-        "read_only_projector"
-    );
-    assert_eq!(
-        payload["bridge"]["curator"]["standalone_automation_blocked"],
-        true
-    );
-    assert_eq!(payload["bridge"]["curator"]["state"]["run_count"], json!(7));
-    assert_eq!(
-        payload["bridge"]["curator"]["policy"]["max_destructive_action"],
-        "archive"
-    );
-    assert_eq!(
-        payload["bridge"]["curator"]["policy"]["eligible_provenance"],
-        json!(["agent", "agent_created"])
-    );
-    assert_eq!(
-        payload["bridge"]["background_review"]["owner"],
-        "hermes_runtime"
-    );
-    assert_eq!(
-        payload["bridge"]["background_review"]["skill_nudge_interval"],
-        json!(16)
-    );
-    assert_eq!(payload["bridge"]["skill_count"], 1);
-    assert_eq!(payload["bridge"]["pending_skill_count"], 1);
-    assert_eq!(payload["bridge"]["skills"][0]["name"], "repo-hygiene");
-    assert_eq!(
-        payload["bridge"]["skills"][0]["ownership"]["owner"],
-        "hermes_local"
-    );
-    assert_eq!(
-        payload["bridge"]["skills"][0]["ownership"]["curator_managed_record"],
-        json!(true)
-    );
-    assert_eq!(
-        payload["bridge"]["skills"][0]["pending_write_ids"],
-        json!(["pending1"])
-    );
-    assert_eq!(
-        payload["bridge"]["usage_records"]["repo-hygiene"]["created_by"],
-        "agent"
-    );
-    assert!(
-        payload["bridge"]["pending_skills"][0]
-            .get("payload")
-            .is_none()
-    );
-
-    close_test_graph(cg).await;
 }
 
 #[test]

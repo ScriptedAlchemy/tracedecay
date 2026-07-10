@@ -25,7 +25,6 @@ fn ctx(home: &Path, tracedecay_bin: &str) -> InstallContext {
         home: home.to_path_buf(),
         tracedecay_bin: tracedecay_bin.to_string(),
         tool_permissions: tracedecay::agents::expected_tool_perms(),
-        profile: None,
         project_root: None,
         dashboard: true,
     }
@@ -191,33 +190,29 @@ fn write_retired_codex_skill(plugin_dir: &Path, name: &str) {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn hermes_update_plugin_refreshes_all_profiles_without_touching_config() {
+fn hermes_update_plugin_refreshes_user_install_and_retires_legacy_named_install() {
     let home = TempDir::new().unwrap();
     let _agent_env = AgentEnvLock::pin(home.path());
     let _hermes_home = EnvVarGuard::unset("HERMES_HOME");
-    let project = TempDir::new().unwrap();
     let hermes = get_integration("hermes").unwrap();
 
-    // Default-profile install with a pinned project root + dashboard page.
-    let mut install_ctx = ctx(home.path(), OLD_BIN);
-    install_ctx.project_root = Some(project.path().to_path_buf());
-    hermes.install(&install_ctx).unwrap();
+    hermes.install(&ctx(home.path(), OLD_BIN)).unwrap();
 
-    // Named-profile install without a dashboard (`--no-dashboard`).
-    let mut profile_ctx = ctx(home.path(), OLD_BIN);
-    profile_ctx.profile = Some("work".to_string());
-    profile_ctx.dashboard = false;
-    hermes.install(&profile_ctx).unwrap();
+    // A legacy named-profile install is retired once rather than refreshed.
+    let work_plugin = home.path().join(".hermes/profiles/work/plugins/tracedecay");
+    std::fs::create_dir_all(&work_plugin).unwrap();
+    std::fs::write(work_plugin.join("plugin.yaml"), "name: tracedecay\n").unwrap();
+    std::fs::write(work_plugin.join("tools.py"), OLD_BIN).unwrap();
+    let work_config = home.path().join(".hermes/profiles/work/config.yaml");
+    std::fs::write(&work_config, "plugins:\n  enabled:\n    - tracedecay\n").unwrap();
 
     // Simulate user customization a YAML rewrite could disturb.
     let default_config = home.path().join(".hermes/config.yaml");
-    let work_config = home.path().join(".hermes/profiles/work/config.yaml");
     let mut customized = text(&default_config);
     customized.push_str("\n# user comment\nui:\n  theme: dark\n");
     std::fs::write(&default_config, &customized).unwrap();
 
     let default_config_before = bytes(&default_config);
-    let work_config_before = bytes(&work_config);
 
     let outcome = hermes.update_plugin(&ctx(home.path(), NEW_BIN)).unwrap();
     let UpdatePluginOutcome::Refreshed(paths) = outcome else {
@@ -225,38 +220,28 @@ fn hermes_update_plugin_refreshes_all_profiles_without_touching_config() {
     };
     let default_plugin = home.path().join(".hermes/plugins/tracedecay");
     let work_plugin = home.path().join(".hermes/profiles/work/plugins/tracedecay");
-    assert!(paths.contains(&default_plugin), "missing default profile");
-    assert!(paths.contains(&work_plugin), "missing named profile");
+    assert_eq!(paths, vec![default_plugin.clone()]);
 
-    // Configs byte-identical: pin, user keys, and comments intact.
+    // The supported user config remains byte-identical.
     assert_eq!(bytes(&default_config), default_config_before);
-    assert_eq!(bytes(&work_config), work_config_before);
 
     // Artifacts re-baked with the new binary path and current version stamp.
-    for plugin_dir in [&default_plugin, &work_plugin] {
-        assert!(text(&plugin_dir.join("tools.py")).contains(NEW_BIN));
-        assert!(
-            text(&plugin_dir.join("plugin.yaml"))
-                .contains(&format!("version: {}", env!("CARGO_PKG_VERSION")))
-        );
-    }
+    assert!(text(&default_plugin.join("tools.py")).contains(NEW_BIN));
+    assert!(
+        text(&default_plugin.join("plugin.yaml"))
+            .contains(&format!("version: {}", env!("CARGO_PKG_VERSION")))
+    );
+    assert!(!work_plugin.join("plugin.yaml").exists());
+    assert!(!text(&work_config).contains("tracedecay"));
 
-    // Dashboard page refreshed where deployed, with the pin re-read from
-    // config.yaml and re-baked into plugin_api.py.
+    // Dashboard page refreshes without a Hermes profile/project default.
     let api = text(&default_plugin.join("dashboard/plugin_api.py"));
     assert!(api.contains(NEW_BIN));
-    // The pin is baked in as a JSON-encoded Python string literal, so match
-    // the encoded form (Windows backslashes are escaped in the artifact).
-    let pinned_json = serde_json::to_string(&project.path().display().to_string()).unwrap();
-    assert!(
-        api.contains(&pinned_json),
-        "plugin_api.py should bake the project-root pin, missing {pinned_json}"
-    );
+    assert!(!api.contains("DEPLOYED_PROJECT_ROOT"));
     assert!(
         text(&default_plugin.join("dashboard/manifest.json")).contains(env!("CARGO_PKG_VERSION"))
     );
 
-    // A `--no-dashboard` install stays dashboard-free.
     assert!(!work_plugin.join("dashboard").exists());
 }
 
@@ -298,6 +283,35 @@ fn hermes_update_plugin_reports_not_installed_when_nothing_is_detected() {
     assert!(matches!(outcome, UpdatePluginOutcome::NotInstalled));
     assert!(!home.path().join(".hermes/plugins").exists());
     assert!(!home.path().join(".hermes/config.yaml").exists());
+}
+
+#[test]
+fn hermes_update_plugin_moves_legacy_named_only_install_to_user_home() {
+    let home = TempDir::new().unwrap();
+    let _agent_env = AgentEnvLock::pin(home.path());
+    let _hermes_home = EnvVarGuard::unset("HERMES_HOME");
+    let legacy = home.path().join(".hermes/profiles/work/plugins/tracedecay");
+    std::fs::create_dir_all(&legacy).unwrap();
+    std::fs::write(legacy.join("plugin.yaml"), "name: tracedecay\n").unwrap();
+    std::fs::write(legacy.join("tools.py"), OLD_BIN).unwrap();
+    std::fs::write(
+        home.path().join(".hermes/profiles/work/config.yaml"),
+        "plugins:\n  enabled:\n    - tracedecay\n",
+    )
+    .unwrap();
+
+    let outcome = get_integration("hermes")
+        .unwrap()
+        .update_plugin(&ctx(home.path(), NEW_BIN))
+        .unwrap();
+
+    let default = home.path().join(".hermes/plugins/tracedecay");
+    assert!(matches!(
+        outcome,
+        UpdatePluginOutcome::Refreshed(paths) if paths == vec![default.clone()]
+    ));
+    assert!(text(&default.join("tools.py")).contains(NEW_BIN));
+    assert!(!legacy.join("plugin.yaml").exists());
 }
 
 // ---------------------------------------------------------------------------

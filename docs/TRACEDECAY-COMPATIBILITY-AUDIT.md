@@ -10,7 +10,12 @@ TraceDecay defaults to user/profile-level storage. Project data is registered un
 
 Project-local storage is reserved for explicit local installs and maintenance paths. Normal operation must not create project-local databases just because the current working directory is a repository.
 
-Hermes uses TraceDecay as its memory and context provider. Unpinned Hermes profiles use profile-level TraceDecay storage; profiles with an explicit project root stay scoped to that project.
+Hermes uses TraceDecay as its memory and context provider through the same
+user-profile installation and project store as every other host. Hermes homes
+and profiles never select storage or project identity. The project comes from
+an explicit runtime root or the current working directory and its Git root.
+Legacy pins may be read only to prove a one-time data migration target; they
+are not runtime fallbacks.
 
 Codex, Cursor, Hermes, and other agent installers should remove generated project-local artifacts they own while preserving user-authored config entries. Cleanup must not follow symlinked project directories outside the repository.
 

@@ -901,7 +901,6 @@ async fn status_for_provider(
 
     Ok(LcmStatus {
         schema_version,
-        storage_scope: Some("project_local".to_string()),
         raw_message_count: count_raw_messages(conn, provider, session_id).await?,
         summary_node_count: count_summary_nodes(conn, provider, session_id).await?,
         external_payload_count,
@@ -962,7 +961,6 @@ async fn aggregate_provider_status(
     aggregate.unreferenced_payload_count = payload_health.payload.unreferenced_count;
     aggregate.payload = payload_health.payload;
     aggregate.payload_gc = payload_health.payload_gc;
-    aggregate.storage_scope = Some("project_local".to_string());
     aggregate.dag.compression_ratio = python_round_ratio_to_tenths(
         aggregate.dag.total_source_tokens,
         aggregate.dag.total_tokens,
@@ -1135,7 +1133,6 @@ fn empty_status(schema_version: i64, gc_config: &LcmGcConfig) -> LcmStatus {
         i64::try_from(gc_config.reap_missing_after).unwrap_or(i64::MAX);
     LcmStatus {
         schema_version,
-        storage_scope: Some("project_local".to_string()),
         raw_message_count: 0,
         summary_node_count: 0,
         external_payload_count: 0,

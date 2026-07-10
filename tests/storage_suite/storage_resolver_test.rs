@@ -719,7 +719,7 @@ async fn resolved_project_store_helpers_default_to_profile_sharded_artifact_path
 }
 
 #[tokio::test]
-async fn hermes_profile_home_session_path_wins_over_default_profile_shard() {
+async fn hermes_profile_like_directory_uses_user_profile_shard() {
     let _guard = HOME_ENV_LOCK.lock().await;
     let dir = TempDir::new().unwrap();
     let hermes_home = dir.path().join(".hermes");
@@ -731,8 +731,11 @@ async fn hermes_profile_home_session_path_wins_over_default_profile_shard() {
     )
     .unwrap();
     let _home_guard = HomeGuard::set(&home);
+    let project_id = default_profile_project_id(&hermes_home);
 
-    let expected = hermes_home.join(".tracedecay/sessions.db");
+    let expected = home
+        .join(".tracedecay")
+        .join(format!("projects/{project_id}/sessions.db"));
     assert_eq!(project_session_db_path(&hermes_home), expected);
     assert_eq!(
         tracedecay::sessions::cursor::resolved_project_session_db_path(&hermes_home)

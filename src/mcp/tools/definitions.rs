@@ -9,6 +9,11 @@ use serde_json::{Value, json};
 use super::ToolDefinition;
 use super::dispatch_policy::REGISTERED_PROJECT_READER_TOOL_NAMES;
 
+/// Tools registered on every host before optional external capabilities.
+/// Count-contract tests share this source of truth so branch rebases cannot
+/// leave independent stale literals on the unit and integration surfaces.
+pub const ALWAYS_REGISTERED_TOOL_COUNT: usize = 103;
+
 mod git_scope;
 mod session;
 
@@ -2469,42 +2474,22 @@ fn def_skill_view() -> ToolDefinition {
 fn def_hermes_skill_bridge() -> ToolDefinition {
     def(
         "tracedecay_hermes_skill_bridge",
-        "Hermes Skill Bridge",
-        "Read Hermes-owned profile skill state without mutating Hermes. Returns skill summaries, pending skill approval records, usage telemetry, archive count, and the explicit host-owned lifecycle contract. Requires an absolute hermes_home path.",
+        "Hermes Skill Inventory",
+        "Read skills, pending approvals, usage telemetry, and archive counts owned by the standard ~/.hermes user install. Read-only; alternate Hermes roots and TraceDecay storage selectors are not supported.",
         json!({
             "type": "object",
             "properties": {
-                "hermes_home": {
-                    "type": "string",
-                    "description": "Absolute path to the Hermes profile home whose skills/ and pending/skills/ stores should be inspected."
-                },
                 "include_skill_bodies": {
                     "type": "boolean",
-                    "description": "If true, include SKILL.md contents capped at the Hermes bridge body limit (default: false)."
+                    "description": "Include bounded SKILL.md contents (default: false)."
                 },
                 "include_pending_payloads": {
                     "type": "boolean",
-                    "description": "If true, include staged skill write replay payloads from pending/skills (default: false)."
+                    "description": "Include staged Hermes skill-write payloads (default: false)."
                 }
-            },
-            "required": ["hermes_home"]
+            }
         }),
     )
-}
-
-fn lcm_storage_scope_schema() -> Value {
-    json!({
-        "type": "string",
-        "enum": ["project_local", "hermes_profile"],
-        "description": "Storage scope for LCM session state. Defaults to project_local. Use hermes_profile only with an explicit absolute hermes_home."
-    })
-}
-
-fn lcm_hermes_home_schema() -> Value {
-    json!({
-        "type": "string",
-        "description": "absolute Hermes profile home directory required when storage_scope is hermes_profile."
-    })
 }
 
 fn lcm_pattern_array_schema(description: &str) -> Value {
@@ -2515,25 +2500,11 @@ fn lcm_pattern_array_schema(description: &str) -> Value {
     })
 }
 
-fn lcm_storage_scope_requires_hermes_home() -> Value {
-    json!([{
-        "if": {
-            "properties": {
-                "storage_scope": { "const": "hermes_profile" }
-            },
-            "required": ["storage_scope"]
-        },
-        "then": {
-            "required": ["hermes_home"]
-        }
-    }])
-}
-
 fn def_lcm_status() -> ToolDefinition {
     def(
         "tracedecay_lcm_status",
         "LCM Status",
-        "Return LCM schema, raw-message, summary, payload, and maintenance counts plus store token estimates, stored summary-depth distribution with compression ratio, payload byte totals, and payload GC status from the active project or Hermes profile session store. Codex compaction summaries store compaction generation in the depth field.",
+        "Return LCM schema, raw-message, summary, payload, and maintenance counts plus store token estimates, stored summary-depth distribution with compression ratio, payload byte totals, and payload GC status from the active project session store. Codex compaction summaries store compaction generation in the depth field.",
         json!({
             "type": "object",
             "properties": {
@@ -2548,11 +2519,8 @@ fn def_lcm_status() -> ToolDefinition {
                 "deep": {
                     "type": "boolean",
                     "description": "When true, include an on-disk payload integrity sweep and populate integrity_mismatch_count. Defaults to false."
-                },
-                "storage_scope": lcm_storage_scope_schema(),
-                "hermes_home": lcm_hermes_home_schema()
-            },
-            "allOf": lcm_storage_scope_requires_hermes_home()
+                }
+            }
         }),
     )
 }
@@ -2606,11 +2574,8 @@ fn def_lcm_doctor() -> ToolDefinition {
                 },
                 "ignore_session_patterns": lcm_pattern_array_schema("Hermes-style glob patterns for sessions that should be diagnosed as ignored cleanup candidates."),
                 "stateless_session_patterns": lcm_pattern_array_schema("Hermes-style glob patterns for stateless sessions that should be diagnosed as cleanup candidates."),
-                "ignore_message_patterns": lcm_pattern_array_schema("Hermes-style glob patterns for low-value message content to treat as storage-only noise."),
-                "storage_scope": lcm_storage_scope_schema(),
-                "hermes_home": lcm_hermes_home_schema()
+                "ignore_message_patterns": lcm_pattern_array_schema("Hermes-style glob patterns for low-value message content to treat as storage-only noise.")
             },
-            "allOf": lcm_storage_scope_requires_hermes_home(),
             "required": ["provider"]
         }),
     )
@@ -2620,7 +2585,7 @@ fn def_lcm_load_session() -> ToolDefinition {
     def(
         "tracedecay_lcm_load_session",
         "LCM Load Session",
-        "Load ordered lossless raw session messages with stable pagination and bounded content slices from the active project or Hermes profile LCM store.",
+        "Load ordered lossless raw session messages with stable pagination and bounded content slices from the active project LCM store.",
         json!({
             "type": "object",
             "properties": {
@@ -2672,11 +2637,8 @@ fn def_lcm_load_session() -> ToolDefinition {
                     "minimum": 1,
                     "maximum": 20000,
                     "description": "Maximum characters returned per message. Values above 20000 are clamped and reported in content_limit_clamped_from."
-                },
-                "storage_scope": lcm_storage_scope_schema(),
-                "hermes_home": lcm_hermes_home_schema()
+                }
             },
-            "allOf": lcm_storage_scope_requires_hermes_home(),
             "required": ["session_id"]
         }),
     )
@@ -2686,7 +2648,7 @@ fn def_lcm_grep() -> ToolDefinition {
     def(
         "tracedecay_lcm_grep",
         "LCM Grep",
-        "Search bounded LCM raw-message snippets and optional summary text across all providers in the active project or Hermes profile session store. Pass provider to constrain one provider.",
+        "Search bounded LCM raw-message snippets and optional summary text across all providers in the active project session store. Pass provider to constrain one provider.",
         json!({
             "type": "object",
             "properties": {
@@ -2771,11 +2733,8 @@ fn def_lcm_grep() -> ToolDefinition {
                 },
                 "branch": git_scope::branch_schema("Optional git branch filter: only LCM snippets from sessions active on this branch (via the session-git correlation index)."),
                 "worktree": git_scope::worktree_schema("Optional git worktree root path filter: only LCM snippets from sessions active in this worktree (via the session-git correlation index)."),
-                "commit": git_scope::commit_schema("Optional commit sha filter (full or >=6-char hex prefix): only LCM snippets from sessions attributed to this commit (via the session-git correlation index)."),
-                "storage_scope": lcm_storage_scope_schema(),
-                "hermes_home": lcm_hermes_home_schema()
+                "commit": git_scope::commit_schema("Optional commit sha filter (full or >=6-char hex prefix): only LCM snippets from sessions attributed to this commit (via the session-git correlation index).")
             },
-            "allOf": lcm_storage_scope_requires_hermes_home(),
             "required": ["query"]
         }),
     )
@@ -2785,7 +2744,7 @@ fn def_lcm_describe() -> ToolDefinition {
     def(
         "tracedecay_lcm_describe",
         "LCM Describe",
-        "Describe one session's LCM raw-message and summary-DAG shape from the active project or Hermes profile store without exposing full payload bodies.",
+        "Describe one session's LCM raw-message and summary-DAG shape from the active project store without exposing full payload bodies.",
         json!({
             "type": "object",
             "properties": {
@@ -2814,11 +2773,8 @@ fn def_lcm_describe() -> ToolDefinition {
                             "description": "External payload ref when kind=external_payload."
                         }
                     }
-                },
-                "storage_scope": lcm_storage_scope_schema(),
-                "hermes_home": lcm_hermes_home_schema()
+                }
             },
-            "allOf": lcm_storage_scope_requires_hermes_home(),
             "required": ["provider", "session_id"]
         }),
     )
@@ -2828,7 +2784,7 @@ fn def_lcm_expand() -> ToolDefinition {
     def(
         "tracedecay_lcm_expand",
         "LCM Expand",
-        "Expand one raw message, summary node, or external payload through the bounded LCM query API from the active project or Hermes profile store.",
+        "Expand one raw message, summary node, or external payload through the bounded LCM query API from the active project store.",
         json!({
             "type": "object",
             "properties": {
@@ -2884,11 +2840,8 @@ fn def_lcm_expand() -> ToolDefinition {
                     "type": "integer",
                     "minimum": 1,
                     "description": "Maximum immediate sources returned from source_offset (summary_node targets only); resume with the response's next_source_offset. If a returned source has content_truncated=true, continue via target.kind=raw_message for that source's store_id and content_offset."
-                },
-                "storage_scope": lcm_storage_scope_schema(),
-                "hermes_home": lcm_hermes_home_schema()
+                }
             },
-            "allOf": lcm_storage_scope_requires_hermes_home(),
             "required": ["provider", "session_id", "target"]
         }),
     )
@@ -2898,7 +2851,7 @@ fn def_lcm_expand_query() -> ToolDefinition {
     def(
         "tracedecay_lcm_expand_query",
         "LCM Expand Query",
-        "Assemble bounded LCM retrieval context for a prompt from the active project or Hermes profile store and, when an automation backend is configured and available, synthesize the answer directly (returned first as `answer`, with `needs_synthesis:false`). Pure-noise blocks (base64 signature blobs, directory listings) are filtered from the context. When no backend is available it falls back to returning the raw context with `needs_synthesis:true` for the host to synthesize.",
+        "Assemble bounded LCM retrieval context for a prompt from the active project store and, when an automation backend is configured and available, synthesize the answer directly (returned first as `answer`, with `needs_synthesis:false`). Pure-noise blocks (base64 signature blobs, directory listings) are filtered from the context. When no backend is available it falls back to returning the raw context with `needs_synthesis:true` for the host to synthesize.",
         json!({
             "type": "object",
             "properties": {
@@ -2945,11 +2898,8 @@ fn def_lcm_expand_query() -> ToolDefinition {
                     "minimum": 1,
                     "maximum": 65536,
                     "description": "Maximum retrieval context budget (tokens of LCM material assembled before synthesis). Defaults to 32000. Independent of max_tokens, which governs the synthesis output size."
-                },
-                "storage_scope": lcm_storage_scope_schema(),
-                "hermes_home": lcm_hermes_home_schema()
+                }
             },
-            "allOf": lcm_storage_scope_requires_hermes_home(),
             "required": ["provider", "session_id", "prompt"]
         }),
     )
@@ -2959,7 +2909,7 @@ fn def_lcm_preflight() -> ToolDefinition {
     def_rw(
         "tracedecay_lcm_preflight",
         "LCM Preflight",
-        "Run compression preflight checks against the active project or Hermes profile LCM store.",
+        "Run compression preflight checks against the active project LCM store.",
         json!({
             "type": "object",
             "properties": {
@@ -3036,11 +2986,8 @@ fn def_lcm_preflight() -> ToolDefinition {
                 },
                 "ignore_session_patterns": lcm_pattern_array_schema("Hermes-style glob patterns for sessions to skip from active LCM ingest/compression."),
                 "stateless_session_patterns": lcm_pattern_array_schema("Hermes-style glob patterns for stateless sessions to replay without durable LCM storage."),
-                "ignore_message_patterns": lcm_pattern_array_schema("Hermes-style glob patterns for low-value message content to keep in replay but skip from LCM storage."),
-                "storage_scope": lcm_storage_scope_schema(),
-                "hermes_home": lcm_hermes_home_schema()
+                "ignore_message_patterns": lcm_pattern_array_schema("Hermes-style glob patterns for low-value message content to keep in replay but skip from LCM storage.")
             },
-            "allOf": lcm_storage_scope_requires_hermes_home(),
             "required": ["provider", "session_id"]
         }),
     )
@@ -3050,7 +2997,7 @@ fn def_lcm_compress() -> ToolDefinition {
     def_rw(
         "tracedecay_lcm_compress",
         "LCM Compress",
-        "Operator/host-lifecycle tool: called by an agent host's own pre-compact or compaction hook, not by a model in response to a user request. Advances the LCM compression lifecycle in the active project or Hermes profile store without invoking an auxiliary LLM.",
+        "Operator/host-lifecycle tool: called by an agent host's own pre-compact or compaction hook, not by a model in response to a user request. Advances the LCM compression lifecycle in the active project store without invoking an auxiliary LLM.",
         json!({
             "type": "object",
             "properties": {
@@ -3149,11 +3096,8 @@ fn def_lcm_compress() -> ToolDefinition {
                         "route": {"type": "string"}
                     },
                     "required": ["mode"]
-                },
-                "storage_scope": lcm_storage_scope_schema(),
-                "hermes_home": lcm_hermes_home_schema()
+                }
             },
-            "allOf": lcm_storage_scope_requires_hermes_home(),
             "required": ["provider", "session_id"]
         }),
     )
@@ -3186,11 +3130,8 @@ fn def_lcm_session_boundary() -> ToolDefinition {
                 "bound_session_id": {
                     "type": "string",
                     "description": "Session id that was bound before this boundary; a mismatch with old_session_id records the cooldown."
-                },
-                "storage_scope": lcm_storage_scope_schema(),
-                "hermes_home": lcm_hermes_home_schema()
+                }
             },
-            "allOf": lcm_storage_scope_requires_hermes_home(),
             "required": ["provider", "session_id"]
         }),
     )

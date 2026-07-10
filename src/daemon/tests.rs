@@ -1685,14 +1685,10 @@ async fn automation_scheduler_tick_respects_pause_control_without_backend_call()
 
 #[cfg(unix)]
 #[tokio::test]
-async fn socket_client_serves_profile_scoped_lcm_without_project() {
-    let hermes_home = TempDir::new().expect("hermes home");
-    let hermes_home = hermes_home
-        .path()
-        .canonicalize()
-        .expect("canonical hermes home");
-    let client_identity = test_client_identity_for(hermes_home.join("client-profile"));
-    std::fs::create_dir_all(hermes_home.join(".tracedecay")).expect("profile root");
+async fn socket_client_rejects_tool_calls_without_project() {
+    let home = TempDir::new().expect("home");
+    let home = home.path().canonicalize().expect("canonical home");
+    let client_identity = test_client_identity_for(home.join("client"));
 
     let (client, server) = tokio::net::UnixStream::pair().expect("unix stream pair");
     let server_task = tokio::spawn(super::serve_socket_client(
@@ -1720,8 +1716,6 @@ async fn socket_client_serves_profile_scoped_lcm_without_project() {
                     "name": "tracedecay_lcm_status",
                     "arguments": {
                         "provider": "cursor",
-                        "storage_scope": "hermes_profile",
-                        "hermes_home": hermes_home,
                         "format": "json"
                     }
                 }
@@ -1737,18 +1731,18 @@ async fn socket_client_serves_profile_scoped_lcm_without_project() {
     let mut lines = tokio::io::BufReader::new(reader).lines();
     let line = tokio::time::timeout(std::time::Duration::from_secs(2), lines.next_line())
         .await
-        .expect("profile-scoped response should not time out")
+        .expect("projectless rejection should not time out")
         .expect("read response")
-        .expect("profile-scoped response");
+        .expect("projectless response");
     let response: Value = serde_json::from_str(&line).expect("response json");
     assert_eq!(response["id"], json!(7));
-    let text = response["result"]["content"][0]["text"]
-        .as_str()
-        .expect("profile result text");
-    let payload: Value = serde_json::from_str(text).expect("profile payload json");
-    assert_eq!(payload["status"], "not_ingested");
-    assert_eq!(payload["storage_scope"], "hermes_profile");
+    assert_eq!(
+        response["error"]["message"], "tracedecay_lcm_status requires an initialized code project",
+        "projectless handshake should return the stable current contract"
+    );
 
-    server_task.abort();
-    let _ = server_task.await;
+    server_task
+        .await
+        .expect("server task should complete")
+        .expect("projectless client shutdown should be clean");
 }

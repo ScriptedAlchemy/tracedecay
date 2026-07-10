@@ -250,6 +250,13 @@ pub async fn handle_tool_call_with_registry_and_implicit_project(
         tool_name.starts_with("tracedecay_"),
         "tool_name must start with 'tracedecay_' prefix"
     );
+    for removed in ["storage_scope", "hermes_home"] {
+        if args.get(removed).is_some() {
+            return Err(TraceDecayError::Config {
+                message: format!("unknown parameter `{removed}` for `{tool_name}`"),
+            });
+        }
+    }
     if !tool_accepts_registered_project_selector(tool_name)
         && rejected_tool_project_selector_present(tool_name, &args)
     {
@@ -505,50 +512,6 @@ pub async fn handle_tool_call_with_registry_and_implicit_project(
     }
 }
 
-/// Dispatches only the storage-scoped LCM tools that can run without an
-/// initialized project (e.g. `storage_scope=hermes_profile`).
-pub async fn handle_profile_scoped_lcm_tool_call(
-    tool_name: &str,
-    args: Value,
-) -> Result<ToolResult> {
-    match tool_name {
-        "tracedecay_lcm_status" => {
-            session::handle_lcm_status(session::LcmHandlerContext::projectless(), args).await
-        }
-        "tracedecay_lcm_doctor" => {
-            session::handle_lcm_doctor(session::LcmHandlerContext::projectless(), args).await
-        }
-        "tracedecay_lcm_load_session" => {
-            session::handle_lcm_load_session(session::LcmHandlerContext::projectless(), args).await
-        }
-        "tracedecay_lcm_grep" => {
-            session::handle_lcm_grep(session::LcmHandlerContext::projectless(), args).await
-        }
-        "tracedecay_lcm_describe" => {
-            session::handle_lcm_describe(session::LcmHandlerContext::projectless(), args).await
-        }
-        "tracedecay_lcm_expand" => {
-            session::handle_lcm_expand(session::LcmHandlerContext::projectless(), args).await
-        }
-        "tracedecay_lcm_expand_query" => {
-            session::handle_lcm_expand_query(session::LcmHandlerContext::projectless(), args).await
-        }
-        "tracedecay_lcm_preflight" => {
-            session::handle_lcm_preflight(session::LcmHandlerContext::projectless(), args).await
-        }
-        "tracedecay_lcm_compress" => {
-            session::handle_lcm_compress(session::LcmHandlerContext::projectless(), args).await
-        }
-        "tracedecay_lcm_session_boundary" => {
-            session::handle_lcm_session_boundary(session::LcmHandlerContext::projectless(), args)
-                .await
-        }
-        _ => Err(TraceDecayError::Config {
-            message: format!("tool `{tool_name}` does not support profile-scoped dispatch"),
-        }),
-    }
-}
-
 #[cfg(test)]
 #[allow(
     clippy::unwrap_used,
@@ -667,11 +630,8 @@ mod tests {
     // MCP registry maintenance guardrail:
     // when adding a tool, update all three surfaces together: its
     // `def_*` entry in definitions.rs, the `get_tool_definitions()` registry,
-    // and the `handle_tool_call` match arm below. For profile-scoped LCM tools,
-    // also advertise `storage_scope: ["project_local", "hermes_profile"]`
-    // plus `hermes_home` in the schema, then add the profile handler arm. These
-    // lockstep tests intentionally fail with the missing tool name when any
-    // surface drifts.
+    // and the `handle_tool_call` match arm below. These lockstep tests
+    // intentionally fail with the missing tool name when any surface drifts.
     #[test]
     fn tool_definitions_and_dispatch_handlers_stay_in_lockstep() {
         let definition_names = get_tool_definitions()
@@ -701,35 +661,6 @@ mod tests {
                 .cloned()
                 .collect(),
             "handle_tool_call handlers missing MCP tool definitions",
-        );
-    }
-
-    #[test]
-    fn profile_scoped_lcm_definitions_and_handlers_stay_in_lockstep() {
-        let profile_scoped_definition_names = get_tool_definitions()
-            .into_iter()
-            .filter(|tool| {
-                tool.input_schema["properties"]["storage_scope"]["enum"]
-                    .as_array()
-                    .is_some_and(|values| values.iter().any(|value| value == "hermes_profile"))
-            })
-            .map(|tool| tool.name)
-            .collect::<BTreeSet<_>>();
-        let handler_names = dispatch_tool_names_from_source("handle_profile_scoped_lcm_tool_call");
-
-        assert_set_empty(
-            profile_scoped_definition_names
-                .difference(&handler_names)
-                .cloned()
-                .collect(),
-            "profile-scoped MCP tool definitions missing profile handler dispatch",
-        );
-        assert_set_empty(
-            handler_names
-                .difference(&profile_scoped_definition_names)
-                .cloned()
-                .collect(),
-            "profile-scoped handler dispatches missing MCP tool definitions",
         );
     }
 
@@ -1059,7 +990,8 @@ mod tests {
         // host CLI capabilities they need; agents should never see a tool that
         // will instantly fail. The count and per-tool checks below adapt to
         // the host's capability set.
-        let expected_total = 103 + usize::from(super::super::definitions::ast_grep_available());
+        let expected_total = super::super::definitions::ALWAYS_REGISTERED_TOOL_COUNT
+            + usize::from(super::super::definitions::ast_grep_available());
         assert_eq!(tools.len(), expected_total);
 
         let tool_names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();

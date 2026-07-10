@@ -27,7 +27,6 @@ fn make_install_ctx(home: &Path) -> InstallContext {
         home: home.to_path_buf(),
         tracedecay_bin: "/usr/local/bin/tracedecay".to_string(),
         tool_permissions: expected_tool_perms(),
-        profile: None,
         project_root: None,
         dashboard: true,
     }
@@ -49,7 +48,6 @@ fn make_install_ctx_with_real_bin(home: &Path) -> InstallContext {
         home: home.to_path_buf(),
         tracedecay_bin: bin_path.to_string_lossy().to_string(),
         tool_permissions: expected_tool_perms(),
-        profile: None,
         project_root: None,
         dashboard: true,
     }

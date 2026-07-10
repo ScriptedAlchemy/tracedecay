@@ -1,5 +1,18 @@
 use crate::support::*;
 
+#[test]
+fn skill_writer_options_have_no_storage_selector() {
+    let options = serde_json::to_value(SkillWriterAutomationOptions::default()).unwrap();
+    assert!(options.get("storage_scope").is_none());
+    assert!(options.get("hermes_home").is_none());
+    assert!(
+        serde_json::from_value::<SkillWriterAutomationOptions>(json!({
+            "hermes_home": "/tmp/hermes"
+        }))
+        .is_err()
+    );
+}
+
 #[tokio::test]
 async fn skill_writer_runner_skips_when_task_is_disabled() {
     let temp = tempdir().unwrap();
@@ -172,52 +185,68 @@ async fn skill_writer_skips_when_replay_disabled_and_no_grep_hits() {
 }
 
 #[tokio::test]
-async fn skill_writer_runner_reads_hermes_profile_lcm() {
+async fn skill_writer_host_modes_do_not_select_alternate_lcm_storage() {
+    let _env_lock = ENV_LOCK.lock().await;
     let temp = tempdir().unwrap();
     let profile_root = temp.path().join("profile");
     let cg = init_project(temp.path()).await;
-
-    let hermes_home = tempdir().unwrap();
-    let profile_db_path = resolve_hermes_profile_session_db_path(hermes_home.path()).unwrap();
-    let profile_db = GlobalDb::open_at(&profile_db_path)
+    let project_db = GlobalDb::open_at(&cg.store_layout().sessions_db_path)
         .await
-        .expect("hermes profile session db open");
+        .expect("project session db open");
     seed_session_message_in_db(
-        &profile_db,
-        hermes_home.path(),
+        &project_db,
+        cg.project_root(),
         SeedSessionMessage {
             provider: "cursor",
-            session_id: "hermes-skill-writer-1",
-            message_id: "hermes-skill-writer-1-message-001",
+            session_id: "project-skill-writer-1",
+            message_id: "project-skill-writer-1-message-001",
             role: "assistant",
             timestamp: 1_715_100_005,
-            text: "Hermes profile-only skill writer evidence should draft reusable workflow guidance.",
-            source: Some("hermes_profile_lcm"),
+            text: "Active project skill writer evidence should draft reusable workflow guidance.",
+            source: Some("project_lcm"),
         },
     )
     .await;
+    let _global_db = isolate_global_db(&cg);
 
     let backend = SkillJsonBackend::new(json!({"skills": []}));
-    let config = enabled_skill_writer_config();
-
-    let run = run_skill_writer_with_backend(
-        &cg,
-        &config,
-        &backend,
-        SkillWriterAutomationOptions {
-            storage_scope: "hermes_profile".to_string(),
-            hermes_home: Some(hermes_home.path().to_path_buf()),
-            provider: "cursor".to_string(),
-            query: "profile-only skill writer evidence".to_string(),
-            profile_root: Some(profile_root),
-            ..SkillWriterAutomationOptions::default()
-        },
-    )
-    .await
-    .unwrap();
+    for (host_mode, query) in [
+        (
+            AutomationHostMode::Standalone,
+            "active project skill writer evidence",
+        ),
+        (
+            AutomationHostMode::DelegatedHost,
+            "project skill writer evidence",
+        ),
+    ] {
+        let mut config = enabled_skill_writer_config();
+        config.host_mode = host_mode;
+        let run = run_skill_writer_with_backend(
+            &cg,
+            &config,
+            &backend,
+            SkillWriterAutomationOptions {
+                provider: "cursor".to_string(),
+                query: query.to_string(),
+                profile_root: Some(profile_root.clone()),
+                ..SkillWriterAutomationOptions::default()
+            },
+        )
+        .await
+        .unwrap();
+        if host_mode == AutomationHostMode::Standalone {
+            assert_eq!(run.ledger_record.status, AutomationRunStatus::Succeeded);
+        } else {
+            assert_eq!(run.ledger_record.status, AutomationRunStatus::Skipped);
+            assert_eq!(
+                run.ledger_record.error.as_deref(),
+                Some("delegated_host_mode")
+            );
+        }
+    }
 
     assert_eq!(backend.calls(), 1);
-    assert_eq!(run.ledger_record.status, AutomationRunStatus::Succeeded);
 }
 
 #[tokio::test]

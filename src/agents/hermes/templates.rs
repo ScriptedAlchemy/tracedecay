@@ -97,25 +97,6 @@ MAX_CAPTURE_CHARS = 4000
 # E2BIG/EFAULT at exec time.
 ARGS_FILE_THRESHOLD_BYTES = 100000
 
-# Profile-state tools: memory facts and transcript search use the active
-# pinned/resolved project when available, falling back to the Hermes profile
-# home only for unpinned profiles.
-PROFILE_STORE_TOOLS = frozenset((
-    "tracedecay_fact_store",
-    "tracedecay_fact_feedback",
-    "tracedecay_memory_status",
-    "tracedecay_message_search",
-    "tracedecay_lcm_status",
-    "tracedecay_lcm_doctor",
-    "tracedecay_lcm_load_session",
-    "tracedecay_lcm_grep",
-    "tracedecay_lcm_describe",
-    "tracedecay_lcm_expand",
-    "tracedecay_lcm_expand_query",
-    "tracedecay_lcm_preflight",
-    "tracedecay_lcm_compress",
-    "tracedecay_lcm_session_boundary",
-))
 JSON_FORMAT_TOOLS = frozenset((
 {format_tools}
 ))
@@ -125,7 +106,6 @@ _PLUGIN_CONFIG_CACHE = {{}}
 def hermes_home_dir(hermes_home=None):
     return str(
         hermes_home
-        or os.environ.get("HERMES_HOME")
         or os.path.join(os.path.expanduser("~"), ".hermes")
     )
 
@@ -160,50 +140,10 @@ def plugin_config_block(hermes_home=None):
     _PLUGIN_CONFIG_CACHE[path] = (cache_key, block)
     return block
 
-def config_pinned_project_root(hermes_home=None):
-    value = plugin_config_block(hermes_home).get("project_root")
-    if not (isinstance(value, str) and value.strip()):
-        return None
-    pin = value.strip()
-    # Legacy installs pinned the Hermes home itself as the "project" — that
-    # was a storage-home conflation, not a code project, so a home-equal pin
-    # is treated as no pin at all.
-    try:
-        if os.path.realpath(pin) == os.path.realpath(hermes_home_dir(hermes_home)):
-            return None
-    except OSError:
-        pass
-    return pin
-
-def config_terminal_cwd(hermes_home=None):
-    home = hermes_home_dir(hermes_home)
-    path = os.path.join(home, "config.yaml")
-    try:
-        import yaml
-        with open(path, encoding="utf-8-sig") as config_file:
-            config = yaml.safe_load(config_file) or {{}}
-        terminal = config.get("terminal")
-        value = terminal.get("cwd") if isinstance(terminal, dict) else None
-    except Exception:
-        return None
-    return value.strip() if isinstance(value, str) and value.strip() else None
-
-def _has_tracedecay_index(path):
-    if not (isinstance(path, str) and path.strip() and os.path.isabs(path)):
-        return False
-    return os.path.isdir(os.path.join(path, ".tracedecay"))
-
-def code_project_root(explicit=None, cwd=None, hermes_home=None):
-    if explicit:
-        return str(explicit)
-    session_cwd = cwd or config_terminal_cwd(hermes_home)
-    if _has_tracedecay_index(session_cwd):
-        return str(session_cwd)
-    pin = config_pinned_project_root(hermes_home)
-    if pin:
-        return pin
-    if isinstance(session_cwd, str) and os.path.isabs(session_cwd):
-        return session_cwd
+def code_project_root(explicit=None, cwd=None):
+    candidate = explicit or cwd or os.getcwd()
+    if isinstance(candidate, str) and candidate.strip() and os.path.isabs(candidate):
+        return candidate.strip()
     return None
 
 def normalize_output(value) -> str:
@@ -233,31 +173,19 @@ def error_payload(message: str, result=None) -> str:
 def call_tracedecay_tool(name: str, args: dict, **kwargs) -> str:
     args_file = None
     try:
-        tool_args = args or {{}}
+        tool_args = dict(args or {{}})
         if name in JSON_FORMAT_TOOLS and "format" not in tool_args:
             tool_args = dict(tool_args)
             tool_args["format"] = "json"
         if "messages" in kwargs and "messages" not in tool_args:
             tool_args = dict(tool_args)
             tool_args["messages"] = kwargs["messages"]
-        # Project routing:
-        #   1. An explicit per-call project_root (call kwarg / tool arg)
-        #      wins for every tool.
-        #   2. Hermes state tools use the active code project when one is
-        #      pinned/resolved, so LCM and memory share the unified
-        #      user-level tracedecay store for that project.
-        #   3. Unpinned Hermes profile-store calls use the Hermes home as
-        #      project identity, which routes through the user-level
-        #      profile-sharded tracedecay store. Explicit hermes_profile
-        #      storage remains supported as a legacy escape hatch.
-        project_root = kwargs.get("project_root") or tool_args.get("project_root")
-        if not project_root and tool_args.get("storage_scope") != "hermes_profile":
+        # `project_root` is transport routing, never part of the MCP argument
+        # object. Resolve it only from an explicit call or the real process /
+        # session cwd; Hermes homes and profiles never select TraceDecay data.
+        project_root = kwargs.get("project_root")
+        if not project_root:
             project_root = code_project_root(cwd=kwargs.get("cwd") or tool_args.get("cwd"))
-            if not project_root and name in PROFILE_STORE_TOOLS:
-                tool_args = dict(tool_args)
-                home = tool_args.get("hermes_home") or hermes_home_dir()
-                tool_args.setdefault("project_root", str(home))
-                project_root = tool_args["project_root"]
         payload = json.dumps(tool_args)
         argv = [TRACEDECAY_BIN, "tool"]
         if project_root:

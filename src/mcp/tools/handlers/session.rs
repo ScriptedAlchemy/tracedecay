@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 use std::fmt::Write as _;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 use std::sync::{LazyLock, Mutex};
 
 use serde_json::{Map, Value, json};
@@ -16,7 +16,6 @@ use crate::mcp::response_handles::{
     RESPONSE_RETRIEVE_TOOL, observe_response_truncation, store_response_handle,
 };
 use crate::mcp::tools::{MAX_RESPONSE_CHARS, ToolResult};
-use crate::sessions::cursor::HermesProfileDbReadOnly;
 use crate::sessions::git_correlation::{
     CommitRelationFilter, GitRefFilter, GitScopeFilter, SessionsForQuery,
 };
@@ -296,13 +295,6 @@ impl<'a> LcmHandlerContext<'a> {
         Self {
             project_root: Some(cg.project_root()),
             project_session_db_path: Some(cg.store_layout().sessions_db_path.as_path()),
-        }
-    }
-
-    pub(super) const fn projectless() -> Self {
-        Self {
-            project_root: None,
-            project_session_db_path: None,
         }
     }
 }
@@ -767,9 +759,6 @@ fn lcm_response_handle_root(project_root: Option<&Path>, args: &Value) -> Option
             return Some(PathBuf::from(root));
         }
     }
-    if string_arg(args, "storage_scope") == Some("hermes_profile") {
-        return string_arg(args, "hermes_home").map(PathBuf::from);
-    }
     None
 }
 
@@ -871,13 +860,7 @@ fn bounded_lcm_expand_query_floor_text(
     };
 
     let mut object = Map::new();
-    for key in [
-        "status",
-        "provider",
-        "session_id",
-        "storage_scope",
-        "answer",
-    ] {
+    for key in ["status", "provider", "session_id", "answer"] {
         insert_bounded_scalar_field(&mut object, value, key, FLOOR_SCALAR_CHARS);
     }
     for key in [
@@ -1025,13 +1008,7 @@ fn compact_lcm_expand_query_payload(
 
     let mut object = Map::new();
     if let Some(max_scalar_chars) = limits.max_scalar_chars {
-        for key in [
-            "status",
-            "provider",
-            "session_id",
-            "storage_scope",
-            "answer",
-        ] {
+        for key in ["status", "provider", "session_id", "answer"] {
             insert_bounded_scalar_field(&mut object, value, key, max_scalar_chars);
         }
         for key in [
@@ -1052,7 +1029,6 @@ fn compact_lcm_expand_query_payload(
             "status",
             "provider",
             "session_id",
-            "storage_scope",
             "answer",
             "needs_synthesis",
             "max_tokens",
@@ -1681,60 +1657,35 @@ fn lcm_unavailable(args: &Value) -> ToolResult {
 /// so callers can tell "no data yet" apart from "open failed".
 /// The `store_exists: false` field is the machine-readable discriminator;
 /// other fields are backward-compatible additions.
-fn lcm_not_yet_ingested(args: &Value, storage_scope: &str) -> ToolResult {
+fn lcm_not_yet_ingested(args: &Value) -> ToolResult {
     tool_json(
         None,
         args,
         &json!({
             "status": "not_ingested",
             "store_exists": false,
-            "storage_scope": storage_scope,
             "message": "session store does not exist yet — nothing has been ingested",
         }),
     )
 }
 
-fn lcm_scoped_unavailable(
-    args: &Value,
-    storage_scope: &str,
-    message: impl Into<String>,
-) -> ToolResult {
+fn project_local_storage_without_project(args: &Value) -> ToolResult {
     tool_json(
         None,
         args,
         &json!({
             "status": "unavailable",
-            "storage_scope": storage_scope,
-            "message": message.into(),
+            "message": "LCM storage requires an initialized TraceDecay project root",
         }),
-    )
-}
-
-fn lcm_storage_scope_unavailable(args: &Value, storage_scope: &str) -> ToolResult {
-    lcm_scoped_unavailable(
-        args,
-        storage_scope,
-        format!(
-            "{storage_scope} LCM status storage is not available from the active project handler"
-        ),
-    )
-}
-
-fn project_local_storage_without_project(args: &Value) -> ToolResult {
-    lcm_scoped_unavailable(
-        args,
-        "project_local",
-        "project_local LCM storage requires an initialized TraceDecay project root",
     )
 }
 
 struct LcmStorage {
     db: GlobalDb,
-    scope: &'static str,
 }
 
-fn available_lcm_storage(db: GlobalDb, scope: &'static str) -> LcmStorageResolution {
-    LcmStorageResolution::Available(Box::new(LcmStorage { db, scope }))
+fn available_lcm_storage(db: GlobalDb) -> LcmStorageResolution {
+    LcmStorageResolution::Available(Box::new(LcmStorage { db }))
 }
 
 /// Database paths whose schema (sessions DDL + LCM migrations) has already
@@ -1788,54 +1739,6 @@ enum LcmStorageResolution {
     Unavailable(ToolResult),
 }
 
-fn invalid_hermes_profile_home(args: &Value, message: impl Into<String>) -> ToolResult {
-    lcm_scoped_unavailable(args, "hermes_profile", message)
-}
-
-fn hermes_profile_home(args: &Value) -> std::result::Result<PathBuf, ToolResult> {
-    let Some(hermes_home) = string_arg(args, "hermes_home") else {
-        return Err(invalid_hermes_profile_home(
-            args,
-            "hermes_profile LCM storage requires an explicit absolute hermes_home",
-        ));
-    };
-    let path = PathBuf::from(hermes_home);
-    if !path.is_absolute() {
-        return Err(invalid_hermes_profile_home(
-            args,
-            "hermes_profile LCM storage requires an absolute hermes_home",
-        ));
-    }
-    if path
-        .components()
-        .any(|component| matches!(component, Component::CurDir | Component::ParentDir))
-    {
-        return Err(invalid_hermes_profile_home(
-            args,
-            "hermes_profile LCM storage requires a normalized absolute hermes_home",
-        ));
-    }
-    let Ok(canonical) = std::fs::canonicalize(&path) else {
-        return Err(invalid_hermes_profile_home(
-            args,
-            format!(
-                "hermes_home does not exist or is not a directory: {}",
-                path.display()
-            ),
-        ));
-    };
-    if !canonical.is_dir() {
-        return Err(invalid_hermes_profile_home(
-            args,
-            format!(
-                "hermes_home does not exist or is not a directory: {}",
-                path.display()
-            ),
-        ));
-    }
-    Ok(canonical)
-}
-
 /// How an LCM storage open treats the backing sessions.db.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum LcmOpenMode {
@@ -1884,86 +1787,20 @@ async fn open_lcm_storage(
     args: &Value,
     mode: LcmOpenMode,
 ) -> LcmStorageResolution {
-    let storage_scope = string_arg(args, "storage_scope").unwrap_or("project_local");
-    match storage_scope {
-        "project_local" => {
-            if context.project_root.is_none() {
-                return LcmStorageResolution::Unavailable(project_local_storage_without_project(
-                    args,
-                ));
-            }
-            let Some(db_path) = context.project_session_db_path else {
-                return LcmStorageResolution::Unavailable(project_local_storage_without_project(
-                    args,
-                ));
-            };
-            let db_path = db_path.to_path_buf();
-            if mode == LcmOpenMode::ReadOnlyOrMissing && !db_path.is_file() {
-                return LcmStorageResolution::Unavailable(lcm_not_yet_ingested(
-                    args,
-                    "project_local",
-                ));
-            }
-            let Some(db) = open_lcm_db_at(&db_path, mode).await else {
-                return LcmStorageResolution::Unavailable(lcm_unavailable(args));
-            };
-            available_lcm_storage(db, "project_local")
-        }
-        "hermes_profile" => {
-            let hermes_home = match hermes_profile_home(args) {
-                Ok(hermes_home) => hermes_home,
-                Err(result) => return LcmStorageResolution::Unavailable(result),
-            };
-            let db_path = match mode {
-                LcmOpenMode::Writable => {
-                    match crate::sessions::cursor::resolve_hermes_profile_session_db_path(
-                        &hermes_home,
-                    ) {
-                        Ok(db_path) => db_path,
-                        Err(message) => {
-                            return LcmStorageResolution::Unavailable(invalid_hermes_profile_home(
-                                args, message,
-                            ));
-                        }
-                    }
-                }
-                LcmOpenMode::ReadOnlyExisting | LcmOpenMode::ReadOnlyOrMissing => {
-                    match crate::sessions::cursor::resolve_hermes_profile_session_db_readonly(
-                        &hermes_home,
-                    ) {
-                        HermesProfileDbReadOnly::Exists(db_path) => db_path,
-                        HermesProfileDbReadOnly::NotIngested(db_path) => {
-                            return LcmStorageResolution::Unavailable(match mode {
-                                LcmOpenMode::ReadOnlyOrMissing => {
-                                    lcm_not_yet_ingested(args, "hermes_profile")
-                                }
-                                _ => invalid_hermes_profile_home(
-                                    args,
-                                    format!(
-                                        "hermes_profile LCM storage requires an existing session database: {}",
-                                        db_path.display()
-                                    ),
-                                ),
-                            });
-                        }
-                        HermesProfileDbReadOnly::ConfigError(msg) => {
-                            return LcmStorageResolution::Unavailable(invalid_hermes_profile_home(
-                                args, msg,
-                            ));
-                        }
-                    }
-                }
-            };
-            let Some(db) = open_lcm_db_at(&db_path, mode).await else {
-                return LcmStorageResolution::Unavailable(invalid_hermes_profile_home(
-                    args,
-                    "could not open hermes_profile tracedecay session database",
-                ));
-            };
-            available_lcm_storage(db, "hermes_profile")
-        }
-        other => LcmStorageResolution::Unavailable(lcm_storage_scope_unavailable(args, other)),
+    if context.project_root.is_none() {
+        return LcmStorageResolution::Unavailable(project_local_storage_without_project(args));
     }
+    let Some(db_path) = context.project_session_db_path else {
+        return LcmStorageResolution::Unavailable(project_local_storage_without_project(args));
+    };
+    let db_path = db_path.to_path_buf();
+    if mode == LcmOpenMode::ReadOnlyOrMissing && !db_path.is_file() {
+        return LcmStorageResolution::Unavailable(lcm_not_yet_ingested(args));
+    }
+    let Some(db) = open_lcm_db_at(&db_path, mode).await else {
+        return LcmStorageResolution::Unavailable(lcm_unavailable(args));
+    };
+    available_lcm_storage(db)
 }
 
 fn parse_lcm_scope(args: &Value) -> Result<LcmScope> {
@@ -2568,12 +2405,11 @@ pub(super) async fn handle_lcm_status(
     let deep = bool_arg(&args, "deep")?.unwrap_or(false);
     let gc_config = lcm_gc_config(&args)?;
     let storage = lcm_open_storage_ro!(context, &args);
-    let mut status = storage
+    let status = storage
         .db
         .lcm_status_with_options(provider, session_id, deep, &gc_config)
         .await
         .map_err(lcm_error)?;
-    status.storage_scope = Some(storage.scope.to_string());
     Ok(tool_json(
         context.project_root,
         &args,
@@ -2670,7 +2506,6 @@ pub(super) async fn handle_lcm_doctor(
         .await
         .map_err(lcm_error)?;
     if let Some(object) = payload.as_object_mut() {
-        object.insert("storage_scope".to_string(), json!(storage.scope));
         if let Some(diagnostics) = object
             .get_mut("diagnostics")
             .and_then(serde_json::Value::as_object_mut)
@@ -3028,7 +2863,6 @@ pub(super) async fn handle_lcm_expand_query(
         object.insert("status".to_string(), json!("ok"));
         object.insert("provider".to_string(), json!(provider));
         object.insert("session_id".to_string(), json!(session_id));
-        object.insert("storage_scope".to_string(), json!(storage.scope));
     }
     Ok(lcm_expand_query_tool_json(
         context.project_root,

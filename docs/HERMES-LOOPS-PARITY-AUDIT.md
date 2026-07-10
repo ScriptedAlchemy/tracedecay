@@ -245,12 +245,12 @@ output for broader improvement work and preserves the configured apply policy.
   (`ingest_project_analytics_events`); stale scoring and improvement
   recommendations feed back into skill_writer evidence.
 
-### 2.6 Hermes bridge
+### 2.6 Hermes-owned skill state
 
-`hermes_bridge.rs`, `hermes_skill_inventory.rs`, `hermes_pending_skills.rs`,
-`hermes_config_projection.rs` provide a **read-only** view over a Hermes
-profile (skills, pending approvals, usage, curator state) as bridge evidence;
-in `delegated_host` mode TraceDecay does no backend calls of its own.
+Hermes owns its profile skills, pending approvals, usage, and curator state.
+TraceDecay does not expose or route that profile-local state through an MCP
+bridge; TraceDecay managed skills use the same plugin-bundle lifecycle as the
+other host integrations.
 
 ---
 

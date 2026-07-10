@@ -250,80 +250,13 @@ fn finalize_arrays_splits_csv() {
 }
 
 #[test]
-fn profile_scoped_lcm_dispatch_detects_allowlisted_tool_and_scope() {
-    assert!(is_profile_scoped_lcm_dispatch(
-        "tracedecay_lcm_status",
-        &json!({"storage_scope": "hermes_profile"})
-    ));
-}
-
-#[test]
-fn profile_scoped_lcm_dispatch_rejects_non_profile_or_non_lcm_calls() {
-    assert!(!is_profile_scoped_lcm_dispatch(
-        "tracedecay_lcm_status",
-        &json!({"storage_scope": "project_local"})
-    ));
-    assert!(!is_profile_scoped_lcm_dispatch(
-        "tracedecay_status",
-        &json!({"storage_scope": "hermes_profile"})
-    ));
-}
-
-#[test]
 fn explicit_project_lcm_dispatch_allows_first_touch_init() {
     let dispatch = DaemonToolDispatch::project_scoped(
-        Some("/tmp/hermes-profile".to_string()),
+        Some("/tmp/project".to_string()),
         "tracedecay_lcm_status",
     );
 
     assert!(dispatch.allow_init);
-    assert!(!dispatch.allow_profile_scoped_fallback);
-}
-
-// Registry integrity guardrail (companion to the handler lockstep tests in
-// `mcp::tools::handlers`): the CLI routes profile-scoped LCM calls through
-// `is_profile_scoped_lcm_dispatch`, which consults the hand-maintained
-// `PROFILE_SCOPED_LCM_TOOLS` const. Any tool the MCP registry advertises as
-// profile-scoped (storage_scope enum including `hermes_profile`) must also
-// appear here, or its CLI invocations silently fall through to project
-// initialization instead of profile-scoped dispatch. This fails in both
-// directions when the const drifts from the registry.
-#[test]
-fn cli_profile_scoped_lcm_allowlist_matches_registry() {
-    use std::collections::BTreeSet;
-
-    let registry_profile_scoped: BTreeSet<String> = get_tool_definitions()
-        .into_iter()
-        .filter(|tool| {
-            tool.input_schema["properties"]["storage_scope"]["enum"]
-                .as_array()
-                .is_some_and(|values| values.iter().any(|value| value == "hermes_profile"))
-        })
-        .map(|tool| tool.name)
-        .collect();
-    let cli_allowlist: BTreeSet<String> = PROFILE_SCOPED_LCM_TOOLS
-        .iter()
-        .map(|s| s.to_string())
-        .collect();
-
-    let missing_from_cli: Vec<String> = registry_profile_scoped
-        .difference(&cli_allowlist)
-        .cloned()
-        .collect();
-    assert!(
-        missing_from_cli.is_empty(),
-        "profile-scoped MCP tools missing from CLI PROFILE_SCOPED_LCM_TOOLS allowlist \
-         (those calls would fall through to project init): {missing_from_cli:?}"
-    );
-    let stale_in_cli: Vec<String> = cli_allowlist
-        .difference(&registry_profile_scoped)
-        .cloned()
-        .collect();
-    assert!(
-        stale_in_cli.is_empty(),
-        "CLI PROFILE_SCOPED_LCM_TOOLS allowlist references tools no longer registered as \
-         profile-scoped in the MCP registry: {stale_in_cli:?}"
-    );
 }
 
 // --- Validation gate and corrective-error contract ---
@@ -432,21 +365,55 @@ fn args_payload_optional_null_is_absent() {
 
 #[test]
 fn dispatch_routing_keys_bypass_unknown_key_gate() {
-    // Hermes injects storage_scope/hermes_home on memory tools whose schemas
-    // don't declare them, dispatch reads top-level project_root, and LCM
-    // response handles can target a separate live project; these must keep
-    // flowing through the gate.
+    // Dispatch reads top-level project_root, and LCM response handles can
+    // target a separate live project; these must keep flowing through the gate.
     let d = def("fact_store");
     let parsed = parse_invocation(
         &d,
         &[
             "--args".to_string(),
-            r#"{"action":"list","storage_scope":"hermes_profile","hermes_home":"/tmp/h","project_root":"/tmp/p","response_handle_project_root":"/tmp/r","cwd":"/tmp"}"#
+            r#"{"action":"list","project_root":"/tmp/p","response_handle_project_root":"/tmp/r","cwd":"/tmp"}"#
                 .to_string(),
         ],
     )
     .unwrap();
     assert_eq!(parsed.tool_args["action"], json!("list"));
+}
+
+#[test]
+fn removed_storage_routing_keys_fail_validation() {
+    let d = def("fact_store");
+    for removed in ["storage_scope", "hermes_home"] {
+        let payload = format!(r#"{{"action":"list","{removed}":"removed"}}"#);
+        let error = parse_invocation(&d, &["--args".to_string(), payload]).unwrap_err();
+        let flag = format!("--{}", removed.replace('_', "-"));
+        assert!(
+            error.to_string().contains("unknown parameter") && error.to_string().contains(&flag),
+            "removed argument should fail clearly: {error}"
+        );
+    }
+}
+
+#[test]
+fn lcm_cli_help_has_no_hermes_storage_routing_flags() {
+    for tool_name in [
+        "lcm_status",
+        "lcm_load_session",
+        "lcm_grep",
+        "lcm_describe",
+        "lcm_expand",
+        "lcm_expand_query",
+        "lcm_preflight",
+        "lcm_compress",
+        "lcm_session_boundary",
+        "lcm_doctor",
+        "hermes_skill_bridge",
+    ] {
+        let help = render_tool_cli_help(&def(tool_name));
+        assert!(!help.contains("--storage-scope"), "{tool_name}: {help}");
+        assert!(!help.contains("--hermes-home"), "{tool_name}: {help}");
+        assert!(!help.contains("hermes_profile"), "{tool_name}: {help}");
+    }
 }
 
 #[test]
@@ -694,14 +661,4 @@ fn join_content_text_skips_empty_blocks() {
 fn join_content_text_empty_when_no_content() {
     assert_eq!(join_content_text(&json!({})), "");
     assert_eq!(join_content_text(&json!({ "content": [] })), "");
-}
-
-#[test]
-fn first_touch_store_tools_superset_of_profile_scoped_lcm_tools() {
-    for tool in PROFILE_SCOPED_LCM_TOOLS {
-        assert!(
-            FIRST_TOUCH_STORE_TOOLS.contains(tool),
-            "profile-scoped LCM tool {tool} must also be a first-touch store tool; keep the two allowlists in lockstep",
-        );
-    }
 }

@@ -20,6 +20,20 @@ shows parameters). Hermes tool calls already run through this CLI under the hood
 execution path without the plugin wrapper. Fall back to it instead of querying
 `.tracedecay` databases directly or abandoning tracedecay.
 
+## Storage and project identity
+
+Hermes may keep its own host files under its Hermes home, but that path never
+selects a TraceDecay installation, store, or project. TraceDecay always uses
+the normal user-profile installation and the same profile-sharded project
+store used by every other host.
+
+Resolve the code project from an explicit runtime project root when the host
+provides one; otherwise use the process working directory and its Git root.
+Project routing belongs to the CLI transport (`--project`), not to MCP tool
+arguments. Do not pass `storage_scope`, `hermes_home`, a Hermes profile name,
+or a configured project pin: those legacy routing inputs are not part of the
+current schemas and are rejected rather than translated.
+
 ## Memory
 
 - **Recall before external search.** Run `fact_search` (and `lcm_grep` for past

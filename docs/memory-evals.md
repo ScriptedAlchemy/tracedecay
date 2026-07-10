@@ -57,12 +57,12 @@ Each scenario runs up to two phases:
 
 `eval/run_real_model.py` drives a real agent through the same scenarios:
 
-- **Hermes** (default): the runner writes a dedicated Hermes profile
-  (`~/.hermes/profiles/tracedecay-eval`), runs
-  `tracedecay install --agent hermes --profile tracedecay-eval
-  --project-root <fixture>` so the generated plugin pins every memory tool to
-  the fixture project, and then sends each scenario prompt through
-  `uv run python cli.py -q …` with `HERMES_HOME` pointed at the profile.
+- **Hermes** (default): the runner creates an isolated temporary user home,
+  runs `tracedecay install --agent hermes` there, and sends each scenario
+  prompt through Hermes with the fixture as the working directory. The plugin
+  and TraceDecay store use that isolated user profile. Hermes host files may
+  live under its own home, but no Hermes profile or `HERMES_HOME` value routes
+  TraceDecay storage or project identity.
 - **cursor-agent** (experimental): `tracedecay install --agent cursor --local`
   inside the fixture, then `cursor-agent -p` with the fixture as cwd.
 

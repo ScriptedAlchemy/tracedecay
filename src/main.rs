@@ -459,9 +459,6 @@ async fn dispatch_command(command: Commands) -> tracedecay::errors::Result<()> {
         Commands::Install {
             agent,
             local,
-            profile,
-            all_profiles,
-            project_root,
             no_dashboard,
             automation,
             auto_apply,
@@ -469,9 +466,6 @@ async fn dispatch_command(command: Commands) -> tracedecay::errors::Result<()> {
             agent_cmd::handle_install_command(
                 agent,
                 local,
-                profile,
-                all_profiles,
-                project_root,
                 no_dashboard,
                 automation.then_some(agent_cmd::CodexAutomationInstall { auto_apply }),
             )
@@ -481,14 +475,10 @@ async fn dispatch_command(command: Commands) -> tracedecay::errors::Result<()> {
             agent_cmd::handle_reinstall_command().await?;
         }
         Commands::UpdatePlugin => {
-            update_cmd::refresh_generated_plugins()?;
+            update_cmd::refresh_generated_plugins().await?;
         }
-        Commands::Uninstall {
-            agent,
-            profile,
-            all_profiles,
-        } => {
-            agent_cmd::handle_uninstall_command(agent, profile, all_profiles).await?;
+        Commands::Uninstall { agent } => {
+            agent_cmd::handle_uninstall_command(agent).await?;
         }
         Commands::ExtractWorker => {
             // Handled by the early dispatch at the top of run(); this arm

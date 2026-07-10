@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 
 use crate::errors::{Result, TraceDecayError};
 pub(crate) use profile_config::read_config_pinned_project_root;
-use profile_config::{disable_plugin, effective_pinned_project_root, enable_plugin};
+use profile_config::{disable_plugin, enable_plugin};
 
 use super::{
     AgentIntegration, DoctorCounters, HealthcheckContext, InstallContext, UpdatePluginOutcome,
@@ -37,15 +37,6 @@ impl AgentIntegration for HermesIntegration {
         Ok(())
     }
 
-    fn supports_local_install(&self) -> bool {
-        true
-    }
-
-    fn install_local(&self, ctx: &InstallContext, project_path: &Path) -> Result<()> {
-        lifecycle::install_local(ctx, project_path)?;
-        Ok(())
-    }
-
     fn update_plugin(&self, ctx: &InstallContext) -> Result<UpdatePluginOutcome> {
         lifecycle::update_plugin(ctx)
     }
@@ -57,7 +48,7 @@ impl AgentIntegration for HermesIntegration {
 
     fn healthcheck(&self, dc: &mut DoctorCounters, ctx: &HealthcheckContext) {
         eprintln!("\n\x1b[1mHermes integration\x1b[0m");
-        doctor_check_plugin(dc, &ctx.home, &ctx.project_path);
+        doctor_check_plugin(dc, &ctx.home);
     }
 
     fn is_detected(&self, home: &Path) -> bool {
@@ -65,13 +56,11 @@ impl AgentIntegration for HermesIntegration {
     }
 
     fn primary_config_path(&self, home: &Path) -> Option<PathBuf> {
-        Some(hermes_profile_dir(home, None).join("config.yaml"))
+        Some(hermes_home(home).join("config.yaml"))
     }
 
     fn has_tracedecay(&self, home: &Path) -> bool {
-        hermes_profile_dir(home, None)
-            .join("plugins/tracedecay/plugin.yaml")
-            .exists()
+        default_plugin_dir(home).join("plugin.yaml").is_file()
     }
 }
 
@@ -79,40 +68,12 @@ fn hermes_home(home: &Path) -> PathBuf {
     home.join(".hermes")
 }
 
-fn hermes_profile_dir(home: &Path, profile: Option<&str>) -> PathBuf {
-    match profile {
-        Some(profile) => hermes_home(home).join("profiles").join(profile),
-        None => hermes_home(home),
-    }
+fn default_plugin_dir(home: &Path) -> PathBuf {
+    hermes_home(home).join("plugins/tracedecay")
 }
 
-// Profile names are deliberately restricted to ASCII `[a-z0-9][a-z0-9_-]`:
-// non-ASCII names are rejected outright (clear error below), so Unicode
-// normalization concerns (NFC vs NFD on macOS filesystems producing
-// colliding/diverging directory names) cannot arise by construction.
-pub(super) fn normalize_profile(profile: Option<&str>) -> Result<Option<String>> {
-    let Some(profile) = profile else {
-        return Ok(None);
-    };
-    let normalized = profile.to_ascii_lowercase();
-    let mut chars = normalized.chars();
-    let valid = normalized.len() <= 64
-        && chars
-            .next()
-            .is_some_and(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit())
-        && chars.all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '_' || ch == '-');
-    if !valid {
-        return Err(TraceDecayError::Config {
-            message: format!(
-                "invalid Hermes profile '{profile}': expected [a-z0-9][a-z0-9_-]{{0,63}}"
-            ),
-        });
-    }
-    Ok(Some(normalized))
-}
-
-fn doctor_check_plugin(dc: &mut DoctorCounters, home: &Path, project_path: &Path) {
-    let candidates = hermes_healthcheck_plugin_paths(home, project_path);
+fn doctor_check_plugin(dc: &mut DoctorCounters, home: &Path) {
+    let candidates = hermes_healthcheck_plugin_paths(home);
     let existing: Vec<&PathBuf> = candidates.iter().filter(|plugin| plugin.exists()).collect();
     let Some(first) = existing.first() else {
         if let Some(plugin) = candidates.first() {
@@ -131,9 +92,6 @@ fn doctor_check_plugin(dc: &mut DoctorCounters, home: &Path, project_path: &Path
     ));
 
     for manifest_path in &existing {
-        let Some(plugin_dir) = manifest_path.parent() else {
-            continue;
-        };
         // Stale generated plugins keep working but miss new tools/config
         // surfaces; `hermes plugins list` shows the same manifest version.
         match read_manifest_version(manifest_path) {
@@ -148,57 +106,11 @@ fn doctor_check_plugin(dc: &mut DoctorCounters, home: &Path, project_path: &Path
                 manifest_path.display(),
             )),
         }
-        // A pinned project that no longer exists makes every Hermes tool
-        // call fail; surface it here instead of at first tool use.
-        if let Some(pin) = effective_pinned_project_root(plugin_dir) {
-            if !Path::new(&pin).is_dir() {
-                dc.warn(&format!(
-                    "{} pins project_root {pin}, which does not exist — re-run `tracedecay install --agent hermes --project-root <path>`",
-                    plugin_dir.display(),
-                ));
-            }
-        }
     }
 }
 
-fn hermes_healthcheck_plugin_paths(home: &Path, project_path: &Path) -> Vec<PathBuf> {
-    let mut roots = Vec::new();
-    roots.push(hermes_home(home));
-
-    if let Some(env_home) = std::env::var_os("HERMES_HOME") {
-        if !env_home.is_empty() {
-            roots.push(PathBuf::from(env_home));
-        }
-    }
-
-    roots.extend(hermes_profile_dirs(home));
-    roots.push(project_path.join(".hermes"));
-
-    let mut seen = std::collections::BTreeSet::new();
-    let mut plugins = Vec::new();
-    for root in roots {
-        let plugin = root.join("plugins/tracedecay/plugin.yaml");
-        if seen.insert(plugin.clone()) {
-            plugins.push(plugin);
-        }
-    }
-    plugins
-}
-
-fn hermes_profile_dirs(home: &Path) -> Vec<PathBuf> {
-    let profiles_dir = hermes_home(home).join("profiles");
-    let Ok(entries) = std::fs::read_dir(&profiles_dir) else {
-        return Vec::new();
-    };
-    let mut profiles = entries
-        .filter_map(|entry| {
-            let entry = entry.ok()?;
-            let file_type = entry.file_type().ok()?;
-            file_type.is_dir().then(|| entry.path())
-        })
-        .collect::<Vec<_>>();
-    profiles.sort();
-    profiles
+fn hermes_healthcheck_plugin_paths(home: &Path) -> Vec<PathBuf> {
+    vec![hermes_home(home).join("plugins/tracedecay/plugin.yaml")]
 }
 
 fn read_manifest_version(manifest_path: &Path) -> Option<String> {
@@ -213,26 +125,13 @@ fn read_manifest_version(manifest_path: &Path) -> Option<String> {
 pub(super) fn install_plugin(
     plugin_dir: &Path,
     tracedecay_bin: &str,
-    project_root: Option<&Path>,
     deploy_dashboard: bool,
 ) -> Result<()> {
-    // An explicit pin wins; otherwise preserve whatever pin a previous
-    // install wrote to the config block, so `tracedecay reinstall` does not
-    // silently unpin.
-    let pinned_project_root = match project_root {
-        Some(path) => Some(path.display().to_string()),
-        None => effective_pinned_project_root(plugin_dir),
-    };
     write_plugin_files(plugin_dir, tracedecay_bin)?;
-    dashboard_wrapper::apply_install_policy(
-        plugin_dir,
-        tracedecay_bin,
-        pinned_project_root.as_deref(),
-        deploy_dashboard,
-    )?;
+    dashboard_wrapper::apply_install_policy(plugin_dir, tracedecay_bin, deploy_dashboard)?;
     if let Some(profile_dir) = plugin_dir.parent().and_then(Path::parent) {
         let config_path = profile_dir.join("config.yaml");
-        enable_plugin(&config_path, pinned_project_root.as_deref())?;
+        enable_plugin(&config_path)?;
     }
 
     eprintln!(
@@ -279,33 +178,67 @@ pub(super) fn write_plugin_files(plugin_dir: &Path, tracedecay_bin: &str) -> Res
     )
 }
 
-/// Plugin directories with a detected generated install (a `plugin.yaml`
-/// manifest), deduplicated across the default profile, named profiles,
-/// `HERMES_HOME`, and the current directory's project-local `.hermes`.
+/// The one supported user-level generated plugin directory, when installed.
 pub(super) fn detected_plugin_dirs(home: &Path) -> Vec<PathBuf> {
-    let mut roots = vec![hermes_home(home)];
-    if let Some(env_home) = std::env::var_os("HERMES_HOME") {
-        if !env_home.is_empty() {
-            roots.push(PathBuf::from(env_home));
+    let plugin_dir = default_plugin_dir(home);
+    plugin_dir
+        .join("plugin.yaml")
+        .is_file()
+        .then_some(plugin_dir)
+        .into_iter()
+        .collect()
+}
+
+/// Historical generated plugin locations. These are consulted only during
+/// the one-time cutover; they never select `TraceDecay` storage or a live Hermes
+/// install target.
+pub(super) fn legacy_plugin_dirs(home: &Path) -> Vec<PathBuf> {
+    let default = default_plugin_dir(home);
+    let roots = [hermes_home(home)];
+    let mut profile_roots = Vec::new();
+    for root in roots {
+        profile_roots.push(root.clone());
+        if let Ok(entries) = std::fs::read_dir(root.join("profiles")) {
+            let mut profiles = entries
+                .filter_map(|entry| {
+                    let entry = entry.ok()?;
+                    entry.file_type().ok()?.is_dir().then(|| entry.path())
+                })
+                .collect::<Vec<_>>();
+            profiles.sort();
+            profile_roots.extend(profiles);
         }
     }
-    roots.extend(hermes_profile_dirs(home));
-    if let Ok(cwd) = std::env::current_dir() {
-        roots.push(cwd.join(".hermes"));
-    }
-
     let mut seen = std::collections::BTreeSet::new();
-    roots
+    profile_roots
         .into_iter()
-        .filter_map(|root| {
-            let plugin_dir = root.join("plugins/tracedecay");
-            plugin_dir
-                .join("plugin.yaml")
-                .is_file()
-                .then_some(plugin_dir)
-                .filter(|plugin_dir| seen.insert(plugin_dir.clone()))
-        })
+        .map(|root| root.join("plugins/tracedecay"))
+        .filter(|plugin_dir| !paths_equal(plugin_dir, &default))
+        .filter(|plugin_dir| plugin_dir.join("plugin.yaml").is_file())
+        .filter(|plugin_dir| seen.insert(canonical_or_original(plugin_dir)))
         .collect()
+}
+
+#[doc(hidden)]
+pub fn has_legacy_plugin_install(home: &Path) -> bool {
+    !legacy_plugin_dirs(home).is_empty()
+}
+
+#[doc(hidden)]
+pub fn cleanup_legacy_plugin_dirs(home: &Path) -> Result<Vec<PathBuf>> {
+    let plugin_dirs = legacy_plugin_dirs(home);
+    for plugin_dir in &plugin_dirs {
+        uninstall_plugin(plugin_dir)?;
+    }
+    Ok(plugin_dirs)
+}
+
+fn paths_equal(left: &Path, right: &Path) -> bool {
+    canonical_or_original(left) == canonical_or_original(right)
+}
+
+fn canonical_or_original(path: &Path) -> PathBuf {
+    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
 }
 
 pub(super) fn uninstall_plugin(plugin_dir: &Path) -> Result<()> {

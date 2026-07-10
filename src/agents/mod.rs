@@ -297,11 +297,8 @@ pub struct InstallContext {
     pub home: PathBuf,
     pub tracedecay_bin: String,
     pub tool_permissions: Vec<String>,
-    pub profile: Option<String>,
-    /// Hermes: pin the generated plugin to a project. Codex update/uninstall
-    /// can also use this as an explicit repo-local plugin target. Storage
-    /// resolves through the user/profile-level `TraceDecay` store scoped to this
-    /// project. `None` preserves any existing pin.
+    /// Codex update/uninstall can use this as an explicit repo-local plugin
+    /// target. Other integrations ignore it.
     pub project_root: Option<PathBuf>,
     /// Hermes only: deploy the dashboard wrapper plugin page alongside the
     /// agent plugin (default; `tracedecay install --agent hermes

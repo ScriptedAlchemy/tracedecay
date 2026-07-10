@@ -537,7 +537,6 @@ pub struct LcmDescribeResponse {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct LcmStatus {
     pub schema_version: i64,
-    pub storage_scope: Option<String>,
     pub raw_message_count: i64,
     pub summary_node_count: i64,
     pub external_payload_count: i64,

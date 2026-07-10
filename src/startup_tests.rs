@@ -1,13 +1,8 @@
 use super::{
-    Commands, SilentReinstallAction,
-    agent_cmd::{
-        hermes_profile_targets, hermes_selected_profile_targets, validate_hermes_profile_flags,
-        validate_hermes_project_root_flag,
-    },
-    is_local_install_command, should_skip_agent_install_maintenance,
-    should_skip_startup_maintenance, silent_reinstall_action,
+    Commands, SilentReinstallAction, is_local_install_command,
+    should_skip_agent_install_maintenance, should_skip_startup_maintenance,
+    silent_reinstall_action,
 };
-use tempfile::TempDir;
 use tracedecay::user_config::UserConfig;
 
 #[test]
@@ -23,9 +18,6 @@ fn explicit_agent_config_commands_skip_startup_maintenance() {
     assert!(should_skip_startup_maintenance(&Commands::Install {
         agent: Some("kiro".to_string()),
         local: false,
-        profile: None,
-        all_profiles: false,
-        project_root: None,
         no_dashboard: false,
         automation: false,
         auto_apply: false,
@@ -47,8 +39,6 @@ fn explicit_agent_config_commands_skip_startup_maintenance() {
     }));
     assert!(should_skip_startup_maintenance(&Commands::Uninstall {
         agent: Some("kiro".to_string()),
-        profile: None,
-        all_profiles: false,
     }));
 }
 
@@ -77,9 +67,6 @@ fn agent_install_maintenance_is_selective() {
     assert!(should_skip_agent_install_maintenance(&Commands::Install {
         agent: Some("cursor".to_string()),
         local: false,
-        profile: None,
-        all_profiles: false,
-        project_root: None,
         no_dashboard: false,
         automation: false,
         auto_apply: false,
@@ -116,8 +103,6 @@ fn agent_install_maintenance_is_selective() {
     assert!(should_skip_agent_install_maintenance(
         &Commands::Uninstall {
             agent: Some("cursor".to_string()),
-            profile: None,
-            all_profiles: false,
         }
     ));
     assert!(should_skip_agent_install_maintenance(&Commands::Doctor {
@@ -287,9 +272,6 @@ fn local_install_detection_tracks_dispatch_preamble_behavior() {
     let local = Commands::Install {
         agent: Some("hermes".to_string()),
         local: true,
-        profile: Some("dev".to_string()),
-        all_profiles: false,
-        project_root: None,
         no_dashboard: false,
         automation: false,
         auto_apply: false,
@@ -297,9 +279,6 @@ fn local_install_detection_tracks_dispatch_preamble_behavior() {
     let global = Commands::Install {
         agent: Some("hermes".to_string()),
         local: false,
-        profile: Some("dev".to_string()),
-        all_profiles: false,
-        project_root: None,
         no_dashboard: false,
         automation: false,
         auto_apply: false,
@@ -307,76 +286,6 @@ fn local_install_detection_tracks_dispatch_preamble_behavior() {
 
     assert!(is_local_install_command(&local));
     assert!(!is_local_install_command(&global));
-}
-
-#[test]
-fn hermes_profile_flags_are_restricted_to_hermes() {
-    let profile = Some("dev".to_string());
-    let none_profile: Option<String> = None;
-
-    let profile_err = validate_hermes_profile_flags(Some("cursor"), &profile, false)
-        .expect_err("non-hermes --profile should fail");
-    assert!(
-        format!("{profile_err}").contains("`--profile` is only supported with `--agent hermes`")
-    );
-
-    let all_profiles_err = validate_hermes_profile_flags(Some("cursor"), &none_profile, true)
-        .expect_err("non-hermes --all-profiles should fail");
-    assert!(
-        format!("{all_profiles_err}")
-            .contains("`--all-profiles` is only supported with `--agent hermes`")
-    );
-
-    assert!(validate_hermes_profile_flags(Some("hermes"), &profile, false).is_ok());
-    assert!(validate_hermes_profile_flags(Some("hermes"), &none_profile, true).is_ok());
-}
-
-#[test]
-fn hermes_project_root_flag_requires_hermes_and_absolute_paths() {
-    let temp = TempDir::new().expect("tempdir should exist");
-    let absolute = temp.path().join("project-root");
-    let absolute_str = absolute.to_string_lossy().to_string();
-    let absolute_flag = Some(absolute_str.clone());
-
-    let agent_err = validate_hermes_project_root_flag(Some("cursor"), &absolute_flag)
-        .expect_err("non-hermes project-root should fail");
-    assert!(
-        format!("{agent_err}").contains("`--project-root` is only supported with `--agent hermes`")
-    );
-
-    let relative_flag = Some("relative/project".to_string());
-    let relative_err = validate_hermes_project_root_flag(Some("hermes"), &relative_flag)
-        .expect_err("relative project-root should fail");
-    assert!(format!("{relative_err}").contains("`--project-root` must be an absolute path"));
-
-    assert_eq!(
-        validate_hermes_project_root_flag(Some("hermes"), &absolute_flag)
-            .expect("absolute hermes project-root should pass"),
-        Some(absolute)
-    );
-}
-
-#[test]
-fn hermes_profile_target_helpers_preserve_default_and_sorted_profiles() {
-    let temp = TempDir::new().expect("tempdir should exist");
-    let profiles_dir = temp.path().join(".hermes/profiles");
-    std::fs::create_dir_all(profiles_dir.join("zeta")).expect("zeta profile dir");
-    std::fs::create_dir_all(profiles_dir.join("alpha")).expect("alpha profile dir");
-    std::fs::write(profiles_dir.join("README.txt"), "not a profile").expect("profile marker file");
-
-    let all_targets = hermes_profile_targets(temp.path()).expect("profile discovery should work");
-    assert_eq!(
-        all_targets,
-        vec![None, Some("alpha".to_string()), Some("zeta".to_string()),]
-    );
-
-    let selected = hermes_selected_profile_targets(temp.path(), &Some("dev".to_string()), false)
-        .expect("explicit profile selection should not scan disk");
-    assert_eq!(selected, vec![Some("dev".to_string())]);
-
-    let selected_all = hermes_selected_profile_targets(temp.path(), &None, true)
-        .expect("all-profiles selection should enumerate profiles");
-    assert_eq!(selected_all, all_targets);
 }
 
 // These tests intentionally stay on pure parse/dispatch guard seams. Direct

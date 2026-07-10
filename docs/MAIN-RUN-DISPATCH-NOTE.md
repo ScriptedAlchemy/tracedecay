@@ -222,11 +222,8 @@ Consequence: to make an extracted handler unit-testable from `tests/`, either
 - `should_skip_startup_maintenance` + `should_skip_agent_install_maintenance`
   + `is_local_install_command` — **already** covered by `mod startup_tests`
   (`main.rs:1583-1713`). Use these as the template.
-- `validate_hermes_profile_flags`, `validate_hermes_project_root_flag`,
-  `hermes_selected_profile_targets`, `hermes_profile_targets`
-  (`main.rs:104-208`) — pure input validation, **currently untested**. Easy wins
-  after they stay where they are or move to `commands.rs` with an in-crate test
-  module.
+- Removed Hermes profile/local-install flags stay covered by CLI parse tests;
+  Hermes install/update/doctor/uninstall now target one user integration.
 - `cloud::is_newer_version` / `is_newer_minor_version` (`src/cloud.rs:263,302`) —
   `pub` in lib, already reachable; the silent-reinstall predicate (4c) should be
   built on them and tested there.

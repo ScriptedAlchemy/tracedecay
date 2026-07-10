@@ -85,13 +85,15 @@ This format is stable and used by wrapper tools (like the Hermes plugin) to disc
 | `TRACEDECAY_BIN` | Path to the tracedecay binary (used by Hermes wrapper for spawn mode) |
 | `TRACEDECAY_DASHBOARD_PROJECT` | Project root path for Hermes dashboard spawn mode (defaults to Hermes' cwd) |
 | `TRACEDECAY_DASHBOARD_URL` | Full URL to an already-running dashboard (Hermes external URL mode) |
-| `HERMES_HOME` | Path to Hermes profile directory for profile-scoped plugin installation |
 | `TRACEDECAY_OFFLINE` | Set to `1` to skip network requests for pricing data (Savings & Cost tab uses bundled fallback) |
 | `TRACEDECAY_MODEL_PRICES_PATH` | Override the on-disk model-price cache location (default `~/.tracedecay/model-prices.json`; mainly for tests) |
 | `DISABLE_TRACEDECAY` | Set to `true` to disable the MCP server entirely (exits cleanly without initializing) |
 
 Use `TRACEDECAY_*` variables (and `DISABLE_TRACEDECAY`) for dashboard runtime
 configuration. Pre-rename `TRACEDECAY_*` spellings are not runtime fallbacks.
+Hermes may separately configure a host home for its own config, plugins, and
+transcripts; that host setting is not a TraceDecay environment variable and
+never selects a TraceDecay store or project.
 
 ---
 
@@ -101,32 +103,28 @@ The dashboard is the canonical implementation; the Hermes plugin is a thin wrapp
 
 ### Installation
 
-`tracedecay install --agent hermes` deploys the wrapper as a Hermes dashboard
-plugin alongside the agent plugin, into
-`<hermes_home>/plugins/tracedecay/dashboard/` (`manifest.json`,
+`tracedecay install --agent hermes` deploys the wrapper once as a Hermes
+dashboard plugin alongside the agent plugin, into
+`~/.hermes/plugins/tracedecay/dashboard/` (`manifest.json`,
 `plugin_api.py`, and the UI bundles — all embedded in the tracedecay binary,
 no source checkout needed). Hermes' dashboard plugin discovery scans
 `plugins/*/dashboard/manifest.json` in both stock and forked Hermes, so a
 "TraceDecay" tab (Memory / LCM / Code Graph / Savings) appears in
-`hermes dashboard` after install. With `--profile <p>` the deploy lands in
-`~/.hermes/profiles/<p>/plugins/tracedecay/dashboard/` and is picked up when
-Hermes runs with `HERMES_HOME` pointing at that profile.
+`hermes dashboard` after install. Named profiles and project-local Hermes
+homes are not separate TraceDecay installation targets. The wrapper always
+uses the normal user-profile TraceDecay store.
 
-The deployed `plugin_api.py` is pinned at install time: the installing
-binary's path becomes the default `TRACEDECAY_BIN`, and the profile's pinned
-`project_root` (from `plugins.tracedecay.project_root` in `config.yaml`)
-becomes the default `TRACEDECAY_DASHBOARD_PROJECT`. The environment variables
-below still win at runtime. Reinstalls preserve the pin; pass
-`--no-dashboard` to skip the dashboard deploy (and remove a previous one).
+The deployed `plugin_api.py` is pinned at install time only to the installing
+binary path, which becomes the default `TRACEDECAY_BIN`.
+`TRACEDECAY_DASHBOARD_PROJECT` or Hermes' real working directory selects the
+active code project at runtime. Pass `--no-dashboard` to skip the dashboard
+deploy (and remove a previous one).
 
 To refresh the deployed page after upgrading tracedecay without touching any
 Hermes configuration, run `tracedecay update-plugin`: it rewrites the
-generated plugin files and the dashboard page (re-baking the binary path and
-re-reading the existing pin from `config.yaml`) for every detected install —
-default profile, every `~/.hermes/profiles/*`, a `HERMES_HOME` override, and
-a project-local `.hermes` in the current directory — while leaving every
-`config.yaml` byte-for-byte intact. Profiles installed with `--no-dashboard`
-stay dashboard-free.
+generated plugin files and dashboard page in the single user integration,
+re-baking the binary path while leaving `~/.hermes/config.yaml` byte-for-byte
+intact. An install created with `--no-dashboard` stays dashboard-free.
 
 On Hermes versions that predate dashboard-plugin discovery the deployed
 directory is inert — the agent-plugin loader only reads `plugin.yaml` and
@@ -143,7 +141,7 @@ Hermes automatically launches the dashboard server and proxies requests to it. T
 | Variable | Required | Description |
 |----------|----------|-------------|
 | `TRACEDECAY_BIN` | No | Path to the tracedecay binary (defaults to the install-time binary baked into `plugin_api.py`, then `PATH`) |
-| `TRACEDECAY_DASHBOARD_PROJECT` | No | Project root path (defaults to the install-time pinned project root, then Hermes' current working directory) |
+| `TRACEDECAY_DASHBOARD_PROJECT` | No | Project root path (defaults to Hermes' current working directory) |
 
 **Example:**
 ```bash
@@ -274,7 +272,7 @@ Setting `TRACEDECAY_GLOBAL_DB` pins the dashboard to an explicit store instead (
 |------|---------|
 | Cursor | Cursor hooks ingest incrementally at end of turn / stop / session start (subagent transcripts included); no sweep needed |
 | Claude Code, Codex, Vibe, Cline / Roo / Kilo | No hooks — discovered by a catch-up sweep that scans each tool's home transcript directory (e.g. `~/.codex/sessions`) and ingests sessions whose recorded `cwd`/project matches the served project root |
-| Hermes | Hermes-side ingest into the same resolved user-level project store as the generated TraceDecay adapter; unpinned profiles use the Hermes profile directory as their project identity |
+| Hermes | Hermes-side ingest into the same resolved user-level project store as the generated TraceDecay adapter; Hermes profile directories are transcript inputs, never project identities |
 
 The catch-up sweep runs automatically when the MCP server starts
 (`tracedecay serve`) and when `tracedecay dashboard` starts with project-local

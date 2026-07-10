@@ -18,7 +18,7 @@ def register_cli(subparser):
     )
     curate = subs.add_parser(
         "curate",
-        help="Similarity-dedup curation of the profile memory store (dry-run by default)",
+        help="Similarity-dedup curation of the current project memory store (dry-run by default)",
     )
     curate.add_argument(
         "--apply", action="store_true", help="Apply the proposed deletions"
@@ -45,7 +45,7 @@ def tracedecay_command(args):
     if sub == "doctor":
         code = _run(["doctor", "--agent", "hermes"])
     elif sub == "curate":
-        argv = ["memory", "curate", "--path", tools.hermes_home_dir()]
+        argv = ["memory", "curate"]
         if getattr(args, "apply", False):
             argv.append("--apply")
         if getattr(args, "llm", False):

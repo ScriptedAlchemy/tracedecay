@@ -1,4 +1,17 @@
 use crate::support::*;
+
+#[test]
+fn session_reflector_options_have_no_storage_selector() {
+    let options = serde_json::to_value(SessionReflectorAutomationOptions::default()).unwrap();
+    assert!(options.get("storage_scope").is_none());
+    assert!(options.get("hermes_home").is_none());
+    assert!(
+        serde_json::from_value::<SessionReflectorAutomationOptions>(json!({
+            "storage_scope": "hermes_profile"
+        }))
+        .is_err()
+    );
+}
 use tracedecay::automation::fact_proposals::record_session_fact_proposals;
 
 #[tokio::test]
@@ -612,93 +625,99 @@ async fn session_fact_proposals_dedupe_repeated_pending_facts_across_runs() {
 }
 
 #[tokio::test]
-async fn session_reflector_runner_reads_hermes_profile_lcm_with_filters() {
+async fn session_reflector_host_modes_do_not_select_alternate_lcm_storage() {
+    let _env_lock = ENV_LOCK.lock().await;
     let temp = tempdir().unwrap();
     let cg = init_project(temp.path()).await;
-    // No project session store is seeded (or created) on purpose: the
-    // hermes_profile storage scope must read only the hermes profile DB, so
-    // a regression that consulted the project store would find no store at
-    // all and skip with lcm_not_ingested instead of succeeding.
-
-    let hermes_home = tempdir().unwrap();
-    let profile_db_path = resolve_hermes_profile_session_db_path(hermes_home.path()).unwrap();
-    let profile_db = GlobalDb::open_at(&profile_db_path)
+    let project_db = GlobalDb::open_at(&cg.store_layout().sessions_db_path)
         .await
-        .expect("hermes profile session db open");
+        .expect("project session db open");
     seed_session_message_in_db(
-        &profile_db,
-        hermes_home.path(),
+        &project_db,
+        cg.project_root(),
         SeedSessionMessage {
             provider: "cursor",
-            session_id: "hermes-reflect-1",
-            message_id: "hermes-reflect-1-message-001",
+            session_id: "project-reflect-1",
+            message_id: "project-reflect-1-message-001",
             role: "assistant",
             timestamp: 1_715_100_005,
-            text: "Hermes profile-only banana evidence should feed session reflection.",
-            source: Some("hermes_profile_lcm"),
+            text: "Active project banana evidence should feed session reflection.",
+            source: Some("project_lcm"),
         },
     )
     .await;
     seed_session_message_in_db(
-        &profile_db,
-        hermes_home.path(),
+        &project_db,
+        cg.project_root(),
         SeedSessionMessage {
             provider: "cursor",
-            session_id: "hermes-reflect-1",
-            message_id: "hermes-reflect-1-message-002",
+            session_id: "project-reflect-1",
+            message_id: "project-reflect-1-message-002",
             role: "user",
             timestamp: 1_715_100_006,
-            text: "Hermes profile-only banana distractor has the wrong role.",
-            source: Some("hermes_profile_lcm"),
+            text: "Active project banana distractor has the wrong role.",
+            source: Some("project_lcm"),
         },
     )
     .await;
+    let _global_db = isolate_global_db(&cg);
 
     let backend = InspectSessionEvidenceBackend;
-    let config = AutomationConfig {
-        enabled: true,
-        backend: AutomationBackend::CodexAppServer,
-        host_mode: AutomationHostMode::Standalone,
-        tasks: AutomationTaskSet {
-            session_reflector: AutomationTaskConfig {
-                enabled: true,
-                schedule: Some("manual".to_string()),
-                ..AutomationTaskConfig::default()
+    for (host_mode, query) in [
+        (AutomationHostMode::Standalone, "active project banana"),
+        (AutomationHostMode::DelegatedHost, "project banana evidence"),
+    ] {
+        let config = AutomationConfig {
+            enabled: true,
+            backend: AutomationBackend::CodexAppServer,
+            host_mode,
+            tasks: AutomationTaskSet {
+                session_reflector: AutomationTaskConfig {
+                    enabled: true,
+                    schedule: Some("manual".to_string()),
+                    ..AutomationTaskConfig::default()
+                },
+                ..AutomationTaskSet::default()
             },
-            ..AutomationTaskSet::default()
-        },
-        ..AutomationConfig::default()
-    };
+            ..AutomationConfig::default()
+        };
 
-    let run = run_session_reflector_with_backend(
-        &cg,
-        &config,
-        &backend,
-        SessionReflectorAutomationOptions {
-            trigger: AutomationTrigger::ManualCli,
-            storage_scope: "hermes_profile".to_string(),
-            hermes_home: Some(hermes_home.path().to_path_buf()),
-            provider: "cursor".to_string(),
-            query: "profile-only banana".to_string(),
-            scope: LcmScope::Session,
-            session_id: Some("hermes-reflect-1".to_string()),
-            include_summaries: false,
-            evidence_limit: 5,
-            sort: LcmGrepSort::Relevance,
-            source: Some("hermes_profile_lcm".to_string()),
-            role: Some("assistant".to_string()),
-            start_time: Some(1_715_100_000),
-            end_time: Some(1_715_100_010),
-            run_id: None,
-            ..SessionReflectorAutomationOptions::default()
-        },
-    )
-    .await
-    .unwrap();
+        let run = run_session_reflector_with_backend(
+            &cg,
+            &config,
+            &backend,
+            SessionReflectorAutomationOptions {
+                trigger: AutomationTrigger::ManualCli,
+                provider: "cursor".to_string(),
+                query: query.to_string(),
+                scope: LcmScope::Session,
+                session_id: Some("project-reflect-1".to_string()),
+                include_summaries: false,
+                evidence_limit: 5,
+                sort: LcmGrepSort::Relevance,
+                source: Some("project_lcm".to_string()),
+                role: Some("assistant".to_string()),
+                start_time: Some(1_715_100_000),
+                end_time: Some(1_715_100_010),
+                run_id: None,
+                ..SessionReflectorAutomationOptions::default()
+            },
+        )
+        .await
+        .unwrap();
 
-    assert_eq!(run.ledger_record.status, AutomationRunStatus::Succeeded);
-    assert_eq!(run.ledger_record.accepted_count, 0);
-    assert_eq!(run.ledger_record.rejected_count, 0);
+        if host_mode == AutomationHostMode::Standalone {
+            assert_eq!(run.ledger_record.status, AutomationRunStatus::Succeeded);
+            assert_eq!(run.ledger_record.accepted_count, 0);
+            assert_eq!(run.ledger_record.rejected_count, 0);
+        } else {
+            assert_eq!(run.ledger_record.status, AutomationRunStatus::Skipped);
+            assert_eq!(
+                run.ledger_record.error.as_deref(),
+                Some("delegated_host_mode")
+            );
+        }
+    }
 }
 
 #[tokio::test]

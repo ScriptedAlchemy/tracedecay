@@ -11,7 +11,8 @@ use std::path::{Path, PathBuf};
 use crate::agents::backup_config_file;
 use crate::errors::{Result, TraceDecayError};
 
-/// Reads `plugins.tracedecay.project_root` from a Hermes profile config.yaml.
+/// Reads the removed `plugins.tracedecay.project_root` setting solely as
+/// provenance for one-time data migration and transcript import.
 ///
 /// This is the single source of truth for the pin (the same
 /// `plugins.<name>` block bundled Hermes plugins use): install writes it,
@@ -58,23 +59,9 @@ fn parse_yaml_scalar(value: &str) -> Option<String> {
     Some(value.to_string())
 }
 
-/// The pin currently in effect for a generated plugin: the
-/// `plugins.tracedecay.project_root` key of the profile config.yaml.
-///
-/// A pin pointing at the profile home itself is the legacy storage-home
-/// conflation, so it is treated — and re-propagated on reinstall — as no pin.
-pub(super) fn effective_pinned_project_root(plugin_dir: &Path) -> Option<String> {
-    let profile_dir = plugin_dir.parent()?.parent()?;
-    let pin = read_config_pinned_project_root(&profile_dir.join("config.yaml"))?;
-    if crate::sessions::shared::paths_equal(Path::new(&pin), profile_dir) {
-        return None;
-    }
-    Some(pin)
-}
-
-pub(super) fn enable_plugin(config_path: &Path, pinned_project_root: Option<&str>) -> Result<bool> {
+pub(super) fn enable_plugin(config_path: &Path) -> Result<bool> {
     let existing = std::fs::read_to_string(config_path).unwrap_or_default();
-    let updated = enable_plugin_config(&existing, pinned_project_root).map_err(|message| {
+    let updated = enable_plugin_config(&existing).map_err(|message| {
         TraceDecayError::Config {
             message: format!(
                 "{message} in {}.\nFix the config by hand, then re-run: tracedecay install --agent hermes",
@@ -104,17 +91,11 @@ pub(super) fn disable_plugin(config_path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn enable_plugin_config(
-    existing: &str,
-    pinned_project_root: Option<&str>,
-) -> std::result::Result<String, String> {
-    let enabled = enable_plugin_list_config(existing)?;
+fn enable_plugin_config(existing: &str) -> std::result::Result<String, String> {
+    let without_legacy_pin = remove_pinned_project_root_config(existing)?;
+    let enabled = enable_plugin_list_config(&without_legacy_pin)?;
     let with_memory = enable_memory_provider_config(&enabled)?;
-    let with_engine = enable_context_engine_config(&with_memory)?;
-    match pinned_project_root {
-        Some(pin) => set_pinned_project_root_config(&with_engine, pin),
-        None => Ok(with_engine),
-    }
+    enable_context_engine_config(&with_memory)
 }
 
 fn enable_plugin_list_config(existing: &str) -> std::result::Result<String, String> {
@@ -408,49 +389,6 @@ fn find_plugin_block_in(
         })
         .unwrap_or(plugins_end);
     Some(PluginBlock::Block { start, end })
-}
-
-/// Writes `plugins.tracedecay.project_root` — the conventional config home
-/// for the install-time project pin. Expects the `plugins:` section to exist
-/// (the enable chain creates it first).
-fn set_pinned_project_root_config(
-    existing: &str,
-    pin: &str,
-) -> std::result::Result<String, String> {
-    let mut lines: Vec<String> = existing.lines().map(str::to_string).collect();
-    let had_trailing_newline = existing.ends_with('\n');
-    let value = serde_json::to_string(pin).map_err(|e| format!("unencodable project pin: {e}"))?;
-    let pin_line = format!("    project_root: {value}");
-
-    let (plugins_start, plugins_end) = find_top_level_section(existing, "plugins")
-        .ok_or_else(|| "unsupported Hermes plugins config".to_string())?;
-    let borrowed: Vec<&str> = lines.iter().map(String::as_str).collect();
-    match find_plugin_block_in(&borrowed, plugins_start, plugins_end, "tracedecay")
-        .ok_or_else(|| "unsupported Hermes plugins config".to_string())?
-    {
-        PluginBlock::Missing => {
-            lines.insert(plugins_start + 1, "  tracedecay:".to_string());
-            lines.insert(plugins_start + 2, pin_line);
-        }
-        PluginBlock::EmptyFlow { line } => {
-            lines[line] = "  tracedecay:".to_string();
-            lines.insert(line + 1, pin_line);
-        }
-        PluginBlock::Block { start, end } => {
-            let existing_pin = lines
-                .iter()
-                .enumerate()
-                .take(end)
-                .skip(start + 1)
-                .find_map(|(idx, line)| line.trim().starts_with("project_root:").then_some(idx));
-            match existing_pin {
-                Some(idx) => lines[idx] = pin_line,
-                None => lines.insert(start + 1, pin_line),
-            }
-        }
-    }
-
-    Ok(join_lines(&lines, had_trailing_newline))
 }
 
 /// Removes `plugins.tracedecay.project_root`, then the `tracedecay:` block when
@@ -783,7 +721,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let config = dir.path().join(".hermes/profiles/work/config.yaml");
 
-        enable_plugin(&config, None).unwrap();
+        enable_plugin(&config).unwrap();
 
         let updated = read(&config);
         assert!(updated.contains("plugins:\n  enabled:\n    - tracedecay\n"));
@@ -806,22 +744,36 @@ mod tests {
     }
 
     #[test]
-    fn enable_plugin_updates_existing_config_and_pin() {
+    fn enable_plugin_updates_existing_config_without_project_pin() {
         let dir = TempDir::new().unwrap();
         let config = dir.path().join("config.yaml");
         std::fs::write(&config, "theme: dark\nplugins:\n  enabled:\n    - other\n").unwrap();
 
-        enable_plugin(&config, Some("/tmp/project root")).unwrap();
+        enable_plugin(&config).unwrap();
 
         let updated = read(&config);
         assert!(updated.contains("theme: dark\n"));
         assert!(updated.contains("    - tracedecay\n    - other\n"));
         assert!(updated.contains("memory:\n  provider: tracedecay\n"));
         assert!(updated.contains("context:\n  engine: tracedecay\n"));
-        assert_eq!(
-            read_config_pinned_project_root(&config),
-            Some("/tmp/project root".to_string())
-        );
+        assert_eq!(read_config_pinned_project_root(&config), None);
+    }
+
+    #[test]
+    fn enable_plugin_removes_legacy_project_pin_but_preserves_behavior_settings() {
+        let dir = TempDir::new().unwrap();
+        let config = dir.path().join("config.yaml");
+        std::fs::write(
+            &config,
+            "plugins:\n  enabled:\n    - tracedecay\n  tracedecay:\n    project_root: /legacy/repo\n    summary_model: glm-4.7\n",
+        )
+        .unwrap();
+
+        enable_plugin(&config).unwrap();
+
+        let updated = read(&config);
+        assert!(!updated.contains("project_root:"), "{updated}");
+        assert!(updated.contains("summary_model: glm-4.7"), "{updated}");
     }
 
     #[test]
@@ -831,7 +783,7 @@ mod tests {
         let original = "plugins: {enabled: [other]}\n";
         std::fs::write(&config, original).unwrap();
 
-        let err = enable_plugin(&config, None).unwrap_err().to_string();
+        let err = enable_plugin(&config).unwrap_err().to_string();
 
         assert!(err.contains("unsupported Hermes plugins config"));
         assert!(err.contains("Fix the config by hand"));
@@ -852,9 +804,9 @@ mod tests {
         )
         .unwrap();
 
-        enable_plugin(&config, None).unwrap();
+        enable_plugin(&config).unwrap();
         let first = read(&config);
-        enable_plugin(&config, None).unwrap();
+        enable_plugin(&config).unwrap();
         let second = read(&config);
 
         assert_eq!(second, first);
@@ -868,7 +820,7 @@ mod tests {
         let original = "memory:\n  provider: other\n";
         std::fs::write(&config, original).unwrap();
 
-        let err = enable_plugin(&config, None).unwrap_err().to_string();
+        let err = enable_plugin(&config).unwrap_err().to_string();
 
         assert!(err.contains("Hermes memory provider already configured"));
         assert_eq!(read(&config), original);
@@ -881,7 +833,7 @@ mod tests {
         let original = "theme: dark\nplugins:\n  enabled:\n    - other\n";
         std::fs::write(&config, original).unwrap();
 
-        enable_plugin(&config, None).unwrap();
+        enable_plugin(&config).unwrap();
 
         let backup = dir.path().join("config.yaml.bak");
         assert!(backup.exists());

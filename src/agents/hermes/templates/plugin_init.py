@@ -500,8 +500,6 @@ def _lcm_retrieve_kwargs(args: dict, kwargs: dict) -> dict:
         return retrieve_kwargs
     if isinstance(args, dict):
         root = args.get("response_handle_project_root") or args.get("project_root")
-        if not root and args.get("storage_scope") == "hermes_profile":
-            root = args.get("hermes_home")
         if isinstance(root, str) and root.strip():
             retrieve_kwargs["project_root"] = root.strip()
     return retrieve_kwargs
@@ -640,14 +638,12 @@ def _tracedecay_binary_available() -> bool:
         return Path(tools.TRACEDECAY_BIN).is_file() and os.access(tools.TRACEDECAY_BIN, os.X_OK)
     return shutil.which(tools.TRACEDECAY_BIN) is not None
 
-def _storage_args(project_root=None, hermes_home=None):
-    """Storage args for LCM/session state in the unified tracedecay store."""
-    if project_root:
-        return {"project_root": str(project_root)}
-    home = hermes_home or _resolve_hermes_home()
-    if home:
-        return {"project_root": str(home)}
-    return {}
+def _project_call_kwargs(project_root=None, kwargs=None):
+    """Route the CLI transport without adding fields to MCP arguments."""
+    routed = dict(kwargs or {})
+    if project_root and not routed.get("project_root"):
+        routed["project_root"] = str(project_root)
+    return routed
 
 # Conventional config home: a `plugins.tracedecay` block in the profile
 # config.yaml (the same `plugins.<name>` convention bundled Hermes plugins
@@ -657,7 +653,6 @@ def _storage_args(project_root=None, hermes_home=None):
 # register_config_defaults()/get_config_field_meta() expose the real
 # surface instead of just the install pin.
 PLUGIN_CONFIG_FIELDS = {
-    "project_root": ("", "Code project pinned for code-graph tool calls (set by `tracedecay install --agent hermes --project-root`)."),
     "nudge": (True, "Inject the first-turn tracedecay tool guidance nudge."),
     "sync_turn": (True, "Mirror each completed turn into the LCM raw store."),
     "prefetch": (True, "Background fact recall injected at turn start."),
@@ -694,8 +689,6 @@ PLUGIN_CONFIG_DEFAULTS = {
 }
 
 def _plugin_config_defaults():
-    # The install-time pin lives in the profile config.yaml itself
-    # (plugins.tracedecay.project_root), so the defaults carry no pin.
     return dict(PLUGIN_CONFIG_DEFAULTS)
 
 def _plugin_toggle(name, default=True):
@@ -742,7 +735,7 @@ def _with_plugin_block(config, hermes_home=None):
     block = {
         key: value
         for key, value in tools.plugin_config_block(hermes_home).items()
-        if value is not None and value != ""
+        if key in PLUGIN_CONFIG_FIELDS and value is not None and value != ""
     }
     if not block:
         return config
@@ -768,8 +761,9 @@ def _configured_hermes_home(config):
     return None
 
 def _configured_project_root(config):
-    # Profiles can pin the indexed project via a `project_root` config key
-    # (kwargs from the host take precedence; cwd is the last fallback).
+    # Accept host runtime context only. The plugins.tracedecay block is
+    # filtered by `_with_plugin_block`, so legacy profile pins cannot route
+    # TraceDecay storage.
     if config is None:
         return None
     if isinstance(config, dict):
@@ -789,19 +783,15 @@ def _has_tracedecay_index(path):
 def _code_project_root(explicit=None, cwd=None, configured=None):
     if explicit:
         return str(explicit)
-    if _has_tracedecay_index(cwd):
-        return str(cwd)
-    if configured:
-        return str(configured)
-    if isinstance(cwd, str) and os.path.isabs(cwd):
-        return str(cwd)
+    candidate = cwd or configured or os.getcwd()
+    if isinstance(candidate, str) and candidate.strip() and os.path.isabs(candidate):
+        return candidate.strip()
     return None
 
 def _resolve_hermes_home(config=None, hermes_home=None):
     for candidate in (
         hermes_home,
         _configured_hermes_home(config),
-        os.environ.get("HERMES_HOME"),
     ):
         if candidate:
             return str(candidate)
@@ -942,11 +932,10 @@ def _config_bool_disabled(value):
 
 def _hermes_yaml_compression_threshold(default, hermes_home=None):
     # Port of hermes-lcm config._hermes_compression_threshold: read the main
-    # Hermes compression.threshold from {HERMES_HOME}/config.yaml when no LCM
+    # Hermes compression.threshold from the resolved host config when no LCM
     # override exists. Disabled Hermes compression must not leak its threshold.
     home = (
         hermes_home
-        or os.environ.get("HERMES_HOME")
         or os.path.join(os.path.expanduser("~"), ".hermes")
     )
     cfg_path = Path(home) / "config.yaml"
@@ -1006,7 +995,6 @@ def _hermes_yaml_auxiliary_compression_timeout_ms(default, hermes_home=None):
     # it in milliseconds for LCM summary timeout parity.
     home = (
         hermes_home
-        or os.environ.get("HERMES_HOME")
         or os.path.join(os.path.expanduser("~"), ".hermes")
     )
     cfg_path = Path(home) / "config.yaml"
@@ -1792,7 +1780,6 @@ def _expand_query_degraded_payload(retrieval, reason: str, *, timeout_seconds=No
             "matches",
             "provider",
             "session_id",
-            "storage_scope",
         ):
             if key in retrieval:
                 payload[key] = retrieval[key]
@@ -2137,7 +2124,7 @@ class TraceDecayContextEngine(ContextEngine):
         next_project_root = _code_project_root(
             explicit=project_root or kwargs.get("project_root"),
             cwd=kwargs.get("cwd"),
-            configured=_configured_project_root(self.config),
+            configured=_configured_project_root(self.config) or self.project_root,
         )
         if next_project_root:
             self.project_root = next_project_root
@@ -2222,9 +2209,9 @@ class TraceDecayContextEngine(ContextEngine):
         return None
 
     def _tool_args(self, session_id=None):
-        args = _storage_args(self.project_root, self.hermes_home)
-        args["session_id"] = session_id if session_id is not None else self.active_session_id
-        return args
+        return {
+            "session_id": session_id if session_id is not None else self.active_session_id
+        }
 
     def _report_compression_boundary(self, session_id, bound_session_id, kwargs):
         # Mirrors Hermes' compression-boundary session starts: hand the
@@ -2239,17 +2226,20 @@ class TraceDecayContextEngine(ContextEngine):
             or old_session_id == session_id
         ):
             return
-        args = _storage_args(self.project_root, self.hermes_home)
-        args.update({
+        args = {
             "provider": STANDARD_HERMES_LCM_PROVIDER,
             "session_id": session_id,
             "old_session_id": old_session_id,
             "boundary_reason": boundary_reason,
-        })
+        }
         if bound_session_id:
             args["bound_session_id"] = bound_session_id
         try:
-            tools.call_tracedecay_tool("tracedecay_lcm_session_boundary", args)
+            tools.call_tracedecay_tool(
+                "tracedecay_lcm_session_boundary",
+                args,
+                **_project_call_kwargs(self.project_root),
+            )
         except Exception as exc:
             logger.warning("LCM session boundary report failed: %s", exc)
 
@@ -2305,7 +2295,11 @@ class TraceDecayContextEngine(ContextEngine):
             "stateless_session_patterns",
             "ignore_message_patterns",
         ))
-        return call_tracedecay_json("tracedecay_lcm_preflight", args, **kwargs)
+        return call_tracedecay_json(
+            "tracedecay_lcm_preflight",
+            args,
+            **_project_call_kwargs(kwargs.get("project_root") or self.project_root),
+        )
 
     def should_compress(self, prompt_tokens=None, **kwargs):
         # The host probes this on EVERY agent-loop iteration (up to ~90
@@ -2366,14 +2360,16 @@ class TraceDecayContextEngine(ContextEngine):
     def status(self, session_id=None, **kwargs):
         args = self._tool_args(session_id)
         args.update(_lcm_gc_config_args(self.config))
-        return call_tracedecay_json("tracedecay_lcm_status", args, **kwargs)
+        return call_tracedecay_json(
+            "tracedecay_lcm_status",
+            args,
+            **_project_call_kwargs(kwargs.get("project_root") or self.project_root),
+        )
 
     def get_tool_schemas(self):
         return _lcm_tool_schemas()
 
     def get_status(self):
-        storage = _storage_args(self.project_root, self.hermes_home)
-        project_root = storage.get("project_root")
         last_result = self.last_compress_result
         if not isinstance(last_result, dict):
             last_result = {"status": "never_ran"}
@@ -2387,15 +2383,6 @@ class TraceDecayContextEngine(ContextEngine):
             "engine": self.name,
             "session_id": self.active_session_id,
             "active_session_id": self.active_session_id,
-            "storage_scope": "profile_sharded",
-            "hermes_home": self.hermes_home,
-            "lcm_project_root": project_root,
-            "lcm_session_db_path": None,
-            "storage_note": (
-                "Hermes LCM conversation state is stored in the unified "
-                "user-level tracedecay store; unpinned profiles use the Hermes home "
-                "as a profile-sharded project identity."
-            ),
             "project_root": self.project_root,
             "tracedecay_binary_path": tools.TRACEDECAY_BIN,
             "tracedecay_binary_available": _tracedecay_binary_available(),
@@ -2436,7 +2423,7 @@ class TraceDecayContextEngine(ContextEngine):
         signature = f"{self.active_session_id}:{_messages_hash(messages)}"
         if signature == self._last_preflight_signature:
             return
-        args = _storage_args(self.project_root, self.hermes_home)
+        args = {}
         args.update(
             _lcm_config_args(
                 self.config,
@@ -2466,9 +2453,11 @@ class TraceDecayContextEngine(ContextEngine):
             "ignore_message_patterns",
         ))
         try:
-            tools.call_tracedecay_tool("tracedecay_lcm_preflight", args, **_copy_without_none({
-                "project_root": kwargs.get("project_root"),
-            }))
+            tools.call_tracedecay_tool(
+                "tracedecay_lcm_preflight",
+                args,
+                **_project_call_kwargs(kwargs.get("project_root") or self.project_root),
+            )
             self._last_preflight_signature = signature
         except Exception as exc:
             logger.warning("LCM current-turn preflight failed: %s", exc)
@@ -2491,9 +2480,6 @@ class TraceDecayContextEngine(ContextEngine):
         tool_args = _translate_lcm_args(native_name, dict(tool_args))
         if tool_args.get("error"):
             return json.dumps({"error": tool_args["error"]})
-        storage_args = _storage_args(self.project_root, self.hermes_home)
-        for key, value in storage_args.items():
-            tool_args.setdefault(key, value)
         if tracedecay_name in LCM_PROVIDER_LOCAL_TOOL_NAMES:
             tool_args.setdefault("provider", STANDARD_HERMES_LCM_PROVIDER)
         if tracedecay_name == "tracedecay_lcm_compress" and self.project_root:
@@ -2506,8 +2492,20 @@ class TraceDecayContextEngine(ContextEngine):
         if tracedecay_name == "tracedecay_lcm_expand_query":
             expand_kwargs = dict(preflight_kwargs)
             agent = expand_kwargs.pop("agent", None) or self.agent
-            return _handle_lcm_expand_query(tool_args, agent=agent, **expand_kwargs)
-        return tools.call_tracedecay_tool(tracedecay_name, tool_args, **preflight_kwargs)
+            return _handle_lcm_expand_query(
+                tool_args,
+                agent=agent,
+                **_project_call_kwargs(
+                    expand_kwargs.get("project_root") or self.project_root
+                ),
+            )
+        return tools.call_tracedecay_tool(
+            tracedecay_name,
+            tool_args,
+            **_project_call_kwargs(
+                preflight_kwargs.get("project_root") or self.project_root
+            ),
+        )
 
     def expand_query(self, prompt, query=None, node_ids=None, **kwargs):
         kwargs = dict(kwargs)
@@ -2523,7 +2521,11 @@ class TraceDecayContextEngine(ContextEngine):
                 args[key] = kwargs[key]
         if "context_max_tokens" not in args:
             args["context_max_tokens"] = _lcm_expansion_context_tokens(self.config)
-        retrieval = call_tracedecay_json("tracedecay_lcm_expand_query", args, **kwargs)
+        retrieval = call_tracedecay_json(
+            "tracedecay_lcm_expand_query",
+            args,
+            **_project_call_kwargs(kwargs.get("project_root") or self.project_root),
+        )
         synthesis_kwargs = dict(kwargs)
         synthesis_agent = synthesis_kwargs.pop("agent", None) or self.agent
         if synthesis_kwargs.get("model") is None:
@@ -2905,6 +2907,9 @@ class TraceDecayContextEngine(ContextEngine):
         summarizer = kwargs.pop("summarizer", None) or {"mode": "hermes_auxiliary"}
         force = bool(kwargs.pop("force", False))
         max_auxiliary_attempts = _auxiliary_retry_limit(kwargs)
+        tool_kwargs = _project_call_kwargs(
+            kwargs.get("project_root") or self.project_root
+        )
         lcm_option_keys = (
             "expected_current_frontier_store_id",
             "threshold_tokens",
@@ -2962,7 +2967,9 @@ class TraceDecayContextEngine(ContextEngine):
         attempt_args = dict(args)
 
         while attempts < max_auxiliary_attempts:
-            first = call_tracedecay_json("tracedecay_lcm_compress", attempt_args, **kwargs)
+            first = call_tracedecay_json(
+                "tracedecay_lcm_compress", attempt_args, **tool_kwargs
+            )
             if _compression_replay_is_compacted(first):
                 return _with_auxiliary_metadata(
                     _compacted_lcm_result_error(first),
@@ -3035,7 +3042,9 @@ class TraceDecayContextEngine(ContextEngine):
                 "summary_text": summary["text"],
                 "route": provided_route,
             }
-            result = call_tracedecay_json("tracedecay_lcm_compress", provided_args, **kwargs)
+            result = call_tracedecay_json(
+                "tracedecay_lcm_compress", provided_args, **tool_kwargs
+            )
             if _compression_replay_is_compacted(result):
                 result = _compacted_lcm_result_error(result)
             return _with_auxiliary_metadata(
@@ -3095,14 +3104,19 @@ class TracedecayMemoryProvider(MemoryProvider):
             return
         home = str(hermes_home or self.hermes_home or _resolve_hermes_home())
         resolved_config = _with_plugin_block(config, home)
-        project_root = _code_project_root(configured=_configured_project_root(resolved_config))
-        storage = _storage_args(project_root, home)
-        status = call_tracedecay_json("tracedecay_memory_status", storage, **storage)
+        project_root = self.project_root or _code_project_root(
+            configured=_configured_project_root(resolved_config)
+        )
+        status = call_tracedecay_json(
+            "tracedecay_memory_status",
+            {},
+            **_project_call_kwargs(project_root),
+        )
         if isinstance(status, dict) and not status.get("error"):
             facts = status.get("fact_count", status.get("facts"))
             suffix = f" ({facts} facts)" if facts is not None else ""
-            label = project_root or home
-            print(f"  tracedecay memory store ready at {label}{suffix}.")
+            label = project_root or "the active TraceDecay user profile"
+            print(f"  tracedecay memory store ready for {label}{suffix}.")
         else:
             detail = status.get("error") if isinstance(status, dict) else status
             print(f"  tracedecay memory store check failed: {detail}")
@@ -3169,9 +3183,12 @@ class TracedecayMemoryProvider(MemoryProvider):
         if not text:
             return ""
         try:
-            args = _storage_args(self.project_root, self.hermes_home)
-            args.update({"action": "search", "query": text[:512], "limit": 3})
-            payload = call_tracedecay_json("tracedecay_fact_store", args, **args)
+            args = {"action": "search", "query": text[:512], "limit": 3}
+            payload = call_tracedecay_json(
+                "tracedecay_fact_store",
+                args,
+                **_project_call_kwargs(self.project_root),
+            )
         except Exception as exc:
             logger.debug("tracedecay memory prefetch failed: %s", exc)
             return ""
@@ -3227,17 +3244,16 @@ class TracedecayMemoryProvider(MemoryProvider):
             for idx, entry in enumerate(turn_messages):
                 role = str(entry.get("role") or "user")
                 entry["id"] = f"tracedecay_sync_{batch_id}_{timestamp_ns}_{idx}_{role}"
-        args = _storage_args(self.project_root, self.hermes_home)
-        args.update({
+        args = {
             "provider": STANDARD_HERMES_LCM_PROVIDER,
             "session_id": sid,
             "messages": turn_messages,
-        })
+        }
         try:
             tools.call_tracedecay_tool(
                 "tracedecay_lcm_preflight",
                 args,
-                **args,
+                **_project_call_kwargs(self.project_root),
             )
         except Exception as exc:
             logger.debug("tracedecay sync_turn ingest failed: %s", exc)
@@ -3262,21 +3278,16 @@ class TracedecayMemoryProvider(MemoryProvider):
             "metadata": fact_metadata,
         }
         try:
-            args = _storage_args(self.project_root, self.hermes_home)
-            args.update(fact_args)
-            tools.call_tracedecay_tool("tracedecay_fact_store", args, **args)
+            tools.call_tracedecay_tool(
+                "tracedecay_fact_store",
+                fact_args,
+                **_project_call_kwargs(self.project_root),
+            )
         except Exception as exc:
             logger.debug("tracedecay on_memory_write mirror failed: %s", exc)
 
     def get_config_schema(self):
-        # Consumed by `hermes memory setup` / `hermes memory status`.
-        return [
-            {
-                "key": "project_root",
-                "description": "Absolute path of the project tracedecay serves (install-time pin)",
-                "default": tools.config_pinned_project_root() or "",
-            },
-        ]
+        return []
 
     def get_config_defaults(self):
         # Hermes layers these under DEFAULT_CONFIG so plugins.tracedecay

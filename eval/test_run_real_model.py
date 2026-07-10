@@ -1,5 +1,7 @@
 import argparse
+import contextlib
 import importlib.util
+import io
 import json
 import sqlite3
 import subprocess
@@ -26,40 +28,35 @@ SCORE_SPEC.loader.exec_module(hermetic_score)
 
 
 class HermesHomeSelectionTest(unittest.TestCase):
-    def test_default_profile_uses_unique_temp_hermes_home(self):
-        first = run_real_model.resolve_hermes_profile(run_real_model.parse_args([]))
-        second = run_real_model.resolve_hermes_profile(run_real_model.parse_args([]))
-        self.addCleanup(first.cleanup)
-        self.addCleanup(second.cleanup)
+    def test_removed_profile_flags_are_rejected(self):
+        for args in (["--profile", "custom-eval"], ["--hermes-home", "/tmp/hermes"]):
+            with self.subTest(args=args), contextlib.redirect_stderr(io.StringIO()):
+                with self.assertRaises(SystemExit):
+                    run_real_model.parse_args(args)
 
-        self.assertEqual(first.profile, run_real_model.DEFAULT_PROFILE)
-        self.assertEqual(second.profile, run_real_model.DEFAULT_PROFILE)
-        self.assertNotEqual(first.profile_dir, second.profile_dir)
-        self.assertIn(tempfile.gettempdir(), str(first.profile_dir))
-        self.assertNotEqual(
-            first.profile_dir,
-            Path.home() / ".hermes/profiles" / run_real_model.DEFAULT_PROFILE,
-        )
+    def test_install_uses_the_isolated_user_hermes_home(self):
+        env = run_real_model.create_eval_environment("hermes-user-install")
+        self.addCleanup(env.cleanup)
+        fixture = env.root / "fixture"
+        fixture.mkdir()
+        completed = subprocess.CompletedProcess([], 0, stdout="", stderr="")
 
-    def test_explicit_profile_keeps_legacy_user_profile_location(self):
-        selected = run_real_model.resolve_hermes_profile(
-            run_real_model.parse_args(["--profile", "custom-eval"])
-        )
-        self.addCleanup(selected.cleanup)
-
-        self.assertEqual(selected.profile, "custom-eval")
-        self.assertEqual(selected.profile_dir, Path.home() / ".hermes/profiles/custom-eval")
-
-    def test_explicit_hermes_home_wins(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            home = Path(tmp) / "explicit-hermes"
-            selected = run_real_model.resolve_hermes_profile(
-                run_real_model.parse_args(["--hermes-home", str(home)])
+        with mock.patch.object(run_real_model, "run", return_value=completed) as run_mock:
+            hermes_home = run_real_model.ensure_hermes_install(
+                "model", "provider", "tracedecay", fixture, env.env
             )
-            self.addCleanup(selected.cleanup)
 
-            self.assertEqual(selected.profile, run_real_model.DEFAULT_PROFILE)
-            self.assertEqual(selected.profile_dir, home)
+        self.assertEqual(hermes_home, env.home / ".hermes")
+        self.assertTrue((hermes_home / "config.yaml").is_file())
+        cmd = run_mock.call_args.args[0]
+        self.assertEqual(
+            cmd,
+            ["tracedecay", "install", "--agent", "hermes", "--no-dashboard"],
+        )
+        self.assertNotIn("--profile", cmd)
+        self.assertNotIn("--project-root", cmd)
+        self.assertEqual(run_mock.call_args.kwargs["cwd"], fixture)
+        self.assertEqual(run_mock.call_args.kwargs["env"], env.env)
 
 
 class EvalStorageIsolationTest(unittest.TestCase):

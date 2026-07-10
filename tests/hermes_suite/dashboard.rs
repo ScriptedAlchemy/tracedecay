@@ -18,7 +18,6 @@ fn make_ctx(home: &Path, dashboard: bool) -> InstallContext {
         home: home.to_path_buf(),
         tracedecay_bin: "/usr/local/bin/tracedecay".to_string(),
         tool_permissions: Vec::new(),
-        profile: None,
         project_root: None,
         dashboard,
     }
@@ -72,27 +71,25 @@ fn install_deploys_dashboard_plugin_page() {
     // The proxy backend bakes in the installing binary (env still wins).
     let api = read(&dash.join("plugin_api.py"));
     assert!(api.contains(r#"DEPLOYED_TRACEDECAY_BIN = "/usr/local/bin/tracedecay""#));
-    // Unpinned installs serve the profile home as the project identity, not
-    // whatever cwd Hermes spawns from.
-    let encoded_home =
-        serde_json::to_string(home.path().join(".hermes").to_string_lossy().as_ref()).unwrap();
-    assert!(api.contains(&format!("DEPLOYED_PROJECT_ROOT = {encoded_home}")));
+    assert!(!api.contains("DEPLOYED_PROJECT_ROOT"));
+    assert!(!api.contains(home.path().to_string_lossy().as_ref()));
     assert!(api.contains("router = APIRouter()"));
 }
 
 #[test]
-fn install_with_project_root_pins_dashboard_project() {
+fn install_context_project_root_is_not_baked_into_dashboard() {
     let home = tempfile::tempdir().unwrap();
     let mut ctx = make_ctx(home.path(), true);
     ctx.project_root = Some(PathBuf::from("/pinned/project"));
     HermesIntegration.install(&ctx).unwrap();
 
     let api = read(&dashboard_dir(home.path()).join("plugin_api.py"));
-    assert!(api.contains(r#"DEPLOYED_PROJECT_ROOT = "/pinned/project""#));
+    assert!(!api.contains("DEPLOYED_PROJECT_ROOT"));
+    assert!(!api.contains("/pinned/project"));
 }
 
 #[test]
-fn reinstall_is_idempotent_and_preserves_pin() {
+fn reinstall_is_idempotent_and_stays_unpinned() {
     let home = tempfile::tempdir().unwrap();
     let mut pinned = make_ctx(home.path(), true);
     pinned.project_root = Some(PathBuf::from("/pinned/project"));
@@ -102,17 +99,14 @@ fn reinstall_is_idempotent_and_preserves_pin() {
     let first_api = read(&dash.join("plugin_api.py"));
     let first_manifest = read(&dash.join("manifest.json"));
 
-    // Reinstall WITHOUT an explicit pin: the existing pin must survive
-    // (mirrors the agent plugin's tools.py/config pin preservation).
+    // Reinstall keeps the generated wrapper stable and unpinned.
     HermesIntegration
         .install(&make_ctx(home.path(), true))
         .unwrap();
 
     assert_eq!(read(&dash.join("plugin_api.py")), first_api);
     assert_eq!(read(&dash.join("manifest.json")), first_manifest);
-    assert!(
-        read(&dash.join("plugin_api.py")).contains(r#"DEPLOYED_PROJECT_ROOT = "/pinned/project""#)
-    );
+    assert!(!read(&dash.join("plugin_api.py")).contains("DEPLOYED_PROJECT_ROOT"));
 }
 
 #[test]

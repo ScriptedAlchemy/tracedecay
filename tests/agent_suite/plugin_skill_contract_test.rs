@@ -144,6 +144,25 @@ fn bundled_session_context_skill_exposes_lcm_session_search_routes() {
 }
 
 #[test]
+fn bundled_skills_do_not_expose_hermes_profile_storage() {
+    let skills = load_skill_docs(CODEX_SKILL_ROOT);
+
+    for skill_name in ["inspecting-managed-skills", "managing-session-context"] {
+        let skill = skill_named(&skills, skill_name);
+        for forbidden in ["hermes_home", "hermes_profile"] {
+            assert!(
+                !skill.raw.contains(forbidden),
+                "{} must not expose removed Hermes profile storage surface {forbidden}",
+                skill.path.display()
+            );
+        }
+    }
+    let inspecting = skill_named(&skills, "inspecting-managed-skills");
+    assert!(inspecting.raw.contains("tracedecay_hermes_skill_bridge"));
+    assert!(inspecting.raw.contains("~/.hermes"));
+}
+
+#[test]
 fn bundled_skills_route_cross_project_context_through_registry() {
     let skills = load_skill_docs(CODEX_SKILL_ROOT);
     let using_tracedecay = skill_named(&skills, "using-tracedecay");
@@ -242,7 +261,6 @@ fn install_ctx(home: &Path) -> InstallContext {
         home: home.to_path_buf(),
         tracedecay_bin: "/tmp/tracedecay-test-bin".to_string(),
         tool_permissions: expected_tool_perms(),
-        profile: None,
         project_root: None,
         dashboard: true,
     }

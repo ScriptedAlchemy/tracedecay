@@ -343,9 +343,10 @@ tracedecay-side curation/archive Phase 3 work.) All work here is confined to
 
 ### How the dashboard was launched
 
-Commands below are reproduced verbatim as run on 2026-06-10, pre-rebrand
-(old `tracedecay` binary and `TRACEDECAY_*` variable names; both are still
-honored as legacy fallbacks):
+Commands below are reproduced verbatim as historical evidence from 2026-06-10,
+pre-rebrand. Do not copy them as current setup instructions: old routing names
+are not runtime fallbacks, and the shown `HERMES_HOME` configured Hermes host
+files only, never TraceDecay storage or project identity.
 
 ```bash
 # Build the working tracedecay binary used by the wrapper (see note below).

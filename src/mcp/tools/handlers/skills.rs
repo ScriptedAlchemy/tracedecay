@@ -6,7 +6,9 @@ use std::path::Path;
 use serde::Serialize;
 use serde_json::{Value, json};
 
-use crate::automation::hermes_bridge::{HermesSkillBridgeOptions, load_hermes_skill_bridge};
+use crate::automation::hermes_skill_bridge::{
+    HermesSkillBridgeOptions, load_standard_hermes_skill_bridge,
+};
 use crate::automation::managed_skills::{
     ManagedSkill, ManagedSkillState, list_managed_skills, load_managed_skill,
 };
@@ -254,14 +256,10 @@ async fn sync_project_skill_analytics(cg: &TraceDecay, profile_root: &Path) -> R
 }
 
 pub(super) fn handle_hermes_skill_bridge(cg: &TraceDecay, args: &Value) -> Result<ToolResult> {
-    let hermes_home = required_str(args, "hermes_home")?;
-    let snapshot = load_hermes_skill_bridge(
-        Path::new(hermes_home),
-        HermesSkillBridgeOptions {
-            include_skill_bodies: optional_bool(args, "include_skill_bodies", false),
-            include_pending_payloads: optional_bool(args, "include_pending_payloads", false),
-        },
-    )?;
+    let snapshot = load_standard_hermes_skill_bridge(HermesSkillBridgeOptions {
+        include_skill_bodies: optional_bool(args, "include_skill_bodies", false),
+        include_pending_payloads: optional_bool(args, "include_pending_payloads", false),
+    })?;
     let payload = json!({
         "status": "ok",
         "bridge": snapshot,

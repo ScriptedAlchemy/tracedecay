@@ -26,10 +26,8 @@ Configuration (environment always wins, then deploy-time defaults below):
 - ``TRACEDECAY_DASHBOARD_URL``      use an existing server instead of spawning
 - ``TRACEDECAY_BIN``                path to the tracedecay binary
 - ``TRACEDECAY_DASHBOARD_PROJECT``  project root/store to serve. When unset,
-  the installed wrapper uses its deploy-time default: the configured
-  ``plugins.tracedecay.project_root`` pin, or the Hermes profile home for
-  unpinned profile-scoped installs. Source-tree development falls back to the
-  Hermes process cwd when no deploy-time default has been baked in.
+  the wrapper uses the Hermes process cwd. Hermes homes and profiles never
+  select a TraceDecay project or store.
 
 Use ``TRACEDECAY_*`` environment variables for runtime configuration.
 """
@@ -66,11 +64,9 @@ logger = logging.getLogger(__name__)
 
 # Deploy-time defaults, rewritten in the installed copy by
 # `tracedecay install --agent hermes` (src/agents/hermes_dashboard.rs in the
-# tracedecay repo): the installer pins the binary that performed the install
-# and the profile's pinned project root. TRACEDECAY_BIN /
-# TRACEDECAY_DASHBOARD_PROJECT always wins at runtime.
+# tracedecay repo): the installer pins only the binary that performed the
+# install. TRACEDECAY_BIN is still overridable at runtime.
 DEPLOYED_TRACEDECAY_BIN = None
-DEPLOYED_PROJECT_ROOT = None
 
 _LISTENING_URL_RE = re.compile(r"https?://[^\s]+")
 
@@ -169,26 +165,12 @@ def _find_tracedecay_bin() -> str | None:
 
 
 def _project_root() -> str:
-    return (
-        _env("DASHBOARD_PROJECT")
-        or DEPLOYED_PROJECT_ROOT
-        or os.getcwd()
-    )
+    return _env("DASHBOARD_PROJECT") or os.getcwd()
 
 
 def _dashboard_env() -> dict[str, str]:
-    """Environment for the spawned tracedecay dashboard process.
-
-    `subprocess.Popen` inherits by default, but constructing the child env
-    explicitly makes the Hermes profile contract visible and stable: the
-    spawned Rust server must resolve `HERMES_HOME` and any `TRACEDECAY_*`
-    overrides exactly like the wrapper process did.
-    """
-    env = os.environ.copy()
-    for key, value in os.environ.items():
-        if key == "HERMES_HOME" or key.startswith("TRACEDECAY_"):
-            env[key] = value
-    return env
+    """Inherit the normal process environment for the dashboard child."""
+    return os.environ.copy()
 
 
 def _spawn_dashboard() -> str:

@@ -142,7 +142,6 @@ fn make_install_ctx(home: &Path) -> InstallContext {
         home: home.to_path_buf(),
         tracedecay_bin: "/usr/local/bin/tracedecay".to_string(),
         tool_permissions: expected_tool_perms(),
-        profile: None,
         project_root: None,
         dashboard: false,
     }
@@ -801,15 +800,15 @@ fn profile_storage_docs_do_not_overclaim_unimplemented_bundle_or_quota_support()
 }
 
 #[test]
-fn hermes_dashboard_wrapper_docs_describe_deployed_profile_default() {
+fn hermes_dashboard_wrapper_docs_reject_profile_project_defaults() {
     let wrapper = include_str!("../../dashboard/hermes-wrapper/plugin_api.py");
     assert!(
-        wrapper.contains("deploy-time default"),
-        "Hermes dashboard wrapper docs should describe the deployed project default"
+        wrapper.contains("Hermes homes and profiles never"),
+        "Hermes dashboard docs should state the single-profile storage contract"
     );
     assert!(
-        !wrapper.contains("defaults to the Hermes process cwd"),
-        "Hermes dashboard wrapper docs must not hide the deployed profile/pin default"
+        !wrapper.contains("configured `plugins.tracedecay.project_root` pin"),
+        "Hermes dashboard docs must not advertise legacy project pins"
     );
 }
 
@@ -883,7 +882,6 @@ fn test_cursor_plugin_hooks_quote_binary_paths_with_spaces() {
         home: home.path().to_path_buf(),
         tracedecay_bin: tracedecay_bin.to_string_lossy().to_string(),
         tool_permissions: expected_tool_perms(),
-        profile: None,
         project_root: None,
         dashboard: false,
     };
@@ -1101,13 +1099,15 @@ fn test_cursor_healthcheck_ignores_foreign_project_cursor_files() {
 }
 
 #[test]
-fn test_hermes_local_install_writes_profile_plugin() {
+fn test_hermes_user_install_writes_single_plugin() {
     let home = TempDir::new().unwrap();
-    let project = TempDir::new().unwrap();
+    let _agent_env = crate::common::AgentEnvLock::pin(&home);
 
-    let output = assert_local_install_success("hermes", project.path(), home.path());
+    HermesIntegration
+        .install(&make_install_ctx(home.path()))
+        .unwrap();
 
-    let plugin_dir = project.path().join(".hermes/plugins/tracedecay");
+    let plugin_dir = home.path().join(".hermes/plugins/tracedecay");
     let manifest = std::fs::read_to_string(plugin_dir.join("plugin.yaml")).unwrap();
     assert!(manifest.contains("name: tracedecay"));
     assert!(manifest.contains("kind: standalone"));
@@ -1137,7 +1137,9 @@ fn test_hermes_local_install_writes_profile_plugin() {
     assert!(init_py.contains("getattr(ctx, \"register_skill\", None)"));
     assert!(init_py.contains("register_skill(\"tracedecay\""));
     assert!(init_py.contains("class TraceDecayContextEngine"));
-    assert!(init_py.contains("storage_scope"));
+    assert!(!init_py.contains("storage_scope"));
+    assert!(!init_py.contains("hermes_home\": self.hermes_home"));
+    assert!(!init_py.contains("HERMES_HOME"));
     assert!(init_py.contains("tracedecay_lcm_compress"));
 
     let schemas_py = std::fs::read_to_string(plugin_dir.join("schemas.py")).unwrap();
@@ -1151,7 +1153,7 @@ fn test_hermes_local_install_writes_profile_plugin() {
     }));
 
     let tools_py = std::fs::read_to_string(plugin_dir.join("tools.py")).unwrap();
-    assert!(contains_expected_tracedecay_bin(&tools_py));
+    assert!(tools_py.contains("/usr/local/bin/tracedecay"));
     assert!(tools_py.contains("subprocess.run"));
     assert!(tools_py.contains("tracedecay tool"));
     assert!(tools_py.contains("TRACEDECAY_TIMEOUT_SECONDS = 120"));
@@ -1161,15 +1163,11 @@ fn test_hermes_local_install_writes_profile_plugin() {
     assert!(tools_py.contains("\"stderr\""));
     assert!(tools_py.contains("\"stdout\""));
     assert!(tools_py.contains("kwargs.get(\"project_root\")"));
-    assert!(tools_py.contains("or tool_args.get(\"project_root\")"));
-    assert!(
-        tools_py.contains("code_project_root(") && tools_py.contains("config_pinned_project_root"),
-        "tool dispatch must resolve healthy cwd before falling back to the config-block project pin"
-    );
-    assert!(
-        tools_py.contains("PROFILE_STORE_TOOLS"),
-        "profile-global state tools must anchor at the Hermes home when unpinned"
-    );
+    assert!(!tools_py.contains("tool_args.pop(\"project_root\", None)"));
+    assert!(tools_py.contains("code_project_root("));
+    assert!(!tools_py.contains("config_pinned_project_root"));
+    assert!(!tools_py.contains("HERMES_HOME"));
+    assert!(!tools_py.contains("PROFILE_STORE_TOOLS"));
     assert!(
         !tools_py.contains("PINNED_PROJECT_ROOT"),
         "the install-time pin lives only in plugins.tracedecay.project_root"
@@ -1199,24 +1197,8 @@ fn test_hermes_local_install_writes_profile_plugin() {
         "Hermes skill must warn against querying .tracedecay databases directly"
     );
 
-    assert_hermes_config_enables_tracedecay_memory(&project.path().join(".hermes/config.yaml"));
-    assert!(
-        !home.path().join(".hermes/config.yaml").exists(),
-        "plain local install must not mutate the user profile config"
-    );
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let expected_hermes_homes = [
-        project.path().join(".hermes"),
-        std::fs::canonicalize(project.path())
-            .unwrap_or_else(|_| project.path().to_path_buf())
-            .join(".hermes"),
-    ];
-    assert!(
-        expected_hermes_homes
-            .iter()
-            .any(|path| stderr.contains(&format!("HERMES_HOME={}", path.display()))),
-        "plain local install guidance must tell users to launch Hermes with the project-local HERMES_HOME\nstderr:\n{stderr}"
-    );
+    assert_hermes_config_enables_tracedecay_memory(&home.path().join(".hermes/config.yaml"));
+    assert!(!home.path().join(".hermes/profiles").exists());
 }
 
 #[test]
@@ -1283,7 +1265,7 @@ fn test_hermes_plugin_init_snapshot_matches_embedded_asset() {
     hasher.update(body.as_bytes());
     assert_eq!(
         hex::encode(hasher.finalize()),
-        "167f7a24ab448980e063f09c1581d81cc69f3e1605223e538616ebda5062f976",
+        "3cd56428c8d7cf40a1877ce85eb6103a8b9dc35fe8194d360586a588d1dbc879",
         "templates/plugin_init.py payload hash changed — verify the edit is intentional and update this snapshot"
     );
 }
@@ -1299,11 +1281,11 @@ fn test_hermes_generated_python_registers_lcm_context_engine() {
 
     assert!(init_py.contains("class TraceDecayContextEngine"));
     assert!(init_py.contains("ctx.register_context_engine"));
-    assert!(init_py.contains("storage_scope"));
+    assert!(!init_py.contains("storage_scope"));
     assert!(init_py.contains("def call_tracedecay_json"));
     assert!(init_py.contains("tracedecay_lcm_status"));
-    assert!(init_py.contains("call_tracedecay_json(\"tracedecay_lcm_preflight\""));
-    assert!(init_py.contains("call_tracedecay_json(\"tracedecay_lcm_compress\""));
+    assert!(init_py.contains("\"tracedecay_lcm_preflight\","));
+    assert!(init_py.contains("\"tracedecay_lcm_compress\","));
     assert!(init_py.contains("tracedecay_lcm_session_boundary"));
     // Both registered provider identities are "tracedecay"; "lcm" is reserved
     // for the tool surface (lcm_* / tracedecay_lcm_*), not the engine name.
@@ -1375,7 +1357,6 @@ fn test_hermes_generated_python_handles_quoted_unicode_tracedecay_path() {
         home: home.path().to_path_buf(),
         tracedecay_bin: tracedecay_bin.to_string_lossy().to_string(),
         tool_permissions: expected_tool_perms(),
-        profile: None,
         project_root: None,
         dashboard: false,
     };
@@ -1398,9 +1379,9 @@ import sys
 
 tools_path = pathlib.Path(sys.argv[1])
 expected_bin = sys.argv[2]
-# Hermetic profile home so plugins.tracedecay from the developer's real
-# ~/.hermes config can never leak a --project argument into the argv checks.
-os.environ["HERMES_HOME"] = str(tools_path.parent.parent.parent)
+# Hermetic user home; the Hermes override must not redirect generated tools.
+os.environ["HOME"] = str(tools_path.parent.parent.parent.parent)
+os.environ["HERMES_HOME"] = "/ignored/hermes-home"
 spec = importlib.util.spec_from_file_location("tracedecay_hermes_tools", tools_path)
 module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
@@ -1414,8 +1395,10 @@ class Result:
 
 def fake_run(argv, **kwargs):
     assert argv[0] == expected_bin
-    assert argv[1:5] == ["tool", "tracedecay_context", "--json", "--args"]
-    assert json.loads(argv[5]) == {"format": "json", "query": "x"}
+    assert argv[1:3] == ["tool", "--project"]
+    assert argv[3] == os.getcwd()
+    assert argv[4:7] == ["tracedecay_context", "--json", "--args"]
+    assert json.loads(argv[7]) == {"format": "json", "query": "x"}
     assert "cwd" not in kwargs
     assert kwargs["timeout"] == 120
     assert kwargs["shell"] is False
@@ -1473,7 +1456,8 @@ import sys
 import types
 
 plugin_dir = pathlib.Path(sys.argv[1])
-os.environ["HERMES_HOME"] = str(plugin_dir.parent.parent)
+os.environ["HOME"] = str(plugin_dir.parent.parent.parent)
+os.environ["HERMES_HOME"] = "/ignored/hermes-home"
 
 class MemoryProvider(abc.ABC):
     @property
@@ -1556,7 +1540,7 @@ assert len(ctx.memory_providers) == 1
 assert len(ctx.config_defaults) == 1
 defaults = ctx.config_defaults[0]
 assert set(defaults) == {"plugins"}
-assert "project_root" in defaults["plugins"]["tracedecay"]
+assert "project_root" not in defaults["plugins"]["tracedecay"]
 
 provider = ctx.memory_providers[0]
 assert isinstance(provider, MemoryProvider)
@@ -1569,13 +1553,13 @@ assert provider.is_available() is False
 plugin.tools.TRACEDECAY_BIN = original_bin
 provider.initialize("session-123", hermes_home="/tmp/hermes-profile")
 assert provider.hermes_home == "/tmp/hermes-profile"
-assert provider.project_root is None
+assert provider.project_root == os.getcwd()
+assert provider.project_root != provider.hermes_home
 assert provider.session_id == "session-123"
-# Without an explicit hermes_home the provider resolves the active profile
-# home itself (sync_turn/prefetch need a storage anchor).
+# Hermes home remains host config only; TraceDecay routing stays on cwd.
 provider.initialize("session-only")
-assert provider.hermes_home == os.environ["HERMES_HOME"]
-assert provider.project_root is None
+assert provider.hermes_home == str(plugin_dir.parent.parent)
+assert provider.project_root == os.getcwd()
 assert provider.session_id == "session-only"
 
 # Collapsed schema surface: fact_store(action=...) covers the nine legacy
@@ -1701,7 +1685,8 @@ import sys
 import types
 
 hermes_home = pathlib.Path(sys.argv[1])
-os.environ["HERMES_HOME"] = str(hermes_home)
+os.environ["HOME"] = str(hermes_home.parent)
+os.environ["HERMES_HOME"] = "/ignored/hermes-home"
 
 class MemoryProvider(abc.ABC):
     @property
@@ -1793,28 +1778,19 @@ assert isinstance(provider, MemoryProvider)
 assert provider.name == "tracedecay"
 assert provider.is_available() is True
 
-# `hermes memory setup` walks get_config_schema(); the pin is the only field.
+# `hermes memory setup` has no TraceDecay storage selector fields.
 schema = provider.get_config_schema()
-assert [field["key"] for field in schema] == ["project_root"]
-assert "description" in schema[0]
-assert not any(field.get("secret") for field in schema)
+assert schema == []
 
 # Hermes layers get_config_defaults() under DEFAULT_CONFIG.
 defaults = provider.get_config_defaults()
-assert "project_root" in defaults["plugins"]["tracedecay"]
+assert "project_root" not in defaults["plugins"]["tracedecay"]
+assert "nudge" in defaults["plugins"]["tracedecay"]
 
 # Dashboard hints use full config dot-paths.
 field_meta = provider.get_config_field_meta()
-assert "plugins.tracedecay.project_root" in field_meta
-assert "description" in field_meta["plugins.tracedecay.project_root"]
-
-# `hermes memory setup` persists non-secret values via save_config(); the
-# conventional home is the plugins.tracedecay block.
-import yaml
-provider.save_config({"project_root": "/pinned/by/setup"}, str(hermes_home))
-saved = yaml.safe_load((hermes_home / "config.yaml").read_text())
-assert saved["plugins"]["tracedecay"]["project_root"] == "/pinned/by/setup"
-assert saved["memory"]["provider"] == "tracedecay"
+assert "plugins.tracedecay.project_root" not in field_meta
+assert "plugins.tracedecay.nudge" in field_meta
 
 provider.initialize("doctor-session", hermes_home=str(hermes_home), platform="cli")
 assert provider.hermes_home == str(hermes_home)
@@ -1871,7 +1847,8 @@ import sys
 import types
 
 plugin_dir = pathlib.Path(sys.argv[1])
-os.environ["HERMES_HOME"] = str(plugin_dir.parent.parent)
+os.environ["HOME"] = str(plugin_dir.parent.parent.parent)
+os.environ["HERMES_HOME"] = "/ignored/hermes-home"
 
 # Stock agent/memory_provider.py abstract surface (upstream pins these four).
 class MemoryProvider(abc.ABC):
@@ -2097,278 +2074,29 @@ fn test_hermes_global_install_and_uninstall_plugin() {
 }
 
 #[test]
-fn test_hermes_profile_install_targets_named_profile() {
-    let home = TempDir::new().unwrap();
-    let _agent_env = crate::common::AgentEnvLock::pin(&home);
-    let ctx = InstallContext {
-        home: home.path().to_path_buf(),
-        tracedecay_bin: "/usr/local/bin/tracedecay".to_string(),
-        tool_permissions: expected_tool_perms(),
-        profile: Some("Work_Profile".to_string()),
-        project_root: None,
-        dashboard: false,
-    };
-
-    HermesIntegration.install(&ctx).unwrap();
-
-    let plugin_dir = home
-        .path()
-        .join(".hermes/profiles/work_profile/plugins/tracedecay");
-    assert!(plugin_dir.join("plugin.yaml").exists());
-    assert!(!home.path().join(".hermes/plugins/tracedecay").exists());
-    let config = std::fs::read_to_string(
-        home.path()
-            .join(".hermes/profiles/work_profile/config.yaml"),
-    )
-    .expect("profile config should be written");
-    assert_hermes_config_enables_tracedecay_memory(
-        &home
-            .path()
-            .join(".hermes/profiles/work_profile/config.yaml"),
-    );
-    assert!(config.contains("- tracedecay"));
-
-    HermesIntegration.uninstall(&ctx).unwrap();
-    assert!(!plugin_dir.exists());
-    assert!(home.path().join(".hermes/profiles/work_profile").exists());
-}
-
-#[test]
-fn test_hermes_install_all_profiles_configures_default_and_named_profiles() {
+fn test_removed_hermes_profile_flags_are_unknown() {
     let home = TempDir::new().unwrap();
     let project = TempDir::new().unwrap();
-    let default_profile = home.path().join(".hermes");
-    let work_profile = home.path().join(".hermes/profiles/work");
-    let personal_profile = home.path().join(".hermes/profiles/personal");
-    std::fs::create_dir_all(&work_profile).unwrap();
-    std::fs::create_dir_all(&personal_profile).unwrap();
-    std::fs::write(
-        default_profile.join("config.yaml"),
-        "theme: dark\nplugins:\n  enabled:\n    - other\n",
-    )
-    .unwrap();
-    std::fs::write(
-        work_profile.join("config.yaml"),
-        "theme: light\nmemory:\n  retention: session\nplugins:\n  disabled:\n    - tracedecay\n    - other-disabled\n",
-    )
-    .unwrap();
-
-    let output = tracedecay_command(project.path(), home.path())
-        .arg("install")
-        .arg("--agent")
-        .arg("hermes")
-        .arg("--all-profiles")
-        .output()
-        .expect("run hermes all-profiles install");
-    assert!(
-        output.status.success(),
-        "hermes all-profiles install should succeed\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-
-    for profile in [&default_profile, &work_profile, &personal_profile] {
+    for (command, flag, value) in [
+        ("install", "--profile", Some("work")),
+        ("install", "--all-profiles", None),
+        ("install", "--project-root", Some("/tmp/project")),
+        ("uninstall", "--profile", Some("work")),
+        ("uninstall", "--all-profiles", None),
+    ] {
+        let mut process = tracedecay_command(project.path(), home.path());
+        process.arg(command).arg("--agent").arg("hermes").arg(flag);
+        if let Some(value) = value {
+            process.arg(value);
+        }
+        let output = process.output().expect("run removed Hermes selector");
+        assert!(!output.status.success());
         assert!(
-            profile.join("plugins/tracedecay/plugin.yaml").exists(),
-            "tracedecay plugin should be installed in {}",
-            profile.display()
+            String::from_utf8_lossy(&output.stderr).contains("unexpected argument"),
+            "stderr:\n{}",
+            String::from_utf8_lossy(&output.stderr)
         );
-        assert_hermes_config_enables_tracedecay_memory(&profile.join("config.yaml"));
     }
-    let default_config = std::fs::read_to_string(default_profile.join("config.yaml")).unwrap();
-    assert!(default_config.contains("    - other"));
-    let work_config = std::fs::read_to_string(work_profile.join("config.yaml")).unwrap();
-    assert!(work_config.contains("  retention: session"));
-    assert!(!work_config.contains("  disabled:\n    - tracedecay"));
-    assert!(
-        !project
-            .path()
-            .join(".hermes/plugins/tracedecay/plugin.yaml")
-            .exists(),
-        "profile-level all-profiles install must not write a project-local plugin"
-    );
-}
-
-#[test]
-fn test_hermes_uninstall_all_profiles_cleans_only_tracedecay_from_each_profile() {
-    let home = TempDir::new().unwrap();
-    let project = TempDir::new().unwrap();
-    let default_profile = home.path().join(".hermes");
-    let work_profile = home.path().join(".hermes/profiles/work");
-    let personal_profile = home.path().join(".hermes/profiles/personal");
-
-    for profile in [&default_profile, &work_profile, &personal_profile] {
-        let plugin_dir = profile.join("plugins/tracedecay");
-        let other_plugin_dir = profile.join("plugins/other");
-        std::fs::create_dir_all(&plugin_dir).unwrap();
-        std::fs::create_dir_all(&other_plugin_dir).unwrap();
-        std::fs::write(plugin_dir.join("plugin.yaml"), "name: tracedecay\n").unwrap();
-        std::fs::write(other_plugin_dir.join("plugin.yaml"), "name: other\n").unwrap();
-        std::fs::write(
-            profile.join("config.yaml"),
-            "theme: dark\nmemory:\n  provider: tracedecay\nplugins:\n  enabled:\n    - tracedecay\n    - other\n",
-        )
-        .unwrap();
-    }
-
-    let output = tracedecay_command(project.path(), home.path())
-        .arg("uninstall")
-        .arg("--agent")
-        .arg("hermes")
-        .arg("--all-profiles")
-        .output()
-        .expect("run hermes all-profiles uninstall");
-    assert!(
-        output.status.success(),
-        "hermes all-profiles uninstall should succeed\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-
-    for profile in [&default_profile, &work_profile, &personal_profile] {
-        assert!(
-            !profile.join("plugins/tracedecay/plugin.yaml").exists(),
-            "tracedecay plugin should be removed from {}",
-            profile.display()
-        );
-        assert!(
-            profile.join("plugins/other/plugin.yaml").exists(),
-            "uninstall must preserve unrelated plugins in {}",
-            profile.display()
-        );
-        let config = std::fs::read_to_string(profile.join("config.yaml")).unwrap();
-        assert!(config.contains("theme: dark"));
-        assert!(config.contains("    - other"));
-        assert!(!config.contains("    - tracedecay"));
-        assert!(!config.contains("provider: tracedecay"));
-    }
-}
-
-#[test]
-fn test_hermes_local_install_with_profile_targets_named_profile() {
-    let home = TempDir::new().unwrap();
-    let project = TempDir::new().unwrap();
-
-    let output = tracedecay_command(project.path(), home.path())
-        .arg("install")
-        .arg("--local")
-        .arg("--agent")
-        .arg("hermes")
-        .arg("--profile")
-        .arg("project")
-        .output()
-        .expect("run hermes local install with profile");
-    assert!(
-        output.status.success(),
-        "hermes profile local install should succeed\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-
-    assert!(
-        home.path()
-            .join(".hermes/profiles/project/plugins/tracedecay/plugin.yaml")
-            .exists()
-    );
-    assert_hermes_config_enables_tracedecay_memory(
-        &home.path().join(".hermes/profiles/project/config.yaml"),
-    );
-    assert!(
-        !project
-            .path()
-            .join(".hermes/plugins/tracedecay/plugin.yaml")
-            .exists(),
-        "--profile should target a profile instead of project plugin directory"
-    );
-}
-
-#[test]
-fn test_hermes_install_rejects_invalid_profile_names() {
-    let home = TempDir::new().unwrap();
-    let _agent_env = crate::common::AgentEnvLock::pin(&home);
-    let ctx = InstallContext {
-        home: home.path().to_path_buf(),
-        tracedecay_bin: "/usr/local/bin/tracedecay".to_string(),
-        tool_permissions: expected_tool_perms(),
-        profile: Some("_bad".to_string()),
-        project_root: None,
-        dashboard: false,
-    };
-
-    let err = HermesIntegration.install(&ctx).unwrap_err().to_string();
-    assert!(err.contains("invalid Hermes profile"));
-    assert!(!home.path().join(".hermes/profiles/_bad").exists());
-}
-
-#[test]
-fn test_profile_flag_is_only_valid_for_hermes_install() {
-    let home = TempDir::new().unwrap();
-    let project = TempDir::new().unwrap();
-
-    let output = tracedecay_command(project.path(), home.path())
-        .arg("install")
-        .arg("--agent")
-        .arg("cursor")
-        .arg("--profile")
-        .arg("work")
-        .output()
-        .expect("run install with invalid --profile agent");
-
-    assert!(!output.status.success());
-    assert!(
-        String::from_utf8_lossy(&output.stderr)
-            .contains("`--profile` is only supported with `--agent hermes`")
-    );
-}
-
-#[test]
-fn test_profile_flag_is_valid_for_hermes_uninstall_only() {
-    let home = TempDir::new().unwrap();
-    let project = TempDir::new().unwrap();
-
-    let install = tracedecay_command(project.path(), home.path())
-        .arg("install")
-        .arg("--agent")
-        .arg("hermes")
-        .arg("--profile")
-        .arg("work")
-        .output()
-        .expect("run hermes profile install");
-    assert!(
-        install.status.success(),
-        "hermes profile install should succeed\nstderr:\n{}",
-        String::from_utf8_lossy(&install.stderr)
-    );
-    let plugin_dir = home.path().join(".hermes/profiles/work/plugins/tracedecay");
-    assert!(plugin_dir.exists());
-
-    let uninstall = tracedecay_command(project.path(), home.path())
-        .arg("uninstall")
-        .arg("--agent")
-        .arg("hermes")
-        .arg("--profile")
-        .arg("work")
-        .output()
-        .expect("run hermes profile uninstall");
-    assert!(
-        uninstall.status.success(),
-        "hermes profile uninstall should succeed\nstderr:\n{}",
-        String::from_utf8_lossy(&uninstall.stderr)
-    );
-    assert!(!plugin_dir.exists());
-
-    let invalid = tracedecay_command(project.path(), home.path())
-        .arg("uninstall")
-        .arg("--agent")
-        .arg("cursor")
-        .arg("--profile")
-        .arg("work")
-        .output()
-        .expect("run non-Hermes uninstall with profile");
-    assert!(!invalid.status.success());
-    assert!(
-        String::from_utf8_lossy(&invalid.stderr)
-            .contains("`--profile` is only supported with `--agent hermes`")
-    );
 }
 
 #[test]
@@ -2670,23 +2398,19 @@ fn test_hermes_install_preserves_user_keys_in_tracedecay_config_block() {
         home: home.path().to_path_buf(),
         tracedecay_bin: "/usr/local/bin/tracedecay".to_string(),
         tool_permissions: expected_tool_perms(),
-        profile: None,
         project_root: Some(std::path::PathBuf::from("/pinned/project")),
         dashboard: false,
     };
     HermesIntegration.install(&ctx).unwrap();
 
     let config = std::fs::read_to_string(hermes_dir.join("config.yaml")).unwrap();
-    assert!(
-        config.contains("    project_root: \"/pinned/project\""),
-        "install must add the pin to the existing plugins.tracedecay block:\n{config}"
-    );
+    assert!(!config.contains("project_root:"));
     assert!(
         config.contains("    summary_model: glm-4.7"),
         "install must keep user keys in the plugins.tracedecay block:\n{config}"
     );
 
-    // Uninstall drops only the generated pin and keeps the user's keys.
+    // Uninstall keeps user-owned plugin settings.
     HermesIntegration
         .uninstall(&make_install_ctx(home.path()))
         .unwrap();
@@ -2702,7 +2426,7 @@ fn test_hermes_install_preserves_user_keys_in_tracedecay_config_block() {
 }
 
 #[test]
-fn test_hermes_healthcheck_warns_on_stale_plugin_and_missing_pin() {
+fn test_hermes_healthcheck_warns_on_stale_plugin() {
     let home = TempDir::new().unwrap();
     let project = TempDir::new().unwrap();
     install_hermes_default(home.path());
@@ -2713,7 +2437,7 @@ fn test_hermes_healthcheck_warns_on_stale_plugin_and_missing_pin() {
         project_path: project.path().to_path_buf(),
     };
 
-    // Fresh install: version matches the binary, no pin — no warnings.
+    // Fresh install: version matches the binary — no warnings.
     let mut dc = DoctorCounters::new();
     HermesIntegration.healthcheck(&mut dc, &hctx);
     assert_eq!(dc.warnings, 0, "fresh install should be healthy");
@@ -2734,24 +2458,6 @@ fn test_hermes_healthcheck_warns_on_stale_plugin_and_missing_pin() {
     assert_eq!(
         dc.warnings, 1,
         "stale generated plugin version should warn once"
-    );
-
-    // A pinned project root that no longer exists must warn too.
-    HermesIntegration
-        .install(&InstallContext {
-            home: home.path().to_path_buf(),
-            tracedecay_bin: "/usr/local/bin/tracedecay".to_string(),
-            tool_permissions: expected_tool_perms(),
-            profile: None,
-            project_root: Some(std::path::PathBuf::from("/missing/pinned/project")),
-            dashboard: false,
-        })
-        .unwrap();
-    let mut dc = DoctorCounters::new();
-    HermesIntegration.healthcheck(&mut dc, &hctx);
-    assert_eq!(
-        dc.warnings, 1,
-        "a dangling pinned project root should warn once"
     );
 }
 
@@ -2777,7 +2483,7 @@ fn test_hermes_install_rejects_inline_plugins_config_without_rewrite() {
 }
 
 #[test]
-fn test_hermes_uninstall_preserves_other_profile_plugins_and_config() {
+fn test_hermes_uninstall_retires_legacy_named_profile_plugin() {
     let home = TempDir::new().unwrap();
     let _agent_env = crate::common::AgentEnvLock::pin(&home);
     let profile = home.path().join(".hermes/profiles/work");
@@ -2797,7 +2503,6 @@ fn test_hermes_uninstall_preserves_other_profile_plugins_and_config() {
         home: home.path().to_path_buf(),
         tracedecay_bin: String::new(),
         tool_permissions: expected_tool_perms(),
-        profile: Some("work".to_string()),
         project_root: None,
         dashboard: false,
     };
@@ -2809,7 +2514,7 @@ fn test_hermes_uninstall_preserves_other_profile_plugins_and_config() {
     let config = std::fs::read_to_string(profile.join("config.yaml")).unwrap();
     assert!(config.contains("theme: dark"));
     assert!(config.contains("    - other"));
-    assert!(!config.contains("    - tracedecay"));
+    assert!(!config.contains("tracedecay"));
 }
 
 #[test]
@@ -3060,8 +2765,16 @@ fn test_local_install_gemini_rejects_symlinked_gemini_dir() {
 
 #[cfg(unix)]
 #[test]
-fn test_local_install_hermes_rejects_symlinked_hermes_dir() {
-    assert_local_install_rejects_symlinked_target("hermes", ".hermes", true);
+fn test_hermes_local_install_is_unsupported() {
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    let output = tracedecay_command(project.path(), home.path())
+        .args(["install", "--local", "--agent", "hermes"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("does not support"));
+    assert!(!project.path().join(".hermes").exists());
 }
 
 #[cfg(unix)]
@@ -4968,7 +4681,6 @@ fn test_antigravity_install_writes_cli_plugin() {
         home: home.to_path_buf(),
         tracedecay_bin: bin.to_string(),
         tool_permissions: expected_tool_perms(),
-        profile: None,
         project_root: None,
         dashboard: false,
     };
@@ -5021,7 +4733,6 @@ fn test_antigravity_uninstall_removes_both_locations() {
         home: home.to_path_buf(),
         tracedecay_bin: bin.to_string(),
         tool_permissions: expected_tool_perms(),
-        profile: None,
         project_root: None,
         dashboard: false,
     };
@@ -5209,7 +4920,6 @@ fn make_install_ctx_with_real_bin(home: &Path) -> InstallContext {
         home: home.to_path_buf(),
         tracedecay_bin: bin_path.to_string_lossy().to_string(),
         tool_permissions: expected_tool_perms(),
-        profile: None,
         project_root: None,
         dashboard: false,
     }
@@ -5421,7 +5131,7 @@ async fn test_cursor_healthcheck_warns_on_literal_workspace_folder_transcript_pa
 }
 
 #[test]
-fn test_healthcheck_hermes_profile_install_checks_named_profiles() {
+fn test_healthcheck_hermes_install_ignores_profile_context() {
     let home = TempDir::new().unwrap();
     let _agent_env = crate::common::AgentEnvLock::pin(&home);
     let project = TempDir::new().unwrap();
@@ -5429,30 +5139,16 @@ fn test_healthcheck_hermes_profile_install_checks_named_profiles() {
         home: home.path().to_path_buf(),
         tracedecay_bin: "/usr/local/bin/tracedecay".to_string(),
         tool_permissions: expected_tool_perms(),
-        profile: Some("work".to_string()),
         project_root: None,
         dashboard: false,
     };
     HermesIntegration.install(&ctx).unwrap();
-
-    let mut dc = DoctorCounters::new();
-    let hctx = HealthcheckContext {
-        home: home.path().to_path_buf(),
-        project_path: project.path().to_path_buf(),
-    };
-    HermesIntegration.healthcheck(&mut dc, &hctx);
-    assert_eq!(dc.issues, 0, "Hermes profile install should have no issues");
-    assert_eq!(
-        dc.warnings, 0,
-        "Hermes healthcheck should recognize named profile installs"
+    assert!(
+        home.path()
+            .join(".hermes/plugins/tracedecay/plugin.yaml")
+            .exists()
     );
-}
-
-#[test]
-fn test_healthcheck_hermes_local_install_checks_project_hermes_home() {
-    let home = TempDir::new().unwrap();
-    let project = TempDir::new().unwrap();
-    assert_local_install_success("hermes", project.path(), home.path());
+    assert!(!home.path().join(".hermes/profiles/work").exists());
 
     let mut dc = DoctorCounters::new();
     let hctx = HealthcheckContext {
@@ -5460,10 +5156,10 @@ fn test_healthcheck_hermes_local_install_checks_project_hermes_home() {
         project_path: project.path().to_path_buf(),
     };
     HermesIntegration.healthcheck(&mut dc, &hctx);
-    assert_eq!(dc.issues, 0, "Hermes local install should have no issues");
+    assert_eq!(dc.issues, 0, "Hermes user install should have no issues");
     assert_eq!(
         dc.warnings, 0,
-        "Hermes healthcheck should recognize project-local HERMES_HOME installs"
+        "Hermes healthcheck should check the one user install"
     );
 }
 
@@ -6509,14 +6205,13 @@ fn test_backup_and_safe_write_round_trip() {
 }
 
 #[test]
-fn test_hermes_install_writes_and_preserves_project_root_pin() {
+fn test_hermes_install_ignores_project_root_context() {
     let home = TempDir::new().unwrap();
     let _agent_env = crate::common::AgentEnvLock::pin(&home);
     let pinned = InstallContext {
         home: home.path().to_path_buf(),
         tracedecay_bin: "/usr/local/bin/tracedecay".to_string(),
         tool_permissions: expected_tool_perms(),
-        profile: None,
         project_root: Some(std::path::PathBuf::from("/pinned/project")),
         dashboard: false,
     };
@@ -6524,64 +6219,36 @@ fn test_hermes_install_writes_and_preserves_project_root_pin() {
 
     let tools_path = home.path().join(".hermes/plugins/tracedecay/tools.py");
     let config_path = home.path().join(".hermes/config.yaml");
-    // The config block is the single pin home; the generated tools.py
-    // carries no install-time pin constant.
     let tools_py = std::fs::read_to_string(&tools_path).unwrap();
-    assert!(
-        !tools_py.contains("PINNED_PROJECT_ROOT"),
-        "tools.py must not carry a pin constant (the config block owns the pin):\n{tools_py}"
-    );
+    assert!(!tools_py.contains("PINNED_PROJECT_ROOT"));
+    assert!(!tools_py.contains("config_pinned_project_root"));
     let config = std::fs::read_to_string(&config_path).unwrap();
     assert!(
-        config.contains("  tracedecay:")
-            && config.contains("    project_root: \"/pinned/project\""),
-        "install --project-root must write the pin into the conventional plugins.tracedecay config block:\n{config}"
+        !config.contains("project_root:"),
+        "Hermes install context must not create a profile-local project pin:\n{config}"
     );
 
-    // A reinstall without the flag must keep the pin (no silent unpinning).
+    // Reinstalls regenerate artifacts without introducing a pin.
     HermesIntegration
         .install(&make_install_ctx(home.path()))
         .unwrap();
     let config = std::fs::read_to_string(&config_path).unwrap();
-    assert!(
-        config.contains("    project_root: \"/pinned/project\""),
-        "reinstall must preserve the plugins.tracedecay config pin:\n{config}"
-    );
+    assert!(!config.contains("project_root:"));
 
-    // A reinstall after the generated tools.py was deleted still keeps the
-    // config pin (the pin never lived in the generated Python).
+    // A reinstall after tools.py was deleted remains pin-free.
     std::fs::remove_file(&tools_path).unwrap();
     HermesIntegration
         .install(&make_install_ctx(home.path()))
         .unwrap();
     assert!(tools_path.is_file(), "reinstall must regenerate tools.py");
     let config = std::fs::read_to_string(&config_path).unwrap();
-    assert!(
-        config.contains("    project_root: \"/pinned/project\""),
-        "reinstall must keep the plugins.tracedecay.project_root pin:\n{config}"
-    );
+    assert!(!config.contains("project_root:"));
 
-    // Uninstall removes the generated pin from the config block.
     HermesIntegration
         .uninstall(&make_install_ctx(home.path()))
         .unwrap();
     let config = std::fs::read_to_string(&config_path).unwrap();
-    assert!(
-        !config.contains("project_root:") && !config.contains("  tracedecay:"),
-        "uninstall must remove the generated plugins.tracedecay pin block:\n{config}"
-    );
-
-    // A fresh install without a pin stays unpinned.
-    let fresh_home = TempDir::new().unwrap();
-    HermesIntegration
-        .install(&make_install_ctx(fresh_home.path()))
-        .unwrap();
-    let fresh_config =
-        std::fs::read_to_string(fresh_home.path().join(".hermes/config.yaml")).unwrap();
-    assert!(
-        !fresh_config.contains("project_root:"),
-        "fresh install without --project-root must not write a config pin:\n{fresh_config}"
-    );
+    assert!(!config.contains("project_root:"));
 }
 
 #[test]
@@ -6608,7 +6275,8 @@ import sys
 
 plugin_dir = pathlib.Path(sys.argv[1])
 hermes_home = plugin_dir.parent.parent
-os.environ["HERMES_HOME"] = str(hermes_home)
+os.environ["HOME"] = str(hermes_home.parent)
+os.environ["HERMES_HOME"] = "/ignored/hermes-home"
 
 # Simulate a user (or the installer) putting settings in the conventional
 # plugins.tracedecay config block.
@@ -6639,10 +6307,9 @@ plugin = importlib.util.module_from_spec(spec)
 sys.modules[module_name] = plugin
 spec.loader.exec_module(plugin)
 
-# The subprocess dispatch path resolves the pin from the config block; the
-# generated tools.py carries no pin constant at all.
+# Legacy project_root is ignored; host-behavior settings remain readable.
 assert not hasattr(plugin.tools, "PINNED_PROJECT_ROOT")
-assert plugin.tools.config_pinned_project_root() == "/config/block/project"
+assert not hasattr(plugin.tools, "config_pinned_project_root")
 
 captured = {}
 
@@ -6659,16 +6326,15 @@ plugin.tools.subprocess.run = fake_run
 plugin.tools.call_tracedecay_tool("tracedecay_status", {})
 argv = captured["argv"]
 assert "--project" in argv, argv
-assert argv[argv.index("--project") + 1] == "/config/block/project", argv
+assert argv[argv.index("--project") + 1] == os.getcwd(), argv
 plugin.tools.call_tracedecay_tool("tracedecay_status", {}, cwd=str(healthy_cwd))
 argv = captured["argv"]
 assert "--project" in argv, argv
 assert argv[argv.index("--project") + 1] == str(healthy_cwd), argv
 
-# The context engine layers the block under the host config: block values
-# fill gaps, host-provided values always win.
+# The context engine filters the legacy pin but layers host-behavior settings.
 engine = plugin.TraceDecayContextEngine()
-assert engine.project_root == "/config/block/project", engine.project_root
+assert engine.project_root is None, engine.project_root
 engine.on_session_start(session_id="s1", cwd=str(healthy_cwd))
 assert engine.project_root == str(healthy_cwd), engine.project_root
 assert plugin._lcm_str_setting(engine.config, "LCM_SUMMARY_MODEL", "summary_model", default="") == "glm-4.7"

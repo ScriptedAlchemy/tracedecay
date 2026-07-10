@@ -19,7 +19,6 @@ fn make_ctx(home: &Path) -> InstallContext {
         home: home.to_path_buf(),
         tracedecay_bin: "/usr/local/bin/tracedecay".to_string(),
         tool_permissions: Vec::new(),
-        profile: None,
         project_root: None,
         dashboard: true,
     }

@@ -87,8 +87,7 @@ fn dashboard_automation_runs_skip_when_disabled_and_record_history() {
             &serde_json::json!({
                 "provider": "cursor",
                 "query": "workflow corrections",
-                "evidence_limit": 7,
-                "storage_scope": "project_local"
+                "evidence_limit": 7
             }),
         );
         assert_eq!(status, 202);
@@ -121,6 +120,27 @@ fn dashboard_automation_runs_skip_when_disabled_and_record_history() {
             rejected_skill_body.contains("unsupported_field"),
             "rejection should name the unsupported field: {rejected_skill_body}"
         );
+        for (field, value) in [
+            ("storage_scope", serde_json::json!("hermes_profile")),
+            ("hermes_home", serde_json::json!("/tmp/hermes")),
+        ] {
+            let mut body = serde_json::Map::new();
+            body.insert(field.to_string(), value);
+            let mut response = agent
+                .post(&format!("{base_url}/api/automation/run/skill-writing"))
+                .send_json(serde_json::Value::Object(body))
+                .expect("removed storage selector should receive response");
+            let status = response.status().as_u16();
+            let response_body = response
+                .body_mut()
+                .read_to_string()
+                .expect("storage selector rejection should be readable");
+            assert_eq!(status, 422);
+            assert!(
+                response_body.contains(field),
+                "rejection should name removed {field}: {response_body}"
+            );
+        }
 
         let run_ids = [
             memory_payload["run_id"].as_str().unwrap().to_string(),

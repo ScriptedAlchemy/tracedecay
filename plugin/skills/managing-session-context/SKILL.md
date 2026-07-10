@@ -64,9 +64,8 @@ before assuming the compacted summary is complete.
 
 ## Lifecycle tools (mutating — host/lifecycle intent only)
 
-All take `--provider` and (except doctor/status) `--session-id`. All default to
-`storage_scope: "project_local"`; pass `hermes_profile` with an absolute
-`hermes_home` only when the user targets a Hermes profile store.
+All take `--provider` and (except doctor/status) `--session-id`. They use the
+active registered project's user-profile session store.
 
 1. **Preflight → `tracedecay_lcm_preflight`** (`provider`, `session-id`, plus
    token knobs like `current-tokens`, `threshold-tokens`, `context-length`,

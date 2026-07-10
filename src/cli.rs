@@ -133,17 +133,6 @@ pub enum Commands {
         /// Write project-local configuration in the current directory
         #[arg(long)]
         local: bool,
-        /// Hermes profile to install into (only used with --agent hermes)
-        #[arg(long)]
-        profile: Option<String>,
-        /// Install into the default profile and every Hermes profile directory
-        #[arg(long, conflicts_with = "profile")]
-        all_profiles: bool,
-        /// Pin the generated plugin to a project root (absolute path; only
-        /// used with --agent hermes). All plugin tool calls then resolve that
-        /// project's .tracedecay/ stores regardless of the Hermes cwd.
-        #[arg(long, conflicts_with = "all_profiles")]
-        project_root: Option<String>,
         /// Skip deploying the tracedecay dashboard plugin page into the
         /// Hermes dashboard (and remove a previously deployed one; only
         /// used with --agent hermes).
@@ -166,10 +155,10 @@ pub enum Commands {
     /// touching agent config files.
     ///
     /// Rewrites only tracedecay-generated artifacts — the Hermes plugin
-    /// (.py files, schemas.json, dashboard page) for every detected profile,
+    /// (.py files, schemas.json, dashboard page) for the user integration,
     /// the Cursor plugin bundle, the Codex plugin bundle/cache, and the Kiro
     /// managed agent — re-baking the current binary path and version. Config
-    /// files (Hermes config.yaml and its project_root pin, mcp.json, settings,
+    /// files (Hermes config.yaml, mcp.json, settings,
     /// prompt rules) are left byte-for-byte intact; use `tracedecay reinstall`
     /// to refresh those.
     #[command(
@@ -189,12 +178,6 @@ pub enum Commands {
         /// Agent to remove (removes all if omitted)
         #[arg(long, value_parser = agent_value_parser())]
         agent: Option<String>,
-        /// Hermes profile to uninstall from (only used with --agent hermes)
-        #[arg(long)]
-        profile: Option<String>,
-        /// Uninstall from the default profile and every Hermes profile directory
-        #[arg(long, conflicts_with = "profile")]
-        all_profiles: bool,
     },
     /// Extraction worker (spawned by tracedecay itself; not for direct use).
     #[command(name = "extract-worker", hide = true)]

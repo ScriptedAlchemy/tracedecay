@@ -33,9 +33,6 @@ pub struct CursorTranscriptIngestStats {
 }
 
 pub fn project_session_db_path(project_root: &Path) -> PathBuf {
-    if is_hermes_profile_home(project_root) {
-        return hermes_profile_session_db_path(project_root);
-    }
     resolve_layout_for_current_profile(project_root).map_or_else(
         |_| {
             let profile_root = default_profile_root()
@@ -53,10 +50,6 @@ pub async fn open_project_session_db(project_root: &Path) -> Option<GlobalDb> {
 }
 
 pub async fn resolved_project_session_db_path(project_root: &Path) -> Option<PathBuf> {
-    if is_hermes_profile_home(project_root) {
-        return Some(hermes_profile_session_db_path(project_root));
-    }
-
     match crate::storage::read_enrollment_marker(project_root) {
         Ok(Some(_)) => {
             return resolve_layout_for_current_profile(project_root)
@@ -80,9 +73,31 @@ async fn registry_profile_session_db_path(project_root: &Path) -> Option<PathBuf
     let git_common_dir = (!crate::worktree::is_detached_linked_worktree(project_root))
         .then(|| crate::worktree::git_common_dir(project_root))
         .flatten();
-    let resolution = global
+    // Mirror the graph store's identity-then-unique-remote fallback
+    // (`resolve_store_layout_for_project` in tracedecay/lifecycle.rs) so a
+    // renamed/moved checkout keeps routing its session history to the store it
+    // was originally registered under, instead of silently forking a fresh
+    // session DB at a new default path.
+    let resolution = if let Some(resolution) = global
         .resolve_project_store_by_identity(project_root, git_common_dir.as_deref())
-        .await?;
+        .await
+    {
+        resolution
+    } else {
+        let remote = crate::tracedecay::git_remote_url(project_root)?;
+        let resolution = global
+            .resolve_unique_project_store_by_git_remote(&remote)
+            .await?;
+        // Remote uniqueness alone cannot tell a renamed checkout (whose
+        // original registered location no longer exists on disk) apart from
+        // a second, still-present clone of the same remote. Only borrow the
+        // registered store when the original checkout is gone, so a live
+        // clone never inherits another checkout's session history.
+        if registered_checkout_present(&resolution.project) {
+            return None;
+        }
+        resolution
+    };
     if resolution.store.storage_mode != "profile_sharded" {
         return None;
     }
@@ -93,114 +108,21 @@ async fn registry_profile_session_db_path(project_root: &Path) -> Option<PathBuf
     )
 }
 
-fn is_hermes_profile_home(path: &Path) -> bool {
-    path.join("config.yaml").is_file() || path.join("state.db").is_file()
-}
-
-pub fn hermes_profile_session_db_path(hermes_home: &Path) -> PathBuf {
-    hermes_home
-        .join(crate::config::TRACEDECAY_DIR)
-        .join(PROJECT_SESSION_DB_FILENAME)
-}
-
-pub fn resolve_hermes_profile_session_db_path(
-    hermes_home: &Path,
-) -> std::result::Result<PathBuf, String> {
-    Ok(resolve_hermes_profile_tracedecay_dir(hermes_home, true)?.join(PROJECT_SESSION_DB_FILENAME))
-}
-
-/// Typed outcome of [`resolve_hermes_profile_session_db_readonly`].
-pub enum HermesProfileDbReadOnly {
-    /// sessions.db exists and is ready to open read-only.
-    Exists(PathBuf),
-    /// The `.tracedecay` dir and path are valid but sessions.db is absent —
-    /// nothing has been ingested yet. Carries the path the store would live
-    /// at so callers can report it.
-    NotIngested(PathBuf),
-    /// A security or configuration error (symlink escape, bad path, etc.)
-    /// that should be surfaced as a hard error.
-    ConfigError(String),
-}
-
-/// Resolves the path to the hermes profile session DB for read-only access,
-/// distinguishing "valid path but file not yet created" from security /
-/// configuration errors such as symlink escapes or non-directory `.tracedecay`.
-pub fn resolve_hermes_profile_session_db_readonly(hermes_home: &Path) -> HermesProfileDbReadOnly {
-    let dir = match resolve_hermes_profile_tracedecay_dir(hermes_home, false) {
-        Ok(dir) => dir,
-        Err(msg) => return HermesProfileDbReadOnly::ConfigError(msg),
-    };
-    let db_path = dir.join(PROJECT_SESSION_DB_FILENAME);
-    if db_path.is_file() {
-        HermesProfileDbReadOnly::Exists(db_path)
-    } else {
-        HermesProfileDbReadOnly::NotIngested(db_path)
-    }
-}
-
-/// Resolves the `TraceDecay` data directory within a Hermes profile home.
-fn resolve_hermes_profile_tracedecay_dir(
-    hermes_home: &Path,
-    create_missing: bool,
-) -> std::result::Result<PathBuf, String> {
-    let brand_dir = hermes_home.join(crate::config::TRACEDECAY_DIR);
-
-    match std::fs::symlink_metadata(&brand_dir) {
-        Ok(metadata) => {
-            if metadata.file_type().is_symlink() {
-                return Err(format!(
-                    "hermes_profile LCM storage rejects symlinked .tracedecay directory: {}",
-                    brand_dir.display()
-                ));
-            }
-            if !metadata.is_dir() {
-                return Err(format!(
-                    "hermes_profile LCM storage requires .tracedecay to be a directory: {}",
-                    brand_dir.display()
-                ));
-            }
-        }
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound && create_missing => {
-            std::fs::create_dir_all(&brand_dir).map_err(|err| {
-                format!(
-                    "could not create hermes_profile .tracedecay directory {}: {err}",
-                    brand_dir.display()
-                )
-            })?;
-        }
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-            return Err(format!(
-                "hermes_profile LCM storage requires an existing .tracedecay directory: {}",
-                brand_dir.display()
-            ));
-        }
-        Err(err) => {
-            return Err(format!(
-                "could not inspect hermes_profile .tracedecay directory {}: {err}",
-                brand_dir.display()
-            ));
-        }
-    }
-
-    let canonical_parent = brand_dir.canonicalize().map_err(|err| {
-        format!(
-            "could not resolve hermes_profile .tracedecay directory {}: {err}",
-            brand_dir.display()
-        )
-    })?;
-    let canonical_home = hermes_home.canonicalize().map_err(|err| {
-        format!(
-            "could not resolve hermes_profile home {}: {err}",
-            hermes_home.display()
-        )
-    })?;
-    if !canonical_parent.starts_with(&canonical_home) {
-        return Err(format!(
-            "hermes_profile LCM storage path must stay inside hermes_home: {}",
-            canonical_parent.display()
-        ));
-    }
-    Ok(canonical_parent)
+/// Returns `true` when the checkout a registered project was recorded at still
+/// exists on disk. A renamed/moved checkout leaves neither its canonical root
+/// nor its git common dir behind, whereas a separate clone of the same remote
+/// leaves the original checkout in place.
+fn registered_checkout_present(project: &crate::global_db::CodeProjectRecord) -> bool {
+    let roots = [
+        Some(project.canonical_root.as_str()),
+        Some(project.display_root.as_str()),
+        project.git_common_dir.as_deref(),
+    ];
+    roots
+        .into_iter()
+        .flatten()
+        .filter(|root| !root.is_empty())
+        .any(|root| Path::new(root).exists())
 }
 
 /// A Cursor hook event scoped to one transcript file.

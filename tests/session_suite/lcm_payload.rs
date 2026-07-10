@@ -913,7 +913,7 @@ async fn lcm_status_reports_missing_and_orphan_payloads_without_previewing_conte
     let status_json = serde_json::to_value(&status).unwrap();
 
     assert_eq!(status_json["schema_version"], LCM_SCHEMA_VERSION);
-    assert_eq!(status_json["storage_scope"], "project_local");
+    assert!(status_json.get("storage_scope").is_none());
     assert_eq!(status_json["raw_message_count"], 1);
     assert_eq!(status_json["summary_node_count"], 0);
     assert_eq!(status_json["external_payload_count"], 1);

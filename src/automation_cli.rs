@@ -508,8 +508,6 @@ async fn handle_automation_run_command(
             provider,
             query,
             evidence_limit,
-            storage_scope,
-            hermes_home,
             scope,
             session_id,
             include_summaries,
@@ -554,8 +552,6 @@ async fn handle_automation_run_command(
                 SessionReflectorAutomationOptions {
                     trigger: tracedecay::automation::run_ledger::AutomationTrigger::ManualCli,
                     run_id: None,
-                    storage_scope,
-                    hermes_home,
                     provider,
                     query,
                     scope: lcm_scope,
@@ -578,8 +574,6 @@ async fn handle_automation_run_command(
             provider,
             query,
             evidence_limit,
-            storage_scope,
-            hermes_home,
             path,
         } => {
             if !dry_run {
@@ -608,8 +602,6 @@ async fn handle_automation_run_command(
                 SkillWriterAutomationOptions {
                     trigger: tracedecay::automation::run_ledger::AutomationTrigger::ManualCli,
                     run_id: None,
-                    storage_scope,
-                    hermes_home,
                     provider,
                     query,
                     evidence_limit,

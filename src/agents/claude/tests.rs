@@ -46,7 +46,6 @@ fn install_ctx(home: &Path) -> InstallContext {
         home: home.to_path_buf(),
         tracedecay_bin: "/usr/local/bin/tracedecay".to_string(),
         tool_permissions: vec!["mcp__tracedecay__search".to_string()],
-        profile: None,
         project_root: None,
         dashboard: true,
     }

@@ -1,102 +1,9 @@
-use std::io;
 use std::path::{Path, PathBuf};
 
 use tracedecay::automation::config::{
     AutomationBackend, AutomationConfigPatch, AutomationHostMode, AutomationTaskPatch,
     apply_project_config_patch, project_config_path,
 };
-
-pub(crate) fn hermes_profile_targets(
-    home: &Path,
-) -> tracedecay::errors::Result<Vec<Option<String>>> {
-    let mut targets = vec![None];
-    let profiles_dir = home.join(".hermes/profiles");
-    let entries = match std::fs::read_dir(&profiles_dir) {
-        Ok(entries) => entries,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(targets),
-        Err(e) => {
-            return Err(tracedecay::errors::TraceDecayError::Config {
-                message: format!(
-                    "failed to read Hermes profiles directory {}: {e}",
-                    profiles_dir.display()
-                ),
-            });
-        }
-    };
-
-    let mut profile_names = Vec::new();
-    for entry in entries {
-        let entry = entry.map_err(|e| tracedecay::errors::TraceDecayError::Config {
-            message: format!(
-                "failed to read Hermes profiles directory {}: {e}",
-                profiles_dir.display()
-            ),
-        })?;
-        let file_type =
-            entry
-                .file_type()
-                .map_err(|e| tracedecay::errors::TraceDecayError::Config {
-                    message: format!(
-                        "failed to inspect Hermes profile {}: {e}",
-                        entry.path().display()
-                    ),
-                })?;
-        if !file_type.is_dir() {
-            continue;
-        }
-        let name = entry.file_name().into_string().map_err(|_| {
-            tracedecay::errors::TraceDecayError::Config {
-                message: format!(
-                    "Hermes profile path is not valid UTF-8: {}",
-                    entry.path().display()
-                ),
-            }
-        })?;
-        profile_names.push(name);
-    }
-    profile_names.sort();
-    targets.extend(profile_names.into_iter().map(Some));
-    Ok(targets)
-}
-
-pub(crate) fn validate_hermes_profile_flags(
-    agent: Option<&str>,
-    profile: &Option<String>,
-    all_profiles: bool,
-) -> tracedecay::errors::Result<()> {
-    if profile.is_some() && agent != Some("hermes") {
-        return Err(tracedecay::errors::TraceDecayError::Config {
-            message: "`--profile` is only supported with `--agent hermes`".to_string(),
-        });
-    }
-    if all_profiles && agent != Some("hermes") {
-        return Err(tracedecay::errors::TraceDecayError::Config {
-            message: "`--all-profiles` is only supported with `--agent hermes`".to_string(),
-        });
-    }
-    Ok(())
-}
-
-pub(crate) fn validate_hermes_project_root_flag(
-    agent: Option<&str>,
-    project_root: &Option<String>,
-) -> tracedecay::errors::Result<Option<PathBuf>> {
-    let Some(project_root) = project_root else {
-        return Ok(None);
-    };
-    if agent != Some("hermes") {
-        return Err(tracedecay::errors::TraceDecayError::Config {
-            message: "`--project-root` is only supported with `--agent hermes`".to_string(),
-        });
-    }
-    let path = PathBuf::from(project_root);
-    if !path.is_absolute() {
-        return Err(tracedecay::errors::TraceDecayError::Config {
-            message: format!("`--project-root` must be an absolute path, got '{project_root}'"),
-        });
-    }
-    Ok(Some(path))
-}
 
 /// How `install --agent codex --automation` should configure the daemon loop.
 #[derive(Debug, Clone, Copy)]
@@ -218,29 +125,42 @@ fn codex_daemon_interval_task(interval_secs: u64) -> AutomationTaskPatch {
     }
 }
 
-pub(crate) fn hermes_selected_profile_targets(
-    home: &Path,
-    profile: &Option<String>,
-    all_profiles: bool,
-) -> tracedecay::errors::Result<Vec<Option<String>>> {
-    if all_profiles {
-        hermes_profile_targets(home)
-    } else {
-        Ok(vec![profile.clone()])
+/// Moves provable historical Hermes-local session data before any install can
+/// remove its legacy project pin. Unresolved or failed sources block only the
+/// Hermes cutover; the source store and its provenance remain untouched.
+pub(crate) async fn migrate_legacy_hermes_data(home: &Path) -> tracedecay::errors::Result<()> {
+    let report = tracedecay::migrate::hermes::migrate_legacy_hermes_stores(home).await;
+    for migration in report.migrated {
+        eprintln!(
+            "  \x1b[32m✔\x1b[0m Migrated legacy Hermes session store {} -> {} ({} rows)",
+            migration.source_db.display(),
+            migration.target_project.display(),
+            migration.rows_copied
+        );
     }
+    if report.unresolved.is_empty() && report.failed.is_empty() {
+        return Ok(());
+    }
+    let issues = report
+        .unresolved
+        .into_iter()
+        .chain(report.failed)
+        .map(|issue| format!("{}: {}", issue.source_db.display(), issue.reason))
+        .collect::<Vec<_>>()
+        .join("; ");
+    Err(tracedecay::errors::TraceDecayError::Config {
+        message: format!(
+            "legacy Hermes session data could not be migrated; source data and project pins were preserved: {issues}"
+        ),
+    })
 }
 
 pub(crate) async fn handle_install_command(
     agent: Option<String>,
     local: bool,
-    profile: Option<String>,
-    all_profiles: bool,
-    project_root: Option<String>,
     no_dashboard: bool,
     automation: Option<CodexAutomationInstall>,
 ) -> tracedecay::errors::Result<()> {
-    validate_hermes_profile_flags(agent.as_deref(), &profile, all_profiles)?;
-    let pinned_project_root = validate_hermes_project_root_flag(agent.as_deref(), &project_root)?;
     validate_codex_automation_flags(agent.as_deref(), automation)?;
     let home = tracedecay::agents::home_dir().ok_or_else(|| {
         tracedecay::errors::TraceDecayError::Config {
@@ -264,29 +184,18 @@ pub(crate) async fn handle_install_command(
             home: home.clone(),
             tracedecay_bin: tracedecay_bin.clone(),
             tool_permissions: tracedecay::agents::expected_tool_perms(),
-            profile: profile.clone(),
-            project_root: pinned_project_root.clone(),
+            project_root: None,
             dashboard: !no_dashboard,
         };
         let mut installed_names: Vec<String> = Vec::new();
 
         if let Some(id) = agent {
             let ag = tracedecay::agents::get_integration(&id)?;
-            for target_profile in hermes_selected_profile_targets(&home, &profile, all_profiles)? {
-                let ctx = tracedecay::agents::InstallContext {
-                    home: home.clone(),
-                    tracedecay_bin: tracedecay_bin.clone(),
-                    tool_permissions: tracedecay::agents::expected_tool_perms(),
-                    profile: target_profile,
-                    project_root: pinned_project_root.clone(),
-                    dashboard: !no_dashboard,
-                };
-                ag.install_local(&ctx, &project_path)?;
-                ag.post_install(Some(&project_path)).await;
-                if let Some(options) = automation.filter(|_| id == "codex") {
-                    let scoped_project_path = validate_codex_automation_project_path()?;
-                    install_codex_daemon_automation(&scoped_project_path, &home, options).await?;
-                }
+            ag.install_local(&ctx, &project_path)?;
+            ag.post_install(Some(&project_path)).await;
+            if let Some(options) = automation.filter(|_| id == "codex") {
+                let scoped_project_path = validate_codex_automation_project_path()?;
+                install_codex_daemon_automation(&scoped_project_path, &home, options).await?;
             }
             installed_names.push(ag.name().to_string());
         } else {
@@ -317,6 +226,10 @@ pub(crate) async fn handle_install_command(
         return Ok(());
     }
 
+    if agent.as_deref() == Some("hermes") {
+        migrate_legacy_hermes_data(&home).await?;
+    }
+
     let mut user_cfg = tracedecay::user_config::UserConfig::load();
     tracedecay::agents::migrate_installed_agents(&home, &mut user_cfg);
 
@@ -327,21 +240,18 @@ pub(crate) async fn handle_install_command(
     if let Some(id) = agent {
         let ag = tracedecay::agents::get_integration(&id)?;
         let name = ag.name().to_string();
-        for target_profile in hermes_selected_profile_targets(&home, &profile, all_profiles)? {
-            let ctx = tracedecay::agents::InstallContext {
-                home: home.clone(),
-                tracedecay_bin: tracedecay_bin.clone(),
-                tool_permissions: tracedecay::agents::expected_tool_perms(),
-                profile: target_profile,
-                project_root: pinned_project_root.clone(),
-                dashboard: !no_dashboard,
-            };
-            ag.install(&ctx)?;
-            ag.post_install(project_path.as_deref()).await;
-            if let Some(options) = automation.filter(|_| id == "codex") {
-                let scoped_project_path = validate_codex_automation_project_path()?;
-                install_codex_daemon_automation(&scoped_project_path, &home, options).await?;
-            }
+        let ctx = tracedecay::agents::InstallContext {
+            home: home.clone(),
+            tracedecay_bin: tracedecay_bin.clone(),
+            tool_permissions: tracedecay::agents::expected_tool_perms(),
+            project_root: None,
+            dashboard: !no_dashboard,
+        };
+        ag.install(&ctx)?;
+        ag.post_install(project_path.as_deref()).await;
+        if let Some(options) = automation.filter(|_| id == "codex") {
+            let scoped_project_path = validate_codex_automation_project_path()?;
+            install_codex_daemon_automation(&scoped_project_path, &home, options).await?;
         }
         if !user_cfg.installed_agents.contains(&id) {
             user_cfg.installed_agents.push(id);
@@ -356,14 +266,17 @@ pub(crate) async fn handle_install_command(
         let (to_install, to_uninstall) =
             tracedecay::agents::pick_integrations_interactive(&home, &user_cfg.installed_agents)?;
 
+        if to_install.iter().any(|id| id == "hermes") {
+            migrate_legacy_hermes_data(&home).await?;
+        }
+
         for id in &to_uninstall {
             let ag = tracedecay::agents::get_integration(id)?;
             let ctx = tracedecay::agents::InstallContext {
                 home: home.clone(),
                 tracedecay_bin: tracedecay_bin.clone(),
                 tool_permissions: tracedecay::agents::expected_tool_perms(),
-                profile: profile.clone(),
-                project_root: pinned_project_root.clone(),
+                project_root: None,
                 dashboard: !no_dashboard,
             };
             ag.uninstall(&ctx)?;
@@ -376,8 +289,7 @@ pub(crate) async fn handle_install_command(
                 home: home.clone(),
                 tracedecay_bin: tracedecay_bin.clone(),
                 tool_permissions: tracedecay::agents::expected_tool_perms(),
-                profile: profile.clone(),
-                project_root: pinned_project_root.clone(),
+                project_root: None,
                 dashboard: !no_dashboard,
             };
             ag.install(&ctx)?;
@@ -480,6 +392,14 @@ pub(crate) async fn reinstall_agent_integrations(
 ) -> Vec<(String, tracedecay::errors::Result<()>)> {
     let project_path = std::env::current_dir().ok();
     let mut results = Vec::new();
+    let hermes_migration_error = if agent_ids.iter().any(|id| id == "hermes") {
+        migrate_legacy_hermes_data(home)
+            .await
+            .err()
+            .map(|error| error.to_string())
+    } else {
+        None
+    };
     for id in agent_ids {
         let ag = match tracedecay::agents::get_integration(id) {
             Ok(ag) => ag,
@@ -491,11 +411,21 @@ pub(crate) async fn reinstall_agent_integrations(
                 continue;
             }
         };
+        if id == "hermes"
+            && let Some(message) = hermes_migration_error.as_ref()
+        {
+            results.push((
+                id.clone(),
+                Err(tracedecay::errors::TraceDecayError::Config {
+                    message: message.clone(),
+                }),
+            ));
+            continue;
+        }
         let ctx = tracedecay::agents::InstallContext {
             home: home.to_path_buf(),
             tracedecay_bin: tracedecay_bin.to_string(),
             tool_permissions: tracedecay::agents::expected_tool_perms(),
-            profile: None,
             project_root: None,
             dashboard: true,
         };
@@ -513,10 +443,7 @@ pub(crate) async fn reinstall_agent_integrations(
 
 pub(crate) async fn handle_uninstall_command(
     agent: Option<String>,
-    profile: Option<String>,
-    all_profiles: bool,
 ) -> tracedecay::errors::Result<()> {
-    validate_hermes_profile_flags(agent.as_deref(), &profile, all_profiles)?;
     let home = tracedecay::agents::home_dir().ok_or_else(|| {
         tracedecay::errors::TraceDecayError::Config {
             message: "could not determine home directory".to_string(),
@@ -525,19 +452,22 @@ pub(crate) async fn handle_uninstall_command(
     let mut user_cfg = tracedecay::user_config::UserConfig::load();
     tracedecay::agents::migrate_installed_agents(&home, &mut user_cfg);
 
+    if agent.as_deref() == Some("hermes")
+        || (agent.is_none() && user_cfg.installed_agents.iter().any(|id| id == "hermes"))
+    {
+        migrate_legacy_hermes_data(&home).await?;
+    }
+
     if let Some(id) = agent {
         let ag = tracedecay::agents::get_integration(&id)?;
-        for target_profile in hermes_selected_profile_targets(&home, &profile, all_profiles)? {
-            let ctx = tracedecay::agents::InstallContext {
-                home: home.clone(),
-                tracedecay_bin: String::new(),
-                tool_permissions: tracedecay::agents::expected_tool_perms(),
-                profile: target_profile,
-                project_root: None,
-                dashboard: true,
-            };
-            ag.uninstall(&ctx)?;
-        }
+        let ctx = tracedecay::agents::InstallContext {
+            home: home.clone(),
+            tracedecay_bin: String::new(),
+            tool_permissions: tracedecay::agents::expected_tool_perms(),
+            project_root: None,
+            dashboard: true,
+        };
+        ag.uninstall(&ctx)?;
         user_cfg.installed_agents.retain(|a| a != &id);
         user_cfg
             .save()
@@ -551,7 +481,6 @@ pub(crate) async fn handle_uninstall_command(
                     home: home.clone(),
                     tracedecay_bin: String::new(),
                     tool_permissions: tracedecay::agents::expected_tool_perms(),
-                    profile: None,
                     project_root: None,
                     dashboard: true,
                 };

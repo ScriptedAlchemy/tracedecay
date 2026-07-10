@@ -523,6 +523,6 @@ fn safe_relative_path(path: &Path) -> Result<&Path> {
 
 fn hermes_host_owned_error() -> TraceDecayError {
     config_error(
-        "Hermes owns profile skills, pending approvals, usage telemetry, and curator state; use the read-only Hermes skill bridge instead of exporting TraceDecay managed skills into Hermes",
+        "Hermes owns profile skills, pending approvals, usage telemetry, and curator state; TraceDecay does not export managed skills into Hermes",
     )
 }

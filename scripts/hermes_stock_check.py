@@ -5,8 +5,7 @@ Run from the upstream hermes-agent repo root with its own interpreter
 (`.venv/bin/python` after `uv sync`), after `tracedecay install --agent hermes`
 wrote the plugin into a throwaway profile:
 
-    HERMES_HOME=<throwaway>/.hermes \
-    TRACEDECAY_PROJECT_ROOT=<throwaway-project> \
+    HOME=<throwaway> \
     .venv/bin/python scripts/hermes_stock_check.py
 
 Asserts the surfaces stock Hermes actually exposes:
@@ -47,9 +46,8 @@ def unwrap_tool_json(raw):
 
 
 def main():
-    hermes_home = os.environ["HERMES_HOME"]
-    project_root = os.environ["TRACEDECAY_PROJECT_ROOT"]
-    sys.path.insert(0, os.getcwd())
+    hermes_home = os.path.join(os.environ["HOME"], ".hermes")
+    project_root = os.getcwd()
 
     # 1. Stock general plugin manager: discovery, enablement, registrations.
     from hermes_cli.plugins import get_plugin_manager, get_plugin_context_engine
@@ -104,7 +102,7 @@ def main():
     assert isinstance(engine, ContextEngine)
     ok("context engine activates via stock plugin fallback")
 
-    engine.initialize(session_id="stock-check-session", hermes_home=hermes_home)
+    engine.initialize(session_id="stock-check-session", cwd=project_root)
     engine.update_model("stock-check-model", 128000)
     engine.update_from_response({"prompt_tokens": 120, "completion_tokens": 30})
     assert engine.last_total_tokens == 150
@@ -153,7 +151,7 @@ def main():
     assert provider.is_available() is True
     ok("memory provider discovered and available on stock")
 
-    provider.initialize("stock-check-session", hermes_home=hermes_home)
+    provider.initialize("stock-check-session", cwd=project_root)
     schema_names = [schema["name"] for schema in provider.get_tool_schemas()]
     assert schema_names == ["fact_store", "fact_feedback", "memory_status"], schema_names
     ok("memory tool schemas collapsed to fact_store/fact_feedback/memory_status")
@@ -207,18 +205,18 @@ def main():
     assert mirrored.get("count", 0) >= 1, mirrored
     ok("on_memory_write mirrors built-in memory writes")
 
-    # 4. Graph tool dispatch through the generated tools.py against the
-    #    pinned throwaway project.
+    # 4. Graph tool dispatch through generated tools.py against the real cwd,
+    #    never the Hermes plugin/config directory.
     plugin = loaded.module
     graph_status = unwrap_tool_json(plugin.tools.call_tracedecay_tool("tracedecay_status", {}))
     assert graph_status.get("file_count", 0) >= 1, graph_status
     assert graph_status.get("node_count", 0) >= 1, graph_status
     ok(
-        "graph tool dispatch round-trips against the pinned project",
+        "graph tool dispatch round-trips against the working project",
         f"files={graph_status.get('file_count')} nodes={graph_status.get('node_count')}",
     )
-    assert plugin.tools.config_pinned_project_root() == project_root
-    ok("plugins.tracedecay.project_root pin resolves", project_root)
+    assert project_root != hermes_home
+    ok("Hermes home does not select the TraceDecay project", project_root)
 
     print(f"1..{PASS}")
     print(f"stock hermes integration: all {PASS} checks passed")

@@ -250,8 +250,8 @@ directly, so TraceDecay has no counter for them. The managed skill store
 (`tracedecay tool skill_list`) holds 2 skills; the sampled one has
 **12 views, 0 uses, 3 patches**, and its own improvement recommendation
 already flags "skill has been patched but still has no recorded successful
-uses". `tracedecay_skill_list` was called 3 times ever;
-`tracedecay_hermes_skill_bridge` once.
+uses". `tracedecay_skill_list` was called 3 times ever; the Hermes skill
+inventory was called once before its input was restricted to `~/.hermes`.
 
 ---
 

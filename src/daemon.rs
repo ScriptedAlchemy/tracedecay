@@ -2740,7 +2740,7 @@ async fn serve_projectless_client(
             break;
         };
         let response = match serde_json::from_str::<JsonRpcRequest>(&line) {
-            Ok(request) => projectless_response(&request, client_identity).await,
+            Ok(request) => projectless_response(&request, client_identity),
             Err(e) => Some(JsonRpcResponse::error(
                 json!(null),
                 ErrorCode::ParseError,
@@ -2758,7 +2758,7 @@ async fn serve_projectless_client(
 }
 
 #[cfg(unix)]
-async fn projectless_response(
+fn projectless_response(
     request: &crate::mcp::JsonRpcRequest,
     client_identity: &DaemonClientIdentity,
 ) -> Option<crate::mcp::JsonRpcResponse> {
@@ -2779,9 +2779,11 @@ async fn projectless_response(
                 }
             }),
         )),
-        "tools/call" => Some(
-            projectless_tools_call_response(id, request.params.as_ref(), client_identity).await,
-        ),
+        "tools/call" => Some(projectless_tools_call_response(
+            id,
+            request.params.as_ref(),
+            client_identity,
+        )),
         "ping" | "logging/setLevel" => Some(JsonRpcResponse::success(id, json!({}))),
         _ => Some(JsonRpcResponse::error(
             id,
@@ -2792,22 +2794,22 @@ async fn projectless_response(
 }
 
 #[cfg(unix)]
-async fn projectless_tools_call_response(
+fn projectless_tools_call_response(
     id: serde_json::Value,
     params: Option<&serde_json::Value>,
     _client_identity: &DaemonClientIdentity,
 ) -> crate::mcp::JsonRpcResponse {
-    let (tool_name, arguments) = match projectless_tool_call(params) {
+    let (tool_name, _arguments) = match projectless_tool_call(params) {
         Ok(tool_call) => tool_call,
         Err(message) => {
             return JsonRpcResponse::error(id, ErrorCode::InvalidParams, message.to_string());
         }
     };
-
-    match crate::mcp::tools::handle_profile_scoped_lcm_tool_call(tool_name, arguments).await {
-        Ok(result) => JsonRpcResponse::success(id, result.value),
-        Err(e) => JsonRpcResponse::error(id, ErrorCode::InternalError, e.to_string()),
-    }
+    JsonRpcResponse::error(
+        id,
+        ErrorCode::InternalError,
+        format!("{tool_name} requires an initialized code project"),
+    )
 }
 
 #[cfg(unix)]

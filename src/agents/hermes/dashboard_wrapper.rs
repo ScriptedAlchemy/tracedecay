@@ -31,9 +31,8 @@ const WRAPPER_ENTRY_JS: &str = include_str!("../../../dashboard/hermes-wrapper/s
 /// Wrapper-chrome stylesheet (concatenated ahead of the child stylesheets).
 const WRAPPER_CSS: &str = include_str!("../../../dashboard/hermes-wrapper/src/wrapper.css");
 
-/// Placeholder lines in `plugin_api.py` rewritten with deploy-time values.
+/// Placeholder line in `plugin_api.py` rewritten with the installed binary.
 const BIN_PLACEHOLDER: &str = "DEPLOYED_TRACEDECAY_BIN = None";
-const ROOT_PLACEHOLDER: &str = "DEPLOYED_PROJECT_ROOT = None";
 
 /// Returns true when `plugin_dir` contains a generated dashboard wrapper.
 pub(super) fn is_deployed(plugin_dir: &Path) -> bool {
@@ -47,11 +46,10 @@ pub(super) fn is_deployed(plugin_dir: &Path) -> bool {
 pub(super) fn apply_install_policy(
     plugin_dir: &Path,
     tracedecay_bin: &str,
-    pinned_project_root: Option<&str>,
     deploy_dashboard: bool,
 ) -> Result<()> {
     if deploy_dashboard {
-        deploy(plugin_dir, tracedecay_bin, pinned_project_root)
+        deploy(plugin_dir, tracedecay_bin)
     } else {
         uninstall(plugin_dir)
     }
@@ -60,35 +58,24 @@ pub(super) fn apply_install_policy(
 /// Refreshes a dashboard wrapper only when the previous install had one.
 ///
 /// `tracedecay update-plugin` must preserve a `--no-dashboard` install as
-/// dashboard-free while still rebaking wrapper assets and deploy-time defaults
+/// dashboard-free while still rebaking wrapper assets and the binary path
 /// for installs where the dashboard page already exists.
 pub(super) fn refresh_if_previously_deployed(
     plugin_dir: &Path,
     tracedecay_bin: &str,
-    pinned_project_root: Option<&str>,
     previously_deployed: bool,
 ) -> Result<()> {
     if previously_deployed {
-        deploy(plugin_dir, tracedecay_bin, pinned_project_root)?;
+        deploy(plugin_dir, tracedecay_bin)?;
     }
     Ok(())
 }
 
 /// Deploys the dashboard wrapper into `<plugin_dir>/dashboard/`.
 ///
-/// `tracedecay_bin` and `pinned_project_root` are baked into the deployed
-/// `plugin_api.py` (the wrapper's `TRACEDECAY_BIN` / `TRACEDECAY_DASHBOARD_PROJECT`
-/// environment variables still win at runtime), so the spawned
-/// `tracedecay dashboard` child serves the profile's pinned project without
-/// any extra host configuration. When no explicit pin exists, project-local
-/// installs fall back to the Hermes profile/project directory that owns
-/// `plugins/tracedecay`.
-fn deploy(
-    plugin_dir: &Path,
-    tracedecay_bin: &str,
-    pinned_project_root: Option<&str>,
-) -> Result<()> {
-    let dashboard_root = dashboard_project_root(plugin_dir, pinned_project_root);
+/// The binary path is baked into `plugin_api.py`; the dashboard resolves its
+/// real project from the Hermes process cwd or an explicit `TraceDecay` env var.
+fn deploy(plugin_dir: &Path, tracedecay_bin: &str) -> Result<()> {
     let dashboard_dir = plugin_dir.join("dashboard");
     let dist_dir = dashboard_dir.join("dist");
     std::fs::create_dir_all(&dist_dir).map_err(|e| TraceDecayError::Config {
@@ -98,7 +85,7 @@ fn deploy(
     super::write_text_file(&dashboard_dir.join("manifest.json"), &manifest_json()?)?;
     super::write_text_file(
         &dashboard_dir.join("plugin_api.py"),
-        &plugin_api(tracedecay_bin, dashboard_root.as_deref())?,
+        &plugin_api(tracedecay_bin)?,
     )?;
     super::write_text_file(&dist_dir.join("index.js"), WRAPPER_ENTRY_JS)?;
     super::write_text_file(
@@ -121,22 +108,6 @@ fn deploy(
         dashboard_dir.display()
     );
     Ok(())
-}
-
-/// Chooses the default project root baked into `plugin_api.py`.
-///
-/// For global/profile installs an explicit config pin wins. Without one, the
-/// wrapper falls back to the Hermes profile directory that owns the generated
-/// plugin, matching the historical deploy behavior regardless of the cwd from
-/// which the Hermes host later imports the plugin.
-fn dashboard_project_root(plugin_dir: &Path, pinned_project_root: Option<&str>) -> Option<String> {
-    if let Some(pin) = pinned_project_root {
-        return Some(pin.to_string());
-    }
-    plugin_dir
-        .parent()
-        .and_then(Path::parent)
-        .map(|profile_dir| profile_dir.display().to_string())
 }
 
 /// Removes a previously deployed dashboard wrapper (uninstall and the
@@ -190,36 +161,29 @@ fn manifest_json() -> Result<String> {
         })
 }
 
-/// The embedded `plugin_api.py` with the deploy-time defaults rewritten.
+/// The embedded `plugin_api.py` with the deploy-time binary path rewritten.
 ///
-/// The placeholders are exact module-level lines in the canonical wrapper;
+/// The placeholder is an exact module-level line in the canonical wrapper;
 /// substitution always starts from the embedded template, so reinstalls are
-/// idempotent and re-pin cleanly.
-fn plugin_api(tracedecay_bin: &str, pinned_project_root: Option<&str>) -> Result<String> {
+/// idempotent.
+fn plugin_api(tracedecay_bin: &str) -> Result<String> {
     let encode = |value: &str| {
         // JSON string literals are valid Python string literals.
         serde_json::to_string(value).map_err(|e| TraceDecayError::Config {
             message: format!("unencodable deploy value for plugin_api.py: {e}"),
         })
     };
-    if !PLUGIN_API_PY.contains(BIN_PLACEHOLDER) || !PLUGIN_API_PY.contains(ROOT_PLACEHOLDER) {
+    if !PLUGIN_API_PY.contains(BIN_PLACEHOLDER) {
         return Err(TraceDecayError::Config {
-            message: "embedded plugin_api.py is missing its deploy placeholders — \
+            message: "embedded plugin_api.py is missing its binary placeholder — \
                       this is a tracedecay build bug"
                 .to_string(),
         });
     }
-    let mut api = PLUGIN_API_PY.replace(
+    Ok(PLUGIN_API_PY.replace(
         BIN_PLACEHOLDER,
         &format!("DEPLOYED_TRACEDECAY_BIN = {}", encode(tracedecay_bin)?),
-    );
-    if let Some(root) = pinned_project_root {
-        api = api.replace(
-            ROOT_PLACEHOLDER,
-            &format!("DEPLOYED_PROJECT_ROOT = {}", encode(root)?),
-        );
-    }
-    Ok(api)
+    ))
 }
 
 /// Wrapper stylesheet: wrapper chrome + the child stylesheets, concatenated
@@ -285,30 +249,28 @@ mod tests {
     }
 
     #[test]
-    fn plugin_api_bakes_bin_and_pin() {
-        let api = plugin_api("/usr/local/bin/tracedecay", Some("/home/u/proj")).unwrap();
+    fn plugin_api_bakes_binary_but_no_project() {
+        let api = plugin_api("/usr/local/bin/tracedecay").unwrap();
         assert!(api.contains(r#"DEPLOYED_TRACEDECAY_BIN = "/usr/local/bin/tracedecay""#));
-        assert!(api.contains(r#"DEPLOYED_PROJECT_ROOT = "/home/u/proj""#));
+        assert!(!api.contains("DEPLOYED_PROJECT_ROOT"));
         assert!(!api.contains(BIN_PLACEHOLDER));
-        assert!(!api.contains(ROOT_PLACEHOLDER));
     }
 
     #[test]
-    fn plugin_api_without_pin_uses_profile_dir_default() {
+    fn plugin_api_never_uses_plugin_profile_dir_as_project() {
         let temp = TempDir::new().unwrap();
         let plugin_dir = temp.path().join(".hermes/plugins/tracedecay");
-        deploy(&plugin_dir, "/usr/local/bin/tracedecay", None).unwrap();
+        deploy(&plugin_dir, "/usr/local/bin/tracedecay").unwrap();
 
         let api = text(&plugin_dir.join("dashboard/plugin_api.py"));
-        let expected_root =
-            serde_json::to_string(&temp.path().join(".hermes").display().to_string()).unwrap();
-        assert!(api.contains(&format!("DEPLOYED_PROJECT_ROOT = {expected_root}")));
+        assert!(!api.contains("DEPLOYED_PROJECT_ROOT"));
+        assert!(!api.contains(temp.path().to_string_lossy().as_ref()));
         assert!(!api.contains(BIN_PLACEHOLDER));
     }
 
     #[test]
     fn plugin_api_escapes_quotes_in_paths() {
-        let api = plugin_api("/tmp/we\"ird/tracedecay", None).unwrap();
+        let api = plugin_api("/tmp/we\"ird/tracedecay").unwrap();
         assert!(api.contains(r#"DEPLOYED_TRACEDECAY_BIN = "/tmp/we\"ird/tracedecay""#));
     }
 
@@ -331,7 +293,7 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let plugin_dir = temp.path().join(".hermes/plugins/tracedecay");
 
-        apply_install_policy(&plugin_dir, "/bin/tracedecay", Some("/project"), true).unwrap();
+        apply_install_policy(&plugin_dir, "/bin/tracedecay", true).unwrap();
 
         assert!(is_deployed(&plugin_dir));
         assert!(plugin_dir.join("dashboard/dist/index.js").is_file());
@@ -341,7 +303,7 @@ mod tests {
         assert!(plugin_dir.join("dashboard/dist/savings.js").is_file());
         let api = text(&plugin_dir.join("dashboard/plugin_api.py"));
         assert!(api.contains(r#"DEPLOYED_TRACEDECAY_BIN = "/bin/tracedecay""#));
-        assert!(api.contains(r#"DEPLOYED_PROJECT_ROOT = "/project""#));
+        assert!(!api.contains("DEPLOYED_PROJECT_ROOT"));
     }
 
     #[test]
@@ -349,7 +311,7 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let plugin_dir = temp.path().join("missing/profile/plugins/tracedecay");
 
-        apply_install_policy(&plugin_dir, "/bin/tracedecay", None, true).unwrap();
+        apply_install_policy(&plugin_dir, "/bin/tracedecay", true).unwrap();
 
         assert!(plugin_dir.join("dashboard/manifest.json").is_file());
         assert!(plugin_dir.join("dashboard/dist/style.css").is_file());
@@ -359,36 +321,23 @@ mod tests {
     fn update_over_existing_wrapper_replaces_generated_content() {
         let temp = TempDir::new().unwrap();
         let plugin_dir = temp.path().join(".hermes/plugins/tracedecay");
-        apply_install_policy(
-            &plugin_dir,
-            "/old/bin/tracedecay",
-            Some("/old/project"),
-            true,
-        )
-        .unwrap();
+        apply_install_policy(&plugin_dir, "/old/bin/tracedecay", true).unwrap();
 
-        apply_install_policy(
-            &plugin_dir,
-            "/new/bin/tracedecay",
-            Some("/new/project"),
-            true,
-        )
-        .unwrap();
+        apply_install_policy(&plugin_dir, "/new/bin/tracedecay", true).unwrap();
 
         let api = text(&plugin_dir.join("dashboard/plugin_api.py"));
         assert!(api.contains("/new/bin/tracedecay"));
-        assert!(api.contains("/new/project"));
         assert!(!api.contains("/old/bin/tracedecay"));
-        assert!(!api.contains("/old/project"));
+        assert!(!api.contains("DEPLOYED_PROJECT_ROOT"));
     }
 
     #[test]
     fn no_dashboard_policy_removes_generated_wrapper() {
         let temp = TempDir::new().unwrap();
         let plugin_dir = temp.path().join(".hermes/plugins/tracedecay");
-        apply_install_policy(&plugin_dir, "/bin/tracedecay", Some("/project"), true).unwrap();
+        apply_install_policy(&plugin_dir, "/bin/tracedecay", true).unwrap();
 
-        apply_install_policy(&plugin_dir, "/bin/tracedecay", Some("/project"), false).unwrap();
+        apply_install_policy(&plugin_dir, "/bin/tracedecay", false).unwrap();
 
         assert!(!plugin_dir.join("dashboard").exists());
     }
@@ -397,10 +346,10 @@ mod tests {
     fn no_dashboard_policy_preserves_non_generated_files() {
         let temp = TempDir::new().unwrap();
         let plugin_dir = temp.path().join(".hermes/plugins/tracedecay");
-        apply_install_policy(&plugin_dir, "/bin/tracedecay", Some("/project"), true).unwrap();
+        apply_install_policy(&plugin_dir, "/bin/tracedecay", true).unwrap();
         std::fs::write(plugin_dir.join("dashboard/notes.txt"), "user file").unwrap();
 
-        apply_install_policy(&plugin_dir, "/bin/tracedecay", Some("/project"), false).unwrap();
+        apply_install_policy(&plugin_dir, "/bin/tracedecay", false).unwrap();
 
         assert_eq!(text(&plugin_dir.join("dashboard/notes.txt")), "user file");
         assert!(!plugin_dir.join("dashboard/manifest.json").exists());
@@ -412,10 +361,10 @@ mod tests {
     fn repeated_deploy_is_idempotent() {
         let temp = TempDir::new().unwrap();
         let plugin_dir = temp.path().join(".hermes/plugins/tracedecay");
-        apply_install_policy(&plugin_dir, "/bin/tracedecay", Some("/project"), true).unwrap();
+        apply_install_policy(&plugin_dir, "/bin/tracedecay", true).unwrap();
         let before = file_contents(&plugin_dir.join("dashboard"));
 
-        apply_install_policy(&plugin_dir, "/bin/tracedecay", Some("/project"), true).unwrap();
+        apply_install_policy(&plugin_dir, "/bin/tracedecay", true).unwrap();
         let after = file_contents(&plugin_dir.join("dashboard"));
 
         assert_eq!(after, before);
@@ -426,8 +375,7 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let plugin_dir = temp.path().join(".hermes/plugins/tracedecay");
 
-        refresh_if_previously_deployed(&plugin_dir, "/bin/tracedecay", Some("/project"), false)
-            .unwrap();
+        refresh_if_previously_deployed(&plugin_dir, "/bin/tracedecay", false).unwrap();
 
         assert!(!plugin_dir.join("dashboard").exists());
     }
@@ -436,24 +384,12 @@ mod tests {
     fn refresh_updates_previously_deployed_wrapper() {
         let temp = TempDir::new().unwrap();
         let plugin_dir = temp.path().join(".hermes/plugins/tracedecay");
-        apply_install_policy(
-            &plugin_dir,
-            "/old/bin/tracedecay",
-            Some("/old/project"),
-            true,
-        )
-        .unwrap();
+        apply_install_policy(&plugin_dir, "/old/bin/tracedecay", true).unwrap();
 
-        refresh_if_previously_deployed(
-            &plugin_dir,
-            "/new/bin/tracedecay",
-            Some("/new/project"),
-            true,
-        )
-        .unwrap();
+        refresh_if_previously_deployed(&plugin_dir, "/new/bin/tracedecay", true).unwrap();
 
         let api = text(&plugin_dir.join("dashboard/plugin_api.py"));
         assert!(api.contains("/new/bin/tracedecay"));
-        assert!(api.contains("/new/project"));
+        assert!(!api.contains("DEPLOYED_PROJECT_ROOT"));
     }
 }

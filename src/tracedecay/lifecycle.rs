@@ -1128,7 +1128,7 @@ fn profile_store_id(project_id: &str) -> String {
     format!("store:{project_id}:profile_sharded")
 }
 
-fn git_remote_url(project_root: &Path) -> Option<String> {
+pub(crate) fn git_remote_url(project_root: &Path) -> Option<String> {
     // gix reads the same config `git config --get` would (repo-local +
     // global) without a subprocess spawn.
     if let Ok(repo) = gix::discover(project_root) {

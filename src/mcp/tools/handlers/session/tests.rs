@@ -343,7 +343,6 @@ fn oversized_needs_synthesis_expand_query_payload() -> Value {
         "status": "ok",
         "provider": "claude",
         "session_id": "s1",
-        "storage_scope": "project",
         "needs_synthesis": true,
         "prompt": "What changed in the auth flow?",
         "context_blocks": context_blocks,

@@ -1020,6 +1020,34 @@ fn automation_run_skill_writing_skips_without_backend_when_disabled() {
 }
 
 #[test]
+fn automation_run_rejects_removed_hermes_storage_flags() {
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+
+    for (task, flag, value) in [
+        ("session-reflection", "--storage-scope", "hermes_profile"),
+        ("session-reflection", "--hermes-home", "/tmp/hermes"),
+        ("skill-writing", "--storage-scope", "hermes_profile"),
+        ("skill-writing", "--hermes-home", "/tmp/hermes"),
+    ] {
+        let mut run = tracedecay_command(home.path(), project.path());
+        run.args(["automation", "run", task, flag, value]);
+        let output = run_with_timeout(run, cli_timeout());
+        assert!(
+            !output.status.success(),
+            "{task} must reject removed {flag}\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("unexpected argument") && stderr.contains(flag),
+            "{task} should report {flag} as unknown:\n{stderr}"
+        );
+    }
+}
+
+#[test]
 fn bare_invocation_skips_create_prompt_when_stdin_not_a_terminal() {
     let home = TempDir::new().unwrap();
     let project = TempDir::new().unwrap();

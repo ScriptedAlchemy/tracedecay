@@ -262,16 +262,16 @@ transcripts"), so Codex sessions also feed reflection.
   The write path from transcripts → facts exists but is off unless the user
   enables automation.
 
-### 3.5 hermes_skill_bridge / skill deployment
+### 3.5 Host skill inventory and deployment
 
-`src/automation/hermes_bridge.rs` is a **read-only projection** of
-Hermes-owned skill lifecycle state (skills dir, pending write approvals,
-usage, curator config) for dashboards/MCP. Skill *deployment* to agents goes
-through the managed-skill overlay (`managed_skills.rs`, `skill_targets.rs`,
-`install_*_managed_skill_overlay`) — agent-authored skills land in the
-`agent-managed/` skill dir of each installed plugin. Relevant here only as
-the template for "TraceDecay materializes generated content into agent
-surfaces on a schedule," which design D reuses for memory.
+`tracedecay_hermes_skill_bridge` provides a read-only inventory of skills,
+pending approvals, usage, and archives from the standard `~/.hermes` install.
+It accepts no alternate home or profile selector. Skill deployment to agents
+goes through the managed-skill overlay
+(`managed_skills.rs`, `skill_targets.rs`, `install_*_managed_skill_overlay`)
+so agent-authored skills land in the `agent-managed/` directory of each
+installed plugin. This is the template for "TraceDecay materializes generated
+content into agent surfaces on a schedule," which design D reuses for memory.
 
 ---
 

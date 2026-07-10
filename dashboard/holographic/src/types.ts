@@ -467,8 +467,6 @@ export interface AutomationRunRequest {
   provider?: string;
   query?: string;
   evidence_limit?: number;
-  storage_scope?: "project_local" | "hermes_profile" | string;
-  hermes_home?: string;
   scope?: "all" | "session" | "current" | string;
   session_id?: string;
   include_summaries?: boolean;

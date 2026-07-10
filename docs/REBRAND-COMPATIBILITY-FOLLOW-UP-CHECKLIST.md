@@ -62,16 +62,18 @@ Goal: turn the approved compatibility policy into small, implementation-ready fo
 
 ## 2. Migration helpers and alias handling
 
-### M-01: Verify Hermes pinned-project-root alias migration end-to-end
-- Area: env/config alias handling
+### M-01: Verify one-time migration of legacy Hermes-local stores
+- Area: storage migration and generated-config cleanup
 - Touchpoints:
   - `src/agents/hermes/profile_config.rs`
   - `src/agents/hermes/tracedecay_migration.rs`
   - `src/agents/hermes/lifecycle.rs`
-- Why: the policy requires `plugins.tracedecay.project_root` to migrate cleanly to `plugins.tracedecay.project_root` when no current key exists.
+- Why: a historical project pin can prove where legacy Hermes-local data
+  belongs, but must never survive as runtime routing state.
 - Done when:
-  - reinstall/refresh preserves a legacy pin when appropriate
-  - a current `plugins.tracedecay.project_root` still wins over the old key
+  - a uniquely provable target receives an idempotent one-time migration
+  - ambiguous or failed migrations preserve and report the source data
+  - install/refresh does not copy or honor a project pin at runtime
   - uninstall/cleanup removes generated legacy artifacts without deleting unknown user files
 
 ### M-02: Verify Hermes plugin/memory/context alias rewrites

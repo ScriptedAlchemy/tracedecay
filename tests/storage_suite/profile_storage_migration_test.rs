@@ -28,12 +28,34 @@ use tracedecay::storage::{
 };
 use tracedecay::tracedecay::{TraceDecay, TraceDecayOpenOptions};
 
+use crate::common::EnvVarGuard;
 use crate::support::HOME_ENV_LOCK;
 
 struct HomeEnvGuard {
     previous_home: Option<OsString>,
     previous_userprofile: Option<OsString>,
     previous_data_dir: Option<OsString>,
+}
+
+#[tokio::test]
+async fn hermes_home_env_cannot_redirect_legacy_migration() {
+    let _lock = HOME_ENV_LOCK.lock().await;
+    let temp = TempDir::new().unwrap();
+    let user_home = temp.path().join("home");
+    let profile_root = temp.path().join("profile");
+    let redirected = temp.path().join("redirected-hermes");
+    let redirected_db = redirected.join(".tracedecay/sessions.db");
+    fs::create_dir_all(redirected_db.parent().unwrap()).unwrap();
+    fs::write(&redirected_db, b"must remain untouched").unwrap();
+    let _hermes_home = EnvVarGuard::set("HERMES_HOME", &redirected);
+
+    let report =
+        tracedecay::migrate::hermes::migrate_legacy_hermes_stores_to(&user_home, &profile_root)
+            .await;
+
+    assert_eq!(report, Default::default());
+    assert_eq!(fs::read(&redirected_db).unwrap(), b"must remain untouched");
+    assert!(!profile_root.exists());
 }
 
 impl HomeEnvGuard {

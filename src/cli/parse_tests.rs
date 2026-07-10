@@ -1,5 +1,3 @@
-use std::path::Path;
-
 use super::{
     AutomationAction, AutomationConfigAction, AutomationConfigScope, AutomationRunAction,
     AutomationRunsAction, AutomationSkillsAction, AutomationSkillsInstallTarget, BranchAction, Cli,
@@ -176,10 +174,6 @@ fn claude_install_alias_dispatches_to_install_command() {
         "claude-install",
         "--agent",
         "hermes",
-        "--profile",
-        "dev",
-        "--project-root",
-        "/tmp/project",
         "--no-dashboard",
     ])
     .expect("install alias should parse");
@@ -189,18 +183,62 @@ fn claude_install_alias_dispatches_to_install_command() {
         Some(Commands::Install {
             agent,
             local,
-            profile,
-            all_profiles,
-            project_root,
             no_dashboard,
             ..
         }) if agent.as_deref() == Some("hermes")
             && !local
-            && profile.as_deref() == Some("dev")
-            && !all_profiles
-            && project_root.as_deref() == Some("/tmp/project")
             && no_dashboard
     ));
+}
+
+#[test]
+fn removed_hermes_install_selectors_are_unknown_arguments() {
+    for args in [
+        vec![
+            "tracedecay",
+            "install",
+            "--agent",
+            "hermes",
+            "--profile",
+            "dev",
+        ],
+        vec![
+            "tracedecay",
+            "install",
+            "--agent",
+            "hermes",
+            "--all-profiles",
+        ],
+        vec![
+            "tracedecay",
+            "install",
+            "--agent",
+            "hermes",
+            "--project-root",
+            "/tmp/project",
+        ],
+        vec![
+            "tracedecay",
+            "uninstall",
+            "--agent",
+            "hermes",
+            "--profile",
+            "dev",
+        ],
+        vec![
+            "tracedecay",
+            "uninstall",
+            "--agent",
+            "hermes",
+            "--all-profiles",
+        ],
+    ] {
+        let error = match Cli::try_parse_from(args.clone()) {
+            Ok(_) => panic!("removed flag must fail: {args:?}"),
+            Err(error) => error,
+        };
+        assert_eq!(error.kind(), ErrorKind::UnknownArgument, "args: {args:?}");
+    }
 }
 
 #[test]
@@ -880,10 +918,6 @@ fn automation_run_session_reflection_parses_manual_dry_run_flags() {
         "remember decisions",
         "--evidence-limit",
         "12",
-        "--storage-scope",
-        "hermes_profile",
-        "--hermes-home",
-        "/tmp/hermes-profile",
         "--scope",
         "session",
         "--session-id",
@@ -916,8 +950,6 @@ fn automation_run_session_reflection_parses_manual_dry_run_flags() {
                             provider,
                             query,
                             evidence_limit,
-                            storage_scope,
-                            hermes_home,
                             scope,
                             session_id,
                             include_summaries,
@@ -933,8 +965,6 @@ fn automation_run_session_reflection_parses_manual_dry_run_flags() {
             && provider == "codex"
             && query == "remember decisions"
             && evidence_limit == 12
-            && storage_scope == "hermes_profile"
-            && hermes_home.as_deref() == Some(Path::new("/tmp/hermes-profile"))
             && scope == "session"
             && session_id.as_deref() == Some("session-123")
             && !include_summaries
@@ -978,8 +1008,6 @@ fn automation_run_skill_writing_parses_manual_dry_run_flags() {
                             provider,
                             query,
                             evidence_limit,
-                            storage_scope,
-                            hermes_home,
                             path,
                         }
                 }
@@ -987,8 +1015,6 @@ fn automation_run_skill_writing_parses_manual_dry_run_flags() {
             && provider == "cursor"
             && query == "workflow corrections"
             && evidence_limit == 9
-            && storage_scope == "project_local"
-            && hermes_home.is_none()
             && path.as_deref() == Some("/tmp/project")
     ));
 }
@@ -1004,14 +1030,9 @@ fn automation_run_skill_writing_defaults_to_all_providers() {
             action:
                 AutomationAction::Run {
                     action:
-                        AutomationRunAction::SkillWriting {
-                            provider,
-                            storage_scope,
-                            hermes_home,
-                            ..
-                        }
+                        AutomationRunAction::SkillWriting { provider, .. }
                 }
-        }) if provider == "all" && storage_scope == "project_local" && hermes_home.is_none()
+        }) if provider == "all"
     ));
 }
 
@@ -1416,24 +1437,6 @@ fn migrate_commands_parse_manifest_scaffolding_flags() {
             action: MigrateAction::Verify { manifest, json }
         }) if manifest == "/tmp/manifest.json" && json
     ));
-}
-
-#[test]
-fn install_conflicting_profile_flags_fail_during_parse() {
-    let err = match Cli::try_parse_from([
-        "tracedecay",
-        "install",
-        "--agent",
-        "hermes",
-        "--profile",
-        "dev",
-        "--all-profiles",
-    ]) {
-        Ok(_) => panic!("conflicting profile flags should fail"),
-        Err(err) => err,
-    };
-
-    assert_eq!(err.kind(), ErrorKind::ArgumentConflict);
 }
 
 #[test]

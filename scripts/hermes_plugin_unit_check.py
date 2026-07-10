@@ -15,6 +15,8 @@ exists. It asserts the host contracts the 2026-06 review found broken:
   4. The memory provider implements sync_turn / prefetch / on_memory_write
      and calls the right subprocess verbs.
   5. pre_llm_call returns None on non-first turns (prompt-cache safety).
+  6. Hermes host-home state cannot redirect the TraceDecay install, store, or
+     project, and removed storage-routing fields stay out of tool schemas.
 
 Usage:
     python3 scripts/hermes_plugin_unit_check.py [plugin_dir]
@@ -55,7 +57,7 @@ def generate_plugin(work: Path) -> Path:
     env["HOME"] = str(home)
     env["USERPROFILE"] = str(home)
     env["PATH"] = f"{bin_path.parent}{os.pathsep}{env.get('PATH', '')}"
-    env.pop("HERMES_HOME", None)
+    env["HERMES_HOME"] = str(work / "ignored-hermes-host-home")
     subprocess.run(
         [str(bin_path), "install", "--agent", "hermes", "--no-dashboard"],
         check=True,
@@ -66,6 +68,7 @@ def generate_plugin(work: Path) -> Path:
     )
     plugin_dir = home / ".hermes" / "plugins" / "tracedecay"
     assert (plugin_dir / "__init__.py").is_file(), plugin_dir
+    assert not (work / "ignored-hermes-host-home").exists()
     return plugin_dir
 
 
@@ -144,8 +147,9 @@ def run_checks(work: Path):
         plugin_dir = generate_plugin(work)
     ok("generated plugin present", str(plugin_dir))
 
-    hermes_home = plugin_dir.parent.parent
-    os.environ["HERMES_HOME"] = str(hermes_home)
+    host_home = plugin_dir.parent.parent
+    os.environ["HOME"] = str(host_home.parent)
+    os.environ["HERMES_HOME"] = str(work / "ignored-runtime-hermes-home")
     sys.path.insert(0, str(plugin_dir.parent))
     plugin = __import__("tracedecay")
     assert Path(plugin.__file__).resolve() == (plugin_dir / "__init__.py").resolve()
@@ -156,7 +160,12 @@ def run_checks(work: Path):
     manifest = (plugin_dir / "plugin.yaml").read_text(encoding="utf-8")
     assert "generator_commit: " in manifest, manifest.splitlines()[:5]
     assert (plugin_dir / "cli.py").is_file()
-    ok("provenance stamp + cli passthrough generated")
+    skill = (plugin_dir / "skills" / "tracedecay" / "SKILL.md").read_text(
+        encoding="utf-8"
+    )
+    assert "normal user-profile installation" in skill, skill
+    assert "current schemas and are rejected" in skill, skill
+    ok("provenance stamp + cli passthrough + storage guidance generated")
 
     # ── 3. Registration split + provider dedup ──────────────────────────
     # The installer wrote memory.provider: tracedecay into the temp profile
@@ -174,6 +183,9 @@ def run_checks(work: Path):
     assert "tracedecay_lcm_preflight" not in ctx.tools, sorted(ctx.tools)
     # Context-engine native mirrors stay gated without the capability flag.
     assert "lcm_grep" not in ctx.tools, sorted(ctx.tools)
+    assert ctx.provider.get_config_schema() == [], ctx.provider.get_config_schema()
+    schemas = json.dumps([entry["schema"] for entry in ctx.tools.values()])
+    assert "storage_scope" not in schemas and "hermes_home" not in schemas, schemas
     ok("code-graph tools register; provider-owned fact tools dedup", f"{len(ctx.tools)} tools")
 
     class OtherProviderCtx(StubCtx):
@@ -210,7 +222,7 @@ def run_checks(work: Path):
 
     real_block = plugin.tools.plugin_config_block
     try:
-        plugin.tools.plugin_config_block = lambda hermes_home=None: {"nudge": False}
+        plugin.tools.plugin_config_block = lambda *_args, **_kwargs: {"nudge": False}
         assert hook(is_first_turn=True) is None
     finally:
         plugin.tools.plugin_config_block = real_block
@@ -219,7 +231,7 @@ def run_checks(work: Path):
     # ── 1. compress() message-list contract ──────────────────────────────
     engine = ctx.engine
     assert engine is not None
-    engine.initialize(session_id="check-session", hermes_home=str(hermes_home))
+    engine.initialize(session_id="check-session", hermes_home=str(host_home))
     messages = [
         {"role": "user", "content": "hello"},
         {"role": "assistant", "content": "hi"},
@@ -352,18 +364,18 @@ def run_checks(work: Path):
     assert degraded["matches"] == retrieval["matches"]
     ok("expand-query synthesis degrades on RuntimeError with retrieval intact")
 
-    # Storage routing: the pin routes LCM/memory through the resolved project
-    # store instead of falling back to a hidden profile-local sessions DB.
-    storage = plugin._storage_args("/some/pin", str(hermes_home))
-    assert storage["project_root"] == "/some/pin", storage
-    fallback_storage = plugin._storage_args(None, str(hermes_home))
-    assert fallback_storage["project_root"] == str(hermes_home), fallback_storage
-    ok("LCM/memory storage routes through resolved project roots")
+    # Hermes host paths are host configuration only. They never become a
+    # TraceDecay storage selector or fallback project identity.
+    assert not hasattr(plugin, "_storage_args")
+    ok("LCM/memory exposes no Hermes profile storage routing")
 
     # ── 4. provider hooks call the right verbs ───────────────────────────
     provider = ctx.provider
     assert provider is not None
-    provider.initialize("check-session", hermes_home=str(hermes_home))
+    provider.initialize("check-session", hermes_home=str(host_home))
+    expected_project_root = os.getcwd()
+    assert provider.project_root == expected_project_root
+    assert provider.project_root != str(host_home)
     schema_names = [schema["name"] for schema in provider.get_tool_schemas()]
     assert schema_names == ["fact_store", "fact_feedback", "memory_status"], schema_names
     ok("memory schemas collapsed to 3")
@@ -379,8 +391,8 @@ def run_checks(work: Path):
         assert name == "tracedecay_lcm_preflight", calls
         assert args["session_id"] == "other-session"
         assert args["messages"] == messages
-        assert args["project_root"] == str(hermes_home), args
-        assert kwargs["project_root"] == str(hermes_home), kwargs
+        assert "project_root" not in args, args
+        assert kwargs["project_root"] == expected_project_root, kwargs
         ok("sync_turn ingests via tracedecay_lcm_preflight")
 
         provider.sync_turn("only user", "and assistant", session_id="s2", messages=None)
@@ -388,8 +400,8 @@ def run_checks(work: Path):
         assert name == "tracedecay_lcm_preflight", calls
         assert args["messages"][0]["content"] == "only user"
         assert args["messages"][1]["content"] == "and assistant"
-        assert args["project_root"] == str(hermes_home), args
-        assert kwargs["project_root"] == str(hermes_home), kwargs
+        assert "project_root" not in args, args
+        assert kwargs["project_root"] == expected_project_root, kwargs
         ok("sync_turn synthesizes a turn when messages are missing")
 
         provider.on_memory_write("add", "user", "likes rust", {"session_id": "s"})
@@ -397,8 +409,8 @@ def run_checks(work: Path):
         assert name == "tracedecay_fact_store", calls
         assert args["action"] == "add" and args["category"] == "user_pref"
         assert args["metadata"]["hermes_action"] == "add"
-        assert args["project_root"] == str(hermes_home), args
-        assert kwargs["project_root"] == str(hermes_home), kwargs
+        assert "project_root" not in args, args
+        assert kwargs["project_root"] == expected_project_root, kwargs
         before = len(calls)
         provider.on_memory_write("remove", "memory", "anything")
         assert len(calls) == before

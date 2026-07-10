@@ -691,34 +691,19 @@ fn tool_cli_skips_daemon_notifications_until_matching_response() {
 }
 
 #[test]
-fn profile_scoped_tool_cli_invokes_daemon_without_project_handshake() {
+fn tool_cli_rejects_removed_storage_scope_argument() {
     let home = TempDir::new().unwrap();
-    let hermes_home = TempDir::new().unwrap();
     let outside_cwd = TempDir::new().unwrap();
-    let socket_dir = TempDir::new().unwrap();
     let home_path = canonical_existing_path(home.path());
-    let hermes_home_path = canonical_existing_path(hermes_home.path());
     let outside_cwd_path = canonical_existing_path(outside_cwd.path());
-
-    let sentinel = "profile-scoped daemon response";
-    let socket_path = socket_dir.path().join("tracedecay.sock");
-    let observed_request = spawn_sentinel_daemon(
-        socket_path.clone(),
-        "tracedecay_lcm_status",
-        false,
-        false,
-        sentinel,
-    );
     let args = json!({
         "provider": "cursor",
         "storage_scope": "hermes_profile",
-        "hermes_home": hermes_home_path,
     })
     .to_string();
 
     let output = tracedecay_command_with_home(&home_path)
         .current_dir(&outside_cwd_path)
-        .env("TRACEDECAY_DAEMON_SOCKET", &socket_path)
         .args([
             "tool",
             "tracedecay_lcm_status",
@@ -730,45 +715,34 @@ fn profile_scoped_tool_cli_invokes_daemon_without_project_handshake() {
         .expect("tracedecay tool should run");
 
     assert!(
-        output.status.success(),
-        "profile-scoped tool CLI should accept daemon response\nstdout:\n{}\nstderr:\n{}",
+        !output.status.success(),
+        "removed storage_scope must fail before dispatch\nstdout:\n{}\nstderr:\n{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stdout.contains(sentinel),
-        "tool CLI should print daemon response, got:\n{stdout}"
-    );
-    let request = observed_request
-        .recv_timeout(CLI_ROUNDTRIP_TIMEOUT)
-        .expect("fake daemon should receive profile-scoped tools/call request");
-    assert_eq!(
-        request["params"]["arguments"]["storage_scope"],
-        "hermes_profile"
+        stderr.contains("unknown parameter") && stderr.contains("--storage-scope"),
+        "rejection should name the removed argument:\n{stderr}"
     );
 }
 
 #[test]
-fn profile_scoped_tool_cli_falls_back_without_daemon_socket() {
+fn tool_cli_rejects_removed_hermes_home_argument() {
     let home = TempDir::new().unwrap();
     let hermes_home = TempDir::new().unwrap();
     let outside_cwd = TempDir::new().unwrap();
-    let socket_dir = TempDir::new().unwrap();
     let home_path = canonical_existing_path(home.path());
     let hermes_home_path = canonical_existing_path(hermes_home.path());
     let outside_cwd_path = canonical_existing_path(outside_cwd.path());
-    let missing_socket = socket_dir.path().join("missing.sock");
     let args = json!({
         "provider": "cursor",
-        "storage_scope": "hermes_profile",
         "hermes_home": hermes_home_path,
     })
     .to_string();
 
     let output = tracedecay_command_with_home(&home_path)
         .current_dir(&outside_cwd_path)
-        .env("TRACEDECAY_DAEMON_SOCKET", &missing_socket)
         .args([
             "tool",
             "tracedecay_lcm_status",
@@ -780,15 +754,15 @@ fn profile_scoped_tool_cli_falls_back_without_daemon_socket() {
         .expect("tracedecay tool should run");
 
     assert!(
-        output.status.success(),
-        "profile-scoped tool CLI should fall back when the daemon socket is missing\nstdout:\n{}\nstderr:\n{}",
+        !output.status.success(),
+        "removed hermes_home must fail before dispatch\nstdout:\n{}\nstderr:\n{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stdout.contains("hermes_profile"),
-        "fallback should use the Hermes profile storage scope, got:\n{stdout}"
+        stderr.contains("unknown parameter") && stderr.contains("--hermes-home"),
+        "rejection should name the removed argument:\n{stderr}"
     );
 }
 
