@@ -3,7 +3,10 @@ use std::path::{Path, PathBuf};
 
 use libsql::{Builder, Connection, Database as LibsqlDatabase};
 
-use super::{attach, db_error, db_message, query_i64, quote_identifier, table_exists};
+use super::{
+    LCM_RAW_MESSAGE_DIVERGENCE_PREDICATE, attach, db_error, db_message, query_i64,
+    quote_identifier, table_exists,
+};
 use crate::errors::Result;
 
 #[derive(Debug, Clone, Copy)]
@@ -11,6 +14,21 @@ pub(in crate::migrate::consolidate) struct DatabaseCollisionCounts {
     pub sessions: u64,
     pub messages: u64,
     pub lcm_messages: u64,
+    pub divergent_lcm_messages: u64,
+    pub divergent_lcm_session_ids: u64,
+    pub divergent_lcm_content_hashes: u64,
+    pub divergent_lcm_storage_kinds: u64,
+    pub divergent_lcm_payload_refs: u64,
+}
+
+#[derive(Debug, Default)]
+struct LcmMessageCollisionCounts {
+    overlaps: u64,
+    divergent: u64,
+    session_ids: u64,
+    content_hashes: u64,
+    storage_kinds: u64,
+    payload_refs: u64,
 }
 
 pub(in crate::migrate::consolidate) struct OfflineDatabaseGuards {
@@ -278,18 +296,16 @@ pub(in crate::migrate::consolidate) async fn inspect_collisions(
         "s.provider = t.provider AND s.message_id = t.message_id",
     )
     .await?;
-    let lcm_messages = overlap_count(
-        snapshots,
-        source_sessions,
-        target_sessions,
-        "lcm_raw_messages",
-        "s.provider = t.provider AND s.message_id = t.message_id",
-    )
-    .await?;
+    let lcm = lcm_message_collision_counts(snapshots, source_sessions, target_sessions).await?;
     Ok(DatabaseCollisionCounts {
         sessions,
         messages,
-        lcm_messages,
+        lcm_messages: lcm.overlaps,
+        divergent_lcm_messages: lcm.divergent,
+        divergent_lcm_session_ids: lcm.session_ids,
+        divergent_lcm_content_hashes: lcm.content_hashes,
+        divergent_lcm_storage_kinds: lcm.storage_kinds,
+        divergent_lcm_payload_refs: lcm.payload_refs,
     })
 }
 
@@ -325,6 +341,64 @@ async fn overlap_count(
         .await
         .map_err(|error| db_error("inspect_collisions", error))?;
     u64::try_from(count).map_err(|error| db_error("inspect_collisions", error))
+}
+
+async fn lcm_message_collision_counts(
+    snapshots: &crate::sqlite_read_snapshot::SnapshotSet,
+    source: &Path,
+    target: &Path,
+) -> Result<LcmMessageCollisionCounts> {
+    if !source.is_file() || !target.is_file() {
+        return Ok(LcmMessageCollisionCounts::default());
+    }
+    let source = read_snapshot(snapshots, source)?;
+    let target = read_snapshot(snapshots, target)?;
+    let conn = source.connection();
+    attach(conn, target.path()).await?;
+    let counts = if table_exists(conn, "main", "lcm_raw_messages").await?
+        && table_exists(conn, "other", "lcm_raw_messages").await?
+    {
+        let sql = format!(
+            "SELECT COUNT(*),
+                    COALESCE(SUM(CASE WHEN {LCM_RAW_MESSAGE_DIVERGENCE_PREDICATE} THEN 1 ELSE 0 END), 0),
+                    COALESCE(SUM(CASE WHEN t.session_id IS NOT s.session_id THEN 1 ELSE 0 END), 0),
+                    COALESCE(SUM(CASE WHEN t.content_hash IS NOT s.content_hash THEN 1 ELSE 0 END), 0),
+                    COALESCE(SUM(CASE WHEN t.storage_kind IS NOT s.storage_kind THEN 1 ELSE 0 END), 0),
+                    COALESCE(SUM(CASE WHEN t.payload_ref IS NOT s.payload_ref THEN 1 ELSE 0 END), 0)
+             FROM main.lcm_raw_messages s
+             JOIN other.lcm_raw_messages t
+               ON s.provider=t.provider AND s.message_id=t.message_id"
+        );
+        let mut rows = conn
+            .query(&sql, ())
+            .await
+            .map_err(|error| db_error("inspect_collisions", error))?;
+        let row = rows
+            .next()
+            .await
+            .map_err(|error| db_error("inspect_collisions", error))?
+            .ok_or_else(|| db_message("inspect_collisions", "collision query returned no row"))?;
+        let count = |index| -> Result<u64> {
+            let value = row
+                .get::<i64>(index)
+                .map_err(|error| db_error("inspect_collisions", error))?;
+            u64::try_from(value).map_err(|error| db_error("inspect_collisions", error))
+        };
+        LcmMessageCollisionCounts {
+            overlaps: count(0)?,
+            divergent: count(1)?,
+            session_ids: count(2)?,
+            content_hashes: count(3)?,
+            storage_kinds: count(4)?,
+            payload_refs: count(5)?,
+        }
+    } else {
+        LcmMessageCollisionCounts::default()
+    };
+    conn.execute("DETACH DATABASE other", ())
+        .await
+        .map_err(|error| db_error("inspect_collisions", error))?;
+    Ok(counts)
 }
 
 fn read_snapshot<'a>(
