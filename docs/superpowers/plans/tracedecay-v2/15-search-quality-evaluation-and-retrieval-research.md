@@ -6,7 +6,7 @@
 
 **Decision:** Keep exact phrase/BM25 as the mandatory baseline. Evaluate character-fuzzy, entity/graph, local dense, learned-sparse, fusion, late interaction, cross-encoder reranking, expansion, recency, clustering, and diversification as independently removable stages. No neural component becomes default without measured real-world gains.
 
-**Publication baseline (2026-07-10):** `origin/master` `66584b4d`; #410/#411/#413/#414/#415/#416/#417/#419 merged, #407/#418/#420 open. Refresh before corpus freeze. Treat #410 origin/representative views, #414/#419 `move_symbol` capability/safety text, and #417 split identity as current searchable kinds; split identity is a hard wrong-scope/unsafe-remediation regression, not “no index.” Include #420 proxy/store-authority wording as an exact routing hard negative.
+**Publication baseline (2026-07-10):** `origin/master` `9f7a1108`; #410/#411/#413/#414/#415/#416/#417/#419/#420/#422 merged, #407/#418/#423 open. Refresh before corpus freeze. Treat #410 origin/representative views, #414/#419 `move_symbol` capability/safety text, #417 split identity, #420 proxy/store authority, and #422 host-versus-daemon catalog-refresh semantics as current searchable kinds; split identity is a hard wrong-scope/unsafe-remediation regression, not “no index.” Treat #423's direction-preserving FTS5 normalization and exact-operational-evidence/counter fixture as incoming future-master behavior until merge/green CI, while retaining the absolute-rank reversal as a labeled regression.
 
 ## 0. Boundary and contract integration
 
@@ -15,6 +15,8 @@
 - Plan 16 supplies cross-repository resolver/routing semantics and the Rspack/Rsbuild/React Router scope corpus. Search consumes the canonical resolved selector and preserves repository/worktree/ref/snapshot identity; it never repairs a wrong scope after retrieval.
 - Plan 09 is the sole application boundary for universal search, benchmark/evaluation reads, label/corpus commands, and Search Quality Lab composition. Plan 10/17 expose those use cases through the one official API/catalog/generated SDK contract; plan 11 visualizes the same results.
 - Plan 18 is authoritative for sanitizer/taint wrappers. Queries enter evaluation as protected refs or `Unclassified<T>` that are sanitized before persistence; candidates, qrels, summaries, embeddings, explanations, reports, problems, and exports contain only eligible wrappers or explicit redacted/unknown states.
+- Plan 23 is the normative message/session/LCM temporal specialization and contributes logical-copy, summary-horizon, current/as-of/evolution/forensic, supersession, and context-assembly strata to this shared corpus/evaluation program. Plan 22 consumes promoted retrieval profiles through bounded anchored reads for the optional Context Scout; scout outcomes never become relevance truth automatically.
+- Plan 24 consumes promoted retrieval profiles for task query, decomposition evidence, temporally correct context packets, prior-attempt recovery, and sibling-materiality selection. Task completion, route success, or a model's use of a packet is outcome evidence, never an automatic relevance label; packet qrels include mandatory, useful, redundant, stale, forbidden, and missing-with-coverage classes.
 - Search replay and corpus evaluation are read-only. Creating/updating a private qrel, promoting a synthetic fixture, or activating a retrieval profile is a separate typed command with preview, expected version, sanitization receipt, audit, and rollback.
 
 ## 1. Current supported-surface probe

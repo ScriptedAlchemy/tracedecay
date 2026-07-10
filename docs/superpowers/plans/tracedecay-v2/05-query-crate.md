@@ -14,6 +14,8 @@
 
 This plan refines master-plan PRs 11–16 and supplies the query-side contracts consumed by PRs 24A–24E, 27–31, and 34–37.
 
+Plan [`24-canonical-task-plan-graph-and-multi-agent-executor.md`](24-canonical-task-plan-graph-and-multi-agent-executor.md) extends this same `TraceQueryV1` algebra with initiative/plan/work-item/dependency/lease/attempt/executor/packet/artifact/outcome sources, typed traversal, critical path, agent-relevant slices, and saved task projections. It cannot introduce a task-only query engine, board filter language, cursor, ranking path, or context assembler.
+
 - Canonical AST ownership remains `crates/tracedecay-domain/src/query/`; its public name is `TraceQueryV1`. `crates/tracedecay-query/src/ast.rs` is a parser/re-export façade. This reconciles the master plan's PR 11 file name with its dependency rule that `TraceQueryV1` is a domain type.
 - Canonical entity, scope, time, evidence, sensitivity, shard, watermark, and schema identifiers come from `tracedecay-domain`; this crate does not introduce parallel string IDs.
 - Catalog/projector/store implementations remain in `tracedecay-store` and `tracedecay-projectors`. This crate defines read ports and logical fragments, not SQL migrations or projector write paths.
@@ -23,6 +25,7 @@ This plan refines master-plan PRs 11–16 and supplies the query-side contracts 
 - A frozen query never observes rows above its captured per-shard high-watermarks. A live query starts with the same frozen snapshot and then emits ordered deltas.
 - A missing, corrupt, stale, incompatible, locked, or redacted shard never disappears silently. Its disposition is present in `CoverageReport`.
 - Read-only execution never updates usage, retrieval, hint, ranking, or memory counters. Adoption/feedback is recorded later as an explicit application/domain event.
+- [`23-session-lcm-temporal-retrieval-and-evaluation.md`](23-session-lcm-temporal-retrieval-and-evaluation.md) is the normative session/LCM specialization: this crate owns its occurrence/logical-copy/summary-DAG candidate channels, temporal current/as-of/evolution/forensic resolver, authority/supersession features, federated fusion, context assembly, explanations, and evaluation execution. No legacy `message_search` or LCM binding retains independent rank semantics.
 
 ## 2. Goals
 
@@ -93,7 +96,7 @@ The V1 policy-specific seams (`src/hooks/tool_hints*`, correlation scoring, sche
 - PR #407 (`fix(hermes): use the user TraceDecay profile`) consolidates Hermes into the user profile and removes Hermes-local bridge/config/inventory paths. `All` and every cursor bind to the canonical user `ProfileId`; query planning must not open or federate an implicit Hermes profile. Duplicate imported rows are reconciled by the migration manifest before query exposure.
 - PR #410 (`fix(sessions): collapse copied subagent prompts`) is the V1 semantic baseline for query-time parent representative dedupe and `direct_user`/`subagent`/`tool_result` filters. V2 adds raw/native, representative, human/direct-user, subagent, tool-result, and protocol modes with hidden-copy counts, classifier version, and provenance; it never deletes copied native rows.
 - PR #411 (`fix(doctor): report foreign-installation skill packages as info, not update-nag`) makes ownership and remediation agreement query-visible: Observatory/skills queries return owner class, severity, actionable capability, and `no_action_for_this_installation`; they cannot recommend a mutation the current installation refuses.
-- Current master later merged #410/#411/#414 and release PRs #413/#416. Open #407/#415/#417 and the current release PR are refreshed before PR 11; #417's split-identity visibility is a required scope/coverage fixture, while #414's edit capability is catalog/application behavior rather than a query operator. PR #409 remains historical.
+- Publication master `9f7a1108` later merged #410/#411/#413/#414/#415/#416/#417/#419/#420/#422. Open #407/#418/#423 are refreshed before PR 11; #417's split-identity visibility is a required scope/coverage fixture, #414/#419's edit capability is catalog/application behavior rather than a query operator, and #423's FTS direction/counter behavior is a future regression input until merge. PR #409 remains historical.
 - Rebase PR 11 onto then-current master, regenerate store/profile/tool inventories, and rerun V1 golden queries. Deleted transition paths are not V2 extension points.
 
 ## 5. Exact File and Module Tree

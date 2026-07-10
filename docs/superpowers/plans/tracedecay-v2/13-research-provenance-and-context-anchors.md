@@ -127,6 +127,11 @@ These are retrieval IDs, not quoted transcript content.
 | Application, API, frontend, search, scope, and privacy convergence review | `019f4985-045c-7d72-a1d9-c9029d5a8eef` | Explicit reviewer scope plus artifact/diff evidence; final lead review resolves any remaining cross-plan issue. |
 | Final whole-system architecture coherence audit | `019f4997-4a3d-7ed2-bbc6-d0cce8ae041d` | Read-only 21-file flow/ownership/contract audit; exact findings drove the final anchor/thread/adapter/query/privacy/route corrections. |
 | Final plan publication-quality audit | `019f4997-6c24-7451-a2e8-688d2ddd86de` | Read-only 21-file numbering/type/client/cutoff/current-state audit; exact findings drove the final PR/client/native-row/baseline corrections. |
+| Configuration control-plane plan | `019f49ba-73ba-7483-9cc0-4226ab4bae8c` | Provider-declared child session `/root/plan_configuration_control_plane`; plan 20 is the artifact, including redactor controls and autonomous-curation policy. |
+| CLI/MCP/output unification, Hermes Kanban audit, and canonical task-graph plan | `019f49c0-0d00-7210-bb9f-1085a4635007` | Provider-declared child session `/root/plan_cli_mcp_surface_unification`; plan 21 plus the official/local Hermes research and plan 24 are bounded outputs from successive tasks in the same child thread. |
+| Current CLI/MCP/source inconsistency audit | `019f49c0-3992-7551-b9b4-764217ee5a84` | Provider-declared child session `/root/audit_cli_mcp_inconsistencies`; read-only 104-MCP/CLI/dashboard/renderer evidence drove plans 14/21. |
+| Incremental Context Scout and suggestion-envelope plan | `019f49ca-265b-7771-b062-989e43c577f3` | Provider-declared child session `/root/plan_incremental_context_scout`; plan 22 is the artifact and includes task/material-sibling integration. |
+| Session/LCM temporal retrieval audit and plan | `019f49cc-f04b-7990-a4c7-5f44856d7fae` | Provider-declared child session `/root/plan_session_temporal_retrieval`; plan 23 and its twelve live failure cases are the bounded outputs; the same child later performed an independent task-graph review. |
 
 The initial domain/store author session is not assigned here with false precision. Current LCM copied coordination events into multiple child sessions and left `parent_tool_use_id` null. The plan files and parent thread preserve the work; V2 must repair this attribution class before claiming an exact child owner.
 
@@ -146,7 +151,7 @@ This is a private corpus reference, not a distributable PR fixture. `gitleaks 8.
 
 | Subject | Stable anchor or query | Evidence note |
 |---|---|---|
-| Publication-base master | commit `66584b4dbdee920204cbcf4cf42d0dbc308559e4` | Includes merged #415/#417/#419 at crate version 0.0.47; plan branch verified exactly `0` ahead/`0` behind before final checks. |
+| Publication-base master | commit `9f7a110805edf226bb0d665d6f4ff5c4f03c6163` | Includes merged #415/#417/#419/#420/#422 at crate version 0.0.47; the plan branch is rebased to this or a newer accepted base before final checks. |
 | Legacy store adoption | PR #405; merge commit `e35279586d6a0886856a26842ef17ce51e83da05` | Current-master migration input. |
 | Hermes user-profile consolidation | PR #407; branch `codex/hermes-user-profile-only` | Open future-master input. `sessions_for` returns historical branch-active sessions; latest exemplars include `019f3ff1-7f85-7812-8255-77481331c0a9` and `019f3ff1-d87f-7f40-9cff-275e15bf589a`. |
 | Copied subagent prompt query semantics | PR #410; head `a40b01f714359759b3d0d0ae0c746ad00ef7e72f`; master commit `f4494c3ad7c354637ed5cafde7ad43af8926ca9b` | Merged current-master input; historical `sessions_for`/`workflows` zero remains a capture/correlation coverage fixture. |
@@ -158,7 +163,9 @@ This is a private corpus reference, not a distributable PR fixture. `gitleaks 8.
 | Identity split visibility | PR #417; merge `bccb6bea38adf18dfb0cf0f8987c144fc73f6a37` | Merged status/reconciliation base input; matches the plan-19 live split-store probe. |
 | Pending 0.0.48 publication | PR #418; branch `release-plz-2026-07-10T01-03-19Z`; head `e870c4b8478205bf4ce2c00e366953d8830ff6b3` | Open/`UNSTABLE` publication snapshot for merged #414/#411 changes; import only after merge, tag, package, and digest verification. |
 | Race-safe move-symbol writes | PR #419; head `109d31c3698fbd6a4b50324afd2b30feff8309f3`; merge `66584b4dbdee920204cbcf4cf42d0dbc308559e4` | Merged command/precondition/filesystem/rollback base input. |
-| MCP daemon hot-swap routing | PR #420; branch `codex/mcp-daemon-hot-swap`; head `7f84436ca7ab18732ff344ac9a93169e83813a68` | Open composition/lifecycle/current-client reconnect input; no write replay or stale tool-schema emulation. |
+| MCP daemon hot-swap routing | PR #420; head `7f84436ca7ab18732ff344ac9a93169e83813a68`; merge `6b05327f67cefb8e11b0ad8bca60e0f921c524e1` | Merged composition/lifecycle/current-client input: proxy authority before local store open, per-request reconnect, no uncertain write replay, and explicit new-session/tool-schema refresh boundary. |
+| MCP generation-scoped tool refresh | PR #422; head `9487230ceaa46ca57aee01c45406c7bf24e29ddc`; merge `9f7a110805edf226bb0d665d6f4ff5c4f03c6163` | Merged input: negotiate `tools.listChanged`, notify a long-lived client once per daemon generation including same-version restarts, bound non-evicting client dedupe, and direct recovery at the stale host or daemon. |
+| Memory FTS direction and retrieval telemetry | PR #423; branch `codex/fact-retrieval-ranking-telemetry`; head `c3b7780ea741806bf551629eed91e9323637b89a`; base `9f7a110805edf226bb0d665d6f4ff5c4f03c6163` | Open future-master input at final audit. Replaces absolute-value FTS5-rank conversion with monotonic negated-BM25 normalization; adds exact operational evidence versus unrelated V2-plan facts, rare-term coverage, explicit-search counters, untracked context enrichment, and analytics assertions. Refresh merge/CI state before implementation. TraceDecay `pr_context` could not inspect it because both explicit worktree/root requests hit the selected-versus-legacy identity cutover conflict; live GitHub plus bounded Git diff supplied the fallback evidence. |
 
 ### 4.5 Cross-project and worktree failure anchors
 
@@ -175,6 +182,19 @@ This is a private corpus reference, not a distributable PR fixture. `gitleaks 8.
 | Missing code-index hint suppressed session/memory capability | `019f1204-5575-72a1-a2d1-ab5c6d1b310d` | Per-domain capability and hint-routing regression anchor. |
 
 The current planning replay added one direct contract failure: `message_search(project_scope="all_registered")` found these cross-project session IDs, but `lcm_load_session` was active-project-only and rejected a project selector. Until global stable-ID routing ships, discovery snippets plus native transcript/source locators may be needed to recover the exact payload. Plan 16 makes this search-to-load sequence a cutover gate.
+
+### 4.6 Hermes Kanban and task-graph research anchors
+
+| Subject | Stable anchor | Evidence note |
+|---|---|---|
+| Registered local Hermes source | TraceDecay project `proj_99472b542e35cdb6`; root `/fast/projects/hermes-agent`; commit `732a9ffc572ad2703fbd25cc8a21c9f3f9c10d69`; package `0.16.0` | Local source/test audit anchor. It is a fork snapshot and differs materially from current upstream; do not infer latest behavior from it. |
+| Official Hermes source/provenance | [NousResearch/hermes-agent](https://github.com/NousResearch/hermes-agent); audited upstream head `540f90190f50f9518bf36632a724e0e58877a10b`; MIT license/Nous Research notice | Pin repository/commit/file/access date before adapting code. Preserve license notice for copied material; prefer contract-level clean implementation where designs diverge. |
+| Official Kanban reference | [Kanban feature reference](https://github.com/NousResearch/hermes-agent/blob/main/website/docs/user-guide/features/kanban.md); [v0.15 Kanban maturation record](https://github.com/NousResearch/hermes-agent/blob/main/RELEASE_v0.15.0.md) | Durable task/attempt/handoff/claim/retry/model/worktree/decomposition/swarm/dashboard behavior and evolution. Documentation is evidence, not a substitute for pinned source/tests. |
+| Ambient-board ownership failure | [Hermes issue #21877](https://github.com/NousResearch/hermes-agent/issues/21877) | Documents global current-board selection causing cross-profile dispatch, writes, token spend, and notifications. TraceDecay forbids ambient board ownership and per-board canonical stores. |
+| Cross-repository fan-out/fan-in usage | Hermes session `20260617_210811_5cd728` | Rspack/Rsbuild/React Router plugin evidence: five parallel triage tickets, synthesis fan-in, implementation children, multiple executor/model routes, dependencies, blockers, and board/assignee ambiguity. |
+| Board/store/current-selection confusion | Hermes session `20260617_020912_188f3e` | Multiple board DBs/backups/recovery artifacts and unset board selectors; migration, scope, corruption, and UI mental-model regression anchor. |
+
+These native Hermes session IDs currently resolve through profile-wide/provider search rather than reliably through the registered code-project shard. Treat that mismatch as plan-16/23 routing evidence. Plan 24 must retain exact source locators and migrate only sanitized task/attempt/handoff metadata with explicit ownership; it must not import old board DBs as parallel live authorities.
 
 ## 5. Retrieval recipes
 

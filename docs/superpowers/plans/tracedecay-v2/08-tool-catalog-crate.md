@@ -14,6 +14,8 @@
 
 This plan owns master-plan PR 22A. It lands before tracedecay-policy PRs 23A–23G so policy bundles can pin a catalog digest, and before hook PR 24F so host descriptors bind to stable capabilities.
 
+Plan [`24-canonical-task-plan-graph-and-multi-agent-executor.md`](24-canonical-task-plan-graph-and-multi-agent-executor.md) contributes initiative/plan/task/query/control/lifecycle, executor registration/protocol, scheduler, packet, and task-view capability families. This catalog owns their audience/effect/scope/grant/privacy/egress/idempotency/output metadata and generated bindings; `all/*` and generic tool grants never enable task mutations implicitly.
+
 - Stable use-case identity is transport-independent. search, tracedecay tool search, a future HTTP route, a dashboard command, and a skill route can be bindings of one use case rather than five implementations.
 - tracedecay-tool-catalog describes use cases and bindings. tracedecay-application implements/orchestrates them. Adapters invoke application ports; the catalog invokes nothing.
 - tracedecay-domain owns canonical IDs, schemas, scope, sensitivity, evidence, watermarks, query/cursor, and command semantics.
@@ -21,6 +23,10 @@ This plan owns master-plan PR 22A. It lands before tracedecay-policy PRs 23A–2
 - Generated artifacts are deterministic from definition/schema/legacy-inventory inputs. Their digest participates in policy/hint/replay manifests.
 - An unavailable, pending, deprecated, incompatible, stale, redacted, credential-gated, or live-refresh-required capability remains discoverable with a reason; it does not vanish.
 - Surface parity means shared semantic request/response/effect/error contracts, not identical presentation. Markdown, JSON, CLI text, and UI may render differently from one typed result.
+- [`20-configuration-control-plane.md`](20-configuration-control-plane.md) owns typed configuration descriptors and effective-value semantics. This catalog generates config bindings and proves full surface coverage; it does not define settings, precedence, or defaults.
+- [`21-cli-mcp-tool-surface-and-output-unification.md`](21-cli-mcp-tool-surface-and-output-unification.md) owns the exhaustive current CLI/MCP/output audit and generated binding/presentation parity contract. This crate emits that metadata; it cannot keep a second format/scope/dispatch/allowlist inventory.
+- [`22-incremental-context-scout-and-suggestion-envelopes.md`](22-incremental-context-scout-and-suggestion-envelopes.md) consumes catalog-declared scout/model/tool eligibility, read-only effect class, egress/privacy, budgets, and delivery bindings; no daemon allowlist is legal.
+- [`23-session-lcm-temporal-retrieval-and-evaluation.md`](23-session-lcm-temporal-retrieval-and-evaluation.md) replaces legacy message/LCM binding semantics with one generated temporal search/context/replay/evaluation family while retaining old names only as bounded compatibility rows.
 - PR #410's direct_user/subagent/tool_result filters and parent-representative dedupe are semantic query capabilities, not presentation-only toggles.
 - Git output distinguishes directly_changed, structurally_impacted, candidate_test, and context_only. Transitive/file-level graph fanout can never be labeled direct modification.
 
@@ -30,7 +36,7 @@ This plan owns master-plan PR 22A. It lands before tracedecay-policy PRs 23A–2
 - Assign stable CapabilityId, UseCaseId, IntentId, BindingId, semantic version, owner, lifecycle, and replacement to each.
 - Require domain `ScopeSelectorV2` on every scoped capability/binding; catalog metadata can constrain allowed scope kinds but cannot invent a transport-specific/current-project selector.
 - Generate MCP schemas/descriptions/categories, CLI command metadata/help cross-references, HTTP/OpenAPI operation metadata, dashboard command/panel manifests, skill/tool references, hook routing facts, documentation tables, and TypeScript catalog types from one definition set.
-- Make read/mutate, side effects, idempotency, dry-run/preview, approval, rollback/compensation, streaming/pagination, cost, latency, freshness, security, privacy, and audit behavior explicit.
+- Make read/mutate, manual-versus-autonomous execution, side effects, idempotency, dry-run/preview, confirmation, automatic recovery/compensation, streaming/pagination, cost, latency, freshness, security, privacy, and audit behavior explicit. Curation item effects are autonomous and have no approval/apply binding.
 - Give policy compact, versioned task-to-capability facts without shipping the entire catalog in every hint.
 - Catalog current agent-presence/work-claim publish, heartbeat, nearby-query, overlap acknowledgement/handoff, coordination analytics, and Coordination Lab capabilities with advisory/privacy/TTL/trigger semantics.
 - Route Git intent to branch_list, branch_search, branch_diff, pr_context, changelog, commit_context, sessions_for, and workflows with exact local/live/joined truth requirements.
@@ -76,7 +82,7 @@ Refreshed implementation inputs:
 - Merged PR #410 copied-subagent prompt collapse adds direct_user, subagent, tool_result, and parent-representative filters consistently while retaining every sanitized native row and explicit coverage.
 - Merged PR #411 foreign-skill ownership makes doctor/removal/update share one ownership predicate; catalog remediation metadata distinguishes actionable-by-this-installation, manual-user-only, and no-action.
 - Merged PR #414 adds the `move_symbol` edit capability; regenerate the tool/CLI/API inventory and require owner/schema/scope/effect/idempotency/preview/error bindings rather than treating the old 102-name count as current.
-- Merged release PRs #413/#416 contribute actual binary/protocol versions only. Open #407/#415/#417 and the current release PR are refresh inputs; their live state must be re-read immediately before PR 22A rather than frozen here. PR #409 remains closed historical inventory only.
+- Merged release PRs #413/#416 and merged #415/#417/#419/#420/#422 contribute current release, identity, edit, routing, and catalog-generation inputs. Open #407/#418/#423 are refresh inputs; their live state must be re-read immediately before PR 22A rather than frozen here. PR #409 remains closed historical inventory only.
 
 The implementation lead refreshes master/open PRs and regenerates all legacy inventories before PR 22A. A changed count is expected; an unexplained capability is not.
 
@@ -163,6 +169,8 @@ Automation and managed skills:
 - GET /api/automation/outcomes;
 - GET /api/automation/runs/{run_id}/artifacts and /artifacts/{kind}.
 
+The approval/apply/reject/draft/install routes above are V1 inventory only. V2 current bindings replace them with curation status/history/decisions/outcomes, autonomy configuration, pause/resume/run-now, pin/protect/exclude, and feedback. Candidate fact/memory/managed-skill effects are internal autonomous application effects with policy/config/version/validation/outcome/recovery receipts and are never generated as CLI/MCP/HTTP/dashboard item commands.
+
 LCM:
 
 - GET /api/plugins/hermes-lcm/overview, /search, /session/{session_id}, /node/{node_id}, /timeline, /compression, /payloads/health;
@@ -219,7 +227,7 @@ Tool-kind bindings include Codex function_call/function_call_output/custom_tool_
 
 Inventory also includes install/reinstall/update/uninstall integration changes; daemon/service lifecycle; branch tracking/GC; init/sync/wipe; storage/profile migration/repair/rollback/cleanup; counter reset/upload preference; gitignore policy; memory curate/fact feedback/store mutations; automation config/jobs/scheduler/runs/skills/facts; LCM compression/boundary/repair/GC; dashboard settings/diagnostic refresh; edit tools; and response-handle retrieval.
 
-Every mutation declares preview/dry-run, approval, idempotency, audit event, effect owner, rollback/compensation, and capability availability. Destructive wipe/delete/GC never inherit a generic read binding.
+Every mutation declares manual/autonomous execution mode, preview/confirmation when applicable, idempotency, audit event, effect owner, recovery/compensation, and capability availability. Destructive wipe/delete/GC never inherit a generic read binding. Curation candidates declare `autonomous` and therefore cannot generate preview/approve/apply/reject/rollback item bindings.
 
 ## 6. Exact File and Module Tree
 
@@ -454,7 +462,7 @@ Validation fails on:
 - duplicate ID/binding/name/method+route;
 - unknown schema/intent/capability/use-case;
 - binding request/response fields not losslessly mapped;
-- mutation without effect owner/idempotency/audit/approval/rollback disposition;
+- mutation without execution-mode/effect-owner/idempotency/audit/confirmation/recovery disposition;
 - destructive effect presented as read or implicit dry-run;
 - query/list without bounded pagination/cap;
 - live/semantic/joined Git output without freshness/evidence;
@@ -526,7 +534,7 @@ Policy receives compact facts selected by IntentId/category:
 
 - stable IDs/names/aliases and one-sentence task fit;
 - required scope/host/index/live refresh/credentials;
-- read/mutate/approval/dry-run;
+- read/mutate/manual-autonomous/confirmation/dry-run;
 - local semantic/live delivery/joined truth;
 - fallback and overlap priority;
 - compact parameter requirements;
@@ -555,7 +563,7 @@ Semantic parity checks:
 - ordering/cursor/cap/truncation/coverage match;
 - evidence/confidence/freshness/watermark match;
 - errors/status/restartability match;
-- read/mutate/effect/idempotency/approval/dry-run/rollback match;
+- read/mutate/execution-mode/effect/idempotency/confirmation/dry-run/recovery match;
 - secret/redaction/export behavior match;
 - direct_user/subagent/tool_result/#410 representative filters match;
 - JSON typed result matches before Markdown/CLI/UI rendering.
@@ -650,7 +658,7 @@ V1 extractor inputs:
 - dashboard: generated command/action manifest plus plugin registry and API calls; audit data-action/test IDs and handler bindings;
 - skills: profile/bundled/installed manifests with checksums/lifecycle/targets/references, not instruction contents;
 - hooks: provider descriptor registry and installer manifests/event matchers/effects;
-- config/operations: every mutation handler/command and its preview/approval/audit/rollback behavior;
+- config/operations: every mutation handler/command and its execution-mode/preview-or-autonomy/confirmation/audit/recovery behavior;
 - incoming PRs: refreshed semantic and live changed-file inventories with merge-base/head.
 
 CI fails when:
@@ -679,7 +687,7 @@ Every accepted drift updates the inventory manifest, definition version, generat
 - Preserve old snapshots while referenced by policy evaluations, hint deliveries, replay fixtures, exports, skills, migration receipts, or the data rollback window; snapshot retention never activates their bindings.
 - At cutover, only current bindings are generated or discoverable. V1 bindings remain historical inventory/replay evidence, not active aliases. Stale clients fail exact protocol/catalog checks with restart/update and the current capability ID/name.
 - Destructive bindings never become available through a read-only host/skill merely because names match.
-- Managed skill references are validated against catalog IDs/versions/host targets at proposal, approval, install, and replay.
+- Managed skill references are validated against catalog IDs/versions/host targets at candidate creation, autonomy decision, materialization, use, recovery, and replay; no per-item approval/install binding is emitted.
 
 ## 15. Performance and Quality Gates
 
@@ -690,7 +698,7 @@ Every accepted drift updates the inventory manifest, definition version, generat
 - 10,000 concurrent readers during 100 snapshot publications see one complete digest each; no mix.
 - Generation is byte-identical across clean runs/platform path differences/time zones/map insertion orders.
 - 100% of live inventory rows have owner/use-case/binding/lifecycle; zero unexplained drift.
-- 100% of mutations have effect/idempotency/audit/preview/approval/rollback disposition.
+- 100% of mutations have effect/idempotency/audit/execution-mode/confirmation-or-autonomy/recovery disposition; 0 curation candidates have per-item preview/approve/apply/reject/rollback bindings.
 - 100% of Git rows have truth source/freshness/watermark/membership/evidence/cap; zero transitive row labeled direct.
 - Secret corpus produces zero secret-bearing catalog/generated/docs/metric output.
 - New production files <=800 lines; definitions are split by bounded context.

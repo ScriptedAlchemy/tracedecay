@@ -8,6 +8,8 @@
 
 **Tech Stack:** Rust 2024; `serde`; `serde_json`; `schemars`; `uuid` with `serde`, `v5`, and `v7`; `sha2`; `thiserror`; `proptest` and `jsonschema` for tests.
 
+[`24-canonical-task-plan-graph-and-multi-agent-executor.md`](24-canonical-task-plan-graph-and-multi-agent-executor.md) consumes this crate for canonical initiative/plan/work-item versions, gates, acceptance, assignments, executor routes, fenced leases/attempts, workspace bindings, context packets, handoffs, artifacts, outcomes, task events, and task-query types. Those remain domain contracts here; plan 24 does not create a monolithic task crate or parallel identity/scope/evidence vocabulary.
+
 ---
 
 ## Goals
@@ -23,7 +25,7 @@
 
 ## Convergence boundary
 
-This plan is the type authority inside the converged system described by [`19-system-defragmentation-convergence-and-extensibility.md`](19-system-defragmentation-convergence-and-extensibility.md). Cross-cutting semantics come from [`16-cross-project-repository-worktree-scope.md`](16-cross-project-repository-worktree-scope.md), [`17-official-public-api-and-sdks.md`](17-official-public-api-and-sdks.md), and [`18-secret-detection-redaction-and-private-data-safety.md`](18-secret-detection-redaction-and-private-data-safety.md); this file owns their exact Rust value contracts and generated-schema names, not competing implementations.
+This plan is the type authority inside the converged system described by [`19-system-defragmentation-convergence-and-extensibility.md`](19-system-defragmentation-convergence-and-extensibility.md). Cross-cutting semantics come from [`16-cross-project-repository-worktree-scope.md`](16-cross-project-repository-worktree-scope.md), [`17-official-public-api-and-sdks.md`](17-official-public-api-and-sdks.md), [`18-secret-detection-redaction-and-private-data-safety.md`](18-secret-detection-redaction-and-private-data-safety.md), [`20-configuration-control-plane.md`](20-configuration-control-plane.md), [`22-incremental-context-scout-and-suggestion-envelopes.md`](22-incremental-context-scout-and-suggestion-envelopes.md), and [`23-session-lcm-temporal-retrieval-and-evaluation.md`](23-session-lcm-temporal-retrieval-and-evaluation.md); this file owns their exact Rust value contracts and generated-schema names, not competing implementations. Plan 20 owns configuration product semantics and the registry/resolver contract; this crate owns only the pure config IDs, values, provenance, version, impact, and schema primitives that contract names. Plans 22–23 own scout/temporal product semantics while this crate owns their exact IDs, addresses, occurrence/copy/summary/assertion/answer-mode/envelope schemas, and reason-code registries.
 
 | Boundary | Contract |
 |---|---|
@@ -70,7 +72,7 @@ This plan is the type authority inside the converged system described by [`19-sy
 | Runtime drain and lifecycle serialization | merged PR #412: `src/lifecycle_lease.rs`, daemon/service/update shutdown changes | Model lease epoch, drain intent, writer quiescence, checkpoint completion, service state, and shutdown receipt as distinct typed evidence. A restart/update may not imply writers drained or WAL checkpointed without the receipt. |
 | Foreign managed-skill ownership and remediation | merged PR #411: `package_is_foreign_to_installation`, `SkillDrift::ForeignOrphan`, doctor/removal agreement | Model installation owner, scope, drift classification, severity, and remediation capability separately. A foreign/legacy package is informative evidence and cannot receive a destructive/update remediation owned by another installation. |
 
-Planning began at `99ad19bc`; current master later merged #410/#411, edit-tool PR #414, and release PRs #413/#416. Open #407, release-integrity #415, identity-split visibility #417, and the current release PR remain live refresh inputs. PR #409 was closed unmerged. Immediately before PR 4, regenerate the exact crate/schema/protocol/tool inventory from current master; #414 requires a cataloged move-symbol capability contract and #417 identity-conflict states must remain visible rather than collapsed.
+Planning began at `99ad19bc`; publication master `9f7a1108` later merged #410/#411/#413/#414/#415/#416/#417/#419/#420/#422. Open #407/#418/#423 remain live refresh inputs. PR #409 was closed unmerged. Immediately before PR 4, regenerate the exact crate/schema/protocol/tool inventory from current master; #414/#419 require a cataloged race-safe move-symbol capability contract, #417 identity-conflict states must remain visible rather than collapsed, and #423's fact-rank/counter behavior is future input until merge.
 
 ## Proposed crate tree
 
@@ -445,7 +447,7 @@ pub enum ProtocolMismatchRemediation {
 
 Handshake acceptance requires the current exact protocol epoch and compatible current digests. Mismatch returns a typed remediation and current catalog digest; it cannot carry or execute an old tool-name alias/fallback.
 
-`EntityKind` includes every master-plan kind: profile/project/project-set/repository/remote/checkout/worktree/ref/commit/tree/pull-request/check/review/release; provider/host/model/installation/actor/agent/agent-presence/work-claim/session/thread/workflow/run/turn/message/content-part; tool definition/invocation/result/approval/goal/task/handoff; code snapshot/file and symbol identity/occurrence/diagnostic/test/build; fact/version/knowledge entity/decision/contradiction/retrieval/feedback; policy bundle/evaluation/hint; automation job/run/artifact/skill/skill-package/proposal/doctor-finding/remediation; lifecycle lease/drain/checkpoint/service-state receipt; query/saved view/annotation/export/payload blob.
+`EntityKind` includes every master-plan kind: profile/project/project-set/repository/remote/checkout/worktree/ref/commit/tree/pull-request/check/review/release; provider/host/model/installation/actor/agent/agent-presence/work-claim/session/thread/workflow/run/turn/message/content-part; tool definition/invocation/result/approval/goal/provider-native-task/provider-native-plan; initiative/plan/plan-version/work-item/work-item-version/task-dependency/acceptance-criterion/task-decision/task-assignment/task-lease/execution-attempt/executor-registration/workspace-binding/context-packet/handoff/task-artifact/task-outcome; code snapshot/file and symbol identity/occurrence/diagnostic/test/build; fact/version/knowledge entity/decision/contradiction/retrieval/feedback; policy bundle/evaluation/hint; automation job/run/artifact/skill/skill-package/proposal/doctor-finding/remediation; lifecycle lease/drain/checkpoint/service-state receipt; query/saved view/annotation/export/payload blob. Provider-native task/plan records remain observed entities or aliases until an authorized materialization command creates canonical work.
 
 Coordination contracts are explicit:
 
@@ -906,6 +908,11 @@ pub enum ScopeRootV2 {
     Goal { target: ScopeTargetV2 },
     Workflow { target: ScopeTargetV2 },
     AutomationRun { target: ScopeTargetV2 },
+    Initiative { target: ScopeTargetV2 },
+    Plan { target: ScopeTargetV2 },
+    WorkItem { target: ScopeTargetV2 },
+    ExecutionAttempt { target: ScopeTargetV2 },
+    Executor { target: ScopeTargetV2 },
     SavedView { target: ScopeTargetV2 },
     GraphNeighborhood { seed: ScopeTargetV2, depth: u8 },
 }

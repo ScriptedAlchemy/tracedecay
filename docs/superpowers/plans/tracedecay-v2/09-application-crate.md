@@ -4,7 +4,7 @@
 
 **Goal:** Build `tracedecay-application`, the transport-neutral use-case layer that authorizes and orchestrates every TraceDecay V2 read, command, replay lab, export, migration, and internal parity operation through one auditable contract.
 
-**Architecture:** Queries compose catalog, query, policy, tool-catalog, projector, and immutable archive ports under one captured request context and return explicit snapshot, coverage, freshness, redaction, and provenance. Commands use typed preview/apply contracts, idempotency, optimistic aggregate versions, one owning-shard unit of work, durable audit/outbox events, and resumable workflows for cross-shard effects; HTTP, CLI, MCP, hooks, and dashboard adapters only map transport data to these use cases.
+**Architecture:** Queries compose catalog, query, policy, tool-catalog, projector, and immutable archive ports under one captured request context and return explicit snapshot, coverage, freshness, redaction, and provenance. Non-curation commands use typed execution contracts and, when destructive, preview/confirmation; all commands use idempotency, optimistic aggregate versions, one owning-shard unit of work, durable audit/outbox events, and resumable workflows for cross-shard effects. Autonomous curation effects have no per-item command. HTTP, CLI, MCP, hooks, and dashboard adapters only map transport data to these use cases.
 
 **Tech Stack:** Rust 2024 workspace; `tracedecay-domain`; `tracedecay-query`; `tracedecay-policy`; `tracedecay-tool-catalog`; store/projector traits; `serde`; `schemars`; `thiserror`; `futures`; `tokio` at the composition boundary; `uuid`; property/contract/differential tests.
 
@@ -14,16 +14,22 @@
 
 This plan refines master-plan PR 24A, supplies the application contracts consumed by PRs 24B–24E and 25–32, and owns transport parity until V1 retirement.
 
-- The application crate owns use-case identity, authorization, orchestration, request deadlines, command preview/apply, idempotency, optimistic versions, audit requirements, export/job lifecycle, and bounded migration dispatch.
+Plan [`24-canonical-task-plan-graph-and-multi-agent-executor.md`](24-canonical-task-plan-graph-and-multi-agent-executor.md) adds task/plan query and command use cases, one authoritative scheduler, owner-shard graph transactions, executor registration/route resolution, fenced claim/heartbeat/terminal workflows, context-packet assembly, workspace/cancellation/effect reconciliation, status, and doctor under this application boundary. No root/adapter/dashboard module may become a second scheduler or lease authority.
+
+- The application crate owns use-case identity, authorization, orchestration, request deadlines, non-curation command execution/confirmation, autonomous curation effect application, idempotency, optimistic versions, audit requirements, export/job lifecycle, and bounded migration dispatch.
 - `tracedecay-domain` owns canonical IDs, scope, evidence, sensitivity, watermarks, query AST, and command envelopes. Application types wrap these contracts; they do not create string substitutes.
 - `tracedecay-query` owns planning, federated reads, ranking, cursors, exports bytes, and live snapshot/delta semantics. Application authorizes and selects query profiles; it does not inspect SQL or re-rank rows.
-- `tracedecay-policy` owns deterministic evaluation and proposed effects. Application assembles immutable inputs, invokes the runtime, transactionally revalidates proposed effects, then records or applies them.
+- `tracedecay-policy` owns deterministic evaluation and proposed effects. Application assembles immutable inputs, invokes the runtime, and transactionally revalidates effects. The curation worker then autonomously records/applies eligible owned memory/fact/skill/profile-curation effects; it never waits on a per-item preview/approval/apply action.
 - `tracedecay-tool-catalog` owns declarative capability metadata and generated transport mappings. Application implements the stable `UseCaseId`s referenced by that catalog and fails CI on missing or duplicate ownership.
+- [`20-configuration-control-plane.md`](20-configuration-control-plane.md) owns the configuration registry/resolution semantics. `tracedecay-application::configuration` is their sole resolver and mutation owner; every other application use case consumes its pinned effective digest.
+- [`21-cli-mcp-tool-surface-and-output-unification.md`](21-cli-mcp-tool-surface-and-output-unification.md) requires sealed typed semantic views and one typed outcome/page/notice/freshness/provenance contract. Application constructs those views once; transports and renderers cannot repair or reinterpret them.
+- [`22-incremental-context-scout-and-suggestion-envelopes.md`](22-incremental-context-scout-and-suggestion-envelopes.md) assigns the daemon's asynchronous context-scout workflow, bounded read/model ports, envelope transactions, status, and exact pending-delivery claim to application; hooks never own its orchestration.
+- [`23-session-lcm-temporal-retrieval-and-evaluation.md`](23-session-lcm-temporal-retrieval-and-evaluation.md) assigns authorized temporal search/context/replay/corpus/evaluation use cases to application while query owns ranking and temporal resolution. No adapter performs search-to-load routing or synthesis fallback locally.
 - `18-secret-detection-redaction-and-private-data-safety.md` owns the mandatory sanitizer and taint-state types. Application accepts new content as `Unclassified<T>`, invokes the one sanitizer port, and passes only sink-eligible wrappers or typed redacted/denied/unknown states to stores, projectors, policy, audit, transports, exports, and workflows. It cannot bless a raw `String`, JSON value, summary, compatibility row, or error detail locally.
 - Store/projector/archive implementations enter through narrow ports or sibling-crate public traits. No connection, transaction, SQL string, filesystem path, Axum, MCP, CLI, React, renderer, or provider hook type crosses this boundary.
 - One command transaction has exactly one canonical owning shard. Cross-shard work is an explicit durable workflow with steps, expected versions, idempotency keys, compensations where safe, and partial/failure state; V2 does not emulate distributed atomicity.
 - A query may span shards but captures one vector watermark and preserves every stale, unavailable, incompatible, locked, skipped, redacted, sampled, and truncated disposition.
-- Labs are read-only use cases. Fixture promotion, policy activation, fact apply, skill install, export publication, and any other mutation are separate commands with preview and audit.
+- Labs are read-only use cases. Fixture promotion, policy/config activation, export publication, and non-curation mutations are separate audited commands. Curation labs are inspectors only: the autonomous curation worker applies policy-eligible fact/memory/skill evolution independently, with no per-item preview/apply/rollback UI.
 - Canonical transcript enumeration preserves every sanitized native row and is lossless for retained non-secret structure/semantics. Message enumeration/search consumes domain `MessageOrigin`/`MessageView` unchanged, exposing native, representative, human-best-effort, direct-user, delegated-agent, tool-result, and provider-protocol views; query-time dedupe never deletes or rewrites sanitized source observations.
 - `All` means the active `ProfileId`. Additional profiles require an explicit collection/scope and separate authorization; there is no implicit Hermes profile.
 - Every fact, skill, policy, automation, saved investigation, and annotation carries domain `DeclaredScope`. Profile/zero-project/cross-project instances are activity-owned; explicitly project-scoped instances are project-owned. A selected project, route, working directory, or active filter is never an ownership default, and unresolved scope blocks mutation rather than guessing.
@@ -56,7 +62,7 @@ This plan refines master-plan PR 24A, supplies the application contracts consume
 
 ### 4.1 Master and incoming changes verified on 2026-07-10
 
-Publication refresh: `origin/master` `66584b4dbdee920204cbcf4cf42d0dbc308559e4`. PRs #410/#411/#413/#414/#415/#416/#417/#419 are merged; #407/#418/#420 remain open. The plan branch was rebased exactly to that base before final verification; re-fetch before implementation because every open-PR state can still change.
+Publication refresh: `origin/master` `9f7a110805edf226bb0d665d6f4ff5c4f03c6163`. PRs #410/#411/#413/#414/#415/#416/#417/#419/#420/#422 are merged; #407/#418/#423 remain open. Re-fetch before implementation because every open-PR state can still change. #420 fixes proxy-before-local-store authority and uncertain-write replay; #422 adds generation-scoped MCP catalog refresh; #423 contributes future fact-search ranking/telemetry conformance.
 
 | Change | Assumed future behavior | Application consequence |
 |---|---|---|
@@ -67,10 +73,10 @@ Publication refresh: `origin/master` `66584b4dbdee920204cbcf4cf42d0dbc308559e4`.
 | Merged PR #411, foreign-installation doctor severity | Foreign-owned skill packages are informational, not an update/remediation failure owned by TraceDecay. | Doctor findings carry severity, observed owner, authority, evidence, and legal remediation. Application cannot offer apply/update when ownership is foreign or unknown. |
 | Merged PR #414, `tracedecay_move_symbol` | Current MCP adds a dry-run-by-default symbol relocation with destination-first rollback, import insertion, impact classes, collisions/cycles/module/visibility evidence, and no automatic caller rewrite. | Add one cataloged application command with preview/apply, exact source/destination snapshot/version, filesystem infrastructure port, idempotency, sanitization, impact evidence, rollback receipt, and current CLI/MCP/API/SDK/dashboard bindings; generic query/edit helpers cannot hide it. |
 | Merged PR #415, release-PR integrity | Trusted-base release guard rejects unexpected files, tracked ignored files, and dirty release-plz generation. | Generated catalog/OpenAPI/SDK/dashboard/release artifacts require an allowlisted deterministic manifest; application fixtures cannot be silently deleted by release packaging. |
-| Merged PRs #413/#416, releases v0.0.46/v0.0.47; open #418 v0.0.48 | Published accepted fixes through 0.0.47; 0.0.48 remains open/unstable. | Regenerate version/catalog/compatibility fixtures from `66584b4d`; create no semantic dependency on release-PR layout and require release artifact inventory parity before treating 0.0.48 as available. |
+| Merged PRs #413/#416, releases v0.0.46/v0.0.47; open #418 v0.0.48 | Published accepted fixes through 0.0.47; 0.0.48 remains open/unstable. | Regenerate version/catalog/compatibility fixtures from `9f7a1108`; create no semantic dependency on release-PR layout and require release artifact inventory parity before treating 0.0.48 as available. |
 | Merged PR #417, doctor identity-split visibility | Error-aware store resolution distinguishes split-store conflict from no index and preserves both stores unchanged. | Add a typed `identity_split` health/error state with exact safe candidate inventory and backup/consolidation preview; never offer `init` or claim absent/healthy when identity is ambiguous. |
 | Merged PR #419, race-safe `move_symbol` writes | Revalidates source/destination snapshots and same-file identity, rejects symlink escapes, uses atomic sibling renames, and preserves concurrent rollback edits. | Every edit command has exact identity/version preconditions, last-moment revalidation, race-safe filesystem ports, and typed apply/rollback conflicts; preview success is not permission to overwrite drift. |
-| Open PR #420, early daemon proxy/hot swap | Chooses managed-daemon authority before local store resolution/open; reconnects per request without replaying writes and requires a new host session for schema refresh. | Root/application context declares authority/reconnect state before use-case execution; uncertain writes are never retried, and typed guidance distinguishes reconnect from restart/new-session/tools-list refresh. |
+| Merged PR #420, early daemon proxy/hot swap | Chooses managed-daemon authority before local store resolution/open; reconnects per request without replaying writes and requires a new host session for incompatible schemas. | Root/application context declares authority/reconnect state before use-case execution; uncertain writes are never retried, and typed guidance distinguishes reconnect from restart/new-session/tools-list refresh. Merged #422 adds generation-scoped `tools.listChanged` refresh for compatible catalogs. |
 
 Before each PR 24 slice, refresh open PRs, accepted merge bases, catalog digests, and compatibility inventory. If source code or generated inventory differs from this snapshot, update the slice receipt before implementation; never silently bind application semantics to stale branches.
 
@@ -85,7 +91,7 @@ Before each PR 24 slice, refresh open PRs, accepted merge bases, catalog digests
 | `src/sessions/lcm/query.rs` and message search | Session/message search, representative selection, replay, status, compression, payload operations | Split into typed read use cases and explicit commands. Preserve #410 raw/native and representative views, author filters, source provenance, and expansion. |
 | `src/sessions/git_correlation.rs` and Git MCP tools | Local semantic Git, live delivery state, correlation and tool-specific rendering | Use graph/delivery read compositions plus policy reconciliation. Local and live revisions retain separate freshness/watermarks; drift blocks joined conclusions. |
 | `src/hooks/**` | Normalize hooks, classify hints, inject, persist outcomes | Hook adapters call narrow evaluation/record ports. Application records evaluation/state transition and proposed effects; hook transport only renders/acknowledges. |
-| `src/memory/**` | Fact reads, retrieval, trust, proposals, mutations, curation | Read via query/policy compositions; mutation through fact/proposal commands with preview, expected version, audit, and deletion impact. |
+| `src/memory/**` | Fact reads, retrieval, trust, proposals, mutations, curation | Read via query/policy compositions. Autonomous curation uses expected versions, evidence/privacy/ownership gates, audit, staged monitoring, and automatic recovery; no proposal approval/apply queue survives. User-facing controls configure policy, pause/resume/run-now, pin/protect/exclude, and submit feedback rather than adjudicating each candidate. |
 | `src/automation/**` | Config, scheduling, leases, runs, skills, proposals, artifacts, outcomes | Expose status/read models and typed commands. Scheduler policy proposes; application revalidates and acquires fenced lease before launch. |
 | Doctor/index/watch/daemon/migration/backup code | Operational reads and side effects selected ad hoc by caller | Separate inspect/preview queries from execute commands/jobs. Every long operation has durable progress, cancellation rules, receipt, and recovery state. |
 
@@ -159,9 +165,9 @@ crates/tracedecay-application/
 │       │   ├── projects.rs            # register/alias/unenroll
 │       │   ├── operations.rs          # index/watch/doctor/repair/backup
 │       │   ├── automation.rs          # job CRUD/run/pause/resume/cancel
-│       │   ├── skills.rs              # draft/update/approve/install/lifecycle
-│       │   ├── proposals.rs           # fact/curation/managed-output apply/reject
-│       │   ├── memory.rs              # fact create/update/delete/feedback/curate
+│       │   ├── curation.rs            # autonomous fact/memory/skill evolution worker
+│       │   ├── curation_control.rs    # config, pause/resume/run-now, pin/protect/exclude
+│       │   ├── memory.rs              # explicit feedback and non-curation admin deletion
 │       │   ├── policy.rs              # publish/activate/rollback
 │       │   ├── settings.rs            # scoped config patches
 │       │   ├── diagnostics.rs         # refresh operation
@@ -456,7 +462,7 @@ pub struct WorkflowStepReceipt {
 }
 ```
 
-Cross-shard workflows cover retention/delete descendants, profile/project settings propagation, export publication, projection rebuild/publish, migration/backfill/cutover, skill install/rollback, backup/restore, and remote refresh plus local reindex. They obey:
+Cross-shard workflows cover retention/delete descendants, profile/project settings propagation, export publication, projection rebuild/publish, migration/backfill/cutover, autonomous managed-skill materialization/supersession/recovery, backup/restore, and remote refresh plus local reindex. They obey:
 
 - Durable state is written before executing the next effect; retries use the same workflow/step idempotency key.
 - Each step owns at most one shard transaction or one bounded external effect, never both simultaneously.
@@ -692,11 +698,11 @@ Current Git tools are not hidden behind the generic query alone: their stable us
 | `labs.coordination.evaluate` | Replay presence/overlap classification, proximity ranking, one-hint selection/suppression/dedupe, safe summary, legal action set, and outcome attribution with exact versions/coverage; message/handoff/ack/suppress are simulated only. |
 | `labs.evolution.inspect` / `labs.evolution.simulate` | Evidence collection through curator/reflector/skill-writer graph, proposal/version diff, validation, historical corpus simulation, rollout/rollback prediction. |
 
-Evolution Studio preserves Hermes-style self-improvement as ordinary evidence-bearing actors, goals, turns, tools, artifacts, skills, memories, approvals, applies, uses, outcomes, revisions, rollbacks, archives, and deletions. Simulation never installs a skill or writes a fact. It returns changed decisions/tool routes/outcomes, regressions/wins only where labels exist, unknown horizons, privacy exclusions, and cost/latency deltas.
+Evolution Studio preserves Hermes-style self-improvement as ordinary evidence-bearing actors, goals, turns, tools, artifacts, skills, memories, autonomy decisions, automatic applies, uses, outcomes, revisions, automatic recoveries, archives, and deletions. Simulation is an inspector and never mutates live state; it returns changed decisions/tool routes/outcomes, regressions/wins only where labels exist, unknown horizons, privacy exclusions, and cost/latency deltas. The live autonomous worker does not wait for the inspector.
 
 ## 10. Complete Command Use-Case Inventory
 
-Every command implements `preview` and `apply`, even if a transport exposes a single convenience call. The catalog marks required confirmation, authorization, side effects, job behavior, and compensation.
+Every non-curation mutation has an explicit typed execution contract and, when destructive/irreversible, preview/confirmation. Curation is deliberately different: it is fully autonomous under versioned configuration and emits no per-item preview/approve/apply/rollback commands. The catalog marks autonomy, authorization, expected versions, side effects, monitoring/recovery behavior, job behavior, and audit.
 
 | Domain | Stable command use cases |
 |---|---|
@@ -705,8 +711,7 @@ Every command implements `preview` and `apply`, even if a transport exposes a si
 | Diagnostics/repair | `diagnostics.refresh`, `doctor.run`, `repair.plan`, `repair.apply`, `backup.create`, `backup.restore`. Restore is a durable workflow with preflight and rollback point. |
 | Capture/LCM | `capture.ingest`, `capture.pause`, `capture.resume`, `lcm.compress.preview`, `lcm.compress.apply`, `lcm.boundary.create`, `lcm.lifecycle.preflight`, `lcm.lifecycle.repair`. Source offsets advance only through capture/store receipts. |
 | Automations | `automation.jobs.create/update/delete`, `automation.run`, `automation.cancel`, `automation.pause`, `automation.resume`, `automation.scheduler.enable/disable`. Run revalidates policy/config/activity/lease before fenced acquisition. |
-| Skills | `skills.draft`, `skills.update`, `skills.discard_update`, `skills.approve`, `skills.disable`, `skills.archive`, `skills.restore`, `skills.install`, `skills.rollback`. Draft/update are versioned proposals; apply records artifact/validation digest, declared scope, version, source evidence, staged rollout and rollback threshold. |
-| Proposals/knowledge | `proposals.apply`, `proposals.reject`, `facts.create`, `facts.update`, `facts.delete`, `facts.feedback`, `memory.curate.preview`, `memory.curate.apply`. Deletion uses descendant/hold/index/blob workflow. |
+| Autonomous curation | `curation.run_now`, `curation.pause`, `curation.resume`, `curation.status`, `curation.history`, `curation.pin`, `curation.protect`, `curation.exclude`, `facts.feedback`. Candidate create/update/supersede/archive/quarantine and owned skill validate/materialize/revise/recover are internal autonomous effects, not public per-item commands. Each records artifact/evidence/validation/config/policy/expected-version/staged-monitoring/outcome receipts; foreign-owned targets are skipped. Explicit administrative deletion remains the separate descendant/hold/index/blob workflow. |
 | Policy | `policy.publish`, `policy.activate`, `policy.rollback`. Exact artifact validation and immutable registry CAS are required; activation never changes an in-flight evaluation. |
 | Settings | `settings.profile.patch`, `settings.project.patch`, `settings.integration.patch`, `settings.automation.patch`, `settings.storage.patch`. Preview shows declared owner, source/default, restart/reindex/privacy/migration impact; environment-derived values are read-only and storage relocation is a durable workflow, never an arbitrary path write. |
 | Payload/privacy | `payloads.gc.preview`, `payloads.gc.apply`, `retention.run.preview`, `retention.run.apply`, `holds.create`, `holds.release`, `entities.delete.preview`, `entities.delete.apply`, `privacy.scan.start/cancel`, `privacy.remediation.preview/apply/verify`, `privacy.quarantine.hold/release`. Privacy commands use safe finding/scan IDs, elevated grants where required, durable jobs, and candidate-free audit receipts. |
@@ -759,9 +764,9 @@ Live refresh is a command because it performs network I/O and appends new eviden
 
 `exports.create` authorizes requested fields/payload/sensitivity, captures a frozen query/access/redaction snapshot, creates a durable job, and returns immediately. A worker streams query frames into a contained staging sink, checks limits/hashes, writes final manifest, fsyncs, and atomically publishes. Failure/cancel leaves no completed manifest or downloadable partial. Export status preserves searched/skipped/stale/unavailable/incompatible/locked/redacted coverage and reasoning exclusions.
 
-### 11.6 Evolution Studio apply boundary
+### 11.6 Evolution Studio and autonomous curation boundary
 
-Inspection/simulation are lab reads. Applying a proposed skill/memory/policy is routed to its ordinary command with exact proposal/version/evidence/validation/simulation receipts. Narrow auto-apply is possible only when the active policy authorizes that versioned risk class and application revalidates staged rollout/rollback thresholds transactionally.
+Inspection/simulation are lab reads and never gates live progress. The application curation worker consumes policy decisions continuously, revalidates exact candidate/version/evidence/validation/config/privacy/ownership state transactionally, and autonomously creates/updates/supersedes/archives/quarantines/materializes eligible owned facts, memories, and skills. It monitors staged outcomes and automatically revises/recovers when thresholds fire. No `approve`, `reject`, `preview`, `apply`, or user-triggered `rollback` command exists for a curation item; operators configure policy, inspect history, pause/resume/run-now, pin/protect/exclude, or submit feedback.
 
 ## 12. Internal Parity and Bounded Migration
 

@@ -55,7 +55,7 @@ The rewrite will not copy every current table into a larger database or place ev
 
 ### 2.1 Live system snapshot
 
-The audit was run on 2026-07-09/10 UTC from a clean worktree created from and repeatedly refreshed against `origin/master`; the publication base is `66584b4d` at crate version 0.0.47, with release PR #418 still open to publish 0.0.48. Early store/analytics snapshots used installed TraceDecay 0.0.44; the latest planning probes used installed 0.0.46. During research, the live store continued ingesting sessions, so counts are snapshot values rather than timeless constants. The direct `project_list` snapshots before and after the early rebase both reported 25 repositories; concurrent audits observed 28–29 searched/registered scopes, reinforcing the requirement that inventories carry a timestamp, tool/runtime identity, catalog generation, runtime version, and watermark rather than presenting a drifting count as timeless.
+The audit was run on 2026-07-09/10 UTC from a clean worktree created from and repeatedly refreshed against `origin/master`; the latest publication base is `9f7a1108` at crate version 0.0.47, including merged daemon proxy PR #420 and MCP catalog-refresh PR #422, with release PR #418 still open to publish 0.0.48. Early store/analytics snapshots used installed TraceDecay 0.0.44; the latest planning probes used installed 0.0.46. During research, the live store continued ingesting sessions, so counts are snapshot values rather than timeless constants. The direct `project_list` snapshots before and after the early rebase both reported 25 repositories; concurrent audits observed 28–29 searched/registered scopes, reinforcing the requirement that inventories carry a timestamp, tool/runtime identity, catalog generation, runtime version, and watermark rather than presenting a drifting count as timeless.
 
 | Signal | Observed evidence | Design consequence |
 |---|---:|---|
@@ -145,12 +145,14 @@ After correction, the TraceDecay Git surface added useful evidence:
 - On PR #410, `pr_context` agreed on 16 directly changed files and the merge base, yet labeled thousands of transitive/file-level symbols as modified and emitted an extremely broad affected-test list. Direct diff facts, dependency impact, candidate tests, and low-confidence module fan-out need separate sections, counts, evidence, and caps.
 - `sessions_for` recovered correlated implementation sessions for the Hermes migration branch, but none for the legacy-store branch or the newly active PR #410 branch.
 - `workflows` found no correlated workflow records for those branches. Absence must render as named capture/index/coverage state, not proof that no agent or workflow participated.
+- The final refresh discovered open PR #423 and correctly attempted `tracedecay tool pr_context` first, but both the explicit redesign worktree and explicit repository root failed before Git analysis with the preserved selected-versus-legacy identity cutover conflict. The workflow then had to fall back to `gh pr view` plus bounded Git diff. This proves capability discovery alone is insufficient: a semantic Git tool must either route through an authorized healthy identity, return both candidates with a retryable exact selector, or produce a structured partial result that preserves the remote/Git facts it can still answer; an unrelated store-identity conflict must not erase all PR context.
 
 This is not merely operator error. V2 must make the right capability discoverable at the moment of need, explain when live remote state and local semantic state answer different questions, and measure when the user has to correct tool selection. Required consequences:
 
 - A Git-intent classifier for branch, worktree, commit, diff, PR, review, checks, release, blame, and historical-intent requests.
 - A generated tool catalog with compact task-to-tool routing hints, including when live GitHub state must be refreshed before semantic analysis.
 - Reconciliation metadata: local ref/merge base/indexed commit, remote head/fetched-at, fallback state, changed-file universe, and named disagreement between remote and semantic results.
+- Typed fallback chaining: preserve the attempted capability, explicit scope, selected/legacy candidate IDs, unavailable semantic domains, safe Git/remote fallback result, and one retrieval/operation anchor instead of forcing the agent to restart the investigation manually.
 - Semantic Git results that distinguish `directly_changed`, `structurally_impacted`, `candidate_test`, and `context_only`; never describe fan-out expansion as a direct modification.
 - A `missed_capability` outcome when a relevant tool was neither suggested nor used, and a `human_correction` event when the user redirects the workflow.
 - Hint evaluation that credits useful silence but penalizes missing a high-confidence, high-value repository capability.
@@ -173,9 +175,11 @@ The plan treats merged fixes as required base semantics and assumes every open P
 | `#417` merged — doctor identity split visibility | Surfaces identity split conflicts rather than hiding competing legacy/selected stores. | Identity/store reconciliation is a first-class preview/apply/rollback application workflow; status names both authorities, evidence, serving refusal, and exact next action without destructive guessing. Import the live convergence-probe fixture from plan 19. |
 | `#418` open — release v0.0.48 | Packages merged move-symbol and foreign-skill ownership changes; the latest snapshot was open and `UNSTABLE`, so publication was not assumed complete. | Import the release only after merge/tag/package verification; record source commit, package version, catalog/schema digests, and partial-publication state. Do not infer runtime availability from an open generated release PR. |
 | `#419` merged — race-safe `move_symbol` writes | Rejects destination symlink escapes and same-file/hard-link aliases, revalidates both source/destination snapshots, uses atomic sibling renames, and avoids clobbering concurrent rollback edits. | Every V2 edit command carries exact source/destination identities and versions, revalidates immediately before commit, uses race-safe filesystem primitives, preserves legal in-project symlinks, and records rollback conflicts rather than overwriting concurrent work. |
-| `#420` open — proxy MCP before opening local stores | Chooses the managed-daemon proxy before resolving/opening local stores; reconnects one daemon connection per request across socket/PID replacement without replaying writes; schema changes still require a new host MCP session/tools list. | Root composition resolves proxy/local authority before any store side effect, delegates config-gated init to the daemon, never replays an uncertain write, and advertises typed reconnect-versus-restart/tool-catalog-refresh requirements. |
+| `#420` merged — proxy MCP before opening local stores | Chooses the managed-daemon proxy before resolving/opening local stores; reconnects one daemon connection per request across socket/PID replacement without replaying writes; schema changes still require a new host MCP session/tools list. | Root composition resolves proxy/local authority before any store side effect, delegates config-gated init to the daemon, never replays an uncertain write, and advertises typed reconnect-versus-restart/tool-catalog-refresh requirements. |
+| `#422` merged — refresh MCP tools after daemon generation change | Negotiates `tools.listChanged`, carries stable client-instance and catalog-version metadata across per-request proxy connections, notifies once per client per daemon generation including same-version restarts, treats initialize/tools-list as current, bounds dedupe without eviction, and distinguishes stale host from stale daemon. | Catalog generation is a first-class handshake/status value. Long-lived hosts refresh without duplicate notices, forged/unbounded client IDs cannot exhaust state, fresh list/initialize suppresses redundant delivery, and schema incompatibility still produces explicit restart/update rather than silent fallback. |
+| `#423` open — preserve FTS5 relevance direction | Replaces `1/(1+abs(rank))`, which reverses negated FTS5 BM25 magnitude, with a bounded direction-preserving transform; adds a real exact operational-evidence-vs-unrelated-V2-facts fixture plus rare-term, once-per-explicit-search counter, context-enrichment, and analytics assertions. | Treat the fix as incoming future-master behavior and retain the pre-fix failure as a hard retrieval regression. Ranking contracts must name native score direction/scale, normalize monotonically, separate access/retrieval telemetry from relevance, prevent rich-get-richer feedback, and evaluate exact operational evidence against plausible high-trust plan/memory distractors across CLI/MCP/context surfaces. |
 
-PR `#409` was closed without merge and superseded by merged release PRs `#413`/`#416`; PR `#418` is the still-open 0.0.48 successor at the publication snapshot. Latest audited `origin/master` is `66584b4dbdee920204cbcf4cf42d0dbc308559e4`; the plan branch was rebased to exactly `0` ahead/`0` behind that commit before final verification. Open inputs were #407/#418/#420; merged base inputs include #415/#417/#419. The implementation lead must refresh open PRs, merge bases, changed files, checks, and TraceDecay semantic context immediately before starting each program phase. If GitHub and TraceDecay disagree, record both snapshots and reconcile index/ref freshness before changing the plan.
+PR `#409` was closed without merge and superseded by merged release PRs `#413`/`#416`; PR `#418` is the still-open 0.0.48 successor at the publication snapshot. Latest audited `origin/master` is `9f7a110805edf226bb0d665d6f4ff5c4f03c6163`; #420/#422 are merged: daemon-proxy authority precedes local store open, and long-lived MCP hosts negotiate `tools.listChanged` with one bounded notification per client per daemon generation, current-on-initialize/tools-list semantics, and stale-host-versus-stale-daemon recovery. Open inputs are #407/#418/#423; #423's intended FTS direction/counter semantics are future-master fixtures until it merges and its CI is green. The plan branch must be rebased to this or a newer accepted base before final verification. The implementation lead refreshes open PRs, merge bases, changed files, checks, and TraceDecay semantic context immediately before each program phase. If GitHub and TraceDecay disagree, record both snapshots and reconcile index/ref freshness before changing the plan.
 
 ### 2.7 Historical failure inventory
 
@@ -194,7 +198,7 @@ The chronological message corpus, TraceDecay session search, semantic Git tools,
 | Hook spam, wrong routing, trust, and weak outcomes | #319 compact steering; #331 trust drift; #336 host parity; #401 compiler trust; 1,182 hints but three acted | Versioned deterministic policy, compact capability routing, exact payload/replay, dedupe/budgets, trusted evidence classes, terminal/missed/corrected outcomes. |
 | Tool/host discoverability and namespace drift | #330 dual MCP namespaces; #344 naming; #368 optional discovery; #400 Cursor showed only `graph`; this plan missed Git tools | Generated catalog and bindings, host capability handshake, one current name, high-confidence contextual routing, availability/fallback explanation, missed-capability feedback. |
 | Doctor false positives and impossible remediation | Stale degraded Cursor logs #316; read-only mismatch #370; foreign-skill nag #411 | Findings and commands share predicates; health names exact store/owner/runtime; informational drift is not warning; every action has preview/precondition/receipt. |
-| Automation/self-improvement unsafe or low-value output | #295 output hardening; #338 retries/autonomy; #359 paraphrase dedupe | Evidence-bounded proposals, version/eval/approval/apply/use/outcome/rollback lineage, idempotent jobs, explicit autonomy policy, no silent self-modification. |
+| Automation/self-improvement unsafe or low-value output | #295 output hardening; #338 retries/autonomy; #359 paraphrase dedupe | Evidence-bounded candidates, deterministic validation/policy, autonomous versioned effect/use/outcome/revision/recovery lineage, idempotent jobs, explicit autonomy configuration, and no per-item approval queue or unrecorded self-modification. |
 | Memory corruption, scope, and extraction errors | #349 long fact mangling; current fact search opened non-database while doctor reported healthy | Immutable fact versions, scope-aware owner, exact source slices, integrity/routing identity in every response, quarantine/partial state, retrieval without hidden mutation. |
 | Installer/plugin/upgrade drift across hosts | Marketplace/schema/cache/permission fixes #268/#273/#278/#303; release/asset/drift fixes #310–#313; branding #400 | Generated host manifests, schema conformance, installed-version/source identity, transactional install/update, current capability handshake, actionable failure without stale-client fallback. |
 | Flaky/order-dependent/cross-platform tests | Windows/env/global-state/watcher/timeout fixes #204/#207/#255/#283/#285/#326/#334/#351/#393/#394; current libtest-only backfill failure | No process-global mutable test state, hermetic clocks/env/ports/stores, nextest/libtest contract declared, deterministic shutdown, platform matrix, failure-class quarantine rather than retries as proof. |
@@ -216,6 +220,10 @@ A small supported-surface replay compared exact, paraphrased, conceptual, and mi
 | Misspelled hint/subagent query | Found the current exact misspelled request, but this does not prove general typo tolerance. | Add character n-gram/fuzzy retrieval and a typo corpus; never infer quality from one self-match. |
 
 Current message search is therefore useful for rare exact terms and high-recall forensic discovery, but not yet a reliable “best contextual answer” layer. V2 must benchmark a composed retrieval stack—lexical phrase/BM25, character fuzzy, entities, event/Git/agent graph, optional local dense representations, recency, duplicate clustering, and optional local reranking—then select the smallest stack that improves labeled metrics and latency. Embeddings are a candidate component, not a default claim of quality.
+
+The final live audit made the temporal failure concrete. Broad all-registered searches returned 81K–311K semantic payloads behind expiring response handles and were frequently dominated by tool definitions/calls, current-query echoes, generated inventories, and copied session rows. TraceDecay context found one logical parent message replicated under twelve session/store IDs. More importantly, a retained `memory-ranking-supersession` fixture proves an obsolete exact “use npm” fact can still outrank the newer “use pnpm” correction; current message/LCM search has no general authority, correction, contradiction, supersession, or valid-time resolver. Current `message_search` is FTS/BM25 plus filters/downranking, while `lcm_grep` has distinct raw/summary and relevance/hybrid/recency semantics; raw BM25 scores are also compared across independent project shards without a shared calibration guarantee.
+
+V2 therefore separates immutable message occurrences, evidence-backed logical-copy clusters, summary DAGs with exact source horizons, and temporal assertions with typed `corrects`/`replaces`/`contradicts`/`revokes` relations. Query mode is explicit: current, historical as-of, evolution, or forensic. Recency is an explained bounded feature, never a truth rule; direct human corrections, Git/check/command evidence, scope, validity, and authority decide current state, while uncertain conflicts expose both sides. Before promotion, at least 500 real query episodes and 5,000 human-grounded judgments span projects/providers, exact IDs, paraphrases, copies, summaries, corrections, cross-project work, no-answer/partial states, and task-context pollution. The source audit, twelve seed regressions, qrel schema, metrics, Search Lab, and cutover live in [`tracedecay-v2/23-session-lcm-temporal-retrieval-and-evaluation.md`](tracedecay-v2/23-session-lcm-temporal-retrieval-and-evaluation.md).
 
 ### 2.9 Cross-project, store, session, and code-graph scope probe
 
@@ -273,7 +281,7 @@ TraceDecay currently normalizes enough to search and aggregate, but it does not 
 - File read/edit/create/delete, patch, symbol change, diagnostic, test selection, test result, and build.
 - Worktree/branch/ref observation, commit produced/observed, PR/check/review/release encounter.
 - Hint evaluation, hint suppression, exact injected payload, memory injection, retrieval candidates, and measured outcome.
-- Automation scheduling decision, skip, lock, run, artifact, proposal, validation, approval, apply, and downstream adoption.
+- Automation scheduling decision, skip, lock, run, artifact, curation candidate, validation, autonomy decision, automatic effect/recovery, and downstream adoption; historical/provider approvals remain evidence only.
 
 Without those events, the timeline cannot distinguish observed facts from temporal coincidence or reconstruct what TraceDecay knew at a historical point.
 
@@ -337,6 +345,7 @@ flowchart LR
     G --> I["Code and delivery projection"]
     G --> J["Knowledge and policy projection"]
     G --> K["Automation and observability projection"]
+    G --> X["Canonical task, plan, and execution projection"]
     C --> L["Content-addressed payload store"]
     F --> M["Catalog and cross-shard index"]
     C --> T["Profile activity and session shard"]
@@ -345,6 +354,7 @@ flowchart LR
     I --> N
     J --> N
     K --> N
+    X --> N
     M --> N
     L --> N
     W["Generated capability and tool catalog"] --> V["Versioned policy runtime"]
@@ -369,16 +379,17 @@ V2 starts as one Rust binary with internal traits and ports for capture, project
 2. **Identity Catalog:** profile, repository, project, checkout, worktree, branch/ref, provider, actor, agent instance, session, message, code snapshot, symbol lineage, aliases.
 3. **Evidence Ledger:** canonical events, temporal relation assertions, provenance, confidence, sensitivity, algorithm versions.
 4. **Agent Execution:** turns, messages, content parts, tool invocations/results, visible reasoning summaries, goals, parent/subagent trees, workflows, handoffs.
-5. **Code Intelligence:** snapshots, files, symbol entities/occurrences, edges, diffs, diagnostics, tests, impact, ownership.
-6. **Delivery:** Git refs, commits, worktrees, PRs, checks, reviews, releases, remotes, fetched-at state.
-7. **Context Intelligence:** LCM summary DAG, compression decisions, context assembly, external payload lineage, replay.
-8. **Knowledge:** versioned facts/claims, entities, decisions, contradictions, trust evidence, retrieval, feedback, curation.
-9. **Policy Runtime:** hints, retrieval, routing, diagnostics, correlation, curation, scheduling, policy bundles, deterministic evaluations.
-10. **Automation:** jobs, schedules, scheduler decisions, runs, agents, artifacts, proposals, approvals, skills, outcomes.
-11. **Observability and Accounting:** usage, latency, errors, caps, savings, cost, ingest/projection lag, data quality, privacy events.
-12. **Capability Catalog:** stable use-case definitions, transport/skill/hook/dashboard bindings, availability, safety, cost, discovery, compatibility, and generated inventories.
-13. **Query and Projection:** `TraceQueryV1`, planners, read models, rankers, saved views, subscriptions, exports.
-14. **Privacy Safety:** mandatory structured sanitizer, taint/sink eligibility, detector registry, protected quarantine, privacy scans/findings/remediation, and restore eligibility. This is one cross-cutting boundary owned by plans 01–04/18, not a detector reimplemented in each domain.
+5. **Work Orchestration:** initiatives, immutable plan versions, canonical work items, typed dependency gates, assignments, executor routes, fenced leases/attempts, context packets, workspaces, handoffs, artifacts, acceptance, outcomes, and costs.
+6. **Code Intelligence:** snapshots, files, symbol entities/occurrences, edges, diffs, diagnostics, tests, impact, ownership.
+7. **Delivery:** Git refs, commits, worktrees, PRs, checks, reviews, releases, remotes, fetched-at state.
+8. **Context Intelligence:** LCM summary DAG, compression decisions, context assembly, external payload lineage, replay.
+9. **Knowledge:** versioned facts/claims, entities, decisions, contradictions, trust evidence, retrieval, feedback, curation.
+10. **Policy Runtime:** hints, retrieval, routing, diagnostics, correlation, curation, scheduling, policy bundles, deterministic evaluations.
+11. **Automation:** jobs, schedules, scheduler decisions, runs, agents, artifacts, curation candidates/autonomy decisions/effects/recovery, skills, outcomes, plus imported historical approval evidence.
+12. **Observability and Accounting:** usage, latency, errors, caps, savings, cost, ingest/projection lag, data quality, privacy events.
+13. **Capability Catalog:** stable use-case definitions, transport/skill/hook/dashboard bindings, availability, safety, cost, discovery, compatibility, and generated inventories.
+14. **Query and Projection:** `TraceQueryV1`, planners, read models, rankers, saved views, subscriptions, exports.
+15. **Privacy Safety:** mandatory structured sanitizer, taint/sink eligibility, detector registry, protected quarantine, privacy scans/findings/remediation, and restore eligibility. This is one cross-cutting boundary owned by plans 01–04/18, not a detector reimplemented in each domain.
 
 ### 5.3 Hook, hint, and concurrent event-stream architecture
 
@@ -411,6 +422,14 @@ Every evaluation records policy bundle, classifier, tool catalog, project/index,
 
 Parent/subagent spawn, delegation, message, handoff, join, interruption, goal, and completion are canonical events. Multiple agents may append concurrently, but shared branch/worktree/file impact is derived from evidence-bearing relations, not assumed from temporal overlap.
 
+#### Incremental Context Scout
+
+An optional daemon-side `IncrementalContextScout` consumes the canonical event outbox after capture/projectors and incrementally prepares context while a Turn evolves. It may use deterministic rules and, when the configured model gateway advertises an eligible capability, a low-latency model such as App Server Spark. The model proposes structured bounded exploration only; application authorization executes at most catalog-approved read-only message/LCM/memory/code/Git/delivery/coordination/task capabilities, and pure policy decides whether one anchored suggestion beats silence. Model/provider names, fallbacks, tools, scope, egress, budgets, and delivery modes come from the configuration/catalog handshake, never hardcoded daemon logic.
+
+The scout emits a `SuggestionEnvelopeV1` addressed to an exact profile/thread/Turn/session/agent/logical-message tuple, with expiry, policy/config/catalog/model/index/watermark receipts, evidence and retrieval anchors, dedupe fingerprint, and host delivery policy. The hook hot path never waits for scout model/search/tool work; it performs only a bounded pending-envelope claim/revalidation/render within a 2 ms p95 target and returns no suggestion on contention, lateness, ambiguity, privacy failure, or weak relevance. Late/stale/superseded envelopes are not injected into another Turn. No suggestion is the default; one category gets at most an initial delivery and one evidence-strengthened escalation within hard per-Turn/session/token budgets.
+
+Task/ticket/claim events are not global board broadcasts. A sibling change reaches a working agent only when a typed dependency, material work-claim overlap, blocker, handoff/context packet, or invalidated assumption connects it to the current task and exact Turn. Observatory, Causal Loom, Hint Lab, Settings, CLI/MCP/API/SDK, replay, evaluation, privacy, and phased cutover are specified in [`tracedecay-v2/22-incremental-context-scout-and-suggestion-envelopes.md`](tracedecay-v2/22-incremental-context-scout-and-suggestion-envelopes.md).
+
 ### 5.4 Generated capability and tool catalog
 
 TraceDecay currently has substantial capability, but definitions are scattered across MCP schemas, CLI commands, skills, dashboard actions, provider hooks, and prose. V2 generates one versioned catalog from typed application use cases. Each capability declares:
@@ -418,13 +437,15 @@ TraceDecay currently has substantial capability, but definitions are scattered a
 - Stable capability/use-case ID, version, owner crate/domain, aliases, status, and replacement/deprecation.
 - Inputs/outputs, scope kinds, entity/event kinds, read/mutate classification, side effects, idempotency, streaming/pagination, cost/latency class, and required freshness.
 - Availability prerequisites: daemon, indexed project/ref, live remote refresh, credentials, provider/host support, protected-mode unlock, and permissions.
-- Privacy/sensitivity behavior, audit events, approval requirement, dry-run/preview, and rollback/compensation contract.
+- Privacy/sensitivity behavior, audit events, and exactly one execution mode: read-only, direct commit, confirmed destructive, autonomous policy effect, resumable workflow, or internal host lifecycle. Curation never generates an item approval/apply binding.
 - MCP tool, CLI command, HTTP route, dashboard command/panel, skill, and hook-intent mappings generated from the same definition.
 - Examples and compact routing copy suitable for dynamic hints; catalog digests are part of policy replay.
 
 The compatibility inventory must include every current capability family: project/registry/doctor/diagnostics; code search/context/grep/definition/call/path/impact/tests/health; branch list/search/diff, PR/commit/changelog, correlated sessions/workflows, Git refresh/fallback; sessions/LCM search/load/status/lifecycle/export; memory/facts/entities/feedback/curation; hints/analytics/usage/cost; automation/scheduler/runs/artifacts/proposals/skills; configuration/integrations/daemon/watch/index/migrate/repair/backup; query/render/response handles. The generated inventory, not a hand-maintained list, is the cutover authority.
 
 Discovery is itself observable. For each eligible prompt, the policy runtime records capabilities considered, suggested, used, unavailable, or missed; whether a fallback was chosen; and user correction evidence. The dashboard exposes coverage/drift by intent category without turning every prompt into a noisy catalog advertisement.
+
+The complete current surface and output audit lives in [`tracedecay-v2/21-cli-mcp-tool-surface-and-output-unification.md`](tracedecay-v2/21-cli-mcp-tool-surface-and-output-unification.md). Its generated inventory must cover all 104 source MCP definitions, 60 current top-level CLI variants plus nested/hidden paths, runtime capability filtering, 83 current dashboard routes, every alias/allowlist/default/format/effect/error, and the installed-versus-source catalog digest. One sealed typed application view feeds canonical JSON and a pure presentation model; MCP defaults to compact Markdown, CLI defaults to deterministic human output, machine formats are explicit, and no renderer traverses arbitrary JSON or silently drops fields.
 
 ### 5.5 Agent proximity, work claims, and non-redundant coordination
 
@@ -479,7 +500,7 @@ The replay lab compares no-awareness, current policy, and candidate policy; show
 
 ### 5.6 Unified multi-repository, project, and worktree scope plane
 
-`ScopeSelectorV2` is a domain contract shared by every transport. It selects All, profile, saved project set, repository, project, checkout, worktree, branch/ref, commit/snapshot, PR, session, agent, workflow, or collection; includes explicit freshness/partial/as-of policy; and resolves natural-language names, paths, remotes, and stable IDs through one application service.
+`ScopeSelectorV2` is a domain contract shared by every transport. It selects All, profile, saved project set, repository, project, checkout, worktree, branch/ref, commit/snapshot, PR, session, agent, workflow, initiative, plan, work item, execution attempt, executor, saved view, or collection; includes explicit freshness/partial/as-of policy; and resolves natural-language names, paths, remotes, and stable IDs through one application service.
 
 Resolver invariants:
 
@@ -520,6 +541,43 @@ Convergence rules:
 - A convergence scorecard tracks duplicate authorities, bypass call sites, direct SQL/store opens, schema drift, adapter call volume, parity gaps, extension conformance, large files/condition growth, and retired code/data.
 
 The target is modular, not microservice-shaped: one Rust process initially, bounded crates and internal services, predictable names/layout, small reviewable modules, and few high-quality extension seams. New behavior should extend a registry/trait/predicate and inherit identity/scope/privacy/query/replay/observability behavior automatically. The complete current-to-target convergence matrix and retirement program live in [`tracedecay-v2/19-system-defragmentation-convergence-and-extensibility.md`](tracedecay-v2/19-system-defragmentation-convergence-and-extensibility.md).
+
+### 5.8 Fully autonomous curation
+
+Memory, fact, managed-skill, session-reflection, profile-learning, and related Hermes-style curation are continuous autonomous system behavior—not proposal inboxes awaiting human preview/approve/apply/rollback clicks. The canonical loop is:
+
+```text
+evidence -> candidate -> deterministic validation/policy -> transactional revalidation
+-> autonomous staged effect -> use/outcome monitoring -> autonomous revise/recover/archive
+```
+
+- No public curation-item command named preview, approve, reject, apply, install, or rollback exists.
+- The policy runtime remains pure; an application-owned worker autonomously applies every eligible owned effect with exact expected versions, privacy/ownership/evidence/resource gates, idempotency, and audit receipts.
+- Unsafe, weak, foreign-owned, secret-like, conflicting, or out-of-authority candidates are automatically rejected, deferred for evidence, protected, or quarantined; they do not become a needs-human queue.
+- Operators control curation through versioned configuration, pause/resume/run-now, pin/protect/exclude, and feedback. The UI exposes history, reasons, staged scope, use/outcomes, and automatic recovery without making inspection a gate.
+- Automatic recovery/revision is policy-driven and outcome-triggered. Historical V1/provider approval/rejection/apply events remain imported evidence but do not define the V2 workflow.
+- Destructive non-curation administration—store deletion, migration, key destruction, external publication—retains its separate safety/confirmation contract.
+
+The configuration system, including autonomy policy and the redactor/detector policy, is fully discoverable/editable in Settings and through generated navigable CLI commands; [`tracedecay-v2/20-configuration-control-plane.md`](tracedecay-v2/20-configuration-control-plane.md) owns the exact control-plane contract.
+
+### 5.9 Canonical task/plan graph and multi-agent executor
+
+TraceDecay owns one profile-level initiative/plan/work-item graph in the activity shard. A board is a saved authorized `TraceQueryV1` projection plus layout/grouping/policy; it is never a database, ownership boundary, dispatch selector, or source of task identity. The same work item may appear simultaneously in a project board, an agent slice, a repository view, a Kanban lane, a dependency DAG, a timeline, and an All initiative without copying its ID, dependencies, history, or authority.
+
+The core entities remain separate: `Initiative`, `Plan`, immutable `PlanVersion`, versioned `WorkItem`, typed gating dependency, acceptance criterion, decision, assignment, `ExecutionAttempt`, fenced `TaskLease`, executor registration/route receipt, workspace binding, `ContextPacketManifest`, handoff, artifact, outcome, and cost. Task↔Thread/Session/Turn/Agent and task↔code/Git/PR relations are many-to-many, bitemporal, evidence-bearing links. A long thread may serve many tickets; one ticket may span many agents, sessions, repositories, worktrees, branches, and PRs.
+
+Execution rules:
+
+- Gating edges form a validated DAG; informational/evidence relations may cycle but never unlock work. Readiness, critical path, slack, and dispatch derive from current plan versions, gates, schedules, budgets, acceptance, capabilities, and leases—not draggable status strings.
+- Assignment names desired ownership. `WorkClaimV1` remains advisory proximity evidence. Only a compare-and-swap `TaskLease` with a monotonic fence epoch grants execution authority.
+- Each attempt pins requested and actual host/provider/model/revision/reasoning effort, skills, tool-catalog generation, effect grants, privacy/egress class, workspace, token/cost/runtime budgets, retry policy, context packet, and deadlines. Codex, Claude, Cursor, Hermes, and custom executors implement one adapter SPI; none owns task truth.
+- Claim issuance revalidates task/plan revisions, dependency readiness, executor capacity, budget, exact repository/worktree/ref/snapshot, active authoritative reservations, and artifact/file/symbol/test overlap. Heartbeat is constant-cost. Completion/cancellation atomically revokes the lease; late worker writes from an old epoch are rejected even if its process remains alive.
+- A multi-repository attempt has one primary writable workspace unless an explicit coordinated multi-write capability is granted. User-owned dirty worktrees are preserved and block unsafe starts; branch, push, PR, merge, release, and external-message effects remain separately authorized workflows.
+- Versioned context packets contain objective, constraints, acceptance, dependencies, parent handoffs, material sibling decisions/results, relevant prior failures, exact Thread/Turn and code/Git/PR anchors, scope/workspace versions, watermarks, query/config/catalog/policy/privacy digests, token budget, expiry, and explicit omissions. Workers never receive a global-board dump or arbitrary sibling prompts.
+- Task materiality projectors emit a candidate only when a dependency, handoff, shared decision, direct workspace/artifact overlap, base/PR/check change, or authoritative sibling result can change the recipient's next action. Plan 22 addresses at most one compact, deduped suggestion to the exact active agent/Thread/Turn; boards never broadcast.
+- Decomposition, routing, readiness, fairness, retry, circuit-breaking, packet selection, and materiality are pure replayable policies. Application services validate and apply their effects within configured authority. Models may propose schema-valid plans/routes/summaries but cannot widen scope, grants, budget, egress, tools, or destructive effects.
+
+The Rspack/Rsbuild/React Router conformance initiative must decompose one graph into independently claimable repository tasks, fan them across explicitly selected Codex and Claude (plus optional Cursor/Hermes/custom) routes, preserve cross-repository gates, join them through verifier/synthesizer/integration tasks, and render focused per-agent/per-repository boards or one global DAG without copies. It must prevent the observed wrong-ambient-board repair pattern, lost dependencies, dispatch of already-complete work, and stale workers after manual completion. Full schemas, executor protocol, UI lenses, Orchestration Lab, Hermes evidence, migration, evals, and PR slices live in [`tracedecay-v2/24-canonical-task-plan-graph-and-multi-agent-executor.md`](tracedecay-v2/24-canonical-task-plan-graph-and-multi-agent-executor.md).
 
 ## 6. Canonical Identity and Evidence Contracts
 
@@ -644,7 +702,7 @@ Owns canonical project evidence:
 - Git/delivery observations and relations.
 - Project knowledge, facts, trust events, retrieval/feedback.
 - Hints/policy evaluations and outcomes.
-- Automation jobs, runs, artifacts, proposals, approvals, skills.
+- Automation jobs, runs, artifacts, curation candidates/autonomy decisions/effects/recovery, skills, and imported historical approval evidence.
 - Project-level search documents, representations, facets, and rollups.
 - Transactional outbox and projector checkpoints.
 
@@ -735,12 +793,13 @@ The exact migrations are produced in Phase 1, but the model is fixed by this pla
 ### 8.2 Profile activity and agent/session projections
 
 - `threads`, `thread_sessions`, `sessions`, `actors`, `agent_instances`, `workflow_runs`, `turns`, `messages`, `content_parts`; thread/session identity remains distinct and their relation is temporal evidence.
-- `tool_invocations`, `tool_results`, `approvals`, `goals`, `tasks`, `handoffs`.
+- `tool_invocations`, `tool_results`, `approvals`, `goals`, and provider-native handoff observations.
 - `reasoning_summaries` only for provider-exposed material, with separate retention/sensitivity.
 - Uniqueness: `(provider, native_session_id)` and `(provider, native_session_id, ordinal)` where native ordering exists.
 - Canonical rows live in `activity.db`; project projections reference their IDs and relation evidence.
 - `agent_presences`, `work_claims`, `work_claim_events`, and overlap projections preserve declared scope, TTL, redundancy mode, safe summary, and stable research anchors.
 - `activity_scope_assertions(event_or_turn_id, repository_id, project_id, checkout_id, worktree_id, ref_id, role, confidence, valid interval, provenance_id)` prevent first-CWD/session-wide attribution.
+- `initiatives`, immutable `initiative_versions`, `plans`, immutable `plan_versions`, `work_items`, immutable `work_item_versions`, `task_dependencies`, `acceptance_criteria/evaluations`, `task_decisions/assignments`, `task_leases/events`, `execution_attempts/events`, `executor_registrations/events`, `workspace_bindings`, `context_packet_manifests/entries`, `task_handoffs/artifacts/outcomes/cost_events`, `task_graph_events`, idempotency results, and saved task views implement plan 24's one owner graph. Large/private text remains in sanitized encrypted blobs; project shards hold content-free evidence locators only.
 
 ### 8.3 Code and delivery projections
 
@@ -753,7 +812,7 @@ The exact migrations are produced in Phase 1, but the model is fixed by this pla
 
 - `facts`, immutable `fact_versions`, `fact_relations`, `trust_events`, `retrieval_events`, `feedback_events`.
 - `policy_bundles`, `policy_evaluations`, `hint_evaluations`, `retrieval_evaluations`, `correlation_evaluations`.
-- `automation_jobs`, `scheduler_decisions`, `automation_runs`, `run_events`, `automation_artifacts`, `skill_versions`, `proposals`, `approvals`.
+- `automation_jobs`, `scheduler_decisions`, `automation_runs`, `run_events`, `automation_artifacts`, `skill_versions`, `curation_candidates`, `autonomy_decisions`, `autonomous_effects`, `outcome_monitors`, `automatic_recoveries`, and imported `legacy_approval_events`.
 
 ### 8.5 Search and representation projections
 
@@ -770,7 +829,7 @@ Read-only retrieval never increments counters inside the query transaction. Retr
 
 `TraceQueryV1` supports:
 
-- Scope: All, project set, project, repository, checkout/worktree, branch/ref, snapshot/commit, session, agent, workflow, saved collection.
+- Scope: All, project set, project, repository, checkout/worktree, branch/ref, snapshot/commit, session, agent, workflow, initiative, plan, work item, execution attempt, executor, saved view/collection.
 - Scope resolution policy: exact/resolve/related, explicit-target refusal, freshness/partial/as-of limits, and activity-attribution role.
 - Entity kinds and typed attribute predicates.
 - Time: occurred, ingested, valid/as-of, absolute/relative, comparison interval.
@@ -832,13 +891,18 @@ Cursor semantics:
 
 - MCP handlers parse arguments, call application services, and render results. They contain no SQL, routing, ranking, policy, or migration logic.
 - CLI calls the same services in-process or through the daemon.
+- CLI/MCP/API/SDK/dashboard bindings decode the same generated request schema, call the same use case, and expose identical semantic rows/order/scope/coverage/freshness/errors/effects. They differ only in transport framing and checked presentation.
+- MCP human output defaults to compact Markdown; `format=json` is canonical typed semantic data, not a JSON-RPC envelope containing rendered JSON text. CLI `--json` selects that same semantic representation; transport debugging is separate.
+- Human renderers consume sealed typed views through the pure presentation boundary. No raw `serde_json::Value` renderer, silent depth/array compaction, appended notice text, handler-local limit, or irreversible `compacted_no_handle` path survives.
+- Every collection uses deterministic ordering, an authenticated opaque cursor, returned/total semantics, applied byte/token budgets, and a resumable retrieval anchor for oversized eligible content. Missing-registry, empty, partial, stale, locked, redacted, and unavailable states retain stable outer shapes.
+- One typed outcome maps application error code, retryability, CLI exit code, MCP `isError`, HTTP status, analytics outcome, notices, metrics, freshness, and provenance; command modules never infer failure from rendered text or exit successfully after a semantic error.
 - HTTP V2 uses typed bounded endpoints, not GraphQL as the primary surface.
 - TypeScript contracts are generated from Rust schemas/OpenAPI and checked for drift.
 - V1 endpoints/tools may shadow V2 only before that domain's cutover. At cutover the current catalog/protocol becomes authoritative; stale clients receive a typed version/restart/update/replacement error instead of a behavioral fallback.
 
 ### 9.6 Message/session retrieval and real-world precision program
 
-[`tracedecay-v2/15-search-quality-evaluation-and-retrieval-research.md`](tracedecay-v2/15-search-quality-evaluation-and-retrieval-research.md) owns the implementation/evaluation plan and primary literature. V2 does not replace BM25 with embeddings. It exposes a versioned multi-stage pipeline whose components can be ablated:
+[`tracedecay-v2/15-search-quality-evaluation-and-retrieval-research.md`](tracedecay-v2/15-search-quality-evaluation-and-retrieval-research.md) owns general retrieval research/evaluation; [`tracedecay-v2/23-session-lcm-temporal-retrieval-and-evaluation.md`](tracedecay-v2/23-session-lcm-temporal-retrieval-and-evaluation.md) owns the current message/LCM source audit, occurrence/copy/summary lineage, temporal truth, context assembly, and session replay gates. V2 does not replace BM25 with embeddings. It exposes a versioned multi-stage pipeline whose components can be ablated:
 
 1. Normalize Unicode, spelling variants, provider/tool aliases, code/Git identifiers, quoted phrases, and time/scope constraints without rewriting exact technical literals.
 2. Generate independent candidates from phrase/BM25 FTS, character n-gram fuzzy matching, typed entity/event/goal/tool/Git indexes, session/agent/work-claim graphs, summaries with source coverage, optional privacy-safe local dense representations, and explicit recency.
@@ -847,6 +911,8 @@ Cursor semantics:
 5. Apply diversity across sessions/projects/providers/agents while retaining exact phrase/entity hits. Penalize the current query/tool echo and inventory noise unless explicitly requested.
 6. Optionally rerank a bounded top set with a versioned local cross-encoder or learned model only when measured gains justify latency/memory/privacy cost. Fall back deterministically.
 7. Return rank explanation, matched fields/entities/relations, retriever contributions, cluster/representative reason, corpus/index/model versions, scope, caps, and coverage.
+
+After candidate recall, a temporal resolver applies explicit answer mode—`Current`, `Historical { as_of }`, `Evolution`, or `Forensic`—plus validity, correction/supersession/conflict relations, evidence authority, and scope before final ranking. Current mode prefers a supported replacement over a stale exact predecessor and links the history; historical mode admits no future evidence; evolution ranks change points; forensic mode minimizes hiding. Summary nodes are derived navigation documents with exact source ranges/horizons and can never independently prove a claim.
 
 The real-world evaluation corpus is sampled from the local registered-project store without committing private text:
 
@@ -878,6 +944,10 @@ HTTP V2 is an official supported public integration surface, not only a dashboar
 - `GET /api/v2/sessions` and `GET /api/v2/messages` — cursor enumeration without text predicates.
 - `GET /api/v2/sessions/{id}` — session summary, coverage, participants, snapshots.
 - `GET /api/v2/agents/nearby` and `GET /api/v2/work-claims` — freshness/coverage-bounded agent proximity with stable retrieval anchors.
+- `GET/POST /api/v2/initiatives`, `GET/PATCH /api/v2/initiatives/{id}`, and `GET /api/v2/initiatives/{id}/graph` — canonical cross-project work ownership and bounded graph-of-graphs views.
+- `GET/POST /api/v2/plans`, `GET /api/v2/plans/{id}/versions/{version}`, `POST /api/v2/plans/{id}:activate`, and `:decompose` — immutable plan versions, validated graph activation, and authority-bounded decomposition.
+- `GET/POST /api/v2/work-items`, `GET/PATCH /api/v2/work-items/{id}`, task dependency/attempt/context subresources, and typed assign/cancel/retry/archive commands.
+- `GET /api/v2/execution-attempts/{id}`, executor-authenticated lifecycle commands, `GET /api/v2/executors`, registration/heartbeat/drain, task-scheduler status/control, saved task views, and task-event SSE — the plan-24 fenced multi-host execution protocol.
 - `POST /api/v2/replay/session` — read-only historical assembly.
 - `POST /api/v2/labs/hints`, `/retrieval`, `/search-quality`, `/coordination`, `/ingest`, `/query`, `/correlation`, `/scheduler`, `/memory`, `/policy-diff`, `/evolution`, `/secret-safety`.
 - `GET/POST/PATCH /api/v2/saved-views` and `/annotations`.
@@ -888,18 +958,17 @@ HTTP V2 is an official supported public integration surface, not only a dashboar
 Typed command endpoints replace every current writable dashboard workflow:
 
 - `/api/v2/commands/automation/jobs`, `/run`, `/pause`, `/resume`.
-- `/api/v2/commands/skills/{approve|disable|archive|restore|install}`.
-- `/api/v2/commands/proposals/{apply|reject}` for facts, curation, and managed output.
-- `/api/v2/commands/memory/{preview|apply}`.
-- `/api/v2/commands/settings/{profile|project}`.
+- `/api/v2/commands/curation/{pause|resume|run-now|pin|protect|exclude}` — system-level autonomy controls only; candidate effects apply internally without per-item commands.
+- `GET /api/v2/curation/{status|history|decisions|outcomes}` — inspect autonomous fact/memory/skill evolution and recovery evidence.
+- `/api/v2/config/{set|unset|import}` plus typed configuration reads/history/diff/schema/effective-source routes from plan 20.
 - `/api/v2/commands/diagnostics/refresh`.
 - `/api/v2/commands/payloads/gc`.
 - `/api/v2/commands/work-claims/{publish|update|release|acknowledge-overlap|mark-disjoint|confirm-redundancy|handoff}`.
 - `/api/v2/commands/privacy/{scan|remediate-preview|remediate-apply|verify|quarantine-hold|quarantine-release}` with safe findings, elevated authorization, lifecycle lease, and rotation-first guidance.
 
-Every command has typed preview/result/audit schemas, idempotency, optimistic version checks, scope, required authorization, and domain parity tests.
+Every non-curation command has typed execution/result/audit schemas, idempotency, optimistic version checks, scope, required authorization, and domain parity tests; destructive commands add preview/confirmation when meaningful. Autonomous curation effects are internal idempotent transactions with equivalent policy/config/version/audit/outcome receipts but no per-item command.
 
-All mutations require idempotency keys, optimistic version checks, preview when meaningful, an audit event, and explicit apply.
+All mutations require idempotency keys, optimistic version checks, and an audit event. Destructive non-curation actions require confirmation/explicit execution when meaningful. Policy-eligible curation effects execute autonomously after transactional revalidation and never require explicit per-item apply.
 
 Local HTTP security is mandatory even on loopback: bind only to loopback by default; mint a per-launch bearer/session token; enforce strict `Host` and `Origin`; use CSRF protection for browser mutations; ship a restrictive CSP; contain export paths; and never place sensitive query literals or entity payloads in URLs.
 
@@ -915,14 +984,15 @@ SSE is scope-filtered and authorized. It uses `Last-Event-ID`/sequence cursors, 
 - `/timeline` — Causal Loom timeline explorer.
 - `/threads`, `/threads/:id`, `/sessions`, `/sessions/:id`, `/turns`, and `/turns/:id`.
 - `/agents`, `/agents/:id`, and `/agents/nearby`.
+- `/work`, `/work/initiatives/:initiativeId`, `/work/plans/:planId/versions/:version`, `/work/tasks/:workItemId`, `/work/attempts/:attemptId`, `/work/executors`, `/work/scheduler`, and `/work/views/:savedViewId`.
 - `/workflows/:id`, `/automation/runs/:id`.
-- `/code`, `/code/entities/:id`, `/code/compare`, and `/graphs/{git|code|threads|turns|agents|timeline|memory|automation}` as saved lens presets over the same investigation state.
+- `/code`, `/code/entities/:id`, `/code/compare`, and `/graphs/{git|code|threads|turns|agents|tasks|plans|timeline|memory|automation}` as saved lens presets over the same investigation state.
 - `/knowledge`, `/knowledge/facts/:id`, `/knowledge/entities/:id`.
 - `/delivery`, `/projects/:id`, `/projects/:id/branches/:branch`, `/pulls/:id`.
 - `/automations`, `/skills`, `/proposals`.
 - `/observatory` — health, ingest, storage, diagnostics, data quality, privacy.
 - `/costs` — tokens, latency, models, tools, savings, methodology.
-- `/playgrounds/hints`, `/retrieval`, `/search-quality`, `/coordination`, `/ingest`, `/query`, `/correlation`, `/scheduler`, `/memory`, `/policy-diff`, `/evolution`, `/secret-safety`.
+- `/playgrounds/hints`, `/retrieval`, `/search-quality`, `/coordination`, `/orchestration`, `/ingest`, `/query`, `/correlation`, `/scheduler`, `/memory`, `/policy-diff`, `/evolution`, `/secret-safety`.
 - `/saved/:viewId`.
 - `/settings`.
 
@@ -1016,9 +1086,10 @@ The Brain is best understood as coordinated graph lenses over shared identity, t
 - **Code graph:** repository snapshots, files, symbol lineages/occurrences, calls/types/uses, diagnostics, tests, ownership, and impact.
 - **Thread graph:** sessions/threads, turns, messages, content/reasoning artifacts, context summaries, tools, goals, and workflow membership.
 - **Agent graph:** actors, agent instances, parent/subagent creation, delegation, messages, handoffs, joins, interruptions, goals, and outcomes.
+- **Task and plan graph:** initiatives, immutable plans/work-item versions, typed gates, acceptance, assignments, claims versus leases, attempts, executor routes, context packets, workspaces, artifacts, outcomes, critical path, and evidence links into every other graph.
 - **Timeline graph:** occurred/ingested order, intervals, causation/correlation, concurrent lanes, late events, and as-of state.
 - **Holographic memory graph:** facts/versions, entities, decisions, contradictions, source evidence, trust, retrieval, feedback, and curation.
-- **Automation and skill graph:** jobs, schedules, Claude workflow runs, Codex goals, Hermes-style curator/reflector/skill-writer agents, proposals, artifacts, approvals, applies, usage, outcomes, revisions, and rollback.
+- **Automation and skill graph:** jobs, schedules, Claude workflow runs, Codex goals, Hermes-style curator/reflector/skill-writer agents, candidates, artifacts, autonomy decisions, automatic effects, usage, outcomes, revisions/recovery, and clearly labeled historical approval/apply events.
 
 A `Turn` is a first-class interval/entity, not just a message index. It owns the user/agent exchange boundary and links the context visible at its start, provider-exposed reasoning artifacts, messages, tools/results, file/code evidence, goals, hints/memory/retrieval, costs, and state produced by its end. Provider-native meanings are preserved: a Claude workflow run, Codex goal, host thread, and TraceDecay automation run are related canonical entities, not flattened into one ambiguous “run.”
 
@@ -1026,7 +1097,7 @@ Selecting an entity in any lens keeps the same investigation state and reveals e
 
 ## 13. Universal Explorer
 
-- Search across projects, messages, sessions, agents, workflows, code, Git/delivery, facts, skills, automation, diagnostics, hints, costs, and artifacts.
+- Search across projects, messages, sessions, agents, workflows, initiatives/plans/tasks/attempts/executors, code, Git/delivery, facts, skills, automation, diagnostics, hints, costs, and artifacts.
 - Text and structured query builder produce the same visible `TraceQueryV1`.
 - Results pivot among table, timeline, graph, matrix, distribution, small multiples, and saved collection.
 - Query Explain shows selected shards, pushed filters, budgets, ranking features, cache/projection use, stale/partial state, and timing.
@@ -1045,7 +1116,7 @@ Selecting an entity in any lens keeps the same investigation state and reveals e
 - Files, symbols, patches, diagnostics, builds, tests, affected-test selection.
 - Worktrees, branches, commits, PRs, checks, reviews, releases.
 - Hints, memory injection, retrieval, facts, feedback, policy decisions.
-- Automation schedules, skips, runs, artifacts, proposals, approvals.
+- Automation schedules, skips, runs, artifacts, curation candidates/autonomy decisions/automatic effects/recovery, plus labeled historical approval evidence.
 - Tokens, context, compression, latency, cost, estimated savings.
 
 ### 14.2 Reading model
@@ -1113,6 +1184,15 @@ Canvas/WebGL exports use a separate deterministic export scene: frozen query sna
 
 ## 15. Domain Workspaces
 
+### Work
+
+- Initiative overview: objective, exact project/repository/worktree scope, current plan/version, budget, deadline, progress, critical-path interval, health, cost, coverage, outcomes, and related Goals/workflows/PRs/checks/releases.
+- Coordinated plan outline and semantic-zoom graph-of-graphs, with immutable plan-version diff, nested subplans, fan-out/fan-in, gates, acceptance, handoffs, and affected active attempts.
+- Interchangeable Kanban, dependency DAG, critical path, timeline, causal, workload, executor-fleet, repository-work, agent-relevant, and All projections over one canonical selection; no board-local task copies.
+- Task and attempt inspectors expose requested/actual Codex/Claude/Cursor/Hermes/custom routes, model/reasoning effort/tools/skills/grants, fenced lease status, context packet and omissions, workspace/ref/snapshot, Turns/tools/artifacts, retries/cancellation, acceptance, costs, provenance, and legal actions.
+- Claim-overlap overlays distinguish authoritative writable-resource reservations from advisory claims and intentional parallel/ensemble work. They show evidence and freshness without leaking sibling prompts.
+- Agents default to active task, parents/blockers, material siblings, decisions, acceptance, handoffs, packet entries, and workspace conflicts. Humans with authorization may widen to initiative or All explicitly.
+
 ### Sessions
 
 - Complete session list and complete sanitized-native message enumeration, lossless for retained non-secret structure/semantics.
@@ -1137,7 +1217,7 @@ Canvas/WebGL exports use a separate deterministic export scene: frozen query sna
 ### Knowledge
 
 - Facts, fact versions, entities, decisions, contradictions, provenance, trust changes.
-- Retrieval history, helpfulness/feedback, Hermes-style curator/reflection proposals, approval/apply, usage/outcomes, revision/rollback, supersession, deletion lineage.
+- Retrieval history, helpfulness/feedback, Hermes-style curator/reflection candidates, policy decisions/automatic effects, usage/outcomes, autonomous revision/recovery, supersession, deletion lineage.
 - Similarity projection plus table/cluster alternatives.
 
 ### Delivery
@@ -1149,8 +1229,8 @@ Canvas/WebGL exports use a separate deterministic export scene: frozen query sna
 ### Automations
 
 - Schedules, effective config/policy scope, locks, skip reasons, run waterfall.
-- Agents, artifacts, proposals, validation, approvals, apply, downstream adoption.
-- Managed skills and memory are evolving product objects: evidence source → proposal → validation/eval → approval/policy → apply/install → injection/use → outcome → revision/rollback/archive.
+- Agents, artifacts, candidates, validation, autonomy decisions, automatic effects, downstream adoption.
+- Managed skills and memory are evolving product objects: evidence source → candidate → validation/eval → policy decision → autonomous materialization → injection/use → outcome → autonomous revision/recovery/archive.
 - Skills lifecycle/version graph and effectiveness evidence, including curator/session-reflector/skill-writer lineage and exact artifacts.
 
 ### Observatory
@@ -1158,6 +1238,15 @@ Canvas/WebGL exports use a separate deterministic export scene: frozen query sna
 - Ingest lag, rewrite/backfill state, parser coverage, identity conflicts.
 - Shard/store health, migrations, projection lag, query latency, caps, partial results.
 - Hook/hint/tool adoption, unresolved outcomes, malformed rows.
+
+### Settings and configuration
+
+- One generated registry covers every user-controllable non-secret file/flag/environment/default/provider/hook/daemon/search/storage/privacy/automation/API/UI setting; unregistered hidden controls block cutover.
+- Navigate All/profile/project/repository/worktree/provider/host targets, search keys/modules/consumers/impact, edit every legal layer, and see default/desired/activated/effective/observed values with the full source/precedence chain.
+- Redactor/detector/custom-rule/action/quarantine/retention/rescan controls are fully visible; the non-disableable safety floor is rendered as an effective constraint and cannot be weakened.
+- Autonomous-curation schedule, authority, evidence/quality/privacy/resource/staging/monitoring/recovery policy is configurable globally/by legal scope; candidates never become item approval controls.
+- History, diff, drift, validation, consumer acknowledgements, restart/new-session/rescan/reproject/reindex/migration impact, credential-reference availability, SSE progress, and safe import/export are first-class.
+- `tracedecay config` provides the same tree/search/get/explain/set/unset/history/diff/status/watch/import/export surface for humans and agents; JSON/JSONL is explicit and deterministic.
 - Storage growth, blob integrity/GC, retention, redaction/privacy events.
 - Data quality coverage matrix across projects/providers/domains.
 
@@ -1243,12 +1332,12 @@ Modes:
 This is the product home for Hermes-style self-improvement across managed skills and memories, not a hidden automation side effect.
 
 - Start from a bounded evidence collection: repeated user correction, missed capability, failed workflow, retrieval gap, automation outcome, diagnostics cluster, or explicitly selected sessions/turns.
-- Inspect the curator/reflection/skill-writer agent graph, exact source evidence, generated proposal, validation/evals, similarity/deduplication, privacy/secret/transience checks, affected profiles/projects/providers, and predicted benefit/risk.
-- Compare skill/memory versions as structured and semantic diffs. Trace every version through draft, validation, approval policy, install/apply, injection/retrieval, observed use, terminal outcome, revision, rollback, archive, and deletion.
-- Simulate the proposed memory or skill over a frozen historical corpus before apply; report changed hints/tool choices/outcomes, regressions, latency/token cost, and unknown observation horizons.
-- Require explicit approval by default. Policy may allow narrow auto-apply only for a versioned low-risk class with signed validation receipt, staged rollout, automatic rollback threshold, and a complete audit trail.
+- Inspect the curator/reflection/skill-writer agent graph, exact source evidence, generated candidate, validation/evals, similarity/deduplication, privacy/secret/transience checks, affected profiles/projects/providers, autonomous decision, staged effect, and observed outcomes.
+- Compare skill/memory versions as structured and semantic diffs. Trace every version through candidate, validation, policy decision, autonomous materialization, injection/retrieval, observed use, terminal outcome, autonomous revision/recovery, archive, and deletion.
+- Replay a candidate or applied version over a frozen historical corpus to explain changed hints/tool choices/outcomes, regressions, latency/token cost, and unknown observation horizons. Simulation is observational and never a gate for the live autonomous worker.
+- Require autonomous application for every policy-eligible owned curation effect. Versioned configuration sets evidence/privacy/ownership/resource/staging/monitoring/recovery rules globally; no per-item human approval or apply action exists.
 - Treat managed agent identities such as Hermes, memory curator, session reflector, and skill writer as actors with goals, turns, tools, artifacts, and outcomes visible in the same timeline and graph lenses.
-- Surface stale, unused, contradictory, over-broad, self-referential, provider-mismatched, or repeatedly reverted skills/facts as review queues.
+- Surface stale, unused, contradictory, over-broad, self-referential, provider-mismatched, or repeatedly recovered skills/facts as autonomous decisions/history and policy-quality signals, not approval queues.
 
 ### 16.10 Coordination Lab
 
@@ -1258,6 +1347,13 @@ This is the product home for Hermes-style self-improvement across managed skills
 - Track whether the candidate would have duplicated a notice, exposed sensitive context, warned on intentional best-of-N, missed a write conflict, or provided a useful retrieval anchor.
 - Promote secret-scanned cases into a labeled coordination corpus without publishing private task summaries.
 - Never publish/modify a live claim, send a message, reserve a file, or record a hint outcome from the lab.
+
+### 16.10A Orchestration Lab
+
+- Replay initiative decomposition, plan-version validation, dependency/readiness, critical path, executor/provider/model/reasoning-effort eligibility, route ranking, fairness, retry/circuit breakers, context packet assembly, sibling materiality, claim/lease/fence races, cancellation, and effect reconciliation.
+- Compare recorded versus current policy/config/catalog/model/index inputs, requested versus actual routes, packet omissions, costs, outcomes, and counterfactual executor choices with exact evidence/retrieval anchors.
+- Include the Hermes wrong-board/copy/lost-dependency/already-complete/stale-worker regression and the multi-repository Rspack/Rsbuild/React Router Codex/Claude fan-out/fan-in fixture.
+- Never claim, lease, schedule, spawn, send, consume budget, change a circuit breaker, publish a work item, or mutate analytics/curation; the application-level side-effect guard fails closed.
 
 ### 16.11 Message Search Quality Lab
 
@@ -1281,6 +1377,7 @@ This is the product home for Hermes-style self-improvement across managed skills
 | Analytical question | Primary artifact | Renderer | Fallback |
 |---|---|---|---|
 | How is the whole system connected? | Clustered semantic-zoom Brain | Sigma.js/Graphology/WebGL + DOM/SVG labels | Outline, relationship table, adjacency matrix |
+| How should cross-repository work decompose and execute? | Initiative graph-of-graphs with plan outline, dependency DAG, critical path, Kanban/workload/executor projections, and claim-overlap overlay | ELK/Sigma + ECharts + virtualized inspectors | Task/dependency/attempt table and nested plan outline |
 | What spawned/produced what? | Workflow/provenance DAG | ELK layout + Canvas/SVG | Ordered event/relationship list |
 | What happened over time? | Causal Loom lanes + density brush | Canvas/WebGL marks + D3 scales + virtualized DOM | Chronological table/transcript |
 | What changed across code snapshots? | Code evolution graph + diff inspector | Layered graph + CodeMirror | File/symbol change table |
@@ -1329,7 +1426,7 @@ Rules:
 - `dashboard/packages/timeline/` — density, lanes, virtualized transcript, time brush.
 - `dashboard/packages/charts/` — ECharts ownership, direct-label and accessibility helpers.
 - `dashboard/packages/code-viewer/` — CodeMirror code/message/diff payloads.
-- `dashboard/features/*` — Brain, Explorer, Sessions, Agents, Code, Knowledge, Delivery, Automations, Observatory, Costs, Playgrounds.
+- `dashboard/features/*` — Brain, Explorer, Work/Plans/Tasks/Executors, Sessions, Agents, Code, Knowledge, Delivery, Automations, Observatory, Costs, Playgrounds.
 
 Before selecting the new dashboard bundler, commit an ADR comparing the current Rsbuild/plugin asset pipeline with Vite: dev/prod build, embedded Rust assets, code splitting/lazy routes, CSP, base paths, source maps, legacy plugin loading, test tooling, and migration cost. React/TypeScript and package boundaries are fixed; the bundler follows the ADR evidence.
 
@@ -1489,11 +1586,11 @@ The inventory includes frontend behavior, not only routes: every plugin view, fi
 | V1 surface | V2 owner | Required parity before retirement |
 |---|---|---|
 | Shell project selector and six tabs | Unified shell | Project selection, legacy-tab redirects, direct deep links, capability/error states, no lost writable action. |
-| Holographic Inspector | Knowledge + universal inspector | Fact list/detail, trust history, provenance, filters, mutation preview/apply. |
+| Holographic Inspector | Knowledge + universal inspector | Fact list/detail, trust history, provenance, filters, autonomous decision/effect/outcome history, pin/protect/exclude/config controls. |
 | Holographic Semantic Map | Knowledge similarity view | Projection, selection, filters, score explanation, table fallback. |
 | Holographic Graph | Knowledge provenance graph | Fact/entity links, neighborhood, inspector, evidence, bounded graph. |
 | Holographic Similarity | Knowledge comparison | Similar/duplicate/conflict pairs, thresholds, exact scores, curation handoff. |
-| Holographic Curation | Knowledge + Automations | Status, activity, runs, config, proposals, apply/reject, oplog/audit. |
+| Holographic Curation | Knowledge + Automations | Status, activity, runs, autonomy config, candidates, policy decisions, automatic effects/recovery, outcomes, oplog/audit; no per-item apply/reject. |
 | LCM overview/recent sessions | Sessions + Observatory | Counts, providers, summaries, compression, health, exact scope/coverage. |
 | LCM text search | Explorer + Sessions | FTS semantics, filters, paging, raw/summary provenance, export. |
 | LCM session/node drawers | Causal Loom + inspector | Lossless replay, node/source expansion, payload coverage, deep links. |
@@ -1504,7 +1601,7 @@ The inventory includes frontend behavior, not only routes: every plugin view, fi
 | Code Graph path mode | Code/Explorer | Exact paths, edge kinds, snapshot scope, evidence and truncation. |
 | Savings overview/ledger/sessions/models/pricing | Costs | Existing ranges/tables/diagnostics plus linked session/tool/hint/outcome evidence. |
 | Code Diagnostics overview/settings/refresh | Observatory + Code | Diagnostics, language settings, refresh actions, mapped symbols/tests, errors. |
-| Settings profile/project patches | Settings | Full config scope/source/defaults, optimistic patch, validation, restart impact. |
+| Settings profile/project patches and hidden file/flag/env defaults | Settings + generated `tracedecay config` | Complete typed registry, target/layer/source/precedence, desired/effective/observed state, CAS patch, history/diff/drift, consumer ack, restart/new-session/rescan/reproject/reindex/migration impact, safe import/export, redactor floor, autonomy controls, and zero hidden/dashboard-only setting. |
 | Automation jobs/scheduler | Automations | CRUD, run, pause/resume, locks/skips, effective config, audit. |
 | Managed skills/proposals/artifacts | Automations + Knowledge | Lifecycle mutations, evidence, validation, usage/outcomes, artifact inspection. |
 | Analytics overview/hints/usage/underused | Observatory + Costs + Hint Lab | Exact counts/denominators/caps, drill-down, policy version, terminal outcomes. |
@@ -1521,6 +1618,14 @@ The inventory includes frontend behavior, not only routes: every plugin view, fi
 Each PR below must be independently reviewable, backward-compatible unless explicitly a cutover, and accompanied by focused tests and a migration/parity receipt.
 
 ### Phase 0 — Truth, contracts, and safe corpora
+
+Cross-cutting contract companions, in dependency order:
+
+| PR | Contract locked |
+|---|---|
+| 4C | Typed configuration descriptors, layers, revisions, values, safety floors, activation and consumer acknowledgements (plan 20). |
+| 4D | Incremental scout trigger/checkpoint/model-plan/suggestion-address/envelope/delivery/outcome contracts (plan 22). |
+| 4E | Initiative, immutable plan/work-item versions, gates, executor routes, fenced leases/attempts, context packets, artifacts/outcomes, and task views (plan 24). |
 
 #### PR 1: Architecture decision records
 
@@ -1615,6 +1720,16 @@ Each PR below must be independently reviewable, backward-compatible unless expli
 
 ### Phase 1 — Storage, capture, identity, and projections
 
+Cross-cutting evidence-plane companions:
+
+| PR | Durable owner/projection slice |
+|---|---|
+| 6E | Immutable configuration revisions, effective snapshots, activation manifests, encrypted value refs, history, and recovery (plan 20). |
+| 6F | Scout work/checkpoint/suggestion/delivery repositories, coalescing, retention, and crash recovery (plan 22). |
+| 6G | Activity-shard task graph repositories, idempotency, reservations, lease epochs, attempt transactions, saved-view definitions, backup/restore, and repair (plan 24). |
+| 10D | Scout trigger/materiality/currentness/feedback safe projections and observability rollups (plan 22). |
+| 10E | Current plan/work-item/readiness/dependency/critical-path/attempt/executor/workspace/packet/cost projections and cross-graph materiality (plan 24). |
+
 #### PR 5: Catalog/project/blob store skeleton
 
 - Create `crates/tracedecay-store/src/{catalog,project,graph,blob,migrations,manifest,integrity,backup}.rs`.
@@ -1687,6 +1802,8 @@ Each PR below must be independently reviewable, backward-compatible unless expli
 
 ### Phase 2 — Query platform
 
+Temporal-session companions extend the same `TraceQueryV1` path: PR 13D freezes the real temporal corpus/current baselines; 13E adds occurrence/logical-copy/Turn/thread/summary-horizon lineage; 14D adds temporal assertion resolution and intent-aware ranking; 15C replaces duplicate session/message/LCM assembly with one current/as-of/evolution/forensic service. None introduces a second search API or compares raw shard-local scores as a global rank.
+
 #### PR 11: `TraceQueryV1` parser, validation, cost model, explain
 
 - Create `crates/tracedecay-query/src/{ast,validate,cost,explain}.rs`.
@@ -1740,6 +1857,18 @@ Each PR below must be independently reviewable, backward-compatible unless expli
 
 ### Phase 3 — Domain projections
 
+Cross-cutting intelligence companions:
+
+| PR | Integrated domain slice |
+|---|---|
+| 17C | Link canonical work/attempts to agents, Turns, goals, tools, code, Git/delivery, knowledge, automation, and exact scope evidence (plan 24). |
+| 21A | Acceptance, handoffs, artifacts, outcomes, costs, context-packet lineage, retention, and downstream gate evidence (plan 24). |
+| 22C | Generate the complete configuration registry, schemas, docs, Settings/CLI/MCP/API/SDK metadata, and legacy inventory drift gates (plan 20). |
+| 22D | Generate scout model/tool/read eligibility, envelopes, observability, and host binding capabilities from the shared catalog (plan 22). |
+| 22E | Generate task/executor query/control/lifecycle capability families, grant metadata, adapter protocol schemas, and conformance manifests (plan 24). |
+| 23H | Pure scout exploration/ranking/silence/dedupe/budget/expiry policy and replay (plan 22). |
+| 23I | Pure task decomposition, readiness, routing, fairness, retry/circuit-breaker, packet relevance, and sibling-materiality policy (plan 24). |
+
 #### PR 17: Sessions and agents
 
 - Project sessions, turns, messages, content parts, tools/results, reasoning summaries, goals, parent/subagent trees, workflows, and handoffs.
@@ -1782,9 +1911,9 @@ Each PR below must be independently reviewable, backward-compatible unless expli
 
 #### PR 21: Automation and skills
 
-- Import jobs, scheduler decisions, runs, artifacts, proposals, approvals, skills, and outcomes; JSONL/files remain immutable export/compatibility sources.
+- Import jobs, scheduler decisions, runs, artifacts, historical proposals/approvals/applies, skills, and outcomes; label them legacy/provider evidence, then project V2 autonomy decisions/effects/recovery. JSONL/files remain immutable export/compatibility sources.
 - [ ] Preserve Claude workflows, Codex goals, and Hermes/curator/reflector/skill-writer identities and native semantics while projecting their shared agent/goal/run/artifact relations.
-- [ ] Implement the managed skill/memory lifecycle ledger from evidence through revision/rollback, including exact validation receipts, installed-version identity, usage/outcome horizon, and staged auto-apply policy.
+- [ ] Implement the fully autonomous managed skill/memory lifecycle from evidence through policy decision, transactional auto-apply, usage/outcome horizon, and automatic revision/recovery, including exact validation/config/installed-version receipts and proof that no per-item approval/apply queue exists.
 - [ ] Backfill and reconcile this domain before its V2 mutations enable.
 
 #### PR 22: Accounting and observability
@@ -1812,6 +1941,22 @@ Each PR below must be independently reviewable, backward-compatible unless expli
 - [ ] Split bundle/runtime, replay, hints/routing, retrieval, correlation, scheduler/diagnostics/curation/memory, and headless labs into PR 23A–23G as specified by the policy-crate plan.
 
 ### Phase 4 — Shared application/API and new product
+
+Cross-cutting official-product companions:
+
+| PR | End-to-end product slice |
+|---|---|
+| 24I | Configuration resolver, direct commands, activation/ack/drift, generated HTTP/CLI/MCP/SDK bindings, and one semantic view model (plan 20). |
+| 24J | Incremental scout worker, bounded context explorer, optional capability-selected model gateway, cancellation/backpressure, and suggestion production (plan 22). |
+| 24K | Exact host/Thread/Turn delivery handshake, claim/revalidation, one shared hint selector, acknowledgements, and terminal outcomes (plan 22). |
+| 24L | Unified temporal session/message/LCM query/context application and generated public bindings (plan 23). |
+| 24M | Canonical task/plan application use cases, authoritative scheduler, fairness, reservations, claims, heartbeats, completion, status, and doctor (plan 24). |
+| 24N | Codex/Claude/Cursor/Hermes/custom executor adapters, exact workspace lifecycle, cancellation/reconciliation, and generated public transports (plan 24). |
+| 25E | Complete Brain Settings workspace over the generated registry (plan 20). |
+| 25F | Scout Observatory, queue/currentness/delivery/feedback views, and exact Turn timeline integration (plan 22). |
+| 25G | Work workspace, initiative/plan/task/attempt inspectors, Kanban projection, dependency DAG, legal actions, and table parity (plan 24). |
+| 30I | Task timeline/causal/critical-path/workload/executor/repository/agent/All lenses and claim-overlap visualization (plan 24). |
+| 31N–31Q | Configuration/autonomy, scout/hints, temporal search/LCM, and full orchestration replay labs with read-only side-effect guards (plans 20, 22, 23, 24). |
 
 #### PR 24 series: Application services, HTTP V2, SSE, generated client, adapters
 
@@ -1895,6 +2040,18 @@ Each PR below must be independently reviewable, backward-compatible unless expli
 
 ### Phase 5 — Backfill, cutover, and retirement
 
+Cross-cutting migration companions:
+
+| PR | Migration/cutover/deletion slice |
+|---|---|
+| 33C | Inventory/import legacy configuration, preserve effective behavior intentionally, shadow resolution, and remove legacy readers after receipts (plan 20). |
+| 33D | Import scout-relevant historical evidence only, reconstruct explicit gaps, and run no-delivery shadow suggestions (plan 22). |
+| 33E | Import occurrence/copy/summary lineage, temporal assertions, and compare V1 message/LCM retrieval/context assembly (plan 23). |
+| 33F | Import provider/Hermes/external task evidence without ambient-board adoption or automatic materialization; shadow task policies/packets/routes with no effects (plan 24). |
+| 35I | Cut session/message/LCM query and context assembly to the one temporal path (plan 23). |
+| 35J | Enable exactly one scoped canonical scheduler/lease owner after old dispatch drains; prove multi-host rollback/reconciliation before expanding strata (plan 24). |
+| 37G–37J | Delete legacy configuration, scout/hint, session/LCM/search, board/current-selector/direct-DB/scheduler/output paths and require one final convergence inventory (plans 20, 22, 23, 24). |
+
 #### PR 33: Resumable V1 backfill
 
 - Reconcile the domain backfills already shipped with PRs 17–23 and import any remaining registry/sidecar data.
@@ -1962,6 +2119,15 @@ Each PR below must be independently reviewable, backward-compatible unless expli
 - Secret/redaction corpus and read-only side-effect assertions.
 - Outcome attribution horizon and unresolved-state tests.
 
+### Task graph, multi-agent execution, and context packets
+
+- Property/reference tests for immutable plan/work-item versions, typed gates, cycle witnesses, readiness, topological order, critical path/slack, acceptance, cancellation, replacement, and as-of reconstruction.
+- Many-host CAS races for claim/heartbeat/expiry/revoke/cancel/complete at 2/8/64/256 contenders; assert one active lease, monotonic epochs, atomic terminal/release, zero stale worker artifacts/terminal writes, and explicit external-effect reconciliation.
+- Codex/Claude/Cursor/Hermes/custom adapter conformance for registration, provider/model/reasoning effort, tool/effect grants, workspace binding, start/status/cancel/event cursor, packet hydration, actual-route receipts, partial telemetry, and secret/environment isolation.
+- Rspack/Rsbuild/React Router fan-out/fan-in fixture: exact cross-repository scope, distinct worktrees, dependency preservation, verifier/synthesizer gates, Codex/Claude route partition, material sibling update, integration acceptance, and delivery evidence.
+- Hermes-derived regressions: no ambient board authority, no task-copy repair, no lost dependencies, no dispatch of already-complete work, no stale worker after manual completion, and correct many-to-many task↔Thread/Turn relations.
+- Context packet mandatory-entry recall, forbidden-entry leakage, temporal correctness, source/omission/digest/expiry coverage, token/latency, sibling-materiality precision, useful silence, and exact-addressee delivery.
+
 ### Product
 
 - Contract tests for every entity/relation/query type and CLI/MCP/HTTP/UI semantic parity.
@@ -2005,6 +2171,12 @@ Record the reference machine and corpus in benchmark output. Test current scale 
 - WCAG 2.2 AA plus keyboard completion of every primary workflow.
 - Mandatory runtime sanitizer meets the hook budget; async built-ins sustain the plan-18 reference throughput; timeout/incomplete scan fails closed.
 - Synthetic secret corpus produces zero plaintext/candidate-digest bytes across every named store/index/prompt/output/cache/fixture/export/backup/restore/release sink.
+- Task lease issue/claim transaction p95 ≤ 50 ms under ordinary load; heartbeat p95 ≤ 20 ms; no operation holds the SQLite writer across Git/process/network/model work.
+- Ready-task event to scheduler decision p95 ≤ 1 second and to adapter start intent p95 ≤ 2 seconds when an eligible executor/workspace is already available; safety reconciliation takes precedence and reports delay.
+- Context packet assembly p95 ≤ 500 ms for cached ordinary packets and ≤ 2 seconds for bounded federated retrieval; mandatory content is never silently dropped to meet latency.
+- Task/plan/attempt list p95 ≤ 200 ms at current scale; bounded dependency neighborhood/critical-path p95 ≤ 500 ms at 10×; All uses safe rollups and authorized lazy hydration.
+- Lease, cancellation, retry, and fault corpora produce zero double-active leases, stale terminal commits, epoch regressions, unauthorized effects, or duplicate non-idempotent effects.
+- Task-aware scout delivery meets plan-22 useful-silence, privacy, expiry, dedupe, token, interruption, and exact-Thread/Turn gates; hook wait remains ≤ 2 ms p95 for pending-envelope claim/revalidation.
 - Architecture scorecard reports zero unowned duplicate semantic authorities, zero transport/direct-store bypasses, zero new compatibility-adapter call sites, and zero expired adapters at each cutover.
 - New bounded-context production files target ≤ 800 lines.
 
@@ -2039,6 +2211,10 @@ Repeatable user-task gates on a fixed corpus, with zero correctness failures:
 - Every persisted/searchable/output content entity has a complete sanitization receipt or explicit legacy-unscanned/quarantined/unknown state; serving unknown secret coverage is zero at cutover.
 - Superseded session/LCM, detector, query, policy, status, error, command, transport-logic, and dashboard-model paths are removed according to the convergence retirement ledger.
 - All primary views share scope, time, selection, inspector, URL, saved-view, and coverage state.
+- One canonical initiative can span multiple repositories and expose any number of focused boards/agent slices without task copies, lost dependencies, or ambient dispatch scope.
+- Every execution attempt records requested/actual executor/provider/model/reasoning effort/tools/skills/grants/workspace/packet/budget/cost and rejects stale fenced writes.
+- Agents receive only temporally correct, authorized, materially relevant task context; sibling hints measurably prevent duplicate work without notifying unrelated agents or intentional ensembles.
+- The Work workspace pivots one selection across plan outline, Kanban, DAG, critical path, timeline, causal, workload, executor, repository, agent, and All views with table/export/accessibility parity.
 - V2 migration has complete manifests, explained parity, tested rollback, and no silent data loss.
 
 ## 28. Risk Register
@@ -2056,6 +2232,11 @@ Repeatable user-task gates on a fixed corpus, with zero correctness failures:
 | Query DSL becomes opaque | Visual builder, saved examples, explain plan, generated clients, bounded operators. |
 | Hybrid ranking feels magical | Component scores, versions, evidence, deterministic lexical fallback, eval corpus. |
 | All scope opens every store | Catalog statistics, projection rollups, shard pruning, budgets, partial coverage. |
+| Boards fragment identity or leak ambient routing | One profile activity-shard task graph; boards are saved authorized queries only; mutation/dispatch always names canonical IDs, versions, and scope. |
+| Autonomous multi-agent execution duplicates or corrupts work | CAS task revision, one fenced lease epoch, exact writable-resource reservations, idempotency, TTL/heartbeat, stale-write rejection, cancellation/effect reconciliation, and planned-parallel labeling. |
+| Agents lack sibling context or receive noisy global context | Versioned recipient-specific packets plus materiality projection and plan-22 exact-addressee selector; explicit omissions, relevance evals, cooldown, budgets, and silence default. |
+| Executor routing silently widens provider/model/tools/cost/privacy | Capability filter before ranking, explicit requested/actual route receipt, deny-wins grants, opaque credential refs, scope/residency/egress/budget floors, and no implicit fallback. |
+| Cross-repository tasks use the wrong checkout/ref | `ScopeSelectorV2` plus immutable workspace binding, base commit/code snapshot, ownership/dirty/overlap checks, and no CWD/current-board fallback. |
 | WebGL excludes accessibility | Synchronized outline/table/text, keyboard model, export, reduced motion. |
 | Renderer sprawl | One renderer owner per artifact family and a shared selection/accessibility contract. |
 | Dual systems drift | Immutable manifests, shadow capture/read, differential tests, migration receipts. |
@@ -2071,6 +2252,9 @@ Repeatable user-task gates on a fixed corpus, with zero correctness failures:
 - No automatic upload of transcripts, reasoning, code, or embeddings.
 - No attempt to recover hidden model chain-of-thought.
 - No giant unbounded graph of every entity.
+- No generic project-management suite, board-local task database, board-as-authority workflow, or external tracker as canonical task truth.
+- No LLM in the atomic claim/heartbeat path and no model/worker authority to widen scope, grants, budget, egress, or destructive effects.
+- No global task broadcast or automatic exposure of all sibling prompts/boards to an executor.
 - No required Neo4j, PostgreSQL, Elasticsearch, or cloud vector database.
 - No simultaneous rewrite of every provider adapter before one vertical slice works.
 - No deletion of V1 stores during backfill or first cutover.
@@ -2085,6 +2269,10 @@ The redesign program is complete only when:
 - One mandatory sanitizer and sink-eligibility model is authoritative before all new writes, indexes, prompts, outputs, caches, fixtures, exports, and backups.
 - V1 data is backfilled with complete manifests, hashes, counts, quarantine records, and explained parity.
 - CLI, MCP, HTTP, dashboard, saved views, exports, and labs use the same application/query contracts.
+- One canonical initiative/plan/work-item graph, scheduler, lease authority, executor SPI, context-packet assembler, task query algebra, and generated public surface serve all projects and agent hosts; no board/current-project/direct-DB dispatch path remains.
+- Codex, Claude, Cursor, Hermes, and custom executors pass the same fenced lifecycle/capability/workspace/cancellation conformance suite with truthful coverage and requested/actual route receipts.
+- Kanban, plan outline, DAG, critical path, timeline, causal, workload, executor, repository, agent, and All task lenses are projections over identical canonical IDs/versions and meet table/accessibility/export/performance gates.
+- Cross-repository task packets and material sibling suggestions preserve exact scope/anchors, prevent the named duplicate-work regressions, remain silent for irrelevant/intentional overlap, and never leak global-board context.
 - The convergence inventory proves there is one canonical owner for every domain semantic, generated binding parity, no serving bypass, and every temporary V1/anti-corruption adapter is retired by its deletion gate.
 - Brain, Explorer, Causal Loom, domain workspaces, Observatory, Costs, and all replay labs meet functionality, accessibility, privacy, and performance gates.
 - Store selection, coverage, freshness, inference, redaction, caps, ranking, and query plans are visible and correct.
@@ -2098,6 +2286,7 @@ The redesign program is complete only when:
 - [ ] Reconcile final LCM role=user and human-authored export counts, chronological order, session/provider coverage, and documented public-API gaps.
 - [ ] Verify every current architecture/data/dashboard finding names a target contract or program PR.
 - [ ] Verify all user-requested views—All/Brain, graphs/charts, agent reasoning/action timeline, code/subagent/branch/PR/impact linkage, hint replay, and additional labs—are covered.
+- [ ] Verify the canonical task/plan graph supports multiple focused boards and cross-repository initiatives, explicit Codex/Claude executor partitions, typed dependencies, context packets, fenced concurrent runs, exact task↔Thread/Turn/code/Git/PR anchors, and task-aware useful-silence hints without a second scheduler or task store.
 - [ ] Verify physical storage remains federated while product/query semantics remain unified.
 - [ ] Verify all plans describe one end-to-end source -> sanitizer/capture -> evidence -> projector -> query -> policy -> application -> thin-adapter flow with identical type names, ownership, versions, watermarks, errors, receipts, and PR order.
 - [ ] Verify plans 18/19 cover every privacy sink and every fragmented authority/bypass, with explicit owners, extensions, scale behavior, retirement tasks, and deletion gates.

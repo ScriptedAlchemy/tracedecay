@@ -14,14 +14,18 @@
 
 This plan owns master-plan PR 24F. It lands after application PR 24A establishes the narrow hook port and may use the commit sequence in Section 15, but remains one hook-runtime boundary in program numbering.
 
+Plan [`24-canonical-task-plan-graph-and-multi-agent-executor.md`](24-canonical-task-plan-graph-and-multi-agent-executor.md) may supply exact task/attempt/context-packet refs to plan-22 suggestions and bounded executor lifecycle signals. Hooks never enumerate boards, schedule/claim/cancel/complete work, widen an executor grant, or inject unaddressed sibling context.
+
 - tracedecay-capture owns spool files, framing, fsync, recovery scans, source continuity, rewrite generations, immutable observation appends, and capture manifests.
 - tracedecay-hooks owns host request decoding, normalization into HookRequestV1, deadline/durability selection, application-policy invocation, host response encoding, and acknowledgement receipts.
 - tracedecay-policy owns deterministic intent, hint, routing, suppression, dedupe, cooldown, escalation, budget, rendering decisions, and missed-capability/correction outcome proposals.
 - tracedecay-tool-catalog owns immutable capability/use-case metadata and host/tool bindings. Hooks may resolve a pinned snapshot; they may not hard-code a second tool catalog.
 - tracedecay-application composes captured request facts, authorized query/memory/skill candidates, policy evaluation, evaluation/state recording, and explicit proposed effects.
+- [`22-incremental-context-scout-and-suggestion-envelopes.md`](22-incremental-context-scout-and-suggestion-envelopes.md) owns optional asynchronous model/read exploration and durable suggestion envelopes. Hooks only claim/revalidate/render an already prepared envelope through `HookApplicationPort`; they never start or wait for scout work.
 - tracedecay-store and tracedecay-projectors are behind capture/application ports. This crate has no SQL, connection, migration, projection, blob, Git, network, or filesystem implementation.
 - Exact replay mode names are domain `ReplayMode::ExactDeterministic`, `ReplayMode::RecordedResult`, and `ReplayMode::CurrentBestEffort`.
 - A host acknowledgement is not an observation commit, hint emission, or acted outcome. Each has a separate typed receipt/event.
+- Deterministic candidates and incremental-scout candidates enter one application/policy delivery selector, dedupe/cooldown/budget state, and outcome model. A host invocation cannot receive both engines' duplicate advice.
 - Provider source rows remain provider-owned and unchanged at their native source. TraceDecay hooks retain privacy-domain-bound locators/fingerprints plus sanitized observations; query-time human-message classification from merged PR #410 is a projection/filter concern, and hooks never delete sanitized copied-subagent observations.
 
 ## 2. Goals
@@ -88,7 +92,7 @@ Base/future-master inputs refreshed on 2026-07-10:
 - PR #407 user-profile Hermes consolidation. Hermes/curator/reflector/skill-writer activity is actor/workflow evidence inside the user's profile, never a separate hook profile.
 - PR #410 copied-subagent prompt collapse. Hook normalization records native `PromptOrigin` evidence and projectors map it into `tracedecay-domain::MessageOrigin`; every sanitized native observation is retained, while direct_user/subagent/tool_result filters and parent-representative dedupe remain query/projector behavior.
 - PR #411 foreign-skill ownership/remediation. Hook hints and diagnostics must not suggest update/delete when catalog/application says the package is foreign to this installation; the safe route is info/no-action or explicit manual ownership transfer.
-- Current master later merged #410/#411/#414 and release PRs #413/#416. Open #407/#415/#417 and the current release PR are refreshed before PR 24F; #414 affects generated edit-tool descriptors and #417 makes split identity explicit coverage/silence, never first-candidate routing. PR #409 remains historical.
+- Publication master `9f7a1108` later merged #410/#411/#413/#414/#415/#416/#417/#419/#420/#422. Open #407/#418/#423 are refreshed before PR 24F; #414/#419 affect generated edit-tool descriptors, #417 makes split identity explicit coverage/silence rather than first-candidate routing, and #423's retrieval behavior may change hint context only after merge. PR #409 remains historical.
 
 Before PR 24F begins, refresh open PRs, master, installed host versions, hook manifests, application hook-port schema, and catalog digest. Drift becomes a manifest difference, not an undocumented assumption.
 

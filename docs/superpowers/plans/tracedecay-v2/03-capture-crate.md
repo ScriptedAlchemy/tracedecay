@@ -8,6 +8,8 @@
 
 **Tech Stack:** Rust workspace; `tracedecay-domain` contracts; `serde`/`serde_json`; SHA-256 and UUID namespaced identity through domain helpers; `rusqlite`-backed sink supplied by `tracedecay-store`; private append-only spool segments; property tests, redacted golden fixtures, crash tests, and Criterion benchmarks.
 
+Plan [`24-canonical-task-plan-graph-and-multi-agent-executor.md`](24-canonical-task-plan-graph-and-multi-agent-executor.md) requires capture of provider-native goals/plans/workflows, executor registration/lifecycle observations, workspace/Git/delivery facts, tool effects, costs, and external task-system records as sanitized evidence. Capture never materializes schedulable work, assigns an executor, grants authority, or treats a provider/board status as canonical completion.
+
 ---
 
 ## Goals
@@ -34,7 +36,7 @@
 
 ## Convergence boundary
 
-Capture is the sole runtime content-ingress/sanitizer owner in [`19-system-defragmentation-convergence-and-extensibility.md`](19-system-defragmentation-convergence-and-extensibility.md) and [`18-secret-detection-redaction-and-private-data-safety.md`](18-secret-detection-redaction-and-private-data-safety.md). It consumes the exact domain taint/scope/evidence types from [`01-domain-crate.md`](01-domain-crate.md), uses store ports from [`02-store-crate.md`](02-store-crate.md), and emits only observations for [`04-projectors-crate.md`](04-projectors-crate.md).
+Capture is the sole runtime content-ingress/sanitizer owner in [`19-system-defragmentation-convergence-and-extensibility.md`](19-system-defragmentation-convergence-and-extensibility.md) and [`18-secret-detection-redaction-and-private-data-safety.md`](18-secret-detection-redaction-and-private-data-safety.md). It consumes the exact domain taint/scope/evidence types from [`01-domain-crate.md`](01-domain-crate.md), uses store ports from [`02-store-crate.md`](02-store-crate.md), and emits only observations for [`04-projectors-crate.md`](04-projectors-crate.md). Scout/model/delivery evidence from [`22`](22-incremental-context-scout-and-suggestion-envelopes.md) and occurrence/correction/summary evidence required by [`23`](23-session-lcm-temporal-retrieval-and-evaluation.md) enter through the same sanitized observation contract; capture never ranks or addresses them.
 
 | Boundary | Contract |
 |---|---|
@@ -370,7 +372,12 @@ pub enum AgentActivityDraft {
     FileObserved { path: String, operation: String },
     GitObserved { native_object_id: String, native_kind: String },
     MemoryObserved { native_memory_id: String, native_kind: String },
-    CurationObserved { native_artifact_id: String, native_kind: String, status: String },
+    LegacyCurationObserved { native_artifact_id: String, native_kind: String, status: String },
+    CurationCandidateObserved { native_artifact_id: String, status: String },
+    AutonomyDecisionObserved { native_artifact_id: String, decision: String },
+    AutonomousEffectObserved { native_artifact_id: String, status: String },
+    CurationOutcomeObserved { native_artifact_id: String, status: String },
+    AutomaticRecoveryObserved { native_artifact_id: String, status: String },
 }
 ```
 
@@ -379,7 +386,7 @@ pub enum AgentActivityDraft {
 - A Turn source record may reference messages/content parts, provider-exposed reasoning summaries, tool invocations/results, files, goals, and usage. Capture records those references but does not create the canonical Turn or its edges.
 - Claude workflow/run/roster/journal semantics remain `WorkflowRunObserved` records with their native status and agent IDs; they are not coerced into Codex goal states.
 - Codex goal create/update/complete/blocked events retain native goal ID, objective, status, budget, and event type; they are not reduced to workflow-run status.
-- Hermes host/user/automation actor hints and curation/self-improvement records preserve proposal, validation, approval, apply, artifact, fact, skill, and outcome kinds. Actor or outcome attribution remains a projector decision backed by these observations.
+- Hermes host/user/automation actor hints and curation/self-improvement records preserve historical proposal/validation/approval/apply kinds as `LegacyCurationObserved`, while V2 emits candidate/autonomy-decision/automatic-effect/outcome/recovery observations. Actor or outcome attribution remains a projector decision backed by these observations; capture never turns a legacy approval into a V2 gate.
 - Presence/work-claim drafts preserve agent/session/parent/goal aliases; repository/worktree/ref/PR/file/symbol/query scope; read/write intent; optional validated safe summary; retrieval anchors; heartbeat/TTL/status; and declared redundancy mode. Capture never infers material overlap, cancels work, or copies raw task/prompt text into the summary.
 - File/Git/memory links retain exact tool/event/source references so projectors can cross-link Turn graphs to timeline, code snapshots, worktrees/commits/PRs, facts/retrieval, and automation without temporal guessing.
 
@@ -446,7 +453,7 @@ pub struct CaptureReplayManifestV1 {
 
 Canonical provider activity, including generic and cross-project sessions, belongs to profile `activity.db`. Project attribution is zero-to-many evidence produced later; project shards receive locators and scoped projections, never duplicate message bodies. Profile/zero-project/cross-project knowledge, skills, policies, and automation also resolve to activity ownership. Project-native Git/code and explicitly project-scoped knowledge/policy/automation evidence belongs to the canonical repository/privacy-domain `project.db`.
 
-Merged PR #405 (`legacy-store-adoption`) is a required pre-backfill seam: source discovery consumes its manifest-backed adopted identity, treats pristine retargeting as the same source, and quarantines nonempty split-identity conflicts instead of minting duplicate artifact IDs. Open PR #407 keeps `~/.hermes` source-only if merged. Merged #410 remains a semantic fixture: every copied parent/subagent prompt, direct-user row, tool result, and protocol row is captured losslessly. Merged #412 supplies lifecycle drain evidence; merged #411 supplies foreign skill-owner/remediation events. #414 and release PRs #413/#416 add no capture semantics by assumption. Open #415/#417 and the current release PR are refreshed before implementation; #417's identity-split visibility is a required discovery/quarantine case. PR #409 remains historical. The conformance manifest records actual merge/base commits and semantics.
+Merged PR #405 (`legacy-store-adoption`) is a required pre-backfill seam: source discovery consumes its manifest-backed adopted identity, treats pristine retargeting as the same source, and quarantines nonempty split-identity conflicts instead of minting duplicate artifact IDs. Open PR #407 keeps `~/.hermes` source-only if merged. Merged #410 remains a semantic fixture: every copied parent/subagent prompt, direct-user row, tool result, and protocol row is captured losslessly. Merged #412 supplies lifecycle drain evidence; merged #411 supplies foreign skill-owner/remediation events. #414/#419 and release PRs #413/#416 add no capture semantics by assumption; merged #415/#417/#420/#422 contribute release, identity, routing, and catalog-generation evidence. Open #418/#423 are refreshed before implementation; #417's identity-split visibility is a required discovery/quarantine case. PR #409 remains historical. The conformance manifest records actual merge/base commits and semantics.
 
 ## Per-provider conformance matrix
 

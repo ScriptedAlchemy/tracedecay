@@ -13,6 +13,7 @@ Core product surfaces:
 - All/Brain system view with semantic zoom and coordinated graph-of-graphs lenses.
 - Universal Explorer with typed query, search, facets, pivots, compare, explain, collections, and export.
 - Causal Loom timeline following an agent/Turn/session through tools, subagents, code, worktrees, commits, PRs, checks, memories, hints, and outcomes.
+- Canonical Tasks workspace over one federated initiative/plan/task graph, with saved Kanban/DAG/timeline views, cross-repository work bundles, dependency/critical-path analysis, executor routing, claims/runs, and versioned context packets.
 - Git, code, thread, agent, Turn, timeline, holographic-memory, and automation/skill graph lenses with tables and accessible fallbacks.
 - Hint, Retrieval, Search Quality, Coordination, Ingest, Query, Correlation, Scheduler, Memory, Policy Diff, Evolution, and Scope/Federation labs.
 - One official contract shared by API, CLI, MCP, generated SDKs, dashboard, hooks, and tool discovery.
@@ -41,12 +42,17 @@ Core product surfaces:
 | [`17-official-public-api-and-sdks.md`](17-official-public-api-and-sdks.md) | Official direct-agent/public API, contract IR/OpenAPI/JSON Schema, stable IDs/errors/cursors/batch/SSE, Rust/TS/Python SDKs, docs/sandbox/conformance. |
 | [`18-secret-detection-redaction-and-private-data-safety.md`](18-secret-detection-redaction-and-private-data-safety.md) | Mandatory structured sanitizer/taint boundary, detector registry, protected quarantine, sink firewalls, retroactive audit/remediation/restore, privacy UI/lab and secret canary gates. |
 | [`19-system-defragmentation-convergence-and-extensibility.md`](19-system-defragmentation-convergence-and-extensibility.md) | Whole-system current-to-target convergence, one canonical owner per semantic, extension SPIs, scale/organization governance, anti-corruption adapter retirement, and architecture scorecard. |
+| [`20-configuration-control-plane.md`](20-configuration-control-plane.md) | One typed configuration registry/resolver/history across Settings, CLI, MCP, API, SDKs, runtimes, and every subsystem, including visible redactor/privacy controls and autonomous-curation policy. |
+| [`21-cli-mcp-tool-surface-and-output-unification.md`](21-cli-mcp-tool-surface-and-output-unification.md) | Exhaustive CLI/MCP/tool inventory and disposition, one generated binding taxonomy, sealed typed views, shared safe human rendering, canonical JSON, errors/exits, cursors/handles, and every-surface semantic parity. |
+| [`22-incremental-context-scout-and-suggestion-envelopes.md`](22-incremental-context-scout-and-suggestion-envelopes.md) | Optional asynchronous daemon context scout, capability-selected Spark/model path, bounded read-only exploration, evidence-anchored suggestion envelopes, exact Thread/Turn delivery, silence/dedupe/privacy budgets, observability, replay, and hint integration. |
+| [`23-session-lcm-temporal-retrieval-and-evaluation.md`](23-session-lcm-temporal-retrieval-and-evaluation.md) | Current message/LCM source audit, logical-copy and summary-DAG lineage, temporal truth/supersession, current/as-of/evolution/forensic retrieval, stable context assembly, real local qrels/replay, and Search Lab. |
+| [`24-canonical-task-plan-graph-and-multi-agent-executor.md`](24-canonical-task-plan-graph-and-multi-agent-executor.md) | One profile-owned federated initiative/plan/task graph; boards as saved projections; cross-project work bundles; typed dependencies; Codex/Claude/Cursor/Hermes/custom executor routes; fenced claims/runs; context packets; task-aware hints; graph-of-graphs UI; replay/evaluation. |
 
 When documents overlap:
 
 1. The master plan owns outcome, global constraints, dependency order, and cutover gates.
 2. A numbered crate/surface plan owns implementation details in its boundary.
-3. Plans 13–19 own cross-cutting evidence, regression, retrieval, scope, public-contract, privacy, and convergence requirements; bounded crates must satisfy them rather than reimplement them.
+3. Plans 13–24 own cross-cutting evidence, regression, retrieval, scope, public-contract, privacy, convergence, configuration, tool/output, incremental-context, temporal-session, and task/executor requirements; bounded crates must satisfy them rather than reimplement them.
 4. An implementation decision that changes a locked domain contract requires an ADR and coordinated plan update before code diverges.
 
 ## 3. Reading paths
@@ -55,7 +61,7 @@ When documents overlap:
 
 1. Master sections 1–9, 18–24.
 2. Plans 01, 02, 05, 06, 09, and 12.
-3. Plans 13–19 as non-negotiable evidence/scope/API/privacy/convergence gates.
+3. Plans 13–24 as non-negotiable evidence/scope/API/privacy/convergence/task-execution gates.
 
 ### Storage and migration implementer
 
@@ -67,7 +73,7 @@ When documents overlap:
 ### Search/query implementer
 
 1. Plans 01, 04, and 05.
-2. Plan 15 in full.
+2. Plans 15 and 23 in full.
 3. Plan 16 federated planner/search-to-retrieval requirements.
 4. Plan 13 for exact private anchor recovery.
 
@@ -75,8 +81,9 @@ When documents overlap:
 
 1. Plans 06–09.
 2. Master sections 5.3–5.5 and 16.
-3. Plan 14 hint/tool/remediation rows.
-4. Plans 15–16 for search precision, nearby agents, and scope behavior.
+3. Plans 21–22 for generated surfaces and the asynchronous context-scout/delivery boundary.
+4. Plan 14 hint/tool/remediation rows.
+5. Plans 15–16 and 23 for search precision, nearby agents, temporal truth, and scope behavior.
 
 ### API/SDK implementer
 
@@ -93,7 +100,7 @@ When documents overlap:
 
 ### Test/evaluation lead
 
-1. Plans 13–16.
+1. Plans 13–16 and 22–24.
 2. Every plan’s Definition of Done and verification sections.
 3. Master phase/PR gates and SLO section.
 
@@ -103,6 +110,24 @@ When documents overlap:
 2. Plans 01–12 boundary/input/output/dependency/retirement sections.
 3. Plans 14 and 18 for historical bypass/privacy regressions.
 4. Generated compatibility/capability/schema inventories and architecture scorecard.
+
+### Configuration/control-plane lead
+
+1. Plan 20 in full plus plans 01, 02, 08–12, 17–19.
+2. Every current config file/flag/env/default/dashboard/provider/hook/daemon setting inventory.
+3. Redactor/privacy floor, credential references, autonomous-curation policy, generated Settings/CLI/MCP/API parity, and activation/ack/drift gates.
+
+### CLI/MCP/output lead
+
+1. Plan 21 in full plus plans 08–10, 12, 17–20.
+2. The generated recursive CLI inventory and all 104 source MCP definitions, including hidden, conditional, aliased, runtime-filtered, and unavailable bindings.
+3. Typed-view, Markdown-default MCP, explicit canonical JSON/NDJSON, error/exit, cursor/retrieval-anchor, stdout/stderr, safe-rendering, and cross-transport parity gates.
+
+### Task graph and multi-agent execution lead
+
+1. Plan 24 in full plus plans 01, 02, 04–06, 08–10, 16–17, and 20–23.
+2. Hermes source/transcript anchors and wrong-board, copied-task, lost-dependency, already-complete-dispatch, and stale-worker regressions in plans 13–14.
+3. Canonical identity, multi-project declared scope, typed dependency edges, versioned context packets, executor capability routes, claims/run fencing, budget/effect grants, task-aware hints, board projections, and replay gates.
 
 ## 4. Locked architectural decisions
 
@@ -125,8 +150,17 @@ When documents overlap:
 - All/Brain is the product default; project views are zoomed scopes inside one system.
 - Every visualization has table/outline/export/accessibility parity and explicit evidence/coverage semantics.
 - Replay labs are read-only by default and do not contaminate analytics, facts, claims, policies, hints, or live coordination.
+- Fact/memory/managed-skill/profile curation is fully autonomous under versioned configuration: deterministic validation/policy -> transactional effect -> outcome monitoring -> automatic revision/recovery. No per-item preview/approve/apply/rollback queue exists; UI/CLI provide configuration, pause/resume/run-now, pin/protect/exclude, feedback, and history.
 - Migrate and retain non-disposable V1 data for rollback; do not emulate stale running clients, old protocol behavior, or obsolete tool names after cutover.
 - One canonical owner/contract exists for identity, scope, privacy, capture, projection, query, policy, capability, application, and transport semantics; compatibility adapters have deletion PRs and cannot accept new call sites.
+- One generated typed configuration registry and application resolver owns every user-controllable non-secret setting, precedence rule, effective source, impact, history, and runtime acknowledgement. All settings—including redactor/privacy and autonomous-curation policy—are navigable/editable in Brain Settings and generated CLI; secrets remain opaque references and the safety floor cannot be weakened.
+- One generated capability/binding manifest owns every CLI/MCP/API/SDK/dashboard/hook/skill name, request/default/scope/effect/output/error contract, help entry, availability state, and compatibility cutoff. MCP defaults to compact Markdown, machine callers request canonical typed JSON/NDJSON explicitly, and all human renderers consume sealed typed views rather than raw JSON.
+- The optional daemon Context Scout consumes canonical Turn/task/agent events asynchronously, performs only catalog-authorized bounded reads, optionally uses a capability-selected model such as Spark, and emits at most one evidence-anchored suggestion to an exact Thread/Turn through the shared hint selector. Hooks never wait for its model/tools; useful silence, privacy, expiry, dedupe, and replay gates dominate recall.
+- Session/LCM retrieval distinguishes immutable occurrences, logical copies, summaries, and temporal assertions. Recency is one explained intent feature, not truth; explicit later corrections/supersession and authority determine current answers, historical/as-of replay has zero future leakage, and uncertain conflicts remain visible.
+- One profile-owned federated initiative/plan/task graph is canonical. Boards are named `TraceQueryV1` plus layout/grouping/policy projections; they never create or copy task identity, dependencies, claims, runs, or authority. A task may appear in any number of project, repository, worktree, agent, executor, timeline, Kanban, DAG, or initiative views.
+- Executor selection is explicit and typed: host/provider/model/reasoning effort, tool and effect grants, privacy/egress class, cost/time budgets, retry/concurrency policy, and availability resolve to an immutable route receipt. Codex, Claude, Cursor, Hermes, and future executors are adapters, not task owners.
+- Every dispatched run uses a compare-and-swap task revision, TTL/heartbeat claim, artifact/worktree overlap set, idempotency key, and unforgeable run fence. Completion/cancellation revokes stale authority; dependency readiness comes only from current canonical edges.
+- Versioned context packets bind task revision, scope, dependency outcomes, exact Thread/Turn anchors, code/Git/PR state, active claims, retrieval/config versions, source watermarks, visibility policy, budget, and digest. Agents receive only materially relevant, recipient-authorized sibling summaries; neither boards nor long threads become implicit context.
 
 ## 5. Dependency and implementation order
 
@@ -150,6 +184,11 @@ flowchart TD
     A --> M
     API --> M
     UI --> M
+    D --> T["Canonical task and plan graph"]
+    Q --> T
+    P --> T
+    T --> A
+    T --> UI
     M --> X["Bounded cutovers, V2 default, V1 retirement"]
 ```
 
@@ -160,6 +199,7 @@ No broad V2 rewrite lands as one PR. Use the master plan’s Phase 0–5 sequenc
 ### Phase 0 — truth and contracts
 
 - ADRs lock logical architecture, evidence language, scope/store ownership, privacy/retention, API/query/cursor semantics, frontend rendering, and stale-client cutoff.
+- The complete configuration inventory maps every public file/flag/env/toggle/default to one typed descriptor or marks it read-only/non-configurable with rationale; generated Settings/CLI/MCP/API schemas are frozen.
 - Redacted corpus and private manifest are reproducible and secret-scanned.
 - Research anchors route to exact context or explicit tombstone.
 - Synthetic secret corpus/sink inventory and system convergence inventory are complete; no private transcript/store becomes a fixture.
@@ -187,13 +227,17 @@ No broad V2 rewrite lands as one PR. Use the master plan’s Phase 0–5 sequenc
 - Sessions/agents/Turns/tools/goals/workflows and temporal project attribution backfill with parity.
 - Code snapshots/lineage, cross-repo graph, Git/delivery, knowledge, automation/skills, accounting, tool catalog, policy, nearby-agent claims, and replay inputs backfill with evidence manifests.
 - Merged/open PR semantics named in the master/failure matrix are fixtures, not assumptions.
+- Initiative/plan/task identities, dependencies, declared cross-repository scope, executor routes, claims/runs, context packets, outcomes, and task-to-Thread/Turn/code/Git/PR relations backfill into the canonical graph without board-local copies.
+- Wrong-board recovery, dependency preservation, duplicate-work suppression, already-complete artifact detection, stale-run fencing, and recipient-scoped task hints pass transcript-derived replay fixtures.
 
 ### Phase 4 — official product
 
 - Application, HTTP/SSE, API contracts, CLI/MCP, the one official TypeScript client plus thin dashboard binding, Rust/Python SDKs, docs/sandbox, and exports pass semantic conformance.
+- Brain Settings and `tracedecay config` expose the complete registry/effective-source/history/impact/drift model, including all privacy/redactor and autonomy controls, with generated MCP/API/SDK parity.
 - Privacy status/scan/remediation/verify and convergence/capability status share application contracts; Secret Safety Lab uses synthetic values only.
 - Brain/All, Observatory, Explorer, Loom, graphs, workspaces, and labs pass desktop/mobile/accessibility/table/export/partial-state acceptance.
 - Rspack/Rsbuild/React Router multi-repository workflows complete without manual registry/store choreography.
+- One initiative can decompose work across Rspack, Rsbuild, and React Router repositories, assign separate bounded task sets to Codex and Claude routes, display each set as focused boards or one dependency graph, and keep every worker current through versioned packets and material task-aware suggestions.
 
 ### Phase 5 — migration and retirement
 
@@ -238,7 +282,8 @@ Before implementing any slice:
 - [ ] Search and hints have real local precision/recall/no-answer/repetition/latency/resource evaluations across many projects and providers.
 - [ ] Nearby agents can discover overlapping work compactly without prompt leakage, spam, false ownership, or suppression of deliberate parallel review.
 - [ ] Hint/search/coordination/scope/policy behavior can be replayed safely against exact historical inputs and candidate versions.
-- [ ] Knowledge, memories, and managed skills have evidence -> proposal -> validation -> approval/autonomy -> apply -> use -> outcome -> revision/rollback lineage.
+- [ ] Every non-secret configuration is discoverable/explainable/editable at legal scopes through Settings and navigable CLI, every runtime acknowledges the exact effective digest, redactor controls cannot weaken the floor, and no hidden config/default path survives.
+- [ ] Knowledge, memories, and managed skills have evidence -> candidate -> validation/policy -> autonomous effect -> use/outcome -> autonomous revision/recovery/archive lineage, with no per-item human gating.
 - [ ] Every output reports coverage, freshness, provenance, limits, uncertainty, and source class truthfully.
 - [ ] Every historical failure class has prevention, visible detection, recovery, and a deterministic/probabilistic cutover gate.
 - [ ] One sanitizer protects every source/sink and one convergence scorecard proves duplicate authorities/bypasses/adapters are removed, not renamed.

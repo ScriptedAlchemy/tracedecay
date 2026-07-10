@@ -14,6 +14,8 @@
 
 This plan refines master-plan PR 23, supplies the headless engines for PR 31 replay labs, and defines policy compatibility/cutover evidence for PRs 34–37.
 
+Plan [`24-canonical-task-plan-graph-and-multi-agent-executor.md`](24-canonical-task-plan-graph-and-multi-agent-executor.md) adds pure decomposition, gate/readiness, route eligibility/ranking, fairness, retry/circuit-breaker, packet relevance, and sibling-materiality bundles here. They propose typed decisions only; atomic leases, scheduling, executor calls, worktree effects, messaging, and completion remain application workflows.
+
 - The crate is pure with respect to external state: no SQLite, filesystem, environment, ambient clock, process inspection, network, GitHub client, hint-state file, scheduler lock file, or mutation port.
 - An evaluator returns `ProposedEffect`; `tracedecay-application` re-reads authoritative versions, enforces authorization/idempotency/optimistic checks, records an audit event, and applies or rejects it.
 - Canonical IDs, observations, events, relation assertions, sensitivity, watermarks, schema versions, and `TraceQueryV1` come from `tracedecay-domain`.
@@ -45,7 +47,7 @@ This plan refines master-plan PR 23, supplies the headless engines for PR 31 rep
 
 ## 3. Non-Goals
 
-- No autonomous application of policy effects.
+- No side effects inside the policy runtime. The application-owned curation worker autonomously applies every eligible owned memory/fact/skill/profile-curation decision after transactional revalidation; there is no per-item human preview/approve/apply queue.
 - No arbitrary executable plugin format, network lookup, subprocess, filesystem access, current-environment read, or host callback with side effects.
 - No inference of hidden chain-of-thought or unsupported causal claims.
 - No policy-owned SQL, FTS, vector index, graph traversal, Git command, GitHub API request, hook renderer, scheduler daemon, memory store, or automation runner.
@@ -57,7 +59,7 @@ This plan refines master-plan PR 23, supplies the headless engines for PR 31 rep
 
 ### 3.1 Convergence boundary
 
-Policy is the sole deterministic decision/evaluation owner inside [`19-system-defragmentation-convergence-and-extensibility.md`](19-system-defragmentation-convergence-and-extensibility.md). It consumes immutable domain/query/catalog inputs from Plans [`01`](01-domain-crate.md), [`05`](05-query-crate.md), and [`08`](08-tool-catalog-crate.md), follows Plan [`18`](18-secret-detection-redaction-and-private-data-safety.md) eligibility without implementing sanitization, and supplies application/hooks/labs with proposals rather than effects.
+Policy is the sole deterministic decision/evaluation owner inside [`19-system-defragmentation-convergence-and-extensibility.md`](19-system-defragmentation-convergence-and-extensibility.md). It consumes immutable domain/query/catalog inputs from Plans [`01`](01-domain-crate.md), [`05`](05-query-crate.md), and [`08`](08-tool-catalog-crate.md), follows Plan [`18`](18-secret-detection-redaction-and-private-data-safety.md) eligibility without implementing sanitization, and supplies application/hooks/labs with proposals rather than effects. Plan [`22`](22-incremental-context-scout-and-suggestion-envelopes.md) adds the optional scout candidate/silence/delivery policy profile; Plan [`23`](23-session-lcm-temporal-retrieval-and-evaluation.md) adds temporal/current/as-of retrieval features. Neither may introduce a model-owned truth or side-effect path inside this crate.
 
 | Boundary | Contract |
 |---|---|
@@ -94,7 +96,7 @@ Policy errors are stable evaluation/fidelity codes. Application owns public retr
 - PR #407, `fix(hermes): use the user TraceDecay profile`, consolidates Hermes onto the user profile and removes Hermes bridge/config/inventory paths. This plan must not introduce dependencies on `src/automation/hermes_bridge.rs`, `hermes_config_projection.rs`, `hermes_pending_skills.rs`, or `hermes_skill_inventory.rs`. Migration routes profile/zero-project/cross-project and unresolved policy/automation history to activity, explicitly project-scoped history to that canonical project shard, and records one source manifest; duplicate copies are reconciled only within the destination privacy domain and quarantined on conflict.
 - PR #410, `fix(sessions): collapse copied subagent prompts`, adds versioned query-time origin/representative semantics without deleting sanitized native rows. Hint/routing policy receives an explicit native/direct-user/subagent/tool-result/protocol classification plus evidence; it must not infer “human” merely from `role=user`, and replay records the classifier/version used.
 - PR #411 supplies one shared foreign-skill ownership predicate and a nonactionable info classification. Diagnostics/curation policy must propose remediation only when the current installation owns the effect and application exposes the matching mutation; foreign/legacy owner evidence produces `NoAction` or explicit manual-user choice, never an update/delete nag.
-- Current master later merged #410/#411/#414 and release PRs #413/#416. Open #407/#415/#417 and the current release PR are refreshed before PR 23A; #414 requires current edit-tool routing metadata and #417 requires abstention/visible remediation on unresolved identity splits. PR #409 remains historical.
+- Publication master `9f7a1108` later merged #410/#411/#413/#414/#415/#416/#417/#419/#420/#422. Open #407/#418/#423 are refreshed before PR 23A; #414/#419 require current edit-tool routing metadata, #417 requires abstention/visible remediation on unresolved identity splits, and #423's fact-rank/counter semantics are future policy/evaluation input until merge. PR #409 remains historical.
 - Before PR 23A starts, refresh master/open PRs, regenerate the V1 compatibility inventory, and update only source-path references actually present. Deleted transition paths are not extension points.
 
 ## 5. Exact File and Module Tree
@@ -566,7 +568,7 @@ The evaluator considers only the five triggers above. It preserves the exact rep
 
 ### 9.6 Diagnostics and curation
 
-Diagnostics input contains captured compiler/tool diagnostic, mapped symbol candidates, source snapshot, and available tool catalog. Output classifies compiler/type versus behavioral/test failure, routes to the correct diagnose/test workflow, and never runs a command. Curation input contains immutable artifact/proposal/evidence/validation/usage/outcome snapshots; output is approve/reject/defer/needs-human proposal with exact gates and no file mutation.
+Diagnostics input contains captured compiler/tool diagnostic, mapped symbol candidates, source snapshot, and available tool catalog. Output classifies compiler/type versus behavioral/test failure, routes to the correct diagnose/test workflow, and never runs a command. Curation input contains immutable artifact/candidate/evidence/validation/usage/outcome/config snapshots; output is `AutoApply`, `AutoReject`, `DeferForEvidence`, `Quarantine`, `Protect`, `Archive`, or `NoChange`, with exact gates, expected versions, rollout scope, monitoring horizon, and automatic recovery threshold. `NeedsHuman`, per-item approval, preview, and manual apply are not legal curation decisions.
 
 ### 9.7 Scheduler
 
@@ -680,7 +682,7 @@ All lab methods require `ReadOnlyLabContext`; its ports expose only immutable lo
 ### Memory Lab
 
 - Show secret/transience classification, entity extraction, duplicate/conflict/supersession, trust change, retrieval consequence, retention/hold, and deletion descendant impact.
-- Applying a proposal/deletion is outside the lab.
+- The lab never mutates live memory. Autonomous application effects execute independently through the application curation worker.
 
 ### Policy Diff Lab
 
@@ -708,11 +710,11 @@ Regression/win requires a versioned human label/metric; unlabeled change is `cha
 
 ### Evolution Studio policy contract
 
-- Input is a frozen, bounded evidence collection plus exact skill/memory versions, Hermes/curator/reflector/skill-writer agent/goal/run/turn/artifact lineage, validation/eval receipts, policy bundle, usage/outcome horizon, and approval state.
-- Curation produces a proposal only: create/update/supersede/rollback/archive/no-change with structured patch, claimed pattern, supporting/contradicting evidence, affected providers/projects/intents, privacy risk, eval plan, staged rollout, and automatic rollback threshold.
+- Input is a frozen, bounded evidence collection plus exact skill/memory versions, Hermes/curator/reflector/skill-writer agent/goal/run/turn/artifact lineage, validation/eval receipts, policy bundle, usage/outcome horizon, and effective autonomy configuration.
+- Curation produces an autonomous effect plan: create/update/supersede/archive/protect/quarantine/no-change with structured patch, claimed pattern, supporting/contradicting evidence, affected providers/projects/intents, privacy risk, evaluation plan, staged rollout, monitoring horizon, and automatic recovery/revision threshold.
 - The evaluator rejects secret/transient content, self-referential machinery-only evidence, provider-mismatched rules, unsupported similarity/deduplication claims, missing loadability/schema metadata, weak/unbounded evidence, and proposals whose regression corpus is not frozen.
-- Historical simulation reports changed decisions/tool routes/retrievals, wins/regressions/unlabeled cases, latency/tokens, source coverage, and unknown outcome horizons. It never installs a skill or writes a fact.
-- Auto-apply is an application policy outside this crate. This crate can return eligibility only for a versioned low-risk class with signed validation, staged scope, rollback trigger, and no unresolved regression/privacy finding.
+- Historical simulation reports changed decisions/tool routes/retrievals, wins/regressions/unlabeled cases, latency/tokens, source coverage, and unknown outcome horizons. It is an inspector/evaluation surface, never a human approval gate.
+- Autonomous apply is the application policy outside this crate, not an optional low-risk mode. The evaluator returns an apply plan only inside configured ownership/privacy/resource/evidence authority with signed validation, staged scope, monitoring/recovery trigger, and no unresolved regression/privacy finding; otherwise it automatically rejects, defers, protects, or quarantines. Foreign-owned targets are always `NoAction`.
 
 ## 12. Consumes and Produces
 
@@ -793,7 +795,7 @@ PR 23 is split into reviewable 23A–23G. PR 31 adds application/API/UI shells o
 
 - [ ] Port V1 interval/cron/pause/no-new-activity/last-run/stale-lock/apply-policy cases. Add `lease_version_conflict_preserves_original_decision`, `policy_never_checks_pid_or_creates_lock`, and concurrent activity watermark cases.
 - [ ] Add memory cases for secret/transient rejection, duplicate, contradiction, supersession, entity ambiguity, trust change, deletion descendant/hold, retrieval consequence, and concurrent fact version.
-- [ ] Add diagnostic compiler/type versus behavioral-test classification and curation validation/usage/evidence gates, including Hermes curator/reflector/skill-writer lineage, #411 self-owned/foreign/legacy skill materialization with remediation-capability agreement, weak/self-referential/provider-mismatched evidence rejection, staged rollout, and rollback eligibility.
+- [ ] Add diagnostic compiler/type versus behavioral-test classification and autonomous curation validation/usage/evidence gates, including Hermes curator/reflector/skill-writer lineage, #411 self-owned/foreign/legacy skill materialization with remediation-capability agreement, weak/self-referential/provider-mismatched evidence rejection, staged rollout, monitoring/recovery eligibility, and proof that no per-item approval state is emitted.
 - [ ] Run `cargo test -p tracedecay-policy --test scheduler_policy --test memory_policy --test concurrency --test security_privacy -- --nocapture`. Expected: tests fail because evaluators are absent.
 - [ ] Implement pure evaluators and checked-in compatibility bundles. Every mutation is a `ProposedEffect` with expected versions; no application/store/process/file APIs are imported.
 - [ ] Re-run the command. Expected: all tests pass; fixture write/PID/network sentinels remain zero; conflicting lease/fact writes do not alter the pinned decision digest.
@@ -839,12 +841,12 @@ PR 23 is split into reviewable 23A–23G. PR 31 adds application/API/UI shells o
 
 ## 15. Cutover and Rollback
 
-1. Refresh publication base `66584b4d`; record merged #405/#410/#411/#412/#413/#414/#415/#416/#417/#419 separately from open-assumed #407/#418/#420, regenerate V1 stores/profile/tool/policy inventory, and record actual master binary/schema/protocol versions. Do not begin backfill from a pre-adoption, Hermes-local, or ownership-ambiguous locator.
+1. Refresh publication base `9f7a1108`; record merged #405/#410/#411/#412/#413/#414/#415/#416/#417/#419/#420/#422 separately from open-assumed #407/#418/#423, regenerate V1 stores/profile/tool/policy inventory, and record actual master binary/schema/protocol/catalog-generation versions. Do not begin backfill from a pre-adoption, Hermes-local, or ownership-ambiguous locator.
 2. Compile/hash V1 compatibility bundles and import immutable input/evaluation/state snapshots with source manifests. Dedupe adopted legacy/Hermes data by canonical source/content digest; quarantine conflicts.
 3. Enable `v2_policy_shadow` per evaluator. V1 remains effect owner; V2 evaluates the same captured snapshot without injecting, acquiring locks, mutating memory, writing files, or incrementing counters.
 4. Compare decisions, payloads, state transitions, correlations, schedule reasons, memory proposals, outcome attribution, latency, coverage, and digests. Block cutover on unexplained gaps, privacy failure, bundle/input loss, or drifted identity/profile provenance.
 5. Cut over independently: routing/hints, retrieval, correlation, diagnostics/curation, scheduler, memory. Each receipt records V1 freeze watermark/state hash, active V2 bundle IDs, input/projector watermarks, source profile/shards, feature flag, and rollback procedure.
-6. Application applies V2 proposals only after transactional revalidation. Shadow evaluator remains available for comparison but cannot double-apply.
+6. The application curation worker autonomously applies eligible V2 effect plans after transactional revalidation, records policy/config/expected-version/effect/outcome receipts, and automatically revises or recovers on thresholds. Shadow evaluation remains comparison-only and cannot double-apply; there is no manual preview/apply queue.
 7. Rollback disables one V2 evaluator, restores V1 state ownership from receipt, and preserves V2 bundle/evaluation/outcome records for diagnosis. Evaluations already recorded retain their bundle IDs/fidelity.
 8. Keep V1 implementation/tests and read-only stores through the data rollback window as internal evidence only. Archive bundles, manifests, corpora, parity/calibration/privacy reports, outcome horizons, migration receipts, and rollback-drill results before retirement; expose no old live schema/name fallback.
 

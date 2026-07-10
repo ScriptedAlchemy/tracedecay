@@ -8,6 +8,14 @@
 
 **Tech Stack:** Rust 2024 workspace; Axum; Tower/Tower HTTP; `serde`; `schemars`; `utoipa` with Axum integration; `tracedecay-domain`; `tracedecay-application`; `tracedecay-tool-catalog`; HMAC-SHA256 authenticated cursors/event IDs; SSE; `openapi-typescript`; TypeScript `fetch` runtime; contract/property/fuzz/E2E tests.
 
+[`20-configuration-control-plane.md`](20-configuration-control-plane.md) owns configuration keys, precedence, effective-state, history, and impact semantics. This API exposes only generated application use cases and OpenAPI/SSE bindings for that contract; it cannot maintain a parallel `/settings` model.
+
+[`21-cli-mcp-tool-surface-and-output-unification.md`](21-cli-mcp-tool-surface-and-output-unification.md) owns cross-transport binding/output parity. HTTP/OpenAPI JSON serializes the same sealed semantic views as CLI/MCP JSON and shares errors, pages, retrieval anchors, notices, freshness, and provenance; HTTP framing is not another business contract.
+
+[`22-incremental-context-scout-and-suggestion-envelopes.md`](22-incremental-context-scout-and-suggestion-envelopes.md) and [`23-session-lcm-temporal-retrieval-and-evaluation.md`](23-session-lcm-temporal-retrieval-and-evaluation.md) own scout and temporal-search semantics. This crate exposes their generated status/replay/search/context/lineage/evaluation routes and SSE events without embedding model orchestration, ranking, temporal resolution, or delivery selection.
+
+[`24-canonical-task-plan-graph-and-multi-agent-executor.md`](24-canonical-task-plan-graph-and-multi-agent-executor.md) owns task/plan/executor semantics and the stricter many-host adapter protocol. This crate exposes generated `/api/v2/initiatives`, plans, work-items, attempts, executors, scheduler, task views/events, idempotent commands, and SSE without implementing readiness, routing, fencing, packet assembly, workspace safety, or board logic.
+
 ---
 
 ## 1. Contract Lock
@@ -55,7 +63,7 @@ Plan 17 declares this same HTTP/OpenAPI surface official and adds the contract I
 
 ### 4.1 Master and incoming changes verified on 2026-07-10
 
-Publication refresh: `origin/master` `66584b4dbdee920204cbcf4cf42d0dbc308559e4`; #410/#411/#413/#414/#415/#416/#417/#419 are merged, while #407/#418/#420 remain open. Regenerate contracts from that or a newer accepted base before every API slice.
+Publication refresh: `origin/master` `9f7a110805edf226bb0d665d6f4ff5c4f03c6163`; #410/#411/#413/#414/#415/#416/#417/#419/#420/#422 are merged, while #407/#418/#423 remain open. Regenerate contracts from that or a newer accepted base before every API slice; #423 adds future fact-ranking/counter fixtures, not accepted-base behavior yet.
 
 | Change | API consequence |
 |---|---|
@@ -69,7 +77,7 @@ Publication refresh: `origin/master` `66584b4dbdee920204cbcf4cf42d0dbc308559e4`;
 | Merged PRs #413/#416 releases v0.0.46/v0.0.47 | Regenerate server/protocol/catalog/OpenAPI/compatibility fixtures from accepted master; no behavior depends on release-PR layout. |
 | Merged PR #417 identity-split visibility | Serialize `identity_split` distinctly from absent index, with safe candidates/evidence and legal backup/consolidation preview; never emit an initialize action. |
 | Merged PR #419 race-safe edits | `code.move_symbol` schemas expose exact source/destination identities/versions, same-file/symlink evidence, pre-commit revalidation, and apply/rollback conflict receipts; no generic success hides concurrent drift. |
-| Open PR #420 daemon proxy/hot swap | API/MCP problems and capability metadata distinguish safe per-request reconnect from uncertain-write non-replay and new-session/tools-list refresh; no adapter opens local stores before authority selection. |
+| Merged PR #420 daemon proxy/hot swap plus #422 catalog refresh | API/MCP problems and capability metadata distinguish safe per-request reconnect from uncertain-write non-replay and compatible generation-scoped `tools.listChanged` versus incompatible new-session refresh; no adapter opens local stores before authority selection. |
 
 Refresh live master/open PRs before every 24B–24E slice. The OpenAPI source manifest records commit, catalog digest, domain registry digest, application registry digest, and generation tool versions so stale artifacts fail rather than masquerade as current.
 
@@ -524,12 +532,11 @@ POST /api/v2/commands/capture/{ingest,pause,resume}
 POST /api/v2/commands/lcm/{compress,boundary,lifecycle-preflight,lifecycle-repair}
 POST /api/v2/commands/automation/jobs/{create,update,delete,run,cancel,pause,resume}
 POST /api/v2/commands/automation/scheduler/{enable,disable}
-POST /api/v2/commands/skills/{draft,update,discard-update,approve,disable,archive,restore,install,rollback}
-POST /api/v2/commands/proposals/{apply,reject}
-POST /api/v2/commands/facts/{create,update,delete,feedback}
-POST /api/v2/commands/memory/{curate-preview,curate-apply}
+POST /api/v2/commands/curation/{pause,resume,run-now,pin,protect,exclude}
+GET  /api/v2/curation/{status,history,decisions,outcomes}
+POST /api/v2/commands/facts/{create,update,delete,feedback,pin,protect,exclude}  # explicit user-authored/admin facts, never candidate approval
 POST /api/v2/commands/policy/{publish,activate,rollback}
-POST /api/v2/commands/settings/{profile,project,integration,automation,storage}
+POST /api/v2/config/{set,unset,import}  # exact typed plan-20 configuration contract
 POST /api/v2/commands/payloads/{gc-preview,gc-apply}
 POST /api/v2/commands/retention/{preview,apply}
 POST /api/v2/commands/holds/{create,release}

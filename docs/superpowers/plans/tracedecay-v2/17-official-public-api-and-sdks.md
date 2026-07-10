@@ -8,7 +8,7 @@
 
 **Initial deployment:** Local-first. A user-owned Unix-domain socket or authenticated loopback HTTP endpoint is supported. Remote or hosted service operation is not assumed by this plan and must not weaken the local trust, privacy, or authorization contract.
 
-**Publication baseline (2026-07-10):** `origin/master` `66584b4d`; #410/#411/#413/#414/#415/#416/#417/#419 merged, #407/#418/#420 open. Regenerate contract/capability fixtures before implementation. The official surface includes current #410 message views, #411 doctor authority, #414/#419 dry-run-default race-safe `move_symbol`, #417 typed identity split, and merged #415 release-integrity gates. Open #420 supplies reconnect-versus-new-session/tool-catalog-refresh semantics and forbids uncertain write replay.
+**Publication baseline (2026-07-10):** `origin/master` `9f7a1108`; #410/#411/#413/#414/#415/#416/#417/#419/#420/#422 merged, #407/#418/#423 open. Regenerate contract/capability fixtures before implementation. The official surface includes current #410 message views, #411 doctor authority, #414/#419 race-safe `move_symbol`, #417 typed identity split, #415 release-integrity gates, #420 proxy-before-store/reconnect/no-write-replay semantics, and #422 negotiated `tools.listChanged` daemon-generation refresh; #423's fact-rank/counter shape is a future conformance input until merged.
 
 ---
 
@@ -26,6 +26,11 @@ This plan complements, rather than replaces, the following ownership:
 - `15-search-quality-evaluation-and-retrieval-research.md` owns relevance judgments and retrieval evaluation.
 - `16-cross-project-repository-worktree-scope.md` owns the resolver/routing UX and cross-repository regression corpus while consuming the exact domain selector.
 - `18-secret-detection-redaction-and-private-data-safety.md` owns the sanitizer, taint-state wrappers, privacy status semantics, and forbidden-sink conformance. Public contracts only expose eligible content or explicit redacted/denied/unknown states.
+- `20-configuration-control-plane.md` owns configuration descriptors, resolution, provenance, history, impact, credentials, and autonomous-curation policy; generated SDK/API surfaces expose those exact use cases without inventing client defaults.
+- `21-cli-mcp-tool-surface-and-output-unification.md` owns the generated binding and presentation parity contract; public SDK JSON shares its sealed views, typed outcomes, pages, retrieval anchors, notices, freshness, and provenance without scraping human Markdown or CLI envelopes.
+- `22-incremental-context-scout-and-suggestion-envelopes.md` owns scout status/replay/feedback/system-control and suggestion-envelope semantics; SDKs cannot trigger delivery or bypass read-only lab guards.
+- `23-session-lcm-temporal-retrieval-and-evaluation.md` owns temporal search/context/lineage/replay/evaluation semantics; SDK modes, anchors, cursors, coverage, no-answer reasons, and hydration are generated from that same contract.
+- `24-canonical-task-plan-graph-and-multi-agent-executor.md` owns initiative/plan/work-item/executor/scheduler/context-packet semantics and the many-host adapter protocol; this plan generates supported orchestration/monitoring clients without turning an SDK into a scheduler, route selector, lease authority, or board database.
 - This plan owns the declaration that the HTTP contract is an **official public integration surface**, agent-oriented discovery and documentation, first-party Rust/TypeScript/Python packages, direct-client lifecycle, compatibility policy, and public conformance program.
 
 There is no independent "SDK API" business layer. SDKs serialize generated request types, call the official transport, deserialize generated response types, and provide bounded ergonomics such as pagination and reconnect helpers. They may not recreate ranking, scope resolution, command authorization, replay classification, or retry policy by guesswork.
@@ -46,6 +51,7 @@ An agent should be able to:
 10. Preview and, only with explicit mutation authority, execute a supported command with idempotency, optimistic version checks, audit, and a durable operation receipt.
 11. Recover from every typed error using a machine-readable retry/restart/current-binding directive rather than prose parsing.
 12. Cite stable TraceDecay retrieval anchors in its own plan, report, PR, or handoff so a later agent can recover the exact evidence.
+13. Query or operate one cross-repository initiative, assign bounded work sets to Codex and Claude routes with explicit provider/model/reasoning-effort/tool/budget constraints, inspect dependencies/packets/runs/outcomes, and subscribe to task events without MCP or dashboard mediation.
 
 Human developers should be able to accomplish the same work with `curl`, generated documentation, or an SDK without learning MCP wire details or reverse-engineering the dashboard.
 
@@ -623,7 +629,9 @@ Every command request includes:
 
 Every result includes effect/audit receipt, current/new version, compensation/rollback availability, and either terminal output or durable operation/workflow ID.
 
-Destructive or broad operations such as wipe, retention deletion, payload GC, migration apply, external delivery, skill install/apply, policy activation, and automation enablement require a capability-specific grant and preview/confirmation. A generic `write` token is insufficient.
+Destructive or broad non-curation operations such as wipe, retention deletion, payload GC, migration apply, external delivery, policy activation, and automation enablement require a capability-specific grant and preview/confirmation. A generic `write` token is insufficient.
+
+Fact/memory/managed-skill/profile curation is not exposed as item-level approve/apply/install/rollback endpoints. A dedicated least-privilege curation service grant plus versioned autonomy configuration authorizes the application worker to apply only owned, policy-eligible effects after transactional revalidation; every effect/outcome/recovery is audited. Public clients can read status/history/decisions/outcomes, configure policy, pause/resume/run-now, pin/protect/exclude, and submit feedback. Unsafe/foreign/out-of-authority candidates are automatically rejected/deferred/quarantined, never converted into a human approval endpoint.
 
 Current `code.move_symbol` is a first-class edit command, not a generic filesystem mutation: generated clients expose preview by default, exact source/destination/snapshot/version, impact classes and applied imports, confirmation digest, repository/worktree edit grant, destination-first rollback/reindex operation, and no automatic caller rewrite. Raw paths/source/diffs use protected/eligible fields and never enter URLs or client logs.
 

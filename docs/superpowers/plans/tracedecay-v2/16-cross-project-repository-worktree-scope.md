@@ -6,7 +6,7 @@
 
 **Purpose:** make multi-repository, multi-project, multi-checkout, and multi-worktree use a native TraceDecay behavior rather than a sequence of registry lookups, path guesses, store switches, and retries.
 
-**Publication baseline (2026-07-10):** `origin/master` `66584b4d`; #410/#411/#413/#414/#415/#416/#417/#419 merged, #407/#418/#420 open. Refresh before implementation. Merged #417 split-store visibility is an explicit resolver/doctor regression input: identity conflict remains candidates/unavailable coverage and never becomes absent index/current-project fallback. Open #420 adds the authority rule that a reachable managed-daemon proxy is chosen before any local project/store resolution or open.
+**Publication baseline (2026-07-10):** `origin/master` `9f7a1108`; #410/#411/#413/#414/#415/#416/#417/#419/#420/#422 merged, #407/#418/#423 open. Refresh before implementation. Merged #417 split-store visibility is an explicit resolver/doctor regression input: identity conflict remains candidates/unavailable coverage and never becomes absent index/current-project fallback. Merged #420 makes reachable managed-daemon proxy authority precede any local project/store resolution/open; #422 adds generation-scoped catalog refresh for long-lived hosts. The failed explicit-worktree/root `pr_context` attempt for #423 is a fresh cross-domain partial/fallback fixture.
 
 ## 1. Product invariant
 
@@ -18,6 +18,9 @@ An agent or person must be able to ask one question about one named repository, 
 4. A direct retrieval path from a summary/search hit to the exact underlying object, even when the object lives in another project shard.
 5. The same selector, error, cursor, and response semantics in the official API, CLI, MCP, dashboard, hooks, and generated SDKs.
 6. A compact answer by default and full provenance on demand.
+7. Plan 22's Context Scout may expand across projects only through a pinned authorized project-set version; a model cannot turn current scope into All, and sibling task/agent activity is silent without a material typed relation.
+8. Plan 23's temporal search and context assembly use the same resolved scope before ranking and return stable cross-shard anchors; current/as-of logic cannot repair a wrong project/worktree/ref after retrieval.
+9. Plan 24's initiative/plan/work-item graph pins one authorized project-set version and exact workspace binding per attempt. A board, executor, agent, CWD, current checkout, or task title cannot add a repository, change the primary writable worktree/ref/snapshot, or copy a task to repair scope after dispatch.
 
 “Current project” remains a convenient default. It is never an invisible constraint and never overrides an explicit repository, worktree, path, PR, branch, session, or agent reference in the request.
 
@@ -66,6 +69,7 @@ Do not expose storage topology as product scope. Use these identities:
 | `ProjectSetId` | Saved or ephemeral set of repositories/projects. | Supports related systems and benchmarks. |
 | `CollectionId` | User-saved heterogeneous entity/query collection. | May cross projects. |
 | `SessionId`, `AgentId`, `WorkflowId` | Activity identities in the profile activity domain. | Attribution to repositories/worktrees is zero, one, many, or unknown over time. |
+| `InitiativeId`, `PlanId`, `WorkItemId`, `ExecutionAttemptId`, `ExecutorRegistrationId` | Canonical plan-24 work/execution identities in the profile activity domain. | Scope may span zero/one/many repositories; an attempt pins one exact writable binding plus authorized reads. Boards and executor queues do not mint scope identity. |
 
 `project_key`, transcript CWD, path hash, graph database filename, store directory, branch database, and provider-local project fields are aliases/provenance. They never become the primary public selector.
 
@@ -122,7 +126,7 @@ Supported selector kinds:
 - `CurrentInvocation` and `AllAuthorized { profile_id }`.
 - `Profile`, `ProjectSet`, `Collection`, `Repository`, `Project`, `Checkout`, and `Worktree`.
 - `Ref` (including branch/tag locators), `Commit`, `CodeSnapshot`, `GraphGeneration`, and `PullRequest`.
-- `Session`, `Thread`, `Turn`, `Agent`, `Goal`, `Workflow`, and `AutomationRun`.
+- `Session`, `Thread`, `Turn`, `Agent`, `Goal`, `Workflow`, `AutomationRun`, `Initiative`, `Plan`, `WorkItem`, `ExecutionAttempt`, and `Executor`.
 - `SavedView` and typed `GraphNeighborhood`.
 
 Resolution modes:

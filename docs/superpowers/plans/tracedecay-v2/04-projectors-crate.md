@@ -8,12 +8,14 @@
 
 **Tech Stack:** Rust workspace; `tracedecay-domain`; store ports implemented by `tracedecay-store` over SQLite/WAL and graph generations; `serde`; deterministic canonical encoding/hashing; property, differential, copied-store, crash/recovery, concurrency, and Criterion tests.
 
+Plan [`24-canonical-task-plan-graph-and-multi-agent-executor.md`](24-canonical-task-plan-graph-and-multi-agent-executor.md) adds plan/work-item/readiness/dependency/topological/critical-path/attempt/executor/workspace/context-packet/cost/status and cross-graph materiality projectors under this crate. They derive current views from the activity ledger and typed evidence; no board column, executor, or dashboard writes projected truth directly.
+
 ---
 
 ## Goals
 
 - Convert every supported capture record family into a registered typed event or an explicit dead letter; no silent discard.
-- Project complete sessions, messages, tools/results, exposed reasoning, goals/tasks/plans, parent/subagents, inter-agent events, LCM lineage, Git/delivery, code, knowledge/policy, hooks/hints, automation/skills, and accounting evidence.
+- Project complete sessions, messages, tools/results, exposed reasoning, provider-native goals/tasks/plans, canonical initiative/plan/work-item/attempt relations, parent/subagents, inter-agent events, LCM lineage, Git/delivery, code, knowledge/policy, hooks/hints, automation/skills, and accounting evidence. Observed provider task/plan state cannot grant canonical readiness or execution authority.
 - Project agent presence/work claims, safe scope overlap features, redundancy declarations, TTL/current state, acknowledgements, handoffs, and coordination outcomes without turning proximity into causation or authority.
 - Keep canonical provider transcripts in profile `activity.db`; place only project locators/scoped read models in `project.db`.
 - Consume outboxes at least once while producing idempotent rows and exactly-once checkpoint advancement per projector transaction.
@@ -33,7 +35,7 @@
 
 ## Convergence boundary
 
-Projectors are the sole observation-to-canonical/read-model derivation owner in [`19-system-defragmentation-convergence-and-extensibility.md`](19-system-defragmentation-convergence-and-extensibility.md). They consume domain/capture/store contracts from Plans [`01`](01-domain-crate.md)–[`03`](03-capture-crate.md), enforce the Plan [`18`](18-secret-detection-redaction-and-private-data-safety.md) sink firewall, and produce the only read models consumed by [`05-query-crate.md`](05-query-crate.md).
+Projectors are the sole observation-to-canonical/read-model derivation owner in [`19-system-defragmentation-convergence-and-extensibility.md`](19-system-defragmentation-convergence-and-extensibility.md). They consume domain/capture/store contracts from Plans [`01`](01-domain-crate.md)–[`03`](03-capture-crate.md), enforce the Plan [`18`](18-secret-detection-redaction-and-private-data-safety.md) sink firewall, and produce the only read models consumed by [`05-query-crate.md`](05-query-crate.md). Plans [`22`](22-incremental-context-scout-and-suggestion-envelopes.md) and [`23`](23-session-lcm-temporal-retrieval-and-evaluation.md) add scout lifecycle/outcome and message-occurrence/copy/summary-horizon/temporal-assertion projections here; projectors never schedule scout work or choose relevance/current truth.
 
 | Boundary | Contract |
 |---|---|
@@ -106,7 +108,7 @@ The dependency boundary is `tracedecay-domain <- tracedecay-projectors`; store i
 | `crates/tracedecay-projectors/src/code/federation.rs` | Repository/checkout/worktree/ref/snapshot/generation tuples, cross-generation joins, ambiguity, freshness, and partial coverage. |
 | `crates/tracedecay-projectors/src/knowledge.rs` | Facts/versions, entities, decisions, contradictions, trust, retrieval, feedback, curation, and deletion lineage. |
 | `crates/tracedecay-projectors/src/policy.rs` | Hint/retrieval/routing/diagnostic/correlation/curation/scheduler/memory evaluation records and outcomes. |
-| `crates/tracedecay-projectors/src/automation.rs` | Jobs, effective config, scheduler decisions, locks/skips, runs, agents, artifacts, proposals, approvals, skills, and outcomes. |
+| `crates/tracedecay-projectors/src/automation.rs` | Jobs, effective config, scheduler decisions, locks/skips, runs, agents, artifacts, curation candidates, autonomy decisions/effects/recovery, skills, outcomes, and clearly labeled imported historical approvals/applies. |
 | `crates/tracedecay-projectors/src/operations.rs` | Installations, skill materialization/ownership/drift/remediation, daemon/update lifecycle leases, drain/checkpoint/service-state receipts, doctor/repair outcomes. |
 | `crates/tracedecay-projectors/src/accounting.rs` | Tokens, latency, model/tool usage, costs, savings methodology, adoption denominators, and data-quality signals. |
 | `crates/tracedecay-projectors/src/search.rs` | Redaction-gated lexical documents and representation eligibility/source metadata. |
@@ -361,7 +363,7 @@ impl<S: ProjectorStore> ProjectionRebuilder<S> {
 | `code_evidence_v1` | Snapshot/file/symbol/edge/diff/diagnostic/test/build/result/impact events | Project rows and immutable graph generations. |
 | `knowledge_v1` | Fact/version/entity/decision/contradiction/trust/retrieval/feedback/curation/deletion events | Immutable knowledge/version/deletion lineage in activity for profile/zero-project/cross-project/unresolved scope or project for explicitly project scope. |
 | `policy_hint_v1` | Hook invocation; hint candidate/emitted/suppressed/deduped/cooldown/escalated/budget; retrieval/routing/diagnostic/correlation/curation/scheduler/memory evaluations; terminal outcomes | Versioned policy/hint rows, terminal state, adoption/outcome horizon, and provenance in the `DeclaredScope` owner. |
-| `automation_v1` | Job/config/schedule/decision/lock/skip/run/agent/artifact/proposal/approval/apply/skill/fact/outcome events | Automation/skill/curation lifecycle rows and immutable artifact locators in the `DeclaredScope` owner. |
+| `automation_v1` | Job/config/schedule/decision/lock/skip/run/agent/artifact/candidate/autonomy-decision/automatic-effect/recovery/skill/fact/outcome events plus imported legacy approval/apply events | Automation/skill/curation lifecycle rows and immutable artifact locators in the `DeclaredScope` owner; V2 approval queues are forbidden. |
 | `operations_v1` | Installation/package owner, skill drift, doctor finding/remediation, lifecycle lease, drain, checkpoint, service state, daemon/update/repair events | Ownership-aligned actionable/info findings plus operation lifecycle read models; no remediation is emitted unless its capability and effect owner match. |
 | `accounting_v1` | Token/context/latency/model/tool/cost/savings/cap/error/data-quality events | Evidence-bearing ledgers and denominator-aware accounting rows in activity or project according to source/scope, with All rollups separate. |
 | `search_document_v1` | Eligible entity/message/code/knowledge/automation event versions | Redaction-gated `search_documents` and representation eligibility/source metadata in the canonical entity owner only. |
@@ -398,7 +400,7 @@ Hermes concepts project at two levels:
 
 - Host/user/agent/automation identities become explicit `Actor` and `AgentInstance` entities with source aliases; the user-profile consolidation from PR #407 governs storage ownership.
 - Session reflector, skill writer, memory curator, combined review, and related automation runs become canonical `AutomationRun`/`WorkflowRun` entities while retaining native task/backend/status labels.
-- Proposal, validation, approval, rejection, apply, archive, fact, skill, artifact, feedback, adoption, and outcome records form curation/self-improvement evidence chains. `produced`, `validated`, `approved`, `applied`, and `affected` remain different predicates with direct supporting events.
+- Candidate, validation, autonomy-decision, automatic-effect, archive, fact, skill, artifact, feedback, adoption, outcome, and recovery records form V2 curation/self-improvement evidence chains. Imported historical/provider proposal/approval/rejection/apply events remain distinct labeled predicates with direct evidence but never become a V2 gate.
 - Adoption/effectiveness is never inferred merely because a skill/fact existed before a later session; policy/outcome projectors require the recorded usage, retrieval, feedback, or labeled evaluation evidence.
 
 Required canonical Turn relations are `part_of_session`, `performed_by`, `contains_message`, `contains_reasoning_artifact`, `invoked_tool`, `received_tool_result`, `observed_goal`, `touched_file`, `observed_git_object`, `retrieved_fact`, `emitted_hint`, `part_of_workflow`, and `produced_artifact`. Registry endpoint/evidence rules define each inverse and legal evidence class.
@@ -420,12 +422,12 @@ Required canonical Turn relations are `part_of_session`, `performed_by`, `contai
 | `src/sessions/git_correlation.rs` and `src/daemon/git_watch.rs` | `activity_project_locator_v1`, `git_delivery_v1` | Direct commit evidence, worktree spans, inferred/heuristic confidence, fetched-at state, unresolved candidates. |
 | `src/sessions/{workflow_ingest,workflow_index,workflow_state}.rs` | `agent_workflow_v1` | Claude/native workflow runs, roster agents, parent/session links, status, result summary, tokens, messages, and handoffs. |
 | `src/hooks/{codex,claude,cursor,kiro,analytics,hint_outcomes}.rs` | `policy_hint_v1`, `tool_activity_v1`, `agent_workflow_v1`, `accounting_v1` | Invocation duration, emitted/suppressed/escalated terminal state, expected tool, adoption horizon, parent/child/inter-agent/tool outcomes. |
-| `src/automation/{config,scheduler,runner,run_ledger,artifact_payloads,managed_skills,outcomes}.rs` | `automation_v1`, `agent_workflow_v1`, `policy_hint_v1`, `knowledge_v1`, `accounting_v1` | Effective config/source, due/skip/lock, Hermes actors/runs/agents, artifacts/hashes, curation proposal/validation/approval/apply, skill/fact outcomes. |
+| `src/automation/{config,scheduler,runner,run_ledger,artifact_payloads,managed_skills,outcomes}.rs` | `automation_v1`, `agent_workflow_v1`, `policy_hint_v1`, `knowledge_v1`, `accounting_v1` | Effective config/source, due/skip/lock, Hermes actors/runs/agents, artifacts/hashes, V2 curation candidate/validation/autonomy-decision/effect/recovery, imported legacy approvals/applies, skill/fact outcomes. |
 | Existing session/LCM/Git/workflow/analytics/automation CLI and MCP handlers | Differential fixtures and temporary internal shadow adapters over `tracedecay-query` | Preserve behavior as parity evidence until cutover; publish only current protocol/catalog handlers afterward. Stale clients/names fail exact version/capability checks. |
 
 Projectors must consume the machine-readable PR 3 compatibility inventory. CI fails when a new V1 structured event kind, provider tool kind, CLI/MCP field, LCM table/sidecar, hook terminal state, or automation artifact kind lacks a registry owner and parity disposition.
 
-Planning began at `99ad19bc`; publication master `66584b4d` includes #410/#411/#413/#414/#415/#416/#417/#419. Open #407/#418/#420 remain refresh inputs; #417 identity-split visibility is a mandatory projection/Observatory conflict fixture, while #419 edit conflicts and #420 proxy/reconnect transitions require projected receipts/status without inferred success or replay. PR #409 remains historical. Before each backfill/cutover PR, refresh master/open state, source/projector registry digests, and actual protocol/schema/tool inventories.
+Planning began at `99ad19bc`; publication master `9f7a1108` includes #410/#411/#413/#414/#415/#416/#417/#419/#420/#422. Open #407/#418/#423 remain refresh inputs; #417 identity-split visibility is a mandatory projection/Observatory conflict fixture, while #419 edit conflicts, #420 proxy/reconnect transitions, #422 generation-scoped catalog-refresh notifications, and #423 fact retrieval/counter events require projected receipts/status without inferred success or replay. PR #409 remains historical. Before each backfill/cutover PR, refresh master/open state, source/projector registry digests, and actual protocol/schema/tool inventories.
 
 ## Ownership and identity rules
 
@@ -440,14 +442,14 @@ Planning began at `99ad19bc`; publication master `66584b4d` includes #410/#411/#
 
 ## Deterministic backfill sequence
 
-1. Freeze a copied V1 inventory watermark at publication base `66584b4d`; record merged #405/#410/#411/#412/#413/#414/#415/#416/#417/#419 separately from open-assumed #407/#418/#420; run disk preflight and secret scan.
+1. Freeze a copied V1 inventory watermark at publication base `9f7a1108`; record merged #405/#410/#411/#412/#413/#414/#415/#416/#417/#419/#420/#422 separately from open-assumed #407/#418/#423; run disk preflight and secret scan.
 2. Import identity allocations, profile/repository/project/checkout/worktree/provider/source aliases, legacy adoption manifests, and Hermes migration ledgers; resolve no ambiguous identity automatically.
 3. Project canonical observations to events, then sessions, turns, messages/content, actors/models, tools/results/approvals, exposed reasoning markers, goals/tasks/plans, agent/workflow/handoff/inter-agent events in `activity.db`.
 4. Project LCM raw/source/summary DAG, compression/context assembly, payload state, lifecycle, and tombstones after canonical message IDs exist.
 5. Project activity-to-project/repository/worktree/branch/snapshot locators; publish candidate relations separately from resolved relations.
 6. Project Git/delivery, then code snapshots/files/symbols/edges/diffs/diagnostics/tests/impact because delivery attribution depends on repository/worktree identity.
 7. Project knowledge/facts/trust/retrieval/feedback/deletion, then policy/hint evaluations/outcomes because policy evidence may reference sessions, tools, code, and facts.
-8. Project automation/skills/artifacts/proposals/approvals/outcomes after session, knowledge, policy, and project ownership exist.
+8. Project automation/skills/artifacts/candidates/autonomy decisions/effects/recovery/outcomes after session, knowledge, policy, and project ownership exist; import historical approvals/applies as evidence only.
 9. Project accounting/data-quality ledgers, search documents/representation eligibility, and All-scope aggregates with the full input vector.
 10. Generate whole-system counts/hashes/orphan/quarantine/dead-letter/coverage manifests, differential V1/V2 results, and an atomic-swap receipt; unexplained differences block publication.
 
@@ -495,7 +497,7 @@ Each step is independently resumable by `(projector, version, shard, generation,
 
 - [ ] Write failing tests for exact event IDs, correction supersession, unknown future schema, illegal relation endpoints, causal evidence rules, ambiguous alias candidates, moved/symlink/linked-worktree identity, pristine legacy adoption, nonempty split conflict, and Hermes user-profile ownership.
 - [ ] Implement `canonical_event_v1` and `identity_alias_v1` with complete capture payload-kind ownership.
-- [ ] Refresh publication base `66584b4d`, record every merged commit/protocol/schema version, and record open #407/#418/#420 as separate future inputs whose disposition must be refreshed before execution.
+- [ ] Refresh publication base `9f7a1108`, record every merged commit/protocol/schema version, and record open #407/#418/#423 as separate future inputs whose disposition must be refreshed before execution.
 - [ ] Run `cargo test -p tracedecay-projectors --test framework_suite`; expected: exit 0 with no unowned capture kind.
 - [ ] Run `cargo test -p tracedecay-projectors --test backfill_parity identity`; expected: one canonical identity per adopted/Hermes fixture and explicit conflict rows for nonempty collisions.
 - [ ] Commit `feat(projectors): project canonical events and identity`.
@@ -599,11 +601,11 @@ Each step is independently resumable by `(projector, version, shard, generation,
 
 **Files:** create `src/automation.rs`; extend `tests/domain_suite.rs` and `tests/backfill_parity.rs`.
 
-- [ ] Write fixtures for job/effective config/source, schedule/due/skip/lock/stale lock, run/agent/status, artifact/hash/payload ref, proposal/validation/approval/rejection/apply, managed skill version/state/install target, fact proposal, and skill/fact outcome.
+- [ ] Write fixtures for job/effective config/source, schedule/due/skip/lock/stale lock, run/agent/status, artifact/hash/payload ref, candidate/validation/autonomy-decision/automatic-effect/recovery, managed skill version/state/materialization target, fact candidate, skill/fact outcome, and imported legacy approval/apply evidence.
 - [ ] Implement `automation_v1` after activity/knowledge/policy ownership exists; JSONL/files remain immutable compatibility sources.
 - [ ] Assert concurrent automation agents preserve roster/parent/handoff evidence and artifact ownership without copying payload bodies.
 - [ ] Run `cargo test -p tracedecay-projectors --test domain_suite automation`; expected: exit 0 for every current run-ledger and managed-skill enum variant.
-- [ ] Run `cargo test -p tracedecay-projectors --test backfill_parity automation`; expected: config/run/artifact/proposal/approval/skill/outcome manifests reconcile.
+- [ ] Run `cargo test -p tracedecay-projectors --test backfill_parity automation`; expected: config/run/artifact/candidate/autonomy/effect/recovery/skill/outcome manifests reconcile and legacy approvals remain evidence-only.
 - [ ] Commit `feat(projectors): project automation lifecycle`.
 
 ### PR 22: Accounting, privacy-gated search, and All-scope rollups
