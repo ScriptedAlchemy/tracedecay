@@ -6,7 +6,7 @@
 !plugin/.mcp.json
 .claude/settings.local.json
 .cursor/
-docs/superpowers
+docs/superpowers/plans/
 /local-only
 .worktrees
 .agents/

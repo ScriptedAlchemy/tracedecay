@@ -29,6 +29,9 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Reject tracked ignored files
+        run: scripts/check-release-pr-integrity.sh HEAD HEAD
+
       - name: Validate PR commit messages
         if: github.event_name == 'pull_request'
         env:

@@ -40,6 +40,13 @@ The first version of a crate must exist before trusted publishing can be configu
 
 After that, release-plz detects unpublished changes from crates.io, opens a release PR, and publishes on merge.
 
+Release PRs may modify only `CHANGELOG.md`, `Cargo.lock`, and `Cargo.toml`. The
+read-only `Release PR integrity` workflow loads its guard from the trusted base
+commit, not from the proposed release branch. If a reviewed release PR must
+carry another change, apply the `release-extra-files-approved` label; tracked
+files that are also ignored remain forbidden because release-plz omits them
+when it creates its temporary repository copy.
+
 ## Normal Release Flow
 
 1. Merge feature/fix PRs into `master`.

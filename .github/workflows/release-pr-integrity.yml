@@ -1,0 +1,42 @@
+name: Release PR integrity
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened, labeled, unlabeled]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  release-pr-integrity:
+    name: Release PR integrity
+    if: >-
+      startsWith(github.event.pull_request.head.ref, 'release-plz-') &&
+      github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout proposed release commit without credentials
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Load guard from the trusted base commit
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: git show "$BASE_SHA:scripts/check-release-pr-integrity.sh" >"$RUNNER_TEMP/check-release-pr-integrity.sh"
+
+      - name: Validate release PR paths
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          EXTRA_FILES_APPROVED: ${{ contains(github.event.pull_request.labels.*.name, 'release-extra-files-approved') }}
+        run: |
+          args=()
+          if [[ "$EXTRA_FILES_APPROVED" == "true" ]]; then
+            args+=(--allow-extra-files)
+          fi
+          bash "$RUNNER_TEMP/check-release-pr-integrity.sh" "$BASE_SHA" "$HEAD_SHA" "${args[@]}"

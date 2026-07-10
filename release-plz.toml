@@ -1,5 +1,5 @@
 [workspace]
-allow_dirty = true
+allow_dirty = false
 dependencies_update = false
 repo_url = "https://github.com/ScriptedAlchemy/tracedecay"
 release_always = false
