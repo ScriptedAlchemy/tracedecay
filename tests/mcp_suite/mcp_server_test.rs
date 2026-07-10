@@ -157,6 +157,10 @@ async fn test_initialize() {
     assert_eq!(resp["id"], 1);
     assert!(resp["result"]["protocolVersion"].is_string());
     assert_eq!(resp["result"]["protocolVersion"], "2024-11-05");
+    assert_eq!(
+        resp["result"]["capabilities"]["tools"]["listChanged"],
+        json!(true)
+    );
     assert_eq!(resp["result"]["serverInfo"]["name"], "tracedecay");
     assert!(resp["result"]["serverInfo"]["version"].is_string());
 }

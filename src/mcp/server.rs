@@ -100,7 +100,9 @@ pub(crate) fn initialize_result(instructions: &str) -> Value {
     json!({
         "protocolVersion": "2024-11-05",
         "capabilities": {
-            "tools": {},
+            "tools": {
+                "listChanged": true
+            },
             "resources": {},
             "logging": {}
         },

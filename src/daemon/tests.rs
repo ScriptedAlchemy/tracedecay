@@ -110,7 +110,15 @@ fn test_handshake_defaults() -> DaemonHandshake {
         allow_initialize_root_routing: false,
         client_identity: test_client_identity(),
         client_version: super::binary_version().to_string(),
+        client_instance_id: crate::runtime_identity::process_run_id().to_string(),
+        tool_list_changed_capable: false,
+        catalog_version: String::new(),
     }
+}
+
+#[cfg(unix)]
+fn test_client_instance_id(value: u128) -> String {
+    format!("{value:032x}")
 }
 
 #[cfg(unix)]
@@ -153,6 +161,50 @@ async fn answer_one_proxy_request(listener: tokio::net::UnixListener, generation
         .expect("write response");
     writer.write_all(b"\n").await.expect("write newline");
     writer.shutdown().await.expect("shutdown fake daemon");
+}
+
+#[cfg(unix)]
+async fn daemon_round_trip(
+    engine: super::DaemonEngine,
+    handshake: &DaemonHandshake,
+    request: Value,
+) -> Vec<Value> {
+    let (server_stream, client_stream) =
+        tokio::net::UnixStream::pair().expect("daemon socket pair");
+    let server =
+        tokio::spawn(async move { super::serve_socket_client(server_stream, engine).await });
+    let (reader, mut writer) = client_stream.into_split();
+    writer
+        .write_all(handshake.to_line().expect("handshake json").as_bytes())
+        .await
+        .expect("write handshake");
+    writer.write_all(b"\n").await.expect("write newline");
+    writer
+        .write_all(request.to_string().as_bytes())
+        .await
+        .expect("write request");
+    writer.write_all(b"\n").await.expect("write newline");
+    writer.shutdown().await.expect("shutdown daemon client");
+    drop(writer);
+
+    let mut lines = tokio::io::BufReader::new(reader).lines();
+    let read_responses = async {
+        let mut responses = Vec::new();
+        while let Some(line) = lines.next_line().await.expect("read daemon response") {
+            responses.push(serde_json::from_str(&line).expect("daemon response json"));
+        }
+        responses
+    };
+    let (server_result, responses) =
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            tokio::join!(server, read_responses)
+        })
+        .await
+        .expect("daemon request and response stream should finish");
+    server_result
+        .expect("daemon socket client task")
+        .expect("serve daemon socket client");
+    responses
 }
 
 #[test]
@@ -906,8 +958,8 @@ fn daemon_handshake_requires_client_identity() {
     assert!(DaemonHandshake::from_line(&encoded).is_err());
 }
 
-/// Old client → new daemon: handshakes without `client_version` (sent by
-/// binaries predating the field) must still parse, with an empty version.
+/// Old client → new daemon: handshakes without version/instance fields must
+/// still parse, with empty defaults.
 #[test]
 fn daemon_handshake_accepts_old_client_without_version() {
     let encoded = serde_json::json!({
@@ -925,6 +977,9 @@ fn daemon_handshake_accepts_old_client_without_version() {
     let decoded = DaemonHandshake::from_line(&encoded).expect("old handshake should decode");
 
     assert_eq!(decoded.client_version, "");
+    assert_eq!(decoded.client_instance_id, "");
+    assert!(!decoded.tool_list_changed_capable);
+    assert_eq!(decoded.catalog_version, "");
 }
 
 /// New client → old daemon: the serde derive ignores unknown fields, so a
@@ -955,6 +1010,10 @@ fn daemon_handshake_advertises_binary_version() {
     assert_eq!(
         value["client_version"],
         serde_json::json!(env!("CARGO_PKG_VERSION"))
+    );
+    assert_eq!(
+        value["client_instance_id"],
+        serde_json::json!(crate::runtime_identity::process_run_id())
     );
 }
 
@@ -1020,6 +1079,229 @@ async fn daemon_engine_logs_version_skew_once_per_client_version() {
 }
 
 #[cfg(unix)]
+#[tokio::test]
+async fn catalog_refresh_claim_is_negotiated_and_once_per_generation() {
+    let engine = super::DaemonEngine::default();
+    let mut handshake = test_handshake_defaults();
+    handshake.client_version = "0.0.0-old".to_string();
+    handshake.catalog_version = "0.0.0-old".to_string();
+    let ping = json!({"jsonrpc": "2.0", "id": 1, "method": "ping"}).to_string();
+
+    handshake.client_instance_id.clear();
+    handshake.tool_list_changed_capable = true;
+    assert!(
+        engine
+            .claim_catalog_refresh(&handshake, &ping)
+            .await
+            .is_none()
+    );
+
+    handshake.client_instance_id = test_client_instance_id(2);
+    handshake.tool_list_changed_capable = false;
+    assert!(
+        engine
+            .claim_catalog_refresh(&handshake, &ping)
+            .await
+            .is_none()
+    );
+
+    handshake.tool_list_changed_capable = true;
+    handshake.catalog_version.clear();
+    assert!(
+        engine
+            .claim_catalog_refresh(&handshake, &ping)
+            .await
+            .is_none(),
+        "catalog refresh requires an explicitly negotiated catalog version"
+    );
+    handshake.tool_list_changed_capable = false;
+    let initialize = json!({"jsonrpc": "2.0", "id": 2, "method": "initialize"}).to_string();
+    assert!(
+        engine
+            .claim_catalog_refresh(&handshake, &initialize)
+            .await
+            .is_none(),
+        "fresh initialize marks the generation current without notifying"
+    );
+    handshake.tool_list_changed_capable = true;
+    handshake.catalog_version = super::binary_version().to_string();
+    assert!(
+        engine
+            .claim_catalog_refresh(&handshake, &ping)
+            .await
+            .is_none(),
+        "the initialized client must not get a redundant refresh"
+    );
+
+    handshake.client_instance_id = test_client_instance_id(3);
+    assert!(
+        engine
+            .claim_catalog_refresh(&handshake, &ping)
+            .await
+            .is_some()
+    );
+    assert!(
+        engine
+            .claim_catalog_refresh(&handshake, &ping)
+            .await
+            .is_none()
+    );
+
+    let next_generation = super::DaemonEngine::default();
+    assert!(
+        next_generation
+            .claim_catalog_refresh(&handshake, &ping)
+            .await
+            .is_some(),
+        "a new daemon generation must notify the same long-lived client once"
+    );
+
+    handshake.catalog_version = super::binary_version().to_string();
+    let same_version_generation = super::DaemonEngine::default();
+    assert!(
+        same_version_generation
+            .claim_catalog_refresh(&handshake, &ping)
+            .await
+            .is_some(),
+        "generation identity, not a reused package version, controls refresh"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn catalog_refresh_rejects_untrusted_ids_and_stops_at_capacity() {
+    let engine = super::DaemonEngine::default();
+    let mut handshake = test_handshake_defaults();
+    handshake.tool_list_changed_capable = true;
+    handshake.catalog_version = "0.0.0-old".to_string();
+    let ping = json!({"jsonrpc": "2.0", "id": 1, "method": "ping"}).to_string();
+
+    assert!(super::valid_client_instance_id(&test_client_instance_id(0)));
+    assert!(super::valid_client_instance_id("mcp-1234567890"));
+    for invalid_id in [
+        "A".repeat(32),
+        "x".repeat(4_096),
+        "mcp-".to_string(),
+        "mcp-not-a-timestamp".to_string(),
+    ] {
+        handshake.client_instance_id = invalid_id;
+        assert!(
+            engine
+                .claim_catalog_refresh(&handshake, &ping)
+                .await
+                .is_none()
+        );
+    }
+    assert!(
+        engine
+            .catalog_refresh_notified_clients
+            .lock()
+            .await
+            .is_empty()
+    );
+
+    for value in 0..super::MAX_CATALOG_REFRESH_CLIENTS_PER_GENERATION {
+        handshake.client_instance_id = test_client_instance_id(value as u128);
+        assert!(
+            engine
+                .claim_catalog_refresh(&handshake, &ping)
+                .await
+                .is_some()
+        );
+    }
+    handshake.client_instance_id =
+        test_client_instance_id(super::MAX_CATALOG_REFRESH_CLIENTS_PER_GENERATION as u128);
+    assert!(
+        engine
+            .claim_catalog_refresh(&handshake, &ping)
+            .await
+            .is_none(),
+        "capacity saturation must skip rather than evicting an existing client"
+    );
+    assert_eq!(
+        engine.catalog_refresh_notified_clients.lock().await.len(),
+        super::MAX_CATALOG_REFRESH_CLIENTS_PER_GENERATION
+    );
+    handshake.client_instance_id = test_client_instance_id(0);
+    assert!(
+        engine
+            .claim_catalog_refresh(&handshake, &ping)
+            .await
+            .is_none(),
+        "saturation must preserve existing dedupe entries"
+    );
+    assert!(
+        engine
+            .catalog_refresh_saturation_logged
+            .load(std::sync::atomic::Ordering::Relaxed)
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn daemon_refreshes_once_only_after_generation_change() {
+    let mut handshake = test_handshake_defaults();
+    handshake.client_instance_id = test_client_instance_id(4);
+    let engine = super::DaemonEngine::default();
+
+    let initialize = json!({"jsonrpc": "2.0", "id": 1, "method": "initialize"});
+    let initialize_responses =
+        daemon_round_trip(engine.clone(), &handshake, initialize.clone()).await;
+    assert_eq!(initialize_responses.len(), 1);
+    let initialize_response_lines: Vec<String> = initialize_responses
+        .iter()
+        .map(serde_json::Value::to_string)
+        .collect();
+    let metadata =
+        super::proxy_initialize_metadata(&initialize.to_string(), &initialize_response_lines);
+    super::apply_proxy_initialize_metadata(&mut handshake, metadata);
+    assert!(handshake.tool_list_changed_capable);
+    assert_eq!(handshake.catalog_version, super::binary_version());
+
+    let same_generation = daemon_round_trip(
+        engine,
+        &handshake,
+        json!({"jsonrpc": "2.0", "id": 2, "method": "ping"}),
+    )
+    .await;
+    assert_eq!(
+        same_generation.len(),
+        1,
+        "initialize already returned this generation's catalog"
+    );
+    assert_eq!(same_generation[0]["id"], json!(2));
+
+    let next_generation = super::DaemonEngine::default();
+    let first = daemon_round_trip(
+        next_generation.clone(),
+        &handshake,
+        json!({"jsonrpc": "2.0", "id": 3, "method": "ping"}),
+    )
+    .await;
+    assert_eq!(
+        first.len(),
+        2,
+        "notification must precede the ping response"
+    );
+    assert_eq!(first[0]["jsonrpc"], json!("2.0"));
+    assert_eq!(
+        first[0]["method"],
+        json!("notifications/tools/list_changed")
+    );
+    assert!(first[0].get("id").is_none());
+    assert_eq!(first[1]["id"], json!(3));
+
+    let second = daemon_round_trip(
+        next_generation,
+        &handshake,
+        json!({"jsonrpc": "2.0", "id": 4, "method": "ping"}),
+    )
+    .await;
+    assert_eq!(second.len(), 1, "the refresh must not loop");
+    assert_eq!(second[0]["id"], json!(4));
+}
+
+#[cfg(unix)]
 #[test]
 fn daemon_version_skew_warning_reads_initialize_server_info() {
     let initialize = serde_json::json!({
@@ -1047,8 +1329,15 @@ fn daemon_version_skew_warning_reads_initialize_server_info() {
         "warning should name both versions, got: {warning}"
     );
     assert!(
+        warning.contains("MCP host") && !warning.contains("tracedecay daemon restart"),
+        "a newer daemon should direct recovery at the stale host, got: {warning}"
+    );
+
+    let warning = super::daemon_version_skew_warning(&initialize, &response("1.0.0"), "9.9.9")
+        .expect("newer client should warn about stale daemon");
+    assert!(
         warning.contains("tracedecay daemon restart"),
-        "warning should point at the restart command, got: {warning}"
+        "a newer client should direct recovery at the stale daemon, got: {warning}"
     );
 
     assert_eq!(
@@ -1069,6 +1358,52 @@ fn daemon_version_skew_warning_reads_initialize_server_info() {
         None,
         "only initialize responses advertise the daemon version"
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn proxy_records_negotiated_catalog_capability_and_version() {
+    let initialize = json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {}
+    })
+    .to_string();
+    let responses = vec![
+        json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+                "capabilities": {"tools": {"listChanged": true}},
+                "serverInfo": {"name": "tracedecay", "version": "2.0.0"}
+            }
+        })
+        .to_string(),
+    ];
+    let metadata = super::proxy_initialize_metadata(&initialize, &responses);
+    let mut handshake = test_handshake_defaults();
+    super::apply_proxy_initialize_metadata(&mut handshake, metadata);
+
+    assert!(handshake.tool_list_changed_capable);
+    assert_eq!(handshake.catalog_version, "2.0.0");
+
+    let legacy_responses = vec![
+        json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+                "capabilities": {"tools": {}},
+                "serverInfo": {"name": "tracedecay", "version": "1.0.0"}
+            }
+        })
+        .to_string(),
+    ];
+    let metadata = super::proxy_initialize_metadata(&initialize, &legacy_responses);
+    let mut legacy = test_handshake_defaults();
+    super::apply_proxy_initialize_metadata(&mut legacy, metadata);
+    assert!(!legacy.tool_list_changed_capable);
+    assert!(legacy.catalog_version.is_empty());
 }
 
 #[cfg(unix)]

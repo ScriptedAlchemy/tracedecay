@@ -22,11 +22,17 @@ use tokio::time::{Duration, timeout};
 use crate::client_identity::DaemonClientIdentity;
 use crate::errors::{Result, TraceDecayError};
 #[cfg(unix)]
-use crate::mcp::{ErrorCode, JsonRpcRequest, JsonRpcResponse, McpTransport, StdioTransport};
+use crate::mcp::{
+    ErrorCode, JsonRpcRequest, JsonRpcResponse, McpTransport, ReplayTransport, StdioTransport,
+};
 
 pub const SERVICE_NAME: &str = "tracedecay.service";
 pub const SOCKET_ENV: &str = "TRACEDECAY_DAEMON_SOCKET";
 pub const HOOK_EVENT_METHOD: &str = "tracedecay/hookEvent";
+#[cfg(unix)]
+const TOOL_LIST_CHANGED_METHOD: &str = "notifications/tools/list_changed";
+#[cfg(unix)]
+const MAX_CATALOG_REFRESH_CLIENTS_PER_GENERATION: usize = 1_024;
 #[cfg(unix)]
 const HOOK_EVENT_NOTIFY_TIMEOUT: Duration = Duration::from_millis(750);
 /// Upper bound on graceful-shutdown persistence work (per-server token
@@ -289,6 +295,21 @@ pub struct DaemonHandshake {
     /// `tracedecay update` replaced the binary.
     #[serde(default)]
     pub client_version: String,
+    /// Stable id for the connecting client process. A stdio MCP proxy reuses
+    /// this across its per-request daemon connections, allowing one
+    /// generation-local catalog refresh notification instead of one per
+    /// request. Old clients omit it and deserialize to an empty string.
+    #[serde(default)]
+    pub client_instance_id: String,
+    /// Whether this proxy already forwarded an initialize response declaring
+    /// `tools.listChanged=true` to its MCP host.
+    #[serde(default)]
+    pub tool_list_changed_capable: bool,
+    /// Daemon version whose initialize response established the host's
+    /// current tool catalog. A nonempty value proves explicit negotiation;
+    /// generation-local daemon state decides whether a refresh is due.
+    #[serde(default)]
+    pub catalog_version: String,
 }
 
 impl DaemonHandshake {
@@ -306,6 +327,9 @@ impl DaemonHandshake {
             allow_initialize_root_routing: false,
             client_identity: DaemonClientIdentity::current()?,
             client_version: binary_version().to_string(),
+            client_instance_id: crate::runtime_identity::process_run_id().to_string(),
+            tool_list_changed_capable: false,
+            catalog_version: String::new(),
         })
     }
 
@@ -341,6 +365,38 @@ fn client_version_skew(client_version: &str, daemon_version: &str) -> Option<Str
         return None;
     }
     Some(client_version.to_string())
+}
+
+#[cfg(unix)]
+fn release_version(version: &str) -> Option<(u64, u64, u64)> {
+    let core = version
+        .strip_prefix('v')
+        .unwrap_or(version)
+        .split(['-', '+'])
+        .next()?;
+    let mut parts = core.split('.');
+    let version = (
+        parts.next()?.parse().ok()?,
+        parts.next()?.parse().ok()?,
+        parts.next()?.parse().ok()?,
+    );
+    parts.next().is_none().then_some(version)
+}
+
+#[cfg(unix)]
+fn version_skew_action(daemon_version: &str, client_version: &str) -> &'static str {
+    match release_version(daemon_version)
+        .zip(release_version(client_version))
+        .map(|(daemon, client)| daemon.cmp(&client))
+    {
+        Some(std::cmp::Ordering::Greater) => {
+            "restart or reconnect the MCP host so it loads the current TraceDecay client and tool catalog"
+        }
+        Some(std::cmp::Ordering::Less) => {
+            "run `tracedecay daemon restart` to load the current daemon binary"
+        }
+        _ => "restart or reconnect whichever TraceDecay component is stale",
+    }
 }
 
 #[cfg(unix)]
@@ -1041,14 +1097,39 @@ pub async fn proxy_transport_to_daemon(
     let mut routed_handshake = handshake.clone();
     if let Some(line) = replay_line {
         update_proxy_handshake_from_initialize(handshake, &mut routed_handshake, &line).await;
-        proxy_request_line_to_daemon(socket_path, &routed_handshake, &line, transport).await?;
+        let metadata =
+            proxy_request_line_to_daemon(socket_path, &routed_handshake, &line, transport).await?;
+        apply_proxy_initialize_metadata(&mut routed_handshake, metadata);
     }
 
     while let Some(line) = transport.read_line().await? {
         update_proxy_handshake_from_initialize(handshake, &mut routed_handshake, &line).await;
-        proxy_request_line_to_daemon(socket_path, &routed_handshake, &line, transport).await?;
+        let metadata =
+            proxy_request_line_to_daemon(socket_path, &routed_handshake, &line, transport).await?;
+        apply_proxy_initialize_metadata(&mut routed_handshake, metadata);
     }
     Ok(())
+}
+
+#[cfg(unix)]
+#[derive(Default)]
+struct ProxyInitializeMetadata {
+    daemon_version: Option<String>,
+    tool_list_changed: bool,
+}
+
+#[cfg(unix)]
+fn apply_proxy_initialize_metadata(
+    handshake: &mut DaemonHandshake,
+    metadata: ProxyInitializeMetadata,
+) {
+    if !metadata.tool_list_changed {
+        return;
+    }
+    handshake.tool_list_changed_capable = true;
+    if let Some(version) = metadata.daemon_version {
+        handshake.catalog_version = version;
+    }
 }
 
 #[cfg(unix)]
@@ -1110,13 +1191,14 @@ async fn proxy_request_line_to_daemon(
     handshake: &DaemonHandshake,
     line: &str,
     transport: &mut impl McpTransport,
-) -> Result<()> {
+) -> Result<ProxyInitializeMetadata> {
     if line.trim().is_empty() {
-        return Ok(());
+        return Ok(ProxyInitializeMetadata::default());
     }
 
     match send_daemon_request_line(socket_path, handshake, line).await {
         Ok(responses) => {
+            let metadata = proxy_initialize_metadata(line, &responses);
             if let Some(warning) = daemon_version_skew_warning(line, &responses, binary_version()) {
                 eprintln!("[tracedecay] warning: {warning}");
             }
@@ -1127,6 +1209,7 @@ async fn proxy_request_line_to_daemon(
                 }
             }
             transport.flush().await?;
+            Ok(metadata)
         }
         Err(err) => {
             if let Some(response) = daemon_proxy_error_response(line, &err) {
@@ -1143,9 +1226,9 @@ async fn proxy_request_line_to_daemon(
                     ],
                 );
             }
+            Ok(ProxyInitializeMetadata::default())
         }
     }
-    Ok(())
 }
 
 #[cfg(unix)]
@@ -1206,21 +1289,38 @@ async fn send_daemon_request_line(
 /// freshly-updated client can still detect a stale daemon left running by a
 /// non-systemd setup or a plain `tracedecay upgrade`.
 #[cfg(unix)]
+fn proxy_initialize_metadata(request_line: &str, responses: &[String]) -> ProxyInitializeMetadata {
+    let Ok(request) = serde_json::from_str::<JsonRpcRequest>(request_line) else {
+        return ProxyInitializeMetadata::default();
+    };
+    if request.method != "initialize" {
+        return ProxyInitializeMetadata::default();
+    }
+    let mut metadata = ProxyInitializeMetadata::default();
+    for line in responses {
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        if metadata.daemon_version.is_none() {
+            metadata.daemon_version = value
+                .pointer("/result/serverInfo/version")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string);
+        }
+        metadata.tool_list_changed |= value
+            .pointer("/result/capabilities/tools/listChanged")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
+    }
+    metadata
+}
+
+#[cfg(unix)]
 fn daemon_version_from_initialize_response(
     request_line: &str,
     responses: &[String],
 ) -> Option<String> {
-    let request = serde_json::from_str::<JsonRpcRequest>(request_line).ok()?;
-    if request.method != "initialize" {
-        return None;
-    }
-    responses.iter().find_map(|line| {
-        serde_json::from_str::<serde_json::Value>(line)
-            .ok()?
-            .pointer("/result/serverInfo/version")?
-            .as_str()
-            .map(str::to_string)
-    })
+    proxy_initialize_metadata(request_line, responses).daemon_version
 }
 
 /// The warning to surface when the daemon behind an `initialize` response is
@@ -1235,9 +1335,10 @@ fn daemon_version_skew_warning(
     if daemon_version == client_version {
         return None;
     }
+    let action = version_skew_action(&daemon_version, client_version);
     Some(format!(
         "TraceDecay daemon is version {daemon_version} but this client is {client_version} — \
-         run `tracedecay daemon restart` to reload the daemon binary"
+         {action}"
     ))
 }
 
@@ -1526,6 +1627,12 @@ struct DaemonEngine {
     /// Client versions whose skew was already logged. Proxy clients reconnect
     /// per request, so without this the mismatch would flood the daemon log.
     logged_client_version_skews: Arc<tokio::sync::Mutex<HashSet<String>>>,
+    /// Client processes already told to refresh their tool catalog during
+    /// this daemon generation. The set is process-local by design: a daemon
+    /// restart creates a new generation and permits one fresh notification.
+    catalog_refresh_notified_clients: Arc<tokio::sync::Mutex<HashSet<CatalogRefreshClientKey>>>,
+    /// Prevents capacity exhaustion from flooding the daemon log.
+    catalog_refresh_saturation_logged: Arc<AtomicBool>,
     /// Git-metadata watcher (design D3/D5). Default-constructed inert; the real
     /// config-driven watcher is installed by `run_foreground_unix` via
     /// [`DaemonEngine::with_git_watcher`] before the accept loop starts.
@@ -1540,6 +1647,35 @@ struct ProjectServerKey {
     project_path: PathBuf,
     scope_prefix: Option<String>,
     client_identity: DaemonClientIdentity,
+}
+
+#[cfg(unix)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct CatalogRefreshClientKey {
+    client_identity: DaemonClientIdentity,
+    client_instance_id: String,
+}
+
+#[cfg(unix)]
+impl CatalogRefreshClientKey {
+    fn from_handshake(handshake: &DaemonHandshake) -> Self {
+        Self {
+            client_identity: handshake.client_identity.clone(),
+            client_instance_id: handshake.client_instance_id.clone(),
+        }
+    }
+}
+
+#[cfg(unix)]
+fn valid_client_instance_id(client_instance_id: &str) -> bool {
+    let bytes = client_instance_id.as_bytes();
+    (bytes.len() == 32
+        && bytes
+            .iter()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(byte)))
+        || client_instance_id.strip_prefix("mcp-").is_some_and(|tail| {
+            !tail.is_empty() && tail.len() <= 20 && tail.bytes().all(|byte| byte.is_ascii_digit())
+        })
 }
 
 #[cfg(unix)]
@@ -1581,19 +1717,78 @@ impl DaemonEngine {
         let Some(client_version) = self.client_version_skew_to_log(handshake).await else {
             return;
         };
+        let hint = version_skew_action(binary_version(), &client_version).to_string();
         log_daemon_event(
             "daemon_version_skew",
             &[
                 ("daemon_version", binary_version().to_string()),
                 ("client_version", client_version),
-                (
-                    "hint",
-                    "daemon binary differs from the connecting client; \
-                     run `tracedecay daemon restart` to reload it"
-                        .to_string(),
-                ),
+                ("hint", hint),
             ],
         );
+    }
+
+    /// Claims the one catalog-refresh notification for this client in the
+    /// current daemon generation. Only proxies that already advertised the
+    /// capability are eligible. `initialize` and `tools/list` mark the client
+    /// current without emitting because those requests already fetch the new
+    /// generation's catalog.
+    async fn claim_catalog_refresh(
+        &self,
+        handshake: &DaemonHandshake,
+        request_line: &str,
+    ) -> Option<CatalogRefreshClientKey> {
+        if !valid_client_instance_id(&handshake.client_instance_id) {
+            return None;
+        }
+        let request = serde_json::from_str::<JsonRpcRequest>(request_line).ok()?;
+        if request.method == HOOK_EVENT_METHOD {
+            return None;
+        }
+        let catalog_is_current = matches!(request.method.as_str(), "initialize" | "tools/list");
+        if !catalog_is_current
+            && (!handshake.tool_list_changed_capable || handshake.catalog_version.is_empty())
+        {
+            return None;
+        }
+        let key = CatalogRefreshClientKey::from_handshake(handshake);
+        let mut notified_clients = self.catalog_refresh_notified_clients.lock().await;
+        if notified_clients.contains(&key) {
+            return None;
+        }
+        if notified_clients.len() >= MAX_CATALOG_REFRESH_CLIENTS_PER_GENERATION {
+            drop(notified_clients);
+            if !self
+                .catalog_refresh_saturation_logged
+                .swap(true, Ordering::Relaxed)
+            {
+                log_daemon_event(
+                    "catalog_refresh",
+                    &[
+                        ("outcome", "skipped".to_string()),
+                        ("reason", "client_capacity_reached".to_string()),
+                        (
+                            "capacity",
+                            MAX_CATALOG_REFRESH_CLIENTS_PER_GENERATION.to_string(),
+                        ),
+                    ],
+                );
+            }
+            return None;
+        }
+        notified_clients.insert(key.clone());
+        drop(notified_clients);
+        if catalog_is_current {
+            return None;
+        }
+        Some(key)
+    }
+
+    async fn release_catalog_refresh(&self, key: CatalogRefreshClientKey) {
+        self.catalog_refresh_notified_clients
+            .lock()
+            .await
+            .remove(&key);
     }
 
     async fn project_server(
@@ -2342,6 +2537,28 @@ async fn serve_socket_client(stream: tokio::net::UnixStream, engine: DaemonEngin
         return Ok(());
     }
 
+    // The stdio proxy creates one daemon connection per request. Peek exactly
+    // that request so this daemon generation can emit one catalog refresh for
+    // a skewed long-lived client, then replay it into the normal MCP server.
+    let first_request_line = tokio::select! {
+        result = transport.read_line() => result?,
+        () = engine.lifecycle.wait_for_draining() => return Ok(()),
+    };
+    let Some(first_request_line) = first_request_line else {
+        return Ok(());
+    };
+    if let Some(key) = engine
+        .claim_catalog_refresh(&handshake, &first_request_line)
+        .await
+    {
+        if let Err(error) = write_tool_list_changed_notification(&mut transport).await {
+            engine.release_catalog_refresh(key).await;
+            return Err(error);
+        }
+    }
+    let mut transport = ReplayTransport::new(transport);
+    transport.push_replay(first_request_line);
+
     if let Some(server) = server {
         Box::pin(server.run_daemon_connection_with_timings(
             &mut transport,
@@ -2357,6 +2574,19 @@ async fn serve_socket_client(stream: tokio::net::UnixStream, engine: DaemonEngin
         )
         .await?;
     }
+    Ok(())
+}
+
+#[cfg(unix)]
+async fn write_tool_list_changed_notification(transport: &mut impl McpTransport) -> Result<()> {
+    let notification = json!({
+        "jsonrpc": "2.0",
+        "method": TOOL_LIST_CHANGED_METHOD,
+    });
+    transport
+        .write_line(&format!("{}\n", serde_json::to_string(&notification)?))
+        .await?;
+    transport.flush().await?;
     Ok(())
 }
 
@@ -2481,7 +2711,7 @@ async fn read_json_rpc_request_id(
 
 #[cfg(unix)]
 async fn write_json_rpc_response(
-    transport: &mut UnixStreamTransport,
+    transport: &mut impl McpTransport,
     response: &crate::mcp::JsonRpcResponse,
 ) -> Result<()> {
     transport
@@ -2494,7 +2724,7 @@ async fn write_json_rpc_response(
 
 #[cfg(unix)]
 async fn serve_projectless_client(
-    transport: &mut UnixStreamTransport,
+    transport: &mut impl McpTransport,
     client_identity: &DaemonClientIdentity,
     lifecycle: &DaemonLifecycle,
 ) -> Result<()> {
@@ -2539,7 +2769,9 @@ async fn projectless_response(
             json!({
                 "protocolVersion": "2024-11-05",
                 "capabilities": {
-                    "tools": {}
+                    "tools": {
+                        "listChanged": true
+                    }
                 },
                 "serverInfo": {
                     "name": "tracedecay",
