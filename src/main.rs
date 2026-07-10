@@ -206,6 +206,14 @@ async fn run(cli: Cli) -> tracedecay::errors::Result<()> {
     };
 
     maybe_run_extract_worker(&command);
+    let _hook_lease = match hook_cmd::admit_hook_command(&command)? {
+        hook_cmd::HookAdmission::NotHook => None,
+        hook_cmd::HookAdmission::Acquired(lease) => Some(lease),
+        hook_cmd::HookAdmission::Busy => {
+            hook_cmd::drain_busy_hook_stdin(&command);
+            return Ok(());
+        }
+    };
     run_startup_preamble(&command).await;
     dispatch_command(command).await
 }
@@ -727,6 +735,9 @@ async fn dispatch_command(command: Commands) -> tracedecay::errors::Result<()> {
 }
 
 fn should_skip_startup_maintenance(command: &Commands) -> bool {
+    if hook_cmd::hook_input(command).is_some() {
+        return true;
+    }
     matches!(
         command,
         Commands::Install { .. }
@@ -744,30 +755,6 @@ fn should_skip_startup_maintenance(command: &Commands) -> bool {
             }
             | Commands::Migrate { .. }
             | Commands::Projects { .. }
-            | Commands::HookPreToolUse
-            | Commands::HookPromptSubmit
-            | Commands::HookStop
-            | Commands::HookClaudeSessionStart
-            | Commands::HookClaudePostToolUse
-            | Commands::HookClaudeSubagentStart
-            | Commands::HookKiroPreToolUse
-            | Commands::HookKiroPromptSubmit
-            | Commands::HookKiroPostToolUse
-            | Commands::HookCursorSubagentStart
-            | Commands::HookCursorPostToolUse
-            | Commands::HookCursorBeforeSubmitPrompt
-            | Commands::HookCursorPreCompact
-            | Commands::HookCursorAfterFileEdit
-            | Commands::HookCursorSessionStart
-            | Commands::HookCursorSessionEnd
-            | Commands::HookCursorAfterShell
-            | Commands::HookCursorWorkspaceOpen
-            | Commands::HookCursorStop
-            | Commands::HookCodexSessionStart
-            | Commands::HookCodexUserPromptSubmit
-            | Commands::HookCodexSubagentStart
-            | Commands::HookCodexPostToolUse
-            | Commands::HookCodexPostCompact
             | Commands::Daemon { .. }
             // `Serve` is the hot path used by MCP clients (Claude Code,
             // Codex, etc.). Clients impose a 30 s `initialize` timeout, so
@@ -781,6 +768,9 @@ fn should_skip_startup_maintenance(command: &Commands) -> bool {
 }
 
 fn should_skip_agent_install_maintenance(command: &Commands) -> bool {
+    if hook_cmd::hook_input(command).is_some() {
+        return true;
+    }
     // Selectively gate the implicit `check_install_stale` + silent-reinstall
     // path so agent permissions/hooks/MCP config stay in sync after a binary
     // upgrade, without firing on paths where it would be wrong or wasteful:

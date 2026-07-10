@@ -26,6 +26,12 @@ pub struct LifecycleLease {
     token: Option<String>,
 }
 
+#[derive(Debug)]
+pub enum SharedLeaseAttempt {
+    Acquired(LifecycleLease),
+    Busy,
+}
+
 impl LifecycleLease {
     pub fn token(&self) -> Option<&str> {
         self.token.as_deref()
@@ -54,17 +60,23 @@ pub fn acquire_exclusive_for_profile(
     profile_root: &Path,
     operation: &str,
 ) -> Result<LifecycleLease> {
-    std::fs::create_dir_all(profile_root).map_err(|error| TraceDecayError::Config {
-        message: format!(
-            "failed to create TraceDecay profile root '{}': {error}",
-            profile_root.display()
-        ),
-    })?;
-    acquire_exclusive_at(&profile_root.join(LIFECYCLE_LOCK_FILENAME), operation)
+    acquire_exclusive_at(&lifecycle_lock_path_for_profile(profile_root)?, operation)
 }
 
 pub fn acquire_shared(operation: &str) -> Result<LifecycleLease> {
     acquire_shared_at(&lifecycle_lock_path()?, operation)
+}
+
+/// Attempts to acquire a non-inherited shared lease without blocking.
+pub fn try_acquire_shared(operation: &str) -> Result<SharedLeaseAttempt> {
+    try_acquire_shared_at(&lifecycle_lock_path()?, operation)
+}
+
+pub fn try_acquire_shared_for_profile(
+    profile_root: &Path,
+    operation: &str,
+) -> Result<SharedLeaseAttempt> {
+    try_acquire_shared_at(&lifecycle_lock_path_for_profile(profile_root)?, operation)
 }
 
 /// Acquires a shared diagnostic lease, or joins the exclusive lease held by
@@ -72,6 +84,23 @@ pub fn acquire_shared(operation: &str) -> Result<LifecycleLease> {
 pub fn acquire_shared_or_inherited(operation: &str) -> Result<LifecycleLease> {
     let path = lifecycle_lock_path()?;
     acquire_shared_or_inherited_at(&path, operation)
+}
+
+/// Attempts to acquire a shared lifecycle lease without blocking. A live
+/// unrelated exclusive owner is reported as [`SharedLeaseAttempt::Busy`];
+/// lock-file and profile configuration failures remain errors.
+pub fn try_acquire_shared_or_inherited(operation: &str) -> Result<SharedLeaseAttempt> {
+    let path = lifecycle_lock_path()?;
+    try_acquire_shared_or_inherited_at(&path, operation)
+}
+
+/// Explicit-profile counterpart used when ambient HOME/profile resolution is
+/// not authoritative.
+pub fn try_acquire_shared_or_inherited_for_profile(
+    profile_root: &Path,
+    operation: &str,
+) -> Result<SharedLeaseAttempt> {
+    try_acquire_shared_or_inherited_at(&lifecycle_lock_path_for_profile(profile_root)?, operation)
 }
 
 fn acquire_shared_or_inherited_at(path: &Path, operation: &str) -> Result<LifecycleLease> {
@@ -91,6 +120,29 @@ fn acquire_shared_or_inherited_at(path: &Path, operation: &str) -> Result<Lifecy
                 })
             } else {
                 Err(busy_error(operation, owner.as_deref()))
+            }
+        }
+        Err(error) => Err(lock_error(path, operation, &error)),
+    }
+}
+
+fn try_acquire_shared_or_inherited_at(path: &Path, operation: &str) -> Result<SharedLeaseAttempt> {
+    let mut file = open_lock_file(path)?;
+    match fs2::FileExt::try_lock_shared(&file) {
+        Ok(()) => Ok(SharedLeaseAttempt::Acquired(LifecycleLease {
+            hold: LeaseHold::File(file),
+            token: None,
+        })),
+        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+            let owner = read_owner(&mut file);
+            let owner_token = owner.as_deref().and_then(|line| line.split('\t').next());
+            if owner_token.is_some_and(process_owns_token) {
+                Ok(SharedLeaseAttempt::Acquired(LifecycleLease {
+                    hold: LeaseHold::Inherited,
+                    token: None,
+                }))
+            } else {
+                Ok(SharedLeaseAttempt::Busy)
             }
         }
         Err(error) => Err(lock_error(path, operation, &error)),
@@ -150,6 +202,16 @@ fn lifecycle_lock_path() -> Result<PathBuf> {
     Ok(root.join(LIFECYCLE_LOCK_FILENAME))
 }
 
+fn lifecycle_lock_path_for_profile(profile_root: &Path) -> Result<PathBuf> {
+    std::fs::create_dir_all(profile_root).map_err(|error| TraceDecayError::Config {
+        message: format!(
+            "failed to create TraceDecay profile root '{}': {error}",
+            profile_root.display()
+        ),
+    })?;
+    Ok(profile_root.join(LIFECYCLE_LOCK_FILENAME))
+}
+
 fn acquire_exclusive_at(path: &Path, operation: &str) -> Result<LifecycleLease> {
     let file = open_lock_file(path)?;
     match fs2::FileExt::try_lock_exclusive(&file) {
@@ -173,6 +235,20 @@ fn acquire_shared_at(path: &Path, operation: &str) -> Result<LifecycleLease> {
         Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
             let owner = read_owner(&mut file);
             Err(busy_error(operation, owner.as_deref()))
+        }
+        Err(error) => Err(lock_error(path, operation, &error)),
+    }
+}
+
+fn try_acquire_shared_at(path: &Path, operation: &str) -> Result<SharedLeaseAttempt> {
+    let file = open_lock_file(path)?;
+    match fs2::FileExt::try_lock_shared(&file) {
+        Ok(()) => Ok(SharedLeaseAttempt::Acquired(LifecycleLease {
+            hold: LeaseHold::File(file),
+            token: None,
+        })),
+        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+            Ok(SharedLeaseAttempt::Busy)
         }
         Err(error) => Err(lock_error(path, operation, &error)),
     }
@@ -282,9 +358,13 @@ fn owner_write_error(error: &std::io::Error) -> TraceDecayError {
 
 #[cfg(test)]
 mod tests {
+    use std::fs::OpenOptions;
+    use std::io::Write;
+
     use super::{
-        acquire_exclusive_at, acquire_exclusive_or_inherited_at, acquire_shared_at,
-        acquire_shared_or_inherited_at,
+        SharedLeaseAttempt, acquire_exclusive_at, acquire_exclusive_or_inherited_at,
+        acquire_shared_at, acquire_shared_or_inherited_at, try_acquire_shared_at,
+        try_acquire_shared_or_inherited_at, try_acquire_shared_or_inherited_for_profile,
     };
 
     #[test]
@@ -321,6 +401,59 @@ mod tests {
         let _parent = acquire_exclusive_at(&path, "post-update").unwrap();
 
         acquire_shared_or_inherited_at(&path, "doctor").unwrap();
+        assert!(matches!(
+            try_acquire_shared_or_inherited_at(&path, "hook").unwrap(),
+            SharedLeaseAttempt::Acquired(_)
+        ));
+    }
+
+    #[test]
+    fn nonblocking_shared_attempt_reports_an_unrelated_exclusive_owner_as_busy() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("lifecycle.lock");
+        let mut external = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&path)
+            .unwrap();
+        fs2::FileExt::try_lock_exclusive(&external).unwrap();
+        writeln!(external, "external-token\tmigration\t999").unwrap();
+        external.flush().unwrap();
+
+        assert!(matches!(
+            try_acquire_shared_or_inherited_at(&path, "hook").unwrap(),
+            SharedLeaseAttempt::Busy
+        ));
+    }
+
+    #[test]
+    fn noninherited_shared_attempt_does_not_join_a_process_owned_exclusive_lease() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("lifecycle.lock");
+        let _parent = acquire_exclusive_at(&path, "update").unwrap();
+
+        assert!(matches!(
+            try_acquire_shared_at(&path, "hook").unwrap(),
+            SharedLeaseAttempt::Busy
+        ));
+    }
+
+    #[test]
+    fn nonblocking_shared_attempt_preserves_profile_io_errors() {
+        let tmp = tempfile::tempdir().unwrap();
+        let not_a_directory = tmp.path().join("profile-file");
+        std::fs::write(&not_a_directory, "not a directory").unwrap();
+
+        let error =
+            try_acquire_shared_or_inherited_for_profile(&not_a_directory, "hook").unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("failed to create TraceDecay profile root")
+        );
     }
 
     #[test]
