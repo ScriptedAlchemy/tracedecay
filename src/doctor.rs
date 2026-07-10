@@ -722,15 +722,29 @@ pub(crate) fn orphan_store_manifest_report(
         profile_root,
         crate::tracedecay::current_timestamp(),
     );
-    let orphan_count = report
-        .plans
-        .iter()
-        .filter(|plan| {
-            let key = crate::global_db::GlobalDb::canonical_project_key(&plan.project.project_root);
-            !registered.contains(&key)
-        })
-        .count();
-    (orphan_count, report.issues)
+    let mut orphan_count = 0;
+    let mut warnings = report.issues;
+    for plan in report.plans {
+        let key = crate::global_db::GlobalDb::canonical_project_key(&plan.project.project_root);
+        if registered.contains(&key) {
+            continue;
+        }
+        match plan.status {
+            crate::migrate::registry::RegistryReconstructionStatus::Eligible => {
+                orphan_count += 1;
+            }
+            crate::migrate::registry::RegistryReconstructionStatus::Blocked => {
+                warnings.push(format!(
+                    "blocked store manifest '{}': {}",
+                    plan.manifest_path.display(),
+                    plan.status_reason.as_deref().unwrap_or("not eligible")
+                ));
+            }
+            crate::migrate::registry::RegistryReconstructionStatus::Stale
+            | crate::migrate::registry::RegistryReconstructionStatus::Retired => {}
+        }
+    }
+    (orphan_count, warnings)
 }
 
 /// Reports git-metadata watcher health (design D3/D5).

@@ -267,6 +267,16 @@ pub(crate) async fn handle_migrate_action(action: MigrateAction) -> tracedecay::
                     message: "confirmation token does not match migration manifest".to_string(),
                 });
             }
+            let target_profile_root =
+                manifest.destination.profile_root.clone().ok_or_else(|| {
+                    tracedecay::errors::TraceDecayError::Config {
+                        message: "migration manifest has no destination profile_root".to_string(),
+                    }
+                })?;
+            let _lifecycle_lease = tracedecay::lifecycle_lease::acquire_exclusive_for_profile(
+                &target_profile_root,
+                "legacy store migration",
+            )?;
             let apply_report = tracedecay::migrate::manifest::apply_migration_manifest(
                 &mut manifest,
             )
@@ -283,13 +293,15 @@ pub(crate) async fn handle_migrate_action(action: MigrateAction) -> tracedecay::
                     ),
                 });
             }
-            let global_db = tracedecay::global_db::GlobalDb::open()
-                .await
-                .ok_or_else(|| tracedecay::errors::TraceDecayError::Config {
-                    message: "could not open global DB for migrate apply".to_string(),
-                })?;
+            let global_db = tracedecay::global_db::GlobalDb::open_at(
+                &apply_report.profile_root.join("global.db"),
+            )
+            .await
+            .ok_or_else(|| tracedecay::errors::TraceDecayError::Config {
+                message: "could not open global DB for migrate apply".to_string(),
+            })?;
             let registry_report =
-                tracedecay::migrate::registry::apply_registry_reconstruction_report(
+                tracedecay::migrate::registry::apply_single_registry_reconstruction_report(
                     &global_db,
                     &verify_report.registry_reconstruction,
                 )
@@ -354,16 +366,63 @@ pub(crate) async fn handle_migrate_action(action: MigrateAction) -> tracedecay::
             apply,
             json,
         } => {
+            let profile_root = PathBuf::from(profile_root);
+            if apply {
+                let projects_root = profile_root.join("projects");
+                std::fs::read_dir(&projects_root).map_err(|error| {
+                    tracedecay::errors::TraceDecayError::Config {
+                        message: format!(
+                            "could not read profile projects directory '{}': {error}",
+                            projects_root.display()
+                        ),
+                    }
+                })?;
+            }
+            let _lifecycle_lease = apply
+                .then(|| {
+                    tracedecay::lifecycle_lease::acquire_exclusive_for_profile(
+                        &profile_root,
+                        "registry reconstruction",
+                    )
+                })
+                .transpose()?;
             let report = tracedecay::migrate::registry::scan_profile_store_manifests(
-                &PathBuf::from(profile_root),
+                &profile_root,
                 tracedecay::tracedecay::current_timestamp(),
             );
             if apply {
-                let global_db = tracedecay::global_db::GlobalDb::open()
-                    .await
-                    .ok_or_else(|| tracedecay::errors::TraceDecayError::Config {
-                        message: "could not open global DB for registry reconstruction".to_string(),
-                    })?;
+                let mut blockers = report.issues.clone();
+                blockers.extend(
+                    report
+                        .plans
+                        .iter()
+                        .filter(|plan| {
+                            plan.status
+                                == tracedecay::migrate::registry::RegistryReconstructionStatus::Blocked
+                        })
+                        .map(|plan| {
+                            format!(
+                                "blocked manifest '{}': {}",
+                                plan.manifest_path.display(),
+                                plan.status_reason.as_deref().unwrap_or("not eligible")
+                            )
+                        }),
+                );
+                if !blockers.is_empty() {
+                    return Err(tracedecay::errors::TraceDecayError::Config {
+                        message: format!(
+                            "failed to preflight registry reconstruction: {}",
+                            blockers.join("; ")
+                        ),
+                    });
+                }
+                let global_db =
+                    tracedecay::global_db::GlobalDb::open_at(&profile_root.join("global.db"))
+                        .await
+                        .ok_or_else(|| tracedecay::errors::TraceDecayError::Config {
+                            message: "could not open global DB for registry reconstruction"
+                                .to_string(),
+                        })?;
                 let applied = tracedecay::migrate::registry::apply_registry_reconstruction_report(
                     &global_db, &report,
                 )
@@ -395,12 +454,27 @@ pub(crate) async fn handle_migrate_action(action: MigrateAction) -> tracedecay::
             } else if json {
                 println!("{}", serde_json::to_string_pretty(&report)?);
             } else {
+                use tracedecay::migrate::registry::RegistryReconstructionStatus;
+                let eligible = report.status_count(RegistryReconstructionStatus::Eligible);
+                let blocked = report.status_count(RegistryReconstructionStatus::Blocked);
+                let stale = report.status_count(RegistryReconstructionStatus::Stale);
+                let retired = report.status_count(RegistryReconstructionStatus::Retired);
                 println!(
-                    "registry reconstruction: {} plan(s), {} issue(s)",
-                    report.plans.len(),
+                    "registry reconstruction: {} eligible, {} blocked, {} stale, {} retired, {} issue(s)",
+                    eligible,
+                    blocked,
+                    stale,
+                    retired,
                     report.issues.len()
                 );
-                println!("apply supported: yes (re-run with --apply after review)");
+                println!(
+                    "apply supported: {} (atomic batch; skips stale/retired, inserts eligible missing rows only, fails on blocked/invalid/conflict)",
+                    if blocked == 0 && report.issues.is_empty() {
+                        "yes"
+                    } else {
+                        "no"
+                    }
+                );
             }
         }
         MigrateAction::RegistryGc {
@@ -1052,6 +1126,9 @@ fn append_orphan_manifest_rows(
         tracedecay::tracedecay::current_timestamp(),
     );
     for plan in report.plans {
+        if plan.status != tracedecay::migrate::registry::RegistryReconstructionStatus::Eligible {
+            continue;
+        }
         let key =
             tracedecay::global_db::GlobalDb::canonical_project_key(&plan.project.project_root);
         if registered.contains(&key) {

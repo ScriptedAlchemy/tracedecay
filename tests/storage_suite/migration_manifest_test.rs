@@ -7,6 +7,7 @@ use crate::common::sample_node;
 use std::os::unix::fs::symlink;
 use tempfile::TempDir;
 use tracedecay::global_db::GlobalDb;
+use tracedecay::lifecycle_lease::acquire_exclusive_for_profile;
 use tracedecay::migrate::inventory::{
     MigrationInventory, RegistryStatus, StoreArtifact, StoreBrand, StoreInventory, StoreRole,
     StoreStatus,
@@ -20,7 +21,8 @@ use tracedecay::migrate::manifest::{
 };
 use tracedecay::storage::{
     EnrollmentMarker, STORE_MANIFEST_FILENAME, STORE_MANIFEST_SCHEMA_VERSION, StorageMode,
-    StoreKind, StoreManifest, read_enrollment_marker, read_store_manifest, write_enrollment_marker,
+    StoreKind, StoreManifest, read_enrollment_marker, read_store_manifest,
+    remove_enrollment_marker, write_enrollment_marker,
 };
 
 fn empty_inventory() -> MigrationInventory {
@@ -937,7 +939,8 @@ fn migrate_apply_copies_single_store_and_cuts_over_profile_shard() {
     let sessions_db = data_dir.join("sessions.db");
     let branch_meta = data_dir.join("branch-meta.json");
     let profile_root = root.join("profile");
-    let global_db_path = root.join("global/global.db");
+    let ambient_global_db_path = root.join("ambient/global.db");
+    let profile_global_db_path = profile_root.join("global.db");
     fs::create_dir_all(&data_dir).unwrap();
     fs::write(&graph_db, b"graph").unwrap();
     fs::write(&sessions_db, b"sessions").unwrap();
@@ -987,8 +990,28 @@ fn migrate_apply_copies_single_store_and_cuts_over_profile_shard() {
     let manifest = manifest.unwrap();
     save_manifest(&manifest).unwrap();
 
+    let lease = acquire_exclusive_for_profile(&profile_root, "test migrate cutover").unwrap();
+    let blocked = Command::new(env!("CARGO_BIN_EXE_tracedecay"))
+        .env("TRACEDECAY_GLOBAL_DB", &ambient_global_db_path)
+        .env("TRACEDECAY_ENABLE_GLOBAL_DB", "1")
+        .args([
+            "migrate",
+            "apply",
+            "--manifest",
+            manifest_path.to_str().unwrap(),
+            "--confirm-token",
+            "confirm-mig_123",
+        ])
+        .output()
+        .unwrap();
+    assert!(!blocked.status.success());
+    assert!(String::from_utf8_lossy(&blocked.stderr).contains("test migrate cutover"));
+    assert!(!profile_root.join("projects/proj_123").exists());
+    assert!(!profile_global_db_path.exists());
+    drop(lease);
+
     let output = Command::new(env!("CARGO_BIN_EXE_tracedecay"))
-        .env("TRACEDECAY_GLOBAL_DB", &global_db_path)
+        .env("TRACEDECAY_GLOBAL_DB", &ambient_global_db_path)
         .env("TRACEDECAY_ENABLE_GLOBAL_DB", "1")
         .args([
             "migrate",
@@ -1048,7 +1071,7 @@ fn migrate_apply_copies_single_store_and_cuts_over_profile_shard() {
 
     let runtime = tokio::runtime::Runtime::new().unwrap();
     let resolution = runtime.block_on(async {
-        GlobalDb::open_at(&global_db_path)
+        GlobalDb::open_at(&profile_global_db_path)
             .await
             .unwrap()
             .resolve_project_store_by_alias(&project)
@@ -1067,6 +1090,41 @@ fn migrate_apply_copies_single_store_and_cuts_over_profile_shard() {
     let verify = verify_migration_manifest(&applied);
     assert!(verify.apply_supported, "{:?}", verify.issues);
     assert!(verify.issues.is_empty(), "{:?}", verify.issues);
+    assert!(!ambient_global_db_path.exists());
+
+    remove_enrollment_marker(&project, "proj_123").unwrap();
+    let retry = Command::new(env!("CARGO_BIN_EXE_tracedecay"))
+        .env("TRACEDECAY_GLOBAL_DB", &ambient_global_db_path)
+        .env("TRACEDECAY_ENABLE_GLOBAL_DB", "1")
+        .args([
+            "migrate",
+            "apply",
+            "--manifest",
+            manifest_path.to_str().unwrap(),
+            "--confirm-token",
+            "confirm-mig_123",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        retry.status.success(),
+        "stderr was: {}",
+        String::from_utf8_lossy(&retry.stderr)
+    );
+    assert_eq!(
+        read_enrollment_marker(&project)
+            .unwrap()
+            .unwrap()
+            .project_id,
+        "proj_123"
+    );
+    let retried = load_manifest(&manifest_path).unwrap();
+    assert!(
+        retried
+            .artifacts
+            .iter()
+            .all(|artifact| artifact.state == ArtifactState::Applied)
+    );
 }
 
 #[test]
@@ -1164,6 +1222,49 @@ fn migrate_reconstruct_reports_registry_plans_without_applying_them() {
     let payload: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(payload["plans"].as_array().unwrap().len(), 1);
     assert_eq!(payload["plans"][0]["project"]["project_id"], "proj_123");
+}
+
+#[test]
+fn reconstruct_apply_rejects_missing_profile_before_creating_lease_or_database() {
+    let dir = TempDir::new().unwrap();
+    let profile_root = dir.path().join("missing-profile");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_tracedecay"))
+        .args([
+            "migrate",
+            "reconstruct",
+            "--profile-root",
+            profile_root.to_str().unwrap(),
+            "--apply",
+        ])
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    assert!(!profile_root.exists());
+}
+
+#[test]
+fn reconstruct_apply_respects_exclusive_profile_lifecycle_cutover() {
+    let dir = TempDir::new().unwrap();
+    let profile_root = dir.path().join("profile");
+    fs::create_dir_all(profile_root.join("projects")).unwrap();
+    let _lease = acquire_exclusive_for_profile(&profile_root, "test cutover").unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_tracedecay"))
+        .args([
+            "migrate",
+            "reconstruct",
+            "--profile-root",
+            profile_root.to_str().unwrap(),
+            "--apply",
+        ])
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("test cutover"));
+    assert!(!profile_root.join("global.db").exists());
 }
 
 #[test]

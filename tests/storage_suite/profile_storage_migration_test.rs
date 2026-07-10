@@ -17,14 +17,16 @@ use tracedecay::migrate::manifest::{
     verify_migration_manifest,
 };
 use tracedecay::migrate::registry::{
-    apply_registry_reconstruction_report, reconstruct_registry_from_store_manifest,
-    scan_profile_store_manifests,
+    RegistryReconstructionReport, RegistryReconstructionStatus,
+    apply_registry_reconstruction_report, apply_single_registry_reconstruction_report,
+    reconstruct_registry_from_store_manifest, scan_profile_store_manifests,
 };
 use tracedecay::serve;
 use tracedecay::sessions::cursor::open_project_session_db;
 use tracedecay::storage::{
     EnrollmentMarker, STORE_MANIFEST_FILENAME, STORE_MANIFEST_SCHEMA_VERSION, StorageMode,
     StoreKind, StoreManifest, read_enrollment_marker, write_enrollment_marker,
+    write_repository_identity_marker,
 };
 use tracedecay::tracedecay::{TraceDecay, TraceDecayOpenOptions};
 
@@ -145,7 +147,15 @@ async fn table_exists(db_path: &std::path::Path, table: &str) -> bool {
 }
 
 fn write_profile_store_manifest(profile_root: &Path, project_root: &Path) -> std::path::PathBuf {
-    let data_root = profile_root.join("projects/proj_123");
+    write_profile_store_manifest_for_id(profile_root, project_root, "proj_123")
+}
+
+fn write_profile_store_manifest_for_id(
+    profile_root: &Path,
+    project_root: &Path,
+    project_id: &str,
+) -> std::path::PathBuf {
+    let data_root = profile_root.join("projects").join(project_id);
     fs::create_dir_all(&data_root).unwrap();
     fs::create_dir_all(project_root).unwrap();
     fs::write(data_root.join("tracedecay.db"), b"graph").unwrap();
@@ -154,7 +164,7 @@ fn write_profile_store_manifest(profile_root: &Path, project_root: &Path) -> std
     branch_meta::save_branch_meta(&data_root, &branch_meta).unwrap();
     let manifest = StoreManifest {
         schema_version: STORE_MANIFEST_SCHEMA_VERSION,
-        project_id: Some("proj_123".to_string()),
+        project_id: Some(project_id.to_string()),
         store_kind: StoreKind::CodeProject,
         storage_mode: StorageMode::ProfileSharded,
         project_root: project_root.to_path_buf(),
@@ -202,9 +212,11 @@ fn reconstructs_registry_records_from_profile_store_manifest() {
     assert!(report.issues.is_empty(), "{:?}", report.issues);
     assert_eq!(report.plans.len(), 1);
     let plan = &report.plans[0];
+    let canonical_project_root = project_root.canonicalize().unwrap();
+    assert_eq!(plan.status, RegistryReconstructionStatus::Eligible);
     assert_eq!(plan.project.project_id, "proj_123");
-    assert_eq!(plan.project.project_root, project_root);
-    assert_eq!(plan.project.aliases, vec![project_root]);
+    assert_eq!(plan.project.project_root, canonical_project_root);
+    assert_eq!(plan.project.aliases, vec![canonical_project_root]);
     assert_eq!(plan.store.project_id, "proj_123");
     assert_eq!(plan.store.store_kind, "code_project");
     assert_eq!(plan.store.storage_mode, "profile_sharded");
@@ -267,6 +279,79 @@ fn scan_profile_store_manifests_rejects_unsafe_manifest_relpaths() {
             .issues
             .iter()
             .any(|issue| issue.contains("unsafe graph_db_relpath"))
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn reconstruction_accepts_equivalent_profile_symlink_but_rejects_symlink_escape() {
+    let dir = TempDir::new().unwrap();
+    let profile_root = dir.path().join("profile");
+    let profile_alias = dir.path().join("profile-alias");
+    let project_root = dir.path().join("repo");
+    let manifest = write_profile_store_manifest(&profile_root, &project_root);
+    std::os::unix::fs::symlink(&profile_root, &profile_alias).unwrap();
+
+    let equivalent = reconstruct_registry_from_store_manifest(&manifest, &profile_alias, 1);
+    assert!(equivalent.issues.is_empty(), "{:?}", equivalent.issues);
+    assert_eq!(equivalent.plans.len(), 1);
+
+    let outside = dir.path().join("outside");
+    fs::create_dir_all(&outside).unwrap();
+    let escaped_root = profile_root.join("projects/proj_escape");
+    std::os::unix::fs::symlink(&outside, &escaped_root).unwrap();
+    let escaped_manifest = StoreManifest {
+        schema_version: STORE_MANIFEST_SCHEMA_VERSION,
+        project_id: Some("proj_escape".to_string()),
+        store_kind: StoreKind::CodeProject,
+        storage_mode: StorageMode::ProfileSharded,
+        project_root,
+        data_root: escaped_root.clone(),
+        graph_db_relpath: "tracedecay.db".into(),
+        sessions_db_relpath: "sessions.db".into(),
+        branch_meta_relpath: "branch-meta.json".into(),
+    };
+    let escaped_manifest_path = escaped_root.join(STORE_MANIFEST_FILENAME);
+    fs::write(
+        &escaped_manifest_path,
+        serde_json::to_string_pretty(&escaped_manifest).unwrap(),
+    )
+    .unwrap();
+
+    let escaped =
+        reconstruct_registry_from_store_manifest(&escaped_manifest_path, &profile_root, 1);
+    assert!(escaped.plans.is_empty());
+    assert!(
+        escaped
+            .issues
+            .iter()
+            .any(|issue| issue.contains("outside profile root"))
+    );
+}
+
+#[test]
+fn unsafe_branch_database_path_blocks_reconstruction() {
+    let dir = TempDir::new().unwrap();
+    let profile_root = dir.path().join("profile");
+    let project_root = dir.path().join("repo");
+    let manifest = write_profile_store_manifest(&profile_root, &project_root);
+    let branch_meta_path = manifest.parent().unwrap().join("branch-meta.json");
+    let mut branch_meta: serde_json::Value =
+        serde_json::from_slice(&fs::read(&branch_meta_path).unwrap()).unwrap();
+    branch_meta["branches"]["main"]["db_file"] = serde_json::json!("../escape.db");
+    fs::write(
+        &branch_meta_path,
+        serde_json::to_vec_pretty(&branch_meta).unwrap(),
+    )
+    .unwrap();
+
+    let report = reconstruct_registry_from_store_manifest(&manifest, &profile_root, 1);
+
+    assert!(
+        report
+            .issues
+            .iter()
+            .any(|issue| issue.contains("unsafe database path"))
     );
 }
 
@@ -466,6 +551,399 @@ async fn applies_registry_reconstruction_records_from_manifest() {
             .as_deref()
             .map(portable_relpath),
         Some("projects/proj_123/store_manifest.json".to_string())
+    );
+}
+
+#[tokio::test]
+async fn single_plan_reconstruction_rejects_noneligible_and_accepts_matching_existing_rows() {
+    let dir = TempDir::new().unwrap();
+    let profile_root = dir.path().join("profile");
+    let project_root = dir.path().join("repo");
+    let manifest_path = write_profile_store_manifest(&profile_root, &project_root);
+    let report =
+        reconstruct_registry_from_store_manifest(&manifest_path, &profile_root, 1_800_000_001);
+    let db = GlobalDb::open_at(&dir.path().join("global.db"))
+        .await
+        .unwrap();
+
+    let mut retired = report.clone();
+    retired.plans[0].status = RegistryReconstructionStatus::Retired;
+    retired.plans[0].status_reason = Some("superseded project".to_string());
+    let error = apply_single_registry_reconstruction_report(&db, &retired)
+        .await
+        .unwrap_err();
+    assert!(error.iter().any(|issue| issue.contains("Retired")));
+    assert!(db.get_code_project("proj_123").await.is_none());
+
+    let inserted = apply_registry_reconstruction_report(&db, &report)
+        .await
+        .unwrap();
+    assert_eq!(inserted.projects, 1);
+    assert_eq!(inserted.stores, 1);
+
+    let resumed = apply_single_registry_reconstruction_report(&db, &report)
+        .await
+        .unwrap();
+    assert_eq!(resumed.projects, 0);
+    assert_eq!(resumed.stores, 0);
+    assert_eq!(
+        db.resolve_project_store_by_identity(&project_root, None)
+            .await
+            .unwrap()
+            .project
+            .project_id,
+        "proj_123"
+    );
+}
+
+#[tokio::test]
+async fn conflicting_alias_is_rejected_without_stealing_or_partial_writes() {
+    let dir = TempDir::new().unwrap();
+    let profile_root = dir.path().join("profile");
+    let project_root = dir.path().join("repo");
+    let manifest = write_profile_store_manifest(&profile_root, &project_root);
+    let report = reconstruct_registry_from_store_manifest(&manifest, &profile_root, 1);
+    let db = GlobalDb::open_at(&dir.path().join("global.db"))
+        .await
+        .unwrap();
+    db.upsert_code_project("proj_owner", &project_root, None, None, None)
+        .await
+        .unwrap();
+
+    let error = apply_registry_reconstruction_report(&db, &report)
+        .await
+        .unwrap_err();
+
+    assert!(error.iter().any(|issue| issue.contains("already owned")));
+    assert!(db.get_code_project("proj_123").await.is_none());
+    assert_eq!(
+        db.project_registry_context_by_alias(&project_root)
+            .await
+            .unwrap()
+            .project
+            .project_id,
+        "proj_owner"
+    );
+}
+
+#[tokio::test]
+async fn conflicting_later_plan_rolls_back_the_entire_reconstruction_batch() {
+    let dir = TempDir::new().unwrap();
+    let profile_root = dir.path().join("profile");
+    let first_root = dir.path().join("first-repo");
+    let second_root = dir.path().join("second-repo");
+    let first = write_profile_store_manifest_for_id(&profile_root, &first_root, "proj_first");
+    let second = write_profile_store_manifest_for_id(&profile_root, &second_root, "proj_second");
+    let first = reconstruct_registry_from_store_manifest(&first, &profile_root, 1);
+    let second = reconstruct_registry_from_store_manifest(&second, &profile_root, 1);
+    let report = RegistryReconstructionReport {
+        plans: first.plans.into_iter().chain(second.plans).collect(),
+        issues: Vec::new(),
+    };
+    let db = GlobalDb::open_at(&dir.path().join("global.db"))
+        .await
+        .unwrap();
+    db.upsert_code_project("proj_owner", &second_root, None, None, None)
+        .await
+        .unwrap();
+
+    apply_registry_reconstruction_report(&db, &report)
+        .await
+        .unwrap_err();
+
+    assert!(db.get_code_project("proj_first").await.is_none());
+    assert!(db.get_code_project("proj_second").await.is_none());
+    assert!(db.get_code_project("proj_owner").await.is_some());
+}
+
+#[tokio::test]
+async fn physical_store_path_conflict_rolls_back_without_creating_project() {
+    let dir = TempDir::new().unwrap();
+    let profile_root = dir.path().join("profile");
+    let project_root = dir.path().join("repo");
+    let manifest = write_profile_store_manifest(&profile_root, &project_root);
+    let report = reconstruct_registry_from_store_manifest(&manifest, &profile_root, 1);
+    let db = GlobalDb::open_at(&dir.path().join("global.db"))
+        .await
+        .unwrap();
+    let owner_root = dir.path().join("owner");
+    fs::create_dir_all(&owner_root).unwrap();
+    db.upsert_code_project("proj_owner", &owner_root, None, None, None)
+        .await
+        .unwrap();
+    db.upsert_store_instance(StoreInstanceUpsert {
+        store_id: "store:owner".to_string(),
+        project_id: "proj_owner".to_string(),
+        store_kind: "code_project".to_string(),
+        storage_mode: "profile_sharded".to_string(),
+        store_relpath: report.plans[0].store.store_relpath.clone(),
+        manifest_relpath: None,
+        last_verified_at: None,
+        last_write_at: None,
+    })
+    .await
+    .unwrap();
+
+    let error = apply_registry_reconstruction_report(&db, &report)
+        .await
+        .unwrap_err();
+
+    assert!(
+        error
+            .iter()
+            .any(|issue| issue.contains("physical store path"))
+    );
+    assert!(db.get_code_project("proj_123").await.is_none());
+}
+
+#[tokio::test]
+async fn physical_graph_scope_conflict_rolls_back_without_creating_project() {
+    let dir = TempDir::new().unwrap();
+    let profile_root = dir.path().join("profile");
+    let project_root = dir.path().join("repo");
+    let manifest = write_profile_store_manifest(&profile_root, &project_root);
+    let report = reconstruct_registry_from_store_manifest(&manifest, &profile_root, 1);
+    let db = GlobalDb::open_at(&dir.path().join("global.db"))
+        .await
+        .unwrap();
+    let owner_root = dir.path().join("owner");
+    fs::create_dir_all(&owner_root).unwrap();
+    db.upsert_code_project("proj_owner", &owner_root, None, None, None)
+        .await
+        .unwrap();
+    db.upsert_store_instance(StoreInstanceUpsert {
+        store_id: "store:owner".to_string(),
+        project_id: "proj_owner".to_string(),
+        store_kind: "code_project".to_string(),
+        storage_mode: "profile_sharded".to_string(),
+        store_relpath: "projects/owner".to_string(),
+        manifest_relpath: None,
+        last_verified_at: None,
+        last_write_at: None,
+    })
+    .await
+    .unwrap();
+    db.upsert_graph_scope(GraphScopeUpsert {
+        graph_scope_id: "scope:owner".to_string(),
+        project_id: "proj_owner".to_string(),
+        store_id: "store:owner".to_string(),
+        branch_name: "owner".to_string(),
+        db_relpath: report.plans[0].graph_scopes[0].db_relpath.clone(),
+        parent_scope_id: None,
+        last_synced_at: None,
+        writable: true,
+    })
+    .await
+    .unwrap();
+
+    let error = apply_registry_reconstruction_report(&db, &report)
+        .await
+        .unwrap_err();
+
+    assert!(
+        error
+            .iter()
+            .any(|issue| issue.contains("physical graph database path"))
+    );
+    assert!(db.get_code_project("proj_123").await.is_none());
+}
+
+#[test]
+fn missing_and_temporary_project_roots_are_classified_stale() {
+    let dir = TempDir::new().unwrap();
+    let profile_root = dir.path().join("profile");
+    let project_root = dir.path().join("temporary-repo");
+    let manifest = write_profile_store_manifest(&profile_root, &project_root);
+    write_enrollment_marker(
+        &project_root,
+        &EnrollmentMarker {
+            project_id: "proj_123".to_string(),
+            storage_mode: StorageMode::ProfileSharded,
+        },
+    )
+    .unwrap();
+
+    let scanned = scan_profile_store_manifests(&profile_root, 1);
+    assert_eq!(scanned.plans[0].status, RegistryReconstructionStatus::Stale);
+    assert!(
+        scanned.plans[0]
+            .status_reason
+            .as_deref()
+            .unwrap()
+            .contains("temporary directory")
+    );
+
+    fs::remove_dir_all(&project_root).unwrap();
+    let missing = reconstruct_registry_from_store_manifest(&manifest, &profile_root, 1);
+    assert_eq!(missing.plans[0].status, RegistryReconstructionStatus::Stale);
+    assert!(
+        missing.plans[0]
+            .status_reason
+            .as_deref()
+            .unwrap()
+            .contains("unavailable")
+    );
+}
+
+#[test]
+fn strict_scan_classifies_unmarked_temporary_project_root_stale() {
+    let dir = TempDir::new().unwrap();
+    let profile_root = dir.path().join("profile");
+    let project_root = dir.path().join("unmarked-repo");
+    write_profile_store_manifest(&profile_root, &project_root);
+
+    let scanned = scan_profile_store_manifests(&profile_root, 1);
+
+    assert_eq!(scanned.plans[0].status, RegistryReconstructionStatus::Stale);
+    assert!(
+        scanned.plans[0]
+            .status_reason
+            .as_deref()
+            .unwrap()
+            .contains("temporary directory")
+    );
+}
+
+#[test]
+fn strict_scan_requires_matching_repository_identity_or_enrollment() {
+    let target = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .to_path_buf();
+    let dir = tempfile::Builder::new()
+        .prefix("reconstruct-identity-")
+        .tempdir_in(target)
+        .unwrap();
+    let profile_root = dir.path().join("profile");
+    let project_root = dir.path().join("repo");
+    write_profile_store_manifest(&profile_root, &project_root);
+
+    let unowned = scan_profile_store_manifests(&profile_root, 1);
+    assert_eq!(
+        unowned.plans[0].status,
+        RegistryReconstructionStatus::Blocked
+    );
+    assert!(
+        unowned.plans[0]
+            .status_reason
+            .as_deref()
+            .unwrap()
+            .contains("no repository identity or enrollment marker")
+    );
+
+    write_enrollment_marker(
+        &project_root,
+        &EnrollmentMarker {
+            project_id: "proj_123".to_string(),
+            storage_mode: StorageMode::ProfileSharded,
+        },
+    )
+    .unwrap();
+    let enrolled = scan_profile_store_manifests(&profile_root, 1);
+    assert_eq!(
+        enrolled.plans[0].status,
+        RegistryReconstructionStatus::Eligible
+    );
+}
+
+#[tokio::test]
+async fn consolidation_source_is_skipped_while_destination_applies() {
+    let dir = TempDir::new().unwrap();
+    let profile_root = dir.path().join("profile");
+    let project_root = dir.path().join("repo");
+    fs::create_dir_all(&project_root).unwrap();
+    run_git(&project_root, &["init"]);
+    write_repository_identity_marker(&project_root, "proj_destination").unwrap();
+    let source = write_profile_store_manifest_for_id(
+        &profile_root,
+        &project_root,
+        "proj_consolidated_source",
+    );
+    fs::write(
+        source.parent().unwrap().join("branch-meta.json"),
+        r#"{"default_branch":"main","branches":{"main":{"db_file":"../outside.db","created_at":"1","last_synced_at":"1"}}}"#,
+    )
+    .unwrap();
+    let destination =
+        write_profile_store_manifest_for_id(&profile_root, &project_root, "proj_destination");
+
+    let source = reconstruct_registry_from_store_manifest(&source, &profile_root, 1);
+    let destination = reconstruct_registry_from_store_manifest(&destination, &profile_root, 1);
+
+    assert_eq!(
+        source.plans[0].status,
+        RegistryReconstructionStatus::Retired
+    );
+    assert!(source.issues.is_empty(), "{:?}", source.issues);
+    assert_eq!(
+        destination.plans[0].status,
+        RegistryReconstructionStatus::Eligible
+    );
+    let issues = source
+        .issues
+        .into_iter()
+        .chain(destination.issues)
+        .collect();
+    let report = RegistryReconstructionReport {
+        plans: source.plans.into_iter().chain(destination.plans).collect(),
+        issues,
+    };
+    let db = GlobalDb::open_at(&dir.path().join("global.db"))
+        .await
+        .unwrap();
+
+    let applied = apply_registry_reconstruction_report(&db, &report)
+        .await
+        .unwrap();
+
+    assert_eq!(applied.projects, 1);
+    assert!(
+        db.get_code_project("proj_consolidated_source")
+            .await
+            .is_none()
+    );
+    assert!(db.get_code_project("proj_destination").await.is_some());
+}
+
+#[test]
+fn disagreeing_dual_markers_block_and_matching_retired_markers_retire() {
+    let dir = TempDir::new().unwrap();
+    let profile_root = dir.path().join("profile");
+    let project_root = dir.path().join("repo");
+    fs::create_dir_all(&project_root).unwrap();
+    run_git(&project_root, &["init"]);
+    write_repository_identity_marker(&project_root, "proj_repository").unwrap();
+    write_enrollment_marker(
+        &project_root,
+        &EnrollmentMarker {
+            project_id: "proj_enrollment".to_string(),
+            storage_mode: StorageMode::ProfileSharded,
+        },
+    )
+    .unwrap();
+    let manifest =
+        write_profile_store_manifest_for_id(&profile_root, &project_root, "proj_repository");
+
+    let disagreement = reconstruct_registry_from_store_manifest(&manifest, &profile_root, 1);
+    assert_eq!(
+        disagreement.plans[0].status,
+        RegistryReconstructionStatus::Blocked
+    );
+
+    write_enrollment_marker(
+        &project_root,
+        &EnrollmentMarker {
+            project_id: "proj_repository".to_string(),
+            storage_mode: StorageMode::ProfileSharded,
+        },
+    )
+    .unwrap();
+    let retired_manifest =
+        write_profile_store_manifest_for_id(&profile_root, &project_root, "proj_retired_manifest");
+    let retired = reconstruct_registry_from_store_manifest(&retired_manifest, &profile_root, 1);
+    assert_eq!(
+        retired.plans[0].status,
+        RegistryReconstructionStatus::Retired
     );
 }
 

@@ -1452,8 +1452,19 @@ async fn wipe_all_removes_profile_sharded_store_and_global_row() {
 #[test]
 fn list_all_reports_orphan_manifest_reconstructable_store() {
     let home = TempDir::new().unwrap();
-    let project = TempDir::new().unwrap();
+    let project = tempfile::Builder::new()
+        .prefix("list-orphan-project-")
+        .tempdir_in(Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap())
+        .unwrap();
     write_profile_sharded_fixture(home.path(), project.path());
+    write_enrollment_marker(
+        project.path(),
+        &EnrollmentMarker {
+            project_id: "proj_cli".to_string(),
+            storage_mode: StorageMode::ProfileSharded,
+        },
+    )
+    .unwrap();
     std::fs::create_dir_all(profile_root(home.path())).unwrap();
 
     let mut command = tracedecay_command(home.path(), project.path());

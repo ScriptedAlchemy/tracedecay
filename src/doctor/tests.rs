@@ -2,8 +2,8 @@ use super::*;
 use crate::global_db::StoreInstanceUpsert;
 use crate::storage::{
     EnrollmentMarker, STORE_MANIFEST_FILENAME, STORE_MANIFEST_SCHEMA_VERSION, StorageMode,
-    StoreKind, StoreManifest, profile_sharded_layout, write_repository_identity_marker,
-    write_store_manifest,
+    StoreKind, StoreManifest, profile_sharded_layout, write_enrollment_marker,
+    write_repository_identity_marker, write_store_manifest,
 };
 #[cfg(unix)]
 use std::os::unix::fs::symlink;
@@ -30,6 +30,60 @@ fn format_bytes_boundaries() {
     assert_eq!(format_bytes(1024 * 1024 * 512), "512.0 MB");
     assert_eq!(format_bytes(1024 * 1024 * 1024), "1.0 GB");
     assert_eq!(format_bytes(1024 * 1024 * 1024 * 2), "2.0 GB");
+}
+
+#[test]
+fn orphan_reporting_counts_only_eligible_and_surfaces_blocked_reasons() {
+    let base = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+    let dir = tempfile::Builder::new()
+        .prefix("doctor-orphans-")
+        .tempdir_in(base)
+        .unwrap();
+    let profile_root = dir.path().join("profile");
+    let eligible_root = dir.path().join("eligible-repo");
+    let blocked_root = dir.path().join("blocked-repo");
+    std::fs::create_dir_all(&eligible_root).unwrap();
+    std::fs::create_dir_all(&blocked_root).unwrap();
+    write_enrollment_marker(
+        &eligible_root,
+        &EnrollmentMarker {
+            project_id: "proj_eligible".to_string(),
+            storage_mode: StorageMode::ProfileSharded,
+        },
+    )
+    .unwrap();
+    for (project_id, project_root) in [
+        ("proj_eligible", &eligible_root),
+        ("proj_blocked", &blocked_root),
+    ] {
+        let data_root = profile_root.join("projects").join(project_id);
+        std::fs::create_dir_all(&data_root).unwrap();
+        let manifest = StoreManifest {
+            schema_version: STORE_MANIFEST_SCHEMA_VERSION,
+            project_id: Some(project_id.to_string()),
+            store_kind: StoreKind::CodeProject,
+            storage_mode: StorageMode::ProfileSharded,
+            project_root: project_root.clone(),
+            data_root: data_root.clone(),
+            graph_db_relpath: "tracedecay.db".into(),
+            sessions_db_relpath: "sessions.db".into(),
+            branch_meta_relpath: "branch-meta.json".into(),
+        };
+        std::fs::write(
+            data_root.join(STORE_MANIFEST_FILENAME),
+            serde_json::to_vec_pretty(&manifest).unwrap(),
+        )
+        .unwrap();
+    }
+
+    let (count, warnings) = orphan_store_manifest_report(&profile_root, &[]);
+
+    assert_eq!(count, 1);
+    assert!(
+        warnings
+            .iter()
+            .any(|warning| warning.contains("no repository identity or enrollment marker"))
+    );
 }
 
 #[test]
