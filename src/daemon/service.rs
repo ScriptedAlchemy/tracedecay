@@ -1466,6 +1466,8 @@ mod tests {
 
         let _config_guard = EnvVarGuard::set("XDG_CONFIG_HOME", &config_home);
         let _home_guard = EnvVarGuard::set("HOME", &home);
+        let _data_guard =
+            EnvVarGuard::set(crate::config::USER_DATA_DIR_ENV, dir.path().join("profile"));
         let _path_guard = EnvVarGuard::set("PATH", &fake_bin);
         let _log_guard = EnvVarGuard::set("TRACEDECAY_SYSTEMCTL_LOG", &log);
         let spec = DaemonServiceSpec {
@@ -1505,6 +1507,8 @@ mod tests {
 
         let _config_guard = EnvVarGuard::set("XDG_CONFIG_HOME", &config_home);
         let _home_guard = EnvVarGuard::set("HOME", &home);
+        let _data_guard =
+            EnvVarGuard::set(crate::config::USER_DATA_DIR_ENV, dir.path().join("profile"));
         let _path_guard = EnvVarGuard::set("PATH", &fake_bin);
         let spec = DaemonServiceSpec {
             tracedecay_bin: PathBuf::from("/opt/tracedecay/bin/tracedecay"),
@@ -1565,6 +1569,8 @@ mod tests {
 
         let _config_guard = EnvVarGuard::set("XDG_CONFIG_HOME", &config_home);
         let _home_guard = EnvVarGuard::set("HOME", &home);
+        let _data_guard =
+            EnvVarGuard::set(crate::config::USER_DATA_DIR_ENV, dir.path().join("profile"));
         let _path_guard = EnvVarGuard::set("PATH", &fake_bin);
         let _log_guard = EnvVarGuard::set("TRACEDECAY_SYSTEMCTL_LOG", &log);
 
@@ -1628,6 +1634,8 @@ mod tests {
             .expect("systemctl permissions");
         let _config_guard = EnvVarGuard::set("XDG_CONFIG_HOME", &config_home);
         let _home_guard = EnvVarGuard::set("HOME", &home);
+        let _data_guard =
+            EnvVarGuard::set(crate::config::USER_DATA_DIR_ENV, dir.path().join("profile"));
         let _path_guard = EnvVarGuard::set("PATH", &fake_bin);
         let _log_guard = EnvVarGuard::set("TRACEDECAY_SYSTEMCTL_LOG", &log);
         let service_path = config_home
