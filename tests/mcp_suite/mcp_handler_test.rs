@@ -2987,6 +2987,152 @@ async fn context_includes_matching_memory_facts() {
 }
 
 #[tokio::test]
+async fn fact_search_ranks_exact_operational_evidence_and_tracks_once() {
+    let (cg, _env, _dir) = setup_empty_project().await;
+    let exact = "22 long-lived tracedecay serve processes spanning 0.0.38 through 0.0.47; four 0.0.45 processes hold selected tracedecay.db file descriptors; doctor/upgrade should report stale PIDs/versions/open holders, never kill.";
+    let unrelated = [
+        "TraceDecay V2 multi-agent task execution spans several repositories and decomposes into independently claimable task subgraphs with versioned compact context packets.",
+        "TraceDecay V2 task-graph scoping uses one profile-owned canonical task graph with Kanban, DAG, timeline, workload, initiative, and saved-query projections.",
+        "TraceDecay V2 task execution relates tickets to threads, sessions, turns, agents, tool calls, files, symbols, worktrees, commits, pull requests, and evidence.",
+        "TraceDecay V2 may run a daemon-side context scout that observes bounded turn events and emits compact relevance-scored suggestion envelopes.",
+        "TraceDecay V2 session and LCM retrieval distinguishes current truth from historical evidence and ranks explicit scope, thread, project, worktree, trust, and current-state signals.",
+    ];
+
+    let mut contents = vec![exact];
+    contents.extend(unrelated);
+    let mut exact_fact_id = None;
+    for content in &contents {
+        let added = handle_tool_call(
+            &cg,
+            "tracedecay_fact_store",
+            json!({
+                "action": "add",
+                "format": "json",
+                "content": content,
+                "category": "decision",
+                "trust": 0.99,
+                "source": "fact-ranking-regression"
+            }),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        let added: Value = serde_json::from_str(extract_text(&added.value)).unwrap();
+        if *content == exact {
+            exact_fact_id = added["fact"]["fact_id"].as_i64();
+        }
+    }
+    let exact_fact_id = exact_fact_id.expect("exact operational fact should be stored");
+
+    let first = handle_tool_call(
+        &cg,
+        "tracedecay_fact_store",
+        json!({
+            "action": "search",
+            "format": "json",
+            "query": "stale tracedecay serve processes versions open database file descriptors doctor upgrade",
+            "limit": 10,
+            "min_trust": 0.0
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let first: Value = serde_json::from_str(extract_text(&first.value)).unwrap();
+    let first_results = first["facts"].as_array().expect("fact search results");
+    assert_eq!(
+        first_results[0]["fact"]["fact_id"].as_i64(),
+        Some(exact_fact_id),
+        "exact operational evidence must outrank unrelated V2 facts: {first}"
+    );
+    let after_first = cg.get_fact(exact_fact_id).await.unwrap().unwrap();
+    assert_eq!(after_first.retrieval_count, 1);
+    assert_eq!(after_first.access_count, 1);
+    assert!(after_first.last_retrieved_at.is_some());
+    assert!(after_first.last_recalled_at.is_some());
+
+    let context = handle_tool_call(
+        &cg,
+        "tracedecay_context",
+        json!({
+            "task": "stale tracedecay serve processes versions open database file descriptors doctor upgrade",
+            "format": "json",
+            "memory_limit": 10,
+            "memory_min_trust": 0.0
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let context: Value = serde_json::from_str(extract_text(&context.value)).unwrap();
+    assert!(context["memory_matches"].as_array().is_some_and(|matches| {
+        matches
+            .iter()
+            .any(|hit| hit["fact"]["fact_id"].as_i64() == Some(exact_fact_id))
+    }));
+    let after_context = cg.get_fact(exact_fact_id).await.unwrap().unwrap();
+    assert_eq!(after_context.retrieval_count, 1);
+    assert_eq!(after_context.access_count, 1);
+
+    let rare = handle_tool_call(
+        &cg,
+        "tracedecay_fact_store",
+        json!({
+            "action": "search",
+            "format": "json",
+            "query": "22 long-lived 0.0.38 0.0.47 four 0.0.45",
+            "limit": 10,
+            "min_trust": 0.0
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let rare: Value = serde_json::from_str(extract_text(&rare.value)).unwrap();
+    let rare_results = rare["facts"].as_array().expect("rare-term results");
+    assert_eq!(
+        rare_results.len(),
+        1,
+        "rare terms should exclude unrelated facts: {rare}"
+    );
+    assert_eq!(
+        rare_results[0]["fact"]["fact_id"].as_i64(),
+        Some(exact_fact_id)
+    );
+    assert!(rare_results[0]["fts_score"].as_f64().unwrap_or_default() > 0.0);
+    let after_rare = cg.get_fact(exact_fact_id).await.unwrap().unwrap();
+    assert_eq!(after_rare.retrieval_count, 2);
+    assert_eq!(after_rare.access_count, 2);
+
+    let analytics = handle_tool_call(
+        &cg,
+        "tracedecay_analytics",
+        json!({"section": "facts", "format": "json"}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let analytics: Value = serde_json::from_str(extract_text(&analytics.value)).unwrap();
+    assert_eq!(
+        analytics["facts"]["facts"].as_i64(),
+        Some(contents.len() as i64)
+    );
+    assert_eq!(
+        analytics["facts"]["retrievals"].as_i64(),
+        Some(first_results.len() as i64 + rare_results.len() as i64)
+    );
+    assert_eq!(
+        analytics["facts"]["facts_retrieved"].as_i64(),
+        Some(contents.len() as i64)
+    );
+}
+
+#[tokio::test]
 async fn context_memory_controls_filter_disable_and_preserve_markdown() {
     let (cg, _dir) = setup_project().await;
     let long_content = format!("Long memory control fact {}", "x".repeat(320));

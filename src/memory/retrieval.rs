@@ -126,8 +126,14 @@ impl<'a> FactRetriever<'a> {
 
         let mut results = Vec::with_capacity(candidates.len());
         for fact in candidates {
-            let fts_score = fts_scores.get(&fact.fact_id).copied().unwrap_or(0.0);
-            let jaccard_score = jaccard(&query_tokens, &fact_search_tokens(&fact));
+            let fact_tokens = fact_search_tokens(&fact);
+            let coverage = term_coverage(&query_tokens, &fact_tokens);
+            // Weight raw BM25 by distinct-term coverage: a document matching
+            // every query term must not lose to a shorter document matching
+            // one term on length normalization alone.
+            let fts_score =
+                fts_scores.get(&fact.fact_id).copied().unwrap_or(0.0) * (0.5 + 0.5 * coverage);
+            let jaccard_score = jaccard(&query_tokens, &fact_tokens);
             let holographic_score =
                 self.holographic_score_with(query, &fact, candidate_vectors.get(&fact.fact_id));
             let trust_score = fact.trust_score;
@@ -149,7 +155,7 @@ impl<'a> FactRetriever<'a> {
                 holographic_score,
                 trust_score,
                 why: Some(format!(
-                    "fts={fts_score:.3}, jaccard={jaccard_score:.3}, holographic={holographic_score:.3}, trust={trust_score:.3}, temporal_decay={temporal_decay:.3}, retrieval_count={retrieval_count}"
+                    "fts={fts_score:.3}, coverage={coverage:.3}, jaccard={jaccard_score:.3}, holographic={holographic_score:.3}, trust={trust_score:.3}, temporal_decay={temporal_decay:.3}, retrieval_count={retrieval_count}"
                 )),
             });
         }
@@ -415,7 +421,7 @@ impl<'a> FactRetriever<'a> {
         }
         .map_err(|e| db_error("fts_candidates", e))?;
 
-        let mut scores = HashMap::new();
+        let mut ranked = Vec::new();
         while let Some(row) = rows
             .next()
             .await
@@ -424,13 +430,13 @@ impl<'a> FactRetriever<'a> {
             let rank = row
                 .get::<f64>(1)
                 .map_err(|e| db_error("fts_candidates", e))?;
-            scores.insert(
+            ranked.push((
                 row.get::<i64>(0)
                     .map_err(|e| db_error("fts_candidates", e))?,
-                1.0 / (1.0 + rank.abs()),
-            );
+                rank,
+            ));
         }
-        Ok(scores)
+        Ok(normalize_fts5_ranks(ranked))
     }
 
     async fn entity_candidates(
@@ -649,10 +655,75 @@ fn build_fts_query(query: &str) -> Option<String> {
     Some(
         tokens
             .into_iter()
-            .map(|token| format!("\"{}\"", token.replace('"', "\"\"")))
+            .map(|token| {
+                let quoted = format!("\"{}\"", token.replace('"', "\"\""));
+                // Prefix-match longer terms so simple morphology reaches the
+                // index ("install" finds "installing"); short tokens stay
+                // exact to avoid over-matching.
+                if token.chars().count() >= PREFIX_MATCH_MIN_CHARS {
+                    format!("{quoted}*")
+                } else {
+                    quoted
+                }
+            })
             .collect::<Vec<_>>()
             .join(" OR "),
     )
+}
+
+/// Minimum token length for prefix-form FTS terms and coverage prefix
+/// matching. Below this, prefixes over-match ("in" would swallow "install").
+const PREFIX_MATCH_MIN_CHARS: usize = 4;
+
+/// Fraction of distinct query tokens the fact's tokens cover, using the same
+/// exact-or-prefix semantics as [`build_fts_query`]. BM25 length
+/// normalization can rank a short one-term document above a longer document
+/// matching every query term; weighting the fts component by coverage keeps
+/// multi-term relevance ahead of single-term brevity.
+fn term_coverage(query_tokens: &[String], fact_tokens: &[String]) -> f64 {
+    if query_tokens.is_empty() {
+        return 0.0;
+    }
+    let matched = query_tokens
+        .iter()
+        .filter(|q| {
+            fact_tokens.iter().any(|t| {
+                t == *q
+                    || (q.chars().count() >= PREFIX_MATCH_MIN_CHARS && t.starts_with(q.as_str()))
+            })
+        })
+        .count();
+    matched as f64 / query_tokens.len() as f64
+}
+
+fn normalize_fts5_ranks(ranked: Vec<(i64, f64)>) -> HashMap<i64, f64> {
+    let max_relevance = ranked
+        .iter()
+        .map(|(_, rank)| fts5_rank_relevance(*rank))
+        .fold(0.0_f64, f64::max);
+    if max_relevance <= f64::EPSILON {
+        return ranked
+            .into_iter()
+            .map(|(fact_id, _)| (fact_id, 0.0))
+            .collect();
+    }
+    ranked
+        .into_iter()
+        .map(|(fact_id, rank)| {
+            (
+                fact_id,
+                (fts5_rank_relevance(rank) / max_relevance).clamp(0.0, 1.0),
+            )
+        })
+        .collect()
+}
+
+fn fts5_rank_relevance(rank: f64) -> f64 {
+    if rank.is_finite() {
+        (-rank).max(0.0)
+    } else {
+        0.0
+    }
 }
 
 fn tokenize(text: &str) -> Vec<String> {
@@ -800,6 +871,49 @@ fn db_error(operation: &str, error: impl fmt::Display) -> TraceDecayError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn build_fts_query_prefixes_long_tokens_only() {
+        let q = build_fts_query("install dependencies in db").unwrap();
+        assert!(q.contains("\"install\"*"), "{q}");
+        assert!(q.contains("\"dependencies\"*"), "{q}");
+        // Short tokens stay exact so prefixes cannot over-match.
+        assert!(!q.contains("\"db\"*"), "{q}");
+    }
+
+    #[test]
+    fn term_coverage_counts_distinct_terms_with_prefix_reach() {
+        let query = vec!["install".to_string(), "dependencies".to_string()];
+        let both = vec!["installing".to_string(), "dependencies".to_string()];
+        let one = vec!["install".to_string(), "packages".to_string()];
+        assert!((term_coverage(&query, &both) - 1.0).abs() < f64::EPSILON);
+        assert!((term_coverage(&query, &one) - 0.5).abs() < f64::EPSILON);
+        // Short query tokens never prefix-match.
+        let short = vec!["db".to_string()];
+        let fact = vec!["dbx".to_string()];
+        assert!(term_coverage(&short, &fact).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn fts5_ranks_are_normalized_without_losing_small_matches() {
+        let scores = normalize_fts5_ranks(vec![
+            (1, -0.000_002),
+            (2, -0.000_001),
+            (3, 0.0),
+            (4, f64::NAN),
+        ]);
+
+        assert!((scores[&1] - 1.0).abs() < f64::EPSILON);
+        assert!((scores[&2] - 0.5).abs() < f64::EPSILON);
+        assert!(scores[&3].abs() < f64::EPSILON);
+        assert!(scores[&4].abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn lone_common_term_match_keeps_full_fts_weight() {
+        let scores = normalize_fts5_ranks(vec![(1, -0.000_001)]);
+        assert!((scores[&1] - 1.0).abs() < f64::EPSILON);
+    }
 
     #[test]
     fn retrieval_reinforcement_boosts_frequently_retrieved_facts() {
