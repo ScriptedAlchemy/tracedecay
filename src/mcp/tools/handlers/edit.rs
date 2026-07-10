@@ -283,6 +283,84 @@ pub(super) async fn handle_insert_at_symbol(cg: &TraceDecay, args: Value) -> Res
     Ok(text_tool_result(cg, &args, &result, touched_files, dry_run, verify).await)
 }
 
+pub(super) async fn handle_move_symbol(cg: &TraceDecay, args: Value) -> Result<ToolResult> {
+    let symbol = required_str(&args, "symbol")?;
+    let dest_file = required_str(&args, "dest_file")?;
+    // The impact report is the product; applying is opt-in.
+    let dry_run = args.get("dry_run").and_then(Value::as_bool).unwrap_or(true);
+    let update_references = args
+        .get("update_references")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+
+    let result = cg
+        .move_symbol(symbol, dest_file, dry_run, update_references)
+        .await?;
+
+    let success = result.success;
+    let touched_files = if success && !dry_run {
+        vec![result.source_file.clone(), result.dest_file.clone()]
+    } else {
+        vec![]
+    };
+    let value = serde_json::to_value(&result).unwrap_or_default();
+    let text = render::finalize(Some(cg.project_root()), &args, &value, || {
+        move_result_md(&result)
+    });
+    let tool_result = ToolResult::new(
+        json!({ "content": [{ "type": "text", "text": text }] }),
+        touched_files,
+    )
+    .with_semantic_error(!success);
+    Ok(if success {
+        tool_result
+    } else {
+        tool_result.with_failure_message(&result.message)
+    })
+}
+
+/// Human-readable markdown for a move result: the outcome line, applied
+/// imports, the impact report (the centerpiece), and the preview diff.
+fn move_result_md(result: &crate::types::MoveResult) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::new();
+    let verb = if result.dry_run {
+        "Would move"
+    } else {
+        "Moved"
+    };
+    let _ = writeln!(
+        out,
+        "## {verb} `{}`\n\n{} → {}\n\n{}",
+        result.symbol, result.source_file, result.dest_file, result.message
+    );
+    if !result.applied_imports.is_empty() {
+        out.push_str("\n### Auto-inserted imports (destination)\n");
+        for imp in &result.applied_imports {
+            let _ = writeln!(out, "- `{}`", imp.trim());
+        }
+    }
+    out.push_str("\n### Impact\n");
+    if result.impact.is_empty() {
+        out.push_str("Clean move — no references, dependencies, or module concerns detected.\n");
+    } else {
+        for hint in &result.impact {
+            let loc = hint
+                .line
+                .map(|l| format!("{}:{}", hint.file, l))
+                .unwrap_or_else(|| hint.file.clone());
+            let _ = writeln!(out, "- **{}** ({}) — {}", hint.kind, loc, hint.detail);
+            if let Some(sug) = &hint.suggestion {
+                let _ = writeln!(out, "  - suggestion: {sug}");
+            }
+        }
+    }
+    if let Some(diff) = &result.diff {
+        let _ = write!(out, "\n### Preview diff\n```diff\n{diff}\n```\n");
+    }
+    out
+}
+
 pub(super) async fn handle_ast_grep_rewrite(cg: &TraceDecay, args: Value) -> Result<ToolResult> {
     let path = required_str(&args, "path")?;
     let pattern = required_str(&args, "pattern")?;

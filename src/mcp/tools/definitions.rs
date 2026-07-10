@@ -338,6 +338,7 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
         def_file_dependents(),
         def_replace_symbol(),
         def_insert_at_symbol(),
+        def_move_symbol(),
         def_find_exact_symbol(),
     ];
     add_registered_project_selector_properties(&mut definitions);
@@ -481,6 +482,7 @@ const FORMAT_CAPABLE_TOOL_NAMES: &[&str] = &[
     "tracedecay_insert_at",
     "tracedecay_insert_at_symbol",
     "tracedecay_replace_symbol",
+    "tracedecay_move_symbol",
     "tracedecay_ast_grep_rewrite",
     // git & info
     "tracedecay_branch_list",
@@ -3749,6 +3751,49 @@ fn def_replace_symbol() -> ToolDefinition {
                 }
             },
             "required": ["symbol", "new_source"]
+        }),
+    )
+}
+
+fn def_move_symbol() -> ToolDefinition {
+    def_rw(
+        "tracedecay_move_symbol",
+        "Move Symbol Across Files",
+        "Move a function (Rust-first) from its file to a destination file, and \
+         — the centerpiece — report the full IMPACT of the move: every caller \
+         whose reference breaks, every dependency the body loses at the \
+         destination, visibility that must be escalated, destination collisions, \
+         and missing module declarations. Each finding is an evidence-based hint \
+         { kind, file, line, detail, suggestion } derived from the code graph \
+         (callers/callees) and parse-level facts (identifiers, `use` lines), not \
+         regex guessing. The moved span includes the item's leading \
+         doc-comment / attribute block. Defaults to a DRY RUN — the report and a \
+         combined source+destination preview diff are the product; applying is \
+         opt-in via `dry_run: false`, which removes the span from the source, \
+         inserts it at the destination, and auto-inserts unambiguous needed \
+         imports (returned in `applied_imports`). Caller references are never \
+         auto-edited in v1; the exact change rides in each hint.",
+        json!({
+            "type": "object",
+            "properties": {
+                "symbol": {
+                    "type": "string",
+                    "description": "Symbol to move. Prefer a fully qualified name for disambiguation; on ambiguity callable kinds win, else the move is refused."
+                },
+                "dest_file": {
+                    "type": "string",
+                    "description": "Destination file (project-relative or absolute, within the project). May be a new module file; parent directories are created on apply."
+                },
+                "dry_run": {
+                    "type": "boolean",
+                    "description": "If true (DEFAULT), compute the move, the combined preview diff, and the impact report but write nothing. Set false to apply the move."
+                },
+                "update_references": {
+                    "type": "boolean",
+                    "description": "Reserved for a future version. In v1 callers are never auto-edited; the exact change is reported as a hint instead (default: false)."
+                }
+            },
+            "required": ["symbol", "dest_file"]
         }),
     )
 }

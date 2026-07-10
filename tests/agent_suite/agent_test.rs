@@ -6156,6 +6156,7 @@ fn test_read_only_tool_names_excludes_mutating_tools() {
         "tracedecay_ast_grep_rewrite",
         "tracedecay_replace_symbol",
         "tracedecay_insert_at_symbol",
+        "tracedecay_move_symbol",
         "tracedecay_run_affected_tests",
         "tracedecay_session_start",
         "tracedecay_session_end",

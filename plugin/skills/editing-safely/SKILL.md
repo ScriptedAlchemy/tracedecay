@@ -65,6 +65,14 @@ Run this read-only recon in one shot for a symbol or `Struct::field` with
    per file for multi-file rewrites. Scope the change first with
    `tracedecay_ast_grep_search` (read-only, in-process, whole-tree) to see every
    match and confirm the pattern before rewriting.
+6. **Move a function to another file → `tracedecay_move_symbol`** (`symbol`,
+   `dest_file`, `dry_run` defaults true). Relocates the symbol with its
+   docs/attrs and returns an **impact report** — broken callers, dependencies
+   the body loses at the destination, visibility escalations, collisions, and
+   missing `mod` declarations — as actionable hints. Unambiguous needed imports
+   are auto-inserted at the destination (`applied_imports`); caller references
+   are reported, never auto-edited. Preview first, then re-run with
+   `dry_run: false` to apply.
 
 ## Porting code
 
