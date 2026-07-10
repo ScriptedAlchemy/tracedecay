@@ -496,6 +496,135 @@ async fn serve_stdio_smokes_automation_run_artifact_view() {
     );
 }
 
+/// A reachable daemon must win before serve opens either local database. The
+/// intentionally uninitialized explicit path also proves that proxy startup
+/// preserves authoritative path routing without invoking local resolution.
+#[cfg(unix)]
+#[tokio::test]
+async fn serve_with_reachable_daemon_proxies_before_opening_explicit_project() {
+    use std::io::{BufRead, BufReader, Read};
+    use std::os::unix::net::UnixListener;
+    use std::time::{Duration, Instant};
+
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    let socket_path = common::daemon_socket_path(home.path());
+    fs::create_dir_all(socket_path.parent().unwrap()).unwrap();
+    let listener = UnixListener::bind(&socket_path).expect("bind fake daemon socket");
+    listener
+        .set_nonblocking(true)
+        .expect("nonblocking fake daemon listener");
+
+    let fake_daemon = std::thread::spawn(move || {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if Instant::now() >= deadline {
+                return None;
+            }
+            let mut stream = match listener.accept() {
+                Ok((stream, _addr)) => stream,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(Duration::from_millis(10));
+                    continue;
+                }
+                Err(error) => panic!("accept serve connection: {error}"),
+            };
+            stream
+                .set_nonblocking(false)
+                .expect("blocking fake daemon stream");
+            let mut reader = BufReader::new(stream.try_clone().expect("clone fake daemon stream"));
+            let mut handshake_line = String::new();
+            reader
+                .read_line(&mut handshake_line)
+                .expect("read daemon handshake");
+            let handshake: Value =
+                serde_json::from_str(handshake_line.trim()).expect("daemon handshake json");
+            let mut request_line = String::new();
+            reader
+                .read_line(&mut request_line)
+                .expect("read proxied request");
+            let request: Value =
+                serde_json::from_str(request_line.trim()).expect("proxied request json");
+            let response = json!({
+                "jsonrpc": "2.0",
+                "id": request["id"],
+                "result": {
+                    "protocolVersion": "2024-11-05",
+                    "capabilities": { "tools": {} },
+                    "serverInfo": {
+                        "name": "sentinel-proxy-first-daemon",
+                        "version": env!("CARGO_PKG_VERSION")
+                    }
+                }
+            });
+            writeln!(stream, "{response}").expect("write fake daemon response");
+            let mut scratch = [0_u8; 64];
+            while matches!(reader.read(&mut scratch), Ok(n) if n > 0) {}
+            return Some(handshake);
+        }
+    });
+
+    let mut child = tracedecay_command_with_home(home.path())
+        .arg("serve")
+        .arg("--path")
+        .arg(project.path())
+        .env("TRACEDECAY_DAEMON_SOCKET", &socket_path)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("tracedecay serve should run");
+    {
+        let stdin = child.stdin.as_mut().expect("stdin should be piped");
+        writeln!(
+            stdin,
+            "{}",
+            json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {}
+            })
+        )
+        .unwrap();
+    }
+    drop(child.stdin.take());
+
+    let output = child
+        .wait_with_output()
+        .expect("tracedecay serve should exit after stdin closes");
+    let handshake = fake_daemon
+        .join()
+        .expect("fake daemon thread should exit")
+        .expect("serve should connect to the daemon before project resolution");
+
+    assert!(
+        output.status.success(),
+        "proxy-first serve failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let response: Value = serde_json::from_slice(&output.stdout).expect("initialize response json");
+    assert_eq!(
+        response["result"]["serverInfo"]["name"],
+        json!("sentinel-proxy-first-daemon")
+    );
+    assert_eq!(
+        handshake["project_path"],
+        json!(project.path().display().to_string()),
+        "an explicit path must remain authoritative"
+    );
+    assert_eq!(handshake["allow_initialize_root_routing"], json!(false));
+    assert!(
+        !home.path().join(".tracedecay/global.db").exists(),
+        "the stdio proxy must not open the global database"
+    );
+    assert!(
+        !project.path().join(".tracedecay").exists(),
+        "the stdio proxy must not open or initialize the project"
+    );
+}
+
 /// Regression test for the serve/daemon-restart race: a serve process started
 /// while `tracedecay update` is restarting the daemon sees no socket file, but
 /// must not silently commit to in-process mode when an installed service is

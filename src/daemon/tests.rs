@@ -11,7 +11,9 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 #[cfg(unix)]
 use tokio::task::JoinHandle;
 
-use super::{DaemonClientIdentity, DaemonHandshake, DaemonLifecycle, drain_client_tasks};
+#[cfg(unix)]
+use super::drain_client_tasks;
+use super::{DaemonClientIdentity, DaemonHandshake, DaemonLifecycle};
 
 #[test]
 fn daemon_lifecycle_rejects_new_work_after_draining() {
@@ -23,6 +25,7 @@ fn daemon_lifecycle_rejects_new_work_after_draining() {
     assert!(!lifecycle.accepting());
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn client_drain_timeout_aborts_and_joins_remaining_work() {
     let mut clients = tokio::task::JoinSet::new();
@@ -37,6 +40,7 @@ async fn client_drain_timeout_aborts_and_joins_remaining_work() {
     assert!(clients.is_empty());
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn client_drain_waits_for_completed_work() {
     let mut clients = tokio::task::JoinSet::new();
@@ -48,6 +52,7 @@ async fn client_drain_waits_for_completed_work() {
     assert!(clients.is_empty());
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn persistent_idle_client_closes_on_draining_without_timeout() {
     let lifecycle = DaemonLifecycle::default();
@@ -65,6 +70,7 @@ async fn persistent_idle_client_closes_on_draining_without_timeout() {
     assert!(lifecycle.try_enter().is_none());
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn draining_waits_for_one_bounded_in_flight_request() {
     let lifecycle = DaemonLifecycle::default();
@@ -113,6 +119,40 @@ async fn await_test_task<T>(task: JoinHandle<T>, label: &str) -> T {
         .await
         .unwrap_or_else(|_| panic!("{label} timed out"))
         .unwrap_or_else(|e| panic!("{label} panicked: {e}"))
+}
+
+#[cfg(unix)]
+async fn answer_one_proxy_request(listener: tokio::net::UnixListener, generation: u64) {
+    let (stream, _addr) = listener.accept().await.expect("accept proxied client");
+    let (reader, mut writer) = stream.into_split();
+    let mut lines = tokio::io::BufReader::new(reader).lines();
+    let handshake_line = lines
+        .next_line()
+        .await
+        .expect("read handshake")
+        .expect("handshake line");
+    DaemonHandshake::from_line(&handshake_line).expect("parse handshake");
+    let request_line = lines
+        .next_line()
+        .await
+        .expect("read request")
+        .expect("request line");
+    let request: Value = serde_json::from_str(&request_line).expect("request json");
+    let response = json!({
+        "jsonrpc": "2.0",
+        "id": request["id"],
+        "result": { "generation": generation }
+    });
+    writer
+        .write_all(
+            serde_json::to_string(&response)
+                .expect("response json")
+                .as_bytes(),
+        )
+        .await
+        .expect("write response");
+    writer.write_all(b"\n").await.expect("write newline");
+    writer.shutdown().await.expect("shutdown fake daemon");
 }
 
 #[test]
@@ -300,6 +340,64 @@ async fn initialize_root_routing_replaces_cached_project_and_scope() {
 
 #[cfg(unix)]
 #[tokio::test]
+async fn initialize_root_routing_delegates_config_gated_git_auto_init() {
+    let profile = TempDir::new().expect("profile temp dir");
+    let fallback = TempDir::new().expect("fallback temp dir");
+    let project = TempDir::new().expect("git project temp dir");
+    let git_status = std::process::Command::new(crate::git::git_program())
+        .args(["init", "-q"])
+        .current_dir(project.path())
+        .status()
+        .expect("git init");
+    assert!(git_status.success(), "git init should succeed");
+    let project = project
+        .path()
+        .canonicalize()
+        .expect("canonical git project");
+
+    let mut base_handshake = test_handshake_defaults();
+    base_handshake.project_path = Some(fallback.path().to_path_buf());
+    base_handshake.allow_initialize_root_routing = true;
+    base_handshake.client_identity = test_client_identity_for(profile.path().to_path_buf());
+    let line = json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+            "roots": [{
+                "uri": format!("file://{}", project.display()),
+                "name": "unindexed-git-project"
+            }]
+        }
+    })
+    .to_string();
+
+    let mut routed_handshake = base_handshake.clone();
+    super::update_proxy_handshake_from_initialize(&base_handshake, &mut routed_handshake, &line)
+        .await;
+    assert_eq!(
+        routed_handshake.project_path.as_deref(),
+        Some(project.as_path())
+    );
+    assert!(routed_handshake.allow_init);
+
+    let mut config = crate::config::TraceDecayConfig {
+        root_dir: project.display().to_string(),
+        ..crate::config::TraceDecayConfig::default()
+    };
+    config.sync.auto_init = false;
+    crate::config::save_config(&project, &config).expect("disable auto-init");
+    super::update_proxy_handshake_from_initialize(&base_handshake, &mut routed_handshake, &line)
+        .await;
+    assert_eq!(
+        routed_handshake.project_path.as_deref(),
+        Some(project.as_path())
+    );
+    assert!(!routed_handshake.allow_init);
+}
+
+#[cfg(unix)]
+#[tokio::test]
 async fn serve_proxies_when_socket_already_exists() {
     let dir = TempDir::new().expect("temp dir");
     let socket = dir.path().join("daemon.sock");
@@ -458,6 +556,68 @@ async fn proxied_request_survives_daemon_restart_window() {
     assert_eq!(response["id"], json!(42));
     assert_eq!(response["result"]["ok"], json!(true));
     daemon.await.expect("fake daemon task");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn long_lived_proxy_reconnects_after_daemon_socket_rebind() {
+    let dir = TempDir::new().expect("temp dir");
+    let socket = dir.path().join("daemon.sock");
+    let first_listener = tokio::net::UnixListener::bind(&socket).expect("bind first daemon socket");
+    let rebound_socket = socket.clone();
+    let (unbound_tx, unbound_rx) = tokio::sync::oneshot::channel();
+    let daemon = tokio::spawn(async move {
+        answer_one_proxy_request(first_listener, 1).await;
+        std::fs::remove_file(&rebound_socket).expect("unlink first daemon socket");
+        unbound_tx.send(()).expect("notify daemon outage");
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        let second_listener =
+            tokio::net::UnixListener::bind(&rebound_socket).expect("bind second daemon socket");
+        answer_one_proxy_request(second_listener, 2).await;
+    });
+
+    let (mut transport, sender, mut receiver) = crate::mcp::transport::ChannelTransport::new();
+    let proxy_socket = socket.clone();
+    let proxy = tokio::spawn(async move {
+        super::proxy_transport_to_daemon(
+            &proxy_socket,
+            &test_handshake_defaults(),
+            None,
+            &mut transport,
+        )
+        .await
+    });
+
+    let request = |id| {
+        serde_json::to_string(&json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": "tools/list"
+        }))
+        .expect("request json")
+    };
+    sender.send(request(1)).expect("send first request");
+    let first = tokio::time::timeout(std::time::Duration::from_secs(2), receiver.recv())
+        .await
+        .expect("first response timed out")
+        .expect("first response");
+    let first: Value = serde_json::from_str(first.trim()).expect("first response json");
+    assert_eq!(first["result"]["generation"], json!(1));
+
+    unbound_rx.await.expect("first daemon should unlink socket");
+    sender.send(request(2)).expect("send second request");
+    let second = tokio::time::timeout(std::time::Duration::from_secs(2), receiver.recv())
+        .await
+        .expect("second response timed out")
+        .expect("second response");
+    let second: Value = serde_json::from_str(second.trim()).expect("second response json");
+    assert_eq!(second["result"]["generation"], json!(2));
+
+    drop(sender);
+    await_test_task(proxy, "long-lived proxy task")
+        .await
+        .expect("proxy transport");
+    await_test_task(daemon, "daemon rebind task").await;
 }
 
 #[cfg(unix)]
@@ -796,6 +956,30 @@ fn daemon_handshake_advertises_binary_version() {
         value["client_version"],
         serde_json::json!(env!("CARGO_PKG_VERSION"))
     );
+}
+
+#[test]
+fn missing_index_classifier_covers_every_auto_init_store_miss() {
+    let missing_messages = [
+        "no TraceDecay index found at '/repo'",
+        "no TraceDecay database found at '/repo/store.db'",
+        "parent DB not found at '/repo/branches/main.db'",
+        "parent branch 'main' has no DB",
+    ];
+    for message in missing_messages {
+        let error = crate::errors::TraceDecayError::Config {
+            message: message.to_string(),
+        };
+        assert!(
+            super::is_missing_index_error(&error),
+            "intentional missing-store state should permit config-gated auto-init: {message}"
+        );
+    }
+
+    let unrelated = crate::errors::TraceDecayError::Config {
+        message: "identity cutover conflict".to_string(),
+    };
+    assert!(!super::is_missing_index_error(&unrelated));
 }
 
 #[cfg(unix)]

@@ -204,7 +204,7 @@ pub(crate) async fn resolve_initialize_roots_project_path(
     None
 }
 
-fn initialize_root_paths(params: Option<&Value>) -> Vec<PathBuf> {
+pub(crate) fn initialize_root_paths(params: Option<&Value>) -> Vec<PathBuf> {
     params
         .and_then(|p| p.get("roots"))
         .and_then(Value::as_array)

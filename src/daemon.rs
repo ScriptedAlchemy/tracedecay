@@ -1067,16 +1067,9 @@ async fn update_proxy_handshake_from_initialize(
     if !base_handshake.allow_initialize_root_routing {
         return;
     }
-    let Some(registry) =
-        crate::global_db::GlobalDb::open_at(&base_handshake.client_identity.global_db_path).await
-    else {
-        return;
-    };
-    let Some(project_path) = crate::mcp::server::resolve_initialize_roots_project_path(
-        request.params.as_ref(),
-        Some(&registry),
-    )
-    .await
+    let Some((project_path, allow_init)) =
+        resolve_proxy_initialize_route(request.params.as_ref(), &base_handshake.client_identity)
+            .await
     else {
         return;
     };
@@ -1084,6 +1077,31 @@ async fn update_proxy_handshake_from_initialize(
         handshake.scope_prefix = None;
     }
     handshake.project_path = Some(project_path);
+    handshake.allow_init = allow_init;
+}
+
+#[cfg(unix)]
+async fn resolve_proxy_initialize_route(
+    params: Option<&serde_json::Value>,
+    client_identity: &DaemonClientIdentity,
+) -> Option<(PathBuf, bool)> {
+    let registry = crate::global_db::GlobalDb::open_at(&client_identity.global_db_path).await;
+    if let Some(project_path) =
+        crate::mcp::server::resolve_initialize_roots_project_path(params, registry.as_ref()).await
+    {
+        return Some((project_path, false));
+    }
+
+    for root in crate::mcp::server::initialize_root_paths(params) {
+        if let Some(project_path) = crate::config::discover_project_root(&root) {
+            return Some((project_path, false));
+        }
+        if let Some(git_root) = crate::worktree::git_worktree_root(&root) {
+            let allow_init = crate::config::load_sync_config(&git_root).auto_init;
+            return Some((git_root, allow_init));
+        }
+    }
+    None
 }
 
 #[cfg(unix)]
@@ -2375,6 +2393,8 @@ fn is_missing_index_error(err: &TraceDecayError) -> bool {
         TraceDecayError::Config { message }
             if message.contains("no TraceDecay index found")
                 || message.contains("no TraceDecay database found")
+                || message.contains("parent DB not found")
+                || (message.contains("parent branch '") && message.contains("' has no DB"))
     )
 }
 

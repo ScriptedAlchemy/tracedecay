@@ -434,13 +434,19 @@ fn hex_value(byte: u8) -> Option<u8> {
 // Serve startup orchestration
 // ---------------------------------------------------------------------------
 
-/// Runs the `serve` command end to end: resolve the project (degrading
-/// instead of exiting when resolution fails — see
-/// [`ServeProjectResolver::resolve_once`] and [`run_degraded_mcp_server`]),
-/// then serve MCP over stdio, proxying to the daemon when one owns the
-/// socket.
+/// Runs the `serve` command end to end. When the daemon owns its socket,
+/// choose the proxy transport before opening any project database; otherwise
+/// resolve the project locally (degrading instead of exiting when resolution
+/// fails — see [`ServeProjectResolver::resolve_once`] and
+/// [`run_degraded_mcp_server`]).
 pub async fn run_serve(path_arg: Option<String>, timings: bool) -> Result<()> {
     let original_cwd = std::env::current_dir().ok();
+    let socket_path = crate::daemon::default_socket_path()?;
+    if crate::daemon::should_proxy_serve_to_daemon(&socket_path).await {
+        let handshake = proxy_serve_handshake(path_arg, original_cwd.as_deref(), timings)?;
+        return crate::daemon::proxy_stdio_to_daemon(&socket_path, &handshake, None).await;
+    }
+
     let (resolver, error, peeked_line) = match Box::pin(resolve_serve_startup(path_arg)).await {
         ServeStartup::Ready {
             cg,
@@ -488,6 +494,47 @@ pub async fn run_serve(path_arg: Option<String>, timings: bool) -> Result<()> {
     }
 }
 
+/// Builds daemon routing metadata without opening a project or global
+/// database. A running daemon is the sole database owner for this serve
+/// process; it performs the open (and the same config-gated git auto-init)
+/// after receiving the handshake.
+fn proxy_serve_handshake(
+    path_arg: Option<String>,
+    original_cwd: Option<&Path>,
+    timings: bool,
+) -> Result<crate::daemon::DaemonHandshake> {
+    let path = sanitize_serve_path_arg(path_arg);
+    let explicit_path = path.is_some();
+    let mut project_path = if explicit_path {
+        crate::config::resolve_path(path)
+    } else {
+        crate::config::resolve_path_with_discovery(None)
+    };
+
+    let initialized = TraceDecay::is_initialized(&project_path);
+    let auto_init_root = (!initialized && crate::config::load_sync_config(&project_path).auto_init)
+        .then(|| crate::worktree::git_worktree_root(&project_path))
+        .flatten();
+    if let Some(root) = auto_init_root.as_ref() {
+        project_path.clone_from(root);
+    }
+
+    let scope_prefix = serve_scope_prefix(original_cwd, &project_path);
+    let telemetry_timings = timings || crate::config::load_telemetry_config(&project_path).timings;
+    let mut handshake = crate::daemon::DaemonHandshake::for_current_client(
+        Some(project_path),
+        scope_prefix,
+        telemetry_timings,
+        auto_init_root.is_some(),
+    )?;
+    // An explicit path remains authoritative. Discovery-mode clients may use
+    // initialize roots only when cwd neither resolved nor can be auto-inited,
+    // matching the local resolver's fallback order.
+    handshake.allow_initialize_root_routing =
+        !explicit_path && !initialized && auto_init_root.is_none();
+    Ok(handshake)
+}
+
 /// Serves a startup-resolved project: proxy to the daemon when one owns the
 /// socket, otherwise run the in-process MCP engine.
 async fn serve_resolved_project(
@@ -509,6 +556,9 @@ async fn serve_resolved_project(
     handshake.allow_initialize_root_routing = allow_initialize_root_routing;
     let socket_path = crate::daemon::default_socket_path()?;
     if crate::daemon::should_proxy_serve_to_daemon(&socket_path).await {
+        // The daemon may have appeared while local resolution was in flight.
+        // Never retain those local DB handles for the lifetime of the proxy.
+        drop(cg);
         crate::daemon::proxy_stdio_to_daemon(&socket_path, &handshake, peeked_line).await
     } else {
         let server = crate::mcp::McpServer::new(cg, handshake.scope_prefix.clone()).await;
