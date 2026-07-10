@@ -477,6 +477,53 @@ pub struct ShardPlan {
     pub estimated_cost: CostEstimate,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct MergePlan {
+    pub strategy: MergeStrategyV1,
+    pub stable_order: Vec<RegisteredSortFieldV1>,
+    pub tie_breaker: StableTieBreakerV1, // always ends in canonical entity ID
+    pub shard_score_contracts: BTreeMap<ShardId, ScoreContractRefV1>,
+    pub fusion_profile: Option<FusionProfileRefV1>,
+    pub dedupe: DedupePlanV1,
+    pub grouping: Option<GroupPlanV1>,
+    pub global_limit: NonZeroU32,
+    pub per_shard_overfetch: NonZeroU32,
+    pub maximum_candidates: NonZeroU32,
+    pub emit_score_components: bool,
+}
+
+pub enum MergeStrategyV1 {
+    StableKWay,
+    ExactTierThenRanked,
+    ReciprocalRankFusion,
+    GroupedAggregate,
+    Topological,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct HydrationPlan {
+    pub fields: BTreeSet<RegisteredHydrationFieldId>,
+    pub mode: HydrationModeV1,
+    pub payload_access: PayloadAccess,
+    pub maximum_items: NonZeroU32,
+    pub maximum_total_bytes: NonZeroU64,
+    pub maximum_bytes_per_item: NonZeroU32,
+    pub maximum_concurrency: NonZeroU16,
+    pub missing_payload: MissingPayloadPolicyV1,
+    pub redaction: RedactionHydrationPolicyV1,
+    pub retention_watermark: EvidenceRetentionWatermark,
+}
+
+pub enum HydrationModeV1 { None, MetadataOnly, SelectedFields, AuthorizedPayloadSlices }
+pub enum MissingPayloadPolicyV1 { PreserveRowUnavailable, PreserveRowTombstoned, FailExactReplay }
+```
+
+`MergePlan` is produced only after every shard advertises compatible sort/score/group capabilities. Native FTS/vector scores never compare across shards without a registered calibration/fusion contract; exact-tier priority precedes approximate fusion. `per_shard_overfetch × shard_count` and `maximum_candidates` are costed hard bounds. Dedupe preserves representative membership, native expansion counts, and the best exact match; grouping/aggregation carries exact versus sampled denominators.
+
+`HydrationPlan` is authorization- and sink-specific. Metadata pages never hydrate payloads accidentally; payload slices are bounded before I/O and preserve unavailable/redacted/retained/tombstoned state per row. Hydration cannot change membership/order/rank, silently drop a row, widen sensitivity, cross a privacy domain, or turn missing payload into an empty string. Export and exact replay use separate larger caller budgets but the same plan type.
+
+```rust
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 pub struct CostUnits {
     pub shard_opens: u32,
@@ -676,6 +723,67 @@ Unknown denominators serialize as `value: null, state: "unknown", reason`, never
 - Shards declare `Exact`, `Approximate { algorithm, build_version }`, or `Unavailable`. Exact fallback is mandatory for the versioned eval corpus; production may return named partial semantic coverage when the budget cannot exact-scan.
 - Distance normalization is metric-specific and versioned. Mixed model/dimension/normalization results are never merged.
 - Vector values and secret-bearing source text never enter logs, cursors, manifests, or explain output.
+
+### 11.2A Representation/model artifact lifecycle
+
+Optional embeddings and rerankers are a complete product subsystem, not an implicit library download. Domain owns `RepresentationArtifactManifestV1`; application owns install/activate/deactivate/evict/status workflows and the `ModelArtifactRegistryPort`; root composition implements the local artifact manager; plan 02 persists catalog/state/leases; plan 18 owns input/output/egress privacy; plan 20 owns controls; this plan owns compatibility with indexes/query/ranking and the PR 14E delivery slice.
+
+```rust
+pub struct RepresentationArtifactManifestV1 {
+    pub artifact_id: RepresentationArtifactId,
+    pub purpose: RepresentationPurposeV1, // Embed | LearnedSparse | Rerank
+    pub model_id: RegisteredModelId,
+    pub model_revision: CatalogSafeText,
+    pub format: ModelFormatV1,
+    pub artifact_sha256: Sha256Digest,
+    pub artifact_signature: SignatureRefV1,
+    pub signed_catalog_digest: ManifestDigest,
+    pub source: AllowlistedArtifactSourceId,
+    pub license_id: CatalogSafeText,
+    pub license_text_digest: ManifestDigest,
+    pub tokenizer_digest: ManifestDigest,
+    pub runtime_abi: RuntimeAbiRefV1,
+    pub dimension: Option<NonZeroU32>,
+    pub metric: Option<VectorMetricV1>,
+    pub normalization: NormalizationRef,
+    pub maximum_input_tokens: NonZeroU32,
+    pub artifact_bytes: NonZeroU64,
+    pub minimum_ram_bytes: NonZeroU64,
+    pub recommended_ram_bytes: NonZeroU64,
+    pub allowed_devices: BTreeSet<DeviceClassV1>,
+    pub allowed_residency: BTreeSet<ResidencyClassV1>,
+    pub determinism: DeterminismClassV1,
+    pub published_at: UtcMicros,
+    pub revoked_at: Option<UtcMicros>,
+}
+
+pub enum RepresentationArtifactStateV1 {
+    CatalogOnly,
+    Downloading { received: u64, expected: u64 },
+    Staged,
+    Verified,
+    Active,
+    Evictable,
+    Evicted,
+    Quarantined { reason: ArtifactQuarantineReasonV1 },
+    Revoked,
+}
+```
+
+Lifecycle and security:
+
+1. TraceDecay releases publish a canonical `representation-artifact-catalog-v1.json` plus detached release signature; entries pin upstream revision, exact bytes, license/notice, tokenizer/runtime ABI, resource envelope, and upstream signature when available. Model bytes are not bundled unless license, size, provenance, and release policy explicitly allow it.
+2. Enabling a representation profile is an explicit config/application action naming artifact IDs, allowed network source, disk/RAM/device budgets, privacy domains, and fallback. It may authorize an automatic first-use download; ordinary query execution itself never performs network I/O or widens egress.
+3. Download uses an allowlisted HTTPS source, bounded redirects within that allowlist, content length/ETag, resumable private staging, maximum size, release-catalog signature, artifact SHA-256, and optional upstream signature. Verify before atomic publish; mismatch/quarantine never replaces a verified artifact.
+4. Profile storage path is `artifacts/representations/<artifact-id>/<sha256>/` under private `0700` directories and `0600` files. Catalog/state rows contain no URL credential. Offline import goes through the same size/hash/signature/license checks.
+5. A runtime lease pins artifact/catalog/runtime/config digests, device, load time, maximum RSS, request count, and owning process. Activation warms outside query/store locks; OOM/load/crash produces explicit coverage and unloads/quarantines according to evidence, never corrupts an index or silently chooses another model.
+6. Default budgets are 4 GiB disk cache, 2 GiB aggregate resident model memory, one concurrent cold load, and five-minute idle unload; plan 20 exposes stricter values and hardware-aware validated increases. LRU eviction skips active leases, config pins, in-progress generation builds, and artifacts required by retained exact-eval/replay manifests. Eviction removes bytes only and keeps the signed manifest/state/history.
+7. Representation indexes pin artifact, tokenizer, dimension, metric, normalization, builder/runtime, privacy domain, key epoch, input watermark, and build digest. Mixed pins never merge. Revocation marks affected generations unavailable and schedules authorized rebuild; it does not query them or fall back to a different embedding space.
+8. Embeddings, learned-sparse values, and rerank caches inherit the source privacy domain/sensitivity and never cross domain/key/residency boundaries. Model input must already be `RepresentationEligibleText`; artifacts receive no raw secret/quarantine/reasoning content and no repository data leaves the machine for inference.
+9. Missing/evicted/revoked/OOM/incompatible artifacts return typed semantic-channel coverage. Ranking preserves the exact pre-semantic lexical list when fallback is allowed and names the omission; a profile requiring semantics fails explicitly.
+10. Status/doctor/Observatory report catalog vs bytes vs verified vs active, signature/revocation, disk/RAM/device, pins/leases, affected generations, cold/warm latency, fallback frequency, and safe remediation. No metric logs model input/vector values or raw cache paths.
+
+Application capabilities are `representations.artifacts.list|get|status|install|import|activate|deactivate|evict|verify` and `representations.generations.list|rebuild`; generated CLI/MCP/API/Settings surfaces share these use cases. Install/import/activate/evict are administrative local effects with idempotency and receipts, never hidden inside search. Exact artifact bytes and license notice are exportable only as their original public artifact, not through transcript/data export.
 
 ### 11.3 Ranking
 
@@ -1041,6 +1149,19 @@ Program numbering is authoritative: PR 12 is implemented in dependency order as 
 - [ ] Measure cold/warm p50/p95, throughput, peak RSS/VRAM, build/download size, and quality with confidence intervals plus per-intent regressions. A reranker is disabled unless its lower-bound quality gain exceeds the declared minimum without violating latency/resource/privacy gates.
 - [ ] Run `cargo test -p tracedecay-query --test hybrid_ranking --test search_quality_eval --test security_privacy rerank`; expected: every accepted or disabled disposition is fixture-locked and fallback is byte-stable.
 - [ ] Commit `feat(query): add gated local reranking` only when gates pass; otherwise preserve the benchmark/disabled decision outside production routing.
+
+### PR 14E: Signed representation artifact catalog and local lifecycle
+
+**Ordering:** after PR 14A records accepted/disabled candidate profiles and before any accepted PR 14B/14C route is enabled by default. A rejected representation profile gets no production artifact entry.
+
+**Files:** domain representation artifact contracts; `crates/tracedecay-application/src/{ports,use_cases}/representation_artifacts.rs`; root `src/representation_artifacts/{catalog,download,verify,cache,runtime,status}.rs`; plan-02 catalog/state/lease migration and repository; plan-20 descriptors/forms; plan-08 capability entries/generated bindings; release workflow/script for the signed catalog; `tests/{representation_artifact_lifecycle,security_privacy,release_artifacts}.rs`.
+
+- [ ] Add failing catalog canonicalization/signature/hash/license/revocation tests; allowlisted download/redirect/resume/size/mismatch/private-mode tests; cold-load/RSS/lease/unload/LRU/pin/eviction/OOM/crash tests; privacy-domain/input eligibility tests; index-pin/revocation/rebuild/fallback tests; offline import and no-network-query tests.
+- [ ] Define the Section 11.2A manifest/state and store `representation_artifacts(artifact_id, manifest_digest, state, artifact_sha256, bytes, verified_at, active_generation, last_used_at, revoked_at)` plus `representation_artifact_leases(artifact_id, lease_id, process_id, runtime_digest, device, rss_budget, issued_at, expires_at)` in the profile catalog, with indexes `(state,last_used_at)` and `(expires_at)`. Manifests/history persist; evictable bytes obey the configured cache budget.
+- [ ] Implement stage→verify→publish, exact signed release catalog, private cache, bounded runtime manager, config/application/capability surfaces, doctor/Observatory receipts, and lexical-preserving failure behavior. No query/store transaction performs download or model load.
+- [ ] Make the release job canonicalize and sign `representation-artifact-catalog-v1.json`, verify every referenced digest/license/notice/runtime ABI, test a clean offline/no-artifact startup, and publish the catalog beside binaries. Model bytes publish only through an explicit licensed release entry; otherwise the catalog points at allowlisted pinned sources.
+- [ ] Run focused lifecycle/security/release tests plus accepted PR 14A–14C quality/resource gates on clean cache, warm cache, offline, revoked, OOM, and eviction fixtures. Expected: exact manifests/coverage/fallback; zero raw model inputs/vectors/credentials/paths in logs or artifacts.
+- [ ] Commit `feat(query): manage signed local representation artifacts`; if no profile passes PR 14A/14C gates, land only the disabled catalog/contract tests and do not ship dormant download/runtime code.
 
 ### PR 15A: Graph, impact, timeline, coordination, and bitemporal/as-of operators
 

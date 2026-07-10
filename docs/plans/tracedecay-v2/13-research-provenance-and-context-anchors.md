@@ -189,6 +189,32 @@ These are retrieval IDs, not quoted transcript content.
 
 The initial domain/store author session is not assigned here with false precision. Current LCM copied coordination events into multiple child sessions and left `parent_tool_use_id` null. The plan files and parent thread preserve the work; V2 must repair this attribution class before claiming an exact child owner.
 
+### 4.2A Claude whole-plan reconciliation and Hermes phase-two audit
+
+The Claude main audit session is `3bbd612a-332a-4198-a42a-8bbc81888e6f` (2026-07-10 03:09:56–05:40:02 UTC), branch/worktree `claude/nice-sanderson-dc67f1` under `/fast/projects/tracedecay/.claude/worktrees/nice-sanderson-dc67f1`. It coordinated whole-plan reviews, cross-plan arbitration, and pinned Hermes backend/frontend research. The supported TraceDecay session lookup was attempted first but stopped at the preserved selected-versus-legacy project-identity conflict; the bounded fallback is the provider-local main JSONL and its `subagents/` directory under `/home/zack/.claude/projects/-fast-projects-tracedecay--claude-worktrees-nice-sanderson-dc67f1/`. This path is a local discovery locator, not a portable product anchor or committed fixture.
+
+Provider-native subagent retrieval IDs, sorted and complete for that session (39 files):
+
+```text
+agent-a0410455b70d353f9  agent-a09f68b15e3378833  agent-a0c19d02d6404ddac
+agent-a0d5a508e720350b2  agent-a1d86ac23b2e74f65  agent-a26843ee73f24c479
+agent-a2786191fd13edbbb  agent-a2a334de8eab3ce69  agent-a2f7a77a770792dcc
+agent-a4a4d0fbc4ee5a664  agent-a4c37e71671fbbeb4  agent-a4ebae99750b5cbb4
+agent-a516841c2360dc84b  agent-a5b0a8ecd4e852b25  agent-a60cf851c29781220
+agent-a653e40e96f30c341  agent-a67b8ef3804efbec5  agent-a6f3f42ab22be6d51
+agent-a70201c4f3d61d8f4  agent-a7ea5955ce2ce35fe  agent-a7f1c53d5776c7ed7
+agent-a8a94666d03d05dec  agent-a8de5d04d00908bbe  agent-a98af556c29abe2e2
+agent-a9a4018e78e03d597  agent-aa505cc1353ae44e8  agent-aa816114d8d80f6f5
+agent-ac16126bb3b205f3d  agent-ac1ccaf8e967ca7ec  agent-ac40df30a63a03cb7
+agent-ace0120eb2aaa272e  agent-ad9874d9bff1f3d41  agent-adba72e32dbf0e306
+agent-addb3a8065095958d  agent-ae1dca2e7f53398ae  agent-af01e0bc4d20bd64e
+agent-af6e3bcf692c2f543  agent-afc237636e097d6b3  agent-afd56fe4c6cb45ab6
+```
+
+Recovery recipe: load the main Claude session by exact provider/session ID, enumerate children by the provider parent/session relation, then select one child ID above; when TraceDecay routing is unavailable, open only that exact JSONL and extract chronological `role=user|assistant` text records. The three independent Codex audits of all 39 child JSONLs plus the main session recorded complete ranges and compared conclusions to plans 00–26. They found the late Hermes task/dashboard/store/model-artifact editors stopped on a concurrent edit or Claude monthly spend limit; their unfinished requirements were subsequently integrated into plans 01/02/05/09/11/12/14/20/21/22/24/26. Do not infer “completed” from the presence of a child file—retain interrupted/spend-limit terminal status.
+
+Implementation must replace these local locators with durable `RetrievalAnchorId`s whose target is the main session or exact subagent transcript span, including source identity, provider-native child ID, branch/worktree, occurred/ingested range, access/privacy digest, and the plan/artifact relation. A future agent should be able to resolve “who researched this decision?” from a plan section to the exact authorized audit context without copying private text into Git.
+
 ### 4.3 Private chronological corpus
 
 The corpus itself remains outside Git:

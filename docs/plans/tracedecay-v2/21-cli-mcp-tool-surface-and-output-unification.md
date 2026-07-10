@@ -514,6 +514,17 @@ Every scoped binding receives the exact plan-16 selector and resolved snapshot. 
 - default source and why it was legal;
 - retry token/template when user selection is required.
 
+Transport routing metadata is generated from a closed `RoutingFieldDescriptorV1`; there is no validation-bypass allowlist. A field is either a canonical typed selector/ID or a transport-only keyed locator. Human/runtime strings such as `project_root`, `cwd`, `hermes_home`, `storage_scope`, and `response_handle_project_root` cannot pass through untyped:
+
+- display/explanation uses `SinkEligible<LogSafeText>` and never becomes a lookup key;
+- lookup uses an opaque ID or `PrivacyDomainBoundLocatorDigest` computed inside the authorized resolver from a normalized path/source value;
+- raw paths remain protected application inputs, never catalog metadata, metrics, logs, errors, response handles, help, or generated routing keys;
+- handler/daemon/plugin code cannot add a field outside the catalog schema, and unknown routing fields fail validation before any store open;
+- keyed-locator key epoch, privacy domain, source kind, normalization version, and scope are bound into the request/snapshot receipt; comparison across domains or key epochs is forbidden;
+- profile-scoped and first-touch behavior is an explicit generated use case with the same resolver, authorization, problem, and coverage contract—not a CLI/MCP side list.
+
+Conformance tests enumerate every generated request field and fail if any field bypasses schema validation, lacks a safe-text/typed-ID/keyed-locator class, or reaches a log/error/presenter as a raw path.
+
 ### 10.2 Required regression corpus
 
 Lock fixtures for:

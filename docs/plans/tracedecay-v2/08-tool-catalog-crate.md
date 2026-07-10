@@ -27,6 +27,7 @@ Plan [`24-canonical-task-plan-graph-and-multi-agent-executor.md`](24-canonical-t
 - [`21-cli-mcp-tool-surface-and-output-unification.md`](21-cli-mcp-tool-surface-and-output-unification.md) owns the exhaustive current CLI/MCP/output audit and generated binding/presentation parity contract. This crate emits that metadata; it cannot keep a second format/scope/dispatch/allowlist inventory.
 - [`22-incremental-context-scout-and-suggestion-envelopes.md`](22-incremental-context-scout-and-suggestion-envelopes.md) consumes catalog-declared scout/model/tool eligibility, read-only effect class, egress/privacy, budgets, and delivery bindings; no daemon allowlist is legal.
 - [`23-session-lcm-temporal-retrieval-and-evaluation.md`](23-session-lcm-temporal-retrieval-and-evaluation.md) replaces legacy message/LCM binding semantics with one generated temporal search/context/replay/evaluation family while retaining old names only as bounded compatibility rows.
+- [`05-query-crate.md`](05-query-crate.md) §11.2A/PR 14E owns optional representation-model artifact semantics and lifecycle delivery. This catalog declares the generated `representations.artifacts.*` and `representations.generations.*` capabilities, effects, config dependencies, availability, and typed views; it never downloads, verifies, loads, or evicts an artifact.
 - PR #410's direct_user/subagent/tool_result filters and parent-representative dedupe are semantic query capabilities, not presentation-only toggles.
 - Git output distinguishes directly_changed, structurally_impacted, candidate_test, and context_only. Transitive/file-level graph fanout can never be labeled direct modification.
 
@@ -795,7 +796,7 @@ Commands run from repository root with checkout-local target directories.
 
 **Files:** src/definitions/*.rs; src/bindings/*.rs; tests/{complete_inventory,transport_parity,compatibility_migration}.rs.
 
-- [ ] Add definitions for all project/code/graph/Git/session/LCM/memory/policy/automation/observability/operation/lab surfaces and all 104 source MCP definitions with dispositions, including `ast_grep_search` and `move_symbol`; 103 are installed at 0.0.47.
+- [ ] Add definitions for all project/code/graph/Git/session/LCM/memory/policy/automation/representation-artifact/observability/operation/lab surfaces and all 104 source MCP definitions with dispositions, including `ast_grep_search` and `move_symbol`; 103 are installed at 0.0.47.
 - [ ] Add current V2 coordination definitions/bindings for presence, claim, heartbeat, nearby work, overlap acknowledgement/handoff, analytics, and Coordination Lab. Fixture-lock parent prefix `019f4906`, four PR #359 child agents, and Cursor session `ebc96a27-b046-4c88-865f-b38d76da9d2d`; these are evidence anchors, never catalog text.
 - [ ] Add direct_user/subagent/tool_result/parent-representative schema fixtures for message search, LCM, CLI, MCP, future HTTP/dashboard/export/saved view.
 - [ ] Run tests. Expected: fail until every legacy field/effect/error is mapped.
