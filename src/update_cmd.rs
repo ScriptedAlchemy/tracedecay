@@ -273,14 +273,18 @@ pub(crate) fn run_upgrade_command(
 }
 
 /// The binary to re-exec for `post-update`: the freshly installed one when
-/// the upgrade reported where it landed, otherwise the usual resolution.
-/// Never `which_tracedecay()` alone — its current-exe-first order can point
-/// at the OLD binary (e.g. a stale Homebrew keg) right after an upgrade.
+/// the upgrade reported where it landed, otherwise the currently running
+/// binary. This keeps source-built dogfood on the source-built binary.
 fn post_update_binary(installed: Option<&Path>) -> tracedecay::errors::Result<String> {
-    match installed.filter(|path| path.exists()) {
-        Some(path) => Ok(path.to_string_lossy().into_owned()),
-        None => tracedecay_bin_on_path(),
-    }
+    let current = std::env::current_exe().ok();
+    post_update_binary_from(installed, current.as_deref()).map_or_else(tracedecay_bin_on_path, Ok)
+}
+
+fn post_update_binary_from(installed: Option<&Path>, current: Option<&Path>) -> Option<String> {
+    installed
+        .filter(|path| path.exists())
+        .map(normalize_bin_path)
+        .or_else(|| current_tracedecay_exe_from(current))
 }
 
 fn run_post_update_subcommand(
@@ -373,9 +377,10 @@ pub(crate) async fn reinstall_tracked_agents(user_config: &UserConfig) -> Reinst
 pub(crate) async fn run_post_update_tasks(
     no_heal: bool,
     no_reinstall: bool,
+    lifecycle_lease: &tracedecay::lifecycle_lease::LifecycleLease,
 ) -> tracedecay::errors::Result<()> {
     let previous_daemon_state = tracedecay::daemon::quiesce_installed_service_under_lease()?;
-    let mutation_result = run_post_update_mutations(no_heal, no_reinstall).await;
+    let mutation_result = run_post_update_mutations(no_heal, no_reinstall, lifecycle_lease).await;
     let restart_result = refresh_daemon_service_after_update(previous_daemon_state);
     mutation_result?;
     restart_result
@@ -384,12 +389,13 @@ pub(crate) async fn run_post_update_tasks(
 async fn run_post_update_mutations(
     no_heal: bool,
     no_reinstall: bool,
+    lifecycle_lease: &tracedecay::lifecycle_lease::LifecycleLease,
 ) -> tracedecay::errors::Result<()> {
     refresh_generated_plugins().await?;
     if no_heal {
         eprintln!("Skipping post-update health pass (--no-heal).");
     } else {
-        tracedecay::doctor::heal::run_post_update_health_pass().await;
+        tracedecay::doctor::heal::run_post_update_health_pass_under_lease(lifecycle_lease).await;
     }
 
     if no_reinstall {
@@ -492,7 +498,7 @@ mod tests {
 
     use super::{
         RefreshPolicy, ReinstallOutcome, current_tracedecay_exe_from, partition_reinstall_results,
-        post_update_binary, run_install_then_refresh,
+        post_update_binary, post_update_binary_from, run_install_then_refresh,
     };
     use tempfile::TempDir;
     use tracedecay::upgrade::UpgradeOutcome;
@@ -807,6 +813,19 @@ mod tests {
         let resolved = post_update_binary(Some(&installed)).expect("installed path should resolve");
 
         assert_eq!(resolved, installed.to_string_lossy());
+    }
+
+    #[test]
+    fn post_update_binary_keeps_source_built_current_executable() {
+        let temp = tempfile::tempdir().expect("tempdir should exist");
+        let current = temp.path().join("tracedecay");
+        std::fs::write(&current, b"source-built").expect("binary should be writable");
+        let expected = current.to_string_lossy().replace('\\', "/");
+
+        assert_eq!(
+            post_update_binary_from(None, Some(&current)).as_deref(),
+            Some(expected.as_str())
+        );
     }
 
     #[test]

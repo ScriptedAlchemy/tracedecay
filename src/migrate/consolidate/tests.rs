@@ -164,6 +164,20 @@ impl Fixture {
     }
 }
 
+fn input_manifest_paths(
+    fixture: &Fixture,
+    project_id: &str,
+    destination_project_id: &str,
+) -> (PathBuf, PathBuf) {
+    let root = fixture.profile.join("projects").join(project_id);
+    (
+        root.join(storage::STORE_MANIFEST_FILENAME),
+        root.join(format!(
+            "store_manifest.consolidated-into-{destination_project_id}.json"
+        )),
+    )
+}
+
 #[tokio::test]
 async fn dry_run_reports_live_split_shape_without_mutation() {
     let fixture = fixture().await;
@@ -276,6 +290,13 @@ async fn interrupted_apply_retries_without_duplicates_and_cuts_over_last() {
         b"target forensic database",
     )
     .unwrap();
+    let input_database_digests = [
+        source_root.join(crate::config::DB_FILENAME),
+        source_root.join(storage::SESSIONS_DB_FILENAME),
+        target_root.join(crate::config::DB_FILENAME),
+        target_root.join(storage::SESSIONS_DB_FILENAME),
+    ]
+    .map(|path| (path.clone(), file_digest(&path).unwrap()));
     let report = plan(&options).await.unwrap();
 
     let error = apply_with_stop(
@@ -398,6 +419,32 @@ async fn interrupted_apply_retries_without_duplicates_and_cuts_over_last() {
             .join(&fixture.source_id)
             .is_dir()
     );
+    for project_id in [&fixture.source_id, &fixture.target_id] {
+        let (canonical, retired) =
+            input_manifest_paths(&fixture, project_id, &applied.destination_project_id);
+        assert!(!canonical.exists());
+        assert!(retired.is_file());
+    }
+    for (path, digest) in input_database_digests {
+        assert_eq!(
+            file_digest(&path).unwrap(),
+            digest,
+            "{} changed",
+            path.display()
+        );
+    }
+    let global = GlobalDb::open_at(&fixture.profile.join("global.db"))
+        .await
+        .unwrap();
+    let owners = global
+        .list_code_projects(usize::MAX)
+        .await
+        .into_iter()
+        .filter(|project| same_path(Path::new(&project.canonical_root), &fixture.project))
+        .map(|project| project.project_id)
+        .collect::<Vec<_>>();
+    assert_eq!(owners, vec![applied.destination_project_id.clone()]);
+    global.close();
     assert!(
         fixture
             .profile
@@ -482,6 +529,74 @@ async fn mixed_page_destination_survives_overlapping_watcher_opens() {
         verification.close();
         cached.get_all_files().await.unwrap();
     }
+}
+
+#[tokio::test]
+async fn applied_manifest_retirement_handles_retry_states_and_fails_closed() {
+    let fixture = fixture().await;
+    let options = fixture.options();
+    let report = plan(&options).await.unwrap();
+    let applied = apply(&options, &report.confirmation_token).await.unwrap();
+    let (source_canonical, source_retired) = input_manifest_paths(
+        &fixture,
+        &fixture.source_id,
+        &applied.destination_project_id,
+    );
+    let (_, target_retired) = input_manifest_paths(
+        &fixture,
+        &fixture.target_id,
+        &applied.destination_project_id,
+    );
+
+    fs::copy(&source_retired, &source_canonical).unwrap();
+    let both_identical = apply(&options, &report.confirmation_token).await.unwrap();
+    assert_eq!(both_identical.state, ConsolidationState::Applied);
+    assert!(!source_canonical.exists());
+    assert!(source_retired.is_file());
+
+    fs::write(&source_canonical, b"divergent manifest").unwrap();
+    let divergent = apply(&options, &report.confirmation_token)
+        .await
+        .unwrap_err();
+    assert!(divergent.to_string().contains("manifests diverge"));
+    assert_eq!(fs::read(&source_canonical).unwrap(), b"divergent manifest");
+    assert!(source_retired.is_file());
+    assert!(target_retired.is_file());
+
+    fs::remove_file(&source_canonical).unwrap();
+    storage::write_enrollment_marker(
+        &fixture.project,
+        &EnrollmentMarker {
+            project_id: fixture.target_id.clone(),
+            storage_mode: StorageMode::ProfileSharded,
+        },
+    )
+    .unwrap();
+    let marker_mismatch = apply(&options, &report.confirmation_token)
+        .await
+        .unwrap_err();
+    assert!(marker_mismatch.to_string().contains("marker mismatch"));
+    assert!(source_retired.is_file());
+    assert!(target_retired.is_file());
+
+    storage::write_enrollment_marker(
+        &fixture.project,
+        &EnrollmentMarker {
+            project_id: applied.destination_project_id.clone(),
+            storage_mode: StorageMode::ProfileSharded,
+        },
+    )
+    .unwrap();
+    fs::remove_file(&source_retired).unwrap();
+    let missing = apply(&options, &report.confirmation_token)
+        .await
+        .unwrap_err();
+    assert!(
+        missing
+            .to_string()
+            .contains("neither canonical nor retired")
+    );
+    assert!(target_retired.is_file());
 }
 
 #[tokio::test]
@@ -2232,6 +2347,42 @@ async fn fixture() -> Fixture {
         false,
     )
     .await;
+    let global = GlobalDb::open_at(&profile.join("global.db")).await.unwrap();
+    let git_common_dir = crate::worktree::git_common_dir(&project).unwrap();
+    for project_id in [&source_id, &target_id] {
+        global
+            .upsert_code_project(
+                project_id,
+                &project,
+                Some(&git_common_dir),
+                None,
+                Some("main"),
+            )
+            .await
+            .unwrap();
+        global
+            .upsert_store_instance(StoreInstanceUpsert {
+                store_id: format!("store:{project_id}:profile_sharded"),
+                project_id: project_id.clone(),
+                store_kind: "code_project".to_string(),
+                storage_mode: "profile_sharded".to_string(),
+                store_relpath: format!("projects/{project_id}"),
+                manifest_relpath: Some(format!(
+                    "projects/{project_id}/{}",
+                    storage::STORE_MANIFEST_FILENAME
+                )),
+                last_verified_at: Some(1_800_000_000),
+                last_write_at: Some(1_800_000_000),
+            })
+            .await
+            .unwrap();
+    }
+    global
+        .upsert_project_alias(&project, &target_id)
+        .await
+        .unwrap();
+    global.checkpoint().await;
+    global.close();
     storage::write_repository_identity_marker(&project, &target_id).unwrap();
     Fixture {
         _temp: temp,
