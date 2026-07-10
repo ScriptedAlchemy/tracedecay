@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.47](https://github.com/ScriptedAlchemy/tracedecay/compare/v0.0.46...v0.0.47) - 2026-07-10
+
+### Fixed
+
+- *(sessions)* collapse copied subagent prompts ([#410](https://github.com/ScriptedAlchemy/tracedecay/pull/410))
+
 ## [0.0.46](https://github.com/ScriptedAlchemy/tracedecay/compare/v0.0.45...v0.0.46) - 2026-07-10
 
 ### Fixed
