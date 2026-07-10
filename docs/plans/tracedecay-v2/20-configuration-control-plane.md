@@ -702,6 +702,25 @@ Phase 0 generates an inventory from source and blocks cutover until every public
 
 Hard-coded correctness constants and safety maxima are not mislabeled as user settings. They still appear in capability/status documentation when relevant, but are not writable. Conversely, a behavior marketed or documented as configurable cannot remain an unregistered constant.
 
+### 13.1 Canonical task/executor liveness descriptors
+
+Plan 24 §8.7 owns the liveness/sentinel policy semantics; this registry is the only configuration publication/resolution authority. The generated descriptors must match these baseline values and constraints exactly:
+
+| Key | Type/default | Validation and impact |
+|---|---|---|
+| `scheduler.attempt_liveness.lease_ttl` | duration / `5m` | `30s..30m`; hot-reload for new extensions, active leases retain their issued bound until the next heartbeat revalidation. |
+| `scheduler.attempt_liveness.heartbeat_expected` | duration / `60s` | `10s..10m`; visibility/diagnostic threshold only, never death authority. |
+| `scheduler.attempt_liveness.heartbeat_stale_backstop` | duration / `60m` | must be `>= 3 × heartbeat_expected` and `<= default_max_runtime`; active attempts re-evaluate and may enter cancel/reconcile, so activation requires an impact operation receipt. |
+| `scheduler.attempt_liveness.probe_timeout` | duration / `2s` | `100ms..10s`; applies to bounded adapter probes outside writer transactions. |
+| `scheduler.attempt_liveness.alive_extension` | duration / `2m` | `10s..lease_ttl`; preserves the same attempt/epoch and cannot exceed maximum runtime. |
+| `scheduler.attempt_liveness.default_max_runtime` | duration / `4h` | `5m..24h`; attempt override may only narrow or use an explicitly authorized higher value within the floor/ceiling. |
+| `scheduler.attempt_liveness.cancel_grace` | duration / `30s` | `1s..10m`; adapter manifest may request a value within this policy ceiling. |
+| `scheduler.rate_limit.default_backoff` | duration / `2m` | `1s..1h`; used only without valid provider `Retry-After`. |
+| `scheduler.rate_limit.max_backoff` | duration / `1h` | `>= default_backoff`, `<=24h`; bounded by attempt deadline/budget. |
+| `scheduler.repair_poll_interval` | duration / `30s` | `5s..5m`; repair-only journal/checkpoint fallback, never normal board/task scanning. |
+
+All ten descriptors are profile defaults with optional initiative/executor/provider narrowing only where the descriptor declares that scope. Deny/safety floors win. Settings shows desired/activated/effective/observed values, source, generation, affected active-attempt count, and whether activation is hot, next-heartbeat, or workflow-mediated. Tests compare the generated registry values to plan-24 policy fixtures so a renamed key, unit drift, or conflicting default blocks both PRs.
+
 ## 14. Privacy, redactor, detector, and credential controls
 
 The entire plan 18 policy is present in Settings and CLI, not hidden behind files or provider metadata.

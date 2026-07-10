@@ -14,6 +14,8 @@
 
 ## 0. Contract lock
 
+This is the plan for a Hermes-Kanban-class implementation **inside TraceDecay**: TraceDecay owns the canonical task/plan graph, scheduler, attempts, leases, executor adapters, CLI/MCP/API/SDK surfaces, and Brain/Work UI. Hermes supplies pinned design evidence and may be one executor/capture adapter, but no Hermes runtime, board database, plugin, or scheduler is required for the TraceDecay product to work.
+
 1. There is one canonical profile-owned initiative/plan/work-item graph. No repository, project, board, worktree, provider, plugin, dashboard, or executor creates a second source of task truth.
 2. An initiative may span zero, one, or many projects, repositories, checkouts, worktrees, refs, and providers. Ownership remains the profile activity shard; scope is explicit relation evidence, not database placement.
 3. `Initiative`, `Plan`, immutable `PlanVersion`, canonical `WorkItem`, dependency/gate, assignment, execution attempt, task lease, handoff, artifact, outcome, and cost are different typed entities.
