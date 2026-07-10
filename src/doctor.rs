@@ -103,7 +103,7 @@ pub async fn run_doctor(agent_filter: Option<&str>) {
 /// conflict (a foreign file blocks the slot), or orphan (a managed file for a
 /// no-longer-active skill). A clean scope passes silently-ish with an info line.
 fn check_managed_skill_materialization(dc: &mut DoctorCounters, home: &Path, project_root: &Path) {
-    use crate::automation::skill_materialization::{SkillDrift, doctor_detected_scopes};
+    use crate::automation::skill_materialization::doctor_detected_scopes;
 
     let Ok(profile_root) = crate::storage::default_profile_root() else {
         return;
@@ -129,32 +129,70 @@ fn check_managed_skill_materialization(dc: &mut DoctorCounters, home: &Path, pro
             ));
             continue;
         }
+        let scope_desc = scope.describe();
         for finding in drift {
-            let path = finding.path().display();
-            let skill_id = finding.skill_id();
-            match finding {
-                SkillDrift::Missing { .. } => dc.warn(&format!(
-                    "{}: '{skill_id}' active but not materialized ({path}); run `tracedecay update`",
-                    scope.describe()
-                )),
-                SkillDrift::Forked { .. } => dc.warn(&format!(
-                    "{}: '{skill_id}' materialized file was user-edited (forked); left untouched ({path})",
-                    scope.describe()
-                )),
-                SkillDrift::Conflict { .. } => dc.warn(&format!(
-                    "{}: '{skill_id}' cannot materialize — a non-managed file occupies {path}",
-                    scope.describe()
-                )),
-                SkillDrift::Orphan { .. } => dc.warn(&format!(
-                    "{}: stale materialized skill '{skill_id}' ({path}); run `tracedecay update` to remove",
-                    scope.describe()
-                )),
-                SkillDrift::Warning { ref message, .. } => dc.warn(&format!(
-                    "{}: '{skill_id}' {message} ({path})",
-                    scope.describe()
-                )),
+            match skill_drift_report(&scope_desc, &finding) {
+                (DriftLevel::Warn, msg) => dc.warn(&msg),
+                (DriftLevel::Info, msg) => dc.info(&msg),
             }
         }
+    }
+}
+
+/// Severity of a doctor materialization-drift line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DriftLevel {
+    Warn,
+    Info,
+}
+
+/// Pure classifier: maps a materialization drift finding to its doctor severity
+/// and rendered line. Split out from emission so it can be unit-tested — in
+/// particular that `ForeignOrphan` renders as `Info` and never prescribes
+/// `tracedecay update`, a remediation `update` refuses to perform on a foreign
+/// package.
+fn skill_drift_report(
+    scope_desc: &str,
+    finding: &crate::automation::skill_materialization::SkillDrift,
+) -> (DriftLevel, String) {
+    use crate::automation::skill_materialization::SkillDrift;
+    let path = finding.path().display();
+    let skill_id = finding.skill_id();
+    match finding {
+        SkillDrift::Missing { .. } => (
+            DriftLevel::Warn,
+            format!(
+                "{scope_desc}: '{skill_id}' active but not materialized ({path}); run `tracedecay update`"
+            ),
+        ),
+        SkillDrift::Forked { .. } => (
+            DriftLevel::Warn,
+            format!(
+                "{scope_desc}: '{skill_id}' materialized file was user-edited (forked); left untouched ({path})"
+            ),
+        ),
+        SkillDrift::Conflict { .. } => (
+            DriftLevel::Warn,
+            format!(
+                "{scope_desc}: '{skill_id}' cannot materialize — a non-managed file occupies {path}"
+            ),
+        ),
+        SkillDrift::Orphan { .. } => (
+            DriftLevel::Warn,
+            format!(
+                "{scope_desc}: stale materialized skill '{skill_id}' ({path}); run `tracedecay update` to remove"
+            ),
+        ),
+        SkillDrift::ForeignOrphan { .. } => (
+            DriftLevel::Info,
+            format!(
+                "{scope_desc}: '{skill_id}' project skill from another installation; leave in place, or delete the directory manually if unwanted ({path})"
+            ),
+        ),
+        SkillDrift::Warning { message, .. } => (
+            DriftLevel::Warn,
+            format!("{scope_desc}: '{skill_id}' {message} ({path})"),
+        ),
     }
 }
 

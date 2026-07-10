@@ -496,3 +496,43 @@ async fn registry_drift_findings_report_manifest_identity_mismatches()
 
     Ok(())
 }
+
+/// A `ForeignOrphan` drift line must render as `Info` severity (no warning
+/// count) and must never prescribe `tracedecay update` — the remediation the
+/// remove path refuses to perform on a foreign package. Mirrors the pure
+/// classifier pattern used for database-recovery guidance.
+#[test]
+fn foreign_orphan_renders_as_info_without_update_remediation() {
+    use crate::automation::skill_materialization::SkillDrift;
+    let finding = SkillDrift::ForeignOrphan {
+        skill_id: "code-slop-cleanup".to_string(),
+        path: std::path::PathBuf::from("/repo/.claude/skills/code-slop-cleanup/SKILL.md"),
+    };
+    let (level, msg) = super::skill_drift_report("claude/project", &finding);
+    assert_eq!(level, super::DriftLevel::Info);
+    assert!(
+        msg.contains("another installation"),
+        "message should explain the foreign origin: {msg}"
+    );
+    assert!(
+        !msg.contains("tracedecay update"),
+        "foreign orphan must not prescribe `tracedecay update`: {msg}"
+    );
+}
+
+/// A self-authored `Orphan` still renders as `Warn` and keeps the update
+/// remediation — the classifier must not blanket-downgrade every orphan.
+#[test]
+fn plain_orphan_still_warns_with_update_remediation() {
+    use crate::automation::skill_materialization::SkillDrift;
+    let finding = SkillDrift::Orphan {
+        skill_id: "code-slop-cleanup".to_string(),
+        path: std::path::PathBuf::from("/repo/.claude/skills/code-slop-cleanup/SKILL.md"),
+    };
+    let (level, msg) = super::skill_drift_report("claude/project", &finding);
+    assert_eq!(level, super::DriftLevel::Warn);
+    assert!(
+        msg.contains("tracedecay update"),
+        "plain orphan should still prescribe update: {msg}"
+    );
+}
