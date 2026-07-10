@@ -65,17 +65,26 @@ pub(crate) fn refresh_generated_plugins() -> tracedecay::errors::Result<()> {
 
 /// Rewrites and restarts the installed daemon service, returning the service
 /// path and its socket, or `None` when no service is installed.
-fn refresh_daemon_service() -> tracedecay::errors::Result<Option<(PathBuf, PathBuf)>> {
+fn refresh_daemon_service(
+    previous_state: tracedecay::daemon::DaemonServiceState,
+) -> tracedecay::errors::Result<Option<(PathBuf, PathBuf)>> {
     let tracedecay_bin = tracedecay_bin_on_path()?;
     let spec = tracedecay::daemon::service_spec(tracedecay_bin, None)?;
     let socket_path = tracedecay::daemon::installed_service_socket_path()?
         .unwrap_or_else(|| spec.socket_path.clone());
-    Ok(tracedecay::daemon::refresh_installed_service(&spec)?
-        .map(|service_path| (service_path, socket_path)))
+    Ok(
+        tracedecay::daemon::refresh_installed_service_under_lease_with_state(
+            &spec,
+            previous_state,
+        )?
+        .map(|service_path| (service_path, socket_path)),
+    )
 }
 
-fn refresh_daemon_service_after_update() -> tracedecay::errors::Result<()> {
-    match refresh_daemon_service()? {
+fn refresh_daemon_service_after_update(
+    previous_state: tracedecay::daemon::DaemonServiceState,
+) -> tracedecay::errors::Result<()> {
+    match refresh_daemon_service(previous_state)? {
         Some((service_path, socket_path)) => {
             eprintln!(
                 "\x1b[32m✔\x1b[0m Daemon service refreshed at {}",
@@ -97,7 +106,8 @@ fn refresh_daemon_service_after_update() -> tracedecay::errors::Result<()> {
 }
 
 pub(crate) fn restart_daemon_service() -> tracedecay::errors::Result<()> {
-    match refresh_daemon_service()? {
+    let _lifecycle_lease = tracedecay::lifecycle_lease::acquire_exclusive("daemon restart")?;
+    match refresh_daemon_service(tracedecay::daemon::DaemonServiceState::RunningEnabled)? {
         Some((service_path, socket_path)) => {
             eprintln!(
                 "\x1b[32m✔\x1b[0m Daemon service restarted at {}",
@@ -213,10 +223,17 @@ pub(crate) fn run_update_command(
     no_heal: bool,
     no_reinstall: bool,
 ) -> tracedecay::errors::Result<()> {
+    let lifecycle_lease = tracedecay::lifecycle_lease::acquire_exclusive("update")?;
+    let lease_token = lifecycle_lease
+        .token()
+        .ok_or_else(|| tracedecay::errors::TraceDecayError::Config {
+            message: "update lifecycle lease did not provide an owner token".to_string(),
+        })?
+        .to_string();
     run_install_then_refresh(
         RefreshPolicy::Always,
         tracedecay::upgrade::run_upgrade,
-        |binary| run_post_update_subcommand(no_heal, no_reinstall, binary),
+        |binary| run_post_update_subcommand(no_heal, no_reinstall, binary, &lease_token),
     )
 }
 
@@ -224,10 +241,17 @@ pub(crate) fn run_upgrade_command(
     no_heal: bool,
     no_reinstall: bool,
 ) -> tracedecay::errors::Result<()> {
+    let lifecycle_lease = tracedecay::lifecycle_lease::acquire_exclusive("upgrade")?;
+    let lease_token = lifecycle_lease
+        .token()
+        .ok_or_else(|| tracedecay::errors::TraceDecayError::Config {
+            message: "upgrade lifecycle lease did not provide an owner token".to_string(),
+        })?
+        .to_string();
     run_install_then_refresh(
         RefreshPolicy::AfterInstall,
         tracedecay::upgrade::run_upgrade,
-        |binary| run_post_update_subcommand(no_heal, no_reinstall, binary),
+        |binary| run_post_update_subcommand(no_heal, no_reinstall, binary, &lease_token),
     )
 }
 
@@ -246,10 +270,14 @@ fn run_post_update_subcommand(
     no_heal: bool,
     no_reinstall: bool,
     installed: Option<&Path>,
+    lifecycle_lease_token: &str,
 ) -> tracedecay::errors::Result<()> {
     let tracedecay_bin = post_update_binary(installed)?;
     let mut command = std::process::Command::new(&tracedecay_bin);
-    command.arg("post-update");
+    command
+        .arg("post-update")
+        .arg("--lifecycle-lease-token")
+        .arg(lifecycle_lease_token);
     if no_heal {
         command.arg("--no-heal");
     }
@@ -329,10 +357,18 @@ pub(crate) async fn run_post_update_tasks(
     no_heal: bool,
     no_reinstall: bool,
 ) -> tracedecay::errors::Result<()> {
+    let previous_daemon_state = tracedecay::daemon::quiesce_installed_service_under_lease()?;
+    let mutation_result = run_post_update_mutations(no_heal, no_reinstall).await;
+    let restart_result = refresh_daemon_service_after_update(previous_daemon_state);
+    mutation_result?;
+    restart_result
+}
+
+async fn run_post_update_mutations(
+    no_heal: bool,
+    no_reinstall: bool,
+) -> tracedecay::errors::Result<()> {
     refresh_generated_plugins()?;
-    if let Err(error) = refresh_daemon_service_after_update() {
-        eprintln!("  \x1b[33mwarning:\x1b[0m daemon service refresh failed: {error}");
-    }
     if no_heal {
         eprintln!("Skipping post-update health pass (--no-heal).");
     } else {

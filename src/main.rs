@@ -595,7 +595,12 @@ async fn dispatch_command(command: Commands) -> tracedecay::errors::Result<()> {
         Commands::PostUpdate {
             no_heal,
             no_reinstall,
+            lifecycle_lease_token,
         } => {
+            let _lifecycle_lease = tracedecay::lifecycle_lease::acquire_exclusive_or_inherited(
+                "post-update",
+                lifecycle_lease_token.as_deref(),
+            )?;
             update_cmd::run_post_update_tasks(no_heal, no_reinstall).await?;
         }
         Commands::Channel { channel } => match channel {

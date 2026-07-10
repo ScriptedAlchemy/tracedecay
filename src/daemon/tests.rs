@@ -11,7 +11,78 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 #[cfg(unix)]
 use tokio::task::JoinHandle;
 
-use super::{DaemonClientIdentity, DaemonHandshake};
+use super::{DaemonClientIdentity, DaemonHandshake, DaemonLifecycle, drain_client_tasks};
+
+#[test]
+fn daemon_lifecycle_rejects_new_work_after_draining() {
+    let lifecycle = DaemonLifecycle::default();
+    assert!(lifecycle.accepting());
+
+    lifecycle.begin_draining();
+
+    assert!(!lifecycle.accepting());
+}
+
+#[tokio::test]
+async fn client_drain_timeout_aborts_and_joins_remaining_work() {
+    let mut clients = tokio::task::JoinSet::new();
+    clients.spawn(async {
+        std::future::pending::<()>().await;
+        Ok(())
+    });
+
+    let drained = drain_client_tasks(&mut clients, tokio::time::Duration::from_millis(5)).await;
+
+    assert!(!drained);
+    assert!(clients.is_empty());
+}
+
+#[tokio::test]
+async fn client_drain_waits_for_completed_work() {
+    let mut clients = tokio::task::JoinSet::new();
+    clients.spawn(async { Ok(()) });
+
+    let drained = drain_client_tasks(&mut clients, tokio::time::Duration::from_secs(1)).await;
+
+    assert!(drained);
+    assert!(clients.is_empty());
+}
+
+#[tokio::test]
+async fn persistent_idle_client_closes_on_draining_without_timeout() {
+    let lifecycle = DaemonLifecycle::default();
+    let idle_lifecycle = lifecycle.clone();
+    let mut clients = tokio::task::JoinSet::new();
+    clients.spawn(async move {
+        idle_lifecycle.wait_for_draining().await;
+        Ok(())
+    });
+
+    lifecycle.begin_draining();
+    let drained = drain_client_tasks(&mut clients, tokio::time::Duration::from_secs(1)).await;
+
+    assert!(drained);
+    assert!(lifecycle.try_enter().is_none());
+}
+
+#[tokio::test]
+async fn draining_waits_for_one_bounded_in_flight_request() {
+    let lifecycle = DaemonLifecycle::default();
+    let activity = lifecycle.try_enter().expect("request should start");
+    let mut clients = tokio::task::JoinSet::new();
+    clients.spawn(async move {
+        tokio::time::sleep(tokio::time::Duration::from_millis(5)).await;
+        drop(activity);
+        Ok(())
+    });
+
+    lifecycle.begin_draining();
+    let drained = drain_client_tasks(&mut clients, tokio::time::Duration::from_secs(1)).await;
+    lifecycle.wait_for_idle().await;
+
+    assert!(drained);
+    assert!(lifecycle.try_enter().is_none());
+}
 
 fn test_client_identity() -> DaemonClientIdentity {
     test_client_identity_for(PathBuf::from("/profiles/client"))

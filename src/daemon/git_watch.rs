@@ -32,11 +32,12 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use notify::{EventKind, RecursiveMode, Watcher};
 use tokio::sync::{Mutex, Notify, Semaphore};
+use tokio::task::JoinHandle;
 use tokio::time::Instant;
 
 use crate::config::SyncConfig;
@@ -209,6 +210,9 @@ struct GitWatcherInner {
     sync_semaphore: Arc<Semaphore>,
     /// Canonical project root → watch state. Also the backstop's project set.
     projects: Mutex<HashMap<PathBuf, Arc<WatchState>>>,
+    /// Single backstop scheduler task, owned so shutdown can cancel and join it.
+    backstop_task: Mutex<Option<JoinHandle<()>>>,
+    shutting_down: AtomicBool,
 }
 
 impl Default for GitWatcher {
@@ -229,6 +233,8 @@ impl GitWatcher {
                 enabled: false,
                 sync_semaphore: Arc::new(Semaphore::new(1)),
                 projects: Mutex::new(HashMap::new()),
+                backstop_task: Mutex::new(None),
+                shutting_down: AtomicBool::new(false),
             }),
         }
     }
@@ -246,6 +252,8 @@ impl GitWatcher {
                 enabled: true,
                 sync_semaphore: Arc::new(Semaphore::new(permits)),
                 projects: Mutex::new(HashMap::new()),
+                backstop_task: Mutex::new(None),
+                shutting_down: AtomicBool::new(false),
             }),
         }
     }
@@ -261,7 +269,7 @@ impl GitWatcher {
     /// Called once from `run_foreground_unix` after the engine is built. Safe to
     /// call on a disabled watcher (no-op).
     pub async fn spawn(&self, global_db_path: Option<PathBuf>) {
-        if !self.inner.enabled {
+        if !self.inner.enabled || self.inner.shutting_down.load(Ordering::Acquire) {
             return;
         }
         // Enumerate recently-seen code projects (most-recent first, capped).
@@ -284,15 +292,16 @@ impl GitWatcher {
         // Start the single backstop timer.
         let watcher = self.clone();
         let db_path = global_db_path.clone();
-        tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
             backstop::run(watcher, db_path).await;
         });
+        *self.inner.backstop_task.lock().await = Some(handle);
     }
 
     /// Lazily starts watching `project_root` if not already watched and under
     /// the project cap. Idempotent and cheap on the hot path (a map lookup).
     pub async fn ensure_watching(&self, project_root: &Path) {
-        if !self.inner.enabled {
+        if !self.inner.enabled || self.inner.shutting_down.load(Ordering::Acquire) {
             return;
         }
         let canonical = project_root
@@ -332,6 +341,29 @@ impl GitWatcher {
             "git_watch_started",
             &[("project", canonical.display().to_string())],
         );
+    }
+
+    /// Stops every watcher-owned task and joins it before database shutdown.
+    pub async fn shutdown(&self) {
+        if !self.inner.enabled || self.inner.shutting_down.swap(true, Ordering::AcqRel) {
+            return;
+        }
+
+        if let Some(handle) = self.inner.backstop_task.lock().await.take() {
+            handle.abort();
+            let _ = handle.await;
+        }
+
+        let states: Vec<Arc<WatchState>> = {
+            let mut projects = self.inner.projects.lock().await;
+            projects.drain().map(|(_, state)| state).collect()
+        };
+        for state in states {
+            if let Some(handle) = state.task.lock().await.take() {
+                handle.abort();
+                let _ = handle.await;
+            }
+        }
     }
 
     /// A doctor-facing snapshot of every registered project's watch health.
@@ -482,7 +514,13 @@ fn classify_and_mark(state: &Arc<WatchState>, event: &notify::Event) {
             let s = path.to_string_lossy();
             if let Some(idx) = s.find("/refs/heads/") {
                 let branch = &s[idx + "/refs/heads/".len()..];
-                if !branch.is_empty() {
+                // Git creates `<ref>.lock` beside a branch ref while updating
+                // it. The sidecar is not a branch and may disappear before
+                // the debounce drain, so never enqueue it for catch-up sync.
+                let is_lock_sidecar = std::path::Path::new(branch)
+                    .extension()
+                    .is_some_and(|extension| extension.eq_ignore_ascii_case("lock"));
+                if !branch.is_empty() && !is_lock_sidecar {
                     dirty.branches.insert(branch.to_string());
                 }
                 if is_remove {

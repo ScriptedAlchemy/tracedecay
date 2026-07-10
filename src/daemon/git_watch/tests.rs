@@ -53,6 +53,33 @@ fn ref_event_marks_branch_and_delete_marks_gc() {
 }
 
 #[test]
+fn ref_lock_sidecar_does_not_become_a_branch() {
+    let state = Arc::new(WatchState {
+        project_root: PathBuf::from("/repo"),
+        dirty: Mutex::new(DirtySet::default()),
+        wake: Notify::new(),
+        health: ProjectHealth::default(),
+        task: Mutex::new(None),
+        entered_debounce: Notify::new(),
+        drained_plans: AtomicU64::new(0),
+        plan_drained: Notify::new(),
+    });
+    let event = notify::Event {
+        kind: EventKind::Create(notify::event::CreateKind::File),
+        paths: vec![PathBuf::from("/repo/.git/refs/heads/codex/topic.lock")],
+        attrs: EventAttributes::new(),
+    };
+
+    classify_and_mark(&state, &event);
+
+    let dirty = state
+        .dirty
+        .try_lock()
+        .expect("dirty set should be unlocked");
+    assert!(dirty.branches.is_empty(), "git lock sidecars are not refs");
+}
+
+#[test]
 fn heartbeat_staleness() {
     let fresh = ProjectHealthSnapshot {
         last_heartbeat: now_secs(),
@@ -170,6 +197,24 @@ async fn disabled_watcher_never_registers() {
     assert!(!watcher.is_enabled());
     watcher.ensure_watching(repo.path()).await;
     assert!(watcher.health_report().await.is_empty());
+}
+
+#[tokio::test]
+async fn shutdown_cancels_and_joins_watcher_tasks() {
+    let repo = temp_repo();
+    let profile = tempfile::tempdir().unwrap();
+    let mut config = fast_watch_config();
+    config.backstop_interval_mins = 1;
+    let watcher = GitWatcher::new(config);
+    watcher.spawn(Some(profile.path().join("global.db"))).await;
+    watcher.ensure_watching(repo.path()).await;
+    let state = ready_registered_state(&watcher, repo.path()).await;
+
+    watcher.shutdown().await;
+
+    assert!(watcher.inner.projects.lock().await.is_empty());
+    assert!(state.task.lock().await.is_none());
+    assert!(watcher.inner.backstop_task.lock().await.is_none());
 }
 
 /// The safety-critical property that justifies this metadata watcher over the

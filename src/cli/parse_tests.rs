@@ -258,14 +258,16 @@ fn update_and_post_update_parse_no_heal_flag() {
         post_update.command,
         Some(Commands::PostUpdate {
             no_heal: true,
-            no_reinstall: false
+            no_reinstall: false,
+            lifecycle_lease_token: None,
         })
     ));
     assert!(matches!(
         post_update_default.command,
         Some(Commands::PostUpdate {
             no_heal: false,
-            no_reinstall: false
+            no_reinstall: false,
+            lifecycle_lease_token: None,
         })
     ));
 }
@@ -320,7 +322,8 @@ fn upgrade_update_and_post_update_parse_no_reinstall_flag() {
         post_update.command,
         Some(Commands::PostUpdate {
             no_heal: false,
-            no_reinstall: true
+            no_reinstall: true,
+            lifecycle_lease_token: None,
         })
     ));
 

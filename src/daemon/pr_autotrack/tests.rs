@@ -1,5 +1,19 @@
 use super::*;
 
+#[tokio::test]
+async fn spawned_loop_is_cancellable_and_joinable() {
+    let profile = tempfile::tempdir().unwrap();
+    let handle = spawn(Some(profile.path().join("global.db")));
+
+    handle.abort();
+
+    assert!(
+        tokio::time::timeout(Duration::from_secs(1), handle)
+            .await
+            .is_ok()
+    );
+}
+
 // ---- Pure discovery parsers -------------------------------------------------
 
 #[test]
