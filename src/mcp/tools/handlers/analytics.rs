@@ -4,9 +4,9 @@
 //! without querying `.tracedecay` databases directly. Reuses the same
 //! durable-analytics service functions the `tracedecay analytics
 //! diagnostics` CLI and dashboard analytics API use
-//! ([`crate::global_db::GlobalDb::query_analytics_events`],
-//! [`crate::dashboard::analytics_api::durable_analytics_event_row`],
-//! [`crate::dashboard::analytics_api::hint_summary_from_events`],
+//! ([`crate::global_db::GlobalDb::query_analytics_tool_counts`],
+//! [`crate::global_db::GlobalDb::query_analytics_hint_counts`],
+//! [`crate::dashboard::analytics_api::hint_summary_from_counts`],
 //! [`crate::automation::run_ledger::load_run_records`]) rather than
 //! re-implementing queries against those tables.
 
@@ -17,7 +17,7 @@ use serde_json::{Value, json};
 
 use crate::automation::run_ledger::load_run_records;
 use crate::errors::{Result, TraceDecayError};
-use crate::global_db::{AnalyticsEventQuery, AnalyticsEventRecord, GlobalDb};
+use crate::global_db::{AnalyticsToolCounts, GlobalDb};
 use crate::timeutil::parse_rfc3339_timestamp;
 use crate::tracedecay::TraceDecay;
 use crate::tracedecay::current_timestamp;
@@ -26,8 +26,6 @@ use super::super::{ToolResult, renderers};
 use super::memory::open_target_memory_db;
 use super::support::{project_registry_context, tool_json_with_md};
 
-/// Bound on how many `analytics_events` rows a single call will scan.
-const EVENT_SAMPLE_LIMIT: usize = 10_000;
 /// Bound on how many automation run-ledger rows a single call will scan.
 const AUTOMATION_RECORD_LIMIT: usize = 200;
 /// Top-N tools shown by call volume.
@@ -307,18 +305,10 @@ pub(super) async fn handle_analytics(
     .await?;
 
     let since = current_timestamp().saturating_sub(window_days.saturating_mul(86_400));
-    let events = gdb
-        .query_analytics_events(&AnalyticsEventQuery {
-            provider: None,
-            project_id: scope.filter.clone(),
-            session_id: None,
-            event_kind: None,
-            since: Some(since),
-            limit: EVENT_SAMPLE_LIMIT,
-        })
+    let event_count = gdb
+        .count_analytics_events(scope.filter.as_deref(), since)
         .await
         .map_err(config_error)?;
-    let event_truncated = events.len() >= EVENT_SAMPLE_LIMIT;
 
     let mut value = json!({
         "status": "ok",
@@ -327,21 +317,25 @@ pub(super) async fn handle_analytics(
         "project_root": scope.display_root,
         "window_days": window_days,
         "since": since,
-        "event_count": events.len(),
-        "event_count_truncated": event_truncated,
+        "event_count": event_count,
+        "event_count_truncated": false,
     });
 
     if wants_section(section, "tools") {
+        let counts = gdb
+            .query_analytics_tool_counts(scope.filter.as_deref(), since)
+            .await
+            .map_err(config_error)?;
         if let Some(object) = value.as_object_mut() {
-            object.insert("tools".to_string(), tools_section(&events));
+            object.insert("tools".to_string(), tools_section(&counts));
         }
     }
     if wants_section(section, "hints") {
-        let rows: Vec<Value> = events
-            .iter()
-            .map(crate::dashboard::analytics_api::durable_analytics_event_row)
-            .collect();
-        let hints = crate::dashboard::analytics_api::hint_summary_from_events(&rows);
+        let counts = gdb
+            .query_analytics_hint_counts(scope.filter.as_deref(), since)
+            .await
+            .map_err(config_error)?;
+        let hints = crate::dashboard::analytics_api::hint_summary_from_counts(&counts);
         if let Some(object) = value.as_object_mut() {
             object.insert("hints".to_string(), hints);
         }
@@ -364,20 +358,12 @@ pub(super) async fn handle_analytics(
     }))
 }
 
-fn tools_section(events: &[AnalyticsEventRecord]) -> Value {
+fn tools_section(rows: &[AnalyticsToolCounts]) -> Value {
     let mut per_tool: BTreeMap<String, ToolCallCounts> = BTreeMap::new();
-    for event in events {
-        if event.event_kind != "mcp_tool_call" {
-            continue;
-        }
-        let Some(tool_name) = event.tool_name.as_deref().filter(|name| !name.is_empty()) else {
-            continue;
-        };
-        let counts = per_tool.entry(tool_name.to_string()).or_default();
-        counts.calls += 1;
-        if event.outcome.as_deref() == Some("error") {
-            counts.errors += 1;
-        }
+    for row in rows {
+        let counts = per_tool.entry(row.tool_name.clone()).or_default();
+        counts.calls += row.calls;
+        counts.errors += row.errors;
     }
 
     let mut per_tier: BTreeMap<&'static str, ToolCallCounts> = BTreeMap::new();
@@ -426,7 +412,7 @@ fn tools_section(events: &[AnalyticsEventRecord]) -> Value {
         zero_call.into_iter().take(ZERO_CALL_SAMPLE_LIMIT).collect();
 
     json!({
-        "available": !events.is_empty(),
+        "available": !rows.is_empty(),
         "tiers": tiers,
         "top_tools": top_tools,
         "distinct_tools_called": per_tool.len(),

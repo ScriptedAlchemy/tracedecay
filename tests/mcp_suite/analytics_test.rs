@@ -4,7 +4,7 @@
 
 use serde_json::{Value, json};
 
-use tracedecay::global_db::{AnalyticsEventInsert, GlobalDb};
+use tracedecay::global_db::{AnalyticsEventInsert, GlobalDb, global_db_path};
 use tracedecay::mcp::handle_tool_call;
 use tracedecay::tracedecay::current_timestamp;
 
@@ -41,6 +41,29 @@ fn tool_call_event(
         hint_category: None,
         hint_id: None,
         outcome: Some(outcome.to_string()),
+        metadata_json: None,
+    }
+}
+
+fn hint_event(
+    project_id: &str,
+    event_kind: &str,
+    outcome: Option<&str>,
+    timestamp: i64,
+) -> AnalyticsEventInsert {
+    AnalyticsEventInsert {
+        provider: "codex".to_string(),
+        project_id: project_id.to_string(),
+        session_id: Some("hint-session".to_string()),
+        timestamp,
+        event_kind: event_kind.to_string(),
+        hook_name: Some("PostToolUse".to_string()),
+        tool_name: None,
+        tool_category: None,
+        skill_name: None,
+        hint_category: Some("search".to_string()),
+        hint_id: Some("hint-search-1".to_string()),
+        outcome: outcome.map(str::to_string),
         metadata_json: None,
     }
 }
@@ -244,4 +267,83 @@ async fn analytics_degrades_gracefully_for_a_zero_data_project() {
         text.contains("No MCP tool calls recorded"),
         "expected an empty-state note in markdown: {text}"
     );
+}
+
+#[tokio::test]
+async fn analytics_aggregates_sections_before_any_event_sample_cap() {
+    let (cg, _env) = crate::mcp_handler_test::setup_project().await;
+    let project_id = GlobalDb::canonical_project_key(cg.project_root());
+    let timestamp = current_timestamp() - 60;
+    let gdb = GlobalDb::open()
+        .await
+        .expect("isolated test global db should open");
+
+    let events = vec![
+        hint_event(&project_id, "hint_emitted", None, timestamp),
+        hint_event(&project_id, "hint_outcome", Some("acted"), timestamp),
+        hint_event(&project_id, "suppressed_duplicate", None, timestamp),
+        tool_call_event(&project_id, "tracedecay_grep", "ok", timestamp),
+    ];
+    gdb.append_analytics_events(&events)
+        .await
+        .expect("seeding a busy analytics window should succeed");
+    let db = libsql::Builder::new_local(global_db_path().expect("test global DB path"))
+        .build()
+        .await
+        .expect("open test global DB directly");
+    let conn = db.connect().expect("connect test global DB");
+    conn.execute(
+        "WITH RECURSIVE seq(n) AS (
+             VALUES(0)
+             UNION ALL
+             SELECT n + 1 FROM seq WHERE n < 100
+         )
+         INSERT INTO analytics_events
+             (provider, project_id, session_id, timestamp, event_kind, hook_name, outcome)
+         SELECT 'codex', ?1, 'busy-session', ?2, 'hook_completed', 'PostToolUse', 'observed'
+         FROM seq AS left_seq CROSS JOIN seq AS right_seq
+         LIMIT 10001",
+        libsql::params![project_id.as_str(), timestamp],
+    )
+    .await
+    .expect("seed more than ten thousand unrelated newer events");
+
+    let hint_response = handle_tool_call(
+        &cg,
+        "tracedecay_analytics",
+        json!({"section": "hints", "format": "json"}),
+        None,
+        None,
+    )
+    .await
+    .expect("hint analytics should succeed");
+    let hints = extract_json(&hint_response.value);
+    assert_eq!(hints["event_count"].as_i64(), Some(10_005));
+    assert_eq!(hints["event_count_truncated"].as_bool(), Some(false));
+    let search = hints["hints"]["by_category"]
+        .as_array()
+        .expect("hint categories")
+        .iter()
+        .find(|row| row["category"] == "search")
+        .expect("search hint category");
+    assert_eq!(search["emitted"].as_i64(), Some(1));
+    assert_eq!(search["followed"].as_i64(), Some(1));
+    assert_eq!(search["suppressed"].as_i64(), Some(1));
+
+    let tool_response = handle_tool_call(
+        &cg,
+        "tracedecay_analytics",
+        json!({"section": "tools", "format": "json"}),
+        None,
+        None,
+    )
+    .await
+    .expect("tool analytics should succeed");
+    let tools = extract_json(&tool_response.value);
+    assert_eq!(tools["tools"]["distinct_tools_called"].as_i64(), Some(1));
+    assert_eq!(
+        tools["tools"]["top_tools"][0]["tool_name"],
+        "tracedecay_grep"
+    );
+    assert_eq!(tools["tools"]["top_tools"][0]["calls"].as_i64(), Some(1));
 }

@@ -370,6 +370,29 @@ async fn open_at_upgrades_existing_global_db_with_analytics_events_table() {
     assert_eq!(events.len(), 1);
     assert_eq!(events[0].id, id);
     assert_eq!(events[0].hook_name.as_deref(), Some("post-tool-use"));
+
+    let verify_db = libsql::Builder::new_local(&db_path).build().await.unwrap();
+    let verify_conn = verify_db.connect().unwrap();
+    let mut index_rows = verify_conn
+        .query(
+            "SELECT COUNT(*) FROM sqlite_master
+             WHERE type = 'index'
+               AND name IN ('idx_analytics_events_project_time', 'idx_analytics_events_timestamp')",
+            (),
+        )
+        .await
+        .unwrap();
+    let index_count = index_rows
+        .next()
+        .await
+        .unwrap()
+        .unwrap()
+        .get::<i64>(0)
+        .unwrap();
+    assert_eq!(
+        index_count, 2,
+        "analytics aggregate indexes must migrate on open"
+    );
 }
 
 #[tokio::test]

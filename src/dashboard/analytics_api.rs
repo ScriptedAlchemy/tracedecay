@@ -14,7 +14,7 @@ use crate::analytics::{
     ToolUsageObservation, UsageKind, categorize_skill, infer_usage_events,
     underused_tool_family_signals,
 };
-use crate::global_db::{AnalyticsEventQuery, AnalyticsEventRecord, GlobalDb};
+use crate::global_db::{AnalyticsEventQuery, AnalyticsEventRecord, AnalyticsHintCounts, GlobalDb};
 
 use super::DashboardState;
 use super::util::{i64_field, query_i64, query_rows, str_field};
@@ -251,6 +251,37 @@ pub(crate) fn hint_summary_from_events(events: &[Value]) -> Value {
         }
     }
 
+    json!({
+        "available": true,
+        "source": "analytics_events",
+        "by_category": by_category.into_iter().map(|(category, counts)| {
+            json!({
+                "category": category,
+                "emitted": counts.emitted,
+                "followed": counts.followed,
+                "ignored": counts.ignored,
+                "suppressed": counts.suppressed,
+            })
+        }).collect::<Vec<_>>(),
+    })
+}
+
+pub(crate) fn hint_summary_from_counts(counts: &[AnalyticsHintCounts]) -> Value {
+    let mut by_category: BTreeMap<String, HintCounts> = HINT_CATEGORIES
+        .iter()
+        .map(|category| ((*category).to_string(), HintCounts::default()))
+        .collect();
+    for row in counts {
+        by_category.insert(
+            row.category.clone(),
+            HintCounts {
+                emitted: row.emitted,
+                followed: row.followed,
+                ignored: row.ignored,
+                suppressed: row.suppressed,
+            },
+        );
+    }
     json!({
         "available": true,
         "source": "analytics_events",

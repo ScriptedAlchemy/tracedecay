@@ -99,6 +99,22 @@ pub struct AnalyticsEventRecord {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AnalyticsToolCounts {
+    pub tool_name: String,
+    pub calls: i64,
+    pub errors: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AnalyticsHintCounts {
+    pub category: String,
+    pub emitted: i64,
+    pub followed: i64,
+    pub ignored: i64,
+    pub suppressed: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionToolUsageRow {
     pub tool_names: String,
     pub text: String,
@@ -566,6 +582,26 @@ fn push_optional_analytics_filter(
         values.push(Value::Text(value.to_string()));
         clauses.push(format!("{column} = ?{}", values.len()));
     }
+}
+
+fn analytics_scope_query(
+    select: &str,
+    project_id: Option<&str>,
+    since: i64,
+    fixed_clauses: &[&str],
+) -> (String, Vec<Value>) {
+    let mut sql = select.to_string();
+    let mut clauses = fixed_clauses
+        .iter()
+        .map(|clause| (*clause).to_string())
+        .collect::<Vec<_>>();
+    let mut values = Vec::new();
+    push_optional_analytics_filter(&mut clauses, &mut values, "project_id", project_id);
+    values.push(Value::Integer(since));
+    clauses.push(format!("timestamp >= ?{}", values.len()));
+    sql.push_str(" WHERE ");
+    sql.push_str(&clauses.join(" AND "));
+    (sql, values)
 }
 
 fn row_to_code_project(row: &libsql::Row, offset: i32) -> Option<CodeProjectRecord> {
@@ -1076,6 +1112,10 @@ impl GlobalDb {
                 ON analytics_events(provider, project_id, session_id, timestamp);
             CREATE INDEX IF NOT EXISTS idx_analytics_events_kind
                 ON analytics_events(event_kind, timestamp);
+            CREATE INDEX IF NOT EXISTS idx_analytics_events_project_time
+                ON analytics_events(project_id, timestamp);
+            CREATE INDEX IF NOT EXISTS idx_analytics_events_timestamp
+                ON analytics_events(timestamp);
             CREATE TABLE IF NOT EXISTS sessions (
                 provider TEXT NOT NULL,
                 session_id TEXT NOT NULL,
@@ -2807,6 +2847,131 @@ impl GlobalDb {
         }
         events.reverse();
         Ok(events)
+    }
+
+    pub async fn count_analytics_events(
+        &self,
+        project_id: Option<&str>,
+        since: i64,
+    ) -> Result<i64, String> {
+        let (sql, values) = analytics_scope_query(
+            "SELECT COUNT(*) FROM analytics_events",
+            project_id,
+            since,
+            &[],
+        );
+        let mut rows = self
+            .conn
+            .query(&sql, libsql::params_from_iter(values))
+            .await
+            .map_err(|e| format!("failed to count analytics events: {e}"))?;
+        let Some(row) = rows
+            .next()
+            .await
+            .map_err(|e| format!("failed to read analytics event count: {e}"))?
+        else {
+            return Ok(0);
+        };
+        row.get::<i64>(0)
+            .map_err(|e| format!("failed to decode analytics event count: {e}"))
+    }
+
+    pub async fn query_analytics_tool_counts(
+        &self,
+        project_id: Option<&str>,
+        since: i64,
+    ) -> Result<Vec<AnalyticsToolCounts>, String> {
+        let (mut sql, values) = analytics_scope_query(
+            "SELECT tool_name,
+                    COUNT(*) AS calls,
+                    SUM(CASE WHEN outcome = 'error' THEN 1 ELSE 0 END) AS errors
+             FROM analytics_events",
+            project_id,
+            since,
+            &[
+                "event_kind = 'mcp_tool_call'",
+                "tool_name IS NOT NULL",
+                "tool_name <> ''",
+            ],
+        );
+        sql.push_str(" GROUP BY tool_name ORDER BY calls DESC, tool_name");
+        let mut rows = self
+            .conn
+            .query(&sql, libsql::params_from_iter(values))
+            .await
+            .map_err(|e| format!("failed to query analytics tool counts: {e}"))?;
+        let mut counts = Vec::new();
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|e| format!("failed to read analytics tool counts: {e}"))?
+        {
+            counts.push(AnalyticsToolCounts {
+                tool_name: row
+                    .get::<String>(0)
+                    .map_err(|e| format!("failed to decode analytics tool name: {e}"))?,
+                calls: row
+                    .get::<i64>(1)
+                    .map_err(|e| format!("failed to decode analytics tool calls: {e}"))?,
+                errors: row
+                    .get::<i64>(2)
+                    .map_err(|e| format!("failed to decode analytics tool errors: {e}"))?,
+            });
+        }
+        Ok(counts)
+    }
+
+    pub async fn query_analytics_hint_counts(
+        &self,
+        project_id: Option<&str>,
+        since: i64,
+    ) -> Result<Vec<AnalyticsHintCounts>, String> {
+        let (mut sql, values) = analytics_scope_query(
+            "SELECT hint_category,
+                    SUM(CASE WHEN event_kind IN ('hint_emitted', 'hint_escalated', 'missing_session') THEN 1 ELSE 0 END) AS emitted,
+                    SUM(CASE WHEN event_kind = 'hint_outcome' AND LOWER(TRIM(COALESCE(outcome, ''))) = 'acted' THEN 1 ELSE 0 END) AS followed,
+                    SUM(CASE WHEN event_kind = 'hint_outcome' AND LOWER(TRIM(COALESCE(outcome, ''))) = 'ignored' THEN 1 ELSE 0 END) AS ignored,
+                    SUM(CASE WHEN event_kind LIKE 'suppressed_%' THEN 1 ELSE 0 END) AS suppressed
+             FROM analytics_events",
+            project_id,
+            since,
+            &[
+                "hint_category IS NOT NULL",
+                "hint_category <> ''",
+                "(event_kind IN ('hint_emitted', 'hint_escalated', 'missing_session', 'hint_outcome') OR event_kind LIKE 'suppressed_%')",
+            ],
+        );
+        sql.push_str(" GROUP BY hint_category ORDER BY hint_category");
+        let mut rows = self
+            .conn
+            .query(&sql, libsql::params_from_iter(values))
+            .await
+            .map_err(|e| format!("failed to query analytics hint counts: {e}"))?;
+        let mut counts = Vec::new();
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|e| format!("failed to read analytics hint counts: {e}"))?
+        {
+            counts.push(AnalyticsHintCounts {
+                category: row
+                    .get::<String>(0)
+                    .map_err(|e| format!("failed to decode analytics hint category: {e}"))?,
+                emitted: row
+                    .get::<i64>(1)
+                    .map_err(|e| format!("failed to decode analytics emitted count: {e}"))?,
+                followed: row
+                    .get::<i64>(2)
+                    .map_err(|e| format!("failed to decode analytics followed count: {e}"))?,
+                ignored: row
+                    .get::<i64>(3)
+                    .map_err(|e| format!("failed to decode analytics ignored count: {e}"))?,
+                suppressed: row
+                    .get::<i64>(4)
+                    .map_err(|e| format!("failed to decode analytics suppressed count: {e}"))?,
+            });
+        }
+        Ok(counts)
     }
 
     pub async fn session_tool_usage_rows(
