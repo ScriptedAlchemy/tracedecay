@@ -73,7 +73,7 @@ impl TraceDecay {
 
         // Mirror replace_symbol's span semantics but ALWAYS include the leading
         // doc-comment / attribute block: a moved item carries its own docs.
-        let start = target.attrs_start_line as usize;
+        let mut start = target.attrs_start_line as usize;
         let end_inclusive = (target.end_line as usize).min(src_lines.len().saturating_sub(1));
         if start >= src_lines.len() || start > end_inclusive {
             return Ok(fail(
@@ -85,6 +85,14 @@ impl TraceDecay {
                 ),
                 Vec::new(),
             ));
+        }
+        // A contiguous leading `//!` inner module-doc line (no blank line before
+        // the item) can never belong to the moved item — inner docs attach to the
+        // enclosing module, not the following item. If `attrs_start_line` picked
+        // up such a line, advance past it so the source keeps its module doc and
+        // the destination doesn't receive a stray `//!` mid-file (a hard E0753).
+        while start < end_inclusive && src_lines[start].trim_start().starts_with("//!") {
+            start += 1;
         }
         let moved_text = src_lines[start..=end_inclusive].join("\n");
 
@@ -123,9 +131,21 @@ impl TraceDecay {
 
         // Dependency + import analysis: what the moved body needs at the
         // destination, and which of those we can auto-insert unambiguously.
-        let dest_original = std::fs::read_to_string(self.project_root.join(&dest_rel))
-            .ok()
-            .unwrap_or_default();
+        // Read the destination, distinguishing "does not exist yet" (a fresh
+        // destination file) from "exists but unreadable" (e.g. non-UTF8). Only
+        // the former is treated as empty; an unreadable existing file must refuse
+        // rather than be silently clobbered.
+        let dest_abs = self.project_root.join(&dest_rel);
+        let (dest_original, dest_existed) = match std::fs::read_to_string(&dest_abs) {
+            Ok(text) => (text, true),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => (String::new(), false),
+            Err(e) => {
+                return Ok(fail(
+                    format!("failed to read destination {dest_rel}: {e}"),
+                    Vec::new(),
+                ));
+            }
+        };
         let dest_module = rust_module_path(&dest_rel);
         let src_module = rust_module_path(&source_rel);
         let analysis = self
@@ -191,7 +211,6 @@ impl TraceDecay {
 
         // Apply: write the destination first (the symbol now exists in both
         // places — recoverable), then remove it from the source. Reindex both.
-        let dest_abs = self.project_root.join(&dest_rel);
         if let Some(parent) = dest_abs.parent() {
             std::fs::create_dir_all(parent).map_err(|e| TraceDecayError::Config {
                 message: format!("failed to create destination directory: {e}"),
@@ -203,11 +222,29 @@ impl TraceDecay {
                 message: format!("failed to write {dest_rel}: {e}"),
             })?;
         if let Err(e) = tokio::fs::write(&source_abs, &source_modified).await {
-            // Best-effort rollback of the destination so we don't leave a
-            // duplicate behind on a half-applied move.
-            let _ = tokio::fs::write(&dest_abs, &dest_original).await;
+            // Roll back so a half-applied move leaves no trace. If the
+            // destination existed before, restore its original bytes; if we
+            // created it, delete it (and any now-empty parent dirs we created)
+            // rather than leaving an empty file behind.
+            if dest_existed {
+                let _ = tokio::fs::write(&dest_abs, &dest_original).await;
+            } else {
+                let _ = tokio::fs::remove_file(&dest_abs).await;
+                let mut dir = dest_abs.parent().map(Path::to_path_buf);
+                while let Some(d) = dir {
+                    if d == self.project_root {
+                        break;
+                    }
+                    // `remove_dir` removes only empty dirs and errors otherwise,
+                    // so this naturally stops at the first non-empty ancestor.
+                    if std::fs::remove_dir(&d).is_err() {
+                        break;
+                    }
+                    dir = d.parent().map(Path::to_path_buf);
+                }
+            }
             return Err(TraceDecayError::Config {
-                message: format!("failed to write {source_rel}: {e}; destination restored"),
+                message: format!("failed to write {source_rel}: {e}; destination rolled back"),
             });
         }
         self.reindex_file(&dest_rel).await?;
@@ -240,12 +277,29 @@ impl TraceDecay {
         } else {
             PathBuf::from(dest_file)
         };
-        if rel.components().any(|c| matches!(c, Component::ParentDir)) {
-            return Err(TraceDecayError::Config {
-                message: "destination path must not contain '..'".to_string(),
-            });
+        // Canonicalize the relative path BEFORE the equality guard and collision
+        // check compare it: reject `..` escapes and drop `.` (CurDir) components,
+        // rebuilding from `Component::Normal` parts only. Without this a
+        // `./src/pricing.rs` destination compares unequal to the graph's
+        // normalized `src/pricing.rs`, slipping past the same-file guard and the
+        // collision check — the apply would then write and truncate the very same
+        // inode, silently deleting the symbol.
+        let mut normalized = PathBuf::new();
+        for comp in rel.components() {
+            match comp {
+                Component::Normal(part) => normalized.push(part),
+                Component::ParentDir => {
+                    return Err(TraceDecayError::Config {
+                        message: "destination path must not contain '..'".to_string(),
+                    });
+                }
+                // Drop `.` (CurDir) so `./x` canonicalizes to `x`, and drop any
+                // root/prefix components (they cannot survive `strip_prefix`
+                // above) rather than embed them in a relative path.
+                Component::CurDir | Component::RootDir | Component::Prefix(_) => {}
+            }
         }
-        let s = rel.to_string_lossy().replace('\\', "/");
+        let s = normalized.to_string_lossy().replace('\\', "/");
         if s.is_empty() {
             return Err(TraceDecayError::Config {
                 message: "destination path is empty".to_string(),
@@ -822,6 +876,14 @@ fn insert_imports(dest_source: &str, imports: &[String]) -> String {
     let mut idx = 0;
     while idx < lines.len() {
         let t = lines[idx].trim();
+        // Stop before an OUTER doc-comment block (`///` or `/**`): it documents
+        // the first item, and inserting a `use` between the doc and its item
+        // detaches the doc. Inner docs (`//!`) and plain comments (`//`) stay in
+        // the header region. Check `///`/`/**` first since `///` also matches the
+        // generic `//` prefix below.
+        if t.starts_with("///") || t.starts_with("/**") {
+            break;
+        }
         let header = t.is_empty()
             || t.starts_with("//!")
             || t.starts_with("//")
@@ -870,11 +932,18 @@ fn cfg_context_hints(moved_text: &str, dest_rel: &str) -> Vec<MoveHint> {
     for (idx, raw) in moved_text.lines().enumerate() {
         let t = raw.trim();
         if t.starts_with("#[cfg(") || t.starts_with("#[cfg_attr(") {
+            // The gate's offset is within the moved snippet, not a real line in
+            // the destination file — reporting it as `line` (which every other
+            // hint uses for a concrete file site) points at nothing. Leave `line`
+            // unset and describe the moved-span offset in the detail instead.
             out.push(MoveHint {
                 kind: "cfg_context".to_string(),
                 file: dest_rel.to_string(),
-                line: Some((idx + 1) as u32),
-                detail: format!("moved item is gated by `{t}`"),
+                line: None,
+                detail: format!(
+                    "moved item is gated by `{t}` (at line {} of the moved span)",
+                    idx + 1
+                ),
                 suggestion: Some(
                     "confirm the destination module builds under the same cfg".to_string(),
                 ),
@@ -1072,6 +1141,52 @@ mod tests {
             &["use crate::X;".to_string()],
         );
         assert_eq!(out, "//! module doc\n\nuse crate::X;\nfn a() {}\n");
+    }
+
+    #[test]
+    fn insert_imports_keeps_outer_doc_attached_to_first_item() {
+        // An outer doc-comment (`///`) documents the first item; the `use` must
+        // NOT be wedged between the doc and its `pub fn`.
+        let out = insert_imports(
+            "/// Docs for other.\npub fn other() {}\n",
+            &["use crate::X;".to_string()],
+        );
+        assert_eq!(
+            out,
+            "use crate::X;\n/// Docs for other.\npub fn other() {}\n"
+        );
+        // The doc line stays immediately above the item.
+        let lines: Vec<&str> = out.lines().collect();
+        let doc = lines
+            .iter()
+            .position(|l| l.trim() == "/// Docs for other.")
+            .unwrap();
+        assert_eq!(lines[doc + 1].trim(), "pub fn other() {}");
+    }
+
+    #[test]
+    fn insert_imports_stops_before_outer_block_doc() {
+        let out = insert_imports(
+            "/** Block doc. */\npub fn other() {}\n",
+            &["use crate::X;".to_string()],
+        );
+        assert_eq!(out, "use crate::X;\n/** Block doc. */\npub fn other() {}\n");
+    }
+
+    #[test]
+    fn cfg_context_hint_reports_moved_span_offset_not_dest_line() {
+        let moved = "#[cfg(feature = \"x\")]\npub fn gated() {}\n";
+        let hints = cfg_context_hints(moved, "src/dest.rs");
+        assert_eq!(hints.len(), 1);
+        assert_eq!(hints[0].kind, "cfg_context");
+        // `line` must be unset — the offset is within the snippet, not a real
+        // destination line.
+        assert_eq!(hints[0].line, None, "hint: {:?}", hints[0]);
+        assert!(
+            hints[0].detail.contains("moved span"),
+            "detail should describe the moved-span offset: {}",
+            hints[0].detail
+        );
     }
 
     /// Mirror `analyze_dependencies`' scan: mask comments/strings (preserving

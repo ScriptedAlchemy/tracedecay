@@ -16806,3 +16806,193 @@ async fn test_move_symbol_first_in_file_docs_travel() {
         "destination must carry the doc and fn: {b:?}"
     );
 }
+
+/// Ship-blocker (silent data loss): a `./`-prefixed destination that resolves to
+/// the symbol's OWN file must be refused. Before the normalization fix,
+/// `./src/pricing.rs` slipped past the same-file guard (it compared unequal to
+/// the graph's `src/pricing.rs`), and the apply then wrote-then-truncated the
+/// same inode, deleting the symbol while returning success.
+#[tokio::test]
+async fn test_move_symbol_dot_prefixed_same_file_refuses() {
+    let dir = test_temp_dir();
+    let project = dir.path();
+    move_pricing_fixture(project).await;
+    let (cg, _env) = init_test_project(project).await;
+    cg.index_all().await.unwrap();
+
+    let before_pricing = fs::read_to_string(project.join("src/pricing.rs")).unwrap();
+    let result = handle_tool_call(
+        &cg,
+        "tracedecay_move_symbol",
+        json!({ "symbol": "compute_grand_total", "dest_file": "./src/pricing.rs", "dry_run": false }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let p = move_payload(&result);
+    assert_eq!(
+        p["success"], false,
+        "`./`-prefixed same-file move must refuse: {p}"
+    );
+    assert!(
+        p["message"].as_str().unwrap().contains("symbol's own file"),
+        "refusal must be the same-file error: {p}"
+    );
+    // The symbol is untouched — no silent deletion.
+    assert_eq!(
+        fs::read_to_string(project.join("src/pricing.rs")).unwrap(),
+        before_pricing,
+        "source file must be byte-identical after the refusal"
+    );
+}
+
+/// A `./`-prefixed different-file destination must behave identically to the
+/// unprefixed form: the path is normalized, the move applies, and the reported
+/// `dest_file` is the canonical `src/grand_total.rs`.
+#[tokio::test]
+async fn test_move_symbol_dot_prefixed_dest_normalizes() {
+    let dir = test_temp_dir();
+    let project = dir.path();
+    move_pricing_fixture(project).await;
+    let (cg, _env) = init_test_project(project).await;
+    cg.index_all().await.unwrap();
+
+    let result = handle_tool_call(
+        &cg,
+        "tracedecay_move_symbol",
+        json!({ "symbol": "compute_grand_total", "dest_file": "./src/grand_total.rs", "dry_run": false }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let p = move_payload(&result);
+    assert_eq!(p["success"], true, "payload: {p}");
+    assert_eq!(
+        p["dest_file"], "src/grand_total.rs",
+        "dest_file must be normalized (no `./`): {p}"
+    );
+    // The move actually landed at the canonical path.
+    let dest = fs::read_to_string(project.join("src/grand_total.rs")).unwrap();
+    assert!(dest.contains("pub fn compute_grand_total"), "dest: {dest}");
+    let pricing = fs::read_to_string(project.join("src/pricing.rs")).unwrap();
+    assert!(
+        !pricing.contains("pub fn compute_grand_total"),
+        "source must have lost the symbol: {pricing}"
+    );
+}
+
+/// Ship-blocker (span correctness): a contiguous leading `//!` inner module-doc
+/// (no blank line before the item) must NOT be swallowed into the moved span.
+/// Otherwise the source loses its module doc and the destination gets a stray
+/// `//!` mid-file (a hard E0753).
+#[tokio::test]
+async fn test_move_symbol_leaves_contiguous_module_doc_behind() {
+    let dir = test_temp_dir();
+    let project = dir.path();
+    fs::create_dir_all(project.join("src")).unwrap();
+    fs::write(project.join("src/lib.rs"), "pub mod a;\npub mod b;\n").unwrap();
+    // Module doc is contiguous with the first item — no blank line between.
+    fs::write(
+        project.join("src/a.rs"),
+        "//! module a doc\npub fn fact() -> u32 {\n    1\n}\n",
+    )
+    .unwrap();
+    fs::write(
+        project.join("src/b.rs"),
+        "//! b\n\npub fn other() -> u32 {\n    0\n}\n",
+    )
+    .unwrap();
+    let (cg, _env) = init_test_project(project).await;
+    cg.index_all().await.unwrap();
+
+    let result = handle_tool_call(
+        &cg,
+        "tracedecay_move_symbol",
+        json!({ "symbol": "fact", "dest_file": "src/b.rs", "dry_run": false }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let p = move_payload(&result);
+    assert_eq!(p["success"], true, "payload: {p}");
+    // The moved span never carries the inner module doc.
+    let span = p["moved_span"].as_str().unwrap();
+    assert!(
+        !span.contains("//!"),
+        "moved span must not swallow the module doc: {span:?}"
+    );
+    assert!(span.contains("pub fn fact"), "span: {span:?}");
+
+    // Source keeps its module doc; destination has no stray `//!` mid-file.
+    let a = fs::read_to_string(project.join("src/a.rs")).unwrap();
+    assert!(
+        a.contains("//! module a doc"),
+        "source must keep its module doc: {a:?}"
+    );
+    let b = fs::read_to_string(project.join("src/b.rs")).unwrap();
+    assert!(b.contains("pub fn fact"), "dest must carry the fn: {b:?}");
+    // The only `//!` in the destination is its own leading module doc (line 0).
+    let stray_inner_doc = b
+        .lines()
+        .enumerate()
+        .any(|(i, l)| i > 0 && l.trim_start().starts_with("//!"));
+    assert!(
+        !stray_inner_doc,
+        "destination must not gain a mid-file `//!`: {b:?}"
+    );
+}
+
+/// Minor (destination read safety): an existing-but-unreadable destination
+/// (non-UTF8) must be refused with a clear message, never treated as empty and
+/// clobbered.
+#[tokio::test]
+async fn test_move_symbol_non_utf8_destination_refuses() {
+    let dir = test_temp_dir();
+    let project = dir.path();
+    fs::create_dir_all(project.join("src")).unwrap();
+    fs::write(project.join("src/lib.rs"), "pub mod a;\n").unwrap();
+    fs::write(
+        project.join("src/a.rs"),
+        "//! a\n\npub fn movable() -> u32 {\n    1\n}\n",
+    )
+    .unwrap();
+    let (cg, _env) = init_test_project(project).await;
+    cg.index_all().await.unwrap();
+
+    // Write an existing destination with invalid UTF-8 bytes AFTER indexing so
+    // the indexer never has to parse it.
+    let dest = project.join("src/blob.rs");
+    fs::write(&dest, [0xff, 0xfe, 0x00, 0xff]).unwrap();
+    let before_dest = fs::read(&dest).unwrap();
+
+    let result = handle_tool_call(
+        &cg,
+        "tracedecay_move_symbol",
+        json!({ "symbol": "movable", "dest_file": "src/blob.rs", "dry_run": false }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let p = move_payload(&result);
+    assert_eq!(
+        p["success"], false,
+        "unreadable destination must refuse: {p}"
+    );
+    assert!(
+        p["message"]
+            .as_str()
+            .unwrap()
+            .contains("failed to read destination"),
+        "refusal message must name the read failure: {p}"
+    );
+    // The destination is untouched — not clobbered with the moved symbol.
+    assert_eq!(
+        fs::read(&dest).unwrap(),
+        before_dest,
+        "unreadable destination must be left byte-identical"
+    );
+}
