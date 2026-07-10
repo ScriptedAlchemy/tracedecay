@@ -1,0 +1,332 @@
+# TraceDecay V2 Search Quality, Evaluation, and Retrieval Plan
+
+> **For implementation agents:** Search quality claims require a versioned corpus, qrels, frozen cutoff, competing baselines, per-stratum metrics, latency/resource measurements, and inspected regressions. “Added embeddings” is not a result.
+
+**Goal:** Make message/session/Turn/agent/workflow/Git/code/memory/automation retrieval precise enough to supply useful context on the first page across TraceDecay's real local multi-project history while preserving exact technical search, privacy, explanations, stable retrieval IDs, temporal correctness, and calibrated no-result behavior.
+
+**Decision:** Keep exact phrase/BM25 as the mandatory baseline. Evaluate character-fuzzy, entity/graph, local dense, learned-sparse, fusion, late interaction, cross-encoder reranking, expansion, recency, clustering, and diversification as independently removable stages. No neural component becomes default without measured real-world gains.
+
+**Publication baseline (2026-07-10):** `origin/master` `66584b4d`; #410/#411/#413/#414/#415/#416/#417/#419 merged, #407/#418/#420 open. Refresh before corpus freeze. Treat #410 origin/representative views, #414/#419 `move_symbol` capability/safety text, and #417 split identity as current searchable kinds; split identity is a hard wrong-scope/unsafe-remediation regression, not “no index.” Include #420 proxy/store-authority wording as an exact routing hard negative.
+
+## 0. Boundary and contract integration
+
+- Plan 01 owns the exact `ScopeSelectorV2`, canonical entity IDs, domain `RetrievalAnchorId`/`RetrievalAnchorRecordV1`, evidence/provenance, time, sensitivity, and retention types. Search does not define `project_key`, `ScopeExpr`, `retrieval_ref`, or a ranking-only anchor.
+- Plans 04–05 own typed search documents, representative clusters, candidate execution, fusion/ranking, distributed cursor, coverage, and explain. This plan supplies evaluation contracts and promotion gates; it does not become a second query engine.
+- Plan 16 supplies cross-repository resolver/routing semantics and the Rspack/Rsbuild/React Router scope corpus. Search consumes the canonical resolved selector and preserves repository/worktree/ref/snapshot identity; it never repairs a wrong scope after retrieval.
+- Plan 09 is the sole application boundary for universal search, benchmark/evaluation reads, label/corpus commands, and Search Quality Lab composition. Plan 10/17 expose those use cases through the one official API/catalog/generated SDK contract; plan 11 visualizes the same results.
+- Plan 18 is authoritative for sanitizer/taint wrappers. Queries enter evaluation as protected refs or `Unclassified<T>` that are sanitized before persistence; candidates, qrels, summaries, embeddings, explanations, reports, problems, and exports contain only eligible wrappers or explicit redacted/unknown states.
+- Search replay and corpus evaluation are read-only. Creating/updating a private qrel, promoting a synthetic fixture, or activating a retrieval profile is a separate typed command with preview, expected version, sanitization receipt, audit, and rollback.
+
+## 1. Current supported-surface probe
+
+The 2026-07-10 probe used `tracedecay tool message_search --catch-up false` over the live local store:
+
+| Query | Useful behavior | Failure |
+|---|---|---|
+| Exact disk-full/non-SQLite corruption phrase | Found the exact user issue. | Prior tool command containing the query ranked first; copied assistant delegation also preceded/duplicated source evidence. |
+| Paraphrased “storage corrupted because volume ran out of space during indexing” | Recalled many disk/build/cache failures. | The exact graph-store corruption case did not appear in top ten; topical vocabulary dominated intent. |
+| Exact doctor/foreign-installation/update-refuses phrase | Found exact issue, implementation, and review context. | Workflow/delegation/implementation copies diluted the direct user evidence. |
+| Paraphrased impossible-remediation query | Found related doctor/skill traffic. | Mixed exact issue with unrelated health, install, and task-notification rows. |
+| Conceptual accidental duplicate-agent work query | Found useful shared-worktree/parallel-agent cases. | Repeated copied sessions and generic worktree results lowered precision. |
+| Misspelled hint/subagent query | Found current exact misspelled request. | This was effectively a self-match and does not establish general fuzzy quality. |
+
+Conclusion: current search is valuable forensic discovery for rare literals, but not yet a dependable best-context retriever. Exact technical recall must be preserved while improving origin/type precision, semantic paraphrase, diversity, temporal correctness, and abstention.
+
+## 2. Primary research and applied decisions
+
+- [Okapi at TREC-3 / BM25](https://www.microsoft.com/en-us/research/publication/okapi-at-trec-3/) — retain a fast, interpretable lexical baseline; identifiers, errors, paths, tool names, and quoted text strongly favor exact lexical evidence.
+- [Dense Passage Retrieval](https://arxiv.org/abs/2004.04906) — evaluate dense recall for paraphrases against strong BM25; do not assume semantic superiority.
+- [SPLADE v2](https://arxiv.org/abs/2109.10086) — test learned sparse expansion as an optional local semantic channel with inverted-index behavior and inspectable terms.
+- [Reciprocal Rank Fusion](https://plg.uwaterloo.ca/~gvcormac/cormacksigir09-rrf.pdf) — use deterministic RRF as the first robust hybrid baseline before learned fusion.
+- [Passage Re-ranking with BERT](https://arxiv.org/abs/1901.04085) — cross-encode only a bounded candidate set; measure precision gain versus latency/memory.
+- [ColBERT](https://arxiv.org/abs/2004.12832) and [ColBERTv2](https://arxiv.org/abs/2112.01488) — benchmark late interaction as an optional middle point; index footprint and local inference cost are release gates.
+- [Document Expansion by Query Prediction](https://arxiv.org/abs/1904.08375) — expansion may reduce vocabulary mismatch, but generated terms are versioned/explained and never quoted as source evidence.
+- [ANCE](https://arxiv.org/abs/2007.00808) — mine hard negatives from real high-scoring false positives, wrong projects/times, copied prompts, and rejected results rather than random rows alone.
+- [Maximal Marginal Relevance](https://aclanthology.org/X98-1025/) — diversify repeated turns/summaries/sessions while preserving distinct evidence.
+- [HippoRAG](https://arxiv.org/abs/2405.14831) and [G-Retriever](https://arxiv.org/abs/2402.07630) — typed bounded graph expansion can recover multi-hop context; unrestricted GraphRAG is not the default.
+- [BEIR](https://arxiv.org/abs/2104.08663) — heterogeneous domains vary materially; report project/provider/query-stratum results rather than one mean.
+- [TREC relevance judgments](https://trec.nist.gov/data/reljudge_eng.html) and [pooled versus sampled judgments](https://www.nist.gov/publications/comparison-pooled-and-sampled-relevance-judgments) — pool candidates from every system and add sampled negatives to reduce evaluation bias.
+- [Optimized Interleaving](https://www.microsoft.com/en-us/research/wp-content/uploads/2013/02/Radlinski_Optimized_WSDM2013.pdf.pdf) — use explicit UI interleaving only after offline/shadow safety; automatic hint contexts need stricter replay/A-B guardrails.
+
+## 3. Retrieval document and identity model
+
+Index separate typed grains instead of flattening all content into one FTS row:
+
+- Native message/content part and representative message cluster.
+- Turn with start context, user/agent exchange, tools, visible reasoning artifacts, goal/work-claim state, and output.
+- Session/thread summary with exact source ranges/coverage.
+- Agent instance, goal/task/work claim, workflow run/phase/agent, and handoff.
+- Git ref/commit/diff/PR/check/review/release evidence.
+- Code file/symbol/snapshot/diagnostic/test/impact evidence.
+- Fact/version/entity/decision/contradiction/retrieval/feedback.
+- Automation job/run/artifact/proposal/skill/version/outcome.
+
+Every result carries a domain `RetrievalAnchorId` resolving to `RetrievalAnchorRecordV1`, plus stable canonical/native aliases, resolved `ScopeSelectorV2`/repository/worktree/ref/snapshot identity, project/profile/privacy owner, provider, occurred/ingested/valid time, origin/audience/kind, source range, representative/hidden-row membership, index/model version, evidence class, sanitization/redaction state, and coverage. Summary/embedding documents never replace source IDs or become the sole anchor.
+
+## 4. Versioned candidate pipeline
+
+### 4.1 Query understanding
+
+- Preserve quoted phrases, exact IDs, error text, paths, symbols, API/tool/config names, and case-sensitive literals.
+- Normalize Unicode and punctuation with visible tokenizer/version.
+- Resolve provider/tool/project/branch/PR/session/agent/goal aliases into candidate entities without removing original tokens.
+- Detect explicit time, scope, audience/origin, result kind, exact-versus-conceptual, and no-answer intent.
+- Generate optional spelling/fuzzy/expansion terms as separate explained channels; never alter quoted evidence.
+
+### 4.2 Recall channels
+
+1. Exact ID/native alias and exact phrase.
+2. Field-weighted FTS5 BM25 over typed fields.
+3. Character n-gram/edit-distance fuzzy channel for typos and partial identifiers.
+4. Entity/event/goal/tool/Git/code indexes.
+5. Agent/session/work-claim/relation graph seeds and bounded typed expansion.
+6. Summary DAG documents with source coverage and retained-time limits.
+7. Optional privacy-domain local dense representation.
+8. Optional learned-sparse/SPLADE representation.
+9. Explicit recency/time-distance feature only when query/time profile warrants it.
+
+Each channel returns a bounded candidate list with channel rank/score, matching fields/terms/entities, index watermark, truncation, and latency.
+
+### 4.3 Fusion, noise control, and diversity
+
+- Start with deterministic RRF over declared channels. Learned fusion is a later ablation requiring feature/version explanation.
+- Cluster copied parent prompts, provider protocol/tool echoes, same-content cross-store rows, summary/source lineage, and repeated assistant status messages.
+- Select representative by requested audience/origin/kind and evidence quality; report hidden counts and exact sanitized-native expansion.
+- Penalize the active query/tool command echo, inventory listings, protocol notifications, and same-session repetition unless requested explicitly.
+- Preserve exact identifier/phrase hits before semantic diversification.
+- Apply bounded MMR/session-project-provider-agent diversity so ten near-identical children do not occupy the page.
+- Use typed project/time/privacy constraints before ranking; do not ask a reranker to repair unsafe scope.
+
+### 4.4 Bounded reranking
+
+- Compare no reranker, local cross-encoder, and ColBERT-style late interaction over a fixed top-N pool.
+- Inputs include query, typed result grain, safe content slice, entity/evidence features, time/scope, and cluster metadata.
+- Secret-classified or locked content uses lexical/entity-only mode unless an explicitly authorized local model/index exists in the same privacy domain.
+- Missing model or timeout falls back to the declared pre-rerank order with reason; it never returns a silently shorter set.
+
+### 4.5 Bounded graph expansion
+
+- Expand only high-confidence lexical/semantic/entity seeds.
+- Legal relation kinds, direction, evidence class, confidence floor, time window, depth, node/edge budget, and privacy frontier are explicit.
+- Multi-hop results explain the path. A graph neighbor is not relevant merely because it is connected.
+- Agent proximity uses current `AgentPresence`/`WorkClaim`; historical search uses versioned events, not live state.
+
+## 5. Real local multi-project evaluation corpus
+
+The private qrel store belongs to the active profile and is never committed. A redacted/synthetic subset plus aggregate metrics is checked in.
+
+### 5.1 Query sources
+
+- Actual later human prompts that refer to an earlier issue, plan, session, PR, worktree, decision, fact, tool, or agent.
+- Explicit “find/recall/show/go back to” requests and later corrections when the wrong session/project was returned.
+- Search reformulations and abandoned queries.
+- Successful retrieval-to-action sequences where the user/agent opened an anchor and continued relevant work.
+- Agent duplication/coordination cases, branch/PR context, diagnostics, memory, automation, hints, provider integration, dashboard, and release incidents.
+- Synthetic/adversarial variants: misspellings, abbreviations, renamed projects, old aliases, exact error/API strings, paraphrase, negation, expected no result, wrong-project near match, wrong-time superseded evidence.
+
+For a query at time `t`, the candidate corpus is frozen to records whose allowed ingest/observation cutoff is `< t`. Later messages, summaries, labels, branches, or outcomes cannot leak into retrieval features.
+
+### 5.2 Strata and holdouts
+
+- Every registered project with sufficient data; small projects are grouped only for reporting, not omitted silently.
+- Codex, Claude, Cursor, Hermes, and other supported provider families.
+- Human/direct-user, subagent/delegated, assistant, tool-result, provider-protocol, summary, and unknown origin.
+- Exact identifier/literal, phrase, typo, conceptual/paraphrase, temporal, cross-project, multi-hop, Git/PR, code/symbol, memory/fact, automation/skill, hint/tool-routing, nearby-agent, and no-result query.
+- Recent versus old evidence, short versus long content, single versus many candidate sessions, healthy versus partial/retained/locked shard.
+
+Use chronological train/dev/test splits plus full holdout of selected projects, providers, and later time blocks. Frozen test judgments are never used to tune weights, prompts, expansion, models, or thresholds.
+
+### 5.3 Candidate pooling and hard negatives
+
+- Pool top 20 from current search, exact/BM25, fuzzy, dense, learned sparse, RRF, graph, expansion, late-interaction, and cross-encoder variants.
+- Add stratified random candidates to reduce pooling bias.
+- Add hard negatives: same terms/wrong project, same project/wrong time, copied child prompt, current query/tool echo, superseded fact, observed-not-produced commit, nearby but disjoint agent, stale summary, protocol row, and same title/different session.
+- Version the pool. New systems add candidates and new judgments without rewriting prior qrels.
+
+### 5.4 Judgment contract
+
+Label each query-result pair:
+
+- `0 misleading_or_irrelevant`.
+- `1 topical_but_not_actionable`.
+- `2 useful_context`.
+- `3 decisive_or_smallest_sufficient_anchor`.
+
+Also label duplicate/echo/protocol noise, wrong project/provider/time/origin, stale/superseded, privacy-ineligible, relation/evidence requirement, and whether the result enables the next action. Record the smallest sufficient anchor grain: message, Turn, session, agent, goal, work claim, workflow, commit/PR, fact, code entity, or evidence bundle.
+
+A substantial stratified subset is independently double-labeled. Report raw agreement and an ordinal agreement statistic; adjudicate disagreement while retaining both labels/rationales. Ambiguous cases remain distributions/unknown, not forced truth.
+
+## 6. Metrics
+
+### Retrieval quality
+
+- Precision@1/3/5.
+- Recall@10/20.
+- MRR and first-useful rank.
+- nDCG@10 using 0–3 grades.
+- Correct abstention/no-answer accuracy and calibration.
+- Success within configured result/token/byte budget.
+- Judged coverage and unjudged rate.
+
+### Product correctness
+
+- Duplicate/echo/protocol-noise rate.
+- Wrong-project, wrong-provider, wrong-time, stale/superseded rates.
+- Project/provider/session/agent diversity after exact-hit preservation.
+- Retrieval-ID resolution validity and exact sanitized-native expansion.
+- Useful-project coverage and privacy/redaction correctness.
+- First-useful latency and bytes/tokens returned.
+
+### Operational cost
+
+- p50/p95/p99 stage and end-to-end latency.
+- CPU time, peak RSS, model load/warmup, index size, build/update lag, shard opens, and cache hit.
+- Query cancellation and fallback latency.
+- Per-privacy-domain representation bytes and rebuild time.
+
+Report macro and micro results, confidence intervals, every primary stratum, and the worst project/provider/query class. Aggregate improvement cannot hide a material regression in exact IDs, no-answer, privacy, or a low-volume provider.
+
+## 7. Offline, shadow, and online evaluation
+
+### 7.1 Frozen offline gates
+
+- Current production search is baseline A.
+- Fielded BM25/phrase/origin filtering is baseline B.
+- Every added channel has an ablation and resource profile.
+- Exact ID and exact phrase Precision@1/Recall cannot regress beyond an explicitly reviewed case.
+- Candidate default must improve predeclared Precision@3, nDCG@10, first-useful rank, and duplicate rate on dev and untouched test, with no material worst-stratum/privacy/no-answer regression.
+
+### 7.2 Rolling local evaluation
+
+- Maintain frozen regression, rolling recent, project holdout, provider holdout, temporal holdout, and adversarial typo/identifier/no-result sets.
+- Mine hard negatives from opened-then-rejected results, reformulations, ignored/incorrect hints, explicit corrections, duplicate sessions, wrong project/time, and newer evidence that superseded a stale result.
+- Refresh rolling sets under versioned cutoff; never edit frozen judgments to improve a score.
+
+### 7.3 Shadow evidence
+
+- Candidate rankers run against real eligible queries without changing delivered results/context.
+- Store ranked stable IDs, explanations, resource cost, and coverage—not sensitive query text in analytics.
+- Compare chosen/expanded/loaded anchors, later actions, reformulation, abandonment, and corrections as weak evidence requiring calibration/manual judgment.
+
+### 7.4 Controlled online comparison
+
+- Randomized interleaving is allowed only in explicit Search/Explorer UI with opt-in telemetry and reversible assignment.
+- Automatic hook/hint retrieval uses historical replay and shadow first, then a narrow A/B with strict relevance/repetition/token/latency/correction guardrails.
+- Never explore aggressively inside agent prompts or silently change the historical context of an in-progress workflow.
+- Helpful/unhelpful labels and result actions are feedback events, not direct training truth.
+
+## 8. Search Quality Lab
+
+Inputs:
+
+- Exact historical query/Turn anchor or sanitized synthetic query.
+- Frozen corpus cutoff, projects/providers/origins/kinds/time/privacy.
+- Candidate retrieval profile, tokenizer/index/model/graph/ranker versions, and budgets.
+- Optional qrel/corpus version and compare profile.
+
+Outputs:
+
+- Query parse/normalization/expansion and resolved aliases/entities.
+- Per-channel candidates, scores/ranks/matches/watermarks/caps/latency.
+- Fusion, cluster/representative, diversity, graph path, rerank, exclusion, privacy, and fallback decisions.
+- Exact final ranked IDs with one-line reason and native expansion.
+- Per-query labels/metrics plus aggregate/per-stratum comparison and inspected regressions.
+- Equivalent CLI/MCP/HTTP request and deterministic aggregate/redacted evaluation receipt.
+
+Lab mode is read-only. Label/create-corpus/fixture promotion is a separately authorized command with stable anchors, secret scan, optimistic version, and audit.
+
+## 9. Implementation file plan
+
+Extend `crates/tracedecay-query/`:
+
+```text
+src/retrieval/
+  query_understanding.rs
+  exact.rs
+  bm25.rs
+  fuzzy.rs
+  entity.rs
+  graph.rs
+  summary.rs
+  dense.rs
+  learned_sparse.rs
+  fusion.rs
+  cluster.rs
+  diversity.rs
+  rerank.rs
+  explain.rs
+src/eval/
+  corpus.rs
+  cutoff.rs
+  pool.rs
+  qrels.rs
+  metrics.rs
+  strata.rs
+  agreement.rs
+  ablation.rs
+  report.rs
+```
+
+Companion ownership:
+
+- Projectors build typed search documents, representative clusters, entities, summaries, and relation indexes.
+- Store owns privacy-domain representation bytes/manifests and immutable eval artifacts.
+- Policy chooses an approved retrieval profile for hints/memory/coordination; it does not execute search.
+- Application owns Search/Explorer/lab/eval use cases and label commands.
+- API exposes `POST /api/v2/search`, `/search/benchmark`, `/labs/search-quality:replay`, and `/labs/search-quality:compare` plus generated types; CLI/MCP/SDK bindings derive from the same catalog entries.
+- Dashboard owns Search Quality Lab, qrel review, explanations, and aggregate charts/tables.
+
+## 10. PR sequence
+
+### PR 13A: Time-safe real-world eval harness and current baselines
+
+- Build private corpus/qrel schemas, stable anchors, time cutoff, strata, pooling, labels, metrics, agreement, aggregate/redacted reports.
+- Capture the six-query probe plus exact identifier, typo, no-answer, cross-project, provider, Git, memory, and nearby-agent fixtures.
+- Benchmark current production and fielded BM25 without changing default search.
+
+### PR 13B: Exact/phrase/BM25, origin/kind fields, self-echo, clustering
+
+- Implement query understanding, exact preservation, fielded BM25, origin/audience/kind filters, query/tool-echo penalty, representative cluster, hidden counts, rank explanation.
+- Prove native expansion and exact technical regression gates.
+
+### PR 13C: Fuzzy/typo and diversity
+
+- Add character channel, alias handling, MMR/session-project-provider diversity, adversarial typo corpus, and resource caps.
+
+### PR 14A: Optional dense and learned-sparse channels
+
+- Benchmark local dense and SPLADE-style candidates inside privacy domains; version model/dimension/tokenizer/index.
+- Keep both disabled by default until gates pass.
+
+### PR 14B: Hybrid fusion, bounded graph, and hard-negative loop
+
+- Add RRF profiles, typed bounded graph expansion, hard-negative mining, cross-project/provider/time holdouts, and ablations.
+
+### PR 14C: Optional late interaction/cross-encoder rerank
+
+- Compare no rerank, late interaction, and local cross-encoder on a bounded pool; include warm/cold/resource measurements and deterministic fallback.
+
+### PR 31J: Search Quality Lab and qrel review
+
+- Ship profile comparison, per-stage waterfall, labels/disagreement, metrics/strata/regressions, aggregate export, and fixture promotion.
+- Consume the shared plan 09 lab result and plan 10/17 generated client; do not add a dashboard-only evaluator, qrel store, scope parser, or replay endpoint.
+
+## 11. Verification commands and artifacts
+
+- `cargo test -p tracedecay-query --test retrieval_exact --test retrieval_fuzzy --test retrieval_hybrid`.
+- `cargo test -p tracedecay-query --test retrieval_cutoff --test retrieval_privacy --test retrieval_ids`.
+- `cargo test -p tracedecay-query --test retrieval_eval --test retrieval_agreement --test retrieval_ablation`.
+- `cargo bench -p tracedecay-query --bench retrieval_pipeline` on current and 10x manifest-derived corpora.
+- Search/API/frontend E2E for native expansion, explanation, no-answer, partial/locked shard, label command, lab no-write, and deterministic aggregate export.
+
+Every report records commit, corpus/qrel/cutoff, query/retrieval profile, tokenizer/index/model/ranker/graph versions, source watermarks, privacy mode, hardware, cold/warm state, and complete per-stratum metrics.
+
+## 12. Definition of done
+
+- Current exact search remains available, explainable, and non-regressed.
+- Real local cross-project queries are frozen, time-safe, privately judged, stratified, and reproducible by stable anchors.
+- The default profile beats lexical baselines on predeclared precision/usefulness metrics without hiding worst-stratum, no-answer, privacy, latency, or resource regressions.
+- Duplicate child prompts, protocol/tool/query echoes, wrong-project/time results, and stale summaries have explicit metrics and inspected regressions.
+- Embeddings, learned sparse, graph expansion, late interaction, expansion, recency, and reranking remain separately ablatable/removable.
+- Search Quality Lab explains one query and evaluates a corpus without mutating production search/usage counters.
+- Only redacted/synthetic fixtures and aggregate reports are committed; private messages/qrels remain local and protected.

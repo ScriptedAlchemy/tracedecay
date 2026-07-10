@@ -1,0 +1,2109 @@
+# TraceDecay Brain Rewrite and Product Redesign Implementation Plan
+
+> **For agentic workers:** REQUIRED SUB-SKILL: Use `superpowers:subagent-driven-development` or `superpowers:executing-plans` to implement this plan task-by-task. Every program PR below requires its own checked-in, code-level execution plan before implementation. Steps use checkbox (`- [ ]`) syntax for tracking.
+
+**Goal:** Defragment and rebuild TraceDecay as one elegant, scalable, extensible, local-first, cross-project intelligence system that can reconstruct, query, explain, visualize, replay, and improve the relationship between human intent, agent activity, code, Git, memory, policy, automation, cost, and outcomes.
+
+**Architecture:** One logical “TraceDecay Brain” over federated physical stores: a profile catalog, a profile activity/session shard, project evidence/projection shards, immutable code-snapshot generations, and privacy-domain-scoped content-addressed payload stores. One capture/sanitization/observation boundary and stable identity/evidence model feed projections that are rebuildable within the retained evidence horizon. One typed query engine, one policy/replay runtime, one generated capability catalog, and one application use-case layer serve thin CLI, MCP, official API/SDK, hook, dashboard, saved-view, and lab adapters.
+
+**Tech Stack:** Rust workspace; standard local SQLite semantics through a storage trait, initially implemented with `rusqlite`, FTS5, and WAL; privacy-domain-scoped content-addressed local blobs; optional local embeddings; Axum HTTP + SSE; React + TypeScript; the dashboard bundler selected by an explicit Rsbuild-versus-Vite ADR; Sigma.js/Graphology for large topology graphs; ECharts for quantitative views; Canvas/WebGL + D3 scales for dense timelines; CodeMirror 6 for message/code/diff inspection. Remote libSQL is a future adapter, not part of the first V2 default.
+
+**Detailed execution plans:** [`tracedecay-v2/00-plan-set-index.md`](tracedecay-v2/00-plan-set-index.md) owns the per-crate, root-migration, frontend, dependency, PR-order, and cross-plan verification map.
+
+## Global Constraints
+
+- Local-first, single-user operation remains the default. No required network service or hosted database.
+- “One brain” is a unified logical model and product, not one failure-prone monolithic database.
+- Every semantic responsibility has one canonical owner and generated/shared contract. V2 does not preserve parallel session/LCM, detector, query, scope, policy, status, error, command, renderer-state, or transport business-logic implementations.
+- Compatibility/anti-corruption adapters are time-bounded migration code with owners, parity tests, retirement gates, and deletion PRs; they cannot become a permanent second architecture.
+- Extensibility uses versioned typed SPIs and capability manifests with safety/resource constraints. New providers, detectors, projectors, rankers, policies, tools, and renderers plug into canonical pipelines rather than creating new stores/query stacks.
+- `All` is the default product scope. Projects are filters and ownership/privacy boundaries, not separate dashboard products.
+- No flag-day migration. V2 runs beside V1, imports and shadows it, proves parity, cuts over by bounded context, and retains rollback.
+- Sanitized observations are append-only and preserve all non-secret source semantics within their declared retention horizon. Secret spans are never copied into the observation; optional raw forensic retention is isolated/encrypted/short-lived. A non-content tombstone/provenance skeleton survives retention or deletion.
+- Derived data is versioned, provenance-bearing, rebuildable within the retained evidence horizon, and never silently treated as canonical.
+- Every relationship says how TraceDecay knows it: observed, provider-declared, user-declared, derived-exact, inferred, or heuristic.
+- Historical views never reconstruct hidden chain-of-thought. They show only provider-exposed reasoning summaries, user-visible rationale, actions, and evidence.
+- No secret-classified content enters FTS, vector indexes, facts, fixtures, exports, logs, or committed test corpora.
+- Every cross-project response reports searched, skipped, unavailable, stale, truncated, and redacted coverage.
+- `All` means the active TraceDecay profile by default. Additional profiles are federated only through explicit profile selection/collections and never mixed implicitly.
+- Canonical provider transcripts live in a profile activity/session shard because a session may touch zero, one, or many projects. Project shards own scoped projections and locators, not duplicate canonical messages.
+- Data migration and shadow parity are mandatory; stale live CLI/MCP/daemon/plugin protocols and obsolete tool names are not emulated after their domain cutover. Version mismatch fails with restart/update and the current replacement.
+- V1 stores remain read-only for one release after verified cutover. Deletion is an explicit later operation, never part of migration.
+- The plan PR contains only this master plan and its linked per-crate/frontend plan documents. Research exports remain untracked outside the repository.
+
+---
+
+## 1. Executive Decision
+
+TraceDecay has accumulated the pieces of an agent intelligence system, but those pieces are organized as storage and transport islands. Code graph, sessions, LCM, memory, analytics, hints, automation, workflows, Git correlation, response handles, and dashboard plugins each have useful local capabilities, yet they cannot answer a single joined question such as:
+
+> Starting from this user request, what did the parent agent and its subagents see, infer, retrieve, decide, invoke, change, test, commit, encounter in GitHub, teach TraceDecay, and affect downstream—and how certain is every link?
+
+The redesign will make that question native.
+
+The selected strategy is a strangler rewrite around four foundations:
+
+1. **Canonical identity:** stable entities and aliases across providers, projects, worktrees, branches, sessions, messages, agents, code snapshots, symbols, facts, artifacts, and delivery systems.
+2. **Immutable evidence:** observations, typed events, bitemporal relation assertions, provenance, confidence, sensitivity, and algorithm versions.
+3. **Shared query platform:** one bounded `TraceQueryV1` AST and application-service layer used by every transport and UI.
+4. **Unified investigation product:** one workbench with a global scope/time model, Brain, Explorer, Causal Timeline, domain workspaces, and deterministic replay labs.
+5. **Convergence governance:** one owner/contract per concept, strict crate dependency direction, generated transport/client/catalog bindings, extension SPIs, architecture lint, complexity budgets, parity receipts, and mandatory retirement of superseded paths.
+
+The rewrite will not copy every current table into a larger database or place every entity in a giant force graph. It will preserve physical isolation and use purpose-specific views over one evidence model.
+
+## 2. Evidence Base
+
+### 2.1 Live system snapshot
+
+The audit was run on 2026-07-09/10 UTC from a clean worktree created from and repeatedly refreshed against `origin/master`; the publication base is `66584b4d` at crate version 0.0.47, with release PR #418 still open to publish 0.0.48. Early store/analytics snapshots used installed TraceDecay 0.0.44; the latest planning probes used installed 0.0.46. During research, the live store continued ingesting sessions, so counts are snapshot values rather than timeless constants. The direct `project_list` snapshots before and after the early rebase both reported 25 repositories; concurrent audits observed 28–29 searched/registered scopes, reinforcing the requirement that inventories carry a timestamp, tool/runtime identity, catalog generation, runtime version, and watermark rather than presenting a drifting count as timeless.
+
+| Signal | Observed evidence | Design consequence |
+|---|---:|---|
+| Registered repositories returned by the project-list snapshot | 25 | `All` must be a first-class scope with shard pruning and partial coverage. |
+| Watched project roots reported by doctor | 36 | Registry, watcher, and store inventory need reconciliation, not separate truths. |
+| TraceDecay code graph | 36k+ nodes, 71k+ edges, 978 files | Graph scale is locally tractable, but cross-project rendering requires clustering and level of detail. |
+| Locally tracked TraceDecay branch graph stores | 14, commonly about 140–150 MB each in the inspected branch list | A physical database per branch multiplies nearly identical state; V2 needs immutable packed snapshots plus bounded overlays and ref pointers. |
+| Project LCM native-message rows (V1 table named `raw`) | at least 388,441 | V2 sanitizes before persistence; timeline/search/export must be cursor-based, virtualized, and server-aggregated. |
+| LCM summary nodes | 1,328+ | Summaries are derived lineage artifacts, not a separate source of truth. |
+| LCM estimated store tokens | about 12.5M | Query budgets, payload externalization, and visible truncation are product requirements. |
+| LCM compression ratio | 10.8:1 | Compression health is useful, but must link to exact source coverage and replay. |
+| Hook calls | 59,618 | Hooks are a high-volume event stream and need cheap append paths. |
+| MCP tool calls in sampled analytics | 522 | Hook-to-tool adoption is weak and must be measurable by category and session. |
+| Installed MCP-equivalent TraceDecay tool names | 102 at the frozen compatibility inventory | Capability exists but is hard to discover and scattered; one generated catalog must own use-case IDs and every transport binding. |
+| Hints emitted | 1,182 | Hint policy needs replay, explanation, and outcome attribution. |
+| Hint outcomes measured as acted | 3 | The current feedback loop is mostly unresolved and cannot support confident optimization. |
+| Analytics event sample | capped at 10,000 | Every list/aggregate API needs stable pagination and explicit cap semantics. |
+| Analytics `message_count` under `--all` | 0 while LCM contained 388k+ rows | Missing denominators must be `unknown`, not misleading zero ratios. |
+| Managed skills | 10 active | Skills, automation runs, adoption, and evidence belong in one observable lifecycle. |
+| Project automation config in the worktree | disabled; no runs | Profile/project scope must be explicit in every status surface. |
+| Current project memory-status snapshot | 0 facts | Memory scope and branch/project/profile ownership are currently easy to misread. |
+| Fact-store search | failed with `file is not a database` | Store routing, corruption isolation, partial results, and repair evidence must be visible. |
+| Doctor on the same checkout | reported active DB integrity as healthy | Every response must identify the exact store/shard/runtime used; “healthy” cannot be ambiguous. |
+| Project-list response | truncated without a retrieval handle | Structured APIs must paginate before renderer-level truncation. |
+
+### 2.2 Code-health snapshot
+
+`tracedecay tool health --args '{"details":true}'` reported:
+
+- Quality signal: **7,083 / 10,000** across 978 files.
+- Acyclicity: **0.50**, with 2,501 edges in nontrivial strongly connected components.
+- Equality: **0.38**, with complexity Gini around 0.62–0.69.
+- Depth: **1.0**; modularity: **1.0**; redundancy: **0.94**; coverage discipline: **1.0**.
+- Static test attribution around 45%, leaving thousands of reachable but unattributed functions.
+- High fan-in: `src/global_db.rs`, `src/storage.rs`, `src/agents/mod.rs`.
+- High fan-out: `src/mcp/server.rs` and MCP handler routers.
+- Major production files exceed 3,000–4,700 lines, including `src/global_db.rs`, `src/mcp/tools/definitions.rs`, `src/sessions/lcm/query.rs`, `src/mcp/server.rs`, and session/analysis handlers.
+- `McpServer` and `DashboardState` are broad composition structures with 38 and 20 fields respectively.
+
+These are not merely file-size problems. They show that persistence, application logic, transport rendering, project routing, and policy decisions are not separated by stable interfaces.
+
+### 2.3 User-intent evolution from LCM
+
+The supported LCM export recovered tens of thousands of chronological `role=user` rows across more than one thousand sessions between 2026-06-28 and 2026-07-09. A separate human-authored subset is required because Claude protocol tool-result rows are also stored as `role=user`.
+
+The evolution is coherent:
+
+1. **Operational foundation:** daemon visibility, telemetry, background curation, skills, memory, and automation must be continuously runnable rather than manual curiosities.
+2. **Self-introspection:** TraceDecay must inspect its own usage across projects and transcripts, measure whether agents use the right tools, and improve from real evidence.
+3. **Finish-the-loop automation:** work should progress from discovery through code, verification, PR, merge, release, local upgrade, and post-release health, with explicit state at every step.
+4. **Lossless agent history:** sessions, tool calls, reasoning summaries, goals, subagents, files, Git, and outcomes must remain queryable without relying on topical snippets.
+5. **Adaptive guidance:** hints, skills, memory, and tool discovery should be contextual, quiet when irrelevant, measurable, explainable, and testable against historical messages.
+6. **One global Brain:** the dashboard should stop reflecting storage silos and expose TraceDecay as one cross-project system with powerful visual investigation and replay interfaces.
+
+Repeated durable requirements:
+
+- Dogfood TraceDecay on TraceDecay using real work, not synthetic demonstrations alone.
+- Preserve complete inspectable history and exact technical evidence.
+- Navigate globally, then narrow to project/worktree/branch/session/agent/time.
+- Connect intent, agent behavior, code, delivery, memory, policy, and outcome.
+- Measure whether self-improvement mechanisms are actually adopted and helpful.
+- Make every automation and policy decision debuggable and replayable.
+
+### 2.4 Research limitation that becomes a product requirement
+
+The current public LCM surface cannot enumerate every session or perform a match-all role query. `lcm_grep` requires a text query, caps results at 100, and can disclose capped sessions without offering a complete cursor. The research export therefore had to recursively bisect time windows, union token-prefix searches, discover session IDs, then page `lcm_load_session` by stable store cursor.
+
+V2 must add:
+
+- `list_sessions(scope, role, provider, time, cursor)`.
+- `list_messages(scope, roles, kinds, provider, time, cursor)` with no text predicate.
+- Exact enumeration/export of all authorized retained sanitized session records for JSONL/Parquet with manifest, counts, hashes, privacy coverage, and redaction report; provider raw source remains locatable but is not copied when secret/retention policy forbids it.
+- Explicit separation of human-authored messages from provider protocol rows.
+- A snapshot watermark so an export can prove completeness while live ingest continues.
+
+The private research artifact set is stored outside Git at `/fast/tracedecay-redesign-research/`: 34,305 chronological native `role=user` records in `user-messages-chronological.jsonl`, a 9,941-record best-effort human-authored derivation in `human-messages-chronological.jsonl`, `manifest.json` with hashes/counts/caveats, and `intent-evolution.md`. All are mode `0600`. The frozen cutoff is 2026-07-09 23:15:42 UTC; live messages after it are intentionally excluded.
+
+### 2.5 Git-tool discovery failure is product evidence
+
+The redesign investigation itself exposed a failure in TraceDecay's guidance loop. The request explicitly concerned `master`, a new worktree, open PRs, branches, and prior implementation intent. The first pass still reached for generic shell/GitHub inspection and only used TraceDecay's semantic Git tools after the user challenged the omission. No hook hint routed the task toward the existing branch, PR-context, changelog, correlated-session, or workflow tools.
+
+After correction, the TraceDecay Git surface added useful evidence:
+
+- `branch_list` exposed the locally tracked branch graph inventory and its fallback/tracking state.
+- `pr_context` summarized changed symbols and architectural impact for every open PR branch.
+- `changelog` exposed commit-level semantic history, but returned a much broader merge-base range than the live GitHub changed-file view for some branches.
+- On PR #410, `pr_context` agreed on 16 directly changed files and the merge base, yet labeled thousands of transitive/file-level symbols as modified and emitted an extremely broad affected-test list. Direct diff facts, dependency impact, candidate tests, and low-confidence module fan-out need separate sections, counts, evidence, and caps.
+- `sessions_for` recovered correlated implementation sessions for the Hermes migration branch, but none for the legacy-store branch or the newly active PR #410 branch.
+- `workflows` found no correlated workflow records for those branches. Absence must render as named capture/index/coverage state, not proof that no agent or workflow participated.
+
+This is not merely operator error. V2 must make the right capability discoverable at the moment of need, explain when live remote state and local semantic state answer different questions, and measure when the user has to correct tool selection. Required consequences:
+
+- A Git-intent classifier for branch, worktree, commit, diff, PR, review, checks, release, blame, and historical-intent requests.
+- A generated tool catalog with compact task-to-tool routing hints, including when live GitHub state must be refreshed before semantic analysis.
+- Reconciliation metadata: local ref/merge base/indexed commit, remote head/fetched-at, fallback state, changed-file universe, and named disagreement between remote and semantic results.
+- Semantic Git results that distinguish `directly_changed`, `structurally_impacted`, `candidate_test`, and `context_only`; never describe fan-out expansion as a direct modification.
+- A `missed_capability` outcome when a relevant tool was neither suggested nor used, and a `human_correction` event when the user redirects the workflow.
+- Hint evaluation that credits useful silence but penalizes missing a high-confidence, high-value repository capability.
+
+### 2.6 Current-master and incoming future-master changes
+
+The plan treats merged fixes as required base semantics and assumes every open PR visible at the latest audit will merge. Implementation must not rediscover or regress them:
+
+| PR/status | Behavior | V2 consequence |
+|---|---|---|
+| `#405` merged — legacy identity-store adoption | Expands legacy identity-store discovery/adoption and lifecycle migration coverage. | Preserve aliases and adoption receipts in the catalog migration; never create a second canonical project because a legacy directory or hash moved. Import resolver fixtures into V2 identity/backfill conformance tests. |
+| `#406` merged — corrupt database recovery sets | Preserves corrupt database families instead of overwriting/destroying forensic recovery inputs. | Detect non-SQLite/corrupt/torn stores before open, quarantine the whole WAL/SHM/database family, preserve a signed recovery set, keep healthy shards available, and make repair preview/apply auditable. |
+| `#412` merged — safe daemon drain during upgrades | Serializes update/upgrade/doctor lifecycle, drains in-flight requests/background writers, checkpoints after writer stop, and preserves systemd/launchd stopped/disabled/masked state. | V2 needs one fenced lifecycle coordinator across daemon, store, watcher, updater, doctor, migration, backup, and service manager; no environment bypass or unconditional restart. |
+| `#407` open — Hermes user profile | Consolidates Hermes onto the user's active profile, removes Hermes-specific bridges/config/inventory, and migrates legacy Hermes project identities/facts. | Profile is the durable isolation boundary; Hermes is an actor/automation/tool identity inside it, not a parallel product silo. Migration must retain fact provenance and record moved identities without copying content across privacy domains silently. |
+| `#410` merged — collapse copied subagent prompts | Preserves native transcript rows, but adds query-time parent-representative dedupe and `direct_user`/`subagent`/`tool_result` filters across message search, LCM, CLI, and MCP. | V2 must preserve sanitized native rows and explicit message-origin classification while offering representative/human views with hidden-copy counts and provenance. Import its eight-child regression corpus and never make UI dedupe an irreversible ingest rule. |
+| `#411` merged — foreign-installation skills are info | Aligns doctor with the remove path so it does not prescribe `update` for project skill packages this installation refuses to delete. | Health/remediation uses one shared typed predicate with the command precondition; every finding declares owner, severity, safe action, whether automation can execute it, and proof that the advertised remediation is actually applicable. |
+| `#413` merged — release v0.0.46; `#416` merged — release v0.0.47 | Packages the audited storage/runtime/session/doctor/tool fixes into published release versions. | Record actual merge/release/catalog/schema versions in compatibility/import manifests; architecture must not depend on release-PR file layout or infer availability from source only. |
+| `#414` merged — `tracedecay_move_symbol` with impact report | Adds a semantic Git/code mutation capability after hardening against data loss and span defects. | Import into the generated capability catalog, effect/safety/preview/receipt inventory, API/CLI/MCP parity, Git-intent routing, and current-versus-live-ref conformance; no tool may bypass sanitizer/scope/application authorization. |
+| `#415` merged — release PR integrity guard | Adds CI enforcement around release PR integrity. | Release/publication is a generated-contract transaction: crate/package/API/SDK/catalog/schema/version artifacts must be mutually consistent and partial publication blocks. |
+| `#417` merged — doctor identity split visibility | Surfaces identity split conflicts rather than hiding competing legacy/selected stores. | Identity/store reconciliation is a first-class preview/apply/rollback application workflow; status names both authorities, evidence, serving refusal, and exact next action without destructive guessing. Import the live convergence-probe fixture from plan 19. |
+| `#418` open — release v0.0.48 | Packages merged move-symbol and foreign-skill ownership changes; the latest snapshot was open and `UNSTABLE`, so publication was not assumed complete. | Import the release only after merge/tag/package verification; record source commit, package version, catalog/schema digests, and partial-publication state. Do not infer runtime availability from an open generated release PR. |
+| `#419` merged — race-safe `move_symbol` writes | Rejects destination symlink escapes and same-file/hard-link aliases, revalidates both source/destination snapshots, uses atomic sibling renames, and avoids clobbering concurrent rollback edits. | Every V2 edit command carries exact source/destination identities and versions, revalidates immediately before commit, uses race-safe filesystem primitives, preserves legal in-project symlinks, and records rollback conflicts rather than overwriting concurrent work. |
+| `#420` open — proxy MCP before opening local stores | Chooses the managed-daemon proxy before resolving/opening local stores; reconnects one daemon connection per request across socket/PID replacement without replaying writes; schema changes still require a new host MCP session/tools list. | Root composition resolves proxy/local authority before any store side effect, delegates config-gated init to the daemon, never replays an uncertain write, and advertises typed reconnect-versus-restart/tool-catalog-refresh requirements. |
+
+PR `#409` was closed without merge and superseded by merged release PRs `#413`/`#416`; PR `#418` is the still-open 0.0.48 successor at the publication snapshot. Latest audited `origin/master` is `66584b4dbdee920204cbcf4cf42d0dbc308559e4`; the plan branch was rebased to exactly `0` ahead/`0` behind that commit before final verification. Open inputs were #407/#418/#420; merged base inputs include #415/#417/#419. The implementation lead must refresh open PRs, merge bases, changed files, checks, and TraceDecay semantic context immediately before starting each program phase. If GitHub and TraceDecay disagree, record both snapshots and reconcile index/ref freshness before changing the plan.
+
+### 2.7 Historical failure inventory
+
+The chronological message corpus, TraceDecay session search, semantic Git tools, and merged-PR history were mined for failures—not only desired features. [`tracedecay-v2/14-historical-failure-regression-matrix.md`](tracedecay-v2/14-historical-failure-regression-matrix.md) owns exact anchors and regression disposition. The recurring classes that shape V2 are:
+
+| Historical failure pattern | Representative evidence | Required V2 invariant |
+|---|---|---|
+| Store damage under disk-full/process death | Live graph DB became non-SQLite data; #406 recovery sets | Preflight capacity, atomic staged publication, integrity before replace/open, whole-family quarantine, no destructive self-heal, kill/disk-full matrix. |
+| Daemon/update/doctor concurrent I/O | #370 read-only doctor; #412 live WAL/background-writer upgrade race | Fenced lifecycle lease, drain/stop/checkpoint order, owned task registry, explicit service-state restoration, typed busy/unsafe refusal. |
+| Repository/worktree/store identity drift | Renamed checkout fallback #269; persistent identity/worktree isolation #371; #405 | Canonical repository identity, durable aliases/adoption receipts, worktree/ref as views, conflict quarantine, no path-hash identity split. |
+| Private append/lock races and platform semantics | #323 JSONL append locking; #328 Windows ledger handles; #399 private lock mode | One writer/lease owner, private creation at first syscall, cross-platform lock conformance, fsync/ack levels, bounded spool/retry. |
+| Global backfill invalidation and process races | #374 process-safe sweep; #387 per-provider marker versions | Per-source/provider/parser checkpoints and generations; one adapter change cannot reparse every provider or reset unrelated offsets. |
+| Missing or duplicated structured agent evidence | #325/#348/#350/#352/#372/#382/#383; #384 reasoning dedupe; #410 prompt copies | Complete sanitized-native observations plus typed origin/tool/reasoning/goal/Turn projection, versioned dedupe views, native expansion, provider conformance fixtures. |
+| Session/Git attribution overclaim | #369/#376 produced-vs-observed; #397 merge-base; current `pr_context` impact inflation | Produced/observed/encountered/direct-change/impact/test/context are distinct evidence roles with freshness, confidence, caps, and abstention. |
+| LCM/search noise, caps, and incomplete enumeration | #358 ranking noise; #361 over-match; #375 cap disclosure; this export required time/token bisection | List-all cursor APIs, origin/audience filters, visible caps/hidden counts, stable distributed cursors, rank explanations, exact export manifest. |
+| Hook spam, wrong routing, trust, and weak outcomes | #319 compact steering; #331 trust drift; #336 host parity; #401 compiler trust; 1,182 hints but three acted | Versioned deterministic policy, compact capability routing, exact payload/replay, dedupe/budgets, trusted evidence classes, terminal/missed/corrected outcomes. |
+| Tool/host discoverability and namespace drift | #330 dual MCP namespaces; #344 naming; #368 optional discovery; #400 Cursor showed only `graph`; this plan missed Git tools | Generated catalog and bindings, host capability handshake, one current name, high-confidence contextual routing, availability/fallback explanation, missed-capability feedback. |
+| Doctor false positives and impossible remediation | Stale degraded Cursor logs #316; read-only mismatch #370; foreign-skill nag #411 | Findings and commands share predicates; health names exact store/owner/runtime; informational drift is not warning; every action has preview/precondition/receipt. |
+| Automation/self-improvement unsafe or low-value output | #295 output hardening; #338 retries/autonomy; #359 paraphrase dedupe | Evidence-bounded proposals, version/eval/approval/apply/use/outcome/rollback lineage, idempotent jobs, explicit autonomy policy, no silent self-modification. |
+| Memory corruption, scope, and extraction errors | #349 long fact mangling; current fact search opened non-database while doctor reported healthy | Immutable fact versions, scope-aware owner, exact source slices, integrity/routing identity in every response, quarantine/partial state, retrieval without hidden mutation. |
+| Installer/plugin/upgrade drift across hosts | Marketplace/schema/cache/permission fixes #268/#273/#278/#303; release/asset/drift fixes #310–#313; branding #400 | Generated host manifests, schema conformance, installed-version/source identity, transactional install/update, current capability handshake, actionable failure without stale-client fallback. |
+| Flaky/order-dependent/cross-platform tests | Windows/env/global-state/watcher/timeout fixes #204/#207/#255/#283/#285/#326/#334/#351/#393/#394; current libtest-only backfill failure | No process-global mutable test state, hermetic clocks/env/ports/stores, nextest/libtest contract declared, deterministic shutdown, platform matrix, failure-class quarantine rather than retries as proof. |
+| Observability without denominators or retrieval handles | Empty analytics message count, 10k cap, unresolved hint outcomes, truncated project list | Every metric declares population, horizon, cap, source watermark, and unknown state; every truncation returns stable cursor/export/retrieval anchor. |
+
+Compatibility lesson: non-disposable on-disk evidence must be migrated and retained for rollback, but V2 does **not** emulate stale running MCP/daemon/plugin clients or guess obsolete tool names. Protocol/catalog mismatch fails with an explicit restart/update/current replacement. Shadow adapters exist only inside the bounded migration and disappear at domain cutover.
+
+### 2.8 Message-search quality probe
+
+A small supported-surface replay compared exact, paraphrased, conceptual, and misspelled queries with `catch_up=false` so the new query would not immediately index itself. It is diagnostic evidence, not a statistically complete benchmark:
+
+| Query class | Observed behavior | Design consequence |
+|---|---|---|
+| Exact rare phrase: disk-full/non-SQLite graph corruption | Correct human issue was returned, but after a prior tool command that contained the query text and a copied assistant delegation. | Penalize query/tool self-echo and copied protocol/delegation rows; group by source issue/session and prefer direct human/native evidence. |
+| Paraphrase: volume ran out of space during indexing | Returned many topically related disk/build/cache failures, but the exact graph-store corruption case did not reach the top ten. | Lexical recall is useful but intent precision is weak; evaluate semantic/entity/reranking stages against labeled paraphrases. |
+| Exact doctor/foreign-skill/remediation query | Found the correct issue/delegation/user rows at the top, plus implementation/review copies. | Preserve exact phrase/BM25 strength; representative clustering and origin/kind filters must remove duplicate workflow noise without losing sanitized-native expansion. |
+| Paraphrased impossible-remediation query | Found implementation and review traffic, but mixed the exact issue with unrelated health/skill sessions. | Use entity/event/PR/session anchors and intent-aware reranking, not embeddings alone. |
+| Conceptual nearby-agent/duplicate-work query | Found useful shared-worktree and parallel-agent cases, but also repeated identical results copied across sessions. | Add agent/work-claim graph retrieval, duplicate clusters, session diversity, and deliberate-redundancy labels. |
+| Misspelled hint/subagent query | Found the current exact misspelled request, but this does not prove general typo tolerance. | Add character n-gram/fuzzy retrieval and a typo corpus; never infer quality from one self-match. |
+
+Current message search is therefore useful for rare exact terms and high-recall forensic discovery, but not yet a reliable “best contextual answer” layer. V2 must benchmark a composed retrieval stack—lexical phrase/BM25, character fuzzy, entities, event/Git/agent graph, optional local dense representations, recency, duplicate clustering, and optional local reranking—then select the smallest stack that improves labeled metrics and latency. Embeddings are a candidate component, not a default claim of quality.
+
+### 2.9 Cross-project, store, session, and code-graph scope probe
+
+The Rspack/Rsbuild/React Router project family exposed a systemic failure rather than one missing search feature. In `session:019f42c9-623a-7cc0-95c1-f073eaa05a4d`, an agent concluded that Rsbuild/Rspack were not registered and fell back to installed packages. The user corrected this in `session:019f4323-f569-74c0-9988-ea3851d14fd7`: the projects existed, but the initial project list capped at 25 and `project_search "rsbuild rspack"` required one contiguous substring. `session:019f4325-57ef-7a53-b6a0-5c583c759301` isolated the single-`LIKE` root cause. Other historical cases include first-CWD Claude attribution, active-base-checkout PR/graph context when another worktree was intended, provider `project_key` acting as a public session boundary, missing-code-index hints suppressing healthy session/memory capabilities, stale/duplicate registry stores, and doctor reporting local/global scope inconsistently.
+
+The supported surface currently compounds these problems: `message_search(project_scope="all_registered")` can return a stable session ID from another project, while `lcm_load_session` is active-project-only and rejects a project selector. A result that cannot be expanded exactly is not a usable global search contract.
+
+V2 therefore has one typed scope plane across API, CLI, MCP, dashboard, hooks, and SDKs. Explicit repository/path/worktree/ref/PR/session targets never fall back to the active project. Provider keys and paths remain aliases/provenance; profile activity owns canonical session discovery, while project shards own scoped code/knowledge/delivery projections. Every federated response reports exact repository/worktree/ref/snapshot, searched/skipped/unavailable/stale/redacted coverage, rank/source evidence, and a location-independent retrieval reference. The complete architecture, Rspack/Rsbuild/React Router regression corpus, transport ergonomics, and implementation slices live in [`tracedecay-v2/16-cross-project-repository-worktree-scope.md`](tracedecay-v2/16-cross-project-repository-worktree-scope.md).
+
+### 2.10 Secret/redaction architecture probe
+
+TraceDecay has redaction components, but current behavior is fragmented and not a system guarantee. `src/sessions/lcm/raw.rs` can redact API-key assignments, bearer tokens, passwords, private keys, and sensitive JSON keys before LCM/session FTS projection, yet `ingest_config` defaults `sensitive_patterns_enabled` to `false`; production providers do not establish one mandatory policy. `src/memory/hygiene.rs` separately rejects secret-like fact content, but not every tag/entity/source/metadata field or V1 backfill. Provider/tool/session/hook/summary paths, response handles, backups, dashboard raw routes, logs/analytics, and already-derived FTS/vector/cache generations lack one complete enforcement and repair boundary. LCM status also reports `redaction.enabled` when any lossy row exists rather than whether protection is configured and coverage-complete.
+
+The current planning corpus added a practical scanner lesson: four marker-only private-key matches were conservatively removed, while a permissive authenticated-URL scan over serialized JSON produced a cross-field false positive that disappeared when values were parsed and scanned independently. The plan set and sanitized private corpus then passed `gitleaks 8.30.1` with zero findings. This does not prove live TraceDecay stores are clean; no supported whole-profile retroactive audit currently exists.
+
+V2 therefore has one mandatory, versioned, parse-before-scan sanitizer and taint-state contract before every persistent/searchable/output sink; optional short-lived encrypted quarantine; privacy-safe findings/markers; synthetic canary evaluation; and a retroactive containment/rotation/rebuild/backup/restore workflow. Exact current code gaps, primary research, product surfaces, test matrix, and PR slices live in [`tracedecay-v2/18-secret-detection-redaction-and-private-data-safety.md`](tracedecay-v2/18-secret-detection-redaction-and-private-data-safety.md).
+
+## 3. Current Architecture and Why It Blocks the Product
+
+### 3.1 Current physical and semantic islands
+
+| Domain | Current primary shape | Disconnection |
+|---|---|---|
+| Project registry | Global tables for projects, aliases, stores, graph scopes, artifacts | Does not provide one canonical entity namespace for sessions, agents, code, facts, or delivery. |
+| Code graph | Branch-scoped graph DBs with nodes, edges, files, vectors, fingerprints, redundancy, cache | Scope is implied by physical DB; edges lack provenance, confidence, validity, and snapshot identity. |
+| Sessions | `sessions`, `session_messages`, turns, FTS, offsets | Provider IDs and project keys vary; tool/reasoning structure often remains JSON. |
+| LCM | Duplicate raw-message projection, summary DAG, lifecycle, FTS, payload metadata | Copies session content and uses separate identity/query paths. |
+| Git correlation | Session spans and commit-session relations | Stronger provenance than other domains, but links stop at session/commit granularity. |
+| Workflows | Workflow runs and agents with string references | No enforced agent/session/artifact/code identity. |
+| Memory | Facts, entities, banks, vectors, trust/feedback, FTS inside graph storage | Project knowledge inherits branch-graph lifecycle and mutable-row authority. |
+| Hints/analytics | Durable analytics plus hook JSONL fallback | Outcomes, inputs, policy versions, exact payloads, and downstream actions are weakly joined. |
+| Automation | JSON/JSONL config, ledgers, outcomes, proposals, skill files, artifact directories | Cannot be transactionally queried with sessions, policies, facts, or provenance. |
+| Payloads | LCM payloads, response handles, automation artifacts use separate conventions | Hashing, retention, ownership, access, and GC are not uniform. |
+| Dashboard | Shell plus separate Memory, LCM, Graph, Savings, Diagnostics, Settings plugins | Navigation follows stores/plugins, not investigations; no true All scope. |
+| Query stacks | Graph DB APIs, LCM query module, memory scorer, dashboard SQL, MCP handlers | Ranking, pagination, filtering, error semantics, and scope differ by transport. |
+
+### 3.2 Identity failures
+
+- `project_id`, `project_key`, project hash, project path, repository path, alias path, and worktree path compete as identifiers.
+- Sessions may be provider-qualified or bare text depending on table/API.
+- Message IDs, `store_id`, row IDs, workflow IDs, run IDs, hint IDs, response handles, and summary nodes occupy unrelated namespaces.
+- Code node IDs include file path, kind, name, and line. Moving a symbol changes its identity.
+- Facts and entities use local mutable integer IDs.
+- Branch/worktree/PR relationships are often stored as strings or inferred from time windows.
+
+This makes joins heuristic and makes history brittle under moves, renames, rebases, force pushes, path aliases, transcript rewrites, and branch deletion.
+
+### 3.3 Missing canonical events and provenance
+
+TraceDecay currently normalizes enough to search and aggregate, but it does not retain one typed event vocabulary for:
+
+- Human prompt, assistant response, visible reasoning summary, system/developer context, and content parts.
+- Tool invocation, tool result, approval, failure, retry, cancellation, and latency.
+- Parent/child agent creation, message, handoff, task, goal, and lifecycle.
+- File read/edit/create/delete, patch, symbol change, diagnostic, test selection, test result, and build.
+- Worktree/branch/ref observation, commit produced/observed, PR/check/review/release encounter.
+- Hint evaluation, hint suppression, exact injected payload, memory injection, retrieval candidates, and measured outcome.
+- Automation scheduling decision, skip, lock, run, artifact, proposal, validation, approval, apply, and downstream adoption.
+
+Without those events, the timeline cannot distinguish observed facts from temporal coincidence or reconstruct what TraceDecay knew at a historical point.
+
+### 3.4 Query fragmentation
+
+Search currently exists as separate implementations for code FTS/vectors, session-message FTS, LCM raw/summary FTS, memory FTS/HRR, analytics, Git correlation, and automation files. Cross-project message search opens stores and merges results in application code without a stable distributed cursor or normalized rank explanation.
+
+The V2 query platform must replace transport-specific query orchestration. MCP, CLI, and dashboard become adapters over the same typed use cases.
+
+### 3.5 Dashboard gap
+
+The current shell has six product tabs and one selected project. URL state mainly preserves the active tab. Useful capabilities exist inside individual plugins, but the system cannot:
+
+- Search all entity types and projects in one query.
+- Follow a prompt through parent agent, subagents, tools, code, tests, commits, PRs, hints, facts, and automation.
+- Share or restore a full investigation state.
+- Explain incomplete results, store selection, caps, ranking, or stale shards.
+- Replay a historical message through the current hint/retrieval/ingest engine.
+- Compare sessions, agents, policies, branches, snapshots, or time ranges.
+- Switch a result among graph, timeline, table, matrix, chart, and inspector views.
+
+Large frontend owners such as the LCM page, semantic map, association graph, settings panel, and graph canvas also combine data fetching, query state, rendering, and interaction behavior.
+
+## 4. Alternatives Considered
+
+### A. One monolithic profile database
+
+**Advantages:** easy joins, one migration chain, one transaction boundary.
+
+**Rejected because:** code graph rebuilds, transcript ingest, automation, memory, and dashboard reads would share contention and corruption blast radius. Backup, retention, privacy, and project deletion would become coarse. “One brain” does not require one file.
+
+### B. Preserve current stores and add only an aggregate dashboard façade
+
+**Advantages:** quickest visible All view and smallest initial code change.
+
+**Rejected as target because:** it preserves duplicated IDs, N-store open/query/merge, inconsistent search semantics, missing provenance, and transport-specific business logic. It is useful only as a compatibility step.
+
+### C. Central PostgreSQL/pgvector service
+
+**Advantages:** strong concurrency, SQL federation, ANN, replication, team deployment.
+
+**Rejected as default because:** it adds server operations, credentials, network failure, and an online dependency to a local developer tool. The logical contracts should permit a future server backend without requiring it.
+
+### D. Unified logical model over federated embedded shards
+
+**Selected.** A profile catalog coordinates project-owned event/evidence stores, immutable graph snapshots, and content-addressed payloads. Transactions remain local; outboxes and watermarks make cross-shard consistency explicit. This preserves local-first operation and bounded failure while enabling one query/product model.
+
+## 5. Target System Architecture
+
+```mermaid
+flowchart LR
+    A["Provider and host sources"] --> U["Bounded hook runtime and durable spool"]
+    A --> B["Capture adapters"]
+    U --> B
+    B --> C["Immutable ObservationEnvelope journal"]
+    C --> D["Identity allocation ledger and alias resolver"]
+    C --> E["Canonical event projector"]
+    D --> F["Entity and evidence relation store"]
+    E --> G["Domain projectors"]
+    G --> H["Session and agent projection"]
+    G --> I["Code and delivery projection"]
+    G --> J["Knowledge and policy projection"]
+    G --> K["Automation and observability projection"]
+    C --> L["Content-addressed payload store"]
+    F --> M["Catalog and cross-shard index"]
+    C --> T["Profile activity and session shard"]
+    T --> N
+    H --> N["TraceQueryV1 planner"]
+    I --> N
+    J --> N
+    K --> N
+    M --> N
+    L --> N
+    W["Generated capability and tool catalog"] --> V["Versioned policy runtime"]
+    N --> V
+    U --> V
+    V --> U
+    N --> O["Application services"]
+    W --> O
+    O --> P["CLI adapter"]
+    O --> Q["MCP adapter"]
+    O --> R["HTTP and SSE adapter"]
+    R --> S["Unified TraceDecay workbench"]
+```
+
+### 5.1 Deployment boundary
+
+V2 starts as one Rust binary with internal traits and ports for capture, projection, query, policy, and API. This avoids premature distributed-system overhead. Boundaries must allow a future daemon/query split without changing domain contracts.
+
+### 5.2 Bounded contexts
+
+1. **Capture:** source discovery, offsets, rewrite generations, hashing, parsing, redaction/classification, immutable observations.
+2. **Identity Catalog:** profile, repository, project, checkout, worktree, branch/ref, provider, actor, agent instance, session, message, code snapshot, symbol lineage, aliases.
+3. **Evidence Ledger:** canonical events, temporal relation assertions, provenance, confidence, sensitivity, algorithm versions.
+4. **Agent Execution:** turns, messages, content parts, tool invocations/results, visible reasoning summaries, goals, parent/subagent trees, workflows, handoffs.
+5. **Code Intelligence:** snapshots, files, symbol entities/occurrences, edges, diffs, diagnostics, tests, impact, ownership.
+6. **Delivery:** Git refs, commits, worktrees, PRs, checks, reviews, releases, remotes, fetched-at state.
+7. **Context Intelligence:** LCM summary DAG, compression decisions, context assembly, external payload lineage, replay.
+8. **Knowledge:** versioned facts/claims, entities, decisions, contradictions, trust evidence, retrieval, feedback, curation.
+9. **Policy Runtime:** hints, retrieval, routing, diagnostics, correlation, curation, scheduling, policy bundles, deterministic evaluations.
+10. **Automation:** jobs, schedules, scheduler decisions, runs, agents, artifacts, proposals, approvals, skills, outcomes.
+11. **Observability and Accounting:** usage, latency, errors, caps, savings, cost, ingest/projection lag, data quality, privacy events.
+12. **Capability Catalog:** stable use-case definitions, transport/skill/hook/dashboard bindings, availability, safety, cost, discovery, compatibility, and generated inventories.
+13. **Query and Projection:** `TraceQueryV1`, planners, read models, rankers, saved views, subscriptions, exports.
+14. **Privacy Safety:** mandatory structured sanitizer, taint/sink eligibility, detector registry, protected quarantine, privacy scans/findings/remediation, and restore eligibility. This is one cross-cutting boundary owned by plans 01–04/18, not a detector reimplemented in each domain.
+
+### 5.3 Hook, hint, and concurrent event-stream architecture
+
+Hooks are latency-sensitive capture adapters, not miniature application servers. Their synchronous path is strictly bounded:
+
+1. Parse the host notification into typed fields and run the mandatory bounded sanitizer; incomplete/timeout returns a blocked non-content receipt.
+2. Normalize the sanitized hook request, allocate the source/session sequence, and append only eligible content plus an idempotent sanitization/observation receipt to a private spool or activity-shard journal.
+3. Read one immutable policy/context snapshot selected by explicit watermarks.
+4. Classify intent, generate candidates, apply relevance/dedupe/cooldown/token/privacy budgets, and render at most the allowed hint payload.
+5. Append the evaluation/envelope receipt and acknowledge the host; slower enrichment/projectors run asynchronously.
+
+The hot path performs no cross-project fan-out, embedding, repository indexing, network fetch, automation run, or long write transaction. Its p95 added wall time target is 10 ms for notification-only hooks and 25 ms for prompt-evaluation hooks on the reference corpus; timeout returns no hint plus a durable, non-content error receipt.
+
+Ordering and concurrency contracts:
+
+- Each provider artifact/source instance has a monotonic source sequence; each session/agent stream has a projected sequence. There is no invented total global order.
+- Every observation carries occurred time, ingested time, source sequence, rewrite generation, and causation/correlation links. Late events are inserted without rewriting prior history.
+- One bounded writer actor owns each SQLite shard connection. Concurrent agents enqueue append batches through a private spool; read services use short-lived read-only snapshot pools.
+- WAL, busy timeout, queue depth, maximum batch bytes, maximum transaction duration, and checkpoint thresholds are explicit configuration with safe defaults and telemetry.
+- Queue saturation applies tiered backpressure: coalesce rebuildable notifications, spill canonical observations durably, and reject/mark optional enrichment. It never silently drops prompts, tool events, approvals, edits, or outcomes.
+- Idempotency is per source record. Projectors and outbox consumers are at-least-once and idempotent. Leases are fenced by generation; a crashed owner cannot resume writes after a new owner takes over.
+- Readers receive vector watermarks and may request frozen, live, or eventual consistency. No read transaction survives UI think time or cursor pagination.
+- Crash tests cover process death before/after spool fsync, observation commit, outbox commit, hint render, host acknowledgement, projector checkpoint, and WAL checkpoint.
+
+The hint engine is a deterministic, versioned policy pipeline:
+
+`RequestFacts -> context snapshot -> intent categories -> capability candidates -> eligibility/privacy -> relevance -> repetition/cooldown -> token/latency budget -> rendered payload -> terminal outcome`
+
+Every evaluation records policy bundle, classifier, tool catalog, project/index, memory/fact, skill, configuration, and prompt-template digests; candidate scores; suppressions and reasons; exact injected payload reference; latency; and terminal outcome. Outcomes distinguish acted, ignored, contradicted, duplicate, unavailable capability, unresolved, missed capability, human correction, and unknown observation horizon. Historical replay can use exact historical artifacts, current artifacts, or an explicit mixed comparison; missing artifacts make replay incomplete rather than approximate silently.
+
+Parent/subagent spawn, delegation, message, handoff, join, interruption, goal, and completion are canonical events. Multiple agents may append concurrently, but shared branch/worktree/file impact is derived from evidence-bearing relations, not assumed from temporal overlap.
+
+### 5.4 Generated capability and tool catalog
+
+TraceDecay currently has substantial capability, but definitions are scattered across MCP schemas, CLI commands, skills, dashboard actions, provider hooks, and prose. V2 generates one versioned catalog from typed application use cases. Each capability declares:
+
+- Stable capability/use-case ID, version, owner crate/domain, aliases, status, and replacement/deprecation.
+- Inputs/outputs, scope kinds, entity/event kinds, read/mutate classification, side effects, idempotency, streaming/pagination, cost/latency class, and required freshness.
+- Availability prerequisites: daemon, indexed project/ref, live remote refresh, credentials, provider/host support, protected-mode unlock, and permissions.
+- Privacy/sensitivity behavior, audit events, approval requirement, dry-run/preview, and rollback/compensation contract.
+- MCP tool, CLI command, HTTP route, dashboard command/panel, skill, and hook-intent mappings generated from the same definition.
+- Examples and compact routing copy suitable for dynamic hints; catalog digests are part of policy replay.
+
+The compatibility inventory must include every current capability family: project/registry/doctor/diagnostics; code search/context/grep/definition/call/path/impact/tests/health; branch list/search/diff, PR/commit/changelog, correlated sessions/workflows, Git refresh/fallback; sessions/LCM search/load/status/lifecycle/export; memory/facts/entities/feedback/curation; hints/analytics/usage/cost; automation/scheduler/runs/artifacts/proposals/skills; configuration/integrations/daemon/watch/index/migrate/repair/backup; query/render/response handles. The generated inventory, not a hand-maintained list, is the cutover authority.
+
+Discovery is itself observable. For each eligible prompt, the policy runtime records capabilities considered, suggested, used, unavailable, or missed; whether a fallback was chosen; and user correction evidence. The dashboard exposes coverage/drift by intent category without turning every prompt into a noisy catalog advertisement.
+
+### 5.5 Agent proximity, work claims, and non-redundant coordination
+
+TraceDecay should make agents lightly aware of nearby work without turning the hint engine into a chatty presence bot or a global lock manager. The canonical coordination objects are:
+
+```text
+AgentPresence(agent, session, parent, provider, host, profile, heartbeat, expires)
+WorkClaim(agent, goal/task, repo, worktree, ref/PR, files/symbols/query/domain,
+          read-or-write intent, planned artifact, safe summary, redundancy mode,
+          status, version, started, heartbeat, expires, retrieval anchors)
+```
+
+`redundancy_mode` distinguishes accidental overlap from deliberate best-of-N, diverse review roles, paired/shared implementation, sequential handoff, and explicitly disjoint work. An advisory claim never grants write ownership. Existing store/file/Git/lifecycle leases remain the authority for mutations that require exclusion.
+
+Agent-nearness is an evidence-scored query, not “same repo means warn”:
+
+- Direct same task/goal/artifact or overlapping file/symbol write intent.
+- Same worktree or branch with intersecting write/diagnostic/test/PR scope.
+- Parallel worktrees with the same branch, PR, merge base, affected symbols/tests, or semantically overlapping research query.
+- Parent/subagent/sibling/handoff relationships and declared disjoint scopes.
+- Claim/presence freshness, current status, heartbeat/TTL, provider coverage, and uncertainty.
+
+The dynamic hint is eligible only at a high-value boundary: session/subagent start, before a first edit/mutation, before expensive research/index/PR review, when a new high-overlap claim appears, or when either claim changes materially. It is suppressed for stale claims, low overlap, acknowledged overlap, declared intentional redundancy, already coordinated peers, and repeated unchanged overlap.
+
+Compact example:
+
+> Nearby work: 2 agents overlap `session-query / subagent dedupe`. Maxwell is reviewing hooks/catalog in this repo; Tesla is mapping Turn projection. Inspect `session:019f…` or run `nearby_agents`; coordinate only if your planned files overlap.
+
+Payload rules:
+
+- One deterministic safe summary line per relevant agent, normally at most 160 characters and at most two peers plus a hidden-count/inspect action.
+- Stable agent/session/goal/work-claim/research anchor IDs; no full prompt, chain-of-thought, secret path, or private payload.
+- Exact reason/overlap fields and source watermark available through inspector/tool, not dumped into the prompt.
+- Dedupe key `(recipient_agent, overlap_signature, claim_versions, policy_bundle)`; one delivery until material change, acknowledgement, expiry, or configured cooldown.
+- Actions: inspect context, message peer, request handoff, accept deliberate overlap, mark scopes disjoint, update/release claim, or mute this signature. Silence remains a successful outcome when no action is useful.
+
+Analytics measures the opportunity funnel, not raw hint volume:
+
+- Eligible overlap, suppressed reason, emitted/delivered, inspected, messaged, handed off, scopes split, deliberate redundancy confirmed, ignored, false positive, unresolved, expired.
+- Subsequent duplicated reads/queries/edits/tests and conflicting writes by evidence class; “work avoided” is estimated/labeled, never asserted from temporal coincidence.
+- Precision among judged high-overlap hints, useful-action rate, repeat rate, token/latency cost, first-useful-context time, and missed-overlap corrections.
+- Breakdowns by same versus parallel worktree, provider, parent/sibling/unrelated agents, task type, read/write intent, and policy version.
+
+Historical replay corpus:
+
+- Current redesign parent session `019f4906-a411-7a11-ad3f-0d58deb0e847` and its anchored child sessions: mostly disjoint authored plans plus intentionally overlapping review passes; copied coordination events and missing parent tool-use IDs test false-positive resistance.
+- PR #359 review wave child sessions `agent-ac3ce9b1ebf998cfb`, `agent-a245d2442cefc621d`, `agent-a96d21dc6391ceba8`, and `agent-a6661fd133491631c`: identical review prompts test deliberate ensemble labeling versus accidental duplication.
+- Cursor shared-worktree session `ebc96a27-b046-4c88-865f-b38d76da9d2d`: many agents in one checkout test explicit file ownership, collision risk, and compact neighborhood summaries.
+- Cursor coordination session `c48804a4-9c7f-4ce1-a771-95c3702654b2`: nine sibling agents with disjoint file ownership test that declared scopes suppress redundant warnings while preserving material conflict alerts.
+
+The replay lab compares no-awareness, current policy, and candidate policy; shows every candidate/suppression/payload; and never writes a live claim, message, fact, counter, or hint outcome.
+
+### 5.6 Unified multi-repository, project, and worktree scope plane
+
+`ScopeSelectorV2` is a domain contract shared by every transport. It selects All, profile, saved project set, repository, project, checkout, worktree, branch/ref, commit/snapshot, PR, session, agent, workflow, or collection; includes explicit freshness/partial/as-of policy; and resolves natural-language names, paths, remotes, and stable IDs through one application service.
+
+Resolver invariants:
+
+- Stable ID, exact path/remote/alias, token-aware terms, fuzzy candidates, and graph-related candidates are distinct explained channels.
+- An explicit target either resolves or returns bounded candidates and one ready-to-retry request; it never runs against `current` instead.
+- `current` is permitted only when the request supplies no target and is always rendered as the resolved project/worktree/ref/head.
+- `project_key`, first/last CWD, path hashes, store directories, and graph filenames are internal aliases/evidence, not public identity.
+- Repository/project/worktree/ref identity survives moves, renames, rebases, branch deletion, and checkout removal through temporal aliases and adoption receipts.
+- Domain availability is independent: missing/stale code graph does not hide profile sessions, messages, facts, Git, automation, or registry tools.
+
+Profile `activity.db` stores canonical provider sessions, Turns, messages, agents, and tool events once. Project/worktree attribution is a bitemporal relation per observation with evidence roles such as `produced_in`, `executed_in`, `queried`, `discussed`, and `observed`; a session may have zero, one, or many attributed repositories over time. Search and exact-load tools route global entity/retrieval IDs through the catalog rather than requiring the caller to select a store or change CWD.
+
+Code federation selects one immutable graph generation per repository/worktree/ref snapshot, reports dirty/base/index drift, prunes shards with catalog statistics, and merges bounded results with per-repository diversity and source explanations. Cross-repository edges—dependency, plugin/host API, PR/base/head, fork/patch, generated artifact, benchmark/downstream, and session/agent evidence—are typed, versioned, and traversed only when requested or policy-authorized. All-scope never means “open every database and concatenate.”
+
+The Rspack/Rsbuild/React Router family is the primary conformance system: one query must resolve the plugin, upstream Rsbuild API, Rspack implementation, React Router semantics, related worktrees/PRs, and downstream benchmark evidence without manual registry loops. CLI common flags, MCP `scope`, HTTP schemas, generated SDK types, dashboard scope chips, distributed cursors, errors, and coverage metadata are generated or validated from the same contract. See [`tracedecay-v2/16-cross-project-repository-worktree-scope.md`](tracedecay-v2/16-cross-project-repository-worktree-scope.md).
+
+### 5.7 System convergence, organization, and extensibility
+
+The rewrite is complete only if it removes fragmentation rather than recreating it in new crates. The canonical flow is:
+
+```text
+source/provider -> classify/sanitize/capture -> observation journal -> identity/evidence
+-> deterministic projectors -> query/search/graph -> policy/replay -> application use case
+-> generated/thin CLI | MCP | API/SDK | hook | dashboard/lab adapter
+```
+
+Each arrow crosses one typed contract. No downstream layer reparses a provider payload, resolves a project independently, reruns a different secret detector, opens arbitrary storage, constructs its own ranking, infers remediation, or invents a transport-specific status/error. Cross-cutting metadata—scope, sensitivity/redaction, provenance, confidence, occurred/ingested/valid time, watermarks, coverage, capability/version, cost, authorization, retention—survives end to end.
+
+Convergence rules:
+
+- One canonical domain type/registry owns each identity, event, scope, predicate, capability, error, receipt, query, policy, and command semantic.
+- One repository/application port owns each read/write use case. Store SQL, provider parsing, and transport rendering never leak across the boundary.
+- One generator/contract IR emits CLI flags, MCP/HTTP schemas, OpenAPI/JSON Schema, SDK types, dashboard client types, tool/skill/hint metadata, docs, and compatibility inventory.
+- Versioned SPIs admit providers, detectors, projectors, rankers, policies, tools, and renderers under explicit capability/safety/resource contracts. An extension cannot create an unregistered side store or bypass sanitization/scope/auth/audit.
+- Physical sharding, graph generations, caches, workers, and future daemon/query separation scale behind stable ports without multiplying semantic models.
+- Every temporary V1 adapter has a named owner, inbound/outbound contract, parity fixture, metrics, last-allowed phase, deletion PR, and CI rule preventing new call sites.
+- Architecture lint enforces dependency direction, transport/store isolation, raw-string/SQL restrictions, schema/catalog bijections, public-type uniqueness, module/file complexity budgets, and zero orphan compatibility paths.
+- A convergence scorecard tracks duplicate authorities, bypass call sites, direct SQL/store opens, schema drift, adapter call volume, parity gaps, extension conformance, large files/condition growth, and retired code/data.
+
+The target is modular, not microservice-shaped: one Rust process initially, bounded crates and internal services, predictable names/layout, small reviewable modules, and few high-quality extension seams. New behavior should extend a registry/trait/predicate and inherit identity/scope/privacy/query/replay/observability behavior automatically. The complete current-to-target convergence matrix and retirement program live in [`tracedecay-v2/19-system-defragmentation-convergence-and-extensibility.md`](tracedecay-v2/19-system-defragmentation-convergence-and-extensibility.md).
+
+## 6. Canonical Identity and Evidence Contracts
+
+### 6.1 `EntityRef`
+
+Use a canonical UUIDv7 plus an entity-kind discriminator. SQLite row IDs never cross an API boundary. UUID allocation is durable data, not a projection: the immutable identity ledger is backed up and restored with the catalog/activity manifests. Exact source identities use deterministic namespaced IDs; ambiguous/resolved entities receive persisted UUIDv7 allocations that survive reimport and rebuild.
+
+Required entity kinds:
+
+- Profile, project, repository, remote, checkout, worktree, branch/ref, commit, tree, pull request, check, review, release.
+- Provider, host instance, model, actor, agent instance, session/thread, workflow, run, turn, message, content part.
+- Tool definition, tool invocation, tool result, approval, goal, task, handoff.
+- Code snapshot, file identity, file occurrence, symbol identity, symbol occurrence, diagnostic, test, build.
+- Fact, fact version, knowledge entity, decision, contradiction, retrieval, feedback.
+- Policy bundle, policy evaluation, hint, automation job/run/artifact/skill/proposal.
+- Query, saved view, annotation, export, payload blob.
+
+### 6.2 `ObservationEnvelopeV1`
+
+Every source adapter emits the same outer contract:
+
+- Deterministic `observation_id` derived from source instance + artifact identity + rewrite generation + offset + a privacy-domain-keyed source fingerprint; no unkeyed secret-content hash crosses the sanitizer.
+- Source system, provider, host instance, artifact identity, rewrite generation, byte/row offset, sanitized output digest, keyed source fingerprint, and sanitization receipt.
+- Schema version and parser version.
+- Occurred time and ingested time; missing-time reason when unknown.
+- Project/repository/worktree/session hints before canonical resolution.
+- Sensitivity class, redaction/quarantine state, detector/policy/parser digests, and scan completeness.
+- Typed sanitized payload discriminator and safe payload reference; protected secret refs use the isolated quarantine domain and never serialize to normal events/APIs.
+- Idempotency key: source instance + artifact identity + rewrite generation + offset + privacy-domain-keyed source fingerprint.
+
+Ingesting the same source twice must produce zero additional observations.
+
+### 6.3 Canonical events
+
+Observations project into immutable events. Corrections create superseding events; they do not rewrite history.
+
+Each event carries:
+
+- Canonical `event_id`.
+- `kind`, schema version, occurred/ingested timestamps.
+- Owning activity/project shard plus actor, session, run, and snapshot references when resolved; project attribution is zero-to-many evidence relations, never one implicit primary project.
+- `correlation_id` for grouping and `causation_id` only when direct causation is supported.
+- Source observation IDs and provenance ID.
+- Payload reference and typed indexed attributes.
+- Sensitivity and retention class.
+
+### 6.4 `RelationAssertion`
+
+All cross-domain edges use one evidence-bearing contract:
+
+- Subject, predicate, object.
+- Valid-from/valid-to and observed-from/observed-to.
+- Evidence class: observed, provider-declared, user-declared, derived-exact, inferred, heuristic.
+- Confidence and confidence rationale.
+- Supporting observation/event IDs.
+- Producing algorithm, model, parser, or resolver version.
+- Scope and sensitivity.
+- Supersession/tombstone state.
+
+The UI must never label an inferred or heuristic relation “caused,” “created,” or “changed.” It uses “correlated,” “likely related,” or the exact evidence label.
+
+### 6.5 Schema and predicate registry
+
+Typed events and relations may preserve unknown provider JSON for forensic replay, but unknown fields never become query-semantic automatically. A versioned registry defines:
+
+- Event/entity/relation kind and owning bounded context.
+- Allowed subject/object kinds and inverse predicate.
+- Cardinality and uniqueness rules.
+- Required evidence class, provenance, confidence, and temporal fields.
+- Promoted indexed attributes and their data types.
+- Sensitivity and retention defaults.
+- Compatible schema versions and migration/projector version.
+
+Writes that violate the registry are quarantined with their original observation. Query builders and generated clients derive their legal predicates from the same registry.
+
+### 6.6 Stable code identity
+
+Separate logical symbols from snapshot occurrences:
+
+- `SymbolEntity`: stable concept within a repository; no line number in its identity.
+- `SymbolOccurrence`: file, range, signature, qualified name, visibility, and extractor version inside one code snapshot.
+- `SymbolLineage`: evidence-bearing rename/move/split/merge/same-lineage assertions across snapshots.
+- `CodeEdge`: snapshot-scoped source/target occurrences, kind, location, resolver version, confidence, provenance.
+
+Ambiguous lineages remain separate candidate links. TraceDecay must prefer a visible uncertain relationship over a silent incorrect merge.
+
+## 7. Physical Storage Design
+
+### 7.1 `catalog.db` per profile
+
+Owns the minimum metadata required to plan queries without opening every shard:
+
+- Profiles, repositories, projects, aliases, checkouts, worktrees, remotes.
+- Durable canonical-ID allocation ledger for profile/global identity classes and opaque entity locators; entity versions and source aliases remain in their owning shard.
+- Shard registry, capabilities, schema versions, coarse sizes/time ranges/entity counts, health, and last watermark.
+- Opaque cross-shard relation/event locators and nonsensitive aggregate rollups.
+- Opaque saved-view/export IDs and manifests.
+- Projection/outbox watermarks and migration receipts.
+
+The catalog does not store message/query literals, annotations, payloads, sensitive alias values, or raw project content. Saved-view state and annotations live in encrypted profile content storage; the catalog retains opaque IDs and safe locators.
+
+### 7.2 `activity.db` per profile
+
+Owns canonical provider activity that may relate to zero, one, or many projects:
+
+- Transcript observations and canonical messages/content parts.
+- Actors, agent instances, sessions, turns, tools/results, goals, workflows, and handoffs.
+- Provider/host/model aliases and source offsets.
+- Session-to-project/repository/worktree/branch/snapshot relation assertions with evidence.
+- Cross-project policy evaluations, usage/accounting events, and activity search projection.
+- Profile-scoped facts/memory, managed skills, policies, automation jobs/runs/artifacts/proposals/outcomes, saved-view content, and annotations that do not belong to one repository privacy domain.
+- Outbox, projection watermarks, and retention horizon.
+
+Project attribution is a relation, not a required `project_id` column on canonical transcripts. Generic chats remain first-class instead of being forced into a project store.
+
+### 7.3 `project.db` per canonical repository/privacy domain
+
+Owns canonical project evidence:
+
+- Project/source observations, project entities/versions/aliases, relations, and activity locators.
+- Scoped session/agent/workflow projections referencing canonical activity IDs, not copied message bodies.
+- Git/delivery observations and relations.
+- Project knowledge, facts, trust events, retrieval/feedback.
+- Hints/policy evaluations and outcomes.
+- Automation jobs, runs, artifacts, proposals, approvals, skills.
+- Project-level search documents, representations, facets, and rollups.
+- Transactional outbox and projector checkpoints.
+
+Project memory moves here and no longer inherits branch graph lifecycle.
+
+Ownership follows declared scope: profile/zero-project/cross-project knowledge, policy, skill, and automation data lives in `activity.db`; repository/project-scoped equivalents live in that privacy-domain `project.db`. Cross-scope reuse creates evidence relations and locators, never a silent copy or a fabricated primary project.
+
+Projects, checkouts, worktrees, and monorepo subprojects are scoped views over a canonical repository shard; they are not alternative shard identities. Non-repository profiles and stricter retention/encryption boundaries use an explicit privacy-domain shard.
+
+### 7.4 Immutable graph snapshot generations
+
+Do not create one tiny SQLite file for every commit. Use packed immutable generations with deduplicated file/symbol content, a manifest mapping snapshot IDs to generation/overlay, bounded dirty overlays, background compaction, retention, and atomic generation swaps. Benchmark the pack size/file-count threshold before fixing it in the storage ADR.
+
+Graph generations own:
+
+- File and symbol occurrences.
+- Call/type/use/annotation edges.
+- Diagnostics, tests, coverage/test-map data.
+- Fingerprints, redundancy, complexity, dependency matrices.
+- Rebuildable FTS/vector representations tied to extractor/version.
+
+Branches and worktrees point to immutable snapshots or a snapshot plus bounded dirty overlay. The physical generation never substitutes for explicit snapshot identity in rows or APIs. The manifest sets maximum open generations, overlay depth, file count, and compaction triggers.
+
+### 7.5 Privacy-domain content-addressed payload stores
+
+Replace separate LCM payload, response-handle, and automation-artifact conventions with one service:
+
+- `blobs/<privacy-domain>/<keyed-content-id-prefix>/<keyed-content-id>`.
+- Staged private write, hash/size verification, atomic rename, then reference publication.
+- Keyed content IDs prevent equality leakage across encryption/retention domains; deduplication occurs only inside one domain.
+- Blob metadata: MIME/schema, compression, sensitivity, encryption key ID, created time, retention class.
+- `blob_refs`: owner, purpose, range, source, privacy/key domain, advisory refcount/protection state.
+- Integrity scan, orphan grace, missing-ref quarantine, and idempotent GC.
+- GC mark-and-sweeps from signed shard manifests and committed outboxes rather than trusting refcounts alone.
+- Protected mode encrypts sanitized eligible payloads with a profile/project key; unsanitized/plaintext forensic bytes are never normal blob inputs.
+- Secret-like forensic payloads do not use this normal content-addressed service. They use random IDs, per-record encrypted keys, no deduplication, no normal backup/export/index access, and 24-hour default retention in the isolated quarantine service from plan 18.
+
+### 7.6 Deferred analytical segments
+
+Parquet/DuckDB is not part of the first V2 default. A later ADR may add rebuildable analytical segments only if measured SQLite aggregate projections miss a named performance gate.
+
+### 7.7 Write ownership and consistency
+
+- Each SQLite shard has one bounded writer actor. It owns the write connection, serializes short transactions, and exposes typed commands rather than a shared connection mutex.
+- Hook/capture clients append through a private per-profile spool with `0600` files, length/checksum framing, fsync policy, maximum disk budget, and recovery scan. Canonical records are acknowledged only at their declared durability level.
+- Read services use bounded read-only connection pools and SQLite snapshot transactions. They never wait behind background compaction/migration without returning an explicit busy/partial state.
+- Capture owns observation appends.
+- Identity service owns canonical IDs and aliases.
+- Code indexer owns graph snapshots.
+- Knowledge service owns fact/trust/version mutations.
+- Automation service owns jobs/runs/approvals.
+- Blob service owns files and refs.
+- Each owner commits domain rows and an outbox record in one local transaction.
+- Each shard exposes a monotonic outbox sequence. Consumers are at-least-once and idempotent by `(shard_id, sequence, projector_version)`.
+- Catalog and projections consume outboxes idempotently and expose a vector watermark across involved shards.
+- Dual capture never advances a V2 source offset unless the observation/outbox commit succeeds. V1 remains authoritative until the domain cutover freeze watermark.
+- A cutover requires zero unexplained parity gaps and projection lag below two seconds for 24 hours; rollback restores V1 source-offset ownership from the migration receipt.
+- Cross-shard queries report vector watermarks; there is no hidden distributed transaction.
+- Backfills use leases, checkpoints, bounded batches, pause/resume, and idempotency keys.
+- Writer commands expose queue time, transaction time, rows/bytes, retry class, and durable sequence. Overload thresholds are tested with many simultaneous parent/subagent streams.
+- WAL checkpointing is coordinated with readers and backup manifests. Disk-full, permission, corruption, busy, process-death, and torn-spool paths have distinct typed errors and repair receipts.
+
+## 8. Logical Schema
+
+The exact migrations are produced in Phase 1, but the model is fixed by this plan.
+
+### 8.1 Core tables
+
+- `entities(entity_id, kind, owning_shard_id, natural_key_keyed_digest, created_at, retired_at)`.
+- `entity_versions(entity_id, version_id, schema_version, valid_from, valid_to, observed_at, sanitized_output_digest, attrs_blob_ref)`.
+- `identity_allocations(allocation_key, entity_id, entity_kind, created_at, source_manifest_id)` in the immutable identity ledger.
+- `identity_aliases(namespace, value_keyed_digest, entity_id, valid_from, valid_to, resolver_version, status, confidence, provenance_id)` in the owning activity/project shard; literal eligible alias values remain encrypted owner-shard payloads.
+- `observations(observation_id, source fields, privacy-domain-keyed source fingerprint, sanitized-output digest, occurred_at, ingested_at, schema/parser versions, payload_ref, sensitivity, idempotency_key)`.
+- `events(event_id, owning_shard_id, session_id, actor_id, kind, occurred_at, ingested_at, correlation_id, causation_id, provenance_id, payload_ref, attrs)`; project attribution lives in relation assertions.
+- `relation_assertions(edge_id, src_id, dst_id, kind, scope_id, valid interval, observed interval, evidence_class, confidence, confidence_reason_code, optional eligible rationale blob ref, producer_version, provenance_id, attrs)`.
+- `schema_registry` and `predicate_registry` define typed attributes, legal endpoints, cardinality, inverse, evidence, sensitivity, retention, and index promotion.
+- `provenance(provenance_id, provider, privacy-domain-bound source locator digest, keyed source fingerprint, parser/version, ingested_at)`.
+- `blobs(keyed_content_id, size, MIME, compression, sensitivity, encryption_key_id, created_at)` and `blob_refs`.
+- `outbox(sequence, owner, event_id, projector_targets, created_at)`.
+- `projection_checkpoints(projector, shard, sequence, schema_version, builder_version, status)`.
+- `scope_sets(scope_set_id, project_set_version_id, owner_id, version, membership_digest, eligible_label_ref, selector_blob_ref, created_at, retired_at)` and immutable `scope_set_members`; `DeclaredScope::CrossProject` pins version ID plus membership digest.
+- `routable_refs(entity_id, owning_shard_id, entity_kind, locator_version, tombstone_state)` and content-free `retrieval_anchor_routes(anchor_id, owning_shard_id, privacy_domain_id, route_version, retention/tombstone state)` provide location-independent search-to-exact-load routing.
+- Owner-shard `retrieval_anchor_records` persist the full `RetrievalAnchorRecordV1` including scope/access/privacy, source refs, vector watermark, data/projection/schema/catalog/view-algorithm versions, provenance, expansion recipe, retention, and durability. Authorization-aware resolution returns exact/moved/redacted/expired/unavailable/denied state; tombstones never redirect to a similar row.
+- `sanitization_receipts(receipt_id, observation_id, privacy_domain_id, policy_digest, detector_set_digest, parser_digest, keyed_input_fingerprint, sanitized_output_digest, completeness, counts_by_class, created_at)` contains no candidate text.
+- `privacy_scan_runs`, `privacy_findings`, `privacy_adjudications`, `privacy_remediations`, and `restore_eligibility` store safe class/state/coverage/receipt metadata only.
+- `quarantine_manifests` store random protected blob IDs, wrapped-key epoch, retention/hold/audit state, and cryptographic-deletion receipt; normal `blobs`/`blob_refs` never reference secret plaintext.
+
+### 8.2 Profile activity and agent/session projections
+
+- `threads`, `thread_sessions`, `sessions`, `actors`, `agent_instances`, `workflow_runs`, `turns`, `messages`, `content_parts`; thread/session identity remains distinct and their relation is temporal evidence.
+- `tool_invocations`, `tool_results`, `approvals`, `goals`, `tasks`, `handoffs`.
+- `reasoning_summaries` only for provider-exposed material, with separate retention/sensitivity.
+- Uniqueness: `(provider, native_session_id)` and `(provider, native_session_id, ordinal)` where native ordering exists.
+- Canonical rows live in `activity.db`; project projections reference their IDs and relation evidence.
+- `agent_presences`, `work_claims`, `work_claim_events`, and overlap projections preserve declared scope, TTL, redundancy mode, safe summary, and stable research anchors.
+- `activity_scope_assertions(event_or_turn_id, repository_id, project_id, checkout_id, worktree_id, ref_id, role, confidence, valid interval, provenance_id)` prevent first-CWD/session-wide attribution.
+
+### 8.3 Code and delivery projections
+
+- `repositories`, `checkouts`, `worktrees`, `refs`, `commits`, `pull_requests`, `checks`, `reviews`, `releases`.
+- `project_sets`, `repository_relations`, `checkout_aliases`, `worktree_aliases`, `snapshot_generations`, and `cross_repository_edges` support federated scope without store-path identity.
+- `code_snapshots`, `files`, `file_occurrences`, `symbol_entities`, `symbol_occurrences`, `symbol_lineage`, `code_edges`.
+- `file_changes`, `symbol_changes`, `diagnostics`, `tests`, `test_results`, `impact_assertions`.
+
+### 8.4 Knowledge, policy, and automation projections
+
+- `facts`, immutable `fact_versions`, `fact_relations`, `trust_events`, `retrieval_events`, `feedback_events`.
+- `policy_bundles`, `policy_evaluations`, `hint_evaluations`, `retrieval_evaluations`, `correlation_evaluations`.
+- `automation_jobs`, `scheduler_decisions`, `automation_runs`, `run_events`, `automation_artifacts`, `skill_versions`, `proposals`, `approvals`.
+
+### 8.5 Search and representation projections
+
+- `search_documents(owner_id, field, search_eligible_text, tokenizer_version, sanitization_receipt_id, sensitivity, source_watermark)`; repository conversion rejects unclassified/secret/unknown text.
+- `representations(owner_id, kind, model, model_version, dimension, metric, normalization, sanitized_content_digest, sanitization_receipt_id)`.
+- `facets(scope, time_bucket, kind, key, value, count, source_watermark)`.
+- `rank_features(owner_id, lexical, semantic, recency, trust, graph, usage, version)`.
+
+Read-only retrieval never increments counters inside the query transaction. Retrieval and feedback are explicit events so replay/debug queries do not change future ranking.
+
+## 9. Query Platform
+
+### 9.1 One `TraceQueryV1` AST
+
+`TraceQueryV1` supports:
+
+- Scope: All, project set, project, repository, checkout/worktree, branch/ref, snapshot/commit, session, agent, workflow, saved collection.
+- Scope resolution policy: exact/resolve/related, explicit-target refusal, freshness/partial/as-of limits, and activity-attribution role.
+- Entity kinds and typed attribute predicates.
+- Time: occurred, ingested, valid/as-of, absolute/relative, comparison interval.
+- Text: phrase, prefix, field, language/tokenizer, lexical profile.
+- Semantic similarity with representation/model constraints.
+- Relation traversal: direction, kinds, evidence classes, confidence floor, depth, path/neighborhood.
+- Git/code predicates: file, symbol, snapshot, changed-by, affected-by, test/diagnostic state.
+- Provenance, provider, model, role, kind, sensitivity, retention, policy version.
+- Facets, grouping, aggregation, projection fields, sort, stable page size.
+- Explain and sampling/downsampling controls.
+
+### 9.2 Planner
+
+1. Resolve scope and permissions through the catalog.
+2. Select shards from kind/time/scope/capability statistics.
+3. Push filters, FTS, vectors, traversal, aggregation, and top-k into shards.
+4. Enforce operator and total cost budgets before execution.
+5. Normalize and merge scores with a declared ranking profile, initially reciprocal-rank fusion plus explicit feature weights.
+6. Batch hydrate entities, provenance, and authorized payload slices.
+7. Return a deterministic cursor containing per-shard high-watermarks, schema/ranking versions, sort cutoffs, and entity ID; never hold SQLite read transactions across pages.
+8. Record a safe query-plan fingerprint and performance metrics without logging sensitive literals.
+
+### 9.3 Query response contract
+
+Every response contains:
+
+- Canonical resolved `ScopeSelectorV2`, catalog/scope-set generation, exact repository/worktree/ref/snapshot labels, and whether `current` was defaulted.
+- Query snapshot/watermark and query-plan ID.
+- Entities/rows/edges plus typed field projection.
+- Facets and aggregation metadata.
+- Next cursor and exact truncation reason.
+- Searched, skipped, stale, unavailable, incompatible, and redacted shards.
+- Sanitization policy/detector generation, locked/quarantined/legacy-unscanned/unknown privacy coverage, and only authorized safe receipt refs.
+- Timing by planner/operator/shard.
+- Ranking feature explanation per result when requested.
+- Provenance/evidence summary.
+- Sampling/downsampling/level-of-detail declaration.
+- Location-independent entity/retrieval refs that exact-load tools accept across project shards without CWD/store switching.
+
+Cursor semantics:
+
+- Cursor expiry is explicit and defaults to 24 hours.
+- Schema/ranking change, retention crossing a captured watermark, or incompatible shard replacement invalidates the cursor with a restart reason.
+- A shard that becomes unavailable during resume yields named partial coverage and preserves other shard positions.
+- Frozen queries exclude events above captured shard watermarks. Live queries use delta cursors with duplicate suppression and explicit gap/resync events.
+
+### 9.4 Specialized services compiled from the same model
+
+- Universal search.
+- Entity batch hydration and inspector.
+- Neighborhood/path/impact/affected-tests queries.
+- Timeline lane/density/event queries.
+- Session replay and as-of state.
+- Hint/retrieval/ingest/correlation/policy evaluation.
+- Saved views, annotations, comparisons, exports.
+- Live snapshot + ordered delta stream over SSE.
+
+### 9.5 Transport rules
+
+- MCP handlers parse arguments, call application services, and render results. They contain no SQL, routing, ranking, policy, or migration logic.
+- CLI calls the same services in-process or through the daemon.
+- HTTP V2 uses typed bounded endpoints, not GraphQL as the primary surface.
+- TypeScript contracts are generated from Rust schemas/OpenAPI and checked for drift.
+- V1 endpoints/tools may shadow V2 only before that domain's cutover. At cutover the current catalog/protocol becomes authoritative; stale clients receive a typed version/restart/update/replacement error instead of a behavioral fallback.
+
+### 9.6 Message/session retrieval and real-world precision program
+
+[`tracedecay-v2/15-search-quality-evaluation-and-retrieval-research.md`](tracedecay-v2/15-search-quality-evaluation-and-retrieval-research.md) owns the implementation/evaluation plan and primary literature. V2 does not replace BM25 with embeddings. It exposes a versioned multi-stage pipeline whose components can be ablated:
+
+1. Normalize Unicode, spelling variants, provider/tool aliases, code/Git identifiers, quoted phrases, and time/scope constraints without rewriting exact technical literals.
+2. Generate independent candidates from phrase/BM25 FTS, character n-gram fuzzy matching, typed entity/event/goal/tool/Git indexes, session/agent/work-claim graphs, summaries with source coverage, optional privacy-safe local dense representations, and explicit recency.
+3. Fuse declared retrievers with a deterministic profile such as reciprocal-rank fusion; retain every component rank/score and missing-feature state.
+4. Cluster copied prompts, protocol/tool echoes, same-content variants, and summary/source lineage. Prefer a representative appropriate to requested audience/kind, preserve hidden counts, and expand to native rows exactly.
+5. Apply diversity across sessions/projects/providers/agents while retaining exact phrase/entity hits. Penalize the current query/tool echo and inventory noise unless explicitly requested.
+6. Optionally rerank a bounded top set with a versioned local cross-encoder or learned model only when measured gains justify latency/memory/privacy cost. Fall back deterministically.
+7. Return rank explanation, matched fields/entities/relations, retriever contributions, cluster/representative reason, corpus/index/model versions, scope, caps, and coverage.
+
+The real-world evaluation corpus is sampled from the local registered-project store without committing private text:
+
+- Stratify across projects, providers, time, human/direct-user/subagent/protocol origin, exact versus paraphrase versus typo versus conceptual query, Git/code/tool/memory/automation intent, old versus recent sessions, short versus long messages, and known-zero-result cases.
+- Derive leakage-resistant queries from later human prompts that refer back to earlier evidence; candidates must come only from data available before the query timestamp.
+- Add real successful retrievals, user corrections, reformulations, abandoned searches, branch/PR/session lookups, and hard negatives from same-project terminology.
+- Pool candidates from every retriever/ablation, blind their source/order, and label exact relevance plus “useful first context,” duplicate/echo/protocol noise, privacy eligibility, and required evidence class. Measure annotator disagreement instead of forcing false certainty.
+- Keep private judgments locally with stable message/session/research anchors; commit only secret-scanned synthetic/redacted fixtures and aggregate metrics.
+
+Required offline metrics: Precision@1/3/5, Recall@10/20, MRR, nDCG@10, judged coverage, no-answer accuracy, duplicate/echo rate, project/provider/session diversity, first-useful rank/time, calibration, p50/p95 latency, peak memory, index size/build lag, and exact-query regression. Report macro averages and worst strata, not one global score.
+
+Required shadow/online evidence: reformulation rate, result open/expand/copy/use, retrieval-to-tool/action continuation, explicit helpful/unhelpful label, time to useful context, abandonment, and user correction. These are evidence signals, not automatic relevance truth. Interleaving/A-B is opt-in, privacy-safe, reversible, and never changes a live agent's context silently.
+
+Release selects a retrieval profile only if it beats the lexical baseline on predeclared primary metrics without violating exact technical recall, privacy, no-answer, latency, memory, or worst-project/provider gates. Dense, sparse-neural, reranker, and graph components remain removable adapters.
+
+## 10. HTTP V2 Surface
+
+HTTP V2 is an official supported public integration surface, not only a dashboard backend. Agents and developers may call it directly through authenticated loopback HTTP or a user-owned local socket, raw `curl`, or first-party Rust/TypeScript/Python SDKs. OpenAPI 3.1, JSON Schema, capability docs, examples, version/cutoff policy, direct-client discovery, conformance, and a hermetic sandbox are release artifacts. CLI and MCP share application/catalog semantics but do not loop through HTTP. Full ownership and rollout are specified in [`tracedecay-v2/17-official-public-api-and-sdks.md`](tracedecay-v2/17-official-public-api-and-sdks.md).
+
+- `GET /api/v2/capabilities` — versions, domains, stores, renderers, policy bundles.
+- `GET /api/v2/meta`, `/openapi`, `/schemas`, and `/bindings` — protocol/catalog/schema digests, current official bindings, discovery, and checked contract artifacts.
+- `GET /api/v2/scopes` — cursor-based lazy scope tree with `parent`, `depth`, `search`, `changed_since`, `child_count`, snapshot watermark, and health; never returns an unbounded branch/worktree tree.
+- `POST /api/v2/scopes:resolve` — resolve stable IDs, names, paths, remotes, worktrees, refs, PRs, natural-language token sets, and saved systems into `ScopeSelectorV2` or typed candidates.
+- `POST /api/v2/query` — generic bounded `TraceQueryV1`.
+- `POST /api/v2/search` — opinionated universal search profile.
+- `POST /api/v2/entities:batch` — stable inspector hydration.
+- `POST /api/v2/graph/neighborhood`, `/path`, `/impact`.
+- `POST /api/v2/timeline` and `/timeline/density`.
+- `GET /api/v2/sessions` and `GET /api/v2/messages` — cursor enumeration without text predicates.
+- `GET /api/v2/sessions/{id}` — session summary, coverage, participants, snapshots.
+- `GET /api/v2/agents/nearby` and `GET /api/v2/work-claims` — freshness/coverage-bounded agent proximity with stable retrieval anchors.
+- `POST /api/v2/replay/session` — read-only historical assembly.
+- `POST /api/v2/labs/hints`, `/retrieval`, `/search-quality`, `/coordination`, `/ingest`, `/query`, `/correlation`, `/scheduler`, `/memory`, `/policy-diff`, `/evolution`, `/secret-safety`.
+- `GET/POST/PATCH /api/v2/saved-views` and `/annotations`.
+- `POST /api/v2/exports` and `GET /api/v2/exports/{id}`.
+- `GET /api/v2/health`, `/coverage`, `/migrations`, `/projections`, `/privacy`.
+- `POST /api/v2/subscriptions` then `GET /api/v2/subscriptions/{id}/events` — authenticated snapshot/delta/progress SSE with opaque resume IDs.
+
+Typed command endpoints replace every current writable dashboard workflow:
+
+- `/api/v2/commands/automation/jobs`, `/run`, `/pause`, `/resume`.
+- `/api/v2/commands/skills/{approve|disable|archive|restore|install}`.
+- `/api/v2/commands/proposals/{apply|reject}` for facts, curation, and managed output.
+- `/api/v2/commands/memory/{preview|apply}`.
+- `/api/v2/commands/settings/{profile|project}`.
+- `/api/v2/commands/diagnostics/refresh`.
+- `/api/v2/commands/payloads/gc`.
+- `/api/v2/commands/work-claims/{publish|update|release|acknowledge-overlap|mark-disjoint|confirm-redundancy|handoff}`.
+- `/api/v2/commands/privacy/{scan|remediate-preview|remediate-apply|verify|quarantine-hold|quarantine-release}` with safe findings, elevated authorization, lifecycle lease, and rotation-first guidance.
+
+Every command has typed preview/result/audit schemas, idempotency, optimistic version checks, scope, required authorization, and domain parity tests.
+
+All mutations require idempotency keys, optimistic version checks, preview when meaningful, an audit event, and explicit apply.
+
+Local HTTP security is mandatory even on loopback: bind only to loopback by default; mint a per-launch bearer/session token; enforce strict `Host` and `Origin`; use CSRF protection for browser mutations; ship a restrictive CSP; contain export paths; and never place sensitive query literals or entity payloads in URLs.
+
+SSE is scope-filtered and authorized. It uses `Last-Event-ID`/sequence cursors, finite replay retention, heartbeat, backpressure/coalescing, slow-client termination, ordered resume, and explicit gap/resync events. The browser keeps last-known-good data, displays last-updated/stale/offline state, reconnects with backoff, repairs gaps, and handles out-of-order deltas idempotently.
+
+## 11. Product Information Architecture
+
+### 11.1 Routes
+
+- `/` — Brain / All.
+- `/activity` — cross-project activity and operational pulse.
+- `/explore` — universal query, pivots, collections, compare, export.
+- `/timeline` — Causal Loom timeline explorer.
+- `/threads`, `/threads/:id`, `/sessions`, `/sessions/:id`, `/turns`, and `/turns/:id`.
+- `/agents`, `/agents/:id`, and `/agents/nearby`.
+- `/workflows/:id`, `/automation/runs/:id`.
+- `/code`, `/code/entities/:id`, `/code/compare`, and `/graphs/{git|code|threads|turns|agents|timeline|memory|automation}` as saved lens presets over the same investigation state.
+- `/knowledge`, `/knowledge/facts/:id`, `/knowledge/entities/:id`.
+- `/delivery`, `/projects/:id`, `/projects/:id/branches/:branch`, `/pulls/:id`.
+- `/automations`, `/skills`, `/proposals`.
+- `/observatory` — health, ingest, storage, diagnostics, data quality, privacy.
+- `/costs` — tokens, latency, models, tools, savings, methodology.
+- `/playgrounds/hints`, `/retrieval`, `/search-quality`, `/coordination`, `/ingest`, `/query`, `/correlation`, `/scheduler`, `/memory`, `/policy-diff`, `/evolution`, `/secret-safety`.
+- `/saved/:viewId`.
+- `/settings`.
+
+Project pages are saved filtered views of the same product. They do not mount separate applications.
+
+### 11.2 Workbench shell
+
+Desktop layout:
+
+- Compact top command/status bar: global search, scope, time, live/frozen, compare, health, save/share/export.
+- Left outline/filter/query rail.
+- Dominant central visualization or table viewport.
+- Right universal inspector with evidence, provenance, raw/normalized data, relationships, and actions.
+- Optional bottom time brush/event-density rail.
+
+Mobile portrait:
+
+- Visualization/evidence first.
+- Command bar opens filter, outline, and inspector sheets.
+- Committed selection survives sheet/panel changes.
+
+Mobile landscape:
+
+- First-class graph/timeline inspection mode.
+
+### 11.3 Shared investigation state
+
+One state model coordinates every workspace:
+
+- Scope and project set.
+- Time range, live/frozen state, as-of point, compare range.
+- Query and facets.
+- Selected and pinned entities/events/paths.
+- Renderer/view mode, layout, camera/zoom, lane visibility.
+- Inspector tab and panel geometry.
+- Sampling/level-of-detail choices.
+
+Persistence ownership is explicit:
+
+- URL: nonsensitive scope IDs, time bounds, view mode, selected opaque entity IDs, and saved-view ID.
+- Local preferences: panel widths/geometry, theme, density, recent nonsensitive views.
+- IndexedDB: local drafts, bounded caches, and offline last-known-good data.
+- Encrypted profile content storage: saved queries with literals, annotations, collections, and protected views.
+- Remote/shared saved view: only after classification/redaction and explicit share action.
+
+Sensitive query text never enters a URL, browser history, analytics event, clipboard link, or catalog row. Browser back/forward traverses investigation states, not just tabs.
+
+## 12. Brain / All View
+
+The default question is:
+
+> What is TraceDecay doing, learning, changing, and failing across all registered projects?
+
+### 12.1 Semantic zoom
+
+- **Level 0 — Profile:** projects/repositories as clusters; active sessions/agents/runs; health; ingest lag; change, knowledge, automation, hint, and cost activity.
+- **Level 1 — Project:** worktrees, branches, sessions, workflows, automation, memory, code snapshots, delivery.
+- **Level 2 — Neighborhood:** selected entity plus typed, filtered evidence relations.
+- **Level 3 — Evidence:** exact message, visible reasoning summary, tool event, diff, diagnostic, fact source, policy evaluation, artifact, or remote delivery record.
+
+### 12.2 Layout modes
+
+- Cluster/stress layout for cross-domain relationships.
+- ELK layered layout for workflow/provenance DAGs.
+- Radial distance-from-selection layout for impact/reachability.
+- Adjacency matrix for dense topology.
+- Searchable outline/table for precision and accessibility.
+
+The server returns clustered multiresolution tiles and bounded neighborhoods. The UI never tries to render “the whole brain” as a hairball. Positions remain stable across expansion and reload; aggregate edges may bundle, evidence-level edges do not.
+
+Every aggregate tile returns a truthful contract: stable cluster ID, exact membership/count or declared sample, source denominator, aggregated edge counts by kind/evidence, uncertainty/coverage, child availability, expansion cursor, snapshot watermark, and layout/community algorithm version.
+
+### 12.3 Default evidence
+
+The default reading path is not an equal-weight card grid:
+
+1. **First-scan claim:** a direct sentence describing the most consequential current activity or health issue, with scope/time/coverage.
+2. **Central focal artifact:** recent active project/workflow clusters linked to the selected event window.
+3. **Subordinate evidence:** recent agent/code/delivery/knowledge/automation timeline aligned beneath the topology.
+4. **Operational guardrail:** compact project × subsystem health strip with ingest/projection/privacy warnings.
+5. **Feedback loop:** hint/tool/fact/skill/automation adoption and unresolved-outcome alerts.
+6. **Resume:** unfinished workflows and saved investigations.
+
+Desktop presents focal topology plus aligned timeline; mobile defaults to the first-scan claim, focused recent cluster, and single-lane activity, with health/feedback/resume in sheets. The default selection is the newest consequential event in the most recently active healthy-enough scope; if data is partial, health/coverage becomes the selection instead.
+
+### 12.4 Graph-of-graphs lenses
+
+The Brain is best understood as coordinated graph lenses over shared identity, time, scope, selection, and evidence—not one universal node/edge soup:
+
+- **Git graph:** refs, worktrees, commits, trees, diffs, PRs, checks, reviews, releases, and encountered remotes.
+- **Code graph:** repository snapshots, files, symbol lineages/occurrences, calls/types/uses, diagnostics, tests, ownership, and impact.
+- **Thread graph:** sessions/threads, turns, messages, content/reasoning artifacts, context summaries, tools, goals, and workflow membership.
+- **Agent graph:** actors, agent instances, parent/subagent creation, delegation, messages, handoffs, joins, interruptions, goals, and outcomes.
+- **Timeline graph:** occurred/ingested order, intervals, causation/correlation, concurrent lanes, late events, and as-of state.
+- **Holographic memory graph:** facts/versions, entities, decisions, contradictions, source evidence, trust, retrieval, feedback, and curation.
+- **Automation and skill graph:** jobs, schedules, Claude workflow runs, Codex goals, Hermes-style curator/reflector/skill-writer agents, proposals, artifacts, approvals, applies, usage, outcomes, revisions, and rollback.
+
+A `Turn` is a first-class interval/entity, not just a message index. It owns the user/agent exchange boundary and links the context visible at its start, provider-exposed reasoning artifacts, messages, tools/results, file/code evidence, goals, hints/memory/retrieval, costs, and state produced by its end. Provider-native meanings are preserved: a Claude workflow run, Codex goal, host thread, and TraceDecay automation run are related canonical entities, not flattened into one ambiguous “run.”
+
+Selecting an entity in any lens keeps the same investigation state and reveals evidence-bearing cross-links into the others. Each lens has its own legal nodes, edges, layout, aggregation, and fallback table. The UI never implies that a memory-similarity edge, call edge, temporal correlation, and Git ancestry edge share the same semantics merely because all can be drawn as lines.
+
+## 13. Universal Explorer
+
+- Search across projects, messages, sessions, agents, workflows, code, Git/delivery, facts, skills, automation, diagnostics, hints, costs, and artifacts.
+- Text and structured query builder produce the same visible `TraceQueryV1`.
+- Results pivot among table, timeline, graph, matrix, distribution, small multiples, and saved collection.
+- Query Explain shows selected shards, pushed filters, budgets, ranking features, cache/projection use, stale/partial state, and timing.
+- Command palette exposes existing MCP capabilities as guided query actions without requiring JSON copying.
+- Every result opens the same universal inspector and can be added to a comparison or collection.
+
+## 14. Causal Loom Timeline
+
+### 14.1 Coordinated lanes
+
+- Human prompts and user-visible objectives.
+- Assistant responses and provider-exposed reasoning summaries.
+- Parent agent and spawned subagent lifecycles.
+- Inter-agent messages, tasks, handoffs, goals, and plan updates.
+- Tool calls, approvals, results, errors, retries, latency.
+- Files, symbols, patches, diagnostics, builds, tests, affected-test selection.
+- Worktrees, branches, commits, PRs, checks, reviews, releases.
+- Hints, memory injection, retrieval, facts, feedback, policy decisions.
+- Automation schedules, skips, runs, artifacts, proposals, approvals.
+- Tokens, context, compression, latency, cost, estimated savings.
+
+### 14.2 Reading model
+
+- Overview density strip for months/days/runs.
+- Zoomable event waterfall for runs/turns/events.
+- Virtualized transcript/code/diff inspector.
+- Stable parent/subagent tree and lane ordering while zooming.
+- Routine tool noise collapses; consequential events remain visible.
+- Selecting a time window derives touched files/symbols/tests/commits/PRs/facts/hints/automations with evidence labels.
+
+Lane level-of-detail rules are part of the API contract:
+
+- Density bins report exact or sampled count, denominator, hidden-event count, source coverage, late-event count, and aggregation version.
+- Consequential classes—human prompt, agent spawn/handoff, failed tool, file mutation, diagnostic/test failure, commit/PR/review/release, policy mutation, privacy event—remain discoverable at every zoom.
+- Collapsing routine noise never removes it from counts or export; the UI shows hidden counts and expands deterministically.
+- Late-arriving events are placed by occurred time and marked by ingested time; a frozen view never silently reorders.
+- “Touched” means a direct structured event. Inferred affected entities appear separately with the producing impact algorithm/evidence.
+- Interval selection includes events by explicit half-open time bounds and reports clipped events/lanes.
+
+### 14.3 Causal lens
+
+Render a bounded chain:
+
+`context before → visible decision/rationale → action/tool → result → code/artifact → test/delivery → downstream impact`
+
+Each connector carries its evidence class. Temporal proximity is not rendered as causation.
+
+### 14.4 Time machine
+
+Scrubbing reconstructs:
+
+- Known project/worktree/branch/snapshot.
+- Messages and visible context assembled so far.
+- Fact/memory versions and retrieval candidates.
+- Hint/policy bundle and config digest.
+- Tool catalog and provider/host capabilities.
+- Open goals/tasks/workflows and observed delivery state.
+
+Replay has three labeled modes:
+
+1. **Exact deterministic replay:** immutable snapshot manifest resolves the executable evaluator bundle plus exact config, candidate/index/memory/tool-catalog data.
+2. **Recorded-result replay:** exact historical inputs/results can be inspected but the original evaluator is unavailable.
+3. **Current best-effort rerun:** current evaluator runs against the closest available historical manifest and reports every substitution, tolerance, and nondeterministic component.
+
+If an input or executable evaluator was not captured historically, the view marks it unavailable rather than substituting current state silently. Model-backed and embedding-dependent evaluations never claim byte-determinism unless the runtime/model artifact proves it.
+
+### 14.5 Follow and compare
+
+- Follow one agent while retaining collaborator/delivery context.
+- Compare two sessions, agents, branches, models, policy versions, or time ranges on aligned anchors.
+- Impact ribbon groups files, symbols, tests, commits, PRs, facts, and automations by evidence class.
+- Bookmark/annotate event ranges, copy deep link, save view, export JSON/Markdown/SVG/PNG.
+
+### 14.6 Reasoning boundary
+
+- Model `reasoning_artifacts(format=summary|analysis_text|structured|encrypted|unavailable)` only when the provider exposes the artifact to the user/host.
+- Label each artifact by its actual format and visibility; never relabel analysis text as a summary.
+- Encrypted/redacted/unavailable reasoning renders as a coverage marker.
+- Exclude reasoning from embeddings and exports by default; use shorter default retention.
+
+### 14.7 Deterministic export
+
+Canvas/WebGL exports use a separate deterministic export scene: frozen query snapshot, fixed viewport/fonts/DPR/layout seed, static direct labels/keys/caveats, complete selection/coverage metadata, and no hover-only evidence. Export waits for an explicit render-ready signal and falls back to a server/SVG/table renderer when WebGL is unavailable. Desktop/mobile/export scenes have visual regression fixtures.
+
+## 15. Domain Workspaces
+
+### Sessions
+
+- Complete session list and complete sanitized-native message enumeration, lossless for retained non-secret structure/semantics.
+- Provider/model/role/kind/time/git/project filters.
+- Turn graph and outline: start/end boundary, visible input/context, message/reasoning artifacts, tools/results, goals, hints/retrieval/memory, files/code, output state, cost, and coverage.
+- Parent/subagent tree, Claude workflow runs, Codex goals, tools, code/delivery impact, context compression, cost.
+- Raw/normalized/projection views with source offsets and hashes.
+
+### Agents
+
+- Actor and agent-instance topology.
+- Parent/subagent trees, turn sequences, delegation, messages, handoffs/joins, goals, tool use, outcomes, failure/retry patterns.
+- Cross-session/project patterns and model/provider comparisons.
+
+### Code
+
+- Repository/snapshot graph, symbol lineage, change history.
+- Session/agent ownership overlays with evidence/confidence.
+- Diff graph, dependency matrix, cycles/coupling, impact and affected-test overlays.
+- Branch/commit/as-of slider and snapshot comparisons.
+
+### Knowledge
+
+- Facts, fact versions, entities, decisions, contradictions, provenance, trust changes.
+- Retrieval history, helpfulness/feedback, Hermes-style curator/reflection proposals, approval/apply, usage/outcomes, revision/rollback, supersession, deletion lineage.
+- Similarity projection plus table/cluster alternatives.
+
+### Delivery
+
+- Worktrees, branches, commits, PRs, checks, reviews, releases, remotes.
+- Evidence-linked agent activity and fetched-at/staleness metadata.
+- Produced vs observed vs merely encountered delivery artifacts.
+
+### Automations
+
+- Schedules, effective config/policy scope, locks, skip reasons, run waterfall.
+- Agents, artifacts, proposals, validation, approvals, apply, downstream adoption.
+- Managed skills and memory are evolving product objects: evidence source → proposal → validation/eval → approval/policy → apply/install → injection/use → outcome → revision/rollback/archive.
+- Skills lifecycle/version graph and effectiveness evidence, including curator/session-reflector/skill-writer lineage and exact artifacts.
+
+### Observatory
+
+- Ingest lag, rewrite/backfill state, parser coverage, identity conflicts.
+- Shard/store health, migrations, projection lag, query latency, caps, partial results.
+- Hook/hint/tool adoption, unresolved outcomes, malformed rows.
+- Storage growth, blob integrity/GC, retention, redaction/privacy events.
+- Data quality coverage matrix across projects/providers/domains.
+
+### Costs
+
+- Tokens, latency, model/provider/tool usage, context/compression, costs, savings methodology.
+- Every aggregate drills to sessions, events, models, hints, tools, and outcomes.
+- Confidence ranges and missing-denominator state are explicit.
+
+## 16. Replay and Debugging Playgrounds
+
+All labs are read-only by default and label replay as exact deterministic, recorded-result, or current best-effort. They run against an immutable input snapshot and cannot mutate facts, hints, files, automation, counters, or ranking state.
+
+### 16.1 Hint Lab
+
+Inputs:
+
+- Any historical message/event/session position.
+- Pasted synthetic provider event or committed redacted fixture.
+- Historical or current project/worktree/branch/snapshot.
+- Provider/host, engine version, policy/config bundle, time, memory/index snapshot.
+- Executable evaluator artifact/digest; if unavailable, the lab disables exact historical execution and offers recorded-result inspection.
+
+Outputs:
+
+- Raw source reference and normalized hook input.
+- Classifier/rule decision tree.
+- Matched, rejected, suppressed, deduped, cooldown, escalation, and budget decisions.
+- Candidate memory/tool/skill hints and component scores.
+- Exact final injected payload.
+- Token/latency/cost contribution.
+- Downstream adoption/outcome when known.
+
+Modes:
+
+- As-submitted-then vs engine-now.
+- Policy/config A/B.
+- Branch/snapshot A/B.
+- Provider/host A/B.
+- Promote a redacted replay into a deterministic regression fixture after secret scanning and explicit confirmation.
+
+### 16.2 Retrieval Lab
+
+- Inspect lexical/entity/vector/recent candidates and every rank feature.
+- Compare memory/index/model versions and scope.
+- Explain exclusions, redactions, dedupe, trust/decay/usage effects.
+- Run without recording retrieval counters.
+
+### 16.3 Ingest Lab
+
+- Provider source event → observation envelope → canonical events → projection rows.
+- Show parser version, source offsets/hashes, dedupe/idempotency, externalization, redaction, quarantine, unresolved identity.
+- Compare parser versions and promote sanitized fixtures.
+
+### 16.4 Query Lab
+
+- Visual builder and source `TraceQueryV1` editor.
+- AST, cost estimate, selected shards, pushed filters, FTS/vector/traversal operations, merge/ranking, cursor, coverage.
+- Compare planner/index/ranking versions and export equivalent CLI/MCP/HTTP requests.
+
+### 16.5 Correlation Lab
+
+- Inspect candidate session↔worktree↔branch↔commit↔PR↔code relations.
+- Show evidence windows, exact supporting events, confidence features, conflicts, and alternative matches.
+- Promote labeled cases into correlation evals.
+
+### 16.6 Scheduler and Automation Lab
+
+- Re-run schedule/lock/no-new-activity/apply-policy decisions as-of a historical time.
+- Show effective config source, input watermarks, skip reason, lease/lock owner, proposed work, and mutations that would occur.
+
+### 16.7 Memory Lab
+
+- Inspect fact proposal, secret/transience checks, duplicate/conflict candidates, entity extraction, trust changes, supersession, retrieval consequences, and deletion impact.
+
+### 16.8 Policy Diff Lab
+
+- Compare any two versioned hint, retrieval, routing, diagnostics, correlation, curation, or scheduling bundles over a saved corpus.
+- Summarize changed decisions, regressions, wins, latency, token cost, and affected categories.
+
+### 16.9 Evolution Studio
+
+This is the product home for Hermes-style self-improvement across managed skills and memories, not a hidden automation side effect.
+
+- Start from a bounded evidence collection: repeated user correction, missed capability, failed workflow, retrieval gap, automation outcome, diagnostics cluster, or explicitly selected sessions/turns.
+- Inspect the curator/reflection/skill-writer agent graph, exact source evidence, generated proposal, validation/evals, similarity/deduplication, privacy/secret/transience checks, affected profiles/projects/providers, and predicted benefit/risk.
+- Compare skill/memory versions as structured and semantic diffs. Trace every version through draft, validation, approval policy, install/apply, injection/retrieval, observed use, terminal outcome, revision, rollback, archive, and deletion.
+- Simulate the proposed memory or skill over a frozen historical corpus before apply; report changed hints/tool choices/outcomes, regressions, latency/token cost, and unknown observation horizons.
+- Require explicit approval by default. Policy may allow narrow auto-apply only for a versioned low-risk class with signed validation receipt, staged rollout, automatic rollback threshold, and a complete audit trail.
+- Treat managed agent identities such as Hermes, memory curator, session reflector, and skill writer as actors with goals, turns, tools, artifacts, and outcomes visible in the same timeline and graph lenses.
+- Surface stale, unused, contradictory, over-broad, self-referential, provider-mismatched, or repeatedly reverted skills/facts as review queues.
+
+### 16.10 Coordination Lab
+
+- Replay a historical parent/child/peer/worktree window using recorded presence/claims or reconstructed evidence; label unavailable fields and confidence.
+- Show every nearby-agent candidate, scope intersection, freshness, redundancy mode, score, eligibility, suppression/dedupe/cooldown, exact compact payload, and proposed inspect/message/handoff/split/mute action.
+- Compare no-awareness, recorded/current, and candidate policies over the same frozen events.
+- Track whether the candidate would have duplicated a notice, exposed sensitive context, warned on intentional best-of-N, missed a write conflict, or provided a useful retrieval anchor.
+- Promote secret-scanned cases into a labeled coordination corpus without publishing private task summaries.
+- Never publish/modify a live claim, send a message, reserve a file, or record a hint outcome from the lab.
+
+### 16.11 Message Search Quality Lab
+
+- Run one query or a frozen multi-project corpus through lexical, phrase, fuzzy, entity/graph, dense, recency, fusion, clustering/diversity, and reranking stages independently or together.
+- Show candidates per stage, component ranks/scores, matched fields/entities/relations, duplicate/echo cluster, audience/origin, exclusions, privacy, coverage, latency, and final explanation.
+- Compare retrieval profiles and ablations on blinded local judgments with Precision@k, Recall@k, MRR, nDCG, no-answer accuracy, duplicate rate, first-useful rank/time, worst-stratum quality, latency, memory, and index lag.
+- Build time-split queries from later real user prompts against earlier-only data to avoid hindsight leakage; preserve stable private research anchors, not committed text.
+- Allow explicit relevance/noise/privacy labels and disagreement; lab reads do not mutate production usage/retrieval counters.
+- Export an aggregate/redacted evaluation receipt and a separately confirmed safe regression fixture.
+
+### 16.12 Secret Safety Lab and Privacy Observatory
+
+- Run only invalid synthetic canaries or already-sanitized minimal fixtures through structured parsing, decoded layers, detector rules, span merge, marker output, sink eligibility, policy versions, and latency/resource budgets.
+- Compare current/candidate detector profiles and false-positive adjudication without displaying or accepting a live finding value.
+- Observatory shows source/store/sink/detector coverage, sanitized/quarantined/legacy-unscanned/unknown counts, finding/remediation state, descendant rebuild graph, backup/restore eligibility, policy/rule versions, and scan progress.
+- Finding cards contain safe class/reason/receipt/state only; no candidate preview, prefix/suffix, exact length, raw hash, source context, URL, header, query parameter, command, or low-cardinality fingerprint.
+- Replay/lab reads never mutate findings, allowlists, facts, analytics, policy, quarantine, or serving projections. Apply flows use separate preview/command authorization.
+
+## 17. Visualization System
+
+| Analytical question | Primary artifact | Renderer | Fallback |
+|---|---|---|---|
+| How is the whole system connected? | Clustered semantic-zoom Brain | Sigma.js/Graphology/WebGL + DOM/SVG labels | Outline, relationship table, adjacency matrix |
+| What spawned/produced what? | Workflow/provenance DAG | ELK layout + Canvas/SVG | Ordered event/relationship list |
+| What happened over time? | Causal Loom lanes + density brush | Canvas/WebGL marks + D3 scales + virtualized DOM | Chronological table/transcript |
+| What changed across code snapshots? | Code evolution graph + diff inspector | Layered graph + CodeMirror | File/symbol change table |
+| What is affected? | Impact DAG + risk/test matrix | Canvas/SVG + table | Ranked affected entities/tests |
+| Where is coupling concentrated? | Dependency structure matrix | Canvas/ECharts heatmap | Sorted coupling table |
+| Which projects/subsystems are unhealthy? | Project × subsystem heatmap and sparklines | ECharts | Directly labeled table |
+| Where is privacy coverage incomplete or remediation pending? | Source × sink × detector coverage/repair matrix and descendant DAG | ECharts + layered graph | Safe finding/coverage/remediation table without candidate content |
+| How does knowledge evolve? | Fact provenance DAG, trust history, contradiction pairs | Graph + ECharts lines | Version/provenance table |
+| How similar are facts/sessions/code entities? | Projection/cluster view | Canvas/WebGL | Nearest-neighbor table with scores |
+| How do automations execute? | Scheduler swimlane/run waterfall/artifact lineage | ECharts + DAG | Run/artifact table |
+| Are hints effective? | Outcome funnel, category matrix, unresolved horizon | ECharts | Exact counts with denominator state |
+| Where do tokens/costs go? | Time series, heatmap, small multiples | ECharts | Precise ledger table |
+| Is storage/data complete? | Growth lines, shard coverage matrix, lag histograms | ECharts | Store/shard status table |
+| How are agents related? | Parent/subagent tree and handoff graph | ELK/Sigma | Nested outline |
+| What happened within an agent turn? | Turn graph linking context, reasoning artifact, tools, files, goals, and outcome | Layered Canvas/SVG + virtualized inspector | Ordered turn evidence table |
+| How does Git history connect to work? | Commit/ref/PR graph with session/agent/code evidence overlays | Sigma/ELK + diff inspector | Git history and correlation table |
+| How do skills and memory improve? | Evidence/proposal/version/use/outcome lineage | DAG + ECharts effectiveness trends | Versioned lifecycle ledger |
+| Which agents are nearby or overlapping? | Work-claim neighborhood with same/parallel-worktree scope intersections | Layered graph + compact agent list | Exact claim/overlap/retrieval-anchor table |
+| Why did message search rank this? | Retriever/reranker waterfall, duplicate clusters, metric comparison | ECharts + ranked result inspector | Per-stage candidate/score/label table |
+
+Rules:
+
+- No decorative 3D, particles, or animation. Motion represents activity, traversal, recency, or state transition.
+- Essential values remain visible without hover. Hover previews; committed selection updates URL/history/inspector.
+- Direct labels beat detached legends. Color is redundant with shape, line, icon, or text.
+- DOM/SVG target: fewer than about 2,000 visible marks. Canvas for dense 2D. WebGL for genuinely large graph/timeline selections.
+- Server clustering/aggregation precedes transfer. Viewport/time-window queries and worker-based layout avoid main-thread stalls.
+- Layout caches are deterministic by query snapshot and preserve positions during expansion.
+- Every graph has synchronized searchable outline, relationship list, selected-path text, and data export.
+- Reduced motion freezes layouts after deterministic settle and replaces animation with static recency/state encodings.
+- Every substantial visual has a checked-in mini-brief: analytical job/claim, data grain, encoding, interaction states, mobile continuation, URL/saved state, fallback, accessibility, export scene, QA fixture, and approved desktop/mobile concept contract.
+- Shared semantic color ledger: neutral context, primary focus, comparison, selection, alert severity, stale/partial/offline, sensitivity, and evidence class. One color has one meaning across views; shape/line/icon/text remains redundant. Contrast, grayscale, and color-deficiency fixtures are required.
+- Mobile portrait uses focused neighborhoods and one primary timeline lane with step-through controls; landscape enables coordinated graph/timeline. Tap/focus replaces hover, 44–48 px targets are required, pinch/wheel ownership and `touch-action` prevent scroll traps, and explicit zoom/reset/step controls provide gesture alternatives.
+- Renderer throughput is not permission to show a hairball. The 50k graph benchmark means loaded/GPU-managed entities; labeled/interactive topology is capped by LOD, crossing/overlap/selection legibility budgets. Timeline benchmarks distinguish density marks from inspectable events.
+
+## 18. Frontend Architecture
+
+### 18.1 Proposed packages
+
+- `dashboard/app/` — route shell and composition root.
+- `dashboard/packages/contracts/` — generated V2 client/types.
+- `dashboard/packages/query-state/` — URL/saved-view schema, codecs, selection/time/scope state.
+- `dashboard/packages/design-system/` — tokens, typography, controls, panels, tables, empty/loading/stale/partial states.
+- `dashboard/packages/inspector/` — universal entity/event/evidence inspector.
+- `dashboard/packages/brain/` — semantic-zoom graph/matrix/outline.
+- `dashboard/packages/timeline/` — density, lanes, virtualized transcript, time brush.
+- `dashboard/packages/charts/` — ECharts ownership, direct-label and accessibility helpers.
+- `dashboard/packages/code-viewer/` — CodeMirror code/message/diff payloads.
+- `dashboard/features/*` — Brain, Explorer, Sessions, Agents, Code, Knowledge, Delivery, Automations, Observatory, Costs, Playgrounds.
+
+Before selecting the new dashboard bundler, commit an ADR comparing the current Rsbuild/plugin asset pipeline with Vite: dev/prod build, embedded Rust assets, code splitting/lazy routes, CSP, base paths, source maps, legacy plugin loading, test tooling, and migration cost. React/TypeScript and package boundaries are fixed; the bundler follows the ADR evidence.
+
+### 18.2 Ownership rules
+
+- Feature modules request typed read models; they never join raw endpoints in the browser.
+- Query state is shared; renderer-local transient state is not global.
+- Each renderer owns one canvas/WebGL instance and exposes selection/camera/accessibility adapters.
+- Hidden views pause layout/render loops.
+- Every feature has loading, empty, stale, partial, offline, incompatible, redacted, and error states.
+- Each old plugin retains its existing read/write behavior until that domain's V2 query and command parity gate passes. It then redirects to V2 and retires independently; no blanket read-only downgrade.
+
+## 19. Privacy, Security, and Retention
+
+### 19.1 Sensitivity classes
+
+- Metadata-only.
+- Normal content.
+- Sensitive content.
+- Secret-like/quarantined.
+- Reasoning.
+- Redacted-derived.
+
+### 19.2 Rules
+
+- Local-only and no network upload by default.
+- Managed files and blobs are private (`0600` where applicable), root-contained, and hash-verified.
+- Classify/redact before FTS, vectors, facts, fixtures, or remote integration.
+- External embeddings require per-scope consent; local embeddings are default.
+- Raw originals are retained only when policy allows; protected mode encrypts blobs.
+- Reasoning has opt-in capture, shorter default retention, and export/index exclusion by default.
+- GitHub/remote delivery integration is read-only by default and repository-allowlisted.
+- Exports include schema versions, source coverage, redaction report, hashes, and generation time.
+- Deletion flow: preview descendants → approve → tombstone canonical entity → rebuild/remove projections → release blob refs → GC → retain non-content audit receipt.
+- Legal/pinned holds prevent deletion and are visible in impact preview.
+
+The privacy ADR committed before the observation journal fixes these initial defaults:
+
+- Normal human/assistant message content: retained until explicit user policy/delete, preserving TraceDecay's local history mission.
+- Provider-exposed reasoning artifacts: 30 days unless explicitly pinned; excluded from FTS, vectors, facts, shares, and exports by default.
+- Secret-like/quarantined raw payload: 24 hours for local inspection, never indexed, then content deletion with tombstone.
+- Reconstructable response handles/cache: 7 days.
+- Raw analytics/hook telemetry: 180 days; nonsensitive aggregate rollups may persist.
+- Reconstructable automation intermediates: 90 days unless pinned by a run/artifact policy.
+- Tombstone/provenance skeleton and deletion audit receipt: retained without deleted content.
+- Protected mode: optional for local V2 compatibility, mandatory before any non-loopback/team exposure. Key lives in the OS keyring; rotation rewraps per-domain keys; encrypted recovery export is required before destructive rotation.
+- Locked store: metadata/coverage remains visible, payload/search projections stay unavailable and explicitly locked.
+- Deletion SLA: canonical tombstone and FTS/vector removal within one minute; blob ref release immediately; physical blob GC after the 24-hour recovery grace.
+
+Every response/export includes the evidence-retention watermark. Historical replay beyond retained inputs is explicitly incomplete.
+
+### 19.3 Zero-secret ingress, indexing, fixture, and release gate
+
+Secret detection is a mandatory boundary before any content becomes generally queryable or distributable. It combines versioned deterministic credential/key/token patterns, structured credential/config parsers, provider-native redaction markers, entropy checks with calibrated context, and user/project allow/deny rules. Scanner findings are data-classification inputs, not content to paste into logs or reports.
+
+Hard invariant: secret or unadjudicated secret-like bytes never enter FTS, dense/learned-sparse representations, graph labels, summary DAG text, facts/memories, skills, hint context, query/rank features, caches/response handles, analytics, logs/traces/errors, cursors/anchors, dashboard/browser storage, source maps, fixtures/snapshots, examples/docs, exports/shares, eval/qrel corpora, or generated SDK/API artifacts. Secret detection runs before those sinks and again at every promotion/export/release boundary.
+
+Raw-source handling:
+
+- Lossless provider source remains provider-owned. TraceDecay stores only source hash/position plus a redacted observation unless policy explicitly permits a protected forensic copy.
+- A permitted secret-like forensic payload is encrypted inside a separate quarantine/key domain, never indexed/deduplicated outside that domain, mode-private, access-audited, and deleted after the initial 24-hour retention unless the user explicitly places a hold.
+- Safe projections contain fixed redaction markers and span/reason receipts, never enough prefix/suffix material to reconstruct the secret.
+- False-positive adjudication records rule/version/class and safe digest only; it does not copy the matched value. Allowlisting is narrow to an exact safe digest/context and cannot disable a rule profile-wide silently.
+
+Fixture and Git gate:
+
+- No database, store, transcript, provider payload, response cache, or user export is copied directly into a fixture or PR.
+- Fixture promotion selects the minimum slice, structurally redacts it, substitutes synthetic identifiers/content, scans the slice plus manifest/generated snapshots/source maps, and records scanner versions/policy digest/zero-findings receipt.
+- CI scans the staged diff, repository history introduced by the PR, archives, generated API/SDK/docs/frontend assets, test snapshots, and release packages with a pinned secret scanner plus TraceDecay's versioned classifier. A finding blocks commit/release until removed or narrowly adjudicated without exposing the value.
+- Canary tests seed synthetic secret classes through every input and assert zero occurrences in every forbidden sink, including post-deletion/rebuild/backup/export paths.
+
+Retroactive V1/V2 audit and repair:
+
+1. Inventory every store, blob, payload cache, FTS table, representation segment, fact/skill/automation artifact, fixture, export, log, backup, and generated frontend/API/package artifact without rendering content.
+2. Scan in the owning privacy domain; persist only safe finding class, entity/blob digest, detector version, owning domain, state, and remediation receipt.
+3. Immediately prevent flagged content from query/hydration/export; show a redacted/quarantined coverage state.
+4. Tombstone/redact canonical content, rebuild FTS/vector/summary/fact/graph/cache projections from redacted observations, release blob refs, rotate credentials when real exposure is confirmed, and invalidate exports/caches/anchors that could reveal content.
+5. Scan backups and rollback stores before they are eligible for restore; an unsafe legacy store remains quarantined rather than becoming a compatibility source.
+6. Verify zero canary/known-secret digest hits across all forbidden sinks and record unexplained/locked/unscanned coverage. “Zero findings” is never claimed when a domain was skipped.
+
+Current planning evidence: `gitleaks 8.30.1` found zero findings in the plan set and sanitized private corpus. The first pass produced four marker-only private-key-rule findings across transcript rows; no complete key block or long key body was present. Parsed-value sanitization conservatively replaced 47 credential-shaped/marker/example occurrences in the user corpus and four assignment-shaped examples in the human subset. A permissive authenticated-URL alert over serialized JSON was reclassified as a cross-field false positive after parsed-field validation. Canonical corpus files were replaced with their sanitized versions, remain outside Git and mode `0600`, and are not committable fixtures.
+
+## 20. Reliability and Operational Model
+
+- Corrupt/missing/incompatible shards return named partial coverage, not silent omission or total dashboard failure.
+- Catalog rebuilds from manifests and outboxes.
+- Projections replay from immutable observations/events.
+- FTS, vectors, rollups, and graph analyses rebuild independently.
+- Blob doctor verifies hashes, references, permissions, missing files, and orphans.
+- Shard quarantine keeps unaffected projects queryable.
+- Backups consist of catalog manifest, project shard snapshots, graph snapshot manifests, and blob inventory.
+- Recovery drills kill processes during observation commit, outbox commit, projection, blob staging, graph swap, migration, retention, and GC.
+- Every migration has disk-space preflight: old data + new data + 25% headroom.
+
+## 21. Observability
+
+Record and expose:
+
+- Source discovery, offsets, rewrite generations, ingest rate/lag/errors/quarantine.
+- Identity conflicts, unresolved aliases, ambiguous lineages.
+- Outbox/projector lag, retries, dead letters, rebuild progress.
+- Shard open/query latency, rows scanned/returned, FTS/vector candidates, merge time, cache hit, planner budget/cancellation.
+- Store/WAL/blob size, integrity, missing/orphan refs, GC and retention.
+- Hook synchronous latency, hint policy decisions, exact terminal state, adoption/outcome horizon.
+- Tool, fact, skill, automation, and query adoption.
+- Privacy classifications, redactions, locked content, denied export/integration.
+- Migration receipts, parity gaps, rollback events.
+
+Do not log sensitive query literals or payloads. Use safe query fingerprints and sampled `EXPLAIN QUERY PLAN` metadata.
+
+## 22. Target Repository Structure
+
+Create bounded crates beside the V1 crate and move behavior only after parity:
+
+- `crates/tracedecay-domain/` — IDs, entities, observations, events, relations, scope, time, sensitivity, `TraceQueryV1`; no I/O.
+- `crates/tracedecay-store/` — catalog/project/graph/blob repositories, migrations, transactions, outbox, backup/repair.
+- `crates/tracedecay-capture/` — source contracts, provider adapters, classification/redaction, idempotent observation journal.
+- `crates/tracedecay-projectors/` — identity, sessions, code/delivery, knowledge, policy, automation, observability projections.
+- `crates/tracedecay-query/` — planner, shard coordinator, FTS/vector/rank, graph/time operators, cursors, explain, exports.
+- `crates/tracedecay-policy/` — versioned deterministic hint/retrieval/correlation/scheduler/memory evaluation.
+- `crates/tracedecay-hooks/` — host hook request normalization, durable spool client, latency budgets, hint envelope rendering, provider acknowledgements; no direct domain SQL.
+- `crates/tracedecay-tool-catalog/` — generated capability definitions and MCP/CLI/HTTP/dashboard/skill/hint mappings; no use-case implementation.
+- `crates/tracedecay-application/` — use cases and composition ports; no transport-specific rendering.
+- `crates/tracedecay-api/` — Axum V2, SSE, generated OpenAPI/schema.
+- `crates/tracedecay-client/` — official Rust client, pager/stream/operation helpers, generated public types.
+- `packages/tracedecay-client/` — official TypeScript client for Node/browser-authorized use, independent of dashboard state.
+- `python/tracedecay-client/` — official typed synchronous/asynchronous Python client.
+- `docs/api/` and `tests/public_api_conformance/` — generated/curated public docs, recipes, authenticated explorer/sandbox, semantic/security/stream/SDK parity.
+- Existing root crate — CLI/binary/daemon/MCP/V1 compatibility composition until final retirement.
+
+Dependency direction:
+
+`domain ← store/capture/projectors/query/policy/tool-catalog ← application ← hooks/CLI/MCP/HTTP/dashboard adapters`
+
+`tracedecay-hooks` may depend on domain policy request/receipt types, tool-catalog read models, and narrow application ports; it may not depend on projectors, SQL repositories, dashboard code, or MCP rendering. `tracedecay-tool-catalog` describes capabilities but never calls them, preventing discovery metadata from becoming a second application layer.
+
+New bounded-context modules target at most 800 lines per production file and may not import dashboard or MCP transport layers.
+
+## 23. Compatibility and Parity Matrix
+
+Before cutover, generate a machine-readable inventory of:
+
+- Every MCP tool, schema, annotation, renderer, mutation/read classification.
+- Every CLI command/flag/output shape.
+- Every HTTP/dashboard route and response.
+- Every config key/environment override/default.
+- Every provider/host integration, hook event, transcript source, and source offset.
+- Every database table/index/trigger/schema version and sidecar file.
+- Every retention, privacy, migration, backfill, doctor, repair, and export behavior.
+
+Each item has one status: V1-only, V2-shadow, parity-proven, V2-default, migration-only, retired. Cutover fails on unexplained divergence.
+
+The inventory includes frontend behavior, not only routes: every plugin view, filter, selection, drawer, URL parameter, keyboard path, export/action, empty/loading/stale/error state, and cross-view transition.
+
+### 23.1 Current view-to-target ownership
+
+| V1 surface | V2 owner | Required parity before retirement |
+|---|---|---|
+| Shell project selector and six tabs | Unified shell | Project selection, legacy-tab redirects, direct deep links, capability/error states, no lost writable action. |
+| Holographic Inspector | Knowledge + universal inspector | Fact list/detail, trust history, provenance, filters, mutation preview/apply. |
+| Holographic Semantic Map | Knowledge similarity view | Projection, selection, filters, score explanation, table fallback. |
+| Holographic Graph | Knowledge provenance graph | Fact/entity links, neighborhood, inspector, evidence, bounded graph. |
+| Holographic Similarity | Knowledge comparison | Similar/duplicate/conflict pairs, thresholds, exact scores, curation handoff. |
+| Holographic Curation | Knowledge + Automations | Status, activity, runs, config, proposals, apply/reject, oplog/audit. |
+| LCM overview/recent sessions | Sessions + Observatory | Counts, providers, summaries, compression, health, exact scope/coverage. |
+| LCM text search | Explorer + Sessions | FTS semantics, filters, paging, raw/summary provenance, export. |
+| LCM session/node drawers | Causal Loom + inspector | Lossless replay, node/source expansion, payload coverage, deep links. |
+| LCM timeline | Causal Loom | Current day/hour aggregates plus event lanes, LOD, source coverage. |
+| LCM compression controls | Sessions + Policy/Scheduler labs | Preview/compress/boundary/status/doctor semantics and audit. |
+| LCM payload health/GC | Observatory | Health, missing/orphan/tombstone detail, preview/apply GC, audit. |
+| Code Graph overview/canvas | Code + Brain | Search, neighborhood, path, callers/callees, selection, layout, table/matrix fallback. |
+| Code Graph path mode | Code/Explorer | Exact paths, edge kinds, snapshot scope, evidence and truncation. |
+| Savings overview/ledger/sessions/models/pricing | Costs | Existing ranges/tables/diagnostics plus linked session/tool/hint/outcome evidence. |
+| Code Diagnostics overview/settings/refresh | Observatory + Code | Diagnostics, language settings, refresh actions, mapped symbols/tests, errors. |
+| Settings profile/project patches | Settings | Full config scope/source/defaults, optimistic patch, validation, restart impact. |
+| Automation jobs/scheduler | Automations | CRUD, run, pause/resume, locks/skips, effective config, audit. |
+| Managed skills/proposals/artifacts | Automations + Knowledge | Lifecycle mutations, evidence, validation, usage/outcomes, artifact inspection. |
+| Analytics overview/hints/usage/underused | Observatory + Costs + Hint Lab | Exact counts/denominators/caps, drill-down, policy version, terminal outcomes. |
+
+### 23.2 SPA and legacy-shell migration
+
+- Axum serves history fallback for every V2 route and rejects asset-path fallthrough.
+- Base path, embedded asset, CSP, code-splitting, cache, and source-map behavior is tested in standalone and host-wrapped dashboards.
+- Legacy `?tab=` and plugin URLs redirect to equivalent V2 saved state.
+- Old/new shells coexist behind a feature flag until direct reload, back/forward, deep link, and mutation parity pass.
+
+## 24. Program Phases and Pull Request Sequence
+
+Each PR below must be independently reviewable, backward-compatible unless explicitly a cutover, and accompanied by focused tests and a migration/parity receipt.
+
+### Phase 0 — Truth, contracts, and safe corpora
+
+#### PR 1: Architecture decision records
+
+**Files:**
+
+- Create `docs/architecture/v2/logical-brain.md`.
+- Create `docs/architecture/v2/identity-and-evidence.md`.
+- Create `docs/architecture/v2/storage-and-consistency.md`.
+- Create `docs/architecture/v2/query-and-api.md`.
+- Create `docs/architecture/v2/privacy-and-retention.md`.
+- Create `docs/architecture/v2/dashboard-and-renderers.md`.
+- Create `docs/architecture/v2/frontend-build-and-embedding.md`.
+
+- [ ] Record selected and rejected alternatives from this plan.
+- [ ] Lock the evidence vocabulary and no-hidden-reasoning rule.
+- [ ] Lock compatibility, rollback, and V1 removal gates.
+- [ ] Lock activity-vs-project shard ownership, deterministic identity allocation, privacy/key-domain blobs, graph generation packing, exact retention/encryption defaults, and cursor/SSE semantics.
+- [ ] Lock canonical planes/owner matrix, crate dependency DAG, extension tiers/SPIs, config/status/error governance, complexity budgets, anti-corruption adapter contract, convergence scorecard, and deletion waves from plan 19.
+- [ ] Select the dashboard bundler after a measured Rsbuild-versus-Vite comparison.
+- [ ] Add architecture lint tests for dependency direction and transport isolation.
+
+#### PR 2: Redacted golden corpus and manifest
+
+**Files:**
+
+- Create `tests/fixtures/v2/manifest.json`.
+- Create redacted provider fixtures under `tests/fixtures/v2/providers/`.
+- Create `tests/v2_corpus_suite/`.
+
+- [ ] Cover every provider and source-record family, subagents, tools, reasoning summaries, goals, Git, rewrites, truncation, malformed/partial input, Unicode, missing timestamps, and secrets.
+- [ ] Add secret scan and deterministic hash manifest.
+- [ ] Prove fixtures preserve all intended non-secret structure/semantics after normalization, contain only synthetic/minimal-redacted content, and are safe to commit.
+
+#### PR 2A: Research provenance and durable context anchors
+
+**Files:**
+
+- Create V2 research-manifest, retrieval-anchor, and context-slice schemas.
+- Create private-corpus validators and redacted aggregate report fixtures.
+
+- [ ] Route every design assertion to stable session/message/Turn/agent/goal/Git/entity anchors plus bounded source slices; response handles are never the durable citation.
+- [ ] Preserve parent/subagent authorship, research question, tool/query arguments, cutoff, searched/skipped coverage, and artifact hashes.
+- [ ] Keep raw chronological user-message exports and private judgments outside Git with mode `0600`; commit only secret-scanned redacted/synthetic fixtures and aggregates.
+- [ ] Prove anchors survive project rename, worktree deletion, and shard routing through the catalog, or return explicit retained tombstones.
+
+#### PR 2B: Synthetic secret corpus, sink inventory, and scan receipts
+
+- Create invalid synthetic positive, realistic negative, serialized-envelope cross-field false-positive, and forbidden-sink canary corpora; never copy a real store/transcript/credential.
+- Generate the complete source/store/index/prompt/output/cache/fixture/export/backup/release sink inventory and privacy manifest schema.
+- Pin `gitleaks` for CI/offline differential scans plus one independent scanner; reports contain versions/classes/counts/coverage only and zero candidate values.
+- Import current LCM/memory/remote/tool-preview/hook/handle/backup/dashboard regressions and plan-18 research anchors.
+
+#### PR 3: V1 compatibility inventory generator
+
+**Files:**
+
+- Create `src/compatibility_inventory/`.
+- Create `tests/fixtures/v2/v1-compatibility.json`.
+
+- [ ] Generate tool/CLI/API/config/schema/sidecar/provider inventory.
+- [ ] Generate store/table/writer/reader ownership, semantic-implementation duplicates, crate/module dependencies, extension points, generated-binding drift, adapter ledger with delete-by PR, and baseline convergence scorecard.
+- [ ] Fail CI when V1 surface changes without an inventory decision.
+- [ ] Add human-readable parity report.
+- [ ] Fail CI on an unowned store/table/public action, a second canonical semantic owner, an unregistered direct writer/query/scope/redaction/policy/status/error path, or an expired adapter.
+
+#### PR 4: Domain contracts only
+
+**Files:**
+
+- Create `crates/tracedecay-domain/`.
+- Modify workspace `Cargo.toml`.
+
+- [ ] Implement UUIDv7 `EntityRef`, scope, temporal types, sensitivity, `ObservationEnvelopeV1`, canonical event, `RelationAssertion`, provenance, and `TraceQueryV1` types.
+- [ ] Add JSON/schema round-trip, validation, forward-version rejection, causation-acyclicity, and interval property tests.
+
+#### PR 4B: Privacy taint, sanitizer receipt, and sink-eligibility contracts
+
+- Add sensitivity/detection/sanitization receipt/policy/keyed-fingerprint/marker/scan coverage/finding/remediation/quarantine types.
+- Add `Unclassified` -> `Classified` -> `Sanitized` -> `CatalogSafe|SearchEligible|PromptEligible|ExportEligible|LogSafe` checked conversions and compile-fail dependency tests.
+- Public markers/receipts reveal no candidate length, prefix/suffix, unkeyed hash, source excerpt, or cross-domain equality.
+
+#### PR 4A: Read-only workbench concept against V1 adapters
+
+**Files:**
+
+- Create `dashboard/v2-prototype/` and `src/dashboard/v2_compat_api/` behind a development-only flag.
+
+- [ ] Build paired desktop, mobile portrait, and mobile landscape concepts for unified shell, Brain reading path, Explorer, and Causal Loom.
+- [ ] Serve one real read-only historical investigation through V1 compatibility adapters.
+- [ ] Validate information architecture, scope/time/selection, table fallback, mobile interaction, and evidence language with the user before storage/query contracts harden.
+- [ ] Delete prototype-only shortcuts when the V2 vertical slice replaces them; preserve approved interaction/semantic contracts as fixtures.
+
+### Phase 1 — Storage, capture, identity, and projections
+
+#### PR 5: Catalog/project/blob store skeleton
+
+- Create `crates/tracedecay-store/src/{catalog,project,graph,blob,migrations,manifest,integrity,backup}.rs`.
+- [ ] Implement forward-only migrations, manifests, private permissions, open modes, integrity and backup/restore.
+- [ ] Prove a corrupt project shard leaves catalog and other projects available.
+
+#### PR 6A: Fenced observation journal, spool ingress, outbox, and commands
+
+- Create transactional observation/outbox/source-head/checkpoint tables, bounded writer queues, and durable spool ingress.
+- [ ] Implement atomic observation + outbox + source-head commit, fenced acknowledgements, gap/rewrite state, and idempotent command receipts.
+- [ ] Prove double ingest is idempotent and kill-at-boundary is retry-safe.
+
+#### PR 6B: Sanitized blob storage, protected quarantine, and key lifecycle
+
+- Add privacy-domain sanitized blob staging/publication/GC plus isolated random-ID encrypted secret blobs, per-record DEK wrapping, OS-keyring profile KEK, first-syscall private I/O, access audit, TTL/holds, cryptographic deletion, and separately gated restore behavior.
+- [ ] Unavailable/locked keyring fails closed to sanitized-only/drop; no plaintext temp/WAL/normal blob/backup/log fallback.
+
+#### PR 6C: Packed immutable graph generations
+
+- Add staged/sealed graph packs, overlay/compaction policy, immutable manifests, snapshot-to-generation mapping, atomic publication, pinned readers, orphan recovery, and bounded generation GC.
+- [ ] A base checkout/ref/current graph can never replace the explicitly resolved worktree/snapshot/generation tuple.
+
+#### PR 6D: Retention, integrity, backup/restore, startup recovery, and repair
+
+- Add typed retention preview/apply/holds, whole-store integrity manifests, consistent multi-shard backup/restore, disk preflight, startup recovery, and safe repair receipts.
+- [ ] Kill/disk-full/corruption/restore matrices preserve the previous valid generation or yield explicit partial/quarantined state; no unsafe artifact becomes serving state.
+
+#### PR 7: Provider capture conformance harness
+
+- Create `crates/tracedecay-capture/` and source adapter trait.
+- [ ] Wrap one provider at a time behind shadow capture.
+- [ ] Record source artifact/generation/offset/privacy-domain-keyed source fingerprint, sanitized-output digest, and sensitivity before projection; raw checksums remain transient/non-serializable.
+- [ ] Differential-test V1 session rows and V2 observations.
+
+#### PR 7A: Mandatory structured sanitizer and provider/hook conformance
+
+- Implement parse-field-before-scan, built-in detector registry, bounded decoding, span merge/replacement, privacy-policy precedence, keyed fingerprints, safe markers/receipts, and fail-closed budgets.
+- Wrap every provider/hook in shadow/differential mode, then make sanitized content the only observation-journal input; record metadata may strengthen but never disable the safety floor.
+- [ ] Test structured/malformed/encoded/chunked/Unicode/timeout/plugin/disk/process cases and every plan-18 secret class without real credentials.
+
+#### PR 8: Identity and alias resolver
+
+- Create repository/project/worktree/actor/session/message resolvers.
+- [ ] Preserve ambiguity as candidate relations.
+- [ ] Cover path aliases, moved repos, detached HEAD, rebases, force-pushes, rewritten transcripts, and provider collisions.
+
+#### PR 8A: Canonical cross-project scope resolver
+
+- Add `ScopeSelectorV2`, saved project sets, checkout/worktree/ref/snapshot identities, match evidence, explicit-target refusal, and typed ambiguity/retry errors.
+- Implement exact, token-aware, alias/remote/path, fuzzy, and relationship-aware resolver channels with explanations and authorization filtering.
+- Generate common CLI flags, MCP/HTTP schemas, and SDK types from the domain contract; prohibit public `project_key` and store-path identity.
+- Import the Rspack/Rsbuild/React Router, moved-repo, duplicate-store, stale-registry, same-name, and main-versus-worktree fixtures.
+
+#### PR 9: Evidence relation store
+
+- Implement bitemporal assertions, evidence classes, confidence, provenance, and supersession.
+- [ ] Add copy-lint tests preventing causal words for inferred/heuristic links.
+
+#### PR 10: Projection framework
+
+- Create `crates/tracedecay-projectors/`.
+- [ ] Implement checkpoints, outbox consumption, versioning, bounded batches, pause/resume, atomic swap, lag metrics, and dead-letter quarantine.
+- [ ] Prove rebuild determinism.
+
+#### PR 10A: Privacy sink firewalls and descendant lineage
+
+- Require sink-eligible types for session/FTS/representation/code/knowledge/policy/automation/analytics/cache projectors and record every derived descendant.
+- Remove secret candidate previews from memory curation/status/doctor/analytics and equivalent inspection routes.
+- [ ] One finding blocks/hydrates/rebuilds every descendant deterministically; synthetic canaries yield zero forbidden-sink bytes.
+
+### Phase 2 — Query platform
+
+#### PR 11: `TraceQueryV1` parser, validation, cost model, explain
+
+- Create `crates/tracedecay-query/src/{ast,validate,cost,explain}.rs`.
+- [ ] Add bounded operators and reject unbounded graph/timeline/export requests.
+
+#### PR 12: Shard planner and stable distributed cursors
+
+- Implement scope resolution, shard statistics/pruning, cancellation, partial coverage, normalized merge, and deterministic cursor resume.
+- [ ] Test missing/corrupt/stale/incompatible shards and live ingest watermarks.
+
+#### PR 12A: First end-to-end V2 vertical slice
+
+- [ ] Choose Codex + one TraceDecay project + sessions/tools/subagents as the slice.
+- [ ] Capture and backfill sanitized real observations into activity/project shards; no raw private corpus or secret-shaped production payload becomes a fixture.
+- [ ] Resolve identity/evidence, project sessions/tools/subagents, query through `TraceQueryV1`, expose minimal HTTP, and render table/timeline/inspector in the prototype shell.
+- [ ] Demonstrate one saved historical investigation, partial/privacy coverage, exact export manifest, and V1/V2 parity before continuing broad domain work.
+
+#### PR 12B: Federated scope planning and globally routed retrieval
+
+- Bind `ScopeSelectorV2`, catalog/scope-set generation, per-shard snapshots/watermarks, partial/stale policy, and globally routable entity/retrieval refs into the planner and cursor.
+- Prove cross-project search result -> exact session/message/Turn/entity -> adjacent context -> source observation/export without CWD/store switching.
+- Test one project, saved system, and All against unavailable, locked, corrupt, migrating, stale, unauthorized, and version-incompatible shards.
+
+#### PR 12C: Privacy-aware query containment
+
+- Enforce safe markers, authorized receipt refs, redacted/quarantined/legacy-unscanned/unknown coverage, cache invalidation, and sink eligibility in every search/graph/timeline/explain/export/exact-load path.
+- [ ] An unsafe entity/shard cannot leak through ranking, facets/aggregates, graph traversal, cursor, response handle, saved view, or cross-shard merge.
+
+#### PR 13 series: Time-safe evaluation and precision-first lexical retrieval
+
+- PR 13A builds the private real-prompt/qrel corpus, chronological cutoff/holdouts, pooling, labels, agreement, metrics, current baseline, and aggregate/redacted reports.
+- PR 13B implements exact/phrase/fielded BM25, origin/audience/kind fields, query/tool self-echo penalty, representative clusters, hidden counts, and rank explanations.
+- PR 13C adds bounded character fuzzy/typo/alias recall and MMR session/project/provider diversity.
+- [ ] Preserve exact technical identifiers and achieve explained parity on V1 golden queries before changing defaults.
+
+#### PR 14 series: Optional hybrid retrieval, graph expansion, and reranking
+
+- PR 14A benchmarks privacy-domain local dense and learned-sparse candidates with versioned representation manifests; both remain disabled until gates pass.
+- PR 14B adds RRF profiles, bounded typed graph expansion, hard-negative mining, cross-project/provider/time holdouts, and per-component ablations.
+- PR 14C compares no rerank, late interaction, and local cross-encoder rerank on bounded pools with cold/warm/resource measurements and deterministic lexical fallback.
+- [ ] Sensitive content never leaves its privacy/key domain or enters an incompatible representation index.
+
+#### PR 15: Graph/time/as-of operators
+
+- Add neighborhood, path, impact, relation evidence filters, event windows, bitemporal/as-of state, and in-memory CSR acceleration for measured large analyses.
+
+#### PR 16: All-scope aggregate projections
+
+- Build project/day/kind/provider/model/tool/hint/automation/health/cost rollups with source watermarks.
+- [ ] Never emit a numeric ratio when its denominator is unavailable.
+
+### Phase 3 — Domain projections
+
+#### PR 17: Sessions and agents
+
+- Project sessions, turns, messages, content parts, tools/results, reasoning summaries, goals, parent/subagent trees, workflows, and handoffs.
+- [ ] Add complete cursor-based list/export APIs for all authorized retained sanitized rows plus human-vs-protocol classification, explicit privacy/retention omissions, and source locators.
+- [ ] Backfill this domain immediately with manifests and shadow parity; do not defer real data until Phase 5.
+
+#### PR 17A: Profile activity, temporal project attribution, and work claims
+
+- Make profile activity the canonical session/message/Turn/agent/tool source; remove public query dependence on provider `project_key` and copied per-project transcript bodies.
+- Project per-observation CWD/tool-workdir/explicit-query/worktree/ref evidence as `produced_in`, `executed_in`, `queried`, `discussed`, or `observed` relations with validity intervals and confidence.
+- Add agent presence, work claims, redundancy mode, heartbeat/TTL, safe summary, overlap projection, handoff, acknowledgement, and stable research/retrieval anchors.
+- [ ] Replay sessions moving across zero/one/many repositories, parent/subagents in parallel worktrees, copied prompts, first-CWD drift, deliberate ensemble review, disjoint scopes, and accidental overlap.
+
+#### PR 18: Code snapshots and lineage
+
+- Project snapshot-scoped files/symbols/edges, durable lineage, diffs, diagnostics, tests, and impact.
+- [ ] Differential-test V1 graph/search/impact/test-map results.
+- [ ] Backfill this domain immediately with manifests and shadow parity.
+
+#### PR 18A: Cross-repository graph federation
+
+- Add compatible graph-generation selection for repository/worktree/ref/commit/dirty-overlay state, source/freshness explanations, cross-repository edge contracts, per-repository diversity, and bounded merge.
+- [ ] Ship Rspack/Rsbuild/React Router upstream/plugin/downstream query fixtures and refuse to imply working-copy coverage from a base-commit-only index.
+
+#### PR 19: Git and delivery
+
+- Project worktrees, refs, commits, PRs, checks, reviews, releases, fetched-at state, and evidence-scored attribution.
+- [ ] Backfill this domain immediately and validate correlation calibration before UI attribution.
+
+#### PR 19A: Related-system and delivery graph
+
+- Relate PR head/base, worktrees, forks, patches/backports, generated/published artifacts, support reproductions, synthetic benchmarks, and upstream/downstream repository project sets.
+- [ ] Preserve direct change, produced, observed, encountered, impact, test candidate, and context-only evidence roles across repository boundaries.
+
+#### PR 20: Knowledge
+
+- Project immutable fact versions, entities, decisions, contradictions, trust/retrieval/feedback/curation and deletion lineage.
+- [ ] Move memory ownership out of branch graph storage.
+- [ ] Backfill facts/entities/trust/feedback with manifests and shadow parity.
+
+#### PR 21: Automation and skills
+
+- Import jobs, scheduler decisions, runs, artifacts, proposals, approvals, skills, and outcomes; JSONL/files remain immutable export/compatibility sources.
+- [ ] Preserve Claude workflows, Codex goals, and Hermes/curator/reflector/skill-writer identities and native semantics while projecting their shared agent/goal/run/artifact relations.
+- [ ] Implement the managed skill/memory lifecycle ledger from evidence through revision/rollback, including exact validation receipts, installed-version identity, usage/outcome horizon, and staged auto-apply policy.
+- [ ] Backfill and reconcile this domain before its V2 mutations enable.
+
+#### PR 22: Accounting and observability
+
+- Project tokens, latency, model/tool usage, costs, savings methodology, hint/tool/fact/skill adoption, and data-quality signals with provenance.
+- [ ] Backfill with denominator/cap/source semantics and shadow current analytics.
+
+#### PR 22A: Generated capability and tool catalog
+
+- Create `crates/tracedecay-tool-catalog/` and compatibility-inventory code generation.
+- [ ] Import every existing MCP tool, CLI command, HTTP/dashboard action, skill, hook event, and configuration mutation with stable use-case ownership and parity state.
+- [ ] Generate transport schemas, dashboard command metadata, compact hint-routing facts, documentation, and a catalog drift test from one source.
+- [ ] Add Git-intent routing and live-remote-versus-semantic-local reconciliation fixtures, including the missed-tool correction from this planning session.
+
+#### PR 22B: Privacy observability and remediation predicates
+
+- Project safe scan/coverage/finding/state/performance/remediation/restore aggregates with minimum thresholds and no candidates/fingerprints.
+- [ ] Privacy status/doctor and actual scan/remediation/restore commands share preconditions, owners, authorization, current detector/policy versions, and truthful unknown coverage.
+
+#### PR 23 series: Versioned policy runtime
+
+- Create `crates/tracedecay-policy/`.
+- [ ] Implement deterministic hint, retrieval, routing, correlation, diagnostics, curation, scheduler, and memory evaluation contracts.
+- [ ] Capture bundle/config/index/memory/tool-catalog digests needed for historical replay.
+- [ ] Split bundle/runtime, replay, hints/routing, retrieval, correlation, scheduler/diagnostics/curation/memory, and headless labs into PR 23A–23G as specified by the policy-crate plan.
+
+### Phase 4 — Shared application/API and new product
+
+#### PR 24 series: Application services, HTTP V2, SSE, generated client, adapters
+
+- PR 24A creates `crates/tracedecay-application/` use cases.
+- PR 24B creates the bounded HTTP V2 base, security, capability, query, entity, and health endpoints.
+- PR 24C adds SSE snapshot/delta/reconnect semantics.
+- PR 24D generates and drift-tests the TypeScript client.
+- PR 24E+ moves one CLI/MCP domain per reviewable PR to thin adapters.
+- Companion PR 24D-API1 through 24D-API4 freeze the official contract IR, direct-agent discovery/scopes/anchors/errors, Graph-of-Graphs/replay schemas, public docs/explorer/sandbox, and whole-surface conformance.
+- Companion PR 24D-SDK1 through 24D-SDK3 add first-party Rust, transport-independent TypeScript, and sync/async Python SDKs; PR 24E-API5 applies domain-by-domain current-binding cutoff.
+
+#### PR 24F: Hook runtime and concurrent capture boundary
+
+- Create `crates/tracedecay-hooks/` after the application hook port exists; replace host-specific direct writes behind compatibility adapters.
+- [ ] Implement normalized hook requests, durable spool/ack receipts, explicit latency/token/privacy budgets, bounded writer queues, backpressure tiers, and provider conformance tests.
+- [ ] Replay concurrent parent/subagent/tool/edit streams with duplicates, gaps, rewrites, late records, busy readers, disk pressure, and kill points; prove no canonical event is silently lost.
+- [ ] Ship per-provider shadow mode before changing injected hints.
+
+#### PR 24G: Cross-project transport parity and official agent ergonomics
+
+- Generate one `ScopeSelectorV2`, global retrieval reference, typed scope error, capability declaration, and one-step retry shape for official HTTP API, CLI, MCP, and SDKs.
+- [ ] Prove natural-language repo/path/worktree/PR/session targets resolve in one request when unambiguous; an explicit target never falls back to the server CWD.
+- [ ] Conformance-test Rspack/Rsbuild/React Router queries and All-search-to-exact-load across transports.
+
+#### PR 24H: Privacy workflows across application, API, CLI, MCP, and SDKs
+
+- Ship status/scan/findings/remediation-preview/apply/verify/detector/quarantine use cases and official generated contracts.
+- [ ] Direct-agent credentials are read-only and cannot access quarantine plaintext; every error/cursor/anchor/log/debug/display shape passes synthetic canaries.
+
+#### PR 25: Unified shell and design system
+
+- Create `dashboard/app/` and shared packages.
+- [ ] Implement All scope, time/as-of/compare, secure URL/persistence state, command palette, universal inspector, status/coverage, saved views, Axum history fallback, legacy redirects, and shell coexistence.
+- [ ] Keyboard, screen-reader, table parity, mobile portrait/landscape, reduced-motion, and direct-link tests are required in this PR, not deferred.
+
+#### PR 25A: All/system scope explorer and coverage inspector
+
+- Ship saved project systems, hierarchical repository/checkout/worktree/ref scope picker, same-name disambiguation, explicit focus/expand behavior, coverage/staleness/partial inspector, and deep-link persistence.
+- [ ] Follow one agent across plugin worktree, upstream Rsbuild/Rspack queries, PR/branch, and benchmark repository without silently changing scope.
+
+#### PR 26: Shared renderer/LOD/export foundation and Observatory slice
+
+- [ ] Implement renderer ownership, LOD contracts, selection/accessibility adapter, deterministic export scene, render-ready signal, and worker/layout infrastructure.
+- [ ] Ship Observatory plus Brain's first-scan claim, health strip, matrix/table/aggregate charts; topology waits for PR 29.
+
+#### PR 27: Universal Explorer
+
+- Ship query builder/raw AST, facets, pivots, collections, compare, export, explain, and shareable state.
+- [ ] Include keyboard/mobile/table/export/accessibility acceptance in the PR.
+
+#### PR 28 series: Causal Loom
+
+- PR 28A ships density and LOD contracts.
+- PR 28B ships lanes, virtualized transcript, and inspector.
+- PR 28C ships agent-follow, subagent tree, and evidence connectors.
+- PR 28D ships impact ribbon and as-of state.
+- PR 28E ships compare, annotation, deep links, and deterministic export.
+- Every sub-PR includes keyboard/mobile/table/reduced-motion acceptance for its interaction.
+
+#### PR 29: Code/evidence graph renderers
+
+- Ship the coordinated Git, code, thread, agent, turn, timeline, holographic-memory, and automation/skill graph lenses using WebGL topology, layered DAG, matrix, stable layout cache, LOD APIs, outline/table parity, hit testing, and context-loss fallback.
+- [ ] Add Brain topology only after renderer/aggregation contracts pass.
+
+#### PR 30 series: Domain workspaces
+
+- Ship Sessions, Agents, Code, Knowledge, Delivery, Automations, and Costs as separate reviewable PRs using shared contracts and inspector.
+- Each workspace must pass its V1 behavior/action parity row plus mobile/accessibility/partial-state tests before redirecting the old plugin.
+
+#### PR 31 series: Replay labs
+
+- Ship Hint, Retrieval, Ingest, Query, Correlation, Scheduler, Memory, Policy Diff, Evolution Studio, Coordination, Search Quality, Scope/Federation, and Secret Safety labs as separate PRs.
+- PR 31J owns Search Quality Lab/qrel review; PR 31K owns Coordination Lab; PR 31L owns scope resolution, shard plan, snapshot selection, and cross-project transport replay; PR 31M owns Privacy Observatory/Secret Safety Lab with synthetic values only.
+- Each PR includes exact/recorded/best-effort modes, read-only guarantees, accessibility, and safe fixture-promotion flow.
+
+#### PR 32: Accessibility, responsive, export, visual QA
+
+- [ ] Audit and polish the accessibility/responsive/export work already required in PRs 25–31.
+- [ ] Complete cross-workspace desktop/mobile portrait/mobile landscape fixtures and interaction consistency.
+- [ ] Complete manual keyboard, screen-reader, contrast, grayscale, reduced-motion, table parity, and deterministic visual regression signoff.
+
+### Phase 5 — Backfill, cutover, and retirement
+
+#### PR 33: Resumable V1 backfill
+
+- Reconcile the domain backfills already shipped with PRs 17–23 and import any remaining registry/sidecar data.
+- PR 33S is the store-owned read-only importer/checkpoint/parity slice; PR 33R is the root migration controller. Neither reuses reserved privacy slice PR 33A.
+- [ ] Produce final whole-system manifests, counts, hashes, orphan/quarantine report, checkpoints, disk preflight, repair mode, and zero unexplained omissions.
+
+#### PR 33A: Retroactive privacy audit, containment, rebuild, and restore gate
+
+- Scan every serving/archive source, canonical/derived store, WAL/SHM/temp/spool, payload/handle/cache, fact/vector/summary/graph, analytics/log, fixture/export/package, backup/recovery/rollback artifact with complete safe coverage manifests.
+- [ ] Block flagged descendants, guide credential rotation/revocation first, rebuild sanitized generations, retire old serving artifacts, invalidate exports/caches, rescan, and issue remediation/restore eligibility receipts.
+- [ ] Cutover requires zero synthetic canary hits and zero unexplained serving unknowns; unsafe V1/backup stores remain quarantined/non-restorable.
+
+#### PR 34: Shadow-query parity dashboard
+
+- Compare V1/V2 queries, ranking, counts, paths, timeline order, memory, hints, and APIs on copied real stores.
+- [ ] Block cutover on unexplained gaps.
+
+#### PR 35: Bounded-context cutovers
+
+- Cut over capture, sessions, graph, knowledge, policy, automation, accounting, then product reads independently.
+- [ ] Require feature flag, migration receipt, rollback drill, and telemetry gate per context.
+
+#### PR 36: V2 default and live-client cutoff
+
+- Default dashboard/CLI/MCP to V2 services.
+- Remove live V1 protocol/tool-name fallback for each cut-over domain; return explicit restart/update/current-replacement errors to stale clients.
+- Keep V1 stores read-only for the rollback/evidence window; data retention is not client emulation.
+
+#### PR 37: V1 archive and removal
+
+- [ ] Require one full release of V2-default operation with parity/health gates satisfied.
+- [ ] Export/archive before any explicit deletion.
+- [ ] Remove storage/plugin/query internals only after rollback is no longer required.
+- [ ] Regenerate convergence inventory/scorecard; require zero live V1 routes/writers/readers, zero expired/waived anti-corruption adapters, zero duplicate semantic authorities, zero obsolete names/config/docs/tests/dependencies, and no serving unscanned privacy descendant.
+
+## 25. Verification Strategy
+
+### Capture and migration
+
+- Golden provider fixtures and copied real-store manifests.
+- Ingest twice: zero duplicate canonical observations/events.
+- Crash/kill at each transaction boundary: complete commit or safe retry.
+- Counts, privacy-safe/keyed hashes, source offsets, timestamps, ordinals, authorized sanitized content, LCM DAG/source lineage, eligible payload/artifact digests, trust/feedback, sanitization receipts, and explicit secret/retention omissions.
+- Rewrites, partial lines, missing files, missing timestamps, Unicode, large payloads, redaction, corruption, schema-forward incompatibility.
+
+### Identity and evidence
+
+- Property tests for aliases, bitemporal intervals, causation acyclicity, unresolved candidates.
+- Labeled repository/worktree/session/message/symbol lineage corpus.
+- Copy/visual tests for evidence-class language.
+
+### Query
+
+- Differential V1/V2 golden queries.
+- Deterministic pagination under equal scores and live ingest snapshot.
+- Missing/stale/corrupt shard coverage.
+- Lexical punctuation/CJK/emoji and hybrid ranking evals.
+- Traversal/path/impact/as-of parity.
+- Cost-limit, cancellation, timeout, and memory-bound tests.
+
+### Policy and replay
+
+- Identical input snapshot + bundle = identical decision/explanation digest.
+- Historical-vs-current fixtures for hints, retrieval, ingest, correlation, scheduler, and memory.
+- Secret/redaction corpus and read-only side-effect assertions.
+- Outcome attribution horizon and unresolved-state tests.
+
+### Product
+
+- Contract tests for every entity/relation/query type and CLI/MCP/HTTP/UI semantic parity.
+- E2E: URL restore, back/forward, saved views, cross-view synchronization, All/project scope, as-of/compare, export, stale/reconnect, partial stores, redactions.
+- Data invariants before screenshots: counts, aggregation, path/impact membership, timeline order, provenance.
+- Deterministic desktop/mobile visual fixtures with fixed fonts, time zone, layout seeds, DPR.
+- Canvas/WebGL nonblank, stable layout, hit testing, context loss, matrix/table fallback.
+- Automated accessibility plus manual keyboard/screen-reader/contrast/grayscale review.
+- Mobile E2E: sheet open/apply/cancel/reset and return path; selection preservation; focused-neighborhood/single-lane adaptation; empty-click vs drag; tap/focus step-through; pinch/wheel scroll containment; keyboard-open viewport; 44–48 px targets; portrait/landscape rotation.
+- Operational E2E: snapshot + SSE resume, disconnect/backoff, gap/resync, out-of-order/duplicate delta, stale-but-visible, partial/offline, low-bandwidth degradation, and URL/saved-view restore.
+- Export E2E: Canvas/WebGL render-ready, fixed fonts/DPR/layout, static labels/keys/caveats, fallback renderer, and nonblank deterministic visual output.
+
+### Recovery and operations
+
+- Catalog rebuild, projection replay, FTS/vector rebuild, blob audit/GC, graph atomic swap, migration resume, shard quarantine, backup restore.
+- Retention/delete impact preview and descendant purge verification.
+
+## 26. Performance and Quality Gates
+
+Record the reference machine and corpus in benchmark output. Test current scale and 10× scale: 100 projects, 5M messages/events, 1M symbols in a large project, hundreds of branches, large tool/reasoning payloads.
+
+- Hook synchronous capture p95 ≤ 10 ms.
+- Projected event visibility p95 ≤ 2 seconds.
+- Ingest append p95 ≤ 20 ms excluding blob I/O.
+- Scoped FTS p95 ≤ 150 ms at current scale.
+- Current-registry-N top-k p95 ≤ 800 ms without opening irrelevant shards; benchmark output records N and the query watermark.
+- At 10×, hot facets p95 ≤ 400 ms and text search p95 ≤ 750 ms on the recorded reference machine.
+- Timeline first page p95 ≤ 200 ms current scale and ≤ 700 ms at 10×.
+- Timeline zoom refinement p95 ≤ 300 ms; no request returns unbounded events.
+- Entity neighborhood p95 ≤ 100 ms current scale; bounded two-hop p95 ≤ 500 ms at 10×.
+- Backfill sustained throughput ≥ 10,000 messages/second excluding embeddings.
+- Dashboard localhost first contentful paint ≤ 1.5 seconds.
+- Local UI state response ≤ 100 ms excluding data fetch.
+- Graph interaction ≥ 55 FPS at 50k loaded/GPU-managed nodes and 200k edges while LOD caps labeled/interactive topology by legibility budgets; larger results cluster.
+- Timeline interaction ≥ 55 FPS at 250k density/LOD marks; inspectable event count remains bounded and declared.
+- Peak query RSS ≤ 1.5 GB at 10× corpus; migration disk amplification ≤ 2.25× source data; WAL ≤ 1 GB per shard before checkpoint; catalog ≤ 5% of canonical content size; one query opens ≤ 32 shards concurrently; graph generation/overlay files ≤ 10,000 per profile after compaction; GC reclaims ≥ 95% of eligible bytes per scheduled pass.
+- Retrieval nDCG@10 ≥ 0.85 and recall@20 ≥ 0.90 on the versioned intent corpus; release regression ≤ 0.02.
+- Repository/session/message alias precision ≥ 99.5% and recall ≥ 99%; abstention/conflict rates are reported and 100% of unresolved identities remain visible.
+- Labeled symbol-lineage F1 ≥ 98%.
+- Git/PR/code relation precision and recall are reported per evidence class; inferred confidence expected calibration error ≤ 0.05 on a labeled corpus, with mandatory abstention below the display threshold selected by the calibration set.
+- WCAG 2.2 AA plus keyboard completion of every primary workflow.
+- Mandatory runtime sanitizer meets the hook budget; async built-ins sustain the plan-18 reference throughput; timeout/incomplete scan fails closed.
+- Synthetic secret corpus produces zero plaintext/candidate-digest bytes across every named store/index/prompt/output/cache/fixture/export/backup/restore/release sink.
+- Architecture scorecard reports zero unowned duplicate semantic authorities, zero transport/direct-store bypasses, zero new compatibility-adapter call sites, and zero expired adapters at each cutover.
+- New bounded-context production files target ≤ 800 lines.
+
+Frontend delivery budgets:
+
+- Initial shell JavaScript ≤ 250 KiB gzip and CSS ≤ 80 KiB gzip.
+- Heavy graph/timeline/editor renderers are lazy-loaded by route.
+- First useful evidence ≤ 2 seconds at current scale; graph/timeline render-ready ≤ 3 seconds.
+- Default query payload ≤ 1 MiB; larger authorized payloads page or stream.
+- Layout workers produce a progressive result within 500 ms and never block the main thread over 50 ms.
+- Mobile active-route heap ≤ 300 MiB and background views stop render/layout work.
+
+Repeatable user-task gates on a fixed corpus, with zero correctness failures:
+
+- Find an exact historical human prompt and prove export/source identity in ≤ 30 seconds.
+- Follow a parent agent through subagents and direct code/test/commit/PR impact in ≤ 60 seconds.
+- Inspect an inferred relation and locate its evidence/confidence/algorithm in ≤ 30 seconds.
+- Replay one hint then-vs-now and explain the payload difference in ≤ 60 seconds.
+- Compare two sessions and export complete evidence with coverage/caveats in ≤ 90 seconds.
+
+## 27. Success Metrics
+
+- Every registered project is visible from All with explicit shard health and freshness.
+- Every captured message can be enumerated/exported without a text query.
+- Every session can show parent/subagents, tools, visible reasoning summaries, code, tests, Git/delivery, hints, memory, automation, and cost when evidence exists.
+- Every relation exposes provenance/evidence/confidence and never overstates causality.
+- Every policy decision can be replayed against historical and current bundles.
+- At least 90% of eligible hint evaluations receive a terminal `observed`, `unobserved`, or `unresolvable` classification within the configured horizon; false attribution stays below 1% on a labeled corpus. This measures outcome coverage, not whether agents obey hints.
+- Tool/fact/skill/automation adoption metrics have correct denominators and drill to evidence.
+- One query has consistent semantics across CLI, MCP, HTTP, dashboard, and export.
+- One capability/use-case has consistent generated schemas/types/errors/receipts across CLI, MCP, official HTTP API, Rust/TypeScript/Python SDKs, dashboard, hooks, skills, and docs.
+- Every persisted/searchable/output content entity has a complete sanitization receipt or explicit legacy-unscanned/quarantined/unknown state; serving unknown secret coverage is zero at cutover.
+- Superseded session/LCM, detector, query, policy, status, error, command, transport-logic, and dashboard-model paths are removed according to the convergence retirement ledger.
+- All primary views share scope, time, selection, inspector, URL, saved-view, and coverage state.
+- V2 migration has complete manifests, explained parity, tested rollback, and no silent data loss.
+
+## 28. Risk Register
+
+| Risk | Mitigation |
+|---|---|
+| Scope explosion | Fixed bounded-context PR sequence; each PR ships one independently testable vertical slice. |
+| Logical Brain becomes physical monolith | Catalog metadata-only rules and storage ownership tests. |
+| Identity resolver silently merges history | Ambiguity defaults to separate entities plus reviewable candidate relations. |
+| False causal narratives | Evidence vocabulary, confidence, copy lint, visual encodings, supporting-event inspector. |
+| Sensitive messages/reasoning leak | Pre-index classification/redaction, protected blobs, short reasoning retention, export exclusion. |
+| Fragmentation reappears behind new crates | One canonical owner/contract per semantic, architecture lint, generated bindings, bypass inventory, convergence scorecard, and mandatory adapter deletion PRs. |
+| Scanner false positive destroys evidence or exposes the candidate | Structured field scanning, synthetic negative corpus, privacy-safe fingerprint-only adjudication, dry-run/versioned rules, previewable descendant rebuild. |
+| Secret deletion leaves WAL/vector/cache/backup copies or skips rotation | Immediate containment, rotation-first workflow, new sanitized generations, lifecycle-leased retirement, cryptographic quarantine deletion, restore rescan gate. |
+| Query DSL becomes opaque | Visual builder, saved examples, explain plan, generated clients, bounded operators. |
+| Hybrid ranking feels magical | Component scores, versions, evidence, deterministic lexical fallback, eval corpus. |
+| All scope opens every store | Catalog statistics, projection rollups, shard pruning, budgets, partial coverage. |
+| WebGL excludes accessibility | Synchronized outline/table/text, keyboard model, export, reduced motion. |
+| Renderer sprawl | One renderer owner per artifact family and a shared selection/accessibility contract. |
+| Dual systems drift | Immutable manifests, shadow capture/read, differential tests, migration receipts. |
+| Projection rebuilds damage live work | Checkpoints, disk preflight, throttling, pause/resume, atomic swap, rollback. |
+| Remote delivery state is stale | Fetched-at provenance, allowlist, refresh policy, stale badges. |
+| Compatibility adapters preserve bad internals | Adapters depend only on V2 application contracts, never V1 storage types. |
+| Live-store audits produce inconsistent counts | Snapshot watermarks and coverage metadata on every query/export. |
+
+## 29. Explicit Non-Goals for the First V2 Default
+
+- No required hosted TraceDecay service.
+- No multi-tenant collaboration/authorization server; IDs and APIs remain tenant-ready.
+- No automatic upload of transcripts, reasoning, code, or embeddings.
+- No attempt to recover hidden model chain-of-thought.
+- No giant unbounded graph of every entity.
+- No required Neo4j, PostgreSQL, Elasticsearch, or cloud vector database.
+- No simultaneous rewrite of every provider adapter before one vertical slice works.
+- No deletion of V1 stores during backfill or first cutover.
+- No writable remote GitHub/PR actions from the investigation UI in the initial V2 default.
+
+## 30. Definition of Done
+
+The redesign program is complete only when:
+
+- All domains are queryable from `All` and narrowable by project/worktree/branch/snapshot/session/agent/workflow/time.
+- The canonical observation/event/evidence model is authoritative for new writes.
+- One mandatory sanitizer and sink-eligibility model is authoritative before all new writes, indexes, prompts, outputs, caches, fixtures, exports, and backups.
+- V1 data is backfilled with complete manifests, hashes, counts, quarantine records, and explained parity.
+- CLI, MCP, HTTP, dashboard, saved views, exports, and labs use the same application/query contracts.
+- The convergence inventory proves there is one canonical owner for every domain semantic, generated binding parity, no serving bypass, and every temporary V1/anti-corruption adapter is retired by its deletion gate.
+- Brain, Explorer, Causal Loom, domain workspaces, Observatory, Costs, and all replay labs meet functionality, accessibility, privacy, and performance gates.
+- Store selection, coverage, freshness, inference, redaction, caps, ranking, and query plans are visible and correct.
+- Historical reasoning displays only captured provider-exposed summaries and respects retention/export policy.
+- Every cutover has a proven rollback; V2 runs as default for one full release without unexplained parity gaps.
+- V1 is archived before any explicit removal.
+- TraceDecay can use its own evidence to answer whether its hints, tools, facts, skills, automations, queries, and UI actually help agents finish work.
+
+## 31. Plan Self-Review Checklist
+
+- [ ] Reconcile final LCM role=user and human-authored export counts, chronological order, session/provider coverage, and documented public-API gaps.
+- [ ] Verify every current architecture/data/dashboard finding names a target contract or program PR.
+- [ ] Verify all user-requested views—All/Brain, graphs/charts, agent reasoning/action timeline, code/subagent/branch/PR/impact linkage, hint replay, and additional labs—are covered.
+- [ ] Verify physical storage remains federated while product/query semantics remain unified.
+- [ ] Verify all plans describe one end-to-end source -> sanitizer/capture -> evidence -> projector -> query -> policy -> application -> thin-adapter flow with identical type names, ownership, versions, watermarks, errors, receipts, and PR order.
+- [ ] Verify plans 18/19 cover every privacy sink and every fragmented authority/bypass, with explicit owners, extensions, scale behavior, retirement tasks, and deletion gates.
+- [ ] Verify every relationship can answer “how do you know?”
+- [ ] Verify no hidden reasoning is reconstructed or retained/exported by default.
+- [ ] Verify every visualization has a bounded data contract and nonvisual equivalent.
+- [ ] Verify migration can resume, compare, cut over, roll back, archive, and preserve V1 behavior.
+- [ ] Verify no placeholder language, contradictory decision, missing file ownership, or unexplained acceptance gap remains.
+- [ ] Fetch `origin/master`, rebase if needed, rerun fresh verification, and confirm the PR diff contains only this plan.
