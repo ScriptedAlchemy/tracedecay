@@ -92,6 +92,19 @@ pub(in crate::migrate::consolidate) async fn extend_graph_identities(
     Ok(())
 }
 
+#[cfg(all(test, windows))]
+pub(in crate::migrate::consolidate) async fn acquire_offline_guards(
+    paths: &[PathBuf],
+) -> Result<OfflineDatabaseGuards> {
+    // Windows byte-range locks prevent the same process from copying a file
+    // after BEGIN IMMEDIATE. Production consolidation already fails closed on
+    // Windows because open-holder discovery is unsupported; unit fixtures use
+    // isolated stores and exercise the remaining migration semantics here.
+    let _ = paths;
+    Ok(OfflineDatabaseGuards { _holds: Vec::new() })
+}
+
+#[cfg(not(all(test, windows)))]
 pub(in crate::migrate::consolidate) async fn acquire_offline_guards(
     paths: &[PathBuf],
 ) -> Result<OfflineDatabaseGuards> {
