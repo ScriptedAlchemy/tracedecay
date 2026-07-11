@@ -2259,16 +2259,21 @@ provider.sync_turn("repeat", "same", session_id="session-1", messages=[])
 provider.sync_turn("repeat", "same", session_id="session-1", messages=[])
 
 assert provider.project_root == "/tmp/project"
-assert len(calls) == 4
-for name, args, kwargs in calls:
-    assert name == "tracedecay_lcm_preflight"
-    assert "project_root" not in args
-    assert kwargs["project_root"] == "/tmp/project"
+assert len(calls) == 8
+for index in range(0, len(calls), 2):
+    user_call, project_call = calls[index:index + 2]
+    assert user_call[0] == "tracedecay_lcm_preflight"
+    assert user_call[1]["storage_scope"] == "user"
+    assert user_call[2] == {}
+    assert project_call[0] == "tracedecay_lcm_preflight"
+    assert "storage_scope" not in project_call[1]
+    assert project_call[2]["project_root"] == "/tmp/project"
+    assert user_call[1]["messages"] == project_call[1]["messages"]
 
 first_messages = calls[0][1]["messages"]
-second_messages = calls[1][1]["messages"]
-empty_list_first_messages = calls[2][1]["messages"]
-empty_list_second_messages = calls[3][1]["messages"]
+second_messages = calls[2][1]["messages"]
+empty_list_first_messages = calls[4][1]["messages"]
+empty_list_second_messages = calls[6][1]["messages"]
 assert [message["role"] for message in first_messages] == ["user", "assistant"]
 assert all(message.get("id") for message in first_messages)
 assert all(message.get("id") for message in second_messages)
@@ -2289,6 +2294,69 @@ assert calls[-1][1]["storage_scope"] == "user"
 assert "project_root" not in calls[-1][2]
 "#,
         "sync_turn fallback messages should not collapse repeated identical turns",
+    );
+}
+
+#[test]
+fn memory_provider_projects_one_turn_to_user_and_every_touched_project() {
+    run_generated_plugin_script(
+        "check_sync_turn_multi_project_projection.py",
+        r#"
+calls = []
+completed = []
+ingested = []
+
+def fake_call_tracedecay_tool(name, args, **kwargs):
+    calls.append((name, dict(args), dict(kwargs)))
+    return '{"content":[{"type":"text","text":"{\\"status\\":\\"ok\\"}"}]}'
+
+plugin.tools.call_tracedecay_tool = fake_call_tracedecay_tool
+plugin._project_scope_resolution = lambda path, *_args: (
+    ("registered", str(path)) if str(path).startswith("/repos/") else ("unregistered", None)
+)
+plugin._notify_turn_completed = lambda sid, root, watermark: completed.append((sid, root, watermark))
+plugin._notify_turn_ingested = lambda sid, root, watermark: ingested.append((sid, root, watermark))
+
+messages = [
+    {"role": "user", "content": "compare both repositories"},
+    {
+        "role": "assistant",
+        "tool_calls": [
+            {"function": {"name": "terminal", "arguments": '{"workdir":"/repos/alpha"}'}},
+            {"function": {"name": "terminal", "arguments": '{"workdir":"/repos/beta"}'}},
+        ],
+    },
+]
+
+provider = plugin.TracedecayMemoryProvider()
+provider.initialize(session_id="telegram-dm")
+provider.sync_turn(
+    "compare both repositories",
+    "done",
+    session_id="telegram-dm",
+    messages=messages,
+)
+
+assert len(calls) == 3, calls
+user_call, alpha_call, beta_call = calls
+assert user_call[1]["storage_scope"] == "user"
+assert user_call[2] == {}
+assert alpha_call[2] == {"project_root": "/repos/alpha"}
+assert beta_call[2] == {"project_root": "/repos/beta"}
+assert "storage_scope" not in alpha_call[1]
+assert "storage_scope" not in beta_call[1]
+
+message_sets = [call[1]["messages"] for call in calls]
+assert message_sets[0] == message_sets[1] == message_sets[2]
+assert message_sets[0][0]["associated_project_roots"] == [
+    "/repos/alpha",
+    "/repos/beta",
+]
+assert [root for _, root, _ in completed] == [None, "/repos/alpha", "/repos/beta"]
+assert ingested == completed
+assert provider.project_root is None
+"#,
+        "one Hermes turn must keep a user canonical copy and project into every touched repository",
     );
 }
 
@@ -4569,8 +4637,7 @@ tools = plugin.tools
 assert not hasattr(tools, "PINNED_PROJECT_ROOT")
 assert not hasattr(tools, "config_pinned_project_root")
 
-# Unscoped dispatch does not infer a project from the plugin process cwd or
-# the legacy profile pin. The routed host wrapper supplies real session cwd.
+# Default CLI dispatch uses the real process cwd, never the profile pin.
 captured = []
 
 class FakeResult:
@@ -4586,7 +4653,9 @@ tools.subprocess.run = fake_run
 tools.call_tracedecay_tool("tracedecay_status", {})
 assert captured, "expected a subprocess invocation"
 argv = captured[-1]
-assert "--project" not in argv, argv
+idx = argv.index("--project")
+assert argv[idx + 1] == os.getcwd(), argv
+assert argv[idx + 1] != "/pinned/project", argv
 
 # An explicit project still wins over the pin.
 tools.call_tracedecay_tool("tracedecay_status", {}, project_root="/explicit/root")
@@ -4594,21 +4663,22 @@ argv = captured[-1]
 idx = argv.index("--project")
 assert argv[idx + 1] == "/explicit/root", argv
 
-# Bare memory bridge calls also stay unscoped; the memory provider wrapper
-# supplies explicit user/project scope before reaching this transport.
+# Memory tools follow the same real cwd route.
 tools.call_tracedecay_tool("tracedecay_fact_store", {})
 argv = captured[-1]
-assert "--project" not in argv, argv
+idx = argv.index("--project")
+assert argv[idx + 1] == os.getcwd(), argv
 
 # A stale MCP `project_root` argument is not translated. The normal cwd route
-# stays in the argument payload, and the strict CLI rejects the unknown
-# argument instead of silently preserving a compatibility protocol.
+# still selects the user-profile project store, and the strict CLI rejects the
+# unknown argument instead of silently preserving a compatibility protocol.
 tools.call_tracedecay_tool(
     "tracedecay_lcm_status",
     {"project_root": "/tmp/hermes-profile"},
 )
 argv = captured[-1]
-assert "--project" not in argv, argv
+idx = argv.index("--project")
+assert argv[idx + 1] == os.getcwd(), argv
 payload = json.loads(argv[argv.index("--args") + 1])
 assert payload["project_root"] == "/tmp/hermes-profile", payload
 

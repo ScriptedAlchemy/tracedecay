@@ -142,7 +142,7 @@ def plugin_config_block(hermes_home=None):
     return block
 
 def code_project_root(explicit=None, cwd=None, hermes_home=None):
-    candidate = explicit or cwd
+    candidate = explicit or cwd or os.getcwd()
     if isinstance(candidate, str) and candidate.strip() and os.path.isabs(candidate):
         candidate = candidate.strip()
         try:

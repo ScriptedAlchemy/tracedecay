@@ -875,7 +875,7 @@ async fn explicit_tool_route_overrides_session_cwd_without_cross_project_duplica
 }
 
 #[tokio::test]
-async fn user_sweep_excludes_turns_explicitly_routed_to_registered_projects() {
+async fn user_sweep_keeps_canonical_turns_routed_to_registered_projects() {
     let tmp = TempDir::new().unwrap();
     let (hermes_home, registered) = setup(&tmp);
     let state_db = write_hermes_profile(&hermes_home, "test", None).await;
@@ -904,12 +904,12 @@ async fn user_sweep_excludes_turns_explicitly_routed_to_registered_projects() {
     )
     .await;
 
-    assert_eq!(stats.messages_upserted, 0);
-    assert!(user_db.get_session("hermes", SESSION_ID).await.is_none());
+    assert_eq!(stats.messages_upserted, 4);
+    assert!(user_db.get_session("hermes", SESSION_ID).await.is_some());
 }
 
 #[tokio::test]
-async fn user_sweep_excludes_registered_session_cwd_without_tool_routes() {
+async fn user_sweep_keeps_registered_session_cwd_as_canonical_history() {
     let tmp = TempDir::new().unwrap();
     let (hermes_home, registered) = setup(&tmp);
     let state_db = write_hermes_profile(&hermes_home, "test", None).await;
@@ -937,6 +937,6 @@ async fn user_sweep_excludes_registered_session_cwd_without_tool_routes() {
     )
     .await;
 
-    assert_eq!(stats.messages_upserted, 0);
-    assert!(user_db.get_session("hermes", SESSION_ID).await.is_none());
+    assert_eq!(stats.messages_upserted, 3);
+    assert!(user_db.get_session("hermes", SESSION_ID).await.is_some());
 }
