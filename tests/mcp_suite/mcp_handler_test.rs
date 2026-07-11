@@ -10574,6 +10574,27 @@ async fn user_scoped_lcm_preflight_ingests_without_a_project() {
         .await
         .unwrap();
     assert_eq!(session.project_key, "user");
+
+    let search = tracedecay::mcp::tools::handle_user_lcm_tool(
+        "tracedecay_message_search",
+        json!({
+            "storage_scope": "user",
+            "provider": "hermes",
+            "query": "general preference",
+            "catch_up": false,
+            "format": "json"
+        }),
+        profile.path(),
+    )
+    .await
+    .unwrap();
+    let search_payload: Value = serde_json::from_str(extract_text(&search.value)).unwrap();
+    assert_eq!(search_payload["status"], "ok");
+    assert_eq!(search_payload["count"], 1);
+    assert_eq!(
+        search_payload["results"][0]["session"]["project_key"],
+        "user"
+    );
 }
 
 #[tokio::test]

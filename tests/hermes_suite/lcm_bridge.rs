@@ -299,6 +299,7 @@ fn generated_context_engine_exposes_native_lcm_surface_and_dispatch() {
         r#"
 import json
 
+plugin._resolved_project_scope = lambda path, *_args: path
 engine = plugin.TraceDecayContextEngine()
 engine.initialize(session_id="session-1", project_root="/tmp/project")
 
@@ -603,11 +604,15 @@ def fake_call_tracedecay_tool(name, args, **kwargs):
     return json.dumps({"content": [{"type": "text", "text": json.dumps({"status": "ok"})}]})
 
 plugin.tools.call_tracedecay_tool = fake_call_tracedecay_tool
-plugin._resolved_project_scope = lambda path: None
+plugin._resolved_project_scope = lambda path, *_args: (
+    str(path) if path and str(path) == "/tmp/project" else None
+)
 
 engine = plugin.TraceDecayContextEngine()
 engine.initialize(session_id="session-1")
-assert engine.hermes_home == str(plugin_dir.parent.parent)
+assert os.path.normcase(os.path.realpath(engine.hermes_home)) == os.path.normcase(
+    os.path.realpath(str(plugin_dir.parent.parent))
+)
 status = engine.get_status()
 assert "storage_scope" not in status
 assert "hermes_home" not in status
@@ -872,7 +877,7 @@ assert "extraction backend unavailable" in payload["pre_compaction_extraction"][
 }
 
 #[test]
-fn generated_context_engine_home_default_is_host_config_only() {
+fn generated_context_engine_home_default_uses_installed_profile() {
     run_generated_plugin_script(
         "check_context_engine_default_home.py",
         r#"
@@ -887,25 +892,22 @@ with tempfile.TemporaryDirectory() as tmp:
     # expanduser reads HOME on POSIX and USERPROFILE on Windows.
     os.environ["HOME"] = str(home)
     os.environ["USERPROFILE"] = str(home)
-    expected = str(home / ".hermes")
-    assert not pathlib.Path(expected).exists()
+    expected = str(plugin_dir.parent.parent)
 
     engine = plugin.TraceDecayContextEngine()
     engine.initialize(session_id="session-1")
 
     def normalized(path):
-        # Windows expanduser("~/.hermes") emits mixed separators for the same
-        # location; normalize separators only there so Unix stays byte-exact.
-        return os.path.normpath(path) if os.name == "nt" else path
+        return os.path.normcase(os.path.realpath(path))
 
     assert normalized(engine.hermes_home) == normalized(expected), engine.hermes_home
     status = engine.get_status()
     assert "storage_scope" not in status
     assert "hermes_home" not in status
     assert "lcm_project_root" not in status
-    assert normalized(status["project_root"]) != normalized(expected), status
+    assert status["project_root"] is None, status
 "#,
-        "Hermes home defaults may configure the host but never TraceDecay storage",
+        "Hermes home defaults to the installed profile but never TraceDecay storage",
     );
 }
 
@@ -1066,6 +1068,7 @@ engine = ctx.context_engines[0]
 assert isinstance(engine, plugin.TraceDecayContextEngine)
 assert isinstance(engine, ContextEngine)
 
+plugin._resolved_project_scope = lambda path, *_args: path
 engine.initialize(
     session_id="session-123",
     hermes_home="/tmp/hermes-profile",
@@ -1088,7 +1091,9 @@ def fake_call_tracedecay_tool(name, args, **kwargs):
     return "{}"
 
 plugin.tools.call_tracedecay_tool = fake_call_tracedecay_tool
-plugin._resolved_project_scope = lambda path: None
+plugin._resolved_project_scope = lambda path, *_args: (
+    str(path) if path and str(path) == "/tmp/project" else None
+)
 
 profile_engine = plugin.TraceDecayContextEngine()
 profile_engine.on_session_start(session_id="session-1", hermes_home="/tmp/hermes")
@@ -1580,8 +1585,11 @@ class Result:
 def mcp_response(inner):
     return json.dumps({"content": [{"type": "text", "text": json.dumps(inner)}]})
 
-def fake_run(argv, check, capture_output, text, timeout, shell):
+run_cwds = []
+
+def fake_run(argv, check, capture_output, text, timeout, shell, cwd=None):
     calls.append(argv)
+    run_cwds.append(cwd)
     tool_name = argv[4] if "--project" in argv else argv[2]
     if tool_name == "tracedecay_lcm_expand_query":
         inner = {
@@ -1614,12 +1622,14 @@ profile_result = profile_engine._preflight_probe(messages=[], current_tokens=100
 assert profile_result["status"] == "ok"
 assert profile_engine.should_compress_preflight([], current_tokens=100) is False
 profile_argv = calls.pop()
+profile_cwd = run_cwds.pop()
 assert profile_argv[0] == plugin.tools.TRACEDECAY_BIN
-assert profile_argv[1:3] == ["tool", "--project"]
-assert profile_argv[3] == os.getcwd()
-assert profile_argv[3] != "/tmp/hermes-profile"
+assert profile_argv[1:3] == ["tool", "tracedecay_lcm_preflight"]
+assert "--project" not in profile_argv
+assert profile_cwd == os.path.abspath(os.sep)
 profile_args = json.loads(profile_argv[profile_argv.index("--args") + 1])
 assert "project_root" not in profile_args
+assert profile_args["storage_scope"] == "user"
 
 explicit = plugin.tools.call_tracedecay_tool(
     "tracedecay_lcm_status",
@@ -1633,7 +1643,7 @@ explicit_args = json.loads(explicit_argv[explicit_argv.index("--args") + 1])
 assert explicit_args["storage_scope"] == "hermes_profile"
 assert explicit_args["hermes_home"] == "/tmp/hermes-profile"
 "#,
-        "generated bridge must route only by real projects and leave stale args for strict CLI rejection",
+        "generated bridge must route only by real projects and isolate explicit user scope",
     );
 }
 
@@ -2160,7 +2170,7 @@ def fake_call_tracedecay_tool(name, args, **kwargs):
     return '{"content":[{"type":"text","text":"{\\"status\\":\\"ok\\"}"}]}'
 
 plugin.tools.call_tracedecay_tool = fake_call_tracedecay_tool
-plugin._project_scope_available = lambda root: True
+plugin._project_scope_available = lambda root, *_args: True
 
 provider = plugin.TracedecayMemoryProvider()
 provider.initialize(session_id="session-1", hermes_home="/tmp/hermes", project_root="/tmp/project")
@@ -2194,9 +2204,10 @@ assert empty_list_first_messages[1]["id"] != empty_list_second_messages[1]["id"]
 fallback = plugin.TracedecayMemoryProvider()
 fallback.initialize(session_id="session-2", hermes_home="/tmp/hermes")
 fallback.sync_turn("user", "assistant", session_id="session-2")
-assert fallback.project_root == os.getcwd()
+assert fallback.project_root is None
 assert "project_root" not in calls[-1][1]
-assert calls[-1][2]["project_root"] == os.getcwd()
+assert calls[-1][1]["storage_scope"] == "user"
+assert "project_root" not in calls[-1][2]
 "#,
         "sync_turn fallback messages should not collapse repeated identical turns",
     );
@@ -4375,9 +4386,9 @@ class Ctx:
         self.context_engines.append(engine)
 
 ctx = Ctx()
+plugin._resolved_project_scope = lambda path, *_args: path
 plugin.register(ctx)
 engine = ctx.context_engines[0]
-plugin._resolved_project_scope = lambda path: path
 
 # Host runtime config applies at registration time.
 assert engine.project_root == "/tmp/pinned-project", engine.project_root
@@ -4508,7 +4519,7 @@ assert payload["project_root"] == "/tmp/hermes-profile", payload
 # Engine resolution never consults the legacy profile pin.
 engine = plugin.TraceDecayContextEngine(config={})
 assert engine.project_root is None, engine.project_root
-plugin._resolved_project_scope = lambda path: path
+plugin._resolved_project_scope = lambda path, *_args: path
 engine.on_session_start(session_id="s1", cwd="/somewhere/else")
 assert engine.project_root == "/somewhere/else", engine.project_root
 

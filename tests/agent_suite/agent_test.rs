@@ -1268,7 +1268,7 @@ fn test_hermes_plugin_init_snapshot_matches_embedded_asset() {
     hasher.update(body.as_bytes());
     assert_eq!(
         hex::encode(hasher.finalize()),
-        "88db26663abdb759748ce77900bddf2746a97ba73635f2a69a909ed1a9d008be",
+        "89bb095bb94827724521b5fb57238411fbd875c9b6eab45ffe4835f5a42ba9ad",
         "templates/plugin_init.py payload hash changed — verify the edit is intentional and update this snapshot"
     );
 }
@@ -6337,8 +6337,13 @@ assert "--project" in argv, argv
 assert argv[argv.index("--project") + 1] == str(healthy_cwd), argv
 
 # The context engine filters the legacy pin but layers host-behavior settings.
-plugin._resolved_project_scope = lambda path: (
-    str(healthy_cwd) if os.path.realpath(str(path)) == os.path.realpath(str(healthy_cwd)) else None
+plugin._resolved_project_scope = lambda path, *_args: (
+    str(path)
+    if path and (
+        os.path.realpath(str(path)) == os.path.realpath(str(healthy_cwd))
+        or str(path) == "/host/wins"
+    )
+    else None
 )
 engine = plugin.TraceDecayContextEngine()
 assert engine.project_root is None, engine.project_root
