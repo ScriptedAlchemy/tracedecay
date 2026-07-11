@@ -1,7 +1,7 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
-use std::sync::{LazyLock, Mutex};
+use std::sync::{Arc, LazyLock, Mutex};
 
 use serde_json::{Map, Value, json};
 
@@ -49,6 +49,53 @@ const MAX_LCM_EXPAND_QUERY_SYNTHESIS_SYSTEM_CHARS: usize = 1_024;
 const MAX_LCM_EXPAND_QUERY_SYNTHESIS_PROMPT_CHARS: usize = 2_048;
 
 const MESSAGE_SEARCH_SNIPPET_CHARS: usize = 240;
+
+static MESSAGE_CATCH_UPS: LazyLock<Mutex<HashMap<String, Arc<tokio::sync::watch::Sender<bool>>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+struct MessageCatchUpLeader {
+    key: String,
+    done: Arc<tokio::sync::watch::Sender<bool>>,
+}
+
+impl Drop for MessageCatchUpLeader {
+    fn drop(&mut self) {
+        if let Ok(mut catch_ups) = MESSAGE_CATCH_UPS.lock()
+            && catch_ups
+                .get(&self.key)
+                .is_some_and(|current| Arc::ptr_eq(current, &self.done))
+        {
+            catch_ups.remove(&self.key);
+        }
+        let _ = self.done.send(true);
+    }
+}
+
+enum MessageCatchUpClaim {
+    Leader(MessageCatchUpLeader),
+    Wait(tokio::sync::watch::Receiver<bool>),
+}
+
+fn claim_message_catch_up(key: String) -> MessageCatchUpClaim {
+    let mut catch_ups = MESSAGE_CATCH_UPS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(done) = catch_ups.get(&key) {
+        return MessageCatchUpClaim::Wait(done.subscribe());
+    }
+    let (done, _) = tokio::sync::watch::channel(false);
+    let done = Arc::new(done);
+    catch_ups.insert(key.clone(), Arc::clone(&done));
+    MessageCatchUpClaim::Leader(MessageCatchUpLeader { key, done })
+}
+
+async fn wait_for_message_catch_up(mut done: tokio::sync::watch::Receiver<bool>) {
+    while !*done.borrow_and_update() {
+        if done.changed().await.is_err() {
+            break;
+        }
+    }
+}
 
 /// Renders `tracedecay_message_search` results as compact markdown. Each hit
 /// shows provider, session (id + title), role, timestamp, and score with a
@@ -1744,6 +1791,17 @@ async fn open_session_db_with_cached_ensure(db_path: &Path) -> Option<GlobalDb> 
     Some(db)
 }
 
+async fn open_session_db_for_bulk_catch_up(db_path: &Path) -> Option<GlobalDb> {
+    if schema_already_ensured(db_path) {
+        if let Some(db) = GlobalDb::open_at_assuming_schema(db_path).await {
+            return Some(db);
+        }
+    }
+    let db = GlobalDb::open_at_without_structured_backfill(db_path).await?;
+    mark_schema_ensured(db_path);
+    Some(db)
+}
+
 enum LcmStorageResolution {
     Available(Box<LcmStorage>),
     Unavailable(ToolResult),
@@ -2254,8 +2312,24 @@ pub(super) async fn handle_message_search(
             .ok_or_else(|| TraceDecayError::Config {
                 message: "could not resolve tracedecay profile root".to_string(),
             })?;
-        let mut results = Vec::new();
-        let mut searched_project_count = 0usize;
+        let catch_up_leader = if request.catch_up {
+            let key = format!(
+                "all-registered:{}:{}",
+                profile_root.display(),
+                request.provider_scope.response_label()
+            );
+            match claim_message_catch_up(key) {
+                MessageCatchUpClaim::Wait(done) => {
+                    wait_for_message_catch_up(done).await;
+                    None
+                }
+                MessageCatchUpClaim::Leader(leader) => Some(leader),
+            }
+        } else {
+            None
+        };
+        let perform_catch_up = catch_up_leader.is_some();
+        let mut destinations = Vec::new();
         let mut skipped_project_count = 0usize;
         for project in global.list_code_projects(usize::MAX).await {
             let Some(context) = global
@@ -2276,8 +2350,8 @@ pub(super) async fn handle_message_search(
                 skipped_project_count += 1;
                 continue;
             };
-            let db = if request.catch_up {
-                open_session_db_with_cached_ensure(&db_path).await
+            let db = if perform_catch_up {
+                open_session_db_for_bulk_catch_up(&db_path).await
             } else {
                 GlobalDb::open_read_only_at(&db_path).await
             };
@@ -2285,21 +2359,47 @@ pub(super) async fn handle_message_search(
                 skipped_project_count += 1;
                 continue;
             };
-            searched_project_count += 1;
-            if request.catch_up {
-                let display_root = Path::new(&context.project.display_root);
-                let project_root = if display_root.is_absolute() {
-                    display_root
-                } else {
-                    Path::new(&context.project.canonical_root)
-                };
-                let _ = crate::sessions::ingest_global_sources_for_provider(
-                    &db,
-                    project_root,
-                    request.provider_scope.provider(),
-                )
-                .await;
+            let display_root = Path::new(&context.project.display_root);
+            let project_root = if display_root.is_absolute() {
+                display_root.to_path_buf()
+            } else {
+                PathBuf::from(&context.project.canonical_root)
+            };
+            destinations.push((db, project_root));
+        }
+        if perform_catch_up {
+            let provider = request.provider_scope.provider();
+            let _ = crate::sessions::ingest_user_global_sources_for_provider(provider).await;
+            if provider.is_none() || provider == Some(crate::sessions::SessionProvider::Hermes) {
+                let hermes_destinations =
+                    destinations
+                        .iter()
+                        .map(|(db, project_root)| {
+                            crate::sessions::hermes::ProjectIngestDestination { db, project_root }
+                        })
+                        .collect::<Vec<_>>();
+                let _ = crate::sessions::hermes::ingest_for_projects(&hermes_destinations).await;
             }
+            if provider == Some(crate::sessions::SessionProvider::Hermes) {
+                for (db, project_root) in &destinations {
+                    crate::sessions::finalize_project_ingest(db, project_root).await;
+                }
+            } else {
+                for (db, project_root) in &destinations {
+                    let _ = crate::sessions::ingest_project_sources_for_provider(
+                        db,
+                        project_root,
+                        provider,
+                        false,
+                    )
+                    .await;
+                }
+            }
+        }
+        drop(catch_up_leader);
+        let searched_project_count = destinations.len();
+        let mut results = Vec::new();
+        for (db, _) in &destinations {
             let mut project_results = search_session_messages_in_db(&db, &request).await;
             results.append(&mut project_results);
         }
@@ -2347,7 +2447,29 @@ pub(super) async fn handle_message_search(
             }),
         ));
     };
-    let Some(db) = open_session_db_with_cached_ensure(&db_path).await else {
+    let catch_up_leader = if request.catch_up {
+        let key = format!(
+            "project:{}:{}",
+            db_path.display(),
+            request.provider_scope.response_label()
+        );
+        match claim_message_catch_up(key) {
+            MessageCatchUpClaim::Wait(done) => {
+                wait_for_message_catch_up(done).await;
+                None
+            }
+            MessageCatchUpClaim::Leader(leader) => Some(leader),
+        }
+    } else {
+        None
+    };
+    let perform_catch_up = catch_up_leader.is_some();
+    let db = if request.catch_up && !perform_catch_up {
+        GlobalDb::open_read_only_at(&db_path).await
+    } else {
+        open_session_db_with_cached_ensure(&db_path).await
+    };
+    let Some(db) = db else {
         return Ok(tool_json(
             Some(cg.project_root()),
             &args,
@@ -2360,7 +2482,7 @@ pub(super) async fn handle_message_search(
         ));
     };
     let catch_up_performed = request.catch_up;
-    if catch_up_performed {
+    if perform_catch_up {
         let _ = crate::sessions::ingest_global_sources_for_provider(
             &db,
             &target_root,
@@ -2368,6 +2490,7 @@ pub(super) async fn handle_message_search(
         )
         .await;
     }
+    drop(catch_up_leader);
     // Build the workflow-run scope filter and, separately, resolve the run's
     // parent thread purely for the echoed `workflow_run_parent_session` field
     // (the scope itself is authoritative via the `workflow_agents` EXISTS

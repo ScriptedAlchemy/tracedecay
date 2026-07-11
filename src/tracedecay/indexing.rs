@@ -13,7 +13,6 @@ use crate::resolution::ReferenceResolver;
 use crate::sync;
 use crate::types::*;
 
-use super::locking::{clear_dirty_sentinel_at, try_acquire_sync_lock_at, write_dirty_sentinel_at};
 use super::{IndexResult, SyncResult, TraceDecay, current_timestamp};
 
 /// Convert any backslash in a *relative* project-root-relative path to a
@@ -238,8 +237,8 @@ impl TraceDecay {
             "project root is not a directory"
         );
         self.ensure_branch_writable("full index")?;
-        let _lock = try_acquire_sync_lock_at(&self.store_layout.sync_lock_path)?;
-        write_dirty_sentinel_at(&self.store_layout.dirty_path);
+        let _lock = self.try_acquire_active_sync_lock()?;
+        self.write_active_dirty_sentinels();
         let start = Instant::now();
 
         // 1. Clear existing data and enter bulk-load mode
@@ -378,7 +377,8 @@ impl TraceDecay {
             result.duration_ms > 0 || result.file_count == 0,
             "non-empty index completed in zero milliseconds"
         );
-        clear_dirty_sentinel_at(&self.store_layout.dirty_path);
+        self.db.checkpoint().await?;
+        self.clear_active_dirty_sentinels();
         Ok(result)
     }
 
@@ -419,9 +419,10 @@ impl TraceDecay {
 
         self.ensure_branch_writable("sync files")?;
 
-        let Ok(lock) = try_acquire_sync_lock_at(&self.store_layout.sync_lock_path) else {
+        let Ok(lock) = self.try_acquire_active_sync_lock() else {
             return Ok(true);
         };
+        self.write_active_dirty_sentinels();
 
         let result = self.sync_single_files(&stale_files).await;
         drop(lock);
@@ -456,7 +457,7 @@ impl TraceDecay {
 
         self.ensure_branch_writable("sync files")?;
 
-        let lock = if let Ok(lock) = try_acquire_sync_lock_at(&self.store_layout.sync_lock_path) {
+        let lock = if let Ok(lock) = self.try_acquire_active_sync_lock() {
             lock
         } else {
             // Peer is syncing. Wait for them to release the lock so the
@@ -471,7 +472,7 @@ impl TraceDecay {
                     return Ok(());
                 }
                 tokio::time::sleep(Duration::from_millis(50)).await;
-                if let Ok(lock) = try_acquire_sync_lock_at(&self.store_layout.sync_lock_path) {
+                if let Ok(lock) = self.try_acquire_active_sync_lock() {
                     // Peer released. If they covered our files, the DB is
                     // fresh and we're done; otherwise sync ourselves.
                     let still_stale = self.check_file_staleness(&stale_files).await;
@@ -483,6 +484,7 @@ impl TraceDecay {
                 }
             }
         };
+        self.write_active_dirty_sentinels();
 
         let _ = self.sync_single_files(&stale_files).await;
         drop(lock);
@@ -594,7 +596,8 @@ impl TraceDecay {
             )
             .await?;
 
-        clear_dirty_sentinel_at(&self.store_layout.dirty_path);
+        self.db.checkpoint().await?;
+        self.clear_active_dirty_sentinels();
         Ok(())
     }
 
@@ -778,8 +781,8 @@ impl TraceDecay {
             "sync: project root is not a directory"
         );
         self.ensure_branch_writable("sync")?;
-        let _lock = try_acquire_sync_lock_at(&self.store_layout.sync_lock_path)?;
-        write_dirty_sentinel_at(&self.store_layout.dirty_path);
+        let _lock = self.try_acquire_active_sync_lock()?;
+        self.write_active_dirty_sentinels();
         let start = Instant::now();
 
         on_progress(0, 0, "scanning files");
@@ -1043,7 +1046,8 @@ impl TraceDecay {
             .set_metadata("last_sync_duration_ms", &duration_ms.to_string())
             .await?;
 
-        clear_dirty_sentinel_at(&self.store_layout.dirty_path);
+        self.db.checkpoint().await?;
+        self.clear_active_dirty_sentinels();
         Ok(SyncResult {
             files_added: new_files.len(),
             files_modified: stale.len(),
