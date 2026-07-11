@@ -160,7 +160,7 @@ fn user_memory_dispatch(tool_name: &str, args: &Value) -> bool {
 }
 
 fn user_lcm_dispatch(tool_name: &str, args: &Value) -> bool {
-    tool_name.starts_with("tracedecay_lcm_")
+    (tool_name.starts_with("tracedecay_lcm_") || tool_name == "tracedecay_message_search")
         && args.get("storage_scope").and_then(Value::as_str) == Some("user")
 }
 

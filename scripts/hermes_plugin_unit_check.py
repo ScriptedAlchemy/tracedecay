@@ -269,6 +269,17 @@ def run_checks(work: Path):
         assert tool_argv[-1][tool_argv[-1].index("--project") + 1] == str(
             hermes_descendant
         )
+        for name, args in (
+            ("tracedecay_fact_store", {"action": "list", "memory_scope": "user"}),
+            ("tracedecay_lcm_status", {"storage_scope": "user"}),
+            (
+                "tracedecay_message_search",
+                {"query": "general chat", "storage_scope": "user"},
+            ),
+        ):
+            plugin.tools.call_tracedecay_tool(name, args, cwd=str(hermes_descendant))
+            assert "--project" not in tool_argv[-1], tool_argv[-1]
+            assert tool_run_kwargs[-1]["cwd"] == os.path.abspath(os.sep)
     finally:
         plugin.tools.subprocess.run = real_tools_run
     real_json = plugin.call_tracedecay_json

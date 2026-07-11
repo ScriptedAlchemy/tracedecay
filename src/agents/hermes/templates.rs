@@ -219,7 +219,13 @@ def call_tracedecay_tool(name: str, args: dict, **kwargs) -> str:
         # object. Resolve it only from an explicit call or the real process /
         # session cwd; Hermes homes and profiles never select TraceDecay data.
         project_root = kwargs.get("project_root")
-        if not project_root:
+        user_scoped = (
+            tool_args.get("memory_scope") == "user"
+            or tool_args.get("storage_scope") == "user"
+        )
+        if user_scoped:
+            project_root = None
+        elif not project_root:
             project_root = code_project_root(
                 cwd=kwargs.get("cwd") or tool_args.get("cwd"),
                 hermes_home=kwargs.get("hermes_home"),

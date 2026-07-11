@@ -2403,6 +2403,35 @@ pub(super) async fn handle_message_search(
     ))
 }
 
+pub(super) async fn handle_user_message_search(
+    sessions_db_path: &Path,
+    args: Value,
+) -> Result<ToolResult> {
+    let request = parse_message_search_request(&args)?;
+    let Some(db) = GlobalDb::open_read_only_at(sessions_db_path).await else {
+        return Ok(tool_json(
+            None,
+            &args,
+            &json!({
+                "status": "unavailable",
+                "message": "could not open user tracedecay session database",
+                "results": [],
+                "count": 0
+            }),
+        ));
+    };
+    let results = if request.goals {
+        db.recent_session_goals(request.project_key, request.limit)
+            .await
+    } else {
+        search_session_messages_in_db(&db, &request).await
+    };
+    let payload = message_search_payload(&request, &results, false);
+    Ok(tool_json_with_md(None, &args, &payload, || {
+        render_message_search_md(&payload)
+    }))
+}
+
 pub(super) async fn handle_lcm_status(
     context: LcmHandlerContext<'_>,
     args: Value,

@@ -47,16 +47,22 @@ pub async fn handle_user_lcm_tool(
         "project_id",
         "project_path",
         "project_root",
+        "project_scope",
         "project_selector",
     ]
     .iter()
     .any(|key| args.get(*key).is_some())
     {
         return Err(TraceDecayError::Config {
-            message: "storage_scope=user cannot be combined with a project selector".to_string(),
+            message:
+                "storage_scope=user cannot be combined with a project selector or project_scope"
+                    .to_string(),
         });
     }
     let sessions_db_path = crate::sessions::user_sessions_db_path(profile_root);
+    if tool_name == "tracedecay_message_search" {
+        return session::handle_user_message_search(&sessions_db_path, args).await;
+    }
     let context = session::LcmHandlerContext::user(&sessions_db_path);
     match tool_name {
         "tracedecay_lcm_status" => session::handle_lcm_status(context, args).await,
