@@ -1139,7 +1139,8 @@ fn test_hermes_user_install_writes_single_plugin() {
     assert!(init_py.contains("getattr(ctx, \"register_skill\", None)"));
     assert!(init_py.contains("register_skill(skill_name, skill_path)"));
     assert!(init_py.contains("class TraceDecayContextEngine"));
-    assert!(!init_py.contains("storage_scope"));
+    assert!(init_py.contains("routed.setdefault(\"storage_scope\", \"user\")"));
+    assert!(!init_py.contains("hermes_profile"));
     assert!(!init_py.contains("hermes_home\": self.hermes_home"));
     assert!(!init_py.contains("HERMES_HOME"));
     assert!(init_py.contains("tracedecay_lcm_compress"));
@@ -1267,7 +1268,7 @@ fn test_hermes_plugin_init_snapshot_matches_embedded_asset() {
     hasher.update(body.as_bytes());
     assert_eq!(
         hex::encode(hasher.finalize()),
-        "5327ef64cb155d386a506d5c4dbf2e17f8ad30480c61016fdd9ded0b6bc70cb8",
+        "88db26663abdb759748ce77900bddf2746a97ba73635f2a69a909ed1a9d008be",
         "templates/plugin_init.py payload hash changed — verify the edit is intentional and update this snapshot"
     );
 }
@@ -1283,7 +1284,7 @@ fn test_hermes_generated_python_registers_lcm_context_engine() {
 
     assert!(init_py.contains("class TraceDecayContextEngine"));
     assert!(init_py.contains("ctx.register_context_engine"));
-    assert!(!init_py.contains("storage_scope"));
+    assert!(init_py.contains("routed.setdefault(\"storage_scope\", \"user\")"));
     assert!(init_py.contains("def call_tracedecay_json"));
     assert!(init_py.contains("tracedecay_lcm_status"));
     assert!(init_py.contains("\"tracedecay_lcm_preflight\","));
@@ -6336,6 +6337,9 @@ assert "--project" in argv, argv
 assert argv[argv.index("--project") + 1] == str(healthy_cwd), argv
 
 # The context engine filters the legacy pin but layers host-behavior settings.
+plugin._resolved_project_scope = lambda path: (
+    str(healthy_cwd) if os.path.realpath(str(path)) == os.path.realpath(str(healthy_cwd)) else None
+)
 engine = plugin.TraceDecayContextEngine()
 assert engine.project_root is None, engine.project_root
 engine.on_session_start(session_id="s1", cwd=str(healthy_cwd))

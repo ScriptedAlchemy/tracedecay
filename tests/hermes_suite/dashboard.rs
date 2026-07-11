@@ -16,7 +16,6 @@ use tracedecay::automation::managed_skills::{
     ManagedSkillDraft, ManagedSkillProvenance, ManagedSkillSource, approve_managed_skill,
     create_managed_skill_draft, default_managed_skill_targets,
 };
-use tracedecay::automation::skill_targets::profile_root_for_agent_home;
 
 fn make_ctx(home: &Path, dashboard: bool) -> InstallContext {
     InstallContext {
@@ -39,8 +38,9 @@ fn read(path: &Path) -> String {
 
 #[tokio::test]
 async fn install_and_update_reconcile_active_managed_skills() {
-    let home = tempfile::tempdir().unwrap();
-    let profile_root = profile_root_for_agent_home(home.path());
+    let (env, _) = super::common::IsolatedEnv::acquire().await;
+    let home = env.home();
+    let profile_root = home.join(".tracedecay");
     create_managed_skill_draft(
         &profile_root,
         ManagedSkillDraft {
@@ -64,11 +64,10 @@ async fn install_and_update_reconcile_active_managed_skills() {
         .await
         .unwrap();
 
-    let ctx = make_ctx(home.path(), false);
+    let ctx = make_ctx(home, false);
     HermesIntegration.install(&ctx).unwrap();
-    let skill_path = home
-        .path()
-        .join(".hermes/plugins/tracedecay/skills/agent-managed/repo-hygiene/SKILL.md");
+    let skill_path =
+        home.join(".hermes/plugins/tracedecay/skills/agent-managed/repo-hygiene/SKILL.md");
     assert!(skill_path.is_file());
 
     std::fs::remove_file(&skill_path).unwrap();

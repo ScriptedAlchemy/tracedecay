@@ -511,3 +511,34 @@ async fn cline_like_task_for_other_project_is_skipped() {
     .await;
     assert_eq!(stats.messages_upserted, 0);
 }
+
+#[tokio::test]
+async fn cline_like_user_scope_includes_only_unregistered_tasks() {
+    let tmp = TempDir::new().unwrap();
+    let (home, project) = setup(&tmp);
+    let projectless = tmp.path().join("general-chat");
+    std::fs::create_dir_all(&projectless).unwrap();
+    let root = vscode_storage_root(&home, "saoudrizwan.claude-dev");
+    write_task(&root, &project, "registered-task");
+    write_task(&root, &projectless, "user-task");
+    let mixed = write_task(&root, &project, "mixed-task");
+    std::fs::write(
+        mixed.parent().unwrap().join("task_metadata.json"),
+        serde_json::json!({
+            "workspacePath": project,
+            "otherDirectory": projectless
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let db = open_project_session_db(&project).await.unwrap();
+    let source = ClineLikeSource::cline_with_home(&home).for_user_scope(vec![project.clone()]);
+    let stats = ingest_source(&db, &source, tmp.path(), None).await;
+    assert_eq!(stats.messages_upserted, 2);
+    assert!(db.get_session("cline", "registered-task").await.is_none());
+    assert!(db.get_session("cline", "mixed-task").await.is_none());
+    let session = db.get_session("cline", "user-task").await.unwrap();
+    assert_eq!(session.project_key, "user");
+    assert_eq!(session.project_path, "user");
+}

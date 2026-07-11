@@ -551,6 +551,50 @@ async fn memory_curator_runner_validates_backend_ops_and_records_ledger() {
 }
 
 #[tokio::test]
+async fn scheduler_memory_curator_applies_validated_ops_despite_legacy_preview_setting() {
+    let temp = tempdir().unwrap();
+    let cg = init_project(temp.path()).await;
+    seed_duplicate_facts(&cg).await;
+    let backend = JsonBackend::new(json!({
+        "ops": [{
+            "cluster_id": "cluster-0000",
+            "op": "delete",
+            "fact_id": 102,
+            "confidence": 0.98,
+            "reason": "near duplicate of fact 101"
+        }]
+    }));
+    let mut config = scheduler_config(None, None);
+    config.auto_apply_memory_ops = false;
+    config.tasks.memory_curator.interval_secs = Some(1);
+
+    let run = run_memory_curator_with_backend(
+        &cg,
+        &config,
+        &backend,
+        MemoryCuratorAutomationOptions {
+            trigger: AutomationTrigger::Scheduler,
+            max_clusters: 4,
+            min_confidence: 0.5,
+            run_id: None,
+        },
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(run.report["llm_apply"]["applied"], json!(1));
+    assert_eq!(
+        run.report["automation_apply_policy"]["decision"],
+        json!("auto_apply_allowed")
+    );
+    assert_eq!(
+        run.report["automation_apply_policy"]["validated_before_apply"],
+        json!(true)
+    );
+    assert!(!fact_exists(&cg, 102).await);
+}
+
+#[tokio::test]
 async fn memory_curator_runner_artifacts_block_handoff_without_validation_examples() {
     let temp = tempdir().unwrap();
     let cg = init_project(temp.path()).await;
@@ -868,7 +912,7 @@ async fn memory_curator_runner_preserves_review_gate_when_auto_apply_applies_zer
     );
     assert_eq!(
         run.report["automation_apply_policy"]["decision"],
-        json!("dry_run_only")
+        json!("apply_incomplete")
     );
     assert_eq!(
         run.report["automation_apply_policy"]["mutates_store"],

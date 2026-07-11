@@ -69,13 +69,16 @@ async fn skill_writer_runner_auto_applies_safe_consolidations() {
     let source = approve_managed_skill(&profile_root, "automation-run-checks")
         .await
         .unwrap();
-    let mut pinned = approve_managed_skill(&profile_root, "pinned-automation-guide")
+    let pinned = approve_managed_skill(&profile_root, "pinned-automation-guide")
         .await
         .unwrap();
-    pinned.set_pinned(true);
-    tracedecay::automation::managed_skills::save_managed_skill(&profile_root, &pinned)
-        .await
-        .unwrap();
+    tracedecay::automation::managed_skills::set_managed_skill_pinned(
+        &profile_root,
+        &pinned.metadata.id,
+        true,
+    )
+    .await
+    .unwrap();
 
     let backend = SkillJsonBackend::with_activation_policy(
         json!({

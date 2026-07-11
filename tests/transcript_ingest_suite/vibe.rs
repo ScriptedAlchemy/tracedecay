@@ -2,7 +2,7 @@ use std::io::Write;
 
 use tempfile::TempDir;
 use tracedecay::sessions::cursor::open_project_session_db;
-use tracedecay::sessions::source::ingest_source;
+use tracedecay::sessions::source::{TranscriptSource, ingest_source};
 use tracedecay::sessions::vibe::VibeSource;
 
 use crate::support::{assert_metadata_path_eq, create_git_repo_with_linked_worktree, setup};
@@ -179,4 +179,36 @@ async fn vibe_session_for_other_project_is_skipped() {
             .messages_upserted,
         0
     );
+}
+
+#[tokio::test]
+async fn vibe_user_scope_includes_only_unregistered_sessions() {
+    let tmp = TempDir::new().unwrap();
+    let (home, project) = setup(&tmp);
+    let projectless = tmp.path().join("general-chat");
+    std::fs::create_dir_all(&projectless).unwrap();
+    write_vibe_session(&home, &project, "registered-vibe");
+    write_vibe_session(&home, &projectless, "user-vibe");
+
+    let db = open_project_session_db(&project).await.unwrap();
+    let source = VibeSource::with_home(&home).for_user_scope(vec![project.clone()]);
+    let stats = ingest_source(&db, &source, tmp.path(), None).await;
+    assert_eq!(stats.messages_upserted, 2);
+    assert!(db.get_session("vibe", "registered-vibe").await.is_none());
+    let session = db.get_session("vibe", "user-vibe").await.unwrap();
+    assert_eq!(session.project_key, "user");
+    assert_eq!(session.project_path, "user");
+}
+
+#[test]
+fn vibe_history_enumeration_is_bounded() {
+    let tmp = TempDir::new().unwrap();
+    let home = tmp.path();
+    for index in 0..513 {
+        let dir = home.join(format!(".vibe/logs/session/session-{index:04}"));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("messages.jsonl"), "").unwrap();
+    }
+    let source = VibeSource::with_home(home);
+    assert_eq!(source.transcript_paths(home).len(), 512);
 }

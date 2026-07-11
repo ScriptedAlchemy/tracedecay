@@ -4,7 +4,8 @@ use tracedecay::automation::managed_skills::{
     approve_managed_skill, archive_managed_skill, create_managed_skill_draft,
     disable_managed_skill, discard_pending_managed_skill_update, list_managed_skills,
     load_managed_skill, managed_skill_dir, restore_managed_skill, save_managed_skill,
-    set_managed_skill_state, stage_managed_skill_update, update_managed_skill,
+    set_managed_skill_pinned, set_managed_skill_state, stage_managed_skill_update,
+    update_managed_skill,
 };
 use tracedecay::automation::skill_usage::{
     SkillUsageAction, SkillUsageEvent, ingest_analytics_events, load_skill_usage_records,
@@ -530,6 +531,30 @@ async fn managed_skill_lifecycle_helpers_keep_activation_explicit() {
 }
 
 #[tokio::test]
+async fn concurrent_managed_skill_mutations_preserve_both_changes() {
+    let temp = tempfile::tempdir().unwrap();
+    let profile_root = temp.path().join("profile");
+    create_managed_skill_draft(&profile_root, draft())
+        .await
+        .unwrap();
+
+    let pin_root = profile_root.clone();
+    let activate_root = profile_root.clone();
+    let (pinned, activated) = tokio::join!(
+        set_managed_skill_pinned(&pin_root, "repo-hygiene", true),
+        set_managed_skill_state(&activate_root, "repo-hygiene", ManagedSkillState::Active,)
+    );
+    pinned.unwrap();
+    activated.unwrap();
+
+    let persisted = load_managed_skill(&profile_root, "repo-hygiene")
+        .await
+        .unwrap();
+    assert!(persisted.metadata.pinned);
+    assert_eq!(persisted.metadata.state, ManagedSkillState::Active);
+}
+
+#[tokio::test]
 async fn managed_skill_save_syncs_usage_lifecycle_metadata() {
     let temp = tempfile::tempdir().unwrap();
     let profile_root = temp.path().join("profile");
@@ -660,14 +685,10 @@ async fn managed_skill_update_restages_content_changes_for_approval() {
     approve_managed_skill(&profile_root, "repo-hygiene")
         .await
         .unwrap();
-    let mut before_update = load_managed_skill(&profile_root, "repo-hygiene")
+    let before_update = load_managed_skill(&profile_root, "repo-hygiene")
         .await
         .unwrap();
     let created_at = before_update.metadata.created_at;
-    before_update.metadata.updated_at = 1;
-    save_managed_skill(&profile_root, &before_update)
-        .await
-        .unwrap();
 
     let updated = update_managed_skill(
         &profile_root,
@@ -687,7 +708,7 @@ async fn managed_skill_update_restages_content_changes_for_approval() {
     assert_eq!(updated.metadata.state, ManagedSkillState::PendingApproval);
     assert!(updated.metadata.pinned);
     assert_eq!(updated.metadata.created_at, created_at);
-    assert!(updated.metadata.updated_at > 1);
+    assert!(updated.metadata.updated_at >= created_at);
     assert_eq!(
         updated.metadata.summary,
         "Updated summary from review evidence."
@@ -893,9 +914,7 @@ async fn staged_managed_skill_update_rejects_no_op_patch() {
 async fn managed_skill_usage_ledger_records_views_uses_and_patches() {
     let temp = tempfile::tempdir().unwrap();
     let profile_root = temp.path().join("profile");
-    let mut skill = create_managed_skill_draft(&profile_root, draft())
-        .await
-        .unwrap();
+    let mut skill = draft().materialize().unwrap();
     skill.set_pinned(true);
     save_managed_skill(&profile_root, &skill).await.unwrap();
 

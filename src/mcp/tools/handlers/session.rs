@@ -300,6 +300,13 @@ impl<'a> LcmHandlerContext<'a> {
             project_session_db_path: Some(cg.store_layout().sessions_db_path.as_path()),
         }
     }
+
+    pub(super) fn user(sessions_db_path: &'a Path) -> Self {
+        Self {
+            project_root: None,
+            project_session_db_path: Some(sessions_db_path),
+        }
+    }
 }
 
 async fn selected_project_session_db_path(
@@ -1790,9 +1797,6 @@ async fn open_lcm_storage(
     args: &Value,
     mode: LcmOpenMode,
 ) -> LcmStorageResolution {
-    if context.project_root.is_none() {
-        return LcmStorageResolution::Unavailable(project_local_storage_without_project(args));
-    }
     let Some(db_path) = context.project_session_db_path else {
         return LcmStorageResolution::Unavailable(project_local_storage_without_project(args));
     };
@@ -2969,10 +2973,14 @@ async fn upsert_live_transcript_projection(
     session_id: &str,
     messages: &[Value],
 ) {
-    let Some(project_root) = project_root else {
-        return;
+    let project = project_root
+        .map(|root| root.to_string_lossy().to_string())
+        .unwrap_or_else(|| "user".to_string());
+    let storage_scope = if project_root.is_some() {
+        "project"
+    } else {
+        "user"
     };
-    let project = project_root.to_string_lossy().to_string();
     let source_path = format!("live://{provider}/{session_id}");
     let mut projected = Vec::new();
     for (ordinal, message) in messages.iter().enumerate() {
@@ -3019,6 +3027,7 @@ async fn upsert_live_transcript_projection(
                 json!({
                     "source": "lcm_preflight_live",
                     "project_root": project,
+                    "storage_scope": storage_scope,
                     "location_provenance": "host_live_route"
                 })
                 .to_string(),
@@ -3048,6 +3057,7 @@ async fn upsert_live_transcript_projection(
             metadata_json: Some(
                 json!({
                     "source": "lcm_preflight_live",
+                    "storage_scope": storage_scope,
                     "location_provenance": "host_live_route"
                 })
                 .to_string(),

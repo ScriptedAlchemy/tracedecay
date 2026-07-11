@@ -5,7 +5,9 @@ use tracedecay::global_db::GlobalDb;
 use tracedecay::hooks::cursor_pre_compact_for_event_with_config;
 use tracedecay::sessions::cursor::{
     CursorSweepSource, cursor_project_slug, ingest_cursor_transcript_event,
-    ingest_cursor_transcript_event_capped, open_project_session_db, project_session_db_path,
+    ingest_cursor_transcript_event_capped, ingest_cursor_user_transcript_event_capped,
+    ingest_cursor_user_transcript_event_capped_with_registered_roots, open_project_session_db,
+    project_session_db_path,
 };
 use tracedecay::sessions::cursor_agent::CursorAgentSummaryConfig;
 use tracedecay::sessions::lcm::{LcmDescribeRequest, LcmDescribeTarget};
@@ -46,6 +48,67 @@ fn write_cursor_parent_with_subagent(tmp: &TempDir) -> (std::path::PathBuf, std:
     )
     .unwrap();
     (parent, subagent)
+}
+
+#[tokio::test]
+async fn projectless_cursor_event_uses_user_session_identity() {
+    let tmp = TempDir::new().unwrap();
+    let transcript = tmp.path().join("general.jsonl");
+    std::fs::write(
+        &transcript,
+        "{\"role\":\"user\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"Remember my general preference.\"}]}}\n",
+    )
+    .unwrap();
+    let event = serde_json::json!({
+        "session_id": "general-session",
+        "transcript_path": transcript,
+    });
+    let db = GlobalDb::open_at(&tmp.path().join("user-sessions.db"))
+        .await
+        .unwrap();
+
+    let stats = ingest_cursor_user_transcript_event_capped(&event.to_string(), &db, None).await;
+
+    assert_eq!(stats.messages_upserted, 1);
+    let session = db.get_session("cursor", "general-session").await.unwrap();
+    assert_eq!(session.project_path, "user");
+}
+
+#[tokio::test]
+async fn user_cursor_event_rejects_registered_project_transcript_slug() {
+    let tmp = TempDir::new().unwrap();
+    let registered = tmp.path().join("registered-project");
+    let slug = cursor_project_slug(&registered).unwrap();
+    let transcript_dir = tmp
+        .path()
+        .join(".cursor/projects")
+        .join(slug)
+        .join("agent-transcripts");
+    std::fs::create_dir_all(&transcript_dir).unwrap();
+    let transcript = transcript_dir.join("project-session.jsonl");
+    std::fs::write(
+        &transcript,
+        "{\"role\":\"user\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"registered project secret\"}]}}\n",
+    )
+    .unwrap();
+    let event = serde_json::json!({
+        "session_id": "project-session",
+        "transcript_path": transcript,
+    });
+    let db = GlobalDb::open_at(&tmp.path().join("user-sessions.db"))
+        .await
+        .unwrap();
+
+    let stats = ingest_cursor_user_transcript_event_capped_with_registered_roots(
+        &event.to_string(),
+        &db,
+        None,
+        &[registered],
+    )
+    .await;
+
+    assert_eq!(stats.messages_upserted, 0);
+    assert!(db.get_session("cursor", "project-session").await.is_none());
 }
 
 #[tokio::test]

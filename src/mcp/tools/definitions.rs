@@ -347,6 +347,7 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
         def_find_exact_symbol(),
     ];
     add_registered_project_selector_properties(&mut definitions);
+    add_lcm_storage_scope_property(&mut definitions);
     add_format_property(&mut definitions);
     if !ast_grep_available() {
         definitions.retain(|d| d.name != "tracedecay_ast_grep_rewrite");
@@ -362,6 +363,29 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
         "all tool definitions must have 'tracedecay_' prefix"
     );
     definitions
+}
+
+fn add_lcm_storage_scope_property(definitions: &mut [ToolDefinition]) {
+    for definition in definitions
+        .iter_mut()
+        .filter(|definition| definition.name.starts_with("tracedecay_lcm_"))
+    {
+        let Some(properties) = definition
+            .input_schema
+            .get_mut("properties")
+            .and_then(Value::as_object_mut)
+        else {
+            continue;
+        };
+        properties.insert(
+            "storage_scope".to_string(),
+            json!({
+                "type": "string",
+                "enum": ["project", "user"],
+                "description": "Session store scope. project (default) uses the active project shard; user uses the profile-level store for untethered conversations and cannot be combined with a project selector."
+            }),
+        );
+    }
 }
 
 fn matching_tool_definitions_mut<'a>(

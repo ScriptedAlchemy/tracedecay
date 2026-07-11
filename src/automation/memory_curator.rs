@@ -12,9 +12,12 @@ use super::lifecycle::{AgentTaskRunContext, SchedulerGate, failed_backend_fallba
 use super::run_ledger::{AutomationRunLedgerRecord, AutomationTrigger};
 use crate::dashboard::memory_curate::{
     CURATION_DEFAULT_MAX_CLUSTERS, CURATION_DEFAULT_MIN_CONFIDENCE, MemoryCurateOptions,
-    run_memory_curate,
+    run_memory_curate, run_user_memory_curate,
 };
+use crate::db::Database;
 use crate::errors::{Result, TraceDecayError};
+use crate::memory::user::{open_user_memory_db, user_memory_db_path};
+use crate::sessions::user_sessions_db_path;
 use crate::tracedecay::TraceDecay;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -55,9 +58,100 @@ pub async fn run_memory_curator_with_backend(
     backend: &dyn AgentTaskBackend,
     options: MemoryCuratorAutomationOptions,
 ) -> Result<MemoryCuratorAutomationRun> {
+    let mut autonomous_config = config.clone();
+    autonomous_config.auto_apply_memory_ops = true;
+    run_memory_curator_for_store(
+        MemoryCuratorStore::Project(cg),
+        &autonomous_config,
+        backend,
+        options,
+    )
+    .await
+}
+
+/// Runs autonomous curation against profile-level user memory.
+pub async fn run_user_memory_curator_with_backend(
+    profile_root: &std::path::Path,
+    config: &AutomationConfig,
+    backend: &dyn AgentTaskBackend,
+    options: MemoryCuratorAutomationOptions,
+) -> Result<MemoryCuratorAutomationRun> {
+    let db = open_user_memory_db(profile_root).await?;
+    let mut autonomous_config = config.clone();
+    autonomous_config.auto_apply_memory_ops = true;
+    run_memory_curator_for_store(
+        MemoryCuratorStore::User {
+            profile_root,
+            db: &db,
+        },
+        &autonomous_config,
+        backend,
+        options,
+    )
+    .await
+}
+
+enum MemoryCuratorStore<'a> {
+    Project(&'a TraceDecay),
+    User {
+        profile_root: &'a std::path::Path,
+        db: &'a Database,
+    },
+}
+
+impl MemoryCuratorStore<'_> {
+    fn dashboard_root(&self) -> std::path::PathBuf {
+        match self {
+            Self::Project(cg) => cg.store_layout().dashboard_root.clone(),
+            Self::User { profile_root, .. } => super::runner::user_automation_root(profile_root),
+        }
+    }
+
+    fn sessions_db_path(&self) -> std::path::PathBuf {
+        match self {
+            Self::Project(cg) => cg.store_layout().sessions_db_path.clone(),
+            Self::User { profile_root, .. } => user_sessions_db_path(profile_root),
+        }
+    }
+
+    async fn curate(&self, options: &MemoryCurateOptions) -> Result<Value> {
+        match self {
+            Self::Project(cg) => run_memory_curate(cg, options).await,
+            Self::User { profile_root, db } => {
+                run_user_memory_curate(
+                    db,
+                    &user_memory_db_path(profile_root),
+                    profile_root,
+                    &super::runner::user_automation_root(profile_root),
+                    options,
+                )
+                .await
+            }
+        }
+    }
+
+    async fn refresh_digest(&self) {
+        if let Self::Project(cg) = self
+            && let Ok(project_db) = cg.open_project_store_db().await
+        {
+            crate::automation::memory_digest::refresh_memory_digest_after_memory_change(
+                project_db.conn(),
+                &cg.store_layout().project_root,
+            )
+            .await;
+        }
+    }
+}
+
+async fn run_memory_curator_for_store(
+    store: MemoryCuratorStore<'_>,
+    config: &AutomationConfig,
+    backend: &dyn AgentTaskBackend,
+    options: MemoryCuratorAutomationOptions,
+) -> Result<MemoryCuratorAutomationRun> {
     let mut run = AgentTaskRunContext::new(
-        cg.store_layout().dashboard_root.clone(),
-        cg.store_layout().sessions_db_path.clone(),
+        store.dashboard_root(),
+        store.sessions_db_path(),
         options.run_id.clone(),
         "memory_curator",
         options.trigger,
@@ -74,17 +168,15 @@ pub async fn run_memory_curator_with_backend(
         }
     };
 
-    let review_report = run_memory_curate(
-        cg,
-        &MemoryCurateOptions {
+    let review_report = store
+        .curate(&MemoryCurateOptions {
             apply: false,
             llm: true,
             llm_ops: None,
             max_clusters,
             min_confidence,
-        },
-    )
-    .await?;
+        })
+        .await?;
     let llm_review =
         review_report
             .get("llm_review")
@@ -130,17 +222,15 @@ pub async fn run_memory_curator_with_backend(
         .response_output_json(&response, evidence_hash.clone())
         .await?;
 
-    let dry_run_report = match run_memory_curate(
-        cg,
-        &MemoryCurateOptions {
+    let dry_run_report = match store
+        .curate(&MemoryCurateOptions {
             apply: false,
             llm: false,
             llm_ops: Some(proposed_ops.clone()),
             max_clusters,
             min_confidence,
-        },
-    )
-    .await
+        })
+        .await
     {
         Ok(report) => report,
         Err(err) => {
@@ -163,17 +253,15 @@ pub async fn run_memory_curator_with_backend(
         .and_then(Value::as_bool)
         .unwrap_or(false);
     let validated_report = if should_apply {
-        let mut applied_report = match run_memory_curate(
-            cg,
-            &MemoryCurateOptions {
+        let mut applied_report = match store
+            .curate(&MemoryCurateOptions {
                 apply: true,
                 llm: false,
                 llm_ops: Some(proposed_ops.clone()),
                 max_clusters,
                 min_confidence,
-            },
-        )
-        .await
+            })
+            .await
         {
             Ok(report) => report,
             Err(err) => {
@@ -197,13 +285,7 @@ pub async fn run_memory_curator_with_backend(
             memory_curation_apply_policy(config, applied_ops.as_ref(), Some(applied_count));
         annotate_memory_curation_report(&mut applied_report, apply_policy.clone());
         if applied_count > 0 {
-            if let Ok(project_db) = cg.open_project_store_db().await {
-                crate::automation::memory_digest::refresh_memory_digest_after_memory_change(
-                    project_db.conn(),
-                    &cg.store_layout().project_root,
-                )
-                .await;
-            }
+            store.refresh_digest().await;
         }
         applied_report
     } else {
@@ -290,7 +372,10 @@ fn memory_curation_apply_policy(
         MemoryApplyDecision::AutoApplyAllowed => {
             "Accepted memory curation ops were applied autonomously and recorded in automation telemetry."
         }
-        MemoryApplyDecision::DryRunOnly | MemoryApplyDecision::ProposalOnly => {
+        MemoryApplyDecision::ApplyIncomplete => {
+            "Automation attempted to apply accepted memory curation ops, but one or more mutations did not complete."
+        }
+        MemoryApplyDecision::ProposalOnly => {
             "Automation recorded accepted memory curation ops without mutating the memory store."
         }
         MemoryApplyDecision::NoValidOps | MemoryApplyDecision::NoValidFacts => {
@@ -299,7 +384,7 @@ fn memory_curation_apply_policy(
     };
     let mut payload = policy.to_json();
     if let Some(object) = payload.as_object_mut() {
-        object.insert("dry_run_first".to_string(), json!(true));
+        object.insert("validated_before_apply".to_string(), json!(true));
         object.insert("accepted_count".to_string(), json!(accepted_count));
         if let Some(applied_count) = applied_count {
             object.insert("applied_count".to_string(), json!(applied_count));

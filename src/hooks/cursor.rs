@@ -115,7 +115,7 @@ pub async fn hook_cursor_before_submit_prompt() -> i32 {
         CURSOR_HOT_INGEST_BUDGET,
     )
     .await;
-    let context = cursor_before_submit_prompt_context(&event).await;
+    let context = Box::pin(cursor_before_submit_prompt_context(&event)).await;
     println!("{}", cursor_before_submit_prompt_json(context.as_deref()));
     0
 }
@@ -141,7 +141,7 @@ pub(super) async fn cursor_before_submit_prompt_context(event_json: &str) -> Opt
     if let Some(hint) = cursor_prompt_hint(event_json) {
         append_tool_hint(&mut context, &hint);
     }
-    if let Some(recall) = cursor_prompt_memory_recall(event_json).await {
+    if let Some(recall) = Box::pin(cursor_prompt_memory_recall(event_json)).await {
         append_context_block(&mut context, &recall);
     }
     (!context.trim().is_empty()).then_some(context)
@@ -185,7 +185,12 @@ async fn cursor_prompt_memory_recall(event_json: &str) -> Option<String> {
     let session_id = event_session_id(&parsed);
     match cursor_project_root_from_parsed_event_with_identity(&parsed).await {
         Some(root) => {
-            memory_inject::prompt_memory_recall(&root, session_id.as_deref(), &prompt).await
+            Box::pin(memory_inject::combined_prompt_memory_recall(
+                &root,
+                session_id.as_deref(),
+                &prompt,
+            ))
+            .await
         }
         None => memory_inject::user_prompt_memory_recall(session_id.as_deref(), &prompt).await,
     }
@@ -203,12 +208,16 @@ pub async fn hook_cursor_session_end() -> i32 {
     let root = cursor_project_root_from_event_with_identity(&event).await;
     let _hook_telemetry =
         record_hook_invoked(root.as_deref(), HintAgent::Cursor, "sessionEnd", &event);
-    ingest_cursor_transcript_for_event(
+    let outcome = ingest_cursor_transcript_for_event_inner(
         &event,
         Some(CURSOR_CATCH_UP_INGEST_MAX_BYTES),
         CURSOR_STOP_INGEST_BUDGET,
     )
     .await;
+    if outcome.user_scope && outcome.messages_upserted > 0 {
+        let session_id = event_session_id_from_json(&event);
+        super::schedule_user_session_review("cursor", session_id.as_deref());
+    }
     println!("{}", serde_json::json!({}));
     0
 }
@@ -223,12 +232,16 @@ pub async fn hook_cursor_stop() -> i32 {
     let event = read_hook_event!();
     let root = cursor_project_root_from_event_with_identity(&event).await;
     let _hook_telemetry = record_hook_invoked(root.as_deref(), HintAgent::Cursor, "stop", &event);
-    ingest_cursor_transcript_for_event(
+    let outcome = ingest_cursor_transcript_for_event_inner(
         &event,
         Some(CURSOR_CATCH_UP_INGEST_MAX_BYTES),
         CURSOR_STOP_INGEST_BUDGET,
     )
     .await;
+    if outcome.user_scope && outcome.messages_upserted > 0 {
+        let session_id = event_session_id_from_json(&event);
+        super::schedule_user_session_review("cursor", session_id.as_deref());
+    }
     println!("{}", serde_json::json!({}));
     0
 }
@@ -309,7 +322,9 @@ pub async fn hook_cursor_session_start() -> i32 {
         .as_ref()
         .and_then(event_session_id);
     let digest = match root.as_deref() {
-        Some(root) => memory_inject::session_memory_digest(root, session_id.as_deref()).await,
+        Some(root) => {
+            memory_inject::combined_session_memory_digest(root, session_id.as_deref()).await
+        }
         None => memory_inject::user_session_memory_digest(session_id.as_deref()).await,
     };
     if let Some(digest) = digest {
@@ -766,36 +781,88 @@ pub(super) async fn ingest_cursor_transcript_for_event(
     max_new_bytes: Option<u64>,
     budget: Duration,
 ) -> bool {
+    ingest_cursor_transcript_for_event_inner(event_json, max_new_bytes, budget)
+        .await
+        .completed
+}
+
+#[derive(Default)]
+struct CursorIngestOutcome {
+    completed: bool,
+    user_scope: bool,
+    messages_upserted: u64,
+}
+
+async fn ingest_cursor_transcript_for_event_inner(
+    event_json: &str,
+    max_new_bytes: Option<u64>,
+    budget: Duration,
+) -> CursorIngestOutcome {
     let work = async {
         let Ok(parsed) = serde_json::from_str::<Value>(event_json) else {
-            return false;
+            return CursorIngestOutcome::default();
         };
-        let Some(project_root) = cursor_project_root_from_parsed_event_with_identity(&parsed).await
-        else {
-            return false;
+        let project_root = cursor_project_root_from_parsed_event_with_identity(&parsed).await;
+        if project_root.is_none() {
+            let Ok(profile_root) = crate::storage::default_profile_root() else {
+                return CursorIngestOutcome::default();
+            };
+            let Some(db) = crate::sessions::open_user_session_db(&profile_root).await else {
+                return CursorIngestOutcome::default();
+            };
+            let Some(registered_roots) = crate::sessions::try_registered_project_roots().await
+            else {
+                return CursorIngestOutcome::default();
+            };
+            let stats = crate::sessions::cursor::ingest_cursor_user_transcript_event_capped_with_registered_roots(
+                event_json,
+                &db,
+                max_new_bytes,
+                &registered_roots,
+            )
+            .await;
+            return CursorIngestOutcome {
+                completed: true,
+                user_scope: true,
+                messages_upserted: stats.messages_upserted,
+            };
+        }
+        let Some(project_root) = project_root else {
+            return CursorIngestOutcome::default();
         };
         if let Some(cwd_root) = cursor_event_cwd(&parsed)
             .as_deref()
             .and_then(crate::config::discover_project_root)
         {
             if !paths_same(&cwd_root, &project_root) {
-                return false;
+                return CursorIngestOutcome::default();
             }
         }
         let Some(db) = crate::sessions::cursor::open_project_session_db(&project_root).await else {
-            return false;
+            return CursorIngestOutcome::default();
         };
-        let _ = crate::sessions::cursor::ingest_cursor_transcript_event_capped(
+        let stats = crate::sessions::cursor::ingest_cursor_transcript_event_capped(
             event_json,
             &db,
             max_new_bytes,
         )
         .await;
-        true
+        CursorIngestOutcome {
+            completed: true,
+            user_scope: false,
+            messages_upserted: stats.messages_upserted,
+        }
     };
     // Short-lived CLI hook processes exit immediately, so the ingest must run
     // inline (not on a detached task); the timeout keeps it inside budget.
-    tokio::time::timeout(budget, work).await.unwrap_or(false)
+    tokio::time::timeout(budget, work).await.unwrap_or_default()
+}
+
+fn event_session_id_from_json(event_json: &str) -> Option<String> {
+    serde_json::from_str::<Value>(event_json)
+        .ok()
+        .as_ref()
+        .and_then(event_session_id)
 }
 
 fn cursor_tool_hint_input(parsed: &Value) -> ToolHintInput {

@@ -58,6 +58,11 @@ def generate_plugin(work: Path) -> Path:
     env = dict(os.environ)
     env["HOME"] = str(home)
     env["USERPROFILE"] = str(home)
+    # HOME alone does not isolate TraceDecay when the invoking Hermes process
+    # exports an explicit profile root. Keep the generated-install fixture on
+    # its throwaway profile so it cannot wait on a live profile's skill-store
+    # lock or inspect its managed skills.
+    env["TRACEDECAY_DATA_DIR"] = str(home / ".tracedecay")
     env["PATH"] = f"{bin_path.parent}{os.pathsep}{env.get('PATH', '')}"
     env["HERMES_HOME"] = str(work / "ignored-hermes-host-home")
     subprocess.run(
@@ -199,6 +204,22 @@ def run_checks(work: Path):
         else:
             os.environ["TERMINAL_CWD"] = previous_terminal_cwd
     ok("unindexed runtime workspace uses profile-level user memory")
+
+    registered_root = work / "registered-project"
+    registered_child = registered_root / "src" / "nested"
+    unrelated_root = work / "unrelated-project"
+    registered_child.mkdir(parents=True)
+    unrelated_root.mkdir()
+    real_json = plugin.call_tracedecay_json
+    try:
+        plugin.call_tracedecay_json = lambda *_args, **_kwargs: {
+            "project_root": str(registered_root)
+        }
+        assert plugin._resolved_project_scope(str(registered_child)) == str(registered_root)
+        assert plugin._resolved_project_scope(str(unrelated_root)) is None
+    finally:
+        plugin.call_tracedecay_json = real_json
+    ok("registered project resolution accepts descendants but rejects siblings")
 
     # ── 3. Registration split + provider dedup ──────────────────────────
     # The installer wrote memory.provider: tracedecay into the temp profile
@@ -369,6 +390,16 @@ def run_checks(work: Path):
     cloned_engine.context_length = 100_000
     assert engine.context_length == 200_000
     ok("context engine safely deep-copies per-agent budget state")
+
+    engine.initialize(session_id="project-session", project_root=str(runtime_project))
+    assert engine.project_root == str(runtime_project)
+    engine.initialize(session_id="untethered-session", cwd=str(host_home))
+    assert engine.project_root is None
+    engine.initialize(session_id="project-session")
+    assert engine.project_root == str(runtime_project)
+    engine.initialize(session_id="untethered-session")
+    assert engine.project_root is None
+    ok("context engine isolates project routing per Hermes session")
 
     messages = [
         {"role": "user", "content": "hello"},
@@ -571,12 +602,17 @@ def run_checks(work: Path):
         provider.project_root = None
         before = len(calls)
         provider.sync_turn("u", "a", session_id="untethered", messages=messages)
-        assert len(calls) == before
+        assert len(calls) == before + 1
+        name, args, kwargs = calls[-1]
+        assert name == "tracedecay_lcm_preflight"
+        assert args["storage_scope"] == "user", args
+        assert args["transcript_projection"] is True
+        assert "project_root" not in kwargs, kwargs
         provider.handle_tool_call("fact_store", {"action": "add", "content": "pref"})
         name, args, kwargs = calls[-1]
         assert args["memory_scope"] == "user", args
         assert "project_root" not in kwargs, kwargs
-        ok("untethered memory uses user scope and skips project LCM")
+        ok("untethered memory and LCM use profile-level user scope")
 
         real_resolver = plugin._resolved_project_scope
         plugin._resolved_project_scope = lambda path: expected_project_root

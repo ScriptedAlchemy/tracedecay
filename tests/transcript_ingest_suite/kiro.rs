@@ -100,6 +100,40 @@ fn write_workspace_session_json(
     path
 }
 
+fn write_extensionless_execution(
+    home: &std::path::Path,
+    project: &std::path::Path,
+    workspace_hash: &str,
+    session_id: &str,
+) -> std::path::PathBuf {
+    let data_dir = tracedecay::agents::kiro_data_dir(home);
+    let ws_storage = data_dir.join("User/workspaceStorage").join(workspace_hash);
+    std::fs::create_dir_all(&ws_storage).unwrap();
+    std::fs::write(
+        ws_storage.join("workspace.json"),
+        serde_json::json!({"folder": format!("file://{}", project.display())}).to_string(),
+    )
+    .unwrap();
+    let path = data_dir
+        .join("User/globalStorage/kiro.kiroagent")
+        .join(workspace_hash)
+        .join(session_id);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(
+        &path,
+        serde_json::json!({
+            "sessionId": session_id,
+            "messages": [
+                {"role": "user", "content": "Remember my preferred review style"},
+                {"role": "assistant", "content": "I will remember that preference."}
+            ]
+        })
+        .to_string(),
+    )
+    .unwrap();
+    path
+}
+
 #[tokio::test]
 async fn kiro_legacy_chat_populates_searchable_messages() {
     let tmp = TempDir::new().unwrap();
@@ -249,4 +283,36 @@ async fn kiro_transcript_for_other_project_is_skipped() {
             .messages_upserted,
         0
     );
+}
+
+#[tokio::test]
+async fn kiro_user_scope_includes_only_unregistered_sessions() {
+    let tmp = TempDir::new().unwrap();
+    let (home, project) = setup(&tmp);
+    let projectless = tmp.path().join("general-chat");
+    std::fs::create_dir_all(&projectless).unwrap();
+    write_legacy_chat(
+        &home,
+        &project,
+        "cccccccccccccccccccccccccccccccc",
+        "registered-exec",
+    );
+    write_workspace_session_json(&home, &projectless, "user-kiro");
+    write_extensionless_execution(
+        &home,
+        &projectless,
+        "dddddddddddddddddddddddddddddddd",
+        "user-extensionless",
+    );
+
+    let db = open_project_session_db(&project).await.unwrap();
+    let source = KiroSource::with_home(&home).for_user_scope(vec![project.clone()]);
+    let stats = ingest_source(&db, &source, tmp.path(), None).await;
+    assert_eq!(stats.messages_upserted, 4);
+    assert!(db.get_session("kiro", "kiro-workflow-1").await.is_none());
+    let session = db.get_session("kiro", "user-kiro").await.unwrap();
+    assert_eq!(session.project_key, "user");
+    assert_eq!(session.project_path, "user");
+    let extensionless = db.get_session("kiro", "user-extensionless").await.unwrap();
+    assert_eq!(extensionless.project_key, "user");
 }

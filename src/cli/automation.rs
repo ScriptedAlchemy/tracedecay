@@ -173,9 +173,6 @@ pub enum AutomationRunAction {
     /// Build a memory-curation review, call the configured backend, and validate proposed ops.
     #[command(name = "memory-curation")]
     MemoryCuration {
-        /// Keep the run non-mutating. This is currently the only supported mode.
-        #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
-        dry_run: bool,
         /// Maximum candidate clusters included in the backend review request.
         #[arg(long, default_value_t = tracedecay::dashboard::memory_curate::CURATION_DEFAULT_MAX_CLUSTERS)]
         max_clusters: usize,
@@ -189,9 +186,6 @@ pub enum AutomationRunAction {
     /// Build a session-reflection fact proposal review from LCM evidence.
     #[command(name = "session-reflection")]
     SessionReflection {
-        /// Keep the run non-mutating. This is currently the only supported mode.
-        #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
-        dry_run: bool,
         /// LCM provider to inspect.
         #[arg(long, default_value = "cursor")]
         provider: String,
@@ -232,9 +226,6 @@ pub enum AutomationRunAction {
     /// Draft managed skills from repeated workflow evidence without activating them.
     #[command(name = "skill-writing")]
     SkillWriting {
-        /// Keep the run non-mutating. This is currently the only supported mode.
-        #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
-        dry_run: bool,
         /// LCM provider to inspect. Use all for unified cross-provider evidence.
         #[arg(long, default_value = "all")]
         provider: String,

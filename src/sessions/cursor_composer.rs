@@ -123,13 +123,36 @@ impl CursorComposerSource {
         let mut workspace_paths: HashMap<String, String> = HashMap::new();
         self.ingest_state_vscdb(
             db,
-            project_root,
+            Some(project_root),
+            &[],
             envelope_cap,
             &mut outcome,
             &mut workspace_paths,
         )
         .await;
-        self.ingest_chat_store_dbs(db, project_root, &workspace_paths, &mut outcome)
+        self.ingest_chat_store_dbs(db, Some(project_root), &[], &workspace_paths, &mut outcome)
+            .await;
+        outcome
+    }
+
+    pub async fn ingest_user(
+        &self,
+        db: &GlobalDb,
+        registered_roots: &[PathBuf],
+        envelope_cap: usize,
+    ) -> CursorComposerSweepOutcome {
+        let mut outcome = CursorComposerSweepOutcome::default();
+        let mut workspace_paths = HashMap::new();
+        self.ingest_state_vscdb(
+            db,
+            None,
+            registered_roots,
+            envelope_cap,
+            &mut outcome,
+            &mut workspace_paths,
+        )
+        .await;
+        self.ingest_chat_store_dbs(db, None, registered_roots, &workspace_paths, &mut outcome)
             .await;
         outcome
     }
@@ -137,7 +160,8 @@ impl CursorComposerSource {
     async fn ingest_state_vscdb(
         &self,
         db: &GlobalDb,
-        project_root: &Path,
+        project_root: Option<&Path>,
+        registered_roots: &[PathBuf],
         envelope_cap: usize,
         outcome: &mut CursorComposerSweepOutcome,
         workspace_paths: &mut HashMap<String, String>,
@@ -184,9 +208,23 @@ impl CursorComposerSource {
                     .entry(ws_hash)
                     .or_insert_with(|| project.path.clone());
             }
-            if !path_belongs_to_project(Path::new(&project.path), project_root) {
-                continue;
-            }
+            let selected_project = match project_root {
+                Some(root) if path_belongs_to_project(Path::new(&project.path), root) => {
+                    ComposerProject {
+                        path: project.path.clone(),
+                    }
+                }
+                Some(_) => continue,
+                None if registered_roots
+                    .iter()
+                    .any(|root| path_belongs_to_project(Path::new(&project.path), root)) =>
+                {
+                    continue;
+                }
+                None => ComposerProject {
+                    path: "user".to_string(),
+                },
+            };
             // Own this session for JSONL dedupe regardless of the per-pass cap.
             outcome.owned_session_ids.insert(composer_id.to_string());
 
@@ -214,7 +252,7 @@ impl CursorComposerSource {
             if messages.is_empty() {
                 continue;
             }
-            let session = composer_session(composer_id, &envelope, &project, &messages);
+            let session = composer_session(composer_id, &envelope, &selected_project, &messages);
             let advanced = ParseOffset {
                 byte_offset: watermark,
                 mtime: last_updated,
@@ -269,7 +307,8 @@ impl CursorComposerSource {
     async fn ingest_chat_store_dbs(
         &self,
         db: &GlobalDb,
-        project_root: &Path,
+        project_root: Option<&Path>,
+        registered_roots: &[PathBuf],
         workspace_paths: &HashMap<String, String>,
         outcome: &mut CursorComposerSweepOutcome,
     ) {
@@ -282,11 +321,19 @@ impl CursorComposerSource {
             }
             let ws_hash = ws_entry.file_name().to_string_lossy().to_string();
             // Scope by ws-hash -> project mapping harvested from the envelopes.
-            let project_path = match workspace_paths.get(&ws_hash) {
-                Some(path) if path_belongs_to_project(Path::new(path), project_root) => {
+            let project_path = match (workspace_paths.get(&ws_hash), project_root) {
+                (Some(path), Some(root)) if path_belongs_to_project(Path::new(path), root) => {
                     path.clone()
                 }
-                _ => continue,
+                (Some(_), Some(_)) | (None, _) => continue,
+                (Some(path), None)
+                    if registered_roots
+                        .iter()
+                        .any(|root| path_belongs_to_project(Path::new(path), root)) =>
+                {
+                    continue;
+                }
+                (Some(_), None) => "user".to_string(),
             };
             let Ok(agent_entries) = std::fs::read_dir(ws_entry.path()) else {
                 continue;

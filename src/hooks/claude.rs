@@ -5,13 +5,14 @@
 use serde_json::Value;
 
 use super::codex::{codex_additional_context_json, codex_project_root_from_parsed_event};
+use super::memory_inject;
 use super::post_tool_use::{
     CLAUDE_POST_TOOL_USE_SHELL_TOOLS, CLAUDE_POST_TOOL_USE_SPEC, captured_tool_output,
     is_claude_edit_tool, is_claude_hint_tool, is_post_tool_use_failure_event, notify_post_tool_use,
     tool_input_command_str, tool_input_edit_text, tool_input_file_path_str, trusted_tool_failure,
 };
 use super::steering::{
-    append_context_recovery_hint, append_tracedecay_bootstrap_context,
+    append_context_block, append_context_recovery_hint, append_tracedecay_bootstrap_context,
     cursor_index_signals_for_root, index_status_line, session_start_from_compaction,
 };
 use super::tool_hints::{HintAgent, ToolHint, ToolHintInput, decide_hint, is_harness_memory_path};
@@ -151,6 +152,19 @@ pub async fn hook_claude_session_start() -> i32 {
     let _hook_telemetry =
         record_hook_invoked(root.as_deref(), HintAgent::Claude, "SessionStart", &event);
     let mut context = claude_session_context_for_event(&event).await;
+    let session_id = event_session_id(&parsed);
+    if root.is_none() && ingest_user_claude_session(session_id.clone()).await {
+        super::schedule_user_session_review("claude", session_id.as_deref());
+    }
+    let digest = match root.as_deref() {
+        Some(root) => {
+            memory_inject::combined_session_memory_digest(root, session_id.as_deref()).await
+        }
+        None => memory_inject::user_session_memory_digest(session_id.as_deref()).await,
+    };
+    if let Some(digest) = digest {
+        append_context_block(&mut context, &digest);
+    }
     // Fire-and-forget: nudge the daemon to refresh the index (and, when this
     // session runs in a harness-created linked worktree, auto-track its branch
     // store) before we print the staleness hint. `notify_hook_event` is
@@ -369,16 +383,69 @@ fn decide_post_tool_use_hint(parsed: &Value) -> Option<ToolHint> {
     })
 }
 
-/// `UserPromptSubmit` hook handler: resets the per-session local counter.
+/// `UserPromptSubmit` hook handler: resets the project counter and injects
+/// scope-correct memory recall.
 pub async fn hook_prompt_submit() {
-    let project_path = crate::config::resolve_path(None);
-    if let Ok(cg) = crate::tracedecay::TraceDecay::open(&project_path).await {
+    let event = match super::read_stdin_to_string() {
+        Ok(event) => event,
+        Err(error) => {
+            eprintln!("tracedecay hook: failed to read stdin: {error}");
+            return;
+        }
+    };
+    let parsed = serde_json::from_str::<Value>(&event).unwrap_or(Value::Null);
+    let root = claude_session_project_root(&parsed).await;
+    let _hook_telemetry = record_hook_invoked(
+        root.as_deref(),
+        HintAgent::Claude,
+        "UserPromptSubmit",
+        &event,
+    );
+    let session_id = event_session_id(&parsed);
+    if root.is_none() && ingest_user_claude_session(session_id.clone()).await {
+        super::schedule_user_session_review("claude", session_id.as_deref());
+    }
+    if let Some(root) = root.as_deref()
+        && let Ok(cg) = crate::tracedecay::TraceDecay::open(root).await
+    {
         let _ = cg.reset_local_counter().await;
+    }
+    let recall = prompt_like_text(&parsed);
+    let recall = match (root.as_deref(), recall.as_deref()) {
+        (Some(root), Some(prompt)) => {
+            Box::pin(memory_inject::combined_prompt_memory_recall(
+                root,
+                session_id.as_deref(),
+                prompt,
+            ))
+            .await
+        }
+        (None, Some(prompt)) => {
+            memory_inject::user_prompt_memory_recall(session_id.as_deref(), prompt).await
+        }
+        (_, None) => None,
+    };
+    if let Some(recall) = recall {
+        println!(
+            "{}",
+            codex_additional_context_json("UserPromptSubmit", &recall)
+        );
+    } else {
+        println!("{}", serde_json::json!({}));
     }
 }
 
 /// `Stop` hook handler: ingests new session data and prints a cost receipt.
 pub async fn hook_stop() {
+    let event = super::read_stdin_to_string().unwrap_or_default();
+    let parsed = serde_json::from_str::<Value>(&event).unwrap_or(Value::Null);
+    let root = claude_session_project_root(&parsed).await;
+    let session_id = event_session_id(&parsed);
+    let _hook_telemetry = record_hook_invoked(root.as_deref(), HintAgent::Claude, "Stop", &event);
+    if root.is_none() && ingest_user_claude_session(session_id.clone()).await {
+        super::schedule_user_session_review("claude", session_id.as_deref());
+    }
+
     let Some(gdb) = crate::global_db::GlobalDb::open().await else {
         return;
     };
@@ -409,6 +476,27 @@ pub async fn hook_stop() {
             stats.cost_usd
         );
     }
+}
+
+/// Incrementally ingests one live projectless Claude session into the profile
+/// session store. `false` means no new transcript evidence was written.
+pub async fn ingest_user_claude_session(session_id: Option<String>) -> bool {
+    if session_id.is_none() {
+        return false;
+    }
+    let Ok(profile_root) = crate::storage::default_profile_root() else {
+        return false;
+    };
+    let Some(db) = crate::sessions::open_user_session_db(&profile_root).await else {
+        return false;
+    };
+    let Some(registered_roots) = crate::sessions::try_registered_project_roots().await else {
+        return false;
+    };
+    crate::sessions::claude::ingest_user_sessions(&db, &profile_root, session_id, registered_roots)
+        .await
+        .messages_upserted
+        > 0
 }
 
 #[cfg(test)]

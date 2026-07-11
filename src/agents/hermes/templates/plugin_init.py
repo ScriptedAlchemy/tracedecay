@@ -468,7 +468,11 @@ def _notify_host_receipt(event, thread_name):
                     text=True,
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
-                    timeout=2,
+                    timeout=(
+                        tools.TRACEDECAY_LONG_TIMEOUT_SECONDS
+                        if queued.get("event") == "turnIngested" and not queued.get("cwd")
+                        else 2
+                    ),
                     check=False,
                 )
             except Exception as exc:
@@ -524,15 +528,37 @@ def _post_tool_call(*args, **kwargs):
     _notify_host_receipt(event, "tracedecay-terminal-receipt")
     return None
 
-def _notify_turn_ingested(session_id, project_root, transcript_watermark):
+def _turn_receipt_event(event_name, session_id, project_root, transcript_watermark):
+    route = {"session_id": str(session_id)[:256]}
     event = {
         "agent": "hermes",
-        "event": "turnIngested",
-        "cwd": str(project_root),
-        "route": {"session_id": str(session_id)[:256], "cwd": str(project_root)},
-        "receipt": {"transcript_watermark": str(transcript_watermark)[:256]},
+        "event": event_name,
+        "route": route,
+        "receipt": {
+            "status": "success",
+            "transcript_watermark": str(transcript_watermark)[:256],
+        },
     }
-    _notify_host_receipt(event, "tracedecay-turn-ingested")
+    if project_root:
+        event["cwd"] = str(project_root)
+        route["cwd"] = str(project_root)
+    return event
+
+def _notify_turn_completed(session_id, project_root, transcript_watermark):
+    _notify_host_receipt(
+        _turn_receipt_event(
+            "turnCompleted", session_id, project_root, transcript_watermark
+        ),
+        "tracedecay-turn-completed",
+    )
+
+def _notify_turn_ingested(session_id, project_root, transcript_watermark):
+    _notify_host_receipt(
+        _turn_receipt_event(
+            "turnIngested", session_id, project_root, transcript_watermark
+        ),
+        "tracedecay-turn-ingested",
+    )
 
 def _tracedecay_status(raw_args: str = ""):
     raw = tools.call_tracedecay_tool("tracedecay_status", {})
@@ -759,6 +785,15 @@ def _memory_schema(tracedecay_name: str, hermes_name: str, action: str = None) -
         "parameters": {"type": "object", "properties": {}},
     }
 
+def _agent_visible_schema(schema: dict) -> dict:
+    """Hide routing fields selected by the Hermes session integration."""
+    visible = json.loads(json.dumps(schema))
+    properties = (visible.get("parameters") or {}).get("properties")
+    if isinstance(properties, dict):
+        properties.pop("storage_scope", None)
+        properties.pop("hermes_home", None)
+    return visible
+
 def _lcm_tool_schemas() -> list:
     return list(LCM_NATIVE_SCHEMAS)
 
@@ -796,6 +831,13 @@ def _project_call_kwargs(project_root=None, kwargs=None):
         routed["project_root"] = str(project_root)
     return routed
 
+def _lcm_store_args(args, project_root):
+    """Select the project shard or the profile-level user session store."""
+    routed = dict(args or {})
+    if not project_root:
+        routed.setdefault("storage_scope", "user")
+    return routed
+
 def _resolved_project_scope(project_root):
     if not project_root:
         return None
@@ -813,7 +855,9 @@ def _resolved_project_scope(project_root):
     if not resolved:
         return None
     try:
-        if os.path.realpath(str(resolved)) != os.path.realpath(str(project_root)):
+        resolved_real = os.path.realpath(str(resolved))
+        candidate_real = os.path.realpath(str(project_root))
+        if os.path.commonpath((resolved_real, candidate_real)) != resolved_real:
             return None
     except (OSError, TypeError, ValueError):
         return None
@@ -2220,6 +2264,7 @@ class _EngineSessionState:
     """
 
     _FIELDS = (
+        "project_root",
         "agent",
         "model",
         "last_prompt_tokens",
@@ -2238,6 +2283,7 @@ class _EngineSessionState:
     )
 
     def __init__(self):
+        self.project_root = None
         self.agent = None
         self.model = ""
         self.last_prompt_tokens = 0
@@ -2326,6 +2372,7 @@ class TraceDecayContextEngine(ContextEngine):
                 clone._session_states[key] = copied_state
         return clone
 
+    project_root = _engine_session_property("project_root")
     agent = _engine_session_property("agent")
     model = _engine_session_property("model")
     last_prompt_tokens = _engine_session_property("last_prompt_tokens")
@@ -2373,8 +2420,12 @@ class TraceDecayContextEngine(ContextEngine):
                     # carry model/window/counters over from the predecessor
                     # session's state (old_session_id on boundary starts,
                     # else whatever this thread was bound to).
-                    source_key = str(kwargs.get("old_session_id") or "") or self._session_key()
-                    source = self._session_states.get(source_key)
+                    source_key = str(kwargs.get("old_session_id") or "")
+                    source = self._session_states.get(source_key) if source_key else None
+                    if source is None and kwargs.get("boundary_reason") == "compression":
+                        source = self._session_states.get(self._session_key())
+                    if source is None:
+                        source = self._session_states.get(_ENGINE_DEFAULT_SESSION)
                     if source is not None:
                         state.adopt(source)
                         state._last_preflight_signature = None
@@ -2403,13 +2454,26 @@ class TraceDecayContextEngine(ContextEngine):
         # Re-layer the profile's plugins.tracedecay block now that the host
         # config and hermes_home are settled for this session.
         self.config = _with_plugin_block(self._host_config, self.hermes_home)
-        next_project_root = _code_project_root(
-            explicit=project_root or kwargs.get("project_root"),
-            cwd=kwargs.get("cwd"),
-            configured=_configured_project_root(self.config) or self.project_root,
-        )
+        explicit_project_root = project_root or kwargs.get("project_root")
+        runtime_cwd = kwargs.get("cwd")
+        configured_project_root = _configured_project_root(self.config)
+        routing_supplied = bool(explicit_project_root or runtime_cwd)
+        if explicit_project_root:
+            next_project_root = str(explicit_project_root)
+        elif runtime_cwd:
+            next_project_root = _resolved_project_scope(str(runtime_cwd))
+        elif self.project_root:
+            next_project_root = self.project_root
+        elif configured_project_root:
+            next_project_root = str(configured_project_root)
+        elif session_id is not None and not self.project_root:
+            next_project_root = _resolved_project_scope(_runtime_working_directory())
+        else:
+            next_project_root = None
         if next_project_root:
             self.project_root = next_project_root
+        elif routing_supplied:
+            self.project_root = None
 
     def initialize(self, session_id=None, hermes_home=None, project_root=None, **kwargs):
         self._bind_session(session_id, hermes_home, project_root, **kwargs)
@@ -2508,12 +2572,12 @@ class TraceDecayContextEngine(ContextEngine):
             or old_session_id == session_id
         ):
             return
-        args = {
+        args = _lcm_store_args({
             "provider": STANDARD_HERMES_LCM_PROVIDER,
             "session_id": session_id,
             "old_session_id": old_session_id,
             "boundary_reason": boundary_reason,
-        }
+        }, self.project_root)
         if bound_session_id:
             args["bound_session_id"] = bound_session_id
         try:
@@ -2577,6 +2641,7 @@ class TraceDecayContextEngine(ContextEngine):
             "stateless_session_patterns",
             "ignore_message_patterns",
         ))
+        args = _lcm_store_args(args, kwargs.get("project_root") or self.project_root)
         return call_tracedecay_json(
             "tracedecay_lcm_preflight",
             args,
@@ -2642,6 +2707,7 @@ class TraceDecayContextEngine(ContextEngine):
     def status(self, session_id=None, **kwargs):
         args = self._tool_args(session_id)
         args.update(_lcm_gc_config_args(self.config))
+        args = _lcm_store_args(args, kwargs.get("project_root") or self.project_root)
         return call_tracedecay_json(
             "tracedecay_lcm_status",
             args,
@@ -2734,6 +2800,7 @@ class TraceDecayContextEngine(ContextEngine):
             "stateless_session_patterns",
             "ignore_message_patterns",
         ))
+        args = _lcm_store_args(args, kwargs.get("project_root") or self.project_root)
         try:
             tools.call_tracedecay_tool(
                 "tracedecay_lcm_preflight",
@@ -2770,6 +2837,10 @@ class TraceDecayContextEngine(ContextEngine):
             tool_args.update(_lcm_gc_config_args(self.config))
         if self.active_session_id:
             tool_args.setdefault("session_id", self.active_session_id)
+        tool_args = _lcm_store_args(
+            tool_args,
+            preflight_kwargs.get("project_root") or self.project_root,
+        )
 
         if tracedecay_name == "tracedecay_lcm_expand_query":
             expand_kwargs = dict(preflight_kwargs)
@@ -2803,6 +2874,7 @@ class TraceDecayContextEngine(ContextEngine):
                 args[key] = kwargs[key]
         if "context_max_tokens" not in args:
             args["context_max_tokens"] = _lcm_expansion_context_tokens(self.config)
+        args = _lcm_store_args(args, kwargs.get("project_root") or self.project_root)
         retrieval = call_tracedecay_json(
             "tracedecay_lcm_expand_query",
             args,
@@ -3512,8 +3584,6 @@ class TracedecayMemoryProvider(MemoryProvider):
         store grows every turn instead of only when compression fires.
         """
         project_root = _turn_project_root(messages) or self.project_root
-        if not project_root:
-            return
         if not _plugin_toggle("sync_turn", True):
             return
         if self.agent_context in ("cron", "flush"):
@@ -3537,12 +3607,12 @@ class TracedecayMemoryProvider(MemoryProvider):
             role = str(entry.get("role") or "user")
             entry["id"] = f"tracedecay_sync_{batch_id}_{timestamp_ns}_{idx}_{role}"
             entry["timestamp"] = timestamp
-        args = {
+        args = _lcm_store_args({
             "provider": STANDARD_HERMES_LCM_PROVIDER,
             "session_id": sid,
             "messages": turn_messages,
             "transcript_projection": True,
-        }
+        }, project_root)
         try:
             result = call_tracedecay_json(
                 "tracedecay_lcm_preflight",
@@ -3550,6 +3620,7 @@ class TracedecayMemoryProvider(MemoryProvider):
                 **_project_call_kwargs(project_root),
             )
             if not result.get("error"):
+                _notify_turn_completed(sid, project_root, turn_messages[-1]["id"])
                 _notify_turn_ingested(sid, project_root, turn_messages[-1]["id"])
             else:
                 logger.debug("tracedecay sync_turn ingest rejected: %s", result.get("error"))
@@ -3775,11 +3846,12 @@ def register(ctx):
                 # prefixed twins would double the schema footprint.
                 continue
             handler = _handle_lcm_expand_query if name == "tracedecay_lcm_expand_query" else tools.make_handler(name)
+            visible_schema = _agent_visible_schema(schema)
             try:
                 register_tool(
                     name=name,
                     toolset="tracedecay",
-                    schema=schema,
+                    schema=visible_schema,
                     handler=handler,
                 )
             except Exception as exc:
@@ -3793,11 +3865,12 @@ def register(ctx):
         if host_forwards_messages:
             for schema in context_engine.get_tool_schemas():
                 name = schema["name"]
+                visible_schema = _agent_visible_schema(schema)
                 try:
                     register_tool(
                         name=name,
                         toolset="context_engine",
-                        schema=schema,
+                        schema=visible_schema,
                         handler=_make_wrapped_lcm_handler(name, context_engine),
                         description=schema.get("description", ""),
                     )

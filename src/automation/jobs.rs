@@ -29,7 +29,7 @@ use super::backend::{
 use super::config::{AutomationBackend, AutomationConfig, AutomationHostMode};
 use super::job_webhook;
 use super::lifecycle::generated_run_id;
-use super::managed_skills::load_managed_skill;
+use super::managed_skills::{ManagedSkillState, load_managed_skill};
 use super::run_ledger::{
     AutomationRunLedgerRecord, AutomationRunStatus, AutomationTrigger, append_run_record,
     load_run_records,
@@ -757,7 +757,7 @@ async fn attached_skill_sections(
     let mut missing = Vec::new();
     for skill_id in skill_ids {
         match load_managed_skill(profile_root, skill_id).await {
-            Ok(skill) => {
+            Ok(skill) if skill.metadata.state == ManagedSkillState::Active => {
                 sections.push(format!(
                     "## Attached skill: {} ({})\n{}\n",
                     skill.metadata.title,
@@ -766,7 +766,7 @@ async fn attached_skill_sections(
                 ));
                 attached.push(skill_id.clone());
             }
-            Err(_) => missing.push(skill_id.clone()),
+            Ok(_) | Err(_) => missing.push(skill_id.clone()),
         }
     }
     (sections, attached, missing)

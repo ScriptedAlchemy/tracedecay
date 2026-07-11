@@ -6,15 +6,11 @@ use crate::errors::Result;
 use crate::memory::retrieval::FactRetriever;
 use crate::memory::trust::{DEFAULT_TRUST, HIGH_TRUST_REPRESENTATIVE, LOW_TRUST_REPRESENTATIVE};
 use crate::memory::types::{AddFactRequest, MemoryCategory};
-use crate::tracedecay::TraceDecay;
-
-pub(crate) async fn validate_fact_proposals(
-    cg: &TraceDecay,
+pub(crate) async fn validate_fact_proposals_on_connection(
+    conn: &libsql::Connection,
     proposals: &[Value],
     evidence: &Value,
 ) -> Result<(Vec<Value>, Vec<Value>)> {
-    let db = cg.open_project_store_db().await?;
-    let conn = db.conn();
     let retriever = FactRetriever::new(conn);
     let citations = EvidenceCitationSet::from_evidence(evidence);
     let mut accepted = Vec::new();

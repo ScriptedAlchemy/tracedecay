@@ -4,8 +4,8 @@ use tempfile::tempdir;
 
 use tracedecay::automation::config::{
     AutomationBackend, AutomationConfig, AutomationConfigPatch, AutomationHostMode,
-    AutomationTaskPatch, effective_config, load_project_config, merge_project_config,
-    save_project_config,
+    AutomationTaskPatch, effective_config, effective_user_automation_config, load_project_config,
+    merge_project_config, save_project_config,
 };
 use tracedecay::user_config::UserConfig;
 
@@ -41,6 +41,53 @@ fn user_config_omits_default_automation_when_serialized() {
         !serialized.contains("[automation]"),
         "default automation config should not churn the user config file: {serialized}"
     );
+}
+
+#[tokio::test]
+async fn projectless_automation_defaults_to_enabled_autonomous_review() {
+    let temp = tempdir().unwrap();
+    let config = effective_user_automation_config(temp.path(), &AutomationConfig::default(), false)
+        .await
+        .unwrap();
+
+    assert!(config.enabled);
+    assert_eq!(config.backend, AutomationBackend::CodexAppServer);
+    assert!(config.auto_apply_memory_ops);
+    assert!(config.auto_enable_skills);
+    assert!(config.tasks.memory_curator.enabled);
+    assert!(config.tasks.session_reflector.enabled);
+    assert!(config.tasks.skill_writer.enabled);
+}
+
+#[tokio::test]
+async fn projectless_automation_preserves_explicit_global_disable() {
+    let temp = tempdir().unwrap();
+    let config = effective_user_automation_config(temp.path(), &AutomationConfig::default(), true)
+        .await
+        .unwrap();
+
+    assert!(!config.enabled);
+    assert_eq!(config.backend, AutomationBackend::Disabled);
+}
+
+#[tokio::test]
+async fn projectless_automation_sidecar_can_explicitly_disable_defaults() {
+    let temp = tempdir().unwrap();
+    let dashboard_root = tracedecay::automation::runner::user_automation_root(temp.path());
+    save_project_config(
+        &dashboard_root,
+        &AutomationConfigPatch {
+            enabled: Some(false),
+            ..AutomationConfigPatch::default()
+        },
+    )
+    .await
+    .unwrap();
+
+    let config = effective_user_automation_config(temp.path(), &AutomationConfig::default(), false)
+        .await
+        .unwrap();
+    assert!(!config.enabled);
 }
 
 #[test]

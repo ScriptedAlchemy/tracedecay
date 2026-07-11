@@ -45,6 +45,7 @@ const CLINE_LIKE_LOCATION_KEYS: TranscriptLocationMetadataKeys =
 pub struct ClineLikeSource {
     provider: &'static str,
     storage_roots: Vec<PathBuf>,
+    user_registered_roots: Option<Vec<PathBuf>>,
 }
 
 impl ClineLikeSource {
@@ -76,6 +77,7 @@ impl ClineLikeSource {
                 crate::agents::vscode_data_dir(home)
                     .join("User/globalStorage/saoudrizwan.claude-dev/tasks"),
             ],
+            user_registered_roots: None,
         }
     }
 
@@ -86,6 +88,7 @@ impl ClineLikeSource {
                 crate::agents::vscode_data_dir(home)
                     .join("User/globalStorage/rooveterinaryinc.roo-cline/tasks"),
             ],
+            user_registered_roots: None,
         }
     }
 
@@ -97,7 +100,14 @@ impl ClineLikeSource {
                     .join("User/globalStorage/kilocode.kilo-code/tasks"),
                 home.join(".kilocode/cli/global/tasks"),
             ],
+            user_registered_roots: None,
         }
+    }
+
+    #[must_use]
+    pub fn for_user_scope(mut self, registered_roots: Vec<PathBuf>) -> Self {
+        self.user_registered_roots = Some(registered_roots);
+        self
     }
 }
 
@@ -125,7 +135,18 @@ impl TranscriptSource for ClineLikeSource {
         let ui_path = task_dir.join("ui_messages.json");
         let changed = read_changed_with_companion(path, &ui_path, prev)?;
         let metadata = read_task_metadata(task_dir)?;
-        let location_cwd = metadata_project_location(&metadata, project_root)?;
+        let location_cwd = if let Some(roots) = &self.user_registered_roots {
+            let paths = metadata_project_paths(&metadata);
+            if paths
+                .iter()
+                .any(|path| roots.iter().any(|root| path_belongs_to_project(path, root)))
+            {
+                return None;
+            }
+            paths.into_iter().next()?
+        } else {
+            metadata_project_location(&metadata, project_root)?
+        };
 
         let document: Value = match serde_json::from_str(&changed.contents) {
             Ok(document) => document,
@@ -180,7 +201,10 @@ impl TranscriptSource for ClineLikeSource {
             }
         }
 
-        let project = project_root.to_string_lossy().to_string();
+        let project = self.user_registered_roots.as_ref().map_or_else(
+            || project_root.to_string_lossy().to_string(),
+            |_| "user".to_string(),
+        );
         let draft = SessionDraft {
             session_id: task_id.to_string(),
             project_key: project.clone(),

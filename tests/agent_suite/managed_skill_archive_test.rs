@@ -2,7 +2,7 @@ use tracedecay::automation::managed_skills::{
     ManagedSkillDraft, ManagedSkillProvenance, ManagedSkillSource, ManagedSkillState,
     ManagedSupportFile, SkillInstallTarget, approve_managed_skill, archive_managed_skill,
     create_managed_skill_draft, discard_pending_managed_skill_update, load_managed_skill,
-    managed_skill_dir, save_managed_skill, stage_managed_skill_archive,
+    managed_skill_dir, set_managed_skill_pinned, stage_managed_skill_archive,
 };
 
 fn draft() -> ManagedSkillDraft {
@@ -115,7 +115,7 @@ async fn staged_managed_skill_archive_rejects_pinned_stale_and_duplicates() {
     create_managed_skill_draft(&profile_root, draft())
         .await
         .unwrap();
-    let mut active = approve_managed_skill(&profile_root, "repo-hygiene")
+    let active = approve_managed_skill(&profile_root, "repo-hygiene")
         .await
         .unwrap();
     let base_checksum = active.metadata.checksum.clone();
@@ -125,8 +125,9 @@ async fn staged_managed_skill_archive_rejects_pinned_stale_and_duplicates() {
         .unwrap_err();
     assert!(err.to_string().contains("is stale"));
 
-    active.set_pinned(true);
-    save_managed_skill(&profile_root, &active).await.unwrap();
+    set_managed_skill_pinned(&profile_root, "repo-hygiene", true)
+        .await
+        .unwrap();
     let err = stage_managed_skill_archive(&profile_root, "repo-hygiene", &base_checksum, None)
         .await
         .unwrap_err();
@@ -135,8 +136,9 @@ async fn staged_managed_skill_archive_rejects_pinned_stale_and_duplicates() {
             .contains("pinned and exempt from staged archive")
     );
 
-    active.set_pinned(false);
-    save_managed_skill(&profile_root, &active).await.unwrap();
+    set_managed_skill_pinned(&profile_root, "repo-hygiene", false)
+        .await
+        .unwrap();
     stage_managed_skill_archive(&profile_root, "repo-hygiene", &base_checksum, None)
         .await
         .unwrap();

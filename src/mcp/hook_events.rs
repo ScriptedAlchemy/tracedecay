@@ -18,6 +18,7 @@ pub(crate) enum HookEventKind {
     SessionStart,
     IncrementalSync,
     TerminalReceipt,
+    TurnCompleted,
     TurnIngested,
 }
 
@@ -30,6 +31,7 @@ impl HookEventKind {
             "sessionStart" => Some(Self::SessionStart),
             "postToolUse" => Some(Self::IncrementalSync),
             "terminalReceipt" => Some(Self::TerminalReceipt),
+            "turnCompleted" => Some(Self::TurnCompleted),
             "turnIngested" => Some(Self::TurnIngested),
             _ => None,
         }
@@ -43,6 +45,7 @@ impl HookEventKind {
             Self::SessionStart => "session_start",
             Self::IncrementalSync => "incremental_sync",
             Self::TerminalReceipt => "terminal_receipt",
+            Self::TurnCompleted => "turn_completed",
             Self::TurnIngested => "turn_ingested",
         }
     }
@@ -124,7 +127,7 @@ pub(crate) fn plan_hook_event(
             HookEventPlan::SyncFiles(event.rel_paths.clone())
         }
         HookEventKind::IncrementalSync => HookEventPlan::DebouncedIncrementalSync(event.agent),
-        HookEventKind::TerminalReceipt => event
+        HookEventKind::TerminalReceipt | HookEventKind::TurnCompleted => event
             .receipt
             .clone()
             .map(|receipt| HookEventPlan::RecordTerminalReceipt {
@@ -821,6 +824,25 @@ mod tests {
             plan_hook_event(&event, Path::new("/tmp/project"), None),
             HookEventPlan::RecordTerminalReceipt { receipt, .. }
                 if receipt.tool_call_id.as_deref() == Some("call-1")
+        ));
+    }
+
+    #[test]
+    fn plans_projectless_hermes_turn_completion_as_a_review_receipt() {
+        let event = parse_or_panic(&json!({
+            "agent": "hermes",
+            "event": "turnCompleted",
+            "route": {"session_id": "session-1"},
+            "receipt": {
+                "status": "success",
+                "transcript_watermark": "message-1"
+            }
+        }));
+        assert_eq!(event.kind, HookEventKind::TurnCompleted);
+        assert!(matches!(
+            plan_hook_event(&event, Path::new("/tmp/project"), None),
+            HookEventPlan::RecordTerminalReceipt { receipt, .. }
+                if receipt.transcript_watermark.as_deref() == Some("message-1")
         ));
     }
 

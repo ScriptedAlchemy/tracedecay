@@ -257,6 +257,9 @@ pub enum Commands {
     /// Hermes terminal receipt handler (called by the TraceDecay plugin)
     #[command(name = "hook-hermes-terminal-receipt", hide = true)]
     HookHermesTerminalReceipt,
+    /// Detached profile user-session automation review.
+    #[command(name = "hook-user-session-review", hide = true)]
+    HookUserSessionReview,
     /// Serve the local dashboard UI (holographic memory + LCM + code graph explorers)
     #[command(long_about = DASHBOARD_LONG_ABOUT, after_help = DASHBOARD_AFTER_HELP)]
     Dashboard {

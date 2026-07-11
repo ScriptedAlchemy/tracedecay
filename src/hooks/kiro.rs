@@ -10,6 +10,7 @@ use serde_json::Value;
 
 use super::claude::is_code_research_prompt;
 use super::codex::codex_project_root_from_event;
+use super::memory_inject;
 use super::tool_hints::{HintAgent, ToolHintInput, decide_hint};
 use super::{
     event_cwd, event_cwd_from_parsed, event_session_id, hook_route_metadata_from_event,
@@ -130,19 +131,29 @@ fn collect_strings<'a>(value: &'a Value, out: &mut Vec<&'a str>) {
 
 /// Kiro `userPromptSubmit` hook handler.
 ///
-/// Resets the per-turn counter and runs bounded Kiro transcript catch-up.
+/// Resets the per-turn counter, catches up transcripts, and injects bounded
+/// user/project memory relevant to the submitted prompt.
 pub async fn hook_kiro_prompt_submit() -> i32 {
     let event = read_hook_event!();
     let root = codex_project_root_from_event(&event);
     let _hook_telemetry =
         record_hook_invoked(root.as_deref(), HintAgent::Kiro, "userPromptSubmit", &event);
     reset_counter_for_kiro_event(&event).await;
-    ingest_kiro_transcript_for_event(
+    let ingest = ingest_kiro_transcript_for_event(
         &event,
         Some(KIRO_HOT_INGEST_MAX_BYTES),
         KIRO_HOT_INGEST_BUDGET,
     )
     .await;
+    if ingest.user_scope && ingest.messages_upserted > 0 {
+        // User-scope catch-up can ingest several changed Kiro sessions in one
+        // bounded sweep, so let the reflector select all recent Kiro evidence
+        // instead of falsely attributing the batch to the prompt's session id.
+        super::schedule_user_session_review("kiro", None);
+    }
+    if let Some(recall) = Box::pin(kiro_prompt_memory_recall(&event)).await {
+        println!("{recall}");
+    }
     0
 }
 
@@ -170,22 +181,71 @@ async fn reset_counter_for_kiro_event(event_json: &str) {
 
 /// Incrementally ingests Kiro IDE transcripts for the workspace referenced by
 /// `event_json`. Always fails open.
+#[derive(Default)]
+struct KiroIngestOutcome {
+    user_scope: bool,
+    messages_upserted: u64,
+}
+
 async fn ingest_kiro_transcript_for_event(
     event_json: &str,
     max_new_bytes: Option<u64>,
     budget: std::time::Duration,
-) {
+) -> KiroIngestOutcome {
     let work = async {
-        let Some(project_root) = kiro_project_root(event_json) else {
-            return;
+        if let Some(project_root) = kiro_project_root(event_json) {
+            let Some(db) = crate::sessions::cursor::open_project_session_db(&project_root).await
+            else {
+                return KiroIngestOutcome::default();
+            };
+            let stats =
+                crate::sessions::kiro::ingest_kiro_for_project(&db, &project_root, max_new_bytes)
+                    .await;
+            return KiroIngestOutcome {
+                messages_upserted: stats.messages_upserted,
+                ..KiroIngestOutcome::default()
+            };
+        }
+
+        let Ok(profile_root) = crate::storage::default_profile_root() else {
+            return KiroIngestOutcome::default();
         };
-        let Some(db) = crate::sessions::cursor::open_project_session_db(&project_root).await else {
-            return;
+        let Some(db) = crate::sessions::open_user_session_db(&profile_root).await else {
+            return KiroIngestOutcome::default();
         };
-        let _ =
-            crate::sessions::kiro::ingest_kiro_for_project(&db, &project_root, max_new_bytes).await;
+        let Some(source) = crate::sessions::kiro::KiroSource::new() else {
+            return KiroIngestOutcome::default();
+        };
+        let Some(registered_roots) = crate::sessions::try_registered_project_roots().await else {
+            return KiroIngestOutcome::default();
+        };
+        let source = source.for_user_scope(registered_roots);
+        let stats =
+            crate::sessions::source::ingest_source(&db, &source, &profile_root, max_new_bytes)
+                .await;
+        KiroIngestOutcome {
+            user_scope: true,
+            messages_upserted: stats.messages_upserted,
+        }
     };
-    let _ = tokio::time::timeout(budget, work).await;
+    tokio::time::timeout(budget, work).await.unwrap_or_default()
+}
+
+async fn kiro_prompt_memory_recall(event_json: &str) -> Option<String> {
+    let parsed = serde_json::from_str::<Value>(event_json).ok()?;
+    let prompt = super::prompt_like_text(&parsed)?;
+    let session_id = event_session_id(&parsed);
+    match codex_project_root_from_event(event_json) {
+        Some(root) => {
+            Box::pin(memory_inject::combined_prompt_memory_recall(
+                &root,
+                session_id.as_deref(),
+                &prompt,
+            ))
+            .await
+        }
+        None => memory_inject::user_prompt_memory_recall(session_id.as_deref(), &prompt).await,
+    }
 }
 
 async fn notify_kiro_post_tool_use(event_json: &str) {

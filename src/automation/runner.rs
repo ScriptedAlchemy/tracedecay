@@ -19,7 +19,7 @@ use super::lifecycle::{
 };
 use super::managed_skills::list_managed_skills;
 use super::run_ledger::{AutomationRunLedgerRecord, AutomationTrigger};
-use super::session_reflector::validate_fact_proposals;
+use super::session_reflector::validate_fact_proposals_on_connection;
 use super::skill_usage::{
     DEFAULT_SKILL_OVERLAP_LIMIT, ingest_project_analytics_events, skill_overlap_candidates,
     stale_skill_recommendations, summarize_skill_usage,
@@ -33,16 +33,25 @@ use super::text::truncate_chars_for_prompt;
 use crate::analytics::{ToolUsageObservation, underused_tool_family_signals};
 use crate::errors::{Result, TraceDecayError};
 use crate::global_db::GlobalDb;
+use crate::memory::user::open_user_memory_db;
 use crate::sessions::lcm::{
     LcmGrepRequest, LcmGrepSort, LcmScope, LcmSessionReplayRequest, LcmSessionReplaySlice,
 };
+use crate::sessions::user_sessions_db_path;
 use crate::tracedecay::{TraceDecay, current_timestamp};
 
 pub use super::memory_curator::{
     MemoryCuratorAutomationOptions, MemoryCuratorAutomationRun, run_memory_curator_with_backend,
+    run_user_memory_curator_with_backend,
 };
 
 const SKILL_ANALYTICS_IMPORT_LIMIT: usize = 2_000;
+const USER_AUTOMATION_DIR: &str = "user-automation";
+
+/// Profile-level artifact, ledger, and lock root for projectless automation.
+pub fn user_automation_root(profile_root: &std::path::Path) -> PathBuf {
+    profile_root.join(USER_AUTOMATION_DIR)
+}
 
 /// Bounds for the session-replay evidence channel. Worst case per session is
 /// `(4 + 4) * 500 + 3 * 700 = 6_100` snippet chars, so the default three
@@ -170,6 +179,50 @@ pub struct SkillWriterAutomationRun {
     pub backend_response: Option<AgentTaskResponse>,
 }
 
+/// One callable projectless post-session review suitable for host hooks.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct UserSessionAutomationOptions {
+    #[serde(default)]
+    pub session_reflector: SessionReflectorAutomationOptions,
+    #[serde(default)]
+    pub memory_curator: MemoryCuratorAutomationOptions,
+    #[serde(default)]
+    pub skill_writer: SkillWriterAutomationOptions,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct UserSessionAutomationRun {
+    pub session_reflector: SessionReflectorAutomationRun,
+    pub memory_curator: MemoryCuratorAutomationRun,
+    pub skill_writer: SkillWriterAutomationRun,
+}
+
+pub async fn run_user_session_automation_with_backend(
+    profile_root: &std::path::Path,
+    config: &AutomationConfig,
+    backend: &dyn AgentTaskBackend,
+    options: UserSessionAutomationOptions,
+) -> Result<UserSessionAutomationRun> {
+    let session_reflector = run_user_session_reflector_with_backend(
+        profile_root,
+        config,
+        backend,
+        options.session_reflector,
+    )
+    .await?;
+    let memory_curator =
+        run_user_memory_curator_with_backend(profile_root, config, backend, options.memory_curator)
+            .await?;
+    let skill_writer =
+        run_user_skill_writer_with_backend(profile_root, config, backend, options.skill_writer)
+            .await?;
+    Ok(UserSessionAutomationRun {
+        session_reflector,
+        memory_curator,
+        skill_writer,
+    })
+}
+
 struct SkillWriterEvidenceBundle {
     profile_root: PathBuf,
     evidence: Value,
@@ -203,9 +256,51 @@ pub async fn run_session_reflector_with_backend(
     backend: &dyn AgentTaskBackend,
     options: SessionReflectorAutomationOptions,
 ) -> Result<SessionReflectorAutomationRun> {
-    let mut run = AgentTaskRunContext::new(
+    let memory_db = cg.open_project_store_db().await?;
+    run_session_reflector_for_store(
         cg.store_layout().dashboard_root.clone(),
         cg.store_layout().sessions_db_path.clone(),
+        memory_db.conn(),
+        Some(cg.store_layout().project_root.as_path()),
+        config,
+        backend,
+        options,
+    )
+    .await
+}
+
+/// Runs session reflection for projectless evidence and profile-level memory.
+pub async fn run_user_session_reflector_with_backend(
+    profile_root: &std::path::Path,
+    config: &AutomationConfig,
+    backend: &dyn AgentTaskBackend,
+    options: SessionReflectorAutomationOptions,
+) -> Result<SessionReflectorAutomationRun> {
+    let memory_db = open_user_memory_db(profile_root).await?;
+    run_session_reflector_for_store(
+        user_automation_root(profile_root),
+        user_sessions_db_path(profile_root),
+        memory_db.conn(),
+        None,
+        config,
+        backend,
+        options,
+    )
+    .await
+}
+
+async fn run_session_reflector_for_store(
+    dashboard_root: PathBuf,
+    sessions_db_path: PathBuf,
+    memory_conn: &libsql::Connection,
+    digest_root: Option<&std::path::Path>,
+    config: &AutomationConfig,
+    backend: &dyn AgentTaskBackend,
+    options: SessionReflectorAutomationOptions,
+) -> Result<SessionReflectorAutomationRun> {
+    let mut run = AgentTaskRunContext::new(
+        dashboard_root,
+        sessions_db_path.clone(),
         options.run_id.clone(),
         "session_reflector",
         options.trigger,
@@ -222,7 +317,14 @@ pub async fn run_session_reflector_with_backend(
     let SessionReflectorEvidenceBundle {
         evidence,
         evidence_hash,
-    } = match build_session_reflector_evidence(cg, &options).await? {
+    } = match build_session_reflector_evidence(
+        &run.dashboard_root,
+        &sessions_db_path,
+        memory_conn,
+        &options,
+    )
+    .await?
+    {
         SessionReflectorEvidenceOutcome::Ready(bundle) => bundle,
         SessionReflectorEvidenceOutcome::Skipped {
             reason,
@@ -266,7 +368,8 @@ pub async fn run_session_reflector_with_backend(
         )
         .await?;
     let (report, record) = finalize_session_reflector_success(
-        cg,
+        memory_conn,
+        digest_root,
         &finalizer,
         &run.dashboard_root,
         &run.run_id,
@@ -293,7 +396,8 @@ pub async fn run_session_reflector_with_backend(
 /// returning the report plus the not-yet-appended success ledger record.
 #[allow(clippy::too_many_arguments)]
 async fn finalize_session_reflector_success(
-    cg: &TraceDecay,
+    memory_conn: &libsql::Connection,
+    digest_root: Option<&std::path::Path>,
     finalizer: &AgentRunFinalizer<'_>,
     dashboard_root: &std::path::Path,
     run_id: &str,
@@ -303,7 +407,8 @@ async fn finalize_session_reflector_success(
     proposed_ops: &Value,
     proposals: &[Value],
 ) -> Result<(Value, AutomationRunLedgerRecord)> {
-    let (accepted_facts, rejected_facts) = validate_fact_proposals(cg, proposals, evidence).await?;
+    let (accepted_facts, rejected_facts) =
+        validate_fact_proposals_on_connection(memory_conn, proposals, evidence).await?;
     let accepted_count = accepted_facts.len();
     let rejected_count = rejected_facts.len();
     let mut proposal_records = record_session_fact_proposals(
@@ -316,8 +421,13 @@ async fn finalize_session_reflector_success(
     .await?;
     let auto_apply_facts = MemoryApplyPolicy::should_apply(accepted_count);
     let applied_fact_proposals = if auto_apply_facts {
-        auto_apply_session_fact_proposals(cg, dashboard_root, std::mem::take(&mut proposal_records))
-            .await?
+        auto_apply_session_fact_proposals(
+            memory_conn,
+            digest_root,
+            dashboard_root,
+            std::mem::take(&mut proposal_records),
+        )
+        .await?
     } else {
         Vec::new()
     };
@@ -415,11 +525,11 @@ async fn finalize_session_reflector_success(
 }
 
 async fn auto_apply_session_fact_proposals(
-    cg: &TraceDecay,
+    memory_conn: &libsql::Connection,
+    digest_root: Option<&std::path::Path>,
     dashboard_root: &std::path::Path,
     proposal_records: Vec<FactProposalRecord>,
 ) -> Result<Vec<FactProposalRecord>> {
-    let project_db = cg.open_project_store_db().await?;
     let mut applied = Vec::with_capacity(proposal_records.len());
     for record in proposal_records {
         if record.state != FactProposalState::PendingApproval {
@@ -429,7 +539,7 @@ async fn auto_apply_session_fact_proposals(
         applied.push(
             apply_fact_proposal(
                 dashboard_root,
-                project_db.conn(),
+                memory_conn,
                 &record.proposal_id,
                 Some("session_reflector:auto_apply".to_string()),
             )
@@ -440,11 +550,13 @@ async fn auto_apply_session_fact_proposals(
         .iter()
         .any(|record| record.state == FactProposalState::Applied)
     {
-        crate::automation::memory_digest::refresh_memory_digest_after_memory_change(
-            project_db.conn(),
-            &cg.store_layout().project_root,
-        )
-        .await;
+        if let Some(digest_root) = digest_root {
+            crate::automation::memory_digest::refresh_memory_digest_after_memory_change(
+                memory_conn,
+                digest_root,
+            )
+            .await;
+        }
     }
     Ok(applied)
 }
@@ -455,9 +567,47 @@ pub async fn run_skill_writer_with_backend(
     backend: &dyn AgentTaskBackend,
     options: SkillWriterAutomationOptions,
 ) -> Result<SkillWriterAutomationRun> {
-    let mut run = AgentTaskRunContext::new(
+    run_skill_writer_for_store(
         cg.store_layout().dashboard_root.clone(),
         cg.store_layout().sessions_db_path.clone(),
+        Some(cg.project_root()),
+        config,
+        backend,
+        options,
+    )
+    .await
+}
+
+/// Runs skill writing from profile-level projectless session evidence.
+pub async fn run_user_skill_writer_with_backend(
+    profile_root: &std::path::Path,
+    config: &AutomationConfig,
+    backend: &dyn AgentTaskBackend,
+    mut options: SkillWriterAutomationOptions,
+) -> Result<SkillWriterAutomationRun> {
+    options.profile_root = Some(profile_root.to_path_buf());
+    run_skill_writer_for_store(
+        user_automation_root(profile_root),
+        user_sessions_db_path(profile_root),
+        None,
+        config,
+        backend,
+        options,
+    )
+    .await
+}
+
+async fn run_skill_writer_for_store(
+    dashboard_root: PathBuf,
+    sessions_db_path: PathBuf,
+    analytics_project_root: Option<&std::path::Path>,
+    config: &AutomationConfig,
+    backend: &dyn AgentTaskBackend,
+    options: SkillWriterAutomationOptions,
+) -> Result<SkillWriterAutomationRun> {
+    let mut run = AgentTaskRunContext::new(
+        dashboard_root,
+        sessions_db_path.clone(),
         options.run_id.clone(),
         "skill_writer",
         options.trigger,
@@ -471,13 +621,16 @@ pub async fn run_skill_writer_with_backend(
         }
     };
 
-    let evidence_bundle = match build_skill_writer_evidence(cg, options).await? {
-        SkillWriterEvidenceOutcome::Ready(bundle) => bundle,
-        SkillWriterEvidenceOutcome::Skipped {
-            reason,
-            evidence_hash,
-        } => return skipped_skill_writer_run(&run, reason, evidence_hash).await,
-    };
+    let evidence_bundle =
+        match build_skill_writer_evidence(&sessions_db_path, analytics_project_root, options)
+            .await?
+        {
+            SkillWriterEvidenceOutcome::Ready(bundle) => bundle,
+            SkillWriterEvidenceOutcome::Skipped {
+                reason,
+                evidence_hash,
+            } => return skipped_skill_writer_run(&run, reason, evidence_hash).await,
+        };
     let SkillWriterEvidenceBundle {
         profile_root,
         evidence,
@@ -649,22 +802,19 @@ async fn finalize_skill_writer_success(
 }
 
 async fn build_session_reflector_evidence(
-    cg: &TraceDecay,
+    dashboard_root: &std::path::Path,
+    sessions_db_path: &std::path::Path,
+    memory_conn: &libsql::Connection,
     options: &SessionReflectorAutomationOptions,
 ) -> Result<SessionReflectorEvidenceOutcome> {
     // Refresh outcomes of previously applied fact proposals so this run's
     // feedback artifact reports real post-apply quality. Best effort: a
     // missing memory store must not block reflection.
-    if let Ok(project_db) = cg.open_project_store_db().await {
-        if let Err(err) = super::outcomes::refresh_fact_outcomes(
-            &cg.store_layout().dashboard_root,
-            project_db.conn(),
-            current_timestamp(),
-        )
-        .await
-        {
-            eprintln!("[tracedecay] warning: failed to refresh fact outcomes: {err}");
-        }
+    if let Err(err) =
+        super::outcomes::refresh_fact_outcomes(dashboard_root, memory_conn, current_timestamp())
+            .await
+    {
+        eprintln!("[tracedecay] warning: failed to refresh fact outcomes: {err}");
     }
 
     let provider = normalized_non_empty(&options.provider).unwrap_or_else(default_session_provider);
@@ -675,14 +825,13 @@ async fn build_session_reflector_evidence(
     let source = options.source.as_deref().and_then(normalized_non_empty);
     let role = options.role.as_deref().and_then(normalized_non_empty);
 
-    let sessions_db_path = cg.store_layout().sessions_db_path.clone();
     if !sessions_db_path.is_file() {
         return Ok(SessionReflectorEvidenceOutcome::Skipped {
             reason: "lcm_not_ingested",
             evidence_hash: None,
         });
     }
-    let Some(lcm_db) = GlobalDb::open_read_only_at(&sessions_db_path).await else {
+    let Some(lcm_db) = GlobalDb::open_read_only_at(sessions_db_path).await else {
         return Ok(SessionReflectorEvidenceOutcome::Skipped {
             reason: "lcm_unavailable",
             evidence_hash: None,
@@ -769,7 +918,8 @@ async fn build_session_reflector_evidence(
 }
 
 async fn build_skill_writer_evidence(
-    cg: &TraceDecay,
+    sessions_db_path: &std::path::Path,
+    analytics_project_root: Option<&std::path::Path>,
     options: SkillWriterAutomationOptions,
 ) -> Result<SkillWriterEvidenceOutcome> {
     let profile_root = match options.profile_root {
@@ -781,14 +931,13 @@ async fn build_skill_writer_evidence(
     let query = normalized_non_empty(&options.query).unwrap_or_else(default_skill_writer_query);
     let evidence_limit = options.evidence_limit.clamp(1, 50);
 
-    let sessions_db_path = cg.store_layout().sessions_db_path.clone();
     if !sessions_db_path.is_file() {
         return Ok(SkillWriterEvidenceOutcome::Skipped {
             reason: "lcm_not_ingested",
             evidence_hash: None,
         });
     }
-    let Some(lcm_db) = GlobalDb::open_read_only_at(&sessions_db_path).await else {
+    let Some(lcm_db) = GlobalDb::open_read_only_at(sessions_db_path).await else {
         return Ok(SkillWriterEvidenceOutcome::Skipped {
             reason: "lcm_unavailable",
             evidence_hash: None,
@@ -828,14 +977,16 @@ async fn build_skill_writer_evidence(
         None
     };
     let existing_skills = list_managed_skills(&profile_root).await?;
-    let global_db = GlobalDb::open().await;
-    ingest_project_analytics_events(
-        &profile_root,
-        cg.project_root(),
-        global_db.as_ref(),
-        SKILL_ANALYTICS_IMPORT_LIMIT,
-    )
-    .await?;
+    if let Some(project_root) = analytics_project_root {
+        let global_db = GlobalDb::open().await;
+        ingest_project_analytics_events(
+            &profile_root,
+            project_root,
+            global_db.as_ref(),
+            SKILL_ANALYTICS_IMPORT_LIMIT,
+        )
+        .await?;
+    }
     let skill_usage_summaries = summarize_skill_usage(&profile_root, &existing_skills).await?;
     let stale_recommendations = stale_skill_recommendations(
         &skill_usage_summaries,
@@ -1025,6 +1176,7 @@ pub async fn run_combined_review_with_backend(
     }
     let dashboard_root = cg.store_layout().dashboard_root.clone();
     let sessions_db_path = cg.store_layout().sessions_db_path.clone();
+    let memory_db = cg.open_project_store_db().await?;
     let started_at = current_timestamp().to_string();
 
     let (reflector_gate, _) = task_run_gate(
@@ -1060,16 +1212,28 @@ pub async fn run_combined_review_with_backend(
         }
     };
 
-    let reflector_bundle =
-        match build_session_reflector_evidence(cg, &options.session_reflector).await? {
-            SessionReflectorEvidenceOutcome::Ready(bundle) => bundle,
-            SessionReflectorEvidenceOutcome::Skipped { .. } => {
-                return Ok(CombinedReviewDispatch::NotCombined {
-                    reason: "session_reflector_evidence_unavailable",
-                });
-            }
-        };
-    let skill_bundle = match build_skill_writer_evidence(cg, options.skill_writer).await? {
+    let reflector_bundle = match build_session_reflector_evidence(
+        &dashboard_root,
+        &sessions_db_path,
+        memory_db.conn(),
+        &options.session_reflector,
+    )
+    .await?
+    {
+        SessionReflectorEvidenceOutcome::Ready(bundle) => bundle,
+        SessionReflectorEvidenceOutcome::Skipped { .. } => {
+            return Ok(CombinedReviewDispatch::NotCombined {
+                reason: "session_reflector_evidence_unavailable",
+            });
+        }
+    };
+    let skill_bundle = match build_skill_writer_evidence(
+        &sessions_db_path,
+        Some(cg.project_root()),
+        options.skill_writer,
+    )
+    .await?
+    {
         SkillWriterEvidenceOutcome::Ready(bundle) => bundle,
         SkillWriterEvidenceOutcome::Skipped { .. } => {
             return Ok(CombinedReviewDispatch::NotCombined {
@@ -1201,7 +1365,8 @@ pub async fn run_combined_review_with_backend(
     };
 
     let (reflector_report, reflector_record) = finalize_session_reflector_success(
-        cg,
+        memory_db.conn(),
+        Some(cg.store_layout().project_root.as_path()),
         &reflector_finalizer,
         &dashboard_root,
         &reflector_run_id,

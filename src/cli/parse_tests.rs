@@ -866,14 +866,12 @@ fn automation_config_commands_parse_project_sidecar_flags() {
 }
 
 #[test]
-fn automation_run_memory_curation_parses_manual_dry_run_flags() {
+fn automation_run_memory_curation_parses_manual_flags() {
     let cli = Cli::try_parse_from([
         "tracedecay",
         "automation",
         "run",
         "memory-curation",
-        "--dry-run",
-        "true",
         "--max-clusters",
         "8",
         "--min-confidence",
@@ -890,28 +888,24 @@ fn automation_run_memory_curation_parses_manual_dry_run_flags() {
                 AutomationAction::Run {
                     action:
                         AutomationRunAction::MemoryCuration {
-                            dry_run,
                             max_clusters,
                             min_confidence,
                             path,
                         }
                 }
-        }) if dry_run
-            && max_clusters == 8
+        }) if max_clusters == 8
             && (min_confidence - 0.7).abs() < f64::EPSILON
             && path.as_deref() == Some("/tmp/project")
     ));
 }
 
 #[test]
-fn automation_run_session_reflection_parses_manual_dry_run_flags() {
+fn automation_run_session_reflection_parses_manual_flags() {
     let cli = Cli::try_parse_from([
         "tracedecay",
         "automation",
         "run",
         "session-reflection",
-        "--dry-run",
-        "true",
         "--provider",
         "codex",
         "--query",
@@ -946,7 +940,6 @@ fn automation_run_session_reflection_parses_manual_dry_run_flags() {
                 AutomationAction::Run {
                     action:
                         AutomationRunAction::SessionReflection {
-                            dry_run,
                             provider,
                             query,
                             evidence_limit,
@@ -961,8 +954,7 @@ fn automation_run_session_reflection_parses_manual_dry_run_flags() {
                             path,
                         }
                 }
-        }) if dry_run
-            && provider == "codex"
+        }) if provider == "codex"
             && query == "remember decisions"
             && evidence_limit == 12
             && scope == "session"
@@ -978,14 +970,12 @@ fn automation_run_session_reflection_parses_manual_dry_run_flags() {
 }
 
 #[test]
-fn automation_run_skill_writing_parses_manual_dry_run_flags() {
+fn automation_run_skill_writing_parses_manual_flags() {
     let cli = Cli::try_parse_from([
         "tracedecay",
         "automation",
         "run",
         "skill-writing",
-        "--dry-run",
-        "true",
         "--provider",
         "cursor",
         "--query",
@@ -1004,15 +994,13 @@ fn automation_run_skill_writing_parses_manual_dry_run_flags() {
                 AutomationAction::Run {
                     action:
                         AutomationRunAction::SkillWriting {
-                            dry_run,
                             provider,
                             query,
                             evidence_limit,
                             path,
                         }
                 }
-        }) if dry_run
-            && provider == "cursor"
+        }) if provider == "cursor"
             && query == "workflow corrections"
             && evidence_limit == 9
             && path.as_deref() == Some("/tmp/project")

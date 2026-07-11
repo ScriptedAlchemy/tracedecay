@@ -294,7 +294,7 @@ async fn handle_automation_skills_command(
             body,
             pinned,
         } => {
-            let mut skill = create_managed_skill_draft(
+            let skill = create_managed_skill_draft(
                 &profile_root,
                 ManagedSkillDraft {
                     id,
@@ -314,11 +314,15 @@ async fn handle_automation_skills_command(
             )
             .await?;
             if pinned {
-                skill.set_pinned(true);
-                tracedecay::automation::managed_skills::save_managed_skill(&profile_root, &skill)
-                    .await?;
+                tracedecay::automation::managed_skills::set_managed_skill_pinned(
+                    &profile_root,
+                    &skill.metadata.id,
+                    true,
+                )
+                .await?
+            } else {
+                skill
             }
-            skill
         }
         AutomationSkillsAction::Update {
             id,
@@ -465,17 +469,10 @@ async fn handle_automation_run_command(
 
     match action {
         AutomationRunAction::MemoryCuration {
-            dry_run,
             max_clusters,
             min_confidence,
             path,
         } => {
-            if !dry_run {
-                return Err(tracedecay::errors::TraceDecayError::Config {
-                    message: "automation run memory-curation only supports --dry-run true"
-                        .to_string(),
-                });
-            }
             let project_path = resolve_cli_project_root(path, None, None).await?;
             let cg = crate::serve::ensure_initialized(&project_path).await?;
             let dashboard_root = cg.store_layout().dashboard_root.clone();
@@ -504,7 +501,6 @@ async fn handle_automation_run_command(
             println!("{}", serde_json::to_string_pretty(&run)?);
         }
         AutomationRunAction::SessionReflection {
-            dry_run,
             provider,
             query,
             evidence_limit,
@@ -518,12 +514,6 @@ async fn handle_automation_run_command(
             end_time,
             path,
         } => {
-            if !dry_run {
-                return Err(tracedecay::errors::TraceDecayError::Config {
-                    message: "automation run session-reflection only supports --dry-run true"
-                        .to_string(),
-                });
-            }
             let project_path = resolve_cli_project_root(path, None, None).await?;
             let cg = crate::serve::ensure_initialized(&project_path).await?;
             let dashboard_root = cg.store_layout().dashboard_root.clone();
@@ -570,18 +560,11 @@ async fn handle_automation_run_command(
             println!("{}", serde_json::to_string_pretty(&run)?);
         }
         AutomationRunAction::SkillWriting {
-            dry_run,
             provider,
             query,
             evidence_limit,
             path,
         } => {
-            if !dry_run {
-                return Err(tracedecay::errors::TraceDecayError::Config {
-                    message: "automation run skill-writing only supports --dry-run true"
-                        .to_string(),
-                });
-            }
             let project_path = resolve_cli_project_root(path, None, None).await?;
             let cg = crate::serve::ensure_initialized(&project_path).await?;
             let dashboard_root = cg.store_layout().dashboard_root.clone();
@@ -856,15 +839,10 @@ fn print_automation_config(
         && effective.host_mode == tracedecay::automation::config::AutomationHostMode::Standalone;
     let delegated_host =
         effective.host_mode == tracedecay::automation::config::AutomationHostMode::DelegatedHost;
-    // Automation applies its output without any human approval; `require_dashboard_approval`
-    // is deprecated and ignored for gating. The effective apply behavior per category is
-    // governed solely by the `auto_apply_*` switches, so surface it explicitly here so the
-    // config is not self-contradictory to a reader.
-    let memory_ops_policy = if effective.auto_apply_memory_ops {
-        "auto_apply"
-    } else {
-        "propose_only"
-    };
+    // Automation applies validated memory output autonomously;
+    // `require_dashboard_approval` and `auto_apply_memory_ops` are retained
+    // only for legacy config compatibility and do not gate curation runs.
+    let memory_ops_policy = "validate_then_apply";
     let skills_policy = if effective.auto_enable_skills {
         "auto_enable"
     } else {
@@ -880,6 +858,7 @@ fn print_automation_config(
             "trace_decay_backend_calls": trace_decay_backend_calls,
             "delegated_host": delegated_host,
             "auto_apply_memory_ops": effective.auto_apply_memory_ops,
+            "auto_apply_memory_ops_legacy_config_only": true,
             "auto_enable_skills": effective.auto_enable_skills,
             "export_memory_digest": effective.export_memory_digest,
             "effective_apply_policy": {
@@ -920,7 +899,10 @@ fn print_automation_config(
                 effective.tasks.session_reflector.enabled
             );
             println!("skill_writer: {}", effective.tasks.skill_writer.enabled);
-            println!("auto_apply_memory_ops: {}", effective.auto_apply_memory_ops);
+            println!(
+                "auto_apply_memory_ops: {} (legacy; autonomous curation always applies)",
+                effective.auto_apply_memory_ops
+            );
             println!("auto_enable_skills: {}", effective.auto_enable_skills);
             println!("export_memory_digest: {}", effective.export_memory_digest);
             println!("apply_policy.human_approval_required: false");

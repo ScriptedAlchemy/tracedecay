@@ -24,6 +24,7 @@ use super::memory_service::{
 };
 use super::util::{qmarks, query_rows};
 use super::{DashboardState, code_diagnostics_broker, storage_mode_label, token_count};
+use crate::db::Database;
 use crate::errors::{Result, TraceDecayError};
 use crate::memory::store::MemoryStore;
 use crate::memory::types::MemoryGroomingOperation;
@@ -154,9 +155,62 @@ async fn cli_state(cg: &TraceDecay) -> DashboardState {
     }
 }
 
+fn user_state(
+    memory_db: &Database,
+    memory_db_path: &std::path::Path,
+    profile_root: &std::path::Path,
+    dashboard_root: &std::path::Path,
+) -> DashboardState {
+    let conn = memory_db.conn().clone();
+    DashboardState {
+        project_id: None,
+        graph_conn: conn.clone(),
+        graph_db_path: memory_db_path.display().to_string(),
+        mem_conn: conn,
+        mem_db_path: memory_db_path.display().to_string(),
+        lcm_conn: None,
+        lcm_db_path: String::new(),
+        lcm_scope: "user".to_string(),
+        savings_db: None,
+        savings_db_path: String::new(),
+        project_root: profile_root.to_path_buf(),
+        storage_mode: "user".to_string(),
+        store_root: profile_root.to_path_buf(),
+        config_path: profile_root.join("config.json"),
+        dashboard_root: dashboard_root.to_path_buf(),
+        curation_activity: Arc::new(RwLock::new(Vec::new())),
+        token_counts: Arc::new(token_count::TokenCountCache::new()),
+        code_diagnostics: Arc::new(RwLock::new(code_diagnostics_broker(
+            profile_root.to_path_buf(),
+            crate::diagnostics::lsp::settings::CodeDiagnosticsSettings::default(),
+        ))),
+        code_diagnostics_backfill_started: Arc::new(AtomicBool::new(false)),
+        automation_scheduler_reconciler: None,
+    }
+}
+
 /// Runs the curate verb and returns the JSON report printed by the CLI.
 pub async fn run_memory_curate(cg: &TraceDecay, options: &MemoryCurateOptions) -> Result<Value> {
     let state = cli_state(cg).await;
+    run_memory_curate_with_state(&state, options).await
+}
+
+/// Runs memory curation against the profile-level user memory store.
+pub async fn run_user_memory_curate(
+    memory_db: &Database,
+    memory_db_path: &std::path::Path,
+    profile_root: &std::path::Path,
+    dashboard_root: &std::path::Path,
+    options: &MemoryCurateOptions,
+) -> Result<Value> {
+    let state = user_state(memory_db, memory_db_path, profile_root, dashboard_root);
+    run_memory_curate_with_state(&state, options).await
+}
+
+async fn run_memory_curate_with_state(
+    state: &DashboardState,
+    options: &MemoryCurateOptions,
+) -> Result<Value> {
     let mut report = Map::new();
     report.insert("mode".to_string(), json!("similarity_dedup"));
     report.insert("dry_run".to_string(), json!(!options.apply));
@@ -166,13 +220,13 @@ pub async fn run_memory_curate(cg: &TraceDecay, options: &MemoryCurateOptions) -
     // deletions beforehand would invalidate the very clusters the ops
     // reference (their fact ids would already be gone).
     if let Some(provided) = options.llm_ops.as_ref() {
-        let clusters = build_clusters(&state, options.max_clusters).await?;
+        let clusters = build_clusters(state, options.max_clusters).await?;
         // Evidence guard: cluster members plus the deterministic hygiene
         // candidates (recomputed against the same pre-apply state the ops
         // were planned on) are the only legal delete targets.
         let mut allowed_ids: BTreeSet<i64> = cluster_fact_ids(&clusters);
         let (_, pre_apply_hygiene_candidates, _, _) =
-            build_delete_plan(&state)
+            build_delete_plan(state)
                 .await
                 .map_err(|message| TraceDecayError::Config {
                     message: format!("curation analysis failed: {message}"),
@@ -190,36 +244,45 @@ pub async fn run_memory_curate(cg: &TraceDecay, options: &MemoryCurateOptions) -
         llm_report.insert("clusters_reviewed".to_string(), json!(clusters.len()));
         llm_report.insert("rejected_ops".to_string(), Value::Array(rejected));
         if options.apply {
-            prevalidate_destructive_ops(&state, &valid).await?;
-            let grooming_ops = parse_grooming_ops(&valid)?;
             let mut results = Vec::new();
             let mut applied = 0i64;
-            if !grooming_ops.is_empty() {
-                let store = MemoryStore::new(&state.mem_conn);
-                let grooming_report = store
-                    .apply_grooming_batch(&grooming_ops, options.min_confidence)
-                    .await?;
-                applied += grooming_ops.len() as i64;
-                results.push(json!({
-                    "status": "applied",
-                    "operations": grooming_ops.len(),
-                    "grooming": grooming_report,
+            if let Err(error) = prevalidate_destructive_ops(state, &valid).await {
+                results.extend(valid.iter().map(|op| {
+                    json!({
+                        "status": "error",
+                        "error": error.to_string(),
+                        "op": op,
+                    })
                 }));
-            }
-            for op in &valid {
-                let (result, ok) = match op.get("op").and_then(Value::as_str) {
-                    Some("delete") => apply_delete_op(&state, op).await,
-                    Some("merge") => apply_merge_op(&state, op).await,
-                    Some(
-                        "normalize_tags" | "merge_entities" | "add_alias" | "link_facts"
-                        | "repair_vector",
-                    ) => continue,
-                    _ => (json!({ "status": "error", "error": "unknown op" }), false),
-                };
-                if ok {
-                    applied += 1;
+            } else {
+                let grooming_ops = parse_grooming_ops(&valid)?;
+                if !grooming_ops.is_empty() {
+                    let store = MemoryStore::new(&state.mem_conn);
+                    let grooming_report = store
+                        .apply_grooming_batch(&grooming_ops, options.min_confidence)
+                        .await?;
+                    applied += grooming_ops.len() as i64;
+                    results.push(json!({
+                        "status": "applied",
+                        "operations": grooming_ops.len(),
+                        "grooming": grooming_report,
+                    }));
                 }
-                results.push(result);
+                for op in &valid {
+                    let (result, ok) = match op.get("op").and_then(Value::as_str) {
+                        Some("delete") => apply_delete_op(state, op).await,
+                        Some("merge") => apply_merge_op(state, op).await,
+                        Some(
+                            "normalize_tags" | "merge_entities" | "add_alias" | "link_facts"
+                            | "repair_vector",
+                        ) => continue,
+                        _ => (json!({ "status": "error", "error": "unknown op" }), false),
+                    };
+                    if ok {
+                        applied += 1;
+                    }
+                    results.push(result);
+                }
             }
             llm_report.insert("applied".to_string(), json!(applied));
             llm_report.insert("results".to_string(), Value::Array(results));
@@ -240,7 +303,7 @@ pub async fn run_memory_curate(cg: &TraceDecay, options: &MemoryCurateOptions) -
     // are never auto-applied here — the external LLM (or a human) confirms
     // them and feeds delete/merge ops back through `--llm-ops`.
     let (actions, hygiene_candidates, counts, total) =
-        build_delete_plan(&state)
+        build_delete_plan(state)
             .await
             .map_err(|message| TraceDecayError::Config {
                 message: format!("curation analysis failed: {message}"),
@@ -260,7 +323,7 @@ pub async fn run_memory_curate(cg: &TraceDecay, options: &MemoryCurateOptions) -
                 skipped += 1;
                 continue;
             };
-            match delete_fact(&state, fact_id).await {
+            match delete_fact(state, fact_id).await {
                 Ok(true) => applied += 1,
                 Ok(false) | Err(_) => skipped += 1,
             }
@@ -272,20 +335,27 @@ pub async fn run_memory_curate(cg: &TraceDecay, options: &MemoryCurateOptions) -
     }
     report.insert("actions".to_string(), Value::Array(actions));
 
-    let repair = super::memory_api::repair_derived_memory(&state)
-        .await
-        .map_err(|message| TraceDecayError::Config {
-            message: format!("memory derived-state repair failed: {message}"),
-        })?;
-    report.insert(
-        "derived_memory_repair".to_string(),
-        serde_json::to_value(repair).map_err(|e| TraceDecayError::Config {
-            message: format!("failed to serialize memory repair report: {e}"),
-        })?,
-    );
+    if options.apply {
+        let repair = super::memory_api::repair_derived_memory(state)
+            .await
+            .map_err(|message| TraceDecayError::Config {
+                message: format!("memory derived-state repair failed: {message}"),
+            })?;
+        report.insert(
+            "derived_memory_repair".to_string(),
+            serde_json::to_value(repair).map_err(|e| TraceDecayError::Config {
+                message: format!("failed to serialize memory repair report: {e}"),
+            })?,
+        );
+    } else {
+        report.insert(
+            "derived_memory_repair".to_string(),
+            json!({ "status": "not_run_read_only_preview" }),
+        );
+    }
 
     if options.llm && options.llm_ops.is_none() {
-        let clusters = build_clusters(&state, options.max_clusters).await?;
+        let clusters = build_clusters(state, options.max_clusters).await?;
         let mut allowed_ids: BTreeSet<i64> = cluster_fact_ids(&clusters);
         allowed_ids.extend(hygiene_candidate_fact_ids(&hygiene_candidates));
         let has_hygiene = !hygiene_candidate_fact_ids(&hygiene_candidates).is_empty();
@@ -789,6 +859,77 @@ mod tests {
 
     fn allowed(ids: &[i64]) -> BTreeSet<i64> {
         ids.iter().copied().collect()
+    }
+
+    #[tokio::test]
+    async fn preview_is_read_only_while_apply_repairs_derived_memory() {
+        let temp = tempfile::tempdir().unwrap();
+        let memory_path = temp.path().join("user-memory.db");
+        let (db, _) = Database::initialize(&memory_path).await.unwrap();
+        db.conn()
+            .execute(
+                "INSERT INTO memory_facts
+                    (fact_id, content, category, trust_score, created_at, updated_at, source)
+                 VALUES (1, 'Keep diagnostic previews read only', 'decision', 0.9, 1, 1, 'test')",
+                (),
+            )
+            .await
+            .unwrap();
+        let options = MemoryCurateOptions {
+            llm_ops: Some(json!({ "ops": [] })),
+            ..MemoryCurateOptions::default()
+        };
+
+        let preview = run_user_memory_curate(
+            &db,
+            &memory_path,
+            temp.path(),
+            &temp.path().join("user-automation"),
+            &options,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            preview["derived_memory_repair"]["status"],
+            json!("not_run_read_only_preview")
+        );
+        assert_eq!(missing_vector_count(&db).await, 1);
+
+        let applied = run_user_memory_curate(
+            &db,
+            &memory_path,
+            temp.path(),
+            &temp.path().join("user-automation"),
+            &MemoryCurateOptions {
+                apply: true,
+                ..options
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            applied["derived_memory_repair"]["missing_vectors_repaired"],
+            json!(1)
+        );
+        assert_eq!(missing_vector_count(&db).await, 0);
+    }
+
+    async fn missing_vector_count(db: &Database) -> i64 {
+        db.conn()
+            .query(
+                "SELECT COUNT(*) FROM memory_facts WHERE hrr_vector IS NULL",
+                (),
+            )
+            .await
+            .unwrap()
+            .next()
+            .await
+            .unwrap()
+            .unwrap()
+            .get(0)
+            .unwrap()
     }
 
     #[test]
