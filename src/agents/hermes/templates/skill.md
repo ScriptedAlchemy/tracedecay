@@ -27,8 +27,16 @@ selects a TraceDecay installation, store, or project. TraceDecay always uses
 the normal user-profile installation and the same profile-sharded project
 store used by every other host.
 
+The user profile is global, but holographic facts are project-sharded: each
+registered project's `tracedecay.db` owns its `memory_facts` and derived banks.
+`~/.tracedecay/global.db` is the cross-project registry/usage database, not one
+shared fact table with a project tag. Selecting the runtime project therefore
+selects the fact and LCM store before retrieval or mutation.
+
 Resolve the code project from an explicit runtime project root when the host
-provides one; otherwise use the process working directory and its Git root.
+provides one; otherwise use stock Hermes' logical session workspace
+(`agent.runtime_cwd`, including its per-session gateway context) and its Git
+root. Fall back to `TERMINAL_CWD` and only then the process working directory.
 Project routing belongs to the CLI transport (`--project`), not to MCP tool
 arguments. Do not pass `storage_scope`, `hermes_home`, a Hermes profile name,
 or a configured project pin: those legacy routing inputs are not part of the

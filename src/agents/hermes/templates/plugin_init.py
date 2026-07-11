@@ -53,6 +53,14 @@ try:
 except Exception:
     _hermes_auxiliary_client = None
 
+# Stock Hermes' single source of truth for the logical session workspace.
+# Multi-session gateways keep this in a ContextVar, so os.getcwd() alone would
+# incorrectly route every session through the gateway process directory.
+try:
+    from agent.runtime_cwd import resolve_agent_cwd as _hermes_resolve_agent_cwd  # type: ignore[import-not-found]
+except Exception:
+    _hermes_resolve_agent_cwd = None
+
 def _resolve_auxiliary_client(agent=None):
     """Best auxiliary LLM client: an agent-attached one, else hermes' module-level facade."""
     client = getattr(agent, "auxiliary_client", None)
@@ -815,10 +823,27 @@ def _has_tracedecay_index(path):
         return False
     return os.path.isdir(os.path.join(path, ".tracedecay"))
 
+def _runtime_working_directory():
+    if _hermes_resolve_agent_cwd is not None:
+        try:
+            resolved = _hermes_resolve_agent_cwd()
+            if resolved:
+                candidate = os.path.abspath(os.path.expanduser(str(resolved)))
+                if os.path.isdir(candidate):
+                    return candidate
+        except Exception:
+            pass
+    raw = os.environ.get("TERMINAL_CWD", "").strip()
+    if raw:
+        candidate = os.path.abspath(os.path.expanduser(raw))
+        if os.path.isdir(candidate):
+            return candidate
+    return os.getcwd()
+
 def _code_project_root(explicit=None, cwd=None, configured=None):
     if explicit:
         return str(explicit)
-    candidate = cwd or configured or os.getcwd()
+    candidate = cwd or configured or _runtime_working_directory()
     if isinstance(candidate, str) and candidate.strip() and os.path.isabs(candidate):
         return candidate.strip()
     return None

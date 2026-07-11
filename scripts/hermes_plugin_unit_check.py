@@ -168,6 +168,25 @@ def run_checks(work: Path):
     assert "current schemas and are rejected" in skill, skill
     ok("provenance stamp + cli passthrough + storage guidance generated")
 
+    # The stock Hermes runtime exposes the logical session workspace through
+    # TERMINAL_CWD (and, when importable, agent.runtime_cwd). Memory/LCM
+    # routing must follow that workspace rather than the gateway process cwd.
+    runtime_project = work / "runtime-project"
+    runtime_project.mkdir()
+    previous_terminal_cwd = os.environ.get("TERMINAL_CWD")
+    os.environ["TERMINAL_CWD"] = str(runtime_project)
+    try:
+        assert plugin._code_project_root() == str(runtime_project)
+        runtime_provider = plugin.TracedecayMemoryProvider()
+        runtime_provider.initialize(session_id="runtime-cwd")
+        assert runtime_provider.project_root == str(runtime_project)
+    finally:
+        if previous_terminal_cwd is None:
+            os.environ.pop("TERMINAL_CWD", None)
+        else:
+            os.environ["TERMINAL_CWD"] = previous_terminal_cwd
+    ok("memory provider follows the stock Hermes runtime workspace")
+
     # ── 3. Registration split + provider dedup ──────────────────────────
     # The installer wrote memory.provider: tracedecay into the temp profile
     # config, so the provider-owned fact trio must NOT register as direct
@@ -415,7 +434,7 @@ def run_checks(work: Path):
     provider = ctx.provider
     assert provider is not None
     provider.initialize("check-session", hermes_home=str(host_home))
-    expected_project_root = os.getcwd()
+    expected_project_root = plugin._runtime_working_directory()
     assert provider.project_root == expected_project_root
     assert provider.project_root != str(host_home)
     schema_names = [schema["name"] for schema in provider.get_tool_schemas()]

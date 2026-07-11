@@ -802,6 +802,14 @@ Repo-local projects create `.tracedecay/` inside each project you index. Profile
 - `tracedecay.db` — the libSQL database with all symbols, edges, files, and vector embeddings
 - `sessions.db` and sidecar directories such as response handles, LCM payloads, branch metadata, and dashboard artifacts when those features are used
 
+Holographic memory is project-sharded too: `memory_facts`, entities, feedback,
+and derived holographic banks live in that project's `tracedecay.db`. The
+user-level `global.db` tracks the project registry and cross-project usage; it
+is not a single fact table with a `project_id` tag. Tools select a registered
+project store before reading or writing facts. Read-only tools can explicitly
+select another registered project, while mutating fact operations write only
+to the active project.
+
 Add `.tracedecay` to your `.gitignore` so enrollment markers are not committed.
 
 Projects indexed before the TraceDecay rename should be migrated into the user-level profile store; runtime storage no longer falls back to `.tracedecay/`.
