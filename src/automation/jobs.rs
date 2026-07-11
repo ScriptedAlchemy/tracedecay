@@ -815,6 +815,9 @@ async fn run_pre_run_command(command: &str, project_root: Option<&Path>) -> Resu
     if let Some(project_root) = project_root {
         process.current_dir(project_root);
     }
+    // Scheduler shutdown aborts the owning future. Ensure a pre-run command
+    // does not outlive that future and keep the daemon cgroup alive.
+    process.kill_on_drop(true);
     let output = tokio::time::timeout(
         Duration::from_secs(JOB_COMMAND_TIMEOUT_SECS),
         process.output(),

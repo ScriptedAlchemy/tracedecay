@@ -169,6 +169,78 @@ pub async fn ingest_user_global_sources() -> TranscriptIngestStats {
     stats
 }
 
+const STARTUP_USER_INGEST_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(30);
+
+#[derive(Default)]
+struct StartupUserIngestState {
+    running: bool,
+    last_completed: Option<std::time::Instant>,
+}
+
+static STARTUP_USER_INGESTS: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::HashMap<PathBuf, StartupUserIngestState>>,
+> = std::sync::OnceLock::new();
+
+struct StartupUserIngestGuard {
+    profile_root: PathBuf,
+    completed: bool,
+}
+
+impl StartupUserIngestGuard {
+    fn claim(profile_root: PathBuf) -> Option<Self> {
+        let ingests = STARTUP_USER_INGESTS
+            .get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+        let mut ingests = ingests
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let state = ingests.entry(profile_root.clone()).or_default();
+        if state.running
+            || state
+                .last_completed
+                .is_some_and(|completed| completed.elapsed() < STARTUP_USER_INGEST_COOLDOWN)
+        {
+            return None;
+        }
+        state.running = true;
+        Some(Self {
+            profile_root,
+            completed: false,
+        })
+    }
+}
+
+impl Drop for StartupUserIngestGuard {
+    fn drop(&mut self) {
+        let Some(ingests) = STARTUP_USER_INGESTS.get() else {
+            return;
+        };
+        let mut ingests = ingests
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let state = ingests.entry(self.profile_root.clone()).or_default();
+        state.running = false;
+        if self.completed {
+            state.last_completed = Some(std::time::Instant::now());
+        }
+    }
+}
+
+/// Coalesces the profile-wide user transcript sweep shared by every project
+/// server created during daemon startup. Live hooks still call
+/// [`ingest_user_global_sources`] directly, so the cooldown cannot hide a
+/// completed turn.
+pub(crate) async fn ingest_user_global_sources_for_startup() -> TranscriptIngestStats {
+    let Ok(profile_root) = crate::storage::default_profile_root() else {
+        return TranscriptIngestStats::default();
+    };
+    let Some(mut guard) = StartupUserIngestGuard::claim(profile_root) else {
+        return TranscriptIngestStats::default();
+    };
+    let stats = ingest_user_global_sources().await;
+    guard.completed = true;
+    stats
+}
+
 const FILE_TRANSCRIPT_PROVIDERS: &[SessionProvider] = &[
     SessionProvider::Claude,
     SessionProvider::Codex,
@@ -203,9 +275,20 @@ pub async fn ingest_global_sources_for_provider(
     project_root: &Path,
     provider: Option<SessionProvider>,
 ) -> TranscriptIngestStats {
+    ingest_global_sources_for_provider_inner(db, project_root, provider, true).await
+}
+
+async fn ingest_global_sources_for_provider_inner(
+    db: &GlobalDb,
+    project_root: &Path,
+    provider: Option<SessionProvider>,
+    include_user_scope: bool,
+) -> TranscriptIngestStats {
     // Keep the profile-level projectless history current alongside every
     // project sweep. Its independent DB cursors make repeated calls no-ops.
-    let _ = ingest_user_global_sources().await;
+    if include_user_scope {
+        let _ = ingest_user_global_sources().await;
+    }
     let mut sources: Vec<Box<dyn TranscriptSource>> = Vec::new();
     match provider {
         None => {
@@ -272,6 +355,16 @@ pub async fn ingest_global_sources_for_provider(
     // Runs live in their own tables, so they do not affect `stats`.
     let _ = workflow_ingest::ingest_workflow_runs(db, project_root).await;
     stats
+}
+
+/// Daemon-startup variant that coalesces the profile-wide user sweep while
+/// still running the active project's independent ingestion pass.
+pub(crate) async fn ingest_global_sources_for_startup(
+    db: &GlobalDb,
+    project_root: &Path,
+) -> TranscriptIngestStats {
+    let user = ingest_user_global_sources_for_startup().await;
+    user.merge(ingest_global_sources_for_provider_inner(db, project_root, None, false).await)
 }
 
 /// Runs the bounded commit-attribution sweep against the correlation store.
@@ -541,5 +634,23 @@ mod git_scan_tests {
     #[test]
     fn parse_git_log_commits_empty_is_empty() {
         assert!(parse_git_log_commits("").is_empty());
+    }
+
+    #[test]
+    fn startup_user_ingest_claims_are_single_flight_and_cancellation_safe() {
+        let profile = tempfile::tempdir().unwrap().path().to_path_buf();
+        let first = StartupUserIngestGuard::claim(profile.clone()).expect("first claim");
+        assert!(StartupUserIngestGuard::claim(profile.clone()).is_none());
+
+        drop(first);
+        let mut retry = StartupUserIngestGuard::claim(profile.clone())
+            .expect("an incomplete claim must release immediately");
+        retry.completed = true;
+        drop(retry);
+
+        assert!(
+            StartupUserIngestGuard::claim(profile).is_none(),
+            "a completed sweep should suppress the startup herd during cooldown"
+        );
     }
 }

@@ -398,7 +398,10 @@ pub fn sample_node(id: &str, name: &str, file_path: &str) -> Node {
 /// Small multi-thread runtime for `#[test]`-driven async dashboard fixtures.
 pub fn create_runtime() -> tokio::runtime::Runtime {
     match tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(2)
+        // Dashboard tests issue synchronous ureq calls while the in-process
+        // server and libsql handlers use this same runtime. Two workers can
+        // deadlock under load (one blocked in ureq, one awaiting DB work).
+        .worker_threads(4)
         .enable_all()
         .build()
     {
@@ -595,10 +598,18 @@ pub async fn wait_for_dashboard(agent: &ureq::Agent, base_url: &str) {
     // HTTP response (2xx). A bare connect success is not enough — the server
     // can accept then drop the socket during startup ("Peer disconnected").
     for _ in 0..160 {
-        if let Ok(response) = agent.get(&probe).call() {
-            if response.status().is_success() {
-                return;
-            }
+        let probe_agent = agent.clone();
+        let probe_url = probe.clone();
+        let ready = tokio::task::spawn_blocking(move || {
+            probe_agent
+                .get(&probe_url)
+                .call()
+                .is_ok_and(|response| response.status().is_success())
+        })
+        .await
+        .unwrap_or(false);
+        if ready {
+            return;
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }

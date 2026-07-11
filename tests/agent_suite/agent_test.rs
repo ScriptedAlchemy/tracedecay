@@ -3607,6 +3607,10 @@ fn assert_codex_hooks_registered(hooks: &serde_json::Value) {
         codex_event_has_handler(hooks, "PostCompact", "hook-codex-post-compact"),
         "Codex PostCompact hook should generate app-server LCM summaries: {hooks}"
     );
+    assert!(
+        codex_event_has_handler(hooks, "Stop", "hook-codex-stop"),
+        "Codex Stop hook should ingest and review the final user-scoped turn: {hooks}"
+    );
     let matcher = codex_matcher_for_handler(hooks, "PostToolUse", "hook-codex-post-tool-use")
         .expect("PostToolUse handler should exist");
     assert!(

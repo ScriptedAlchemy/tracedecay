@@ -94,6 +94,7 @@ async fn user_cursor_event_rejects_registered_project_transcript_slug() {
     let event = serde_json::json!({
         "session_id": "project-session",
         "transcript_path": transcript,
+        "workspace_roots": [registered],
     });
     let db = GlobalDb::open_at(&tmp.path().join("user-sessions.db"))
         .await
@@ -109,6 +110,99 @@ async fn user_cursor_event_rejects_registered_project_transcript_slug() {
 
     assert_eq!(stats.messages_upserted, 0);
     assert!(db.get_session("cursor", "project-session").await.is_none());
+}
+
+#[tokio::test]
+async fn user_cursor_event_prefers_exact_workspace_over_colliding_slug() {
+    let tmp = TempDir::new().unwrap();
+    let registered = tmp.path().join("work").join("foo-bar");
+    let projectless = tmp.path().join("work").join("foo").join("bar");
+    std::fs::create_dir_all(&registered).unwrap();
+    std::fs::create_dir_all(&projectless).unwrap();
+    assert_eq!(
+        cursor_project_slug(&registered),
+        cursor_project_slug(&projectless)
+    );
+    let transcript_dir = tmp
+        .path()
+        .join(".cursor/projects")
+        .join(cursor_project_slug(&projectless).unwrap())
+        .join("agent-transcripts");
+    std::fs::create_dir_all(&transcript_dir).unwrap();
+    let transcript = transcript_dir.join("projectless-session.jsonl");
+    std::fs::write(
+        &transcript,
+        "{\"role\":\"user\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"projectless collision preference\"}]}}\n",
+    )
+    .unwrap();
+    let event = serde_json::json!({
+        "session_id": "projectless-session",
+        "transcript_path": transcript,
+        "workspace_roots": [projectless],
+    });
+    let db = GlobalDb::open_at(&tmp.path().join("user-sessions.db"))
+        .await
+        .unwrap();
+
+    let stats = ingest_cursor_user_transcript_event_capped_with_registered_roots(
+        &event.to_string(),
+        &db,
+        None,
+        &[registered],
+    )
+    .await;
+
+    assert_eq!(stats.messages_upserted, 1);
+    let session = db
+        .get_session("cursor", "projectless-session")
+        .await
+        .expect("exact projectless workspace should override its colliding slug");
+    assert_eq!(session.project_path, "user");
+}
+
+#[tokio::test]
+async fn user_cursor_event_without_workspace_fails_closed_on_slug_collision() {
+    let tmp = TempDir::new().unwrap();
+    let registered = tmp.path().join("work").join("foo-bar");
+    let colliding = tmp.path().join("work").join("foo").join("bar");
+    assert_eq!(
+        cursor_project_slug(&registered),
+        cursor_project_slug(&colliding)
+    );
+    let transcript_dir = tmp
+        .path()
+        .join(".cursor/projects")
+        .join(cursor_project_slug(&colliding).unwrap())
+        .join("agent-transcripts");
+    std::fs::create_dir_all(&transcript_dir).unwrap();
+    let transcript = transcript_dir.join("ambiguous-session.jsonl");
+    std::fs::write(
+        &transcript,
+        "{\"role\":\"user\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"ambiguous collision\"}]}}\n",
+    )
+    .unwrap();
+    let event = serde_json::json!({
+        "session_id": "ambiguous-session",
+        "transcript_path": transcript,
+    });
+    let db = GlobalDb::open_at(&tmp.path().join("user-sessions.db"))
+        .await
+        .unwrap();
+
+    let stats = ingest_cursor_user_transcript_event_capped_with_registered_roots(
+        &event.to_string(),
+        &db,
+        None,
+        &[registered],
+    )
+    .await;
+
+    assert_eq!(stats.messages_upserted, 0);
+    assert!(
+        db.get_session("cursor", "ambiguous-session")
+            .await
+            .is_none()
+    );
 }
 
 #[tokio::test]

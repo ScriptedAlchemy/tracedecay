@@ -13,7 +13,10 @@ use tokio::task::JoinHandle;
 
 #[cfg(unix)]
 use super::drain_client_tasks;
-use super::{DaemonClientIdentity, DaemonHandshake, DaemonLifecycle};
+use super::{
+    AutomationSchedulerHandle, DaemonClientIdentity, DaemonEngine, DaemonHandshake,
+    DaemonLifecycle, ProjectServerKey,
+};
 
 #[test]
 fn daemon_lifecycle_rejects_new_work_after_draining() {
@@ -88,6 +91,35 @@ async fn draining_waits_for_one_bounded_in_flight_request() {
 
     assert!(drained);
     assert!(lifecycle.try_enter().is_none());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn daemon_scheduler_shutdown_aborts_and_joins_every_loop() {
+    let engine = DaemonEngine::default();
+    let key = ProjectServerKey {
+        project_path: PathBuf::from("/projects/shutdown-test"),
+        scope_prefix: None,
+        client_identity: test_client_identity(),
+    };
+    let task = tokio::spawn(std::future::pending::<()>());
+    engine.automation_schedulers.lock().await.insert(
+        key,
+        AutomationSchedulerHandle {
+            task,
+            wake: std::sync::Arc::new(tokio::sync::Notify::new()),
+        },
+    );
+
+    engine.lifecycle.begin_draining();
+    tokio::time::timeout(
+        tokio::time::Duration::from_secs(1),
+        engine.shutdown_automation_schedulers(),
+    )
+    .await
+    .expect("scheduler shutdown should not wait for its tick interval");
+
+    assert!(engine.automation_schedulers.lock().await.is_empty());
 }
 
 fn test_client_identity() -> DaemonClientIdentity {

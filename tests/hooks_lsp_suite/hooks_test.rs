@@ -1418,6 +1418,9 @@ fn test_codex_subagent_start_allows_invalid_json() {
 
 #[test]
 fn test_codex_subagent_start_injects_context_for_new_no_history_agent() {
+    let _lock = lock_global_db_env();
+    let profile = tempfile::tempdir().unwrap();
+    let _profile_env = EnvVarGuard::set(USER_DATA_DIR_ENV, profile.path().to_str().unwrap());
     let input = r#"{
         "hook_event_name": "SubagentStart",
         "agent_type": "generalPurpose",

@@ -89,6 +89,29 @@ pub(crate) fn parse_epoch(value: &str) -> Option<f64> {
     trimmed.parse::<f64>().ok()
 }
 
+async fn session_provider_count(conn: &libsql::Connection, session_id: &str) -> i64 {
+    super::util::query_i64(
+        conn,
+        "SELECT COUNT(*)
+         FROM (
+             SELECT provider FROM lcm_raw_messages WHERE session_id = ?1
+             UNION
+             SELECT provider FROM lcm_summary_nodes WHERE session_id = ?1
+         )",
+        libsql::params![session_id.to_string()],
+    )
+    .await
+}
+
+fn ambiguous_session_error(session_id: &str) -> LcmErrorResponse {
+    (
+        StatusCode::CONFLICT,
+        Json(http_detail(&format!(
+            "ambiguous session id across providers: {session_id}"
+        ))),
+    )
+}
+
 pub(crate) async fn ensure_valid_summary_metadata(
     state: &DashboardState,
     conn: &libsql::Connection,
@@ -454,6 +477,10 @@ pub(crate) async fn session_payload(
     };
     ensure_valid_summary_metadata(state, conn, "session").await?;
 
+    if session_provider_count(conn, session_id).await > 1 {
+        return Err(ambiguous_session_error(session_id));
+    }
+
     let message_count = super::util::query_i64(
         conn,
         "SELECT COUNT(*) FROM lcm_raw_messages WHERE session_id = ?1",
@@ -507,6 +534,9 @@ pub(crate) async fn session_payload(
         "session summary nodes",
         lcm_queries::session_summary_nodes(conn, session_id, limit + 1, offset).await,
     )?;
+    if session_provider_count(conn, session_id).await > 1 {
+        return Err(ambiguous_session_error(session_id));
+    }
     let has_more_summary_nodes = summary_nodes.len() as i64 > limit;
     summary_nodes.truncate(limit as usize);
     let has_more = has_more_messages || has_more_summary_nodes;

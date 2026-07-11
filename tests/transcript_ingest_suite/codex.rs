@@ -92,6 +92,120 @@ async fn user_scope_excludes_codex_turns_after_switching_to_registered_project()
     );
 }
 
+#[tokio::test]
+async fn project_scopes_split_codex_turns_when_cwd_changes() {
+    let tmp = TempDir::new().unwrap();
+    let home = tmp.path().join("home");
+    let project_a = tmp.path().join("project-a");
+    let project_b = tmp.path().join("project-b");
+    std::fs::create_dir_all(&project_a).unwrap();
+    std::fs::create_dir_all(&project_b).unwrap();
+    let path = write_codex_rollout(&home, &project_a, "cross-project-session");
+    let mut file = std::fs::OpenOptions::new().append(true).open(path).unwrap();
+    writeln!(
+        file,
+        "{}",
+        serde_json::json!({
+            "timestamp": "2026-01-01T00:00:03.000Z",
+            "type": "turn_context",
+            "payload": {"cwd": project_b.to_string_lossy()}
+        })
+    )
+    .unwrap();
+    writeln!(
+        file,
+        "{}",
+        serde_json::json!({
+            "timestamp": "2026-01-01T00:00:04.000Z",
+            "type": "event_msg",
+            "payload": {"type": "agent_message", "message": "project beta private marker"}
+        })
+    )
+    .unwrap();
+
+    let db_a = GlobalDb::open_at(&tmp.path().join("project-a.db"))
+        .await
+        .unwrap();
+    let db_b = GlobalDb::open_at(&tmp.path().join("project-b.db"))
+        .await
+        .unwrap();
+    let source = CodexSource::with_home(&home);
+    ingest_source(&db_a, &source, &project_a, None).await;
+    ingest_source(&db_b, &source, &project_b, None).await;
+
+    assert!(
+        !db_a
+            .search_session_messages("codex", None, "billing pipeline", 10)
+            .await
+            .is_empty()
+    );
+    assert!(
+        db_a.search_session_messages("codex", None, "project beta private marker", 10)
+            .await
+            .is_empty()
+    );
+    assert!(
+        db_b.search_session_messages("codex", None, "billing pipeline", 10)
+            .await
+            .is_empty()
+    );
+    assert!(
+        !db_b
+            .search_session_messages("codex", None, "project beta private marker", 10)
+            .await
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn user_scope_ingests_codex_turns_after_leaving_a_registered_project() {
+    let tmp = TempDir::new().unwrap();
+    let home = tmp.path().join("home");
+    let registered = tmp.path().join("registered");
+    let general = tmp.path().join("general-chat");
+    std::fs::create_dir_all(&registered).unwrap();
+    std::fs::create_dir_all(&general).unwrap();
+    let path = write_codex_rollout(&home, &registered, "project-to-user-session");
+    let mut file = std::fs::OpenOptions::new().append(true).open(path).unwrap();
+    writeln!(
+        file,
+        "{}",
+        serde_json::json!({
+            "timestamp": "2026-01-01T00:00:03.000Z",
+            "type": "turn_context",
+            "payload": {"cwd": general.to_string_lossy()}
+        })
+    )
+    .unwrap();
+    writeln!(
+        file,
+        "{}",
+        serde_json::json!({
+            "timestamp": "2026-01-01T00:00:04.000Z",
+            "type": "event_msg",
+            "payload": {"type": "agent_message", "message": "general chat private marker"}
+        })
+    )
+    .unwrap();
+    let db = GlobalDb::open_at(&tmp.path().join("user-sessions.db"))
+        .await
+        .unwrap();
+    let source = CodexSource::with_home(&home).for_user_scope(None, vec![registered]);
+
+    ingest_source(&db, &source, tmp.path(), None).await;
+
+    assert!(
+        db.search_session_messages("codex", None, "billing pipeline", 10)
+            .await
+            .is_empty()
+    );
+    assert!(
+        !db.search_session_messages("codex", None, "general chat private marker", 10)
+            .await
+            .is_empty()
+    );
+}
+
 /// Writes a Codex rollout JSONL whose `session_meta.cwd` is `project`. Includes a
 /// `response_item` line that must be ignored (it duplicates the agent_message).
 fn write_codex_rollout(

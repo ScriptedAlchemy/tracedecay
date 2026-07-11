@@ -1,12 +1,16 @@
 //! Codex app-server adapter used to generate auxiliary compaction summaries.
 
+use std::collections::HashSet;
 use std::fmt::Write as _;
 use std::io::{BufRead, BufReader, ErrorKind, Write as IoWrite};
 #[cfg(windows)]
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
-use std::sync::mpsc;
+use std::sync::{Mutex, OnceLock, mpsc};
 use std::time::{Duration, Instant};
+
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
 
 use serde_json::{Value, json};
 
@@ -16,6 +20,43 @@ use crate::sessions::lcm::LcmSummaryRequest;
 pub const CODEX_SUMMARY_CHILD_ENV: &str = "TRACEDECAY_CODEX_SUMMARY_CHILD";
 const CODEX_APP_SERVER_SPAWN_RETRY_WINDOW: Duration = Duration::from_millis(250);
 const CODEX_APP_SERVER_SPAWN_RETRY_SLEEP: Duration = Duration::from_millis(10);
+
+#[derive(Default)]
+struct ActiveCodexChildren {
+    process_groups: HashSet<u32>,
+    shutdown_guards: usize,
+}
+
+static ACTIVE_CODEX_CHILDREN: OnceLock<Mutex<ActiveCodexChildren>> = OnceLock::new();
+
+fn active_codex_children() -> &'static Mutex<ActiveCodexChildren> {
+    ACTIVE_CODEX_CHILDREN.get_or_init(|| Mutex::new(ActiveCodexChildren::default()))
+}
+
+pub(crate) struct CodexAppServerShutdownGuard;
+
+pub(crate) fn begin_codex_app_server_shutdown() -> CodexAppServerShutdownGuard {
+    let process_groups = {
+        let mut active = active_codex_children()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        active.shutdown_guards += 1;
+        active.process_groups.iter().copied().collect::<Vec<_>>()
+    };
+    for process_group in process_groups {
+        terminate_process_tree(process_group);
+    }
+    CodexAppServerShutdownGuard
+}
+
+impl Drop for CodexAppServerShutdownGuard {
+    fn drop(&mut self) {
+        let mut active = active_codex_children()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        active.shutdown_guards = active.shutdown_guards.saturating_sub(1);
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct CodexAppServerSummaryConfig {
@@ -181,9 +222,26 @@ pub fn run_prompt_with_codex_app_server(
 }
 
 fn spawn_codex_app_server(command: &mut Command, codex_bin: &str) -> Result<Child> {
+    #[cfg(unix)]
+    command.process_group(0);
     let deadline = Instant::now() + CODEX_APP_SERVER_SPAWN_RETRY_WINDOW;
     loop {
-        match command.spawn() {
+        let spawn_result = {
+            let mut active = active_codex_children()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if active.shutdown_guards > 0 {
+                return Err(TraceDecayError::Config {
+                    message: "codex app-server shutdown is in progress".to_string(),
+                });
+            }
+            let child = command.spawn();
+            if let Ok(child) = &child {
+                active.process_groups.insert(child.id());
+            }
+            child
+        };
+        match spawn_result {
             Ok(child) => return Ok(child),
             Err(err)
                 if err.kind() == ErrorKind::ExecutableFileBusy && Instant::now() < deadline =>
@@ -241,23 +299,23 @@ struct ChildGuard {
 
 impl Drop for ChildGuard {
     fn drop(&mut self) {
-        kill_child_process_tree(&mut self.child);
+        let process_group = self.child.id();
+        terminate_process_tree(process_group);
         let _ = self.child.kill();
         let _ = self.child.wait();
+        active_codex_children()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .process_groups
+            .remove(&process_group);
     }
 }
 
 #[cfg(windows)]
-fn kill_child_process_tree(child: &mut Child) {
-    // `cmd /C` shims wait for their grandchildren, so a child that already
-    // exited has no live process tree left; skip the taskkill spawn that
-    // would fail anyway.
-    if matches!(child.try_wait(), Ok(Some(_))) {
-        return;
-    }
+fn terminate_process_tree(process_group: u32) {
     let _ = Command::new("taskkill")
         .arg("/PID")
-        .arg(child.id().to_string())
+        .arg(process_group.to_string())
         .arg("/T")
         .arg("/F")
         .stdout(Stdio::null())
@@ -265,8 +323,19 @@ fn kill_child_process_tree(child: &mut Child) {
         .status();
 }
 
-#[cfg(not(windows))]
-fn kill_child_process_tree(_child: &mut Child) {}
+#[cfg(unix)]
+fn terminate_process_tree(process_group: u32) {
+    const SIGKILL: i32 = 9;
+    unsafe extern "C" {
+        fn kill(pid: i32, signal: i32) -> i32;
+    }
+    // The app-server is started as its own process-group leader, so signaling
+    // the negative pid also terminates node/codex descendants.
+    let _ = unsafe { kill(-(process_group as i32), SIGKILL) };
+}
+
+#[cfg(not(any(unix, windows)))]
+fn terminate_process_tree(_process_group: u32) {}
 
 fn send_json(stdin: &mut impl IoWrite, value: &Value) -> Result<()> {
     writeln!(stdin, "{value}")?;
@@ -558,5 +627,57 @@ mod tests {
         assert_eq!(params["ephemeral"], json!(true));
         assert_eq!(params["threadSource"], json!("tracedecay_codex_summary"));
         assert_eq!(params["model"], json!("gpt-5.5-codex"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn shutdown_guard_terminates_active_child_and_rejects_new_spawns() {
+        unsafe extern "C" {
+            fn kill(pid: i32, signal: i32) -> i32;
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let descendant_pid_path = temp.path().join("descendant.pid");
+        let mut command = Command::new("sh");
+        command
+            .args(["-c", "sleep 30 & echo $! > \"$1\"; wait", "sh"])
+            .arg(&descendant_pid_path);
+        let child = spawn_codex_app_server(&mut command, "sh").expect("spawn child");
+        let mut child = ChildGuard { child };
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while !descendant_pid_path.is_file() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let descendant_pid: i32 = std::fs::read_to_string(&descendant_pid_path)
+            .expect("descendant pid file")
+            .trim()
+            .parse()
+            .expect("descendant pid");
+
+        let shutdown = begin_codex_app_server_shutdown();
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while !matches!(child.child.try_wait(), Ok(Some(_))) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            matches!(child.child.try_wait(), Ok(Some(_))),
+            "active child should exit during shutdown"
+        );
+        let descendant_deadline = Instant::now() + Duration::from_secs(1);
+        while unsafe { kill(descendant_pid, 0) } == 0 && Instant::now() < descendant_deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_ne!(
+            unsafe { kill(descendant_pid, 0) },
+            0,
+            "app-server descendant should exit during shutdown"
+        );
+
+        let mut blocked = Command::new("sh");
+        blocked.args(["-c", "exit 0"]);
+        let err = spawn_codex_app_server(&mut blocked, "sh")
+            .expect_err("new app-server spawns must fail during shutdown");
+        assert!(err.to_string().contains("shutdown is in progress"));
+
+        drop(shutdown);
     }
 }

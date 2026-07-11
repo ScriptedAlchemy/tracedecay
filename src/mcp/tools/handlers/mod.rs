@@ -308,7 +308,7 @@ pub async fn handle_tool_call_with_registry_and_implicit_project(
         }
     }
     if let Some(storage_scope) = args.get("storage_scope").and_then(Value::as_str) {
-        if !tool_name.starts_with("tracedecay_lcm_") {
+        if !tool_name.starts_with("tracedecay_lcm_") && tool_name != "tracedecay_message_search" {
             return Err(TraceDecayError::Config {
                 message: format!("unknown parameter `storage_scope` for `{tool_name}`"),
             });

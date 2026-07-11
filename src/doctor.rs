@@ -454,7 +454,9 @@ async fn check_stale_stores(dc: &mut DoctorCounters) {
 
     if !std::io::stdin().is_terminal() {
         dc.warnings += 1;
-        dc.info("    Re-run `tracedecay doctor` interactively to purge them.");
+        dc.info(
+            "    Run `tracedecay migrate registry-gc --json` to preview, then add `--apply` to purge metadata only.",
+        );
         return;
     }
 

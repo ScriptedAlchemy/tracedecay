@@ -12432,6 +12432,61 @@ async fn lcm_status_cli_bridge_accepts_json_args() {
     );
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn user_message_search_cli_bridge_accepts_storage_scope() {
+    let home_dir = test_temp_dir();
+    let home = home_dir.path().join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    let _daemon = common::spawn_tracedecay_daemon(&home);
+    let outside_cwd = test_temp_dir();
+
+    let mut ingest = std::process::Command::new(env!("CARGO_BIN_EXE_tracedecay"));
+    common::apply_tracedecay_home_env(&mut ingest, &home);
+    let ingest_output = ingest
+        .current_dir(outside_cwd.path())
+        .args([
+            "tool",
+            "tracedecay_lcm_preflight",
+            "--json",
+            "--args",
+            r#"{"storage_scope":"user","provider":"codex","session_id":"projectless-codex","messages":[{"id":"projectless-message","role":"user","content":"Projectless apricot preference"}],"transcript_projection":true,"format":"json"}"#,
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        ingest_output.status.success(),
+        "user ingest failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&ingest_output.stdout),
+        String::from_utf8_lossy(&ingest_output.stderr)
+    );
+
+    let mut search = std::process::Command::new(env!("CARGO_BIN_EXE_tracedecay"));
+    common::apply_tracedecay_home_env(&mut search, &home);
+    let search_output = search
+        .current_dir(outside_cwd.path())
+        .args([
+            "tool",
+            "tracedecay_message_search",
+            "--json",
+            "--args",
+            r#"{"storage_scope":"user","provider":"codex","query":"apricot","catch_up":false,"format":"json"}"#,
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        search_output.status.success(),
+        "user search failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&search_output.stdout),
+        String::from_utf8_lossy(&search_output.stderr)
+    );
+    let envelope: Value = serde_json::from_slice(&search_output.stdout).unwrap();
+    let payload = extract_first_json_content(&envelope);
+    assert_eq!(payload["status"], "ok");
+    assert_eq!(payload["count"], 1);
+    assert_eq!(payload["results"][0]["session"]["project_key"], "user");
+}
+
 #[test]
 fn memory_tool_definitions_include_hermes_payload_fields() {
     let tools = get_tool_definitions();
@@ -12942,6 +12997,10 @@ fn message_search_provider_schema_matches_ingested_providers() {
     assert_eq!(
         message_search.input_schema["properties"]["scope"]["enum"],
         serde_json::json!(["all", "parents_only", "subagents_only"])
+    );
+    assert_eq!(
+        message_search.input_schema["properties"]["storage_scope"]["enum"],
+        serde_json::json!(["project", "user"])
     );
     assert!(
         message_search.input_schema["properties"]
@@ -14713,14 +14772,11 @@ async fn mcp_server_owns_watcher_and_refreshes_token_map_on_change() {
 
     let (cg, _env) = init_test_project(project).await;
     cg.sync().await.unwrap();
+    let mut config = tracedecay::config::load_config(project).expect("load test config");
+    config.sync.session_start_sync = false;
+    tracedecay::config::save_config(project, &config).expect("disable unrelated catch-up");
 
     let server = tracedecay::mcp::McpServer::new(cg.into_inner(), None).await;
-    assert!(
-        server
-            .wait_for_startup_catch_up(std::time::Duration::from_secs(30))
-            .await,
-        "startup catch-up sync should finish before mutating the project"
-    );
 
     let initial_count = server.file_token_map_snapshot().len();
 
@@ -15487,7 +15543,6 @@ async fn wait_for_startup_catch_up_waits_for_transcript_ingest_flag() {
     cg.index_all().await.unwrap();
 
     let server = tracedecay::mcp::McpServer::new(cg.into_inner(), None).await;
-    server.run_startup_catch_up_sync().await;
 
     let completed = server
         .wait_for_startup_catch_up(std::time::Duration::from_secs(30))

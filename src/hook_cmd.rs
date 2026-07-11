@@ -78,6 +78,7 @@ pub(crate) fn hook_input(command: &Commands) -> Option<HookInput> {
         | Commands::HookCodexSubagentStart
         | Commands::HookCodexPostToolUse
         | Commands::HookCodexPostCompact
+        | Commands::HookCodexStop
         | Commands::HookHermesTerminalReceipt
         | Commands::HookUserSessionReview => Some(HookInput::Stdin),
         _ => None,
@@ -161,6 +162,9 @@ pub(crate) async fn handle_hook_command(command: Commands) -> tracedecay::errors
         Commands::HookCodexPostCompact => {
             exit_if_nonzero(tracedecay::hooks::hook_codex_post_compact().await);
         }
+        Commands::HookCodexStop => {
+            exit_if_nonzero(tracedecay::hooks::hook_codex_stop().await);
+        }
         Commands::HookHermesTerminalReceipt => {
             exit_if_nonzero(tracedecay::hooks::hook_hermes_terminal_receipt().await);
         }
@@ -216,6 +220,7 @@ mod tests {
             (Commands::HookCodexSubagentStart, HookInput::Stdin),
             (Commands::HookCodexPostToolUse, HookInput::Stdin),
             (Commands::HookCodexPostCompact, HookInput::Stdin),
+            (Commands::HookCodexStop, HookInput::Stdin),
             (Commands::HookHermesTerminalReceipt, HookInput::Stdin),
             (Commands::HookUserSessionReview, HookInput::Stdin),
         ]
@@ -224,7 +229,7 @@ mod tests {
     #[test]
     fn all_hook_commands_have_explicit_input_semantics() {
         let hooks = hook_commands();
-        assert_eq!(hooks.len(), 26);
+        assert_eq!(hooks.len(), 27);
         assert_eq!(
             hooks
                 .iter()
@@ -237,7 +242,7 @@ mod tests {
                 .iter()
                 .filter(|(_, input)| *input == HookInput::Stdin)
                 .count(),
-            25
+            26
         );
         for (command, expected) in hooks {
             assert_eq!(hook_input(&command), Some(expected));

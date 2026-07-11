@@ -982,14 +982,17 @@ pub fn lock_user_data_dir_test_env() -> std::sync::MutexGuard<'static, ()> {
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
-/// Pins [`USER_DATA_DIR_ENV`] to an isolated temp profile while holding
-/// [`USER_DATA_DIR_TEST_LOCK`], so parallel lib tests cannot race profile
-/// resolution during `TraceDecay::init` / indexing.
+/// Pins [`USER_DATA_DIR_ENV`] and agent home discovery to an isolated temp
+/// profile while holding [`USER_DATA_DIR_TEST_LOCK`], so parallel lib tests
+/// cannot race profile resolution or scan live host transcripts during
+/// `TraceDecay::init` / indexing.
 #[cfg(test)]
 pub struct PinnedUserDataDir {
     _lock: std::sync::MutexGuard<'static, ()>,
     _root: tempfile::TempDir,
     previous: Option<OsString>,
+    previous_home: Option<OsString>,
+    previous_userprofile: Option<OsString>,
 }
 
 #[cfg(test)]
@@ -1002,13 +1005,19 @@ impl PinnedUserDataDir {
         fs::create_dir_all(&profile)
             .unwrap_or_else(|err| panic!("failed to create isolated profile root: {err}"));
         let previous = std::env::var_os(USER_DATA_DIR_ENV);
+        let previous_home = std::env::var_os("HOME");
+        let previous_userprofile = std::env::var_os("USERPROFILE");
         unsafe {
             std::env::set_var(USER_DATA_DIR_ENV, &profile);
+            std::env::set_var("HOME", root.path());
+            std::env::set_var("USERPROFILE", root.path());
         }
         Self {
             _lock: lock,
             _root: root,
             previous,
+            previous_home,
+            previous_userprofile,
         }
     }
 }
@@ -1027,6 +1036,14 @@ impl Drop for PinnedUserDataDir {
             match self.previous.take() {
                 Some(previous) => std::env::set_var(USER_DATA_DIR_ENV, previous),
                 None => std::env::remove_var(USER_DATA_DIR_ENV),
+            }
+            match self.previous_home.take() {
+                Some(previous) => std::env::set_var("HOME", previous),
+                None => std::env::remove_var("HOME"),
+            }
+            match self.previous_userprofile.take() {
+                Some(previous) => std::env::set_var("USERPROFILE", previous),
+                None => std::env::remove_var("USERPROFILE"),
             }
         }
     }

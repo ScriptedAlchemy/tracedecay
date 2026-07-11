@@ -96,8 +96,11 @@ pub async fn hook_codex_user_prompt_submit() -> i32 {
         .ok()
         .as_ref()
         .and_then(event_session_id);
-    if root.is_none() && ingest_user_codex_session(session_id.clone()).await {
-        super::schedule_user_session_review("codex", session_id.as_deref());
+    if root.is_none() {
+        // Keep recall current, but wait for the native Stop receipt before
+        // reflection so one completed turn schedules one review rather than a
+        // prompt-only review followed immediately by a final-turn review.
+        let _ = ingest_user_codex_session(session_id).await;
     }
     let context = Box::pin(codex_user_prompt_submit_context_for_event(&event)).await;
     println!(
@@ -303,6 +306,42 @@ pub async fn hook_codex_post_compact() -> i32 {
     }
     println!("{}", serde_json::json!({}));
     0
+}
+
+const CODEX_STOP_INGEST_BUDGET: Duration = Duration::from_secs(3);
+
+/// Codex `Stop` hook handler.
+///
+/// Codex emits this after the assistant finishes a turn. Projectless sessions
+/// need this terminal receipt because the prompt hook runs before the final
+/// assistant message has been appended to the rollout.
+pub async fn hook_codex_stop() -> i32 {
+    let event = read_hook_event!();
+    let parsed = serde_json::from_str::<Value>(&event).unwrap_or(Value::Null);
+    let root = codex_project_root_from_parsed_event_with_identity(&parsed).await;
+    let _hook_telemetry = record_hook_invoked(root.as_deref(), HintAgent::Codex, "Stop", &event);
+    let session_id = event_session_id(&parsed);
+    let ingested = tokio::time::timeout(
+        CODEX_STOP_INGEST_BUDGET,
+        finalize_codex_user_session(root.as_deref(), session_id.clone()),
+    )
+    .await
+    .unwrap_or(false);
+    if ingested {
+        super::schedule_user_session_review("codex", session_id.as_deref());
+    }
+    println!("{}", serde_json::json!({}));
+    0
+}
+
+async fn finalize_codex_user_session(
+    project_root: Option<&Path>,
+    session_id: Option<String>,
+) -> bool {
+    if project_root.is_some() {
+        return false;
+    }
+    ingest_user_codex_session(session_id).await
 }
 
 /// Builds a Codex hook stdout payload with `additionalContext`.
@@ -926,6 +965,72 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn codex_stop_ingests_final_user_turn_once() {
+        let _lock = crate::hooks::lock_test_env();
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("home");
+        let profile = temp.path().join("profile");
+        let general = temp.path().join("general-chat");
+        std::fs::create_dir_all(&general).unwrap();
+        let _home_env = EnvGuard::set_path("HOME", &home);
+        let _profile_env = EnvGuard::set_path(USER_DATA_DIR_ENV, &profile);
+        let rollout_dir = home.join(".codex/sessions/2026/01/01");
+        std::fs::create_dir_all(&rollout_dir).unwrap();
+        let rollout = rollout_dir.join("rollout-2026-01-01T00-00-00-final-turn.jsonl");
+        let records = [
+            serde_json::json!({
+                "timestamp": "2026-01-01T00:00:00.000Z",
+                "type": "session_meta",
+                "payload": {
+                    "id": "final-turn",
+                    "cwd": general.to_string_lossy(),
+                    "model": "gpt-5.5"
+                }
+            }),
+            serde_json::json!({
+                "timestamp": "2026-01-01T00:00:01.000Z",
+                "type": "event_msg",
+                "payload": {"type": "user_message", "message": "one turn prompt"}
+            }),
+            serde_json::json!({
+                "timestamp": "2026-01-01T00:00:02.000Z",
+                "type": "event_msg",
+                "payload": {"type": "agent_message", "message": "final assistant evidence"}
+            }),
+        ];
+        std::fs::write(
+            rollout,
+            records
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join("\n")
+                + "\n",
+        )
+        .unwrap();
+
+        assert!(finalize_codex_user_session(None, Some("final-turn".to_string())).await);
+        assert!(
+            !finalize_codex_user_session(None, Some("final-turn".to_string())).await,
+            "a repeated Stop receipt must not schedule another review"
+        );
+        assert!(
+            !finalize_codex_user_session(Some(&general), Some("final-turn".to_string())).await,
+            "project-scoped Stop receipts must never write the user session store"
+        );
+
+        let db = crate::sessions::open_user_session_db(&profile)
+            .await
+            .expect("user session db should exist");
+        let hits = db
+            .search_session_messages("codex", Some("user"), "final assistant evidence", 10)
+            .await;
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].session.session_id, "final-turn");
     }
 
     #[test]

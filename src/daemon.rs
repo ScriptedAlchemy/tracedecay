@@ -43,6 +43,7 @@ const HOOK_EVENT_NOTIFY_TIMEOUT: Duration = Duration::from_millis(750);
 const DAEMON_SHUTDOWN_DEADLINE: Duration = Duration::from_secs(45);
 #[cfg(unix)]
 const DAEMON_CLIENT_DRAIN_DEADLINE: Duration = Duration::from_secs(15);
+const DAEMON_TASK_ABORT_DEADLINE: Duration = Duration::from_secs(2);
 
 #[derive(Clone, Default)]
 pub(crate) struct DaemonLifecycle {
@@ -1534,22 +1535,40 @@ async fn run_foreground_unix(socket_path: PathBuf) -> Result<()> {
         client_tasks.spawn(async move { Box::pin(serve_socket_client(stream, engine)).await });
     }
     engine.lifecycle.begin_draining();
-    log_daemon_event(
-        "daemon_shutdown",
-        &[("socket", socket_path.display().to_string())],
-    );
     // Stop accepting and unlink the socket before draining so clients that
     // connect during shutdown get NotFound/ConnectionRefused (which they retry
     // via `connect_with_restart_grace`) instead of a queued connection that
     // will never be served.
     drop(listener);
     let _ = std::fs::remove_file(&socket_path);
-    let clients_drained = drain_client_tasks(&mut client_tasks, DAEMON_CLIENT_DRAIN_DEADLINE).await;
-    engine.lifecycle.wait_for_idle().await;
+    // Keep auxiliary process creation blocked until every scheduler and client
+    // task is drained or abandoned. A killed app-server call may retry before
+    // unwinding, so a shorter guard leaves a shutdown-time respawn race.
+    let _codex_shutdown = crate::sessions::codex_app_server::begin_codex_app_server_shutdown();
+    // Stop automation before announcing shutdown or waiting for clients.
+    // Scheduler tasks may be inside a synchronous auxiliary-agent call, so
+    // shutdown also terminates their tracked process trees before joining.
+    engine.shutdown_automation_schedulers().await;
+    log_daemon_event(
+        "daemon_shutdown",
+        &[("socket", socket_path.display().to_string())],
+    );
+    let in_flight_drained = timeout(
+        DAEMON_CLIENT_DRAIN_DEADLINE,
+        engine.lifecycle.wait_for_idle(),
+    )
+    .await
+    .is_ok();
+    // Once admitted requests are finished (or their bound elapsed), every
+    // remaining client task is an idle socket reader or already-cancelled
+    // request wrapper. Abort those immediately instead of making shutdown wait
+    // for clients to close persistent connections themselves.
+    client_tasks.abort_all();
+    let clients_drained = drain_client_tasks(&mut client_tasks, DAEMON_TASK_ABORT_DEADLINE).await;
     // Client setup and in-flight requests may create schedulers or project
     // servers. Sweep owned background tasks only after all client work drains.
     engine.shutdown_background_tasks().await;
-    if !clients_drained {
+    if !in_flight_drained || !clients_drained {
         log_daemon_event(
             "daemon_shutdown",
             &[
@@ -1618,9 +1637,12 @@ async fn drain_client_tasks(clients: &mut JoinSet<Result<()>>, deadline: Duratio
     }
 
     clients.abort_all();
-    while let Some(completed) = clients.join_next().await {
-        log_client_task_result(completed);
-    }
+    let _ = timeout(DAEMON_TASK_ABORT_DEADLINE, async {
+        while let Some(completed) = clients.join_next().await {
+            log_client_task_result(completed);
+        }
+    })
+    .await;
     false
 }
 
@@ -1905,6 +1927,9 @@ impl DaemonEngine {
         project_path: PathBuf,
         handshake: DaemonHandshake,
     ) {
+        if !self.lifecycle.accepting() {
+            return;
+        }
         {
             let schedulers = self.automation_schedulers.lock().await;
             if schedulers.contains_key(&key) {
@@ -1976,8 +2001,11 @@ impl DaemonEngine {
         project_path: PathBuf,
         handshake: DaemonHandshake,
     ) {
+        if !self.lifecycle.accepting() {
+            return;
+        }
         let mut schedulers = self.automation_schedulers.lock().await;
-        if schedulers.contains_key(&key) {
+        if !self.lifecycle.accepting() || schedulers.contains_key(&key) {
             return;
         }
         let wake = Arc::new(tokio::sync::Notify::new());
@@ -1994,20 +2022,30 @@ impl DaemonEngine {
     }
 
     async fn shutdown_background_tasks(&self) {
-        let scheduler_handles: Vec<JoinHandle<()>> = {
-            let mut schedulers = self.automation_schedulers.lock().await;
-            schedulers.drain().map(|(_, handle)| handle.task).collect()
-        };
-        for handle in scheduler_handles {
-            handle.abort();
-            let _ = handle.await;
-        }
+        self.shutdown_automation_schedulers().await;
 
         self.git_watcher.shutdown().await;
         if let Some(handle) = self.pr_autotrack_task.lock().await.take() {
             handle.abort();
             let _ = handle.await;
         }
+    }
+
+    async fn shutdown_automation_schedulers(&self) {
+        let scheduler_handles: Vec<JoinHandle<()>> = {
+            let mut schedulers = self.automation_schedulers.lock().await;
+            schedulers.drain().map(|(_, handle)| handle.task).collect()
+        };
+        let _child_shutdown = crate::sessions::codex_app_server::begin_codex_app_server_shutdown();
+        for handle in &scheduler_handles {
+            handle.abort();
+        }
+        let _ = timeout(DAEMON_TASK_ABORT_DEADLINE, async {
+            for handle in scheduler_handles {
+                let _ = handle.await;
+            }
+        })
+        .await;
     }
 
     async fn shutdown_servers(&self) {

@@ -494,42 +494,84 @@ pub(crate) async fn handle_migrate_action(action: MigrateAction) -> tracedecay::
                 &prefixes,
                 tracedecay::migrate::registry::StaleRootScope::CanonicalRootMissing,
             );
-            let deleted = if apply {
+            let profile_root = tracedecay::config::user_data_dir();
+            let mut stale_storage_projects = Vec::new();
+            for project_path in global_db.list_project_paths().await {
+                let path = Path::new(&project_path);
+                if !prefixes.is_empty() && !prefixes.iter().any(|prefix| path.starts_with(prefix)) {
+                    continue;
+                }
+                let location = global::classify_project_storage_with_registry(
+                    path,
+                    Some(&global_db),
+                    profile_root.as_deref(),
+                )
+                .await;
+                if location.status == global::ProjectStorageStatus::Stale {
+                    stale_storage_projects.push(project_path);
+                }
+            }
+            let (deleted_code_projects, deleted_storage_projects) = if apply {
                 let project_ids: Vec<String> = stale
                     .iter()
                     .map(|project| project.project_id.clone())
                     .collect();
-                global_db.delete_code_projects(&project_ids).await
+                (
+                    global_db.delete_code_projects(&project_ids).await,
+                    global_db.delete_projects(&stale_storage_projects).await,
+                )
             } else {
-                0
+                (0, 0)
             };
+            let candidate_paths = stale
+                .iter()
+                .map(|project| {
+                    tracedecay::global_db::GlobalDb::canonical_project_key(Path::new(
+                        &project.canonical_root,
+                    ))
+                })
+                .chain(stale_storage_projects.iter().map(|path| {
+                    tracedecay::global_db::GlobalDb::canonical_project_key(Path::new(path))
+                }))
+                .collect::<std::collections::BTreeSet<_>>();
+            let candidate_count = candidate_paths.len();
+            let metadata_candidate_count = stale.len() + stale_storage_projects.len();
+            let deleted_count = deleted_code_projects + deleted_storage_projects;
             if json {
                 println!(
                     "{}",
                     serde_json::to_string_pretty(&serde_json::json!({
                         "apply": apply,
                         "prefix": prefix,
-                        "candidate_count": stale.len(),
-                        "deleted_count": deleted,
+                        "candidate_count": candidate_count,
+                        "metadata_candidate_count": metadata_candidate_count,
+                        "code_project_candidate_count": stale.len(),
+                        "storage_project_candidate_count": stale_storage_projects.len(),
+                        "deleted_count": deleted_count,
+                        "deleted_code_project_count": deleted_code_projects,
+                        "deleted_storage_project_count": deleted_storage_projects,
                         "candidates": stale,
+                        "storage_project_candidates": stale_storage_projects,
                     }))?
                 );
             } else {
                 println!(
                     "registry-gc: {} stale project(s){}",
-                    stale.len(),
+                    candidate_count,
                     if apply { " selected" } else { " found" }
                 );
                 if apply {
-                    println!("deleted: {deleted}");
+                    println!(
+                        "metadata rows deleted: {deleted_count} ({deleted_code_projects} identity, {deleted_storage_projects} storage)"
+                    );
                 } else {
                     println!("dry run: re-run with --apply to delete registry metadata");
                 }
-                for project in stale.iter().take(20) {
-                    println!("{} {}", project.project_id, project.canonical_root);
+                for project_path in candidate_paths.iter().take(20) {
+                    println!("{project_path}");
                 }
-                if stale.len() > 20 {
-                    println!("... {} more", stale.len() - 20);
+                if candidate_count > 20 {
+                    println!("... {} more", candidate_count - 20);
                 }
             }
         }

@@ -43,7 +43,7 @@
 //! double-count the conversation. Goal context blocks are cataloged as compact
 //! `goal_context` rows because real rollouts often record them only in
 //! `response_item` form. This append-only JSONL is read with the shared
-//! byte-offset machinery and scoped to the current project by `session_meta.cwd`.
+//! byte-offset machinery and scoped per turn by the latest Codex cwd context.
 
 mod context;
 mod events;
@@ -158,22 +158,15 @@ impl TranscriptSource for CodexSource {
         project_root: &Path,
         max_new_bytes: Option<u64>,
     ) -> Option<ParsedTranscript> {
-        // `session_meta` (line 1) is authoritative for cwd + session id; without
-        // it we cannot safely attribute the rollout to a project, so skip.
+        // `session_meta` (line 1) is authoritative for session identity and the
+        // initial cwd. Later context records can move one rollout between scopes.
         let meta = session_meta(path)?;
-        if let Some(scope) = &self.user_scope {
-            if scope
-                .session_id
-                .as_deref()
-                .is_some_and(|session_id| session_id != meta.session_id)
-                || scope
-                    .registered_roots
-                    .iter()
-                    .any(|root| path_belongs_to_project(&meta.cwd, root))
-            {
-                return None;
-            }
-        } else if !path_belongs_to_project(&meta.cwd, project_root) {
+        if self
+            .user_scope
+            .as_ref()
+            .and_then(|scope| scope.session_id.as_deref())
+            .is_some_and(|session_id| session_id != meta.session_id)
+        {
             return None;
         }
 
@@ -192,14 +185,50 @@ impl TranscriptSource for CodexSource {
         } else {
             CodexContextState::from_meta(&meta)
         };
+        let mut last_in_scope_cwd = None;
+        let mut last_in_scope_git = None;
         for line in &new.lines {
+            let is_context_record = context_state.observe_context_record(&line.value, path, &meta);
+            let in_scope = self.user_scope.as_ref().map_or_else(
+                || {
+                    context_state
+                        .cwd
+                        .as_deref()
+                        .is_some_and(|cwd| path_belongs_to_project(cwd, project_root))
+                },
+                |scope| {
+                    context_state.cwd.as_deref().is_none_or(|cwd| {
+                        !scope
+                            .registered_roots
+                            .iter()
+                            .any(|root| path_belongs_to_project(cwd, root))
+                    })
+                },
+            );
+            if !in_scope {
+                if compacted_summary_from_line(
+                    &line.value,
+                    &meta,
+                    context_state.model.as_deref(),
+                    path,
+                    line.offset,
+                    context_state.compaction_depth + 1,
+                )
+                .is_some()
+                {
+                    context_state.compaction_depth += 1;
+                }
+                continue;
+            }
+            last_in_scope_cwd.clone_from(&context_state.cwd);
+            last_in_scope_git.clone_from(&context_state.git);
             // Non-consuming: harvest session-level policy/effort/rate-limit
             // summary before the line is routed to its owning handler below.
             structured.observe_summary(&line.value);
-            if turn_usage.observe(&line.value) {
+            if is_context_record {
                 continue;
             }
-            if context_state.observe_context_record(&line.value, path, &meta) {
+            if turn_usage.observe(&line.value) {
                 continue;
             }
             if let Some(rows) = structured.event_from_line(
@@ -332,14 +361,10 @@ impl TranscriptSource for CodexSource {
         for mut message in structured.flush_pending(&meta, path) {
             context::annotate_message(
                 &mut message,
-                context_state.cwd.as_deref(),
-                context_state.git.as_ref(),
+                last_in_scope_cwd.as_deref(),
+                last_in_scope_git.as_ref(),
             );
             messages.push(message);
-        }
-
-        if let Some(scope) = &self.user_scope {
-            messages.retain(|message| user_scope_message_allowed(message, &scope.registered_roots));
         }
 
         let project = self.user_scope.as_ref().map_or_else(
@@ -370,27 +395,6 @@ impl TranscriptSource for CodexSource {
             new_cursor: new.new_cursor,
         })
     }
-}
-
-fn user_scope_message_allowed(
-    message: &SessionMessageRecord,
-    registered_roots: &[PathBuf],
-) -> bool {
-    let turn_cwd = message
-        .metadata_json
-        .as_deref()
-        .and_then(|metadata| serde_json::from_str::<Value>(metadata).ok())
-        .and_then(|metadata| {
-            metadata
-                .get("codex_turn_cwd")
-                .and_then(Value::as_str)
-                .map(PathBuf::from)
-        });
-    turn_cwd.is_none_or(|cwd| {
-        !registered_roots
-            .iter()
-            .any(|root| path_belongs_to_project(&cwd, root))
-    })
 }
 
 /// Read the leading `session_meta` line of a rollout for cwd/session-id/model.
