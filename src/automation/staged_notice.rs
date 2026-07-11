@@ -232,6 +232,8 @@ mod tests {
                 created_at: 1,
                 updated_at: 1,
                 approved_at: None,
+                absorbed_into: None,
+                archived_reason: None,
                 provenance: ManagedSkillProvenance {
                     source: ManagedSkillSource::AutomationRun,
                     actor: "test".to_string(),
