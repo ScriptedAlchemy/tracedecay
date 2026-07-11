@@ -938,6 +938,10 @@ When an individual eligible field or complete encoded response exceeds a transpo
 
 MCP renders the anchor as a `resource_link` to a generated `tracedecay://v2/retrieval/{anchor_id}` resource template plus the same ID in `structuredContent`. `resources/read` reauthorizes and resolves the canonical record through the application layer. V1 `rh_*` response handles are accepted only by the frozen differential harness until cutoff and are absent from V2 definitions, prompts, resources, hints, and live dispatch.
 
+The frozen V1 harness includes PR #441's cross-project dereference failure: resolving a handle must preserve the original canonical resolved scope, explicit `project_path`/selector, TraceDecay profile, principal/grant, privacy domain, and source binding through the follow-up call. Reinterpreting the opaque handle under the active project or a host profile is a typed failure, never a fallback. V2 retrieval anchors make those bindings part of the record and reauthorize them; they do not inherit current CWD.
+
+`memory_scope=profile` or equivalent V1 CLI/MCP spelling is migration syntax only. Current bindings lower to the canonical `DeclaredScope::Profile`; active-project reads use `preset.knowledge.active-project-with-profile`. Projectless CLI/API calls authorize against the user-global TraceDecay profile without initializing a project or opening a separate database.
+
 If storage is unavailable, return a typed `response_budget_exceeded` problem with a narrower request/cursor recommendation. Never emit `compacted_no_handle`, an invalid JSON prefix, or a false complete result.
 
 ### 13.4 Current regression cases
@@ -947,6 +951,7 @@ Fixture-lock:
 - generic Markdown and JSON exceeding the current 15,000-character boundary;
 - missing project root/handle cache;
 - expired, missing, wrong-project, wrong-profile, wrong-access, and corrupt handles;
+- selector-preserving cross-project auto-dereference versus active-project mismatch (FM-140), including identical behavior across CLI/MCP/API;
 - LCM preflight/expand-query compaction tiers;
 - multi-block MCP responses so notices do not hide payload/metrics;
 - Unicode boundaries and Markdown/code-fence preservation;

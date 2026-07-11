@@ -462,9 +462,19 @@ pub struct ScopeResolutionSnapshot {
     pub watermark: VectorWatermark,
 }
 
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+pub enum InteractionIntentClassV1 {
+    CodeProjectWork,
+    GeneralConversation,
+    GreetingOrAcknowledgement,
+    Ambiguous,
+    Unavailable,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct HintEvaluationInput {
     pub provider_event: NormalizedProviderEvent,
+    pub interaction_intent: InteractionIntentClassV1,
     pub host_capabilities: HostCapabilitySnapshotV1,
     pub session: SessionId,
     pub scope: ScopeSelectorV2,
@@ -499,6 +509,8 @@ When a hint payload proposes actions rather than plain guidance, those actions a
 
 Scope is preserved end-to-end in evaluation/input/output digests. A tool/skill/dependency hint may narrow only by returning an explicit proposed `ScopeSelectorV2` and showing the change; ignored dependency hints cannot erase the caller's multi-repo/worktree selection. Ambiguous/stale/polluted registry resolution suppresses confident routing/correlation/coordination and exposes the candidate/action needed.
 
+`InteractionIntentClassV1` is one versioned policy classification from sanitized prompt/event facts; host adapters may supply documented event fields and bounded lexical/path evidence but cannot own a final regex or eligibility fork. `GreetingOrAcknowledgement` and `GeneralConversation` suppress code/tool nudges as useful silence. `Ambiguous`/`Unavailable` also favor silence unless another high-confidence material boundary independently qualifies. The evaluation records classifier/bundle version, evidence classes, eligible denominator, suppression reason, and host rendering outcome. The FM-138 corpus includes greeting, thanks, general chat, code/file/PR work, misleading code words, multilingual cases, and host parity; no adapter may make its own first-turn decision.
+
 `available_tools` and `EvaluationEnvironment.tool_catalog` must carry the same pinned plan-01 `CatalogSnapshotRefV1`; the catalog snapshot itself is loaded once through `BundleArchivePort`-adjacent reads at evaluation start, so no full-catalog canonical-CBOR digest is computed inside the evaluation stage budget.
 
 Host availability is never a Boolean or an unversioned host name. `HostCapabilitySnapshotV1` pins an explicit `Target` pre-install subject or `Installed` runtime subject, its independent snapshot digest, observation/freshness interval, and a typed disposition for each evaluated capability: `Supported`, `VersionGated`, `Absent`, `Undocumented`, `PolicyDisabled`, `Stale`, or `TrustPending`. Installation planning may inspect a `Target` subject; executable routing requires `Installed`, a matching active runtime handshake, supported/fresh capability, and current principal grants. Every other disposition or subject mismatch produces a distinct checked rejection/fallback reason, survives the input and decision digests, and is replayed against the pinned snapshot rather than current host state. Policy never probes the host itself.
@@ -515,6 +527,7 @@ pub struct RequestFacts {
     pub host_capabilities: HostCapabilitySnapshotV1,
     pub hook_point: HookPoint,
     pub prompt_origin: Option<PromptOrigin>,
+    pub interaction_intent: InteractionIntentClassV1,
     pub session: SessionId,
     pub agent: Option<AgentId>,
     pub scope: ScopeSelectorV2,

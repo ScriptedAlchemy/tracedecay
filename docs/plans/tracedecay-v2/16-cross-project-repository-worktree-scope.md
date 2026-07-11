@@ -25,6 +25,8 @@ An agent or person must be able to ask one question about one named repository, 
 
 “Current project” remains a convenient default. It is never an invisible constraint and never overrides an explicit repository, worktree, path, PR, branch, session, or agent reference in the request.
 
+Host profile is not data scope. `HostProfileId` identifies an installation/configuration target; it never selects a TraceDecay `ProfileId`, Brain, database root, fact partition, or query boundary. All named Hermes profiles bind the same user-global TraceDecay profile and stores used by Codex, Claude, and Cursor. Each provider invocation supplies an immutable logical workspace/root set from that session; process CWD, first/last workspace, cached project, `HERMES_HOME`, and host-profile directory are provenance only. A projectless invocation resolves explicitly to profile/zero-project semantics rather than manufacturing a project.
+
 ## 2. Historical evidence and exact anchors
 
 The following sessions are regression fixtures, not anecdotes:

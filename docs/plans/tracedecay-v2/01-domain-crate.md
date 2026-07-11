@@ -362,6 +362,7 @@ pub struct HostBundleComponentRefV1 {
     pub component_digest: ManifestDigest,
 }
 pub struct HostIntegrationRuntimeRefV1 {
+    pub tracedecay_profile_id: ProfileId,
     pub host_profile: HostProfileRef,
     pub host_instance: HostInstanceId,
     pub surface: HostSurfaceKindV1,
@@ -1024,6 +1025,10 @@ pub struct PayloadRef {
     pub sanitization_receipt: SanitizationReceiptId,
 }
 ```
+
+`DeclaredScope::Profile` is durable user-wide ownership inside one TraceDecay `ProfileId`; `ZeroProject` is evidence/activity from a session with no canonical project relation. They share the activity shard but not retrieval eligibility: zero-project evidence is never silently promoted into profile memory or injected into every project. A policy-owned curation decision may create a new profile-scoped fact only with source anchors, classification, and a supersession/relation receipt. Active-project recall composes explicit `Profile` and exact `Project` roots through `ScopeSelectorV2`, preserving both owner scopes and per-shard coverage; it never copies rows or invents a memory-specific scope language.
+
+`HostProfileId` identifies a host application's configuration/runtime target, not a TraceDecay data profile. Every `HostIntegrationRuntimeRefV1` therefore binds both `tracedecay_profile_id` and `host_profile`; many Hermes/Codex/Claude/Cursor host profiles may bind the same TraceDecay profile, binary, daemon, and stores. Neither ID can be derived from the other, from `HERMES_HOME`, or from a filesystem path.
 
 ### One privacy and taint contract
 

@@ -53,6 +53,8 @@ Plan [`24-canonical-task-plan-graph-and-multi-agent-executor.md`](24-canonical-t
 - No implicit retry that can inject the same hint twice. Retry requires an idempotent invocation and delivery receipt.
 - No assumption that cwd identifies one project or that a session has a primary project.
 - No current-project fallback: hooks carry domain `ScopeSelectorV2` plus zero-to-many workspace candidates. Missing/ambiguous/stale scope becomes explicit coverage or deliberate `AllAuthorized`, never first CWD/base checkout/current branch graph.
+- No process-global workspace cache: every invocation carries the provider session's logical workspace/root set, host session identity, and explicit projectless state. A long-lived Hermes/Codex/Claude/Cursor process may interleave sessions in different repositories without one session's CWD or cached project affecting another.
+- No adapter-local greeting/code regex decides whether TraceDecay speaks. Adapters report bounded evidence and plan 06's canonical `InteractionIntentClassV1`; policy owns eligibility, useful silence, and replayable reason codes.
 - No security-product expansion. Existing explicit blocking pre-tool decisions retain parity; ordinary guidance remains fail-open and silent on internal failure.
 
 ### 3.1 Convergence boundary
@@ -553,11 +555,14 @@ Hook RequestFacts are immutable, minimal, and content-referenced; the typed shap
 - session/actor/agent/parent aliases and resolution coverage;
 - available capability/catalog digest and host-installed availability;
 - workspace/index/project/ref candidates with freshness;
+- provider-session logical workspace source, explicit projectless marker, `InteractionIntentClassV1`, and resolution coverage; process CWD is evidence only and never a fallback;
 - tool call/result/error/edit facts with provider field, source event, parser version, and trust class;
 - bounded memory/skill/query candidates supplied by application;
 - prior hint state snapshot and evaluation horizon;
 - current presence/work claim, nearby-claim query snapshot, declared redundancy, and coordination dedupe/cooldown/ack state;
 - explicit clock, deadline, access, sensitivity, and vector watermark.
+
+The FM-138/FM-139 conformance corpus includes greetings and acknowledgements that remain silent, ambiguous general chat, projectless memory requests, and two concurrently interleaved sessions in distinct Hermes workspaces. Deep-copy/reload fixtures prove that immutable config may be shared while locks, session/turn state, pending deliveries, and workspace bindings remain invocation/session owned.
 
 The live path records:
 

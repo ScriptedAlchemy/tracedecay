@@ -53,9 +53,12 @@
 37. There is no always-on “TraceDecay catalog” rule that dumps all tools or skills into context. Discovery uses compact skill metadata, host-native plugin inventory, generated CLI help, and optional deferred tool search.
 38. Every omitted component has a typed reason: unsupported host, unsupported version, policy disabled, incompatible scope, missing binary, trust pending, MCP profile omitted, or evidence unknown.
 39. The dashboard and Settings show the same resolved manifest, install state, trust state, facade selection, version/digest, compatibility, and doctor findings returned by CLI/HTTP/SDK. They do not inspect host files independently.
-40. Completion requires stock-host conformance on the supported Claude Code, Codex, and Cursor matrices plus a documented downgrade for every unsupported surface.
+40. Completion requires stock-host conformance on the supported Claude Code, Codex, Cursor, and Hermes matrices plus a documented downgrade for every unsupported surface.
 41. The Rust workspace remains at or below plan 19's 11-package ceiling. Pure host bundle generation lives in `tracedecay-tool-catalog::host_bundles`; root-private `v2::host_deploy` owns host effects only. A future crate requires the plan-19 package-admission ADR, a merger alternative, and another package retirement.
 42. Install topology is a component set, not one mutually exclusive MCP choice: optional MCP-free core plus zero to three independently selected `McpFacade { registration, profile }` companions. A connection still pins exactly one registration/profile. Headless MCP-only deployment omits core; it does not create another implementation.
+43. `HostProfileId` is only a host installation/configuration target. It never selects or creates a TraceDecay user profile, Brain, database root, memory partition, or authorization domain.
+44. Every Hermes named profile, regardless of `HERMES_HOME` or profile count, binds the same user-global TraceDecay `ProfileId`, daemon, catalog, and stores used by Codex, Claude, and Cursor. Per-profile deployment/trust receipts remain distinct; data ownership does not.
+45. Host runtime context is invocation/session scoped. Logical workspace roots and explicit projectless state come from the provider event; process CWD, first/last session workspace, cached project, and host-profile directory cannot route memory, LCM, or retrieval.
 
 ## 1. Product objective and non-goals
 
@@ -193,6 +196,8 @@ All sources below were accessed for this design on **2026-07-10 UTC**. Source co
 | Cursor and Claude command directories tempt workflow duplication; Codex has no documented equivalent. | Names, invocation, and maintenance diverge. | Skills own new workflows; compatibility commands are bounded migration artifacts only. |
 | Host-specific version/cache/update rules are not represented in one state machine. | Updates can leave old processes, cache artifacts, hooks, or configs active. | Versioned deployment operation with staged validation, atomic owned-file swap, restart/reload, verification, and safe compensation. |
 | Current host scope often begins from CWD or a single workspace root. | Multi-repo/worktree sessions miss related projects and duplicate work. | Explicit `workspace_roots` set plus plan-16 project/worktree resolution and coverage report. |
+| PR #441 exposed greeting/code regex gating, process-CWD session routing, selector-dropping response-handle dereference, context-engine clone state, and partial named-profile deployment. | General chat is hijacked, concurrent sessions cross-route memory, cross-project retrieval fails, locks/state leak across clones, or some Hermes profiles remain stale. | Canonical intent policy and useful silence; immutable per-invocation workspace; retrieval-anchor binding; explicit shared-versus-session-owned clone fields; frozen target-set reconciliation with per-target receipts (FM-138–FM-143). |
+| A transitional follow-up introduces `user-memory.db` and host-specific global-memory injection. | A second fact authority diverges from `activity.db`, and host profile can be mistaken for data profile. | Canonical `DeclaredScope::Profile` in the activity shard, composed profile+project reads, one-time import/retirement only, and one global TraceDecay profile across all hosts. |
 | Host configuration files can contain foreign edits and secrets. | Broad rewrite, backup, or diagnostics can overwrite user state or leak credentials. | AST-preserving owned-block merge, opaque credential refs, redaction, secret scan, backup ownership, and content-free receipts. |
 | No stock-host matrix proves cloud/desktop/IDE/CLI equivalence. | A feature can pass locally and fail in the surface users actually run. | Per-surface capability probes, fixtures, and supported/degraded matrix in every release. |
 
@@ -297,7 +302,7 @@ No arrow from a host artifact reaches storage directly. No host artifact constru
 
 ### 4.1 Identity reuse
 
-This plan creates no parallel UUID/digest/version/state/privacy families. It reuses `ManifestId`, `ManifestDigest`, `ComponentVersion`, `HostProfileId`/`HostProfileRef`, `HostInstanceId`, `BindingId`, `CapabilityId`, `SkillId`/`SkillVersionRef`, `OperationId`, `IdempotencyKeyV1`, `SanitizationReceiptId`, `SanitizerFloorId`, `PrivacyPolicyDigest`, `DataSensitivity`, `RetrievalAnchorId`, `HostCapabilityDispositionV1`, `HostBundleComponentRefV1`, `HostIntegrationRuntimeRefV1`, `HostCapabilitySubjectV1`, and `HostCapabilitySnapshotV1` from plan 01.
+This plan creates no parallel UUID/digest/version/state/privacy families. It reuses `ProfileId`, `ManifestId`, `ManifestDigest`, `ComponentVersion`, `HostProfileId`/`HostProfileRef`, `HostInstanceId`, `BindingId`, `CapabilityId`, `SkillId`/`SkillVersionRef`, `OperationId`, `IdempotencyKeyV1`, `SanitizationReceiptId`, `SanitizerFloorId`, `PrivacyPolicyDigest`, `DataSensitivity`, `RetrievalAnchorId`, `HostCapabilityDispositionV1`, `HostBundleComponentRefV1`, `HostIntegrationRuntimeRefV1`, `HostCapabilitySubjectV1`, and `HostCapabilitySnapshotV1` from plan 01. `HostIntegrationRuntimeRefV1.tracedecay_profile_id` is mandatory and all host targets for one user installation must agree on it.
 
 Host names, component kinds, capability codes, and surface codes are grammar-validated registry entries. Literal marketplace names, cache paths, executable paths, usernames, endpoints, and credentials never become identity.
 
@@ -1184,6 +1189,8 @@ Cross-host conformance runs a many-item/multi-project board through export → e
 
 Users declare plan 20's exact `HostIntegrationDesiredStateV1`; this plan does not redefine it. It contains the target/profile, instance, install scope, signed packages, plan-08 `HostInstallSetV1`, role/hook selection, narrowing-only MCP policy, trust/update policy, and opaque credential ref.
 
+For Hermes bulk reconciliation, discovery freezes an explicit sorted target set of named host profiles before mutation. Each target receives its own expected-generation operation and receipt, while every desired/runtime record binds the same `tracedecay_profile_id`. A profile created after the frozen set is not silently mutated; the next reconciliation discovers it. Partial success remains visible and resumable without treating one healthy profile as proof for all profiles.
+
 `packages` constrains signed package versions/generated subcomponents; `install_set` is the sole core/facade topology and sole profile selection. Their host profile, package IDs, facade profiles, and integration-manifest digest must agree. `roles` selects generated role projections, including separately installed Codex agents; it never accepts arbitrary instructions. `mcp_narrowing` may only remove bindings or lower scope/sensitivity/grant ceilings for facades already present in the install set. All fields are projections of plan-20 target descriptors.
 
 Observed state includes host version/surface, config sources and precedence, package/cache contents, owned artifact digests, hook trust, companion enablement, binary/daemon handshake, catalog/profile digest, agent files, restart/reload state, and conformance probes. Reconciliation never infers desired packages from whatever happens to exist in a cache.
@@ -1644,6 +1651,7 @@ The arbiter may emit at most one compact, route-specific suggestion per turn and
 10. **Task edit:** the `working-task-graph` lifecycle and security corpus from `7.7`.
 11. **Privacy/security:** secret/private-path, traversal/symlink/archive, command injection, manifest tampering, signature/revocation, broad grant, and output leakage.
 12. **Migration:** every current integration row in `6.7`, stale caches/versions, duplicate registrations/hooks, owned/unowned files, and interrupted V1 cutover.
+13. **Hermes multi-profile/runtime context:** zero/one/many named profiles all bind one TraceDecay profile/store; parallel sessions retain distinct workspaces; projectless memory uses Profile scope; clone/reload shares only immutable config/circuit state; greetings and acknowledgements remain silent; cross-project retrieval retains selector/auth bindings.
 
 ### 12.2 Supported stock-host matrix
 
@@ -1654,6 +1662,7 @@ The release manifest lists exact tested versions; “latest” never appears in 
 | Claude Code | CLI/local plugin; other surfaces only when officially supported | core; each companion/profile; Tool Search on/off; packaged agents; trust/reload; user/project/local scope |
 | Codex | CLI, desktop/app, and IDE surface independently where available | core; each companion/profile; eager inventory pressure; hook trust hash; external agents selected/omitted; repo/personal scope |
 | Cursor | IDE and CLI; cloud separately when available | core; each companion/profile; agents; hook overlap; `workspace_roots` set; operator-inheritance denial; cloud event omissions |
+| Hermes | CLI plus every officially supported chat/service surface | zero/one/many named host profiles; one shared TraceDecay `ProfileId`/store; session-workspace and projectless routing; context clone/reload; first-turn silence; CLI/MCP fallback parity |
 
 For each host, test minimum-supported, current pinned, and pre-release/nightly observation lanes. Only pinned supported lanes gate publication; observational lanes open compatibility work without changing released support automatically.
 
@@ -2104,6 +2113,8 @@ Normative conflict resolutions:
 - [ ] Internal compensation restores only eligible signed owned state.
 - [ ] Config merge preserves unrelated/foreign content; path/symlink/ownership adversarial tests pass.
 - [ ] Multi-root/multi-worktree scope is a set with explicit coverage/omissions.
+- [ ] Every Hermes host profile has separate deployment health but the same `tracedecay_profile_id`, daemon/catalog handshake, and database set; no `HERMES_HOME`-scoped TraceDecay store exists.
+- [ ] Interleaved Hermes sessions, projectless chat, context cloning, greeting silence, and selector-preserving retrieval pass FM-138–FM-143 stock-host fixtures.
 - [ ] Cursor operator inheritance is blocked at planning, install, runtime authorization, and UI.
 
 ### Privacy, evidence, release, and quality

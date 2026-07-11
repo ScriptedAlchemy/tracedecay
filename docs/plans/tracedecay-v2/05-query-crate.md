@@ -262,6 +262,12 @@ Host installation/package/component state remains ordinary versioned `Installati
 
 Registry tests require every plan-27 component/capability disposition to round-trip through the generic query, facet, cursor, export, and saved-view paths; unknown keys fail validation, unsupported/version-gated states remain visible, and no query result includes a host path, credential, config body, backup body, or cache contents.
 
+### 6.1B Profile plus active-project memory composition
+
+Memory uses the same multi-root `ScopeSelectorV2`. The catalog preset `preset.knowledge.active-project-with-profile` expands to exactly two authorized roots—`Profile { profile_id }` and the resolved canonical `Project { project_id }`—and never includes `ZeroProject`, sibling projects, a host profile, or CWD by implication. Projectless sessions use an explicit profile-only or zero-project selector according to the caller's requested view. The planner opens activity and project owners independently, captures one vector watermark, emits per-root coverage, and deterministically merges candidate rows while retaining owner scope, source session/Turn, trust/version, contradiction/supersession, score components, and privacy provenance. Equal text does not collapse distinct scoped facts; policy may select or relate them after query.
+
+This preset is convenience generation, not a memory-specific selector or storage join. An explicit caller selector always wins. A missing/ambiguous active project returns candidates or a profile-only result only when that exact binding declares the downgrade; it never chooses the process directory, first registered project, last project, or a named host profile. Regression fixtures cover profile preference plus project decision, contradictory scopes, projectless chat, denied profile memory, partial project shard, same-name projects, and stable pagination under unrelated-project growth.
+
 ### 6.2 Session and message list intents
 
 `list_sessions` and `list_messages` (master plan §2.4) are first-class named `TraceQueryV1` list intents, not separate APIs:
