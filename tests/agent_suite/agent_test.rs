@@ -6337,8 +6337,13 @@ assert "--project" in argv, argv
 assert argv[argv.index("--project") + 1] == str(healthy_cwd), argv
 
 # The context engine filters the legacy pin but layers host-behavior settings.
-plugin._resolved_project_scope = lambda path: (
-    str(healthy_cwd) if os.path.realpath(str(path)) == os.path.realpath(str(healthy_cwd)) else None
+plugin._resolved_project_scope = lambda path, *_args: (
+    str(path)
+    if path and (
+        os.path.realpath(str(path)) == os.path.realpath(str(healthy_cwd))
+        or str(path) == "/host/wins"
+    )
+    else None
 )
 engine = plugin.TraceDecayContextEngine()
 assert engine.project_root is None, engine.project_root

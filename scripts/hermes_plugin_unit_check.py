@@ -210,16 +210,108 @@ def run_checks(work: Path):
     unrelated_root = work / "unrelated-project"
     registered_child.mkdir(parents=True)
     unrelated_root.mkdir()
+    hermes_descendant = host_home / "repos" / "registered-project"
+    hermes_descendant.mkdir(parents=True)
+    (hermes_descendant / "src").mkdir()
+    assert plugin.tools.code_project_root(cwd=str(host_home)) is None
+    assert plugin._code_project_root(cwd=str(host_home), hermes_home=str(host_home)) is None
+    assert plugin.tools.code_project_root(cwd=str(hermes_descendant)) == str(hermes_descendant)
+    assert plugin._code_project_root(
+        cwd=str(hermes_descendant), hermes_home=str(host_home)
+    ) == str(hermes_descendant)
+    missing_home_child = host_home / "missing-project"
+    assert plugin._project_scope_resolution(
+        str(missing_home_child), str(host_home)
+    ) == ("rejected", None)
+    tool_argv = []
+    tool_run_kwargs = []
+    real_tools_run = plugin.tools.subprocess.run
+    class ToolResult:
+        returncode = 0
+        stdout = "{}"
+        stderr = ""
+    try:
+        def capture_tool_run(argv, **run_kwargs):
+            tool_argv.append(argv)
+            tool_run_kwargs.append(run_kwargs)
+            return ToolResult()
+        plugin.tools.subprocess.run = capture_tool_run
+        plugin.tools.call_tracedecay_tool(
+            "tracedecay_project_search", {"query": "scope"}, cwd=str(host_home)
+        )
+        assert "--project" not in tool_argv[-1], tool_argv[-1]
+        assert tool_argv[-1][1:4] == ["projects", "search", "scope"], tool_argv[-1]
+        assert tool_run_kwargs[-1]["cwd"] == os.path.abspath(os.sep)
+        plugin.tools.call_tracedecay_tool(
+            "tracedecay_project_search", {"query": "scope"}, cwd=str(hermes_descendant)
+        )
+        assert tool_run_kwargs[-1]["cwd"] == str(hermes_descendant)
+        registry_raw = plugin.tools.call_tracedecay_tool(
+            "tracedecay_project_list", {"limit": 3}, cwd=str(host_home)
+        )
+        assert tool_argv[-1][1:3] == ["projects", "list"], tool_argv[-1]
+        assert json.loads(json.loads(registry_raw)["content"][0]["text"]) == {}
+        plugin.tools.call_tracedecay_tool(
+            "tracedecay_project_context", {"project_id": "proj_test"}, cwd=str(host_home)
+        )
+        assert tool_argv[-1][1:4] == ["projects", "context", "proj_test"]
+        active_context_raw = plugin.tools.call_tracedecay_tool(
+            "tracedecay_project_context", {}, cwd=str(hermes_descendant)
+        )
+        assert "--project" in tool_argv[-1], (tool_argv[-1], active_context_raw)
+        assert tool_argv[-1][tool_argv[-1].index("--project") + 1] == str(
+            hermes_descendant
+        )
+        assert "tracedecay_project_context" in tool_argv[-1], tool_argv[-1]
+        plugin.tools.call_tracedecay_tool(
+            "tracedecay_status", {"small": True}, cwd=str(hermes_descendant)
+        )
+        assert tool_argv[-1][tool_argv[-1].index("--project") + 1] == str(
+            hermes_descendant
+        )
+    finally:
+        plugin.tools.subprocess.run = real_tools_run
     real_json = plugin.call_tracedecay_json
     try:
+        plugin.call_tracedecay_json = lambda *_args, **_kwargs: {"error": "offline"}
+        assert plugin._project_scope_resolution(
+            str(hermes_descendant), str(host_home)
+        ) == ("rejected", None)
+        def raise_resolution(*_args, **_kwargs):
+            raise RuntimeError("offline")
+        plugin.call_tracedecay_json = raise_resolution
+        assert plugin._project_scope_resolution(
+            str(hermes_descendant), str(host_home)
+        ) == ("rejected", None)
         plugin.call_tracedecay_json = lambda *_args, **_kwargs: {
             "project_root": str(registered_root)
         }
         assert plugin._resolved_project_scope(str(registered_child)) == str(registered_root)
         assert plugin._resolved_project_scope(str(unrelated_root)) is None
+        assert plugin._resolved_project_scope(str(host_home), str(host_home)) is None
+        plugin.call_tracedecay_json = lambda *_args, **_kwargs: {
+            "project_root": str(host_home)
+        }
+        assert plugin._resolved_project_scope(
+            str(hermes_descendant / "src"), str(host_home)
+        ) is None
+        plugin.call_tracedecay_json = lambda *_args, **_kwargs: {
+            "project_root": str(hermes_descendant)
+        }
+        assert plugin._resolved_project_scope(
+            str(hermes_descendant / "src"), str(host_home)
+        ) == str(hermes_descendant)
     finally:
         plugin.call_tracedecay_json = real_json
-    ok("registered project resolution accepts descendants but rejects siblings")
+    home_engine = plugin.TraceDecayContextEngine(hermes_home=str(host_home))
+    home_engine.on_session_start(session_id="home-scope", cwd=str(host_home))
+    assert home_engine.project_root is None
+    home_provider = plugin.TracedecayMemoryProvider()
+    home_provider.initialize(
+        session_id="home-scope", hermes_home=str(host_home), cwd=str(host_home)
+    )
+    assert home_provider.project_root is None
+    ok("Hermes home is user scope while registered descendant repos remain projects")
 
     # ── 3. Registration split + provider dedup ──────────────────────────
     # The installer wrote memory.provider: tracedecay into the temp profile
@@ -238,6 +330,70 @@ def run_checks(work: Path):
     assert "tracedecay_fact_store" not in ctx.tools, sorted(ctx.tools)
     assert "tracedecay_fact_feedback" not in ctx.tools, sorted(ctx.tools)
     assert "tracedecay_memory_status" not in ctx.tools, sorted(ctx.tools)
+
+    custom_home = work / "custom-hermes-home"
+    custom_home.mkdir()
+    custom_descendant = custom_home / "repos" / "unregistered"
+    custom_descendant.mkdir(parents=True)
+    custom_registered = custom_home / "repos" / "registered"
+    custom_registered.mkdir()
+    custom_ctx = StubCtx()
+    custom_ctx.hermes_home = str(custom_home)
+    plugin.register(custom_ctx)
+    assert custom_ctx.engine.hermes_home == str(custom_home)
+    custom_ctx.engine.on_session_start(session_id="custom-home", cwd=str(custom_home))
+    assert custom_ctx.engine.project_root is None
+    custom_ctx.provider.initialize(session_id="custom-home", cwd=str(custom_home))
+    assert custom_ctx.provider.hermes_home == str(custom_home)
+    assert custom_ctx.provider.project_root is None
+    registered_argv = []
+    real_tools_run = plugin.tools.subprocess.run
+    real_json = plugin.call_tracedecay_json
+    try:
+        plugin.tools.subprocess.run = lambda argv, **_kwargs: (
+            registered_argv.append(argv) or ToolResult()
+        )
+        for tool_name, tool_args in (
+            ("tracedecay_search", {"query": "scope"}),
+            ("tracedecay_status", {}),
+            ("tracedecay_runtime", {}),
+        ):
+            result = custom_ctx.tools[tool_name]["handler"](
+                tool_args, cwd=str(custom_home)
+            )
+            assert "requires a registered project" in result, (tool_name, result)
+        assert registered_argv == [], registered_argv
+        custom_ctx.tools["tracedecay_project_search"]["handler"](
+            {"query": "scope"}, cwd=str(custom_home)
+        )
+        assert "--project" not in registered_argv[-1], registered_argv[-1]
+        assert registered_argv[-1][1:4] == ["projects", "search", "scope"]
+        before = len(registered_argv)
+        plugin.call_tracedecay_json = lambda *_args, **_kwargs: {
+            "project_root": str(custom_home)
+        }
+        result = custom_ctx.tools["tracedecay_search"]["handler"](
+            {"query": "scope"}, cwd=str(custom_descendant)
+        )
+        assert "requires a registered project" in result, result
+        assert len(registered_argv) == before, registered_argv[before:]
+        plugin.call_tracedecay_json = lambda *_args, **_kwargs: {
+            "project": {"project_root": str(custom_registered)}
+        }
+        custom_ctx.tools["tracedecay_search"]["handler"](
+            {
+                "query": "scope",
+                "project_selector": {"project_path": str(custom_registered)},
+            },
+            cwd=str(custom_home),
+        )
+        assert registered_argv[-1][registered_argv[-1].index("--project") + 1] == str(
+            custom_registered
+        )
+    finally:
+        plugin.tools.subprocess.run = real_tools_run
+        plugin.call_tracedecay_json = real_json
+    ok("registered tools and providers honor a custom Hermes home")
     assert "tracedecay_lcm_compress" not in ctx.tools, sorted(ctx.tools)
     assert "tracedecay_lcm_preflight" not in ctx.tools, sorted(ctx.tools)
     # Context-engine native mirrors stay gated without the capability flag.
@@ -289,15 +445,36 @@ def run_checks(work: Path):
     notifications = []
     real_run = plugin.subprocess.run
     real_thread = plugin.threading.Thread
-    class ImmediateThread:
+    real_resolution = plugin._project_scope_resolution
+    pending_threads = []
+    resolver_calls = []
+    class DeferredThread:
         def __init__(self, target, **_kwargs):
             self.target = target
         def start(self):
-            self.target()
+            pending_threads.append(self.target)
     try:
-        plugin.threading.Thread = ImmediateThread
+        plugin.threading.Thread = DeferredThread
         plugin.subprocess.run = lambda argv, **kwargs: notifications.append((argv, kwargs))
+        def resolve_receipt(path, *_args):
+            resolver_calls.append(path)
+            if path and os.path.realpath(str(path)) == os.path.realpath(str(runtime_project)):
+                return "registered", str(runtime_project)
+            if path and os.path.realpath(str(path)) == os.path.realpath(str(hermes_descendant)):
+                return "rejected", None
+            return "unregistered", str(path) if path else None
+        plugin._project_scope_resolution = resolve_receipt
         assert receipt_hook(tool_name="web_search", cwd=str(runtime_project)) is None
+        assert notifications == []
+        assert receipt_hook(tool_name="terminal", cwd=str(host_home)) is None
+        assert notifications == []
+        assert resolver_calls == []
+        assert pending_threads == []
+        assert receipt_hook(tool_name="terminal", cwd=str(hermes_descendant)) is None
+        assert resolver_calls == []
+        assert len(pending_threads) == 1
+        pending_threads.pop(0)()
+        assert resolver_calls == [str(hermes_descendant)]
         assert notifications == []
         assert receipt_hook(
             tool_name="terminal",
@@ -309,6 +486,10 @@ def run_checks(work: Path):
             status="success",
             duration_ms=9,
         ) is None
+        assert resolver_calls == [str(hermes_descendant)]
+        assert len(pending_threads) == 1
+        pending_threads.pop(0)()
+        assert resolver_calls == [str(hermes_descendant), str(runtime_project)]
         assert len(notifications) == 1
         argv, call = notifications[0]
         assert argv[-1] == "hook-hermes-terminal-receipt"
@@ -319,6 +500,7 @@ def run_checks(work: Path):
     finally:
         plugin.subprocess.run = real_run
         plugin.threading.Thread = real_thread
+        plugin._project_scope_resolution = real_resolution
     ok("post_tool_call emits bounded asynchronous terminal receipts")
 
     real_block = plugin.tools.plugin_config_block
@@ -391,14 +573,24 @@ def run_checks(work: Path):
     assert engine.context_length == 200_000
     ok("context engine safely deep-copies per-agent budget state")
 
-    engine.initialize(session_id="project-session", project_root=str(runtime_project))
-    assert engine.project_root == str(runtime_project)
-    engine.initialize(session_id="untethered-session", cwd=str(host_home))
-    assert engine.project_root is None
-    engine.initialize(session_id="project-session")
-    assert engine.project_root == str(runtime_project)
-    engine.initialize(session_id="untethered-session")
-    assert engine.project_root is None
+    real_resolver = plugin._resolved_project_scope
+    try:
+        plugin._resolved_project_scope = lambda path, *_args: (
+            str(runtime_project)
+            if path
+            and os.path.realpath(str(path)) == os.path.realpath(str(runtime_project))
+            else None
+        )
+        engine.initialize(session_id="project-session", project_root=str(runtime_project))
+        assert engine.project_root == str(runtime_project)
+        engine.initialize(session_id="untethered-session", cwd=str(host_home))
+        assert engine.project_root is None
+        engine.initialize(session_id="project-session")
+        assert engine.project_root == str(runtime_project)
+        engine.initialize(session_id="untethered-session")
+        assert engine.project_root is None
+    finally:
+        plugin._resolved_project_scope = real_resolver
     ok("context engine isolates project routing per Hermes session")
 
     messages = [
@@ -615,7 +807,7 @@ def run_checks(work: Path):
         ok("untethered memory and LCM use profile-level user scope")
 
         real_resolver = plugin._resolved_project_scope
-        plugin._resolved_project_scope = lambda path: expected_project_root
+        plugin._resolved_project_scope = lambda path, *_args: expected_project_root
         provider.sync_turn(
             "project task",
             "done",

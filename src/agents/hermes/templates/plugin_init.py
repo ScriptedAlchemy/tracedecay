@@ -462,6 +462,22 @@ def _notify_host_receipt(event, thread_name):
                     return
                 queued = _HOST_RECEIPT_QUEUE.popleft()
             try:
+                candidate = queued.pop("_project_candidate", None)
+                hermes_home = queued.pop("_hermes_home", None)
+                trusted_project = queued.pop("_trusted_project", False)
+                if candidate:
+                    route_state, resolved = _project_scope_resolution(
+                        candidate, hermes_home
+                    )
+                    if route_state == "unregistered" and trusted_project:
+                        resolved = _code_project_root(
+                            explicit=candidate,
+                            hermes_home=hermes_home,
+                        )
+                    if not resolved:
+                        continue
+                    queued["cwd"] = str(resolved)
+                    queued["route"]["cwd"] = str(resolved)
                 subprocess.run(
                     [tools.TRACEDECAY_BIN, "hook-hermes-terminal-receipt"],
                     input=json.dumps(queued),
@@ -490,11 +506,12 @@ def _post_tool_call(*args, **kwargs):
     if tool_name not in _TERMINAL_TOOL_NAMES:
         return None
     tool_args = payload.get("args") if isinstance(payload.get("args"), dict) else {}
-    cwd = _code_project_root(
+    candidate = _code_project_root(
         explicit=payload.get("project_root") or payload.get("project_path"),
         cwd=payload.get("cwd") or tool_args.get("cwd") or tool_args.get("workdir"),
+        hermes_home=payload.get("hermes_home"),
     )
-    if not cwd:
+    if not candidate:
         return None
     session_id = payload.get("session_id") or payload.get("thread_id")
     turn_id = payload.get("turn_id")
@@ -508,11 +525,14 @@ def _post_tool_call(*args, **kwargs):
     event = {
         "agent": "hermes",
         "event": "terminalReceipt",
-        "cwd": str(cwd),
+        "_project_candidate": str(candidate),
+        "_hermes_home": payload.get("hermes_home"),
+        "_trusted_project": bool(
+            payload.get("project_root") or payload.get("project_path")
+        ),
         "route": {
             "session_id": str(session_id)[:256] if session_id else None,
             "thread_id": str(payload.get("thread_id"))[:256] if payload.get("thread_id") else None,
-            "cwd": str(cwd),
         },
         "receipt": {
             "tool_call_id": str(tool_call_id)[:256] if tool_call_id else None,
@@ -560,8 +580,10 @@ def _notify_turn_ingested(session_id, project_root, transcript_watermark):
         "tracedecay-turn-ingested",
     )
 
-def _tracedecay_status(raw_args: str = ""):
-    raw = tools.call_tracedecay_tool("tracedecay_status", {})
+def _tracedecay_status(raw_args: str = "", hermes_home=None):
+    raw = tools.call_tracedecay_tool(
+        "tracedecay_status", {}, hermes_home=hermes_home
+    )
     try:
         payload = json.loads(json.loads(raw)["content"][0]["text"])
     except Exception:
@@ -838,33 +860,59 @@ def _lcm_store_args(args, project_root):
         routed.setdefault("storage_scope", "user")
     return routed
 
-def _resolved_project_scope(project_root):
+def _project_scope_resolution(project_root, hermes_home=None):
     if not project_root:
-        return None
+        return "unregistered", None
+    try:
+        if os.path.realpath(str(project_root)) == os.path.realpath(
+            _resolve_hermes_home(hermes_home=hermes_home)
+        ):
+            return "rejected", None
+    except (OSError, TypeError, ValueError):
+        return "unregistered", None
+    candidate = _code_project_root(explicit=project_root, hermes_home=hermes_home)
+    if not candidate:
+        return "unregistered", None
+    try:
+        home_real = os.path.realpath(_resolve_hermes_home(hermes_home=hermes_home))
+        candidate_real = os.path.realpath(candidate)
+        inside_hermes_home = os.path.commonpath((home_real, candidate_real)) == home_real
+    except (OSError, TypeError, ValueError):
+        inside_hermes_home = False
+    unresolved_state = "rejected" if inside_hermes_home else "unregistered"
+    unresolved_root = None if inside_hermes_home else candidate
+    if not os.path.exists(candidate):
+        return unresolved_state, unresolved_root
     try:
         status = call_tracedecay_json(
             "tracedecay_active_project",
             {},
-            **_project_call_kwargs(project_root),
+            **_project_call_kwargs(candidate),
         )
     except Exception:
-        return None
+        return unresolved_state, unresolved_root
     if not isinstance(status, dict) or status.get("error"):
-        return None
+        return unresolved_state, unresolved_root
     resolved = status.get("project_root") or status.get("root")
     if not resolved:
-        return None
+        return unresolved_state, unresolved_root
+    if not _code_project_root(explicit=resolved, hermes_home=hermes_home):
+        return "rejected", None
     try:
         resolved_real = os.path.realpath(str(resolved))
-        candidate_real = os.path.realpath(str(project_root))
+        candidate_real = os.path.realpath(str(candidate))
         if os.path.commonpath((resolved_real, candidate_real)) != resolved_real:
-            return None
+            return unresolved_state, unresolved_root
     except (OSError, TypeError, ValueError):
-        return None
-    return str(resolved)
+        return unresolved_state, unresolved_root
+    return "registered", str(resolved)
 
-def _project_scope_available(project_root) -> bool:
-    return _resolved_project_scope(project_root) is not None
+def _resolved_project_scope(project_root, hermes_home=None):
+    state, resolved = _project_scope_resolution(project_root, hermes_home)
+    return resolved if state == "registered" else None
+
+def _project_scope_available(project_root, hermes_home=None) -> bool:
+    return _resolved_project_scope(project_root, hermes_home) is not None
 
 def _decoded_tool_arguments(call):
     if not isinstance(call, dict):
@@ -910,7 +958,7 @@ def _tool_project_candidates(messages):
             for candidate in (
                 arguments.get("project_root"),
                 arguments.get("project_path"),
-                selector.get("path") if isinstance(selector, dict) else None,
+                _project_selector_path(selector),
                 arguments.get("cwd"),
                 arguments.get("workdir"),
             ):
@@ -920,15 +968,148 @@ def _tool_project_candidates(messages):
                 candidates.extend(_terminal_cd_candidates(arguments.get("command") or arguments.get("cmd")))
     return candidates
 
-def _turn_project_root(messages):
+def _turn_project_root(messages, hermes_home=None):
     for candidate in reversed(_tool_project_candidates(messages)):
         expanded = os.path.abspath(os.path.expanduser(candidate))
         if os.path.isfile(expanded):
             expanded = os.path.dirname(expanded)
-        resolved = _resolved_project_scope(expanded)
+        resolved = _resolved_project_scope(expanded, hermes_home)
         if resolved:
             return resolved
     return None
+
+_UNSCOPED_DIRECT_TOOLS = frozenset((
+    "tracedecay_project_list",
+    "tracedecay_project_search",
+))
+
+_READ_ONLY_SELECTOR_TOOLS = frozenset((
+    "tracedecay_search",
+    "tracedecay_grep",
+    "tracedecay_context",
+    "tracedecay_retrieve",
+    "tracedecay_callers",
+    "tracedecay_callees",
+    "tracedecay_impact",
+    "tracedecay_node",
+    "tracedecay_files",
+    "tracedecay_body",
+    "tracedecay_read",
+    "tracedecay_outline",
+    "tracedecay_signature_search",
+    "tracedecay_implementations",
+    "tracedecay_callers_for",
+    "tracedecay_call_chain",
+    "tracedecay_file_dependents",
+    "tracedecay_find_exact_symbol",
+    "tracedecay_by_qualified_name",
+    "tracedecay_signature",
+    "tracedecay_impls",
+    "tracedecay_derives",
+    "tracedecay_project_context",
+    "tracedecay_memory_status",
+    "tracedecay_message_search",
+    "tracedecay_analytics",
+))
+
+def _project_selector_path(selector):
+    if not isinstance(selector, dict):
+        return None
+    return selector.get("path") or selector.get("project_path")
+
+def _read_only_selector_call(name, args):
+    if name in _READ_ONLY_SELECTOR_TOOLS:
+        return True
+    return name == "tracedecay_fact_store" and str(args.get("action") or "") in (
+        "search", "probe", "related", "reason", "contradict", "list"
+    )
+
+def _make_project_safe_handler(name, handler, hermes_home):
+    def safe_handler(args, **kwargs):
+        tool_args = dict(args or {})
+        selector = tool_args.get("project_selector")
+        selector_path = _project_selector_path(selector)
+        explicit_selector = bool(
+            tool_args.get("project_id")
+            or tool_args.get("project_path")
+            or selector_path
+            or (isinstance(selector, dict) and selector.get("project_id"))
+        )
+        if explicit_selector and not _read_only_selector_call(name, tool_args):
+            return tools.error_payload(
+                f"{name} does not permit a cross-project mutating selector"
+            )
+        if explicit_selector and name == "tracedecay_project_context":
+            return handler(tool_args, hermes_home=hermes_home)
+        candidate = (
+            kwargs.get("project_root")
+            or kwargs.get("cwd")
+            or tool_args.get("project_root")
+            or tool_args.get("project_path")
+            or selector_path
+            or _runtime_working_directory()
+        )
+        if explicit_selector:
+            context_args = {}
+            selector_id = tool_args.get("project_id") or (
+                selector.get("project_id") if isinstance(selector, dict) else None
+            )
+            if selector_id:
+                context_args["project_id"] = selector_id
+            else:
+                context_args["path"] = tool_args.get("project_path") or selector_path
+            context = call_tracedecay_json(
+                "tracedecay_project_context",
+                context_args,
+                hermes_home=hermes_home,
+            )
+            project = context.get("project") if isinstance(context, dict) else None
+            resolved = (
+                project.get("project_root") or project.get("canonical_root")
+                if isinstance(project, dict)
+                else None
+            )
+            if resolved and not _code_project_root(
+                explicit=resolved, hermes_home=hermes_home
+            ):
+                resolved = None
+        else:
+            route_state, resolved = _project_scope_resolution(candidate, hermes_home)
+            if route_state == "unregistered" and kwargs.get("project_root"):
+                resolved = _code_project_root(
+                    explicit=kwargs.get("project_root"),
+                    hermes_home=hermes_home,
+                )
+        if explicit_selector and not resolved:
+            return tools.error_payload(
+                f"{name} project selector did not resolve to a registered non-Hermes project"
+            )
+        routed_kwargs = dict(kwargs)
+        routed_kwargs["hermes_home"] = hermes_home
+        if resolved:
+            routed_kwargs["project_root"] = resolved
+            return handler(tool_args, **routed_kwargs)
+        routed_kwargs.pop("project_root", None)
+        routed_kwargs.pop("cwd", None)
+        if name in _UNSCOPED_DIRECT_TOOLS:
+            return handler(tool_args, **routed_kwargs)
+        if name.startswith("tracedecay_lcm_"):
+            tool_args.setdefault("storage_scope", "user")
+            return handler(tool_args, **routed_kwargs)
+        if name in (
+            "tracedecay_fact_store",
+            "tracedecay_fact_feedback",
+            "tracedecay_memory_status",
+        ):
+            tool_args.setdefault("memory_scope", "user")
+            return handler(tool_args, **routed_kwargs)
+        if name == "tracedecay_message_search":
+            tool_args.setdefault("storage_scope", "user")
+            return handler(tool_args, **routed_kwargs)
+        return tools.error_payload(
+            f"{name} requires a registered project; Hermes home and unregistered workspaces use user scope"
+        )
+    return safe_handler
 
 # Conventional config home: a `plugins.tracedecay` block in the profile
 # config.yaml (the same `plugins.<name>` convention bundled Hermes plugins
@@ -1082,12 +1263,18 @@ def _runtime_working_directory():
             return candidate
     return os.getcwd()
 
-def _code_project_root(explicit=None, cwd=None, configured=None):
-    if explicit:
-        return str(explicit)
-    candidate = cwd or configured or _runtime_working_directory()
+def _code_project_root(explicit=None, cwd=None, configured=None, hermes_home=None):
+    candidate = explicit or cwd or configured or _runtime_working_directory()
     if isinstance(candidate, str) and candidate.strip() and os.path.isabs(candidate):
-        return candidate.strip()
+        candidate = candidate.strip()
+        try:
+            if os.path.realpath(candidate) == os.path.realpath(
+                _resolve_hermes_home(hermes_home=hermes_home)
+            ):
+                return None
+        except (OSError, TypeError, ValueError):
+            return None
+        return candidate
     return None
 
 def _resolve_hermes_home(config=None, hermes_home=None):
@@ -2342,7 +2529,10 @@ class TraceDecayContextEngine(ContextEngine):
         self._host_config = config
         self.hermes_home = _resolve_hermes_home(config, hermes_home)
         self.config = _with_plugin_block(config, self.hermes_home)
-        self.project_root = _configured_project_root(self.config)
+        self.project_root = _resolved_project_scope(
+            _configured_project_root(self.config),
+            self.hermes_home,
+        )
         # Auxiliary-route circuit breakers are process-global on purpose:
         # a broken summary model is broken for every session.
         self._route_failures = {}
@@ -2459,15 +2649,39 @@ class TraceDecayContextEngine(ContextEngine):
         configured_project_root = _configured_project_root(self.config)
         routing_supplied = bool(explicit_project_root or runtime_cwd)
         if explicit_project_root:
-            next_project_root = str(explicit_project_root)
+            route_state, next_project_root = _project_scope_resolution(
+                explicit_project_root,
+                self.hermes_home,
+            )
+            if route_state == "unregistered":
+                next_project_root = _code_project_root(
+                    explicit=explicit_project_root,
+                    hermes_home=self.hermes_home,
+                )
         elif runtime_cwd:
-            next_project_root = _resolved_project_scope(str(runtime_cwd))
+            next_project_root = _resolved_project_scope(runtime_cwd, self.hermes_home)
         elif self.project_root:
-            next_project_root = self.project_root
+            route_state, next_project_root = _project_scope_resolution(
+                self.project_root,
+                self.hermes_home,
+            )
+            if route_state == "unregistered":
+                next_project_root = _code_project_root(
+                    explicit=self.project_root,
+                    hermes_home=self.hermes_home,
+                )
+            routing_supplied = routing_supplied or next_project_root is None
         elif configured_project_root:
-            next_project_root = str(configured_project_root)
+            next_project_root = _resolved_project_scope(
+                configured_project_root,
+                self.hermes_home,
+            )
+            routing_supplied = True
         elif session_id is not None and not self.project_root:
-            next_project_root = _resolved_project_scope(_runtime_working_directory())
+            next_project_root = _resolved_project_scope(
+                _runtime_working_directory(),
+                self.hermes_home,
+            )
         else:
             next_project_root = None
         if next_project_root:
@@ -3429,14 +3643,26 @@ class TracedecayMemoryProvider(MemoryProvider):
         return _tracedecay_binary_available()
 
     def initialize(self, session_id=None, **kwargs):
-        self.hermes_home = kwargs.get("hermes_home") or _resolve_hermes_home()
+        self.hermes_home = (
+            kwargs.get("hermes_home") or self.hermes_home or _resolve_hermes_home()
+        )
         config = _with_plugin_block(kwargs.get("config"), self.hermes_home)
+        explicit_project_root = kwargs.get("project_root")
         candidate_root = _code_project_root(
-            explicit=kwargs.get("project_root"),
+            explicit=explicit_project_root,
             cwd=kwargs.get("cwd"),
             configured=_configured_project_root(config),
+            hermes_home=self.hermes_home,
         )
-        self.project_root = candidate_root if _project_scope_available(candidate_root) else None
+        route_state, resolved_root = _project_scope_resolution(
+            candidate_root, self.hermes_home
+        )
+        if route_state == "registered":
+            self.project_root = resolved_root
+        elif route_state == "unregistered" and explicit_project_root:
+            self.project_root = candidate_root
+        else:
+            self.project_root = None
         self.session_id = session_id
         # Execution context ("", "cron", "flush", ...): cron/flush runs are
         # not primary conversations and must not write turn state (cron
@@ -3459,8 +3685,9 @@ class TracedecayMemoryProvider(MemoryProvider):
             return
         home = str(hermes_home or self.hermes_home or _resolve_hermes_home())
         resolved_config = _with_plugin_block(config, home)
-        project_root = self.project_root or _code_project_root(
-            configured=_configured_project_root(resolved_config)
+        project_root = _resolved_project_scope(
+            self.project_root or _configured_project_root(resolved_config),
+            home,
         )
         status = call_tracedecay_json(
             "tracedecay_memory_status",
@@ -3583,7 +3810,7 @@ class TracedecayMemoryProvider(MemoryProvider):
         same content-cursored path the context engine uses), so the raw
         store grows every turn instead of only when compression fires.
         """
-        project_root = _turn_project_root(messages) or self.project_root
+        project_root = _turn_project_root(messages, self.hermes_home) or self.project_root
         if not _plugin_toggle("sync_turn", True):
             return
         if self.agent_context in ("cron", "flush"):
@@ -3768,9 +3995,21 @@ class TracedecayMemoryProvider(MemoryProvider):
 
 def register(ctx):
     global _HOST_FORWARDS_MESSAGES
+    context_config = getattr(ctx, "config", None)
+    context_hermes_home = _resolve_hermes_home(
+        context_config,
+        getattr(ctx, "hermes_home", None) or getattr(ctx, "_hermes_home", None),
+    )
+
+    def bind_hermes_home(handler):
+        def bound(*args, **kwargs):
+            kwargs.setdefault("hermes_home", context_hermes_home)
+            return handler(*args, **kwargs)
+        return bound
+
     ctx.register_hook("pre_llm_call", _pre_llm_call)
     try:
-        ctx.register_hook("post_tool_call", _post_tool_call)
+        ctx.register_hook("post_tool_call", bind_hermes_home(_post_tool_call))
     except Exception as exc:
         logger.debug("tracedecay post_tool_call hook unavailable: %s", exc)
     # Declare the plugins.tracedecay config block so its keys exist in
@@ -3801,18 +4040,15 @@ def register(ctx):
     if callable(register_command):
         register_command(
             "/tracedecay_status",
-            _tracedecay_status,
+            bind_hermes_home(_tracedecay_status),
             description="Show tracedecay project status.",
         )
 
     if callable(getattr(ctx, "register_memory_provider", None)):
-        ctx.register_memory_provider(TracedecayMemoryProvider())
+        memory_provider = TracedecayMemoryProvider()
+        memory_provider.hermes_home = context_hermes_home
+        ctx.register_memory_provider(memory_provider)
 
-    context_config = getattr(ctx, "config", None)
-    context_hermes_home = (
-        getattr(ctx, "hermes_home", None)
-        or getattr(ctx, "_hermes_home", None)
-    )
     context_engine = TraceDecayContextEngine(
         config=context_config,
         hermes_home=context_hermes_home,
@@ -3845,7 +4081,16 @@ def register(ctx):
                 # fact_store/fact_feedback/memory_status — registering the
                 # prefixed twins would double the schema footprint.
                 continue
-            handler = _handle_lcm_expand_query if name == "tracedecay_lcm_expand_query" else tools.make_handler(name)
+            raw_handler = (
+                _handle_lcm_expand_query
+                if name == "tracedecay_lcm_expand_query"
+                else tools.make_handler(name, hermes_home=context_hermes_home)
+            )
+            handler = _make_project_safe_handler(
+                name,
+                raw_handler,
+                context_hermes_home,
+            )
             visible_schema = _agent_visible_schema(schema)
             try:
                 register_tool(

@@ -299,6 +299,7 @@ fn generated_context_engine_exposes_native_lcm_surface_and_dispatch() {
         r#"
 import json
 
+plugin._resolved_project_scope = lambda path, *_args: path
 engine = plugin.TraceDecayContextEngine()
 engine.initialize(session_id="session-1", project_root="/tmp/project")
 
@@ -603,7 +604,9 @@ def fake_call_tracedecay_tool(name, args, **kwargs):
     return json.dumps({"content": [{"type": "text", "text": json.dumps({"status": "ok"})}]})
 
 plugin.tools.call_tracedecay_tool = fake_call_tracedecay_tool
-plugin._resolved_project_scope = lambda path: None
+plugin._resolved_project_scope = lambda path, *_args: (
+    str(path) if path and str(path) == "/tmp/project" else None
+)
 
 engine = plugin.TraceDecayContextEngine()
 engine.initialize(session_id="session-1")
@@ -1066,6 +1069,7 @@ engine = ctx.context_engines[0]
 assert isinstance(engine, plugin.TraceDecayContextEngine)
 assert isinstance(engine, ContextEngine)
 
+plugin._resolved_project_scope = lambda path, *_args: path
 engine.initialize(
     session_id="session-123",
     hermes_home="/tmp/hermes-profile",
@@ -1088,7 +1092,9 @@ def fake_call_tracedecay_tool(name, args, **kwargs):
     return "{}"
 
 plugin.tools.call_tracedecay_tool = fake_call_tracedecay_tool
-plugin._resolved_project_scope = lambda path: None
+plugin._resolved_project_scope = lambda path, *_args: (
+    str(path) if path and str(path) == "/tmp/project" else None
+)
 
 profile_engine = plugin.TraceDecayContextEngine()
 profile_engine.on_session_start(session_id="session-1", hermes_home="/tmp/hermes")
@@ -2160,7 +2166,7 @@ def fake_call_tracedecay_tool(name, args, **kwargs):
     return '{"content":[{"type":"text","text":"{\\"status\\":\\"ok\\"}"}]}'
 
 plugin.tools.call_tracedecay_tool = fake_call_tracedecay_tool
-plugin._project_scope_available = lambda root: True
+plugin._project_scope_available = lambda root, *_args: True
 
 provider = plugin.TracedecayMemoryProvider()
 provider.initialize(session_id="session-1", hermes_home="/tmp/hermes", project_root="/tmp/project")
@@ -2194,9 +2200,10 @@ assert empty_list_first_messages[1]["id"] != empty_list_second_messages[1]["id"]
 fallback = plugin.TracedecayMemoryProvider()
 fallback.initialize(session_id="session-2", hermes_home="/tmp/hermes")
 fallback.sync_turn("user", "assistant", session_id="session-2")
-assert fallback.project_root == os.getcwd()
+assert fallback.project_root is None
 assert "project_root" not in calls[-1][1]
-assert calls[-1][2]["project_root"] == os.getcwd()
+assert calls[-1][1]["storage_scope"] == "user"
+assert "project_root" not in calls[-1][2]
 "#,
         "sync_turn fallback messages should not collapse repeated identical turns",
     );
@@ -4375,9 +4382,9 @@ class Ctx:
         self.context_engines.append(engine)
 
 ctx = Ctx()
+plugin._resolved_project_scope = lambda path, *_args: path
 plugin.register(ctx)
 engine = ctx.context_engines[0]
-plugin._resolved_project_scope = lambda path: path
 
 # Host runtime config applies at registration time.
 assert engine.project_root == "/tmp/pinned-project", engine.project_root
@@ -4508,7 +4515,7 @@ assert payload["project_root"] == "/tmp/hermes-profile", payload
 # Engine resolution never consults the legacy profile pin.
 engine = plugin.TraceDecayContextEngine(config={})
 assert engine.project_root is None, engine.project_root
-plugin._resolved_project_scope = lambda path: path
+plugin._resolved_project_scope = lambda path, *_args: path
 engine.on_session_start(session_id="s1", cwd="/somewhere/else")
 assert engine.project_root == "/somewhere/else", engine.project_root
 

@@ -107,7 +107,7 @@ _PLUGIN_CONFIG_CACHE = {{}}
 def hermes_home_dir(hermes_home=None):
     return str(
         hermes_home
-        or os.path.join(os.path.expanduser("~"), ".hermes")
+        or os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     )
 
 def plugin_config_block(hermes_home=None):
@@ -141,10 +141,16 @@ def plugin_config_block(hermes_home=None):
     _PLUGIN_CONFIG_CACHE[path] = (cache_key, block)
     return block
 
-def code_project_root(explicit=None, cwd=None):
+def code_project_root(explicit=None, cwd=None, hermes_home=None):
     candidate = explicit or cwd or os.getcwd()
     if isinstance(candidate, str) and candidate.strip() and os.path.isabs(candidate):
-        return candidate.strip()
+        candidate = candidate.strip()
+        try:
+            if os.path.realpath(candidate) == os.path.realpath(hermes_home_dir(hermes_home)):
+                return None
+        except (OSError, TypeError, ValueError):
+            return None
+        return candidate
     return None
 
 def normalize_output(value) -> str:
@@ -181,37 +187,80 @@ def call_tracedecay_tool(name: str, args: dict, **kwargs) -> str:
         if "messages" in kwargs and "messages" not in tool_args:
             tool_args = dict(tool_args)
             tool_args["messages"] = kwargs["messages"]
+        registry_argv = None
+        if name == "tracedecay_project_list":
+            registry_argv = [TRACEDECAY_BIN, "projects", "list"]
+            if tool_args.get("limit") is not None:
+                registry_argv.extend(["--limit", str(tool_args["limit"])])
+        elif name == "tracedecay_project_search":
+            query = str(tool_args.get("query") or "").strip()
+            if not query:
+                return error_payload("tracedecay_project_search requires query")
+            registry_argv = [TRACEDECAY_BIN, "projects", "search", query]
+            if tool_args.get("limit") is not None:
+                registry_argv.extend(["--limit", str(tool_args["limit"])])
+        elif name == "tracedecay_project_context":
+            project_selector = tool_args.get("project_selector")
+            nested_selector = project_selector if isinstance(project_selector, dict) else {{}}
+            selector = str(
+                tool_args.get("project_id")
+                or tool_args.get("project_path")
+                or tool_args.get("path")
+                or nested_selector.get("project_id")
+                or nested_selector.get("project_path")
+                or nested_selector.get("path")
+                or ""
+            ).strip()
+            if selector:
+                registry_argv = [TRACEDECAY_BIN, "projects", "context", selector]
+        if registry_argv is not None:
+            registry_argv.append("--json")
         # `project_root` is transport routing, never part of the MCP argument
         # object. Resolve it only from an explicit call or the real process /
         # session cwd; Hermes homes and profiles never select TraceDecay data.
         project_root = kwargs.get("project_root")
         if not project_root:
-            project_root = code_project_root(cwd=kwargs.get("cwd") or tool_args.get("cwd"))
-        payload = json.dumps(tool_args)
-        argv = [TRACEDECAY_BIN, "tool"]
-        if project_root:
-            argv.extend(["--project", str(project_root)])
-        argv.extend([name, "--json", "--args"])
-        if len(payload.encode("utf-8")) >= ARGS_FILE_THRESHOLD_BYTES:
-            fd, args_file = tempfile.mkstemp(prefix="tracedecay-args-", suffix=".json")
-            with os.fdopen(fd, "w", encoding="utf-8") as args_handle:
-                args_handle.write(payload)
-            argv.append("@" + args_file)
+            project_root = code_project_root(
+                cwd=kwargs.get("cwd") or tool_args.get("cwd"),
+                hermes_home=kwargs.get("hermes_home"),
+            )
         else:
-            argv.append(payload)
+            project_root = code_project_root(
+                explicit=project_root,
+                hermes_home=kwargs.get("hermes_home"),
+            )
+        payload = json.dumps(tool_args)
+        if registry_argv is not None:
+            argv = registry_argv
+        else:
+            argv = [TRACEDECAY_BIN, "tool"]
+            if project_root:
+                argv.extend(["--project", str(project_root)])
+            argv.extend([name, "--json", "--args"])
+            if len(payload.encode("utf-8")) >= ARGS_FILE_THRESHOLD_BYTES:
+                fd, args_file = tempfile.mkstemp(prefix="tracedecay-args-", suffix=".json")
+                with os.fdopen(fd, "w", encoding="utf-8") as args_handle:
+                    args_handle.write(payload)
+                argv.append("@" + args_file)
+            else:
+                argv.append(payload)
         timeout_seconds = (
             TRACEDECAY_LONG_TIMEOUT_SECONDS
             if name in LONG_RUNNING_TOOLS
             else TRACEDECAY_TIMEOUT_SECONDS
         )
-        result = subprocess.run(
-            argv,
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=timeout_seconds,
-            shell=False,
-        )
+        run_kwargs = {{
+            "check": False,
+            "capture_output": True,
+            "text": True,
+            "timeout": timeout_seconds,
+            "shell": False,
+        }}
+        if registry_argv is not None:
+            run_kwargs["cwd"] = str(project_root) if project_root else os.path.abspath(os.sep)
+        elif not project_root:
+            run_kwargs["cwd"] = os.path.abspath(os.sep)
+        result = subprocess.run(argv, **run_kwargs)
         if result.returncode != 0:
             return error_payload(f"tracedecay tool exited with status {{result.returncode}}", result)
         output = result.stdout.strip()
@@ -219,6 +268,8 @@ def call_tracedecay_tool(name: str, args: dict, **kwargs) -> str:
             return "{{}}"
         try:
             json.loads(output)
+            if registry_argv is not None:
+                return json.dumps({{"content": [{{"type": "text", "text": output}}]}})
             return output
         except json.JSONDecodeError:
             return error_payload("tracedecay tool returned invalid JSON", result)
@@ -233,8 +284,10 @@ def call_tracedecay_tool(name: str, args: dict, **kwargs) -> str:
             except OSError:
                 pass
 
-def make_handler(name: str):
+def make_handler(name: str, hermes_home=None):
     def handler(args: dict, **kwargs) -> str:
+        if hermes_home and not kwargs.get("hermes_home"):
+            kwargs["hermes_home"] = hermes_home
         return call_tracedecay_tool(name, args, **kwargs)
     return handler
 "#
