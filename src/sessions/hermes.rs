@@ -803,40 +803,41 @@ async fn build_batches_with_locations(
     let mut order = Vec::new();
     let mut by_session: HashMap<String, TranscriptBatch> = HashMap::new();
 
-    let mut add_row = |row: &HermesRow| {
-        if row.role == "session_meta" || row.role.is_empty() {
-            return;
-        }
-        if row.active == 0 {
-            // Rewound/undone turns are soft-deleted in Hermes; surfacing
-            // them as live history would misrepresent the conversation.
-            return;
-        }
-        let Some(location) = turn_locations.get(&row.id) else {
-            return;
-        };
-        let Some(message) = message_from_row(row, state_db_path, source, &location) else {
-            return;
-        };
-        let batch = by_session.entry(row.session_id.clone()).or_insert_with(|| {
-            order.push(row.session_id.clone());
-            TranscriptBatch {
-                session: session_from_row(row, state_db_path, project_root, source, &location),
-                messages: Vec::new(),
+    {
+        let mut add_row = |row: &HermesRow| {
+            if row.role == "session_meta" || row.role.is_empty() {
+                return;
             }
-        });
-        batch.messages.push(message);
-    };
-    if let Some(row_indices) = row_indices {
-        for &index in row_indices {
-            add_row(&rows[index]);
-        }
-    } else {
-        for row in rows {
-            add_row(row);
+            if row.active == 0 {
+                // Rewound/undone turns are soft-deleted in Hermes; surfacing
+                // them as live history would misrepresent the conversation.
+                return;
+            }
+            let Some(location) = turn_locations.get(&row.id) else {
+                return;
+            };
+            let Some(message) = message_from_row(row, state_db_path, source, &location) else {
+                return;
+            };
+            let batch = by_session.entry(row.session_id.clone()).or_insert_with(|| {
+                order.push(row.session_id.clone());
+                TranscriptBatch {
+                    session: session_from_row(row, state_db_path, project_root, source, &location),
+                    messages: Vec::new(),
+                }
+            });
+            batch.messages.push(message);
+        };
+        if let Some(row_indices) = row_indices {
+            for &index in row_indices {
+                add_row(&rows[index]);
+            }
+        } else {
+            for row in rows {
+                add_row(row);
+            }
         }
     }
-    drop(add_row);
 
     let mut batches = Vec::with_capacity(order.len());
     for session_id in order {

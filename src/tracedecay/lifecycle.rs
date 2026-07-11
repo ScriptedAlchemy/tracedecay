@@ -969,7 +969,6 @@ fn graph_sidecar_path(db_path: &Path, suffix: &str) -> PathBuf {
 }
 
 fn activate_graph_layout(store_layout: &mut StoreLayout, db_path: &Path) {
-    store_layout.graph_db_path = db_path.to_path_buf();
     store_layout.dirty_path = graph_sidecar_path(db_path, ".dirty");
     store_layout.sync_lock_path = graph_sidecar_path(db_path, ".sync.lock");
 }
