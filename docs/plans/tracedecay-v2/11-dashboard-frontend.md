@@ -188,12 +188,13 @@ Plan 13 PR 2A must assess Hermes dashboard files, tests, and interaction flows i
 | `/automations`, `/automation/runs/:id`, `/skills`, `/skills/:id`, `/evolution` | How is the system autonomously curating and improving itself? | `features/automations` | complete run/skill inventory + autonomy decision/effect/outcome ledger |
 | `/observatory` | Is capture, storage, projection, privacy, and query healthy? | `features/observatory` | project × subsystem matrix |
 | `/observatory/context-scout` | Is incremental suggestion preparation useful, timely, quiet, private, and healthy? | `features/observatory` + `features/hints` | trigger/silence/envelope/delivery/outcome funnel + queue/model/tool/host state |
+| `/observatory/sync` | Is the shared Brain connected, converged, private, backed up, and correctly fenced? | `features/observatory` + `features/brain-topology` | node/store/repository/sync topology + lag/spool/conflict/recovery matrix |
 | `/privacy` | Is the mandatory sanitizer effective across every source/sink, and what is blocked or needs remediation? | `features/privacy` | coverage/unknown matrix + safe remediation lineage |
 | `/costs` | Where do tokens, latency, and cost go? | `features/costs` | precise ledger + trends |
 | `/playgrounds/:lab` | What would this versioned engine decide, and why? | `features/playgrounds` | shared replay workbench |
 | `/playgrounds/evolution` | How do skills, memories, policies, and automations evolve? | `features/evolution` | version/use/outcome lineage |
 | `/saved/:viewId` | Reopen a classified saved investigation | `features/saved-views` | saved route + state |
-| `/settings`, `/settings/context-scout`, `/settings/integrations` | Which effective settings, capabilities, and host integrations govern behavior? | `features/settings` | scoped settings form + source labels; context-scout renders plan 22's controls, while integrations renders the generated host topology, capability differences, inventory, effective/drift state, and operation history from plans 09/10/20/21 |
+| `/settings`, `/settings/context-scout`, `/settings/integrations`, `/settings/brain` | Which effective settings, capabilities, host integrations, enrolled Brain nodes, and placements govern behavior? | `features/settings` | scoped settings form + source labels; context-scout renders plan 22's controls, integrations renders plan 27 host bundles, and Brain renders plan 28 node/enrollment/grant/placement/replica/backup/failover controls |
 
 Legal `:lens` values are `git`, `code`, `threads`, `agents`, `turns`, `tasks`, `plans`, `timeline`, `memory`, and `automation`. Legal `:lab` values are `hints`, `retrieval`, `ingest`, `query`, `search-quality`, `scope-federation`, `correlation`, `coordination`, `orchestration`, `scheduler`, `memory`, `policy-diff`, and `privacy`; together with the named `/playgrounds/evolution` route these thirteen slugs form the canonical fourteen-lab inventory: Hint, Retrieval, Search Quality, Coordination, Orchestration, Ingest, Query, Correlation, Scheduler, Memory, Policy Diff, Evolution, Scope/Federation, and Privacy. The `privacy` slug displays as "Privacy & Secret Safety Lab" and supersedes the retired `secret-safety` route name; plan 23's temporal "Search Lab" content is folded into the Search Quality Lab, not a separate lab. Hint Lab includes deterministic and incremental-scout replay, Search Quality includes temporal session/LCM retrieval, and Orchestration replays plan/task/executor/context/lease decisions at `/playgrounds/orchestration` (the only route spelling). Every route is a configured view over plan 10 §8.5's generic experiment/run API and a catalog-owned typed evaluator; no lab gets a bespoke HTTP lifecycle. Evolution has a named route because it is both a lab and a product workspace.
 
@@ -966,6 +967,10 @@ Scope and persistence are visible product semantics, not hidden implementation d
 - Generated Capability Registry for every current use case and MCP/CLI/HTTP/dashboard/skill/hook binding: semantic version, request/result schema, read/mutate/autonomous/confirmation/recovery mode, scope, privacy, cost, local/live/joined evidence, availability/gap, catalog digest, and “open guided action.” Old curation approval/apply names remain operator-only migration evidence, never current help/hints/catalog.
 - Storage growth, blob integrity/GC, retention, redaction/privacy, remote freshness, malformed rows.
 - Provider/project/domain coverage matrix and direct drill-down to evidence.
+- `/observatory/sync` renders plan 28's stable topology graph: Brain nodes, fenced authorities, shard placements, replicas/caches, repository/checkout/worktree bindings, sync links, privacy boundaries, and backup/recovery edges. Shape, stroke, labels, and accessible table duplicate color; it is not an unconstrained force graph.
+- Synchronized panels show authority/node epochs, placement generation, per-shard watermarks, cache/replica lag, pending spool bytes/age, gaps/conflicts/quarantine, schema/privacy/grant compatibility, certificate/key age, revocation, backup age, verified recovery point, RPO/RTO, and old-authority fencing. Every alert deep-links to Explorer/Loom/config/audit evidence.
+- Failover stays disabled on mere unreachability. The inspector names the required positive fence class/receipt—graceful shutdown, external exclusive-resource revocation, or independent quorum lease—and offers a separate forensic-fork export when same-Brain promotion cannot be proven safe.
+- Repository-correlation compare exposes credential-free remote aliases and immutable Git proof, with fork/shallow/rewritten ambiguity and explicit adopt/split action. Same paths/names never render as proof; sensitive paths/addresses remain redacted.
 
 ### 13.7A Integrations workspace
 
@@ -1202,7 +1207,9 @@ Target WCAG 2.2 AA and completion of every primary workflow by keyboard and scre
 | Empty partial | never “no data”; list unavailable/locked/redacted sources | retry, unlock, change scope |
 | Stale | last-known-good timestamp/watermark and reason | refresh; read-only navigation |
 | Partial | missing source matrix, effect on claim/aggregate | inspect coverage, exclude/refresh source |
-| Offline | last-known-good snapshot, commands disabled | retry when online; export cached nonsensitive metadata if allowed |
+| Offline | last verified watermark/cache age and authority identity; pending local overlay separately labeled; canonical commands disabled | retry/sync when online; export cached nonsensitive metadata if allowed |
+| Authority fenced | old/current authority epochs, placement and recovery receipt | inspect failover; re-seed old node; never resume writes |
+| Sync conflict | gap/collision/policy/schema/placement class without payload | inspect receipt, repair or retain locally |
 | Locked | metadata/coverage only, no payload/search leak | unlock profile/store |
 | Redacted | redaction class/reason and count without hidden IDs/content | request authorized view if policy permits |
 | Incompatible | client/server/schema versions and supported recovery | restart/update/open current route; never stale-name fallback |
@@ -1215,7 +1222,7 @@ The first-scan Brain claim is suppressed when coverage is insufficient to suppor
 ### 17.1 Privacy and security
 
 - Use no third-party analytics, CDN, external font, telemetry pixel, or remote visualization service.
-- Reject non-loopback launch/bind configuration in the first V2 default. Browser bootstrap exchanges a one-time launch nonce for an `HttpOnly`, `SameSite=Strict` session; the nonce never persists in URL/history/storage/logs.
+- Local mode rejects unprotected non-loopback launch/bind. Plan 28's optional protected-remote profile requires TLS, allowlisted authority/proxy trust, enrolled-node/scoped authentication, and application authorization; Tailscale or another VPN may supply reachability but never replaces these controls. Browser bootstrap exchanges a one-time launch nonce for an `HttpOnly`, `SameSite=Strict` session; the nonce never persists in URL/history/storage/logs.
 - Send cookies with `credentials: "same-origin"`. Unsafe cookie-authenticated requests include the in-memory `X-TraceDecay-CSRF` token; logout/profile lock clears it. Nonbrowser clients use bearer auth, never a query token.
 - Enforce exact loopback `Host`, exact same-origin `Origin`/fetch metadata, no wildcard CORS, and restrictive nonce CSP without `unsafe-eval`; reject forwarded-host and DNS-rebinding variants.
 - Never put raw prompts, queries, file paths, branches classified sensitive, payload text, tokens, or error bodies in `console`, performance marks, route names, DOM data attributes, query keys, or screenshot filenames.
@@ -1596,6 +1603,14 @@ The phase-4 PR letters in this section are the authoritative sub-split ledger fo
 - [ ] Verify keyboard/screen-reader matrix navigation, table parity, focus restoration under deltas, reduced motion, non-color encoding, 200% zoom, high contrast, both themes, mobile sheets, direct reload/back/forward, and every loading/empty/denied/locked/partial/stale/offline/unsupported/reconciliation/error state.
 - [ ] Run `cd dashboard && npm test && npx playwright test tests/e2e/integrations.spec.ts`. Expected: pass with no accessibility, console, request-schema, or visual-regression failure.
 - [ ] Commit `feat(dashboard): add integrations topology workspace`.
+
+### Task 14B: PR 25I — Shared Brain Settings and Sync Observatory
+
+- [ ] Add generated-client fixtures for standalone, remote authority, cached client, read replica, standby, hybrid placement, partition, revocation, schema/privacy skew, Git identity candidates, restore/promotion, and old-authority reappearance.
+- [ ] Implement `/settings/brain` and `/observatory/sync` per §13.7 using the stable node/store/repository/sync topology plus complete accessible table, synchronized inspector, lag/spool/conflict/recovery charts, and exact coverage.
+- [ ] Bind enrollment, placement, sync repair, repository adopt/split, replica retirement, restore, and failover only to plan 28/10 generated operations with legal-action grants, expected versions, idempotency, and receipts. UI never opens database paths or assumes Tailscale.
+- [ ] Prove stale/offline/pending/fenced/policy-excluded states cannot look canonical or healthy; pass keyboard, screen-reader, mobile, theme, 200% zoom, deterministic export, synthetic secret, and topology comprehension gates.
+- [ ] Commit `feat(dashboard): add shared Brain topology and sync observatory`.
 
 ### Task 15: PR 31A–31Q — Shared cockpit, evaluator labs, and owned extensions
 

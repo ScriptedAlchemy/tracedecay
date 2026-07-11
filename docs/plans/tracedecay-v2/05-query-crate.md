@@ -631,6 +631,8 @@ pub struct MessageViewReport {
 
 `CoverageReportV1` is imported unchanged from [`01-domain-crate.md`](01-domain-crate.md). Query fills its disposition vectors, freshness, retention watermark, and `unknown_coverage`; consumers derive completeness only through the domain `is_complete()` rule. This crate defines no `complete` field, `ShardCoverage` fork, or alternate coverage shape.
 
+For plan 28, the request selects `Authoritative`, `BoundedStale`, `OfflineCache`, or `AsOfWatermark` consistency. Coverage binds `BrainId`, placement generation, authority/replica/node identities and epochs, per-shard watermarks, cache age/sync lag, unreachable/unauthorized/local-only/policy-excluded scopes, and pending-local counts separately from canonical totals. A cache or pending overlay can never satisfy an authoritative request. Repository identity ambiguity remains coverage plus candidates, never duplicate global entities or silent scope selection.
+
 ```rust
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -1030,6 +1032,13 @@ Program numbering is authoritative: PR 12 is implemented in dependency order as 
 - [ ] Run the complete Plan 18 sink-canary matrix through lexical/vector/graph/time/aggregate/exact-load/cursor/cache/export paths. Expected: zero plaintext or candidate digest bytes; every blocked descendant is visible as coverage without hidden-ID leakage.
 - [ ] Run `cargo test -p tracedecay-query --test security_privacy --test partial_coverage --test cursor_resume --test export_manifest`; expected: all containment and ordinary query cases pass.
 - [ ] Commit `feat(query): enforce privacy containment across federated reads`.
+
+### PR 12D: Remote authority, replica, cache, and consistency routing
+
+- [ ] Add failing cases for authoritative remote reads, bounded-stale replicas, explicit offline cache, mixed local/remote placement, authority epoch changes, revoked nodes, unreachable shards, stale caches, cancellation/SSE gaps, and pending-local overlays.
+- [ ] Resolve logical scope before physical placement; route through injected application/store adapters, verify signed snapshot/tail manifests, and globally merge normalized evidence/rank contracts. Query never performs network I/O or opens a remote database itself.
+- [ ] Bind consistency, placement generation, authority epochs, node grants, watermarks, and cache generations into plans/cursors; resume across a changed authority only with a verified equivalent snapshot or a structured restart.
+- [ ] Pass plan 28's partition, restore/promotion, cross-machine repository, and partial-coverage matrix before remote mode is enabled.
 
 ### PR 13A: Time-safe search evaluation corpus and baseline
 

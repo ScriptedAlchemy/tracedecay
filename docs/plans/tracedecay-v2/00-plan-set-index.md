@@ -19,6 +19,7 @@ Core product surfaces:
 - One official contract shared by API, CLI, MCP, generated SDKs, dashboard, hooks, and tool discovery.
 - An optional zero-to-three logical MCP registration component set (`context`, `work`, `operator`) backed by one implementation/binary/daemon/catalog, with negotiated lifecycle/capabilities, generated eager-safe tools/resources/templates/prompts/completions, structured content and resource links, progress/cancellation/task support, subscriptions/list-changed notifications, explicit roots/sampling/elicitation trust boundaries, stdio and Streamable HTTP transports, authentication, and host conformance; generated skills plus CLI remain the portable MCP-free baseline.
 - Change-gated autonomous evolution: a registered relevant change dirties only affected scopes; quiescence/materiality and effective-input digest admission precede one generic operation; unchanged ticks perform no scan/model/run work and coalesce one skip episode instead of creating fake history.
+- A transport-agnostic multi-machine Brain: local-only remains valid, while enrolled clients may share a fenced remote authority, verified read replicas/caches, and Git-correlated repositories over authenticated HTTPS/mTLS or an optional private network such as Tailscale. Network-mounted SQLite and implicit multi-primary writes are forbidden.
 
 ## 2. Plan documents and authority
 
@@ -38,7 +39,7 @@ Core product surfaces:
 | [`11-dashboard-frontend.md`](11-dashboard-frontend.md) | Concept-led Evidence Cartography product; stable profile atlas, linked Atlas/Trace/Compare/Lab/Triage compositions, complete memory/skill/automation navigation in Brain and Explorer, Loom replay player, composable lenses, hermetic experiment cockpit, visual ontology/renderers/charts, accessibility/mobile/export, perceptual and comprehension gates. |
 | [`12-root-compatibility-migration.md`](12-root-compatibility-migration.md) | Root binary/daemon/CLI/MCP composition and deployment/probe/config/service effect adapters; application-owned integration lifecycle execution; V1 data migration, cutover/rollback/retirement. |
 | [`13-research-provenance-and-context-anchors.md`](13-research-provenance-and-context-anchors.md) | Research manifest, durable retrieval anchors, subagent context, corpus hashes/cutoff, source recovery, future implementation handoff. |
-| [`14-historical-failure-regression-matrix.md`](14-historical-failure-regression-matrix.md) | Historical problem -> prevention owner -> visible detection/recovery -> cutover regression gate; 128 stable rows (`FM-001` through `FM-128`) with no gaps. |
+| [`14-historical-failure-regression-matrix.md`](14-historical-failure-regression-matrix.md) | Historical problem -> prevention owner -> visible detection/recovery -> cutover regression gate; 137 stable rows (`FM-001` through `FM-137`) with no gaps. |
 | [`15-search-quality-evaluation-and-retrieval-research.md`](15-search-quality-evaluation-and-retrieval-research.md) | Real local precision corpus, primary retrieval research, hybrid pipeline, qrels/metrics/holdouts, shadow/online evaluation, Search Quality Lab. |
 | [`16-cross-project-repository-worktree-scope.md`](16-cross-project-repository-worktree-scope.md) | Exceptional multi-repo/project/worktree/ref/store behavior, `ScopeSelectorV2`, routed retrieval, graph federation, CLI/MCP UX, Rspack/Rsbuild/React Router corpus. |
 | [`17-official-public-api-and-sdks.md`](17-official-public-api-and-sdks.md) | Official direct-agent/public API, contract IR/OpenAPI/JSON Schema, stable IDs/errors/cursors/batch/SSE, Rust/TS/Python SDKs, docs/sandbox/conformance. |
@@ -52,12 +53,13 @@ Core product surfaces:
 | [`25-code-intelligence-indexing-crate.md`](25-code-intelligence-indexing-crate.md) | Code extraction (tree-sitter parser registry), deterministic incremental reuse, immutable packed snapshot/generation builds, symbol lineage, diagnostics/test-attribution mapping, and V1 per-branch graph-store migration; root/capture owns watcher intake. |
 | [`26-observability-accounting-and-usage.md`](26-observability-accounting-and-usage.md) | Usage/cost/savings accounting, ingest/projection lag, data-quality metrics, denominator/unknown-population semantics, cap/truncation telemetry with retrieval anchors, per-capability adoption analytics, hint outcome rollups, SLO monitors, and Observatory data contracts. |
 | [`27-cross-host-agent-plugin-bundles.md`](27-cross-host-agent-plugin-bundles.md) | One host-neutral integration/workflow source IR and deterministic Codex, Claude Code, and Cursor bundle projections across skills, commands/recipes, agents/roles, hooks, MCP companions, install/update/trust, capability differences, stock-host conformance, and legacy retirement. |
+| [`28-remote-multi-machine-shared-brain.md`](28-remote-multi-machine-shared-brain.md) | Transport-agnostic remote/shared Brain topology; node enrollment, one fenced authority per shard, offline sanitized capture, replicas/caches, Git clone correlation, consistency/coverage, privacy/auth, backup/failover, API/CLI/MCP/UI, and multi-machine fault gates. |
 
 When documents overlap:
 
 1. The master plan owns outcome, global constraints, dependency order, and cutover gates.
 2. A numbered crate/surface plan owns implementation details in its boundary.
-3. Plans 13–27 own cross-cutting evidence, regression, retrieval, scope, public-contract, privacy, convergence, configuration, tool/output, incremental-context, temporal-session, task/executor, code-indexing, observability/accounting, and cross-host bundle requirements; bounded crates must satisfy them rather than reimplement them.
+3. Plans 13–28 own cross-cutting evidence, regression, retrieval, scope, public-contract, privacy, convergence, configuration, tool/output, incremental-context, temporal-session, task/executor, code-indexing, observability/accounting, cross-host bundle, and remote shared-Brain requirements; bounded crates must satisfy them rather than reimplement them.
 4. An implementation decision that changes a locked domain contract requires an ADR and coordinated plan update before code diverges.
 
 Execution follows checked PR/TDD slices, current repository instructions, and whatever orchestration tools are available at implementation time. No optional named agent skill is a dependency of this plan set.
@@ -68,7 +70,7 @@ Execution follows checked PR/TDD slices, current repository instructions, and wh
 
 1. Master sections 1–9, 18–24.
 2. Plans 01, 02, 05, 06, 09, and 12.
-3. Plans 13–27 as non-negotiable evidence/scope/API/privacy/convergence/task-execution/code-indexing/observability/host-integration gates.
+3. Plans 13–28 as non-negotiable evidence/scope/API/privacy/convergence/task-execution/code-indexing/observability/host-integration/remote-authority gates.
 
 ### Storage and migration implementer
 
@@ -77,6 +79,7 @@ Execution follows checked PR/TDD slices, current repository instructions, and wh
 3. Plan 14 storage/identity/durability rows.
 4. Plan 16 registry/activity/routing sections.
 5. Plan 25 for code extraction, incremental indexing, and V1 per-branch graph-store migration.
+6. Plan 28 for authority placement, replication units, offline spool, backup/failover, and the prohibition on remote SQLite files.
 
 ### Search/query implementer
 
@@ -154,6 +157,12 @@ Execution follows checked PR/TDD slices, current repository instructions, and wh
 2. Preserve one canonical `HostIntegrationManifestV1`, one pure `tracedecay-tool-catalog::host_bundles` compiler, one application lifecycle, and one root-private deployment/probe/config adapter.
 3. Validate stock Codex, Claude Code, and Cursor behavior independently; skills+CLI must work with MCP absent, every enabled facade must be eager-safe, and every undocumented or host-specific difference stays explicit.
 
+### Remote shared-Brain implementer
+
+1. Plan 28 in full plus plans 01–05, 09–12, 16–18, 20–21, and 26.
+2. Preserve one fenced authority per mutable shard, semantic replication through the application/API boundary, local-only SQLite/WAL families, explicit consistency/coverage, and transport-independent node authorization.
+3. Validate cross-machine Git identity, offline idempotency, revocation, privacy classes, replica/cache lag, backup/restore, standby promotion, and old-authority fencing before remote mode releases.
+
 ## 4. Locked architectural decisions
 
 - Start as one Rust binary with bounded internal crates/ports; allow later daemon/query split without changing contracts. The workspace is capped at 11 Rust packages including root and the official Rust client. Root-only hook, presentation, and API adapters remain private `src/v2` modules with import lints rather than published crates.
@@ -161,7 +170,8 @@ Execution follows checked PR/TDD slices, current repository instructions, and wh
 - Reuse one narrow domain registry/canonical-encoding substrate, one projection runtime, one fenced application operation substrate, one scheduler kernel, one `HostIntegrationManifestV1`, one graph/timeline slice pipeline, one page/problem/presentation pipeline, and one saved-view lifecycle. Share mechanics without erasing typed domain meaning.
 - Replacement work is accepted only with a `reuse-dispositions.json` decision and negative-code/footprint receipt. At parity, handwritten replacement code must be smaller than the live V1 plus adapters it deletes; generated output, packages, dependencies/features, tables/indexes, workers, files, binary/RSS/startup/build time, and stored bytes are reported separately and cannot hide growth.
 - Use one profile catalog, one canonical profile activity journal/projection, project/privacy-domain shards, immutable packed graph generations, and privacy-domain content-addressed blobs.
-- SQLite/rusqlite is the initial local engine; libSQL/remote federation is a future evaluated option, not an assumption.
+- SQLite/rusqlite is the physical engine local to each authority/replica host. Multi-machine sharing uses the official authenticated application/API protocol and semantic snapshots/tails; database files/WAL are never network-mounted or exposed. libSQL/Turso remains evaluated prior art, not an initial dependency.
+- Local, remote-authority, cached-client, read-replica, standby, and hybrid-placement modes share one `BrainId`; exactly one fenced authority may write a mutable shard. Tailscale is an optional connectivity profile, never an architectural or authorization dependency.
 - Capture immutable sanitized-native observations before canonical projection; retain keyed source fingerprints/offsets/parser versions and unknown sanitized fields. Sanitize-before-persist is mandatory; no raw source hash of secret-bearing content is stored.
 - Run one mandatory parse-before-scan sanitizer before the observation journal; secret plaintext never reaches general stores/indexes/outputs, while optional protected raw retention is isolated/encrypted/short-lived.
 - Model bitemporal evidence relations and confidence/provenance; never convert correlation into causal language silently.

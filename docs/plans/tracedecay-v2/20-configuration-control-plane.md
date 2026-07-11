@@ -913,6 +913,26 @@ Every host target exposes all state planes together:
 
 Observed data is probe evidence, never a writable layer. Status cannot report effective from desired alone, and stale/unknown cache cannot become healthy. Foreign-owned files or registrations remain visible but immutable unless a separately authorized adoption workflow exists; `repair` changes only TraceDecay-owned state. Settings, CLI, HTTP/SDK, MCP, doctor, and the Integrations workspace render this same generated status/difference view.
 
+### 13.5 Shared Brain node, placement, sync, and transport descriptors
+
+Plan 28 supplies topology semantics; this registry owns desired configuration and provenance. Secrets remain credential references and node enrollment is a distinct application workflow, never a settings file edit.
+
+| Key | Typed value/default | Contract |
+|---|---|---|
+| `brain.role` | `Standalone | Authority | RemoteClient | ReadReplica | Standby` / `Standalone` | Restart/store-open impact; role cannot self-promote or imply placement. |
+| `brain.authority.endpoint` | protected authority reference / none | HTTPS/mTLS authority; credential-free display. Tailscale/MagicDNS is an optional URL profile, never required semantics. |
+| `brain.transport.profile` | `DirectTls | LanTls | PrivateOverlay | ReverseProxy` / `DirectTls` | Reachability and proxy/authority pins only; cannot widen application grants or disable TLS/auth. |
+| `brain.consistency.default` | `Authoritative | BoundedStale` / `Authoritative` | UI/query default only; explicit requests and authority-only commands remain stronger. `OfflineCache` is observed state, not desired truth. |
+| `brain.cache.enabled/max_bytes/max_age` | false / bounded | Encrypted read-only cache; never authority/backup. Effective age is capped by signed grant `not_after`, policy/revocation generation, retention, and pending purge frontier; configuration cannot raise those floors. |
+| `brain.sync.batch_bytes/backoff/spool_budget` | bounded values | Narrows plan-28 hard ceilings; cannot bypass local sanitize-before-spool, durable ack, or reserved non-content lane. |
+| `brain.placements` | versioned map of shard/privacy domain to authority/replica policy | Saving validates a desired plan; `brain.placements.apply` performs the fenced resumable effect. No database path/URL. |
+| `brain.privacy.sync_classes` | per-domain `NeverSync | MetadataOnly | SanitizedEncrypted | FullEligible` | Non-disableable floor; protected quarantine defaults `NeverSync`; relaxation requires fresh scan/activation. |
+| `brain.replica/standby` | eligibility, lag/RPO/RTO bounds | Desired membership only; seeding/promotion requires signed manifests and recovery receipts. |
+| `brain.failover.fence_provider` | `GracefulOnly | ExternalExclusiveResource | IndependentQuorumLease` / `GracefulOnly` | Declares how positive exclusivity is proven; endpoint/capability/credential refs are opaque. `None`, unreachability, wall-clock expiry, or operator assertion can never enable promotion. |
+| `brain.recovery.key_provider` | offline recovery-bundle or external KMS/escrow reference / required before standby | Separately wraps retained data-key epochs; never stores unwrap secret in config/export/backup or weakens restore privacy scan. |
+
+`BrainId`, `BrainNodeId`, node keys, authority epochs, memberships, revocations, observed topology, causal frontiers, and recovery receipts are not writable config values. `/settings/brain`, CLI, API/SDK, and optional operator MCP render the same desired/activated/observed/effective/drift/restart model. Local-only users see no remote warning merely because no endpoint exists.
+
 ## 14. Privacy, redactor, detector, and credential controls
 
 The entire plan 18 policy is present in Settings and CLI, not hidden behind files or provider metadata.

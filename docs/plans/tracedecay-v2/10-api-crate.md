@@ -51,7 +51,7 @@ Plan 17 declares this same HTTP/OpenAPI surface official and adds the contract I
 
 ## 3. Non-Goals
 
-- No GraphQL primary surface, WebSocket requirement, hosted service, multi-tenant identity server, remote libSQL gateway, or arbitrary network bind in the first V2 default.
+- No GraphQL primary surface, WebSocket requirement, required vendor-hosted control plane, multi-tenant identity server, remote libSQL gateway, or arbitrary/unprotected network bind in the first V2 default. Plan 28's user-operated protected authority is an explicit optional profile of this same API.
 - No HTML/dashboard component implementation beyond secure SPA/static delivery, bootstrap, history fallback, and asset headers.
 - No application authorization rules, query planning, policy evaluation, command transaction, export sink, migration runner, or subscription semantics duplicated in handlers.
 - No arbitrary client-supplied filesystem path, shell command, SQL/FTS fragment, renderer code, GitHub mutation, or provider credential over HTTP.
@@ -520,6 +520,23 @@ POST /api/v2/commands/doctor/run
 POST /api/v2/repair:inspect
 POST /api/v2/commands/repair:start
 POST /api/v2/commands/backups/{create,restore}
+GET  /api/v2/brain/status
+GET  /api/v2/brain/topology
+GET  /api/v2/brain/nodes
+GET  /api/v2/brain/nodes/{id}
+GET  /api/v2/brain/placements
+GET  /api/v2/brain/sync/status
+GET  /api/v2/brain/replicas
+GET  /api/v2/brain/backup/status
+POST /api/v2/brain/repositories:candidates
+POST /api/v2/commands/brain:join|leave
+POST /api/v2/brain/nodes/{id}:rotate|revoke
+POST /api/v2/brain/placements:plan|apply|verify
+POST /api/v2/brain/sync:run|pause|resume|repair
+POST /api/v2/brain/replicas:seed|verify|retire
+POST /api/v2/brain/backup:verify
+POST /api/v2/brain/failover:plan|promote|verify
+POST /api/v2/brain/repositories:adopt|split
 POST /api/v2/storage-consolidation:inspect|plan                       # read-shaped operator preflight with sensitive source refs in body
 POST /api/v2/commands/storage-consolidation/{start,resume,recover}    # operator-only merged-#425 mutations
 GET  /api/v2/storage-consolidation/operations/{id}                   # status/receipts/exact recovery
@@ -612,6 +629,8 @@ Search-evaluation mutation routes bind one-to-one to `retrieval.corpus_versions.
 
 The storage-consolidation routes bind only plan 09's operator workflow. `inspect/plan/status` are read-shaped application results; POST is used for inspect/plan because protected source references do not belong in URLs. `start/resume/recover` require administrative capability, exact source IDs, durable operation state, deterministic confirmation where applicable, and fail-closed path-plus-file/inode holder/lease/write-reservation evidence. V1 `preview/apply` names exist only in the compatibility adapter/inventory. These bindings are absent from curation credentials and cannot be invoked by task executors, scheduler, dashboard auto-save, or a generic Settings patch.
 
+The `/brain/**` routes bind only plan 08/28's closed typed family. `brain.join` is the sole public enrollment/bootstrap workflow; no `nodes.enroll` route exists. Join/leave, placement, repair, backup verification, replica retirement, repository adoption/split, restore, and promotion require operator grants, idempotency, expected versions, authority/placement epochs, and durable receipts. Snapshot/tail transfer is an internal bounded protocol behind generated clients and never exposes a filesystem path, SQLite page/WAL, credential, or reusable bootstrap secret.
+
 The integration routes are generated bindings of plan 09's sole host-integration feature. Every route requires the administrative host-integration grant. `install` accepts canonical `HostProfileRef`/`HostInstanceId` plus the desired package/component set; the other operation commands accept the same opaque instance/deployment ref, expected desired/observed/manifest versions, and the ordinary idempotency envelope. Each lifecycle or active-probe invocation returns `202` with the shared `OperationRef`, and clients poll or subscribe through the generic operation surface. `verify` is a non-repairing workflow because it performs a fresh external probe; `list/get/diff/status` never do so. Requests and responses cannot contain host filesystem paths, raw configuration bodies, command lines, environment values, credential material, or arbitrary manifests; safe digests, ownership states, difference rows, restart directives, and content-free effect receipts are sufficient.
 
 The explicit saved-view/collection/annotation and export action routes in Section 8.6 are the sole HTTP bindings for those commands; duplicate `/commands/**` aliases are not added. They use the same generated application command envelope, idempotency, expected version, direct validation or operation-specific share plan/start contract, and audit. Scope-sensitive create bodies require `declared_scope`; existing-target bodies carry the opaque target and the application resolves its canonical owner. No current V1 dashboard mutation may bypass this inventory.
@@ -671,15 +690,16 @@ pub enum ApiStreamEvent {
 - Browser/client reconnects with capped exponential backoff and `Last-Event-ID`. `401/403` stops retry; `409/410` creates a new subscription/snapshot; `429/503` honors bounded retry advice.
 - SSE headers include `Content-Type: text/event-stream`, `Cache-Control: no-store`, `X-Accel-Buffering: no`, and security headers. Compression/proxy buffering is disabled for the event stream.
 
-## 10. Loopback Authentication, CSRF, Host/Origin, CSP, and Request Security
+## 10. Local and Protected-Remote Authentication, CSRF, Host/Origin, CSP, and Request Security
 
 ### 10.1 Bind and Host policy
 
 - Default listeners bind `127.0.0.1` and `[::1]` only. Startup fails rather than silently falling back to wildcard.
-- Non-loopback bind requires explicit protected-mode configuration, TLS, an architecture/security review, and is outside first-default support.
+- Non-loopback bind is disabled unless plan 28's explicit protected-remote profile names allowlisted interfaces/authorities, TLS 1.3, enrolled-node mTLS or a scoped revocable token, proxy-trust pins when applicable, and strict origin policy. Wildcard bind/CORS remains forbidden. This is supported optional operation, never the local default.
 - Accept only exact configured authorities: `127.0.0.1:<port>`, `[::1]:<port>`, and `localhost:<port>` when enabled. Reject missing, malformed, multiple, userinfo, trailing-dot, wildcard, unexpected port, and untrusted `Forwarded`/`X-Forwarded-*` headers.
 - Absolute-form request targets and proxy mode are rejected by default, preventing DNS-rebinding/proxy confusion.
 - A user-owned Unix-domain socket listener is a first-class transport built by this root API boundary (plan 17 §18.1 prefers it for local nonbrowser clients; plan 17 §24 owns its conformance suite). The socket directory and file are owner-only (`0700`/`0600`), peer credentials (`SO_PEERCRED`/`getpeereid`) must match the profile owner, and application token authentication still applies. Cookie, CSRF, and Host/Origin rules are HTTP-listener browser rules and neither apply to nor weaken over the socket; browser sessions are not accepted on it.
+- Tailscale, another VPN, LAN, reverse proxy, or tunnel supplies reachability only. Optional Tailscale identity/grants/posture may narrow access, but the API still authenticates TraceDecay enrollment and authorizes `BrainId`, use case, project/privacy domain, placement, and authority epoch.
 
 ### 10.2 Launch, browser session, and bearer authentication
 
@@ -691,6 +711,8 @@ pub enum ApiStreamEvent {
 6. Sessions expire at process exit and after bounded idle/absolute lifetimes; logout/restart revokes them. Authentication failures reveal no token validity detail.
 
 All cookie-authenticated unsafe methods require valid CSRF, exact Origin, `Sec-Fetch-Site: same-origin` when supplied, JSON content type, and authenticated principal. Bearer clients do not require CSRF but still cannot bypass Host, method, schema, authorization, or limits. CORS is disabled by default; no wildcard origin or credentials response exists.
+
+Remote node streams additionally bind the handshake to `BrainId`, `BrainNodeId + NodeEpoch`, authority/placement epoch, protocol/schema/catalog/privacy versions, scoped grants, and causal frontier. Revocation closes active streams and denies new reads/writes. API routes expose semantic observations/snapshots/tails/receipts only; raw store files, WAL pages, paths, database URLs, credentials, and key material have no schema.
 
 ### 10.3 Browser/security headers
 

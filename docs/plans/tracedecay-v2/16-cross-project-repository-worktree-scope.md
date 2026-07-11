@@ -21,6 +21,7 @@ An agent or person must be able to ask one question about one named repository, 
 7. Plan 22's Context Scout may expand across projects only through a pinned authorized project-set version; a model cannot turn current scope into All, and sibling task/agent activity is silent without a material typed relation.
 8. Plan 23's temporal search and context assembly use the same resolved scope before ranking and return stable cross-shard anchors; current/as-of logic cannot repair a wrong project/worktree/ref after retrieval.
 9. Plan 24's initiative/plan/work-item graph pins one authorized project-set version and exactly one writable workspace binding per attempt. Other repositories are read-only; a required multi-repository write decomposes into one fenced child work item per writable target plus explicit integration gates. A board, executor, agent, CWD, current checkout, or task title cannot add a repository, change the primary writable worktree/ref/snapshot, or copy a task to repair scope after dispatch.
+10. Plan 28 may place the same logical Brain/repository on several enrolled machines. Repository identity is global within the Brain; checkout/worktree/path identity is node-scoped; every routed result names authority/replica/cache coverage without exposing storage topology as the user's scope.
 
 “Current project” remains a convenient default. It is never an invisible constraint and never overrides an explicit repository, worktree, path, PR, branch, session, or agent reference in the request.
 
@@ -60,11 +61,12 @@ Do not expose storage topology as product scope. Use these identities:
 
 | Identity | Meaning | Cardinality/notes |
 |---|---|---|
-| `ProfileId` | Local privacy and ownership boundary. | One profile can contain many repositories and stores. |
+| `ProfileId` / `BrainId` | Privacy/ownership profile and its logical Brain across zero or more enrolled machines. | Local-only remains valid; one Brain can contain many repositories, nodes, placements, and stores. |
+| `BrainNodeId` | Stable TraceDecay enrollment/key identity for one node. | Hostname, path, IP, or VPN/Tailscale identity is only transport evidence. |
 | `RepositoryId` | Durable source-control lineage, independent of checkout path. | Derived from evidence-scored remote/common-history identity; ambiguity is preserved. |
 | `ProjectId` | Registered TraceDecay product unit and policy/config boundary. | Usually maps to one repository, but may represent a non-Git workspace or explicit subproject. |
-| `CheckoutId` | One filesystem checkout of a repository. | Main checkout and worktrees are peers. |
-| `WorktreeId` | Git worktree identity, including git common dir and admin record. | Path is a versioned alias, not identity. |
+| `CheckoutId` | One node-scoped filesystem checkout of a repository. | Main checkout and worktrees are peers; clean snapshots may dedupe by verified immutable manifest. |
+| `WorktreeId` | Node-scoped Git worktree identity, including git common dir and admin record. | Path is a versioned local alias, not repository identity; dirty overlays never merge by branch name. |
 | `RefId` | Branch/tag/remote-ref lineage. | Ref name is mutable; observations are time-qualified. |
 | `CodeSnapshotId` | Immutable code/Git state used for a graph query. | Normally commit/tree plus index/config/parser generation; distinct from `GraphGenerationId`. |
 | `ProjectSetId` | Saved or ephemeral set of repositories/projects. | Supports related systems and benchmarks. |
@@ -127,10 +129,12 @@ The resolver is a shared application service, not duplicated transport code:
 4. After authorization selects the privacy domain/key epoch, query the catalog's versioned privacy-domain-keyed exact alias-routing digests; verify every selected candidate against canonical alias evidence in its owner shard.
 5. Run token-aware matching over keyed token/quoted-phrase routing digests with per-token `AND` across an `OR` field set; no literal path/remote/alias enters the catalog.
 6. Add typo/fuzzy candidates from bounded keyed n-gram routes only below the exact/token confidence threshold, then verify in authorized owner shards.
-7. Add relationship evidence: shared Git common dir, remote, commit ancestry, registered project family, previous co-query/co-investigation, dependency, generated artifact, PR/base/head, and explicit user project set.
+7. Add relationship evidence: node-local shared Git common dir, credential-free normalized remote/forge alias, verified immutable commit/tree/object-format and ancestry evidence, registered project family, previous co-query/co-investigation, dependency, generated artifact, PR/base/head, and explicit user project set. Remote equality or common history alone cannot collapse forks.
 8. Score candidates with field/evidence explanations; never promote recency over an exact ID/path.
 9. If one candidate exceeds the calibrated exact threshold, resolve it.
 10. Otherwise return bounded candidates with stable IDs, discriminators, and a ready-to-resubmit selector.
+
+Across nodes, `RepositoryIdentityProofV1` records which immutable Git objects and normalized aliases were actually verified, object format, shallow/partial/replacement/graft/rewrite limitations, contradictions, confidence, and source nodes. Ambiguity requires a versioned adopt/split receipt. Same path/name, hostname, branch, or remote string never silently merges identities.
 
 Disambiguators include owner/repository, canonical path, worktree path, branch/ref, head commit, last indexed time, store health, default branch, and reason matched. Credential-bearing remotes are redacted before rendering.
 
@@ -161,6 +165,7 @@ Alias-routing digests are versioned records, not bare hashes: every digest row c
 Required behavior:
 
 - A registry watcher reconciles Git worktree admin data, filesystem presence, remotes, canonical alias evidence, keyed catalog routes, tombstones, and store manifests without eagerly opening every shard. Resolution prunes through the routing index and opens only authorized candidate owners for literal/evidence verification.
+- Plan 28's catalog additionally routes logical entities to authority/replica/cache placement and maps node-scoped checkout/worktree/path aliases to one verified `RepositoryId`. Physical placement changes do not mint product identity; stale placement/authority epochs produce typed coverage instead of fallback to the caller's local checkout.
 - Discovery is idempotent and provenance-bearing. A transient worktree path does not create a new repository identity.
 - Stale/deleted checkout rows are historical aliases with state, not active results and not silent garbage.
 - Duplicate stores for one canonical repository enter conflict/quarantine workflow; reads expose the conflict rather than picking newest mtime.
@@ -384,6 +389,7 @@ UX requirements:
 - Selecting a result from another repository never changes global scope invisibly; it opens an inspector or offers an explicit focus/expand action.
 - Saved systems/project sets are shareable by stable ID and may define default cross-repository graph lenses.
 - Timeline can follow an agent as it moves between worktrees and queries sibling repositories.
+- All/Brain renders one repository with node-scoped checkout/worktree children and a topology overlay; it never duplicates the repository because a laptop and server use different paths.
 
 ## 14. Agent proximity and hint integration
 
@@ -432,6 +438,7 @@ All-scope is not implemented by opening every database and concatenating rows:
 - Large exact exports become manifest-backed jobs with progress and resumable chunks.
 - Query explain reports planned/visited/pruned/skipped shards and estimated/actual cost.
 - Hot hook paths never perform federated fan-out; they read a bounded precomputed nearby/capability snapshot.
+- Remote plans route to one current authority or verified replica/cache per shard under the requested consistency. They never mount or inspect remote database files; network loss, stale cache, and pending local observations are explicit coverage dimensions.
 
 Targets at the current local corpus scale:
 

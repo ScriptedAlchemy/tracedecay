@@ -248,7 +248,7 @@ tracedecay api openapi --output <path>
 tracedecay api docs
 ```
 
-`api status --json` returns only safe discovery material: endpoint kind, socket path or loopback origin, server/protocol version, health, catalog/schema digest, authentication method, docs/OpenAPI path, and current profile ID. It never returns bearer/session/CSRF secrets. `api token create|revoke` bind audited application commands; `api token list` binds the elevated read use case `auth.tokens.list` and returns metadata only. The per-launch bootstrap bearer may execute only `auth.tokens.create` for the initial admin-class token (plan 10 §10.2).
+`api status --json` returns only safe discovery material: endpoint kind, socket path/loopback origin or configured protected authority, server/protocol version, health, catalog/schema digest, authentication method, docs/OpenAPI path, current profile/`BrainId`, node role, and safe placement generation. It never returns bearer/session/CSRF secrets, raw addresses beyond the configured endpoint, database locations, node keys, or grants. `api token create|revoke` bind audited application commands; `api token list` binds the elevated read use case `auth.tokens.list` and returns metadata only. The per-launch bootstrap bearer may execute only `auth.tokens.create` for the initial admin-class token (plan 10 §10.2).
 
 Discovery precedence for SDKs is explicit:
 
@@ -268,6 +268,8 @@ SDKs never scan processes, ports, parent directories, dashboards, MCP config, or
 - `GET /api/v2/capabilities` provides cursor-based capability discovery, not one unbounded registry blob.
 - `GET /api/v2/bindings/{use_case_id}` provides current CLI/MCP/HTTP/SDK/dashboard bindings and prerequisites.
 - `POST /api/v2/scopes:resolve` resolves one or many human locators into canonical scopes with ambiguity and coverage.
+
+Plan 28's public family is imported exactly from plan 08: `brain.status.get`, `brain.topology.get`, `brain.nodes.list|get`, `brain.join|leave`, `brain.nodes.rotate|revoke`, `brain.placements.list|plan|apply|verify`, `brain.sync.status|run|pause|resume|repair`, `brain.replicas.list|seed|verify|retire`, `brain.backup.status|verify`, `brain.failover.plan|promote|verify`, and `brain.repositories.candidates|adopt|split`. OpenAPI operation IDs and Rust/TypeScript/Python methods are generated one-to-one; `join` is the enrollment workflow and no `nodes.enroll` alias exists. Read clients receive status/topology/list/get/candidates only. Admin clients receive effects according to grants; MCP/CLI/UI are bindings of the same rows.
 
 ## 8. Capability Parity and Agent-Friendly Discovery
 
@@ -511,7 +513,7 @@ Rules:
 Every request carries or inherits:
 
 - resolved typed scope;
-- caller-selected consistency: `eventual`, `frozen`, `at_least_watermark`, or allowed domain-specific mode;
+- caller-selected consistency: plan 01/28's `Authoritative`, `BoundedStale`, `OfflineCache`, or `AsOfWatermark`; generated language conveniences may not invent weaker aliases;
 - bounded deadline and resource budget;
 - requested fields/payload policy;
 - result/page bound;
@@ -536,6 +538,7 @@ The generated `ApiResponse<T>` contains `data` and `meta`; `ApiMeta` contains th
 
 - Useful rows with one unavailable/stale/locked/redacted shard return success with `!coverage.is_complete()`.
 - Each shard/source coverage item declares selected/skipped disposition, requested/captured watermark, schema/capability version, freshness, rows considered/returned when known, and safe reason.
+- Multi-machine coverage also carries `BrainId`, placement generation, authority/replica/node identities and epochs, cache age/sync lag, unreachable/local-only/policy-excluded state, and pending local counts separately from canonical totals.
 - Zero results plus incomplete coverage is not represented as "no matches".
 - Counts declare exact, lower-bound, estimate, sampled, capped, or unknown.
 - Search/graph scores declare algorithm/version and are not comparable across profiles unless explicitly normalized.
@@ -770,7 +773,7 @@ SDKs separate `ReadClient` and `AdminClient` surfaces where the language permits
 - Loopback HTTP binds only exact loopback by default and enforces strict Host/Origin/forwarded-header policy.
 - Browser uses per-launch bootstrap, secure session cookie, and CSRF token.
 - Agent/SDK uses a bearer token or local credential-provider handshake. Tokens never appear in URLs, process titles, command history examples, OpenAPI examples, or logs.
-- Non-loopback bind requires a future explicit deployment profile with TLS, stronger identity, documented threat model, and separate review; changing the address flag alone is insufficient.
+- Plan 28's optional protected-remote profile permits an allowlisted non-loopback authority with TLS 1.3, enrolled-node mTLS or scoped token, pinned proxy trust, strict Host/Origin, and application authorization. Changing an address flag alone is insufficient. Tailscale or another VPN is optional reachability and never substitutes for TraceDecay identity/grants.
 
 ### 18.2 Credential model
 
@@ -783,6 +786,8 @@ Tokens are:
 - constrained by scope selectors and sensitivity/payload grants;
 - optionally process/installation identity bound where supported;
 - revocable immediately with stream/operation implications declared.
+
+Remote nodes additionally use an enrolled asymmetric identity stored through the OS credential provider, with explicit `BrainId`, node epoch, key rotation/revocation, placement, and sync grants. A Tailscale node identity may narrow an enrollment/grant decision but is not the durable TraceDecay node identity. Revocation closes streams and prevents new reads/writes. Offline cache access requires a signed `CacheGrantSnapshotV1` with mandatory expiry and policy/revocation/purge frontier; SDKs lock expired caches and apply/acknowledge tombstones before serving after reconnect.
 
 The per-launch bootstrap bearer of plan 10 §10.2 is not a parallel credential model: it is the bootstrap credential whose only permitted operation is `auth.tokens.create` (plan 09 §10), minting the initial admin-class token in this registry. Every operating credential is a registry token.
 

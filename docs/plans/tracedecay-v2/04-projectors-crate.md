@@ -33,6 +33,8 @@ Plan [`24-canonical-task-plan-graph-and-multi-agent-executor.md`](24-canonical-t
 
 ## Convergence boundary
 
+In a multi-machine Brain, only the current fenced authority for a shard runs canonical projectors or advances its checkpoints. Remote nodes may capture, sanitize, or build eligible immutable code/Git packs, but replicas/caches consume signed published generations and never project independently. Every projector transaction compare-checks plan 28's placement and authority epoch in addition to its ordinary lease/checkpoint.
+
 Projectors are the sole observation-to-canonical/read-model derivation owner in [`19-system-defragmentation-convergence-and-extensibility.md`](19-system-defragmentation-convergence-and-extensibility.md). They consume domain/capture/store contracts from Plans [`01`](01-domain-crate.md)–[`03`](03-capture-crate.md), enforce the Plan [`18`](18-secret-detection-redaction-and-private-data-safety.md) sink firewall, and produce the only read models consumed by [`05-query-crate.md`](05-query-crate.md). Plans [`22`](22-incremental-context-scout-and-suggestion-envelopes.md) and [`23`](23-session-lcm-temporal-retrieval-and-evaluation.md) add scout lifecycle/outcome and message-occurrence/copy/summary-horizon/temporal-assertion projections here; projectors never schedule scout work or choose relevance/current truth.
 
 | Boundary | Contract |
@@ -242,6 +244,8 @@ impl Projector for CanonicalEventProjector {
 - `causation_id` is accepted only from direct/provider-declared evidence that passes predicate rules. Temporal proximity yields no causal edge.
 
 ### Outbox, checkpoints, watermarks, and concurrency
+
+Authority transfer freezes projection at a vector watermark, verifies the recovery manifest, increments `AuthorityEpoch`, and resumes from the exact checkpoint under a new lease. An old authority, stale replica, or local cache cannot publish projection output after promotion. Deterministic rebuild from the same retained observations must produce the same manifest on another node.
 
 ```rust
 use tracedecay_domain::{ProjectionCheckpointKeyV1, ProjectionCheckpointV1};

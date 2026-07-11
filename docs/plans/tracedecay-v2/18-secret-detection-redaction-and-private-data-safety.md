@@ -87,6 +87,7 @@ The private chronological research corpus remains outside Git and mode `0600`. I
 11. “Zero findings” is claimed only with complete named coverage and scanner/policy versions. Locked, skipped, corrupt, incompatible, too-large, timed-out, and unsupported inputs remain explicit unknowns.
 12. V1 rollback stores/backups cannot reintroduce unsafe content. They are rescanned/migrated in isolation before becoming eligible for restore.
 13. Host installation metadata is not permission to retain host content. Config/backup bodies and raw hook/probe/diagnostic payloads are protected-operation data only; general projections contain content-free digests/counts/states and authorized receipt references, and retirement preserves foreign or ownership-ambiguous bytes.
+14. Multi-machine transfer is a separately enforced sink. The sender sanitizes/classifies before spooling/upload, the authority revalidates eligibility, and protected quarantine defaults to local-only. Connectivity, enrollment, replication, backup, or a Tailscale/VPN identity never implies payload permission.
 
 ## 4. Threat model
 
@@ -127,6 +128,7 @@ The private chronological research corpus remains outside Git and mode `0600`. I
 - A stale projection/backup/cache restoring content after apparent deletion.
 - Cross-project HMAC/equality correlation leaking that two privacy domains contain the same secret.
 - A detector plugin exfiltrating candidate text or using the network.
+- A revoked/compromised enrolled node, misconfigured reverse proxy/VPN, stale replica/cache, or offline node retaining/resurrecting content after policy/retention changes.
 
 ### 4.4 Host-bundle and installation containment
 
@@ -408,6 +410,19 @@ The plan-10/17 `task_graph.edit_bundles.*` workflow treats every exported, downl
 - Durable submit/delete/expiry/sweeper receipts contain only `TaskGraphEditWorkspaceId`, `TaskGraphEditCandidateRefV1`, source/manifest/policy digests, safe part/item/byte counts, disposition/reason enums, timestamps, and audit/retrieval anchors. They contain no Markdown/YAML/archive content, logical filename, client path, physical path, candidate excerpt, secret fingerprint, or inode/device value.
 
 Line-addressed validation output is plan 01's exact transient `TaskGraphEditDiagnosticV1`, not durable content: safe code/severity/phase, optional contained relative-file byte and line/column span, optional editable subject and field path, safe message, optional bounded deterministic text edit, and evidence anchors. Parser/library exceptions, YAML tokens, source lines, archive entry bytes, and surrounding text never reach the diagnostic.
+
+### 11.8 Multi-machine synchronization and remote stores
+
+Every domain resolves exactly one plan-28 sync class: `NeverSync`, `MetadataOnly`, `SanitizedEncrypted`, or `FullEligible`. Classes bind source and destination privacy domain, principal/node grant, sanitizer/detector/policy versions, retention, and placement. The sender enforces before durable upload; the receiver revalidates before canonical commit. A stricter policy applies immediately, while relaxation requires explicit activation and a fresh eligibility scan.
+
+- `NeverSync` content and all reconstructable descendants remain on the local authority. Only allowlisted non-sensitive availability may be reported.
+- `MetadataOnly` permits bounded allowlisted identity/count/health fields, never payload or reversible features.
+- `SanitizedEncrypted` permits sanitizer-approved records over authenticated transport and encrypted storage.
+- `FullEligible` still means sanitizer-approved fields allowed by domain/principal policy; it never means raw bypass.
+- Protected quarantine is `NeverSync` by default. A future protected transfer requires a distinct elevated design/ADR and is not inferred from ordinary remote eligibility.
+- Node revocation closes streams and blocks new reads/writes. Local cache/spool bytes remain encrypted, retention-bound, and purgeable; signed tombstones/purge proofs prevent offline resurrection.
+- Every cache/replica authorization is a signed `CacheGrantSnapshotV1` bound to principal/node, exact scope/fields/payload classes, policy/privacy/catalog and revocation generations, purge frontier, and mandatory `not_after`. Offline cache locks at expiry; clock rollback cannot extend it. Reconnect applies and acknowledges tombstones/purge directives before serving again, and UI/coverage exposes pending purge acknowledgements.
+- Sync manifests, receipts, logs, metrics, errors, topology, and backup catalogs contain only opaque IDs, safe counts/states/digests, and authorized anchors—never addresses, paths, remote credentials, token material, candidate fingerprints, or content.
 
 ## 12. Retroactive whole-profile audit
 

@@ -44,6 +44,24 @@ task_graph.status|doctor|events
 task_graph.edit_bundles.export|get|validate|diff|rebase|submit|delete
 ```
 
+Plan [`28-remote-multi-machine-shared-brain.md`](28-remote-multi-machine-shared-brain.md) contributes topology/node/enrollment/placement/sync/replica/backup/failover/repository-correlation use cases. The catalog marks safe status reads separately from operator effects, generates the plan-21 CLI and plan-10/17 API/SDK bindings, includes compact `brain_status` only in reviewed context profiles, and keeps enrollment/revocation/placement/repair/promotion mutations in explicit operator profiles. No generated schema exposes database paths/URLs, sync chunks, credentials, node keys, or Tailscale-specific semantics.
+
+```text
+brain.status.get
+brain.topology.get
+brain.nodes.list|get
+brain.join|leave
+brain.nodes.rotate|revoke
+brain.placements.list|plan|apply|verify
+brain.sync.status|run|pause|resume|repair
+brain.replicas.list|seed|verify|retire
+brain.backup.status|verify
+brain.failover.plan|promote|verify
+brain.repositories.candidates|adopt|split
+```
+
+This family is closed. `join` owns enrollment plus initial placement compensation; there is no public `nodes.enroll` twin. `leave` owns self-revocation/cache retirement after authority-transfer checks. Status/list/get/candidates and operation-specific `plan` are read/preflight shaped as cataloged; rotate/revoke/apply/run/pause/resume/repair/seed/verify/retire/promote/adopt/split are versioned/idempotent effects or resumable operations. Every CLI/HTTP/SDK/MCP/UI spelling maps bijectively to one row.
+
 The exact host-integration family is likewise closed and generated:
 
 ```text

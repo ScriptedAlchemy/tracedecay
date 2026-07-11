@@ -44,7 +44,7 @@ Program numbering remains authoritative from the master plan. This document refi
 | PR 34 | PR 34R parity runner and operator dashboard binding |
 | PR 35 | PR 35A–35J bounded-context routing cutovers |
 | PR 36 | PR 36R V2-default release and V1 data archive window |
-| PR 37 | PR 37A–37K V1 code/store/dashboard/host-installer retirement |
+| PR 37 | PR 37A–37L V1 code/store/dashboard/host-installer/path-routing retirement |
 
 No V2 crate may import the root crate. Root adapters may import both V1 modules and public V2 contracts. A compatibility adapter cannot contain policy, query planning, projection, business mutation, or SQL beyond invoking a V1 repository that remains authoritative for that route.
 
@@ -148,6 +148,8 @@ This is a baseline runner-order defect, not a V2 parity waiver:
 | Long-lived daemon | V2 store writers, capture drain, projectors, scheduler/automation workers, catalog publication, MCP socket, watchers | fenced leases, recovery, shutdown/checkpoint, background work | Accept a stale writer epoch or mix profiles across a connection. |
 | Dashboard/API server | root `v2::api`, application kernel, static asset service, V1 route nest during coexistence | loopback auth, HTTP/SSE, SPA delivery | Call legacy dashboard SQL/services after a route is V2-default. |
 | Official external API/SDK client | user-owned socket or authenticated loopback endpoint, current protocol/catalog handshake | bounded request/stream/operation lifecycle only | Open internal stores, use dashboard/MCP as a proxy, or fall back to a retired binding. |
+| Enrolled remote Brain client | local sanitized capture spool, generated authenticated client, optional verified read cache | node handshake, idempotent upload, receipt retirement, cache watermark, offline state | Open authority SQLite/WAL, project canonical state locally, self-promote, or treat VPN identity as application authorization. |
+| Remote Brain authority/standby | only its placed host-local stores or verified standby manifests | fenced authority epoch, enrollment/grants, semantic snapshot/tail, backup/recovery receipt | Mount database files remotely, accept stale epochs, or permit two writers. |
 | Extraction worker | bounded code-source adapter and grammar registry | authenticated request, parse result/observation production | Resolve profile/routes or write canonical stores directly. |
 
 ### 5.2 Final dependency direction
@@ -458,6 +460,7 @@ Required changes:
 - Add persisted per-context V2 route config under the active user profile. Defaults remain V1 until a signed receipt exists.
 - Emergency environment overrides are limited to operational tuning and diagnostics — timeouts, log verbosity, socket/path selection, offline mode, and read-only diagnostic modes. They cannot select V1 or V2 routing. Rollback requires the typed operator command, lifecycle lease, signed receipt, quiescence, and process restart; environment drift cannot bypass migration gates.
 - Profile selection happens before global/catalog/store opens. PR #407 means Hermes commands/sources use the same active profile.
+- Plan 28's role, `BrainId`, node enrollment, authority endpoint, placement, consistency/cache, sync/privacy class, replica, and standby settings resolve before any store opens. Tailscale-specific values are optional endpoint metadata only; ordinary HTTPS/mTLS remains complete.
 - Every client/daemon/plugin handshake exchanges exact root build/protocol version, route generation, schema major, catalog digest, tool-catalog generation, and profile identity. Any mismatch that changes executable bindings rejects the connection before request/store use and reports restart/update/current replacement; there is no older-reader or stale-plugin mode.
 - Ordinary configuration patches are direct application commands with inline full-snapshot validation/impact, expected revision, idempotency, atomic private write, backup, audit event, and typed restart/operation requirement. They have no generic preview/apply ceremony. Separately cataloged destructive system effects use an operation-specific inspect or immutable plan followed by separately authorized start. Root adapters never directly mutate config from HTTP/MCP.
 - Existing host-owned config file semantics—JSON, JSONC, TOML, shell hook, permissions, backup/restore, unrelated-key preservation—remain installer responsibilities and have fixture parity.
@@ -551,12 +554,13 @@ The accepted-base Phase-0 reuse ledger starts with 15 `AgentIntegration` impleme
 1. Parse process profile without opening a store.
 2. Acquire PR #412's shared lifecycle lease for normal service/read operation, or exclusive/inherited lease for update, migration, rollback, repair, service refresh, archive, or destructive maintenance. The lease is cross-process and profile-root scoped.
 3. Resolve executable/build identity, user profile, request principal, and effective config.
-4. Load/verify route snapshot and exact client/protocol/catalog/policy/schema compatibility; stale processes fail before store opens.
-5. Acquire only required V1/V2 store/writer leases; refuse ambiguous #405 identity.
-6. Run V2 store/spool/staging/outbox recovery before accepting writes.
-7. Open V1 migration readers/writers only while the context is pre-cutover or an explicit rollback is active.
-8. Start capture drain, projectors, scheduler/automation, Git/watch, and maintenance workers in dependency order.
-9. Bind socket/API, publish readiness with route/vector watermarks, then accept clients.
+4. Select `Standalone | Authority | RemoteClient | ReadReplica | Standby`, verify node enrollment/credential and remote handshake where applicable, and bind `BrainId`, placement generation, authority/node epochs, grants, schema/catalog/privacy versions, and causal frontier before store open.
+5. Load/verify route snapshot and exact client/protocol/catalog/policy/schema compatibility; stale processes fail before store opens.
+6. Acquire only required V1/V2 store/writer leases; refuse ambiguous #405 identity and any placement/authority-epoch mismatch. A remote client opens only local spool/cache state.
+7. Run V2 store/spool/staging/outbox/sync-receipt recovery before accepting writes.
+8. Open V1 migration readers/writers only while the context is pre-cutover or an explicit rollback is active.
+9. Start capture drain everywhere; start canonical projectors, scheduler/automation, curation, leases, retention, and effectors only for locally authoritative shards.
+10. Bind socket/API, publish readiness with role/authority/placement/vector/cache/sync state, then accept clients.
 
 ### Runtime rules
 
@@ -568,6 +572,7 @@ The accepted-base Phase-0 reuse ledger starts with 15 `AgentIntegration` impleme
 - Watchers emit source observations/effects; they do not call graph/session/automation databases directly.
 - Projector/scheduler/maintenance work has bounded queues, fair scheduling, cancellation, and disk/backpressure states exposed in doctor/Observatory.
 - A hook remains useful when the daemon is absent: durable local spool if policy permits, explicit degraded acknowledgement, and later idempotent drain. No false “committed” receipt.
+- A hook remains useful when the remote authority is unreachable: it sanitizes and durably spools locally, never blocks on network, and retires frames only after a verified canonical sync receipt. Cache/offline/pending state is never reported as committed authority state.
 - Version skew is checked on every daemon handshake and route generation change. A stale daemon cannot continue writing after upgrade changes schema/catalog major.
 - Service refresh snapshots and restores the exact pre-operation state: active/stopped plus enabled/disabled/persistently-masked/runtime-masked where the platform exposes it. A disabled or masked service is never silently enabled or started by update, doctor, or migration.
 - Skill materialization ownership uses the single #411 predicate for doctor, autonomous update/archive/recovery, remove, and repair. A foreign-installation package remains untouched and informational; no autonomy decision or remediation advertises an effect the materialization path refuses.
@@ -821,6 +826,13 @@ Companion PR 24G/24H and plan 17 SDK slices add generated scope/anchor/problem b
 - [ ] Restore backup/archive into a clean profile and run parity corpus.
 - [ ] Commit `feat(migrate): orchestrate resumable v1 to v2 migration`.
 
+### PR 33I: Existing-profile remote Brain enrollment and correlation
+
+- [ ] Bootstrap local versus remote authority before store open; enroll the node with protected one-time material; verify `BrainId`, grants, versions, placement, backup, privacy eligibility, and authority epoch before publishing any route.
+- [ ] Correlate repositories/checkouts across nodes through plan 16/28 Git proofs; ambiguous forks/shallow/rewritten histories remain candidates and block automatic adoption.
+- [ ] Seed replicas/caches only from signed manifests, resume every upload/import phase idempotently, and prove no code path opens a database/WAL over the network.
+- [ ] Kill/retry every enrollment, placement, snapshot/tail, receipt, and publication boundary; failed migration leaves the prior local authority unchanged.
+
 ### PR 34R: Shadow parity runner and operator surface
 
 **Files:** extend `src/compat/parity.rs`, application operations adapter, Observatory migration/parity views, machine receipts.
@@ -853,7 +865,15 @@ Companion PR 24G/24H and plan 17 SDK slices add generated scope/anchor/problem b
 - [ ] Run upgrade, daemon skew, dashboard package, backup/restore, and supported-host install/update/repair/uninstall/reload/trust/cloud-vs-local conformance drills; versions/digests and unsupported cells remain visible in the receipt.
 - [ ] Commit `release: make v2 the tracedecay default`.
 
-### PR 37A–37K: Retirement
+### PR 36S: Protected multi-machine release gate
+
+**Files:** plan-28 conformance/fault fixtures, release receipts, supported transport matrix, backup/restore and RPO/RTO reports.
+
+- [ ] Pass local/authority/client/replica/standby/hybrid, partition, revocation, privacy, cache, Git identity, restore/promotion, old-authority, RPO/RTO, and 10× scale cases over ordinary HTTPS/mTLS; repeat the connectivity subset over optional Tailscale without changing application semantics.
+- [ ] Prove standby promotion is impossible on unreachability/time alone and succeeds only after a graceful old-authority fence receipt, verified external exclusive-resource revocation, or expired independent quorum lease term; restore also succeeds after total authority-node/keyring loss through separately wrapped recovery keys.
+- [ ] Enable remote mode only for profiles with current enrollment, one fenced authority per shard, verified backup/recovery receipt, explicit placements/privacy classes, and current client/schema/catalog versions. Local-only operation remains complete.
+
+### PR 37A–37L: Retirement
 
 **Files:** exact deletion groups in Section 15; compatibility inventory status updates; archive/deletion receipts.
 
@@ -862,6 +882,7 @@ Companion PR 24G/24H and plan 17 SDK slices add generated scope/anchor/problem b
 - [ ] Remove retired tool/argument aliases at cutover. Keep only human browser navigation redirects and current-binary archive readers for exactly one full release after the owning retirement slice merges — that is the declared data/UI window; when it closes they fail typed with the current replacement.
 - [ ] Physical user-store deletion remains an explicit command after code retirement; repository cleanup does not touch profile data.
 - [ ] PR 37K removes copied legacy host installers/config fragments only after plan-27 conformance and ownership proof; it preserves foreign caches, unmanaged plugins, user/team/workspace config, unknown keys, backups, and any path whose receipt ownership is missing.
+- [ ] PR 37L removes legacy path/store-file remote routing and temporary remote-authority compatibility adapters only after PR 36S; it preserves foreign VPN/proxy/certificate configuration and user-managed infrastructure.
 
 ## 18. Verification Matrix and Release Gates
 

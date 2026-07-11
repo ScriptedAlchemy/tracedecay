@@ -422,6 +422,8 @@ Legal renderings per state, enforced across every surface by the shared conforma
 - Lag series sample capture source watermarks against journal commit time (`IngestLagSampled`) and journal outbox positions against projector checkpoints (plan 04's contiguous/highest sequences) per `(shard, projector)`; the cutover gate "projection lag < 2 s for 24 h" (master §7.7) reads from these rows, not from an ad-hoc probe.
 - Data-quality series count dead letters by reason, quarantine entries, unknown-denominator metric points, coverage omissions, and parse/schema failures — the inputs the Observatory needs to say *why* a number is partial.
 
+Plan 28 extends the same registered series—without a second sync telemetry store—with spool events/bytes/oldest age, upload/ack latency, replica/cache watermark lag, snapshot/tail bytes, dedupe/ID-digest collision/gap/conflict/quarantine, authority-epoch mismatch/fenced-write/split-brain attempt, revocation propagation, remote query/SSE latency and coverage, repository adopt/split outcomes, backup age, verified recovery point, restore/promotion duration, and achieved RPO/RTO. Dimensions use bounded role/transport/decision classes and opaque scope digests; never node names, addresses, paths, remote URLs, repository names, tokens, content, or unbounded IDs. Tailscale is at most a `PrivateOverlay` transport class.
+
 ### Cap/truncation telemetry with retrieval anchors
 
 - Any surface that applies a cap (query page/budget, hint token budget, export bound, traversal depth, analytics sample) emits `CapApplied` with a `CapTruncationRecordV1`. Where the truncated population is retained evidence, the record carries a `RetrievalAnchorId` routing to the exact frozen result (anchors are ID-only in rows; hydration goes through the anchor endpoint per plan 01's rule).
@@ -514,6 +516,9 @@ Registered SLO descriptors at minimum (thresholds are plan 20 descriptors defaul
 | Current-registry top-k | p95 ≤ 800 ms |
 | Timeline first page | p95 ≤ 200 ms current scale |
 | Task lease / heartbeat (plan 24 surfaces) | p95 ≤ 50 ms / ≤ 20 ms |
+| Remote observation authority acknowledgement | p95 target declared by deployment profile; no hook-path coupling |
+| Replica/cache lag and oldest pending spool | explicit per-placement bounds; breach is never hidden by availability |
+| Backup age / restore / promotion | declared plan-28 RPO/RTO profile with verified drill |
 
 Monitors compute windowed p50/p95/p99 from latency events, record breaches with reasons and sample counts, and never sample away breaches: a capped sample renders `Capped`. Release-gate measurement remains the owning plans' benchmarks; these monitors are the continuous production view of the same budgets.
 
@@ -659,6 +664,10 @@ Migration is coordinated with plan 12's controller (its §14 phases) and gated b
 | Crash separates effect, terminal receipt, and cursor advance | Atomic-boundary reconciliation fixture | Reconcile to exactly one terminal/effect/cursor result; never clear newer dirt | crash-at-every-boundary matrix |
 | Metric rendered without descriptor | Registry drift gate | Surface build fails; no orphan metrics | Generated-artifact drift CI |
 | Content leakage into metrics | Sink firewall + log-safe types | Only safe IDs/fingerprints; violation fails closed | Secret-corpus canary over all telemetry tables |
+| Cache/replica or pending spool presented as canonical/current | Consistency + authority/watermark coverage validation | Render stale/offline/pending separately; block authoritative claim | mixed consistency/offline fixtures |
+| Two authority epochs accept writes | Fenced-write and placement receipts | Reject stale epoch, open blocking split-brain incident | partition/promotion/old-authority matrix |
+| Revoked node continues a stream or sync | Membership/revocation generation mismatch | Close stream, deny read/write, retain safe audit | revoke-during-upload/query/SSE fixtures |
+| Remote Git clones silently merge or split | Repository proof/adoption evaluation | Surface candidates and false-merge/false-split metric | fork/shallow/rewritten/path-difference corpus |
 
 ## PR and task sequence
 

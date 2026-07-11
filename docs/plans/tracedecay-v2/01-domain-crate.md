@@ -42,7 +42,7 @@ This plan is the type authority inside the converged system described by [`19-sy
 - No V1 type aliases that expose V1 strings as V2 IDs.
 - No hidden reasoning representation. `ReasoningArtifact` represents only provider-exposed material and always carries visibility and format.
 - No global total order across independent sources or shards.
-- No remote libSQL adapter or multi-tenant authorization model in the first V2 default.
+- No database/transport implementation, node credential handling, network listener, or multi-tenant policy engine. This crate does own the pure single-user multi-machine Brain, node, authority, placement, sync, consistency, and repository-proof value contracts consumed by plan 28.
 
 ## Authoritative ownership decisions
 
@@ -53,6 +53,8 @@ This plan is the type authority inside the converged system described by [`19-sy
 5. Graph generations own immutable snapshot occurrences and edges. Project rows point to explicit `CodeSnapshotId` and `GraphGenerationId`; a physical generation is never an entity identity.
 6. Blobs are addressed inside a `BlobDomainId` composed from privacy domain, encryption-key epoch, and retention class. Deduplication never crosses that boundary.
 7. An event has one owning shard and zero or more project-attribution relation assertions. Canonical activity never has a required primary `project_id`.
+8. A `BrainId` is the logical profile-wide identity across enrolled machines. A mutable shard has exactly one `StoreAuthorityId + AuthorityEpoch`; caches and replicas are never authorities. Hostnames, paths, IPs, VPN identities, and Tailscale node IDs are evidence/aliases, not canonical identity.
+9. `RepositoryIdentityProofV1` may resolve clones only from credential-free normalized remote evidence plus verified Git object/commit/tree/ancestry evidence. Ambiguous fork/shallow/rewritten cases remain candidates until an adoption receipt exists.
 
 ## Current V1 seams and migration inputs
 
@@ -196,6 +198,9 @@ The implementation must expose these names unchanged:
 
 ```rust
 pub struct ProfileId(pub uuid::Uuid);
+pub struct BrainId(pub uuid::Uuid);
+pub struct BrainNodeId(pub uuid::Uuid);
+pub struct StoreAuthorityId(pub uuid::Uuid);
 pub struct ShardId(pub uuid::Uuid);
 pub struct PrivacyDomainId(pub uuid::Uuid);
 pub struct SourceInstanceId(pub uuid::Uuid);
@@ -248,6 +253,11 @@ pub struct QueryId(pub uuid::Uuid);
 pub struct RequestId(pub uuid::Uuid);
 pub struct LeaseId(pub uuid::Uuid);
 pub struct ConsumerInstanceId(pub uuid::Uuid);
+pub struct AuthorityEpoch(pub u64);
+pub struct NodeEpoch(pub u64);
+pub struct NodeSigningKeyId(pub uuid::Uuid);
+pub struct ReceiptNonce(pub [u8; 32]);
+pub struct Ed25519SignatureV1(pub [u8; 64]);
 pub struct DeadLetterId(pub uuid::Uuid);
 pub struct DeadLetterAttemptId(pub uuid::Uuid);
 pub struct DeadLetterCompactionId(pub uuid::Uuid);
@@ -2214,6 +2224,146 @@ impl VectorWatermark {
     pub fn merge_max(&self, other: &Self) -> Self;
 }
 
+pub struct EventDotV1 {
+    pub node_id: BrainNodeId,
+    pub node_epoch: NodeEpoch,
+    pub sequence: u64,
+}
+
+pub struct CausalFrontierV1 {
+    pub components: BoundedVec<EventDotV1, 1_024>, // sorted unique node/epoch; highest accepted sequence
+    pub compaction_floor_digest: Option<ManifestDigest>,
+}
+
+pub enum ReadConsistencyV1 {
+    Authoritative,
+    BoundedStale { max_lag_micros: u64 },
+    OfflineCache,
+    AsOfWatermark(VectorWatermark),
+}
+
+pub struct ShardPlacementV1 {
+    pub brain_id: BrainId,
+    pub shard_id: ShardId,
+    pub privacy_domain_id: PrivacyDomainId,
+    pub authority_id: StoreAuthorityId,
+    pub authority_node_id: BrainNodeId,
+    pub authority_epoch: AuthorityEpoch,
+    pub placement_version: EntityVersionId,
+    pub schema_version: SchemaVersion,
+    pub registry_digest: RegistryManifestDigest,
+    pub privacy_policy_digest: PrivacyPolicyDigest,
+    pub sync_class: SyncClassV1,
+    pub replicas: BoundedVec<ReplicaPlacementV1, 64>,
+}
+
+pub enum SyncClassV1 { NeverSync, MetadataOnly, SanitizedEncrypted, FullEligible }
+pub enum BrainNodeRoleV1 { Standalone, Authority, RemoteClient, ReadReplica, Standby }
+
+pub struct ReplicaPlacementV1 {
+    pub node_id: BrainNodeId,
+    pub role: BrainNodeRoleV1,
+    pub maximum_lag_micros: Option<u64>,
+}
+
+pub struct SyncReceiptV1 {
+    pub brain_id: BrainId,
+    pub authority_id: StoreAuthorityId,
+    pub authority_node_id: BrainNodeId,
+    pub authority_epoch: AuthorityEpoch,
+    pub placement_version: EntityVersionId,
+    pub source_node_id: BrainNodeId,
+    pub source_node_epoch: NodeEpoch,
+    pub source_id: SourceInstanceId,
+    pub first_sequence: u64,
+    pub last_sequence: u64,
+    pub batch_digest: ManifestDigest,
+    pub accepted_frontier: CausalFrontierV1,
+    pub committed_watermark: VectorWatermark,
+    pub manifest_digest: ManifestDigest,
+    pub revocation_generation: u64,
+    pub signing_key_id: NodeSigningKeyId,
+    pub signing_key_epoch: u64,
+    pub issued_at: UtcMicros,
+    pub expires_at: UtcMicros,
+    pub nonce: ReceiptNonce,
+    pub signature: Ed25519SignatureV1,
+}
+
+pub struct CausalFrontierCompactionV1 {
+    pub brain_id: BrainId,
+    pub prior_frontier_digest: ManifestDigest,
+    pub compacted_frontier: CausalFrontierV1,
+    pub retired_epochs: BoundedVec<EventDotV1, 1_024>,
+    pub tombstone_ack_watermark: VectorWatermark,
+    pub backup_horizon: UtcMicros,
+    pub manifest_digest: ManifestDigest,
+}
+
+pub struct CacheGrantSnapshotV1 {
+    pub brain_id: BrainId,
+    pub node_id: BrainNodeId,
+    pub capability_grants: CapabilityGrantSetId,
+    pub access_digest: AccessPolicyDigest,
+    pub privacy_policy_digest: PrivacyPolicyDigest,
+    pub registry_digest: RegistryManifestDigest,
+    pub revocation_generation: u64,
+    pub issued_at: UtcMicros,
+    pub not_after: UtcMicros,
+    pub trusted_authority_time: UtcMicros,
+    pub purge_frontier: VectorWatermark,
+    pub signing_key_id: NodeSigningKeyId,
+    pub signing_key_epoch: u64,
+    pub nonce: ReceiptNonce,
+    pub signature: Ed25519SignatureV1,
+}
+
+pub struct RepositoryIdentityProofV1 {
+    pub repository_id: Option<RepositoryId>,
+    pub source_nodes: BoundedVec<BrainNodeId, 64>,
+    pub normalized_remote_digests: BoundedVec<PrivacyDomainBoundLocatorDigest, 32>,
+    pub object_format: RegistryEntryId,
+    pub shared_object_evidence: BoundedVec<ManifestDigest, 256>,
+    pub ancestry_evidence: BoundedVec<ManifestDigest, 256>,
+    pub limitations: BoundedVec<RegistryEntryId, 32>,
+    pub contradictions: BoundedVec<RegistryEntryId, 32>,
+    pub confidence: Confidence,
+    pub proof_digest: ManifestDigest,
+}
+
+pub enum AuthorityFenceKindV1 {
+    GracefulOldAuthorityShutdown,
+    ExternalExclusiveResourceRevoked,
+    IndependentQuorumLeaseTerm,
+}
+
+pub struct AuthorityFenceProofV1 {
+    pub brain_id: BrainId,
+    pub shard_id: ShardId,
+    pub prior_authority_id: StoreAuthorityId,
+    pub prior_authority_epoch: AuthorityEpoch,
+    pub kind: AuthorityFenceKindV1,
+    pub provider_ref: SchemaBoundValueRef,
+    pub evidence_anchors: BoundedVec<RetrievalAnchorId, 32>,
+    pub observed_at: UtcMicros,
+    pub proof_digest: ManifestDigest,
+    pub signature: Ed25519SignatureV1,
+}
+
+pub struct AuthorityRecoveryReceiptV1 {
+    pub brain_id: BrainId,
+    pub shard_id: ShardId,
+    pub prior_authority_id: StoreAuthorityId,
+    pub prior_authority_epoch: AuthorityEpoch,
+    pub new_authority_id: StoreAuthorityId,
+    pub new_authority_epoch: AuthorityEpoch,
+    pub recovery_manifest_digest: ManifestDigest,
+    pub wrapped_key_manifest_digest: ManifestDigest,
+    pub fence_proof: AuthorityFenceProofV1,
+    pub privacy_scan_receipt: ManifestId,
+    pub receipt_digest: ManifestDigest,
+}
+
 pub struct FrozenSnapshot {
     pub captured_at: UtcMicros,
     pub watermark: VectorWatermark,
@@ -2301,6 +2451,12 @@ pub struct SpoolReceipt {
     pub durable_at: UtcMicros,
 }
 ```
+
+Dots/frontiers describe replication provenance only. They never replace `ObservationId`, evidence causality, shard sequences, or vector watermarks. Frontier components are sorted/unique and hard-bounded; retired epochs compact only after every authority/replica acknowledges the compaction and tombstone/backup horizon. An older reconnecting node must re-seed and cannot append an omitted epoch.
+
+`SyncReceiptV1` is the signed envelope; there is no unsigned public receipt twin. Canonical signing bytes are the domain canonical encoding of every field except `signature`, prefixed by the receipt schema/domain-separation tag. The authority's enrolled Ed25519 public-key chain, key epoch, revocation generation, expiry, and nonce are verified before acknowledgement retirement; nonce uniqueness and accepted source range prevent replay. Key rotation preserves verification keys through the maximum receipt/cache/backup horizon. `CacheGrantSnapshotV1` uses the same trust root/domain separation and always expires; disconnected cache access cannot outlive `not_after`.
+
+Plan 28 owns the complete placement, sync-policy, repository-proof, enrollment, replica, recovery, and failover behavior; all canonical encodings freeze with PR 4H. Plan 02 lowers these exact fields, and no transport/store creates a smaller receipt or placement type.
 
 Rules:
 
@@ -2549,6 +2705,23 @@ pub struct CursorClaimsV1 {
     pub sort_cutoff: Vec<SortValue>,
     pub last_entity_id: Option<EntityId>,
     pub emitted_ids_digest: ManifestDigest,
+    pub remote: Option<RemoteCursorBindingV1>,
+}
+
+pub struct RemoteCursorShardBindingV1 {
+    pub shard_id: ShardId,
+    pub authority_id: StoreAuthorityId,
+    pub authority_epoch: AuthorityEpoch,
+    pub served_by_node: BrainNodeId,
+    pub cache_generation: Option<ManifestDigest>,
+    pub cache_grant_digest: Option<ManifestDigest>,
+}
+
+pub struct RemoteCursorBindingV1 {
+    pub brain_id: BrainId,
+    pub placement_version: EntityVersionId,
+    pub consistency: ReadConsistencyV1,
+    pub shards: BoundedVec<RemoteCursorShardBindingV1, 1_024>,
 }
 
 pub enum ShardDispositionV1 {
@@ -2574,6 +2747,29 @@ pub struct CoverageReportV1 {
     pub freshness: std::collections::BTreeMap<ShardId, ShardWatermark>,
     pub retention_watermark: Option<EvidenceRetentionWatermark>,
     pub unknown_coverage: bool,
+    pub remote: Option<RemoteCoverageV1>,
+}
+
+pub struct RemoteShardCoverageV1 {
+    pub shard_id: ShardId,
+    pub authority_id: StoreAuthorityId,
+    pub authority_epoch: AuthorityEpoch,
+    pub served_by_node: BrainNodeId,
+    pub served_by_role: BrainNodeRoleV1,
+    pub captured_watermark: Option<ShardWatermark>,
+    pub cache_generation: Option<ManifestDigest>,
+    pub cache_not_after: Option<UtcMicros>,
+    pub cache_age_micros: Option<u64>,
+    pub sync_lag_micros: Option<u64>,
+    pub pending_local_observations: u64,
+    pub pending_tombstone_acks: u64,
+}
+
+pub struct RemoteCoverageV1 {
+    pub brain_id: BrainId,
+    pub placement_version: EntityVersionId,
+    pub requested_consistency: ReadConsistencyV1,
+    pub shards: BoundedVec<RemoteShardCoverageV1, 1_024>,
 }
 
 pub struct CommandEnvelopeV1<C> {
@@ -2586,13 +2782,13 @@ pub struct CommandEnvelopeV1<C> {
 }
 ```
 
-`CoverageReportV1::is_complete()` is derived, never stored or serialized: it is true only when `unknown_coverage` is false and `stale`, `unavailable`, `incompatible`, `locked`, `redacted`, and `truncated` are empty. `skipped` contains only shards proven irrelevant by scope pruning; any unproven disposition sets `unknown_coverage`. Consumers must call this derivation instead of inventing a `complete` field.
+`CoverageReportV1::is_complete()` is derived, never stored or serialized: it is true only when `unknown_coverage` is false and `stale`, `unavailable`, `incompatible`, `locked`, `redacted`, and `truncated` are empty. Under `Authoritative`, every remote shard must also be served by its current authority at the bound epoch/watermark with zero pending-local contribution. Under a weaker requested mode, completeness means complete for that explicit mode, never globally current. Expired cache grants, pending tombstone acknowledgements, unknown placement, or unproven authority set `unknown_coverage` or the matching disposition. `skipped` contains only shards proven irrelevant by scope pruning; any unproven disposition sets `unknown_coverage`. Consumers must call this derivation instead of inventing a `complete` field.
 
 `ScopeSelectorV2` is the only public scope selector across query, commands, policy, catalog, capture, hooks/application, labs, exports, saved views, and coordination. `roots` must be nonempty; `exclude` can only subtract from resolved roots. `CurrentInvocation` and `AllAuthorized` are explicit roots, never meanings assigned to an empty vector. Human locators are typed, sanitized inputs inside the same selector and resolve to a canonical-selector echo in `ScopeResolutionV2`; no transport invents `project_key`, `project_path`, or stringly `all` semantics. Multi-repository/project/checkout/worktree/ref/snapshot/graph-generation selection is first-class. Resolution never falls back to CWD, `sessions.project_key`, the first Claude CWD, active base checkout, current branch graph, ignored-dependency hint scope, or a stale registry row. Ambiguity is an error or returned candidate set according to the selector, never “pick first.” Each selected code candidate is the explicit repository/checkout/worktree/ref/snapshot/generation tuple actually opened; refs may share a generation, and no ref name owns a database. Core resolution reports selected/candidate/missing/stale/unavailable/quarantined stores plus registry/index/ref watermarks and whether current invocation was deliberately defaulted. Application/query responses join separately authorized cross-project session/activity relation evidence without mutating or narrowing the selector.
 
 Query validation rejects page size above 1,000, unbounded traversal, traversal depth above 5, missing total/operator budgets, text/semantic predicates against secret or reasoning content without an explicit authorized filter, and unregistered attributes/predicates. Interactive cursor expiry comes from plan 20's `query.cursor.interactive_ttl` descriptor (default 15 minutes); export/bulk continuations use their catalog-declared job lifetime. Registry/ranking changes, retention crossing the snapshot, or incompatible shard replacement yield a typed restart reason. Commands require idempotency and compare-and-swap aggregate version; a conflict returns current version without applying the command.
 
-`TemporalClauseV1` is the only temporal answer-mode carrier: an absent clause means `Current`, and `AsOf` requires both the valid-time and knowledge-time cutoffs (plan 05 §11.4). Plan 05 plans and executes the clause; plan 23's session/LCM retrieval rides it, and plan 05 specifies the registered-attribute mapping for plan 23's filters — no parallel temporal AST or second answer-mode enum exists. `CursorClaimsV1` binds the resolved scope digest, catalog generation, temporal clause, intent-profile version, and partial-shard dispositions exactly as issued; plans 16/17/21/23 cite these fields rather than restating binding lists. Its digest fields are authoritative types: every adapter (including plan 05's private `CursorV1` encoding) must reuse `PrivacyDomainBoundLocatorDigest`, `AccessPolicyDigest`, and `ManifestDigest` unchanged — an unkeyed `ContentDigest` of query or access material is forbidden by the keyed-digest rule above. `CoverageReportV1` is the one shared coverage vocabulary for query/export/replay responses: plan 05 produces it, plans 07/09/10/13/17/20/22 consume it under this exact name, and `unknown_coverage: true` is mandatory whenever any shard's disposition cannot be proven — coverage never silently reads as complete.
+`TemporalClauseV1` is the only temporal answer-mode carrier: an absent clause means `Current`, and `AsOf` requires both the valid-time and knowledge-time cutoffs (plan 05 §11.4). Plan 05 plans and executes the clause; plan 23's session/LCM retrieval rides it, and plan 05 specifies the registered-attribute mapping for plan 23's filters — no parallel temporal AST or second answer-mode enum exists. `CursorClaimsV1` binds the resolved scope digest, catalog generation, temporal clause, intent-profile version, partial-shard dispositions, and optional exact `RemoteCursorBindingV1` consistency/Brain/placement/authority/cache/grant generations exactly as issued; plans 16/17/21/23/28 cite these fields rather than restating binding lists. Its digest fields are authoritative types: every adapter (including plan 05's private `CursorV1` encoding) must reuse `PrivacyDomainBoundLocatorDigest`, `AccessPolicyDigest`, and `ManifestDigest` unchanged — an unkeyed `ContentDigest` of query or access material is forbidden by the keyed-digest rule above. `CoverageReportV1` is the one shared coverage vocabulary for query/export/replay responses: plan 05 produces it, plans 07/09/10/13/17/20/22/28 consume it under this exact name, and `unknown_coverage: true` is mandatory whenever any shard's disposition, authority, placement, cache grant, or purge state cannot be proven — coverage never silently reads as complete.
 
 Task/plan/executor reads also use this exact `TraceQueryV1`. `EntityKind`, registered `AttributePredicate`, bounded `TraversalPredicate`, facets/aggregates/projection/sort/page/snapshot fields, and `TemporalClauseV1` express task sources and operators. No `TaskQuery`, `TaskSource`, pipeline DSL, task-local scope/as-of/page/sort/projection carrier, or saved-view scope copy is a public contract. A task-specific facade may only build and canonicalize a `TraceQueryV1` losslessly; saved task views persist that one AST and derive scope from `TraceQueryV1.scope`.
 

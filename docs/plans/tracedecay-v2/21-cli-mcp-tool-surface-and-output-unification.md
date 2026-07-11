@@ -583,7 +583,8 @@ Generated public commands share only applicable global switches:
 --worktree <path-or-id>
 --ref <git-ref>
 --snapshot <snapshot-id>
---consistency eventual|frozen|at-least-watermark
+--consistency authoritative|bounded-stale|offline-cache|as-of-watermark
+--freeze-pagination
 --limit <n>
 --cursor <opaque-cursor>
 --fields <generated-field-set>
@@ -644,6 +645,24 @@ tracedecay help        catalog-backed discovery
 ```
 
 The `system` group also exposes plan 17's scoped, TTL-bound, revocable local API-token surface with exact effect classes: `api token list` binds the elevated read `auth.tokens.list`, while `api token create` and `api token revoke` bind audited commands. HTTP parity is `GET /api/v2/auth/tokens`, `POST /api/v2/commands/auth/tokens:create`, and `POST /api/v2/commands/auth/tokens:revoke`; MCP/CLI bindings preserve those semantics without copying HTTP route syntax. Plan 10's per-launch bearer remains only the bootstrap credential permitted to invoke the initial `auth.tokens.create` command.
+
+Plan 28 freezes this transport-agnostic subtree:
+
+```text
+tracedecay system brain status
+tracedecay system brain join|leave
+tracedecay system brain nodes list|show|rotate|revoke
+tracedecay system brain placements list|plan|apply|verify
+tracedecay system brain sync status|run|pause|resume|repair
+tracedecay system brain replicas list|seed|verify|retire
+tracedecay system brain repositories candidates|adopt|split
+tracedecay system brain backup status|verify
+tracedecay system brain failover plan|promote|verify
+```
+
+Selectors are opaque Brain/node/shard/repository refs or safe authority URLs; no flag accepts a database/WAL path, database credential, raw node key, or generic SQL. `join` works with ordinary HTTPS/mTLS. A Tailscale/MagicDNS example is optional documentation, never a command mode or dependency. Mutations require generated operator grants, expected versions, authority/placement epochs, idempotency, and operation receipts.
+
+The default `tracedecay-context` MCP component exposes only compact `brain_status`/coverage and actionable retrieval IDs. Node/placement/sync-repair/revoke/replica/failover mutations exist only in the explicitly installed operator component and remain least-privilege. MCP never exposes sync chunks, certificate/key material, credentials, raw store locations, or transport internals; skills plus CLI remain complete without MCP.
 
 `experiment fork` accepts any catalog-compatible message/Turn/session/agent/tool/hint/fact/task/policy/code/Git/retrieval anchor and returns the same typed draft/source backlink as the dashboard's Fork to Playground. `create` consumes the tagged `LabKindV1` schema; `run` returns the shared `OperationRef`; experiment/run/cell/stage/comparison/comparison-cell/reduction list/get use the one generated top-level filtered operation and addressable read-only MCP resources where supported; cancel/resume/retry/minimize are generated tools/CLI commands over the one operation lifecycle. Every cell renders its variant/evaluator/corpus-case/repetition/sweep coordinate and anchor. MCP protocol task augmentation may wrap a long experiment run, but `McpTaskId`, `OperationId`, plan-24 `WorkItemId`, and `ExperimentRunId` remain distinct. No per-lab tool-name explosion or lab-owned progress/cancel schema is generated.
 
@@ -944,6 +963,7 @@ Rules:
 - A stale graph result cannot be labeled current. Local semantic Git, live delivery state, and joined/reconciled conclusions remain distinct.
 - Active state is computed once in the application response and reused everywhere.
 - Status commands and MCP status tools consume the shared `SystemStatusSnapshot`; they do not aggregate different component meanings under local booleans.
+- Multi-machine status additionally renders `BrainId`, node role, authority/placement epoch, requested consistency, per-shard watermark/cache age/sync lag, pending local counts, conflicts/revocation, backup/recovery state, and unreachable/local-only/policy-excluded scopes. Pending/cache/replica state is never labeled canonical or complete.
 
 ## 15. Safe rendering and redaction
 

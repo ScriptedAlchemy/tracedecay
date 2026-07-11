@@ -2,17 +2,19 @@
 
 **Goal:** Defragment and rebuild TraceDecay as one elegant, scalable, extensible, local-first, cross-project intelligence system that can reconstruct, query, explain, visualize, replay, and improve the relationship between human intent, agent activity, code, Git, memory, policy, automation, cost, and outcomes.
 
-**Architecture:** One logical “TraceDecay Brain” over federated physical stores: a profile catalog, a profile activity/session shard, project evidence/projection shards, immutable code-snapshot generations, and privacy-domain-scoped content-addressed payload stores. One capture/sanitization/observation boundary and stable identity/evidence model feed projections that are rebuildable within the retained evidence horizon. One typed query engine, one policy/replay runtime, one generated capability/host-integration catalog, and one application use-case layer serve thin CLI, optional MCP, official API/SDK, hook, dashboard, saved-view, lab, and generated Codex/Claude/Cursor bundle adapters. Skills plus CLI are the portable baseline; zero-to-three logical MCP facade registrations share one implementation, binary, daemon, catalog, authorization path, and data root.
+**Architecture:** One logical “TraceDecay Brain” over federated physical stores: a profile catalog, a profile activity/session shard, project evidence/projection shards, immutable code-snapshot generations, and privacy-domain-scoped content-addressed payload stores. A Brain may remain entirely local or span enrolled machines through one fenced TraceDecay authority per mutable shard, semantic snapshots/event tails, verified replicas/caches, and the authenticated application/API protocol; SQLite/WAL files never cross a network filesystem. One capture/sanitization/observation boundary and stable identity/evidence model feed projections that are rebuildable within the retained evidence horizon. One typed query engine, one policy/replay runtime, one generated capability/host-integration catalog, and one application use-case layer serve thin CLI, optional MCP, official API/SDK, hook, dashboard, saved-view, lab, and generated Codex/Claude/Cursor bundle adapters. Skills plus CLI are the portable baseline; zero-to-three logical MCP facade registrations share one implementation, binary, daemon, catalog, authorization path, and logical Brain.
 
-**Tech Stack:** Rust workspace; standard local SQLite semantics through a storage trait, initially implemented with `rusqlite`, FTS5, and WAL; privacy-domain-scoped content-addressed local blobs; optional local embeddings; Axum HTTP + SSE; React + TypeScript; the dashboard bundler selected by an explicit Rsbuild-versus-Vite ADR; the large-graph WebGL/Canvas stack selected by a current-and-10×-corpus renderer bakeoff rather than precommitted; ECharts for quantitative views unless the same visual-quality/performance gate rejects it; Canvas/WebGL + D3 scales for dense timelines; CodeMirror 6 for message/code/diff inspection. Remote libSQL is a future adapter, not part of the first V2 default.
+**Tech Stack:** Rust workspace; standard host-local SQLite semantics through a storage trait, initially implemented with `rusqlite`, FTS5, and WAL; privacy-domain-scoped content-addressed blobs; optional local embeddings; Axum HTTP + SSE over authenticated HTTPS/mTLS for protected remote mode; React + TypeScript; the dashboard bundler selected by an explicit Rsbuild-versus-Vite ADR; the large-graph WebGL/Canvas stack selected by a current-and-10×-corpus renderer bakeoff rather than precommitted; ECharts for quantitative views unless the same visual-quality/performance gate rejects it; Canvas/WebGL + D3 scales for dense timelines; CodeMirror 6 for message/code/diff inspection. Tailscale is an optional connectivity profile, not a dependency; libSQL/Turso is evaluated prior art, not part of the first V2 default.
 
 **Detailed execution plans:** [`tracedecay-v2/00-plan-set-index.md`](tracedecay-v2/00-plan-set-index.md) owns the per-crate, root-migration, frontend, dependency, PR-order, and cross-plan verification map.
 
-Direct bounded-context authorities: [`01-domain-crate.md`](tracedecay-v2/01-domain-crate.md), [`03-capture-crate.md`](tracedecay-v2/03-capture-crate.md), [`04-projectors-crate.md`](tracedecay-v2/04-projectors-crate.md), [`05-query-crate.md`](tracedecay-v2/05-query-crate.md), [`06-policy-crate.md`](tracedecay-v2/06-policy-crate.md), [`07-hooks-crate.md`](tracedecay-v2/07-hooks-crate.md), [`08-tool-catalog-crate.md`](tracedecay-v2/08-tool-catalog-crate.md), [`09-application-crate.md`](tracedecay-v2/09-application-crate.md), [`11-dashboard-frontend.md`](tracedecay-v2/11-dashboard-frontend.md), [`12-root-compatibility-migration.md`](tracedecay-v2/12-root-compatibility-migration.md), and [`13-research-provenance-and-context-anchors.md`](tracedecay-v2/13-research-provenance-and-context-anchors.md). Plans 02 and 10 and cross-cutting plans 14–26 are linked at their owning sections and exhaustively indexed above.
+Direct bounded-context authorities: [`01-domain-crate.md`](tracedecay-v2/01-domain-crate.md), [`03-capture-crate.md`](tracedecay-v2/03-capture-crate.md), [`04-projectors-crate.md`](tracedecay-v2/04-projectors-crate.md), [`05-query-crate.md`](tracedecay-v2/05-query-crate.md), [`06-policy-crate.md`](tracedecay-v2/06-policy-crate.md), [`07-hooks-crate.md`](tracedecay-v2/07-hooks-crate.md), [`08-tool-catalog-crate.md`](tracedecay-v2/08-tool-catalog-crate.md), [`09-application-crate.md`](tracedecay-v2/09-application-crate.md), [`11-dashboard-frontend.md`](tracedecay-v2/11-dashboard-frontend.md), [`12-root-compatibility-migration.md`](tracedecay-v2/12-root-compatibility-migration.md), and [`13-research-provenance-and-context-anchors.md`](tracedecay-v2/13-research-provenance-and-context-anchors.md). Plans 02 and 10 and cross-cutting plans 14–28 are linked at their owning sections and exhaustively indexed above; [`28-remote-multi-machine-shared-brain.md`](tracedecay-v2/28-remote-multi-machine-shared-brain.md) is normative for distribution.
 
 ## Global Constraints
 
 - Local-first, single-user operation remains the default. No required network service or hosted database.
+- Multi-machine operation is optional and transport-agnostic. Tailscale, another VPN, LAN, reverse proxy, or ordinary authenticated HTTPS/mTLS may provide reachability, but TraceDecay always enforces its own enrolled-node identity, grants, privacy, placement, and authority epochs.
+- Exactly one fenced authority writes each mutable shard. Network-mounted SQLite/WAL, implicit multi-primary writes, last-write-wins state, and automatic cache promotion are prohibited.
 - “One brain” is a unified logical model and product, not one failure-prone monolithic database.
 - Every semantic responsibility has one canonical owner and generated/shared contract. V2 does not preserve parallel session/LCM, detector, query, scope, policy, status, error, command, renderer-state, or transport business-logic implementations.
 - Compatibility/anti-corruption adapters are time-bounded migration code with owners, parity tests, retirement gates, and deletion PRs; they cannot become a permanent second architecture.
@@ -25,6 +27,7 @@ Direct bounded-context authorities: [`01-domain-crate.md`](tracedecay-v2/01-doma
 - Historical views never reconstruct hidden chain-of-thought. They show only provider-exposed reasoning summaries, user-visible rationale, actions, and evidence.
 - No secret-classified content enters FTS, vector indexes, facts, fixtures, exports, logs, or committed test corpora.
 - Every cross-project response reports searched, skipped, unavailable, stale, truncated, and redacted coverage.
+- Every remote/cached response additionally reports authority epoch, placement generation, consistency mode, per-shard watermark/cache age, sync lag, and pending local observations separately from canonical state.
 - `All` means the active TraceDecay profile by default. Additional profiles are federated only through explicit profile selection/collections and never mixed implicitly.
 - Canonical provider transcripts live in a profile activity/session shard because a session may touch zero, one, or many projects. Project shards own scoped projections and locators, not duplicate canonical messages.
 - Data migration and shadow parity are mandatory; stale live CLI/MCP/daemon/plugin protocols and obsolete tool names are not emulated after their domain cutover. Version mismatch fails with restart/update and the current replacement.
@@ -811,6 +814,16 @@ Parquet/DuckDB is not part of the first V2 default. A later ADR may add rebuilda
 - Backfills use leases, checkpoints, bounded batches, pause/resume, and idempotency keys.
 - Writer commands expose queue time, transaction time, rows/bytes, retry class, and durable sequence. Overload thresholds are tested with many simultaneous parent/subagent streams.
 - WAL checkpointing is coordinated with readers and backup manifests. Disk-full, permission, corruption, busy, process-death, and torn-spool paths have distinct typed errors and repair receipts.
+
+### 7.8 Multi-machine authority and synchronization
+
+Plan [`tracedecay-v2/28-remote-multi-machine-shared-brain.md`](tracedecay-v2/28-remote-multi-machine-shared-brain.md) is normative. One `BrainId` can contain standalone, authority, remote-client, read-replica, standby, and hybrid-placement nodes, but each mutable shard has exactly one current `StoreAuthorityId + AuthorityEpoch`. Remote clients submit sanitized observations and versioned commands through application use cases; they never open store files or write projections directly.
+
+Hooks sanitize and durably spool locally without blocking on the network. Upload is idempotent by observation identity and digest; the authority acknowledges only after canonical commit. Read caches and replicas consume signed immutable snapshots and canonical tails, are watermark-bound and read-only, and are never backups or implicit authorities. Offline state distinguishes verified cache, pending local overlays, rejected/quarantined records, and unavailable canonical commands.
+
+Repository identity spans machines through credential-free normalized remote evidence plus verified immutable Git object/commit/tree/ancestry evidence. Paths and `git-common-dir` identify node-local checkout/worktree aliases only. Fork, mirror, shallow, rewritten, grafted, replacement-object, and ambiguous cases produce candidates and adoption receipts rather than silent merge.
+
+Remote reachability may use HTTPS/mTLS directly or an optional network such as Tailscale. TraceDecay enrollment, scoped grants, privacy sync classes, placement, revocation, and fencing remain authoritative. A later storage/replication engine must preserve these contracts and pass partition, split-brain, privacy, backup/restore, and deterministic-projection gates; it cannot bypass the application boundary.
 
 ## 8. Logical Schema
 
@@ -1672,6 +1685,7 @@ Cross-cutting contract companions, in dependency order:
 | 4E | Initiative, immutable plan/work-item versions, gates, executor routes, fenced leases/attempts, context packets, artifacts/outcomes, and task views (plan 24). |
 | 4F | Incremental scout trigger/checkpoint/model-plan/suggestion-address/envelope/delivery/outcome contracts (plan 22), consuming the canonical task refs from 4E. |
 | 4G | Domain-owned host profile/instance/surface/install-scope identities, capability subject/snapshot/disposition, installed runtime/component refs, and acyclic digest/provenance contracts (plans 01/27). |
+| 4H | `BrainId`, node/authority epochs, placements, causal frontiers, sync receipts/policies, and cross-node repository-identity proofs (plan 28). |
 
 Lettered PR suffixes are stable identifiers ordered by dependency, not lexical order: PR 4B's privacy taint contracts intentionally precede the PR 4A prototype so no concept build renders unclassified real data.
 
@@ -1817,6 +1831,11 @@ Cross-cutting evidence-plane companions:
 - Add typed retention plan/start/holds, whole-store integrity manifests, consistent multi-shard backup/restore, disk preflight, startup recovery, and safe repair receipts.
 - [ ] Kill/disk-full/corruption/restore matrices preserve the previous valid generation or yield explicit partial/quarantined state; no unsafe artifact becomes serving state.
 
+#### PR 6H: Remote authority metadata and verified cache/replica persistence
+
+- Persist authority/placement/membership/revocation, signed sync receipt/gap/conflict, cache/replica manifest, repository proof, and recovery/fencing receipt contracts in store-owned schemas. Do not add a network database driver or capture spool implementation.
+- [ ] Reject network-mounted SQLite and stale authority epochs; prove cache/replica generations stay read-only and backup/restore retains wrapped recovery keys and authority history.
+
 #### PR 7: Provider capture conformance harness
 
 - Create `crates/tracedecay-capture/` and source adapter trait.
@@ -1829,6 +1848,11 @@ Cross-cutting evidence-plane companions:
 - Implement parse-field-before-scan, built-in detector registry, bounded decoding, span merge/replacement, privacy-policy precedence, keyed fingerprints, safe markers/receipts, and fail-closed budgets.
 - Wrap every provider/hook in shadow/differential mode, then make sanitized content the only observation-journal input; record metadata may strengthen but never disable the safety floor.
 - [ ] Test structured/malformed/encoded/chunked/Unicode/timeout/plugin/disk/process cases and every plan-18 secret class without real credentials.
+
+#### PR 7B companion: Remote-safe sole capture spool
+
+- Extend plan 03's one spool—not store—with AEAD/key-epoch frame headers, sync policy/placement binding, remote canonical acknowledgement retirement, grant/policy revalidation, bounded partition backoff, and exact pending/rejected states.
+- [ ] Hooks never wait on connectivity; duplicate/reordered/crash-before-or-after-commit/ack replay yields one canonical observation set and no premature segment deletion.
 
 #### PR 8: Identity and alias resolver
 
@@ -1891,6 +1915,11 @@ Temporal-session companions extend the same `TraceQueryV1` path: PR 13D freezes 
 
 - Enforce safe markers, authorized receipt refs, redacted/quarantined/legacy-unscanned/unknown coverage, cache invalidation, and sink eligibility in every search/graph/timeline/explain/export/exact-load path.
 - [ ] An unsafe entity/shard cannot leak through ranking, facets/aggregates, graph traversal, cursor, response handle, saved view, or cross-shard merge.
+
+#### PR 12D: Remote authority, replica, cache, and consistency routing
+
+- Route logical scope through plan 28 placements to the current authority or a verified replica/cache under `ReadConsistencyV1`; bind placement/authority/cache/grant generations into cursor claims and coverage.
+- [ ] Pass partitions, expiry/revocation, stale cache, pending-local overlays, promotion, cross-machine Git identity, cancellation, and mixed-placement cases without opening remote database files.
 
 #### PR 13 series: Time-safe evaluation and precision-first lexical retrieval
 
@@ -2088,11 +2117,17 @@ Cross-cutting official-product companions:
 - [ ] Prove semantic diff and three-way rebase preserve graph meaning, conflicts create a successor workspace rather than YAML markers, final owner-shard submit commits every canonical version/event/head/ID allocation/receipt or none, exact retries are idempotent, and success/expiry/crash recovery leaves no retained raw workspace content.
 - [ ] Generate product-level CLI/MCP/API/SDK/UI bindings from one catalog family; skills plus CLI remain complete without MCP, remote surfaces exchange contained artifact/resource refs rather than server paths, and plan 11/25G consumes the same diagnostics/diff/conflict/cleanup views.
 
+#### PR 24S: Remote shared-Brain application and product contract
+
+- Add the exact plan-08 `brain.*` family for join/leave, status/topology/nodes, placement, sync, replicas, backup, repository adoption/split, and positively fenced failover through application/API/SDK/CLI and the optional MCP operator component. Tailscale is an example endpoint profile only.
+- [ ] Prove every binding is bijective, revocation/expiry closes access, promotion requires positive external fencing, and no database/WAL path or key material crosses the API.
+
 #### PR 25: Unified shell and design system
 
 - Create `dashboard/app/` and shared packages.
 - [ ] Implement All scope, time/as-of/compare, secure URL/persistence state, command palette, universal inspector, status/coverage, saved views, Axum history fallback, legacy redirects, and shell coexistence.
 - [ ] Keyboard, screen-reader, table parity, mobile portrait/landscape, reduced-motion, and direct-link tests are required in this PR, not deferred.
+- PR 25I adds Brain Settings and Sync Observatory topology, placement, repository-correlation, lag/cache/spool/conflict, enrollment/grant, backup, restore, and failover views over PR 24S.
 
 #### PR 25A: Dashboard generated-client consumption, bundler ADR, and application foundation
 
@@ -2174,6 +2209,7 @@ Cross-cutting migration companions:
 - Reconcile the domain backfills already shipped with PRs 17–23 and import any remaining registry/sidecar data.
 - PR 33S is the store-owned read-only importer/checkpoint/parity executor; PR 33S-2 is store cutover/rollback-window/deletion-proof support consumed by the root cutover sequence (plan 02). PR 33R is the root migration controller. Neither reuses reserved privacy slice PR 33A.
 - PR 33R/33S generalizes #425 rather than nesting a second merger: freeze/reserve both nonempty sources, verify dual backups, revalidate deterministic confirmation, preserve remapped LCM source edges, account for every table/collision, resume every ledger state, and atomically publish marker/registry state only after exhaustive proof.
+- PR 33I enrolls an existing local profile into a local or remote `BrainId`, correlates repositories/checkouts across nodes with verified Git proofs, publishes placements only after backup/privacy/version gates, and seeds caches/replicas from signed manifests. Retry is ledgered; no migration opens a remote SQLite file or silently merges an ambiguous fork.
 - [ ] Import the 14 per-branch V1 graph stores (about 140–150 MB each) as immutable packed generations, or record a documented drop-with-receipt per store, following plan 25's migration slice with plan 12; record the disk math against the ≤ 2.25× migration amplification gate.
 - [ ] Produce final whole-system manifests, counts, hashes, orphan/quarantine report, checkpoints, disk preflight, repair mode, and zero unexplained omissions.
 
@@ -2200,6 +2236,7 @@ Cross-cutting migration companions:
 - Remove live V1 protocol/tool-name fallback for each cut-over domain; return explicit restart/update/current-replacement errors to stale clients.
 - Keep V1 stores read-only for the rollback/evidence window; data retention is not client emulation.
 - PR 36R publishes one signed host release set whose canonical integration manifest, unsigned bundle payloads, signed release manifests/attestations, runtime-resolved bundles, package/component digests, capability/difference/conformance reports, supported-host matrix, signatures, SBOM/licenses, secret-scan receipts, and marketplace locators bind one source/catalog digest. Multi-component publication is atomic or remains non-current.
+- PR 36S enables protected multi-machine mode only after PR 33I enrollment/correlation migration and the partition, revocation, privacy, split-brain, backup/restore, RPO/RTO, cache, and cross-machine Git identity matrix passes.
 
 #### PR 37: V1 archive and removal
 
@@ -2207,6 +2244,7 @@ Cross-cutting migration companions:
 - [ ] Export/archive before any explicit deletion.
 - [ ] Remove storage/plugin/query internals only after rollback is no longer required.
 - [ ] PR 37K removes copied host installers, semantic manifest copies, permission/tool lists, and owned config fragments only with exact receipt ownership and PR 36R parity; foreign marketplace/plugin caches, unmanaged packages, user/team/workspace config, backups, unknown fields, and unproven paths are preserved and reported.
+- [ ] PR 37L removes legacy path-based remote/store routing and every temporary remote-authority compatibility route only after PR 36S; it never deletes foreign network/VPN configuration or user-managed certificates.
 - [ ] Regenerate convergence inventory/scorecard; require zero live V1 routes/writers/readers, zero duplicate semantic authorities, zero obsolete names/config/docs/tests/dependencies, and no serving unscanned privacy descendant.
 - [ ] PR 37 completes with zero live compatibility adapters; every waiver has an expiry that precedes PR 37, and expired waivers block CI (plan 19 §12.3/§16 state the same end state).
 
