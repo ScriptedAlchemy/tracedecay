@@ -610,7 +610,9 @@ plugin._resolved_project_scope = lambda path, *_args: (
 
 engine = plugin.TraceDecayContextEngine()
 engine.initialize(session_id="session-1")
-assert engine.hermes_home == str(plugin_dir.parent.parent)
+assert os.path.normcase(os.path.realpath(engine.hermes_home)) == os.path.normcase(
+    os.path.realpath(str(plugin_dir.parent.parent))
+)
 status = engine.get_status()
 assert "storage_scope" not in status
 assert "hermes_home" not in status

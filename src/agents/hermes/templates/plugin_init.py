@@ -1291,7 +1291,7 @@ def _resolve_hermes_home(config=None, hermes_home=None):
                 return str(resolved)
         except Exception:
             pass
-    fallback = os.path.expanduser("~/.hermes")
+    fallback = tools.hermes_home_dir()
     return fallback or None
 
 def _configured_value(config, *names, default=None):
