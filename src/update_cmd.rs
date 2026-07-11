@@ -496,8 +496,9 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     use super::{
-        RefreshPolicy, ReinstallOutcome, current_tracedecay_exe_from, partition_reinstall_results,
-        post_update_binary, post_update_binary_from, run_install_then_refresh,
+        RefreshPolicy, ReinstallOutcome, current_tracedecay_exe_from, normalize_bin_path,
+        partition_reinstall_results, post_update_binary, post_update_binary_from,
+        run_install_then_refresh,
     };
     use tempfile::TempDir;
     use tracedecay::upgrade::UpgradeOutcome;
@@ -811,7 +812,7 @@ mod tests {
 
         let resolved = post_update_binary(Some(&installed)).expect("installed path should resolve");
 
-        assert_eq!(resolved, installed.to_string_lossy());
+        assert_eq!(resolved, normalize_bin_path(&installed));
     }
 
     #[test]

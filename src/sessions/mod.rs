@@ -54,6 +54,15 @@ pub async fn registered_project_roots() -> Vec<PathBuf> {
 /// is projectless.
 pub async fn try_registered_project_roots() -> Option<Vec<PathBuf>> {
     let global = GlobalDb::open().await?;
+    registered_project_roots_from(&global).await
+}
+
+async fn try_registered_project_roots_at(profile_root: &Path) -> Option<Vec<PathBuf>> {
+    let global = GlobalDb::open_at(&profile_root.join("global.db")).await?;
+    registered_project_roots_from(&global).await
+}
+
+async fn registered_project_roots_from(global: &GlobalDb) -> Option<Vec<PathBuf>> {
     let mut roots = global
         .list_project_paths()
         .await
@@ -72,27 +81,42 @@ pub async fn ingest_user_codex_sessions(session_id: Option<String>) -> Transcrip
     let Ok(profile_root) = crate::storage::default_profile_root() else {
         return TranscriptIngestStats::default();
     };
-    let Some(db) = open_user_session_db(&profile_root).await else {
+    let Some(registered_roots) = try_registered_project_roots().await else {
+        return TranscriptIngestStats::default();
+    };
+    ingest_user_codex_sessions_at(&profile_root, session_id, registered_roots).await
+}
+
+async fn ingest_user_codex_sessions_at(
+    profile_root: &Path,
+    session_id: Option<String>,
+    registered_roots: Vec<PathBuf>,
+) -> TranscriptIngestStats {
+    let Some(db) = open_user_session_db(profile_root).await else {
         return TranscriptIngestStats::default();
     };
     let Some(source) = codex::CodexSource::new() else {
         return TranscriptIngestStats::default();
     };
-    let Some(registered_roots) = try_registered_project_roots().await else {
-        return TranscriptIngestStats::default();
-    };
     let source = source.for_user_scope(session_id, registered_roots);
-    ingest_source(&db, &source, &profile_root, None).await
+    ingest_source(&db, &source, profile_root, None).await
 }
 
 pub async fn ingest_user_cursor_sessions() -> TranscriptIngestStats {
     let Ok(profile_root) = crate::storage::default_profile_root() else {
         return TranscriptIngestStats::default();
     };
-    let Some(db) = open_user_session_db(&profile_root).await else {
+    let Some(registered_roots) = try_registered_project_roots().await else {
         return TranscriptIngestStats::default();
     };
-    let Some(registered_roots) = try_registered_project_roots().await else {
+    ingest_user_cursor_sessions_at(&profile_root, registered_roots).await
+}
+
+async fn ingest_user_cursor_sessions_at(
+    profile_root: &Path,
+    registered_roots: Vec<PathBuf>,
+) -> TranscriptIngestStats {
+    let Some(db) = open_user_session_db(profile_root).await else {
         return TranscriptIngestStats::default();
     };
     let (composer_stats, owned) = if let Some(source) = cursor_composer::CursorComposerSource::new()
@@ -123,7 +147,7 @@ pub async fn ingest_user_cursor_sessions() -> TranscriptIngestStats {
     let source = source
         .with_skip_session_ids(owned)
         .for_user_scope(&registered_roots);
-    composer_stats.merge(ingest_source(&db, &source, &profile_root, None).await)
+    composer_stats.merge(ingest_source(&db, &source, profile_root, None).await)
 }
 
 pub async fn ingest_user_global_sources() -> TranscriptIngestStats {
@@ -139,28 +163,46 @@ fn provider_selected(scope: Option<SessionProvider>, candidate: SessionProvider)
 pub async fn ingest_user_global_sources_for_provider(
     provider: Option<SessionProvider>,
 ) -> TranscriptIngestStats {
-    let mut stats = TranscriptIngestStats::default();
-    if provider_selected(provider, SessionProvider::Codex) {
-        stats = stats.merge(ingest_user_codex_sessions(None).await);
-    }
-    if provider_selected(provider, SessionProvider::Cursor) {
-        stats = stats.merge(ingest_user_cursor_sessions().await);
-    }
     let Ok(profile_root) = crate::storage::default_profile_root() else {
-        return stats;
-    };
-    let Some(db) = open_user_session_db(&profile_root).await else {
-        return stats;
+        return TranscriptIngestStats::default();
     };
     let Some(roots) = try_registered_project_roots().await else {
+        return TranscriptIngestStats::default();
+    };
+    ingest_user_global_sources_for_provider_with_roots(&profile_root, provider, roots).await
+}
+
+pub(crate) async fn ingest_user_global_sources_for_provider_at(
+    profile_root: &Path,
+    provider: Option<SessionProvider>,
+) -> TranscriptIngestStats {
+    let Some(roots) = try_registered_project_roots_at(profile_root).await else {
+        return TranscriptIngestStats::default();
+    };
+    ingest_user_global_sources_for_provider_with_roots(profile_root, provider, roots).await
+}
+
+async fn ingest_user_global_sources_for_provider_with_roots(
+    profile_root: &Path,
+    provider: Option<SessionProvider>,
+    roots: Vec<PathBuf>,
+) -> TranscriptIngestStats {
+    let mut stats = TranscriptIngestStats::default();
+    if provider_selected(provider, SessionProvider::Codex) {
+        stats = stats.merge(ingest_user_codex_sessions_at(profile_root, None, roots.clone()).await);
+    }
+    if provider_selected(provider, SessionProvider::Cursor) {
+        stats = stats.merge(ingest_user_cursor_sessions_at(profile_root, roots.clone()).await);
+    }
+    let Some(db) = open_user_session_db(profile_root).await else {
         return stats;
     };
     if provider_selected(provider, SessionProvider::Hermes) {
         stats = stats.merge(hermes::ingest_user_sessions(&db, &roots).await);
     }
     if provider_selected(provider, SessionProvider::Claude) {
-        stats = stats
-            .merge(claude::ingest_user_sessions(&db, &profile_root, None, roots.clone()).await);
+        stats =
+            stats.merge(claude::ingest_user_sessions(&db, profile_root, None, roots.clone()).await);
     }
     let mut sources: Vec<Box<dyn TranscriptSource>> = Vec::new();
     if provider_selected(provider, SessionProvider::Vibe)
@@ -189,7 +231,7 @@ pub async fn ingest_user_global_sources_for_provider(
         sources.push(Box::new(source.for_user_scope(roots)));
     }
     for source in sources {
-        let source_stats = ingest_source(&db, source.as_ref(), &profile_root, None).await;
+        let source_stats = ingest_source(&db, source.as_ref(), profile_root, None).await;
         stats = stats.merge(source_stats);
     }
     if stats.messages_upserted > 0 {
@@ -198,6 +240,78 @@ pub async fn ingest_user_global_sources_for_provider(
             None,
         );
     }
+    stats
+}
+
+const STARTUP_USER_INGEST_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(30);
+
+#[derive(Default)]
+struct StartupUserIngestState {
+    running: bool,
+    last_completed: Option<std::time::Instant>,
+}
+
+static STARTUP_USER_INGESTS: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::HashMap<PathBuf, StartupUserIngestState>>,
+> = std::sync::OnceLock::new();
+
+struct StartupUserIngestGuard {
+    profile_root: PathBuf,
+    completed: bool,
+}
+
+impl StartupUserIngestGuard {
+    fn claim(profile_root: PathBuf) -> Option<Self> {
+        let ingests = STARTUP_USER_INGESTS
+            .get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+        let mut ingests = ingests
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let state = ingests.entry(profile_root.clone()).or_default();
+        if state.running
+            || state
+                .last_completed
+                .is_some_and(|completed| completed.elapsed() < STARTUP_USER_INGEST_COOLDOWN)
+        {
+            return None;
+        }
+        state.running = true;
+        Some(Self {
+            profile_root,
+            completed: false,
+        })
+    }
+}
+
+impl Drop for StartupUserIngestGuard {
+    fn drop(&mut self) {
+        let Some(ingests) = STARTUP_USER_INGESTS.get() else {
+            return;
+        };
+        let mut ingests = ingests
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let state = ingests.entry(self.profile_root.clone()).or_default();
+        state.running = false;
+        if self.completed {
+            state.last_completed = Some(std::time::Instant::now());
+        }
+    }
+}
+
+/// Coalesces the profile-wide user transcript sweep shared by every project
+/// server created during daemon startup. Live hooks still call
+/// [`ingest_user_global_sources`] directly, so the cooldown cannot hide a
+/// completed turn.
+pub(crate) async fn ingest_user_global_sources_for_startup() -> TranscriptIngestStats {
+    let Ok(profile_root) = crate::storage::default_profile_root() else {
+        return TranscriptIngestStats::default();
+    };
+    let Some(mut guard) = StartupUserIngestGuard::claim(profile_root) else {
+        return TranscriptIngestStats::default();
+    };
+    let stats = ingest_user_global_sources().await;
+    guard.completed = true;
     stats
 }
 
@@ -321,6 +435,16 @@ pub(crate) async fn finalize_project_ingest(db: &GlobalDb, project_root: &Path) 
     // a workflow-ingest hiccup only logs at debug, never blocks session ingest.
     // Runs live in their own tables, so they do not affect `stats`.
     let _ = workflow_ingest::ingest_workflow_runs(db, project_root).await;
+}
+
+/// Daemon-startup variant that coalesces the profile-wide user sweep while
+/// still running the active project's independent ingestion pass.
+pub(crate) async fn ingest_global_sources_for_startup(
+    db: &GlobalDb,
+    project_root: &Path,
+) -> TranscriptIngestStats {
+    let user = ingest_user_global_sources_for_startup().await;
+    user.merge(ingest_project_sources_for_provider(db, project_root, None, true).await)
 }
 
 /// Runs the bounded commit-attribution sweep against the correlation store.
@@ -612,5 +736,23 @@ mod git_scan_tests {
     #[test]
     fn parse_git_log_commits_empty_is_empty() {
         assert!(parse_git_log_commits("").is_empty());
+    }
+
+    #[test]
+    fn startup_user_ingest_claims_are_single_flight_and_cancellation_safe() {
+        let profile = tempfile::tempdir().unwrap().path().to_path_buf();
+        let first = StartupUserIngestGuard::claim(profile.clone()).expect("first claim");
+        assert!(StartupUserIngestGuard::claim(profile.clone()).is_none());
+
+        drop(first);
+        let mut retry = StartupUserIngestGuard::claim(profile.clone())
+            .expect("an incomplete claim must release immediately");
+        retry.completed = true;
+        drop(retry);
+
+        assert!(
+            StartupUserIngestGuard::claim(profile).is_none(),
+            "a completed sweep should suppress the startup herd during cooldown"
+        );
     }
 }

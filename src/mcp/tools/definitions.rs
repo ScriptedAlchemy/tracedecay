@@ -366,10 +366,10 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
 }
 
 fn add_lcm_storage_scope_property(definitions: &mut [ToolDefinition]) {
-    for definition in definitions
-        .iter_mut()
-        .filter(|definition| definition.name.starts_with("tracedecay_lcm_"))
-    {
+    for definition in definitions.iter_mut().filter(|definition| {
+        definition.name.starts_with("tracedecay_lcm_")
+            || definition.name == "tracedecay_message_search"
+    }) {
         let Some(properties) = definition
             .input_schema
             .get_mut("properties")

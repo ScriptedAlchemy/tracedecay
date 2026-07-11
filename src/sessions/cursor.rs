@@ -359,13 +359,29 @@ pub async fn ingest_cursor_user_transcript_event_capped_with_registered_roots(
     else {
         return CursorTranscriptIngestStats::default();
     };
-    let registered_slugs = registered_roots
-        .iter()
-        .filter_map(|root| cursor_project_slug(root))
-        .collect::<std::collections::HashSet<_>>();
-    if cursor_transcript_project_slug(&transcript_path)
-        .is_some_and(|slug| registered_slugs.contains(slug))
-    {
+    let event_workspaces = cursor_event_workspace_roots(&event);
+    let belongs_to_registered_project = if event_workspaces.is_empty() {
+        // Without event workspace identity, Cursor's transcript directory is
+        // the only attribution available. Its slash-to-hyphen encoding is
+        // lossy, so a registered-slug collision must fail closed rather than
+        // risk copying project evidence into user memory.
+        cursor_transcript_project_slug(&transcript_path).is_some_and(|slug| {
+            registered_roots
+                .iter()
+                .filter_map(|root| cursor_project_slug(root))
+                .any(|registered_slug| registered_slug == slug)
+        })
+    } else {
+        // A hook-provided cwd/file/workspace root is stronger than the lossy
+        // transcript slug. This keeps distinct slash-vs-hyphen workspaces,
+        // linked worktrees, and renamed checkouts from excluding one another.
+        event_workspaces.iter().any(|workspace| {
+            registered_roots
+                .iter()
+                .any(|registered| paths_equal(workspace, registered))
+        })
+    };
+    if belongs_to_registered_project {
         return CursorTranscriptIngestStats::default();
     }
     let placeholder = transcript_path
@@ -382,6 +398,37 @@ pub async fn ingest_cursor_user_transcript_event_capped_with_registered_roots(
         sessions_upserted: stats.sessions_upserted,
         messages_upserted: stats.messages_upserted,
     }
+}
+
+fn cursor_event_workspace_roots(event: &Value) -> Vec<PathBuf> {
+    let candidates = if let Some(cwd) = event_cwd(event) {
+        vec![cwd]
+    } else if let Some(file_path) = event
+        .get("file_path")
+        .and_then(Value::as_str)
+        .filter(|path| !path.is_empty())
+    {
+        let path = Path::new(file_path);
+        vec![path.parent().unwrap_or(path).to_path_buf()]
+    } else {
+        event
+            .get("workspace_roots")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .filter(|path| !path.is_empty())
+            .map(PathBuf::from)
+            .collect()
+    };
+    let mut roots: Vec<PathBuf> = Vec::new();
+    for candidate in candidates {
+        let root = crate::config::discover_project_root(&candidate).unwrap_or(candidate);
+        if !roots.iter().any(|seen| paths_equal(seen, &root)) {
+            roots.push(root);
+        }
+    }
+    roots
 }
 
 fn cursor_transcript_project_slug(path: &Path) -> Option<&str> {

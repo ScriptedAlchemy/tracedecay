@@ -113,10 +113,34 @@ async fn migrate_legacy_hermes_stores_inner(
         .await
         {
             Ok(CandidateOutcome::Migrated(migration, preserved_memory)) => {
+                if let Err(reason) = remove_legacy_registry_metadata(
+                    tracedecay_profile_root,
+                    candidate.legacy_registry_project_id.as_deref(),
+                    &candidate.profile_dir,
+                )
+                .await
+                {
+                    report.failed.push(LegacyHermesMigrationIssue {
+                        source_db: source_db.clone(),
+                        reason,
+                    });
+                }
                 report.migrated.push(migration);
                 report.unresolved.extend(preserved_memory);
             }
             Ok(CandidateOutcome::AlreadyMigrated(migration, preserved_memory)) => {
+                if let Err(reason) = remove_legacy_registry_metadata(
+                    tracedecay_profile_root,
+                    candidate.legacy_registry_project_id.as_deref(),
+                    &candidate.profile_dir,
+                )
+                .await
+                {
+                    report.failed.push(LegacyHermesMigrationIssue {
+                        source_db: source_db.clone(),
+                        reason,
+                    });
+                }
                 report.already_migrated.push(migration);
                 report.unresolved.extend(preserved_memory);
             }
@@ -173,11 +197,46 @@ async fn migrate_legacy_hermes_stores_inner(
     report
 }
 
+async fn remove_legacy_registry_metadata(
+    tracedecay_profile_root: &Path,
+    project_id: Option<&str>,
+    expected_legacy_root: &Path,
+) -> Result<(), String> {
+    let Some(project_id) = project_id else {
+        return Ok(());
+    };
+    let registry_path = tracedecay_profile_root.join("global.db");
+    let registry = GlobalDb::open_at(&registry_path).await.ok_or_else(|| {
+        format!(
+            "could not open project registry '{}'",
+            registry_path.display()
+        )
+    })?;
+    let Some(project) = registry.get_code_project(project_id).await else {
+        return Ok(());
+    };
+    if !same_path(Path::new(&project.canonical_root), expected_legacy_root)
+        && !same_path(Path::new(&project.display_root), expected_legacy_root)
+    {
+        return Ok(());
+    }
+    registry
+        .delete_code_projects(&[project_id.to_string()])
+        .await;
+    if registry.get_code_project(project_id).await.is_some() {
+        return Err(format!(
+            "migrated legacy sessions, but could not remove legacy Hermes registry metadata for '{project_id}'; source stores were preserved"
+        ));
+    }
+    Ok(())
+}
+
 struct LegacyStoreCandidate {
     profile_dir: PathBuf,
     source_db: PathBuf,
     source_sessions_db: Option<PathBuf>,
     source_memory_db: Option<PathBuf>,
+    legacy_registry_project_id: Option<String>,
 }
 
 impl LegacyStoreCandidate {
@@ -205,6 +264,7 @@ fn legacy_store_candidates(
                 },
                 source_sessions_db: sessions_db.is_file().then_some(sessions_db),
                 source_memory_db: memory_db.is_file().then_some(memory_db),
+                legacy_registry_project_id: None,
             })
         })
         .collect::<Vec<_>>();
@@ -241,6 +301,7 @@ fn legacy_store_candidates(
                     },
                     source_sessions_db: sessions_db.is_file().then_some(sessions_db),
                     source_memory_db: memory_db.is_file().then_some(memory_db),
+                    legacy_registry_project_id: manifest.project_id,
                 });
             }
         }
@@ -837,10 +898,10 @@ async fn resolve_target_project(
             if is_projectless_candidate(&candidate, user_home, hermes_homes) {
                 continue;
             }
-            let Some(target) =
+            let resolved =
                 resolve_project_candidate(&candidate, user_home, hermes_homes, registry.as_ref())
-                    .await?
-            else {
+                    .await?;
+            let Some(target) = resolved else {
                 row_has_unresolved_project_evidence = true;
                 continue;
             };
@@ -916,10 +977,12 @@ fn is_projectless_candidate(candidate: &Path, user_home: &Path, hermes_homes: &[
     if candidate.as_os_str().is_empty() || candidate == Path::new("user") {
         return true;
     }
-    same_path(candidate, user_home)
-        || hermes_homes
-            .iter()
-            .any(|hermes_home| same_path(candidate, hermes_home))
+    if same_path(candidate, user_home) {
+        return true;
+    }
+    hermes_homes
+        .iter()
+        .any(|hermes_home| same_path(candidate, hermes_home))
 }
 
 fn collect_metadata_project_candidates(
@@ -1014,13 +1077,13 @@ fn real_project_root(
     let canonical_user_home = user_home
         .canonicalize()
         .unwrap_or_else(|_| user_home.to_path_buf());
-    let is_hermes_owned = hermes_homes.iter().any(|hermes_home| {
+    let is_hermes_home = hermes_homes.iter().any(|hermes_home| {
         let canonical_hermes_home = hermes_home
             .canonicalize()
             .unwrap_or_else(|_| hermes_home.clone());
-        canonical.starts_with(canonical_hermes_home)
+        canonical == canonical_hermes_home
     });
-    if canonical == canonical_user_home || is_hermes_owned {
+    if canonical == canonical_user_home || is_hermes_home {
         return None;
     }
     if let Some(git_root) = crate::worktree::git_worktree_root(&canonical) {
@@ -2165,6 +2228,29 @@ mod tests {
         fs::write(project.join(".tracedecay/tracedecay.db"), []).unwrap();
     }
 
+    #[tokio::test]
+    async fn registry_cleanup_preserves_reassigned_project_identity() {
+        let temp = tempfile::tempdir().unwrap();
+        let profile_root = temp.path().join("profile");
+        let legacy_root = temp.path().join("home/.hermes");
+        let corrected_root = temp.path().join("projects/hermes-agent");
+        fs::create_dir_all(&legacy_root).unwrap();
+        fs::create_dir_all(&corrected_root).unwrap();
+        let registry = GlobalDb::open_at(&profile_root.join("global.db"))
+            .await
+            .unwrap();
+        registry
+            .upsert_code_project("reassigned", &corrected_root, None, None, None)
+            .await
+            .unwrap();
+
+        remove_legacy_registry_metadata(&profile_root, Some("reassigned"), &legacy_root)
+            .await
+            .unwrap();
+
+        assert!(registry.get_code_project("reassigned").await.is_some());
+    }
+
     async fn seed_source(path: &Path, sessions: &[(&str, &Path)]) {
         let db = GlobalDb::open_at(path).await.expect("open source");
         for (ordinal, (session_id, project)) in sessions.iter().enumerate() {
@@ -3049,6 +3135,13 @@ mod tests {
             serde_json::to_vec_pretty(&manifest).unwrap(),
         )
         .unwrap();
+        let registry = GlobalDb::open_at(&profile_root.join("global.db"))
+            .await
+            .unwrap();
+        registry
+            .upsert_code_project("legacy-hermes-identity", &hermes, None, None, None)
+            .await
+            .unwrap();
         seed_source(&source, &[("session", &project)]).await;
 
         let report = migrate_legacy_hermes_stores_to(&user_home, &profile_root).await;
@@ -3062,6 +3155,75 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(count(target.conn(), "sessions").await, 1);
+        assert!(source.is_file());
+        assert!(
+            registry
+                .get_code_project("legacy-hermes-identity")
+                .await
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn migrates_hermes_owned_profile_shard_sessions_to_user_and_cleans_registry() {
+        let temp = tempfile::tempdir().unwrap();
+        let user_home = temp.path().join("home");
+        let profile_root = temp.path().join("tracedecay-profile");
+        let hermes = user_home.join(".hermes");
+        let legacy_shard = profile_root.join("projects/legacy-hermes-projectless");
+        let source = legacy_shard.join(crate::storage::SESSIONS_DB_FILENAME);
+        fs::create_dir_all(&legacy_shard).unwrap();
+        let manifest = crate::storage::StoreManifest {
+            schema_version: crate::storage::STORE_MANIFEST_SCHEMA_VERSION,
+            project_id: Some("legacy-hermes-projectless".into()),
+            store_kind: crate::storage::StoreKind::CodeProject,
+            storage_mode: crate::storage::StorageMode::ProfileSharded,
+            project_root: hermes.clone(),
+            data_root: legacy_shard.clone(),
+            graph_db_relpath: PathBuf::from("tracedecay.db"),
+            sessions_db_relpath: PathBuf::from(crate::storage::SESSIONS_DB_FILENAME),
+            branch_meta_relpath: PathBuf::from(crate::storage::BRANCH_META_FILENAME),
+        };
+        fs::write(
+            legacy_shard.join(crate::storage::STORE_MANIFEST_FILENAME),
+            serde_json::to_vec_pretty(&manifest).unwrap(),
+        )
+        .unwrap();
+        let registry = GlobalDb::open_at(&profile_root.join("global.db"))
+            .await
+            .unwrap();
+        registry
+            .upsert_code_project("legacy-hermes-projectless", &hermes, None, None, None)
+            .await
+            .unwrap();
+        seed_source(&source, &[("session", &hermes)]).await;
+
+        let report = migrate_legacy_hermes_stores_to(&user_home, &profile_root).await;
+        assert_eq!(report.migrated.len(), 1, "{report:?}");
+        assert!(report.failed.is_empty(), "{report:?}");
+        assert_eq!(report.migrated[0].source_db, source);
+        assert_eq!(report.migrated[0].target_project, Path::new("user"));
+        let target_path = crate::sessions::user_sessions_db_path(&profile_root);
+        let target = GlobalDb::open_read_only_at(&target_path).await.unwrap();
+        let session = target.get_session("hermes", "session").await.unwrap();
+        assert_eq!(session.project_key, "user");
+        assert_eq!(session.project_path, "user");
+        let source_after = GlobalDb::open_read_only_at(&source).await.unwrap();
+        for table in ["sessions", "session_messages"] {
+            assert_eq!(
+                count(source_after.conn(), table).await,
+                count(target.conn(), table).await,
+                "row parity for {table}"
+            );
+        }
+        assert_eq!(marker_count(&target_path), 1);
+        assert!(source.is_file());
+        assert!(
+            registry
+                .get_code_project("legacy-hermes-projectless")
+                .await
+                .is_none()
+        );
     }
 
     #[tokio::test]
@@ -3221,7 +3383,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn vanished_project_evidence_is_preserved_not_misrouted_to_user() {
+    async fn vanished_hermes_owned_path_is_preserved_as_unresolved() {
         let temp = tempfile::tempdir().unwrap();
         let user_home = temp.path().join("home");
         let profile_root = temp.path().join("tracedecay-profile");
@@ -3231,11 +3393,32 @@ mod tests {
         seed_source(&source, &[("session", &vanished_project)]).await;
 
         let report = migrate_legacy_hermes_stores_to(&user_home, &profile_root).await;
+        assert!(report.migrated.is_empty(), "{report:?}");
         assert_eq!(report.unresolved.len(), 1, "{report:?}");
-        assert!(report.migrated.is_empty());
         assert!(!crate::sessions::user_sessions_db_path(&profile_root).exists());
         let source_after = GlobalDb::open_read_only_at(&source).await.unwrap();
         assert_eq!(count(source_after.conn(), "sessions").await, 1);
+    }
+
+    #[tokio::test]
+    async fn durable_project_under_hermes_home_remains_project_scoped() {
+        let temp = tempfile::tempdir().unwrap();
+        let user_home = temp.path().join("home");
+        let profile_root = temp.path().join("tracedecay-profile");
+        let project = user_home.join(".hermes/workspaces/real-project");
+        mark_real_project(&project);
+        let source = user_home.join(".hermes/.tracedecay/sessions.db");
+        fs::create_dir_all(source.parent().unwrap()).unwrap();
+        seed_source(&source, &[("session", &project)]).await;
+
+        let report = migrate_legacy_hermes_stores_to(&user_home, &profile_root).await;
+        assert_eq!(report.migrated.len(), 1, "{report:?}");
+        assert!(report.unresolved.is_empty(), "{report:?}");
+        assert_eq!(
+            report.migrated[0].target_project,
+            project.canonicalize().unwrap()
+        );
+        assert!(!crate::sessions::user_sessions_db_path(&profile_root).exists());
     }
 
     #[tokio::test]

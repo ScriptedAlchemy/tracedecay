@@ -716,6 +716,12 @@ const CODEX_MANAGED_HOOKS: &[CodexManagedHook] = &[
         timeout_secs: 120,
         matcher: Some("auto|manual"),
     },
+    CodexManagedHook {
+        event: "Stop",
+        subcommand: "hook-codex-stop",
+        timeout_secs: 5,
+        matcher: None,
+    },
 ];
 
 /// Subcommands from older bundles that uninstall must also strip even though

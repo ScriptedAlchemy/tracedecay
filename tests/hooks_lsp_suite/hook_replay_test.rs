@@ -101,6 +101,13 @@ fn replays(root: &str) -> Vec<Replay> {
             tool_input_env: None,
         },
         Replay {
+            subcommand: "hook-codex-stop",
+            agent: "codex",
+            hook_name: "Stop",
+            stdin: Some(json!({ "session_id": "codex-s1", "cwd": root })),
+            tool_input_env: None,
+        },
+        Replay {
             subcommand: "hook-cursor-session-start",
             agent: "cursor",
             hook_name: "sessionStart",

@@ -48,9 +48,18 @@ pub async fn init_project_direct(home: &Path, project: &Path) {
 }
 
 pub async fn register_global_project(home: &Path, project: &Path) {
+    use std::hash::{Hash, Hasher};
+
     let home = canonical_existing_path(home);
     let db_path = home.join(".tracedecay/global.db");
     let db = GlobalDb::open_at(&db_path).await.unwrap();
+    let canonical = GlobalDb::canonical_project_key(project);
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    canonical.hash(&mut hasher);
+    let project_id = format!("test_{:016x}", hasher.finish());
+    db.upsert_code_project(&project_id, project, None, None, None)
+        .await
+        .expect("register checked test project identity");
     db.upsert(project, 0).await;
     db.checkpoint().await;
 }

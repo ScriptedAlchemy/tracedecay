@@ -173,6 +173,7 @@ fn codex_hook_trust_state_reports_missing_entries() {
         CodexHookTrustState::Missing(vec![
             "post_compact".to_string(),
             "session_start".to_string(),
+            "stop".to_string(),
             "subagent_start".to_string(),
             "user_prompt_submit".to_string(),
         ])
@@ -230,6 +231,9 @@ trusted_hash = "sha256:subagent"
 
 [hooks.state."tracedecay@local-repo:hooks/hooks.json:post_compact:0:0"]
 trusted_hash = "sha256:compact"
+
+[hooks.state."tracedecay@local-repo:hooks/hooks.json:stop:0:0"]
+trusted_hash = "sha256:stop"
 "#,
     )
     .unwrap();
@@ -240,6 +244,7 @@ trusted_hash = "sha256:compact"
             "post_compact".to_string(),
             "post_tool_use".to_string(),
             "session_start".to_string(),
+            "stop".to_string(),
             "subagent_start".to_string(),
             "user_prompt_submit".to_string(),
         ])

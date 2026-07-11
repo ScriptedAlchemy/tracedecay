@@ -59,10 +59,10 @@ pub async fn handle_user_lcm_tool(
                     .to_string(),
         });
     }
-    let sessions_db_path = crate::sessions::user_sessions_db_path(profile_root);
     if tool_name == "tracedecay_message_search" {
-        return session::handle_user_message_search(&sessions_db_path, args).await;
+        return session::handle_user_message_search(profile_root, args).await;
     }
+    let sessions_db_path = crate::sessions::user_sessions_db_path(profile_root);
     let context = session::LcmHandlerContext::user(&sessions_db_path);
     match tool_name {
         "tracedecay_lcm_status" => session::handle_lcm_status(context, args).await,
@@ -308,7 +308,7 @@ pub async fn handle_tool_call_with_registry_and_implicit_project(
         }
     }
     if let Some(storage_scope) = args.get("storage_scope").and_then(Value::as_str) {
-        if !tool_name.starts_with("tracedecay_lcm_") {
+        if !tool_name.starts_with("tracedecay_lcm_") && tool_name != "tracedecay_message_search" {
             return Err(TraceDecayError::Config {
                 message: format!("unknown parameter `storage_scope` for `{tool_name}`"),
             });
