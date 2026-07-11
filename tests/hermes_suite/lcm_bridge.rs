@@ -2153,6 +2153,49 @@ assert "project_root" not in kwargs
 }
 
 #[test]
+fn project_resolution_uses_registry_and_rejects_hermes_descendants() {
+    run_generated_plugin_script(
+        "check_registry_project_resolution.py",
+        r#"
+import json
+import os
+import pathlib
+import tempfile
+
+calls = []
+temp = tempfile.TemporaryDirectory()
+base = pathlib.Path(temp.name)
+canonical = base / "repo"
+alias = base / "repo-feature"
+hermes_home = base / "hermes"
+for path in (canonical, alias, hermes_home / "hermes-agent"):
+    path.mkdir(parents=True)
+
+def fake_call_tracedecay_tool(name, args, **kwargs):
+    calls.append((name, dict(args), dict(kwargs)))
+    assert name == "tracedecay_project_context"
+    assert args == {"project_path": str(alias)}
+    return json.dumps({"content": [{"type": "text", "text": json.dumps({
+        "project": {"project_root": str(canonical)},
+        "aliases": [{"alias_path": str(alias)}],
+    })}]})
+
+plugin.tools.call_tracedecay_tool = fake_call_tracedecay_tool
+
+state, root = plugin._project_scope_resolution(str(alias), str(hermes_home))
+assert state == "registered"
+assert root == str(canonical)
+assert [call[0] for call in calls] == ["tracedecay_project_context"]
+
+for path in (hermes_home, hermes_home / "hermes-agent"):
+    assert plugin._code_project_root(explicit=str(path), hermes_home=str(hermes_home)) is None
+    assert plugin.tools.code_project_root(explicit=str(path), hermes_home=str(hermes_home)) is None
+"#,
+        "Hermes project resolution must use the registry and reject host-owned descendants",
+    );
+}
+
+#[test]
 fn context_engine_rejects_compacted_compression_replay() {
     run_generated_plugin_script(
         "check_compacted_replay_abort.py",
@@ -4526,7 +4569,8 @@ tools = plugin.tools
 assert not hasattr(tools, "PINNED_PROJECT_ROOT")
 assert not hasattr(tools, "config_pinned_project_root")
 
-# Default CLI dispatch uses the real process cwd, never the profile pin.
+# Unscoped dispatch does not infer a project from the plugin process cwd or
+# the legacy profile pin. The routed host wrapper supplies real session cwd.
 captured = []
 
 class FakeResult:
@@ -4542,9 +4586,7 @@ tools.subprocess.run = fake_run
 tools.call_tracedecay_tool("tracedecay_status", {})
 assert captured, "expected a subprocess invocation"
 argv = captured[-1]
-idx = argv.index("--project")
-assert argv[idx + 1] == os.getcwd(), argv
-assert argv[idx + 1] != "/pinned/project", argv
+assert "--project" not in argv, argv
 
 # An explicit project still wins over the pin.
 tools.call_tracedecay_tool("tracedecay_status", {}, project_root="/explicit/root")
@@ -4552,22 +4594,21 @@ argv = captured[-1]
 idx = argv.index("--project")
 assert argv[idx + 1] == "/explicit/root", argv
 
-# Memory tools follow the same real cwd route.
+# Bare memory bridge calls also stay unscoped; the memory provider wrapper
+# supplies explicit user/project scope before reaching this transport.
 tools.call_tracedecay_tool("tracedecay_fact_store", {})
 argv = captured[-1]
-idx = argv.index("--project")
-assert argv[idx + 1] == os.getcwd(), argv
+assert "--project" not in argv, argv
 
 # A stale MCP `project_root` argument is not translated. The normal cwd route
-# still selects the user-profile project store, and the strict CLI rejects the
-# unknown argument instead of silently preserving a compatibility protocol.
+# stays in the argument payload, and the strict CLI rejects the unknown
+# argument instead of silently preserving a compatibility protocol.
 tools.call_tracedecay_tool(
     "tracedecay_lcm_status",
     {"project_root": "/tmp/hermes-profile"},
 )
 argv = captured[-1]
-idx = argv.index("--project")
-assert argv[idx + 1] == os.getcwd(), argv
+assert "--project" not in argv, argv
 payload = json.loads(argv[argv.index("--args") + 1])
 assert payload["project_root"] == "/tmp/hermes-profile", payload
 

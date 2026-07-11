@@ -142,11 +142,13 @@ def plugin_config_block(hermes_home=None):
     return block
 
 def code_project_root(explicit=None, cwd=None, hermes_home=None):
-    candidate = explicit or cwd or os.getcwd()
+    candidate = explicit or cwd
     if isinstance(candidate, str) and candidate.strip() and os.path.isabs(candidate):
         candidate = candidate.strip()
         try:
-            if os.path.realpath(candidate) == os.path.realpath(hermes_home_dir(hermes_home)):
+            candidate_real = os.path.realpath(candidate)
+            hermes_real = os.path.realpath(hermes_home_dir(hermes_home))
+            if os.path.commonpath((hermes_real, candidate_real)) == hermes_real:
                 return None
         except (OSError, TypeError, ValueError):
             return None

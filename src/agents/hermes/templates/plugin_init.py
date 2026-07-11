@@ -886,23 +886,32 @@ def _project_scope_resolution(project_root, hermes_home=None):
         return unresolved_state, unresolved_root
     try:
         status = call_tracedecay_json(
-            "tracedecay_active_project",
-            {},
-            **_project_call_kwargs(candidate),
+            "tracedecay_project_context",
+            {"project_path": candidate},
         )
     except Exception:
         return unresolved_state, unresolved_root
     if not isinstance(status, dict) or status.get("error"):
         return unresolved_state, unresolved_root
-    resolved = status.get("project_root") or status.get("root")
+    project = status.get("project") if isinstance(status.get("project"), dict) else status
+    resolved = project.get("project_root") or project.get("canonical_root") or project.get("root")
     if not resolved:
         return unresolved_state, unresolved_root
     if not _code_project_root(explicit=resolved, hermes_home=hermes_home):
         return "rejected", None
     try:
-        resolved_real = os.path.realpath(str(resolved))
         candidate_real = os.path.realpath(str(candidate))
-        if os.path.commonpath((resolved_real, candidate_real)) != resolved_real:
+        registered_roots = [resolved]
+        for alias in status.get("aliases") or []:
+            if isinstance(alias, dict) and alias.get("alias_path"):
+                registered_roots.append(alias["alias_path"])
+        matched = False
+        for root in registered_roots:
+            root_real = os.path.realpath(str(root))
+            if os.path.commonpath((root_real, candidate_real)) == root_real:
+                matched = True
+                break
+        if not matched:
             return unresolved_state, unresolved_root
     except (OSError, TypeError, ValueError):
         return unresolved_state, unresolved_root
@@ -1269,9 +1278,9 @@ def _code_project_root(explicit=None, cwd=None, configured=None, hermes_home=Non
     if isinstance(candidate, str) and candidate.strip() and os.path.isabs(candidate):
         candidate = candidate.strip()
         try:
-            if os.path.realpath(candidate) == os.path.realpath(
-                _resolve_hermes_home(hermes_home=hermes_home)
-            ):
+            candidate_real = os.path.realpath(candidate)
+            hermes_real = os.path.realpath(_resolve_hermes_home(hermes_home=hermes_home))
+            if os.path.commonpath((hermes_real, candidate_real)) == hermes_real:
                 return None
         except (OSError, TypeError, ValueError):
             return None
