@@ -745,6 +745,8 @@ async fn structured_backfill_one_shot_process_never_spawns() {
         tracedecay::global_db::structured_backfill_will_spawn(),
         "a long-lived host must spawn the sweep"
     );
+    tracedecay::global_db::reset_process_long_lived_for_structured_backfill();
+    tracedecay::global_db::set_background_structured_backfill_enabled(false);
 }
 
 /// Two concurrent openers of the same store contend on the sibling lock file:

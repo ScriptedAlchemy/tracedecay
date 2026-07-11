@@ -902,6 +902,13 @@ pub fn mark_process_long_lived_for_structured_backfill() {
     STRUCTURED_BACKFILL_LONG_LIVED_PROCESS.store(true, std::sync::atomic::Ordering::Relaxed);
 }
 
+/// Resets the long-lived-process gate after tests that exercise daemon-only
+/// background behavior in a shared test process.
+#[doc(hidden)]
+pub fn reset_process_long_lived_for_structured_backfill() {
+    STRUCTURED_BACKFILL_LONG_LIVED_PROCESS.store(false, std::sync::atomic::Ordering::Relaxed);
+}
+
 /// Whether [`GlobalDb::spawn_structured_backfill`] will schedule a sweep: the
 /// background switch is on *and* this process is a long-lived host. This is the
 /// single predicate the spawn path consults, exposed so tests can assert that a
