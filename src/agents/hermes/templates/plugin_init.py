@@ -1283,7 +1283,7 @@ def _resolve_hermes_home(config=None, hermes_home=None):
         _configured_hermes_home(config),
         # The generated package physically belongs to <profile>/plugins.
         # Prefer that stable owner over process-global helpers and inherited
-        # HERMES_HOME values when no explicit/configured home was supplied.
+        # environment values when no explicit/configured home was supplied.
         tools.hermes_home_dir(),
     ):
         if candidate:
