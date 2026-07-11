@@ -59,6 +59,10 @@ impl Drop for LifecycleLease {
             unregister_process_token(token);
         }
         if let LeaseHold::File(file) = &self.hold {
+            #[cfg(windows)]
+            if self.exclusive {
+                remove_owner_sidecar_if_current(&self.lock_path, self.token.as_deref());
+            }
             let _ = fs2::FileExt::unlock(file);
         }
     }
@@ -127,8 +131,8 @@ fn acquire_shared_or_inherited_at(path: &Path, operation: &str) -> Result<Lifecy
             lock_path: path.to_path_buf(),
             exclusive: false,
         }),
-        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-            let owner = read_owner(&mut file);
+        Err(error) if is_lock_contended(&error) => {
+            let owner = read_owner(&mut file, path);
             let owner_token = owner.as_deref().and_then(|line| line.split('\t').next());
             if owner_token.is_some_and(process_owns_token) {
                 Ok(LifecycleLease {
@@ -154,8 +158,8 @@ fn try_acquire_shared_or_inherited_at(path: &Path, operation: &str) -> Result<Sh
             lock_path: path.to_path_buf(),
             exclusive: false,
         })),
-        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-            let owner = read_owner(&mut file);
+        Err(error) if is_lock_contended(&error) => {
+            let owner = read_owner(&mut file, path);
             let owner_token = owner.as_deref().and_then(|line| line.split('\t').next());
             if owner_token.is_some_and(process_owns_token) {
                 Ok(SharedLeaseAttempt::Acquired(LifecycleLease {
@@ -193,8 +197,8 @@ fn acquire_exclusive_or_inherited_at(
     let mut file = open_lock_file(path)?;
     match fs2::FileExt::try_lock_exclusive(&file) {
         Ok(()) => own_exclusive(file, path, operation),
-        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-            let owner = read_owner(&mut file);
+        Err(error) if is_lock_contended(&error) => {
+            let owner = read_owner(&mut file, path);
             if let Some(token) = inherited.filter(|token| {
                 owner.as_deref().and_then(|line| line.split('\t').next()) == Some(token.as_str())
             }) {
@@ -241,9 +245,9 @@ fn acquire_exclusive_at(path: &Path, operation: &str) -> Result<LifecycleLease> 
     let file = open_lock_file(path)?;
     match fs2::FileExt::try_lock_exclusive(&file) {
         Ok(()) => own_exclusive(file, path, operation),
-        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+        Err(error) if is_lock_contended(&error) => {
             let mut file = file;
-            let owner = read_owner(&mut file);
+            let owner = read_owner(&mut file, path);
             Err(busy_error(operation, owner.as_deref()))
         }
         Err(error) => Err(lock_error(path, operation, &error)),
@@ -259,8 +263,8 @@ fn acquire_shared_at(path: &Path, operation: &str) -> Result<LifecycleLease> {
             lock_path: path.to_path_buf(),
             exclusive: false,
         }),
-        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-            let owner = read_owner(&mut file);
+        Err(error) if is_lock_contended(&error) => {
+            let owner = read_owner(&mut file, path);
             Err(busy_error(operation, owner.as_deref()))
         }
         Err(error) => Err(lock_error(path, operation, &error)),
@@ -276,21 +280,22 @@ fn try_acquire_shared_at(path: &Path, operation: &str) -> Result<SharedLeaseAtte
             lock_path: path.to_path_buf(),
             exclusive: false,
         })),
-        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-            Ok(SharedLeaseAttempt::Busy)
-        }
+        Err(error) if is_lock_contended(&error) => Ok(SharedLeaseAttempt::Busy),
         Err(error) => Err(lock_error(path, operation, &error)),
     }
 }
 
 fn own_exclusive(mut file: File, path: &Path, operation: &str) -> Result<LifecycleLease> {
     let token = lease_token();
+    let owner = format!("{token}\t{operation}\t{}\n", std::process::id());
     file.set_len(0).map_err(|error| owner_write_error(&error))?;
     file.seek(SeekFrom::Start(0))
         .map_err(|error| owner_write_error(&error))?;
-    writeln!(file, "{token}\t{operation}\t{}", std::process::id())
+    file.write_all(owner.as_bytes())
         .map_err(|error| owner_write_error(&error))?;
     file.flush().map_err(|error| owner_write_error(&error))?;
+    #[cfg(windows)]
+    std::fs::write(owner_sidecar_path(path), owner).map_err(|error| owner_write_error(&error))?;
     register_process_token(&token);
     Ok(LifecycleLease {
         hold: LeaseHold::File(file),
@@ -340,12 +345,53 @@ fn open_lock_file(path: &Path) -> Result<File> {
         .map_err(|error| lock_error(path, "open", &error))
 }
 
-fn read_owner(file: &mut File) -> Option<String> {
+fn is_lock_contended(error: &std::io::Error) -> bool {
+    if error.kind() == std::io::ErrorKind::WouldBlock {
+        return true;
+    }
+    #[cfg(windows)]
+    {
+        // LockFileEx reports lock contention as ERROR_LOCK_VIOLATION, which
+        // std currently classifies as Uncategorized rather than WouldBlock.
+        return error.raw_os_error() == Some(33);
+    }
+    #[cfg(not(windows))]
+    false
+}
+
+fn read_owner(file: &mut File, _path: &Path) -> Option<String> {
+    #[cfg(windows)]
+    if let Ok(owner) = std::fs::read_to_string(owner_sidecar_path(_path)) {
+        let owner = owner.trim();
+        if !owner.is_empty() {
+            return Some(owner.to_string());
+        }
+    }
     let mut owner = String::new();
     file.seek(SeekFrom::Start(0)).ok()?;
     file.read_to_string(&mut owner).ok()?;
     let owner = owner.trim();
     (!owner.is_empty()).then(|| owner.to_string())
+}
+
+#[cfg(windows)]
+fn owner_sidecar_path(path: &Path) -> PathBuf {
+    path.with_extension("lock.owner")
+}
+
+#[cfg(windows)]
+fn remove_owner_sidecar_if_current(path: &Path, token: Option<&str>) {
+    let Some(token) = token else {
+        return;
+    };
+    let owner_path = owner_sidecar_path(path);
+    let is_current = std::fs::read_to_string(&owner_path)
+        .ok()
+        .and_then(|owner| owner.split('\t').next().map(str::to_string))
+        .is_some_and(|owner_token| owner_token == token);
+    if is_current {
+        let _ = std::fs::remove_file(owner_path);
+    }
 }
 
 fn lease_token() -> String {
