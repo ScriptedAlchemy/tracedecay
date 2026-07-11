@@ -16,7 +16,7 @@ use crate::memory::store::MemoryStore;
 
 /// The highest migration version defined in this file. Bump this and add a
 /// new entry to `run_migration` whenever the schema changes.
-const LATEST_VERSION: u32 = 17;
+const LATEST_VERSION: u32 = 18;
 
 /// Reads the current schema version from `PRAGMA user_version`.
 async fn get_version(conn: &Connection) -> Result<u32> {
@@ -376,6 +376,7 @@ async fn run_migration(conn: &Connection, version: u32) -> Result<()> {
         15 => migrate_v15(conn).await,
         16 => migrate_v16(conn).await,
         17 => migrate_v17(conn).await,
+        18 => migrate_v18(conn).await,
         _ => Err(TraceDecayError::Database {
             message: format!("unknown migration version: {version}"),
             operation: "run_migration".to_string(),
@@ -627,6 +628,85 @@ async fn migrate_v16(conn: &Connection) -> Result<()> {
 ///   false 0, and NULL is only ever *read*, never written, on such databases.
 #[allow(clippy::unused_async)] // keeps the migration dispatch uniform
 async fn migrate_v17(_conn: &Connection) -> Result<()> {
+    Ok(())
+}
+
+/// v18: bounded, project-local semantic relationships between memory facts.
+///
+/// Relations deliberately use a closed vocabulary. Entity timestamps support
+/// optimistic grooming without creating a global entity identity system.
+async fn migrate_v18(conn: &Connection) -> Result<()> {
+    let mut has_updated_at = false;
+    let mut rows = conn
+        .query("PRAGMA table_info(memory_entities)", ())
+        .await
+        .map_err(|e| TraceDecayError::Database {
+            message: format!("v18: failed to read memory_entities columns: {e}"),
+            operation: "migrate_v18".to_string(),
+        })?;
+    while let Some(row) = rows.next().await.map_err(|e| TraceDecayError::Database {
+        message: format!("v18: failed to iterate memory_entities columns: {e}"),
+        operation: "migrate_v18".to_string(),
+    })? {
+        let name: String = row.get(1).map_err(|e| TraceDecayError::Database {
+            message: format!("v18: failed to read memory_entities column name: {e}"),
+            operation: "migrate_v18".to_string(),
+        })?;
+        has_updated_at |= name == "updated_at";
+    }
+    if !has_updated_at {
+        conn.execute(
+            "ALTER TABLE memory_entities ADD COLUMN updated_at INTEGER NOT NULL DEFAULT 0",
+            (),
+        )
+        .await
+        .map_err(|e| TraceDecayError::Database {
+            message: format!("v18: failed to add memory_entities.updated_at: {e}"),
+            operation: "migrate_v18".to_string(),
+        })?;
+        conn.execute(
+            "UPDATE memory_entities SET updated_at = created_at WHERE updated_at = 0",
+            (),
+        )
+        .await
+        .map_err(|e| TraceDecayError::Database {
+            message: format!("v18: failed to backfill memory_entities.updated_at: {e}"),
+            operation: "migrate_v18".to_string(),
+        })?;
+    }
+    create_memory_fact_relations_schema(conn, "migrate_v18").await
+}
+
+async fn create_memory_fact_relations_schema(conn: &Connection, operation: &str) -> Result<()> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS memory_fact_relations (
+            source_fact_id INTEGER NOT NULL,
+            target_fact_id INTEGER NOT NULL,
+            relation TEXT NOT NULL CHECK (
+                relation IN ('supports', 'contradicts', 'supersedes', 'derived_from')
+            ),
+            confidence REAL NOT NULL CHECK (confidence >= 0.0 AND confidence <= 1.0),
+            source TEXT NOT NULL,
+            metadata TEXT NOT NULL DEFAULT '{}',
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL,
+            PRIMARY KEY (source_fact_id, target_fact_id, relation),
+            CHECK (source_fact_id != target_fact_id),
+            FOREIGN KEY (source_fact_id) REFERENCES memory_facts(fact_id) ON DELETE CASCADE,
+            FOREIGN KEY (target_fact_id) REFERENCES memory_facts(fact_id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_memory_fact_relations_source
+            ON memory_fact_relations(source_fact_id);
+        CREATE INDEX IF NOT EXISTS idx_memory_fact_relations_target
+            ON memory_fact_relations(target_fact_id);
+        CREATE INDEX IF NOT EXISTS idx_memory_fact_relations_kind
+            ON memory_fact_relations(relation);",
+    )
+    .await
+    .map_err(|e| TraceDecayError::Database {
+        message: format!("{operation}: failed to create memory fact relations: {e}"),
+        operation: operation.to_string(),
+    })?;
     Ok(())
 }
 
@@ -1305,7 +1385,8 @@ async fn create_holographic_memory_schema(conn: &Connection, operation: &str) ->
             normalized_name TEXT NOT NULL UNIQUE,
             entity_type TEXT NOT NULL DEFAULT 'unknown',
             aliases TEXT NOT NULL DEFAULT '[]',
-            created_at INTEGER NOT NULL DEFAULT 0
+            created_at INTEGER NOT NULL DEFAULT 0,
+            updated_at INTEGER NOT NULL DEFAULT 0
         );
 
         CREATE TABLE IF NOT EXISTS memory_fact_entities (
@@ -1400,6 +1481,8 @@ async fn create_holographic_memory_schema(conn: &Connection, operation: &str) ->
             message: format!("{operation}: failed to create memory oplog schema: {e}"),
             operation: operation.to_string(),
         })?;
+
+    create_memory_fact_relations_schema(conn, operation).await?;
 
     Ok(())
 }

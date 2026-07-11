@@ -25,6 +25,8 @@ use super::memory_service::{
 use super::util::{qmarks, query_rows};
 use super::{DashboardState, code_diagnostics_broker, storage_mode_label, token_count};
 use crate::errors::{Result, TraceDecayError};
+use crate::memory::store::MemoryStore;
+use crate::memory::types::MemoryGroomingOperation;
 use crate::tracedecay::TraceDecay;
 
 pub const CURATION_DEFAULT_MAX_CLUSTERS: usize = 12;
@@ -56,7 +58,8 @@ contradictions - leave them with \"keep\".\n\n\
 There is NO archive: delete and merge losers are removed permanently, \
 so prefer \"keep\" whenever unsure.\n\n\
 Return JSON of shape: {\"ops\": [ ... ]}. Each op MUST include: \
-cluster_id (string, from the input), op (one of merge, delete, keep), \
+cluster_id (string, from the input), op (one of merge, delete, keep, \
+normalize_tags, merge_entities, add_alias, link_facts, repair_vector), \
 confidence (0.0-1.0), and reason (short string). Use op \"keep\" for \
 reviewed clusters that need no change; do not omit keep reviews.\n\
 Per-op required fields:\n\
@@ -64,6 +67,16 @@ Per-op required fields:\n\
 \"merged_content\" (string) when the winner's text should be replaced \
 by a consolidated fact.\n\
   delete: {\"fact_id\": <id>}\n\
+  normalize_tags: {\"fact_id\": <id>, \"tags\": [<canonical_tag>, ...], \
+\"evidence_fact_ids\": [<id>, ...]}\n\
+  merge_entities: {\"winner_entity_id\": <id>, \"loser_entity_ids\": [<id>, ...], \
+\"evidence_fact_ids\": [<id>, ...]}\n\
+  add_alias: {\"entity_id\": <id>, \"alias\": <bounded alias>, \
+\"evidence_fact_ids\": [<id>, ...]}\n\
+  link_facts: {\"source_fact_id\": <id>, \"target_fact_id\": <id>, \
+\"relation\": <supports|contradicts|supersedes|derived_from>, \
+\"source\": <provenance>, \"evidence_fact_ids\": [<id>, ...]}\n\
+  repair_vector: {\"fact_id\": <id>, \"evidence_fact_ids\": [<id>, ...]}\n\
 Only reference fact ids that appear in the input clusters or in \
 hygiene_candidates. Return ONLY the JSON object.\n\n\
 Hygiene categories: the input may also carry \"hygiene_candidates\" — \
@@ -177,12 +190,30 @@ pub async fn run_memory_curate(cg: &TraceDecay, options: &MemoryCurateOptions) -
         llm_report.insert("clusters_reviewed".to_string(), json!(clusters.len()));
         llm_report.insert("rejected_ops".to_string(), Value::Array(rejected));
         if options.apply {
+            prevalidate_destructive_ops(&state, &valid).await?;
+            let grooming_ops = parse_grooming_ops(&valid)?;
             let mut results = Vec::new();
             let mut applied = 0i64;
+            if !grooming_ops.is_empty() {
+                let store = MemoryStore::new(&state.mem_conn);
+                let grooming_report = store
+                    .apply_grooming_batch(&grooming_ops, options.min_confidence)
+                    .await?;
+                applied += grooming_ops.len() as i64;
+                results.push(json!({
+                    "status": "applied",
+                    "operations": grooming_ops.len(),
+                    "grooming": grooming_report,
+                }));
+            }
             for op in &valid {
                 let (result, ok) = match op.get("op").and_then(Value::as_str) {
                     Some("delete") => apply_delete_op(&state, op).await,
                     Some("merge") => apply_merge_op(&state, op).await,
+                    Some(
+                        "normalize_tags" | "merge_entities" | "add_alias" | "link_facts"
+                        | "repair_vector",
+                    ) => continue,
                     _ => (json!({ "status": "error", "error": "unknown op" }), false),
                 };
                 if ok {
@@ -473,7 +504,14 @@ fn validate_llm_ops(
         if op == "keep" {
             continue;
         }
-        if op != "merge" && op != "delete" {
+        const GROOMING_OPS: [&str; 5] = [
+            "normalize_tags",
+            "merge_entities",
+            "add_alias",
+            "link_facts",
+            "repair_vector",
+        ];
+        if op != "merge" && op != "delete" && !GROOMING_OPS.contains(&op) {
             rejected.push(reject(raw, &format!("unknown op '{op}'")));
             continue;
         }
@@ -486,6 +524,74 @@ fn validate_llm_ops(
         }
         if confidence < min_confidence {
             rejected.push(reject(raw, &format!("confidence {confidence} below floor")));
+            continue;
+        }
+        if GROOMING_OPS.contains(&op) {
+            let evidence_ids = op_obj
+                .get("evidence_fact_ids")
+                .and_then(Value::as_array)
+                .map(|ids| ids.iter().filter_map(Value::as_i64).collect::<Vec<_>>())
+                .unwrap_or_default();
+            if evidence_ids.is_empty() || evidence_ids.iter().any(|id| !allowed_ids.contains(id)) {
+                rejected.push(reject(
+                    raw,
+                    "grooming evidence_fact_ids were empty or outside reviewed evidence",
+                ));
+                continue;
+            }
+            let valid_shape = match op {
+                "normalize_tags" => {
+                    op_obj
+                        .get("fact_id")
+                        .and_then(Value::as_i64)
+                        .is_some_and(|id| allowed_ids.contains(&id))
+                        && op_obj.get("tags").and_then(Value::as_array).is_some()
+                }
+                "merge_entities" => {
+                    op_obj
+                        .get("winner_entity_id")
+                        .and_then(Value::as_i64)
+                        .is_some()
+                        && op_obj
+                            .get("loser_entity_ids")
+                            .and_then(Value::as_array)
+                            .is_some_and(|ids| {
+                                !ids.is_empty() && ids.iter().all(|id| id.as_i64().is_some())
+                            })
+                }
+                "add_alias" => {
+                    op_obj.get("entity_id").and_then(Value::as_i64).is_some()
+                        && op_obj
+                            .get("alias")
+                            .and_then(Value::as_str)
+                            .is_some_and(|alias| !alias.trim().is_empty())
+                }
+                "link_facts" => {
+                    let source_id = op_obj.get("source_fact_id").and_then(Value::as_i64);
+                    let target_id = op_obj.get("target_fact_id").and_then(Value::as_i64);
+                    source_id.is_some_and(|id| allowed_ids.contains(&id))
+                        && target_id.is_some_and(|id| allowed_ids.contains(&id))
+                        && source_id != target_id
+                        && matches!(
+                            op_obj.get("relation").and_then(Value::as_str),
+                            Some("supports" | "contradicts" | "supersedes" | "derived_from")
+                        )
+                        && op_obj
+                            .get("source")
+                            .and_then(Value::as_str)
+                            .is_some_and(|source| !source.trim().is_empty())
+                }
+                "repair_vector" => op_obj
+                    .get("fact_id")
+                    .and_then(Value::as_i64)
+                    .is_some_and(|id| allowed_ids.contains(&id)),
+                _ => false,
+            };
+            if !valid_shape {
+                rejected.push(reject(raw, "missing/invalid bounded grooming fields"));
+                continue;
+            }
+            valid.push(raw.clone());
             continue;
         }
         if op == "delete" {
@@ -530,6 +636,115 @@ fn reject(raw: &Value, reason: &str) -> Value {
     let mut out = raw.as_object().cloned().unwrap_or_default();
     out.insert("rejected_reason".to_string(), json!(reason));
     Value::Object(out)
+}
+
+fn parse_grooming_ops(valid: &[Value]) -> Result<Vec<MemoryGroomingOperation>> {
+    valid
+        .iter()
+        .filter(|op| {
+            matches!(
+                op.get("op").and_then(Value::as_str),
+                Some(
+                    "normalize_tags"
+                        | "merge_entities"
+                        | "add_alias"
+                        | "link_facts"
+                        | "repair_vector"
+                )
+            )
+        })
+        .map(|op| {
+            serde_json::from_value(op.clone()).map_err(|e| TraceDecayError::Config {
+                message: format!("invalid grooming operation after validation: {e}"),
+            })
+        })
+        .collect()
+}
+
+async fn prevalidate_destructive_ops(state: &DashboardState, ops: &[Value]) -> Result<()> {
+    let mut mutation_targets = BTreeSet::new();
+    let mut merge_winners = BTreeSet::new();
+    let mut required_facts = BTreeSet::new();
+    for op in ops {
+        match op.get("op").and_then(Value::as_str) {
+            Some("delete") => {
+                let fact_id = op.get("fact_id").and_then(Value::as_i64).ok_or_else(|| {
+                    TraceDecayError::Config {
+                        message: "delete op lost fact_id after validation".to_string(),
+                    }
+                })?;
+                if merge_winners.contains(&fact_id) || !mutation_targets.insert(fact_id) {
+                    return Err(TraceDecayError::Config {
+                        message: format!("fact {fact_id} is targeted by multiple destructive ops"),
+                    });
+                }
+                required_facts.insert(fact_id);
+            }
+            Some("merge") => {
+                let winner_id = op.get("winner_id").and_then(Value::as_i64).ok_or_else(|| {
+                    TraceDecayError::Config {
+                        message: "merge op lost winner_id after validation".to_string(),
+                    }
+                })?;
+                if mutation_targets.contains(&winner_id) {
+                    return Err(TraceDecayError::Config {
+                        message: format!(
+                            "fact {winner_id} has conflicting destructive batch roles"
+                        ),
+                    });
+                }
+                merge_winners.insert(winner_id);
+                required_facts.insert(winner_id);
+                for loser_id in op
+                    .get("loser_ids")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(Value::as_i64)
+                {
+                    if merge_winners.contains(&loser_id)
+                        || !mutation_targets.insert(loser_id)
+                        || loser_id == winner_id
+                    {
+                        return Err(TraceDecayError::Config {
+                            message: format!(
+                                "fact {loser_id} has conflicting destructive batch roles"
+                            ),
+                        });
+                    }
+                    required_facts.insert(loser_id);
+                }
+            }
+            _ => {}
+        }
+    }
+    for fact_id in required_facts {
+        let mut rows = state
+            .mem_conn
+            .query(
+                "SELECT 1 FROM memory_facts WHERE fact_id = ?1 LIMIT 1",
+                libsql::params![fact_id],
+            )
+            .await
+            .map_err(|e| TraceDecayError::Database {
+                message: e.to_string(),
+                operation: "prevalidate_destructive_ops".to_string(),
+            })?;
+        if rows
+            .next()
+            .await
+            .map_err(|e| TraceDecayError::Database {
+                message: e.to_string(),
+                operation: "prevalidate_destructive_ops".to_string(),
+            })?
+            .is_none()
+        {
+            return Err(TraceDecayError::Config {
+                message: format!("fact {fact_id} no longer exists; batch was not applied"),
+            });
+        }
+    }
+    Ok(())
 }
 
 fn uses_updated_at_as_truth_freshness(raw: &Value) -> bool {
@@ -655,5 +870,42 @@ mod tests {
                 .unwrap()
                 .contains("updated_at is maintenance metadata")
         );
+    }
+
+    #[test]
+    fn validate_accepts_only_bounded_grooming_with_reviewed_evidence() {
+        let ops = vec![
+            json!({
+                "op": "link_facts",
+                "source_fact_id": 1,
+                "target_fact_id": 2,
+                "relation": "supports",
+                "source": "memory_curator",
+                "evidence_fact_ids": [1, 2],
+                "confidence": 0.9
+            }),
+            json!({
+                "op": "link_facts",
+                "source_fact_id": 1,
+                "target_fact_id": 1,
+                "relation": "invented_relation",
+                "source": "memory_curator",
+                "evidence_fact_ids": [1],
+                "confidence": 0.9
+            }),
+            json!({
+                "op": "add_alias",
+                "entity_id": 4,
+                "alias": "safe alias",
+                "evidence_fact_ids": [99],
+                "confidence": 0.9
+            }),
+        ];
+
+        let (valid, rejected) = validate_llm_ops(&ops, &allowed(&[1, 2]), 0.5);
+
+        assert_eq!(valid.len(), 1);
+        assert_eq!(valid[0]["relation"], "supports");
+        assert_eq!(rejected.len(), 2);
     }
 }
