@@ -168,7 +168,7 @@ This is not merely operator error. V2 must make the right capability discoverabl
 
 ### 2.6 Current-master accepted changes
 
-The plan treats merged rows below as required base semantics at publication base `e8883933`; rows explicitly marked open are incoming constraints that execution must reconcile before touching their seam. The 2026-07-11 refresh verified Hermes PRs #441/#443/#445 and releases #442/#444/#446 as merged; only draft plan PR #421 remained open. Implementation must not rediscover or regress accepted behavior, and must not assume a future open input or worktree draft has merged until the execution-slice refresh proves it:
+The plan treats merged rows below as required base semantics at publication base `e8883933`; rows explicitly marked open are incoming constraints that execution must reconcile before touching their seam. The 2026-07-11 refresh verified Hermes PRs #441/#443/#445 and releases #442/#444/#446 as merged; only draft plan PR #421 remained open. A later same-day local `fix/session-catchup-integrity` worktree remains uncommitted/unmerged evidence: its measured N×M transcript catch-up amplification, exact-database dirty/checkpoint race, curator input starvation, and hint-rollup contradiction are captured as FM-153–FM-156 and translated into plans 02/03/06/09/11/12/13/23/25/26. V2 deliberately does not port its handler-static singleflight, transcript fan-out, branch databases, or sidecar protocol. Implementation must not rediscover or regress accepted behavior, and must not assume a future open input or worktree draft has merged until the execution-slice refresh proves it:
 
 | PR/status | Behavior | V2 consequence |
 |---|---|---|

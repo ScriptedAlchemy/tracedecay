@@ -988,6 +988,7 @@ Rules:
 - Missing registry returns empty typed collections plus `registry_state=missing`, not an unrelated error string or absent fields.
 - One unavailable shard may produce useful partial success; all unavailable returns a typed problem with per-source coverage.
 - A stale graph result cannot be labeled current. Local semantic Git, live delivery state, and joined/reconciled conclusions remain distinct.
+- Session/message/LCM/search reads never run provider catch-up. Stale/partial coverage may include the generated legal `capture.refresh` command and existing `OperationRef`; CLI/MCP/API/dashboard start or join that same operation and render identical progress/cancellation/terminal receipts.
 - Active state is computed once in the application response and reused everywhere.
 - Status commands and MCP status tools consume the shared `SystemStatusSnapshot`; they do not aggregate different component meanings under local booleans.
 - Multi-machine status additionally renders `BrainId`, node role, authority/placement epoch, requested consistency, per-shard watermark/cache age/sync lag, pending local counts, conflicts/revocation, backup/recovery state, and unreachable/local-only/policy-excluded scopes. Pending/cache/replica state is never labeled canonical or complete.
@@ -1044,6 +1045,7 @@ Targets on the reference machine:
 - MCP per-session requests, server requests, subscriptions, protocol tasks, progress events, and notifications each have reviewed count/byte/deadline caps; list-change/resource-update events coalesce by generation/URI and never form an unbounded queue;
 - 1,000 repeated renders of the same typed fixture are byte-stable and leak no state;
 - large result rendering scales linearly in returned rows/eligible bytes.
+- Transport overhead is benchmarked separately from provider freshness work: the 30-project ≤60-second cold-history gate belongs to capture/application, while every search binding proves zero source opens, scanned bytes, cursor writes, or hidden refresh operations.
 
 Benchmarks separately measure application execution, view construction, rendering, serialization, transport framing, truncation/anchor storage, and CLI/MCP overhead. Analytics record safe aggregate latency/bytes/tokens/format/truncation/cursor use by binding ID, never result text.
 
@@ -1241,6 +1243,7 @@ The parity matrix includes the merged #445 fixtures for user-scoped `message_sea
 - slow NDJSON/SSE consumers, bounded backpressure, gap/resync, and exact final coverage;
 - renderer panic/serialization failure converts to safe invariant problem without partial stdout;
 - identity-cutover conflict returns the same candidates/remediation through CLI/MCP/HTTP.
+- 64 concurrent CLI/MCP/API/dashboard freshness requests join one operation; leader death, cancellation, partial source failure, and terminal error are byte-equivalent semantic outcomes, and no waiting adapter reports completion from a process-local notification alone.
 - edit bundles at maximum item/edge/body size, concurrent plan-version change, active lease, cycle/dangling reference, validation cancellation, rebase conflict fanout, submit kill points, staged-payload GC, and indexed expiry cleanup without a full-bundle scan.
 
 ## 20. Implementation slices inside the existing master program

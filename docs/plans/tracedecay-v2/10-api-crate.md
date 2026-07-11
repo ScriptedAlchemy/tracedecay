@@ -548,7 +548,7 @@ POST /api/v2/brain/repositories:adopt|split
 POST /api/v2/storage-consolidation:inspect|plan                       # read-shaped operator preflight with sensitive source refs in body
 POST /api/v2/commands/storage-consolidation/{start,resume,recover}    # operator-only merged-#425 mutations
 GET  /api/v2/storage-consolidation/operations/{id}                   # status/receipts/exact recovery
-POST /api/v2/commands/capture/{ingest,pause,resume}
+POST /api/v2/commands/capture/{refresh,ingest,pause,resume}
 POST /api/v2/commands/lcm/{compress,boundary,lifecycle-preflight,lifecycle-repair}
 POST /api/v2/commands/automation/jobs/{create,update,delete,run,cancel,pause,resume}
 POST /api/v2/commands/automation/scheduler/{enable,disable}
@@ -630,6 +630,8 @@ POST /api/v2/task-graph/edit-bundles/{workspace_id}:rebase
 POST /api/v2/task-graph/edit-bundles/{workspace_id}:submit
 POST /api/v2/task-graph/edit-bundles/{workspace_id}:delete
 ```
+
+`capture/refresh` is the explicit provider/session freshness command from plan 09. It returns `202` with the shared `OperationRef`; equivalent profile/provider/source/frontier/target-watermark requests join one daemon operation and receive identical terminal coverage/error receipts. Search/session/LCM read routes never invoke it implicitly. `capture/ingest` remains the authenticated source-broker submission route and is not exposed as an agentic catch-up shortcut.
 
 The task/orchestration `:action` routes are the sole HTTP bindings for plan 24 §9.2's command use cases — no duplicate `/commands/**` aliases and no `PATCH` route exist — and they use the same `CommandHttpRequest` envelope, idempotency, expected version, operation-specific validation, and audit contract. Task-view mutations use only Section 8.6's `/saved-views` routes with a `SavedViewDefinitionV1::Task` body. `work-items:assign-set` is one bounded all-or-none owner-shard use case with plan/item expected versions and deterministic per-item receipts. `task-offers/{id}:accept` carries the expected offer/work/plan versions and readiness digest and is the sole public route that invokes the atomic sealed packet/attempt/lease transaction from plan 24 §9.4. Attempt lifecycle and packet acceptance require the active fence; packet acceptance also requires the exact prior packet and safe Turn boundary. Task-notification mutations never create implicit subscriptions. `WorkClaimV1` remains only under coordination reads/events; no task command is named “claim.”
 

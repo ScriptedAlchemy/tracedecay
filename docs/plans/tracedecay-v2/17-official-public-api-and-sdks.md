@@ -444,6 +444,10 @@ Each lifecycle or active-probe method consumes canonical `HostProfileRef`/`HostI
 
 No integration request, model, problem, event, example, debug representation, or operation receipt exposes a host filesystem path, raw host configuration body, command line, environment value, credential value, or arbitrary package manifest. Clients use opaque target/installation/component/credential refs, generated manifest/profile digests, safe capability differences, ownership/trust states, and content-free effect receipts. A local SDK convenience may display a caller-owned label, but it cannot serialize that label as host authority.
 
+### 8.5 Provider freshness operation client lock
+
+The generated command clients expose exactly one `capture.refresh` binding (`AdminClient::refresh_capture`, `admin.refreshCapture`, `admin.refresh_capture`) over `POST /api/v2/commands/capture/refresh`. It accepts the canonical profile/provider/source scope, committed frontier and target watermark plus expected config/catalog versions and idempotency, then returns the shared `OperationRef`. Equivalent calls join one daemon operation; polling/subscription exposes source opens, records/bytes, progress, partial coverage, cancellation boundary, and the identical terminal receipt. `ReadClient` search/session/LCM methods have no `catch_up`, `refresh`, or hidden-write option and never call this method automatically. `capture.ingest` is reserved for the authenticated source-broker client and is absent from ordinary public/admin agent conveniences.
+
 ## 9. Typed ScopeSelectorV2
 
 Scope must be identical across API, SDKs, CLI, MCP, dashboard, saved views, exports, and retrieval anchors. `project_key` and a process's active checkout are internal/provider locators, not the public identity model.

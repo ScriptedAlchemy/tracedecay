@@ -792,6 +792,21 @@ The producer version field itself, its emission requirement, and legacy-unknown 
 
 Hard-coded correctness constants and safety maxima are not mislabeled as user settings. They still appear in capability/status documentation when relevant, but are not writable. Conversely, a behavior marketed or documented as configurable cannot remain an unregistered constant.
 
+### 13.0 Provider freshness descriptors
+
+These profile defaults configure plan 09's daemon operation; they never make a search/read perform ingestion. Provider/host overrides may only narrow budgets or disable eligible sources, and the current effective values/provenance are visible in Settings plus CLI/MCP/API/SDK:
+
+| Key | Type/default | Validation and impact |
+|---|---|---|
+| `capture.refresh.background_policy` | enum / `on_source_change` | `off`, `on_source_change`, or `bounded_periodic`; periodic wakeups still skip unchanged frontiers and cannot create project×source rescans. |
+| `capture.refresh.max_concurrent_sources` | integer / `2` | `1..16`; global across joined requesters and projects for one profile authority. |
+| `capture.refresh.max_records` / `max_input_bytes` | integer + bytes / `5_000_000` / `16GiB` | Per operation hard bounds; partial completion returns a resumable frontier and explicit coverage. |
+| `capture.refresh.max_wall_time` / `max_rss` | duration + bytes / `60s` / `2GiB` | Current cold-history target and resource ceiling; exceeding either cancels at a committed boundary rather than advancing an uncommitted cursor. |
+| `capture.refresh.yield_every_records` | integer / `10_000` | `100..100_000`; cooperative cancellation/progress cadence, not a commit-size promise. |
+| `capture.refresh.required_freshness` | enum / `bounded_stale` | Default read requirement only; an authoritative caller starts/joins `capture.refresh` explicitly and receives an operation ref. |
+
+`source-open count <= eligible SourceInstanceId count`, one sweep per committed frontier, query-write sentinel zero, and the FM-153 30-project ≤60-second gate are non-disableable invariants rather than settings.
+
 ### 13.1 Canonical task/executor liveness descriptors
 
 Plan 24 §8.7 owns the liveness/sentinel policy semantics; this registry is the only configuration publication/resolution authority. The generated descriptors must match these baseline values and constraints exactly:
@@ -826,6 +841,9 @@ These descriptors govern curator/reflector/skill-writer/profile-learning admissi
 | `automation.admission.minimum_tokens` | integer / `256` | `0..1_000_000`; high-value correction/failure/feedback/boundary events may bypass; exact bypass reason is receipted. |
 | `automation.admission.max_scopes_per_batch` | integer / `32` | `1..256`; fairness/oldest-dirty ordering and per-owner caps prevent one project starving others. |
 | `automation.admission.maximum_pending_scopes` | integer / `10_000` | `100..1_000_000`; overflow coalesces by owner/task and raises degraded coverage, never drops the source events. |
+| `automation.admission.max_input_characters` / `max_input_tokens` | integer + integer / `1_000_000` / `200_000` | Hard preflight ceilings within backend/model context limits; bounded deterministic selection/chunking must fit both before launch. |
+| `automation.admission.max_evidence_items` / `max_source_bytes` | integer + bytes / `10_000` / `64MiB` | Stable evidence-order selection with explicit excluded coverage; a large source cannot create an unbounded prompt or hide the job. |
+| `automation.admission.max_run_rss` / `max_run_wall_time` | bytes + duration / `2GiB` / `30m` | Enforced by the shared operation worker; breach quarantines only the effective input digest under the pinned version. |
 | `automation.admission.dependency_reevaluation` | enum / `future_evidence_only` | `future_evidence_only`, `dirty_scopes`, or bounded historical window; a version change cannot silently rescan all history. |
 | `automation.admission.retry_backoff_initial` / `max` | duration / `5m` / `6h` | Exponential+jittered, `initial<=max<=7d`; retry binds the same failed input digest and preserves new concurrent dirty generations. |
 | `automation.admission.retry_attempt_cap` / `deadline` | integer + duration / `5` / `24h` | `1..32`, `5m..7d`; implemented by the shared operation attempt substrate, never a curation-only retry loop. |

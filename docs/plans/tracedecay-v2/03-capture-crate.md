@@ -13,6 +13,7 @@ Plan [`24-canonical-task-plan-graph-and-multi-agent-executor.md`](24-canonical-t
 ## Goals
 
 - Capture every supported V1 provider/source family without changing V1 writes during shadow mode.
+- Open and scan each provider-native source once per committed source frontier, independent of how many projects, worktrees, queries, or concurrent refresh requesters may consume its attributed evidence.
 - Use one domain `ScopeSelectorV2` for multi-repo/project/checkout/worktree/ref/snapshot/generation discovery; source candidates never collapse to current project, `project_key`, first CWD, active base checkout, or current graph.
 - Make an observation deterministic from source instance, artifact identity, rewrite generation, record offset/sequence, and privacy-domain-keyed source fingerprint; any raw checksum is transient/non-serializable inside sanitizer memory.
 - Acknowledge a source offset only in the same commit that persists the observation and its outbox row.
@@ -185,6 +186,19 @@ pub struct SourceBatch {
     pub detected_gaps: Vec<SequenceGap>,
 }
 
+pub struct ScanBudget {
+    pub max_artifacts: NonZeroU32,
+    pub max_records: NonZeroU64,
+    pub max_input_bytes: NonZeroU64,
+    pub max_wall_time: Duration,
+    pub yield_every_records: NonZeroU32,
+    pub cancellation: Arc<dyn CaptureCancellation>,
+}
+
+pub trait CaptureCancellation: Send + Sync {
+    fn is_cancelled(&self) -> bool;
+}
+
 pub struct CaptureRequest {
     pub scope: ScopeSelectorV2,
     pub discovery_cursor: DiscoveryCursor,
@@ -208,6 +222,8 @@ pub struct SanitizedObservation {
     pub protected: Option<ProtectedQuarantineIngress>,
 }
 ```
+
+`ScanBudget` is mandatory for live and backfill scans. Hitting a record/byte/artifact/time limit or cooperative cancellation returns `BatchCompleteness::Partial` plus the last fully framed resumable position; it never advances `AppendReceipt.post_commit_source_head` for an uncommitted record. The runner schedules by `SourceInstanceId` and committed frontier, not destination project. Equivalent refresh demand joins plan 09's daemon-owned fenced operation; capture does not implement handler-local singleflight. One sanitized canonical activity observation may later acquire zero-to-many project/worktree attributions through plan 04, so scan-once never means copying a transcript body into many project stores.
 
 ```rust
 pub trait ObservationSink: Send + Sync {
@@ -263,12 +279,13 @@ pub fn detect_rewrite(
 
 `SourceRecord.bytes` and any transient checksum exist only in bounded capture/sanitizer memory and cannot implement `Serialize`, `Display`, logging, repository, or receipt traits. The sanitizer computes `KeyedSourceRecordFingerprint` with the privacy-domain key after parsing/classification. The fingerprint enters envelope/provenance/source-head verification fields, never `CaptureObservationIdentity` or `ObservationKey`; observation identity remains stable across key rotation.
 
-- `SourceInstanceId` is a namespaced deterministic ID over profile, host installation, adapter ID, and provider-native source instance.
+- `SourceInstanceId` is a namespaced deterministic ID over TraceDecay `ProfileId`, optional `HostProfileRef` source partition, host installation, adapter ID, and provider-native source instance. Zero/one/many Hermes host profiles remain source partitions inside one TraceDecay profile; none is a data owner or a TraceDecay profile.
 - `ArtifactId` is a namespaced deterministic ID over source instance plus the provider-native durable artifact identity; a pathname is only one alias.
 - The adapter normalizes the four `CaptureObservationIdentity` fields into the domain `ObservationKey` canonical field encoding; `derive_observation_id` is the only observation-ID implementation. Capture may not define a second UUID namespace or canonical encoder.
 - `SourcePosition` persists through the offset-lowering columns defined in [`02-store-crate.md`](02-store-crate.md): `observations` stores `(position_kind TEXT, byte_start INTEGER NULL, byte_end INTEGER NULL, object_key_digest BLOB NULL)` with `source_heads.contiguous_offset` retained only for byte/row/sequence ordered sources. Capture treats the lowering as opaque and round-trips every variant, including keyed `ObjectKey(PrivacyDomainBoundLocatorDigest)` and `ByteOffset{start,end}`.
 - Key rotation never changes an `ObservationId`. Under the lifecycle lease, the sanitizer/key service can recompute active-source fingerprints with old and new epochs while authorized source bytes are transiently available, append a signed `FingerprintEpochContinuityV1` receipt, and advance only the verification fingerprint/head epoch. If continuity cannot be proven, capture starts a named rewrite generation or quarantines; it never compares raw digests, silently treats an epoch mismatch as a rewrite, or duplicates the prior generation.
 - Append growth with matching artifact and head fingerprints preserves the generation and resumes at the committed cursor.
+- Every ordered provider cursor is a total, replay-stable composite over the provider's strongest monotonic position plus a deterministic tie-breaker (for example native timestamp plus native row ID/sequence). Timestamp-only, mtime-only, count-only, or `LIMIT/OFFSET` progress is forbidden; equal-time records across a batch boundary cannot be skipped or duplicated. The complete composite position is inside `SourceCursor`/`SourceHeadV1` and commits atomically with observations/outbox.
 - Truncation, head-fingerprint change before the committed offset, SQLite replacement, or native artifact identity change starts `generation + 1`; old observations remain immutable.
 - The final unterminated JSONL line is not acknowledged. Malformed complete records are quarantined and the cursor advances only when the quarantine skeleton and outbox marker commit atomically.
 - Duplicates preserve one canonical observation plus duplicate-seen metrics. Late/out-of-order records retain occurred time, ingested time, source position, and `late_by`; capture never rewrites prior order.
@@ -520,7 +537,7 @@ Merged PR #405 (`legacy-store-adoption`) is a required pre-backfill seam: source
 | Cursor agent | Project/CWD candidates; timestamp carry; model; tool dispatch/result; parent/subagent transcript discovery; agent dispatch target; late/out-of-order records. |
 | Cursor Composer | Read-only SQLite/envelope/blob discovery; bubble order; plans; tool/edit metadata; PR/Git metadata; replacement database rewrite generation. |
 | Cline-like | Provider identity, message/tool families, source ordering, malformed record quarantine, unknown fields preserved in forensic payload. |
-| Hermes | Transcript source under `~/.hermes`; ordinary user-profile ownership; migrated session/fact collision and idempotent-ledger fixtures from PR #407; no Hermes-only runtime store route. |
+| Hermes | Transcript source under `~/.hermes`; ordinary user-profile ownership; zero/one/many host-profile source partitions; one source open/sweep per committed frontier; provider-filtered discovery; canonical activity observation with zero-to-many later project attributions; skewed destination visibility never causes source rescan; migrated session/fact collision and idempotent-ledger fixtures from PR #407; no Hermes-only runtime store route. |
 | Kiro | Transcript messages, hook records, tool/result, project hints, partial line and rewrite behavior. |
 | Vibe | Session metadata, message ordering, usage metadata, changed-file cursor, missing timestamp reason. |
 | Hook stream | Codex/Claude/Cursor/Kiro event taxonomy; per-producer sequence; parent/child/inter-agent messages; duplicate/gap/fill/late markers; hint terminal/outcome linkage. |
@@ -580,6 +597,7 @@ Plan 03 is authoritative for capture slicing: the former master-plan PR 7 harnes
 - [ ] Implement Cline-like, Hermes, Kiro, and Vibe adapters with every matrix assertion.
 - [ ] Implement the `code_snapshot` extractor adapter with explicit repository/checkout/worktree/ref/snapshot tuple identity, bounded dirty overlays, large-blob/binary budgets with skip coverage, and secret-bearing repository fixtures proving sanitizer conformance for the plan 25 pipeline.
 - [ ] Regenerate the Hermes fixture manifest from merged PR #407 and prove `~/.hermes` is source-only while sessions/LCM are activity-owned and scope-sensitive histories retain `DeclaredScope` for activity/project routing.
+- [ ] Add Hermes scale/fault fixtures that open the provider source once for 30 registered projects, route one sanitized canonical stream to zero-to-many attribution projections, preserve independent source and projection checkpoints under skew, keep later valid rows ingestible after a quarantined malformed middle row, resume after cancellation/partial projector failure without rescanning committed input, and make the second refresh add zero observations.
 - [ ] Run `cargo test -p tracedecay-capture --test provider_conformance`; expected: exit 0 for every adapter registered in `adapters/mod.rs` and no untested registry entry.
 - [ ] Run `cargo test --test transcript_ingest_suite`; expected: existing V1 provider suite remains green because shadow capture does not change V1 writes.
 - [ ] Commit `feat(capture): conform remaining provider sources`.
@@ -633,6 +651,7 @@ PR 7E owns V1 parse and sanitize: every byte of V1 import content passes the man
 - Hook synchronous capture p95 at or below 8 ms at 128 concurrent producers, fitting plan 07's capture sub-budget inside its 10 ms notification-hook total; p99 and rejected/deferred counts are reported.
 - Journal append p95 at or below 20 ms excluding blob I/O.
 - Backfill sustained throughput at least 10,000 messages/second excluding embeddings.
+- A cold full-history Hermes refresh over the current 30-project corpus completes in ≤60 seconds, opens/scans each provider source once, and reports source-open count, records/bytes read, destination-attribution count, p50/p95 batch latency, peak RSS, cancellation boundary, and joined-request count; the same manifest is also exercised at 10× scale under explicit resource budgets.
 - Projected visibility is measured end-to-end by the projector plan and must be at or below two seconds p95 before cutover.
 - Spool recovery of 1 million frames completes without loading all payloads into memory; benchmark records peak RSS.
 
@@ -645,7 +664,7 @@ PR 7E owns V1 parse and sanitize: every byte of V1 import content passes the man
 
 ### Observability
 
-- Metrics expose discovery, bytes/records scanned, source generation/cursor, ingest rate/lag, duplicates, rewrites, gaps/fills, late records, spool bytes/oldest age, ack lag, backpressure, errors/quarantine, parser/schema coverage, redactions, and cutover epoch.
+- Metrics expose discovery, source-open/sweep count, bytes/records scanned, destination-attribution fan-out, scan-amplification ratio, refresh leaders/joiners/cancellations, source generation/cursor, ingest rate/lag, duplicates, rewrites, gaps/fills, late records, spool bytes/oldest age, ack lag, backpressure, errors/quarantine, parser/schema coverage, redactions, and cutover epoch.
 - Logs use safe IDs/reason codes and never source literals, hook prompts, tool payloads, reasoning, secrets, or redacted content.
 - Every report names profile, source adapter/version, source watermark, searched/skipped/unavailable/incompatible/redacted coverage, and migration receipt.
 

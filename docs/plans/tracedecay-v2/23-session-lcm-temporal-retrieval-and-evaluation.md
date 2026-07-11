@@ -77,6 +77,7 @@ Observed semantics:
 11. Limits clamp to 1–50. All-registered search reports searched/skipped project counts, but not a per-shard coverage/disposition ledger in the compact human result.
 12. JSON output can exceed the global response limit and becomes an expiring response-handle envelope; Markdown is compact but still lacks paginated continuation and stable result hydration.
 13. Merged PR #445 added a separate user-session `message_search` dispatch when compatibility `storage_scope=user` is explicit. It correctly bypasses project routing, but the sentinel, CLI/MCP allowlists, and dedicated handler remain V1 compatibility mechanics; V2 queries one Profile root, retains `DeclaredScope::Profile`/`DeclaredScope::ZeroProject` provenance, and uses the one search application path.
+14. The 2026-07-11 catch-up audit quantified the hidden cost: four concurrent all-registered searches exceeded 397 seconds while the same read with `catch_up:false` took 1.85 seconds; 31 destinations repeatedly scanned a 1.15 GiB Hermes source, implying at least 35.7 GiB read per request before concurrency. This is FM-153. The unmerged V1 singleflight/multi-destination patch is regression evidence only; V2 makes reads side-effect free and delegates explicit freshness to plan 09's durable operation kernel.
 
 ### 1.2 `lcm_grep`
 
@@ -860,6 +861,7 @@ Profile-activity search uses `ScopeRootV2::Profile` plus an optional canonical `
 - replay session/thread or one historical query at a frozen cutoff;
 - inspect temporal lineage, rank explanation, coverage, and summary horizon;
 - run/compare/evaluate frozen corpora and export safe aggregate reports;
+- inspect/start/join/cancel a separately authorized provider freshness operation when required, with source frontier, target watermark, progress, records/bytes/source-open counts, leader/joiner state, partial failures, and terminal receipt; ordinary search never starts it;
 - navigate Settings for retrieval profiles, models, budgets, temporal policy, and privacy.
 
 ### MCP
@@ -897,7 +899,7 @@ Plan 20 exposes every configurable retrieval value in UI plus navigable CLI/MCP/
 - local model/tokenizer/index/reranker/synthesizer descriptors;
 - privacy-domain eligibility and remote-model prohibition;
 - candidate/result/context/latency/token/cost budgets;
-- catch-up/index-freshness behavior;
+- freshness requirements, automatic background-refresh policy, and resource budgets; these configure daemon operations and stale-result notices, never a per-query ingest side effect;
 - provider/project/source inclusion;
 - no-answer/conflict/stale-warning thresholds;
 - evaluation corpus, rolling replay, and promotion gates.
@@ -949,6 +951,8 @@ Rebuild in bounded phases:
 8. frozen replay corpus and V1/V2 shadow results.
 
 All stages are restartable, versioned, and watermarked. Re-clustering or re-summarization publishes a new projection generation; it does not rewrite prior receipts.
+
+Provider-history refresh/backfill is a daemon-owned plan-09 operation keyed by source frontier and target watermark. Capture scans each `SourceInstanceId` once, globally budgets records/bytes/wall time/RSS, commits sanitized observations plus source head atomically, and lets projectors materialize zero-to-many attributions. Equivalent concurrent callers join the same durable receipt. Cancellation returns the last committed cursor; malformed complete rows quarantine atomically so later valid rows remain ingestible; a query can continue against its prior watermark with explicit stale/partial coverage.
 
 ### 12.3 Shadow and cutover
 
@@ -1050,6 +1054,8 @@ Application/API/UI use the shared Plan 09/10/11/21 locations. Root V1 adapters l
 - partial/locked/conflicted shard and no-answer reasons;
 - stable pagination under frozen watermark and stale-cursor failure;
 - output views remain compact and transport-identical.
+- search remains write-free under fresh, stale, missing, and partial provider coverage; requesting freshness yields a legal operation descriptor rather than hidden catch-up;
+- 64 identical refresh requests join one operation and receive the same terminal coverage/error receipt; leader death/takeover, cancellation, skewed projection checkpoints, and malformed-middle-row recovery do not duplicate or skip committed observations.
 
 ### Evaluation/replay tests
 
@@ -1074,6 +1080,7 @@ Application/API/UI use the shared Plan 09/10/11/21 locations. Root V1 adapters l
 
 - lexical-only and optional-model cold/warm benchmarks at current and 10x manifest scale;
 - fan-out, cancellation, slow/missing/conflicted shard, and loaded-daemon concurrency;
+- current 30-project cold Hermes history refresh completes in ≤60 seconds with one provider-source sweep, bounded source-open/read-byte/RSS counts, explicit progress, and second-refresh zero additions; query latency is measured separately and includes no ingestion work;
 - token/byte/result/context ceilings, durable retrieval-anchor recovery, and legacy response-handle regression behavior;
 - secret/query-log leakage, keyed fingerprint isolation, prompt-injection labeling, deletion/cache invalidation, and unauthorized hydration.
 
