@@ -26,6 +26,7 @@ plugin_dir defaults to a fresh install generated into a temp HOME via the
 tracedecay binary named by $TRACEDECAY_BIN (default: target/debug/tracedecay).
 """
 
+import copy
 import json
 import os
 import shutil
@@ -293,6 +294,21 @@ def run_checks(work: Path):
     engine = ctx.engine
     assert engine is not None
     engine.initialize(session_id="check-session", hermes_home=str(host_home))
+    engine.project_root = str(runtime_project)
+    engine.context_length = 200_000
+    engine.threshold_tokens = 150_000
+    engine.agent = object()
+    cloned_engine = copy.deepcopy(engine)
+    assert cloned_engine is not engine
+    assert cloned_engine._state_lock is not engine._state_lock
+    assert cloned_engine.project_root == str(runtime_project)
+    assert cloned_engine.context_length == 200_000
+    assert cloned_engine.threshold_tokens == 150_000
+    assert cloned_engine.agent is None
+    cloned_engine.context_length = 100_000
+    assert engine.context_length == 200_000
+    ok("context engine safely deep-copies per-agent budget state")
+
     messages = [
         {"role": "user", "content": "hello"},
         {"role": "assistant", "content": "hi"},
@@ -447,6 +463,13 @@ def run_checks(work: Path):
         plugin.tools.call_tracedecay_tool = lambda name, args, **kw: (
             calls.append((name, args, kw)) or "{}"
         )
+        provider.handle_tool_call("fact_store", {"action": "search", "query": "rust"})
+        name, args, kwargs = calls[-1]
+        assert name == "tracedecay_fact_store", calls
+        assert "project_root" not in args, args
+        assert kwargs["project_root"] == expected_project_root, kwargs
+        ok("memory tool calls stay bound to the provider's session project")
+
         provider.sync_turn("u", "a", session_id="other-session", messages=messages)
         name, args, kwargs = calls[-1]
         assert name == "tracedecay_lcm_preflight", calls

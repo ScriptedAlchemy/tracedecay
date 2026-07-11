@@ -1,4 +1,5 @@
 """tracedecay Hermes plugin registration."""
+import copy
 import json
 import hashlib
 import logging
@@ -2104,6 +2105,30 @@ class TraceDecayContextEngine(ContextEngine):
         self._route_failures = {}
         self._cooldown_until = {}
 
+    def __deepcopy__(self, memo):
+        """Create an agent-local engine without copying locks or live agents."""
+        clone = type(self)(
+            config=copy.deepcopy(self._host_config, memo),
+            hermes_home=self.hermes_home,
+        )
+        memo[id(self)] = clone
+        clone.config = copy.deepcopy(self.config, memo)
+        clone.project_root = self.project_root
+        # Auxiliary-route circuit breakers intentionally remain process-wide.
+        clone._route_failures = self._route_failures
+        clone._cooldown_until = self._cooldown_until
+
+        with self._state_lock:
+            clone.active_session_id = self.active_session_id
+            for key, state in self._session_states.items():
+                copied_state = _EngineSessionState()
+                for field in _EngineSessionState._FIELDS:
+                    if field == "agent":
+                        continue
+                    setattr(copied_state, field, copy.deepcopy(getattr(state, field), memo))
+                clone._session_states[key] = copied_state
+        return clone
+
     agent = _engine_session_property("agent")
     model = _engine_session_property("model")
     last_prompt_tokens = _engine_session_property("last_prompt_tokens")
@@ -3437,7 +3462,11 @@ class TracedecayMemoryProvider(MemoryProvider):
         if fixed_args:
             tool_args = dict(tool_args)
             tool_args.update(fixed_args)
-        return tools.call_tracedecay_tool(tracedecay_name, tool_args, **kwargs)
+        return tools.call_tracedecay_tool(
+            tracedecay_name,
+            tool_args,
+            **_project_call_kwargs(self.project_root, kwargs),
+        )
 
 def register(ctx):
     global _HOST_FORWARDS_MESSAGES

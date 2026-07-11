@@ -19,8 +19,10 @@ Asserts the surfaces stock Hermes actually exposes:
 Everything runs offline: no model calls (compress stays below threshold).
 """
 
+import copy
 import json
 import os
+import subprocess
 import sys
 import time
 
@@ -108,6 +110,19 @@ def main():
     assert engine.last_total_tokens == 150
     ok("stock ContextEngine ABC surface works", "update_from_response")
 
+    # Stock Hermes deep-copies the registered plugin singleton for every
+    # AIAgent. The copy must retain routing/budget state without sharing locks
+    # or live agent references, otherwise Hermes falls back to its compressor.
+    engine.agent = object()
+    cloned_engine = copy.deepcopy(engine)
+    assert cloned_engine is not engine
+    assert cloned_engine._state_lock is not engine._state_lock
+    assert cloned_engine.project_root == project_root
+    assert cloned_engine.context_length == 128000
+    assert cloned_engine.last_total_tokens == 150
+    assert cloned_engine.agent is None
+    ok("context engine deep-copies through the stock Hermes agent contract")
+
     assert engine.should_compress(1000) is False
     ok("should_compress gates locally below the tracked threshold")
     assert engine.should_compress_preflight([], current_tokens=1000) is False
@@ -178,6 +193,46 @@ def main():
     )
     assert found.get("count", 0) >= 1, found
     ok("memory fact add/search round-trips through the binary")
+
+    # A second Hermes session rooted in another registered project must get a
+    # distinct provider instance and fact shard. This is the gateway/Desktop
+    # routing invariant that prevents one project's memories leaking into
+    # another project.
+    other_project = os.path.join(os.path.dirname(project_root), "project-two")
+    os.makedirs(other_project, exist_ok=True)
+    with open(os.path.join(other_project, "README.md"), "w", encoding="utf-8") as handle:
+        handle.write("# project two\n")
+    subprocess.run(
+        [loaded.module.tools.TRACEDECAY_BIN, "init"],
+        cwd=other_project,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    other_provider = load_memory_provider("tracedecay")
+    assert other_provider is not None and other_provider is not provider
+    other_provider.initialize("stock-check-session-two", cwd=other_project)
+    unwrap_tool_json(
+        other_provider.handle_tool_call(
+            "fact_add",
+            {"content": "stock hermes project two isolated", "fact_type": "decision"},
+        )
+    )
+    first_project_result = unwrap_tool_json(
+        provider.handle_tool_call(
+            "fact_store",
+            {"action": "search", "query": "project two isolated", "limit": 1},
+        )
+    )
+    second_project_result = unwrap_tool_json(
+        other_provider.handle_tool_call(
+            "fact_store",
+            {"action": "search", "query": "project two isolated", "limit": 1},
+        )
+    )
+    assert first_project_result.get("count", 0) == 0, first_project_result
+    assert second_project_result.get("count", 0) >= 1, second_project_result
+    ok("memory facts remain isolated between Hermes session projects")
 
     # Passive-ingest / recall hooks (sync_turn, queue_prefetch, on_memory_write).
     # prefetch() is the fast inline half: recall happens in queue_prefetch's

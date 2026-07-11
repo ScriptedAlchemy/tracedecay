@@ -3933,9 +3933,12 @@ def fake_retrieve_call(name, args, **kwargs):
     if name == "tracedecay_lcm_preflight":
         return envelope({"truncated": True, "handle": "payload-1"})
     if name == "tracedecay_retrieve":
-        assert args == {"handle": "payload-1"}
-        assert kwargs == {"project_root": "/tmp/project"}
-        return envelope({"content": json.dumps({"should_compress": True, "source": "retrieved"})})
+        if args == {"handle": "payload-1"}:
+            assert kwargs == {"project_root": "/tmp/project"}
+            return envelope({"content": json.dumps({"should_compress": True, "source": "retrieved"})})
+        assert args == {"handle": "payload-ignored"}
+        assert kwargs == {}
+        return envelope({"count": 1, "facts": [{"fact": {"content": "retrieved fact"}}]})
     if name == "tracedecay_fact_store":
         return envelope({"truncated": True, "handle": "payload-ignored"})
     raise AssertionError(f"unexpected tool call: {name}")
@@ -3945,12 +3948,13 @@ retrieved = plugin.call_tracedecay_json("tracedecay_lcm_preflight", {}, project_
 assert retrieved == {"should_compress": True, "source": "retrieved"}
 assert [call[0] for call in calls] == ["tracedecay_lcm_preflight", "tracedecay_retrieve"]
 
-not_contract_critical = plugin.call_tracedecay_json("tracedecay_fact_store", {})
-assert not_contract_critical == {"truncated": True, "handle": "payload-ignored"}
+retrieved_fact = plugin.call_tracedecay_json("tracedecay_fact_store", {})
+assert retrieved_fact == {"count": 1, "facts": [{"fact": {"content": "retrieved fact"}}]}
 assert [call[0] for call in calls] == [
     "tracedecay_lcm_preflight",
     "tracedecay_retrieve",
     "tracedecay_fact_store",
+    "tracedecay_retrieve",
 ]
 
 plugin.tools.call_tracedecay_tool = fake_call_tracedecay_tool
