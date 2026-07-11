@@ -12,11 +12,8 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 use tokio::task::JoinHandle;
 
 #[cfg(unix)]
-use super::drain_client_tasks;
-use super::{
-    AutomationSchedulerHandle, DaemonClientIdentity, DaemonEngine, DaemonHandshake,
-    DaemonLifecycle, ProjectServerKey,
-};
+use super::{AutomationSchedulerHandle, DaemonEngine, ProjectServerKey, drain_client_tasks};
+use super::{DaemonClientIdentity, DaemonHandshake, DaemonLifecycle};
 
 #[test]
 fn daemon_lifecycle_rejects_new_work_after_draining() {
