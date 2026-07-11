@@ -199,18 +199,28 @@ fn acquire_exclusive_or_inherited_at(
         Ok(()) => own_exclusive(file, path, operation),
         Err(error) if is_lock_contended(&error) => {
             let owner = read_owner(&mut file, path);
-            if let Some(token) = inherited.filter(|token| {
-                owner.as_deref().and_then(|line| line.split('\t').next()) == Some(token.as_str())
-            }) {
-                register_process_token(&token);
-                Ok(LifecycleLease {
-                    hold: LeaseHold::Inherited,
-                    token: Some(token),
-                    lock_path: path.to_path_buf(),
-                    exclusive: true,
-                })
-            } else {
+            #[cfg(windows)]
+            {
+                let _ = inherited;
                 Err(busy_error(operation, owner.as_deref()))
+            }
+            #[cfg(not(windows))]
+            {
+                if let Some(token) = inherited.filter(|token| {
+                    owner
+                        .as_deref()
+                        .is_some_and(|owner| live_owner_matches(owner, token))
+                }) {
+                    register_process_token(&token);
+                    Ok(LifecycleLease {
+                        hold: LeaseHold::Inherited,
+                        token: Some(token),
+                        lock_path: path.to_path_buf(),
+                        exclusive: true,
+                    })
+                } else {
+                    Err(busy_error(operation, owner.as_deref()))
+                }
             }
         }
         Err(error) => Err(lock_error(path, operation, &error)),
@@ -287,7 +297,14 @@ fn try_acquire_shared_at(path: &Path, operation: &str) -> Result<SharedLeaseAtte
 
 fn own_exclusive(mut file: File, path: &Path, operation: &str) -> Result<LifecycleLease> {
     let token = lease_token();
-    let owner = format!("{token}\t{operation}\t{}\n", std::process::id());
+    let pid = std::process::id();
+    #[cfg(not(windows))]
+    let owner = process_start_time(pid).map_or_else(
+        || format!("{token}\t{operation}\t{pid}\n"),
+        |started_at| format!("{token}\t{operation}\t{pid}\t{started_at}\n"),
+    );
+    #[cfg(windows)]
+    let owner = format!("{token}\t{operation}\t{pid}\n");
     file.set_len(0).map_err(|error| owner_write_error(&error))?;
     file.seek(SeekFrom::Start(0))
         .map_err(|error| owner_write_error(&error))?;
@@ -327,6 +344,32 @@ fn process_owns_token(token: &str) -> bool {
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .iter()
         .any(|candidate| candidate == token)
+}
+
+#[cfg(not(windows))]
+fn live_owner_matches(owner: &str, inherited_token: &str) -> bool {
+    let mut fields = owner.split('\t');
+    if fields.next() != Some(inherited_token) {
+        return false;
+    }
+    let _operation = fields.next();
+    let Some(pid) = fields.next().and_then(|pid| pid.parse::<u32>().ok()) else {
+        return false;
+    };
+    let Some(live_start_time) = process_start_time(pid) else {
+        return false;
+    };
+    fields
+        .next()
+        .is_none_or(|recorded| recorded.parse::<u64>().ok() == Some(live_start_time))
+}
+
+#[cfg(not(windows))]
+fn process_start_time(pid: u32) -> Option<u64> {
+    let pid = sysinfo::Pid::from_u32(pid);
+    let mut system = sysinfo::System::new();
+    system.refresh_processes(sysinfo::ProcessesToUpdate::Some(&[pid]), true);
+    system.process(pid).map(sysinfo::Process::start_time)
 }
 
 fn open_lock_file(path: &Path) -> Result<File> {
@@ -547,6 +590,81 @@ mod tests {
             Some("stale-token".to_string()),
         )
         .unwrap_err();
+
+        assert!(error.to_string().contains("update"));
+    }
+
+    #[test]
+    fn post_update_child_rejects_a_stale_owner_token_from_a_dead_process() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("lifecycle.lock");
+        let mut external = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&path)
+            .unwrap();
+        fs2::FileExt::try_lock_exclusive(&external).unwrap();
+        let stale_token = "stale-owner-token";
+        writeln!(external, "{stale_token}\tupdate\t{}", u32::MAX).unwrap();
+        external.flush().unwrap();
+
+        let error =
+            acquire_exclusive_or_inherited_at(&path, "post-update", Some(stale_token.to_string()))
+                .unwrap_err();
+
+        assert!(error.to_string().contains("update"));
+    }
+
+    #[test]
+    fn post_update_child_rejects_a_reused_pid_with_the_wrong_process_start() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("lifecycle.lock");
+        let mut external = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&path)
+            .unwrap();
+        fs2::FileExt::try_lock_exclusive(&external).unwrap();
+        let stale_token = "stale-owner-token";
+        writeln!(external, "{stale_token}\tupdate\t{}\t0", std::process::id()).unwrap();
+        external.flush().unwrap();
+
+        let error =
+            acquire_exclusive_or_inherited_at(&path, "post-update", Some(stale_token.to_string()))
+                .unwrap_err();
+
+        assert!(error.to_string().contains("update"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn post_update_child_never_trusts_a_matching_windows_sidecar_token() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("lifecycle.lock");
+        let mut external = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&path)
+            .unwrap();
+        fs2::FileExt::try_lock_exclusive(&external).unwrap();
+        let token = "matching-live-token";
+        writeln!(external, "{token}\tupdate\t{}", std::process::id()).unwrap();
+        external.flush().unwrap();
+        std::fs::write(
+            super::owner_sidecar_path(&path),
+            format!("{token}\tupdate\t{}\n", std::process::id()),
+        )
+        .unwrap();
+
+        let error =
+            acquire_exclusive_or_inherited_at(&path, "post-update", Some(token.to_string()))
+                .unwrap_err();
 
         assert!(error.to_string().contains("update"));
     }

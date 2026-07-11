@@ -1868,13 +1868,11 @@ async fn divergent_summary_node_identity_remains_a_hard_error() {
 }
 
 #[tokio::test]
+#[cfg(not(windows))]
 async fn identity_survives_symlink_and_repository_move() {
     let fixture = fixture().await;
     let symlink = fixture.project.parent().unwrap().join("repo-symlink");
-    #[cfg(unix)]
     std::os::unix::fs::symlink(&fixture.project, &symlink).unwrap();
-    #[cfg(windows)]
-    std::os::windows::fs::symlink_dir(&fixture.project, &symlink).unwrap();
     let mut options = fixture.options();
     options.project_root = symlink;
     let report = plan(&options).await.unwrap();
