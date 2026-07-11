@@ -93,6 +93,11 @@ pub(super) fn copy_file_atomic(source: &Path, target: &Path) -> Result<()> {
         .ok_or_else(|| config_error("artifact target has no parent"))?;
     fs::create_dir_all(parent).map_err(io_error)?;
     let temp = target.with_extension(format!("tmp-{}", std::process::id()));
+    match fs::remove_file(&temp) {
+        Ok(()) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(io_error(error)),
+    }
     fs::copy(source, &temp).map_err(io_error)?;
     File::open(&temp)
         .and_then(|file| file.sync_all())
