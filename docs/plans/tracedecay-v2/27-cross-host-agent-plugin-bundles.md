@@ -165,6 +165,10 @@ All sources below were accessed for this design on **2026-07-10 UTC**. Source co
 - `D` Enabled plugin MCP servers can be enabled/disabled and tool-allowlisted through `plugins.<plugin>.mcp_servers.<server>` configuration.
 - `D` Plugin hooks require trust for the exact definition hash. A changed hook is skipped until re-reviewed. `PLUGIN_ROOT`/`PLUGIN_DATA` and Claude compatibility variables are available.
 - `D` Current hook execution supports command handlers; parsed prompt/agent/async forms are not a runtime guarantee.
+- `D` The current Codex hook contract has exactly ten events: `SessionStart`, `SubagentStart`, `PreToolUse`, `PermissionRequest`, `PostToolUse`, `PreCompact`, `PostCompact`, `UserPromptSubmit`, `SubagentStop`, and `Stop`. `PostToolUse` also covers Bash nonzero exit; there is no separate current `PostToolUseFailure` event.
+- `D` User/repository `hooks.json`, inline `[hooks]`, enabled plugin hooks, session sources, and system/cloud/MDM/`requirements.toml` managed sources compose additively. Higher config precedence does not replace lower hooks. Repository sources require project trust; same-layer JSON+inline merges with a startup warning.
+- `D` Codex launches matching command handlers concurrently. Matchers apply only to documented subjects; `UserPromptSubmit`/`Stop` ignore them. `apply_patch` also matches `Edit|Write`. Hook outputs and continuation precedence are event-specific, and pre-tool interception remains incomplete for unified exec/WebSearch/other paths.
+- `D` `[features].hooks` is canonical, `codex_hooks` is deprecated, managed policy can force enable/disable or managed-only mode, and managed hooks are trusted/non-disableable. `/hooks` owns user review/disable; the dangerous one-off bypass is not persisted trust.
 - `D` Plugins have a Codex-specific marketplace, install cache, version directory, enable state, and app/desktop lifecycle.
 - `A` There is no documented plugin `commands/` directory. Enabled skills already participate in skill/slash discovery; custom prompts use a distinct `/prompts:<name>` concept and are not generated for TraceDecay.
 
@@ -313,12 +317,12 @@ Type ownership is explicit; an implementation may not create plan-27-local looka
 
 | Types | Sole owner |
 |---|---|
-| `HostProfileRef`, `HostInstanceId`, `HostSurfaceKindV1`, `HostInstallScopeV1`, `McpLogicalRegistrationId`, `McpSurfaceProfileId`, `HostCapabilityDispositionV1`, `HostBundleComponentRefV1`, `HostIntegrationRuntimeRefV1`, `HostCapabilitySubjectV1`, `HostCapabilitySnapshotV1`, generic IDs/digests/time/privacy refs | Plan 01 domain |
+| `HostProfileRef`, `HostInstanceId`, `HostSurfaceKindV1`, `HostInstallScopeV1`, `McpLogicalRegistrationId`, `McpSurfaceProfileId`, `HostCapabilityDispositionV1`, `HostBundleComponentRefV1`, `HostIntegrationRuntimeRefV1`, `HostCapabilitySubjectV1`, `HostCapabilitySnapshotV1`, `HostHookBindingId`, `CodexHookTrustHash`, and all hook source/provenance/definition/run/group/trust/eligibility/support/freshness/visibility refs, generic IDs/digests/time/privacy refs | Plan 01 domain `hooks_v1` companion |
 | `HostComponentRefV1`, `HostAdapterId`, `BinaryCompatibilityRequirementV1`, `McpFacadePackageSpecV1`, `HostComponentOmissionV1`, `HostCapabilityCode`, `HostDifferenceDecisionV1`, and the compiled capability registry | Plan 08 `host_integration` source IR |
 | `GeneratedHostArtifactV1`, `HostBundlePayloadV1`, `HostBundleCompileResultV1` | Plan 08 `host_bundles` pure compiler contracts |
 | `HostEvidenceRefV1`, `HostConformanceCaseRefV1`, sanitized stock-host evidence records | Plan 13 research/evidence contracts |
 | `ResolvedWorkspaceRootV1` | Plan 16 scope-resolution contracts |
-| `HostConfigSourceV1`, `HostIntegrationDesiredStateV1` and all desired/narrowing/trust/update child policy types | Plan 20 configuration contracts |
+| `HostIntegrationDesiredStateV1` and all desired/narrowing/update child policy types | Plan 20 configuration contracts; consumes plan-01 hook source/trust observation types unchanged |
 | `ResolvedHostPackageV1`, `ResolvedHostBundleV1`, `HostDeploymentStateV1`, integration operation/difference/status view enums | Plan 09 application contracts; this plan specifies their required states but does not fork them |
 | `SafeRelativePath`, `PortableFileModeV1`, release-scan input/safe artifact rules | Plan 18 privacy-safe artifact contracts |
 | `SignatureRefV1`, `HostBundleReleaseAttestationV1`, `HostBundleManifestV1`, and release/publication receipts | Plan 12/PR 36R release contracts |
@@ -490,7 +494,9 @@ pub struct HostCapabilityProbeReceiptV1 {
     pub observed_version: ComponentVersion,
     pub snapshot: HostCapabilitySnapshotV1,
     pub workspace_roots: BTreeSet<ResolvedWorkspaceRootV1>,
-    pub config_sources: BoundedVec<HostConfigSourceV1, 32>,
+    pub config_inventory_manifest: ManifestDigest,
+    pub config_source_total: u64,
+    pub config_source_coverage: CoverageReportV1,
     pub evidence_manifest: ManifestDigest,
     pub conformance_manifest: ManifestDigest,
     pub receipt_digest: ManifestDigest,
@@ -508,6 +514,8 @@ pub struct HostDifferenceEntryV1 {
     pub owner: BoundedContext,
 }
 ```
+
+The immutable content-addressed config/definition inventory manifest commits every sanitized `HostConfigSourceV1` and `HostHookDefinitionObservationV1` row, total, and coverage. Application queries paginate that pinned manifest through expiring cursors; the receipt never embeds a cursor. A cap, parse denial, stale page, or inaccessible layer produces explicit partial coverage and prevents `Healthy`; no plugin count can silently truncate the effective hook inventory.
 
 Plan 01's `HostCapabilitySnapshotV1` is the sole state map. Its `Target` subject represents a pre-install probe using only host profile/instance/surface and adapter version; its `Installed` subject binds a verified `HostIntegrationRuntimeRefV1`. That runtime ref never contains a capability-probe or snapshot digest. `snapshot_digest` covers canonical subject/capability/time fields and excludes itself; this receipt's digest covers its operation/evidence fields plus the already computed snapshot digest and excludes itself. The graph is therefore acyclic, and a clean host can move `Discovered -> Probed` before an installation exists.
 
@@ -710,7 +718,7 @@ Unknown capability is an error for a required component and an explicit omission
 | Skills | `D` `skills/<name>/SKILL.md` | `D` `skills/<name>/SKILL.md` | `D` skills/default or manifest path | Canonical skill source plus host overlay. |
 | Commands directory | `D` supported, skills preferred | `A` not documented in plugin schema | `D` supported but legacy/explicit; migration to skills documented | Emit no new command directory. Only bounded migration shims for existing names. |
 | Packaged agents | `D` `agents/*.md` | `A` plugin packaging undocumented; external TOML config | `D` plugin agents | Bundle in Claude/Cursor; separately install generated Codex TOML only with explicit component selection. |
-| Hooks | `D` plugin hook JSON/inline | `D` `hooks/hooks.json`/manifest | `D` plugin hooks | Generate thin declarative wiring from canonical hook intents. |
+| Hooks | `D` plugin hook JSON/inline | `D` default `hooks/hooks.json`; manifest path/path-array/inline/inline-array override; additive user/repo/session/managed layers | `D` plugin hooks | TraceDecay emits one contained plugin-default JSON representation; compiler validates every documented foreign/override form, and deployment observes but never replaces foreign/managed definitions or host trust. |
 | MCP config | `D` `.mcp.json`/manifest; servers auto-start with enabled plugin | `D` `.mcp.json`/manifest; per-server/tool policy | `D` `mcpServers` | Separate companion packages on every host for consistent least privilege. |
 | Apps/connectors | No TraceDecay requirement | `D` `.app.json` available | Host-specific/unused | Omit in epoch one; public HTTP/dashboard remains plan 17/11. |
 | Plugin binary | Claude can expose `bin/`, but not portable | Not required by canonical design | `A` cannot ship binary | Never bundle core executable; probe separately installed signed CLI/daemon. |
@@ -755,26 +763,30 @@ Host constraints:
 
 | Canonical event | Claude mapping | Codex mapping | Cursor mapping | Required dedupe/caveat |
 |---|---|---|---|---|
-| Host session start/resume | `SessionStart` | `SessionStart` | session/workspace event where documented | Fingerprint host instance + session + source + bundle digest. |
-| User prompt accepted | `UserPromptSubmit` | `UserPromptSubmit` | before-submit prompt event | One hint arbitration per turn; matcher differences normalized. |
-| Before supported tool | `PreToolUse` | `PreToolUse`, interception incomplete | before tool/MCP hooks | Guardrail coverage reports exact tool classes; never claim universal enforcement. |
-| After tool success | `PostToolUse` | `PostToolUse` | after tool/MCP/shell/edit events | Tool ID + call ID + normalized outcome; Cursor overlaps collapsed. |
-| After tool failure | `PostToolUseFailure` | Availability from probed schema | documented failure events | Missing event becomes coverage gap, not synthetic success. |
-| Subagent start/stop | `SubagentStart/Stop` | `SubagentStart/Stop` | agent/subagent events | Correlate parent/child IDs; one presence/work-claim update. |
-| Before/after compaction | `PreCompact/PostCompact` | `PreCompact/PostCompact` | compaction hooks | Preserve boundary/retrieval anchors, not prompt content dump. |
-| Worktree/workspace change | `WorktreeCreate/Remove`, `CwdChanged` | host worktree/session evidence | workspace events with `workspace_roots` | Resolve set identities through plan 16. |
-| Task created/completed | `TaskCreated/Completed` | Host-native availability probed | host-native availability probed | Provider-native task evidence relates to plan-24 work; never becomes authority. |
-| Turn/response stop | `Stop/StopFailure` | `Stop` | stop/session-end events | Terminal ingestion is idempotent and distinguishes incomplete/error. |
+| Host session start/resume/clear/compact | `SessionStart` | `SessionStart` | session/workspace event where documented | Codex source matcher; thread scope; fingerprint host+parent session+source+definition/run/bundle. |
+| User prompt accepted | `UserPromptSubmit` | `UserPromptSubmit` | before-submit prompt event | Codex matcher ignored; Turn ID required; one delivery-arbiter effect per invocation group. |
+| Before supported tool | `PreToolUse` | `PreToolUse` | before tool/MCP hooks | Codex tool matcher includes `apply_patch`=`Edit|Write` and MCP regex; incomplete interception denominator is mandatory. |
+| Permission approval requested | host approval hook where documented | `PermissionRequest` | host approval hook where documented | Distinct from approval evidence; no event fires when no approval is needed; any host-collected deny wins. |
+| After tool completion | `PostToolUse`/documented failure event | `PostToolUse` for success and Bash nonzero | after tool/MCP/shell/edit events | Tool/call ID and outcome; cannot undo effects; no invented Codex failure event. |
+| Subagent start | `SubagentStart` | `SubagentStart` | agent/subagent start | Parent session plus agent/Turn identity; `continue:false` cannot stop Codex start. |
+| Subagent stop | `SubagentStop` | `SubagentStop` | agent/subagent stop | Distinct terminal/continuation event; preserve `stop_hook_active`; any `continue:false` wins. |
+| Before compaction | `PreCompact` | `PreCompact` | pre-compaction hook | `manual|auto` trigger matcher; stop occurs before boundary; no synchronous transcript parse. |
+| After compaction | `PostCompact` | `PostCompact` | post-compaction hook where documented | `manual|auto` trigger matcher; stop occurs after boundary; preserve boundary anchors. |
+| Turn/response stop | `Stop`/documented failure event | `Stop` | stop/session-end events | Codex matcher ignored; JSON-only exit-0 continuation, `stop_hook_active` loop guard, any `continue:false` wins. |
+| Worktree/workspace change | `WorktreeCreate/Remove`, `CwdChanged` | host worktree/session evidence, not a Codex hook event | workspace events with `workspace_roots` | Resolve set identities through plan 16; never invent a Codex lifecycle hook. |
+| Task created/completed | `TaskCreated/Completed` | host-native availability probe, not a current hook assumption | host-native availability probed | Provider-native task evidence relates to plan-24 work; never becomes authority. |
 
 Hook lowering rules:
 
-1. Every command is the minimum host-native invocation of `tracedecay host-event ingest --host <host> --event <event> --stdin`.
-2. Hook JSON never contains database paths, profile secrets, query semantics, hint text, or tool lists.
+1. Every generated command is the minimum host-native invocation of `tracedecay host-event ingest --host <host> --event <event> --binding <catalog-binding-id> --stdin`; Codex emits only `type:"command"`, never `prompt`, `agent`, or `async:true`. The opaque release-manifest-bound binding selects immutable catalog semantics; arbitrary/stale bindings are capture-only or rejected and cannot authorize policy effects.
+2. Hook JSON never contains database paths, profile secrets, query semantics, hint text, or tool lists. Codex output is one canonical `hooks/hooks.json`; `.codex-plugin/plugin.json` omits `hooks` so the default is unambiguous. The compiler still validates foreign manifest path/path-array/inline/inline-array forms, `./` prefix, root containment, and manifest-override-of-default semantics.
 3. Claude commands use `${CLAUDE_PLUGIN_ROOT}` only if a package-local non-executable resource is required; normal execution uses the installed CLI.
-4. Codex plugin hooks use `${PLUGIN_ROOT}`/`${PLUGIN_DATA}` only for package-local state and honor exact-definition trust. Compatibility variables are not the canonical contract.
-5. Cursor hook fail-closed is enabled only for an explicit security guardrail with proven coverage; ingestion and hints fail open.
-6. Cloud/desktop/IDE/CLI absence is recorded per event. The bundle never registers a polling loop to imitate an unavailable hook.
-7. All matching-host concurrency is bounded by the host; TraceDecay itself deduplicates concurrent input and keeps hook latency independent of background persistence.
+4. Codex receives fixed Unix `command` plus independently escaped `commandWindows`, explicit one-second timeout, and optional catalog-owned `statusMessage`; the compiler accepts JSON/TOML spelling differences only when parsing observed foreign state. Session cwd never resolves the executable. `PLUGIN_ROOT` plus supplied `PLUGIN_DATA` and compatibility aliases are tested but are not identity, authorization, scope, or database storage; generated TraceDecay hooks never write plugin data.
+5. Codex installation/enabling never trusts hooks. Exact-definition hash review/disable remains in `/hooks`; update creates `NeedsReview`. Managed hooks and `allow_managed_hooks_only` remain policy-owned/read-only. The dangerous one-off bypass is never generated or persisted.
+6. Cursor hook fail-closed is enabled only for an explicit security guardrail with proven coverage; ingestion and hints fail open.
+7. Cloud/desktop/IDE/CLI absence is recorded per event. The bundle never registers a polling loop to imitate an unavailable hook.
+8. All active Codex source layers compose. The host starts every matching command concurrently, and one result cannot prevent sibling start. TraceDecay retains every observable definition/handler run and groups them separately; retry dedupe is handler-run-specific. One CAS winner may return an advisory context/hint only. Blocking, rewrite, permission, and continuation follow exact host event aggregation; security deny is never suppressed, and only the current signed binding is eligible for a policy effect.
+9. Codex matchers are exact plan-07/catalog semantics: tool name/aliases for pre/permission/post, trigger for compact, source for session, agent type for subagent, ignored for prompt/Stop, and `*`/empty/omitted means all. A generated matcher on an ignored event is a compiler error.
 
 ### 6.5 MCP
 
@@ -818,6 +830,10 @@ Host-specific lowering:
 | Minimum host version | No reliable universal manifest gate established | Capability depends on current client schema | `U` | Runtime probe plus compatibility table; fail before mutation. |
 | Native rollback | Marketplace/update behavior host-specific | Cache/install behavior host-specific | `U` | TraceDecay-owned artifact/config compensation, never claimed as host-native rollback. |
 | Restart/reload | `/reload-plugins` and host restart cases | Desktop/client restart or config reload cases | Surface-specific | Install receipt reports exact required action; verification waits for new handshake. |
+
+Codex discovery preserves every active source independently: system/cloud/MDM/`requirements.toml`, user `~/.codex/hooks.json` and inline `~/.codex/config.toml`, trusted-project `<repo>/.codex/hooks.json` and inline `<repo>/.codex/config.toml`, session sources, and each enabled plugin's default or manifest-declared path/path-array/inline/inline-array source. Sources compose; precedence never erases lower-layer hook definitions. A same-layer JSON-plus-inline pair remains two merged sources with a startup-warning state. Untrusted projects suppress only their project layer. The compiler emits one plugin-default `hooks/hooks.json` and no manifest override; the deployment probe can observe every foreign representation but never normalize, delete, disable, or replace it.
+
+`[features].hooks` is canonical; deprecated `codex_hooks` is import-only. Managed requirements may force feature state and `allow_managed_hooks_only`; managed hooks are policy-trusted, non-disableable, and immutable to TraceDecay. All other command definitions remain unusable until Codex records trust for the exact current definition hash; changed bytes return to review. Installation/enabling/repair never automates `/hooks`, trusts a hash, or persists `--dangerously-bypass-hook-trust`. Generated handlers are synchronous `command` only, carry explicit one-second timeout, `statusMessage` only when useful, independently escaped `commandWindows`, and execute safely from arbitrary session cwd. Parsed-but-skipped `prompt`, `agent`, or `async` handlers are reported unsupported, never healthy.
 
 ### 6.7 Disposition of every current integration
 
@@ -1664,7 +1680,7 @@ The release manifest lists exact tested versions; “latest” never appears in 
 | Host | Required surfaces | Required configurations |
 |---|---|---|
 | Claude Code | CLI/local plugin; other surfaces only when officially supported | core; each companion/profile; Tool Search on/off; packaged agents; trust/reload; user/project/local scope |
-| Codex | CLI, desktop/app, and IDE surface independently where available | core; each companion/profile; eager inventory pressure; hook trust hash; external agents selected/omitted; repo/personal scope |
+| Codex | CLI, desktop/app, and IDE surface independently where available | core; each companion/profile; eager inventory pressure; exact ten-event hook matrix; every additive source/representation; same-layer merge warning; exact-hash review/change/disable; trusted/untrusted project; managed/managed-only/feature states; concurrent handlers; Unix/Windows command lowering; external agents selected/omitted; repo/personal scope |
 | Cursor | IDE and CLI; cloud separately when available | core; each companion/profile; agents; hook overlap; `workspace_roots` set; operator-inheritance denial; cloud event omissions |
 | Hermes | CLI plus every officially supported chat/service surface | zero/one/many named host profiles; one shared TraceDecay `ProfileId`/store; session-workspace and projectless routing; context clone/reload; first-turn silence; CLI/MCP fallback parity |
 
@@ -1699,6 +1715,7 @@ Labels identify eligible skill/use case, relevant scope, expected binding/fallba
 | MCP profile budget | Every host fallback projection/profile | 100% within plan-08 tool/definition/schema ceilings |
 | Unauthorized MCP/agent effect | Adversarial grant/inheritance/profile cases | Zero |
 | Hook duplicate delivery | Duplicate/retry/overlap event groups | Zero second hint/effect; all duplicate ingest dispositions explicit |
+| Hook source/run conservation | Every eligible observed TraceDecay definition and command-handler run across additive sources | 100% represented as separate definition/run evidence; exactly one invocation-group arbitration result; no flattened or silently skipped run |
 | Hook latency | Eligible invocations by host/event class | Plan-07 p50/p95/p99 budget; no regression beyond its gate |
 | Hint relevance | Human-labelled eligible deliveries | Plan-07/22 precision gate; zero repeated equivalent hint inside cooldown |
 | Scope coverage truth | Multi-root/cross-project cases | 100% covered/omitted roots reported; zero false all-scope claim |
@@ -1727,9 +1744,10 @@ integration.workflow_eligible
 integration.skill_selected
 integration.binding_resolved
 integration.fallback_used
-integration.hook_received
-integration.hook_deduped
-integration.hook_completed
+integration.hook_definition_observed
+integration.hook_handler_run
+integration.hook_invocation_grouped
+integration.hook_effect_arbitrated
 integration.mcp_initialized
 integration.role_started
 integration.role_completed
@@ -1749,7 +1767,7 @@ Allowed bounded dimensions:
 - operation/transition/result/error class;
 - trust/reload/staleness state;
 - discovery route and fallback route;
-- hook canonical event/outcome/dedupe class;
+- hook canonical event, source-layer, managed/trust/result, invocation-group, and effect-arbitration class; exact definition/run/Turn/tool/build identities remain protected drill-down refs;
 - install scope class, multi-root count bucket, and migration disposition.
 
 Never use user, raw project/repository/path, session/thread/agent/tool-call ID, URL, error text, config key/value, or retrieval-anchor ID as metric labels. Those correlations remain privacy-filtered trace/event attributes with access control.
@@ -1761,7 +1779,7 @@ Required denominators:
 - enabled and trusted components for actual availability;
 - labelled/online workflow-eligible turns for discovery/underuse;
 - selected workflows for completion/fallback outcome;
-- source hook events for delivery/dedupe/latency;
+- eligible observed hook definitions, handler runs, and invocation groups separately for source/run conservation, delivery/dedupe/arbitration, and latency;
 - initialized MCP connections for profile/authorization health;
 - started role invocations for role success;
 - integration operations/transitions for reliability;
@@ -1952,7 +1970,7 @@ Every PR starts with a failing focused test/fixture, lands the smallest implemen
 - Implement Claude Code, Codex, Cursor pure lowering only.
 - Generate unsigned non-semantic `HostBundlePayloadV1`, artifacts, differences, omissions, source maps, and SBOM/license/provenance/conformance/scan/rebuild inputs.
 - Add six skills, three roles, hook maps, core and three companions, task-edit skill workflow.
-- Add deterministic build, release-scan input generation, pure path/control validation, host-schema parse, eager-MCP budget, and official-evidence fixtures; signing, runtime scan receipts, stock-host receipts, and publication remain PR 36R concerns.
+- Add deterministic build, release-scan input generation, pure path/control validation, host-schema parse, eager-MCP budget, and official-evidence fixtures; Codex output is one contained default `hooks/hooks.json` with all ten exact event contracts, command-only handlers, explicit timeout/status, Unix/Windows commands, and no invented failure event. Signing, runtime scan receipts, stock-host receipts, and publication remain PR 36R concerns.
 
 **Tests first**
 
@@ -1960,6 +1978,7 @@ Every PR starts with a failing focused test/fixture, lands the smallest implemen
 - same source built in two roots differs until determinism is implemented;
 - unsupported agent field, unknown capability, path escape, secret, eager overflow, and duplicated workflow fail;
 - semantic-source-ref test proves artifact manifest contains no copied semantics.
+- an independent fixed Codex ten-event oracle fails if generated coverage omits an event, adds one, emits an ignored matcher, unsupported field/handler, implicit 600-second timeout, unsafe cwd-relative command, or non-contained manifest path; foreign path-array/inline override forms still parse without becoming generated output.
 
 **Gate:** `cargo test -p tracedecay-tool-catalog` including host-bundle compiler/golden/security suites.
 
@@ -1973,6 +1992,7 @@ Every PR starts with a failing focused test/fixture, lands the smallest implemen
 - Generate exact CLI/HTTP/Rust/TypeScript/Python SDK bindings and plan-21 Markdown/JSON views.
 - Add plan-20 config keys/provenance/policy locks and `integrations.verify` doctor.
 - Enforce multi-root scope, trust/reload, ownership merge, foreign edits, component set, Cursor inherited-MCP conflict, and no path leakage.
+- Inventory all Codex hook source layers/representations and effective/skipped definitions through read-only probes; preserve managed/project/feature/exact-hash trust state, never mutate `/hooks` trust or persist the bypass, and expose definition/run/group receipts through redacted views.
 
 **Tests first**
 
@@ -1982,6 +2002,7 @@ Every PR starts with a failing focused test/fixture, lands the smallest implemen
 - install multiple companions and headless MCP-only selection;
 - exact API/CLI/SDK parity and no tenth use case;
 - V1 mode/state import and projection rebuild.
+- Codex source/trust/managed/feature/dual-representation probe fixtures and reordered concurrent-handler/effect-arbitration conservation.
 
 **Gate:** affected domain/store/projector/application/API/root tests, contract generation diff, and end-to-end local fake-host suite.
 
@@ -1991,6 +2012,7 @@ Every PR starts with a failing focused test/fixture, lands the smallest implemen
 
 - Add the one system-wide `/settings/integrations` workspace; host targets are a rail/pivot, not another screen.
 - Render package/effect/profile choices, skill/role/hook/MCP state, capability evidence, trust/reload/stale/foreign state, operations, migration, and exact remediation.
+- Render a redacted per-definition Codex hook table with source layer/representation, exact event/matcher behavior, definition digest, managed/project-trust/review/disable/effective/skip state, overlap group, run visibility, evidenced last handler run/arbitration only when observable, coverage gap, and `/hooks` remediation; never infer foreign execution or render command/path/payload/transcript/environment content.
 - Add plan-26 discovery/fallback/hook/agent/operation panels with numerator/denominator/watermark/coverage/privacy.
 - Link sessions/agents/tasks/timelines through retrieval anchors; never inspect host files from frontend.
 
@@ -2022,6 +2044,7 @@ Every PR starts with a failing focused test/fixture, lands the smallest implemen
 - core never depends on companion/operator;
 - current marketplace artifact round-trips to exact signed digest;
 - supported stock-client matrix and documented downgrade assertions.
+- Codex exact ten-event wire/output/matcher/exit matrix across every supported surface, additive source/concurrent completion permutations, exact-hash review/change/disable, trusted/untrusted project, feature off/on/alias, managed-only/managed immutable state, plugin manifest forms, arbitrary cwd, and Unix/Windows lowering.
 
 **Gate:** two independent reproducible builds, full stock-host matrix, a clean plan-18 scan, verified provenance/signatures, and aggregate quality gates from `12.4`.
 
@@ -2104,6 +2127,7 @@ Normative conflict resolutions:
 ### Host bundles and workflows
 
 - [ ] Claude Code, Codex, and Cursor core/companion artifacts parse on every supported stock surface/version.
+- [ ] Codex conformance covers exactly the current ten events and every source/trust/concurrency/output/interception state above; the fixed oracle is independent of generated artifacts and no separate `PostToolUseFailure` is claimed.
 - [ ] Six skills and three roles have semantic parity, trigger/negative evals, CLI fallback, and anchor/coverage outputs.
 - [ ] No new command/rule/prompt duplication; bounded legacy aliases name removal versions.
 - [ ] Core installs no MCP; companions are independent; operator is never default/transitive/inherited into read roles.

@@ -354,12 +354,14 @@ The catalog records skill package ID/version/checksum/state/targets, referenced 
 
 Current host entry points to inventory:
 
-- Codex: session_start, user_prompt_submit, subagent_start, post_tool_use, post_compact;
+- Codex: exact current set `SessionStart`, `SubagentStart`, `PreToolUse`, `PermissionRequest`, `PostToolUse`, `PreCompact`, `PostCompact`, `UserPromptSubmit`, `SubagentStop`, and `Stop`; no invented `PostToolUseFailure`;
 - Claude Code: pre_tool_use allow/deny, session_start, subagent_start, post_tool_use, prompt_submit, stop;
 - Cursor: before_submit_prompt, subagent_start, post_tool_use, session_start, session_end, stop, pre_compact, after_file_edit, after_shell, workspace_open;
 - Kiro: pre_tool_use, prompt_submit, post_tool_use;
 - MCP/daemon hook events: FileEdit, Shell, WorkspaceOpen, SessionStart, IncrementalSync;
 - shared effects: capture, inject context/hint, allow/deny, reset/accounting marker, transcript catch-up, LCM lifecycle, file/project sync, branch/worktree tracking, analytics/outcome evidence.
+
+The hook facet stores one closed `HostHookBindingSpecV1` per host-version/event with its release-manifest-bound `HostHookBindingId`. It declares canonical and native event IDs, thread/subagent/Turn scope, exact matcher subject and aliases (or ignored matcher), required/nullable common and event fields, supported handler kinds, timeout requirement, platform command lowering, allowed stdout/JSON/exit-code result shapes, legal blocking/rewrite/permission/continuation effects, durability/privacy class, interception coverage denominator, capability disposition/evidence, and conformance case IDs. For Codex the compiler must consume an independent ten-event required manifest; generated output cannot define its own denominator, omit `PermissionRequest`, merge `SubagentStop` with `Stop`, or add a separate failure event. Event-response legality and handler support are catalog data consumed unchanged by plans 07/21/27, never adapter-local match logic.
 
 Tool-kind bindings include Codex function_call/function_call_output/custom_tool_call/custom_tool_call_output/local_shell_call/tool_search_call/web_search_call; Claude tool_use/tool_result and parent tool-use IDs; Cursor Agent/Composer invocation/result/edit/plan; automation backend traces; unknown future kinds with opaque schema/coverage.
 

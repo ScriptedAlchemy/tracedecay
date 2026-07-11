@@ -339,6 +339,8 @@ pub struct PredicateId(String); // private, grammar-validated predicate registry
 pub struct HintCategoryId(String); // private, grammar-validated policy category token
 pub struct LanguageId(String); // private, grammar-validated language registry token
 pub struct BindingId(String); // private, grammar-validated generated catalog binding token
+pub struct HostHookBindingId(String); // private, release-manifest-bound catalog hook-binding token
+pub struct CodexHookTrustHash(String); // opaque host-owned trust hash; distinct from TraceDecay content digests
 pub struct McpLogicalRegistrationId(String); // private, grammar-validated opaque registration identity; semantics owned by plan 08
 pub struct McpSurfaceProfileId(String); // private, grammar-validated opaque profile identity; membership/budgets owned by plan 08
 pub struct HostSurfaceKindV1(String); // private, grammar-validated opaque host surface identity; registry/evidence owned by plans 08/27
@@ -478,6 +480,60 @@ pub struct HostCapabilitySnapshotV1 {
     pub observed_at: UtcMicros,
     pub fresh_until: UtcMicros,
     pub snapshot_digest: ManifestDigest, // canonical subject/capabilities/times only; excludes this field
+}
+pub enum HookInvocationScopeV1 { ThreadStart, SubagentStart, Turn }
+pub enum HookDefinitionRepresentationV1 { JsonFile, InlineToml, PluginDefaultFile, PluginManifestPath, PluginManifestPathArray, PluginManifestInline, PluginManifestInlineArray, ManagedInline }
+pub enum HostConfigLayerV1 { System, Cloud, Mdm, ManagedRequirements, User, Project, Session, Plugin }
+pub struct HostConfigSourceV1 {
+    pub source_id: EntityId,
+    pub layer: HostConfigLayerV1,
+    pub representation: HookDefinitionRepresentationV1,
+    pub managed: bool,
+    pub project_layer_trusted: Option<bool>,
+    pub source_digest: ManifestDigest,
+}
+pub enum HookDefinitionProvenanceV1 {
+    Resolved(HostConfigSourceV1),
+    Ambiguous { candidate_source_ids: BoundedVec<EntityId, 16>, coverage: CoverageReportV1 },
+    GeneratedBindingOnly { binding: HostHookBindingId, coverage: CoverageReportV1 },
+}
+pub struct HookDefinitionRefV1 {
+    pub provenance: HookDefinitionProvenanceV1,
+    pub content_digest: ManifestDigest,
+    pub host_trust_hash: Option<CodexHookTrustHash>,
+    pub catalog_binding: Option<HostHookBindingId>,
+    pub matcher_group_ordinal: u16,
+    pub handler_ordinal: u16,
+    pub managed: bool,
+    pub bundle_digest: Option<ManifestDigest>,
+}
+pub struct HookHandlerRunRefV1 { pub run_id: EntityId, pub definition: HookDefinitionRefV1, pub attempt: u16 }
+pub struct HookInvocationGroupRefV1 { pub group_id: EntityId, pub host_event_identity_digest: ManifestDigest }
+pub enum PermissionBehaviorV1 { Allow, Deny, NoDecision }
+pub enum HookContinuationTargetV1 { Turn, Subagent }
+pub enum HookHandlerResultV1 { Succeeded, TimedOut, Exited { code: i32 }, InvalidOutput { reason: RegistryEntryId }, SkippedUnsupported, SkippedTrust }
+pub enum HostHookTrustStateV1 { NeedsReview, Trusted, ManagedTrusted, Unknown }
+pub enum HostHookEligibilityStateV1 { Eligible, DisabledByUser, SkippedUntrustedProject, SkippedManagedOnly, SkippedFeatureDisabled }
+pub enum HostHookHandlerSupportV1 { SupportedCommand, UnsupportedPrompt, UnsupportedAgent, UnsupportedAsync }
+pub enum HostHookDefinitionFreshnessV1 { Current, ChangedSinceReview }
+pub enum HostHookTrustRequirementV1 { ExactHashUserReview, ManagedPolicy }
+pub enum HostHookRunVisibilityV1 { TraceDecayOwned, HostObserved, Unobservable }
+pub struct HostHookTrustReceiptRefV1 {
+    pub receipt_id: EntityId,
+    pub host_trust_hash: CodexHookTrustHash,
+    pub content_digest: ManifestDigest,
+    pub codex_version: ComponentVersion,
+    pub source_id: EntityId,
+    pub managed_generation: Option<u64>,
+}
+pub struct HostHookDefinitionObservationV1 {
+    pub definition: HookDefinitionRefV1,
+    pub trust: HostHookTrustStateV1,
+    pub eligibility: HostHookEligibilityStateV1,
+    pub handler_support: HostHookHandlerSupportV1,
+    pub freshness: HostHookDefinitionFreshnessV1,
+    pub trust_receipt: Option<HostHookTrustReceiptRefV1>,
+    pub run_visibility: HostHookRunVisibilityV1,
 }
 pub struct SkillVersionRef {
     pub skill_id: SkillId,
@@ -3022,6 +3078,7 @@ git commit -m "feat(domain): define stable v2 identity"
 - Create: `crates/tracedecay-domain/src/replay.rs`
 - Create: `crates/tracedecay-domain/src/protocol.rs`
 - Create: `crates/tracedecay-domain/src/payload.rs`
+- Create: `crates/tracedecay-domain/src/hooks_v1.rs`
 - Create: `crates/tracedecay-domain/tests/ownership_contract.rs`
 - Create: `crates/tracedecay-domain/tests/retention_contract.rs`
 - Create: `crates/tracedecay-domain/tests/replay_contract.rs`
@@ -3029,7 +3086,7 @@ git commit -m "feat(domain): define stable v2 identity"
 
 - [ ] **Step 1: Write failing boundary tests**
 
-Assert activity ownership for canonical messages and experiments; project ownership for Git/code; activity ownership for profile-scoped facts/skills/policy/automation; project ownership for project-scoped equivalents; rejection of missing/ambiguous declared scope; catalog rejection of literal strings; blob-domain inequality across privacy/key/retention domains; the exact Plan 18 `SanitizationReceiptV1` field set, findings-total invariant, expiry/revocation/supersession validation, canonical-schema round trip, and rejection of receipt cycles or cross-observation supersession; half-open time behavior; exact-cutoff retention; hold precedence; the seven content-horizon defaults; requested/actual replay invariants; one baseline/at-most-six variants; sole acyclic experiment branch ancestry; explicit sweep values, checked full-coordinate expansion, hard total-cell rejection, and unique run-cell coordinates; anchors for experiment/run/cell/stage/comparison/comparison-cell/reduction; running trace without and terminal trace with sealed receipt; complete resource budgets; a side-effect receipt whose production effect count is zero; automation invariants for all trigger frontiers, typed field selectors, sorted per-shard current/considered/consumed/included frontiers, fresh writer snapshot/quiescence, unknown/partial deferral, semantic-versus-evaluation digests, admitted-only identical-input fencing, pre-admission considered transitions, terminal consumed-cursor advancement, coalesced input-bound skip episodes, and exactly-once effect reconciliation; and host-integration invariants for one source-manifest digest, at most four unique components, exact install receipt/generation, typed capability dispositions, probe freshness/digest, no secret/path fields, and handshake failure on stale or mismatched component/catalog/probe identity.
+Assert activity ownership for canonical messages and experiments; project ownership for Git/code; activity ownership for profile-scoped facts/skills/policy/automation; project ownership for project-scoped equivalents; rejection of missing/ambiguous declared scope; catalog rejection of literal strings; blob-domain inequality across privacy/key/retention domains; the exact Plan 18 `SanitizationReceiptV1` field set, findings-total invariant, expiry/revocation/supersession validation, canonical-schema round trip, and rejection of receipt cycles or cross-observation supersession; half-open time behavior; exact-cutoff retention; hold precedence; the seven content-horizon defaults; requested/actual replay invariants; one baseline/at-most-six variants; sole acyclic experiment branch ancestry; explicit sweep values, checked full-coordinate expansion, hard total-cell rejection, and unique run-cell coordinates; anchors for experiment/run/cell/stage/comparison/comparison-cell/reduction; running trace without and terminal trace with sealed receipt; complete resource budgets; a side-effect receipt whose production effect count is zero; automation invariants for all trigger frontiers, typed field selectors, sorted per-shard current/considered/consumed/included frontiers, fresh writer snapshot/quiescence, unknown/partial deferral, semantic-versus-evaluation digests, admitted-only identical-input fencing, pre-admission considered transitions, terminal consumed-cursor advancement, coalesced input-bound skip episodes, and exactly-once effect reconciliation; host-integration invariants for one source-manifest digest, at most four unique components, exact install receipt/generation, typed capability dispositions, probe freshness/digest, no secret/path fields, and handshake failure on stale or mismatched component/catalog/probe identity; and hook-contract round trips for resolved/ambiguous/generated-only provenance, orthogonal trust/eligibility/support/freshness/visibility, exact host-trust-hash/content-digest separation, and no fabricated source/run identity.
 
 - [ ] **Step 2: Verify failure**
 
@@ -3039,7 +3096,7 @@ Expected: FAIL with unresolved ownership and retention types.
 
 - [ ] **Step 3: Implement the ownership and retention matrices**
 
-Implement `ShardKind`, `ShardRef`, `DeclaredScope`, `BlobDomainId`, `CatalogValue`, `UtcMicros`, `TimeInterval`, the Plan 18 `DataSensitivity`/receipt/taint/sink-eligibility types, `RetentionClass`, `RetentionPolicyV1`, `EvidenceRetentionWatermark`, the complete replay manifest/fidelity/branch/experiment/variant/run/cell/stage/comparison/comparison-cell/reduction/resource-budget/receipt family, the automation input-contract/manifest/frontier/quiescence/admission/skip-episode family, `SurfaceKind`, opaque `HostSurfaceKindV1`/`McpLogicalRegistrationId`/`McpSurfaceProfileId`, `HostInstallScopeV1`, `HostCapabilityDispositionV1`, `HostBundleComponentRefV1`, `HostIntegrationRuntimeRefV1`, `HostCapabilitySubjectV1`, `HostCapabilitySnapshotV1`, `RuntimeHandshakeV1`, `PayloadRef`, and reasoning format/visibility. Put kind-plus-declared-scope ownership in one exhaustive match so a new kind or scope class causes a compile error.
+Implement `ShardKind`, `ShardRef`, `DeclaredScope`, `BlobDomainId`, `CatalogValue`, `UtcMicros`, `TimeInterval`, the Plan 18 `DataSensitivity`/receipt/taint/sink-eligibility types, `RetentionClass`, `RetentionPolicyV1`, `EvidenceRetentionWatermark`, the complete replay manifest/fidelity/branch/experiment/variant/run/cell/stage/comparison/comparison-cell/reduction/resource-budget/receipt family, the automation input-contract/manifest/frontier/quiescence/admission/skip-episode family, `SurfaceKind`, opaque `HostSurfaceKindV1`/`McpLogicalRegistrationId`/`McpSurfaceProfileId`, `HostInstallScopeV1`, `HostCapabilityDispositionV1`, `HostBundleComponentRefV1`, `HostIntegrationRuntimeRefV1`, `HostCapabilitySubjectV1`, `HostCapabilitySnapshotV1`, the complete hook binding/source/provenance/definition/run/group/trust/eligibility/support/freshness/visibility/permission/continuation/result family above in `crates/tracedecay-domain/src/hooks_v1.rs`, `RuntimeHandshakeV1`, `PayloadRef`, and reasoning format/visibility. Hook provenance must round-trip resolved, ambiguous candidate-set, and generated-binding-only cases without fabricating a source; Codex trust hash never compares as a TraceDecay content digest. Put kind-plus-declared-scope ownership in one exhaustive match so a new kind or scope class causes a compile error.
 
 - [ ] **Step 4: Verify pass and schema serialization**
 
@@ -3050,7 +3107,7 @@ Expected: PASS.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add crates/tracedecay-domain/src/ownership.rs crates/tracedecay-domain/src/time.rs crates/tracedecay-domain/src/privacy.rs crates/tracedecay-domain/src/retention.rs crates/tracedecay-domain/src/replay.rs crates/tracedecay-domain/src/protocol.rs crates/tracedecay-domain/src/payload.rs crates/tracedecay-domain/tests/ownership_contract.rs crates/tracedecay-domain/tests/retention_contract.rs crates/tracedecay-domain/tests/replay_contract.rs crates/tracedecay-domain/tests/protocol_contract.rs
+git add crates/tracedecay-domain/src/ownership.rs crates/tracedecay-domain/src/time.rs crates/tracedecay-domain/src/privacy.rs crates/tracedecay-domain/src/retention.rs crates/tracedecay-domain/src/replay.rs crates/tracedecay-domain/src/protocol.rs crates/tracedecay-domain/src/payload.rs crates/tracedecay-domain/src/hooks_v1.rs crates/tracedecay-domain/tests/ownership_contract.rs crates/tracedecay-domain/tests/retention_contract.rs crates/tracedecay-domain/tests/replay_contract.rs crates/tracedecay-domain/tests/protocol_contract.rs
 git commit -m "feat(domain): lock ownership and retention semantics"
 ```
 

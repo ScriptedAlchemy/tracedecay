@@ -317,9 +317,10 @@ pub struct WorkClaimDraft {
 }
 
 pub enum HookEventV1 {
-    SessionStarted,
-    PromptSubmitted { content: ProviderFieldValue },
+    SessionStarted { source: NativeKindCode },
+    PromptSubmitted { turn_id: AliasRef, content: ProviderFieldValue },
     AgentSpawned { child: NativeAgentId, task: ProviderFieldValue },
+    AgentStopped { child: NativeAgentId, stop_hook_active: bool, last_message: Option<ProviderFieldValue> },
     AgentMessage { recipient: NativeAgentId, content: ProviderFieldValue },
     AgentHandoff { recipient: NativeAgentId, state: ProviderFieldValue },
     AgentPresenceHeartbeat { status: PresenceStatus },
@@ -327,10 +328,15 @@ pub enum HookEventV1 {
     WorkClaimScopeChanged { claim_id: String, scope: WorkClaimScopeDraft },
     WorkClaimAcknowledged { claim_id: String, redundancy: RedundancyMode },
     CoordinationOutcomeObserved { claim_id: String, outcome: CoordinationOutcome },
+    PermissionRequested { turn_id: AliasRef, native_request_id: Option<AliasRef>, tool: String, input: ProviderFieldValue },
+    PermissionDecisionObserved { permission_request: AliasRef, behavior: PermissionBehaviorV1 },
     ToolStarted { call_id: String, tool: String, input: ProviderFieldValue },
     ToolFinished { call_id: String, outcome: ToolOutcome, output: ProviderFieldValue },
-    CompactStarted,
-    CompactFinished,
+    CompactStarted { trigger: NativeKindCode },
+    CompactFinished { trigger: NativeKindCode },
+    TurnStopRequested { turn_id: AliasRef, stop_hook_active: bool, last_message: Option<ProviderFieldValue> },
+    ContinuationDecisionObserved { target: HookContinuationTargetV1, continued: bool, reason: Option<ProviderFieldValue> },
+    HookHandlerRunObserved { definition: HookDefinitionRefV1, run: HookHandlerRunRefV1, result: HookHandlerResultV1 },
     HintTerminal { hint_id: String, terminal: HintTerminalState },
     SessionStopped { outcome: Option<String> },
 }
@@ -350,7 +356,11 @@ impl HookSpool {
 
 Every TraceDecay-owned source adapter and hook draft carries the originating `TraceDecayBuildRefV1`; capture rejects a newly emitted log/hook/diagnostic record without it. Spool frames authenticate the producer build reference in their header, and drain/forward/import preserves it independently from the current drainer/collector build. This applies even before project/store initialization and during recovery failures. Pre-contract V1 JSONL/file logs enter migration as `KnownVersion` when component+SemVer are proven without a build manifest, otherwise explicit `UnknownLegacy`; neither is ever relabeled as the importing binary.
 
+Codex lowering preserves the exact parent-session `session_id`, Turn, agent, tool-use, hook-definition binding, matcher-group, handler, run/attempt, bundle, trust/source-layer evidence, producer-build, and optional collector-build identities available at that surface. `PermissionRequest` has no mandatory native call ID: capture accepts an optional native alias, while application persists a deterministic request identity over session/Turn/tool/sanitized-input digest and source generation. It appends every concurrently launched observable TraceDecay handler run; an invocation-group projection relates them and records host aggregation evidence separately. Shared definition/run/result/trust/source refs are owned by `tracedecay-domain`; capture imports them and never depends on root hook/config composition. `transcript_path`, `agent_transcript_path`, cwd, prompt, tool input/response, and last assistant message remain transient unclassified inputs and may persist only as sanitized payload refs or privacy-domain locator fingerprints. Stop/SubagentStop terminal observations asynchronously dirty only their exact thread/subagent automation scope; the hook never waits for reflection/curation, and unchanged terminal inputs remain fenced by plans 09/26.
+
 Capture owns the one hook spool and its drainer. There is exactly one spool implementation, one hash-chained frame format (below), and one always-spool ingress protocol; the store exposes only append transactions and never runs a handoff-first or fallback ingress spool of its own ([`02-store-crate.md`](02-store-crate.md) drains capture's spool through `ObservationJournal` appends). Plan [`07-hooks-crate.md`](07-hooks-crate.md) hook hosts write exclusively through capture's spool client (`spool/client.rs`) and receive durability acks carrying the domain `SpoolReceipt` from [`01-domain-crate.md`](01-domain-crate.md); no crate mints a spool-receipt variant.
+
+Under dedicated-service isolation, that client is an authenticated connect-only call to a socket-activated, service-owned capture-ingress helper that sanitizes/validates and `fdatasync`s the canonical capture spool without opening an application store. It stays available while the main daemon is stopped or draining and hands segments to the normal daemon drainer after restart. Client hooks never receive spool paths or keys and never create a second user-owned spool; if the ingress service itself is unavailable, the hook reports a non-content degraded receipt and never claims durability. Remote-authority mode uses the same local service-owned ingress spool until a verified remote commit receipt retires the frame.
 
 `RawHookObservationDraft` exists only in adapter memory. Plan 07's wire shape `Unclassified<RawHookRequestV1>` decodes one-to-one into `RawHookObservationDraft` at the capture client boundary; no second pre-sanitizer hook shape exists. The hook adapter parses and sanitizes it through the same `ObservationSanitizer` before constructing `SanitizedHookObservation`; only that sanitized wrapper can serialize into a spool frame. A scanner timeout or unavailable privacy policy fails closed with no content retention: it produces a non-content receipt and no hint/content frame, and no encrypted or deferred-scan copy of the input is spooled anywhere outside the store's isolated protected-quarantine service. This fail-closed no-content-retention rule is the canonical statement for the plan set; Plan 18's hook target restates it. It is the mandatory-security tradeoff defined by Plan 18, not a provider-specific fast-path bypass.
 

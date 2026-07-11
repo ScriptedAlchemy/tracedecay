@@ -76,7 +76,7 @@ Hooks own only host wire adaptation and bounded orchestration in [`19-system-def
 | V1 seam | Behavior to preserve or replace | V2 disposition |
 |---|---|---|
 | src/hooks/mod.rs | Shared JSON reading, project/session lookup, analytics, hint formatting/dedupe | Split wire/common adapters, application ports, and generated host descriptors. Delete only after all host cutovers. |
-| src/hooks/codex.rs | Session start, user prompt, subagent start, post-tool, post-compact, workspace/context hints | CodexAdapter conformance rows; no direct memory/index/policy calls. |
+| src/hooks/codex.rs | Historical subset of Codex hooks and workspace/context hints | Replace with the ten-event current Codex contract: `SessionStart`, `SubagentStart`, `PreToolUse`, `PermissionRequest`, `PostToolUse`, `PreCompact`, `PostCompact`, `UserPromptSubmit`, `SubagentStop`, and `Stop`; no direct memory/index/policy calls and no invented `PostToolUseFailure`. |
 | src/hooks/claude.rs | Pre-tool block, session/subagent start, post-tool, prompt submit, stop | ClaudeAdapter; preserve explicit block/allow semantics and tool matcher parity. |
 | src/hooks/cursor.rs, cursor_compact.rs, cursor_shell.rs | Before prompt, post-tool, file/shell/workspace, precompact, session start/end/stop, bounded ingest | CursorAdapter plus capture scheduling effects; no inline transcript ingest. |
 | src/hooks/kiro.rs | Pre-tool, prompt, post-tool and transcript catch-up | KiroAdapter with explicit coverage where the host lacks richer lifecycle events. |
@@ -219,11 +219,13 @@ The domain companion module defines transport-neutral IDs and enums; adapters ma
 ~~~rust
 pub enum HookPoint {
     SessionStart,
-    PromptSubmit,
+    UserPromptSubmit,
     SubagentStart,
+    SubagentStop,
     PreToolUse,
+    PermissionRequest,
     PostToolUse,
-    Approval,
+    ApprovalObserved,
     BeforeFileEdit,
     AfterFileEdit,
     AfterShell,
@@ -266,10 +268,20 @@ pub struct HookRequestV1 {
     pub host_profile: HostProfileRef,
     pub host_surface: HostSurfaceKindV1,
     pub hook_point: HookPoint,
+    pub invocation_scope: HookInvocationScopeV1,
+    pub definition: HookDefinitionRefV1,
+    pub handler_run: HookHandlerRunRefV1,
+    pub invocation_group: HookInvocationGroupRefV1,
+    pub producer_build: TraceDecayBuildRefV1,
+    pub collector_build: Option<TraceDecayBuildRefV1>,
+    pub capability_snapshot_digest: ManifestDigest,
+    pub trust_state: HostHookTrustStateV1,
     pub source: SourceInstanceId,
     pub requested_scope: ScopeSelectorV2,
     pub native: NativeEventIdentity,
     pub session_hint: Option<AliasRef>,
+    pub turn_hint: Option<AliasRef>,
+    pub tool_use_hint: Option<AliasRef>,
     pub actor_hint: Option<AliasRef>,
     pub agent_hint: Option<AliasRef>,
     pub parent_agent_hint: Option<AliasRef>,
@@ -287,11 +299,42 @@ pub struct HookRequestV1 {
 
 Raw paths, tokens, credentials, environment maps, query literals, prompts, arguments, and results are absent from structured fields. Authorized content resides behind PayloadRef. `requested_scope` uses the shared domain selector unchanged. Workspace facts carry privacy-domain digests plus zero-to-many candidate aliases and freshness; identity resolution occurs in application/projectors and never selects the first/current candidate silently.
 
+Plan 01 PR 4 owns the complete definition/source/provenance/run/representation/trust vocabulary in `crates/tracedecay-domain/src/hooks_v1.rs`. Plan 20 consumes it in configuration views, plan 03 captures it, plan 08 binds immutable `HostHookBindingId` specs, and this crate adds only host-wire adapters and runtime behavior. `HookDefinitionProvenanceV1` is resolved, ambiguous candidate-set plus coverage, or generated-binding-only; the runtime never fabricates one source when Codex does not identify the launching definition.
+
+`HookInvocationScopeV1` is closed over `ThreadStart`, `SubagentStart`, and `Turn`. Codex `SessionStart` is thread-scoped, `SubagentStart` is subagent-start-scoped, and the other eight Codex events are Turn-scoped. `HookDefinitionRefV1` binds host/config source layer, JSON-versus-inline-versus-plugin/managed representation, definition digest, matcher-group ordinal, handler ordinal, managed bit, and installed bundle digest. `HookHandlerRunRefV1` binds the host hook-run ID when supplied, attempt ordinal, and exact definition ref. Every matching definition/run remains distinct evidence; retry dedupe may collapse only the same handler-run identity. A separate invocation-group projection correlates simultaneous runs for one session/Turn/tool/agent event and arbitrates at most one TraceDecay hint/effect without erasing any handler execution.
+
+### 7.1 Exact Codex wire and matcher contract
+
+The Codex adapter has private closed `CodexHookWireInputV1` variants and losslessly lowers every current release field. All variants receive `session_id`, nullable `transcript_path`, `cwd`, `hook_event_name`, and `model`. `transcript_path` is an unstable convenience locator and `cwd` is an untrusted scope candidate; neither is a canonical session/project identity or permission. `SessionStart`, `PreToolUse`, `PermissionRequest`, `PostToolUse`, `UserPromptSubmit`, `SubagentStart`, `SubagentStop`, and `Stop` additionally carry closed `permission_mode=default|acceptEdits|plan|dontAsk|bypassPermissions`; a forward-unknown value is retained as bounded unknown evidence, never mapped to a known authorization mode. Subagents reuse the parent `session_id`, so `agent_id` is mandatory lineage rather than optional decoration.
+
+| Codex event | Scope and required event fields | Matcher | Supported response semantics |
+|---|---|---|---|
+| `SessionStart` | Thread; `source=startup|resume|clear|compact` | regex over `source`; `*`, empty, or omitted means all | plain text or JSON developer context; common `systemMessage`/`continue`/`stopReason`; `continue:false` stops before session proceeds |
+| `SubagentStart` | Subagent start; `turn_id`, `agent_id`, `agent_type` | regex over `agent_type` | plain text or JSON subagent context and `systemMessage`; `continue:false` is recorded but cannot prevent start |
+| `PreToolUse` | Turn; `turn_id`, `tool_name`, `tool_use_id`, `tool_input` | tool name, including `apply_patch` aliases `Edit|Write` and MCP names/regexes | warning/context, allow, deny, or allow plus complete replacement `updatedInput`; plain stdout ignored; exit 2 is legacy block |
+| `PermissionRequest` | Turn; `turn_id`, `tool_name`, `tool_input`, optional `tool_input.description: string|null` | same tool-name/alias rules | ignored plain stdout; `systemMessage`; allow, deny+message, or no decision; any host-collected deny wins, otherwise allow wins over no decision; no rewrite/permission expansion/interrupt |
+| `PostToolUse` | Turn; `turn_id`, `tool_name`, `tool_use_id`, `tool_input`, `tool_response`; Bash nonzero remains this event | same tool-name/alias rules | warning/additional context, legacy block/exit 2 feedback, or `continue:false`; feedback/stop text replaces the original result before the model continues, but the completed tool effect cannot be undone |
+| `PreCompact` | Turn; `turn_id`, `trigger=manual|auto` | regex over trigger | common JSON; `continue:false` stops before compaction; plain stdout ignored |
+| `PostCompact` | Turn; `turn_id`, `trigger=manual|auto` | regex over trigger | common JSON; `continue:false` stops after compaction; plain stdout ignored |
+| `UserPromptSubmit` | Turn; `turn_id`, `prompt` | matcher ignored | plain text or JSON developer context; block/exit 2 rejects submission; common continuation fields apply |
+| `SubagentStop` | Turn; `turn_id`, `agent_id`, `agent_type`, nullable `agent_transcript_path`, `stop_hook_active`, nullable `last_assistant_message` | regex over `agent_type` | exit-0 stdout must be JSON; `decision:block` or exit 2+stderr requests another subagent continuation, but any matching `continue:false` wins |
+| `Stop` | Turn; `turn_id`, `stop_hook_active`, nullable `last_assistant_message` | matcher ignored | exit-0 stdout must be JSON; `decision:block` or exit 2+stderr creates a continuation prompt, but any matching `continue:false` wins |
+
+Tool input/response, prompts, last messages, and transcript-derived content enter transient `Unclassified` fields and then payload refs; public facts retain only bounded typed IDs/kinds, classified locators, digests, receipts, and coverage. The adapter accepts unknown forward fields only behind the bounded forensic payload policy and never treats them as trusted tool/compiler facts. Current Codex interception gaps (`unified_exec` rich shell paths, WebSearch, and other non-shell/non-MCP tools) are explicit capability-denominator gaps: hooks are guardrails, not a complete enforcement boundary.
+
+Codex loads every matching active definition and launches matching command handlers concurrently. Config precedence does not replace lower-layer hooks, one denial cannot prevent a sibling hook from starting, and TraceDecay never serializes foreign handlers. The invocation-group receipt records all observed TraceDecay handler runs, result arrival order, aggregation state, and the fact that unseen foreign results remain host-owned. Policy state/hint delivery is compare-and-swap keyed to canonical session/Turn/tool/agent identity so duplicate TraceDecay definitions cannot emit a second hint, while their distinct runs remain auditable.
+
 ~~~rust
 pub enum HookEffect {
     InjectContext(PromptEligibleText),
+    SystemWarning(LogSafeText),
     Allow,
-    Deny { code: BlockingDecisionCode, message: LogSafeText },
+    Block { code: BlockingDecisionCode, message: LogSafeText },
+    RewriteToolInput(PayloadRef),
+    PermissionDecision { behavior: PermissionBehaviorV1, message: Option<LogSafeText> },
+    ContinueTurn { reason: LogSafeText },
+    ContinueSubagent { reason: LogSafeText },
+    StopHookFlow { reason: Option<LogSafeText> },
     ScheduleCaptureCatchUp(CaptureRequest),
     ScheduleProjectSync(ProjectSyncRequest),
     RecordDeliveryAttempt(DeliveryAttempt),
@@ -319,7 +362,15 @@ pub struct HookCaptureResult {
 }
 ~~~
 
-HookEffect is a proposal until the host adapter delivers it. Deny is legal only for catalog-declared blocking hook points with a policy decision carrying a blocking rule ID. Notification and ordinary hint failures return an empty response, not denial.
+HookEffect is a proposal until the host adapter delivers it. A generated per-event output validator makes illegal combinations unrepresentable: `RewriteToolInput` is legal only for `PreToolUse` and must contain a complete string `command` for Bash/`apply_patch` or a complete arguments object for MCP; it accompanies allow only. `PermissionDecision` is legal only for `PermissionRequest`. Continuation effects target only their matching stop event and are always suppressed when `stop_hook_active` proves that host flow was already continued. Blocking is legal only for catalog-declared blocking hook points with a policy decision carrying a blocking rule ID. Notification and ordinary hint failures return an empty response, not denial.
+
+Codex fields parsed but unsupported in the current release are rejected by conformance before install: `permissionDecision:"ask"`, legacy approve, PreTool `continue`/`stopReason`/`suppressOutput`, PermissionRequest `updatedInput`/`updatedPermissions`/`interrupt`, PostTool `updatedMCPToolOutput`/`suppressOutput`, and unsupported common/event combinations. TraceDecay emits neither `suppressOutput` nor handler types Codex currently skips. Parsed `suppressOutput` has no implemented effect where documented; PreTool invalid fields fail/report and the tool call continues unchanged, PermissionRequest reserved fields fail closed, and PostTool unsupported fields fail/report while ordinary result processing continues. Each outcome is a distinct receipt-tested handler result, never a generic continuation bucket.
+
+### 7.2 Codex handler execution contract
+
+Generated Codex hooks use exactly one `type:"command"` handler per TraceDecay matcher group. The generator never emits `prompt`, `agent`, or `async:true`; foreign instances of those parsed-but-skipped forms remain observed `UnsupportedHandler` rows and are never called healthy. Every generated command has a catalog-fixed executable/argv, explicit one-second host timeout (the internal 10/25 ms budgets still govern normal completion), optional catalog-owned `statusMessage` only when useful, and an independently escaped `commandWindows`; JSON uses `commandWindows`, while TOML input accepts `command_windows` or `commandWindows`. Omitting timeout and inheriting Codex's 600-second default is a generation failure.
+
+Commands execute with the session `cwd`; the entrypoint therefore never resolves itself or a package resource relative to cwd. Plugin `PLUGIN_ROOT` is contained read-only package state. Although Codex supplies writable `PLUGIN_DATA` and compatibility aliases, generated TraceDecay hooks never write them; no plugin-local spool, cache, identity, or state silo exists. None of these variables is profile/Brain identity, authorization, source scope, database storage, or permission to read a transcript. Repo-local foreign hooks are diagnosed with git-root guidance, but TraceDecay's generated plugin command invokes the separately installed signed `tracedecay` binary directly.
 
 The remaining boundary values are explicit:
 
@@ -463,8 +514,8 @@ Defaults:
 
 | Event class | Required before host acknowledgement | Degradation |
 |---|---|---|
-| Direct/copy/subagent prompt, tool call/result, approval, file edit, agent/goal/handoff, outcome | LocalFsync | If unavailable, return typed degraded acknowledgement and emergency per-invocation capture receipt; never claim durable. |
-| Session/workspace/compaction lifecycle | DaemonQueue; LocalFsync when daemon unavailable | May coalesce only identical rebuildable lifecycle notifications after one durable representative. |
+| Direct/copy/subagent prompt, tool call/result, permission request/decision, file edit, agent start/stop/goal/handoff, Turn stop/continuation, outcome | LocalFsync | If unavailable, return typed degraded acknowledgement and a non-content failure receipt; never claim durable. |
+| Session/workspace/compaction lifecycle | LocalFsync through capture's service-owned ingress spool | May coalesce only identical rebuildable lifecycle notifications after one durable representative. |
 | Project sync/index notification | DaemonQueue | Can coalesce by project/ref/path digest; canonical source event remains captured. |
 | Hint evaluation/delivery | Evaluation record plus state transition committed when budget permits; otherwise append delivery-pending receipt | No hint on uncertain state; never inject twice. |
 
@@ -473,7 +524,8 @@ Idempotency:
 - Prefer provider event/call/message IDs plus source generation and content digest.
 - When only an offset exists, use source artifact, rewrite generation, [offset,next_offset), and record digest.
 - When neither exists, application insert-or-reads a persisted allocation keyed by host/session/hook-point/native digest. Random process-local IDs cannot determine duplicate identity.
-- The host retry of one invocation returns the stored render/delivery receipt when its policy/catalog/environment digest still matches; a digest mismatch returns a typed `stale_environment` error with no re-evaluation and no redelivery (plan 22 §11 envelope-claim retries follow the same rule).
+- Definition/handler/run identity is preserved separately from canonical event identity. A generated release-manifest-bound `HostHookBindingId` in fixed argv resolves the current catalog definition; stale bindings and foreign/ambiguous copies are capture-only. Because Codex supplies no definition/run ID, application persists run allocation keyed by binding, canonical host-event identity, source candidate set, and attempt evidence; indistinguishable copied definitions remain one partial-coverage group rather than fabricated distinct runs. Exact retry dedupe is handler-run-specific. A CAS/lease arbitrates only advisory context/hints so one deterministic current binding can inject them. Blocking, rewrite, permission, and continuation responses use event-specific host aggregation: security deny is never suppressed by advisory arbitration, `PermissionRequest` defaults to `NoDecision` and may allow only under separately authorized managed policy bound to exact tool/input/grant, and current signed duplicate bindings render identical policy results.
+- The host retry of one invocation returns acknowledgement-only plus the stored delivery state when its policy/catalog/environment digest still matches; it never reprints a possibly delivered effect. A digest mismatch returns typed `stale_environment` with no re-evaluation/redelivery. Delivery-unknown is never automatically retried (plan 22 §11 envelope claims follow the same rule).
 - A transcript rewrite increments generation, emits RewriteDetected, and appends superseding observations. It never overwrites old evidence.
 - Late records retain occurred/ingested times and source continuity. They do not renumber established Turns or imply causation.
 
@@ -590,7 +642,7 @@ The checked-in human-readable table below is a historical fixture inventory, not
 
 | Host | Historical V1/probe fixture seeds | Generated V2 coverage target |
 |---|---|---|
-| Codex | hook_codex_session_start, hook_codex_user_prompt_submit, hook_codex_subagent_start, hook_codex_post_tool_use, hook_codex_post_compact | Session/prompt/subagent/tool/compact; response-item tool kinds; goal create/update; parent/subagent IDs; additional_context render; explicit absent coverage for unsupported approvals/events. |
+| Codex | all ten current hidden bindings and stock-wire goldens | Exact `SessionStart`, `SubagentStart`, `PreToolUse`, `PermissionRequest`, `PostToolUse`, `PreCompact`, `PostCompact`, `UserPromptSubmit`, `SubagentStop`, and `Stop`; common/event inputs, matchers/aliases, command-only execution, trust/source/definition lineage, concurrent-handler grouping, stdout/JSON/exit-2 outputs, unsupported-field failures, interception gaps, Windows lowering, and continuation guards. |
 | Claude Code | hook_pre_tool_use/evaluate_hook_decision, hook_claude_session_start, hook_claude_subagent_start, hook_claude_post_tool_use, hook_prompt_submit, hook_stop | Pre-tool allow/deny, session/subagent/prompt/tool/stop, tool_use/tool_result pairing, parent tool-use IDs, workflow/handoff evidence, context render. |
 | Cursor | hook_cursor_before_submit_prompt, subagent/post-tool, session start/end/stop, precompact, after file/shell, workspace open | Prompt/subagent/tool/session/compact/edit/shell/workspace, Composer/agent origin, file paths as classified locators, JSON reply. |
 | Kiro | pre-tool, prompt-submit, post-tool | Delegation/tool/prompt facts, bounded catch-up request, explicit gaps for unsupported lifecycle. |
@@ -603,6 +655,7 @@ For every generated supported/version-gated row, fixtures cover:
 - presence/work claims, heartbeat/TTL, every redundancy mode, session/subagent/pre-edit/expensive-research/scope-change coordination gates, planned-overlap acknowledgement, and one-compact-hint maximum;
 - multi-repo/project/worktree, generic zero-project, moved/adopted/linked/detached cases, `sessions.project_key` conflict, Claude first-CWD change, active-base-versus-PR-worktree graph mismatch, ignored dependency hint retaining scope, and stale registry/store candidates;
 - tool success/error/retry/missing result, approval allow/deny, edit/shell variants;
+- Codex all-source concurrency with reordered completion, no sibling-start suppression, advisory-only invocation-group CAS winner/losers, separately aggregated deny/rewrite/permission/continuation precedence, delivery-unknown no-redelivery, and observable handler-run audit conservation;
 - exact V1 normalized fields and host response where compatibility is required;
 - no panic and safe empty response for unknown forward event.
 
@@ -613,6 +666,7 @@ For every generated supported/version-gated row, fixtures cover:
 - Request/access digest binds profile, privacy domain, sensitivity grant, host, and installed integration identity. A response cannot be replayed under different access.
 - Validate JSON depth, string/array counts, UTF-8, declared lengths, media type, IDs, and all host output escaping.
 - Ignore environment variables and paths not in the explicit invocation allowlist. Hash classified locators before telemetry.
+- Never synchronously open `transcript_path` or `agent_transcript_path`, whose format is unstable. Persist only a classified locator fingerprint and coverage, and schedule separately authorized source-broker capture when a provider adapter supports the current format. Prompt/tool/last-message bodies are sanitized payloads; scan failure retains only a durable non-content failure receipt.
 - Blocking messages use catalog-owned safe templates; provider text cannot inject terminal control sequences or response-envelope fields.
 - Fuzz every wire adapter, framed receipt, host renderer, and retry record. Add malicious nested JSON, decompression/large-string, duplicate-key, path traversal, symlink, control-character, and schema-forward cases.
 - A lab/conformance run uses read-only ports and write sentinels; fixture promotion is a separate reviewed application command with redaction scan.
@@ -638,6 +692,7 @@ Release gates:
 - disk/WAL pressure reaches explicit degradation tiers and recovers without unbounded memory;
 - secret corpus: zero secret-bearing search/vector/fact/metric/fixture/export hit;
 - host conformance: 100% generated documented/probe-validated event/reply rows have fixtures and every absent/unknown/version-gated row has a checked disposition with no fabricated adapter;
+- Codex conformance: an independent ten-event required matrix cannot shrink with generated output; every stock-client lane covers exact fields/nullability, matcher semantics, additive sources/concurrency, outputs/exit codes, handler type/timeout/cwd/platform, trust/managed/feature state, and explicit interception denominator;
 - outcome: >=90% eligible evaluations terminal within horizon, false attribution <1% on labeled corpus;
 - trust/noise: zero adversarial prompt/pasted-log promotion to trusted compiler/tool failure, repeated-hint budget and useful-silence fixtures pass, and every injected hint names its trusted routing evidence or abstains;
 - new production files target <=400 lines, remain <=800 lines absent a temporary plan-19 waiver, and contain no provider duplication of policy/capture logic.
@@ -650,7 +705,7 @@ Commands run from repository root with the checkout-local target directory. Do n
 
 **Files:** root `Cargo.toml`; `src/v2/hooks/{mod,error,request,response,receipt,budget,durability,ports}.rs`; `src/v2/hooks/adapters/{mod,common}.rs`; `tests/hooks_v2.rs`; `tests/hooks_v2/{request_contract,host_conformance,privacy_security}.rs`.
 
-- [ ] Write failing schema/validation tests for every generated supported HookPoint, PromptOrigin, `ScopeSelectorV2`, missing-time rule, payload sensitivity, budget bound, unsupported blocking point, host-bundle/runtime/probe digest binding, capability disposition, and adapter descriptor uniqueness; include multi-repo/worktree, empty explicit selector, first-CWD, base-checkout/PR-worktree, and stale-registry cases. Generate the cases from the plan-27 ledger and fail if an unknown/absent capability appears as required.
+- [ ] Write failing schema/validation tests for every generated supported HookPoint, PromptOrigin, invocation scope, definition/handler-run/invocation-group identity, `ScopeSelectorV2`, missing-time rule, payload sensitivity, budget bound, unsupported blocking/output point, host-bundle/runtime/probe digest binding, capability disposition, and adapter descriptor uniqueness; include the independent ten-event Codex matrix, multi-repo/worktree, empty explicit selector, first-CWD, base-checkout/PR-worktree, and stale-registry cases. Fail if generated Codex coverage omits one required event or adds an invented event.
 - [ ] Run `cargo test --test hooks_v2 -- --nocapture`. Expected: fail because the root V2 hook module/types do not exist.
 - [ ] Implement the pure contracts and immutable adapter registry; generate JSON Schema fixtures and stable digests.
 - [ ] Re-run. Expected: all tests pass and unknown forward host event maps to typed UnsupportedEvent without panic.
@@ -670,7 +725,7 @@ Commands run from repository root with the checkout-local target directory. Do n
 
 **Files:** `src/v2/hooks/adapters/{codex,claude}.rs`; `src/v2/hooks/render/{mod,codex,claude}.rs`; `tests/fixtures/hooks_v2/{codex,claude}/`; `tests/hooks_v2/{host_conformance,v1_differential,outcome_evidence}.rs`.
 
-- [ ] Freeze redacted V1 fixtures for every applicable generated entry point in Section 12, including tool/result/error, subagent parent IDs, supported blocking/deny points, compact, direct/copy/subagent/protocol origins; preserve unsupported historical entry points only as explicit absent/legacy evidence.
+- [ ] Freeze redacted V1 fixtures and current stock Codex/Claude fixtures for every applicable generated entry point in Section 12. Codex covers all ten events, common/event fields, matcher aliases/ignored matchers, multiple additive source layers, concurrent handlers, command-only/unsupported handler forms, explicit timeout/status/cwd, Unix/Windows commands, tool/result/nonzero Bash, permission decisions, compact triggers, subagent/Turn continuation guards, plain-text/JSON/exit-2 output, invalid fields, and interception gaps; preserve unsupported historical entry points only as explicit absent/legacy evidence.
 - [ ] Run differential tests. Expected: fail before adapters exist.
 - [ ] Implement mapping/render only; use catalog binding and application policy result.
 - [ ] Re-run. Expected: normalized/request/reply parity passes or a fixture records an intentional versioned difference.

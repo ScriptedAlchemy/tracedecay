@@ -850,7 +850,7 @@ The hello is accepted only when its `HostCapabilitySnapshotV1.subject` is `Insta
 
 Timing rules:
 
-- ready before `PromptSubmit`: inject through the provider's supported developer/additional-context field, never by wrapping a normal prompt in a fake `UserPromptSubmit hook (completed)` user message;
+- ready before Codex `UserPromptSubmit` (or the host's exact equivalent): inject through the event-supported developer/additional-context field, never by wrapping a normal prompt in a fake `UserPromptSubmit hook (completed)` user message;
 - ready after prompt submission but before a declared `PreToolUse` boundary: deliver only if the category remains relevant to that exact Turn and the host supports that context field;
 - ready mid-generation: use `ProviderSteer` only when explicitly advertised, semantically safe, and the envelope is urgent enough under policy; otherwise do not interrupt;
 - ready after the useful boundary: mark `Late`, optionally reconsider as a new candidate against the next Turn only when the underlying evidence is independently relevant and a new envelope/address is created;
@@ -867,6 +867,8 @@ Claim and delivery are separate:
 3. adapter records delivered, failed, rejected, or unknown receipt;
 4. claim timeout returns envelope to eligible only if no host acknowledgement could have occurred; uncertain delivery is never retried automatically;
 5. retries by the same invocation return the stored receipt while its policy/catalog/environment digest still matches and do not duplicate injection; a digest mismatch returns a typed stale-environment error rather than re-evaluating or redelivering (the plan 7 §8 retry rule).
+
+When additive Codex sources launch several matching TraceDecay handlers concurrently, every handler run is captured, but `claim_pending_suggestion` uses plan 07's invocation-group identity and the same hint-state CAS. Exactly one winner may render a model-visible suggestion; losers return an empty successful response and cannot suppress sibling start. Arrival order never changes the chosen envelope. `Stop`/`SubagentStop` continuation is a separate policy effect, never an incremental-scout delivery channel, and `stop_hook_active` prevents a suggestion from creating a continuation loop.
 
 ## 12. Feedback and outcome attribution
 
@@ -942,11 +944,14 @@ Hint Lab accepts any authorized message, Turn, session position, event, suggesti
 - shadow replay of an entire session with cumulative dedupe/cooldown/budget state;
 - step view: trigger -> context delta -> hypotheses -> requested reads -> returned anchors -> feature scores -> suppression/selection -> rendered envelope;
 - exact payload/token count and host-specific rendering preview;
+- Codex definition/source replay with all ten exact events, source/trust/managed/effective state, matcher aliases or ignored matcher, concurrent handler-run grouping and arrival order, output/exit-code decode, deny/continuation precedence, unsupported-field failure, and explicit `unified_exec`/WebSearch/non-MCP interception gaps;
 - counterfactual delivery-time simulation for on-time/late/next-boundary behavior;
 - outcome relabeling workflow with adjudicator identity and agreement, never production delivery;
 - fixture promotion as a separate explicit test-artifact command.
 
 The evaluator is production-read-only by construction: plan 6 exposes immutable evaluator ports only, while plan 9's one hermetic experiment runner freezes clock/RNG, mounts immutable inputs plus a disposable overlay, denies production write/counter/cache/lease/effect ports, and records opened/denied resources in `ReplaySideEffectReceiptV1`. Results, relabeling evidence, variants, traces, and comparisons persist only through plan 2's generic experiment/run/stage family, never a scout/lab/replay-artifact store. It cannot claim/deliver an envelope, mutate live hint state, invoke mutation tools, or approve/apply/rollback curation. A current-best-effort live-model stage requires an explicit metered egress/model grant and budget; the manifest can reproduce inputs and recorded output but cannot claim byte determinism.
+
+Observed foreign hook definitions remain inert: Hint Lab may replay their recorded sanitized result or compare against TraceDecay's catalog renderer, but never executes a foreign command, handler, script, prompt, agent, path, or environment and never changes host trust.
 
 ### 13.4 Controls and feedback
 

@@ -872,9 +872,25 @@ pub struct HostBundleUpdatePolicyV1 {
     pub channel: HostBundleUpdateChannelV1,
     pub automatic: BoundedAutomaticUpdatePolicyV1,
 }
+
+pub struct HostHookComponentPolicyV1 {
+    pub enabled_intents: BTreeSet<RegistryEntryId>,
+    pub maximum_delivery: HostHookDeliveryBudgetV1,
+    pub trust_requirement: HostHookTrustRequirementV1,
+}
+pub struct HostHookDeliveryBudgetV1 {
+    pub max_model_visible_bytes_per_turn: u32,
+}
+// Imported unchanged from plan 01's tracedecay-domain::hooks_v1:
+// HostConfigSourceV1, HostHookDefinitionObservationV1,
+// HookDefinitionRepresentationV1, HostHookTrustRequirementV1, and child axes/receipts.
 ```
 
 `McpRegistrationNarrowingV1` can only remove exact plan-08 `BindingId`s or lower scope/sensitivity/grant ceilings for a registration already present in `install_set`; the selected `McpSurfaceProfileId` exists only inside that set. `BoundedAutomaticUpdatePolicyV1` carries enablement, maintenance window, and restart behavior under the target's authority. The remaining child types are closed validated value/policy records with no path, body, prompt, executable, URL, or secret field.
+
+For Codex, desired TraceDecay output selects only the generated plugin-default `hooks/hooks.json` representation; it never writes both that file and inline `[hooks]` in one layer. Observed `HostConfigSourceV1` inventory covers system/cloud/MDM/`requirements.toml`, user `~/.codex/hooks.json`, user `~/.codex/config.toml`, trusted-repository `<repo>/.codex/hooks.json`, trusted-repository `<repo>/.codex/config.toml`, session sources, and every enabled plugin default/manifest-declared source. Active sources compose additively—higher layers do not replace lower hooks. One layer containing JSON plus inline hooks records `dual_hook_representation` and the Codex startup warning; repair never deletes or rewrites the foreign representation. Untrusted repositories omit only their project-local source while user/system/plugin sources remain eligible.
+
+Codex feature resolution canonicalizes `[features].hooks`, defaults enabled when no key or policy override exists, and treats `codex_hooks` as an import-only deprecated alias rather than a second effective key. Managed requirements may force hooks true/false and `allow_managed_hooks_only`; the effective view records the winning policy lock and every skipped ordinary definition. Managed system/MDM/cloud/requirements hooks are `ManagedTrusted`, non-disableable, and read-only to ordinary TraceDecay install/repair. `managed_dir`/`windows_managed_dir` are externally deployed absolute-command roots observed without exposing paths or bodies. TraceDecay never turns a hash into `Trusted`, never automates `/hooks`, and never persists the one-off `--dangerously-bypass-hook-trust`; exact host trust hash and separate TraceDecay content digest bind through `HostHookTrustReceiptRefV1`, so changed bytes create `NeedsReview` plus `ChangedSinceReview` until the user acts in Codex. Trust, eligibility, handler support, and freshness remain orthogonal typed axes.
 
 | Key | Typed value | Contract |
 |---|---|---|
@@ -882,7 +898,7 @@ pub struct HostBundleUpdatePolicyV1 {
 | `host_integrations.install_scope` | `HostInstallScopeV1` | One adapter-documented user, machine, or managed-host scope; unsupported or privilege-escalating scope is a typed incompatibility, never silent fallback. |
 | `host_integrations.install_set` | `HostInstallSetV1` | Canonical `CoreSkillsCli` plus zero/one/many context/work/operator facade components; dependencies and conflicts are manifest-validated. |
 | `host_integrations.roles` | `BTreeMap<RegistryEntryId, DesiredComponentStateV1>` | Generated specialist-role enablement constrained to roles supplied by selected signed packages; no arbitrary prompt/body. |
-| `host_integrations.hook_policy` | generated hook-component policy | Per canonical hook-intent enablement, delivery limits, and host trust requirements; cannot add arbitrary executable/event definitions. |
+| `host_integrations.hook_policy` | generated hook-component policy | Per canonical hook-intent enablement, model-visible byte limit, and host trust requirement; the one plugin-default JSON layout and one-advisory-effect invariant are signed catalog metadata, not writable settings. Cannot add arbitrary executable/event definitions, mark Codex trust, edit managed hooks, persist bypass, or weaken feature/policy locks. |
 | `host_integrations.mcp_narrowing` | `BTreeMap<McpLogicalRegistrationId, McpRegistrationNarrowingV1>` | Optional narrowing only for registrations/profiles selected exactly once by `install_set`; cannot select or switch a profile. |
 | `host_integrations.trust_policy` | `HostTrustPolicyV1` | Ownership acceptance, signature/publisher policy, foreign-state behavior, and host-interaction approval class; cannot waive safety/privacy floors. |
 | `host_integrations.update_policy` | `HostBundleUpdatePolicyV1` | Pinned/current/channel selection plus bounded automatic-check policy, maintenance window, and restart behavior; automatic mutation remains bounded by the target's authority. |
@@ -1126,7 +1142,7 @@ Named V1 anchors (a human audit anchor in the plan 08 §5 style; plan 12's gener
 - project `.tracedecay/config.json` and profile `~/.tracedecay/config.json` (`CONFIG_FILENAME` under `TRACEDECAY_DIR`, relocated by `TRACEDECAY_DATA_DIR`);
 - project `.tracedecay/enrollment.json` and legacy settings rows in project/profile `.tracedecay/tracedecay.db` (dashboard project/user settings, automation config, branch autotrack state);
 - environment reads including `TRACEDECAY_DATA_DIR`, `TRACEDECAY_GLOBAL_DB`, `TRACEDECAY_SYNC_*`, `TRACEDECAY_DIAGNOSTICS_PREWARM`, `TRACEDECAY_OFFLINE`, `TRACEDECAY_TOOLS`, and `TRACEDECAY_MEMORY_INJECTION`; internal worker/test variables are classified as non-config runtime observations, not user settings;
-- provider/host hook and MCP installation metadata: Claude `settings.json` hook/MCP entries, Codex `config.toml` entries, Cursor hook configuration, and Kiro hook entries as foreign-observed state.
+- provider/host hook and MCP installation metadata: Claude `settings.json` hook/MCP entries; Codex user/repository `hooks.json`, inline `[hooks]` in `config.toml`, plugin default/manifest path-array/inline sources, system/session/cloud/MDM/`requirements.toml` managed sources, `[features].hooks`, deprecated `codex_hooks`, `allow_managed_hooks_only`, project trust, exact definition-hash review/disable state, and one-off bypass observation; Cursor hook configuration; and Kiro hook entries as foreign-observed state.
 
 For each legacy input record source, owner, parser version, value classification, mapped key, target resolution, selected precedence, semantic difference, and import receipt. Secrets are converted to keyring references or quarantined; they never enter V2 layer history. Ambiguous ownership is `ImportUnresolved` and cannot become effective.
 
@@ -1240,7 +1256,7 @@ For every use case, run one fixture through in-process application, CLI JSON, MC
 
 Generated artifacts must leave a clean tree. An inventory test compares every registry key against CLI completion, MCP/OpenAPI schemas, SDKs, dashboard renderer coverage, and docs.
 
-Add host-profile fixtures for a core-only component set with no MCP dependency; explicit zero/one/many context/work/operator facade companions from the thin `tracedecay` integration binary connected to private `tracedecayd`; explicit headless facade-only deployment; target-scoped base/companion package selection; skills/roles/hooks/MCP component enablement; user/machine/managed install scopes; trust/update/credential-reference policy; immutable integration/profile/catalog/grant/budget digest verification; desired/activated/observed/effective separation; stale-cache/foreign-owner/version-digest/registration drift; every restart directive; allowlist/ceiling narrowing; immediate disable/revocation; pending reconnect on every widening; eager-all-tools, paginated-list, ignored-list-change, and deferred-tool-search clients. Prove config save has no host effect and every host effect has one integration operation receipt. No fixture may rely on protocol-guaranteed progressive disclosure.
+Add host-profile fixtures for a core-only component set with no MCP dependency; explicit zero/one/many context/work/operator facade companions from the thin `tracedecay` integration binary connected to private `tracedecayd`; explicit headless facade-only deployment; target-scoped base/companion package selection; skills/roles/hooks/MCP component enablement; user/machine/managed install scopes; trust/update/credential-reference policy; immutable integration/profile/catalog/grant/budget digest verification; desired/activated/observed/effective separation; stale-cache/foreign-owner/version-digest/registration drift; every restart directive; allowlist/ceiling narrowing; immediate disable/revocation; pending reconnect on every widening; eager-all-tools, paginated-list, ignored-list-change, and deferred-tool-search clients. Codex fixtures cover every additive source/layer, same-layer dual representation warning, trusted/untrusted repository, plugin default/manifest override forms, feature false/true/deprecated alias, requirements force/managed-only, managed immutable trust, exact-hash change/review/disable, ephemeral bypass, and unsupported handler state. Prove config save has no host effect, trust is never automated, managed state is never mutated, and every legal host effect has one integration operation receipt. No fixture may rely on protocol-guaranteed progressive disclosure.
 
 ### 21.4 UI and CLI
 
@@ -1250,6 +1266,7 @@ Add host-profile fixtures for a core-only component set with no MCP dependency; 
 - Restart/rescan/reindex/migration progress and SSE reconnect/resync.
 - Secret-reference non-rendering, URL/storage/log/clipboard scans, and synthetic canaries.
 - Copy-command round trips between UI and CLI JSON.
+- Redacted Codex hook inventory parity across Settings/CLI/API: source layer/representation, event/matcher behavior, definition digest, managed/project-trust/review/disable/effective/skip reason, overlap group, last run, and exact `/hooks` remediation; no command body or path renders.
 
 ### 21.5 Autonomous curation
 
