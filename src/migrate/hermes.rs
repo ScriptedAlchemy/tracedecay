@@ -3414,7 +3414,10 @@ mod tests {
         let report = migrate_legacy_hermes_stores_to(&user_home, &profile_root).await;
         assert_eq!(report.migrated.len(), 1, "{report:?}");
         assert!(report.unresolved.is_empty(), "{report:?}");
-        assert_eq!(report.migrated[0].target_project, project);
+        assert_eq!(
+            report.migrated[0].target_project,
+            project.canonicalize().unwrap()
+        );
         assert!(!crate::sessions::user_sessions_db_path(&profile_root).exists());
     }
 
