@@ -1394,7 +1394,11 @@ impl McpServer {
             tokio::spawn(async move {
                 let _ = tokio::time::timeout(std::time::Duration::from_secs(20), async move {
                     if let Some(db) = GlobalDb::open_at(&session_db_path).await {
-                        let _ = crate::sessions::ingest_global_sources(&db, &project_root).await;
+                        let _ = crate::sessions::ingest_global_sources_for_startup(
+                            &db,
+                            &project_root,
+                        )
+                        .await;
                         // Historical git-span correlation is only ever written by
                         // live hook events (which never fire for stdio/daemonless
                         // deployments) or a manual CLI backfill. Neither runs for

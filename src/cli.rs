@@ -254,6 +254,9 @@ pub enum Commands {
     /// Codex PostCompact hook handler for app-server LCM summaries (called by Codex)
     #[command(name = "hook-codex-post-compact", hide = true)]
     HookCodexPostCompact,
+    /// Codex Stop hook handler for final-turn user-session ingestion (called by Codex)
+    #[command(name = "hook-codex-stop", hide = true)]
+    HookCodexStop,
     /// Hermes terminal receipt handler (called by the TraceDecay plugin)
     #[command(name = "hook-hermes-terminal-receipt", hide = true)]
     HookHermesTerminalReceipt,

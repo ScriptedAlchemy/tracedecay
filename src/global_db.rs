@@ -971,20 +971,38 @@ impl GlobalDb {
     /// in-process and retried briefly to also cover a racing *external*
     /// process (e.g. two MCP servers starting simultaneously).
     pub async fn open_at(db_path: &std::path::Path) -> Option<Self> {
+        Self::open_at_with_backfill(db_path, true).await
+    }
+
+    /// Opens and ensures a writable session store without starting detached
+    /// structured backfill. Bulk multi-store catch-up uses this to avoid
+    /// launching one competing backfill task per registered project.
+    pub async fn open_at_without_structured_backfill(db_path: &std::path::Path) -> Option<Self> {
+        Self::open_at_with_backfill(db_path, false).await
+    }
+
+    async fn open_at_with_backfill(
+        db_path: &std::path::Path,
+        spawn_structured_backfill: bool,
+    ) -> Option<Self> {
         static OPEN_ENSURE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
         let _guard = OPEN_ENSURE_LOCK.lock().await;
         for attempt in 0..3_u64 {
             if attempt > 0 {
                 tokio::time::sleep(std::time::Duration::from_millis(50 * attempt)).await;
             }
-            if let Some(db) = Self::open_at_unsynchronized(db_path).await {
+            if let Some(db) = Self::open_at_unsynchronized(db_path, spawn_structured_backfill).await
+            {
                 return Some(db);
             }
         }
         None
     }
 
-    async fn open_at_unsynchronized(db_path: &std::path::Path) -> Option<Self> {
+    async fn open_at_unsynchronized(
+        db_path: &std::path::Path,
+        spawn_structured_backfill: bool,
+    ) -> Option<Self> {
         if let Some(parent) = db_path.parent() {
             std::fs::create_dir_all(parent).ok()?;
         }
@@ -1204,7 +1222,9 @@ impl GlobalDb {
         // runs on every open (per hook event, per CLI/MCP invocation), so it
         // must not block: schedule it on a detached background task rather than
         // synchronously reading and re-parsing a batch of multi-MB transcripts.
-        db.spawn_structured_backfill();
+        if spawn_structured_backfill {
+            db.spawn_structured_backfill();
+        }
 
         Some(db)
     }
@@ -3477,10 +3497,17 @@ impl GlobalDb {
                 return false;
             }
         }
-        if !self
-            .set_parse_offset_in_existing_tx(parse_offset_path, parse_offset)
-            .await
-        {
+        let cursor_set = match mode {
+            TranscriptWriteMode::Full => {
+                self.set_parse_offset_in_existing_tx(parse_offset_path, parse_offset)
+                    .await
+            }
+            TranscriptWriteMode::ProjectionOnly => {
+                self.set_parse_offset_monotonic_in_existing_tx(parse_offset_path, parse_offset)
+                    .await
+            }
+        };
+        if !cursor_set {
             let _ = self.conn.execute("ROLLBACK", ()).await;
             return false;
         }
@@ -4849,6 +4876,39 @@ impl GlobalDb {
     /// Saves the parse cursor for a transcript path. Best-effort.
     pub async fn set_parse_offset(&self, path: &str, offset: ParseOffset) {
         let _ = self.set_parse_offset_in_existing_tx(path, offset).await;
+    }
+
+    /// Advances a row-style parse cursor without allowing an overlapping,
+    /// older sweep to move it backwards.
+    pub async fn advance_parse_offset(&self, path: &str, offset: ParseOffset) {
+        let _ = self
+            .set_parse_offset_monotonic_in_existing_tx(path, offset)
+            .await;
+    }
+
+    async fn set_parse_offset_monotonic_in_existing_tx(
+        &self,
+        path: &str,
+        offset: ParseOffset,
+    ) -> bool {
+        self.conn
+            .execute(
+                "INSERT INTO parse_offsets (file_path, byte_offset, mtime, file_id)
+                 VALUES (?1, ?2, ?3, ?4)
+                 ON CONFLICT(file_path) DO UPDATE SET
+                    byte_offset = excluded.byte_offset,
+                    mtime = excluded.mtime,
+                    file_id = excluded.file_id
+                 WHERE excluded.byte_offset >= parse_offsets.byte_offset",
+                params![
+                    path,
+                    offset.byte_offset as i64,
+                    offset.mtime as i64,
+                    offset.file_id as i64
+                ],
+            )
+            .await
+            .is_ok()
     }
 
     async fn set_parse_offset_in_existing_tx(&self, path: &str, offset: ParseOffset) -> bool {

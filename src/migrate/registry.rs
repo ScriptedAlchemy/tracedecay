@@ -1140,5 +1140,5 @@ fn is_safe_relpath(path: &Path) -> bool {
 }
 
 fn path_string(path: &Path) -> String {
-    path.to_string_lossy().to_string()
+    path.to_string_lossy().replace('\\', "/")
 }

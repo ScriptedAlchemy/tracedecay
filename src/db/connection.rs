@@ -256,13 +256,45 @@ impl Database {
     /// This ensures all committed transactions are merged into the main DB
     /// before the process exits, preventing a stale WAL file on next startup.
     pub async fn checkpoint(&self) -> Result<()> {
-        self.conn
-            .execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
+        let mut rows = self
+            .conn
+            .query("PRAGMA wal_checkpoint(TRUNCATE);", ())
             .await
             .map_err(|e| TraceDecayError::Database {
                 message: format!("failed to checkpoint WAL: {e}"),
                 operation: "checkpoint".to_string(),
             })?;
+        let row = rows
+            .next()
+            .await
+            .map_err(|e| TraceDecayError::Database {
+                message: format!("failed to read WAL checkpoint status: {e}"),
+                operation: "checkpoint".to_string(),
+            })?
+            .ok_or_else(|| TraceDecayError::Database {
+                message: "WAL checkpoint returned no status row".to_string(),
+                operation: "checkpoint".to_string(),
+            })?;
+        let busy: i64 = row.get(0).map_err(|e| TraceDecayError::Database {
+            message: format!("failed to read WAL checkpoint busy status: {e}"),
+            operation: "checkpoint".to_string(),
+        })?;
+        let log_frames: i64 = row.get(1).map_err(|e| TraceDecayError::Database {
+            message: format!("failed to read WAL checkpoint frame count: {e}"),
+            operation: "checkpoint".to_string(),
+        })?;
+        let checkpointed_frames: i64 = row.get(2).map_err(|e| TraceDecayError::Database {
+            message: format!("failed to read WAL checkpoint completion count: {e}"),
+            operation: "checkpoint".to_string(),
+        })?;
+        if busy != 0 || checkpointed_frames < log_frames {
+            return Err(TraceDecayError::Database {
+                message: format!(
+                    "WAL checkpoint incomplete: busy={busy}, log_frames={log_frames}, checkpointed_frames={checkpointed_frames}"
+                ),
+                operation: "checkpoint".to_string(),
+            });
+        }
         Ok(())
     }
 

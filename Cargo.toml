@@ -1,6 +1,6 @@
 [package]
 name = "tracedecay"
-version = "0.0.56"
+version = "0.0.57"
 edition = "2024"
 description = "Code intelligence tool that builds a semantic knowledge graph from Rust, Go, Java, Scala, TypeScript, Python, C, C++, Kotlin, C#, Swift, and many more codebases"
 license = "MIT"
@@ -182,6 +182,12 @@ jsonschema = { version = "0.46.8", default-features = false }
 [[bench]]
 name = "large_repos"
 harness = false
+
+# Full debuginfo makes each large integration-test binary 500-700 MB and
+# dominates local/CI link time. Level 1 preserves source line tables for
+# useful panic backtraces while substantially shrinking linker input/output.
+[profile.test]
+debug = 1
 
 # Compile the SQLite stack with optimizations even in dev/test builds. The
 # bundled SQLite C sources in libsql-ffi are otherwise built at -O0 (cc honors

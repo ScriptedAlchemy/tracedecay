@@ -28,6 +28,7 @@ const STDIN_HOOKS: &[&str] = &[
     "hook-codex-subagent-start",
     "hook-codex-post-tool-use",
     "hook-codex-post-compact",
+    "hook-codex-stop",
 ];
 
 fn hold_external_exclusive_lease(home: &Path) -> File {
@@ -69,7 +70,7 @@ fn run_hook(home: &Path, hook: &str, input: Option<&[u8]>) -> Output {
 #[test]
 fn exclusive_lifecycle_owner_quiesces_every_hook_before_startup_or_dispatch() {
     assert_eq!(NO_INPUT_HOOKS.len(), 3);
-    assert_eq!(STDIN_HOOKS.len(), 21);
+    assert_eq!(STDIN_HOOKS.len(), 22);
     let temp = tempfile::tempdir().unwrap();
     let home = temp.path();
     let profile = home.join(".tracedecay");

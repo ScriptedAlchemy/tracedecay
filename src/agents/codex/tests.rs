@@ -173,6 +173,7 @@ fn codex_hook_trust_state_reports_missing_entries() {
         CodexHookTrustState::Missing(vec![
             "post_compact".to_string(),
             "session_start".to_string(),
+            "stop".to_string(),
             "subagent_start".to_string(),
             "user_prompt_submit".to_string(),
         ])
@@ -230,6 +231,9 @@ trusted_hash = "sha256:subagent"
 
 [hooks.state."tracedecay@local-repo:hooks/hooks.json:post_compact:0:0"]
 trusted_hash = "sha256:compact"
+
+[hooks.state."tracedecay@local-repo:hooks/hooks.json:stop:0:0"]
+trusted_hash = "sha256:stop"
 "#,
     )
     .unwrap();
@@ -240,6 +244,7 @@ trusted_hash = "sha256:compact"
             "post_compact".to_string(),
             "post_tool_use".to_string(),
             "session_start".to_string(),
+            "stop".to_string(),
             "subagent_start".to_string(),
             "user_prompt_submit".to_string(),
         ])
@@ -263,10 +268,33 @@ trusted_hash = "sha256:foreign"
 "#,
     )
     .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&config_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
 
     let outcome = sync_codex_hook_trust(home.path(), TEST_BIN).unwrap();
     assert_eq!(outcome.trusted, CODEX_MANAGED_HOOKS.len());
     assert!(outcome.skipped.is_empty());
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            std::fs::metadata(&config_path)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+    }
+
+    let config_text = std::fs::read_to_string(&config_path).unwrap();
+    assert!(
+        config_text.lines().any(|line| line == "[hooks.state]"),
+        "Codex requires an explicit [hooks.state] parent table before trusting child records"
+    );
 
     let entries = managed_entries(TEST_BIN);
     let config = load_toml_file(&config_path).unwrap();

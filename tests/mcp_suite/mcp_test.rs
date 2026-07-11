@@ -113,7 +113,7 @@ fn test_tool_definitions_count() {
             tool.name
         );
         let storage_scope = tool.input_schema["properties"].get("storage_scope");
-        if tool.name.starts_with("tracedecay_lcm_") {
+        if tool.name.starts_with("tracedecay_lcm_") || tool.name == "tracedecay_message_search" {
             assert_eq!(storage_scope.unwrap()["enum"], json!(["project", "user"]));
         } else {
             assert!(

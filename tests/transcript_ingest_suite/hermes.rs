@@ -8,15 +8,47 @@ use std::path::{Path, PathBuf};
 
 use serde_json::json;
 use tempfile::TempDir;
-use tracedecay::global_db::GlobalDb;
+use tracedecay::global_db::{GlobalDb, ParseOffset};
 use tracedecay::sessions::SessionRecord;
 use tracedecay::sessions::cursor::open_project_session_db;
-use tracedecay::sessions::hermes::{ingest_for_project, ingest_homes, ingest_user_homes};
+use tracedecay::sessions::hermes::{
+    ProjectIngestDestination, ingest_for_project, ingest_homes, ingest_homes_for_projects,
+    ingest_user_homes,
+};
 use tracedecay::sessions::lcm::LcmPreflightRequest;
 
 use crate::support::{assert_metadata_path_eq, create_git_repo_with_linked_worktree};
 
 const SESSION_ID: &str = "20260101_000000_abc123";
+
+#[tokio::test]
+async fn hermes_row_cursor_cannot_regress_during_overlapping_sweeps() {
+    let tmp = TempDir::new().unwrap();
+    let db = GlobalDb::open_at(&tmp.path().join("sessions.db"))
+        .await
+        .unwrap();
+    let cursor = "state.db#turn-project-v2";
+    db.advance_parse_offset(
+        cursor,
+        ParseOffset {
+            byte_offset: 200,
+            mtime: 20,
+            file_id: 0,
+        },
+    )
+    .await;
+    db.advance_parse_offset(
+        cursor,
+        ParseOffset {
+            byte_offset: 100,
+            mtime: 10,
+            file_id: 0,
+        },
+    )
+    .await;
+
+    assert_eq!(db.get_parse_offset(cursor).await.unwrap().byte_offset, 200);
+}
 
 #[tokio::test]
 // Intentional: this test changes HOME/USERPROFILE/HERMES_HOME while storage
@@ -460,6 +492,126 @@ async fn hermes_ingest_is_incremental_and_idempotent() {
     let session = db.get_session("hermes", SESSION_ID).await.unwrap();
     assert_eq!(session.started_at, Some(1_780_629_300));
     assert_eq!(session.ended_at, Some(1_780_629_340));
+}
+
+#[tokio::test]
+async fn hermes_shared_sweep_routes_one_source_to_multiple_project_stores() {
+    let tmp = TempDir::new().unwrap();
+    let (hermes_home, first_project) = setup(&tmp);
+    let second_project = tmp.path().join("second-project");
+    crate::support::init_project_at(&second_project);
+    let state_db = write_hermes_profile(&hermes_home, "test", None).await;
+    let conn = open_state_db(&state_db).await;
+    conn.execute(
+        "UPDATE sessions SET cwd = ?1 WHERE id = ?2",
+        libsql::params![first_project.to_string_lossy().as_ref(), SESSION_ID],
+    )
+    .await
+    .unwrap();
+    let second_session = "20260101_000100_def456";
+    conn.execute(
+        "INSERT INTO sessions (id, source, model, started_at, cwd, title)
+         VALUES (?1, 'telegram', 'gpt-5.5', 1780629500.0, ?2, 'Second project')",
+        libsql::params![second_session, second_project.to_string_lossy().as_ref()],
+    )
+    .await
+    .unwrap();
+    conn.execute(
+        "INSERT INTO messages (session_id, role, content, timestamp)
+         VALUES (?1, 'user', 'Route this message to the second project', 1780629501.0)",
+        libsql::params![second_session],
+    )
+    .await
+    .unwrap();
+
+    let first_db = open_project_session_db(&first_project).await.unwrap();
+    let second_db = open_project_session_db(&second_project).await.unwrap();
+    let destinations = [
+        ProjectIngestDestination {
+            db: &first_db,
+            project_root: &first_project,
+        },
+        ProjectIngestDestination {
+            db: &second_db,
+            project_root: &second_project,
+        },
+    ];
+    let stats = ingest_homes_for_projects(std::slice::from_ref(&hermes_home), &destinations).await;
+
+    assert_eq!(stats.messages_upserted, 5);
+    assert!(first_db.get_session("hermes", SESSION_ID).await.is_some());
+    assert!(
+        first_db
+            .get_session("hermes", second_session)
+            .await
+            .is_none()
+    );
+    assert!(second_db.get_session("hermes", SESSION_ID).await.is_none());
+    assert!(
+        second_db
+            .get_session("hermes", second_session)
+            .await
+            .is_some()
+    );
+    assert_eq!(
+        ingest_homes_for_projects(std::slice::from_ref(&hermes_home), &destinations)
+            .await
+            .messages_upserted,
+        0
+    );
+}
+
+#[tokio::test]
+#[ignore = "manual cold-history benchmark; requires TRACEDECAY_HERMES_BENCH_HOME and TRACEDECAY_HERMES_BENCH_PROJECT"]
+async fn hermes_shared_sweep_cold_history_completes_under_sixty_seconds() {
+    let hermes_home = PathBuf::from(
+        std::env::var("TRACEDECAY_HERMES_BENCH_HOME").expect("Hermes home for benchmark"),
+    );
+    let project_root = PathBuf::from(
+        std::env::var("TRACEDECAY_HERMES_BENCH_PROJECT").expect("project root for benchmark"),
+    );
+    let output_root = PathBuf::from(
+        std::env::var("TRACEDECAY_HERMES_BENCH_OUTPUT").expect("fast output root for benchmark"),
+    );
+    std::fs::create_dir_all(&output_root).unwrap();
+    let temp = tempfile::Builder::new()
+        .prefix("hermes-cold-catchup-")
+        .tempdir_in(output_root)
+        .unwrap();
+    let mut project_roots = vec![project_root];
+    for index in 1..31 {
+        let root = temp.path().join(format!("project-{index}"));
+        crate::support::init_project_at(&root);
+        project_roots.push(root);
+    }
+    let mut dbs = Vec::with_capacity(project_roots.len());
+    for index in 0..project_roots.len() {
+        dbs.push(
+            GlobalDb::open_at_without_structured_backfill(
+                &temp.path().join(format!("sessions-{index}.db")),
+            )
+            .await
+            .unwrap(),
+        );
+    }
+    let destinations = dbs
+        .iter()
+        .zip(&project_roots)
+        .map(|(db, project_root)| ProjectIngestDestination { db, project_root })
+        .collect::<Vec<_>>();
+
+    let started = std::time::Instant::now();
+    let stats = ingest_homes_for_projects(std::slice::from_ref(&hermes_home), &destinations).await;
+    let elapsed = started.elapsed();
+
+    assert!(
+        stats.messages_upserted > 0,
+        "benchmark must ingest real history"
+    );
+    assert!(
+        elapsed < std::time::Duration::from_secs(60),
+        "cold Hermes catch-up took {elapsed:?}"
+    );
 }
 
 #[tokio::test]

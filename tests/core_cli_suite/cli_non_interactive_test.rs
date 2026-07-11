@@ -1766,6 +1766,103 @@ fn migrate_verify_text_reports_actual_apply_supported_state() {
 }
 
 #[test]
+fn migrate_registry_gc_cleans_stale_storage_metadata_and_preserves_live_and_blocked_stores() {
+    let home = TempDir::new().expect("home tempdir");
+    let live_project = home.path().join("live-project");
+    std::fs::create_dir_all(&live_project).expect("live project dir");
+    std::fs::write(live_project.join("lib.rs"), "pub fn live() {}\n").expect("live source");
+
+    let init = tracedecay_command(home.path(), &live_project)
+        .args(["init", "."])
+        .output()
+        .expect("init live project");
+    assert!(
+        init.status.success(),
+        "init failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&init.stdout),
+        String::from_utf8_lossy(&init.stderr)
+    );
+
+    let stale_project = canonical_temp_path(home.path()).join("gone-project");
+    let global_db_path = profile_root(home.path()).join("global.db");
+    create_runtime().block_on(async {
+        let db = GlobalDb::open_at(&global_db_path)
+            .await
+            .expect("open global db");
+        db.upsert(&stale_project, 1).await;
+        db.upsert_code_project("stale-identity", &stale_project, None, None, None)
+            .await
+            .expect("register stale project identity");
+    });
+
+    let blocked_manifest = profile_root(home.path())
+        .join("projects/proj_blocked")
+        .join(STORE_MANIFEST_FILENAME);
+    std::fs::create_dir_all(blocked_manifest.parent().expect("manifest parent"))
+        .expect("blocked store dir");
+    std::fs::write(&blocked_manifest, b"blocked-store-sentinel")
+        .expect("blocked manifest sentinel");
+
+    let preview = tracedecay_command(home.path(), &live_project)
+        .args(["migrate", "registry-gc", "--json"])
+        .output()
+        .expect("registry-gc preview");
+    assert!(
+        preview.status.success(),
+        "preview failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&preview.stdout),
+        String::from_utf8_lossy(&preview.stderr)
+    );
+    let preview: serde_json::Value = serde_json::from_slice(&preview.stdout).expect("preview json");
+    assert_eq!(preview["candidate_count"], 1);
+    assert_eq!(preview["metadata_candidate_count"], 2);
+    assert_eq!(preview["code_project_candidate_count"], 1);
+    assert_eq!(preview["storage_project_candidate_count"], 1);
+    assert_eq!(preview["deleted_count"], 0);
+    assert_eq!(
+        preview["storage_project_candidates"][0],
+        stale_project.display().to_string()
+    );
+
+    let apply = tracedecay_command(home.path(), &live_project)
+        .args(["migrate", "registry-gc", "--apply", "--json"])
+        .output()
+        .expect("registry-gc apply");
+    assert!(
+        apply.status.success(),
+        "apply failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&apply.stdout),
+        String::from_utf8_lossy(&apply.stderr)
+    );
+    let apply: serde_json::Value = serde_json::from_slice(&apply.stdout).expect("apply json");
+    assert_eq!(apply["deleted_code_project_count"], 1);
+    assert_eq!(apply["deleted_storage_project_count"], 1);
+    assert_eq!(apply["deleted_count"], 2);
+
+    let remaining = create_runtime().block_on(async {
+        GlobalDb::open_at(&global_db_path)
+            .await
+            .expect("reopen global db")
+            .list_project_paths()
+            .await
+    });
+    assert!(
+        !remaining
+            .iter()
+            .any(|path| Path::new(path) == stale_project)
+    );
+    assert!(
+        remaining
+            .iter()
+            .any(|path| Path::new(path) == canonical_temp_path(&live_project))
+    );
+    assert_eq!(
+        std::fs::read(&blocked_manifest).expect("blocked manifest retained"),
+        b"blocked-store-sentinel"
+    );
+}
+
+#[test]
 fn migrate_plan_save_writes_manifest_and_prints_confirmation_token_noninteractively() {
     let home = TempDir::new().unwrap();
     let project = TempDir::new().unwrap();

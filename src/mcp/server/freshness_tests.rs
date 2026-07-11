@@ -150,6 +150,9 @@ async fn startup_catch_up_spawned_once_per_server() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn ledger_writes_settled_is_bounded_when_a_write_wedges() {
     let (cg, _dir, _pin) = init_indexed_repo().await;
+    let mut config = crate::config::load_config(cg.project_root()).expect("load config");
+    config.sync.session_start_sync = false;
+    crate::config::save_config(cg.project_root(), &config).expect("disable unrelated catch-up");
     let server = McpServer::new(cg, None).await;
 
     // Inject a never-completing observed ledger write via the same accounting

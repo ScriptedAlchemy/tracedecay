@@ -411,6 +411,44 @@ async fn insert_undated_message(global_db_path: &Path) {
     }
 }
 
+async fn insert_colliding_provider_message(global_db_path: &Path) {
+    let Some(global_db) = GlobalDb::open_at(global_db_path).await else {
+        panic!(
+            "failed to open colliding-provider fixture store at {}",
+            global_db_path.display()
+        );
+    };
+    let session = SessionRecord {
+        provider: "codex".to_string(),
+        session_id: SESSION_ID.to_string(),
+        project_key: "provider-collision".to_string(),
+        project_path: "/provider-collision".to_string(),
+        title: Some("Provider collision".to_string()),
+        started_at: Some(1_700_003_000),
+        ended_at: None,
+        transcript_path: None,
+        metadata_json: None,
+        parent_session_id: None,
+        is_subagent: false,
+        agent_id: None,
+        parent_tool_use_id: None,
+    };
+    if !global_db.upsert_session(&session).await {
+        panic!("failed to upsert colliding provider session fixture");
+    }
+    let mut colliding = message(
+        "msg-collision",
+        "user",
+        1,
+        1_700_003_000,
+        "provider collision",
+    );
+    colliding.provider = "codex".to_string();
+    if !global_db.upsert_session_message(&colliding).await {
+        panic!("failed to upsert colliding provider message fixture");
+    }
+}
+
 #[test]
 fn basic_lcm_dashboard_errors_and_timeline_contracts() {
     let _env_lock = GLOBAL_DB_ENV_LOCK
@@ -666,6 +704,35 @@ fn session_endpoint_orders_by_ordinal_paginates_nodes_and_enriches_messages() {
                 .iter()
                 .any(|id| id == fixture.linked_node_id.as_str()),
             "node source message must include summary_node_ids"
+        );
+    });
+}
+
+#[test]
+fn session_endpoint_rejects_provider_ambiguous_session_ids() {
+    let _env_lock = GLOBAL_DB_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let runtime = create_runtime();
+    runtime.block_on(async {
+        let fixture = start_fixture(false).await;
+        insert_colliding_provider_message(&fixture.global_db_path).await;
+
+        let (status, response) = get_json(
+            &http_agent(),
+            &format!(
+                "{}/api/plugins/hermes-lcm/session/{SESSION_ID}",
+                fixture.base_url
+            ),
+        );
+
+        assert_eq!(status, 409);
+        assert!(
+            response["detail"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("ambiguous session id across providers"),
+            "unexpected response: {response}"
         );
     });
 }

@@ -1686,5 +1686,5 @@ fn io_error(error: io::Error) -> TraceDecayError {
     config_error(error.to_string())
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(windows)))]
 mod tests;

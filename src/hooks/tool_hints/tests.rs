@@ -171,8 +171,10 @@ fn every_hint_route_names_a_registered_agent_tool() {
 
     for spec in CATEGORY_SPECS {
         for tool in spec.expected_tools {
+            let unavailable_optional_tool =
+                *tool == "tracedecay_ast_grep_rewrite" && !crate::mcp::tools::ast_grep_available();
             assert!(
-                registered.contains(*tool),
+                registered.contains(*tool) || unavailable_optional_tool,
                 "hint category {} routes agents to unregistered tool {tool}",
                 spec.key
             );

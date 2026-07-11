@@ -309,7 +309,10 @@ fn database_recovery_guidance(db_path: &Path) -> String {
     let wal_path = db_path.with_extension("db-wal");
     let shm_path = db_path.with_extension("db-shm");
     let data_root = db_path.parent().unwrap_or_else(|| Path::new("."));
-    let dirty_path = data_root.join("dirty");
+    let mut graph_dirty = db_path.as_os_str().to_os_string();
+    graph_dirty.push(".dirty");
+    let graph_dirty = PathBuf::from(graph_dirty);
+    let legacy_dirty = data_root.join("dirty");
     let sessions_path = data_root.join(crate::storage::SESSIONS_DB_FILENAME);
 
     format!(
@@ -318,7 +321,8 @@ fn database_recovery_guidance(db_path: &Path) -> String {
          DB: {}\n\
          WAL: {}\n\
          SHM: {}\n\
-         dirty sentinel: {}\n\
+         graph dirty sentinel: {}\n\
+         legacy dirty sentinel (if present): {}\n\
          `sessions.db` is separate and must not be removed: {}\n\
          Facts are stored in the graph database; automatic rebuild is intentionally blocked because it cannot preserve them generically.\n\
          Do not run `tracedecay init`, `tracedecay sync --force`, or `tracedecay wipe` until that recovery set is safely copied.\n\
@@ -326,7 +330,8 @@ fn database_recovery_guidance(db_path: &Path) -> String {
         db_path.display(),
         wal_path.display(),
         shm_path.display(),
-        dirty_path.display(),
+        graph_dirty.display(),
+        legacy_dirty.display(),
         sessions_path.display(),
     )
 }
@@ -454,7 +459,9 @@ async fn check_stale_stores(dc: &mut DoctorCounters) {
 
     if !std::io::stdin().is_terminal() {
         dc.warnings += 1;
-        dc.info("    Re-run `tracedecay doctor` interactively to purge them.");
+        dc.info(
+            "    Run `tracedecay migrate registry-gc --json` to preview, then add `--apply` to purge metadata only.",
+        );
         return;
     }
 
