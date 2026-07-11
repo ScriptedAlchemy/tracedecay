@@ -349,6 +349,9 @@ fn refresh_installed_service_with_state(
     spec: &DaemonServiceSpec,
     previous_state: Option<DaemonServiceState>,
 ) -> Result<Option<PathBuf>> {
+    if !cfg!(any(target_os = "linux", target_os = "macos")) {
+        return Ok(None);
+    }
     let service_path = service_unit_path()?;
     if !service_path.exists() {
         return Ok(None);
@@ -372,6 +375,9 @@ fn refresh_installed_service_with_state(
 
 #[doc(hidden)]
 pub fn quiesce_installed_service_under_lease() -> Result<DaemonServiceState> {
+    if !cfg!(any(target_os = "linux", target_os = "macos")) {
+        return Ok(DaemonServiceState::Missing);
+    }
     let service_path = service_unit_path()?;
     if !service_path.exists() {
         if daemon_reachable() {

@@ -1,5 +1,5 @@
 use std::collections::BTreeMap;
-use std::fs::{self, File};
+use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 
@@ -93,19 +93,34 @@ pub(super) fn copy_file_atomic(source: &Path, target: &Path) -> Result<()> {
         .ok_or_else(|| config_error("artifact target has no parent"))?;
     fs::create_dir_all(parent).map_err(io_error)?;
     let temp = target.with_extension(format!("tmp-{}", std::process::id()));
-    fs::copy(source, &temp).map_err(io_error)?;
-    File::open(&temp)
-        .and_then(|file| file.sync_all())
+    match fs::remove_file(&temp) {
+        Ok(()) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(io_error(error)),
+    }
+    let mut input = File::open(source).map_err(io_error)?;
+    let mut output = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temp)
         .map_err(io_error)?;
+    io::copy(&mut input, &mut output).map_err(io_error)?;
+    fs::set_permissions(&temp, fs::metadata(source).map_err(io_error)?.permissions())
+        .map_err(io_error)?;
+    output.sync_all().map_err(io_error)?;
+    drop(output);
     fs::rename(&temp, target).map_err(io_error)?;
     sync_parent_directory(parent)?;
     Ok(())
 }
 
 fn sync_file_and_parent(path: &Path) -> Result<()> {
+    #[cfg(unix)]
     File::open(path)
         .and_then(|file| file.sync_all())
         .map_err(io_error)?;
+    #[cfg(not(unix))]
+    let _ = path;
     let parent = path
         .parent()
         .ok_or_else(|| config_error("artifact target has no parent"))?;
