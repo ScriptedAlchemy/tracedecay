@@ -9,8 +9,8 @@ use tracedecay::memory::trust::{
     DEFAULT_TRUST, apply_feedback, clamp_trust, trust_bucket, trust_distribution,
 };
 use tracedecay::memory::types::{
-    AddFactDiffKind, AddFactRequest, FactRecord, FeedbackAction, FeedbackRequest, MemoryCategory,
-    SearchFactsRequest, UpdateFactRequest,
+    AddFactDiffKind, AddFactRequest, FactRecord, FactRelationKind, FeedbackAction, FeedbackRequest,
+    MemoryCategory, MemoryGroomingOperation, SearchFactsRequest, UpdateFactRequest,
 };
 use tracedecay::tracedecay::TraceDecay;
 
@@ -19,6 +19,234 @@ async fn make_project() -> (TempDir, TraceDecay) {
     std::fs::write(tmp.path().join("a.rs"), "pub fn hello() {}").unwrap();
     let cg = TraceDecay::init(tmp.path()).await.unwrap();
     (tmp, cg)
+}
+
+#[tokio::test]
+async fn fact_relations_rewire_and_deduplicate_when_facts_merge() {
+    let (db, _tmp) = make_memory_store().await;
+    let store = MemoryStore::new(db.conn());
+    let a = store
+        .add_fact(
+            fact_request("alpha relation fact", MemoryCategory::Project, 0.9),
+            DEFAULT_TRUST,
+        )
+        .await
+        .unwrap()
+        .fact
+        .unwrap();
+    let b = store
+        .add_fact(
+            fact_request("beta relation fact", MemoryCategory::Project, 0.9),
+            DEFAULT_TRUST,
+        )
+        .await
+        .unwrap()
+        .fact
+        .unwrap();
+    let c = store
+        .add_fact(
+            fact_request("gamma relation fact", MemoryCategory::Project, 0.9),
+            DEFAULT_TRUST,
+        )
+        .await
+        .unwrap()
+        .fact
+        .unwrap();
+
+    store
+        .upsert_fact_relation(
+            a.fact_id,
+            c.fact_id,
+            FactRelationKind::Supports,
+            0.6,
+            "test",
+            serde_json::json!({"evidence": "a"}),
+        )
+        .await
+        .unwrap();
+    store
+        .upsert_fact_relation(
+            b.fact_id,
+            c.fact_id,
+            FactRelationKind::Supports,
+            0.8,
+            "test",
+            serde_json::json!({"evidence": "b"}),
+        )
+        .await
+        .unwrap();
+
+    store
+        .merge_facts(a.fact_id, vec![b.fact_id], None)
+        .await
+        .unwrap();
+
+    let relations = store.list_fact_relations(None).await.unwrap();
+    assert_eq!(relations.len(), 1);
+    assert_eq!(relations[0].source_fact_id, a.fact_id);
+    assert_eq!(relations[0].target_fact_id, c.fact_id);
+    assert_eq!(relations[0].relation, FactRelationKind::Supports);
+    assert_eq!(relations[0].confidence, 0.8);
+}
+
+#[tokio::test]
+async fn grooming_batch_prevalidates_before_mutating_and_rejects_conflicting_links() {
+    let (db, _tmp) = make_memory_store().await;
+    let store = MemoryStore::new(db.conn());
+    let fact = store
+        .add_fact(
+            fact_request("batch validation fact", MemoryCategory::Project, 0.9),
+            DEFAULT_TRUST,
+        )
+        .await
+        .unwrap()
+        .fact
+        .unwrap();
+    let operations = vec![
+        MemoryGroomingOperation::NormalizeTags {
+            fact_id: fact.fact_id,
+            tags: vec![" Needs Cleanup ".to_string()],
+            evidence_fact_ids: vec![fact.fact_id],
+            confidence: 0.9,
+        },
+        MemoryGroomingOperation::LinkFacts {
+            source_fact_id: fact.fact_id,
+            target_fact_id: fact.fact_id,
+            relation: FactRelationKind::Supports,
+            evidence_fact_ids: vec![fact.fact_id],
+            confidence: 0.9,
+            source: "test".to_string(),
+            metadata: serde_json::json!({}),
+        },
+    ];
+
+    assert!(store.apply_grooming_batch(&operations, 0.5).await.is_err());
+    assert!(
+        store
+            .get_fact(fact.fact_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .tags
+            .is_empty()
+    );
+    assert!(store.list_fact_relations(None).await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn entity_grooming_rewires_links_supports_alias_retrieval_and_repairs_vectors() {
+    let (db, _tmp) = make_memory_store().await;
+    let store = MemoryStore::new(db.conn());
+    let mut first_request =
+        fact_request("TraceDecay owns graph memory", MemoryCategory::Project, 0.9);
+    first_request.entities = vec!["TraceDecay".to_string()];
+    let first = store
+        .add_fact(first_request, DEFAULT_TRUST)
+        .await
+        .unwrap()
+        .fact
+        .unwrap();
+    let mut second_request =
+        fact_request("MemoryGraph stores relations", MemoryCategory::Project, 0.9);
+    second_request.entities = vec!["MemoryGraph".to_string()];
+    let second = store
+        .add_fact(second_request, DEFAULT_TRUST)
+        .await
+        .unwrap()
+        .fact
+        .unwrap();
+    let winner = entity_id(&db, "tracedecay").await;
+    let loser = entity_id(&db, "memorygraph").await;
+    db.conn()
+        .execute(
+            "UPDATE memory_facts SET hrr_vector = X'00', hrr_algebra = 'wrong', hrr_dim = 1,
+                    hrr_precision = 'f64' WHERE fact_id = ?1",
+            libsql::params![first.fact_id],
+        )
+        .await
+        .unwrap();
+
+    let report = store
+        .apply_grooming_batch(
+            &[
+                MemoryGroomingOperation::MergeEntities {
+                    winner_entity_id: winner,
+                    loser_entity_ids: vec![loser],
+                    evidence_fact_ids: vec![first.fact_id, second.fact_id],
+                    confidence: 0.95,
+                },
+                MemoryGroomingOperation::AddAlias {
+                    entity_id: winner,
+                    alias: "TD".to_string(),
+                    evidence_fact_ids: vec![first.fact_id],
+                    confidence: 0.95,
+                },
+                MemoryGroomingOperation::RepairVector {
+                    fact_id: first.fact_id,
+                    evidence_fact_ids: vec![first.fact_id],
+                    confidence: 1.0,
+                },
+            ],
+            0.5,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(report.merged_entities, 1);
+    assert_eq!(report.aliases_added, 1);
+    assert!(report.derived_repair.banks_rebuilt >= 2);
+    assert_eq!(
+        scalar_i64(
+            &db,
+            "SELECT COUNT(*) FROM memory_entities WHERE entity_id = 0"
+        )
+        .await,
+        0
+    );
+    assert_eq!(
+        scalar_i64(
+            &db,
+            "SELECT COUNT(*) FROM memory_entities WHERE normalized_name = 'memorygraph'"
+        )
+        .await,
+        0
+    );
+    let retriever = FactRetriever::new(db.conn());
+    let alias_hits = retriever.probe("TD", None, Some(0.0), 10).await.unwrap();
+    assert!(
+        alias_hits
+            .iter()
+            .any(|hit| hit.fact.fact_id == first.fact_id)
+    );
+    assert!(
+        alias_hits
+            .iter()
+            .any(|hit| hit.fact.fact_id == second.fact_id)
+    );
+    let mut rows = db
+        .conn()
+        .query(
+            "SELECT hrr_algebra, hrr_dim, hrr_precision, length(hrr_vector)
+             FROM memory_facts WHERE fact_id = ?1",
+            libsql::params![first.fact_id],
+        )
+        .await
+        .unwrap();
+    let row = rows.next().await.unwrap().unwrap();
+    assert_eq!(row.get::<String>(0).unwrap(), "amari_fhrr");
+    assert_eq!(
+        row.get::<i64>(1).unwrap(),
+        HolographicEncoder::DIMENSIONS as i64
+    );
+    assert_eq!(
+        row.get::<String>(2).unwrap(),
+        HolographicEncoder::HRR_PRECISION
+    );
+    assert_eq!(
+        row.get::<i64>(3).unwrap(),
+        HolographicEncoder::SERIALIZED_F32_BYTES as i64
+    );
+    assert!(dirty_bank_names(&db).await.is_empty());
 }
 
 async fn make_memory_store() -> (Database, TempDir) {
@@ -146,6 +374,18 @@ async fn dirty_bank_names(db: &Database) -> Vec<String> {
         names.push(row.get::<String>(0).unwrap());
     }
     names
+}
+
+async fn entity_id(db: &Database, normalized_name: &str) -> i64 {
+    let mut rows = db
+        .conn()
+        .query(
+            "SELECT entity_id FROM memory_entities WHERE normalized_name = ?1",
+            libsql::params![normalized_name],
+        )
+        .await
+        .unwrap();
+    rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap()
 }
 
 async fn dirty_bank_updated_at(db: &Database, bank_name: &str) -> i64 {

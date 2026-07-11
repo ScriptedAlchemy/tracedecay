@@ -1,5 +1,7 @@
 use std::collections::HashSet;
 
+use super::hygiene::detect_secret_like;
+
 /// Hard upper bound on an entity's character length. An entity name is a short
 /// identifier-like or proper-noun span, never a sentence, so anything longer is
 /// a mangled extraction (e.g. a run captured between two apostrophes) and is
@@ -16,6 +18,22 @@ pub fn normalize_entity(entity: &str) -> String {
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+/// Canonicalizes an entity alias and rejects values that are unsafe or too
+/// broad for deterministic alias matching.
+pub fn normalize_entity_alias(alias: &str) -> Result<String, &'static str> {
+    let normalized = normalize_entity(alias);
+    if normalized.is_empty() || !is_valid_entity(&normalized) {
+        return Err("alias is empty or not a bounded entity name");
+    }
+    if normalized.contains(['/', '\\']) || normalized == "." || normalized == ".." {
+        return Err("path fragments are not valid entity aliases");
+    }
+    if detect_secret_like(&normalized).is_some() {
+        return Err("secret-like values are not valid entity aliases");
+    }
+    Ok(normalized)
 }
 
 pub fn extract_entities(text: &str) -> Vec<String> {

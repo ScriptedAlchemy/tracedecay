@@ -10,13 +10,15 @@ use super::diff::{
     vector_similarity,
 };
 use super::encoding::HolographicEncoder;
-use super::entities::{extract_entities, normalize_entity};
+use super::entities::{extract_entities, normalize_entity, normalize_entity_alias};
 use super::hygiene::detect_secret_like;
 use super::similarity::content_tokens;
 use super::trust::{DEFAULT_MIN_TRUST, apply_feedback, clamp_trust};
 use super::types::{
-    AddFactDiff, AddFactDiffKind, AddFactOutcome, AddFactRequest, FactRecord, FeedbackAction,
-    FeedbackRequest, FeedbackResult, MemoryCategory, TrustHistoryEntry, UpdateFactRequest,
+    AddFactDiff, AddFactDiffKind, AddFactOutcome, AddFactRequest, EntityGroomingResult, FactRecord,
+    FactRelationKind, FactRelationRecord, FeedbackAction, FeedbackRequest, FeedbackResult,
+    MemoryCategory, MemoryGroomingOperation, MemoryGroomingReport, TrustHistoryEntry,
+    UpdateFactRequest,
 };
 use crate::errors::{Result, TraceDecayError};
 use crate::sync::content_hash;
@@ -549,6 +551,8 @@ impl<'a> MemoryStore<'a> {
         }
 
         let mut deleted = Vec::with_capacity(loser_ids.len());
+        self.rewire_fact_relations_inner(winner_id, &loser_ids)
+            .await?;
         for loser_id in loser_ids {
             if self.remove_fact_inner(loser_id).await? {
                 deleted.push(loser_id);
@@ -1181,6 +1185,863 @@ impl<'a> MemoryStore<'a> {
         Ok(rebuilt)
     }
 
+    pub async fn upsert_fact_relation(
+        &self,
+        source_fact_id: i64,
+        target_fact_id: i64,
+        relation: FactRelationKind,
+        confidence: f64,
+        source: &str,
+        metadata: serde_json::Value,
+    ) -> Result<FactRelationRecord> {
+        self.with_immediate_tx(
+            "upsert_fact_relation",
+            self.upsert_fact_relation_inner(
+                source_fact_id,
+                target_fact_id,
+                relation,
+                confidence,
+                source,
+                metadata,
+            ),
+        )
+        .await
+    }
+
+    async fn upsert_fact_relation_inner(
+        &self,
+        source_fact_id: i64,
+        target_fact_id: i64,
+        relation: FactRelationKind,
+        confidence: f64,
+        source: &str,
+        metadata: serde_json::Value,
+    ) -> Result<FactRelationRecord> {
+        if source_fact_id == target_fact_id {
+            return Err(db_message(
+                "upsert_fact_relation",
+                "self-relations are not allowed",
+            ));
+        }
+        if !(0.0..=1.0).contains(&confidence) || !confidence.is_finite() {
+            return Err(db_message(
+                "upsert_fact_relation",
+                "confidence must be finite and between 0 and 1",
+            ));
+        }
+        let source = source.trim();
+        if source.is_empty() {
+            return Err(db_message("upsert_fact_relation", "source cannot be empty"));
+        }
+        if self.get_fact(source_fact_id).await?.is_none()
+            || self.get_fact(target_fact_id).await?.is_none()
+        {
+            return Err(db_message(
+                "upsert_fact_relation",
+                "source and target facts must both exist in this project store",
+            ));
+        }
+        let mut existing_rows = self
+            .conn
+            .query(
+                "SELECT relation FROM memory_fact_relations
+                 WHERE source_fact_id = ?1 AND target_fact_id = ?2",
+                params![source_fact_id, target_fact_id],
+            )
+            .await
+            .map_err(|e| db_error("upsert_fact_relation", e))?;
+        while let Some(row) = existing_rows
+            .next()
+            .await
+            .map_err(|e| db_error("upsert_fact_relation", e))?
+        {
+            let existing = row
+                .get::<String>(0)
+                .map_err(|e| db_error("upsert_fact_relation", e))?
+                .parse::<FactRelationKind>()
+                .map_err(|e| db_message("upsert_fact_relation", e))?;
+            if relations_conflict(existing, relation) {
+                return Err(db_message(
+                    "upsert_fact_relation",
+                    "supports and contradicts cannot coexist for the same directed fact pair",
+                ));
+            }
+        }
+        let metadata_json = to_json_string(&metadata, "upsert_fact_relation")?;
+        let now = current_timestamp();
+        self.conn
+            .execute(
+                "INSERT INTO memory_fact_relations (
+                    source_fact_id, target_fact_id, relation, confidence,
+                    source, metadata, created_at, updated_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7)
+                 ON CONFLICT(source_fact_id, target_fact_id, relation) DO UPDATE SET
+                    confidence = excluded.confidence,
+                    source = excluded.source,
+                    metadata = excluded.metadata,
+                    updated_at = excluded.updated_at",
+                params![
+                    source_fact_id,
+                    target_fact_id,
+                    relation.as_str(),
+                    confidence,
+                    source,
+                    metadata_json,
+                    now,
+                ],
+            )
+            .await
+            .map_err(|e| db_error("upsert_fact_relation", e))?;
+        self.get_fact_relation(source_fact_id, target_fact_id, relation)
+            .await?
+            .ok_or_else(|| {
+                db_message(
+                    "upsert_fact_relation",
+                    "relation was not found after upsert",
+                )
+            })
+    }
+
+    pub async fn list_fact_relations(
+        &self,
+        fact_id: Option<i64>,
+    ) -> Result<Vec<FactRelationRecord>> {
+        let sql = if fact_id.is_some() {
+            "SELECT source_fact_id, target_fact_id, relation, confidence, source,
+                    metadata, created_at, updated_at
+             FROM memory_fact_relations
+             WHERE source_fact_id = ?1 OR target_fact_id = ?1
+             ORDER BY source_fact_id, target_fact_id, relation"
+        } else {
+            "SELECT source_fact_id, target_fact_id, relation, confidence, source,
+                    metadata, created_at, updated_at
+             FROM memory_fact_relations
+             ORDER BY source_fact_id, target_fact_id, relation"
+        };
+        let mut rows = if let Some(fact_id) = fact_id {
+            self.conn.query(sql, params![fact_id]).await
+        } else {
+            self.conn.query(sql, ()).await
+        }
+        .map_err(|e| db_error("list_fact_relations", e))?;
+        let mut relations = Vec::new();
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|e| db_error("list_fact_relations", e))?
+        {
+            relations.push(relation_from_row(&row, "list_fact_relations")?);
+        }
+        Ok(relations)
+    }
+
+    pub async fn related_fact_ids(&self, fact_ids: &[i64], limit: usize) -> Result<Vec<i64>> {
+        if fact_ids.is_empty() || limit == 0 {
+            return Ok(Vec::new());
+        }
+        let fact_ids = &fact_ids[..fact_ids.len().min(128)];
+        let placeholders = std::iter::repeat_n("?", fact_ids.len())
+            .collect::<Vec<_>>()
+            .join(",");
+        let mut values = Vec::with_capacity(fact_ids.len() * 3 + 1);
+        for _ in 0..3 {
+            values.extend(fact_ids.iter().copied().map(libsql::Value::Integer));
+        }
+        values.push(libsql::Value::Integer(limit.min(256) as i64));
+        let mut rows = self
+            .conn
+            .query(
+                &format!(
+                    "SELECT CASE WHEN source_fact_id IN ({placeholders})
+                                 THEN target_fact_id ELSE source_fact_id END AS related_fact_id
+                     FROM memory_fact_relations
+                     WHERE source_fact_id IN ({placeholders}) OR target_fact_id IN ({placeholders})
+                     ORDER BY confidence DESC, updated_at DESC
+                     LIMIT ?"
+                ),
+                values,
+            )
+            .await
+            .map_err(|e| db_error("related_fact_ids", e))?;
+        let mut related = BTreeSet::new();
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|e| db_error("related_fact_ids", e))?
+        {
+            related.insert(
+                row.get::<i64>(0)
+                    .map_err(|e| db_error("related_fact_ids", e))?,
+            );
+        }
+        Ok(related.into_iter().collect())
+    }
+
+    pub async fn remove_fact_relation(
+        &self,
+        source_fact_id: i64,
+        target_fact_id: i64,
+        relation: FactRelationKind,
+    ) -> Result<bool> {
+        let changed = self
+            .conn
+            .execute(
+                "DELETE FROM memory_fact_relations
+                 WHERE source_fact_id = ?1 AND target_fact_id = ?2 AND relation = ?3",
+                params![source_fact_id, target_fact_id, relation.as_str()],
+            )
+            .await
+            .map_err(|e| db_error("remove_fact_relation", e))?;
+        Ok(changed > 0)
+    }
+
+    pub async fn normalize_fact_tags(&self, fact_id: i64, tags: &[String]) -> Result<Vec<String>> {
+        self.with_immediate_tx(
+            "normalize_fact_tags",
+            self.normalize_fact_tags_inner(fact_id, tags),
+        )
+        .await
+    }
+
+    async fn normalize_fact_tags_inner(
+        &self,
+        fact_id: i64,
+        tags: &[String],
+    ) -> Result<Vec<String>> {
+        let fact = self.get_fact(fact_id).await?.ok_or_else(|| {
+            db_message("normalize_fact_tags", format!("fact {fact_id} not found"))
+        })?;
+        let normalized: Vec<String> = tags
+            .iter()
+            .map(|tag| {
+                tag.trim()
+                    .to_ascii_lowercase()
+                    .split_whitespace()
+                    .collect::<Vec<_>>()
+                    .join("_")
+                    .replace('-', "_")
+            })
+            .filter(|tag| !tag.is_empty())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        let tags_json = to_json_string(&normalized, "normalize_fact_tags")?;
+        self.conn
+            .execute(
+                "UPDATE memory_facts SET tags = ?1, updated_at = ?2 WHERE fact_id = ?3",
+                params![tags_json, current_timestamp(), fact_id],
+            )
+            .await
+            .map_err(|e| db_error("normalize_fact_tags", e))?;
+        self.mark_fact_banks_dirty(fact.category).await?;
+        Ok(normalized)
+    }
+
+    pub async fn update_entity_aliases(
+        &self,
+        entity_id: i64,
+        aliases: &[String],
+    ) -> Result<Vec<String>> {
+        self.with_immediate_tx(
+            "update_entity_aliases",
+            self.update_entity_aliases_inner(entity_id, aliases),
+        )
+        .await
+    }
+
+    async fn update_entity_aliases_inner(
+        &self,
+        entity_id: i64,
+        aliases: &[String],
+    ) -> Result<Vec<String>> {
+        let mut rows = self
+            .conn
+            .query(
+                "SELECT name, aliases FROM memory_entities WHERE entity_id = ?1",
+                params![entity_id],
+            )
+            .await
+            .map_err(|e| db_error("update_entity_aliases", e))?;
+        let row = rows
+            .next()
+            .await
+            .map_err(|e| db_error("update_entity_aliases", e))?
+            .ok_or_else(|| {
+                db_message(
+                    "update_entity_aliases",
+                    format!("entity {entity_id} not found"),
+                )
+            })?;
+        let canonical = row
+            .get::<String>(0)
+            .map_err(|e| db_error("update_entity_aliases", e))?;
+        let stored = row
+            .get::<String>(1)
+            .map_err(|e| db_error("update_entity_aliases", e))?;
+        let mut merged: BTreeMap<String, String> = serde_json::from_str::<Vec<String>>(&stored)
+            .unwrap_or_default()
+            .into_iter()
+            .chain(aliases.iter().cloned())
+            .map(|alias| {
+                normalize_entity_alias(&alias)
+                    .map(|value| (value.to_ascii_lowercase(), value))
+                    .map_err(|reason| db_message("update_entity_aliases", reason))
+            })
+            .collect::<Result<_>>()?;
+        merged.remove(&canonical.to_ascii_lowercase());
+        let aliases: Vec<String> = merged.into_values().collect();
+        let aliases_json = to_json_string(&aliases, "update_entity_aliases")?;
+        self.conn
+            .execute(
+                "UPDATE memory_entities SET aliases = ?1, updated_at = ?2 WHERE entity_id = ?3",
+                params![aliases_json, current_timestamp(), entity_id],
+            )
+            .await
+            .map_err(|e| db_error("update_entity_aliases", e))?;
+        self.mark_entity_fact_banks_dirty(entity_id, false).await?;
+        Ok(aliases)
+    }
+
+    pub async fn merge_entities(
+        &self,
+        winner_entity_id: i64,
+        loser_entity_ids: Vec<i64>,
+    ) -> Result<EntityGroomingResult> {
+        self.with_immediate_tx(
+            "merge_entities",
+            self.merge_entities_inner(winner_entity_id, loser_entity_ids),
+        )
+        .await
+    }
+
+    async fn merge_entities_inner(
+        &self,
+        winner_entity_id: i64,
+        loser_entity_ids: Vec<i64>,
+    ) -> Result<EntityGroomingResult> {
+        let mut seen = BTreeSet::new();
+        let mut aliases = Vec::new();
+        let mut fact_ids = BTreeSet::new();
+        for entity_id in std::iter::once(winner_entity_id).chain(loser_entity_ids.iter().copied()) {
+            if !seen.insert(entity_id) {
+                return Err(db_message(
+                    "merge_entities",
+                    "duplicate winner/loser entity id",
+                ));
+            }
+            let mut rows = self
+                .conn
+                .query(
+                    "SELECT name, aliases FROM memory_entities WHERE entity_id = ?1",
+                    params![entity_id],
+                )
+                .await
+                .map_err(|e| db_error("merge_entities", e))?;
+            let row = rows
+                .next()
+                .await
+                .map_err(|e| db_error("merge_entities", e))?
+                .ok_or_else(|| {
+                    db_message("merge_entities", format!("entity {entity_id} not found"))
+                })?;
+            if entity_id != winner_entity_id {
+                aliases.push(
+                    row.get::<String>(0)
+                        .map_err(|e| db_error("merge_entities", e))?,
+                );
+            }
+            aliases.extend(
+                serde_json::from_str::<Vec<String>>(
+                    &row.get::<String>(1)
+                        .map_err(|e| db_error("merge_entities", e))?,
+                )
+                .unwrap_or_default(),
+            );
+            let mut links = self
+                .conn
+                .query(
+                    "SELECT fact_id FROM memory_fact_entities WHERE entity_id = ?1",
+                    params![entity_id],
+                )
+                .await
+                .map_err(|e| db_error("merge_entities", e))?;
+            while let Some(link) = links
+                .next()
+                .await
+                .map_err(|e| db_error("merge_entities", e))?
+            {
+                fact_ids.insert(
+                    link.get::<i64>(0)
+                        .map_err(|e| db_error("merge_entities", e))?,
+                );
+            }
+        }
+        let aliases = self
+            .update_entity_aliases_inner(winner_entity_id, &aliases)
+            .await?;
+        for loser_id in &loser_entity_ids {
+            self.conn
+                .execute(
+                    "INSERT OR IGNORE INTO memory_fact_entities (fact_id, entity_id)
+                     SELECT fact_id, ?1 FROM memory_fact_entities WHERE entity_id = ?2",
+                    params![winner_entity_id, *loser_id],
+                )
+                .await
+                .map_err(|e| db_error("merge_entities", e))?;
+            self.conn
+                .execute(
+                    "DELETE FROM memory_entities WHERE entity_id = ?1",
+                    params![*loser_id],
+                )
+                .await
+                .map_err(|e| db_error("merge_entities", e))?;
+        }
+        for fact_id in &fact_ids {
+            self.invalidate_fact_vector_and_mark_dirty(*fact_id).await?;
+        }
+        Ok(EntityGroomingResult {
+            winner_entity_id,
+            merged_entity_ids: loser_entity_ids,
+            aliases,
+            rewired_fact_count: fact_ids.len(),
+        })
+    }
+
+    pub async fn repair_fact_vector(&self, fact_id: i64) -> Result<bool> {
+        self.with_immediate_tx("repair_fact_vector", self.repair_fact_vector_inner(fact_id))
+            .await
+    }
+
+    async fn repair_fact_vector_inner(&self, fact_id: i64) -> Result<bool> {
+        let Some(fact) = self.get_fact(fact_id).await? else {
+            return Err(db_message(
+                "repair_fact_vector",
+                format!("fact {fact_id} not found"),
+            ));
+        };
+        self.update_fact_vector(fact_id, &fact.content, &fact.entities, "repair_fact_vector")
+            .await?;
+        self.mark_fact_banks_dirty(fact.category).await?;
+        Ok(true)
+    }
+
+    /// Applies a fully prevalidated, bounded grooming batch atomically, then
+    /// repairs derived vectors and dirty banks using the store's configured
+    /// encoder contract before commit.
+    pub async fn apply_grooming_batch(
+        &self,
+        operations: &[MemoryGroomingOperation],
+        min_confidence: f64,
+    ) -> Result<MemoryGroomingReport> {
+        let mut report = self
+            .with_immediate_tx(
+                "apply_grooming_batch",
+                self.apply_grooming_batch_inner(operations, min_confidence),
+            )
+            .await?;
+        // Derived state is resumable. Keep its CPU-heavy work outside the
+        // logical mutation transaction and cap each pass.
+        report.derived_repair.missing_vectors_repaired = self.compute_missing_vectors(500).await?;
+        report.derived_repair.banks_rebuilt = self.rebuild_dirty_banks().await?;
+        Ok(report)
+    }
+
+    async fn apply_grooming_batch_inner(
+        &self,
+        operations: &[MemoryGroomingOperation],
+        min_confidence: f64,
+    ) -> Result<MemoryGroomingReport> {
+        self.prevalidate_grooming_batch(operations, min_confidence)
+            .await?;
+        let mut report = MemoryGroomingReport::default();
+        for operation in operations {
+            match operation {
+                MemoryGroomingOperation::NormalizeTags { fact_id, tags, .. } => {
+                    self.normalize_fact_tags_inner(*fact_id, tags).await?;
+                    report.normalized_tags += 1;
+                }
+                MemoryGroomingOperation::MergeEntities {
+                    winner_entity_id,
+                    loser_entity_ids,
+                    ..
+                } => {
+                    self.merge_entities_inner(*winner_entity_id, loser_entity_ids.clone())
+                        .await?;
+                    report.merged_entities += 1;
+                }
+                MemoryGroomingOperation::AddAlias {
+                    entity_id, alias, ..
+                } => {
+                    self.update_entity_aliases_inner(*entity_id, std::slice::from_ref(alias))
+                        .await?;
+                    report.aliases_added += 1;
+                }
+                MemoryGroomingOperation::LinkFacts {
+                    source_fact_id,
+                    target_fact_id,
+                    relation,
+                    confidence,
+                    source,
+                    metadata,
+                    ..
+                } => {
+                    self.upsert_fact_relation_inner(
+                        *source_fact_id,
+                        *target_fact_id,
+                        *relation,
+                        *confidence,
+                        source,
+                        metadata.clone(),
+                    )
+                    .await?;
+                    report.facts_linked += 1;
+                }
+                MemoryGroomingOperation::RepairVector { fact_id, .. } => {
+                    self.repair_fact_vector_inner(*fact_id).await?;
+                    report.vectors_repaired += 1;
+                }
+            }
+        }
+        Ok(report)
+    }
+
+    async fn prevalidate_grooming_batch(
+        &self,
+        operations: &[MemoryGroomingOperation],
+        min_confidence: f64,
+    ) -> Result<()> {
+        if !(0.0..=1.0).contains(&min_confidence) || !min_confidence.is_finite() {
+            return Err(db_message(
+                "apply_grooming_batch",
+                "invalid confidence floor",
+            ));
+        }
+        let mut merged_entities = BTreeSet::new();
+        let mut proposed_relations = HashMap::new();
+        let existing_relations = self.list_fact_relations(None).await?;
+        for operation in operations {
+            let (confidence, evidence): (f64, &[i64]) = match operation {
+                MemoryGroomingOperation::NormalizeTags {
+                    confidence,
+                    evidence_fact_ids,
+                    ..
+                }
+                | MemoryGroomingOperation::MergeEntities {
+                    confidence,
+                    evidence_fact_ids,
+                    ..
+                }
+                | MemoryGroomingOperation::AddAlias {
+                    confidence,
+                    evidence_fact_ids,
+                    ..
+                }
+                | MemoryGroomingOperation::LinkFacts {
+                    confidence,
+                    evidence_fact_ids,
+                    ..
+                }
+                | MemoryGroomingOperation::RepairVector {
+                    confidence,
+                    evidence_fact_ids,
+                    ..
+                } => (*confidence, evidence_fact_ids),
+            };
+            if confidence < min_confidence || confidence > 1.0 || !confidence.is_finite() {
+                return Err(db_message(
+                    "apply_grooming_batch",
+                    format!("operation confidence {confidence} is outside the accepted range"),
+                ));
+            }
+            if evidence.is_empty() {
+                return Err(db_message(
+                    "apply_grooming_batch",
+                    "every grooming operation requires evidence_fact_ids",
+                ));
+            }
+            for fact_id in evidence {
+                if self.get_fact(*fact_id).await?.is_none() {
+                    return Err(db_message(
+                        "apply_grooming_batch",
+                        format!("evidence fact {fact_id} does not exist"),
+                    ));
+                }
+            }
+            match operation {
+                MemoryGroomingOperation::NormalizeTags { fact_id, .. }
+                | MemoryGroomingOperation::RepairVector { fact_id, .. } => {
+                    if self.get_fact(*fact_id).await?.is_none() {
+                        return Err(db_message(
+                            "apply_grooming_batch",
+                            format!("fact {fact_id} does not exist"),
+                        ));
+                    }
+                }
+                MemoryGroomingOperation::MergeEntities {
+                    winner_entity_id,
+                    loser_entity_ids,
+                    evidence_fact_ids,
+                    ..
+                } => {
+                    if loser_entity_ids.is_empty() {
+                        return Err(db_message(
+                            "apply_grooming_batch",
+                            "entity merge has no losers",
+                        ));
+                    }
+                    for entity_id in std::iter::once(winner_entity_id).chain(loser_entity_ids) {
+                        if !merged_entities.insert(*entity_id) {
+                            return Err(db_message(
+                                "apply_grooming_batch",
+                                "an entity appears in more than one merge role",
+                            ));
+                        }
+                        if !self.entity_exists(*entity_id).await? {
+                            return Err(db_message(
+                                "apply_grooming_batch",
+                                format!("entity {entity_id} does not exist"),
+                            ));
+                        }
+                        if !self
+                            .entity_linked_to_evidence(*entity_id, evidence_fact_ids)
+                            .await?
+                        {
+                            return Err(db_message(
+                                "apply_grooming_batch",
+                                format!(
+                                    "entity {entity_id} is not linked to the supplied evidence facts"
+                                ),
+                            ));
+                        }
+                    }
+                }
+                MemoryGroomingOperation::AddAlias {
+                    entity_id,
+                    alias,
+                    evidence_fact_ids,
+                    ..
+                } => {
+                    if !self.entity_exists(*entity_id).await? {
+                        return Err(db_message(
+                            "apply_grooming_batch",
+                            format!("entity {entity_id} does not exist"),
+                        ));
+                    }
+                    if !self
+                        .entity_linked_to_evidence(*entity_id, evidence_fact_ids)
+                        .await?
+                    {
+                        return Err(db_message(
+                            "apply_grooming_batch",
+                            format!(
+                                "entity {entity_id} is not linked to the supplied evidence facts"
+                            ),
+                        ));
+                    }
+                    normalize_entity_alias(alias)
+                        .map_err(|reason| db_message("apply_grooming_batch", reason))?;
+                }
+                MemoryGroomingOperation::LinkFacts {
+                    source_fact_id,
+                    target_fact_id,
+                    relation,
+                    ..
+                } => {
+                    if source_fact_id == target_fact_id {
+                        return Err(db_message(
+                            "apply_grooming_batch",
+                            "self-relations are not allowed",
+                        ));
+                    }
+                    if self.get_fact(*source_fact_id).await?.is_none()
+                        || self.get_fact(*target_fact_id).await?.is_none()
+                    {
+                        return Err(db_message(
+                            "apply_grooming_batch",
+                            "linked facts must both exist",
+                        ));
+                    }
+                    let key = (*source_fact_id, *target_fact_id);
+                    if let Some(other) = proposed_relations.insert(key, *relation) {
+                        if relations_conflict(other, *relation) {
+                            return Err(db_message(
+                                "apply_grooming_batch",
+                                "batch proposes contradictory relation kinds for the same facts",
+                            ));
+                        }
+                    }
+                    if existing_relations.iter().any(|existing| {
+                        existing.source_fact_id == *source_fact_id
+                            && existing.target_fact_id == *target_fact_id
+                            && relations_conflict(existing.relation, *relation)
+                    }) {
+                        return Err(db_message(
+                            "apply_grooming_batch",
+                            "stored relation contradicts the proposed relation kind",
+                        ));
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    async fn entity_exists(&self, entity_id: i64) -> Result<bool> {
+        let mut rows = self
+            .conn
+            .query(
+                "SELECT 1 FROM memory_entities WHERE entity_id = ?1 LIMIT 1",
+                params![entity_id],
+            )
+            .await
+            .map_err(|e| db_error("entity_exists", e))?;
+        Ok(rows
+            .next()
+            .await
+            .map_err(|e| db_error("entity_exists", e))?
+            .is_some())
+    }
+
+    async fn entity_linked_to_evidence(&self, entity_id: i64, fact_ids: &[i64]) -> Result<bool> {
+        if fact_ids.is_empty() {
+            return Ok(false);
+        }
+        let placeholders = std::iter::repeat_n("?", fact_ids.len())
+            .collect::<Vec<_>>()
+            .join(",");
+        let mut values = Vec::with_capacity(fact_ids.len() + 1);
+        values.push(libsql::Value::Integer(entity_id));
+        values.extend(fact_ids.iter().copied().map(libsql::Value::Integer));
+        let mut rows = self
+            .conn
+            .query(
+                &format!(
+                    "SELECT 1 FROM memory_fact_entities WHERE entity_id = ? AND fact_id IN ({placeholders}) LIMIT 1"
+                ),
+                values,
+            )
+            .await
+            .map_err(|e| db_error("entity_linked_to_evidence", e))?;
+        Ok(rows
+            .next()
+            .await
+            .map_err(|e| db_error("entity_linked_to_evidence", e))?
+            .is_some())
+    }
+
+    async fn get_fact_relation(
+        &self,
+        source_fact_id: i64,
+        target_fact_id: i64,
+        relation: FactRelationKind,
+    ) -> Result<Option<FactRelationRecord>> {
+        let mut rows = self
+            .conn
+            .query(
+                "SELECT source_fact_id, target_fact_id, relation, confidence, source,
+                        metadata, created_at, updated_at
+                 FROM memory_fact_relations
+                 WHERE source_fact_id = ?1 AND target_fact_id = ?2 AND relation = ?3",
+                params![source_fact_id, target_fact_id, relation.as_str()],
+            )
+            .await
+            .map_err(|e| db_error("get_fact_relation", e))?;
+        rows.next()
+            .await
+            .map_err(|e| db_error("get_fact_relation", e))?
+            .map(|row| relation_from_row(&row, "get_fact_relation"))
+            .transpose()
+    }
+
+    async fn rewire_fact_relations_inner(&self, winner_id: i64, loser_ids: &[i64]) -> Result<()> {
+        if loser_ids.is_empty() {
+            return Ok(());
+        }
+        let loser_set: BTreeSet<i64> = loser_ids.iter().copied().collect();
+        let relations = self.list_fact_relations(None).await?;
+        self.conn
+            .execute(
+                &format!(
+                    "DELETE FROM memory_fact_relations WHERE source_fact_id IN ({0}) OR target_fact_id IN ({0})",
+                    std::iter::repeat_n("?", loser_ids.len()).collect::<Vec<_>>().join(",")
+                ),
+                loser_ids.iter().copied().map(libsql::Value::Integer).collect::<Vec<_>>(),
+            )
+            .await
+            .map_err(|e| db_error("merge_facts", e))?;
+        for relation in relations.into_iter().filter(|relation| {
+            loser_set.contains(&relation.source_fact_id)
+                || loser_set.contains(&relation.target_fact_id)
+        }) {
+            let source_fact_id = if loser_set.contains(&relation.source_fact_id) {
+                winner_id
+            } else {
+                relation.source_fact_id
+            };
+            let target_fact_id = if loser_set.contains(&relation.target_fact_id) {
+                winner_id
+            } else {
+                relation.target_fact_id
+            };
+            if source_fact_id != target_fact_id {
+                self.upsert_fact_relation_inner(
+                    source_fact_id,
+                    target_fact_id,
+                    relation.relation,
+                    relation.confidence,
+                    &relation.source,
+                    relation.metadata,
+                )
+                .await?;
+            }
+        }
+        Ok(())
+    }
+
+    async fn mark_entity_fact_banks_dirty(&self, entity_id: i64, invalidate: bool) -> Result<()> {
+        let mut rows = self
+            .conn
+            .query(
+                "SELECT fact_id FROM memory_fact_entities WHERE entity_id = ?1",
+                params![entity_id],
+            )
+            .await
+            .map_err(|e| db_error("mark_entity_fact_banks_dirty", e))?;
+        let mut fact_ids = Vec::new();
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|e| db_error("mark_entity_fact_banks_dirty", e))?
+        {
+            fact_ids.push(
+                row.get::<i64>(0)
+                    .map_err(|e| db_error("mark_entity_fact_banks_dirty", e))?,
+            );
+        }
+        for fact_id in fact_ids {
+            if invalidate {
+                self.invalidate_fact_vector_and_mark_dirty(fact_id).await?;
+            } else if let Some(fact) = self.get_fact(fact_id).await? {
+                self.mark_fact_banks_dirty(fact.category).await?;
+            }
+        }
+        Ok(())
+    }
+
+    async fn invalidate_fact_vector_and_mark_dirty(&self, fact_id: i64) -> Result<()> {
+        if let Some(fact) = self.get_fact(fact_id).await? {
+            self.conn
+                .execute(
+                    "UPDATE memory_facts SET hrr_vector = NULL WHERE fact_id = ?1",
+                    params![fact_id],
+                )
+                .await
+                .map_err(|e| db_error("invalidate_fact_vector", e))?;
+            self.mark_fact_banks_dirty(fact.category).await?;
+        }
+        Ok(())
+    }
+
     pub(crate) fn conn(&self) -> &Connection {
         self.conn
     }
@@ -1296,9 +2157,9 @@ impl<'a> MemoryStore<'a> {
         self.conn
             .execute(
                 "INSERT OR IGNORE INTO memory_entities (
-                    name, normalized_name, entity_type, aliases, created_at
+                    name, normalized_name, entity_type, aliases, created_at, updated_at
                  )
-                 VALUES (?1, ?2, 'unknown', '[]', ?3)",
+                 VALUES (?1, ?2, 'unknown', '[]', ?3, ?3)",
                 params![name, normalized.as_str(), current_timestamp(),],
             )
             .await
@@ -1588,6 +2449,34 @@ fn fact_from_row(row: &libsql::Row, operation: &str, entities: Vec<String>) -> R
             .map_err(|e| db_error(operation, e))?,
         metadata,
     })
+}
+
+fn relation_from_row(row: &libsql::Row, operation: &str) -> Result<FactRelationRecord> {
+    let relation = row
+        .get::<String>(2)
+        .map_err(|e| db_error(operation, e))?
+        .parse::<FactRelationKind>()
+        .map_err(|e| db_message(operation, e))?;
+    let metadata = serde_json::from_str(&row.get::<String>(5).map_err(|e| db_error(operation, e))?)
+        .map_err(|e| db_message(operation, format!("failed to parse relation metadata: {e}")))?;
+    Ok(FactRelationRecord {
+        source_fact_id: row.get::<i64>(0).map_err(|e| db_error(operation, e))?,
+        target_fact_id: row.get::<i64>(1).map_err(|e| db_error(operation, e))?,
+        relation,
+        confidence: row.get::<f64>(3).map_err(|e| db_error(operation, e))?,
+        source: row.get::<String>(4).map_err(|e| db_error(operation, e))?,
+        metadata,
+        created_at: row.get::<i64>(6).map_err(|e| db_error(operation, e))?,
+        updated_at: row.get::<i64>(7).map_err(|e| db_error(operation, e))?,
+    })
+}
+
+fn relations_conflict(left: FactRelationKind, right: FactRelationKind) -> bool {
+    matches!(
+        (left, right),
+        (FactRelationKind::Supports, FactRelationKind::Contradicts)
+            | (FactRelationKind::Contradicts, FactRelationKind::Supports)
+    )
 }
 
 fn serialize_vector(vector: &[f64], operation: &str) -> Result<Vec<u8>> {

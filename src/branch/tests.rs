@@ -48,6 +48,20 @@ fn unique_stem_disambiguates_sanitization_collision() {
 }
 
 #[test]
+fn unique_stem_preserves_hashed_orphan_recovery_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut meta = crate::branch_meta::BranchMeta::new("main");
+    meta.add_branch("feature/foo", "branches/feature_foo.db", "main");
+    let hashed = format!("feature_foo-{}", short_branch_hash("feature_foo"));
+    std::fs::write(dir.path().join(format!("{hashed}.db")), b"recovery").unwrap();
+
+    assert_eq!(
+        unique_branch_db_stem(&meta, dir.path(), "feature_foo").unwrap(),
+        format!("{hashed}-1")
+    );
+}
+
+#[test]
 fn unique_stem_is_idempotent_for_same_branch() {
     // Recomputing for a branch already in meta must not treat its own entry
     // as a conflict.
@@ -179,18 +193,31 @@ fn add_tracked_branch(
     db_path
 }
 
-#[test]
-fn clone_or_copy_db_produces_identical_bytes() {
+#[tokio::test]
+async fn read_only_sqlite_snapshot_includes_committed_data() {
     let dir = tempfile::tempdir().unwrap();
     let src = dir.path().join("src.db");
     let dst = dir.path().join("dst.db");
-    let payload: Vec<u8> = (0..4096u32).map(|i| (i % 251) as u8).collect();
-    std::fs::write(&src, &payload).unwrap();
+    let (writer, _) = crate::db::Database::initialize(&src).await.unwrap();
+    writer
+        .conn()
+        .execute_batch(
+            "CREATE TABLE snapshot_probe(value TEXT NOT NULL);
+             INSERT INTO snapshot_probe(value) VALUES ('committed-in-wal');",
+        )
+        .await
+        .unwrap();
 
-    clone_or_copy_db(&src, &dst).unwrap();
+    writer.snapshot_to(&dst).await.unwrap();
 
-    let copied = std::fs::read(&dst).unwrap();
-    assert_eq!(copied, payload, "reflink-or-copy must be byte-identical");
+    let (snapshot, _) = crate::db::Database::open_read_only(&dst).await.unwrap();
+    let mut rows = snapshot
+        .conn()
+        .query("SELECT value FROM snapshot_probe", ())
+        .await
+        .unwrap();
+    let row = rows.next().await.unwrap().unwrap();
+    assert_eq!(row.get::<String>(0).unwrap(), "committed-in-wal");
 }
 
 #[test]

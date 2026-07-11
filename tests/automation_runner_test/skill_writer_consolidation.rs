@@ -1,7 +1,7 @@
 use crate::support::*;
 
 #[tokio::test]
-async fn skill_writer_runner_stages_consolidations_without_auto_apply() {
+async fn skill_writer_runner_auto_applies_safe_consolidations() {
     let _env_lock = ENV_LOCK.lock().await;
     let temp = tempdir().unwrap();
     let profile_root = temp.path().join("profile");
@@ -69,13 +69,16 @@ async fn skill_writer_runner_stages_consolidations_without_auto_apply() {
     let source = approve_managed_skill(&profile_root, "automation-run-checks")
         .await
         .unwrap();
-    let mut pinned = approve_managed_skill(&profile_root, "pinned-automation-guide")
+    let pinned = approve_managed_skill(&profile_root, "pinned-automation-guide")
         .await
         .unwrap();
-    pinned.set_pinned(true);
-    tracedecay::automation::managed_skills::save_managed_skill(&profile_root, &pinned)
-        .await
-        .unwrap();
+    tracedecay::automation::managed_skills::set_managed_skill_pinned(
+        &profile_root,
+        &pinned.metadata.id,
+        true,
+    )
+    .await
+    .unwrap();
 
     let backend = SkillJsonBackend::with_activation_policy(
         json!({
@@ -120,10 +123,7 @@ async fn skill_writer_runner_stages_consolidations_without_auto_apply() {
 
     let consolidation = &run.report["staged_consolidations"][0];
     assert_eq!(consolidation["action"], json!("merge"));
-    assert_eq!(
-        consolidation["approval_status"],
-        json!("staged_consolidation")
-    );
+    assert_eq!(consolidation["approval_status"], json!("auto_applied"));
     assert_eq!(
         consolidation["target_skill_id"],
         json!("automation-run-review")
@@ -137,7 +137,7 @@ async fn skill_writer_runner_stages_consolidations_without_auto_apply() {
         json!("automation-run-checks")
     );
     assert_eq!(consolidation["resulting_state"], json!("archived"));
-    assert_eq!(consolidation["target_update_staged"], json!(true));
+    assert_eq!(consolidation["target_update_staged"], json!(false));
     assert!(
         run.report["rejected_skills"][0]["reason"]
             .as_str()
@@ -158,38 +158,30 @@ async fn skill_writer_runner_stages_consolidations_without_auto_apply() {
     let staged_source = load_managed_skill(&profile_root, "automation-run-checks")
         .await
         .unwrap();
-    assert_eq!(staged_source.metadata.state, ManagedSkillState::Active);
-    let source_pending = staged_source.pending_update.as_ref().unwrap();
+    assert_eq!(staged_source.metadata.state, ManagedSkillState::Archived);
     assert_eq!(
-        source_pending.resulting_state,
-        Some(ManagedSkillState::Archived)
+        staged_source.metadata.absorbed_into.as_deref(),
+        Some("automation-run-review")
     );
     assert!(
-        source_pending
-            .staged_reason
+        staged_source
+            .metadata
+            .archived_reason
             .as_deref()
-            .is_some_and(|reason| reason.contains("merged into 'automation-run-review'"))
+            .is_some_and(|reason| reason.contains("overlap"))
     );
     let staged_target = load_managed_skill(&profile_root, "automation-run-review")
         .await
         .unwrap();
     assert_eq!(staged_target.metadata.state, ManagedSkillState::Active);
-    assert_eq!(staged_target.metadata.checksum, target.metadata.checksum);
-    assert!(staged_target.pending_update.is_some());
+    assert_ne!(staged_target.metadata.checksum, target.metadata.checksum);
+    assert!(staged_target.pending_update.is_none());
     let untouched_pinned = load_managed_skill(&profile_root, "pinned-automation-guide")
         .await
         .unwrap();
     assert_eq!(untouched_pinned.metadata.state, ManagedSkillState::Active);
     assert!(untouched_pinned.pending_update.is_none());
 
-    let archived = approve_managed_skill(&profile_root, "automation-run-checks")
-        .await
-        .unwrap();
-    assert_eq!(archived.metadata.state, ManagedSkillState::Archived);
-    assert_eq!(archived.body_markdown, source.body_markdown);
-    let merged = approve_managed_skill(&profile_root, "automation-run-review")
-        .await
-        .unwrap();
-    assert_eq!(merged.metadata.state, ManagedSkillState::Active);
-    assert!(merged.body_markdown.contains("approval gates"));
+    assert_eq!(staged_source.body_markdown, source.body_markdown);
+    assert!(staged_target.body_markdown.contains("approval gates"));
 }

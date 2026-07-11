@@ -166,7 +166,10 @@ pub(crate) async fn scheduler_gate(
     task: AgentTaskKind,
     trigger: AutomationTrigger,
 ) -> Result<(SchedulerGate, Option<Vec<AutomationRunLedgerRecord>>)> {
-    if trigger != AutomationTrigger::Scheduler {
+    if !matches!(
+        trigger,
+        AutomationTrigger::Scheduler | AutomationTrigger::HostReceipt
+    ) {
         return Ok((SchedulerGate::Proceed(None), None));
     }
 
@@ -184,7 +187,11 @@ pub(crate) async fn scheduler_gate(
     };
 
     let activity = load_session_activity(sessions_db_path).await;
-    let decision = schedule_decision(config, task, &records, activity, now_secs);
+    let decision = if trigger == AutomationTrigger::HostReceipt {
+        super::scheduler::host_receipt_decision(config, task, &records, activity, now_secs)
+    } else {
+        schedule_decision(config, task, &records, activity, now_secs)
+    };
     if let Some(reason) = scheduler_skip_reason(&decision, task) {
         return Ok((SchedulerGate::Skip(reason), Some(records)));
     }

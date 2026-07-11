@@ -644,7 +644,9 @@ have been tried. Delegation is still appropriate for long-running execution work
 such as builds, tests, generated reports, or independent implementation tasks.\n\n\
 For durable project/user facts, prefer `tracedecay_fact_store`, \
 `tracedecay_fact_feedback`, and `tracedecay_memory_status` over ad-hoc notes. Do not \
-store secrets, credentials, or unnecessary PII in persistent facts.\n\n\
+store secrets, credentials, or unnecessary PII in persistent facts. Use \
+`memory_scope=user` for durable preferences or projectless chat and \
+`memory_scope=project` for active-codebase facts.\n\n\
 {cli_fallback}\n\n\
 If you discover a gap where an extractor, schema, or tracedecay tool could answer a \
 question natively, propose opening an issue at \

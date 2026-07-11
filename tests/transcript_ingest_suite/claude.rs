@@ -1,6 +1,7 @@
 use std::io::Write;
 
 use tempfile::TempDir;
+use tracedecay::global_db::GlobalDb;
 use tracedecay::sessions::claude::ClaudeSource;
 use tracedecay::sessions::cursor::open_project_session_db;
 use tracedecay::sessions::git_correlation::{
@@ -57,6 +58,134 @@ fn write_claude_transcript(
     );
     std::fs::write(&path, contents).unwrap();
     path
+}
+
+fn write_claude_rows(home: &std::path::Path, session: &str, rows: &[serde_json::Value]) {
+    let dir = home.join(".claude/projects/-user-scope");
+    std::fs::create_dir_all(&dir).unwrap();
+    let contents = rows
+        .iter()
+        .map(serde_json::Value::to_string)
+        .collect::<Vec<_>>()
+        .join("\n");
+    std::fs::write(
+        dir.join(format!("{session}.jsonl")),
+        format!("{contents}\n"),
+    )
+    .unwrap();
+}
+
+#[tokio::test]
+async fn claude_user_scope_excludes_registered_project_rows() {
+    let tmp = TempDir::new().unwrap();
+    let home = tmp.path().join("home");
+    let registered = tmp.path().join("registered");
+    let general = tmp.path().join("general-chat");
+    let profile = tmp.path().join("profile");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(&registered).unwrap();
+    std::fs::create_dir_all(&general).unwrap();
+    std::fs::create_dir_all(&profile).unwrap();
+
+    write_claude_rows(
+        &home,
+        "mixed-session",
+        &[
+            serde_json::json!({
+                "type": "user", "cwd": registered, "sessionId": "mixed-session",
+                "uuid": "project-row", "timestamp": "2026-01-01T00:00:00Z",
+                "message": {"role": "user", "content": "registered project secret decision"}
+            }),
+            serde_json::json!({
+                "type": "assistant", "cwd": general, "sessionId": "mixed-session",
+                "uuid": "general-row", "timestamp": "2026-01-01T00:00:01Z",
+                "message": {"role": "assistant", "content": "general preference evidence"}
+            }),
+            serde_json::json!({
+                "type": "user", "sessionId": "mixed-session",
+                "uuid": "missing-cwd-row", "timestamp": "2026-01-01T00:00:02Z",
+                "message": {"role": "user", "content": "registered session fallback evidence"}
+            }),
+        ],
+    );
+    write_claude_rows(
+        &home,
+        "locationless-session",
+        &[serde_json::json!({
+            "type": "user", "sessionId": "locationless-session",
+            "uuid": "locationless-row", "timestamp": "2026-01-01T00:00:03Z",
+            "message": {"role": "user", "content": "locationless general evidence"}
+        })],
+    );
+
+    let db = GlobalDb::open_at(&profile.join("user-sessions.db"))
+        .await
+        .unwrap();
+    let source = ClaudeSource::with_home(&home).for_user_scope(None, vec![registered.clone()]);
+    let stats = ingest_source(&db, &source, &profile, None).await;
+    assert_eq!(stats.sessions_upserted, 2);
+    assert_eq!(stats.messages_upserted, 2);
+    assert_eq!(
+        db.get_session("claude", "mixed-session")
+            .await
+            .unwrap()
+            .project_path,
+        "user"
+    );
+    assert!(
+        db.search_session_messages("claude", None, "registered project secret", 10)
+            .await
+            .is_empty(),
+        "registered-project evidence must never enter user-sessions.db"
+    );
+    assert_eq!(
+        db.search_session_messages("claude", None, "preference", 10)
+            .await
+            .len(),
+        1
+    );
+    assert_eq!(
+        db.search_session_messages("claude", None, "locationless", 10)
+            .await
+            .len(),
+        1
+    );
+    assert!(
+        db.search_session_messages("claude", None, "registered session fallback", 10)
+            .await
+            .is_empty(),
+        "rows without cwd inherit the registered session cwd"
+    );
+}
+
+#[tokio::test]
+async fn claude_user_scope_live_filter_only_ingests_requested_session() {
+    let tmp = TempDir::new().unwrap();
+    let home = tmp.path().join("home");
+    let general = tmp.path().join("general-chat");
+    let profile = tmp.path().join("profile");
+    std::fs::create_dir_all(&general).unwrap();
+    std::fs::create_dir_all(&profile).unwrap();
+    for (session, content) in [("wanted", "wanted evidence"), ("other", "other evidence")] {
+        write_claude_rows(
+            &home,
+            session,
+            &[serde_json::json!({
+                "type": "user", "cwd": general, "sessionId": session,
+                "uuid": format!("{session}-row"), "timestamp": "2026-01-01T00:00:00Z",
+                "message": {"role": "user", "content": content}
+            })],
+        );
+    }
+    let db = GlobalDb::open_at(&profile.join("user-sessions.db"))
+        .await
+        .unwrap();
+    let source = ClaudeSource::with_home(&home).for_user_scope(Some("wanted".into()), vec![]);
+    let stats = ingest_source(&db, &source, &profile, None).await;
+    assert_eq!(stats.sessions_upserted, 1);
+    assert_eq!(stats.messages_upserted, 1);
+    assert!(db.get_session("claude", "wanted").await.is_some());
+    assert!(db.get_session("claude", "other").await.is_none());
 }
 
 fn write_claude_subagent_transcript(

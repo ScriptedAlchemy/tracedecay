@@ -130,6 +130,7 @@ struct CursorEventSource {
     event: Value,
     transcript_path: PathBuf,
     include_subagents: bool,
+    user_scope: bool,
 }
 
 impl TranscriptSource for CursorEventSource {
@@ -157,7 +158,14 @@ impl TranscriptSource for CursorEventSource {
         max_new_bytes: Option<u64>,
     ) -> Option<ParsedTranscript> {
         let parent_session_id = event_session_id(&self.event, &self.transcript_path);
-        parse_cursor_jsonl(&self.event, &parent_session_id, path, prev, max_new_bytes)
+        parse_cursor_jsonl(
+            &self.event,
+            &parent_session_id,
+            path,
+            prev,
+            max_new_bytes,
+            self.user_scope,
+        )
     }
 }
 
@@ -173,6 +181,7 @@ fn parse_cursor_jsonl(
     path: &Path,
     prev: StoredCursor,
     max_new_bytes: Option<u64>,
+    user_scope: bool,
 ) -> Option<ParsedTranscript> {
     let new = stream_new_jsonl(path, prev, max_new_bytes)?;
     let subagent = cursor_subagent_identity(path, parent_session_id);
@@ -226,7 +235,11 @@ fn parse_cursor_jsonl(
             parent_tool_use_id: None,
         }
     } else {
-        let (project_key, project_path) = event_project(event);
+        let (project_key, project_path) = if user_scope {
+            ("user".to_string(), "user".to_string())
+        } else {
+            event_project(event)
+        };
         let (draft_parent_session_id, agent_id) = subagent
             .map_or((None, None), |(_session_id, agent_id)| {
                 (Some(parent_session_id.to_string()), Some(agent_id))
@@ -304,12 +317,82 @@ pub async fn ingest_cursor_transcript_event_capped(
         event,
         transcript_path,
         include_subagents: true,
+        user_scope: false,
     };
     let stats = ingest_source(db, &source, &project_root, max_new_bytes).await;
     CursorTranscriptIngestStats {
         sessions_upserted: stats.sessions_upserted,
         messages_upserted: stats.messages_upserted,
     }
+}
+
+pub async fn ingest_cursor_user_transcript_event_capped(
+    event_json: &str,
+    db: &GlobalDb,
+    max_new_bytes: Option<u64>,
+) -> CursorTranscriptIngestStats {
+    ingest_cursor_user_transcript_event_capped_with_registered_roots(
+        event_json,
+        db,
+        max_new_bytes,
+        &[],
+    )
+    .await
+}
+
+/// User-scope live ingest guarded by a registry snapshot. The unguarded
+/// wrapper remains useful for isolated parsing without a profile registry.
+pub async fn ingest_cursor_user_transcript_event_capped_with_registered_roots(
+    event_json: &str,
+    db: &GlobalDb,
+    max_new_bytes: Option<u64>,
+    registered_roots: &[PathBuf],
+) -> CursorTranscriptIngestStats {
+    let Ok(event) = serde_json::from_str::<Value>(event_json) else {
+        return CursorTranscriptIngestStats::default();
+    };
+    let Some(transcript_path) = event
+        .get("transcript_path")
+        .and_then(Value::as_str)
+        .filter(|path| !path.is_empty())
+        .map(PathBuf::from)
+    else {
+        return CursorTranscriptIngestStats::default();
+    };
+    let registered_slugs = registered_roots
+        .iter()
+        .filter_map(|root| cursor_project_slug(root))
+        .collect::<std::collections::HashSet<_>>();
+    if cursor_transcript_project_slug(&transcript_path)
+        .is_some_and(|slug| registered_slugs.contains(slug))
+    {
+        return CursorTranscriptIngestStats::default();
+    }
+    let placeholder = transcript_path
+        .parent()
+        .map_or_else(|| transcript_path.clone(), Path::to_path_buf);
+    let source = CursorEventSource {
+        event,
+        transcript_path,
+        include_subagents: true,
+        user_scope: true,
+    };
+    let stats = ingest_source(db, &source, &placeholder, max_new_bytes).await;
+    CursorTranscriptIngestStats {
+        sessions_upserted: stats.sessions_upserted,
+        messages_upserted: stats.messages_upserted,
+    }
+}
+
+fn cursor_transcript_project_slug(path: &Path) -> Option<&str> {
+    let components = path.components().collect::<Vec<_>>();
+    let transcripts = components
+        .iter()
+        .position(|component| component.as_os_str() == "agent-transcripts")?;
+    components
+        .get(transcripts.checked_sub(1)?)?
+        .as_os_str()
+        .to_str()
 }
 
 /// `agent-transcripts/<session>/subagents/<child>.jsonl` is the deepest layout
@@ -335,6 +418,7 @@ pub struct CursorSweepSource {
     /// ([`crate::sessions::cursor_composer`]). Transcript files whose stem is
     /// one of these are skipped so the two Cursor sources never double-ingest.
     skip_session_ids: std::collections::HashSet<String>,
+    user_registered_slugs: Option<std::collections::HashSet<String>>,
 }
 
 impl CursorSweepSource {
@@ -350,6 +434,7 @@ impl CursorSweepSource {
         Self {
             cursor_projects_dir: home.join(".cursor").join("projects"),
             skip_session_ids: std::collections::HashSet::new(),
+            user_registered_slugs: None,
         }
     }
 
@@ -360,6 +445,17 @@ impl CursorSweepSource {
         self.skip_session_ids = ids;
         self
     }
+
+    #[must_use]
+    pub fn for_user_scope(mut self, registered_roots: &[PathBuf]) -> Self {
+        self.user_registered_slugs = Some(
+            registered_roots
+                .iter()
+                .filter_map(|root| cursor_project_slug(root))
+                .collect(),
+        );
+        self
+    }
 }
 
 impl TranscriptSource for CursorSweepSource {
@@ -368,6 +464,28 @@ impl TranscriptSource for CursorSweepSource {
     }
 
     fn transcript_paths(&self, project_root: &Path) -> Vec<PathBuf> {
+        if let Some(registered_slugs) = &self.user_registered_slugs {
+            let Ok(entries) = std::fs::read_dir(&self.cursor_projects_dir) else {
+                return Vec::new();
+            };
+            return entries
+                .filter_map(|entry| entry.ok())
+                .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
+                .filter(|entry| {
+                    entry
+                        .file_name()
+                        .to_str()
+                        .is_some_and(|slug| !registered_slugs.contains(slug))
+                })
+                .flat_map(|entry| {
+                    collect_files_with_ext(
+                        &entry.path().join("agent-transcripts"),
+                        "jsonl",
+                        MAX_SWEEP_SCAN_DEPTH,
+                    )
+                })
+                .collect();
+        }
         let Some(slug) = cursor_project_slug(project_root) else {
             return Vec::new();
         };
@@ -441,12 +559,27 @@ impl TranscriptSource for CursorSweepSource {
         // the same session id a live hook would carry (Cursor names parent
         // transcripts `<session-id>.jsonl`) and the project root as `cwd` so
         // `event_project` scopes the session exactly like the hook path.
-        let event = serde_json::json!({
-            "session_id": parent_session_id,
-            "cwd": project_root.to_string_lossy(),
-            "tracedecay_location_provenance": "sweep_project_root",
-        });
-        parse_cursor_jsonl(&event, &parent_session_id, path, prev, max_new_bytes)
+        let user_scope = self.user_registered_slugs.is_some();
+        let event = if user_scope {
+            serde_json::json!({
+                "session_id": parent_session_id,
+                "tracedecay_location_provenance": "user_sweep",
+            })
+        } else {
+            serde_json::json!({
+                "session_id": parent_session_id,
+                "cwd": project_root.to_string_lossy(),
+                "tracedecay_location_provenance": "sweep_project_root",
+            })
+        };
+        parse_cursor_jsonl(
+            &event,
+            &parent_session_id,
+            path,
+            prev,
+            max_new_bytes,
+            user_scope,
+        )
     }
 }
 

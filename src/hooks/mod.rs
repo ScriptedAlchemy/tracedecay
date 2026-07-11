@@ -3,7 +3,7 @@
 //! Each agent sends its own event schema and expects its own output shape, so
 //! handlers stay agent-specific while shared plumbing lives here.
 
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
 
 use serde_json::Value;
@@ -81,6 +81,233 @@ macro_rules! read_hook_event {
     }};
 }
 pub(crate) use read_hook_event;
+
+pub async fn hook_hermes_terminal_receipt() -> i32 {
+    let event_json = read_hook_event!();
+    let Ok(event) = serde_json::from_str::<crate::daemon::DaemonHookEvent>(&event_json) else {
+        return 0;
+    };
+    if event.agent != "hermes"
+        || !matches!(
+            event.event.as_str(),
+            "terminalReceipt" | "turnCompleted" | "turnIngested"
+        )
+        || event.receipt.is_none()
+    {
+        return 0;
+    }
+    let cwd = event
+        .route
+        .as_ref()
+        .and_then(|route| route.cwd.clone().or_else(|| route.worktree.clone()))
+        .or_else(|| event.cwd.clone());
+    if let Some(project_root) = match cwd {
+        Some(cwd) => crate::config::discover_project_root_with_identity(&cwd).await,
+        None => None,
+    } {
+        crate::daemon::notify_hook_event(&project_root, event).await;
+    } else if let Err(error) = Box::pin(handle_user_hermes_receipt(event)).await {
+        eprintln!("[tracedecay] user Hermes receipt failed: {error}");
+    }
+    0
+}
+
+async fn handle_user_hermes_receipt(
+    event: crate::daemon::DaemonHookEvent,
+) -> crate::errors::Result<()> {
+    use crate::automation::run_ledger::AutomationRunStatus;
+
+    let profile_root = crate::storage::default_profile_root()?;
+    let dashboard_root = crate::automation::runner::user_automation_root(&profile_root);
+    let route = event.route.clone();
+    let Some(receipt) = event.receipt.clone() else {
+        return Ok(());
+    };
+    match event.event.as_str() {
+        "terminalReceipt" | "turnCompleted" => {
+            crate::automation::host_receipts::record(&dashboard_root, route, receipt).await?;
+        }
+        "turnIngested" => {
+            let Some(watermark) = receipt.transcript_watermark.as_deref() else {
+                return Ok(());
+            };
+            crate::automation::host_receipts::mark_turn_ingested(&dashboard_root, route, watermark)
+                .await?;
+            let Some(ready) =
+                crate::automation::host_receipts::oldest_ready(&dashboard_root).await?
+            else {
+                return Ok(());
+            };
+            let sessions_path = crate::sessions::user_sessions_db_path(&profile_root);
+            let Some(session_db) =
+                crate::global_db::GlobalDb::open_read_only_at(&sessions_path).await
+            else {
+                return Ok(());
+            };
+            if session_db
+                .lcm_load_raw_message("hermes", &ready.transcript_watermark)
+                .await
+                .is_none()
+            {
+                return Ok(());
+            }
+            if crate::automation::scheduler::load_scheduler_control(&dashboard_root)
+                .await?
+                .paused
+            {
+                return Ok(());
+            }
+            let Some(_review_lock) = lock_user_session_review(&dashboard_root) else {
+                return Ok(());
+            };
+            let session_id = ready
+                .pending
+                .route
+                .as_ref()
+                .and_then(|route| route.session_id.clone());
+            let run = run_user_session_review(
+                &profile_root,
+                "hermes",
+                session_id,
+                Some(format!("user_host_receipt_{}", ready.pending.generation)),
+            )
+            .await?;
+            if run.session_reflector.ledger_record.status == AutomationRunStatus::Succeeded
+                && run.memory_curator.ledger_record.status != AutomationRunStatus::Failed
+                && run.skill_writer.ledger_record.status == AutomationRunStatus::Succeeded
+            {
+                crate::automation::host_receipts::mark_consumed(
+                    &dashboard_root,
+                    &ready.pending.session_key,
+                    ready.pending.generation,
+                )
+                .await?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+pub(crate) fn schedule_user_session_review(provider: &str, session_id: Option<&str>) {
+    let Ok(exe) = std::env::current_exe() else {
+        return;
+    };
+    let payload = serde_json::json!({
+        "provider": provider,
+        "session_id": session_id,
+    })
+    .to_string();
+    let Ok(mut child) = std::process::Command::new(exe)
+        .arg("hook-user-session-review")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+    else {
+        return;
+    };
+    if let Some(mut stdin) = child.stdin.take() {
+        let _ = stdin.write_all(payload.as_bytes());
+    }
+}
+
+pub async fn hook_user_session_review() -> i32 {
+    let event = read_hook_event!();
+    let Ok(payload) = serde_json::from_str::<Value>(&event) else {
+        return 0;
+    };
+    let Some(provider) = payload.get("provider").and_then(Value::as_str) else {
+        return 0;
+    };
+    let session_id = payload
+        .get("session_id")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    review_user_session(provider, session_id).await;
+    0
+}
+
+async fn review_user_session(provider: &str, session_id: Option<String>) {
+    let Ok(profile_root) = crate::storage::default_profile_root() else {
+        return;
+    };
+    let dashboard_root = crate::automation::runner::user_automation_root(&profile_root);
+    let Some(_review_lock) = lock_user_session_review(&dashboard_root) else {
+        return;
+    };
+    if crate::automation::scheduler::load_scheduler_control(&dashboard_root)
+        .await
+        .is_ok_and(|control| control.paused)
+    {
+        return;
+    }
+    if let Err(error) = run_user_session_review(&profile_root, provider, session_id, None).await {
+        eprintln!("[tracedecay] {provider} user session review failed: {error}");
+    }
+}
+
+fn lock_user_session_review(dashboard_root: &std::path::Path) -> Option<std::fs::File> {
+    std::fs::create_dir_all(dashboard_root).ok()?;
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(dashboard_root.join("host-review.lock"))
+        .ok()?;
+    fs2::FileExt::lock_exclusive(&lock).ok()?;
+    Some(lock)
+}
+
+async fn run_user_session_review(
+    profile_root: &std::path::Path,
+    provider: &str,
+    session_id: Option<String>,
+    run_id: Option<String>,
+) -> crate::errors::Result<crate::automation::runner::UserSessionAutomationRun> {
+    use crate::automation::backend::CodexAppServerBackend;
+    use crate::automation::run_ledger::AutomationTrigger;
+    use crate::automation::runner::{
+        MemoryCuratorAutomationOptions, SessionReflectorAutomationOptions,
+        SkillWriterAutomationOptions, UserSessionAutomationOptions,
+        run_user_session_automation_with_backend,
+    };
+
+    let global = crate::user_config::UserConfig::load().automation;
+    let config = crate::automation::config::effective_user_automation_config(
+        profile_root,
+        &global,
+        crate::user_config::automation_is_configured(),
+    )
+    .await?;
+    let backend = CodexAppServerBackend::from_automation_config(&config);
+    run_user_session_automation_with_backend(
+        profile_root,
+        &config,
+        &backend,
+        UserSessionAutomationOptions {
+            session_reflector: SessionReflectorAutomationOptions {
+                trigger: AutomationTrigger::HostReceipt,
+                run_id,
+                provider: provider.to_string(),
+                session_id,
+                ..SessionReflectorAutomationOptions::default()
+            },
+            memory_curator: MemoryCuratorAutomationOptions {
+                trigger: AutomationTrigger::HostReceipt,
+                ..MemoryCuratorAutomationOptions::default()
+            },
+            skill_writer: SkillWriterAutomationOptions {
+                trigger: AutomationTrigger::HostReceipt,
+                provider: provider.to_string(),
+                ..SkillWriterAutomationOptions::default()
+            },
+        },
+    )
+    .await
+}
 
 const TRACEDECAY_RESEARCH_BLOCK_REASON: &str = "STOP: Use tracedecay MCP tools \
 (tracedecay_context, tracedecay_grep, tracedecay_search, tracedecay_callees, \

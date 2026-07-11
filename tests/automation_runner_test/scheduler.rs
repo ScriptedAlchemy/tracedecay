@@ -9,8 +9,8 @@ use tracedecay::automation::run_ledger::{
 };
 use tracedecay::automation::scheduler::{
     AutomationSchedule, AutomationSchedulerControl, AutomationTaskLock, SessionActivity,
-    load_scheduler_control, load_session_activity, parse_schedule, save_scheduler_control,
-    schedule_decision, scheduler_control_path,
+    host_receipt_decision, load_scheduler_control, load_session_activity, parse_schedule,
+    save_scheduler_control, schedule_decision, scheduler_control_path,
 };
 use tracedecay::global_db::GlobalDb;
 
@@ -85,6 +85,45 @@ fn scheduler_parses_manual_aliases_and_intervals() {
         AutomationSchedule::Interval { every_secs: 7200 }
     );
     assert!(parse_schedule(Some("after lunch")).is_err());
+}
+
+#[test]
+fn host_receipt_bypasses_schedule_but_preserves_enablement_and_idle_gates() {
+    let mut config = automation_config(None, None);
+    assert!(
+        host_receipt_decision(
+            &config,
+            AgentTaskKind::SessionReflector,
+            &[],
+            SessionActivity::at(100),
+            200,
+        )
+        .is_due()
+    );
+    config.tasks.session_reflector.min_idle_secs = Some(120);
+    assert_eq!(
+        host_receipt_decision(
+            &config,
+            AgentTaskKind::SessionReflector,
+            &[],
+            SessionActivity::at(100),
+            200,
+        )
+        .skip_reason(),
+        Some("scheduler_idle_window_active")
+    );
+    config.enabled = false;
+    assert_eq!(
+        host_receipt_decision(
+            &config,
+            AgentTaskKind::SessionReflector,
+            &[],
+            SessionActivity::none(),
+            200,
+        )
+        .skip_reason(),
+        Some("automation_disabled")
+    );
 }
 
 #[tokio::test]
@@ -176,6 +215,32 @@ fn scheduler_uses_interval_and_latest_successful_ledger_record() {
         )
         .is_due()
     );
+}
+
+#[test]
+fn fresh_session_activity_bypasses_interval_for_all_host_evidence_tasks() {
+    let config = automation_config(Some("every 10m"), None);
+    for task in [AgentTaskKind::SessionReflector, AgentTaskKind::SkillWriter] {
+        let records = vec![record(
+            "previous-success",
+            task,
+            AutomationRunStatus::Succeeded,
+            1_000,
+        )];
+        assert!(
+            schedule_decision(
+                &config,
+                task,
+                &records,
+                SessionActivity {
+                    last_activity_secs: Some(1_100),
+                },
+                1_101,
+            )
+            .is_due(),
+            "fresh completed-turn evidence should wake {task:?} without waiting for its repair interval"
+        );
+    }
 }
 
 #[test]
@@ -522,11 +587,9 @@ fn scheduler_skips_session_evidence_tasks_without_new_activity() {
         assert!(
             schedule_decision(&config, task, &records, SessionActivity::at(1_650), 1_700).is_due()
         );
-        // The interval gate still wins while it has not elapsed.
-        assert_eq!(
-            schedule_decision(&config, task, &records, SessionActivity::at(1_050), 1_100)
-                .skip_reason(),
-            Some("scheduler_interval_not_elapsed")
+        // Fresh completed-turn evidence bypasses the periodic repair interval.
+        assert!(
+            schedule_decision(&config, task, &records, SessionActivity::at(1_050), 1_100).is_due()
         );
     }
 }

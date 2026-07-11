@@ -24,7 +24,10 @@ use super::memory_service::{
 };
 use super::util::{qmarks, query_rows};
 use super::{DashboardState, code_diagnostics_broker, storage_mode_label, token_count};
+use crate::db::Database;
 use crate::errors::{Result, TraceDecayError};
+use crate::memory::store::MemoryStore;
+use crate::memory::types::MemoryGroomingOperation;
 use crate::tracedecay::TraceDecay;
 
 pub const CURATION_DEFAULT_MAX_CLUSTERS: usize = 12;
@@ -56,7 +59,8 @@ contradictions - leave them with \"keep\".\n\n\
 There is NO archive: delete and merge losers are removed permanently, \
 so prefer \"keep\" whenever unsure.\n\n\
 Return JSON of shape: {\"ops\": [ ... ]}. Each op MUST include: \
-cluster_id (string, from the input), op (one of merge, delete, keep), \
+cluster_id (string, from the input), op (one of merge, delete, keep, \
+normalize_tags, merge_entities, add_alias, link_facts, repair_vector), \
 confidence (0.0-1.0), and reason (short string). Use op \"keep\" for \
 reviewed clusters that need no change; do not omit keep reviews.\n\
 Per-op required fields:\n\
@@ -64,6 +68,16 @@ Per-op required fields:\n\
 \"merged_content\" (string) when the winner's text should be replaced \
 by a consolidated fact.\n\
   delete: {\"fact_id\": <id>}\n\
+  normalize_tags: {\"fact_id\": <id>, \"tags\": [<canonical_tag>, ...], \
+\"evidence_fact_ids\": [<id>, ...]}\n\
+  merge_entities: {\"winner_entity_id\": <id>, \"loser_entity_ids\": [<id>, ...], \
+\"evidence_fact_ids\": [<id>, ...]}\n\
+  add_alias: {\"entity_id\": <id>, \"alias\": <bounded alias>, \
+\"evidence_fact_ids\": [<id>, ...]}\n\
+  link_facts: {\"source_fact_id\": <id>, \"target_fact_id\": <id>, \
+\"relation\": <supports|contradicts|supersedes|derived_from>, \
+\"source\": <provenance>, \"evidence_fact_ids\": [<id>, ...]}\n\
+  repair_vector: {\"fact_id\": <id>, \"evidence_fact_ids\": [<id>, ...]}\n\
 Only reference fact ids that appear in the input clusters or in \
 hygiene_candidates. Return ONLY the JSON object.\n\n\
 Hygiene categories: the input may also carry \"hygiene_candidates\" — \
@@ -141,9 +155,62 @@ async fn cli_state(cg: &TraceDecay) -> DashboardState {
     }
 }
 
+fn user_state(
+    memory_db: &Database,
+    memory_db_path: &std::path::Path,
+    profile_root: &std::path::Path,
+    dashboard_root: &std::path::Path,
+) -> DashboardState {
+    let conn = memory_db.conn().clone();
+    DashboardState {
+        project_id: None,
+        graph_conn: conn.clone(),
+        graph_db_path: memory_db_path.display().to_string(),
+        mem_conn: conn,
+        mem_db_path: memory_db_path.display().to_string(),
+        lcm_conn: None,
+        lcm_db_path: String::new(),
+        lcm_scope: "user".to_string(),
+        savings_db: None,
+        savings_db_path: String::new(),
+        project_root: profile_root.to_path_buf(),
+        storage_mode: "user".to_string(),
+        store_root: profile_root.to_path_buf(),
+        config_path: profile_root.join("config.json"),
+        dashboard_root: dashboard_root.to_path_buf(),
+        curation_activity: Arc::new(RwLock::new(Vec::new())),
+        token_counts: Arc::new(token_count::TokenCountCache::new()),
+        code_diagnostics: Arc::new(RwLock::new(code_diagnostics_broker(
+            profile_root.to_path_buf(),
+            crate::diagnostics::lsp::settings::CodeDiagnosticsSettings::default(),
+        ))),
+        code_diagnostics_backfill_started: Arc::new(AtomicBool::new(false)),
+        automation_scheduler_reconciler: None,
+    }
+}
+
 /// Runs the curate verb and returns the JSON report printed by the CLI.
 pub async fn run_memory_curate(cg: &TraceDecay, options: &MemoryCurateOptions) -> Result<Value> {
     let state = cli_state(cg).await;
+    run_memory_curate_with_state(&state, options).await
+}
+
+/// Runs memory curation against the profile-level user memory store.
+pub async fn run_user_memory_curate(
+    memory_db: &Database,
+    memory_db_path: &std::path::Path,
+    profile_root: &std::path::Path,
+    dashboard_root: &std::path::Path,
+    options: &MemoryCurateOptions,
+) -> Result<Value> {
+    let state = user_state(memory_db, memory_db_path, profile_root, dashboard_root);
+    run_memory_curate_with_state(&state, options).await
+}
+
+async fn run_memory_curate_with_state(
+    state: &DashboardState,
+    options: &MemoryCurateOptions,
+) -> Result<Value> {
     let mut report = Map::new();
     report.insert("mode".to_string(), json!("similarity_dedup"));
     report.insert("dry_run".to_string(), json!(!options.apply));
@@ -153,13 +220,13 @@ pub async fn run_memory_curate(cg: &TraceDecay, options: &MemoryCurateOptions) -
     // deletions beforehand would invalidate the very clusters the ops
     // reference (their fact ids would already be gone).
     if let Some(provided) = options.llm_ops.as_ref() {
-        let clusters = build_clusters(&state, options.max_clusters).await?;
+        let clusters = build_clusters(state, options.max_clusters).await?;
         // Evidence guard: cluster members plus the deterministic hygiene
         // candidates (recomputed against the same pre-apply state the ops
         // were planned on) are the only legal delete targets.
         let mut allowed_ids: BTreeSet<i64> = cluster_fact_ids(&clusters);
         let (_, pre_apply_hygiene_candidates, _, _) =
-            build_delete_plan(&state)
+            build_delete_plan(state)
                 .await
                 .map_err(|message| TraceDecayError::Config {
                     message: format!("curation analysis failed: {message}"),
@@ -179,16 +246,43 @@ pub async fn run_memory_curate(cg: &TraceDecay, options: &MemoryCurateOptions) -
         if options.apply {
             let mut results = Vec::new();
             let mut applied = 0i64;
-            for op in &valid {
-                let (result, ok) = match op.get("op").and_then(Value::as_str) {
-                    Some("delete") => apply_delete_op(&state, op).await,
-                    Some("merge") => apply_merge_op(&state, op).await,
-                    _ => (json!({ "status": "error", "error": "unknown op" }), false),
-                };
-                if ok {
-                    applied += 1;
+            if let Err(error) = prevalidate_destructive_ops(state, &valid).await {
+                results.extend(valid.iter().map(|op| {
+                    json!({
+                        "status": "error",
+                        "error": error.to_string(),
+                        "op": op,
+                    })
+                }));
+            } else {
+                let grooming_ops = parse_grooming_ops(&valid)?;
+                if !grooming_ops.is_empty() {
+                    let store = MemoryStore::new(&state.mem_conn);
+                    let grooming_report = store
+                        .apply_grooming_batch(&grooming_ops, options.min_confidence)
+                        .await?;
+                    applied += grooming_ops.len() as i64;
+                    results.push(json!({
+                        "status": "applied",
+                        "operations": grooming_ops.len(),
+                        "grooming": grooming_report,
+                    }));
                 }
-                results.push(result);
+                for op in &valid {
+                    let (result, ok) = match op.get("op").and_then(Value::as_str) {
+                        Some("delete") => apply_delete_op(state, op).await,
+                        Some("merge") => apply_merge_op(state, op).await,
+                        Some(
+                            "normalize_tags" | "merge_entities" | "add_alias" | "link_facts"
+                            | "repair_vector",
+                        ) => continue,
+                        _ => (json!({ "status": "error", "error": "unknown op" }), false),
+                    };
+                    if ok {
+                        applied += 1;
+                    }
+                    results.push(result);
+                }
             }
             llm_report.insert("applied".to_string(), json!(applied));
             llm_report.insert("results".to_string(), Value::Array(results));
@@ -209,7 +303,7 @@ pub async fn run_memory_curate(cg: &TraceDecay, options: &MemoryCurateOptions) -
     // are never auto-applied here — the external LLM (or a human) confirms
     // them and feeds delete/merge ops back through `--llm-ops`.
     let (actions, hygiene_candidates, counts, total) =
-        build_delete_plan(&state)
+        build_delete_plan(state)
             .await
             .map_err(|message| TraceDecayError::Config {
                 message: format!("curation analysis failed: {message}"),
@@ -229,7 +323,7 @@ pub async fn run_memory_curate(cg: &TraceDecay, options: &MemoryCurateOptions) -
                 skipped += 1;
                 continue;
             };
-            match delete_fact(&state, fact_id).await {
+            match delete_fact(state, fact_id).await {
                 Ok(true) => applied += 1,
                 Ok(false) | Err(_) => skipped += 1,
             }
@@ -241,8 +335,27 @@ pub async fn run_memory_curate(cg: &TraceDecay, options: &MemoryCurateOptions) -
     }
     report.insert("actions".to_string(), Value::Array(actions));
 
+    if options.apply {
+        let repair = super::memory_api::repair_derived_memory(state)
+            .await
+            .map_err(|message| TraceDecayError::Config {
+                message: format!("memory derived-state repair failed: {message}"),
+            })?;
+        report.insert(
+            "derived_memory_repair".to_string(),
+            serde_json::to_value(repair).map_err(|e| TraceDecayError::Config {
+                message: format!("failed to serialize memory repair report: {e}"),
+            })?,
+        );
+    } else {
+        report.insert(
+            "derived_memory_repair".to_string(),
+            json!({ "status": "not_run_read_only_preview" }),
+        );
+    }
+
     if options.llm && options.llm_ops.is_none() {
-        let clusters = build_clusters(&state, options.max_clusters).await?;
+        let clusters = build_clusters(state, options.max_clusters).await?;
         let mut allowed_ids: BTreeSet<i64> = cluster_fact_ids(&clusters);
         allowed_ids.extend(hygiene_candidate_fact_ids(&hygiene_candidates));
         let has_hygiene = !hygiene_candidate_fact_ids(&hygiene_candidates).is_empty();
@@ -446,6 +559,13 @@ fn validate_llm_ops(
     allowed_ids: &BTreeSet<i64>,
     min_confidence: f64,
 ) -> (Vec<Value>, Vec<Value>) {
+    const GROOMING_OPS: [&str; 5] = [
+        "normalize_tags",
+        "merge_entities",
+        "add_alias",
+        "link_facts",
+        "repair_vector",
+    ];
     let mut valid = Vec::new();
     let mut rejected = Vec::new();
     for raw in raw_ops {
@@ -461,7 +581,7 @@ fn validate_llm_ops(
         if op == "keep" {
             continue;
         }
-        if op != "merge" && op != "delete" {
+        if op != "merge" && op != "delete" && !GROOMING_OPS.contains(&op) {
             rejected.push(reject(raw, &format!("unknown op '{op}'")));
             continue;
         }
@@ -474,6 +594,74 @@ fn validate_llm_ops(
         }
         if confidence < min_confidence {
             rejected.push(reject(raw, &format!("confidence {confidence} below floor")));
+            continue;
+        }
+        if GROOMING_OPS.contains(&op) {
+            let evidence_ids = op_obj
+                .get("evidence_fact_ids")
+                .and_then(Value::as_array)
+                .map(|ids| ids.iter().filter_map(Value::as_i64).collect::<Vec<_>>())
+                .unwrap_or_default();
+            if evidence_ids.is_empty() || evidence_ids.iter().any(|id| !allowed_ids.contains(id)) {
+                rejected.push(reject(
+                    raw,
+                    "grooming evidence_fact_ids were empty or outside reviewed evidence",
+                ));
+                continue;
+            }
+            let valid_shape = match op {
+                "normalize_tags" => {
+                    op_obj
+                        .get("fact_id")
+                        .and_then(Value::as_i64)
+                        .is_some_and(|id| allowed_ids.contains(&id))
+                        && op_obj.get("tags").and_then(Value::as_array).is_some()
+                }
+                "merge_entities" => {
+                    op_obj
+                        .get("winner_entity_id")
+                        .and_then(Value::as_i64)
+                        .is_some()
+                        && op_obj
+                            .get("loser_entity_ids")
+                            .and_then(Value::as_array)
+                            .is_some_and(|ids| {
+                                !ids.is_empty() && ids.iter().all(|id| id.as_i64().is_some())
+                            })
+                }
+                "add_alias" => {
+                    op_obj.get("entity_id").and_then(Value::as_i64).is_some()
+                        && op_obj
+                            .get("alias")
+                            .and_then(Value::as_str)
+                            .is_some_and(|alias| !alias.trim().is_empty())
+                }
+                "link_facts" => {
+                    let source_id = op_obj.get("source_fact_id").and_then(Value::as_i64);
+                    let target_id = op_obj.get("target_fact_id").and_then(Value::as_i64);
+                    source_id.is_some_and(|id| allowed_ids.contains(&id))
+                        && target_id.is_some_and(|id| allowed_ids.contains(&id))
+                        && source_id != target_id
+                        && matches!(
+                            op_obj.get("relation").and_then(Value::as_str),
+                            Some("supports" | "contradicts" | "supersedes" | "derived_from")
+                        )
+                        && op_obj
+                            .get("source")
+                            .and_then(Value::as_str)
+                            .is_some_and(|source| !source.trim().is_empty())
+                }
+                "repair_vector" => op_obj
+                    .get("fact_id")
+                    .and_then(Value::as_i64)
+                    .is_some_and(|id| allowed_ids.contains(&id)),
+                _ => false,
+            };
+            if !valid_shape {
+                rejected.push(reject(raw, "missing/invalid bounded grooming fields"));
+                continue;
+            }
+            valid.push(raw.clone());
             continue;
         }
         if op == "delete" {
@@ -520,6 +708,137 @@ fn reject(raw: &Value, reason: &str) -> Value {
     Value::Object(out)
 }
 
+fn parse_grooming_ops(valid: &[Value]) -> Result<Vec<MemoryGroomingOperation>> {
+    valid
+        .iter()
+        .filter(|op| {
+            matches!(
+                op.get("op").and_then(Value::as_str),
+                Some(
+                    "normalize_tags"
+                        | "merge_entities"
+                        | "add_alias"
+                        | "link_facts"
+                        | "repair_vector"
+                )
+            )
+        })
+        .map(|op| {
+            serde_json::from_value(op.clone()).map_err(|e| TraceDecayError::Config {
+                message: format!("invalid grooming operation after validation: {e}"),
+            })
+        })
+        .collect()
+}
+
+async fn prevalidate_destructive_ops(state: &DashboardState, ops: &[Value]) -> Result<()> {
+    let destructive_count = ops
+        .iter()
+        .filter(|op| {
+            matches!(
+                op.get("op").and_then(Value::as_str),
+                Some("delete" | "merge")
+            )
+        })
+        .count();
+    let has_grooming = ops.iter().any(|op| {
+        matches!(
+            op.get("op").and_then(Value::as_str),
+            Some(
+                "normalize_tags" | "merge_entities" | "add_alias" | "link_facts" | "repair_vector"
+            )
+        )
+    });
+    if destructive_count > 1 || (destructive_count == 1 && has_grooming) {
+        return Err(TraceDecayError::Config {
+            message: "curation batches may contain one destructive operation or an atomic grooming batch, not both".to_string(),
+        });
+    }
+    let mut mutation_targets = BTreeSet::new();
+    let mut merge_winners = BTreeSet::new();
+    let mut required_facts = BTreeSet::new();
+    for op in ops {
+        match op.get("op").and_then(Value::as_str) {
+            Some("delete") => {
+                let fact_id = op.get("fact_id").and_then(Value::as_i64).ok_or_else(|| {
+                    TraceDecayError::Config {
+                        message: "delete op lost fact_id after validation".to_string(),
+                    }
+                })?;
+                if merge_winners.contains(&fact_id) || !mutation_targets.insert(fact_id) {
+                    return Err(TraceDecayError::Config {
+                        message: format!("fact {fact_id} is targeted by multiple destructive ops"),
+                    });
+                }
+                required_facts.insert(fact_id);
+            }
+            Some("merge") => {
+                let winner_id = op.get("winner_id").and_then(Value::as_i64).ok_or_else(|| {
+                    TraceDecayError::Config {
+                        message: "merge op lost winner_id after validation".to_string(),
+                    }
+                })?;
+                if mutation_targets.contains(&winner_id) {
+                    return Err(TraceDecayError::Config {
+                        message: format!(
+                            "fact {winner_id} has conflicting destructive batch roles"
+                        ),
+                    });
+                }
+                merge_winners.insert(winner_id);
+                required_facts.insert(winner_id);
+                for loser_id in op
+                    .get("loser_ids")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(Value::as_i64)
+                {
+                    if merge_winners.contains(&loser_id)
+                        || !mutation_targets.insert(loser_id)
+                        || loser_id == winner_id
+                    {
+                        return Err(TraceDecayError::Config {
+                            message: format!(
+                                "fact {loser_id} has conflicting destructive batch roles"
+                            ),
+                        });
+                    }
+                    required_facts.insert(loser_id);
+                }
+            }
+            _ => {}
+        }
+    }
+    for fact_id in required_facts {
+        let mut rows = state
+            .mem_conn
+            .query(
+                "SELECT 1 FROM memory_facts WHERE fact_id = ?1 LIMIT 1",
+                libsql::params![fact_id],
+            )
+            .await
+            .map_err(|e| TraceDecayError::Database {
+                message: e.to_string(),
+                operation: "prevalidate_destructive_ops".to_string(),
+            })?;
+        if rows
+            .next()
+            .await
+            .map_err(|e| TraceDecayError::Database {
+                message: e.to_string(),
+                operation: "prevalidate_destructive_ops".to_string(),
+            })?
+            .is_none()
+        {
+            return Err(TraceDecayError::Config {
+                message: format!("fact {fact_id} no longer exists; batch was not applied"),
+            });
+        }
+    }
+    Ok(())
+}
+
 fn uses_updated_at_as_truth_freshness(raw: &Value) -> bool {
     raw.get("reason")
         .and_then(Value::as_str)
@@ -540,6 +859,77 @@ mod tests {
 
     fn allowed(ids: &[i64]) -> BTreeSet<i64> {
         ids.iter().copied().collect()
+    }
+
+    #[tokio::test]
+    async fn preview_is_read_only_while_apply_repairs_derived_memory() {
+        let temp = tempfile::tempdir().unwrap();
+        let memory_path = temp.path().join("user-memory.db");
+        let (db, _) = Database::initialize(&memory_path).await.unwrap();
+        db.conn()
+            .execute(
+                "INSERT INTO memory_facts
+                    (fact_id, content, category, trust_score, created_at, updated_at, source)
+                 VALUES (1, 'Keep diagnostic previews read only', 'decision', 0.9, 1, 1, 'test')",
+                (),
+            )
+            .await
+            .unwrap();
+        let options = MemoryCurateOptions {
+            llm_ops: Some(json!({ "ops": [] })),
+            ..MemoryCurateOptions::default()
+        };
+
+        let preview = run_user_memory_curate(
+            &db,
+            &memory_path,
+            temp.path(),
+            &temp.path().join("user-automation"),
+            &options,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            preview["derived_memory_repair"]["status"],
+            json!("not_run_read_only_preview")
+        );
+        assert_eq!(missing_vector_count(&db).await, 1);
+
+        let applied = run_user_memory_curate(
+            &db,
+            &memory_path,
+            temp.path(),
+            &temp.path().join("user-automation"),
+            &MemoryCurateOptions {
+                apply: true,
+                ..options
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            applied["derived_memory_repair"]["missing_vectors_repaired"],
+            json!(1)
+        );
+        assert_eq!(missing_vector_count(&db).await, 0);
+    }
+
+    async fn missing_vector_count(db: &Database) -> i64 {
+        db.conn()
+            .query(
+                "SELECT COUNT(*) FROM memory_facts WHERE hrr_vector IS NULL",
+                (),
+            )
+            .await
+            .unwrap()
+            .next()
+            .await
+            .unwrap()
+            .unwrap()
+            .get(0)
+            .unwrap()
     }
 
     #[test]
@@ -643,5 +1033,42 @@ mod tests {
                 .unwrap()
                 .contains("updated_at is maintenance metadata")
         );
+    }
+
+    #[test]
+    fn validate_accepts_only_bounded_grooming_with_reviewed_evidence() {
+        let ops = vec![
+            json!({
+                "op": "link_facts",
+                "source_fact_id": 1,
+                "target_fact_id": 2,
+                "relation": "supports",
+                "source": "memory_curator",
+                "evidence_fact_ids": [1, 2],
+                "confidence": 0.9
+            }),
+            json!({
+                "op": "link_facts",
+                "source_fact_id": 1,
+                "target_fact_id": 1,
+                "relation": "invented_relation",
+                "source": "memory_curator",
+                "evidence_fact_ids": [1],
+                "confidence": 0.9
+            }),
+            json!({
+                "op": "add_alias",
+                "entity_id": 4,
+                "alias": "safe alias",
+                "evidence_fact_ids": [99],
+                "confidence": 0.9
+            }),
+        ];
+
+        let (valid, rejected) = validate_llm_ops(&ops, &allowed(&[1, 2]), 0.5);
+
+        assert_eq!(valid.len(), 1);
+        assert_eq!(valid[0]["relation"], "supports");
+        assert_eq!(rejected.len(), 2);
     }
 }

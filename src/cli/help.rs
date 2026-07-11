@@ -481,7 +481,7 @@ Related: tracedecay dashboard (visual curation), tracedecay tool fact_store
 
 pub(crate) const AUTOMATION_LONG_ABOUT: &str = "\
 Configures and drives the self-improvement automation loop (memory curator, \
-session reflector, skill writer): sidecar config, manual dry-runs, run \
+session reflector, skill writer): sidecar config, autonomous validated runs, run \
 history with durable artifacts, managed-skill lifecycle, and fact-proposal \
 review. Read-only MCP twins: tracedecay_skill_list, tracedecay_skill_view, \
 tracedecay_automation_run_artifact_view.";
@@ -490,7 +490,7 @@ pub(crate) const AUTOMATION_AFTER_HELP: &str = "\
 Examples:
   tracedecay automation config get --json        Effective config
   tracedecay automation config enable            Turn the loop on
-  tracedecay automation run skill-writing        Manual dry-run
+  tracedecay automation run skill-writing        Run managed-skill evolution
   tracedecay automation runs list --json         Run history
   tracedecay automation runs artifact run-123 codex_handoff --json
   tracedecay automation skills list              Managed skills

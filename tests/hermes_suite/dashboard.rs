@@ -12,6 +12,10 @@
 use std::path::{Path, PathBuf};
 
 use tracedecay::agents::{AgentIntegration, HermesIntegration, InstallContext};
+use tracedecay::automation::managed_skills::{
+    ManagedSkillDraft, ManagedSkillProvenance, ManagedSkillSource, approve_managed_skill,
+    create_managed_skill_draft, default_managed_skill_targets,
+};
 
 fn make_ctx(home: &Path, dashboard: bool) -> InstallContext {
     InstallContext {
@@ -30,6 +34,49 @@ fn dashboard_dir(home: &Path) -> PathBuf {
 fn read(path: &Path) -> String {
     std::fs::read_to_string(path)
         .unwrap_or_else(|e| panic!("failed to read {}: {e}", path.display()))
+}
+
+#[tokio::test]
+async fn install_and_update_reconcile_active_managed_skills() {
+    let (env, _) = super::common::IsolatedEnv::acquire().await;
+    let home = env.home();
+    let profile_root = home.join(".tracedecay");
+    create_managed_skill_draft(
+        &profile_root,
+        ManagedSkillDraft {
+            id: "repo-hygiene".to_string(),
+            title: "Repository hygiene".to_string(),
+            summary: "Use when checking repository hygiene.".to_string(),
+            category: "workflow".to_string(),
+            targets: default_managed_skill_targets(),
+            body_markdown: "Check repository hygiene.".to_string(),
+            support_files: Vec::new(),
+            provenance: ManagedSkillProvenance {
+                source: ManagedSkillSource::UserDraft,
+                actor: "test".to_string(),
+                run_id: None,
+            },
+        },
+    )
+    .await
+    .unwrap();
+    approve_managed_skill(&profile_root, "repo-hygiene")
+        .await
+        .unwrap();
+
+    let ctx = make_ctx(home, false);
+    HermesIntegration.install(&ctx).unwrap();
+    let skill_path =
+        home.join(".hermes/plugins/tracedecay/skills/agent-managed/repo-hygiene/SKILL.md");
+    assert!(skill_path.is_file());
+
+    std::fs::remove_file(&skill_path).unwrap();
+    let outcome = HermesIntegration.update_plugin(&ctx).unwrap();
+    assert!(matches!(
+        outcome,
+        tracedecay::agents::UpdatePluginOutcome::Refreshed(_)
+    ));
+    assert!(skill_path.is_file());
 }
 
 const DIST_FILES: &[&str] = &[

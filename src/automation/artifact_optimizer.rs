@@ -23,7 +23,7 @@ pub(super) fn optimizer_ranked_changes(
         "validation_required": [
             "inspect generated eval definitions",
             "run listed handoff tests",
-            "preserve dashboard approval before mutation",
+            "preserve validation and reversibility safeguards",
         ],
         "ready_for_codex_handoff": !is_blocked_improvement_decision(improvement_decision),
     })]

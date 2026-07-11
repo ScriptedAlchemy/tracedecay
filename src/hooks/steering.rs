@@ -164,7 +164,9 @@ pub fn build_codex_session_context_for_workspace(
                  recovery, use tracedecay_lcm_expand_query, tracedecay_message_search, and \
                  tracedecay_lcm_describe before asking the user to repeat themselves. When \
                  a durable preference, decision, correction, or pitfall surfaces, store it \
-                 proactively with tracedecay_fact_store (action \"add\"). Do NOT store \
+                 proactively with tracedecay_fact_store (action \"add\") and \
+                 memory_scope \"user\". The CLI fallback supports this user scope even \
+                 without an initialized project. Do NOT store \
                  secrets or credentials, transient errors, environment-specific failures, \
                  one-off narratives, task progress, or soon-stale session outcomes; \
                  recover those from transcripts instead.\n",

@@ -1,6 +1,7 @@
 use std::io::Write;
 
 use tempfile::TempDir;
+use tracedecay::global_db::GlobalDb;
 use tracedecay::global_db::ParseOffset;
 use tracedecay::sessions::codex::CodexSource;
 use tracedecay::sessions::cursor::open_project_session_db;
@@ -22,6 +23,73 @@ fn write_jsonl(path: &std::path::Path, lines: &[serde_json::Value]) {
             + "\n",
     )
     .unwrap();
+}
+
+#[tokio::test]
+async fn user_scope_ingests_only_codex_sessions_outside_registered_projects() {
+    let tmp = TempDir::new().unwrap();
+    let home = tmp.path().join("home");
+    let registered = tmp.path().join("registered");
+    let general = tmp.path().join("general-chat");
+    std::fs::create_dir_all(&registered).unwrap();
+    std::fs::create_dir_all(&general).unwrap();
+    write_codex_rollout(&home, &registered, "project-session");
+    write_codex_rollout(&home, &general, "user-session");
+    let db = GlobalDb::open_at(&tmp.path().join("user-sessions.db"))
+        .await
+        .unwrap();
+    let source = CodexSource::with_home(&home).for_user_scope(None, vec![registered]);
+
+    let stats = ingest_source(&db, &source, tmp.path(), None).await;
+
+    assert_eq!(stats.sessions_upserted, 1);
+    assert!(db.get_session("codex", "user-session").await.is_some());
+    assert!(db.get_session("codex", "project-session").await.is_none());
+}
+
+#[tokio::test]
+async fn user_scope_excludes_codex_turns_after_switching_to_registered_project() {
+    let tmp = TempDir::new().unwrap();
+    let home = tmp.path().join("home");
+    let registered = tmp.path().join("registered");
+    let general = tmp.path().join("general-chat");
+    std::fs::create_dir_all(&registered).unwrap();
+    std::fs::create_dir_all(&general).unwrap();
+    let path = write_codex_rollout(&home, &general, "mixed-session");
+    let mut file = std::fs::OpenOptions::new().append(true).open(path).unwrap();
+    writeln!(
+        file,
+        "{}",
+        serde_json::json!({
+            "timestamp": "2026-01-01T00:00:03.000Z",
+            "type": "turn_context",
+            "payload": {"cwd": registered.to_string_lossy()}
+        })
+    )
+    .unwrap();
+    writeln!(
+        file,
+        "{}",
+        serde_json::json!({
+            "timestamp": "2026-01-01T00:00:04.000Z",
+            "type": "event_msg",
+            "payload": {"type": "agent_message", "message": "registered project secret"}
+        })
+    )
+    .unwrap();
+    let db = GlobalDb::open_at(&tmp.path().join("user-sessions.db"))
+        .await
+        .unwrap();
+    let source = CodexSource::with_home(&home).for_user_scope(None, vec![registered]);
+
+    let stats = ingest_source(&db, &source, tmp.path(), None).await;
+
+    assert!(stats.messages_upserted > 0);
+    assert!(
+        db.search_session_messages("codex", None, "registered project secret", 10)
+            .await
+            .is_empty()
+    );
 }
 
 /// Writes a Codex rollout JSONL whose `session_meta.cwd` is `project`. Includes a

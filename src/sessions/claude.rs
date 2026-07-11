@@ -75,6 +75,12 @@ pub(crate) const CWD_PROBE_LINES: usize = 8;
 /// Claude Code transcript locator + parser.
 pub struct ClaudeSource {
     projects_dir: PathBuf,
+    user_scope: Option<UserClaudeScope>,
+}
+
+struct UserClaudeScope {
+    session_id: Option<String>,
+    registered_roots: Vec<PathBuf>,
 }
 
 impl ClaudeSource {
@@ -89,8 +95,41 @@ impl ClaudeSource {
     pub fn with_home(home: &Path) -> Self {
         Self {
             projects_dir: home.join(".claude").join("projects"),
+            user_scope: None,
         }
     }
+
+    /// Restricts ingestion to transcript rows that cannot be attributed to any
+    /// registered project. `session_id` bounds a live hook ingest; `None`
+    /// performs a historical sweep.
+    #[must_use]
+    pub fn for_user_scope(
+        mut self,
+        session_id: Option<String>,
+        registered_roots: Vec<PathBuf>,
+    ) -> Self {
+        self.user_scope = Some(UserClaudeScope {
+            session_id,
+            registered_roots,
+        });
+        self
+    }
+}
+
+/// Ingests projectless Claude transcript evidence into the profile session
+/// store. Registered-project rows are excluded even when a Claude session
+/// crosses workspace boundaries.
+pub async fn ingest_user_sessions(
+    db: &crate::global_db::GlobalDb,
+    profile_root: &Path,
+    session_id: Option<String>,
+    registered_roots: Vec<PathBuf>,
+) -> crate::sessions::shared::TranscriptIngestStats {
+    let Some(source) = ClaudeSource::new() else {
+        return crate::sessions::shared::TranscriptIngestStats::default();
+    };
+    let source = source.for_user_scope(session_id, registered_roots);
+    crate::sessions::source::ingest_source(db, &source, profile_root, None).await
 }
 
 impl TranscriptSource for ClaudeSource {
@@ -133,6 +172,19 @@ impl TranscriptSource for ClaudeSource {
             },
             |info| info.session_id.clone(),
         );
+        if self
+            .user_scope
+            .as_ref()
+            .and_then(|scope| scope.session_id.as_deref())
+            .is_some_and(|expected| {
+                expected != session_id
+                    && subagent
+                        .as_ref()
+                        .is_none_or(|info| expected != info.parent_session_id)
+            })
+        {
+            return None;
+        }
 
         // Session-level facts folded across every new line (PR links seen in the
         // session, the set of files edited) so the draft can carry a compact
@@ -142,10 +194,22 @@ impl TranscriptSource for ClaudeSource {
         for line in &new.lines {
             let record = &line.value;
             let line_cwd = record_cwd(record).or_else(|| session_cwd.clone());
-            if !line_cwd
-                .as_deref()
-                .is_some_and(|cwd| path_belongs_to_project(cwd, project_root))
-            {
+            let include = self.user_scope.as_ref().map_or_else(
+                || {
+                    line_cwd
+                        .as_deref()
+                        .is_some_and(|cwd| path_belongs_to_project(cwd, project_root))
+                },
+                |scope| {
+                    line_cwd.as_deref().is_none_or(|cwd| {
+                        !scope
+                            .registered_roots
+                            .iter()
+                            .any(|root| path_belongs_to_project(cwd, root))
+                    })
+                },
+            );
+            if !include {
                 continue;
             }
             // Conversational turns and system hook signals first; structured
@@ -195,7 +259,10 @@ impl TranscriptSource for ClaudeSource {
         // persist the advanced cursor; returning `None` would pin the cursor
         // at 0 and re-read + re-filter the whole file on every sweep.
 
-        let project = project_root.to_string_lossy().to_string();
+        let project = self.user_scope.as_ref().map_or_else(
+            || project_root.to_string_lossy().to_string(),
+            |_| "user".to_string(),
+        );
         let draft = SessionDraft {
             session_id,
             project_key: project.clone(),

@@ -13,7 +13,7 @@ pub(crate) enum MemoryApplySubject {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum MemoryApplyDecision {
     AutoApplyAllowed,
-    DryRunOnly,
+    ApplyIncomplete,
     ProposalOnly,
     NoValidOps,
     NoValidFacts,
@@ -23,7 +23,7 @@ impl MemoryApplyDecision {
     pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::AutoApplyAllowed => "auto_apply_allowed",
-            Self::DryRunOnly => "dry_run_only",
+            Self::ApplyIncomplete => "apply_incomplete",
             Self::ProposalOnly => "proposal_only",
             Self::NoValidOps => "no_valid_ops",
             Self::NoValidFacts => "no_valid_facts",
@@ -39,9 +39,9 @@ impl MemoryApplySubject {
         }
     }
 
-    fn dry_run_decision(self) -> MemoryApplyDecision {
+    fn incomplete_decision(self) -> MemoryApplyDecision {
         match self {
-            Self::CurationOps => MemoryApplyDecision::DryRunOnly,
+            Self::CurationOps => MemoryApplyDecision::ApplyIncomplete,
             Self::SessionFacts => MemoryApplyDecision::ProposalOnly,
         }
     }
@@ -124,7 +124,7 @@ impl MemoryApplyPolicy {
         {
             MemoryApplyDecision::AutoApplyAllowed
         } else {
-            self.subject.dry_run_decision()
+            self.subject.incomplete_decision()
         }
     }
 

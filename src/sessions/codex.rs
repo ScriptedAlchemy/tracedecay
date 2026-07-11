@@ -93,6 +93,12 @@ struct CodexMeta {
 pub struct CodexSource {
     sessions_dir: PathBuf,
     archived_sessions_dir: PathBuf,
+    user_scope: Option<UserCodexScope>,
+}
+
+struct UserCodexScope {
+    session_id: Option<String>,
+    registered_roots: Vec<PathBuf>,
 }
 
 impl CodexSource {
@@ -109,7 +115,22 @@ impl CodexSource {
         Self {
             sessions_dir: codex_home.join("sessions"),
             archived_sessions_dir: codex_home.join("archived_sessions"),
+            user_scope: None,
         }
+    }
+
+    /// Restricts ingestion to sessions that cannot be attributed to a registered project.
+    #[must_use]
+    pub fn for_user_scope(
+        mut self,
+        session_id: Option<String>,
+        registered_roots: Vec<PathBuf>,
+    ) -> Self {
+        self.user_scope = Some(UserCodexScope {
+            session_id,
+            registered_roots,
+        });
+        self
     }
 }
 
@@ -140,7 +161,19 @@ impl TranscriptSource for CodexSource {
         // `session_meta` (line 1) is authoritative for cwd + session id; without
         // it we cannot safely attribute the rollout to a project, so skip.
         let meta = session_meta(path)?;
-        if !path_belongs_to_project(&meta.cwd, project_root) {
+        if let Some(scope) = &self.user_scope {
+            if scope
+                .session_id
+                .as_deref()
+                .is_some_and(|session_id| session_id != meta.session_id)
+                || scope
+                    .registered_roots
+                    .iter()
+                    .any(|root| path_belongs_to_project(&meta.cwd, root))
+            {
+                return None;
+            }
+        } else if !path_belongs_to_project(&meta.cwd, project_root) {
             return None;
         }
 
@@ -305,13 +338,26 @@ impl TranscriptSource for CodexSource {
             messages.push(message);
         }
 
-        let project = project_root.to_string_lossy().to_string();
+        if let Some(scope) = &self.user_scope {
+            messages.retain(|message| user_scope_message_allowed(message, &scope.registered_roots));
+        }
+
+        let project = self.user_scope.as_ref().map_or_else(
+            || project_root.to_string_lossy().to_string(),
+            |_| "user".to_string(),
+        );
         let draft = SessionDraft {
             session_id: meta.session_id.clone(),
             project_key: project.clone(),
             project_path: project,
             title: title_from_messages(&messages),
-            metadata_json: context::session_metadata_json(&meta, Some(&structured.summary)),
+            // The summary is session-wide and may include evidence observed
+            // after Codex changed cwd into a registered project. User scope
+            // stores only the filtered message rows, never that mixed summary.
+            metadata_json: context::session_metadata_json(
+                &meta,
+                self.user_scope.is_none().then_some(&structured.summary),
+            ),
             parent_session_id: meta.parent_session_id.clone(),
             is_subagent: meta.is_subagent,
             agent_id: meta.agent_id.clone(),
@@ -324,6 +370,27 @@ impl TranscriptSource for CodexSource {
             new_cursor: new.new_cursor,
         })
     }
+}
+
+fn user_scope_message_allowed(
+    message: &SessionMessageRecord,
+    registered_roots: &[PathBuf],
+) -> bool {
+    let turn_cwd = message
+        .metadata_json
+        .as_deref()
+        .and_then(|metadata| serde_json::from_str::<Value>(metadata).ok())
+        .and_then(|metadata| {
+            metadata
+                .get("codex_turn_cwd")
+                .and_then(Value::as_str)
+                .map(PathBuf::from)
+        });
+    turn_cwd.is_none_or(|cwd| {
+        !registered_roots
+            .iter()
+            .any(|root| path_belongs_to_project(&cwd, root))
+    })
 }
 
 /// Read the leading `session_meta` line of a rollout for cwd/session-id/model.

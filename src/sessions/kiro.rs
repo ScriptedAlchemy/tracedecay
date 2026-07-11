@@ -48,6 +48,7 @@ const MAX_WORKSPACE_DIRS: usize = 256;
 pub struct KiroSource {
     agent_dir: PathBuf,
     workspace_storage_dir: PathBuf,
+    user_registered_roots: Option<Vec<PathBuf>>,
 }
 
 impl KiroSource {
@@ -64,7 +65,14 @@ impl KiroSource {
         Self {
             agent_dir: data_dir.join("User/globalStorage/kiro.kiroagent"),
             workspace_storage_dir: data_dir.join("User/workspaceStorage"),
+            user_registered_roots: None,
         }
+    }
+
+    #[must_use]
+    pub fn for_user_scope(mut self, registered_roots: Vec<PathBuf>) -> Self {
+        self.user_registered_roots = Some(registered_roots);
+        self
     }
 }
 
@@ -74,6 +82,18 @@ impl TranscriptSource for KiroSource {
     }
 
     fn transcript_paths(&self, project_root: &Path) -> Vec<PathBuf> {
+        if let Some(registered_roots) = &self.user_registered_roots {
+            let mut out = collect_user_workspace_session_files(
+                &self.agent_dir.join("workspace-sessions"),
+                registered_roots,
+            );
+            out.extend(collect_user_agent_storage_files(
+                &self.agent_dir,
+                &self.workspace_storage_dir,
+                registered_roots,
+            ));
+            return out;
+        }
         let mut out = Vec::new();
         out.extend(collect_workspace_session_files(
             &self.agent_dir.join("workspace-sessions"),
@@ -95,7 +115,14 @@ impl TranscriptSource for KiroSource {
         _max_new_bytes: Option<u64>,
     ) -> Option<ParsedTranscript> {
         let location_cwd = transcript_location_path(path, &self.workspace_storage_dir)?;
-        if !path_belongs_to_project(&location_cwd, project_root) {
+        if let Some(roots) = &self.user_registered_roots {
+            if roots
+                .iter()
+                .any(|root| path_belongs_to_project(&location_cwd, root))
+            {
+                return None;
+            }
+        } else if !path_belongs_to_project(&location_cwd, project_root) {
             return None;
         }
 
@@ -133,7 +160,10 @@ impl TranscriptSource for KiroSource {
             ));
         }
 
-        let project = project_root.to_string_lossy().to_string();
+        let project = self.user_registered_roots.as_ref().map_or_else(
+            || project_root.to_string_lossy().to_string(),
+            |_| "user".to_string(),
+        );
         let draft = SessionDraft {
             session_id: session_id.clone(),
             project_key: project.clone(),
@@ -152,6 +182,55 @@ impl TranscriptSource for KiroSource {
             new_cursor: changed.new_cursor,
         })
     }
+}
+
+fn collect_user_workspace_session_files(
+    sessions_root: &Path,
+    registered_roots: &[PathBuf],
+) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(sessions_root) else {
+        return Vec::new();
+    };
+    let mut workspace_dirs = entries
+        .flatten()
+        .filter_map(|entry| {
+            let path = entry.path();
+            if !path.is_dir() {
+                return None;
+            }
+            let workspace =
+                decode_workspace_sessions_dir(entry.file_name().to_string_lossy().as_ref())?;
+            if registered_roots
+                .iter()
+                .any(|root| path_belongs_to_project(&workspace, root))
+            {
+                return None;
+            }
+            let mtime = entry
+                .metadata()
+                .ok()
+                .and_then(|meta| meta.modified().ok())
+                .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+                .map_or(0, |duration| duration.as_secs());
+            Some((mtime, path))
+        })
+        .collect::<Vec<_>>();
+    workspace_dirs.sort_by_key(|(mtime, _)| std::cmp::Reverse(*mtime));
+    workspace_dirs.truncate(MAX_WORKSPACE_DIRS);
+
+    let mut out = Vec::new();
+    for (_, workspace_dir) in workspace_dirs {
+        let Ok(entries) = std::fs::read_dir(workspace_dir) else {
+            continue;
+        };
+        out.extend(
+            entries
+                .flatten()
+                .map(|entry| entry.path())
+                .filter(|path| path.is_file() && path.extension().is_none_or(|ext| ext == "json")),
+        );
+    }
+    out
 }
 
 /// Incrementally ingests Kiro transcripts for `project_root` into `db`.
@@ -263,6 +342,58 @@ fn collect_agent_storage_files(
 
     let mut out = Vec::new();
     for (_, workspace_dir, _) in workspace_dirs {
+        out.extend(
+            collect_files_with_ext(&workspace_dir, "chat", MAX_SCAN_DEPTH)
+                .into_iter()
+                .filter(|path| path.is_file()),
+        );
+        collect_extensionless_execution_files(&workspace_dir, MAX_SCAN_DEPTH, &mut out);
+    }
+    out
+}
+
+fn collect_user_agent_storage_files(
+    agent_dir: &Path,
+    workspace_storage_dir: &Path,
+    registered_roots: &[PathBuf],
+) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(agent_dir) else {
+        return Vec::new();
+    };
+    let mut workspace_dirs = entries
+        .flatten()
+        .filter_map(|entry| {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            let path = entry.path();
+            if name == "workspace-sessions"
+                || name.starts_with('.')
+                || !path.is_dir()
+                || name.len() != 32
+            {
+                return None;
+            }
+            let workspace = workspace_path_from_hash(workspace_storage_dir, &name)?;
+            if registered_roots
+                .iter()
+                .any(|root| path_belongs_to_project(&workspace, root))
+            {
+                return None;
+            }
+            let mtime = entry
+                .metadata()
+                .ok()
+                .and_then(|meta| meta.modified().ok())
+                .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+                .map_or(0, |duration| duration.as_secs());
+            Some((mtime, path))
+        })
+        .collect::<Vec<_>>();
+    workspace_dirs.sort_by_key(|(mtime, _)| std::cmp::Reverse(*mtime));
+    workspace_dirs.truncate(MAX_WORKSPACE_DIRS);
+
+    let mut out = Vec::new();
+    for (_, workspace_dir) in workspace_dirs {
         out.extend(
             collect_files_with_ext(&workspace_dir, "chat", MAX_SCAN_DEPTH)
                 .into_iter()

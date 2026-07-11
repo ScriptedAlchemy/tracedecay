@@ -107,10 +107,18 @@ fn test_tool_definitions_count() {
         + usize::from(tracedecay::mcp::tools::ast_grep_available());
     assert_eq!(tools.len(), expected);
     for tool in &tools {
-        for removed in ["storage_scope", "hermes_home"] {
+        assert!(
+            tool.input_schema["properties"].get("hermes_home").is_none(),
+            "{} must not expose Hermes host-home routing",
+            tool.name
+        );
+        let storage_scope = tool.input_schema["properties"].get("storage_scope");
+        if tool.name.starts_with("tracedecay_lcm_") {
+            assert_eq!(storage_scope.unwrap()["enum"], json!(["project", "user"]));
+        } else {
             assert!(
-                tool.input_schema["properties"].get(removed).is_none(),
-                "{} must not expose removed Hermes storage parameter {removed}",
+                storage_scope.is_none(),
+                "{} exposes LCM storage scope",
                 tool.name
             );
         }

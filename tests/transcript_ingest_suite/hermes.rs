@@ -8,9 +8,10 @@ use std::path::{Path, PathBuf};
 
 use serde_json::json;
 use tempfile::TempDir;
+use tracedecay::global_db::GlobalDb;
 use tracedecay::sessions::SessionRecord;
 use tracedecay::sessions::cursor::open_project_session_db;
-use tracedecay::sessions::hermes::{ingest_for_project, ingest_homes};
+use tracedecay::sessions::hermes::{ingest_for_project, ingest_homes, ingest_user_homes};
 use tracedecay::sessions::lcm::LcmPreflightRequest;
 
 use crate::support::{assert_metadata_path_eq, create_git_repo_with_linked_worktree};
@@ -18,8 +19,14 @@ use crate::support::{assert_metadata_path_eq, create_git_repo_with_linked_worktr
 const SESSION_ID: &str = "20260101_000000_abc123";
 
 #[tokio::test]
+// Intentional: this test changes HOME/USERPROFILE/HERMES_HOME while storage
+// discovery is running, so it must share the profile-environment lock used by
+// Cursor's transcript tests.
+#[allow(clippy::await_holding_lock)]
 async fn hermes_home_env_cannot_redirect_runtime_session_discovery() {
-    let _lock = crate::common::PROCESS_ENV_LOCK.lock().await;
+    let _lock = crate::common::GLOBAL_DB_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|err| err.into_inner());
     let tmp = TempDir::new().unwrap();
     let (standard_hermes_home, project) = setup(&tmp);
     let user_home = standard_hermes_home.parent().unwrap();
@@ -610,4 +617,174 @@ async fn unpinned_profile_uses_session_cwd_as_project_provenance() {
         "session_cwd"
     );
     assert_metadata_path_eq(&metadata["hermes_session_cwd"], &project);
+}
+
+#[tokio::test]
+async fn unpinned_projectless_session_routes_only_a_tool_proven_turn() {
+    let tmp = TempDir::new().unwrap();
+    let (hermes_home, project) = setup(&tmp);
+    let state_db = write_hermes_profile(&hermes_home, "test", None).await;
+    let conn = open_state_db(&state_db).await;
+    let tool_calls = json!([{
+        "id": "call_project_context",
+        "type": "function",
+        "function": {
+            "name": "tracedecay_context",
+            "arguments": json!({
+                "project_path": project.to_string_lossy(),
+                "query": "billing pipeline"
+            }).to_string()
+        }
+    }])
+    .to_string();
+    conn.execute(
+        "UPDATE messages SET tool_calls = ?1
+         WHERE session_id = ?2 AND tool_calls IS NOT NULL",
+        libsql::params![tool_calls, SESSION_ID],
+    )
+    .await
+    .unwrap();
+
+    let db = open_project_session_db(&project).await.unwrap();
+    let stats = ingest_homes(&db, std::slice::from_ref(&hermes_home), &project).await;
+    assert_eq!(stats.messages_upserted, 4);
+    let session = db
+        .get_session("hermes", SESSION_ID)
+        .await
+        .expect("structured tool project path should prove turn association");
+    let metadata: serde_json::Value =
+        serde_json::from_str(session.metadata_json.as_deref().unwrap()).unwrap();
+    assert_eq!(
+        metadata["hermes_session_location_provenance"],
+        "tool_project_path"
+    );
+    assert_metadata_path_eq(&metadata["hermes_session_cwd"], &project);
+}
+
+#[tokio::test]
+async fn explicit_tool_route_overrides_session_cwd_without_cross_project_duplication() {
+    let tmp = TempDir::new().unwrap();
+    let (hermes_home, session_project) = setup(&tmp);
+    let tool_project = tmp.path().join("tool-project");
+    crate::support::init_project_at(&tool_project);
+    let state_db = write_hermes_profile(&hermes_home, "test", None).await;
+    let conn = open_state_db(&state_db).await;
+    conn.execute(
+        "UPDATE sessions SET cwd = ?1 WHERE id = ?2",
+        libsql::params![session_project.to_string_lossy().as_ref(), SESSION_ID],
+    )
+    .await
+    .unwrap();
+    let tool_calls = json!([{
+        "id": "call_other_project",
+        "type": "function",
+        "function": {
+            "name": "tracedecay_context",
+            "arguments": json!({
+                "project_path": tool_project.to_string_lossy(),
+                "query": "other project"
+            }).to_string()
+        }
+    }])
+    .to_string();
+    conn.execute(
+        "UPDATE messages SET tool_calls = ?1
+         WHERE session_id = ?2 AND tool_calls IS NOT NULL",
+        libsql::params![tool_calls, SESSION_ID],
+    )
+    .await
+    .unwrap();
+
+    let session_db = open_project_session_db(&session_project).await.unwrap();
+    let session_stats = ingest_homes(
+        &session_db,
+        std::slice::from_ref(&hermes_home),
+        &session_project,
+    )
+    .await;
+    assert_eq!(session_stats.messages_upserted, 0);
+    assert!(session_db.get_session("hermes", SESSION_ID).await.is_none());
+
+    let tool_db = open_project_session_db(&tool_project).await.unwrap();
+    let tool_stats =
+        ingest_homes(&tool_db, std::slice::from_ref(&hermes_home), &tool_project).await;
+    assert_eq!(tool_stats.messages_upserted, 4);
+    let session = tool_db
+        .get_session("hermes", SESSION_ID)
+        .await
+        .expect("explicit tool route should associate the turn with its project");
+    let metadata: serde_json::Value =
+        serde_json::from_str(session.metadata_json.as_deref().unwrap()).unwrap();
+    assert_eq!(
+        metadata["hermes_session_location_provenance"],
+        "tool_project_path"
+    );
+    assert_metadata_path_eq(&metadata["hermes_session_cwd"], &tool_project);
+}
+
+#[tokio::test]
+async fn user_sweep_excludes_turns_explicitly_routed_to_registered_projects() {
+    let tmp = TempDir::new().unwrap();
+    let (hermes_home, registered) = setup(&tmp);
+    let state_db = write_hermes_profile(&hermes_home, "test", None).await;
+    let conn = open_state_db(&state_db).await;
+    let tool_calls = json!([{
+        "function": {
+            "name": "tracedecay_context",
+            "arguments": json!({"project_path": registered.to_string_lossy()}).to_string()
+        }
+    }])
+    .to_string();
+    conn.execute(
+        "UPDATE messages SET tool_calls = ?1 WHERE session_id = ?2 AND tool_calls IS NOT NULL",
+        libsql::params![tool_calls, SESSION_ID],
+    )
+    .await
+    .unwrap();
+    let user_db = GlobalDb::open_at(&tmp.path().join("user-sessions.db"))
+        .await
+        .unwrap();
+
+    let stats = ingest_user_homes(
+        &user_db,
+        std::slice::from_ref(&hermes_home),
+        std::slice::from_ref(&registered),
+    )
+    .await;
+
+    assert_eq!(stats.messages_upserted, 0);
+    assert!(user_db.get_session("hermes", SESSION_ID).await.is_none());
+}
+
+#[tokio::test]
+async fn user_sweep_excludes_registered_session_cwd_without_tool_routes() {
+    let tmp = TempDir::new().unwrap();
+    let (hermes_home, registered) = setup(&tmp);
+    let state_db = write_hermes_profile(&hermes_home, "test", None).await;
+    let conn = open_state_db(&state_db).await;
+    conn.execute(
+        "UPDATE sessions SET cwd = ?1 WHERE id = ?2",
+        libsql::params![registered.to_string_lossy().as_ref(), SESSION_ID],
+    )
+    .await
+    .unwrap();
+    conn.execute(
+        "UPDATE messages SET tool_calls = NULL WHERE session_id = ?1",
+        [SESSION_ID],
+    )
+    .await
+    .unwrap();
+    let user_db = GlobalDb::open_at(&tmp.path().join("user-sessions.db"))
+        .await
+        .unwrap();
+
+    let stats = ingest_user_homes(
+        &user_db,
+        std::slice::from_ref(&hermes_home),
+        std::slice::from_ref(&registered),
+    )
+    .await;
+
+    assert_eq!(stats.messages_upserted, 0);
+    assert!(user_db.get_session("hermes", SESSION_ID).await.is_none());
 }

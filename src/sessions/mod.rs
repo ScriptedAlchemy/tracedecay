@@ -33,6 +33,142 @@ pub mod workflow_state;
 pub use providers::{ProviderScope, SessionProvider};
 pub use shared::SESSION_TRANSCRIPT_STALLED_INGEST_WARNING_BYTES;
 
+pub const USER_SESSIONS_DB_FILENAME: &str = "user-sessions.db";
+
+pub fn user_sessions_db_path(profile_root: &Path) -> PathBuf {
+    profile_root.join(USER_SESSIONS_DB_FILENAME)
+}
+
+pub async fn open_user_session_db(profile_root: &Path) -> Option<GlobalDb> {
+    GlobalDb::open_at(&user_sessions_db_path(profile_root)).await
+}
+
+/// All registry paths that may identify project-owned transcript evidence.
+pub async fn registered_project_roots() -> Vec<PathBuf> {
+    try_registered_project_roots().await.unwrap_or_default()
+}
+
+/// Returns `None` when the registry cannot be opened. User-scope ingestion
+/// must fail closed in that case: an empty root set is valid for a fresh
+/// profile, while an unavailable registry cannot safely prove that evidence
+/// is projectless.
+pub async fn try_registered_project_roots() -> Option<Vec<PathBuf>> {
+    let global = GlobalDb::open().await?;
+    let mut roots = global
+        .list_project_paths()
+        .await
+        .into_iter()
+        .map(PathBuf::from)
+        .collect::<Vec<_>>();
+    roots.sort();
+    roots.dedup();
+    Some(roots)
+}
+
+/// Ingests Codex sessions that have no registered-project attribution into the
+/// profile user session store. `session_id` bounds live hook work to one host
+/// session; `None` performs historical backfill.
+pub async fn ingest_user_codex_sessions(session_id: Option<String>) -> TranscriptIngestStats {
+    let Ok(profile_root) = crate::storage::default_profile_root() else {
+        return TranscriptIngestStats::default();
+    };
+    let Some(db) = open_user_session_db(&profile_root).await else {
+        return TranscriptIngestStats::default();
+    };
+    let Some(source) = codex::CodexSource::new() else {
+        return TranscriptIngestStats::default();
+    };
+    let Some(registered_roots) = try_registered_project_roots().await else {
+        return TranscriptIngestStats::default();
+    };
+    let source = source.for_user_scope(session_id, registered_roots);
+    ingest_source(&db, &source, &profile_root, None).await
+}
+
+pub async fn ingest_user_cursor_sessions() -> TranscriptIngestStats {
+    let Ok(profile_root) = crate::storage::default_profile_root() else {
+        return TranscriptIngestStats::default();
+    };
+    let Some(db) = open_user_session_db(&profile_root).await else {
+        return TranscriptIngestStats::default();
+    };
+    let Some(registered_roots) = try_registered_project_roots().await else {
+        return TranscriptIngestStats::default();
+    };
+    let (composer_stats, owned) = if let Some(source) = cursor_composer::CursorComposerSource::new()
+    {
+        let outcome = source
+            .ingest_user(
+                &db,
+                &registered_roots,
+                cursor_composer::DEFAULT_COMPOSER_ENVELOPE_CAP,
+            )
+            .await;
+        (
+            TranscriptIngestStats {
+                sessions_upserted: outcome.sessions_upserted,
+                messages_upserted: outcome.messages_upserted,
+            },
+            outcome.owned_session_ids,
+        )
+    } else {
+        (
+            TranscriptIngestStats::default(),
+            std::collections::HashSet::default(),
+        )
+    };
+    let Some(source) = cursor::CursorSweepSource::new() else {
+        return composer_stats;
+    };
+    let source = source
+        .with_skip_session_ids(owned)
+        .for_user_scope(&registered_roots);
+    composer_stats.merge(ingest_source(&db, &source, &profile_root, None).await)
+}
+
+pub async fn ingest_user_global_sources() -> TranscriptIngestStats {
+    let codex = ingest_user_codex_sessions(None).await;
+    let cursor = ingest_user_cursor_sessions().await;
+    let stats = codex.merge(cursor);
+    let Ok(profile_root) = crate::storage::default_profile_root() else {
+        return stats;
+    };
+    let Some(db) = open_user_session_db(&profile_root).await else {
+        return stats;
+    };
+    let Some(roots) = try_registered_project_roots().await else {
+        return stats;
+    };
+    let hermes = hermes::ingest_user_sessions(&db, &roots).await;
+    let mut stats = stats.merge(hermes);
+    let claude = claude::ingest_user_sessions(&db, &profile_root, None, roots.clone()).await;
+    stats = stats.merge(claude);
+    let mut sources: Vec<Box<dyn TranscriptSource>> = Vec::new();
+    if let Some(source) = vibe::VibeSource::new() {
+        sources.push(Box::new(source.for_user_scope(roots.clone())));
+    }
+    if let Some(source) = cline_like::ClineLikeSource::cline() {
+        sources.push(Box::new(source.for_user_scope(roots.clone())));
+    }
+    if let Some(source) = cline_like::ClineLikeSource::roo_code() {
+        sources.push(Box::new(source.for_user_scope(roots.clone())));
+    }
+    if let Some(source) = cline_like::ClineLikeSource::kilo() {
+        sources.push(Box::new(source.for_user_scope(roots.clone())));
+    }
+    if let Some(source) = kiro::KiroSource::new() {
+        sources.push(Box::new(source.for_user_scope(roots)));
+    }
+    for source in sources {
+        let source_stats = ingest_source(&db, source.as_ref(), &profile_root, None).await;
+        stats = stats.merge(source_stats);
+    }
+    if stats.messages_upserted > 0 {
+        crate::hooks::schedule_user_session_review("all", None);
+    }
+    stats
+}
+
 const FILE_TRANSCRIPT_PROVIDERS: &[SessionProvider] = &[
     SessionProvider::Claude,
     SessionProvider::Codex,
@@ -67,6 +203,9 @@ pub async fn ingest_global_sources_for_provider(
     project_root: &Path,
     provider: Option<SessionProvider>,
 ) -> TranscriptIngestStats {
+    // Keep the profile-level projectless history current alongside every
+    // project sweep. Its independent DB cursors make repeated calls no-ops.
+    let _ = ingest_user_global_sources().await;
     let mut sources: Vec<Box<dyn TranscriptSource>> = Vec::new();
     match provider {
         None => {

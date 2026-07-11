@@ -127,6 +127,114 @@ pub struct EntityRecord {
     pub updated_at: i64,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FactRelationKind {
+    Supports,
+    Contradicts,
+    Supersedes,
+    DerivedFrom,
+}
+
+impl FactRelationKind {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Supports => "supports",
+            Self::Contradicts => "contradicts",
+            Self::Supersedes => "supersedes",
+            Self::DerivedFrom => "derived_from",
+        }
+    }
+}
+
+impl fmt::Display for FactRelationKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl FromStr for FactRelationKind {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "supports" => Ok(Self::Supports),
+            "contradicts" => Ok(Self::Contradicts),
+            "supersedes" => Ok(Self::Supersedes),
+            "derived_from" => Ok(Self::DerivedFrom),
+            other => Err(format!("unsupported fact relation kind: {other}")),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct FactRelationRecord {
+    pub source_fact_id: i64,
+    pub target_fact_id: i64,
+    pub relation: FactRelationKind,
+    pub confidence: f64,
+    pub source: String,
+    pub metadata: Value,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub struct EntityGroomingResult {
+    pub winner_entity_id: i64,
+    pub merged_entity_ids: Vec<i64>,
+    pub aliases: Vec<String>,
+    pub rewired_fact_count: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "op", rename_all = "snake_case")]
+pub enum MemoryGroomingOperation {
+    NormalizeTags {
+        fact_id: i64,
+        tags: Vec<String>,
+        evidence_fact_ids: Vec<i64>,
+        confidence: f64,
+    },
+    MergeEntities {
+        winner_entity_id: i64,
+        loser_entity_ids: Vec<i64>,
+        evidence_fact_ids: Vec<i64>,
+        confidence: f64,
+    },
+    AddAlias {
+        entity_id: i64,
+        alias: String,
+        evidence_fact_ids: Vec<i64>,
+        confidence: f64,
+    },
+    LinkFacts {
+        source_fact_id: i64,
+        target_fact_id: i64,
+        relation: FactRelationKind,
+        evidence_fact_ids: Vec<i64>,
+        confidence: f64,
+        source: String,
+        #[serde(default)]
+        metadata: Value,
+    },
+    RepairVector {
+        fact_id: i64,
+        evidence_fact_ids: Vec<i64>,
+        confidence: f64,
+    },
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct MemoryGroomingReport {
+    pub normalized_tags: usize,
+    pub merged_entities: usize,
+    pub aliases_added: usize,
+    pub facts_linked: usize,
+    pub vectors_repaired: usize,
+    pub derived_repair: MemoryRepairStats,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct FactSearchResult {
     pub fact: FactRecord,
@@ -186,7 +294,7 @@ pub struct TrustHistoryEntry {
     pub note: Option<String>,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct MemoryRepairStats {
     pub missing_vectors_repaired: usize,
     pub banks_rebuilt: usize,

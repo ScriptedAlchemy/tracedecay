@@ -516,7 +516,9 @@ async fn dispatch_command(command: Commands) -> tracedecay::errors::Result<()> {
         | Commands::HookCodexUserPromptSubmit
         | Commands::HookCodexSubagentStart
         | Commands::HookCodexPostToolUse
-        | Commands::HookCodexPostCompact) => {
+        | Commands::HookCodexPostCompact
+        | Commands::HookHermesTerminalReceipt
+        | Commands::HookUserSessionReview) => {
             hook_cmd::handle_hook_command(hook_command).await?;
         }
         Commands::Dashboard {

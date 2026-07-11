@@ -793,7 +793,16 @@ tracedecay sync --force
 
 ## Configuration Files
 
-TraceDecay stores data in two local store classes.
+TraceDecay stores data in three local store classes.
+
+### User memory store
+
+`~/.tracedecay/user-memory.db` stores durable user preferences and memory from
+chat sessions that are not attached to an initialized TraceDecay project. Use
+`memory_scope=user` with `tracedecay_fact_store`,
+`tracedecay_fact_feedback`, or `tracedecay_memory_status`. The CLI can access
+this scope outside any project. Hermes routes untethered chat and explicit
+user-preference writes here; projectless Codex and Cursor hooks recall from it.
 
 ### Active project store
 
@@ -801,6 +810,15 @@ Repo-local projects create `.tracedecay/` inside each project you index. Profile
 
 - `tracedecay.db` — the libSQL database with all symbols, edges, files, and vector embeddings
 - `sessions.db` and sidecar directories such as response handles, LCM payloads, branch metadata, and dashboard artifacts when those features are used
+
+Project holographic memory remains sharded: project `memory_facts`, entities,
+feedback, and derived holographic banks live in that project's
+`tracedecay.db`. The user-level `global.db` tracks the project registry and
+cross-project usage; it is not a single fact table with a `project_id` tag.
+Tools select either the profile-level user store or a registered project store
+before reading or writing facts. Read-only tools can explicitly select another
+registered project, while project-scoped mutations write only to the active
+project.
 
 Add `.tracedecay` to your `.gitignore` so enrollment markers are not committed.
 

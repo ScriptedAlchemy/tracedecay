@@ -200,7 +200,7 @@ class NoToolCtx:
 ctx = NoToolCtx()
 plugin.register(ctx)
 
-assert [name for name, _ in ctx.hooks] == ["pre_llm_call"]
+assert [name for name, _ in ctx.hooks] == ["pre_llm_call", "post_tool_call"]
 assert len(ctx.memory_providers) == 1
 assert len(ctx.context_engines) == 1
 assert isinstance(ctx.context_engines[0], plugin.TraceDecayContextEngine)
@@ -240,7 +240,7 @@ ctx = RaisingToolCtx()
 plugin.register(ctx)
 
 assert ctx.tool_calls
-assert [name for name, _ in ctx.hooks] == ["pre_llm_call"]
+assert [name for name, _ in ctx.hooks] == ["pre_llm_call", "post_tool_call"]
 assert len(ctx.memory_providers) == 1
 assert len(ctx.context_engines) == 1
 "#,
@@ -387,7 +387,6 @@ def fake_call_tracedecay_tool(name, args, **kwargs):
     return json.dumps({"ok": True, "tool": name})
 
 plugin.tools.call_tracedecay_tool = fake_call_tracedecay_tool
-
 native_result = engine.handle_tool_call(
     "lcm_grep",
     {
@@ -604,6 +603,7 @@ def fake_call_tracedecay_tool(name, args, **kwargs):
     return json.dumps({"content": [{"type": "text", "text": json.dumps({"status": "ok"})}]})
 
 plugin.tools.call_tracedecay_tool = fake_call_tracedecay_tool
+plugin._resolved_project_scope = lambda path: None
 
 engine = plugin.TraceDecayContextEngine()
 engine.initialize(session_id="session-1")
@@ -612,7 +612,7 @@ status = engine.get_status()
 assert "storage_scope" not in status
 assert "hermes_home" not in status
 assert "lcm_project_root" not in status
-assert status["project_root"] == os.getcwd()
+assert status["project_root"] is None
 
 engine.handle_tool_call(
     "lcm_grep",
@@ -622,17 +622,20 @@ engine.handle_tool_call(
 
 assert calls[0][0] == "tracedecay_lcm_preflight"
 assert "project_root" not in calls[0][1]
-assert calls[0][2]["project_root"] == os.getcwd()
+assert calls[0][1]["storage_scope"] == "user"
+assert calls[0][2] == {}
 assert calls[0][1]["messages"] == [{"role": "user", "content": "profile current turn"}]
 assert calls[1][0] == "tracedecay_lcm_grep"
 assert "project_root" not in calls[1][1]
-assert calls[1][2]["project_root"] == os.getcwd()
+assert calls[1][1]["storage_scope"] == "user"
+assert calls[1][2] == {}
 
 os.environ["HERMES_HOME"] = "/tmp/another-hermes-home"
 other = plugin.TraceDecayContextEngine()
 other.initialize(session_id="session-2")
 other.status()
-assert calls[-1][2]["project_root"] == os.getcwd()
+assert calls[-1][1]["storage_scope"] == "user"
+assert calls[-1][2] == {}
 "#,
         "generated context engine must not use HERMES_HOME as a TraceDecay storage identity",
     );
@@ -652,7 +655,6 @@ def fake_call_tracedecay_tool(name, args, **kwargs):
     return json.dumps({"status": "ok", "tool": name})
 
 plugin.tools.call_tracedecay_tool = fake_call_tracedecay_tool
-
 engine = plugin.TraceDecayContextEngine()
 engine.initialize(session_id="session-1", project_root="/tmp/project")
 
@@ -1086,6 +1088,7 @@ def fake_call_tracedecay_tool(name, args, **kwargs):
     return "{}"
 
 plugin.tools.call_tracedecay_tool = fake_call_tracedecay_tool
+plugin._resolved_project_scope = lambda path: None
 
 profile_engine = plugin.TraceDecayContextEngine()
 profile_engine.on_session_start(session_id="session-1", hermes_home="/tmp/hermes")
@@ -1094,7 +1097,8 @@ name, args, kwargs = calls.pop()
 assert name == "tracedecay_lcm_preflight"
 assert args["session_id"] == "session-1"
 assert "project_root" not in args
-assert kwargs["project_root"] == os.getcwd()
+assert args["storage_scope"] == "user"
+assert kwargs == {}
 
 project_engine = plugin.TraceDecayContextEngine()
 project_engine.on_session_start(
@@ -1111,7 +1115,7 @@ assert kwargs == {"project_root": "/tmp/project"}
 
 project_engine = plugin.TraceDecayContextEngine()
 project_engine.initialize(session_id="initial", project_root="/tmp/project")
-project_engine.on_session_start(session_id="next")
+project_engine.on_session_start(session_id="next", project_root="/tmp/project")
 project_engine.should_compress_preflight(messages=[], current_tokens=789)
 name, args, kwargs = calls.pop()
 assert name == "tracedecay_lcm_preflight"
@@ -1127,7 +1131,8 @@ name, args, kwargs = calls.pop()
 assert name == "tracedecay_lcm_preflight"
 assert args["session_id"] == "next"
 assert "project_root" not in args
-assert kwargs["project_root"] == os.getcwd()
+assert args["storage_scope"] == "user"
+assert kwargs == {}
 
 class LegacyCtx:
     def register_tool(self, *args, **kwargs):
@@ -2155,6 +2160,7 @@ def fake_call_tracedecay_tool(name, args, **kwargs):
     return '{"content":[{"type":"text","text":"{\\"status\\":\\"ok\\"}"}]}'
 
 plugin.tools.call_tracedecay_tool = fake_call_tracedecay_tool
+plugin._project_scope_available = lambda root: True
 
 provider = plugin.TracedecayMemoryProvider()
 provider.initialize(session_id="session-1", hermes_home="/tmp/hermes", project_root="/tmp/project")
@@ -3933,9 +3939,12 @@ def fake_retrieve_call(name, args, **kwargs):
     if name == "tracedecay_lcm_preflight":
         return envelope({"truncated": True, "handle": "payload-1"})
     if name == "tracedecay_retrieve":
-        assert args == {"handle": "payload-1"}
-        assert kwargs == {"project_root": "/tmp/project"}
-        return envelope({"content": json.dumps({"should_compress": True, "source": "retrieved"})})
+        if args == {"handle": "payload-1"}:
+            assert kwargs == {"project_root": "/tmp/project"}
+            return envelope({"content": json.dumps({"should_compress": True, "source": "retrieved"})})
+        assert args == {"handle": "payload-ignored"}
+        assert kwargs == {}
+        return envelope({"count": 1, "facts": [{"fact": {"content": "retrieved fact"}}]})
     if name == "tracedecay_fact_store":
         return envelope({"truncated": True, "handle": "payload-ignored"})
     raise AssertionError(f"unexpected tool call: {name}")
@@ -3945,12 +3954,13 @@ retrieved = plugin.call_tracedecay_json("tracedecay_lcm_preflight", {}, project_
 assert retrieved == {"should_compress": True, "source": "retrieved"}
 assert [call[0] for call in calls] == ["tracedecay_lcm_preflight", "tracedecay_retrieve"]
 
-not_contract_critical = plugin.call_tracedecay_json("tracedecay_fact_store", {})
-assert not_contract_critical == {"truncated": True, "handle": "payload-ignored"}
+retrieved_fact = plugin.call_tracedecay_json("tracedecay_fact_store", {})
+assert retrieved_fact == {"count": 1, "facts": [{"fact": {"content": "retrieved fact"}}]}
 assert [call[0] for call in calls] == [
     "tracedecay_lcm_preflight",
     "tracedecay_retrieve",
     "tracedecay_fact_store",
+    "tracedecay_retrieve",
 ]
 
 plugin.tools.call_tracedecay_tool = fake_call_tracedecay_tool
@@ -4367,6 +4377,7 @@ class Ctx:
 ctx = Ctx()
 plugin.register(ctx)
 engine = ctx.context_engines[0]
+plugin._resolved_project_scope = lambda path: path
 
 # Host runtime config applies at registration time.
 assert engine.project_root == "/tmp/pinned-project", engine.project_root
@@ -4378,6 +4389,11 @@ assert engine.project_root == "/somewhere/else", engine.project_root
 # An explicit project_root remains highest priority.
 engine.on_session_start(session_id="s2", project_root="/explicit/root")
 assert engine.project_root == "/explicit/root", engine.project_root
+
+# Returning to a prior session restores its route instead of inheriting the
+# most recently active session or the host default.
+engine.on_session_start(session_id="s1")
+assert engine.project_root == "/somewhere/else", engine.project_root
 
 # Without explicit runtime context, cwd is the fallback.
 unpinned = plugin.TraceDecayContextEngine(config={})
@@ -4492,6 +4508,7 @@ assert payload["project_root"] == "/tmp/hermes-profile", payload
 # Engine resolution never consults the legacy profile pin.
 engine = plugin.TraceDecayContextEngine(config={})
 assert engine.project_root is None, engine.project_root
+plugin._resolved_project_scope = lambda path: path
 engine.on_session_start(session_id="s1", cwd="/somewhere/else")
 assert engine.project_root == "/somewhere/else", engine.project_root
 

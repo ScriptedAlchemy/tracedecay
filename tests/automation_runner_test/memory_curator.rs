@@ -130,7 +130,7 @@ async fn memory_curator_runner_validates_backend_ops_and_records_ledger() {
     );
     assert_eq!(
         run.ledger_record.validation_report.as_ref().unwrap()["apply_policy"]["decision"],
-        json!("dry_run_only")
+        json!("auto_apply_allowed")
     );
     assert_eq!(
         run.ledger_record.validation_report.as_ref().unwrap()["apply_policy"]["permanent_delete_count"],
@@ -138,12 +138,13 @@ async fn memory_curator_runner_validates_backend_ops_and_records_ledger() {
     );
     assert_eq!(
         run.ledger_record.validation_report.as_ref().unwrap()["apply_policy"]["mutates_store"],
-        json!(false)
+        json!(true)
     );
     assert_eq!(
         run.report["automation_apply_policy"]["autonomous_memory_apply"],
-        json!(false)
+        json!(true)
     );
+    assert!(!fact_exists(&cg, 102).await);
     assert_eq!(
         run.report["automation_apply_policy"]["require_dashboard_approval"],
         json!(false)
@@ -213,7 +214,7 @@ async fn memory_curator_runner_validates_backend_ops_and_records_ledger() {
     );
     assert_eq!(
         validation_payload["improvement_gate"]["criteria"]["auto_apply_allowed"],
-        json!(false)
+        json!(true)
     );
     assert_eq!(
         validation_payload["improvement_gate"]["source_refs"]
@@ -479,7 +480,7 @@ async fn memory_curator_runner_validates_backend_ops_and_records_ledger() {
     assert_eq!(handoff_payload["readiness"]["eval_count"], json!(2));
     assert_eq!(
         handoff_payload["readiness"]["auto_apply_allowed"],
-        json!(false)
+        json!(true)
     );
     assert_eq!(
         handoff_payload["machine_summary"]["next_stage"],
@@ -487,7 +488,7 @@ async fn memory_curator_runner_validates_backend_ops_and_records_ledger() {
     );
     assert_eq!(
         handoff_payload["validation_requirements"]["must_not_auto_apply"],
-        json!(true)
+        json!(false)
     );
     assert_eq!(
         handoff_payload["source_refs"][0]["kind"],
@@ -544,9 +545,53 @@ async fn memory_curator_runner_validates_backend_ops_and_records_ledger() {
     assert_eq!(records[0].rejected_count, 1);
     assert_eq!(records[0].artifacts.len(), 6);
     assert!(
-        fact_exists(&cg, 102).await,
-        "dry-run memory curator must not delete accepted ops before approval"
+        !fact_exists(&cg, 102).await,
+        "default memory curation must apply accepted validated ops"
     );
+}
+
+#[tokio::test]
+async fn scheduler_memory_curator_applies_validated_ops_despite_legacy_preview_setting() {
+    let temp = tempdir().unwrap();
+    let cg = init_project(temp.path()).await;
+    seed_duplicate_facts(&cg).await;
+    let backend = JsonBackend::new(json!({
+        "ops": [{
+            "cluster_id": "cluster-0000",
+            "op": "delete",
+            "fact_id": 102,
+            "confidence": 0.98,
+            "reason": "near duplicate of fact 101"
+        }]
+    }));
+    let mut config = scheduler_config(None, None);
+    config.auto_apply_memory_ops = false;
+    config.tasks.memory_curator.interval_secs = Some(1);
+
+    let run = run_memory_curator_with_backend(
+        &cg,
+        &config,
+        &backend,
+        MemoryCuratorAutomationOptions {
+            trigger: AutomationTrigger::Scheduler,
+            max_clusters: 4,
+            min_confidence: 0.5,
+            run_id: None,
+        },
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(run.report["llm_apply"]["applied"], json!(1));
+    assert_eq!(
+        run.report["automation_apply_policy"]["decision"],
+        json!("auto_apply_allowed")
+    );
+    assert_eq!(
+        run.report["automation_apply_policy"]["validated_before_apply"],
+        json!(true)
+    );
+    assert!(!fact_exists(&cg, 102).await);
 }
 
 #[tokio::test]
@@ -867,7 +912,7 @@ async fn memory_curator_runner_preserves_review_gate_when_auto_apply_applies_zer
     );
     assert_eq!(
         run.report["automation_apply_policy"]["decision"],
-        json!("dry_run_only")
+        json!("apply_incomplete")
     );
     assert_eq!(
         run.report["automation_apply_policy"]["mutates_store"],

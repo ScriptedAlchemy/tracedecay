@@ -83,7 +83,10 @@ pub struct AutomationConfig {
     pub timeout_secs: u64,
     #[serde(default = "default_scheduler_tick_secs")]
     pub scheduler_tick_secs: u64,
-    #[serde(default)]
+    /// Legacy compatibility setting. Autonomous memory curation always
+    /// validates and applies accepted operations; explicit preview APIs remain
+    /// read-only until their caller requests apply.
+    #[serde(default = "default_true")]
     pub auto_apply_memory_ops: bool,
     #[serde(default)]
     pub auto_enable_skills: bool,
@@ -118,7 +121,7 @@ impl Default for AutomationConfig {
             host_mode: AutomationHostMode::Standalone,
             timeout_secs: default_timeout_secs(),
             scheduler_tick_secs: default_scheduler_tick_secs(),
-            auto_apply_memory_ops: false,
+            auto_apply_memory_ops: true,
             auto_enable_skills: false,
             export_memory_digest: true,
             combine_due_tasks: true,
@@ -211,6 +214,7 @@ pub struct AutomationConfigPatch {
     /// (`explanation.effective_apply_policy`).
     #[serde(default, skip_serializing)]
     pub require_dashboard_approval: Option<bool>,
+    /// Legacy compatibility setting; autonomous memory curation ignores it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto_apply_memory_ops: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -266,6 +270,47 @@ pub fn effective_config(
     }
     validate_config(&config)?;
     Ok(config)
+}
+
+/// Resolves the profile-level projectless automation policy.
+///
+/// A missing global `[automation]` table opts into the self-improving user
+/// session defaults. An explicitly configured global table remains
+/// authoritative, and the isolated user-automation sidecar can override it.
+pub async fn effective_user_automation_config(
+    profile_root: &Path,
+    global: &AutomationConfig,
+    global_configured: bool,
+) -> Result<AutomationConfig> {
+    let base = if global_configured {
+        global.clone()
+    } else {
+        default_user_automation_config()
+    };
+    let dashboard_root = crate::automation::runner::user_automation_root(profile_root);
+    let profile_patch = load_project_config(&dashboard_root).await?;
+    effective_config(&base, profile_patch.as_ref())
+}
+
+fn default_user_automation_config() -> AutomationConfig {
+    let task = || AutomationTaskConfig {
+        enabled: true,
+        schedule: Some("manual".to_string()),
+        ..AutomationTaskConfig::default()
+    };
+    AutomationConfig {
+        enabled: true,
+        backend: AutomationBackend::CodexAppServer,
+        host_mode: AutomationHostMode::Standalone,
+        auto_apply_memory_ops: true,
+        auto_enable_skills: true,
+        tasks: AutomationTaskSet {
+            memory_curator: task(),
+            session_reflector: task(),
+            skill_writer: task(),
+        },
+        ..AutomationConfig::default()
+    }
 }
 
 pub fn merge_project_config(

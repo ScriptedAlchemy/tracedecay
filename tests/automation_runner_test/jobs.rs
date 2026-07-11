@@ -652,6 +652,87 @@ async fn scheduler_user_job_uses_explicit_profile_root_for_attached_skills() {
 }
 
 #[tokio::test]
+async fn user_job_does_not_attach_archived_managed_skills() {
+    let temp = tempdir().unwrap();
+    let dashboard_root = temp.path().join("dashboard");
+    let profile_root = temp.path().join("profile");
+    let project_root = temp.path().join("project");
+    fs::create_dir_all(&profile_root).unwrap();
+    fs::create_dir_all(&project_root).unwrap();
+    create_managed_skill_draft(
+        &profile_root,
+        ManagedSkillDraft {
+            id: "archived-job-context".to_string(),
+            title: "Archived job context".to_string(),
+            summary: "Must not be attached after archival.".to_string(),
+            category: "workflow".to_string(),
+            targets: tracedecay::automation::managed_skills::default_managed_skill_targets(),
+            body_markdown: "ARCHIVED_SKILL_BODY_MUST_NOT_RUN".to_string(),
+            support_files: Vec::new(),
+            provenance: ManagedSkillProvenance {
+                source: ManagedSkillSource::UserDraft,
+                actor: "test".to_string(),
+                run_id: None,
+            },
+        },
+    )
+    .await
+    .unwrap();
+    approve_managed_skill(&profile_root, "archived-job-context")
+        .await
+        .unwrap();
+    tracedecay::automation::managed_skills::archive_managed_skill(
+        &profile_root,
+        "archived-job-context",
+    )
+    .await
+    .unwrap();
+
+    let mut job = sample_job("archived-profile-skill");
+    job.skill_ids = vec!["archived-job-context".to_string()];
+
+    struct AssertArchivedSkillExcludedBackend;
+    impl AgentTaskBackend for AssertArchivedSkillExcludedBackend {
+        fn run_task(
+            &self,
+            request: &AgentTaskRequest,
+        ) -> tracedecay::errors::Result<AgentTaskResponse> {
+            assert!(!request.prompt.contains("ARCHIVED_SKILL_BODY_MUST_NOT_RUN"));
+            assert_eq!(request.context["attached_skills"], json!([]));
+            assert_eq!(
+                request.context["missing_skills"],
+                json!(["archived-job-context"])
+            );
+            Ok(AgentTaskResponse {
+                run_id: request.run_id.clone(),
+                task: request.task,
+                output_text: "done".to_string(),
+                output_json: None,
+                model: Some("fixture-model".to_string()),
+                input_tokens: None,
+                output_tokens: None,
+            })
+        }
+    }
+
+    let run = run_user_job_with_backend(
+        &dashboard_root,
+        &enabled_job_config(),
+        &AssertArchivedSkillExcludedBackend,
+        &job,
+        UserJobRunOptions {
+            trigger: AutomationTrigger::Scheduler,
+            run_id: Some("archived-profile-skill-run".to_string()),
+            profile_root: Some(profile_root),
+            project_root: Some(project_root),
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(run.report["status"], json!("delivered"));
+}
+
+#[tokio::test]
 async fn user_job_backend_failure_records_failed_ledger_entry() {
     let temp = tempdir().unwrap();
     let dashboard_root = temp.path().join("dashboard");

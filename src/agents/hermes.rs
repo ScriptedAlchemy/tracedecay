@@ -34,11 +34,16 @@ impl AgentIntegration for HermesIntegration {
 
     fn install(&self, ctx: &InstallContext) -> Result<()> {
         lifecycle::install(ctx)?;
+        self.reconcile_managed_skills(ctx)?;
         Ok(())
     }
 
     fn update_plugin(&self, ctx: &InstallContext) -> Result<UpdatePluginOutcome> {
-        lifecycle::update_plugin(ctx)
+        let outcome = lifecycle::update_plugin(ctx)?;
+        if matches!(outcome, UpdatePluginOutcome::Refreshed(_)) {
+            self.reconcile_managed_skills(ctx)?;
+        }
+        Ok(outcome)
     }
 
     fn uninstall(&self, ctx: &InstallContext) -> Result<()> {
@@ -60,16 +65,38 @@ impl AgentIntegration for HermesIntegration {
     }
 
     fn has_tracedecay(&self, home: &Path) -> bool {
-        default_plugin_dir(home).join("plugin.yaml").is_file()
+        detected_plugin_dirs(home)
+            .into_iter()
+            .any(|dir| dir.is_dir())
+    }
+
+    fn export_managed_skills(
+        &self,
+        home: &Path,
+        profile_root: &Path,
+    ) -> Result<Vec<crate::automation::skill_targets::SkillInstallSummary>> {
+        let mut exports = Vec::new();
+        for plugin_dir in detected_plugin_dirs(home) {
+            exports.push(crate::automation::skill_targets::install_managed_skills(
+                profile_root,
+                crate::automation::skill_targets::SkillInstallTarget::Hermes,
+                &plugin_dir,
+            )?);
+        }
+        Ok(exports)
+    }
+}
+
+impl HermesIntegration {
+    fn reconcile_managed_skills(&self, ctx: &InstallContext) -> Result<()> {
+        let profile_root = crate::automation::skill_targets::profile_root_for_agent_home(&ctx.home);
+        self.export_managed_skills(&ctx.home, &profile_root)?;
+        Ok(())
     }
 }
 
 fn hermes_home(home: &Path) -> PathBuf {
     home.join(".hermes")
-}
-
-fn default_plugin_dir(home: &Path) -> PathBuf {
-    hermes_home(home).join("plugins/tracedecay")
 }
 
 fn doctor_check_plugin(dc: &mut DoctorCounters, home: &Path) {
@@ -178,67 +205,34 @@ pub(super) fn write_plugin_files(plugin_dir: &Path, tracedecay_bin: &str) -> Res
     )
 }
 
-/// The one supported user-level generated plugin directory, when installed.
-pub(super) fn detected_plugin_dirs(home: &Path) -> Vec<PathBuf> {
-    let plugin_dir = default_plugin_dir(home);
-    plugin_dir
-        .join("plugin.yaml")
-        .is_file()
-        .then_some(plugin_dir)
-        .into_iter()
-        .collect()
-}
-
-/// Historical generated plugin locations. These are consulted only during
-/// the one-time cutover; they never select `TraceDecay` storage or a live Hermes
-/// install target.
-pub(super) fn legacy_plugin_dirs(home: &Path) -> Vec<PathBuf> {
-    let default = default_plugin_dir(home);
-    let roots = [hermes_home(home)];
-    let mut profile_roots = Vec::new();
-    for root in roots {
-        profile_roots.push(root.clone());
-        if let Ok(entries) = std::fs::read_dir(root.join("profiles")) {
-            let mut profiles = entries
-                .filter_map(|entry| {
-                    let entry = entry.ok()?;
-                    entry.file_type().ok()?.is_dir().then(|| entry.path())
-                })
-                .collect::<Vec<_>>();
-            profiles.sort();
-            profile_roots.extend(profiles);
-        }
+/// Generated plugin locations for the default Hermes profile and every named
+/// profile that already exists. Hermes resolves each profile to an independent
+/// `HERMES_HOME`, so each one needs the same stock plugin package and provider
+/// selections in its own config.yaml.
+pub(super) fn profile_plugin_dirs(home: &Path) -> Vec<PathBuf> {
+    let root = hermes_home(home);
+    let mut profile_roots = vec![root.clone()];
+    if let Ok(entries) = std::fs::read_dir(root.join("profiles")) {
+        let mut profiles = entries
+            .filter_map(|entry| {
+                let entry = entry.ok()?;
+                entry.file_type().ok()?.is_dir().then(|| entry.path())
+            })
+            .collect::<Vec<_>>();
+        profiles.sort();
+        profile_roots.extend(profiles);
     }
-    let mut seen = std::collections::BTreeSet::new();
     profile_roots
         .into_iter()
-        .map(|root| root.join("plugins/tracedecay"))
-        .filter(|plugin_dir| !paths_equal(plugin_dir, &default))
-        .filter(|plugin_dir| plugin_dir.join("plugin.yaml").is_file())
-        .filter(|plugin_dir| seen.insert(canonical_or_original(plugin_dir)))
+        .map(|profile_root| profile_root.join("plugins/tracedecay"))
         .collect()
 }
 
-#[doc(hidden)]
-pub fn has_legacy_plugin_install(home: &Path) -> bool {
-    !legacy_plugin_dirs(home).is_empty()
-}
-
-#[doc(hidden)]
-pub fn cleanup_legacy_plugin_dirs(home: &Path) -> Result<Vec<PathBuf>> {
-    let plugin_dirs = legacy_plugin_dirs(home);
-    for plugin_dir in &plugin_dirs {
-        uninstall_plugin(plugin_dir)?;
-    }
-    Ok(plugin_dirs)
-}
-
-fn paths_equal(left: &Path, right: &Path) -> bool {
-    canonical_or_original(left) == canonical_or_original(right)
-}
-
-fn canonical_or_original(path: &Path) -> PathBuf {
-    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+pub(super) fn detected_plugin_dirs(home: &Path) -> Vec<PathBuf> {
+    profile_plugin_dirs(home)
+        .into_iter()
+        .filter(|plugin_dir| plugin_dir.join("plugin.yaml").is_file())
+        .collect()
 }
 
 pub(super) fn uninstall_plugin(plugin_dir: &Path) -> Result<()> {
@@ -262,6 +256,18 @@ pub(super) fn remove_generated_plugin_files(plugin_dir: &Path) -> Result<()> {
     remove_generated_file(&plugin_dir.join("cli.py"))?;
     remove_generated_file(&plugin_dir.join("skills/tracedecay/SKILL.md"))?;
     remove_empty_dir(&plugin_dir.join("skills/tracedecay"))?;
+    let managed_overlay = plugin_dir.join("skills/agent-managed");
+    if managed_overlay
+        .join(".tracedecay-managed-skills.json")
+        .is_file()
+    {
+        std::fs::remove_dir_all(&managed_overlay).map_err(|e| TraceDecayError::Config {
+            message: format!(
+                "failed to remove generated Hermes skill overlay {}: {e}",
+                managed_overlay.display()
+            ),
+        })?;
+    }
     remove_empty_dir(&plugin_dir.join("skills"))?;
     dashboard_wrapper::uninstall(plugin_dir)?;
 

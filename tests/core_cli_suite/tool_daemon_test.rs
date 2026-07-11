@@ -691,7 +691,7 @@ fn tool_cli_skips_daemon_notifications_until_matching_response() {
 }
 
 #[test]
-fn tool_cli_rejects_removed_storage_scope_argument() {
+fn tool_cli_rejects_invalid_storage_scope_argument() {
     let home = TempDir::new().unwrap();
     let outside_cwd = TempDir::new().unwrap();
     let home_path = canonical_existing_path(home.path());
@@ -716,14 +716,15 @@ fn tool_cli_rejects_removed_storage_scope_argument() {
 
     assert!(
         !output.status.success(),
-        "removed storage_scope must fail before dispatch\nstdout:\n{}\nstderr:\n{}",
+        "invalid storage_scope must fail before dispatch\nstdout:\n{}\nstderr:\n{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("unknown parameter") && stderr.contains("--storage-scope"),
-        "rejection should name the removed argument:\n{stderr}"
+        stderr.contains("storage-scope")
+            && (stderr.contains("invalid value") || stderr.contains("project, user")),
+        "rejection should name the valid scopes:\n{stderr}"
     );
 }
 

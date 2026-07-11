@@ -80,6 +80,20 @@ impl<'a> FactRetriever<'a> {
                 limit.saturating_mul(10),
             )
             .await?;
+        let direct_ids: HashSet<i64> = fts_scores
+            .keys()
+            .copied()
+            .chain(entity_candidate_ids)
+            .collect();
+        let related_ids: HashSet<i64> = self
+            .store
+            .related_fact_ids(
+                &direct_ids.iter().copied().collect::<Vec<_>>(),
+                limit.saturating_mul(5),
+            )
+            .await?
+            .into_iter()
+            .collect();
         let mut candidates = self
             .store
             .list_facts(category, Some(min_trust), limit.saturating_mul(10))
@@ -89,7 +103,7 @@ impl<'a> FactRetriever<'a> {
         // `list_facts` baseline did not already include, then hydrate them with a
         // single batched `get_facts` call instead of one round-trip per id.
         let mut missing_ids: Vec<i64> = Vec::new();
-        for fact_id in fts_scores.keys().copied().chain(entity_candidate_ids) {
+        for fact_id in direct_ids.iter().chain(&related_ids).copied() {
             if candidate_ids.insert(fact_id) {
                 missing_ids.push(fact_id);
             }
@@ -102,11 +116,14 @@ impl<'a> FactRetriever<'a> {
                 }
             }
         }
+        candidates.retain(|fact| {
+            fact.trust_score >= min_trust && category.is_none_or(|value| fact.category == value)
+        });
 
         if !query_tokens.is_empty() {
-            let fts_ids: HashSet<i64> = fts_scores.keys().copied().collect();
             candidates.retain(|fact| {
-                fts_ids.contains(&fact.fact_id)
+                direct_ids.contains(&fact.fact_id)
+                    || related_ids.contains(&fact.fact_id)
                     || token_overlap(&query_tokens, &fact_search_tokens(fact)) > 0
             });
         }
@@ -201,12 +218,15 @@ impl<'a> FactRetriever<'a> {
             .conn()
             .query(
                 "SELECT DISTINCT related.entity_id, related.name, related.normalized_name,
-                        related.entity_type, related.created_at
+                        related.entity_type, related.created_at, related.updated_at
                  FROM memory_entities source
                  JOIN memory_fact_entities source_fe ON source_fe.entity_id = source.entity_id
                  JOIN memory_fact_entities related_fe ON related_fe.fact_id = source_fe.fact_id
                  JOIN memory_entities related ON related.entity_id = related_fe.entity_id
-                 WHERE source.normalized_name = ?1
+                 WHERE (source.normalized_name = ?1 OR EXISTS (
+                           SELECT 1 FROM json_each(source.aliases)
+                           WHERE lower(json_each.value) = ?1
+                       ))
                    AND related.normalized_name != ?1
                  ORDER BY related.name
                  LIMIT ?2",
@@ -224,7 +244,7 @@ impl<'a> FactRetriever<'a> {
                 normalized_name: row.get::<String>(2).map_err(|e| db_error("related", e))?,
                 entity_type: Some(row.get::<String>(3).map_err(|e| db_error("related", e))?),
                 created_at,
-                updated_at: created_at,
+                updated_at: row.get::<i64>(5).map_err(|e| db_error("related", e))?,
             });
         }
         Ok(entities)
@@ -462,13 +482,19 @@ impl<'a> FactRetriever<'a> {
         // Bind each term's exact and LIKE values as anonymous `?` placeholders in
         // positional order. `escape_like` still governs wildcard semantics on the
         // LIKE value, but the value is bound rather than interpolated.
-        let mut values: Vec<libsql::Value> = Vec::with_capacity(terms.len() * 2 + 3);
+        let mut values: Vec<libsql::Value> = Vec::with_capacity(terms.len() * 4 + 3);
         let predicates = terms
             .iter()
             .map(|term| {
                 values.push(libsql::Value::Text(term.clone()));
                 values.push(libsql::Value::Text(format!("%{}%", escape_like(term))));
-                "(e.normalized_name = ? OR e.normalized_name LIKE ? ESCAPE '\\')".to_string()
+                values.push(libsql::Value::Text(term.clone()));
+                values.push(libsql::Value::Text(format!("%{}%", escape_like(term))));
+                "(e.normalized_name = ? OR e.normalized_name LIKE ? ESCAPE '\\' OR EXISTS (
+                    SELECT 1 FROM json_each(e.aliases) alias
+                    WHERE lower(alias.value) = ? OR lower(alias.value) LIKE ? ESCAPE '\\'
+                 ))"
+                .to_string()
             })
             .collect::<Vec<_>>()
             .join(" OR ");
@@ -541,7 +567,10 @@ impl<'a> FactRetriever<'a> {
              FROM memory_entities e
              JOIN memory_fact_entities fe ON fe.entity_id = e.entity_id
              JOIN memory_facts f ON f.fact_id = fe.fact_id
-             WHERE e.normalized_name = ?1
+             WHERE (e.normalized_name = ?1 OR EXISTS (
+                       SELECT 1 FROM json_each(e.aliases)
+                       WHERE lower(json_each.value) = ?1
+                   ))
                AND f.category = ?2
                AND f.trust_score >= ?3
              ORDER BY f.updated_at DESC
@@ -551,7 +580,10 @@ impl<'a> FactRetriever<'a> {
              FROM memory_entities e
              JOIN memory_fact_entities fe ON fe.entity_id = e.entity_id
              JOIN memory_facts f ON f.fact_id = fe.fact_id
-             WHERE e.normalized_name = ?1
+             WHERE (e.normalized_name = ?1 OR EXISTS (
+                       SELECT 1 FROM json_each(e.aliases)
+                       WHERE lower(json_each.value) = ?1
+                   ))
                AND f.trust_score >= ?2
              ORDER BY f.updated_at DESC
              LIMIT ?3"

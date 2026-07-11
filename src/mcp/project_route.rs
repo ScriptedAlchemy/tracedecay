@@ -418,6 +418,7 @@ mod tests {
                 worktree: None,
                 branch: None,
             }),
+            receipt: None,
         }
     }
 }

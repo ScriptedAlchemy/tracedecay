@@ -315,6 +315,27 @@ pub fn schedule_decision(
     activity: SessionActivity,
     now_secs: i64,
 ) -> AutomationScheduleDecision {
+    schedule_decision_for_trigger(config, task, records, activity, now_secs, true)
+}
+
+pub fn host_receipt_decision(
+    config: &AutomationConfig,
+    task: AgentTaskKind,
+    records: &[AutomationRunLedgerRecord],
+    activity: SessionActivity,
+    now_secs: i64,
+) -> AutomationScheduleDecision {
+    schedule_decision_for_trigger(config, task, records, activity, now_secs, false)
+}
+
+fn schedule_decision_for_trigger(
+    config: &AutomationConfig,
+    task: AgentTaskKind,
+    records: &[AutomationRunLedgerRecord],
+    activity: SessionActivity,
+    now_secs: i64,
+    enforce_schedule: bool,
+) -> AutomationScheduleDecision {
     if !config.enabled {
         return AutomationScheduleDecision::skipped("automation_disabled");
     }
@@ -331,20 +352,25 @@ pub fn schedule_decision(
         return AutomationScheduleDecision::skipped("task_disabled");
     }
 
-    let Ok(schedule) = parse_schedule(task_config.schedule.as_deref()) else {
-        return AutomationScheduleDecision::skipped("scheduler_schedule_invalid");
-    };
-    let (interval_secs, cron) = match schedule {
-        AutomationSchedule::Manual => {
+    let (interval_secs, cron) = if enforce_schedule {
+        let Ok(schedule) = parse_schedule(task_config.schedule.as_deref()) else {
+            return AutomationScheduleDecision::skipped("scheduler_schedule_invalid");
+        };
+        let timing = match schedule {
+            AutomationSchedule::Manual => {
+                return AutomationScheduleDecision::skipped("scheduler_schedule_manual");
+            }
+            AutomationSchedule::ConfiguredInterval => (task_config.interval_secs, None),
+            AutomationSchedule::Interval { every_secs } => (Some(every_secs), None),
+            AutomationSchedule::Cron(cron) => (None, Some(cron)),
+        };
+        if timing.0.is_none() && timing.1.is_none() {
             return AutomationScheduleDecision::skipped("scheduler_schedule_manual");
         }
-        AutomationSchedule::ConfiguredInterval => (task_config.interval_secs, None),
-        AutomationSchedule::Interval { every_secs } => (Some(every_secs), None),
-        AutomationSchedule::Cron(cron) => (None, Some(cron)),
+        timing
+    } else {
+        (None, None)
     };
-    if interval_secs.is_none() && cron.is_none() {
-        return AutomationScheduleDecision::skipped("scheduler_schedule_manual");
-    }
 
     // `min_idle_secs` is a true idle window: the project must have been quiet
     // (no LCM session ingest activity) for at least this long. An unknown
@@ -357,9 +383,24 @@ pub fn schedule_decision(
         }
     }
 
-    if let Some(record) =
-        latest_non_skipped_record(records, task, Some(AutomationTrigger::Scheduler))
-    {
+    // Session-evidence tasks are event-driven across every supported host.
+    // Cursor, Claude, Codex, and Hermes all ingest completed-turn evidence
+    // into the project session store; a newer activity watermark should wake
+    // reflection as soon as the idle window closes instead of waiting for the
+    // periodic interval. The interval remains the repair/backstop schedule.
+    let fresh_session_activity = task_consumes_session_evidence(task)
+        && latest_successful_record(records, task).is_some_and(|record| {
+            let started_at = record.started_at.parse::<i64>().ok().unwrap_or(0);
+            activity
+                .last_activity_secs
+                .is_some_and(|last_activity| last_activity > started_at)
+        });
+
+    if let Some(record) = latest_non_skipped_record(
+        records,
+        task,
+        enforce_schedule.then_some(AutomationTrigger::Scheduler),
+    ) {
         let completed_at = record.completed_at.parse::<i64>().ok().unwrap_or(0);
         if record.status == AutomationRunStatus::Failed {
             let failure = agent_task_failure_disposition(
@@ -378,12 +419,12 @@ pub fn schedule_decision(
             }
             return AutomationScheduleDecision::due();
         }
-        if let Some(interval_secs) = interval_secs {
+        if let Some(interval_secs) = interval_secs.filter(|_| !fresh_session_activity) {
             if elapsed_secs(completed_at, now_secs) < interval_secs {
                 return AutomationScheduleDecision::skipped("scheduler_interval_not_elapsed");
             }
         }
-        if let Some(cron) = cron {
+        if let Some(cron) = cron.filter(|_| !fresh_session_activity) {
             if !cron_is_due(&cron, Some(completed_at), now_secs) {
                 return AutomationScheduleDecision::skipped("scheduler_cron_not_due");
             }

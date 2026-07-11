@@ -13,7 +13,7 @@ use crate::automation::managed_skills::{
     ManagedSkill, ManagedSkillDraft, ManagedSkillProvenance, ManagedSkillSource, ManagedSkillState,
     ManagedSkillUpdate, ManagedSupportFile, SkillInstallTarget, approve_managed_skill,
     create_managed_skill_draft, discard_pending_managed_skill_update, list_managed_skills,
-    load_managed_skill, managed_skill_dir, managed_skill_root, save_managed_skill,
+    load_managed_skill, managed_skill_dir, managed_skill_root, set_managed_skill_pinned,
     set_managed_skill_state, stage_managed_skill_update, update_managed_skill,
 };
 use crate::automation::skill_usage::{
@@ -106,15 +106,16 @@ pub(crate) async fn draft(
     let profile_root = profile_root_or_error()?;
     reject_existing_managed_skill(&profile_root, &request.id).await?;
     let pinned = request.pinned;
-    let mut skill = create_managed_skill_draft(&profile_root, request.into_draft())
+    let skill = create_managed_skill_draft(&profile_root, request.into_draft())
         .await
         .map_err(|err| bad_request_or_internal(&err))?;
-    if let Some(pinned) = pinned {
-        skill.set_pinned(pinned);
-        save_managed_skill(&profile_root, &skill)
+    let skill = if let Some(pinned) = pinned {
+        set_managed_skill_pinned(&profile_root, &skill.metadata.id, pinned)
             .await
-            .map_err(|err| internal_error(&err))?;
-    }
+            .map_err(|err| internal_error(&err))?
+    } else {
+        skill
+    };
     skill_payload(&profile_root, skill).await
 }
 

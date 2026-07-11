@@ -54,12 +54,12 @@ fn drain_hook_input(mode: HookInput, input: &mut impl std::io::Read) -> std::io:
 
 pub(crate) fn hook_input(command: &Commands) -> Option<HookInput> {
     match command {
-        Commands::HookPreToolUse | Commands::HookPromptSubmit | Commands::HookStop => {
-            Some(HookInput::NoInput)
-        }
+        Commands::HookPreToolUse => Some(HookInput::NoInput),
         Commands::HookClaudeSessionStart
         | Commands::HookClaudePostToolUse
         | Commands::HookClaudeSubagentStart
+        | Commands::HookPromptSubmit
+        | Commands::HookStop
         | Commands::HookKiroPreToolUse
         | Commands::HookKiroPromptSubmit
         | Commands::HookKiroPostToolUse
@@ -77,7 +77,9 @@ pub(crate) fn hook_input(command: &Commands) -> Option<HookInput> {
         | Commands::HookCodexUserPromptSubmit
         | Commands::HookCodexSubagentStart
         | Commands::HookCodexPostToolUse
-        | Commands::HookCodexPostCompact => Some(HookInput::Stdin),
+        | Commands::HookCodexPostCompact
+        | Commands::HookHermesTerminalReceipt
+        | Commands::HookUserSessionReview => Some(HookInput::Stdin),
         _ => None,
     }
 }
@@ -159,6 +161,12 @@ pub(crate) async fn handle_hook_command(command: Commands) -> tracedecay::errors
         Commands::HookCodexPostCompact => {
             exit_if_nonzero(tracedecay::hooks::hook_codex_post_compact().await);
         }
+        Commands::HookHermesTerminalReceipt => {
+            exit_if_nonzero(tracedecay::hooks::hook_hermes_terminal_receipt().await);
+        }
+        Commands::HookUserSessionReview => {
+            exit_if_nonzero(tracedecay::hooks::hook_user_session_review().await);
+        }
         _ => unreachable!("non-hook command passed to hook dispatcher"),
     }
     Ok(())
@@ -185,8 +193,8 @@ mod tests {
     fn hook_commands() -> Vec<(Commands, HookInput)> {
         vec![
             (Commands::HookPreToolUse, HookInput::NoInput),
-            (Commands::HookPromptSubmit, HookInput::NoInput),
-            (Commands::HookStop, HookInput::NoInput),
+            (Commands::HookPromptSubmit, HookInput::Stdin),
+            (Commands::HookStop, HookInput::Stdin),
             (Commands::HookClaudeSessionStart, HookInput::Stdin),
             (Commands::HookClaudePostToolUse, HookInput::Stdin),
             (Commands::HookClaudeSubagentStart, HookInput::Stdin),
@@ -208,26 +216,28 @@ mod tests {
             (Commands::HookCodexSubagentStart, HookInput::Stdin),
             (Commands::HookCodexPostToolUse, HookInput::Stdin),
             (Commands::HookCodexPostCompact, HookInput::Stdin),
+            (Commands::HookHermesTerminalReceipt, HookInput::Stdin),
+            (Commands::HookUserSessionReview, HookInput::Stdin),
         ]
     }
 
     #[test]
     fn all_hook_commands_have_explicit_input_semantics() {
         let hooks = hook_commands();
-        assert_eq!(hooks.len(), 24);
+        assert_eq!(hooks.len(), 26);
         assert_eq!(
             hooks
                 .iter()
                 .filter(|(_, input)| *input == HookInput::NoInput)
                 .count(),
-            3
+            1
         );
         assert_eq!(
             hooks
                 .iter()
                 .filter(|(_, input)| *input == HookInput::Stdin)
                 .count(),
-            21
+            25
         );
         for (command, expected) in hooks {
             assert_eq!(hook_input(&command), Some(expected));

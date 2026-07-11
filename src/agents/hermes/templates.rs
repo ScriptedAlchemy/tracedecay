@@ -25,6 +25,7 @@ pub(super) fn plugin_manifest() -> String {
          provides_tools:\n{tools}\n\
          provides_hooks:\n\
            - pre_llm_call\n\
+           - post_tool_call\n\
          provides_commands:\n\
            - /tracedecay_status\n",
         version = env!("CARGO_PKG_VERSION"),

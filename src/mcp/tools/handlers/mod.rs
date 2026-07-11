@@ -33,6 +33,50 @@ use crate::mcp::response_handles::{ResponseHandleLookup, retrieve_response_handl
 use crate::tracedecay::TraceDecay;
 use crate::tracedecay::current_timestamp;
 
+pub async fn handle_user_lcm_tool(
+    tool_name: &str,
+    args: Value,
+    profile_root: &Path,
+) -> Result<crate::mcp::tools::ToolResult> {
+    if args.get("storage_scope").and_then(Value::as_str) != Some("user") {
+        return Err(TraceDecayError::Config {
+            message: "projectless LCM dispatch requires storage_scope=user".to_string(),
+        });
+    }
+    if [
+        "project_id",
+        "project_path",
+        "project_root",
+        "project_selector",
+    ]
+    .iter()
+    .any(|key| args.get(*key).is_some())
+    {
+        return Err(TraceDecayError::Config {
+            message: "storage_scope=user cannot be combined with a project selector".to_string(),
+        });
+    }
+    let sessions_db_path = crate::sessions::user_sessions_db_path(profile_root);
+    let context = session::LcmHandlerContext::user(&sessions_db_path);
+    match tool_name {
+        "tracedecay_lcm_status" => session::handle_lcm_status(context, args).await,
+        "tracedecay_lcm_doctor" => session::handle_lcm_doctor(context, args).await,
+        "tracedecay_lcm_load_session" => session::handle_lcm_load_session(context, args).await,
+        "tracedecay_lcm_grep" => session::handle_lcm_grep(context, args).await,
+        "tracedecay_lcm_describe" => session::handle_lcm_describe(context, args).await,
+        "tracedecay_lcm_expand" => session::handle_lcm_expand(context, args).await,
+        "tracedecay_lcm_expand_query" => session::handle_lcm_expand_query(context, args).await,
+        "tracedecay_lcm_preflight" => session::handle_lcm_preflight(context, args).await,
+        "tracedecay_lcm_compress" => session::handle_lcm_compress(context, args).await,
+        "tracedecay_lcm_session_boundary" => {
+            session::handle_lcm_session_boundary(context, args).await
+        }
+        _ => Err(TraceDecayError::Config {
+            message: format!("unknown user-scoped LCM tool: {tool_name}"),
+        }),
+    }
+}
+
 use super::ToolResult;
 use super::dispatch_policy::{
     tool_accepts_registered_project_selector, tool_dispatches_registered_project_reader,
@@ -250,11 +294,37 @@ pub async fn handle_tool_call_with_registry_and_implicit_project(
         tool_name.starts_with("tracedecay_"),
         "tool_name must start with 'tracedecay_' prefix"
     );
-    for removed in ["storage_scope", "hermes_home"] {
+    for removed in ["hermes_home"] {
         if args.get(removed).is_some() {
             return Err(TraceDecayError::Config {
                 message: format!("unknown parameter `{removed}` for `{tool_name}`"),
             });
+        }
+    }
+    if let Some(storage_scope) = args.get("storage_scope").and_then(Value::as_str) {
+        if !tool_name.starts_with("tracedecay_lcm_") {
+            return Err(TraceDecayError::Config {
+                message: format!("unknown parameter `storage_scope` for `{tool_name}`"),
+            });
+        }
+        match storage_scope {
+            "user" => {
+                let profile_root = support::profile_root_for_global_db(
+                    options.global_db,
+                    options.allow_default_registry_fallback,
+                )?;
+                return handle_user_lcm_tool(tool_name, args, &profile_root).await;
+            }
+            "project" => {
+                if let Some(object) = args.as_object_mut() {
+                    object.remove("storage_scope");
+                }
+            }
+            _ => {
+                return Err(TraceDecayError::Config {
+                    message: "storage_scope must be one of project, user".to_string(),
+                });
+            }
         }
     }
     if !tool_accepts_registered_project_selector(tool_name)
@@ -436,7 +506,15 @@ pub async fn handle_tool_call_with_registry_and_implicit_project(
             )
             .await
         }
-        "tracedecay_fact_feedback" => memory::handle_fact_feedback(cg, args).await,
+        "tracedecay_fact_feedback" => {
+            memory::handle_fact_feedback(
+                cg,
+                args,
+                options.global_db,
+                options.allow_default_registry_fallback,
+            )
+            .await
+        }
         "tracedecay_memory_status" => {
             memory::handle_memory_status(
                 cg,

@@ -1647,11 +1647,10 @@ fn lcm_tool_schemas_are_registered_with_stable_names() {
             .iter()
             .find(|tool| tool.name == scoped)
             .unwrap_or_else(|| panic!("{scoped} definition"));
-        assert!(
-            tool.input_schema["properties"]
-                .get("storage_scope")
-                .is_none(),
-            "{scoped} must use only the active project session store"
+        assert_eq!(
+            tool.input_schema["properties"]["storage_scope"]["enum"],
+            json!(["project", "user"]),
+            "{scoped} must expose only the project and user session stores"
         );
         assert!(
             tool.input_schema["properties"].get("hermes_home").is_none(),
@@ -7999,6 +7998,137 @@ async fn memory_status_project_selector_reports_registered_project_memory() {
 }
 
 #[tokio::test]
+async fn user_memory_scope_is_profile_level_and_isolated_from_project_memory() {
+    let (active, target, _env) = setup_cross_project_memory_projects().await;
+
+    handle_tool_call(
+        &active,
+        "tracedecay_fact_store",
+        json!({
+            "action": "add",
+            "content": "Project-only routing decision",
+            "category": "project"
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    handle_tool_call(
+        &active,
+        "tracedecay_fact_store",
+        json!({
+            "action": "add",
+            "content": "User prefers concise technical answers",
+            "category": "user_pref",
+            "memory_scope": "user"
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+
+    let project_facts = handle_tool_call(
+        &active,
+        "tracedecay_fact_store",
+        json!({"action": "list", "format": "json", "min_trust": 0.0}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let user_facts = handle_tool_call(
+        &active,
+        "tracedecay_fact_store",
+        json!({
+            "action": "list",
+            "format": "json",
+            "min_trust": 0.0,
+            "memory_scope": "user"
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let project_facts = extract_json(&project_facts.value).to_string();
+    let user_facts = extract_json(&user_facts.value).to_string();
+    assert!(project_facts.contains("Project-only routing decision"));
+    assert!(!project_facts.contains("User prefers concise technical answers"));
+    assert!(user_facts.contains("User prefers concise technical answers"));
+    assert!(!user_facts.contains("Project-only routing decision"));
+
+    close_test_graph(target).await;
+    close_test_graph(active).await;
+}
+
+#[tokio::test]
+async fn hermes_live_preflight_projects_stable_turns_into_the_active_project() {
+    let (cg, _env, _dir) = setup_empty_project().await;
+    handle_tool_call(
+        &cg,
+        "tracedecay_lcm_preflight",
+        json!({
+            "provider": "hermes",
+            "session_id": "hermes-live-session",
+            "transcript_projection": true,
+            "messages": [
+                {
+                    "id": "hermes-live-user-1",
+                    "role": "user",
+                    "content": "Correlate this Hermes turn with orchard routing",
+                    "timestamp": 1_783_700_000.0
+                },
+                {
+                    "id": "hermes-live-assistant-1",
+                    "role": "assistant",
+                    "content": "The turn is routed to the active project.",
+                    "timestamp": 1_783_700_001.0
+                }
+            ]
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+
+    let search = handle_tool_call(
+        &cg,
+        "tracedecay_message_search",
+        json!({
+            "query": "orchard routing",
+            "provider": "hermes",
+            "catch_up": false,
+            "format": "json"
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let search = extract_json(&search.value);
+    assert_eq!(search["count"].as_u64(), Some(1));
+    assert_eq!(
+        search["results"][0]["session"]["session_id"],
+        "hermes-live-session"
+    );
+    assert_eq!(
+        search["results"][0]["session"]["project_path"],
+        cg.project_root().to_string_lossy().as_ref()
+    );
+    assert_eq!(
+        search["results"][0]["message"]["metadata_json"]
+            .as_str()
+            .and_then(|metadata| serde_json::from_str::<Value>(metadata).ok())
+            .and_then(|metadata| metadata["location_provenance"].as_str().map(str::to_string))
+            .as_deref(),
+        Some("host_live_route")
+    );
+}
+
+#[tokio::test]
 async fn memory_fact_store_update_rejects_secret_like_content_with_diff_report() {
     let (cg, _env, _dir) = setup_empty_project().await;
     let added = handle_tool_call(
@@ -10377,12 +10507,20 @@ async fn lcm_doctor_retention_reports_candidates_without_deleting() {
 }
 
 #[tokio::test]
-async fn lcm_tools_reject_removed_storage_routing_arguments() {
+async fn lcm_tools_reject_invalid_storage_routing_arguments() {
     let dir = test_temp_dir();
     let (cg, _env) = init_test_project(dir.path()).await;
-    for (removed, value) in [
-        ("storage_scope", json!("hermes_profile")),
-        ("hermes_home", json!("/tmp/hermes")),
+    for (removed, value, expected) in [
+        (
+            "storage_scope",
+            json!("hermes_profile"),
+            "storage_scope must be one of",
+        ),
+        (
+            "hermes_home",
+            json!("/tmp/hermes"),
+            "unknown parameter `hermes_home`",
+        ),
     ] {
         let mut args = json!({"provider": "cursor"});
         args.as_object_mut()
@@ -10392,10 +10530,50 @@ async fn lcm_tools_reject_removed_storage_routing_arguments() {
             handle_tool_call(&cg, "tracedecay_lcm_status", args, None, None).await,
         );
         assert!(
-            error.contains(&format!("unknown parameter `{removed}`")),
-            "removed argument should fail clearly: {error}"
+            error.contains(expected),
+            "invalid {removed} should fail clearly: {error}"
         );
     }
+}
+
+#[tokio::test]
+async fn user_scoped_lcm_preflight_ingests_without_a_project() {
+    let profile = TempDir::new().unwrap();
+    let result = tracedecay::mcp::tools::handle_user_lcm_tool(
+        "tracedecay_lcm_preflight",
+        json!({
+            "storage_scope": "user",
+            "provider": "hermes",
+            "session_id": "untethered-session",
+            "messages": [{
+                "id": "untethered-message-1",
+                "role": "user",
+                "content": "Remember this general preference"
+            }],
+            "transcript_projection": true,
+            "format": "json"
+        }),
+        profile.path(),
+    )
+    .await
+    .unwrap();
+    let payload: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
+    assert_eq!(payload["status"], "ok");
+
+    let db =
+        GlobalDb::open_read_only_at(&tracedecay::sessions::user_sessions_db_path(profile.path()))
+            .await
+            .unwrap();
+    assert!(
+        db.lcm_load_raw_message("hermes", "untethered-message-1")
+            .await
+            .is_some()
+    );
+    let session = db
+        .get_session("hermes", "untethered-session")
+        .await
+        .unwrap();
+    assert_eq!(session.project_key, "user");
 }
 
 #[tokio::test]

@@ -23,6 +23,7 @@ pub enum AutomationTrigger {
     ManualCli,
     Dashboard,
     Scheduler,
+    HostReceipt,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

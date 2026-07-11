@@ -222,6 +222,32 @@ async fn merge_one_graph_tx(conn: &Connection, offset: &GraphMergeOffsets) -> Re
          SELECT s.fact_id, t.fact_id
          FROM source.memory_facts s JOIN memory_facts t ON t.content = s.content;
 
+         INSERT INTO memory_fact_relations (
+             source_fact_id, target_fact_id, relation, confidence,
+             source, metadata, created_at, updated_at
+         )
+         SELECT source_map.target_id, target_map.target_id, relation.relation,
+                relation.confidence, relation.source, relation.metadata,
+                relation.created_at, relation.updated_at
+         FROM source.memory_fact_relations AS relation
+         JOIN consolidation_fact_map AS source_map
+           ON source_map.source_id = relation.source_fact_id
+         JOIN consolidation_fact_map AS target_map
+           ON target_map.source_id = relation.target_fact_id
+         WHERE source_map.target_id != target_map.target_id
+         ON CONFLICT(source_fact_id, target_fact_id, relation) DO UPDATE SET
+             confidence = CASE
+                 WHEN excluded.updated_at >= memory_fact_relations.updated_at
+                 THEN excluded.confidence ELSE memory_fact_relations.confidence END,
+             source = CASE
+                 WHEN excluded.updated_at >= memory_fact_relations.updated_at
+                 THEN excluded.source ELSE memory_fact_relations.source END,
+             metadata = CASE
+                 WHEN excluded.updated_at >= memory_fact_relations.updated_at
+                 THEN excluded.metadata ELSE memory_fact_relations.metadata END,
+             created_at = MIN(memory_fact_relations.created_at, excluded.created_at),
+             updated_at = MAX(memory_fact_relations.updated_at, excluded.updated_at);
+
          INSERT OR IGNORE INTO memory_entities (
              entity_id, name, normalized_name, entity_type, aliases, created_at
          )

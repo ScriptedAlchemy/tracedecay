@@ -347,6 +347,7 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
         def_find_exact_symbol(),
     ];
     add_registered_project_selector_properties(&mut definitions);
+    add_lcm_storage_scope_property(&mut definitions);
     add_format_property(&mut definitions);
     if !ast_grep_available() {
         definitions.retain(|d| d.name != "tracedecay_ast_grep_rewrite");
@@ -362,6 +363,29 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
         "all tool definitions must have 'tracedecay_' prefix"
     );
     definitions
+}
+
+fn add_lcm_storage_scope_property(definitions: &mut [ToolDefinition]) {
+    for definition in definitions
+        .iter_mut()
+        .filter(|definition| definition.name.starts_with("tracedecay_lcm_"))
+    {
+        let Some(properties) = definition
+            .input_schema
+            .get_mut("properties")
+            .and_then(Value::as_object_mut)
+        else {
+            continue;
+        };
+        properties.insert(
+            "storage_scope".to_string(),
+            json!({
+                "type": "string",
+                "enum": ["project", "user"],
+                "description": "Session store scope. project (default) uses the active project shard; user uses the profile-level store for untethered conversations and cannot be combined with a project selector."
+            }),
+        );
+    }
 }
 
 fn matching_tool_definitions_mut<'a>(
@@ -2170,6 +2194,11 @@ fn def_run_affected_tests() -> ToolDefinition {
 
 fn memory_fact_properties() -> Value {
     json!({
+        "memory_scope": {
+            "type": "string",
+            "enum": ["project", "user"],
+            "description": "Fact scope. project (default) uses the active project shard; user uses the profile-level store for durable preferences and projectless conversations."
+        },
         "action": {
             "type": "string",
             "enum": ["add", "search", "probe", "related", "reason", "contradict", "get", "update", "remove", "list"],
@@ -2371,6 +2400,11 @@ fn def_fact_feedback() -> ToolDefinition {
                 "note": {
                     "type": "string",
                     "description": "Optional feedback note."
+                },
+                "memory_scope": {
+                    "type": "string",
+                    "enum": ["project", "user"],
+                    "description": "Scope containing the fact id (default: project)."
                 }
             },
             "anyOf": [
@@ -2396,9 +2430,24 @@ fn def_memory_status() -> ToolDefinition {
         "Repair derived holographic memory vectors and banks, then return fact/entity counts, trust distribution, below-threshold and missing-vector signals, capacity-per-bank, and repair stats. Defaults to the active project; pass project_id or project_path only when intentionally checking another registered project. Human/operator equivalents: `tracedecay memory status` and `GET /api/plugins/holographic/status`.",
         json!({
             "type": "object",
-            "properties": project_selector_properties()
+            "properties": memory_status_properties()
         }),
     )
+}
+
+fn memory_status_properties() -> Value {
+    let mut properties = project_selector_properties();
+    if let Some(properties) = properties.as_object_mut() {
+        properties.insert(
+            "memory_scope".to_string(),
+            json!({
+                "type": "string",
+                "enum": ["project", "user"],
+                "description": "Memory scope to inspect (default: project)."
+            }),
+        );
+    }
+    properties
 }
 
 fn def_automation_run_artifact_view() -> ToolDefinition {
@@ -2925,6 +2974,10 @@ fn def_lcm_preflight() -> ToolDefinition {
                     "type": "array",
                     "description": "Current active context messages to inspect before compression.",
                     "items": {"type": "object"}
+                },
+                "transcript_projection": {
+                    "type": "boolean",
+                    "description": "Host-integration flag: also upsert these stable-id messages into this project's searchable transcript projection. Intended for Hermes live turn ingestion when its state.db session lacks cwd provenance."
                 },
                 "current_tokens": {
                     "type": "integer",

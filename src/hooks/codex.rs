@@ -53,16 +53,21 @@ pub async fn hook_codex_session_start() -> i32 {
     let _hook_telemetry =
         record_hook_invoked(root.as_deref(), HintAgent::Codex, "SessionStart", &event);
     let (mut context, _) = codex_session_context_for_event(&event).await;
-    if let Some(root) = root.as_deref() {
-        let session_id = serde_json::from_str::<Value>(&event)
-            .ok()
-            .as_ref()
-            .and_then(event_session_id);
-        if let Some(digest) =
-            memory_inject::session_memory_digest(root, session_id.as_deref()).await
-        {
-            append_context_block(&mut context, &digest);
+    let session_id = serde_json::from_str::<Value>(&event)
+        .ok()
+        .as_ref()
+        .and_then(event_session_id);
+    if root.is_none() && ingest_user_codex_session(session_id.clone()).await {
+        super::schedule_user_session_review("codex", session_id.as_deref());
+    }
+    let digest = match root.as_deref() {
+        Some(root) => {
+            memory_inject::combined_session_memory_digest(root, session_id.as_deref()).await
         }
+        None => memory_inject::user_session_memory_digest(session_id.as_deref()).await,
+    };
+    if let Some(digest) = digest {
+        append_context_block(&mut context, &digest);
     }
     if session_start_from_compaction(&event) {
         append_context_recovery_hint(&mut context);
@@ -87,7 +92,14 @@ pub async fn hook_codex_user_prompt_submit() -> i32 {
         &event,
     );
     reset_counter_for_codex_event(&event).await;
-    let context = codex_user_prompt_submit_context_for_event(&event).await;
+    let session_id = serde_json::from_str::<Value>(&event)
+        .ok()
+        .as_ref()
+        .and_then(event_session_id);
+    if root.is_none() && ingest_user_codex_session(session_id.clone()).await {
+        super::schedule_user_session_review("codex", session_id.as_deref());
+    }
+    let context = Box::pin(codex_user_prompt_submit_context_for_event(&event)).await;
     println!(
         "{}",
         codex_additional_context_json("UserPromptSubmit", &context)
@@ -101,19 +113,28 @@ pub async fn codex_user_prompt_submit_context_for_event(event: &str) -> String {
         if let Some(hint) = codex_prompt_hint(event) {
             append_tool_hint(&mut context, &hint);
         }
-        if let Some(recall) = codex_prompt_memory_recall(event).await {
-            append_context_block(&mut context, &recall);
-        }
+    }
+    if let Some(recall) = Box::pin(codex_prompt_memory_recall(event)).await {
+        append_context_block(&mut context, &recall);
     }
     context
 }
 
 async fn codex_prompt_memory_recall(event_json: &str) -> Option<String> {
     let parsed = serde_json::from_str::<Value>(event_json).ok()?;
-    let root = codex_project_root_from_parsed_event_with_identity(&parsed).await?;
     let prompt = prompt_like_text(&parsed)?;
     let session_id = event_session_id(&parsed);
-    memory_inject::prompt_memory_recall(&root, session_id.as_deref(), &prompt).await
+    match codex_project_root_from_parsed_event_with_identity(&parsed).await {
+        Some(root) => {
+            Box::pin(memory_inject::combined_prompt_memory_recall(
+                &root,
+                session_id.as_deref(),
+                &prompt,
+            ))
+            .await
+        }
+        None => memory_inject::user_prompt_memory_recall(session_id.as_deref(), &prompt).await,
+    }
 }
 
 /// Builds Codex session/prompt context.
@@ -146,8 +167,8 @@ pub async fn hook_codex_subagent_start() -> i32 {
     let count = record_codex_subagent_start(&event).await;
     let output = evaluate_codex_subagent_start(&event);
     let digest = match root.as_deref() {
-        Some(root) => memory_inject::session_memory_digest(root, None).await,
-        None => None,
+        Some(root) => memory_inject::combined_session_memory_digest(root, None).await,
+        None => memory_inject::user_session_memory_digest(None).await,
     };
     let output = merge_codex_subagent_output(output, digest);
     eprintln!(
@@ -591,8 +612,18 @@ fn codex_apply_patch_added_text(command: &str) -> Option<String> {
 
 async fn codex_post_compact(event_json: &str) {
     let work = async {
-        let Some(project_root) = codex_project_root_from_event_with_identity(event_json).await
-        else {
+        let project_root = codex_project_root_from_event_with_identity(event_json).await;
+        if project_root.is_none() {
+            let session_id = serde_json::from_str::<Value>(event_json)
+                .ok()
+                .as_ref()
+                .and_then(event_session_id);
+            if ingest_user_codex_session(session_id.clone()).await {
+                super::schedule_user_session_review("codex", session_id.as_deref());
+            }
+            return;
+        }
+        let Some(project_root) = project_root else {
             return;
         };
         if !crate::tracedecay::TraceDecay::has_initialized_store(&project_root).await {
@@ -640,6 +671,16 @@ async fn codex_post_compact(event_json: &str) {
         }
     };
     let _ = tokio::time::timeout(CODEX_POST_COMPACT_BUDGET, work).await;
+}
+
+async fn ingest_user_codex_session(session_id: Option<String>) -> bool {
+    if session_id.is_none() {
+        return false;
+    }
+    crate::sessions::ingest_user_codex_sessions(session_id)
+        .await
+        .messages_upserted
+        > 0
 }
 
 async fn reset_counter_for_codex_event(event_json: &str) {

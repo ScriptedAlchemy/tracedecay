@@ -9,3 +9,4 @@ pub mod similarity;
 pub mod store;
 pub mod trust;
 pub mod types;
+pub mod user;

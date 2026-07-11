@@ -1,12 +1,16 @@
 """tracedecay Hermes plugin registration."""
+import copy
 import json
 import hashlib
 import logging
 import os
 import re
+import shlex
 import shutil
+import subprocess
 import threading
 import time
+from collections import deque
 from pathlib import Path
 
 from . import schemas, tools
@@ -52,6 +56,14 @@ try:
     from agent import auxiliary_client as _hermes_auxiliary_client
 except Exception:
     _hermes_auxiliary_client = None
+
+# Stock Hermes' single source of truth for the logical session workspace.
+# Multi-session gateways keep this in a ContextVar, so os.getcwd() alone would
+# incorrectly route every session through the gateway process directory.
+try:
+    from agent.runtime_cwd import resolve_agent_cwd as _hermes_resolve_agent_cwd  # type: ignore[import-not-found]
+except Exception:
+    _hermes_resolve_agent_cwd = None
 
 def _resolve_auxiliary_client(agent=None):
     """Best auxiliary LLM client: an agent-attached one, else hermes' module-level facade."""
@@ -374,21 +386,178 @@ def _host_forwards_registered_tool_messages(ctx) -> bool:
             return False
     return bool(capability)
 
+_NUDGE_CODE_REQUEST_RE = re.compile(
+    r"\b("
+    r"codebase|repo(?:sitory)?|project|workspace|symbol|function|method|class|"
+    r"call\s*graph|caller|callee|impact|architecture|module|file|path|diff|"
+    r"git|branch|commit|pr|pull\s*request|ci|test|build|compile|lint|"
+    r"bug|fix|debug|implement|refactor|review|traceback|stack\s*trace|error"
+    r")\b",
+    re.IGNORECASE,
+)
+
+_NUDGE_PATH_OR_CODE_RE = re.compile(
+    r"(```|`[^`]+`|(?:^|\s)[\w./-]+\.(?:py|rs|ts|tsx|js|jsx|go|java|kt|rb|php|c|cc|cpp|h|hpp|cs|swift|toml|ya?ml|json|md)\b|(?:^|\s)[\w.-]+/[\w./-]+)",
+    re.IGNORECASE,
+)
+
+_NUDGE_GREETING_RE = re.compile(
+    r"^\s*(?:hi|hello|hey|yo|sup|howdy|good\s+(?:morning|afternoon|evening)|thanks?|thank\s+you|ok(?:ay)?|yes|no)[\s!.?,~-]*$",
+    re.IGNORECASE,
+)
+
+def _should_emit_tracedecay_nudge(user_message) -> bool:
+    """Return true only when the first user turn is actually code/project work.
+
+    The hook text is appended to the user's first message. For greetings like
+    "Hi", an unconditional nudge becomes the most salient content and the model
+    may answer by talking about tracedecay instead of simply greeting back.
+    """
+    text = str(user_message or "").strip()
+    if not text or _NUDGE_GREETING_RE.match(text):
+        return False
+    return bool(_NUDGE_CODE_REQUEST_RE.search(text) or _NUDGE_PATH_OR_CODE_RE.search(text))
+
 def _pre_llm_call(*args, **kwargs):
-    # Inject guidance ONLY on the first turn: the hook result is appended to
-    # the user message, so emitting it every turn would change every turn
-    # boundary and break the conversation's prompt-cache prefix. Skip it
-    # entirely when no tracedecay tools actually registered on this host —
-    # advertising unregistered tools invites hallucinated calls.
+    # Inject guidance only for first-turn code/project requests. The hook result
+    # is appended to the user message, so unconditional text on a greeting ("Hi")
+    # can hijack the assistant's response and surface tracedecay when the user
+    # did not ask for code work. Keep it first-turn-only for prompt-cache
+    # stability, and skip it entirely when no tracedecay tools registered on
+    # this host — advertising unregistered tools invites hallucinated calls.
     if not kwargs.get("is_first_turn"):
         return None
     if not _REGISTERED_TOOL_NAMES:
         return None
     if not _plugin_toggle("nudge", True):
         return None
+    if not _should_emit_tracedecay_nudge(kwargs.get("user_message")):
+        return None
     return (
-        "Prefer tracedecay tools for codebase exploration, symbol lookup, call graphs, "
+        "For this codebase request, prefer tracedecay tools for symbol lookup, call graphs, "
         "impact analysis, affected files, and architectural navigation before broad file reads."
+    )
+
+_TERMINAL_TOOL_NAMES = frozenset((
+    "terminal", "bash", "shell", "exec_command", "run_command", "terminal.exec",
+))
+_HOST_RECEIPT_QUEUE = deque()
+_HOST_RECEIPT_QUEUE_LOCK = threading.Lock()
+_HOST_RECEIPT_WORKER_ACTIVE = False
+
+def _notify_host_receipt(event, thread_name):
+    global _HOST_RECEIPT_WORKER_ACTIVE
+    with _HOST_RECEIPT_QUEUE_LOCK:
+        _HOST_RECEIPT_QUEUE.append(event)
+        if _HOST_RECEIPT_WORKER_ACTIVE:
+            return
+        _HOST_RECEIPT_WORKER_ACTIVE = True
+
+    def _drain():
+        global _HOST_RECEIPT_WORKER_ACTIVE
+        while True:
+            with _HOST_RECEIPT_QUEUE_LOCK:
+                if not _HOST_RECEIPT_QUEUE:
+                    _HOST_RECEIPT_WORKER_ACTIVE = False
+                    return
+                queued = _HOST_RECEIPT_QUEUE.popleft()
+            try:
+                subprocess.run(
+                    [tools.TRACEDECAY_BIN, "hook-hermes-terminal-receipt"],
+                    input=json.dumps(queued),
+                    text=True,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=(
+                        tools.TRACEDECAY_LONG_TIMEOUT_SECONDS
+                        if queued.get("event") == "turnIngested" and not queued.get("cwd")
+                        else 2
+                    ),
+                    check=False,
+                )
+            except Exception as exc:
+                logger.debug("tracedecay host receipt notification failed: %s", exc)
+
+    threading.Thread(target=_drain, name=thread_name, daemon=True).start()
+
+def _post_tool_call(*args, **kwargs):
+    """Send a bounded, fail-open terminal receipt to TraceDecay."""
+    payload = {}
+    if args and isinstance(args[0], dict):
+        payload.update(args[0])
+    payload.update(kwargs)
+    tool_name = str(payload.get("tool_name") or payload.get("name") or "").lower()
+    if tool_name not in _TERMINAL_TOOL_NAMES:
+        return None
+    tool_args = payload.get("args") if isinstance(payload.get("args"), dict) else {}
+    cwd = _code_project_root(
+        explicit=payload.get("project_root") or payload.get("project_path"),
+        cwd=payload.get("cwd") or tool_args.get("cwd") or tool_args.get("workdir"),
+    )
+    if not cwd:
+        return None
+    session_id = payload.get("session_id") or payload.get("thread_id")
+    turn_id = payload.get("turn_id")
+    tool_call_id = payload.get("tool_call_id") or payload.get("call_id")
+    status = str(payload.get("status") or ("error" if payload.get("error") else "success"))
+    duration = payload.get("duration_ms")
+    try:
+        duration = max(0, min(int(duration), 86_400_000)) if duration is not None else None
+    except (TypeError, ValueError):
+        duration = None
+    event = {
+        "agent": "hermes",
+        "event": "terminalReceipt",
+        "cwd": str(cwd),
+        "route": {
+            "session_id": str(session_id)[:256] if session_id else None,
+            "thread_id": str(payload.get("thread_id"))[:256] if payload.get("thread_id") else None,
+            "cwd": str(cwd),
+        },
+        "receipt": {
+            "tool_call_id": str(tool_call_id)[:256] if tool_call_id else None,
+            "turn_id": str(turn_id)[:256] if turn_id else None,
+            "status": status[:32],
+            "duration_ms": duration,
+            "transcript_watermark": str(
+                payload.get("transcript_watermark") or turn_id or tool_call_id or ""
+            )[:256] or None,
+        },
+    }
+
+    _notify_host_receipt(event, "tracedecay-terminal-receipt")
+    return None
+
+def _turn_receipt_event(event_name, session_id, project_root, transcript_watermark):
+    route = {"session_id": str(session_id)[:256]}
+    event = {
+        "agent": "hermes",
+        "event": event_name,
+        "route": route,
+        "receipt": {
+            "status": "success",
+            "transcript_watermark": str(transcript_watermark)[:256],
+        },
+    }
+    if project_root:
+        event["cwd"] = str(project_root)
+        route["cwd"] = str(project_root)
+    return event
+
+def _notify_turn_completed(session_id, project_root, transcript_watermark):
+    _notify_host_receipt(
+        _turn_receipt_event(
+            "turnCompleted", session_id, project_root, transcript_watermark
+        ),
+        "tracedecay-turn-completed",
+    )
+
+def _notify_turn_ingested(session_id, project_root, transcript_watermark):
+    _notify_host_receipt(
+        _turn_receipt_event(
+            "turnIngested", session_id, project_root, transcript_watermark
+        ),
+        "tracedecay-turn-ingested",
     )
 
 def _tracedecay_status(raw_args: str = ""):
@@ -504,6 +673,14 @@ def _lcm_retrieve_kwargs(args: dict, kwargs: dict) -> dict:
             retrieve_kwargs["project_root"] = root.strip()
     return retrieve_kwargs
 
+def _retrieve_args(handle: str, args: dict) -> dict:
+    retrieve_args = {"handle": handle}
+    if isinstance(args, dict):
+        for key in ("project_id", "project_path", "project_selector"):
+            if args.get(key) is not None:
+                retrieve_args[key] = args[key]
+    return retrieve_args
+
 def _decode_tool_payload(value, name: str, args: dict, kwargs: dict, depth: int = 0, seen_handles=None):
     if depth > 8:
         return value
@@ -518,13 +695,13 @@ def _decode_tool_payload(value, name: str, args: dict, kwargs: dict, depth: int 
         return value
 
     handle = _retrieval_handle(value)
-    if handle and name.startswith("tracedecay_lcm_"):
+    if handle and name != "tracedecay_retrieve":
         if handle in seen_handles:
             return value
         seen_handles.add(handle)
         retrieved = call_tracedecay_json(
             "tracedecay_retrieve",
-            {"handle": handle},
+            _retrieve_args(handle, args),
             **_lcm_retrieve_kwargs(args, kwargs),
         )
         if isinstance(retrieved, dict) and not retrieved.get("error"):
@@ -608,6 +785,15 @@ def _memory_schema(tracedecay_name: str, hermes_name: str, action: str = None) -
         "parameters": {"type": "object", "properties": {}},
     }
 
+def _agent_visible_schema(schema: dict) -> dict:
+    """Hide routing fields selected by the Hermes session integration."""
+    visible = json.loads(json.dumps(schema))
+    properties = (visible.get("parameters") or {}).get("properties")
+    if isinstance(properties, dict):
+        properties.pop("storage_scope", None)
+        properties.pop("hermes_home", None)
+    return visible
+
 def _lcm_tool_schemas() -> list:
     return list(LCM_NATIVE_SCHEMAS)
 
@@ -645,6 +831,105 @@ def _project_call_kwargs(project_root=None, kwargs=None):
         routed["project_root"] = str(project_root)
     return routed
 
+def _lcm_store_args(args, project_root):
+    """Select the project shard or the profile-level user session store."""
+    routed = dict(args or {})
+    if not project_root:
+        routed.setdefault("storage_scope", "user")
+    return routed
+
+def _resolved_project_scope(project_root):
+    if not project_root:
+        return None
+    try:
+        status = call_tracedecay_json(
+            "tracedecay_active_project",
+            {},
+            **_project_call_kwargs(project_root),
+        )
+    except Exception:
+        return None
+    if not isinstance(status, dict) or status.get("error"):
+        return None
+    resolved = status.get("project_root") or status.get("root")
+    if not resolved:
+        return None
+    try:
+        resolved_real = os.path.realpath(str(resolved))
+        candidate_real = os.path.realpath(str(project_root))
+        if os.path.commonpath((resolved_real, candidate_real)) != resolved_real:
+            return None
+    except (OSError, TypeError, ValueError):
+        return None
+    return str(resolved)
+
+def _project_scope_available(project_root) -> bool:
+    return _resolved_project_scope(project_root) is not None
+
+def _decoded_tool_arguments(call):
+    if not isinstance(call, dict):
+        return None, {}
+    function = call.get("function") if isinstance(call.get("function"), dict) else call
+    name = str(function.get("name") or call.get("name") or "")
+    arguments = function.get("arguments", call.get("arguments", {}))
+    if isinstance(arguments, str):
+        try:
+            arguments = json.loads(arguments)
+        except Exception:
+            arguments = {}
+    return name, arguments if isinstance(arguments, dict) else {}
+
+def _terminal_cd_candidates(command):
+    try:
+        tokens = shlex.split(str(command or ""), posix=os.name != "nt")
+    except Exception:
+        return []
+    candidates = []
+    for index, token in enumerate(tokens[:-1]):
+        if token == "cd":
+            candidates.append(tokens[index + 1])
+    return candidates
+
+def _tool_project_candidates(messages):
+    if not isinstance(messages, list):
+        return []
+    start = 0
+    for index, message in enumerate(messages):
+        if isinstance(message, dict) and message.get("role") == "user":
+            start = index
+    candidates = []
+    for message in messages[start:]:
+        if not isinstance(message, dict):
+            continue
+        calls = message.get("tool_calls") or []
+        if isinstance(calls, dict):
+            calls = [calls]
+        for call in calls:
+            name, arguments = _decoded_tool_arguments(call)
+            selector = arguments.get("project_selector")
+            for candidate in (
+                arguments.get("project_root"),
+                arguments.get("project_path"),
+                selector.get("path") if isinstance(selector, dict) else None,
+                arguments.get("cwd"),
+                arguments.get("workdir"),
+            ):
+                if isinstance(candidate, str) and os.path.isabs(os.path.expanduser(candidate)):
+                    candidates.append(candidate)
+            if name in ("terminal", "bash", "shell", "exec_command"):
+                candidates.extend(_terminal_cd_candidates(arguments.get("command") or arguments.get("cmd")))
+    return candidates
+
+def _turn_project_root(messages):
+    for candidate in reversed(_tool_project_candidates(messages)):
+        expanded = os.path.abspath(os.path.expanduser(candidate))
+        if os.path.isfile(expanded):
+            expanded = os.path.dirname(expanded)
+        resolved = _resolved_project_scope(expanded)
+        if resolved:
+            return resolved
+    return None
+
 # Conventional config home: a `plugins.tracedecay` block in the profile
 # config.yaml (the same `plugins.<name>` convention bundled Hermes plugins
 # use). Keys are flat and mirror the host-config attribute names the
@@ -653,7 +938,7 @@ def _project_call_kwargs(project_root=None, kwargs=None):
 # register_config_defaults()/get_config_field_meta() expose the real
 # surface instead of just the install pin.
 PLUGIN_CONFIG_FIELDS = {
-    "nudge": (True, "Inject the first-turn tracedecay tool guidance nudge."),
+    "nudge": (True, "Inject a first-turn tracedecay guidance nudge only for codebase/navigation requests."),
     "sync_turn": (True, "Mirror each completed turn into the LCM raw store."),
     "prefetch": (True, "Background fact recall injected at turn start."),
     "context_threshold": ("", "Compression trigger as a fraction of the context window (default: hermes compression.threshold)."),
@@ -780,10 +1065,27 @@ def _has_tracedecay_index(path):
         return False
     return os.path.isdir(os.path.join(path, ".tracedecay"))
 
+def _runtime_working_directory():
+    if _hermes_resolve_agent_cwd is not None:
+        try:
+            resolved = _hermes_resolve_agent_cwd()
+            if resolved:
+                candidate = os.path.abspath(os.path.expanduser(str(resolved)))
+                if os.path.isdir(candidate):
+                    return candidate
+        except Exception:
+            pass
+    raw = os.environ.get("TERMINAL_CWD", "").strip()
+    if raw:
+        candidate = os.path.abspath(os.path.expanduser(raw))
+        if os.path.isdir(candidate):
+            return candidate
+    return os.getcwd()
+
 def _code_project_root(explicit=None, cwd=None, configured=None):
     if explicit:
         return str(explicit)
-    candidate = cwd or configured or os.getcwd()
+    candidate = cwd or configured or _runtime_working_directory()
     if isinstance(candidate, str) and candidate.strip() and os.path.isabs(candidate):
         return candidate.strip()
     return None
@@ -1962,6 +2264,7 @@ class _EngineSessionState:
     """
 
     _FIELDS = (
+        "project_root",
         "agent",
         "model",
         "last_prompt_tokens",
@@ -1980,6 +2283,7 @@ class _EngineSessionState:
     )
 
     def __init__(self):
+        self.project_root = None
         self.agent = None
         self.model = ""
         self.last_prompt_tokens = 0
@@ -2044,6 +2348,31 @@ class TraceDecayContextEngine(ContextEngine):
         self._route_failures = {}
         self._cooldown_until = {}
 
+    def __deepcopy__(self, memo):
+        """Create an agent-local engine without copying locks or live agents."""
+        clone = type(self)(
+            config=copy.deepcopy(self._host_config, memo),
+            hermes_home=self.hermes_home,
+        )
+        memo[id(self)] = clone
+        clone.config = copy.deepcopy(self.config, memo)
+        clone.project_root = self.project_root
+        # Auxiliary-route circuit breakers intentionally remain process-wide.
+        clone._route_failures = self._route_failures
+        clone._cooldown_until = self._cooldown_until
+
+        with self._state_lock:
+            clone.active_session_id = self.active_session_id
+            for key, state in self._session_states.items():
+                copied_state = _EngineSessionState()
+                for field in _EngineSessionState._FIELDS:
+                    if field == "agent":
+                        continue
+                    setattr(copied_state, field, copy.deepcopy(getattr(state, field), memo))
+                clone._session_states[key] = copied_state
+        return clone
+
+    project_root = _engine_session_property("project_root")
     agent = _engine_session_property("agent")
     model = _engine_session_property("model")
     last_prompt_tokens = _engine_session_property("last_prompt_tokens")
@@ -2091,8 +2420,12 @@ class TraceDecayContextEngine(ContextEngine):
                     # carry model/window/counters over from the predecessor
                     # session's state (old_session_id on boundary starts,
                     # else whatever this thread was bound to).
-                    source_key = str(kwargs.get("old_session_id") or "") or self._session_key()
-                    source = self._session_states.get(source_key)
+                    source_key = str(kwargs.get("old_session_id") or "")
+                    source = self._session_states.get(source_key) if source_key else None
+                    if source is None and kwargs.get("boundary_reason") == "compression":
+                        source = self._session_states.get(self._session_key())
+                    if source is None:
+                        source = self._session_states.get(_ENGINE_DEFAULT_SESSION)
                     if source is not None:
                         state.adopt(source)
                         state._last_preflight_signature = None
@@ -2121,13 +2454,26 @@ class TraceDecayContextEngine(ContextEngine):
         # Re-layer the profile's plugins.tracedecay block now that the host
         # config and hermes_home are settled for this session.
         self.config = _with_plugin_block(self._host_config, self.hermes_home)
-        next_project_root = _code_project_root(
-            explicit=project_root or kwargs.get("project_root"),
-            cwd=kwargs.get("cwd"),
-            configured=_configured_project_root(self.config) or self.project_root,
-        )
+        explicit_project_root = project_root or kwargs.get("project_root")
+        runtime_cwd = kwargs.get("cwd")
+        configured_project_root = _configured_project_root(self.config)
+        routing_supplied = bool(explicit_project_root or runtime_cwd)
+        if explicit_project_root:
+            next_project_root = str(explicit_project_root)
+        elif runtime_cwd:
+            next_project_root = _resolved_project_scope(str(runtime_cwd))
+        elif self.project_root:
+            next_project_root = self.project_root
+        elif configured_project_root:
+            next_project_root = str(configured_project_root)
+        elif session_id is not None and not self.project_root:
+            next_project_root = _resolved_project_scope(_runtime_working_directory())
+        else:
+            next_project_root = None
         if next_project_root:
             self.project_root = next_project_root
+        elif routing_supplied:
+            self.project_root = None
 
     def initialize(self, session_id=None, hermes_home=None, project_root=None, **kwargs):
         self._bind_session(session_id, hermes_home, project_root, **kwargs)
@@ -2226,12 +2572,12 @@ class TraceDecayContextEngine(ContextEngine):
             or old_session_id == session_id
         ):
             return
-        args = {
+        args = _lcm_store_args({
             "provider": STANDARD_HERMES_LCM_PROVIDER,
             "session_id": session_id,
             "old_session_id": old_session_id,
             "boundary_reason": boundary_reason,
-        }
+        }, self.project_root)
         if bound_session_id:
             args["bound_session_id"] = bound_session_id
         try:
@@ -2295,6 +2641,7 @@ class TraceDecayContextEngine(ContextEngine):
             "stateless_session_patterns",
             "ignore_message_patterns",
         ))
+        args = _lcm_store_args(args, kwargs.get("project_root") or self.project_root)
         return call_tracedecay_json(
             "tracedecay_lcm_preflight",
             args,
@@ -2360,6 +2707,7 @@ class TraceDecayContextEngine(ContextEngine):
     def status(self, session_id=None, **kwargs):
         args = self._tool_args(session_id)
         args.update(_lcm_gc_config_args(self.config))
+        args = _lcm_store_args(args, kwargs.get("project_root") or self.project_root)
         return call_tracedecay_json(
             "tracedecay_lcm_status",
             args,
@@ -2452,6 +2800,7 @@ class TraceDecayContextEngine(ContextEngine):
             "stateless_session_patterns",
             "ignore_message_patterns",
         ))
+        args = _lcm_store_args(args, kwargs.get("project_root") or self.project_root)
         try:
             tools.call_tracedecay_tool(
                 "tracedecay_lcm_preflight",
@@ -2488,6 +2837,10 @@ class TraceDecayContextEngine(ContextEngine):
             tool_args.update(_lcm_gc_config_args(self.config))
         if self.active_session_id:
             tool_args.setdefault("session_id", self.active_session_id)
+        tool_args = _lcm_store_args(
+            tool_args,
+            preflight_kwargs.get("project_root") or self.project_root,
+        )
 
         if tracedecay_name == "tracedecay_lcm_expand_query":
             expand_kwargs = dict(preflight_kwargs)
@@ -2521,6 +2874,7 @@ class TraceDecayContextEngine(ContextEngine):
                 args[key] = kwargs[key]
         if "context_max_tokens" not in args:
             args["context_max_tokens"] = _lcm_expansion_context_tokens(self.config)
+        args = _lcm_store_args(args, kwargs.get("project_root") or self.project_root)
         retrieval = call_tracedecay_json(
             "tracedecay_lcm_expand_query",
             args,
@@ -3077,11 +3431,12 @@ class TracedecayMemoryProvider(MemoryProvider):
     def initialize(self, session_id=None, **kwargs):
         self.hermes_home = kwargs.get("hermes_home") or _resolve_hermes_home()
         config = _with_plugin_block(kwargs.get("config"), self.hermes_home)
-        self.project_root = _code_project_root(
+        candidate_root = _code_project_root(
             explicit=kwargs.get("project_root"),
             cwd=kwargs.get("cwd"),
             configured=_configured_project_root(config),
         )
+        self.project_root = candidate_root if _project_scope_available(candidate_root) else None
         self.session_id = session_id
         # Execution context ("", "cron", "flush", ...): cron/flush runs are
         # not primary conversations and must not write turn state (cron
@@ -3109,7 +3464,7 @@ class TracedecayMemoryProvider(MemoryProvider):
         )
         status = call_tracedecay_json(
             "tracedecay_memory_status",
-            {},
+            {} if project_root else {"memory_scope": "user"},
             **_project_call_kwargs(project_root),
         )
         if isinstance(status, dict) and not status.get("error"):
@@ -3182,34 +3537,43 @@ class TracedecayMemoryProvider(MemoryProvider):
         text = str(query or "").strip()
         if not text:
             return ""
-        try:
-            args = {"action": "search", "query": text[:512], "limit": 3}
-            payload = call_tracedecay_json(
-                "tracedecay_fact_store",
-                args,
-                **_project_call_kwargs(self.project_root),
-            )
-        except Exception as exc:
-            logger.debug("tracedecay memory prefetch failed: %s", exc)
-            return ""
-        if not isinstance(payload, dict) or payload.get("error"):
-            return ""
-        facts = payload.get("facts") or payload.get("results") or []
+        payloads = []
+        scopes = ["user"] + (["project"] if self.project_root else [])
+        for scope in scopes:
+            try:
+                args = {
+                    "action": "search",
+                    "query": text[:512],
+                    "limit": 3,
+                    "memory_scope": scope,
+                }
+                payload = call_tracedecay_json(
+                    "tracedecay_fact_store",
+                    args,
+                    **_project_call_kwargs(self.project_root if scope == "project" else None),
+                )
+            except Exception as exc:
+                logger.debug("tracedecay %s memory prefetch failed: %s", scope, exc)
+                continue
+            if isinstance(payload, dict) and not payload.get("error"):
+                payloads.append((scope, payload))
         lines = []
-        for item in facts:
-            if not isinstance(item, dict):
-                continue
-            # Search results nest the row under "fact" (with match scores
-            # beside it); list results are flat fact rows.
-            fact = item.get("fact") if isinstance(item.get("fact"), dict) else item
-            content = str(fact.get("content") or "").strip()
-            if not content:
-                continue
-            if len(content) > 600:
-                content = content[:600].rstrip() + "..."
-            fact_id = fact.get("fact_id")
-            prefix = f"[fact {fact_id}] " if fact_id is not None else ""
-            lines.append(f"- {prefix}{content}")
+        seen_content = set()
+        for scope, payload in payloads:
+            facts = payload.get("facts") or payload.get("results") or []
+            for item in facts:
+                if not isinstance(item, dict):
+                    continue
+                fact = item.get("fact") if isinstance(item.get("fact"), dict) else item
+                content = str(fact.get("content") or "").strip()
+                if not content or content in seen_content:
+                    continue
+                seen_content.add(content)
+                if len(content) > 600:
+                    content = content[:600].rstrip() + "..."
+                fact_id = fact.get("fact_id")
+                prefix = f"[{scope} fact {fact_id}] " if fact_id is not None else f"[{scope}] "
+                lines.append(f"- {prefix}{content}")
         return "\n".join(lines)
 
     def sync_turn(self, user_content, assistant_content, *, session_id="", messages=None):
@@ -3219,6 +3583,7 @@ class TracedecayMemoryProvider(MemoryProvider):
         same content-cursored path the context engine uses), so the raw
         store grows every turn instead of only when compression fires.
         """
+        project_root = _turn_project_root(messages) or self.project_root
         if not _plugin_toggle("sync_turn", True):
             return
         if self.agent_context in ("cron", "flush"):
@@ -3227,34 +3592,38 @@ class TracedecayMemoryProvider(MemoryProvider):
         sid = session_id or self.session_id
         if not sid:
             return
-        forwarded_messages = isinstance(messages, list) and bool(messages)
-        turn_messages = messages if forwarded_messages else None
-        if not turn_messages:
-            turn_messages = []
-            if user_content:
-                turn_messages.append({"role": "user", "content": str(user_content)})
-            if assistant_content:
-                turn_messages.append({"role": "assistant", "content": str(assistant_content)})
+        turn_messages = []
+        if user_content:
+            turn_messages.append({"role": "user", "content": str(user_content)})
+        if assistant_content:
+            turn_messages.append({"role": "assistant", "content": str(assistant_content)})
         if not turn_messages:
             return
-        if not forwarded_messages:
-            self._sync_turn_sequence += 1
-            batch_id = self._sync_turn_sequence
-            timestamp_ns = time.time_ns()
-            for idx, entry in enumerate(turn_messages):
-                role = str(entry.get("role") or "user")
-                entry["id"] = f"tracedecay_sync_{batch_id}_{timestamp_ns}_{idx}_{role}"
-        args = {
+        self._sync_turn_sequence += 1
+        batch_id = self._sync_turn_sequence
+        timestamp_ns = time.time_ns()
+        timestamp = time.time()
+        for idx, entry in enumerate(turn_messages):
+            role = str(entry.get("role") or "user")
+            entry["id"] = f"tracedecay_sync_{batch_id}_{timestamp_ns}_{idx}_{role}"
+            entry["timestamp"] = timestamp
+        args = _lcm_store_args({
             "provider": STANDARD_HERMES_LCM_PROVIDER,
             "session_id": sid,
             "messages": turn_messages,
-        }
+            "transcript_projection": True,
+        }, project_root)
         try:
-            tools.call_tracedecay_tool(
+            result = call_tracedecay_json(
                 "tracedecay_lcm_preflight",
                 args,
-                **_project_call_kwargs(self.project_root),
+                **_project_call_kwargs(project_root),
             )
+            if not result.get("error"):
+                _notify_turn_completed(sid, project_root, turn_messages[-1]["id"])
+                _notify_turn_ingested(sid, project_root, turn_messages[-1]["id"])
+            else:
+                logger.debug("tracedecay sync_turn ingest rejected: %s", result.get("error"))
         except Exception as exc:
             logger.debug("tracedecay sync_turn ingest failed: %s", exc)
 
@@ -3276,12 +3645,15 @@ class TracedecayMemoryProvider(MemoryProvider):
             "content": text,
             "category": "user_pref" if target == "user" else "general",
             "metadata": fact_metadata,
+            "memory_scope": "user" if target == "user" or not self.project_root else "project",
         }
         try:
             tools.call_tracedecay_tool(
                 "tracedecay_fact_store",
                 fact_args,
-                **_project_call_kwargs(self.project_root),
+                **_project_call_kwargs(
+                    self.project_root if fact_args["memory_scope"] == "project" else None
+                ),
             )
         except Exception as exc:
             logger.debug("tracedecay on_memory_write mirror failed: %s", exc)
@@ -3377,11 +3749,30 @@ class TracedecayMemoryProvider(MemoryProvider):
         if fixed_args:
             tool_args = dict(tool_args)
             tool_args.update(fixed_args)
-        return tools.call_tracedecay_tool(tracedecay_name, tool_args, **kwargs)
+        if "memory_scope" not in tool_args:
+            action = str(tool_args.get("action") or "")
+            category = str(tool_args.get("category") or "")
+            if not self.project_root or (action in ("add", "update") and category == "user_pref"):
+                tool_args["memory_scope"] = "user"
+            else:
+                tool_args["memory_scope"] = "project"
+        routed_project = self.project_root if tool_args["memory_scope"] == "project" else None
+        routed_kwargs = dict(kwargs)
+        if routed_project is None:
+            routed_kwargs.pop("project_root", None)
+        return tools.call_tracedecay_tool(
+            tracedecay_name,
+            tool_args,
+            **_project_call_kwargs(routed_project, routed_kwargs),
+        )
 
 def register(ctx):
     global _HOST_FORWARDS_MESSAGES
     ctx.register_hook("pre_llm_call", _pre_llm_call)
+    try:
+        ctx.register_hook("post_tool_call", _post_tool_call)
+    except Exception as exc:
+        logger.debug("tracedecay post_tool_call hook unavailable: %s", exc)
     # Declare the plugins.tracedecay config block so its keys exist in
     # load_config() even before the user edits config.yaml.
     register_config_defaults = getattr(ctx, "register_config_defaults", None)
@@ -3455,11 +3846,12 @@ def register(ctx):
                 # prefixed twins would double the schema footprint.
                 continue
             handler = _handle_lcm_expand_query if name == "tracedecay_lcm_expand_query" else tools.make_handler(name)
+            visible_schema = _agent_visible_schema(schema)
             try:
                 register_tool(
                     name=name,
                     toolset="tracedecay",
-                    schema=schema,
+                    schema=visible_schema,
                     handler=handler,
                 )
             except Exception as exc:
@@ -3473,11 +3865,12 @@ def register(ctx):
         if host_forwards_messages:
             for schema in context_engine.get_tool_schemas():
                 name = schema["name"]
+                visible_schema = _agent_visible_schema(schema)
                 try:
                     register_tool(
                         name=name,
                         toolset="context_engine",
-                        schema=schema,
+                        schema=visible_schema,
                         handler=_make_wrapped_lcm_handler(name, context_engine),
                         description=schema.get("description", ""),
                     )
@@ -3498,13 +3891,44 @@ def register(ctx):
             "tracedecay direct tool registration unavailable on this Hermes host; continuing with context-engine schemas"
         )
 
-    skills_dir = Path(__file__).parent / "skills"
-    skill_path = skills_dir / "tracedecay" / "SKILL.md"
     register_skill = getattr(ctx, "register_skill", None)
-    if skill_path.exists() and callable(register_skill):
-        # Newer Hermes derives the namespace from the plugin name and
-        # rejects ':' in skill names, so register the bare name.
-        try:
-            register_skill("tracedecay", skill_path)
-        except Exception as exc:
-            logger.warning("tracedecay skill registration failed: %s", exc)
+    skills_dir = Path(__file__).parent / "skills"
+    if callable(register_skill) and skills_dir.is_dir():
+        direct_skills = [
+            path
+            for path in sorted(skills_dir.iterdir(), key=lambda path: path.name)
+            if path.name != "agent-managed"
+        ]
+        managed_dir = skills_dir / "agent-managed"
+        managed_skills = (
+            sorted(managed_dir.iterdir(), key=lambda path: path.name)
+            if managed_dir.is_dir()
+            else []
+        )
+        registered_skills = set()
+        for skill_dir in direct_skills + managed_skills:
+            if not skill_dir.is_dir():
+                logger.debug("tracedecay skill entry is not a directory; skipping: %s", skill_dir)
+                continue
+            skill_name = skill_dir.name
+            if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]*", skill_name):
+                logger.warning("tracedecay skill name is invalid; skipping: %s", skill_name)
+                continue
+            if skill_name in registered_skills:
+                logger.warning("tracedecay skill name collides; skipping: %s", skill_name)
+                continue
+            skill_path = skill_dir / "SKILL.md"
+            if not skill_path.is_file():
+                logger.debug("tracedecay skill has no SKILL.md; skipping: %s", skill_dir)
+                continue
+            registered_skills.add(skill_name)
+            # Hermes derives the plugin namespace and rejects ':' in skill
+            # names, so register every bundled/exported skill by bare name.
+            try:
+                register_skill(skill_name, skill_path)
+            except Exception as exc:
+                logger.warning(
+                    "tracedecay skill registration failed for %s: %s",
+                    skill_name,
+                    exc,
+                )

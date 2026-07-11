@@ -50,6 +50,7 @@ fn managed_skill_defaults_target_supported_hosts() {
             SkillInstallTarget::OpenCode,
             SkillInstallTarget::Kimi,
             SkillInstallTarget::Kiro,
+            SkillInstallTarget::Hermes,
         ]
     );
 }
@@ -868,10 +869,11 @@ command = "other"
 }
 
 #[tokio::test]
-async fn hermes_target_is_host_owned_and_not_exported_by_tracedecay() {
+async fn hermes_target_uses_native_plugin_overlay() {
     let temp = tempfile::tempdir().unwrap();
     let profile_root = temp.path().join("profile");
     let prompt_path = temp.path().join("HERMES.md");
+    let plugin_root = temp.path().join("plugin");
 
     create_managed_skill_draft(&profile_root, draft("repo-hygiene", "Repository hygiene"))
         .await
@@ -886,8 +888,13 @@ async fn hermes_target_is_host_owned_and_not_exported_by_tracedecay() {
     assert!(err.contains("Hermes owns profile skills"));
     assert!(!prompt_path.exists());
 
-    let err = install_managed_skills(&profile_root, SkillInstallTarget::Hermes, &prompt_path)
-        .unwrap_err()
-        .to_string();
-    assert!(err.contains("does not export managed skills into Hermes"));
+    let summary =
+        install_managed_skills(&profile_root, SkillInstallTarget::Hermes, &plugin_root).unwrap();
+    assert_eq!(summary.exported_count, 1);
+    assert_eq!(summary.exported[0].id, "repo-hygiene");
+    assert!(
+        plugin_root
+            .join("skills/agent-managed/repo-hygiene/SKILL.md")
+            .is_file()
+    );
 }

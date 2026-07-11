@@ -1124,6 +1124,7 @@ fn test_hermes_user_install_writes_single_plugin() {
     assert!(manifest.contains("tracedecay_lcm_compress"));
     assert!(manifest.contains("provides_hooks:"));
     assert!(manifest.contains("pre_llm_call"));
+    assert!(manifest.contains("post_tool_call"));
     assert!(manifest.contains("provides_commands:"));
     assert!(manifest.contains("/tracedecay_status"));
 
@@ -1133,11 +1134,13 @@ fn test_hermes_user_install_writes_single_plugin() {
     assert!(init_py.contains("ctx.register_memory_provider("));
     assert!(init_py.contains("register_tool = getattr(ctx, \"register_tool\", None)"));
     assert!(init_py.contains("ctx.register_hook(\"pre_llm_call\""));
+    assert!(init_py.contains("ctx.register_hook(\"post_tool_call\""));
     assert!(init_py.contains("getattr(ctx, \"register_command\", None)"));
     assert!(init_py.contains("getattr(ctx, \"register_skill\", None)"));
-    assert!(init_py.contains("register_skill(\"tracedecay\""));
+    assert!(init_py.contains("register_skill(skill_name, skill_path)"));
     assert!(init_py.contains("class TraceDecayContextEngine"));
-    assert!(!init_py.contains("storage_scope"));
+    assert!(init_py.contains("routed.setdefault(\"storage_scope\", \"user\")"));
+    assert!(!init_py.contains("hermes_profile"));
     assert!(!init_py.contains("hermes_home\": self.hermes_home"));
     assert!(!init_py.contains("HERMES_HOME"));
     assert!(init_py.contains("tracedecay_lcm_compress"));
@@ -1265,7 +1268,7 @@ fn test_hermes_plugin_init_snapshot_matches_embedded_asset() {
     hasher.update(body.as_bytes());
     assert_eq!(
         hex::encode(hasher.finalize()),
-        "3cd56428c8d7cf40a1877ce85eb6103a8b9dc35fe8194d360586a588d1dbc879",
+        "88db26663abdb759748ce77900bddf2746a97ba73635f2a69a909ed1a9d008be",
         "templates/plugin_init.py payload hash changed — verify the edit is intentional and update this snapshot"
     );
 }
@@ -1281,7 +1284,7 @@ fn test_hermes_generated_python_registers_lcm_context_engine() {
 
     assert!(init_py.contains("class TraceDecayContextEngine"));
     assert!(init_py.contains("ctx.register_context_engine"));
-    assert!(!init_py.contains("storage_scope"));
+    assert!(init_py.contains("routed.setdefault(\"storage_scope\", \"user\")"));
     assert!(init_py.contains("def call_tracedecay_json"));
     assert!(init_py.contains("tracedecay_lcm_status"));
     assert!(init_py.contains("\"tracedecay_lcm_preflight\","));
@@ -1553,14 +1556,15 @@ assert provider.is_available() is False
 plugin.tools.TRACEDECAY_BIN = original_bin
 provider.initialize("session-123", hermes_home="/tmp/hermes-profile")
 assert provider.hermes_home == "/tmp/hermes-profile"
-assert provider.project_root == os.getcwd()
+assert provider.project_root is None
 assert provider.project_root != provider.hermes_home
 assert provider.session_id == "session-123"
 # Hermes home remains host config only; TraceDecay routing stays on cwd.
 provider.initialize("session-only")
 assert provider.hermes_home == str(plugin_dir.parent.parent)
-assert provider.project_root == os.getcwd()
+assert provider.project_root is None
 assert provider.session_id == "session-only"
+provider.project_root = os.getcwd()
 
 # Collapsed schema surface: fact_store(action=...) covers the nine legacy
 # fixed-action aliases, which stay dispatchable but cost no schema footprint.
@@ -1594,13 +1598,13 @@ assert json.loads(feedback_result)["name"] == "tracedecay_fact_feedback"
 assert json.loads(search_result)["name"] == "tracedecay_fact_store"
 assert json.loads(status_result)["name"] == "tracedecay_memory_status"
 assert calls[0][0] == "tracedecay_fact_store"
-assert calls[0][1] == {"action": "list"}
+assert calls[0][1] == {"action": "list", "memory_scope": "project"}
 assert calls[0][2]["request_id"] == "r1"
 assert calls[1][0] == "tracedecay_fact_feedback"
 assert calls[2][0] == "tracedecay_fact_store"
-assert calls[2][1] == {"query": "Project Phoenix", "action": "search"}
+assert calls[2][1] == {"query": "Project Phoenix", "action": "search", "memory_scope": "project"}
 assert calls[3][0] == "tracedecay_memory_status"
-assert calls[3][1] == {}
+assert calls[3][1] == {"memory_scope": "project"}
 
 class LegacyCtx:
     context_engine_tool_handlers_receive_messages = True
@@ -6333,6 +6337,9 @@ assert "--project" in argv, argv
 assert argv[argv.index("--project") + 1] == str(healthy_cwd), argv
 
 # The context engine filters the legacy pin but layers host-behavior settings.
+plugin._resolved_project_scope = lambda path: (
+    str(healthy_cwd) if os.path.realpath(str(path)) == os.path.realpath(str(healthy_cwd)) else None
+)
 engine = plugin.TraceDecayContextEngine()
 assert engine.project_root is None, engine.project_root
 engine.on_session_start(session_id="s1", cwd=str(healthy_cwd))

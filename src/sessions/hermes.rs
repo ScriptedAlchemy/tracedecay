@@ -6,6 +6,10 @@
 //! `~/.hermes/profiles/<name>` for named profiles. A profile maps to exactly
 //! one ingest target only when provenance proves a real code project: a
 //! legacy `plugins.tracedecay.project_root` pin or the session row's `cwd`.
+//! For projectless/gateway sessions, one completed turn may instead prove its
+//! project through structured tool-call routing (`project_path`,
+//! `project_root`, or a nested project selector). Only that turn is projected;
+//! an entire long-running multi-project chat is never assigned by inference.
 //! Profile directories are never `TraceDecay` project identities.
 //!
 //! Unlike the file-based adapters this source holds *many* sessions in one
@@ -49,6 +53,7 @@ const HERMES_LOCATION_KEYS: TranscriptLocationMetadataKeys = TranscriptLocationM
 /// the cursor advance after every committed chunk, so an interrupted sweep
 /// resumes where it stopped.
 const CHUNK_ROWS: usize = 2000;
+const CORRELATION_CURSOR_VERSION: &str = "turn-project-v2";
 
 /// Ingests Hermes sessions proven to belong to `project_root` into `db`.
 ///
@@ -77,6 +82,37 @@ pub async fn ingest_homes(
                 state_db = %source.state_db.display(),
                 error,
                 "skipping Hermes transcript source"
+            ),
+        }
+    }
+    stats
+}
+
+/// Ingests historical Hermes turns that have no registered-project
+/// attribution into the profile-level user session store.
+pub async fn ingest_user_sessions(
+    db: &GlobalDb,
+    registered_roots: &[PathBuf],
+) -> TranscriptIngestStats {
+    let homes = crate::sessions::home_dir()
+        .map(|home| vec![home.join(".hermes")])
+        .unwrap_or_default();
+    ingest_user_homes(db, &homes, registered_roots).await
+}
+
+pub async fn ingest_user_homes(
+    db: &GlobalDb,
+    hermes_homes: &[PathBuf],
+    registered_roots: &[PathBuf],
+) -> TranscriptIngestStats {
+    let mut stats = TranscriptIngestStats::default();
+    for source in all_profile_sources(hermes_homes) {
+        match try_ingest_user_state_db(db, &source, registered_roots).await {
+            Ok(source_stats) => stats = stats.merge(source_stats),
+            Err(error) => tracing::debug!(
+                state_db = %source.state_db.display(),
+                error,
+                "skipping projectless Hermes transcript source"
             ),
         }
     }
@@ -129,6 +165,37 @@ struct HermesProfileSource {
     state_db: PathBuf,
     profile: Option<String>,
     legacy_project_pin: Option<PathBuf>,
+}
+
+fn all_profile_sources(hermes_homes: &[PathBuf]) -> Vec<HermesProfileSource> {
+    let mut out = Vec::new();
+    let mut seen = BTreeSet::new();
+    for home in hermes_homes {
+        let mut profiles = vec![(home.clone(), None)];
+        if let Ok(entries) = std::fs::read_dir(home.join("profiles")) {
+            profiles.extend(entries.filter_map(|entry| {
+                let path = entry.ok()?.path();
+                path.is_dir().then(|| {
+                    let name = path.file_name()?.to_str()?.to_string();
+                    Some((path, Some(name)))
+                })?
+            }));
+        }
+        for (profile_dir, profile) in profiles {
+            let state_db = profile_dir.join("state.db");
+            if state_db.is_file() && seen.insert(state_db.clone()) {
+                out.push(HermesProfileSource {
+                    state_db,
+                    profile,
+                    legacy_project_pin: read_config_pinned_project_root(
+                        &profile_dir.join("config.yaml"),
+                    )
+                    .map(PathBuf::from),
+                });
+            }
+        }
+    }
+    out
 }
 
 fn candidate_state_dbs(hermes_homes: &[PathBuf], project_root: &Path) -> Vec<HermesProfileSource> {
@@ -274,8 +341,9 @@ async fn try_ingest_state_db(
     let state_db = &source.state_db;
     let conn = open_read_only_strict(state_db).await?;
     let path_str = state_db.to_string_lossy().to_string();
+    let cursor_path = format!("{path_str}#{CORRELATION_CURSOR_VERSION}");
     let mut cursor = {
-        let prev = db.get_parse_offset(&path_str).await.unwrap_or_default();
+        let prev = db.get_parse_offset(&cursor_path).await.unwrap_or_default();
         StoredCursor {
             position: prev.byte_offset,
             mtime: prev.mtime,
@@ -308,14 +376,14 @@ async fn try_ingest_state_db(
         if batches.is_empty() {
             // Only non-conversation rows (e.g. `session_meta`) — still advance
             // the cursor so the next sweep does not re-read them.
-            db.set_parse_offset(&path_str, offset).await;
+            db.set_parse_offset(&cursor_path, offset).await;
         } else {
             let message_count: u64 = batches
                 .iter()
                 .map(|batch| batch.messages.len() as u64)
                 .sum();
             if !db
-                .upsert_transcript_projection_batches(&batches, &path_str, offset)
+                .upsert_transcript_projection_batches(&batches, &cursor_path, offset)
                 .await
             {
                 return Err(format!(
@@ -328,6 +396,71 @@ async fn try_ingest_state_db(
             }
             stats.messages_upserted = stats.messages_upserted.saturating_add(message_count);
             stats.sessions_upserted = sessions_seen.len() as u64;
+        }
+        cursor = next_cursor;
+        if row_count < CHUNK_ROWS {
+            return Ok(stats);
+        }
+    }
+}
+
+async fn try_ingest_user_state_db(
+    db: &GlobalDb,
+    source: &HermesProfileSource,
+    registered_roots: &[PathBuf],
+) -> Result<TranscriptIngestStats, String> {
+    let mut stats = TranscriptIngestStats::default();
+    let state_db = &source.state_db;
+    let conn = open_read_only_strict(state_db).await?;
+    let path_str = state_db.to_string_lossy().to_string();
+    let cursor_path = format!("{path_str}#user-turn-v1");
+    let mut cursor = {
+        let prev = db.get_parse_offset(&cursor_path).await.unwrap_or_default();
+        StoredCursor {
+            position: prev.byte_offset,
+            mtime: prev.mtime,
+            file_id: prev.file_id,
+        }
+    };
+    let select_sql = select_new_messages_sql(
+        &message_columns(&conn).await,
+        &table_columns(&conn, "sessions").await,
+    );
+    loop {
+        let new = read_new_rows_strict(&conn, &select_sql, cursor).await?;
+        let row_count = new.items.len();
+        if row_count == 0 {
+            return Ok(stats);
+        }
+        let next_cursor = StoredCursor {
+            position: new.new_cursor.position,
+            mtime: file_mtime_secs(state_db),
+            file_id: 0,
+        };
+        let offset = ParseOffset {
+            byte_offset: next_cursor.position,
+            mtime: next_cursor.mtime,
+            file_id: 0,
+        };
+        let batches = build_user_batches(db, &new.items, &path_str, source, registered_roots).await;
+        if batches.is_empty() {
+            db.set_parse_offset(&cursor_path, offset).await;
+        } else {
+            let message_count = batches
+                .iter()
+                .map(|batch| batch.messages.len() as u64)
+                .sum::<u64>();
+            if !db
+                .upsert_transcript_projection_batches(&batches, &cursor_path, offset)
+                .await
+            {
+                return Err(format!(
+                    "could not persist projectless Hermes rows from '{}'",
+                    state_db.display()
+                ));
+            }
+            stats.messages_upserted = stats.messages_upserted.saturating_add(message_count);
+            stats.sessions_upserted = stats.sessions_upserted.saturating_add(batches.len() as u64);
         }
         cursor = next_cursor;
         if row_count < CHUNK_ROWS {
@@ -423,6 +556,7 @@ async fn build_batches(
 ) -> Vec<TranscriptBatch> {
     let mut order = Vec::new();
     let mut by_session: HashMap<String, TranscriptBatch> = HashMap::new();
+    let turn_locations = turn_project_locations(rows, project_root, source);
 
     for row in rows {
         if row.role == "session_meta" || row.role.is_empty() {
@@ -433,7 +567,7 @@ async fn build_batches(
             // them as live history would misrepresent the conversation.
             continue;
         }
-        let Some(location) = session_location(row, project_root, source) else {
+        let Some(location) = turn_locations.get(&row.id) else {
             continue;
         };
         let Some(message) = message_from_row(row, state_db_path, source, &location) else {
@@ -460,6 +594,235 @@ async fn build_batches(
     batches
 }
 
+async fn build_user_batches(
+    db: &GlobalDb,
+    rows: &[HermesRow],
+    state_db_path: &str,
+    source: &HermesProfileSource,
+    registered_roots: &[PathBuf],
+) -> Vec<TranscriptBatch> {
+    let mut order = Vec::new();
+    let mut by_session: HashMap<String, TranscriptBatch> = HashMap::new();
+    let locations = user_turn_locations(rows, source, registered_roots);
+    for row in rows {
+        if row.role == "session_meta" || row.role.is_empty() || row.active == 0 {
+            continue;
+        }
+        let Some(location) = locations.get(&row.id) else {
+            continue;
+        };
+        let Some(message) = message_from_row(row, state_db_path, source, location) else {
+            continue;
+        };
+        let batch = by_session.entry(row.session_id.clone()).or_insert_with(|| {
+            order.push(row.session_id.clone());
+            TranscriptBatch {
+                session: session_from_row(row, state_db_path, Path::new("user"), source, location),
+                messages: Vec::new(),
+            }
+        });
+        batch.messages.push(message);
+    }
+    let mut batches = Vec::with_capacity(order.len());
+    for session_id in order {
+        if let Some(mut batch) = by_session.remove(&session_id) {
+            merge_with_existing(db, &mut batch).await;
+            batches.push(batch);
+        }
+    }
+    batches
+}
+
+fn user_turn_locations(
+    rows: &[HermesRow],
+    source: &HermesProfileSource,
+    registered_roots: &[PathBuf],
+) -> HashMap<i64, HermesSessionLocation> {
+    let mut by_session: HashMap<&str, Vec<&HermesRow>> = HashMap::new();
+    for row in rows {
+        by_session.entry(&row.session_id).or_default().push(row);
+    }
+    let belongs_to_registered = |path: &Path| {
+        registered_roots
+            .iter()
+            .any(|root| path_belongs_to_project(path, root))
+    };
+    let mut locations = HashMap::new();
+    for session_rows in by_session.into_values() {
+        if source
+            .legacy_project_pin
+            .as_deref()
+            .is_some_and(|pin| belongs_to_registered(pin))
+        {
+            continue;
+        }
+        let recorded_cwd = session_rows.iter().find_map(|row| {
+            let cwd = PathBuf::from(row.session_cwd.as_deref()?.trim());
+            cwd.is_absolute().then_some(cwd)
+        });
+        let fallback = source
+            .legacy_project_pin
+            .clone()
+            .or_else(|| {
+                recorded_cwd
+                    .as_ref()
+                    .filter(|cwd| !belongs_to_registered(cwd))
+                    .cloned()
+            })
+            // Only genuinely locationless sessions fall back to the profile
+            // directory. A registered cwd must never be relabeled as user.
+            .or_else(|| {
+                recorded_cwd
+                    .is_none()
+                    .then(|| source.state_db.parent().map(Path::to_path_buf))
+                    .flatten()
+            });
+        let mut turn = Vec::new();
+        for row in session_rows {
+            if row.role == "user" && !turn.is_empty() {
+                assign_user_turn(&turn, fallback.as_deref(), registered_roots, &mut locations);
+                turn.clear();
+            }
+            turn.push(row);
+        }
+        assign_user_turn(&turn, fallback.as_deref(), registered_roots, &mut locations);
+    }
+    locations
+}
+
+fn assign_user_turn(
+    rows: &[&HermesRow],
+    fallback: Option<&Path>,
+    registered_roots: &[PathBuf],
+    locations: &mut HashMap<i64, HermesSessionLocation>,
+) {
+    let explicit = rows
+        .iter()
+        .flat_map(|row| structured_tool_project_paths(row))
+        .collect::<Vec<_>>();
+    if explicit.iter().any(|path| {
+        registered_roots
+            .iter()
+            .any(|root| path_belongs_to_project(path, root))
+    }) {
+        return;
+    }
+    let cwd = explicit
+        .last()
+        .cloned()
+        .or_else(|| fallback.map(Path::to_path_buf));
+    let Some(cwd) = cwd else {
+        return;
+    };
+    let location = HermesSessionLocation {
+        cwd,
+        provenance: "user_scope",
+    };
+    for row in rows {
+        locations.insert(row.id, location.clone());
+    }
+}
+
+fn turn_project_locations(
+    rows: &[HermesRow],
+    project_root: &Path,
+    source: &HermesProfileSource,
+) -> HashMap<i64, HermesSessionLocation> {
+    let mut by_session: HashMap<&str, Vec<&HermesRow>> = HashMap::new();
+    for row in rows {
+        by_session.entry(&row.session_id).or_default().push(row);
+    }
+    let mut locations = HashMap::new();
+    for session_rows in by_session.into_values() {
+        let fallback = session_rows
+            .iter()
+            .find_map(|row| session_location(row, project_root, source));
+        let mut turn = Vec::new();
+        for row in session_rows {
+            if row.role == "user" && !turn.is_empty() {
+                assign_turn_location(&turn, project_root, fallback.as_ref(), &mut locations);
+                turn.clear();
+            }
+            turn.push(row);
+        }
+        assign_turn_location(&turn, project_root, fallback.as_ref(), &mut locations);
+    }
+    locations
+}
+
+fn assign_turn_location(
+    rows: &[&HermesRow],
+    project_root: &Path,
+    fallback: Option<&HermesSessionLocation>,
+    locations: &mut HashMap<i64, HermesSessionLocation>,
+) {
+    let explicit_paths = rows
+        .iter()
+        .rev()
+        .flat_map(|row| structured_tool_project_paths(row))
+        .collect::<Vec<_>>();
+    let location = if explicit_paths.is_empty() {
+        fallback.cloned()
+    } else {
+        explicit_paths
+            .into_iter()
+            .find(|path| path_belongs_to_project(path, project_root))
+            .map(|cwd| HermesSessionLocation {
+                cwd,
+                provenance: "tool_project_path",
+            })
+    };
+    let Some(location) = location else {
+        return;
+    };
+    for row in rows {
+        locations.insert(row.id, location.clone());
+    }
+}
+
+fn structured_tool_project_paths(row: &HermesRow) -> Vec<PathBuf> {
+    let Some(raw) = row.tool_calls.as_deref() else {
+        return Vec::new();
+    };
+    let Ok(calls) = serde_json::from_str::<Value>(raw) else {
+        return Vec::new();
+    };
+    let mut paths = Vec::new();
+    let calls = calls.as_array().map(Vec::as_slice).unwrap_or(&[]);
+    for call in calls {
+        let arguments = call
+            .pointer("/function/arguments")
+            .or_else(|| call.get("arguments"));
+        let parsed;
+        let arguments = match arguments {
+            Some(Value::String(raw)) => {
+                parsed = serde_json::from_str::<Value>(raw).unwrap_or(Value::Null);
+                &parsed
+            }
+            Some(value) => value,
+            None => continue,
+        };
+        for value in [
+            arguments.get("project_root"),
+            arguments.get("project_path"),
+            arguments.pointer("/project_selector/path"),
+            arguments.get("cwd"),
+            arguments.get("workdir"),
+        ]
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        {
+            let path = PathBuf::from(value);
+            if path.is_absolute() {
+                paths.push(path);
+            }
+        }
+    }
+    paths
+}
+
+#[derive(Clone)]
 struct HermesSessionLocation {
     cwd: PathBuf,
     provenance: &'static str,

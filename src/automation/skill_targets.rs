@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use super::config_error;
 use crate::agents::safe_write_text_file;
 use crate::automation::managed_skills::{
-    ManagedSkill, ManagedSkillState, ManagedSupportFile, managed_skill_root,
+    ManagedSkill, ManagedSupportFile, load_active_managed_skills_snapshot,
     validate_managed_support_files,
 };
 use crate::config::{TRACEDECAY_DIR, USER_DATA_DIR_ENV};
@@ -62,9 +62,6 @@ pub fn install_managed_skills(
     target: SkillInstallTarget,
     output: &Path,
 ) -> Result<SkillInstallSummary> {
-    if target == SkillInstallTarget::Hermes {
-        return Err(hermes_host_owned_error());
-    }
     if target.is_native_overlay() {
         export_native_skill_overlay(profile_root, target, output)
     } else {
@@ -259,25 +256,7 @@ fn remove_prompt_skill_indexes(
 }
 
 pub fn load_active_managed_skills(profile_root: &Path) -> Result<Vec<ManagedSkill>> {
-    let root = managed_skill_root(profile_root);
-    if !root.exists() {
-        return Ok(Vec::new());
-    }
-
-    let mut skills = Vec::new();
-    for entry in fs::read_dir(&root)? {
-        let entry = entry?;
-        let path = entry.path().join("skill.json");
-        if !path.is_file() {
-            continue;
-        }
-        let skill: ManagedSkill = serde_json::from_slice(&fs::read(&path)?)?;
-        if skill.metadata.state == ManagedSkillState::Active {
-            skills.push(skill);
-        }
-    }
-    skills.sort_by(|left, right| left.metadata.id.cmp(&right.metadata.id));
-    Ok(skills)
+    load_active_managed_skills_snapshot(profile_root)
 }
 
 pub fn load_active_managed_skills_for_target(

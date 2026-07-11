@@ -12,6 +12,7 @@
 //! `meta.json` to `project_root`.
 
 use std::path::{Path, PathBuf};
+use std::time::UNIX_EPOCH;
 
 use serde_json::Value;
 
@@ -27,6 +28,8 @@ use crate::sessions::source::{
 
 const PROVIDER: &str = "vibe";
 const MAX_SCAN_DEPTH: u8 = 4;
+/// Bound global history enumeration so one large Vibe profile cannot stall ingest.
+const MAX_SESSION_FILES: usize = 512;
 const VIBE_LOCATION_KEYS: TranscriptLocationMetadataKeys = TranscriptLocationMetadataKeys::new(
     "vibe_session_cwd",
     "vibe_session_worktree",
@@ -36,6 +39,7 @@ const VIBE_LOCATION_KEYS: TranscriptLocationMetadataKeys = TranscriptLocationMet
 /// Vibe session locator + parser.
 pub struct VibeSource {
     session_root: PathBuf,
+    user_registered_roots: Option<Vec<PathBuf>>,
 }
 
 impl VibeSource {
@@ -56,7 +60,14 @@ impl VibeSource {
     pub fn with_vibe_home(vibe_home: &Path) -> Self {
         Self {
             session_root: vibe_home.join("logs").join("session"),
+            user_registered_roots: None,
         }
+    }
+
+    #[must_use]
+    pub fn for_user_scope(mut self, registered_roots: Vec<PathBuf>) -> Self {
+        self.user_registered_roots = Some(registered_roots);
+        self
     }
 }
 
@@ -66,12 +77,23 @@ impl TranscriptSource for VibeSource {
     }
 
     fn transcript_paths(&self, _project_root: &Path) -> Vec<PathBuf> {
-        collect_files_with_ext(&self.session_root, "jsonl", MAX_SCAN_DEPTH)
+        let mut paths = collect_files_with_ext(&self.session_root, "jsonl", MAX_SCAN_DEPTH)
             .into_iter()
             .filter(|path| {
                 path.file_name().and_then(|name| name.to_str()) == Some("messages.jsonl")
             })
-            .collect()
+            .map(|path| {
+                let mtime = std::fs::metadata(&path)
+                    .ok()
+                    .and_then(|meta| meta.modified().ok())
+                    .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+                    .map_or(0, |duration| duration.as_secs());
+                (mtime, path)
+            })
+            .collect::<Vec<_>>();
+        paths.sort_by(|left, right| right.0.cmp(&left.0).then_with(|| left.1.cmp(&right.1)));
+        paths.truncate(MAX_SESSION_FILES);
+        paths.into_iter().map(|(_, path)| path).collect()
     }
 
     fn parse_new(
@@ -83,7 +105,14 @@ impl TranscriptSource for VibeSource {
     ) -> Option<ParsedTranscript> {
         let meta_path = path.parent()?.join("meta.json");
         let meta = read_meta(&meta_path)?;
-        if !path_belongs_to_project(&meta.working_directory, project_root) {
+        if let Some(roots) = &self.user_registered_roots {
+            if roots
+                .iter()
+                .any(|root| path_belongs_to_project(&meta.working_directory, root))
+            {
+                return None;
+            }
+        } else if !path_belongs_to_project(&meta.working_directory, project_root) {
             return None;
         }
 
@@ -95,7 +124,10 @@ impl TranscriptSource for VibeSource {
             }
         }
 
-        let project = project_root.to_string_lossy().to_string();
+        let project = self.user_registered_roots.as_ref().map_or_else(
+            || project_root.to_string_lossy().to_string(),
+            |_| "user".to_string(),
+        );
         let draft = SessionDraft {
             session_id: meta.session_id.clone(),
             project_key: project.clone(),

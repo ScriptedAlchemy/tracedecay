@@ -14,7 +14,8 @@ exists. It asserts the host contracts the 2026-06 review found broken:
      flag; the messages-dependent LCM verbs stay gated.
   4. The memory provider implements sync_turn / prefetch / on_memory_write
      and calls the right subprocess verbs.
-  5. pre_llm_call returns None on non-first turns (prompt-cache safety).
+  5. pre_llm_call returns None on non-first turns and on first-turn greetings
+     (prompt-cache safety without hijacking small talk).
   6. Hermes host-home state cannot redirect the TraceDecay install, store, or
      project, and removed storage-routing fields stay out of tool schemas.
 
@@ -25,6 +26,7 @@ plugin_dir defaults to a fresh install generated into a temp HOME via the
 tracedecay binary named by $TRACEDECAY_BIN (default: target/debug/tracedecay).
 """
 
+import copy
 import json
 import os
 import shutil
@@ -56,6 +58,11 @@ def generate_plugin(work: Path) -> Path:
     env = dict(os.environ)
     env["HOME"] = str(home)
     env["USERPROFILE"] = str(home)
+    # HOME alone does not isolate TraceDecay when the invoking Hermes process
+    # exports an explicit profile root. Keep the generated-install fixture on
+    # its throwaway profile so it cannot wait on a live profile's skill-store
+    # lock or inspect its managed skills.
+    env["TRACEDECAY_DATA_DIR"] = str(home / ".tracedecay")
     env["PATH"] = f"{bin_path.parent}{os.pathsep}{env.get('PATH', '')}"
     env["HERMES_HOME"] = str(work / "ignored-hermes-host-home")
     subprocess.run(
@@ -82,6 +89,7 @@ class StubCtx:
         self.provider = None
         self.engine = None
         self.config = None
+        self.skills = {}
 
     def register_hook(self, name, fn):
         self.hooks[name] = fn
@@ -96,7 +104,7 @@ class StubCtx:
         self.engine = engine
 
     def register_skill(self, name, path):
-        pass
+        self.skills[name] = Path(path)
 
     def register_config_defaults(self, defaults):
         pass
@@ -167,12 +175,63 @@ def run_checks(work: Path):
     assert "current schemas and are rejected" in skill, skill
     ok("provenance stamp + cli passthrough + storage guidance generated")
 
+    managed_skill = (
+        plugin_dir / "skills" / "agent-managed" / "managed-test" / "SKILL.md"
+    )
+    managed_skill.parent.mkdir(parents=True)
+    managed_skill.write_text("# Managed test\n", encoding="utf-8")
+    managed_collision = (
+        plugin_dir / "skills" / "agent-managed" / "tracedecay" / "SKILL.md"
+    )
+    managed_collision.parent.mkdir(parents=True)
+    managed_collision.write_text("# Must not replace bundled skill\n", encoding="utf-8")
+
+    # The stock Hermes runtime exposes the logical session workspace through
+    # TERMINAL_CWD (and, when importable, agent.runtime_cwd). Memory/LCM
+    # routing must follow that workspace rather than the gateway process cwd.
+    runtime_project = work / "runtime-project"
+    runtime_project.mkdir()
+    previous_terminal_cwd = os.environ.get("TERMINAL_CWD")
+    os.environ["TERMINAL_CWD"] = str(runtime_project)
+    try:
+        assert plugin._code_project_root() == str(runtime_project)
+        runtime_provider = plugin.TracedecayMemoryProvider()
+        runtime_provider.initialize(session_id="runtime-cwd")
+        assert runtime_provider.project_root is None
+    finally:
+        if previous_terminal_cwd is None:
+            os.environ.pop("TERMINAL_CWD", None)
+        else:
+            os.environ["TERMINAL_CWD"] = previous_terminal_cwd
+    ok("unindexed runtime workspace uses profile-level user memory")
+
+    registered_root = work / "registered-project"
+    registered_child = registered_root / "src" / "nested"
+    unrelated_root = work / "unrelated-project"
+    registered_child.mkdir(parents=True)
+    unrelated_root.mkdir()
+    real_json = plugin.call_tracedecay_json
+    try:
+        plugin.call_tracedecay_json = lambda *_args, **_kwargs: {
+            "project_root": str(registered_root)
+        }
+        assert plugin._resolved_project_scope(str(registered_child)) == str(registered_root)
+        assert plugin._resolved_project_scope(str(unrelated_root)) is None
+    finally:
+        plugin.call_tracedecay_json = real_json
+    ok("registered project resolution accepts descendants but rejects siblings")
+
     # ── 3. Registration split + provider dedup ──────────────────────────
     # The installer wrote memory.provider: tracedecay into the temp profile
     # config, so the provider-owned fact trio must NOT register as direct
     # duplicates; transcript search has no provider twin and stays.
     ctx = StubCtx()
     plugin.register(ctx)
+    assert ctx.skills == {
+        "managed-test": managed_skill,
+        "tracedecay": plugin_dir / "skills" / "tracedecay" / "SKILL.md",
+    }, ctx.skills
+    ok("bundled and managed skills register through Hermes discovery")
     assert "tracedecay_search" in ctx.tools, sorted(ctx.tools)
     assert "tracedecay_context" in ctx.tools, sorted(ctx.tools)
     assert "tracedecay_message_search" in ctx.tools, sorted(ctx.tools)
@@ -207,31 +266,141 @@ def run_checks(work: Path):
     assert "lcm_grep" in fwd.tools, sorted(fwd.tools)
     ok("LCM live-ingest verbs register when the host forwards messages")
 
-    # ── 5. pre_llm_call cache safety ─────────────────────────────────────
+    # ── 5. pre_llm_call cache safety + small-talk guard ───────────────────
     hook = ctx.hooks["pre_llm_call"]
-    assert hook(is_first_turn=False) is None
+    assert hook(is_first_turn=False, user_message="Can you debug src/main.rs?") is None
     assert hook() is None
-    first = hook(is_first_turn=True)
+    assert hook(is_first_turn=True) is None
+    assert hook(is_first_turn=True, user_message="Hi") is None
+    assert hook(is_first_turn=True, user_message="hello!") is None
+    assert hook(is_first_turn=True, user_message="What time is it?") is None
+    first = hook(is_first_turn=True, user_message="Can you debug this bug in src/main.rs?")
     assert isinstance(first, str) and "tracedecay" in first
-    ok("pre_llm_call injects on first turn only")
+    path_first = hook(is_first_turn=True, user_message="Please review scripts/check.py")
+    assert isinstance(path_first, str) and "tracedecay" in path_first
+    ok("pre_llm_call only nudges first-turn code/project requests")
     saved_names = set(plugin._REGISTERED_TOOL_NAMES)
     plugin._REGISTERED_TOOL_NAMES.clear()
     assert hook(is_first_turn=True) is None
     plugin._REGISTERED_TOOL_NAMES.update(saved_names)
     ok("pre_llm_call stays silent when no tools registered")
 
+    receipt_hook = ctx.hooks["post_tool_call"]
+    notifications = []
+    real_run = plugin.subprocess.run
+    real_thread = plugin.threading.Thread
+    class ImmediateThread:
+        def __init__(self, target, **_kwargs):
+            self.target = target
+        def start(self):
+            self.target()
+    try:
+        plugin.threading.Thread = ImmediateThread
+        plugin.subprocess.run = lambda argv, **kwargs: notifications.append((argv, kwargs))
+        assert receipt_hook(tool_name="web_search", cwd=str(runtime_project)) is None
+        assert notifications == []
+        assert receipt_hook(
+            tool_name="terminal",
+            args={"command": "secret output is deliberately absent"},
+            cwd=str(runtime_project),
+            session_id="session-1",
+            turn_id="turn-1",
+            tool_call_id="call-1",
+            status="success",
+            duration_ms=9,
+        ) is None
+        assert len(notifications) == 1
+        argv, call = notifications[0]
+        assert argv[-1] == "hook-hermes-terminal-receipt"
+        event = json.loads(call["input"])
+        assert event["route"]["session_id"] == "session-1"
+        assert event["receipt"]["tool_call_id"] == "call-1"
+        assert "command" not in call["input"] and "output" not in call["input"]
+    finally:
+        plugin.subprocess.run = real_run
+        plugin.threading.Thread = real_thread
+    ok("post_tool_call emits bounded asynchronous terminal receipts")
+
     real_block = plugin.tools.plugin_config_block
     try:
         plugin.tools.plugin_config_block = lambda *_args, **_kwargs: {"nudge": False}
-        assert hook(is_first_turn=True) is None
+        assert hook(is_first_turn=True, user_message="Can you debug src/main.rs?") is None
     finally:
         plugin.tools.plugin_config_block = real_block
     ok("plugins.tracedecay.nudge kill switch silences the nudge")
+
+    # Response handles are a generic MCP transport feature, not LCM-only.
+    # Large fact-store searches must dereference their handle before the
+    # Hermes memory provider tries to read count/facts from the payload.
+    real_tool = plugin.tools.call_tracedecay_tool
+    bridge_calls = []
+    try:
+        def _handled_response(name, args, **kwargs):
+            bridge_calls.append((name, args, kwargs))
+            if name == "tracedecay_retrieve":
+                payload = {
+                    "count": 1,
+                    "facts": [{"fact": {"fact_id": 7, "content": "remember me"}}],
+                }
+            else:
+                payload = {
+                    "truncated": True,
+                    "handle": "rh_fact_search",
+                    "retrieve_tool": "tracedecay_retrieve",
+                    "preview": "{\"count\":1",
+                }
+            return json.dumps({"content": [{"type": "text", "text": json.dumps(payload)}]})
+
+        plugin.tools.call_tracedecay_tool = _handled_response
+        resolved = plugin.call_tracedecay_json(
+            "tracedecay_fact_store",
+            {
+                "action": "search",
+                "query": "remember",
+                "project_selector": {"path": "/tmp/selected-project"},
+            },
+        )
+        assert resolved.get("count") == 1, resolved
+        assert [call[0] for call in bridge_calls] == [
+            "tracedecay_fact_store",
+            "tracedecay_retrieve",
+        ], bridge_calls
+        assert bridge_calls[1][1]["project_selector"] == {
+            "path": "/tmp/selected-project"
+        }, bridge_calls
+        ok("generic response handles dereference for memory-provider results")
+    finally:
+        plugin.tools.call_tracedecay_tool = real_tool
 
     # ── 1. compress() message-list contract ──────────────────────────────
     engine = ctx.engine
     assert engine is not None
     engine.initialize(session_id="check-session", hermes_home=str(host_home))
+    engine.project_root = str(runtime_project)
+    engine.context_length = 200_000
+    engine.threshold_tokens = 150_000
+    engine.agent = object()
+    cloned_engine = copy.deepcopy(engine)
+    assert cloned_engine is not engine
+    assert cloned_engine._state_lock is not engine._state_lock
+    assert cloned_engine.project_root == str(runtime_project)
+    assert cloned_engine.context_length == 200_000
+    assert cloned_engine.threshold_tokens == 150_000
+    assert cloned_engine.agent is None
+    cloned_engine.context_length = 100_000
+    assert engine.context_length == 200_000
+    ok("context engine safely deep-copies per-agent budget state")
+
+    engine.initialize(session_id="project-session", project_root=str(runtime_project))
+    assert engine.project_root == str(runtime_project)
+    engine.initialize(session_id="untethered-session", cwd=str(host_home))
+    assert engine.project_root is None
+    engine.initialize(session_id="project-session")
+    assert engine.project_root == str(runtime_project)
+    engine.initialize(session_id="untethered-session")
+    assert engine.project_root is None
+    ok("context engine isolates project routing per Hermes session")
+
     messages = [
         {"role": "user", "content": "hello"},
         {"role": "assistant", "content": "hi"},
@@ -373,9 +542,10 @@ def run_checks(work: Path):
     provider = ctx.provider
     assert provider is not None
     provider.initialize("check-session", hermes_home=str(host_home))
-    expected_project_root = os.getcwd()
-    assert provider.project_root == expected_project_root
+    expected_project_root = plugin._runtime_working_directory()
+    assert provider.project_root is None
     assert provider.project_root != str(host_home)
+    provider.project_root = expected_project_root
     schema_names = [schema["name"] for schema in provider.get_tool_schemas()]
     assert schema_names == ["fact_store", "fact_feedback", "memory_status"], schema_names
     ok("memory schemas collapsed to 3")
@@ -386,14 +556,26 @@ def run_checks(work: Path):
         plugin.tools.call_tracedecay_tool = lambda name, args, **kw: (
             calls.append((name, args, kw)) or "{}"
         )
+
+        provider.handle_tool_call("fact_store", {"action": "search", "query": "rust"})
+        name, args, kwargs = calls[-1]
+        assert name == "tracedecay_fact_store", calls
+        assert "project_root" not in args, args
+        assert args["memory_scope"] == "project", args
+        assert kwargs["project_root"] == expected_project_root, kwargs
+        ok("memory tool calls stay bound to the provider's session project")
+
         provider.sync_turn("u", "a", session_id="other-session", messages=messages)
         name, args, kwargs = calls[-1]
         assert name == "tracedecay_lcm_preflight", calls
         assert args["session_id"] == "other-session"
-        assert args["messages"] == messages
+        assert [message["content"] for message in args["messages"]] == ["u", "a"]
+        assert all(message.get("id") for message in args["messages"])
+        assert args["transcript_projection"] is True
         assert "project_root" not in args, args
         assert kwargs["project_root"] == expected_project_root, kwargs
-        ok("sync_turn ingests via tracedecay_lcm_preflight")
+
+        ok("sync_turn projects only the completed turn into project LCM")
 
         provider.sync_turn("only user", "and assistant", session_id="s2", messages=None)
         name, args, kwargs = calls[-1]
@@ -408,13 +590,56 @@ def run_checks(work: Path):
         name, args, kwargs = calls[-1]
         assert name == "tracedecay_fact_store", calls
         assert args["action"] == "add" and args["category"] == "user_pref"
+        assert args["memory_scope"] == "user"
         assert args["metadata"]["hermes_action"] == "add"
         assert "project_root" not in args, args
-        assert kwargs["project_root"] == expected_project_root, kwargs
+        assert "project_root" not in kwargs, kwargs
         before = len(calls)
         provider.on_memory_write("remove", "memory", "anything")
         assert len(calls) == before
         ok("on_memory_write mirrors adds and skips removals")
+
+        provider.project_root = None
+        before = len(calls)
+        provider.sync_turn("u", "a", session_id="untethered", messages=messages)
+        assert len(calls) == before + 1
+        name, args, kwargs = calls[-1]
+        assert name == "tracedecay_lcm_preflight"
+        assert args["storage_scope"] == "user", args
+        assert args["transcript_projection"] is True
+        assert "project_root" not in kwargs, kwargs
+        provider.handle_tool_call("fact_store", {"action": "add", "content": "pref"})
+        name, args, kwargs = calls[-1]
+        assert args["memory_scope"] == "user", args
+        assert "project_root" not in kwargs, kwargs
+        ok("untethered memory and LCM use profile-level user scope")
+
+        real_resolver = plugin._resolved_project_scope
+        plugin._resolved_project_scope = lambda path: expected_project_root
+        provider.sync_turn(
+            "project task",
+            "done",
+            session_id="tool-routed",
+            messages=[
+                {"role": "user", "content": "work on the repo"},
+                {
+                    "role": "assistant",
+                    "tool_calls": [{
+                        "function": {
+                            "name": "tracedecay_grep",
+                            "arguments": json.dumps({"project_path": expected_project_root}),
+                        }
+                    }],
+                },
+            ],
+        )
+        name, args, kwargs = calls[-1]
+        assert name == "tracedecay_lcm_preflight"
+        assert kwargs["project_root"] == expected_project_root
+        assert args["transcript_projection"] is True
+        plugin._resolved_project_scope = real_resolver
+        ok("structured tool activity correlates an untethered turn to its project")
+        provider.project_root = expected_project_root
 
         # Non-primary execution contexts must not write turn state.
         before = len(calls)
@@ -425,6 +650,7 @@ def run_checks(work: Path):
         ok("sync_turn skips cron/flush execution contexts")
     finally:
         plugin.tools.call_tracedecay_tool = real_tool
+
 
     real_json = plugin.call_tracedecay_json
     try:
@@ -448,8 +674,8 @@ def run_checks(work: Path):
             if text:
                 break
             time.sleep(0.05)
-        assert "zack prefers rust" in text and "[fact 7]" in text, text
-        assert "flat row" in text and "[fact 8]" in text, text
+        assert "zack prefers rust" in text and "[user fact 7]" in text, text
+        assert "flat row" in text and "[user fact 8]" in text, text
         # Consumed on read: the next prefetch starts empty again.
         assert provider.prefetch("rust preferences", session_id="check-session") == ""
         plugin.call_tracedecay_json = lambda name, args, **kw: {"error": "nope"}

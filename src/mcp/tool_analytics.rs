@@ -226,6 +226,7 @@ mod tests {
                 worktree: Some(PathBuf::from("/repo")),
                 branch: Some("feature/hook-route".to_string()),
             }),
+            receipt: None,
         };
 
         let Some(record) =

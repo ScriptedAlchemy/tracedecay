@@ -23,8 +23,9 @@ pub(super) struct UninstallOutcome {
 pub(super) fn install(ctx: &InstallContext) -> Result<InstallOutcome> {
     let plugin_dir = ctx.home.join(".hermes/plugins/tracedecay");
 
-    install_supported_plugin(&plugin_dir, &ctx.tracedecay_bin, ctx.dashboard)?;
-    super::cleanup_legacy_plugin_dirs(&ctx.home)?;
+    for profile_plugin_dir in super::profile_plugin_dirs(&ctx.home) {
+        install_supported_plugin(&profile_plugin_dir, &ctx.tracedecay_bin, ctx.dashboard)?;
+    }
 
     eprintln!();
     eprintln!("Setup complete. Next steps:");
@@ -63,7 +64,6 @@ pub(super) fn update_plugin(ctx: &InstallContext) -> Result<UpdatePluginOutcome>
 
 /// Refreshes the generated user-level plugin without rewriting config.yaml.
 fn refresh_installed_plugins(home: &Path, tracedecay_bin: &str) -> Result<Vec<PathBuf>> {
-    let legacy_plugins = super::legacy_plugin_dirs(home);
     let mut refreshed = Vec::new();
     for plugin_dir in super::detected_plugin_dirs(home) {
         let had_dashboard = super::dashboard_wrapper::is_deployed(&plugin_dir);
@@ -80,23 +80,15 @@ fn refresh_installed_plugins(home: &Path, tracedecay_bin: &str) -> Result<Vec<Pa
         );
         refreshed.push(plugin_dir);
     }
-    if refreshed.is_empty() && !legacy_plugins.is_empty() {
-        let plugin_dir = home.join(".hermes/plugins/tracedecay");
-        let deploy_dashboard = legacy_plugins
-            .iter()
-            .any(|legacy| super::dashboard_wrapper::is_deployed(legacy));
-        install_supported_plugin(&plugin_dir, tracedecay_bin, deploy_dashboard)?;
-        refreshed.push(plugin_dir);
-    }
-    super::cleanup_legacy_plugin_dirs(home)?;
     Ok(refreshed)
 }
 
 pub(super) fn uninstall(ctx: &InstallContext) -> Result<UninstallOutcome> {
     let plugin_dir = ctx.home.join(".hermes/plugins/tracedecay");
 
-    super::uninstall_plugin(&plugin_dir)?;
-    super::cleanup_legacy_plugin_dirs(&ctx.home)?;
+    for profile_plugin_dir in super::profile_plugin_dirs(&ctx.home) {
+        super::uninstall_plugin(&profile_plugin_dir)?;
+    }
 
     eprintln!();
     eprintln!("Uninstall complete. Tracedecay has been removed from Hermes.");
@@ -208,7 +200,7 @@ mod tests {
     }
 
     #[test]
-    fn install_cutover_ignores_hermes_home_redirect() {
+    fn install_configures_every_existing_hermes_profile() {
         let home = TempDir::new().unwrap();
         let redirected = TempDir::new().unwrap();
         let named = home.path().join(".hermes/profiles/work/plugins/tracedecay");
@@ -228,18 +220,15 @@ mod tests {
             .unwrap();
         }
 
-        let retired = with_hermes_home(redirected.path(), || {
-            crate::agents::hermes::cleanup_legacy_plugin_dirs(home.path()).unwrap()
-        });
         let outcome = install(&ctx(home.path(), NEW_BIN)).unwrap();
 
-        assert_eq!(retired, vec![named.clone()]);
         assert!(outcome.plugin_dir.join("plugin.yaml").is_file());
-        assert!(!named.join("plugin.yaml").exists());
+        assert!(named.join("plugin.yaml").exists());
         assert!(redirected_plugin.join("plugin.yaml").exists());
-        assert!(
-            !text(&home.path().join(".hermes/profiles/work/config.yaml")).contains("tracedecay")
-        );
+        let named_config = text(&home.path().join(".hermes/profiles/work/config.yaml"));
+        assert!(named_config.contains("- tracedecay"));
+        assert!(named_config.contains("provider: tracedecay"));
+        assert!(named_config.contains("engine: tracedecay"));
         assert!(text(&redirected.path().join("config.yaml")).contains("tracedecay"));
     }
 
