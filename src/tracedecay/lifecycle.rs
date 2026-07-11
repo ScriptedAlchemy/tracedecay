@@ -38,6 +38,7 @@ impl TraceDecay {
         save_config_to_path(&store_layout.config_path, &config)?;
 
         let (db, _migrated) = Database::initialize(&store_layout.graph_db_path).await?;
+        let active_graph_layout = active_graph_layout(&store_layout.graph_db_path);
         if store_layout.storage_mode == storage::StorageMode::ProfileSharded {
             storage::write_store_manifest(&store_layout)?;
         }
@@ -57,6 +58,7 @@ impl TraceDecay {
             config,
             project_root: project_root.to_path_buf(),
             store_layout,
+            active_graph_layout,
             open_options,
             registry: LanguageRegistry::new(),
             active_branch,
@@ -311,6 +313,11 @@ impl TraceDecay {
             active_branch.as_deref(),
         );
 
+        // Sync state belongs to the concrete graph DB, not the repository-wide
+        // store root. Different tracked branches have independent databases
+        // and must never clear or inherit one another's dirty marker or lock.
+        let active_graph_layout = active_graph_layout(&db_path);
+
         if !db_path.exists() {
             return Err(TraceDecayError::Config {
                 message: format!(
@@ -322,7 +329,8 @@ impl TraceDecay {
 
         // If the dirty sentinel exists, a previous sync/index was interrupted.
         // Check integrity and rebuild if necessary.
-        let crashed = has_dirty_sentinel_at(&store_layout.dirty_path);
+        let crashed = has_dirty_sentinel_at(&active_graph_layout.dirty_path)
+            || has_dirty_sentinel_at(&store_layout.dirty_path);
         if crashed {
             eprintln!(
                 "[tracedecay] previous operation was interrupted — checking database integrity…"
@@ -346,7 +354,10 @@ impl TraceDecay {
         // quick integrity check.
         if crashed {
             match db.quick_check().await {
-                Ok(true) => clear_dirty_sentinel_at(&store_layout.dirty_path),
+                Ok(true) => {
+                    clear_dirty_sentinel_at(&active_graph_layout.dirty_path);
+                    clear_dirty_sentinel_at(&store_layout.dirty_path);
+                }
                 Ok(false) => {
                     print_corruption_warning(&db_path);
                     return Err(recovery_required_error(
@@ -366,6 +377,7 @@ impl TraceDecay {
             config,
             project_root: project_root.to_path_buf(),
             store_layout,
+            active_graph_layout,
             open_options,
             registry: LanguageRegistry::new(),
             active_branch,
@@ -411,6 +423,7 @@ impl TraceDecay {
             &store_layout.data_root,
             active_branch.as_deref(),
         );
+        let active_graph_layout = active_graph_layout(&db_path);
 
         if !db_path.exists() {
             return Err(TraceDecayError::Config {
@@ -427,6 +440,7 @@ impl TraceDecay {
             config,
             project_root: project_root.to_path_buf(),
             store_layout,
+            active_graph_layout,
             open_options,
             registry: LanguageRegistry::new(),
             active_branch,
@@ -643,6 +657,7 @@ impl TraceDecay {
             .ok_or_else(|| TraceDecayError::Config {
             message: format!("branch '{branch_name}' is not tracked"),
         })?;
+        let active_graph_layout = active_graph_layout(&db_path);
 
         if !db_path.exists() {
             return Err(TraceDecayError::Config {
@@ -659,6 +674,7 @@ impl TraceDecay {
             config,
             project_root: project_root.to_path_buf(),
             store_layout,
+            active_graph_layout,
             open_options,
             registry: LanguageRegistry::new(),
             active_branch: Some(branch_name.to_string()),
@@ -952,6 +968,19 @@ impl TraceDecay {
         open_options: &TraceDecayOpenOptions,
     ) -> Result<StoreLayout> {
         Self::resolve_store_layout_with_identity_migration(project_root, open_options, false).await
+    }
+}
+
+fn graph_sidecar_path(db_path: &Path, suffix: &str) -> PathBuf {
+    let mut file_name = db_path.file_name().unwrap_or_default().to_os_string();
+    file_name.push(suffix);
+    db_path.with_file_name(file_name)
+}
+
+fn active_graph_layout(db_path: &Path) -> super::ActiveGraphLayout {
+    super::ActiveGraphLayout {
+        dirty_path: graph_sidecar_path(db_path, ".dirty"),
+        sync_lock_path: graph_sidecar_path(db_path, ".sync.lock"),
     }
 }
 

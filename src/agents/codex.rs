@@ -1041,8 +1041,36 @@ fn sync_codex_hook_trust(home: &Path, tracedecay_bin: &str) -> Result<CodexHookT
         trusted += 1;
     }
 
-    write_toml_file(&config_path, &config)?;
+    write_codex_hook_trust_config(&config_path, &config)?;
     Ok(CodexHookTrustSyncOutcome { trusted, skipped })
+}
+
+/// Codex's hook loader requires the parent table to be explicit on disk. The
+/// `toml` serializer otherwise emits only `[hooks.state."..."]` child tables,
+/// which parses equivalently but still triggers Codex's hook-review prompt.
+fn write_codex_hook_trust_config(config_path: &Path, config: &toml::Value) -> Result<()> {
+    super::backup_file(config_path)?;
+    let contents = toml::to_string_pretty(config).map_err(|error| TraceDecayError::Config {
+        message: format!("failed to serialize {}: {error}", config_path.display()),
+    })?;
+    let Some(child_offset) = contents.find("[hooks.state.\"") else {
+        return Err(TraceDecayError::Config {
+            message: "Codex hook trust state serialized without hook entries".to_string(),
+        });
+    };
+    let mut updated = String::with_capacity(contents.len() + "[hooks.state]\n\n".len());
+    updated.push_str(&contents[..child_offset]);
+    updated.push_str("[hooks.state]\n\n");
+    updated.push_str(&contents[child_offset..]);
+    std::fs::write(config_path, updated).map_err(|error| TraceDecayError::Config {
+        message: format!("failed to write {}: {error}", config_path.display()),
+    })?;
+    eprintln!("\x1b[32m✔\x1b[0m Wrote {}", config_path.display());
+    Ok(())
+}
+
+fn codex_hook_state_table_is_explicit(contents: &str) -> bool {
+    contents.lines().any(|line| line.trim() == "[hooks.state]")
 }
 
 /// Auto-trust the installed plugin's hooks, printing a concise confirmation on
@@ -1855,8 +1883,17 @@ fn doctor_check_hooks(
     let entries = codex_hook_trust_entries_for_marketplace(&hooks, marketplace_name);
     match load_toml_file(config_path) {
         Ok(config) => match codex_plugin_hook_trust_state(&config, &entries) {
-            CodexHookTrustState::Trusted => dc.pass(&format!(
-                "Codex hook trust entries recorded and current in {}",
+            CodexHookTrustState::Trusted
+                if std::fs::read_to_string(config_path)
+                    .is_ok_and(|contents| codex_hook_state_table_is_explicit(&contents)) =>
+            {
+                dc.pass(&format!(
+                    "Codex hook trust entries recorded and current in {}",
+                    config_path.display()
+                ));
+            }
+            CodexHookTrustState::Trusted => dc.warn(&format!(
+                "Codex hook trust records in {} lack an explicit [hooks.state] table, so Codex still requests review; run `tracedecay update-plugin` to repair and auto-trust them",
                 config_path.display()
             )),
             CodexHookTrustState::Missing(missing) => dc.info(&format!(

@@ -127,9 +127,25 @@ pub async fn ingest_user_cursor_sessions() -> TranscriptIngestStats {
 }
 
 pub async fn ingest_user_global_sources() -> TranscriptIngestStats {
-    let codex = ingest_user_codex_sessions(None).await;
-    let cursor = ingest_user_cursor_sessions().await;
-    let stats = codex.merge(cursor);
+    ingest_user_global_sources_for_provider(None).await
+}
+
+fn provider_selected(scope: Option<SessionProvider>, candidate: SessionProvider) -> bool {
+    scope.is_none() || scope == Some(candidate)
+}
+
+/// Keeps the profile-level session store current without touching providers
+/// outside an explicitly requested message-search scope.
+pub async fn ingest_user_global_sources_for_provider(
+    provider: Option<SessionProvider>,
+) -> TranscriptIngestStats {
+    let mut stats = TranscriptIngestStats::default();
+    if provider_selected(provider, SessionProvider::Codex) {
+        stats = stats.merge(ingest_user_codex_sessions(None).await);
+    }
+    if provider_selected(provider, SessionProvider::Cursor) {
+        stats = stats.merge(ingest_user_cursor_sessions().await);
+    }
     let Ok(profile_root) = crate::storage::default_profile_root() else {
         return stats;
     };
@@ -139,24 +155,37 @@ pub async fn ingest_user_global_sources() -> TranscriptIngestStats {
     let Some(roots) = try_registered_project_roots().await else {
         return stats;
     };
-    let hermes = hermes::ingest_user_sessions(&db, &roots).await;
-    let mut stats = stats.merge(hermes);
-    let claude = claude::ingest_user_sessions(&db, &profile_root, None, roots.clone()).await;
-    stats = stats.merge(claude);
+    if provider_selected(provider, SessionProvider::Hermes) {
+        stats = stats.merge(hermes::ingest_user_sessions(&db, &roots).await);
+    }
+    if provider_selected(provider, SessionProvider::Claude) {
+        stats = stats
+            .merge(claude::ingest_user_sessions(&db, &profile_root, None, roots.clone()).await);
+    }
     let mut sources: Vec<Box<dyn TranscriptSource>> = Vec::new();
-    if let Some(source) = vibe::VibeSource::new() {
+    if provider_selected(provider, SessionProvider::Vibe)
+        && let Some(source) = vibe::VibeSource::new()
+    {
         sources.push(Box::new(source.for_user_scope(roots.clone())));
     }
-    if let Some(source) = cline_like::ClineLikeSource::cline() {
+    if provider_selected(provider, SessionProvider::Cline)
+        && let Some(source) = cline_like::ClineLikeSource::cline()
+    {
         sources.push(Box::new(source.for_user_scope(roots.clone())));
     }
-    if let Some(source) = cline_like::ClineLikeSource::roo_code() {
+    if provider_selected(provider, SessionProvider::RooCode)
+        && let Some(source) = cline_like::ClineLikeSource::roo_code()
+    {
         sources.push(Box::new(source.for_user_scope(roots.clone())));
     }
-    if let Some(source) = cline_like::ClineLikeSource::kilo() {
+    if provider_selected(provider, SessionProvider::Kilo)
+        && let Some(source) = cline_like::ClineLikeSource::kilo()
+    {
         sources.push(Box::new(source.for_user_scope(roots.clone())));
     }
-    if let Some(source) = kiro::KiroSource::new() {
+    if provider_selected(provider, SessionProvider::Kiro)
+        && let Some(source) = kiro::KiroSource::new()
+    {
         sources.push(Box::new(source.for_user_scope(roots)));
     }
     for source in sources {
@@ -164,7 +193,10 @@ pub async fn ingest_user_global_sources() -> TranscriptIngestStats {
         stats = stats.merge(source_stats);
     }
     if stats.messages_upserted > 0 {
-        crate::hooks::schedule_user_session_review("all", None);
+        crate::hooks::schedule_user_session_review(
+            provider.map_or("all", SessionProvider::id),
+            None,
+        );
     }
     stats
 }
@@ -203,9 +235,19 @@ pub async fn ingest_global_sources_for_provider(
     project_root: &Path,
     provider: Option<SessionProvider>,
 ) -> TranscriptIngestStats {
-    // Keep the profile-level projectless history current alongside every
-    // project sweep. Its independent DB cursors make repeated calls no-ops.
-    let _ = ingest_user_global_sources().await;
+    let _ = ingest_user_global_sources_for_provider(provider).await;
+    ingest_project_sources_for_provider(db, project_root, provider, true).await
+}
+
+/// Project-store half of catch-up. Cross-project search runs user ingestion
+/// once, then calls this per destination; Hermes can be excluded because its
+/// dedicated multi-destination driver scans each source database only once.
+pub(crate) async fn ingest_project_sources_for_provider(
+    db: &GlobalDb,
+    project_root: &Path,
+    provider: Option<SessionProvider>,
+    include_hermes: bool,
+) -> TranscriptIngestStats {
     let mut sources: Vec<Box<dyn TranscriptSource>> = Vec::new();
     match provider {
         None => {
@@ -256,13 +298,21 @@ pub async fn ingest_global_sources_for_provider(
     } else {
         stats
     };
-    let stats = if provider.is_none() || provider == Some(SessionProvider::Hermes) {
-        // Hermes stores many sessions in one SQLite file per profile, so it
-        // plugs in beside the file-based sources rather than `TranscriptSource`.
-        stats.merge(hermes::ingest_for_project(db, project_root).await)
-    } else {
-        stats
-    };
+    let stats =
+        if include_hermes && (provider.is_none() || provider == Some(SessionProvider::Hermes)) {
+            // Hermes stores many sessions in one SQLite file per profile, so it
+            // plugs in beside the file-based sources rather than `TranscriptSource`.
+            stats.merge(hermes::ingest_for_project(db, project_root).await)
+        } else {
+            stats
+        };
+    finalize_project_ingest(db, project_root).await;
+    stats
+}
+
+/// Refreshes derived session data after a caller performs its own optimized
+/// transcript ingest (for example, one shared Hermes source sweep).
+pub(crate) async fn finalize_project_ingest(db: &GlobalDb, project_root: &Path) {
     // Now that messages have landed, attribute any commits that fell inside a
     // recorded session span. Fail-open: a git or DB hiccup never blocks ingest.
     attribute_commits_after_ingest(db).await;
@@ -271,7 +321,6 @@ pub async fn ingest_global_sources_for_provider(
     // a workflow-ingest hiccup only logs at debug, never blocks session ingest.
     // Runs live in their own tables, so they do not affect `stats`.
     let _ = workflow_ingest::ingest_workflow_runs(db, project_root).await;
-    stats
 }
 
 /// Runs the bounded commit-attribution sweep against the correlation store.
@@ -512,6 +561,28 @@ impl SessionMessageType {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod git_scan_tests {
     use super::*;
+
+    #[test]
+    fn provider_scoped_user_catch_up_excludes_unrelated_providers() {
+        assert!(provider_selected(
+            Some(SessionProvider::Hermes),
+            SessionProvider::Hermes
+        ));
+        for unrelated in [
+            SessionProvider::Codex,
+            SessionProvider::Cursor,
+            SessionProvider::Claude,
+            SessionProvider::Vibe,
+            SessionProvider::Cline,
+            SessionProvider::RooCode,
+            SessionProvider::Kilo,
+            SessionProvider::Kiro,
+        ] {
+            assert!(!provider_selected(Some(SessionProvider::Hermes), unrelated));
+        }
+        assert!(provider_selected(None, SessionProvider::Codex));
+        assert!(provider_selected(None, SessionProvider::Hermes));
+    }
 
     #[test]
     fn parse_git_log_commits_reads_sha_and_time_skipping_malformed() {
