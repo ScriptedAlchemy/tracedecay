@@ -462,6 +462,7 @@ Plan 01 §14 solely defines `ScopeSelectorV2`, `ScopeRootV2`, `ScopeTargetV2`, a
 - Same-basename repositories are disambiguated with safe parent/common-dir/registry identity, never credential-bearing remote URLs.
 - Repository, checkout, worktree, branch/ref, and code snapshot remain different identities. A worktree query cannot silently read the base checkout graph.
 - `AllAuthorized { profile_id }` means all authorized, registered selected-profile evidence. `CurrentInvocation` is legal only when the binding catalog declares it; `ScopeResolutionV2.defaulted_current` makes that choice visible. Skipped/locked/stale/unavailable stores appear in coverage.
+- A selector containing only `ScopeRootV2::Profile { profile_id }` resolves before project discovery and routes directly to profile activity; a canonical query predicate distinguishes `DeclaredScope::Profile` from `DeclaredScope::ZeroProject` rows. A client CWD, provider home, or host profile cannot supply an implicit project or data owner. Canonical builders may explicitly compose authorized Profile+Project roots for read federation.
 - A session or agent may relate to zero, one, or many repositories/worktrees. The API does not force one provider project key into canonical ownership.
 - Scope resolution is versioned and produces a `ScopeResolutionId` usable in the query/retrieval anchor. The server revalidates authorization and liveness; it does not trust a client-cached path mapping forever.
 
@@ -469,6 +470,7 @@ Plan 01 §14 solely defines `ScopeSelectorV2`, `ScopeRootV2`, `ScopeTargetV2`, a
 
 - HTTP accepts the full tagged selector.
 - SDKs expose builders and typed constructors, never stringly `scope="all"` conventions.
+- SDKs generate `profile(profile_id)` plus typed declared-scope query filters; they do not invent a `ZeroProject` scope-root constructor. Import-only `memory_scope=user`/`storage_scope=user` shims lower to a single Profile root with the legal declared-scope predicate and reject compatibility project fields; they are absent from current generated docs after compatibility cutoff. The ordinary canonical builder still supports explicit Profile+Project multi-root reads.
 - MCP uses the same schema under one `scope` property; convenience `project_id`/`project_path` fields are generated aliases only while current and cannot conflict.
 - CLI exposes consistent `--all`, `--collection`, `--repo`, `--project`, `--worktree`, `--ref`, `--session`, and `--agent` flags generated from the selector registry.
 - Every response echoes the resolved canonical scope, safe labels, snapshot watermarks, and coverage. Defaults such as "active project" are explicit in metadata.

@@ -76,6 +76,7 @@ Observed semantics:
 10. Results contain full session/message records in JSON and a score without component explanation. They do not contain a durable V2 retrieval anchor, cluster identity, current/stale state, source coverage, or next cursor.
 11. Limits clamp to 1–50. All-registered search reports searched/skipped project counts, but not a per-shard coverage/disposition ledger in the compact human result.
 12. JSON output can exceed the global response limit and becomes an expiring response-handle envelope; Markdown is compact but still lacks paginated continuation and stable result hydration.
+13. Merged PR #445 added a separate user-session `message_search` dispatch when compatibility `storage_scope=user` is explicit. It correctly bypasses project routing, but the sentinel, CLI/MCP allowlists, and dedicated handler remain V1 compatibility mechanics; V2 queries one Profile root, retains `DeclaredScope::Profile`/`DeclaredScope::ZeroProject` provenance, and uses the one search application path.
 
 ### 1.2 `lcm_grep`
 
@@ -848,6 +849,8 @@ Lab replay is read-only against frozen inputs. Judgment and corpus updates are e
 
 Exact transport names derive from Plan 08/21's catalog. Anchor operations are exclusively `retrieval_anchors.metadata_batch_get`, `retrieval_anchors.resolve`, and `retrieval_recipes.execute`; evaluation operations are the complete plan 15 §0.1 `retrieval.*` family. Required surfaces:
 
+Profile-activity search uses `ScopeRootV2::Profile` plus an optional canonical `DeclaredScope::Profile`/`DeclaredScope::ZeroProject` query predicate, not a storage flag or invented root. It routes directly to the placed profile-activity authority regardless of client CWD, current project placement, or host profile; a missing/unavailable profile session source returns explicit incomplete coverage and never an empty-success or project fallback. Project and profile roots may be queried together only through an explicit authorized multi-root selector, not by combining legacy user scope with a compatibility project field.
+
 ### CLI
 
 - search messages/Turns/sessions/threads/agents/workflows with mode/scope/as-of/grain and keyset pagination;
@@ -925,6 +928,7 @@ Import read-only, idempotently:
 - response-handle metadata as expiring operational evidence, never durable anchors;
 - current eval fixture and live probe recipes;
 - duplicate/identity-conflict stores as separate observed sources until explicit consolidation.
+- shipped `user-sessions.db`/`user-memory.db` and legacy rows whose `project_key="user"` as compatibility sources; lower the sentinel only to typed Profile activity or ZeroProject when source evidence proves that ownership, preserve the original alias/provenance, and quarantine ambiguous/mixed/project evidence rather than retaining `user` as canonical identity.
 
 Each imported row gets source/store identity, sanitization status, occurrence ID, owner route, temporal fields, and parity receipt. Missing provenance becomes `unknown`, not guessed. Two explicit escape hatches keep the import honest:
 
@@ -1061,6 +1065,7 @@ Application/API/UI use the shared Plan 09/10/11/21 locations. Root V1 adapters l
 
 - Codex, Claude, Cursor, Hermes, and remaining provider fixtures normalize origin, role, Turn, parent/child, and tool results consistently;
 - CLI/MCP/API/SDK produce equivalent typed JSON and Markdown default behavior;
+- merged #445 fixtures run user-scoped message search and LCM from `/`, Hermes home, unrelated CWD, and project CWD with no project route/handshake/init; missing user-session storage reports typed unavailable coverage, every legacy scalar-user-plus-compatibility-project request fails identically, and canonical Profile+Project reads remain valid;
 - Markdown and JSON disclose limit/truncation/cursor/coverage/conflict/stale state;
 - Search Quality Lab session-temporal then-versus-now replay is read-only and visually/accessibly testable;
 - Settings changes produce versioned effective-config provenance and deterministic replay.

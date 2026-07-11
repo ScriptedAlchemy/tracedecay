@@ -138,6 +138,8 @@ Every hint/suggestion records whether evidence was authoritative, bounded-stale,
 
 The query planner resolves logical scope before physical placement, then routes each shard to its authority, verified replica, or declared unavailable state. Global merge compares normalized rank/evidence contracts, never raw shard-local scores.
 
+A single Profile-root activity query, optionally filtered by `DeclaredScope::Profile` or `DeclaredScope::ZeroProject`, routes directly to the one placed profile-activity authority regardless of the client's CWD, current project, host profile, or where any project shard is placed. An unavailable profile authority remains typed unavailable even when a local project shard is healthy; an unavailable project shard cannot suppress a healthy profile-only answer. Explicit multi-root queries may combine Profile and Project roots only after independent authorization/placement resolution and retain per-root coverage.
+
 Every response coverage includes:
 
 - `BrainId`, placement generation, and requested consistency;
@@ -277,6 +279,7 @@ Required deterministic/fault cases:
 8. corrupt/stale cache or replica, incomplete snapshot, missing blob/graph pack, and cache eviction;
 9. remote query cancellation, SSE gaps/backpressure, mixed consistency, and partial authorization;
 10. current TraceDecay failure where a selected worktree/project context resolves to an invalid database: routing must identify the exact node/store/placement, return a structured recovery, and never encourage raw database access.
+11. local and remote profile/user fact, LCM, memory-status, and message-search requests from neutral, host-home, unrelated, and project CWDs with every healthy/unavailable profile-activity versus project-shard placement combination; logical route and coverage are identical and no project is initialized as fallback.
 
 ## 14. Implementation slices
 

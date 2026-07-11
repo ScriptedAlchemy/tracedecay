@@ -786,6 +786,8 @@ Transport routing metadata is generated from a closed `RoutingFieldDescriptorV1`
 - keyed-locator key epoch, privacy domain, source kind, normalization version, and scope are bound into the request/snapshot receipt; comparison across domains or key epochs is forbidden;
 - profile-scoped and first-touch behavior is an explicit generated use case with the same resolver, authorization, problem, and coverage contract—not a CLI/MCP side list.
 
+Each descriptor also carries one closed route class (`ProfileActivity`, `CurrentProject`, `ExplicitReadScope`, `ExplicitMutationScope`, or `RegistryDiscovery`), `requires_project`, legal implicit-current policy, and selector mutual-exclusion group. A single `ScopeRootV2::Profile` request is classified as `ProfileActivity` before CWD/session/host routing; a canonical query predicate may select Profile- or ZeroProject-owned activity rows, while an explicit canonical Profile+Project read is `ExplicitReadScope`. Only migration scalar user/profile aliases conflict with compatibility project fields. `RegistryDiscovery` executes without a project; explicit cross-project selectors are accepted only by cataloged read use cases; mutations require the exact authorized durable target; project-required calls fail rather than silently downgrade. These are generated from the same `UseCaseSpecV1` as CLI/MCP/API/SDK bindings—there is no tool-name allowlist in daemon, CLI fallback, or host plugin code.
+
 Conformance tests enumerate every generated request field and fail if any field bypasses schema validation, lacks a safe-text/typed-ID/keyed-locator class, or reaches a log/error/presenter as a raw path.
 
 ### 10.2 Required regression corpus
@@ -803,6 +805,9 @@ Lock fixtures for:
 - profile-wide All returning partial locked/stale stores;
 - safe active marker differences between current CLI and MCP project output;
 - credential-bearing remote URL present in source metadata but absent from search labels/output.
+- explicit profile/user fact, LCM, memory-status, and message-search requests from `/`, a host-profile home, unrelated CWD, and project CWD; every binding reaches profile activity with no project flag/handshake/registration/initialization;
+- every illegal migration scalar user/profile alias plus compatibility `project_id|project_path|project_root|project_scope|project_selector` combination, with identical typed invalid fields across transports, alongside valid canonical Profile+Project multi-root reads;
+- host-profile home exclusion, a registered repository below that home, misleading ambient `HOME`/`HERMES_HOME`, and sequential/interleaved provider-session reset.
 
 ### 10.3 Labels and active markers
 
@@ -947,7 +952,7 @@ MCP renders the anchor as a `resource_link` to a generated `tracedecay://v2/retr
 
 The frozen V1 harness includes PR #441's cross-project dereference failure: resolving a handle must preserve the original canonical resolved scope, explicit `project_path`/selector, TraceDecay profile, principal/grant, privacy domain, and source binding through the follow-up call. Reinterpreting the opaque handle under the active project or a host profile is a typed failure, never a fallback. V2 retrieval anchors make those bindings part of the record and reauthorize them; they do not inherit current CWD.
 
-`memory_scope=profile` or equivalent V1 CLI/MCP spelling is migration syntax only. Current bindings lower to the canonical `DeclaredScope::Profile`; active-project reads use `preset.knowledge.active-project-with-profile`. Projectless CLI/API calls authorize against the user-global TraceDecay profile without initializing a project or opening a separate database.
+`memory_scope=profile` or equivalent V1 CLI/MCP spelling is migration syntax only. Current bindings lower to one Profile root plus the canonical `DeclaredScope::Profile` query predicate; active-project reads use `preset.knowledge.active-project-with-profile`. Projectless CLI/API calls authorize against the user-global TraceDecay profile without initializing a project or opening a separate database. A migration scalar user/profile alias plus any compatibility project field fails before resolution; a canonical Profile+Project multi-root read remains valid. The compatibility CLI process runs with a neutral working directory and sends no `--project` for the single-root route; this is defense in depth, not the authority boundary—the daemon application still resolves and authorizes the canonical request independently.
 
 If storage is unavailable, return a typed `response_budget_exceeded` problem with a narrower request/cursor recommendation. Never emit `compacted_no_handle`, an invalid JSON prefix, or a false complete result.
 
@@ -1212,6 +1217,8 @@ Run one canonical fixture per use case through the hermetic in-process applicati
 - autonomous curation policy/run/outcome views;
 - configuration effective values/provenance/impact;
 - Git local/live/joined truth.
+
+The parity matrix includes the merged #445 fixtures for user-scoped `message_search`, every LCM call, fact search/mutation/feedback, and memory status from neutral/host/unrelated/project working directories. It asserts identical route class, canonical scope-resolution ID, default source, authority, and coverage; zero project discovery/open/init or synthetic project flag; typed unavailable/incomplete coverage when profile activity is absent; and no raw CWD/path/`HERMES_HOME`/host-profile name in logs, metrics, or errors.
 
 ### 19.5 Security, fuzz, and accessibility
 

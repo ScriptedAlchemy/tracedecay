@@ -4,6 +4,8 @@
 
 **Canonical master plan:** [`../2026-07-09-tracedecay-brain-rewrite.md`](../2026-07-09-tracedecay-brain-rewrite.md). This tracked path is authoritative; there is intentionally no second `docs/architecture/tracedecay-v2-master-plan.md` copy that could drift.
 
+**Accepted-base refresh:** audited `origin/master` is `e888393368ce8704e6fa123f0daecebd1af9ef8d` at v0.0.56, including merged Hermes routing/recovery PRs #441/#443/#445 and releases through #446. The master §2.6, plans 12–14, and affected scope/configuration/transport/provider plans preserve those behaviors as fixtures rather than adapter-local V2 architecture.
+
 ## 1. Intended outcome
 
 TraceDecay V2 defragments and reconciles the product into one local-first “Brain” for human intent, agent/Turn/session activity, tools and visible reasoning summaries, code and diagnostics, Git/delivery, goals/workflows, memory/knowledge, hints/policy, automation/skills, usage/cost, health, privacy, and outcomes. It is not a dashboard skin over existing silos or a set of new crates that preserve duplicate semantics. The plan replaces the internal model, storage/query/policy/privacy architecture, public contracts, and product interface behind bounded parity/cutover/deletion gates.

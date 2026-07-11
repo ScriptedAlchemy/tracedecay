@@ -61,7 +61,7 @@ Plan 17 declares this same HTTP/OpenAPI surface official and adds the contract I
 
 ## 4. Incoming-Master and V1 Inputs
 
-### 4.1 Master and incoming changes verified on 2026-07-10
+### 4.1 Master and incoming changes verified through 2026-07-11
 
 The normative publication snapshot is [master §2.6](../2026-07-09-tracedecay-brain-rewrite.md#26-current-master-accepted-changes) plus [plan 13](13-research-provenance-and-context-anchors.md). Regenerate contracts before every API slice; fact ranking, exact analytics, restart-safe applied-manifest retirement, and operator-only split-store consolidation are accepted-base behavior, not autonomous curation.
 
@@ -278,6 +278,8 @@ pub struct ApiProblem {
 
 This is the same `ApiProblem` generated for plan 17's SDKs and consumed by plan 11. `ApplicationErrorCode`, `RetryDirective`, `RestartDirective`, scope candidates, version, binding, invalid-field, and operation semantics come from application/domain contracts. HTTP supplies only RFC 9457 fields and status; SDKs/transports do not define an `ApiErrorCode` fork or infer recovery from status. Plan 21's `SurfaceProblemV2` is exactly this shared shape plus its exit-class mapping table — same field names, `restart` and `current_binding` included. Stale-client codes are exactly plan 17 §12's contract-IR registry: `client_update_required`, `daemon_restart_required`, and `capability_replaced { current_binding }`.
 
+A migration scalar user/profile alias combined with any compatibility project locator (`project_id`, `project_path`, `project_root`, `project_scope`, or nested `project_selector`) returns `invalid_input` before scope resolution or store access. `invalid` enumerates every conflicting field; HTTP, CLI, MCP, and SDKs preserve the same list and never discard one side or choose CWD. A canonical `ScopeSelectorV2` containing explicit authorized Profile+Project roots is valid for read use cases and is not rewritten into that compatibility shape.
+
 Status mapping is fixed:
 
 | Condition | HTTP status |
@@ -344,6 +346,8 @@ Every route is authenticated except the static HTML/assets and one-time bootstra
 Scope query parameters are bounded opaque IDs/enums and pagination only. Project search text uses `POST /api/v2/projects/search` so literal text does not enter URLs. Every binding has a catalog-declared default that is inserted as an explicit canonical selector request: Brain/Observatory use `AllAuthorized { profile_id }`; code-local bindings may use `CurrentInvocation`. Handlers never infer cwd, last project, route, or referrer independently.
 
 Domain `ScopeSelectorV2` and `ScopeResolutionV2` are serialized unchanged. The selector is exactly `version`, nonempty `roots`, `exclude`, `time`, `activity_attribution`, `coverage`, `freshness`, `traversal`, `ambiguity`, and `limits`; canonical/locator targets use `ScopeTargetV2`. Resolution includes `resolution_id`, selector digest/canonical selector, selected/ambiguous/stale/unavailable/quarantined/missing sets, `defaulted_current`, catalog generation, and watermark. A client resubmits the preserved canonical request plus selected candidate once; query/filter/time/message-view bodies are not reconstructed client-side. CLI/MCP/API/SDK/dashboard parity fixtures require identical candidate identity/order, resolution, provenance, and errors.
+
+Single-root `ScopeRootV2::Profile` activity routes bind the authenticated `ProfileId` directly and contain no project locator; a canonical query predicate may select `DeclaredScope::Profile` or `DeclaredScope::ZeroProject` rows without inventing another scope root. Their response coverage names the activity authority/shard disposition; missing profile session/knowledge data is typed unavailable/incomplete coverage, never empty success or a fallback project query. Explicit canonical multi-root reads use the normal federated route and preserve per-root coverage. HTTP route code cannot inspect CWD, host profile, or provider home.
 
 Doctor/provider payloads use generated `DoctorFindingView` and `ProviderIntegrationState`. `severity`, `observed_owner`, `remediation_authority`, evidence, legal actions, hook/tool/session coverage, missing pieces, and last verified time are required. An apply/update action for foreign or unknown ownership is unrepresentable in the application view itself (plan 09 §9.1); this serializer adds no second gate and cannot express one, and it never maps `Partial`/`Degraded` to healthy branding.
 
@@ -832,6 +836,7 @@ Required comparisons:
 - Git local/live revisions, reconciliation/drift, fallback state;
 - error code/retry semantics before CLI exit-code, HTTP status, or MCP markdown rendering;
 - SSE initial snapshot equals ordinary HTTP query snapshot at the same watermark; export logical rows equal paged query rows at its frozen watermark.
+- merged #445 profile/user fixtures for facts, LCM, memory status, and message search from neutral, host-home, unrelated, and project working directories; all transports report the same profile-activity route/scope/authority/coverage, send no project selector for the single-root route, reject every legacy scalar-user-plus-compatibility-project spelling before resolution, and preserve canonical Profile+Project reads.
 
 MCP markdown and CLI text may differ only in checked presentation fixtures. JSON modes use the typed schema. Handler source is linted to reject store/query/policy imports and direct SQL. V1 aliases exist only in the internal migration harness; current help, hints, catalogs, and live dispatch never advertise or execute them after domain cutover.
 

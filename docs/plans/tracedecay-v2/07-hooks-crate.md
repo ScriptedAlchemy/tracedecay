@@ -88,12 +88,13 @@ Hooks own only host wire adaptation and bounded orchestration in [`19-system-def
 | src/mcp/hook_events.rs | FileEdit, Shell, WorkspaceOpen, SessionStart, IncrementalSync notification planning | Compatibility adapter emits canonical hook observations and proposed application effects; MCP notification transport stays thin. |
 | daemon hook notification/spool paths | Process routing, sync debounce, branch tracking | Capture/application worker consumes effects asynchronously; hook runtime records route/fallback evidence. |
 
-Accepted-base inputs refreshed on 2026-07-10:
+Accepted-base inputs refreshed through 2026-07-11:
 
 - The inspected base `99ad19bc` contains merged PR #405 legacy identity adoption and #412 daemon/update drain safety. Host requests resolve one adopted identity. Shutdown/update hooks record lifecycle lease, in-flight drain, background-writer stop, checkpoint, and service-state receipts separately and cannot acknowledge safe restart before them.
 - PR #407 user-profile Hermes consolidation. Hermes/curator/reflector/skill-writer activity is actor/workflow evidence inside the user's profile, never a separate hook profile.
 - PR #410 copied-subagent prompt collapse. Hook normalization records native `PromptOrigin` evidence and projectors map it into `tracedecay-domain::MessageOrigin`; every sanitized native observation is retained, while direct_user/subagent/tool_result filters and parent-representative dedupe remain query/projector behavior.
 - PR #411 foreign-skill ownership/remediation. Hook hints and diagnostics must not suggest update/delete when catalog/application says the package is foreign to this installation; the safe route is info/no-action or explicit manual ownership transfer.
+- Merged #441/#445 Hermes routing. Hook envelopes keep immutable installed `HostProfileRef` evidence separate from current invocation/session workspace and explicit projectless state; reinitialize/clone/reload resets runtime route/home, and profile/user events reach profile activity without project discovery or a host-home fallback.
 - The normative publication snapshot is [master §2.6](../2026-07-09-tracedecay-brain-rewrite.md#26-current-master-accepted-changes) plus [plan 13](13-research-provenance-and-context-anchors.md). Hooks must acquire the lifecycle lease before configuration/store startup, never install or repair while an exclusive lifecycle owner exists, drain already accepted input, and expose typed deferral evidence. Identity, retirement, session variants, read-only search, and peer-safe checkpoint behavior remain hint-context/outcome fixtures.
 
 Before PR 24F begins, refresh open PRs, master, installed host versions, hook manifests, application hook-port schema, and catalog digest. Drift becomes a manifest difference, not an undocumented assumption.
