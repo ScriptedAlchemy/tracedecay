@@ -3514,6 +3514,10 @@ class TraceDecayContextEngine(ContextEngine):
             "focus_topic": focus_topic,
             "summarizer": summarizer,
         })
+        args = _lcm_store_args(
+            args,
+            kwargs.get("project_root") or self.project_root,
+        )
         if self.project_root:
             args["response_handle_project_root"] = self.project_root
         _apply_lcm_option_overrides(args, kwargs, lcm_option_keys)

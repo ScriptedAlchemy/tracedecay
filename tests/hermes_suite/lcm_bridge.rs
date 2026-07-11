@@ -2117,6 +2117,42 @@ assert [call[0] for call in calls] == [
 }
 
 #[test]
+fn projectless_context_engine_compression_uses_user_session_store() {
+    run_generated_plugin_script(
+        "check_projectless_compression_user_scope.py",
+        r#"
+import json
+
+calls = []
+
+def fake_call_tracedecay_tool(name, args, **kwargs):
+    calls.append((name, dict(args), dict(kwargs)))
+    return json.dumps({"content": [{"type": "text", "text": json.dumps({
+        "status": "ok",
+        "reason": "compressed_backlog",
+        "replay_messages": [{"role": "user", "content": "compressed"}],
+    })}]})
+
+plugin.tools.call_tracedecay_tool = fake_call_tracedecay_tool
+
+engine = plugin.TraceDecayContextEngine()
+engine.initialize(session_id="general-chat")
+compressed = engine.compress(
+    [{"role": "user", "content": "oversized general chat"}],
+    current_tokens=350000,
+)
+
+assert compressed == [{"role": "user", "content": "compressed"}]
+name, args, kwargs = calls.pop()
+assert name == "tracedecay_lcm_compress"
+assert args["storage_scope"] == "user"
+assert "project_root" not in kwargs
+"#,
+        "projectless Hermes compression must use the profile-level user session store",
+    );
+}
+
+#[test]
 fn context_engine_rejects_compacted_compression_replay() {
     run_generated_plugin_script(
         "check_compacted_replay_abort.py",
