@@ -87,7 +87,10 @@ pub async fn hook_hermes_terminal_receipt() -> i32 {
     let Ok(event) = serde_json::from_str::<crate::daemon::DaemonHookEvent>(&event_json) else {
         return 0;
     };
-    if event.agent != "hermes" || event.event != "terminalReceipt" || event.receipt.is_none() {
+    if event.agent != "hermes"
+        || !matches!(event.event.as_str(), "terminalReceipt" | "turnIngested")
+        || event.receipt.is_none()
+    {
         return 0;
     }
     let Some(cwd) = event

@@ -24,12 +24,26 @@ pub struct PendingHostReceipt {
     pub receipt: HookTerminalReceipt,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReadyHostReceipt {
+    pub pending: PendingHostReceipt,
+    pub transcript_watermark: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct HostReceiptReadiness {
+    generation: u64,
+    transcript_watermark: String,
+}
+
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct HostReceiptState {
     #[serde(default)]
     generation: u64,
     #[serde(default)]
     sessions: BTreeMap<String, PendingHostReceipt>,
+    #[serde(default)]
+    readiness: BTreeMap<String, HostReceiptReadiness>,
     #[serde(default)]
     recent_dedupe_keys: Vec<String>,
 }
@@ -131,15 +145,54 @@ pub async fn record(
     .map_err(|error| config_error(format!("host receipt task failed: {error}")))?
 }
 
-pub async fn latest_pending(dashboard_root: &Path) -> Result<Option<PendingHostReceipt>> {
+pub async fn mark_turn_ingested(
+    dashboard_root: &Path,
+    route: Option<HookRouteMetadata>,
+    transcript_watermark: &str,
+) -> Result<()> {
+    let root = dashboard_root.to_path_buf();
+    let watermark = transcript_watermark.to_string();
+    tokio::task::spawn_blocking(move || {
+        with_locked_state(&root, |state| {
+            let session = session_key(route.as_ref());
+            state.readiness.insert(
+                session,
+                HostReceiptReadiness {
+                    generation: state.generation,
+                    transcript_watermark: watermark,
+                },
+            );
+            Ok(())
+        })
+    })
+    .await
+    .map_err(|error| config_error(format!("host receipt task failed: {error}")))?
+}
+
+pub async fn oldest_ready(dashboard_root: &Path) -> Result<Option<ReadyHostReceipt>> {
     let root = dashboard_root.to_path_buf();
     tokio::task::spawn_blocking(move || {
         with_locked_state(&root, |state| {
-            Ok(state
+            let pending = state
                 .sessions
                 .values()
-                .max_by_key(|receipt| receipt.generation)
-                .cloned())
+                .filter(|receipt| {
+                    state
+                        .readiness
+                        .get(&receipt.session_key)
+                        .is_some_and(|ready| ready.generation >= receipt.generation)
+                })
+                .min_by_key(|receipt| receipt.generation)
+                .cloned();
+            Ok(pending.and_then(|pending| {
+                state
+                    .readiness
+                    .get(&pending.session_key)
+                    .map(|ready| ReadyHostReceipt {
+                        pending,
+                        transcript_watermark: ready.transcript_watermark.clone(),
+                    })
+            }))
         })
     })
     .await
@@ -199,10 +252,41 @@ mod tests {
                 .unwrap()
         );
         assert!(!record(tmp.path(), route, receipt("call-1")).await.unwrap());
-        let pending = latest_pending(tmp.path()).await.unwrap().unwrap();
+        mark_turn_ingested(tmp.path(), pending_route("session-1"), "message-1")
+            .await
+            .unwrap();
+        let pending = oldest_ready(tmp.path()).await.unwrap().unwrap().pending;
         mark_consumed(tmp.path(), &pending.session_key, pending.generation)
             .await
             .unwrap();
-        assert!(latest_pending(tmp.path()).await.unwrap().is_none());
+        assert!(oldest_ready(tmp.path()).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn serves_parallel_sessions_oldest_first() {
+        let tmp = tempfile::tempdir().unwrap();
+        for session_id in ["session-1", "session-2"] {
+            let route = pending_route(session_id);
+            assert!(
+                record(tmp.path(), route, receipt(session_id))
+                    .await
+                    .unwrap()
+            );
+            mark_turn_ingested(tmp.path(), pending_route(session_id), session_id)
+                .await
+                .unwrap();
+        }
+        let pending = oldest_ready(tmp.path()).await.unwrap().unwrap();
+        assert_eq!(pending.pending.session_key, "session-1");
+    }
+
+    fn pending_route(session_id: &str) -> Option<HookRouteMetadata> {
+        Some(HookRouteMetadata {
+            session_id: Some(session_id.to_string()),
+            thread_id: None,
+            cwd: None,
+            worktree: None,
+            branch: None,
+        })
     }
 }

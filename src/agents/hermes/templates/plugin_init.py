@@ -10,6 +10,7 @@ import shutil
 import subprocess
 import threading
 import time
+from collections import deque
 from pathlib import Path
 
 from . import schemas, tools
@@ -440,6 +441,40 @@ def _pre_llm_call(*args, **kwargs):
 _TERMINAL_TOOL_NAMES = frozenset((
     "terminal", "bash", "shell", "exec_command", "run_command", "terminal.exec",
 ))
+_HOST_RECEIPT_QUEUE = deque()
+_HOST_RECEIPT_QUEUE_LOCK = threading.Lock()
+_HOST_RECEIPT_WORKER_ACTIVE = False
+
+def _notify_host_receipt(event, thread_name):
+    global _HOST_RECEIPT_WORKER_ACTIVE
+    with _HOST_RECEIPT_QUEUE_LOCK:
+        _HOST_RECEIPT_QUEUE.append(event)
+        if _HOST_RECEIPT_WORKER_ACTIVE:
+            return
+        _HOST_RECEIPT_WORKER_ACTIVE = True
+
+    def _drain():
+        global _HOST_RECEIPT_WORKER_ACTIVE
+        while True:
+            with _HOST_RECEIPT_QUEUE_LOCK:
+                if not _HOST_RECEIPT_QUEUE:
+                    _HOST_RECEIPT_WORKER_ACTIVE = False
+                    return
+                queued = _HOST_RECEIPT_QUEUE.popleft()
+            try:
+                subprocess.run(
+                    [tools.TRACEDECAY_BIN, "hook-hermes-terminal-receipt"],
+                    input=json.dumps(queued),
+                    text=True,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=2,
+                    check=False,
+                )
+            except Exception as exc:
+                logger.debug("tracedecay host receipt notification failed: %s", exc)
+
+    threading.Thread(target=_drain, name=thread_name, daemon=True).start()
 
 def _post_tool_call(*args, **kwargs):
     """Send a bounded, fail-open terminal receipt to TraceDecay."""
@@ -486,22 +521,18 @@ def _post_tool_call(*args, **kwargs):
         },
     }
 
-    def _notify():
-        try:
-            subprocess.run(
-                [tools.TRACEDECAY_BIN, "hook-hermes-terminal-receipt"],
-                input=json.dumps(event),
-                text=True,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                timeout=2,
-                check=False,
-            )
-        except Exception as exc:
-            logger.debug("tracedecay terminal receipt notification failed: %s", exc)
-
-    threading.Thread(target=_notify, name="tracedecay-terminal-receipt", daemon=True).start()
+    _notify_host_receipt(event, "tracedecay-terminal-receipt")
     return None
+
+def _notify_turn_ingested(session_id, project_root, transcript_watermark):
+    event = {
+        "agent": "hermes",
+        "event": "turnIngested",
+        "cwd": str(project_root),
+        "route": {"session_id": str(session_id)[:256], "cwd": str(project_root)},
+        "receipt": {"transcript_watermark": str(transcript_watermark)[:256]},
+    }
+    _notify_host_receipt(event, "tracedecay-turn-ingested")
 
 def _tracedecay_status(raw_args: str = ""):
     raw = tools.call_tracedecay_tool("tracedecay_status", {})
@@ -3513,11 +3544,15 @@ class TracedecayMemoryProvider(MemoryProvider):
             "transcript_projection": True,
         }
         try:
-            tools.call_tracedecay_tool(
+            result = call_tracedecay_json(
                 "tracedecay_lcm_preflight",
                 args,
                 **_project_call_kwargs(project_root),
             )
+            if not result.get("error"):
+                _notify_turn_ingested(sid, project_root, turn_messages[-1]["id"])
+            else:
+                logger.debug("tracedecay sync_turn ingest rejected: %s", result.get("error"))
         except Exception as exc:
             logger.debug("tracedecay sync_turn ingest failed: %s", exc)
 

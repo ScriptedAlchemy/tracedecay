@@ -18,6 +18,7 @@ pub(crate) enum HookEventKind {
     SessionStart,
     IncrementalSync,
     TerminalReceipt,
+    TurnIngested,
 }
 
 impl HookEventKind {
@@ -29,6 +30,7 @@ impl HookEventKind {
             "sessionStart" => Some(Self::SessionStart),
             "postToolUse" => Some(Self::IncrementalSync),
             "terminalReceipt" => Some(Self::TerminalReceipt),
+            "turnIngested" => Some(Self::TurnIngested),
             _ => None,
         }
     }
@@ -41,6 +43,7 @@ impl HookEventKind {
             Self::SessionStart => "session_start",
             Self::IncrementalSync => "incremental_sync",
             Self::TerminalReceipt => "terminal_receipt",
+            Self::TurnIngested => "turn_ingested",
         }
     }
 }
@@ -72,6 +75,10 @@ pub(crate) enum HookEventPlan {
     RecordTerminalReceipt {
         route: Option<crate::daemon::HookRouteMetadata>,
         receipt: crate::daemon::HookTerminalReceipt,
+    },
+    MarkTurnIngested {
+        route: Option<crate::daemon::HookRouteMetadata>,
+        transcript_watermark: String,
     },
     Noop,
 }
@@ -123,6 +130,15 @@ pub(crate) fn plan_hook_event(
             .map(|receipt| HookEventPlan::RecordTerminalReceipt {
                 route: event.route.clone(),
                 receipt,
+            })
+            .unwrap_or(HookEventPlan::Noop),
+        HookEventKind::TurnIngested => event
+            .receipt
+            .as_ref()
+            .and_then(|receipt| receipt.transcript_watermark.clone())
+            .map(|transcript_watermark| HookEventPlan::MarkTurnIngested {
+                route: event.route.clone(),
+                transcript_watermark,
             })
             .unwrap_or(HookEventPlan::Noop),
     }

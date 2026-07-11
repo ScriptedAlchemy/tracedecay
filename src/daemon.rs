@@ -2094,7 +2094,7 @@ async fn run_automation_scheduler_loop(
                 ],
             );
         }
-        if let Err(error) = run_host_receipt_review(&project_path, &handshake).await {
+        if let Err(error) = Box::pin(run_host_receipt_review(&project_path, &handshake)).await {
             log_daemon_event(
                 "host_receipt_review",
                 &[
@@ -2128,7 +2128,7 @@ async fn run_automation_scheduler_loop(
                         () = wake.notified() => {}
                     }
                 }
-                if let Err(error) = run_host_receipt_review(&project_path, &handshake).await {
+                if let Err(error) = Box::pin(run_host_receipt_review(&project_path, &handshake)).await {
                     log_daemon_event(
                         "host_receipt_review",
                         &[
@@ -2471,12 +2471,16 @@ async fn run_host_receipt_review(project_path: &Path, handshake: &DaemonHandshak
         SkillWriterAutomationOptions, run_combined_review_with_backend,
     };
 
-    let cg = open_existing_project_with_options(project_path, handshake.open_options()).await?;
+    let cg = Box::pin(open_existing_project_with_options(
+        project_path,
+        handshake.open_options(),
+    ))
+    .await?;
     let dashboard_root = cg.store_layout().dashboard_root.clone();
-    let Some(pending) = crate::automation::host_receipts::latest_pending(&dashboard_root).await?
-    else {
+    let Some(ready) = crate::automation::host_receipts::oldest_ready(&dashboard_root).await? else {
         return Ok(());
     };
+    let pending = ready.pending;
     if crate::automation::scheduler::load_scheduler_control(&dashboard_root)
         .await?
         .paused
@@ -2484,11 +2488,25 @@ async fn run_host_receipt_review(project_path: &Path, handshake: &DaemonHandshak
         return Ok(());
     }
     let config = effective_automation_config_for_project(&cg, &handshake.client_identity).await?;
-    let backend = CodexAppServerBackend::from_automation_config(&config);
     let session_id = pending
         .route
         .as_ref()
         .and_then(|route| route.session_id.clone());
+    let Some(session_db) =
+        crate::global_db::GlobalDb::open_read_only_at(&cg.store_layout().sessions_db_path).await
+    else {
+        return Ok(());
+    };
+    if session_db
+        .lcm_load_raw_message("hermes", &ready.transcript_watermark)
+        .await
+        .is_none()
+    {
+        // Never review a terminal receipt until the exact completed-turn
+        // watermark is durable in LCM.
+        return Ok(());
+    }
+    let backend = CodexAppServerBackend::from_automation_config(&config);
     let result = run_combined_review_with_backend(
         &cg,
         &config,
@@ -2514,22 +2532,22 @@ async fn run_host_receipt_review(project_path: &Path, handshake: &DaemonHandshak
         CombinedReviewDispatch::Ran(run) => {
             log_daemon_scheduler_record(project_path, &run.session_reflector.ledger_record);
             log_daemon_scheduler_record(project_path, &run.skill_writer.ledger_record);
-            crate::automation::host_receipts::mark_consumed(
-                &dashboard_root,
-                &pending.session_key,
-                pending.generation,
-            )
-            .await?;
+            if run.session_reflector.ledger_record.status
+                == crate::automation::run_ledger::AutomationRunStatus::Succeeded
+                && run.skill_writer.ledger_record.status
+                    == crate::automation::run_ledger::AutomationRunStatus::Succeeded
+            {
+                crate::automation::host_receipts::mark_consumed(
+                    &dashboard_root,
+                    &pending.session_key,
+                    pending.generation,
+                )
+                .await?;
+            }
         }
         CombinedReviewDispatch::RecordedFailure { run, error } => {
             log_daemon_scheduler_record(project_path, &run.session_reflector.ledger_record);
             log_daemon_scheduler_record(project_path, &run.skill_writer.ledger_record);
-            crate::automation::host_receipts::mark_consumed(
-                &dashboard_root,
-                &pending.session_key,
-                pending.generation,
-            )
-            .await?;
             return Err(error);
         }
         CombinedReviewDispatch::NotCombined { reason } => {

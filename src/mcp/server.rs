@@ -2196,7 +2196,7 @@ impl McpServer {
             *counts.entry(request.method.clone()).or_insert(0) += 1;
         }
         if matches!(classify_mcp_method(&request.method), McpMethod::HookEvent) {
-            self.handle_hook_event_notification(request.params.as_ref(), route_cache)
+            Box::pin(self.handle_hook_event_notification(request.params.as_ref(), route_cache))
                 .await;
             return None;
         }
@@ -2350,6 +2350,25 @@ impl McpServer {
                     }
                     Ok(false) => {}
                     Err(error) => eprintln!("[tracedecay] host receipt record failed: {error}"),
+                }
+            }
+            HookEventPlan::MarkTurnIngested {
+                route,
+                transcript_watermark,
+            } => {
+                match crate::automation::host_receipts::mark_turn_ingested(
+                    &cg.store_layout().dashboard_root,
+                    route,
+                    &transcript_watermark,
+                )
+                .await
+                {
+                    Ok(()) => {
+                        if let Some(reconcile) = &self.automation_scheduler_reconciler {
+                            reconcile();
+                        }
+                    }
+                    Err(error) => eprintln!("[tracedecay] turn ingest receipt failed: {error}"),
                 }
             }
             HookEventPlan::Noop => {}
