@@ -59,10 +59,10 @@ pub async fn handle_user_lcm_tool(
                     .to_string(),
         });
     }
-    let sessions_db_path = crate::sessions::user_sessions_db_path(profile_root);
     if tool_name == "tracedecay_message_search" {
-        return session::handle_user_message_search(&sessions_db_path, args).await;
+        return session::handle_user_message_search(profile_root, args).await;
     }
+    let sessions_db_path = crate::sessions::user_sessions_db_path(profile_root);
     let context = session::LcmHandlerContext::user(&sessions_db_path);
     match tool_name {
         "tracedecay_lcm_status" => session::handle_lcm_status(context, args).await,
