@@ -26,12 +26,11 @@ pub(crate) async fn refresh_generated_plugins() -> tracedecay::errors::Result<()
     let mut refreshed_any = false;
     let mut failures: Vec<String> = Vec::new();
     for ag in tracedecay::agents::all_integrations() {
-        let hermes_was_installed = ag.id() == "hermes"
-            && (ag.has_tracedecay(&home)
-                || tracedecay::agents::hermes::has_legacy_plugin_install(&home));
-        if hermes_was_installed {
-            crate::agent_cmd::migrate_legacy_hermes_data(&home).await?;
-        }
+        let hermes_was_installed = ag.id() == "hermes" && ag.has_tracedecay(&home);
+        // Generated-plugin refresh never rewrites Hermes profile config, so it
+        // must not be blocked by an unresolved historical session migration.
+        // Migration remains mandatory on install/uninstall paths that can
+        // remove a legacy project pin.
         let ctx = tracedecay::agents::InstallContext {
             home: home.clone(),
             tracedecay_bin: tracedecay_bin.clone(),
