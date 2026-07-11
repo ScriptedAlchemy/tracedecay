@@ -13,7 +13,9 @@ use tempfile::TempDir;
 use super::*;
 use crate::db::Database;
 use crate::memory::store::MemoryStore;
-use crate::memory::types::{AddFactRequest, FeedbackAction, FeedbackRequest, MemoryCategory};
+use crate::memory::types::{
+    AddFactRequest, FactRelationKind, FeedbackAction, FeedbackRequest, MemoryCategory,
+};
 use crate::sessions::{SessionMessageRecord, SessionRecord};
 use crate::tracedecay::{TraceDecay, TraceDecayOpenOptions};
 
@@ -276,6 +278,7 @@ async fn many_branch_plan_retains_constant_database_handles_and_bounded_scratch(
 #[tokio::test]
 async fn interrupted_apply_retries_without_duplicates_and_cuts_over_last() {
     let fixture = fixture().await;
+    add_fact_relation_to_shard(&fixture, &fixture.source_id).await;
     let options = fixture.options();
     let source_root = fixture.profile.join("projects").join(&fixture.source_id);
     let target_root = fixture.profile.join("projects").join(&fixture.target_id);
@@ -344,7 +347,13 @@ async fn interrupted_apply_retries_without_duplicates_and_cuts_over_last() {
     let sessions = applied
         .destination_data_root
         .join(storage::SESSIONS_DB_FILENAME);
-    assert_eq!(sqlite::count_rows(&graph, "memory_facts").await.unwrap(), 2);
+    assert_eq!(sqlite::count_rows(&graph, "memory_facts").await.unwrap(), 3);
+    assert_eq!(
+        sqlite::count_rows(&graph, "memory_fact_relations")
+            .await
+            .unwrap(),
+        1
+    );
     assert_eq!(
         sqlite::count_rows(&graph, "memory_feedback_events")
             .await
@@ -462,7 +471,13 @@ async fn interrupted_apply_retries_without_duplicates_and_cuts_over_last() {
 
     let retried = apply(&options, &report.confirmation_token).await.unwrap();
     assert_eq!(retried.state, ConsolidationState::Applied);
-    assert_eq!(sqlite::count_rows(&graph, "memory_facts").await.unwrap(), 2);
+    assert_eq!(sqlite::count_rows(&graph, "memory_facts").await.unwrap(), 3);
+    assert_eq!(
+        sqlite::count_rows(&graph, "memory_fact_relations")
+            .await
+            .unwrap(),
+        1
+    );
     assert_eq!(sqlite::count_rows(&sessions, "sessions").await.unwrap(), 2);
 }
 
@@ -2263,6 +2278,7 @@ fn graph_table_disposition(table: &str) -> Option<&'static str> {
     match table {
         "memory_entities"
         | "memory_fact_entities"
+        | "memory_fact_relations"
         | "memory_facts"
         | "memory_feedback_events"
         | "memory_oplog" => Some("merged"),
@@ -2524,6 +2540,51 @@ async fn add_fact_to_shard(
             .await
             .unwrap();
     }
+    graph.checkpoint().await.unwrap();
+    graph.close();
+}
+
+async fn add_fact_relation_to_shard(fixture: &Fixture, project_id: &str) {
+    let layout = layout_for_id(&fixture.project, &fixture.profile, project_id).unwrap();
+    let (graph, _) = Database::open(&layout.graph_db_path).await.unwrap();
+    let memory = MemoryStore::new(graph.conn());
+    let source_fact_id = memory
+        .list_facts(None, Some(0.0), 10)
+        .await
+        .unwrap()
+        .into_iter()
+        .next()
+        .expect("fixture source fact")
+        .fact_id;
+    let target_fact_id = memory
+        .add_fact(
+            AddFactRequest {
+                content: "relation target fact".to_string(),
+                category: MemoryCategory::Project,
+                source: Some("consolidation-test".to_string()),
+                tags: vec!["relation".to_string()],
+                entities: vec!["TraceDecay".to_string()],
+                trust: Some(0.75),
+                metadata: json!({"project_id": project_id}),
+            },
+            0.5,
+        )
+        .await
+        .unwrap()
+        .fact
+        .expect("relation target fact should be stored")
+        .fact_id;
+    memory
+        .upsert_fact_relation(
+            source_fact_id,
+            target_fact_id,
+            FactRelationKind::Supports,
+            0.9,
+            "consolidation-test",
+            json!({"evidence": "fixture"}),
+        )
+        .await
+        .unwrap();
     graph.checkpoint().await.unwrap();
     graph.close();
 }

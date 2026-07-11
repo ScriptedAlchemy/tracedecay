@@ -128,9 +128,9 @@ async fn combined_review_runner_records_both_tasks_from_one_backend_call() {
         .await
         .unwrap();
     assert_eq!(records.len(), 2);
-    let now = current_timestamp();
     for task in [AgentTaskKind::SessionReflector, AgentTaskKind::SkillWriter] {
-        let decision = schedule_decision(&config, task, &records, SessionActivity::at(now), now);
+        let now = current_timestamp();
+        let decision = schedule_decision(&config, task, &records, SessionActivity::none(), now);
         assert_eq!(
             decision.skip_reason(),
             Some("scheduler_interval_not_elapsed"),
