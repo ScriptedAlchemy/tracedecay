@@ -6,6 +6,10 @@
 //! `~/.hermes/profiles/<name>` for named profiles. A profile maps to exactly
 //! one ingest target only when provenance proves a real code project: a
 //! legacy `plugins.tracedecay.project_root` pin or the session row's `cwd`.
+//! For projectless/gateway sessions, one completed turn may instead prove its
+//! project through structured tool-call routing (`project_path`,
+//! `project_root`, or a nested project selector). Only that turn is projected;
+//! an entire long-running multi-project chat is never assigned by inference.
 //! Profile directories are never `TraceDecay` project identities.
 //!
 //! Unlike the file-based adapters this source holds *many* sessions in one
@@ -49,6 +53,7 @@ const HERMES_LOCATION_KEYS: TranscriptLocationMetadataKeys = TranscriptLocationM
 /// the cursor advance after every committed chunk, so an interrupted sweep
 /// resumes where it stopped.
 const CHUNK_ROWS: usize = 2000;
+const CORRELATION_CURSOR_VERSION: &str = "turn-project-v2";
 
 /// Ingests Hermes sessions proven to belong to `project_root` into `db`.
 ///
@@ -274,8 +279,9 @@ async fn try_ingest_state_db(
     let state_db = &source.state_db;
     let conn = open_read_only_strict(state_db).await?;
     let path_str = state_db.to_string_lossy().to_string();
+    let cursor_path = format!("{path_str}#{CORRELATION_CURSOR_VERSION}");
     let mut cursor = {
-        let prev = db.get_parse_offset(&path_str).await.unwrap_or_default();
+        let prev = db.get_parse_offset(&cursor_path).await.unwrap_or_default();
         StoredCursor {
             position: prev.byte_offset,
             mtime: prev.mtime,
@@ -308,14 +314,14 @@ async fn try_ingest_state_db(
         if batches.is_empty() {
             // Only non-conversation rows (e.g. `session_meta`) — still advance
             // the cursor so the next sweep does not re-read them.
-            db.set_parse_offset(&path_str, offset).await;
+            db.set_parse_offset(&cursor_path, offset).await;
         } else {
             let message_count: u64 = batches
                 .iter()
                 .map(|batch| batch.messages.len() as u64)
                 .sum();
             if !db
-                .upsert_transcript_projection_batches(&batches, &path_str, offset)
+                .upsert_transcript_projection_batches(&batches, &cursor_path, offset)
                 .await
             {
                 return Err(format!(
@@ -423,6 +429,7 @@ async fn build_batches(
 ) -> Vec<TranscriptBatch> {
     let mut order = Vec::new();
     let mut by_session: HashMap<String, TranscriptBatch> = HashMap::new();
+    let turn_locations = turn_project_locations(rows, project_root, source);
 
     for row in rows {
         if row.role == "session_meta" || row.role.is_empty() {
@@ -433,7 +440,7 @@ async fn build_batches(
             // them as live history would misrepresent the conversation.
             continue;
         }
-        let Some(location) = session_location(row, project_root, source) else {
+        let Some(location) = turn_locations.get(&row.id) else {
             continue;
         };
         let Some(message) = message_from_row(row, state_db_path, source, &location) else {
@@ -460,6 +467,104 @@ async fn build_batches(
     batches
 }
 
+fn turn_project_locations(
+    rows: &[HermesRow],
+    project_root: &Path,
+    source: &HermesProfileSource,
+) -> HashMap<i64, HermesSessionLocation> {
+    let mut by_session: HashMap<&str, Vec<&HermesRow>> = HashMap::new();
+    for row in rows {
+        by_session.entry(&row.session_id).or_default().push(row);
+    }
+    let mut locations = HashMap::new();
+    for session_rows in by_session.into_values() {
+        if let Some(location) = session_rows
+            .iter()
+            .find_map(|row| session_location(row, project_root, source))
+        {
+            for row in session_rows {
+                locations.insert(row.id, location.clone());
+            }
+            continue;
+        }
+        let mut turn = Vec::new();
+        for row in session_rows {
+            if row.role == "user" && !turn.is_empty() {
+                assign_tool_routed_turn(&turn, project_root, &mut locations);
+                turn.clear();
+            }
+            turn.push(row);
+        }
+        assign_tool_routed_turn(&turn, project_root, &mut locations);
+    }
+    locations
+}
+
+fn assign_tool_routed_turn(
+    rows: &[&HermesRow],
+    project_root: &Path,
+    locations: &mut HashMap<i64, HermesSessionLocation>,
+) {
+    let Some(cwd) = rows
+        .iter()
+        .rev()
+        .flat_map(|row| structured_tool_project_paths(row))
+        .find(|path| path_belongs_to_project(path, project_root))
+    else {
+        return;
+    };
+    let location = HermesSessionLocation {
+        cwd,
+        provenance: "tool_project_path",
+    };
+    for row in rows {
+        locations.insert(row.id, location.clone());
+    }
+}
+
+fn structured_tool_project_paths(row: &HermesRow) -> Vec<PathBuf> {
+    let Some(raw) = row.tool_calls.as_deref() else {
+        return Vec::new();
+    };
+    let Ok(calls) = serde_json::from_str::<Value>(raw) else {
+        return Vec::new();
+    };
+    let mut paths = Vec::new();
+    let calls = calls.as_array().map(Vec::as_slice).unwrap_or(&[]);
+    for call in calls {
+        let arguments = call
+            .pointer("/function/arguments")
+            .or_else(|| call.get("arguments"));
+        let parsed;
+        let arguments = match arguments {
+            Some(Value::String(raw)) => {
+                parsed = serde_json::from_str::<Value>(raw).unwrap_or(Value::Null);
+                &parsed
+            }
+            Some(value) => value,
+            None => continue,
+        };
+        for value in [
+            arguments.get("project_root"),
+            arguments.get("project_path"),
+            arguments.pointer("/project_selector/path"),
+            arguments.get("cwd"),
+            arguments.get("workdir"),
+        ]
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        {
+            let path = PathBuf::from(value);
+            if path.is_absolute() {
+                paths.push(path);
+            }
+        }
+    }
+    paths
+}
+
+#[derive(Clone)]
 struct HermesSessionLocation {
     cwd: PathBuf,
     provenance: &'static str,

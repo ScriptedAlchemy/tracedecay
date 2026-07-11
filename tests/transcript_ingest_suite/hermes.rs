@@ -611,3 +611,45 @@ async fn unpinned_profile_uses_session_cwd_as_project_provenance() {
     );
     assert_metadata_path_eq(&metadata["hermes_session_cwd"], &project);
 }
+
+#[tokio::test]
+async fn unpinned_projectless_session_routes_only_a_tool_proven_turn() {
+    let tmp = TempDir::new().unwrap();
+    let (hermes_home, project) = setup(&tmp);
+    let state_db = write_hermes_profile(&hermes_home, "test", None).await;
+    let conn = open_state_db(&state_db).await;
+    let tool_calls = json!([{
+        "id": "call_project_context",
+        "type": "function",
+        "function": {
+            "name": "tracedecay_context",
+            "arguments": json!({
+                "project_path": project.to_string_lossy(),
+                "query": "billing pipeline"
+            }).to_string()
+        }
+    }])
+    .to_string();
+    conn.execute(
+        "UPDATE messages SET tool_calls = ?1
+         WHERE session_id = ?2 AND tool_calls IS NOT NULL",
+        libsql::params![tool_calls, SESSION_ID],
+    )
+    .await
+    .unwrap();
+
+    let db = open_project_session_db(&project).await.unwrap();
+    let stats = ingest_homes(&db, std::slice::from_ref(&hermes_home), &project).await;
+    assert_eq!(stats.messages_upserted, 4);
+    let session = db
+        .get_session("hermes", SESSION_ID)
+        .await
+        .expect("structured tool project path should prove turn association");
+    let metadata: serde_json::Value =
+        serde_json::from_str(session.metadata_json.as_deref().unwrap()).unwrap();
+    assert_eq!(
+        metadata["hermes_session_location_provenance"],
+        "tool_project_path"
+    );
+    assert_metadata_path_eq(&metadata["hermes_session_cwd"], &project);
+}
