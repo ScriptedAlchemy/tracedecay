@@ -84,6 +84,9 @@ pub(crate) async fn refresh_generated_plugins() -> tracedecay::errors::Result<()
 fn refresh_daemon_service(
     previous_state: tracedecay::daemon::DaemonServiceState,
 ) -> tracedecay::errors::Result<Option<(PathBuf, PathBuf)>> {
+    if !cfg!(any(target_os = "linux", target_os = "macos")) {
+        return Ok(None);
+    }
     let tracedecay_bin = tracedecay_bin_on_path()?;
     let spec = tracedecay::daemon::service_spec(tracedecay_bin, None)?;
     let socket_path = tracedecay::daemon::installed_service_socket_path()?
