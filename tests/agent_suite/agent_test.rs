@@ -1124,6 +1124,7 @@ fn test_hermes_user_install_writes_single_plugin() {
     assert!(manifest.contains("tracedecay_lcm_compress"));
     assert!(manifest.contains("provides_hooks:"));
     assert!(manifest.contains("pre_llm_call"));
+    assert!(manifest.contains("post_tool_call"));
     assert!(manifest.contains("provides_commands:"));
     assert!(manifest.contains("/tracedecay_status"));
 
@@ -1133,6 +1134,7 @@ fn test_hermes_user_install_writes_single_plugin() {
     assert!(init_py.contains("ctx.register_memory_provider("));
     assert!(init_py.contains("register_tool = getattr(ctx, \"register_tool\", None)"));
     assert!(init_py.contains("ctx.register_hook(\"pre_llm_call\""));
+    assert!(init_py.contains("ctx.register_hook(\"post_tool_call\""));
     assert!(init_py.contains("getattr(ctx, \"register_command\", None)"));
     assert!(init_py.contains("getattr(ctx, \"register_skill\", None)"));
     assert!(init_py.contains("register_skill(skill_name, skill_path)"));

@@ -952,7 +952,7 @@ async fn skipped_skill_writer_run(
 /// Options for the scheduler-only combined reflector+skill pass. Manual
 /// (CLI/dashboard) runs stay per-task; this path exists so one backend call
 /// can serve both tasks when they are due in the same scheduler tick.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CombinedReviewAutomationOptions {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub run_id: Option<String>,
@@ -960,6 +960,23 @@ pub struct CombinedReviewAutomationOptions {
     pub session_reflector: SessionReflectorAutomationOptions,
     #[serde(default)]
     pub skill_writer: SkillWriterAutomationOptions,
+    #[serde(default = "scheduler_trigger")]
+    pub trigger: AutomationTrigger,
+}
+
+fn scheduler_trigger() -> AutomationTrigger {
+    AutomationTrigger::Scheduler
+}
+
+impl Default for CombinedReviewAutomationOptions {
+    fn default() -> Self {
+        Self {
+            run_id: None,
+            session_reflector: SessionReflectorAutomationOptions::default(),
+            skill_writer: SkillWriterAutomationOptions::default(),
+            trigger: AutomationTrigger::Scheduler,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1015,7 +1032,7 @@ pub async fn run_combined_review_with_backend(
         &dashboard_root,
         &sessions_db_path,
         AgentTaskKind::SessionReflector,
-        AutomationTrigger::Scheduler,
+        options.trigger,
     )
     .await?;
     let _reflector_lock = match reflector_gate {
@@ -1031,7 +1048,7 @@ pub async fn run_combined_review_with_backend(
         &dashboard_root,
         &sessions_db_path,
         AgentTaskKind::SkillWriter,
-        AutomationTrigger::Scheduler,
+        options.trigger,
     )
     .await?;
     let _skill_lock = match skill_gate {
@@ -1087,7 +1104,7 @@ pub async fn run_combined_review_with_backend(
     let reflector_finalizer = AgentRunFinalizer::new(
         &dashboard_root,
         &reflector_run_id,
-        AutomationTrigger::Scheduler,
+        options.trigger,
         config,
         AgentTaskKind::SessionReflector,
         &started_at,
@@ -1097,7 +1114,7 @@ pub async fn run_combined_review_with_backend(
     let skill_finalizer = AgentRunFinalizer::new(
         &dashboard_root,
         &skill_run_id,
-        AutomationTrigger::Scheduler,
+        options.trigger,
         config,
         AgentTaskKind::SkillWriter,
         &started_at,

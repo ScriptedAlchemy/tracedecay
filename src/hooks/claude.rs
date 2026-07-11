@@ -236,6 +236,7 @@ fn session_start_hook_event(cwd: Option<std::path::PathBuf>) -> crate::daemon::D
         command: None,
         cwd,
         route: None,
+        receipt: None,
     }
 }
 

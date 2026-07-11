@@ -315,6 +315,27 @@ pub fn schedule_decision(
     activity: SessionActivity,
     now_secs: i64,
 ) -> AutomationScheduleDecision {
+    schedule_decision_for_trigger(config, task, records, activity, now_secs, true)
+}
+
+pub fn host_receipt_decision(
+    config: &AutomationConfig,
+    task: AgentTaskKind,
+    records: &[AutomationRunLedgerRecord],
+    activity: SessionActivity,
+    now_secs: i64,
+) -> AutomationScheduleDecision {
+    schedule_decision_for_trigger(config, task, records, activity, now_secs, false)
+}
+
+fn schedule_decision_for_trigger(
+    config: &AutomationConfig,
+    task: AgentTaskKind,
+    records: &[AutomationRunLedgerRecord],
+    activity: SessionActivity,
+    now_secs: i64,
+    enforce_schedule: bool,
+) -> AutomationScheduleDecision {
     if !config.enabled {
         return AutomationScheduleDecision::skipped("automation_disabled");
     }
@@ -331,20 +352,25 @@ pub fn schedule_decision(
         return AutomationScheduleDecision::skipped("task_disabled");
     }
 
-    let Ok(schedule) = parse_schedule(task_config.schedule.as_deref()) else {
-        return AutomationScheduleDecision::skipped("scheduler_schedule_invalid");
-    };
-    let (interval_secs, cron) = match schedule {
-        AutomationSchedule::Manual => {
+    let (interval_secs, cron) = if enforce_schedule {
+        let Ok(schedule) = parse_schedule(task_config.schedule.as_deref()) else {
+            return AutomationScheduleDecision::skipped("scheduler_schedule_invalid");
+        };
+        let timing = match schedule {
+            AutomationSchedule::Manual => {
+                return AutomationScheduleDecision::skipped("scheduler_schedule_manual");
+            }
+            AutomationSchedule::ConfiguredInterval => (task_config.interval_secs, None),
+            AutomationSchedule::Interval { every_secs } => (Some(every_secs), None),
+            AutomationSchedule::Cron(cron) => (None, Some(cron)),
+        };
+        if timing.0.is_none() && timing.1.is_none() {
             return AutomationScheduleDecision::skipped("scheduler_schedule_manual");
         }
-        AutomationSchedule::ConfiguredInterval => (task_config.interval_secs, None),
-        AutomationSchedule::Interval { every_secs } => (Some(every_secs), None),
-        AutomationSchedule::Cron(cron) => (None, Some(cron)),
+        timing
+    } else {
+        (None, None)
     };
-    if interval_secs.is_none() && cron.is_none() {
-        return AutomationScheduleDecision::skipped("scheduler_schedule_manual");
-    }
 
     // `min_idle_secs` is a true idle window: the project must have been quiet
     // (no LCM session ingest activity) for at least this long. An unknown
@@ -370,9 +396,11 @@ pub fn schedule_decision(
                 .is_some_and(|last_activity| last_activity > started_at)
         });
 
-    if let Some(record) =
-        latest_non_skipped_record(records, task, Some(AutomationTrigger::Scheduler))
-    {
+    if let Some(record) = latest_non_skipped_record(
+        records,
+        task,
+        enforce_schedule.then_some(AutomationTrigger::Scheduler),
+    ) {
         let completed_at = record.completed_at.parse::<i64>().ok().unwrap_or(0);
         if record.status == AutomationRunStatus::Failed {
             let failure = agent_task_failure_disposition(

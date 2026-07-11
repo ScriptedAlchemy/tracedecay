@@ -9,8 +9,8 @@ use tracedecay::automation::run_ledger::{
 };
 use tracedecay::automation::scheduler::{
     AutomationSchedule, AutomationSchedulerControl, AutomationTaskLock, SessionActivity,
-    load_scheduler_control, load_session_activity, parse_schedule, save_scheduler_control,
-    schedule_decision, scheduler_control_path,
+    host_receipt_decision, load_scheduler_control, load_session_activity, parse_schedule,
+    save_scheduler_control, schedule_decision, scheduler_control_path,
 };
 use tracedecay::global_db::GlobalDb;
 
@@ -85,6 +85,45 @@ fn scheduler_parses_manual_aliases_and_intervals() {
         AutomationSchedule::Interval { every_secs: 7200 }
     );
     assert!(parse_schedule(Some("after lunch")).is_err());
+}
+
+#[test]
+fn host_receipt_bypasses_schedule_but_preserves_enablement_and_idle_gates() {
+    let mut config = automation_config(None, None);
+    assert!(
+        host_receipt_decision(
+            &config,
+            AgentTaskKind::SessionReflector,
+            &[],
+            SessionActivity::at(100),
+            200,
+        )
+        .is_due()
+    );
+    config.tasks.session_reflector.min_idle_secs = Some(120);
+    assert_eq!(
+        host_receipt_decision(
+            &config,
+            AgentTaskKind::SessionReflector,
+            &[],
+            SessionActivity::at(100),
+            200,
+        )
+        .skip_reason(),
+        Some("scheduler_idle_window_active")
+    );
+    config.enabled = false;
+    assert_eq!(
+        host_receipt_decision(
+            &config,
+            AgentTaskKind::SessionReflector,
+            &[],
+            SessionActivity::none(),
+            200,
+        )
+        .skip_reason(),
+        Some("automation_disabled")
+    );
 }
 
 #[tokio::test]

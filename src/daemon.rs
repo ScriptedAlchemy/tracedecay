@@ -141,6 +141,7 @@ pub enum HookAgent {
     Codex,
     Cursor,
     Kiro,
+    Hermes,
 }
 
 impl HookAgent {
@@ -150,6 +151,7 @@ impl HookAgent {
             Self::Codex => "codex",
             Self::Cursor => "cursor",
             Self::Kiro => "kiro",
+            Self::Hermes => "hermes",
         }
     }
 
@@ -159,6 +161,7 @@ impl HookAgent {
             "codex" => Some(Self::Codex),
             "cursor" => Some(Self::Cursor),
             "kiro" => Some(Self::Kiro),
+            "hermes" => Some(Self::Hermes),
             _ => None,
         }
     }
@@ -170,6 +173,7 @@ impl HookAgent {
             Self::Codex => ".codex_shell_sync_at",
             Self::Cursor => ".cursor_shell_sync_at",
             Self::Kiro => ".kiro_post_tool_sync_at",
+            Self::Hermes => ".hermes_terminal_receipt_at",
         }
     }
 }
@@ -189,6 +193,20 @@ pub struct HookRouteMetadata {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HookTerminalReceipt {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transcript_watermark: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DaemonHookEvent {
     pub agent: String,
     pub event: String,
@@ -200,6 +218,8 @@ pub struct DaemonHookEvent {
     pub cwd: Option<PathBuf>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub route: Option<HookRouteMetadata>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub receipt: Option<HookTerminalReceipt>,
 }
 
 impl DaemonHookEvent {
@@ -217,6 +237,7 @@ impl DaemonHookEvent {
             command,
             cwd,
             route: None,
+            receipt: None,
         }
     }
 
@@ -269,6 +290,23 @@ impl DaemonHookEvent {
 
     pub fn kiro_post_tool_use(rel_paths: Vec<String>, cwd: Option<PathBuf>) -> Self {
         Self::new(HookAgent::Kiro, "postToolUse", rel_paths, None, cwd)
+    }
+
+    pub fn hermes_terminal_receipt(
+        cwd: PathBuf,
+        route: HookRouteMetadata,
+        receipt: HookTerminalReceipt,
+    ) -> Self {
+        let mut event = Self::new(
+            HookAgent::Hermes,
+            "terminalReceipt",
+            Vec::new(),
+            None,
+            Some(cwd),
+        );
+        event.route = Some(route);
+        event.receipt = Some(receipt);
+        event
     }
 }
 
@@ -1623,7 +1661,8 @@ struct DaemonEngine {
     /// Shared daemon state, partitioned by the client-scoped project server key.
     project_servers: Arc<tokio::sync::Mutex<HashMap<ProjectServerKey, Arc<crate::mcp::McpServer>>>>,
     /// Background automation loops, partitioned with the same client/project identity as MCP state.
-    automation_schedulers: Arc<tokio::sync::Mutex<HashMap<ProjectServerKey, JoinHandle<()>>>>,
+    automation_schedulers:
+        Arc<tokio::sync::Mutex<HashMap<ProjectServerKey, AutomationSchedulerHandle>>>,
     /// Client versions whose skew was already logged. Proxy clients reconnect
     /// per request, so without this the mismatch would flood the daemon log.
     logged_client_version_skews: Arc<tokio::sync::Mutex<HashSet<String>>>,
@@ -1639,6 +1678,12 @@ struct DaemonEngine {
     git_watcher: git_watch::GitWatcher,
     /// PR reconciliation task, retained so shutdown never leaves it writing.
     pr_autotrack_task: Arc<tokio::sync::Mutex<Option<JoinHandle<()>>>>,
+}
+
+#[cfg(unix)]
+struct AutomationSchedulerHandle {
+    task: JoinHandle<()>,
+    wake: Arc<tokio::sync::Notify>,
 }
 
 #[cfg(unix)]
@@ -1916,8 +1961,11 @@ impl DaemonEngine {
             let handshake = handshake.clone();
             tokio::spawn(async move {
                 engine
-                    .ensure_automation_scheduler(key, project_path, handshake)
+                    .ensure_automation_scheduler(key.clone(), project_path, handshake)
                     .await;
+                if let Some(handle) = engine.automation_schedulers.lock().await.get(&key) {
+                    handle.wake.notify_one();
+                }
             });
         })
     }
@@ -1932,16 +1980,23 @@ impl DaemonEngine {
         if schedulers.contains_key(&key) {
             return;
         }
-        let handle = tokio::spawn(async move {
-            Box::pin(run_automation_scheduler_loop(project_path, handshake)).await;
+        let wake = Arc::new(tokio::sync::Notify::new());
+        let loop_wake = Arc::clone(&wake);
+        let task = tokio::spawn(async move {
+            Box::pin(run_automation_scheduler_loop(
+                project_path,
+                handshake,
+                loop_wake,
+            ))
+            .await;
         });
-        schedulers.insert(key, handle);
+        schedulers.insert(key, AutomationSchedulerHandle { task, wake });
     }
 
     async fn shutdown_background_tasks(&self) {
         let scheduler_handles: Vec<JoinHandle<()>> = {
             let mut schedulers = self.automation_schedulers.lock().await;
-            schedulers.drain().map(|(_, handle)| handle).collect()
+            schedulers.drain().map(|(_, handle)| handle.task).collect()
         };
         for handle in scheduler_handles {
             handle.abort();
@@ -1979,7 +2034,11 @@ impl DaemonEngine {
 }
 
 #[cfg(unix)]
-async fn run_automation_scheduler_loop(project_path: PathBuf, handshake: DaemonHandshake) {
+async fn run_automation_scheduler_loop(
+    project_path: PathBuf,
+    handshake: DaemonHandshake,
+    wake: Arc<tokio::sync::Notify>,
+) {
     loop {
         match Box::pin(automation_scheduler_has_work_for_project(
             &project_path,
@@ -2035,6 +2094,16 @@ async fn run_automation_scheduler_loop(project_path: PathBuf, handshake: DaemonH
                 ],
             );
         }
+        if let Err(error) = run_host_receipt_review(&project_path, &handshake).await {
+            log_daemon_event(
+                "host_receipt_review",
+                &[
+                    ("project", project_path.display().to_string()),
+                    ("outcome", "error".to_string()),
+                    ("error", error.to_string()),
+                ],
+            );
+        }
         let tick_secs = Box::pin(automation_scheduler_tick_secs_for_project(
             &project_path,
             &handshake,
@@ -2047,7 +2116,30 @@ async fn run_automation_scheduler_loop(project_path: PathBuf, handshake: DaemonH
                 ("next_tick_secs", tick_secs.to_string()),
             ],
         );
-        tokio::time::sleep(Duration::from_secs(tick_secs)).await;
+        tokio::select! {
+            () = tokio::time::sleep(Duration::from_secs(tick_secs)) => {}
+            () = wake.notified() => {
+                // Receipts arrive at tool cadence. Wait for a short quiet
+                // period and reset it for every later receipt, producing one
+                // review for the burst rather than one review per command.
+                loop {
+                    tokio::select! {
+                        () = tokio::time::sleep(Duration::from_secs(5)) => break,
+                        () = wake.notified() => {}
+                    }
+                }
+                if let Err(error) = run_host_receipt_review(&project_path, &handshake).await {
+                    log_daemon_event(
+                        "host_receipt_review",
+                        &[
+                            ("project", project_path.display().to_string()),
+                            ("outcome", "error".to_string()),
+                            ("error", error.to_string()),
+                        ],
+                    );
+                }
+            }
+        }
     }
 }
 
@@ -2371,6 +2463,90 @@ async fn run_automation_scheduler_tick(
 }
 
 #[cfg(unix)]
+async fn run_host_receipt_review(project_path: &Path, handshake: &DaemonHandshake) -> Result<()> {
+    use crate::automation::backend::CodexAppServerBackend;
+    use crate::automation::run_ledger::AutomationTrigger;
+    use crate::automation::runner::{
+        CombinedReviewAutomationOptions, CombinedReviewDispatch, SessionReflectorAutomationOptions,
+        SkillWriterAutomationOptions, run_combined_review_with_backend,
+    };
+
+    let cg = open_existing_project_with_options(project_path, handshake.open_options()).await?;
+    let dashboard_root = cg.store_layout().dashboard_root.clone();
+    let Some(pending) = crate::automation::host_receipts::latest_pending(&dashboard_root).await?
+    else {
+        return Ok(());
+    };
+    if crate::automation::scheduler::load_scheduler_control(&dashboard_root)
+        .await?
+        .paused
+    {
+        return Ok(());
+    }
+    let config = effective_automation_config_for_project(&cg, &handshake.client_identity).await?;
+    let backend = CodexAppServerBackend::from_automation_config(&config);
+    let session_id = pending
+        .route
+        .as_ref()
+        .and_then(|route| route.session_id.clone());
+    let result = run_combined_review_with_backend(
+        &cg,
+        &config,
+        &backend,
+        CombinedReviewAutomationOptions {
+            run_id: Some(format!("host_receipt_{}", pending.generation)),
+            session_reflector: SessionReflectorAutomationOptions {
+                trigger: AutomationTrigger::HostReceipt,
+                provider: "hermes".to_string(),
+                session_id,
+                ..SessionReflectorAutomationOptions::default()
+            },
+            skill_writer: SkillWriterAutomationOptions {
+                trigger: AutomationTrigger::HostReceipt,
+                provider: "hermes".to_string(),
+                ..SkillWriterAutomationOptions::default()
+            },
+            trigger: AutomationTrigger::HostReceipt,
+        },
+    )
+    .await?;
+    match result {
+        CombinedReviewDispatch::Ran(run) => {
+            log_daemon_scheduler_record(project_path, &run.session_reflector.ledger_record);
+            log_daemon_scheduler_record(project_path, &run.skill_writer.ledger_record);
+            crate::automation::host_receipts::mark_consumed(
+                &dashboard_root,
+                &pending.session_key,
+                pending.generation,
+            )
+            .await?;
+        }
+        CombinedReviewDispatch::RecordedFailure { run, error } => {
+            log_daemon_scheduler_record(project_path, &run.session_reflector.ledger_record);
+            log_daemon_scheduler_record(project_path, &run.skill_writer.ledger_record);
+            crate::automation::host_receipts::mark_consumed(
+                &dashboard_root,
+                &pending.session_key,
+                pending.generation,
+            )
+            .await?;
+            return Err(error);
+        }
+        CombinedReviewDispatch::NotCombined { reason } => {
+            log_daemon_event(
+                "host_receipt_review",
+                &[
+                    ("project", project_path.display().to_string()),
+                    ("outcome", "deferred".to_string()),
+                    ("reason", reason.to_string()),
+                ],
+            );
+        }
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
 async fn effective_automation_config_for_project(
     cg: &crate::tracedecay::TraceDecay,
     client_identity: &DaemonClientIdentity,
@@ -2403,6 +2579,12 @@ fn automation_scheduler_configured(config: &crate::automation::config::Automatio
         || config.backend != AutomationBackend::CodexAppServer
     {
         return false;
+    }
+    if config.combine_due_tasks
+        && config.tasks.session_reflector.enabled
+        && config.tasks.skill_writer.enabled
+    {
+        return true;
     }
     [
         &config.tasks.memory_curator,

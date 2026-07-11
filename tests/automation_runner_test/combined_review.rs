@@ -16,6 +16,7 @@ fn combined_options(profile_root: &Path) -> CombinedReviewAutomationOptions {
             ..SessionReflectorAutomationOptions::default()
         },
         skill_writer: manual_skill_writer_options(profile_root),
+        trigger: AutomationTrigger::Scheduler,
     }
 }
 

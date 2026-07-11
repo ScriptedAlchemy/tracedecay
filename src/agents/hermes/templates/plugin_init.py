@@ -7,6 +7,7 @@ import os
 import re
 import shlex
 import shutil
+import subprocess
 import threading
 import time
 from pathlib import Path
@@ -435,6 +436,72 @@ def _pre_llm_call(*args, **kwargs):
         "For this codebase request, prefer tracedecay tools for symbol lookup, call graphs, "
         "impact analysis, affected files, and architectural navigation before broad file reads."
     )
+
+_TERMINAL_TOOL_NAMES = frozenset((
+    "terminal", "bash", "shell", "exec_command", "run_command", "terminal.exec",
+))
+
+def _post_tool_call(*args, **kwargs):
+    """Send a bounded, fail-open terminal receipt to TraceDecay."""
+    payload = {}
+    if args and isinstance(args[0], dict):
+        payload.update(args[0])
+    payload.update(kwargs)
+    tool_name = str(payload.get("tool_name") or payload.get("name") or "").lower()
+    if tool_name not in _TERMINAL_TOOL_NAMES:
+        return None
+    tool_args = payload.get("args") if isinstance(payload.get("args"), dict) else {}
+    cwd = _code_project_root(
+        explicit=payload.get("project_root") or payload.get("project_path"),
+        cwd=payload.get("cwd") or tool_args.get("cwd") or tool_args.get("workdir"),
+    )
+    if not cwd:
+        return None
+    session_id = payload.get("session_id") or payload.get("thread_id")
+    turn_id = payload.get("turn_id")
+    tool_call_id = payload.get("tool_call_id") or payload.get("call_id")
+    status = str(payload.get("status") or ("error" if payload.get("error") else "success"))
+    duration = payload.get("duration_ms")
+    try:
+        duration = max(0, min(int(duration), 86_400_000)) if duration is not None else None
+    except (TypeError, ValueError):
+        duration = None
+    event = {
+        "agent": "hermes",
+        "event": "terminalReceipt",
+        "cwd": str(cwd),
+        "route": {
+            "session_id": str(session_id)[:256] if session_id else None,
+            "thread_id": str(payload.get("thread_id"))[:256] if payload.get("thread_id") else None,
+            "cwd": str(cwd),
+        },
+        "receipt": {
+            "tool_call_id": str(tool_call_id)[:256] if tool_call_id else None,
+            "turn_id": str(turn_id)[:256] if turn_id else None,
+            "status": status[:32],
+            "duration_ms": duration,
+            "transcript_watermark": str(
+                payload.get("transcript_watermark") or turn_id or tool_call_id or ""
+            )[:256] or None,
+        },
+    }
+
+    def _notify():
+        try:
+            subprocess.run(
+                [tools.TRACEDECAY_BIN, "hook-hermes-terminal-receipt"],
+                input=json.dumps(event),
+                text=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=2,
+                check=False,
+            )
+        except Exception as exc:
+            logger.debug("tracedecay terminal receipt notification failed: %s", exc)
+
+    threading.Thread(target=_notify, name="tracedecay-terminal-receipt", daemon=True).start()
+    return None
 
 def _tracedecay_status(raw_args: str = ""):
     raw = tools.call_tracedecay_tool("tracedecay_status", {})
@@ -3596,6 +3663,10 @@ class TracedecayMemoryProvider(MemoryProvider):
 def register(ctx):
     global _HOST_FORWARDS_MESSAGES
     ctx.register_hook("pre_llm_call", _pre_llm_call)
+    try:
+        ctx.register_hook("post_tool_call", _post_tool_call)
+    except Exception as exc:
+        logger.debug("tracedecay post_tool_call hook unavailable: %s", exc)
     # Declare the plugins.tracedecay config block so its keys exist in
     # load_config() even before the user edits config.yaml.
     register_config_defaults = getattr(ctx, "register_config_defaults", None)

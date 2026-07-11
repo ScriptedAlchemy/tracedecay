@@ -82,6 +82,29 @@ macro_rules! read_hook_event {
 }
 pub(crate) use read_hook_event;
 
+pub async fn hook_hermes_terminal_receipt() -> i32 {
+    let event_json = read_hook_event!();
+    let Ok(event) = serde_json::from_str::<crate::daemon::DaemonHookEvent>(&event_json) else {
+        return 0;
+    };
+    if event.agent != "hermes" || event.event != "terminalReceipt" || event.receipt.is_none() {
+        return 0;
+    }
+    let Some(cwd) = event
+        .route
+        .as_ref()
+        .and_then(|route| route.cwd.clone().or_else(|| route.worktree.clone()))
+        .or_else(|| event.cwd.clone())
+    else {
+        return 0;
+    };
+    let Some(project_root) = crate::config::discover_project_root(&cwd) else {
+        return 0;
+    };
+    crate::daemon::notify_hook_event(&project_root, event).await;
+    0
+}
+
 const TRACEDECAY_RESEARCH_BLOCK_REASON: &str = "STOP: Use tracedecay MCP tools \
 (tracedecay_context, tracedecay_grep, tracedecay_search, tracedecay_callees, \
 tracedecay_callers, tracedecay_impact, tracedecay_files, tracedecay_affected) \

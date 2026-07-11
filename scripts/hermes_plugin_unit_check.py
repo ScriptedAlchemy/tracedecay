@@ -264,6 +264,42 @@ def run_checks(work: Path):
     plugin._REGISTERED_TOOL_NAMES.update(saved_names)
     ok("pre_llm_call stays silent when no tools registered")
 
+    receipt_hook = ctx.hooks["post_tool_call"]
+    notifications = []
+    real_run = plugin.subprocess.run
+    real_thread = plugin.threading.Thread
+    class ImmediateThread:
+        def __init__(self, target, **_kwargs):
+            self.target = target
+        def start(self):
+            self.target()
+    try:
+        plugin.threading.Thread = ImmediateThread
+        plugin.subprocess.run = lambda argv, **kwargs: notifications.append((argv, kwargs))
+        assert receipt_hook(tool_name="web_search", cwd=str(runtime_project)) is None
+        assert notifications == []
+        assert receipt_hook(
+            tool_name="terminal",
+            args={"command": "secret output is deliberately absent"},
+            cwd=str(runtime_project),
+            session_id="session-1",
+            turn_id="turn-1",
+            tool_call_id="call-1",
+            status="success",
+            duration_ms=9,
+        ) is None
+        assert len(notifications) == 1
+        argv, call = notifications[0]
+        assert argv[-1] == "hook-hermes-terminal-receipt"
+        event = json.loads(call["input"])
+        assert event["route"]["session_id"] == "session-1"
+        assert event["receipt"]["tool_call_id"] == "call-1"
+        assert "command" not in call["input"] and "output" not in call["input"]
+    finally:
+        plugin.subprocess.run = real_run
+        plugin.threading.Thread = real_thread
+    ok("post_tool_call emits bounded asynchronous terminal receipts")
+
     real_block = plugin.tools.plugin_config_block
     try:
         plugin.tools.plugin_config_block = lambda *_args, **_kwargs: {"nudge": False}

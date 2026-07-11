@@ -2335,6 +2335,23 @@ impl McpServer {
             HookEventPlan::DebouncedIncrementalSync(agent) => {
                 self.run_hook_incremental_sync(cg, agent).await;
             }
+            HookEventPlan::RecordTerminalReceipt { route, receipt } => {
+                match crate::automation::host_receipts::record(
+                    &cg.store_layout().dashboard_root,
+                    route,
+                    receipt,
+                )
+                .await
+                {
+                    Ok(true) => {
+                        if let Some(reconcile) = &self.automation_scheduler_reconciler {
+                            reconcile();
+                        }
+                    }
+                    Ok(false) => {}
+                    Err(error) => eprintln!("[tracedecay] host receipt record failed: {error}"),
+                }
+            }
             HookEventPlan::Noop => {}
         }
     }

@@ -17,6 +17,7 @@ pub(crate) enum HookEventKind {
     WorkspaceOpen,
     SessionStart,
     IncrementalSync,
+    TerminalReceipt,
 }
 
 impl HookEventKind {
@@ -27,6 +28,7 @@ impl HookEventKind {
             "workspaceOpen" => Some(Self::WorkspaceOpen),
             "sessionStart" => Some(Self::SessionStart),
             "postToolUse" => Some(Self::IncrementalSync),
+            "terminalReceipt" => Some(Self::TerminalReceipt),
             _ => None,
         }
     }
@@ -38,6 +40,7 @@ impl HookEventKind {
             Self::WorkspaceOpen => "workspace_open",
             Self::SessionStart => "session_start",
             Self::IncrementalSync => "incremental_sync",
+            Self::TerminalReceipt => "terminal_receipt",
         }
     }
 }
@@ -49,6 +52,7 @@ pub(crate) struct HookEvent {
     pub(crate) command: Option<String>,
     pub(crate) cwd: Option<PathBuf>,
     pub(crate) route: Option<crate::daemon::HookRouteMetadata>,
+    pub(crate) receipt: Option<crate::daemon::HookTerminalReceipt>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -65,6 +69,10 @@ pub(crate) enum HookEventPlan {
         agent: HookAgent,
     },
     DebouncedIncrementalSync(HookAgent),
+    RecordTerminalReceipt {
+        route: Option<crate::daemon::HookRouteMetadata>,
+        receipt: crate::daemon::HookTerminalReceipt,
+    },
     Noop,
 }
 
@@ -77,6 +85,7 @@ pub(crate) fn parse_hook_event(params: Option<&Value>) -> Option<HookEvent> {
         command: event.command.filter(|command| !command.is_empty()),
         cwd: event.cwd,
         route: event.route,
+        receipt: event.receipt,
     })
 }
 
@@ -108,6 +117,14 @@ pub(crate) fn plan_hook_event(
             HookEventPlan::SyncFiles(event.rel_paths.clone())
         }
         HookEventKind::IncrementalSync => HookEventPlan::DebouncedIncrementalSync(event.agent),
+        HookEventKind::TerminalReceipt => event
+            .receipt
+            .clone()
+            .map(|receipt| HookEventPlan::RecordTerminalReceipt {
+                route: event.route.clone(),
+                receipt,
+            })
+            .unwrap_or(HookEventPlan::Noop),
     }
 }
 
@@ -765,6 +782,30 @@ mod tests {
             Some(HookEventKind::SessionStart)
         );
         assert_eq!(HookEventKind::SessionStart.as_key(), "session_start");
+    }
+
+    #[test]
+    fn parses_hermes_terminal_receipt_without_terminal_content() {
+        let event = parse_or_panic(&json!({
+            "agent": "hermes",
+            "event": "terminalReceipt",
+            "cwd": "/tmp/project",
+            "route": {"session_id": "session-1", "cwd": "/tmp/project"},
+            "receipt": {
+                "tool_call_id": "call-1",
+                "turn_id": "turn-1",
+                "status": "success",
+                "duration_ms": 12,
+                "transcript_watermark": "turn-1"
+            }
+        }));
+        assert_eq!(event.agent, HookAgent::Hermes);
+        assert_eq!(event.kind, HookEventKind::TerminalReceipt);
+        assert!(matches!(
+            plan_hook_event(&event, Path::new("/tmp/project"), None),
+            HookEventPlan::RecordTerminalReceipt { receipt, .. }
+                if receipt.tool_call_id.as_deref() == Some("call-1")
+        ));
     }
 
     #[test]
