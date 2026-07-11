@@ -12470,7 +12470,7 @@ async fn user_message_search_cli_bridge_accepts_storage_scope() {
             "tracedecay_message_search",
             "--json",
             "--args",
-            r#"{"storage_scope":"user","provider":"codex","query":"apricot","catch_up":false,"format":"json"}"#,
+            r#"{"storage_scope":"user","provider":"codex","query":"apricot","format":"json"}"#,
         ])
         .output()
         .unwrap();
@@ -12483,6 +12483,7 @@ async fn user_message_search_cli_bridge_accepts_storage_scope() {
     let envelope: Value = serde_json::from_slice(&search_output.stdout).unwrap();
     let payload = extract_first_json_content(&envelope);
     assert_eq!(payload["status"], "ok");
+    assert_eq!(payload["catch_up_performed"], true);
     assert_eq!(payload["count"], 1);
     assert_eq!(payload["results"][0]["session"]["project_key"], "user");
 }

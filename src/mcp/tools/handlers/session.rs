@@ -2527,11 +2527,36 @@ pub(super) async fn handle_message_search(
 }
 
 pub(super) async fn handle_user_message_search(
-    sessions_db_path: &Path,
+    profile_root: &Path,
     args: Value,
 ) -> Result<ToolResult> {
     let request = parse_message_search_request(&args)?;
-    let Some(db) = GlobalDb::open_read_only_at(sessions_db_path).await else {
+    let sessions_db_path = crate::sessions::user_sessions_db_path(profile_root);
+    let catch_up_leader = if request.catch_up {
+        let key = format!(
+            "user:{}:{}",
+            sessions_db_path.display(),
+            request.provider_scope.response_label()
+        );
+        match claim_message_catch_up(key) {
+            MessageCatchUpClaim::Wait(done) => {
+                wait_for_message_catch_up(done).await;
+                None
+            }
+            MessageCatchUpClaim::Leader(leader) => Some(leader),
+        }
+    } else {
+        None
+    };
+    if catch_up_leader.is_some() {
+        let _ = crate::sessions::ingest_user_global_sources_for_provider_at(
+            profile_root,
+            request.provider_scope.provider(),
+        )
+        .await;
+    }
+    drop(catch_up_leader);
+    let Some(db) = GlobalDb::open_read_only_at(&sessions_db_path).await else {
         return Ok(tool_json(
             None,
             &args,
@@ -2549,7 +2574,7 @@ pub(super) async fn handle_user_message_search(
     } else {
         search_session_messages_in_db(&db, &request).await
     };
-    let payload = message_search_payload(&request, &results, false);
+    let payload = message_search_payload(&request, &results, request.catch_up);
     Ok(tool_json_with_md(None, &args, &payload, || {
         render_message_search_md(&payload)
     }))

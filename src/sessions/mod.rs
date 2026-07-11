@@ -54,6 +54,15 @@ pub async fn registered_project_roots() -> Vec<PathBuf> {
 /// is projectless.
 pub async fn try_registered_project_roots() -> Option<Vec<PathBuf>> {
     let global = GlobalDb::open().await?;
+    registered_project_roots_from(&global).await
+}
+
+async fn try_registered_project_roots_at(profile_root: &Path) -> Option<Vec<PathBuf>> {
+    let global = GlobalDb::open_at(&profile_root.join("global.db")).await?;
+    registered_project_roots_from(&global).await
+}
+
+async fn registered_project_roots_from(global: &GlobalDb) -> Option<Vec<PathBuf>> {
     let mut roots = global
         .list_project_paths()
         .await
@@ -72,27 +81,42 @@ pub async fn ingest_user_codex_sessions(session_id: Option<String>) -> Transcrip
     let Ok(profile_root) = crate::storage::default_profile_root() else {
         return TranscriptIngestStats::default();
     };
-    let Some(db) = open_user_session_db(&profile_root).await else {
+    let Some(registered_roots) = try_registered_project_roots().await else {
+        return TranscriptIngestStats::default();
+    };
+    ingest_user_codex_sessions_at(&profile_root, session_id, registered_roots).await
+}
+
+async fn ingest_user_codex_sessions_at(
+    profile_root: &Path,
+    session_id: Option<String>,
+    registered_roots: Vec<PathBuf>,
+) -> TranscriptIngestStats {
+    let Some(db) = open_user_session_db(profile_root).await else {
         return TranscriptIngestStats::default();
     };
     let Some(source) = codex::CodexSource::new() else {
         return TranscriptIngestStats::default();
     };
-    let Some(registered_roots) = try_registered_project_roots().await else {
-        return TranscriptIngestStats::default();
-    };
     let source = source.for_user_scope(session_id, registered_roots);
-    ingest_source(&db, &source, &profile_root, None).await
+    ingest_source(&db, &source, profile_root, None).await
 }
 
 pub async fn ingest_user_cursor_sessions() -> TranscriptIngestStats {
     let Ok(profile_root) = crate::storage::default_profile_root() else {
         return TranscriptIngestStats::default();
     };
-    let Some(db) = open_user_session_db(&profile_root).await else {
+    let Some(registered_roots) = try_registered_project_roots().await else {
         return TranscriptIngestStats::default();
     };
-    let Some(registered_roots) = try_registered_project_roots().await else {
+    ingest_user_cursor_sessions_at(&profile_root, registered_roots).await
+}
+
+async fn ingest_user_cursor_sessions_at(
+    profile_root: &Path,
+    registered_roots: Vec<PathBuf>,
+) -> TranscriptIngestStats {
+    let Some(db) = open_user_session_db(profile_root).await else {
         return TranscriptIngestStats::default();
     };
     let (composer_stats, owned) = if let Some(source) = cursor_composer::CursorComposerSource::new()
@@ -123,7 +147,7 @@ pub async fn ingest_user_cursor_sessions() -> TranscriptIngestStats {
     let source = source
         .with_skip_session_ids(owned)
         .for_user_scope(&registered_roots);
-    composer_stats.merge(ingest_source(&db, &source, &profile_root, None).await)
+    composer_stats.merge(ingest_source(&db, &source, profile_root, None).await)
 }
 
 pub async fn ingest_user_global_sources() -> TranscriptIngestStats {
@@ -139,28 +163,46 @@ fn provider_selected(scope: Option<SessionProvider>, candidate: SessionProvider)
 pub async fn ingest_user_global_sources_for_provider(
     provider: Option<SessionProvider>,
 ) -> TranscriptIngestStats {
-    let mut stats = TranscriptIngestStats::default();
-    if provider_selected(provider, SessionProvider::Codex) {
-        stats = stats.merge(ingest_user_codex_sessions(None).await);
-    }
-    if provider_selected(provider, SessionProvider::Cursor) {
-        stats = stats.merge(ingest_user_cursor_sessions().await);
-    }
     let Ok(profile_root) = crate::storage::default_profile_root() else {
-        return stats;
-    };
-    let Some(db) = open_user_session_db(&profile_root).await else {
-        return stats;
+        return TranscriptIngestStats::default();
     };
     let Some(roots) = try_registered_project_roots().await else {
+        return TranscriptIngestStats::default();
+    };
+    ingest_user_global_sources_for_provider_with_roots(&profile_root, provider, roots).await
+}
+
+pub(crate) async fn ingest_user_global_sources_for_provider_at(
+    profile_root: &Path,
+    provider: Option<SessionProvider>,
+) -> TranscriptIngestStats {
+    let Some(roots) = try_registered_project_roots_at(profile_root).await else {
+        return TranscriptIngestStats::default();
+    };
+    ingest_user_global_sources_for_provider_with_roots(profile_root, provider, roots).await
+}
+
+async fn ingest_user_global_sources_for_provider_with_roots(
+    profile_root: &Path,
+    provider: Option<SessionProvider>,
+    roots: Vec<PathBuf>,
+) -> TranscriptIngestStats {
+    let mut stats = TranscriptIngestStats::default();
+    if provider_selected(provider, SessionProvider::Codex) {
+        stats = stats.merge(ingest_user_codex_sessions_at(profile_root, None, roots.clone()).await);
+    }
+    if provider_selected(provider, SessionProvider::Cursor) {
+        stats = stats.merge(ingest_user_cursor_sessions_at(profile_root, roots.clone()).await);
+    }
+    let Some(db) = open_user_session_db(profile_root).await else {
         return stats;
     };
     if provider_selected(provider, SessionProvider::Hermes) {
         stats = stats.merge(hermes::ingest_user_sessions(&db, &roots).await);
     }
     if provider_selected(provider, SessionProvider::Claude) {
-        stats = stats
-            .merge(claude::ingest_user_sessions(&db, &profile_root, None, roots.clone()).await);
+        stats =
+            stats.merge(claude::ingest_user_sessions(&db, profile_root, None, roots.clone()).await);
     }
     let mut sources: Vec<Box<dyn TranscriptSource>> = Vec::new();
     if provider_selected(provider, SessionProvider::Vibe)
@@ -189,7 +231,7 @@ pub async fn ingest_user_global_sources_for_provider(
         sources.push(Box::new(source.for_user_scope(roots)));
     }
     for source in sources {
-        let source_stats = ingest_source(&db, source.as_ref(), &profile_root, None).await;
+        let source_stats = ingest_source(&db, source.as_ref(), profile_root, None).await;
         stats = stats.merge(source_stats);
     }
     if stats.messages_upserted > 0 {
@@ -307,20 +349,7 @@ pub async fn ingest_global_sources_for_provider(
     project_root: &Path,
     provider: Option<SessionProvider>,
 ) -> TranscriptIngestStats {
-    ingest_global_sources_for_provider_inner(db, project_root, provider, true).await
-}
-
-async fn ingest_global_sources_for_provider_inner(
-    db: &GlobalDb,
-    project_root: &Path,
-    provider: Option<SessionProvider>,
-    include_user_scope: bool,
-) -> TranscriptIngestStats {
-    // Keep the profile-level projectless history current alongside every
-    // project sweep while respecting an explicit provider scope.
-    if include_user_scope {
-        let _ = ingest_user_global_sources_for_provider(provider).await;
-    }
+    let _ = ingest_user_global_sources_for_provider(provider).await;
     ingest_project_sources_for_provider(db, project_root, provider, true).await
 }
 
@@ -415,7 +444,7 @@ pub(crate) async fn ingest_global_sources_for_startup(
     project_root: &Path,
 ) -> TranscriptIngestStats {
     let user = ingest_user_global_sources_for_startup().await;
-    user.merge(ingest_global_sources_for_provider_inner(db, project_root, None, false).await)
+    user.merge(ingest_project_sources_for_provider(db, project_root, None, true).await)
 }
 
 /// Runs the bounded commit-attribution sweep against the correlation store.
