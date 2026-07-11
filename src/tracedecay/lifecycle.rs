@@ -38,6 +38,7 @@ impl TraceDecay {
         save_config_to_path(&store_layout.config_path, &config)?;
 
         let (db, _migrated) = Database::initialize(&store_layout.graph_db_path).await?;
+        let active_graph_layout = active_graph_layout(&store_layout.graph_db_path);
         if store_layout.storage_mode == storage::StorageMode::ProfileSharded {
             storage::write_store_manifest(&store_layout)?;
         }
@@ -57,6 +58,7 @@ impl TraceDecay {
             config,
             project_root: project_root.to_path_buf(),
             store_layout,
+            active_graph_layout,
             open_options,
             registry: LanguageRegistry::new(),
             active_branch,
@@ -293,7 +295,7 @@ impl TraceDecay {
         project_root: &Path,
         open_options: TraceDecayOpenOptions,
     ) -> Result<Self> {
-        let mut store_layout =
+        let store_layout =
             Self::resolve_store_layout_for_project(project_root, &open_options).await?;
         let config = load_config_from_path(project_root, &store_layout.config_path)?;
         let active_branch = branch::current_branch(project_root);
@@ -314,7 +316,7 @@ impl TraceDecay {
         // Sync state belongs to the concrete graph DB, not the repository-wide
         // store root. Different tracked branches have independent databases
         // and must never clear or inherit one another's dirty marker or lock.
-        activate_graph_layout(&mut store_layout, &db_path);
+        let active_graph_layout = active_graph_layout(&db_path);
 
         if !db_path.exists() {
             return Err(TraceDecayError::Config {
@@ -327,7 +329,8 @@ impl TraceDecay {
 
         // If the dirty sentinel exists, a previous sync/index was interrupted.
         // Check integrity and rebuild if necessary.
-        let crashed = has_dirty_sentinel_at(&store_layout.dirty_path);
+        let crashed = has_dirty_sentinel_at(&active_graph_layout.dirty_path)
+            || has_dirty_sentinel_at(&store_layout.dirty_path);
         if crashed {
             eprintln!(
                 "[tracedecay] previous operation was interrupted — checking database integrity…"
@@ -351,7 +354,10 @@ impl TraceDecay {
         // quick integrity check.
         if crashed {
             match db.quick_check().await {
-                Ok(true) => clear_dirty_sentinel_at(&store_layout.dirty_path),
+                Ok(true) => {
+                    clear_dirty_sentinel_at(&active_graph_layout.dirty_path);
+                    clear_dirty_sentinel_at(&store_layout.dirty_path);
+                }
                 Ok(false) => {
                     print_corruption_warning(&db_path);
                     return Err(recovery_required_error(
@@ -371,6 +377,7 @@ impl TraceDecay {
             config,
             project_root: project_root.to_path_buf(),
             store_layout,
+            active_graph_layout,
             open_options,
             registry: LanguageRegistry::new(),
             active_branch,
@@ -406,7 +413,7 @@ impl TraceDecay {
         project_root: &Path,
         open_options: TraceDecayOpenOptions,
     ) -> Result<Self> {
-        let mut store_layout =
+        let store_layout =
             Self::resolve_store_layout_for_project_read_only(project_root, &open_options).await?;
         let config = load_config_from_path(project_root, &store_layout.config_path)?;
         let active_branch = branch::current_branch(project_root);
@@ -416,7 +423,7 @@ impl TraceDecay {
             &store_layout.data_root,
             active_branch.as_deref(),
         );
-        activate_graph_layout(&mut store_layout, &db_path);
+        let active_graph_layout = active_graph_layout(&db_path);
 
         if !db_path.exists() {
             return Err(TraceDecayError::Config {
@@ -433,6 +440,7 @@ impl TraceDecay {
             config,
             project_root: project_root.to_path_buf(),
             store_layout,
+            active_graph_layout,
             open_options,
             registry: LanguageRegistry::new(),
             active_branch,
@@ -634,7 +642,7 @@ impl TraceDecay {
         branch_name: &str,
         open_options: TraceDecayOpenOptions,
     ) -> Result<Self> {
-        let mut store_layout =
+        let store_layout =
             Self::resolve_store_layout_for_project(project_root, &open_options).await?;
         let config = load_config_from_path(project_root, &store_layout.config_path)?;
 
@@ -649,7 +657,7 @@ impl TraceDecay {
             .ok_or_else(|| TraceDecayError::Config {
             message: format!("branch '{branch_name}' is not tracked"),
         })?;
-        activate_graph_layout(&mut store_layout, &db_path);
+        let active_graph_layout = active_graph_layout(&db_path);
 
         if !db_path.exists() {
             return Err(TraceDecayError::Config {
@@ -666,6 +674,7 @@ impl TraceDecay {
             config,
             project_root: project_root.to_path_buf(),
             store_layout,
+            active_graph_layout,
             open_options,
             registry: LanguageRegistry::new(),
             active_branch: Some(branch_name.to_string()),
@@ -968,9 +977,11 @@ fn graph_sidecar_path(db_path: &Path, suffix: &str) -> PathBuf {
     db_path.with_file_name(file_name)
 }
 
-fn activate_graph_layout(store_layout: &mut StoreLayout, db_path: &Path) {
-    store_layout.dirty_path = graph_sidecar_path(db_path, ".dirty");
-    store_layout.sync_lock_path = graph_sidecar_path(db_path, ".sync.lock");
+fn active_graph_layout(db_path: &Path) -> super::ActiveGraphLayout {
+    super::ActiveGraphLayout {
+        dirty_path: graph_sidecar_path(db_path, ".dirty"),
+        sync_lock_path: graph_sidecar_path(db_path, ".sync.lock"),
+    }
 }
 
 #[derive(Debug)]

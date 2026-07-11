@@ -1041,30 +1041,32 @@ fn sync_codex_hook_trust(home: &Path, tracedecay_bin: &str) -> Result<CodexHookT
         trusted += 1;
     }
 
-    write_toml_file(&config_path, &config)?;
-    ensure_explicit_codex_hook_state_table(&config_path)?;
+    write_codex_hook_trust_config(&config_path, &config)?;
     Ok(CodexHookTrustSyncOutcome { trusted, skipped })
 }
 
 /// Codex's hook loader requires the parent table to be explicit on disk. The
 /// `toml` serializer otherwise emits only `[hooks.state."..."]` child tables,
 /// which parses equivalently but still triggers Codex's hook-review prompt.
-fn ensure_explicit_codex_hook_state_table(config_path: &Path) -> Result<()> {
-    let contents =
-        std::fs::read_to_string(config_path).map_err(|error| TraceDecayError::Config {
-            message: format!("failed to read {}: {error}", config_path.display()),
-        })?;
-    if codex_hook_state_table_is_explicit(&contents) {
-        return Ok(());
-    }
+fn write_codex_hook_trust_config(config_path: &Path, config: &toml::Value) -> Result<()> {
+    super::backup_file(config_path)?;
+    let contents = toml::to_string_pretty(config).map_err(|error| TraceDecayError::Config {
+        message: format!("failed to serialize {}: {error}", config_path.display()),
+    })?;
     let Some(child_offset) = contents.find("[hooks.state.\"") else {
-        return Ok(());
+        return Err(TraceDecayError::Config {
+            message: "Codex hook trust state serialized without hook entries".to_string(),
+        });
     };
     let mut updated = String::with_capacity(contents.len() + "[hooks.state]\n\n".len());
     updated.push_str(&contents[..child_offset]);
     updated.push_str("[hooks.state]\n\n");
     updated.push_str(&contents[child_offset..]);
-    safe_write_text_file(config_path, &updated, None)
+    std::fs::write(config_path, updated).map_err(|error| TraceDecayError::Config {
+        message: format!("failed to write {}: {error}", config_path.display()),
+    })?;
+    eprintln!("\x1b[32m✔\x1b[0m Wrote {}", config_path.display());
+    Ok(())
 }
 
 fn codex_hook_state_table_is_explicit(contents: &str) -> bool {

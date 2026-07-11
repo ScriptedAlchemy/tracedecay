@@ -438,7 +438,7 @@ async fn try_ingest_state_db(
         if batches.is_empty() {
             // Only non-conversation rows (e.g. `session_meta`) — still advance
             // the cursor so the next sweep does not re-read them.
-            db.set_parse_offset(&cursor_path, offset).await;
+            db.advance_parse_offset(&cursor_path, offset).await;
         } else {
             let message_count: u64 = batches
                 .iter()
@@ -611,7 +611,7 @@ async fn try_ingest_state_db_for_projects(
         state
             .destination
             .db
-            .set_parse_offset(
+            .advance_parse_offset(
                 &cursor_path,
                 ParseOffset {
                     byte_offset: state.cursor.position,
@@ -668,7 +668,7 @@ async fn try_ingest_user_state_db(
         };
         let batches = build_user_batches(db, &new.items, &path_str, source, registered_roots).await;
         if batches.is_empty() {
-            db.set_parse_offset(&cursor_path, offset).await;
+            db.advance_parse_offset(&cursor_path, offset).await;
         } else {
             let message_count = batches
                 .iter()

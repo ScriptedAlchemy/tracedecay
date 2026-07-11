@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::json;
 use tempfile::TempDir;
-use tracedecay::global_db::GlobalDb;
+use tracedecay::global_db::{GlobalDb, ParseOffset};
 use tracedecay::sessions::SessionRecord;
 use tracedecay::sessions::cursor::open_project_session_db;
 use tracedecay::sessions::hermes::{
@@ -20,6 +20,35 @@ use tracedecay::sessions::lcm::LcmPreflightRequest;
 use crate::support::{assert_metadata_path_eq, create_git_repo_with_linked_worktree};
 
 const SESSION_ID: &str = "20260101_000000_abc123";
+
+#[tokio::test]
+async fn hermes_row_cursor_cannot_regress_during_overlapping_sweeps() {
+    let tmp = TempDir::new().unwrap();
+    let db = GlobalDb::open_at(&tmp.path().join("sessions.db"))
+        .await
+        .unwrap();
+    let cursor = "state.db#turn-project-v2";
+    db.advance_parse_offset(
+        cursor,
+        ParseOffset {
+            byte_offset: 200,
+            mtime: 20,
+            file_id: 0,
+        },
+    )
+    .await;
+    db.advance_parse_offset(
+        cursor,
+        ParseOffset {
+            byte_offset: 100,
+            mtime: 10,
+            file_id: 0,
+        },
+    )
+    .await;
+
+    assert_eq!(db.get_parse_offset(cursor).await.unwrap().byte_offset, 200);
+}
 
 #[tokio::test]
 // Intentional: this test changes HOME/USERPROFILE/HERMES_HOME while storage

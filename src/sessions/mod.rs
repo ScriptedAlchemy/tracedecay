@@ -306,6 +306,13 @@ pub(crate) async fn ingest_project_sources_for_provider(
         } else {
             stats
         };
+    finalize_project_ingest(db, project_root).await;
+    stats
+}
+
+/// Refreshes derived session data after a caller performs its own optimized
+/// transcript ingest (for example, one shared Hermes source sweep).
+pub(crate) async fn finalize_project_ingest(db: &GlobalDb, project_root: &Path) {
     // Now that messages have landed, attribute any commits that fell inside a
     // recorded session span. Fail-open: a git or DB hiccup never blocks ingest.
     attribute_commits_after_ingest(db).await;
@@ -314,7 +321,6 @@ pub(crate) async fn ingest_project_sources_for_provider(
     // a workflow-ingest hiccup only logs at debug, never blocks session ingest.
     // Runs live in their own tables, so they do not affect `stats`.
     let _ = workflow_ingest::ingest_workflow_runs(db, project_root).await;
-    stats
 }
 
 /// Runs the bounded commit-attribution sweep against the correlation store.

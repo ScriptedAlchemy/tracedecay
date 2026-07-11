@@ -215,10 +215,15 @@ fn database_recovery_guidance_names_the_preserved_recovery_set() {
     let db_path = PathBuf::from("/profile/projects/proj_test/tracedecay.db");
     let guidance = database_recovery_guidance(&db_path);
 
-    assert!(guidance.contains("/profile/projects/proj_test/tracedecay.db"));
-    assert!(guidance.contains("/profile/projects/proj_test/tracedecay.db-wal"));
-    assert!(guidance.contains("/profile/projects/proj_test/tracedecay.db-shm"));
-    assert!(guidance.contains("/profile/projects/proj_test/dirty"));
+    for path in [
+        db_path.clone(),
+        db_path.with_extension("db-wal"),
+        db_path.with_extension("db-shm"),
+        PathBuf::from(format!("{}.dirty", db_path.display())),
+        db_path.parent().unwrap().join("dirty"),
+    ] {
+        assert!(guidance.contains(&path.display().to_string()));
+    }
     assert!(guidance.contains("stop all TraceDecay daemon and MCP processes"));
     assert!(
         guidance.contains(

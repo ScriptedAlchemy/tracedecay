@@ -75,18 +75,52 @@ async fn open_untracked_project() -> (IsolatedEnv, PathBuf, TraceDecay) {
     assert_eq!(feature.serving_branch(), Some("feature/untracked"));
     assert!(!feature.is_fallback());
     let layout = feature.store_layout();
-    assert_eq!(
-        layout.dirty_path,
-        PathBuf::from(format!("{}.dirty", feature.db_path().display()))
-    );
-    assert_eq!(
-        layout.sync_lock_path,
-        PathBuf::from(format!("{}.sync.lock", feature.db_path().display()))
-    );
+    assert_eq!(layout.dirty_path, layout.data_root.join("dirty"));
+    assert_eq!(layout.sync_lock_path, layout.data_root.join("sync.lock"));
     assert_ne!(feature.db_path(), layout.graph_db_path);
-    assert_ne!(layout.dirty_path, layout.data_root.join("dirty"));
 
     (env, project, feature)
+}
+
+#[tokio::test]
+// Regression: init and reopen must use the same graph-scoped lock.
+async fn init_index_uses_graph_specific_sync_lock() {
+    let (_env, project) = IsolatedEnv::acquire().await;
+    fs::create_dir_all(project.join("src")).unwrap();
+    fs::write(project.join("src/lib.rs"), "pub fn indexed() {}\n").unwrap();
+
+    let cg = TraceDecay::init(&project).await.unwrap();
+    let lock_path = PathBuf::from(format!("{}.sync.lock", cg.db_path().display()));
+    fs::write(&lock_path, std::process::id().to_string()).unwrap();
+
+    let err = match cg.index_all().await {
+        Ok(_) => panic!("active graph lock must block init indexing"),
+        Err(err) => err,
+    };
+    assert!(
+        err.to_string()
+            .contains("another sync is already in progress")
+    );
+}
+
+#[tokio::test]
+async fn open_honors_and_clears_legacy_dirty_sentinel() {
+    let (_env, project) = IsolatedEnv::acquire().await;
+    fs::create_dir_all(project.join("src")).unwrap();
+    fs::write(project.join("src/lib.rs"), "pub fn indexed() {}\n").unwrap();
+
+    let cg = TraceDecay::init(&project).await.unwrap();
+    cg.index_all().await.unwrap();
+    let legacy_dirty = cg.store_layout().data_root.join("dirty");
+    fs::write(&legacy_dirty, "interrupted legacy writer").unwrap();
+    drop(cg);
+
+    let reopened = TraceDecay::open(&project).await.unwrap();
+    assert!(
+        !legacy_dirty.exists(),
+        "successful recovery must clear legacy sentinel"
+    );
+    drop(reopened);
 }
 
 async fn open_detached_fallback_project() -> (IsolatedEnv, PathBuf, TraceDecay) {

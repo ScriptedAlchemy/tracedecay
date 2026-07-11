@@ -2380,7 +2380,11 @@ pub(super) async fn handle_message_search(
                         .collect::<Vec<_>>();
                 let _ = crate::sessions::hermes::ingest_for_projects(&hermes_destinations).await;
             }
-            if provider != Some(crate::sessions::SessionProvider::Hermes) {
+            if provider == Some(crate::sessions::SessionProvider::Hermes) {
+                for (db, project_root) in &destinations {
+                    crate::sessions::finalize_project_ingest(db, project_root).await;
+                }
+            } else {
                 for (db, project_root) in &destinations {
                     let _ = crate::sessions::ingest_project_sources_for_provider(
                         db,
@@ -2392,6 +2396,7 @@ pub(super) async fn handle_message_search(
                 }
             }
         }
+        drop(catch_up_leader);
         let searched_project_count = destinations.len();
         let mut results = Vec::new();
         for (db, _) in &destinations {
@@ -2485,6 +2490,7 @@ pub(super) async fn handle_message_search(
         )
         .await;
     }
+    drop(catch_up_leader);
     // Build the workflow-run scope filter and, separately, resolve the run's
     // parent thread purely for the echoed `workflow_run_parent_session` field
     // (the scope itself is authoritative via the `workflow_agents` EXISTS

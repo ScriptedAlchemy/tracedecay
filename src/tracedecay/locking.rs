@@ -47,6 +47,41 @@ pub struct SyncLockGuard {
     path: PathBuf,
 }
 
+pub(super) struct ActiveSyncLockGuard {
+    _active: SyncLockGuard,
+    _legacy: Option<SyncLockGuard>,
+}
+
+impl super::TraceDecay {
+    pub(super) fn try_acquire_active_sync_lock(&self) -> Result<ActiveSyncLockGuard> {
+        let active = try_acquire_sync_lock_at(&self.active_graph_layout.sync_lock_path)?;
+        let legacy = if self.active_graph_layout.sync_lock_path == self.store_layout.sync_lock_path
+        {
+            None
+        } else {
+            Some(try_acquire_sync_lock_at(&self.store_layout.sync_lock_path)?)
+        };
+        Ok(ActiveSyncLockGuard {
+            _active: active,
+            _legacy: legacy,
+        })
+    }
+
+    pub(super) fn write_active_dirty_sentinels(&self) {
+        write_dirty_sentinel_at(&self.active_graph_layout.dirty_path);
+        if self.active_graph_layout.dirty_path != self.store_layout.dirty_path {
+            write_dirty_sentinel_at(&self.store_layout.dirty_path);
+        }
+    }
+
+    pub(super) fn clear_active_dirty_sentinels(&self) {
+        clear_dirty_sentinel_at(&self.active_graph_layout.dirty_path);
+        if self.active_graph_layout.dirty_path != self.store_layout.dirty_path {
+            clear_dirty_sentinel_at(&self.store_layout.dirty_path);
+        }
+    }
+}
+
 impl Drop for SyncLockGuard {
     fn drop(&mut self) {
         let _ = std::fs::remove_file(&self.path);
