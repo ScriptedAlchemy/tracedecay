@@ -704,6 +704,8 @@ mod git_scan_tests {
         let worktree = temp.path().join("repo-worktree");
         std::fs::create_dir_all(&canonical).unwrap();
         std::fs::create_dir_all(&worktree).unwrap();
+        let canonical = std::fs::canonicalize(canonical).unwrap();
+        let worktree = std::fs::canonicalize(worktree).unwrap();
         let db = GlobalDb::open_at(&temp.path().join("global.db"))
             .await
             .unwrap();
