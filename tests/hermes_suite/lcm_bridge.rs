@@ -1585,8 +1585,11 @@ class Result:
 def mcp_response(inner):
     return json.dumps({"content": [{"type": "text", "text": json.dumps(inner)}]})
 
-def fake_run(argv, check, capture_output, text, timeout, shell):
+run_cwds = []
+
+def fake_run(argv, check, capture_output, text, timeout, shell, cwd=None):
     calls.append(argv)
+    run_cwds.append(cwd)
     tool_name = argv[4] if "--project" in argv else argv[2]
     if tool_name == "tracedecay_lcm_expand_query":
         inner = {
@@ -1619,12 +1622,14 @@ profile_result = profile_engine._preflight_probe(messages=[], current_tokens=100
 assert profile_result["status"] == "ok"
 assert profile_engine.should_compress_preflight([], current_tokens=100) is False
 profile_argv = calls.pop()
+profile_cwd = run_cwds.pop()
 assert profile_argv[0] == plugin.tools.TRACEDECAY_BIN
-assert profile_argv[1:3] == ["tool", "--project"]
-assert profile_argv[3] == os.getcwd()
-assert profile_argv[3] != "/tmp/hermes-profile"
+assert profile_argv[1:3] == ["tool", "tracedecay_lcm_preflight"]
+assert "--project" not in profile_argv
+assert profile_cwd == os.path.abspath(os.sep)
 profile_args = json.loads(profile_argv[profile_argv.index("--args") + 1])
 assert "project_root" not in profile_args
+assert profile_args["storage_scope"] == "user"
 
 explicit = plugin.tools.call_tracedecay_tool(
     "tracedecay_lcm_status",
@@ -1638,7 +1643,7 @@ explicit_args = json.loads(explicit_argv[explicit_argv.index("--args") + 1])
 assert explicit_args["storage_scope"] == "hermes_profile"
 assert explicit_args["hermes_home"] == "/tmp/hermes-profile"
 "#,
-        "generated bridge must route only by real projects and leave stale args for strict CLI rejection",
+        "generated bridge must route only by real projects and isolate explicit user scope",
     );
 }
 
