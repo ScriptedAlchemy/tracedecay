@@ -43,6 +43,7 @@ const HOOK_EVENT_NOTIFY_TIMEOUT: Duration = Duration::from_millis(750);
 const DAEMON_SHUTDOWN_DEADLINE: Duration = Duration::from_secs(45);
 #[cfg(unix)]
 const DAEMON_CLIENT_DRAIN_DEADLINE: Duration = Duration::from_secs(15);
+#[cfg(unix)]
 const DAEMON_TASK_ABORT_DEADLINE: Duration = Duration::from_secs(2);
 
 #[derive(Clone, Default)]
