@@ -268,6 +268,12 @@ trusted_hash = "sha256:foreign"
     assert_eq!(outcome.trusted, CODEX_MANAGED_HOOKS.len());
     assert!(outcome.skipped.is_empty());
 
+    let config_text = std::fs::read_to_string(&config_path).unwrap();
+    assert!(
+        config_text.lines().any(|line| line == "[hooks.state]"),
+        "Codex requires an explicit [hooks.state] parent table before trusting child records"
+    );
+
     let entries = managed_entries(TEST_BIN);
     let config = load_toml_file(&config_path).unwrap();
     let state = config["hooks"]["state"].as_table().unwrap();
