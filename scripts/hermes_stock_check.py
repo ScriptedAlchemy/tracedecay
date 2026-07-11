@@ -25,6 +25,7 @@ import os
 import subprocess
 import sys
 import time
+from pathlib import Path
 
 PASS = 0
 
@@ -51,6 +52,25 @@ def main():
     hermes_home = os.path.join(os.environ["HOME"], ".hermes")
     project_root = os.getcwd()
 
+    # The installer projects approved managed skills beside the bundled
+    # plugin skill. Add one fixture before discovery to verify that stock
+    # Hermes registers the complete plugin-native skill overlay.
+    managed_skill = (
+        Path(hermes_home)
+        / "plugins"
+        / "tracedecay"
+        / "skills"
+        / "agent-managed"
+        / "managed-check"
+        / "SKILL.md"
+    )
+    managed_skill.parent.mkdir(parents=True, exist_ok=True)
+    managed_skill.write_text(
+        "---\nname: managed-check\ndescription: Managed skill registration check.\n---\n\n"
+        "# Managed check\n\nHermes can load this exported managed skill.\n",
+        encoding="utf-8",
+    )
+
     # 1. Stock general plugin manager: discovery, enablement, registrations.
     from hermes_cli.plugins import get_plugin_manager, get_plugin_context_engine
 
@@ -65,6 +85,16 @@ def main():
     ok("pre_llm_call hook registered")
     assert "tracedecay_status" in loaded.commands_registered, loaded.commands_registered
     ok("/tracedecay_status command registered")
+    assert manager.list_plugin_skills("tracedecay") == [
+        "managed-check",
+        "tracedecay",
+    ], manager.list_plugin_skills("tracedecay")
+    from tools.skills_tool import skill_view
+
+    managed_view = json.loads(skill_view("tracedecay:managed-check"))
+    assert managed_view.get("success") is True, managed_view
+    assert "Hermes can load this exported managed skill" in managed_view.get("content", "")
+    ok("plugin-native managed skills resolve through qualified skill_view")
     # Code-graph / memory / transcript tools register unconditionally; only
     # the live-ingest LCM verbs (whose schemas take the in-memory messages
     # list) depend on the context_engine_tool_handlers_receive_messages
@@ -84,6 +114,62 @@ def main():
         "code-graph tools register on stock; LCM + provider-owned tools stay gated",
         f"{len(registered)} tools",
     )
+    from model_tools import get_tool_definitions
+    from tools.tool_search import (
+        ToolSearchConfig,
+        assemble_tool_defs,
+        dispatch_tool_describe,
+        dispatch_tool_search,
+        resolve_underlying_call,
+    )
+
+    raw_tool_defs = get_tool_definitions(
+        enabled_toolsets=["tracedecay"],
+        quiet_mode=True,
+        skip_tool_search_assembly=True,
+    )
+    raw_names = {(item.get("function") or {}).get("name") for item in raw_tool_defs}
+    assert "tracedecay_search" in raw_names, sorted(raw_names)
+    forced_search = ToolSearchConfig(
+        enabled="on",
+        threshold_pct=10.0,
+        search_default_limit=5,
+        max_search_limit=20,
+    )
+    assembled = assemble_tool_defs(raw_tool_defs, config=forced_search)
+    visible_names = {
+        (item.get("function") or {}).get("name") for item in assembled.tool_defs
+    }
+    assert assembled.activated is True, assembled
+    assert "tracedecay_search" not in visible_names, sorted(visible_names)
+    assert {"tool_search", "tool_describe", "tool_call"}.issubset(visible_names)
+    search_result = json.loads(
+        dispatch_tool_search(
+            {"query": "semantic code search"},
+            current_tool_defs=raw_tool_defs,
+            config=forced_search,
+        )
+    )
+    match_names = {item["name"] for item in search_result.get("matches", [])}
+    assert "tracedecay_search" in match_names, search_result
+    described = json.loads(
+        dispatch_tool_describe(
+            {"name": "tracedecay_search"}, current_tool_defs=raw_tool_defs
+        )
+    )
+    assert described.get("name") == "tracedecay_search", described
+    underlying, arguments, error = resolve_underlying_call(
+        {
+            "name": "tracedecay_search",
+            "arguments": {"query": "register skill"},
+        }
+    )
+    assert (underlying, arguments, error) == (
+        "tracedecay_search",
+        {"query": "register skill"},
+        None,
+    )
+    ok("TraceDecay tools participate in stock progressive tool discovery")
 
     # 2. Context engine: registered through the plugin and selected the way
     #    stock agent/agent_init.py selects it (config-driven, plugin fallback).
@@ -215,6 +301,10 @@ def main():
     other_provider = load_memory_provider("tracedecay")
     assert other_provider is not None and other_provider is not provider
     other_provider.initialize("stock-check-session-two", cwd=other_project)
+    assert provider.project_root != other_provider.project_root, (
+        provider.project_root,
+        other_provider.project_root,
+    )
     isolation_marker = "stock hermes project two isolated"
     unwrap_tool_json(
         other_provider.handle_tool_call(

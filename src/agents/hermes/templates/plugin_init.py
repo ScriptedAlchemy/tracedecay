@@ -703,7 +703,7 @@ def _resolved_project_scope(project_root):
         return None
     try:
         status = call_tracedecay_json(
-            "tracedecay_status",
+            "tracedecay_active_project",
             {},
             **_project_call_kwargs(project_root),
         )
@@ -712,7 +712,14 @@ def _resolved_project_scope(project_root):
     if not isinstance(status, dict) or status.get("error"):
         return None
     resolved = status.get("project_root") or status.get("root")
-    return str(resolved or project_root)
+    if not resolved:
+        return None
+    try:
+        if os.path.realpath(str(resolved)) != os.path.realpath(str(project_root)):
+            return None
+    except (OSError, TypeError, ValueError):
+        return None
+    return str(resolved)
 
 def _project_scope_available(project_root) -> bool:
     return _resolved_project_scope(project_root) is not None
@@ -3705,13 +3712,44 @@ def register(ctx):
             "tracedecay direct tool registration unavailable on this Hermes host; continuing with context-engine schemas"
         )
 
-    skills_dir = Path(__file__).parent / "skills"
-    skill_path = skills_dir / "tracedecay" / "SKILL.md"
     register_skill = getattr(ctx, "register_skill", None)
-    if skill_path.exists() and callable(register_skill):
-        # Newer Hermes derives the namespace from the plugin name and
-        # rejects ':' in skill names, so register the bare name.
-        try:
-            register_skill("tracedecay", skill_path)
-        except Exception as exc:
-            logger.warning("tracedecay skill registration failed: %s", exc)
+    skills_dir = Path(__file__).parent / "skills"
+    if callable(register_skill) and skills_dir.is_dir():
+        direct_skills = [
+            path
+            for path in sorted(skills_dir.iterdir(), key=lambda path: path.name)
+            if path.name != "agent-managed"
+        ]
+        managed_dir = skills_dir / "agent-managed"
+        managed_skills = (
+            sorted(managed_dir.iterdir(), key=lambda path: path.name)
+            if managed_dir.is_dir()
+            else []
+        )
+        registered_skills = set()
+        for skill_dir in direct_skills + managed_skills:
+            if not skill_dir.is_dir():
+                logger.debug("tracedecay skill entry is not a directory; skipping: %s", skill_dir)
+                continue
+            skill_name = skill_dir.name
+            if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]*", skill_name):
+                logger.warning("tracedecay skill name is invalid; skipping: %s", skill_name)
+                continue
+            if skill_name in registered_skills:
+                logger.warning("tracedecay skill name collides; skipping: %s", skill_name)
+                continue
+            skill_path = skill_dir / "SKILL.md"
+            if not skill_path.is_file():
+                logger.debug("tracedecay skill has no SKILL.md; skipping: %s", skill_dir)
+                continue
+            registered_skills.add(skill_name)
+            # Hermes derives the plugin namespace and rejects ':' in skill
+            # names, so register every bundled/exported skill by bare name.
+            try:
+                register_skill(skill_name, skill_path)
+            except Exception as exc:
+                logger.warning(
+                    "tracedecay skill registration failed for %s: %s",
+                    skill_name,
+                    exc,
+                )

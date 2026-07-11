@@ -84,6 +84,7 @@ class StubCtx:
         self.provider = None
         self.engine = None
         self.config = None
+        self.skills = {}
 
     def register_hook(self, name, fn):
         self.hooks[name] = fn
@@ -98,7 +99,7 @@ class StubCtx:
         self.engine = engine
 
     def register_skill(self, name, path):
-        pass
+        self.skills[name] = Path(path)
 
     def register_config_defaults(self, defaults):
         pass
@@ -169,6 +170,17 @@ def run_checks(work: Path):
     assert "current schemas and are rejected" in skill, skill
     ok("provenance stamp + cli passthrough + storage guidance generated")
 
+    managed_skill = (
+        plugin_dir / "skills" / "agent-managed" / "managed-test" / "SKILL.md"
+    )
+    managed_skill.parent.mkdir(parents=True)
+    managed_skill.write_text("# Managed test\n", encoding="utf-8")
+    managed_collision = (
+        plugin_dir / "skills" / "agent-managed" / "tracedecay" / "SKILL.md"
+    )
+    managed_collision.parent.mkdir(parents=True)
+    managed_collision.write_text("# Must not replace bundled skill\n", encoding="utf-8")
+
     # The stock Hermes runtime exposes the logical session workspace through
     # TERMINAL_CWD (and, when importable, agent.runtime_cwd). Memory/LCM
     # routing must follow that workspace rather than the gateway process cwd.
@@ -194,6 +206,11 @@ def run_checks(work: Path):
     # duplicates; transcript search has no provider twin and stays.
     ctx = StubCtx()
     plugin.register(ctx)
+    assert ctx.skills == {
+        "managed-test": managed_skill,
+        "tracedecay": plugin_dir / "skills" / "tracedecay" / "SKILL.md",
+    }, ctx.skills
+    ok("bundled and managed skills register through Hermes discovery")
     assert "tracedecay_search" in ctx.tools, sorted(ctx.tools)
     assert "tracedecay_context" in ctx.tools, sorted(ctx.tools)
     assert "tracedecay_message_search" in ctx.tools, sorted(ctx.tools)
@@ -472,6 +489,7 @@ def run_checks(work: Path):
         plugin.tools.call_tracedecay_tool = lambda name, args, **kw: (
             calls.append((name, args, kw)) or "{}"
         )
+
         provider.handle_tool_call("fact_store", {"action": "search", "query": "rust"})
         name, args, kwargs = calls[-1]
         assert name == "tracedecay_fact_store", calls
@@ -489,6 +507,7 @@ def run_checks(work: Path):
         assert args["transcript_projection"] is True
         assert "project_root" not in args, args
         assert kwargs["project_root"] == expected_project_root, kwargs
+
         ok("sync_turn projects only the completed turn into project LCM")
 
         provider.sync_turn("only user", "and assistant", session_id="s2", messages=None)
@@ -559,6 +578,7 @@ def run_checks(work: Path):
         ok("sync_turn skips cron/flush execution contexts")
     finally:
         plugin.tools.call_tracedecay_tool = real_tool
+
 
     real_json = plugin.call_tracedecay_json
     try:

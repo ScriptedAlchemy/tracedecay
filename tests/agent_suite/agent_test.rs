@@ -1135,7 +1135,7 @@ fn test_hermes_user_install_writes_single_plugin() {
     assert!(init_py.contains("ctx.register_hook(\"pre_llm_call\""));
     assert!(init_py.contains("getattr(ctx, \"register_command\", None)"));
     assert!(init_py.contains("getattr(ctx, \"register_skill\", None)"));
-    assert!(init_py.contains("register_skill(\"tracedecay\""));
+    assert!(init_py.contains("register_skill(skill_name, skill_path)"));
     assert!(init_py.contains("class TraceDecayContextEngine"));
     assert!(!init_py.contains("storage_scope"));
     assert!(!init_py.contains("hermes_home\": self.hermes_home"));
@@ -1265,7 +1265,7 @@ fn test_hermes_plugin_init_snapshot_matches_embedded_asset() {
     hasher.update(body.as_bytes());
     assert_eq!(
         hex::encode(hasher.finalize()),
-        "12dd6436c774e1b5e0103a02c63806b329f678183aec0c9e4b24034044e84ed2",
+        "5327ef64cb155d386a506d5c4dbf2e17f8ad30480c61016fdd9ded0b6bc70cb8",
         "templates/plugin_init.py payload hash changed — verify the edit is intentional and update this snapshot"
     );
 }

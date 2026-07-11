@@ -38,7 +38,7 @@ pub enum SkillInstallTarget {
 
 impl SkillInstallTarget {
     pub fn is_native_overlay(self) -> bool {
-        matches!(self, Self::Cursor | Self::Codex)
+        matches!(self, Self::Cursor | Self::Codex | Self::Hermes)
     }
 
     /// True for hosts that reconcile their managed-skill listing as a
@@ -72,6 +72,7 @@ pub fn default_managed_skill_targets() -> Vec<SkillInstallTarget> {
         SkillInstallTarget::OpenCode,
         SkillInstallTarget::Kimi,
         SkillInstallTarget::Kiro,
+        SkillInstallTarget::Hermes,
     ]
 }
 

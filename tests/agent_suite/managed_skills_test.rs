@@ -190,7 +190,10 @@ fn rejects_frontmatter_breaking_metadata_and_oversized_body() {
 
     let mut hermes_target = draft();
     hermes_target.targets = vec![SkillInstallTarget::Hermes];
-    assert!(hermes_target.materialize().is_err());
+    assert_eq!(
+        hermes_target.materialize().unwrap().metadata.targets,
+        vec![SkillInstallTarget::Hermes]
+    );
 }
 
 #[test]

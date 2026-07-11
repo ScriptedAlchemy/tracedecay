@@ -34,11 +34,16 @@ impl AgentIntegration for HermesIntegration {
 
     fn install(&self, ctx: &InstallContext) -> Result<()> {
         lifecycle::install(ctx)?;
+        self.reconcile_managed_skills(ctx)?;
         Ok(())
     }
 
     fn update_plugin(&self, ctx: &InstallContext) -> Result<UpdatePluginOutcome> {
-        lifecycle::update_plugin(ctx)
+        let outcome = lifecycle::update_plugin(ctx)?;
+        if matches!(outcome, UpdatePluginOutcome::Refreshed(_)) {
+            self.reconcile_managed_skills(ctx)?;
+        }
+        Ok(outcome)
     }
 
     fn uninstall(&self, ctx: &InstallContext) -> Result<()> {
@@ -60,7 +65,33 @@ impl AgentIntegration for HermesIntegration {
     }
 
     fn has_tracedecay(&self, home: &Path) -> bool {
-        !detected_plugin_dirs(home).is_empty()
+        detected_plugin_dirs(home)
+            .into_iter()
+            .any(|dir| dir.is_dir())
+    }
+
+    fn export_managed_skills(
+        &self,
+        home: &Path,
+        profile_root: &Path,
+    ) -> Result<Vec<crate::automation::skill_targets::SkillInstallSummary>> {
+        let mut exports = Vec::new();
+        for plugin_dir in detected_plugin_dirs(home) {
+            exports.push(crate::automation::skill_targets::install_managed_skills(
+                profile_root,
+                crate::automation::skill_targets::SkillInstallTarget::Hermes,
+                &plugin_dir,
+            )?);
+        }
+        Ok(exports)
+    }
+}
+
+impl HermesIntegration {
+    fn reconcile_managed_skills(&self, ctx: &InstallContext) -> Result<()> {
+        let profile_root = crate::automation::skill_targets::profile_root_for_agent_home(&ctx.home);
+        self.export_managed_skills(&ctx.home, &profile_root)?;
+        Ok(())
     }
 }
 
@@ -225,6 +256,18 @@ pub(super) fn remove_generated_plugin_files(plugin_dir: &Path) -> Result<()> {
     remove_generated_file(&plugin_dir.join("cli.py"))?;
     remove_generated_file(&plugin_dir.join("skills/tracedecay/SKILL.md"))?;
     remove_empty_dir(&plugin_dir.join("skills/tracedecay"))?;
+    let managed_overlay = plugin_dir.join("skills/agent-managed");
+    if managed_overlay
+        .join(".tracedecay-managed-skills.json")
+        .is_file()
+    {
+        std::fs::remove_dir_all(&managed_overlay).map_err(|e| TraceDecayError::Config {
+            message: format!(
+                "failed to remove generated Hermes skill overlay {}: {e}",
+                managed_overlay.display()
+            ),
+        })?;
+    }
     remove_empty_dir(&plugin_dir.join("skills"))?;
     dashboard_wrapper::uninstall(plugin_dir)?;
 

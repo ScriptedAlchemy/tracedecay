@@ -2437,7 +2437,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn legacy_only_upgrade_keeps_plugin_until_default_install_succeeds() {
+    async fn named_profile_upgrade_refreshes_in_place_without_default_cutover() {
         let temp = tempfile::tempdir().unwrap();
         let user_home = temp.path().join("home");
         let profile_root = temp.path().join("tracedecay-profile");
@@ -2466,14 +2466,11 @@ mod tests {
             project_root: None,
             dashboard: false,
         };
-        let Err(error) = HermesIntegration.update_plugin(&ctx) else {
-            panic!("conflicting default config must fail the cutover");
-        };
-        assert!(
-            error
-                .to_string()
-                .contains("memory provider already configured")
-        );
+        let outcome = HermesIntegration.update_plugin(&ctx).unwrap();
+        assert!(matches!(
+            outcome,
+            UpdatePluginOutcome::Refreshed(paths) if paths == vec![legacy_plugin.clone()]
+        ));
         assert!(legacy_plugin.join("plugin.yaml").is_file());
         assert_eq!(
             fs::read_to_string(legacy_profile.join("config.yaml")).unwrap(),
@@ -2493,13 +2490,16 @@ mod tests {
         );
         fs::write(&default_config, "").unwrap();
         let outcome = HermesIntegration.update_plugin(&ctx).unwrap();
-        assert!(matches!(outcome, UpdatePluginOutcome::Refreshed(_)));
+        assert!(matches!(
+            outcome,
+            UpdatePluginOutcome::Refreshed(paths) if paths == vec![legacy_plugin.clone()]
+        ));
+        assert!(legacy_plugin.join("plugin.yaml").is_file());
         assert!(
-            user_home
+            !user_home
                 .join(".hermes/plugins/tracedecay/plugin.yaml")
-                .is_file()
+                .exists()
         );
-        assert!(!legacy_plugin.join("plugin.yaml").exists());
 
         let layout = crate::storage::resolve_layout(&project, &profile_root).unwrap();
         let target = GlobalDb::open_read_only_at(&layout.sessions_db_path)

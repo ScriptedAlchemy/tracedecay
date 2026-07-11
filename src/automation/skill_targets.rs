@@ -62,9 +62,6 @@ pub fn install_managed_skills(
     target: SkillInstallTarget,
     output: &Path,
 ) -> Result<SkillInstallSummary> {
-    if target == SkillInstallTarget::Hermes {
-        return Err(hermes_host_owned_error());
-    }
     if target.is_native_overlay() {
         export_native_skill_overlay(profile_root, target, output)
     } else {

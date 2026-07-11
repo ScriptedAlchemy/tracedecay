@@ -255,12 +255,6 @@ fn validate_skill_targets(targets: &[SkillInstallTarget]) -> Result<()> {
     }
     let mut seen = BTreeSet::new();
     for target in targets {
-        if *target == SkillInstallTarget::Hermes {
-            return Err(config_error(
-                "managed skill targets cannot include Hermes because Hermes owns profile skills"
-                    .to_string(),
-            ));
-        }
         if !seen.insert(*target) {
             return Err(config_error(format!(
                 "duplicate managed skill target '{}'",
@@ -392,14 +386,11 @@ mod tests {
     }
 
     #[test]
-    fn managed_skill_validation_rejects_hermes_target() {
+    fn managed_skill_validation_accepts_hermes_plugin_target() {
         let mut draft = valid_draft();
         draft.targets = vec![SkillInstallTarget::Hermes];
-        let err = draft.materialize().unwrap_err().to_string();
-        assert!(
-            err.contains("managed skill targets cannot include Hermes"),
-            "unexpected error: {err}"
-        );
+        let skill = draft.materialize().unwrap();
+        assert_eq!(skill.metadata.targets, vec![SkillInstallTarget::Hermes]);
     }
 
     #[test]
