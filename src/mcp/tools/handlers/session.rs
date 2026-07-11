@@ -11,7 +11,9 @@ use super::support::{
     string_arg, tool_json, tool_json_with_md,
 };
 use crate::errors::{Result, TraceDecayError};
-use crate::global_db::{GlobalDb, ProjectRegistryContext, WorkflowScopeFilter};
+use crate::global_db::{
+    GlobalDb, ParseOffset, ProjectRegistryContext, TranscriptBatch, WorkflowScopeFilter,
+};
 use crate::mcp::response_handles::{
     RESPONSE_RETRIEVE_TOOL, observe_response_truncation, store_response_handle,
 };
@@ -27,9 +29,10 @@ use crate::sessions::lcm::{
     LcmLoadSessionRequest, LcmPreflightRequest, LcmScope, LcmSessionBoundaryRequest,
     LcmSummarizerMode,
 };
+use crate::sessions::shared::{content_storage_text_and_tools, preview_title};
 use crate::sessions::{
-    ProviderScope, SessionMessageSearchResult, SessionMessageType, SessionSearchFilters,
-    SessionSearchScope, SessionSearchTimeRange,
+    ProviderScope, SessionMessageRecord, SessionMessageSearchResult, SessionMessageType,
+    SessionRecord, SessionSearchFilters, SessionSearchScope, SessionSearchTimeRange,
 };
 use crate::timeutil::SearchTimeBound;
 use crate::tracedecay::{TraceDecay, current_timestamp};
@@ -2910,12 +2913,13 @@ pub(super) async fn handle_lcm_preflight(
     let provider = required_specific_provider_arg(&args)?;
     let session_id = required_string_arg(&args, "session_id")?;
     let storage = lcm_open_storage!(context, &args);
+    let messages = messages_arg(&args)?;
     let response = storage
         .db
         .lcm_preflight(LcmPreflightRequest {
             provider: provider.to_string(),
             session_id: session_id.to_string(),
-            messages: messages_arg(&args)?,
+            messages: messages.clone(),
             current_tokens: non_negative_i64_arg(&args, "current_tokens")?,
             threshold_tokens: non_negative_i64_arg(&args, "threshold_tokens")?,
             max_assembly_tokens: non_negative_i64_arg(&args, "max_assembly_tokens")?,
@@ -2934,6 +2938,16 @@ pub(super) async fn handle_lcm_preflight(
         })
         .await
         .map_err(lcm_error)?;
+    if bool_arg(&args, "transcript_projection")? == Some(true) {
+        upsert_live_transcript_projection(
+            &storage.db,
+            context.project_root,
+            provider,
+            session_id,
+            &messages,
+        )
+        .await;
+    }
     Ok(lcm_preflight_tool_json(
         context.project_root,
         &args,
@@ -2946,6 +2960,115 @@ pub(super) async fn handle_lcm_preflight(
             "replay_messages": response.replay_messages,
         }),
     ))
+}
+
+async fn upsert_live_transcript_projection(
+    db: &GlobalDb,
+    project_root: Option<&Path>,
+    provider: &str,
+    session_id: &str,
+    messages: &[Value],
+) {
+    let Some(project_root) = project_root else {
+        return;
+    };
+    let project = project_root.to_string_lossy().to_string();
+    let source_path = format!("live://{provider}/{session_id}");
+    let mut projected = Vec::new();
+    for (ordinal, message) in messages.iter().enumerate() {
+        let Some(message_id) = message
+            .get("id")
+            .or_else(|| message.get("message_id"))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+        else {
+            continue;
+        };
+        let role = message
+            .get("role")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown")
+            .to_string();
+        let content = message.get("content").cloned().unwrap_or(Value::Null);
+        let tool_calls = message.get("tool_calls");
+        let (text, tool_names) = content_storage_text_and_tools(&content, tool_calls);
+        if text.trim().is_empty() {
+            continue;
+        }
+        projected.push(SessionMessageRecord {
+            provider: provider.to_string(),
+            message_id: message_id.to_string(),
+            session_id: session_id.to_string(),
+            role,
+            timestamp: message
+                .get("timestamp")
+                .and_then(Value::as_f64)
+                .map(|value| value as i64),
+            ordinal: ordinal as i64,
+            text,
+            kind: Some("message".to_string()),
+            model: message
+                .get("model")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            tool_names: (!tool_names.is_empty()).then(|| tool_names.join(",")),
+            source_path: Some(source_path.clone()),
+            source_offset: Some(ordinal as i64),
+            metadata_json: Some(
+                json!({
+                    "source": "lcm_preflight_live",
+                    "project_root": project,
+                    "location_provenance": "host_live_route"
+                })
+                .to_string(),
+            ),
+        });
+    }
+    if projected.is_empty() {
+        return;
+    }
+    let title = projected
+        .iter()
+        .find(|message| message.role == "user")
+        .map(|message| preview_title(&message.text));
+    let batch = TranscriptBatch {
+        session: SessionRecord {
+            provider: provider.to_string(),
+            session_id: session_id.to_string(),
+            project_key: project.clone(),
+            project_path: project,
+            title,
+            started_at: projected
+                .iter()
+                .filter_map(|message| message.timestamp)
+                .min(),
+            ended_at: None,
+            transcript_path: Some(source_path.clone()),
+            metadata_json: Some(
+                json!({
+                    "source": "lcm_preflight_live",
+                    "location_provenance": "host_live_route"
+                })
+                .to_string(),
+            ),
+            parent_session_id: None,
+            is_subagent: false,
+            agent_id: None,
+            parent_tool_use_id: None,
+        },
+        messages: projected,
+    };
+    let persisted = db
+        .upsert_transcript_projection_batches(&[batch], &source_path, ParseOffset::default())
+        .await;
+    if !persisted {
+        tracing::debug!(
+            provider,
+            session_id,
+            "live transcript projection upsert failed"
+        );
+    }
 }
 
 pub(super) async fn handle_lcm_compress(

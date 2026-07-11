@@ -2951,6 +2951,10 @@ fn def_lcm_preflight() -> ToolDefinition {
                     "description": "Current active context messages to inspect before compression.",
                     "items": {"type": "object"}
                 },
+                "transcript_projection": {
+                    "type": "boolean",
+                    "description": "Host-integration flag: also upsert these stable-id messages into this project's searchable transcript projection. Intended for Hermes live turn ingestion when its state.db session lacks cwd provenance."
+                },
                 "current_tokens": {
                     "type": "integer",
                     "minimum": 0,

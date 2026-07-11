@@ -5,6 +5,7 @@ import hashlib
 import logging
 import os
 import re
+import shlex
 import shutil
 import threading
 import time
@@ -548,6 +549,14 @@ def _lcm_retrieve_kwargs(args: dict, kwargs: dict) -> dict:
             retrieve_kwargs["project_root"] = root.strip()
     return retrieve_kwargs
 
+def _retrieve_args(handle: str, args: dict) -> dict:
+    retrieve_args = {"handle": handle}
+    if isinstance(args, dict):
+        for key in ("project_id", "project_path", "project_selector"):
+            if args.get(key) is not None:
+                retrieve_args[key] = args[key]
+    return retrieve_args
+
 def _decode_tool_payload(value, name: str, args: dict, kwargs: dict, depth: int = 0, seen_handles=None):
     if depth > 8:
         return value
@@ -568,7 +577,7 @@ def _decode_tool_payload(value, name: str, args: dict, kwargs: dict, depth: int 
         seen_handles.add(handle)
         retrieved = call_tracedecay_json(
             "tracedecay_retrieve",
-            {"handle": handle},
+            _retrieve_args(handle, args),
             **_lcm_retrieve_kwargs(args, kwargs),
         )
         if isinstance(retrieved, dict) and not retrieved.get("error"):
@@ -689,9 +698,9 @@ def _project_call_kwargs(project_root=None, kwargs=None):
         routed["project_root"] = str(project_root)
     return routed
 
-def _project_scope_available(project_root) -> bool:
+def _resolved_project_scope(project_root):
     if not project_root:
-        return False
+        return None
     try:
         status = call_tracedecay_json(
             "tracedecay_status",
@@ -699,8 +708,78 @@ def _project_scope_available(project_root) -> bool:
             **_project_call_kwargs(project_root),
         )
     except Exception:
-        return False
-    return isinstance(status, dict) and not status.get("error")
+        return None
+    if not isinstance(status, dict) or status.get("error"):
+        return None
+    resolved = status.get("project_root") or status.get("root")
+    return str(resolved or project_root)
+
+def _project_scope_available(project_root) -> bool:
+    return _resolved_project_scope(project_root) is not None
+
+def _decoded_tool_arguments(call):
+    if not isinstance(call, dict):
+        return None, {}
+    function = call.get("function") if isinstance(call.get("function"), dict) else call
+    name = str(function.get("name") or call.get("name") or "")
+    arguments = function.get("arguments", call.get("arguments", {}))
+    if isinstance(arguments, str):
+        try:
+            arguments = json.loads(arguments)
+        except Exception:
+            arguments = {}
+    return name, arguments if isinstance(arguments, dict) else {}
+
+def _terminal_cd_candidates(command):
+    try:
+        tokens = shlex.split(str(command or ""), posix=os.name != "nt")
+    except Exception:
+        return []
+    candidates = []
+    for index, token in enumerate(tokens[:-1]):
+        if token == "cd":
+            candidates.append(tokens[index + 1])
+    return candidates
+
+def _tool_project_candidates(messages):
+    if not isinstance(messages, list):
+        return []
+    start = 0
+    for index, message in enumerate(messages):
+        if isinstance(message, dict) and message.get("role") == "user":
+            start = index
+    candidates = []
+    for message in messages[start:]:
+        if not isinstance(message, dict):
+            continue
+        calls = message.get("tool_calls") or []
+        if isinstance(calls, dict):
+            calls = [calls]
+        for call in calls:
+            name, arguments = _decoded_tool_arguments(call)
+            selector = arguments.get("project_selector")
+            for candidate in (
+                arguments.get("project_root"),
+                arguments.get("project_path"),
+                selector.get("path") if isinstance(selector, dict) else None,
+                arguments.get("cwd"),
+                arguments.get("workdir"),
+            ):
+                if isinstance(candidate, str) and os.path.isabs(os.path.expanduser(candidate)):
+                    candidates.append(candidate)
+            if name in ("terminal", "bash", "shell", "exec_command"):
+                candidates.extend(_terminal_cd_candidates(arguments.get("command") or arguments.get("cmd")))
+    return candidates
+
+def _turn_project_root(messages):
+    for candidate in reversed(_tool_project_candidates(messages)):
+        expanded = os.path.abspath(os.path.expanduser(candidate))
+        if os.path.isfile(expanded):
+            expanded = os.path.dirname(expanded)
+        resolved = _resolved_project_scope(expanded)
+        if resolved:
+            return resolved
+    return None
 
 # Conventional config home: a `plugins.tracedecay` block in the profile
 # config.yaml (the same `plugins.<name>` convention bundled Hermes plugins
@@ -3327,7 +3406,8 @@ class TracedecayMemoryProvider(MemoryProvider):
         same content-cursored path the context engine uses), so the raw
         store grows every turn instead of only when compression fires.
         """
-        if not self.project_root:
+        project_root = _turn_project_root(messages) or self.project_root
+        if not project_root:
             return
         if not _plugin_toggle("sync_turn", True):
             return
@@ -3337,33 +3417,32 @@ class TracedecayMemoryProvider(MemoryProvider):
         sid = session_id or self.session_id
         if not sid:
             return
-        forwarded_messages = isinstance(messages, list) and bool(messages)
-        turn_messages = messages if forwarded_messages else None
-        if not turn_messages:
-            turn_messages = []
-            if user_content:
-                turn_messages.append({"role": "user", "content": str(user_content)})
-            if assistant_content:
-                turn_messages.append({"role": "assistant", "content": str(assistant_content)})
+        turn_messages = []
+        if user_content:
+            turn_messages.append({"role": "user", "content": str(user_content)})
+        if assistant_content:
+            turn_messages.append({"role": "assistant", "content": str(assistant_content)})
         if not turn_messages:
             return
-        if not forwarded_messages:
-            self._sync_turn_sequence += 1
-            batch_id = self._sync_turn_sequence
-            timestamp_ns = time.time_ns()
-            for idx, entry in enumerate(turn_messages):
-                role = str(entry.get("role") or "user")
-                entry["id"] = f"tracedecay_sync_{batch_id}_{timestamp_ns}_{idx}_{role}"
+        self._sync_turn_sequence += 1
+        batch_id = self._sync_turn_sequence
+        timestamp_ns = time.time_ns()
+        timestamp = time.time()
+        for idx, entry in enumerate(turn_messages):
+            role = str(entry.get("role") or "user")
+            entry["id"] = f"tracedecay_sync_{batch_id}_{timestamp_ns}_{idx}_{role}"
+            entry["timestamp"] = timestamp
         args = {
             "provider": STANDARD_HERMES_LCM_PROVIDER,
             "session_id": sid,
             "messages": turn_messages,
+            "transcript_projection": True,
         }
         try:
             tools.call_tracedecay_tool(
                 "tracedecay_lcm_preflight",
                 args,
-                **_project_call_kwargs(self.project_root),
+                **_project_call_kwargs(project_root),
             )
         except Exception as exc:
             logger.debug("tracedecay sync_turn ingest failed: %s", exc)

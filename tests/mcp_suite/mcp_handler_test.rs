@@ -8065,6 +8065,71 @@ async fn user_memory_scope_is_profile_level_and_isolated_from_project_memory() {
 }
 
 #[tokio::test]
+async fn hermes_live_preflight_projects_stable_turns_into_the_active_project() {
+    let (cg, _env, _dir) = setup_empty_project().await;
+    handle_tool_call(
+        &cg,
+        "tracedecay_lcm_preflight",
+        json!({
+            "provider": "hermes",
+            "session_id": "hermes-live-session",
+            "transcript_projection": true,
+            "messages": [
+                {
+                    "id": "hermes-live-user-1",
+                    "role": "user",
+                    "content": "Correlate this Hermes turn with orchard routing",
+                    "timestamp": 1_783_700_000.0
+                },
+                {
+                    "id": "hermes-live-assistant-1",
+                    "role": "assistant",
+                    "content": "The turn is routed to the active project.",
+                    "timestamp": 1_783_700_001.0
+                }
+            ]
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+
+    let search = handle_tool_call(
+        &cg,
+        "tracedecay_message_search",
+        json!({
+            "query": "orchard routing",
+            "provider": "hermes",
+            "catch_up": false,
+            "format": "json"
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let search = extract_json(&search.value);
+    assert_eq!(search["count"].as_u64(), Some(1));
+    assert_eq!(
+        search["results"][0]["session"]["session_id"],
+        "hermes-live-session"
+    );
+    assert_eq!(
+        search["results"][0]["session"]["project_path"],
+        cg.project_root().to_string_lossy().as_ref()
+    );
+    assert_eq!(
+        search["results"][0]["message"]["metadata_json"]
+            .as_str()
+            .and_then(|metadata| serde_json::from_str::<Value>(metadata).ok())
+            .and_then(|metadata| metadata["location_provenance"].as_str().map(str::to_string))
+            .as_deref(),
+        Some("host_live_route")
+    );
+}
+
+#[tokio::test]
 async fn memory_fact_store_update_rejects_secret_like_content_with_diff_report() {
     let (cg, _env, _dir) = setup_empty_project().await;
     let added = handle_tool_call(

@@ -279,13 +279,21 @@ def run_checks(work: Path):
 
         plugin.tools.call_tracedecay_tool = _handled_response
         resolved = plugin.call_tracedecay_json(
-            "tracedecay_fact_store", {"action": "search", "query": "remember"}
+            "tracedecay_fact_store",
+            {
+                "action": "search",
+                "query": "remember",
+                "project_selector": {"path": "/tmp/selected-project"},
+            },
         )
         assert resolved.get("count") == 1, resolved
         assert [call[0] for call in bridge_calls] == [
             "tracedecay_fact_store",
             "tracedecay_retrieve",
         ], bridge_calls
+        assert bridge_calls[1][1]["project_selector"] == {
+            "path": "/tmp/selected-project"
+        }, bridge_calls
         ok("generic response handles dereference for memory-provider results")
     finally:
         plugin.tools.call_tracedecay_tool = real_tool
@@ -476,10 +484,12 @@ def run_checks(work: Path):
         name, args, kwargs = calls[-1]
         assert name == "tracedecay_lcm_preflight", calls
         assert args["session_id"] == "other-session"
-        assert args["messages"] == messages
+        assert [message["content"] for message in args["messages"]] == ["u", "a"]
+        assert all(message.get("id") for message in args["messages"])
+        assert args["transcript_projection"] is True
         assert "project_root" not in args, args
         assert kwargs["project_root"] == expected_project_root, kwargs
-        ok("sync_turn ingests via tracedecay_lcm_preflight")
+        ok("sync_turn projects only the completed turn into project LCM")
 
         provider.sync_turn("only user", "and assistant", session_id="s2", messages=None)
         name, args, kwargs = calls[-1]
@@ -512,6 +522,32 @@ def run_checks(work: Path):
         assert args["memory_scope"] == "user", args
         assert "project_root" not in kwargs, kwargs
         ok("untethered memory uses user scope and skips project LCM")
+
+        real_resolver = plugin._resolved_project_scope
+        plugin._resolved_project_scope = lambda path: expected_project_root
+        provider.sync_turn(
+            "project task",
+            "done",
+            session_id="tool-routed",
+            messages=[
+                {"role": "user", "content": "work on the repo"},
+                {
+                    "role": "assistant",
+                    "tool_calls": [{
+                        "function": {
+                            "name": "tracedecay_grep",
+                            "arguments": json.dumps({"project_path": expected_project_root}),
+                        }
+                    }],
+                },
+            ],
+        )
+        name, args, kwargs = calls[-1]
+        assert name == "tracedecay_lcm_preflight"
+        assert kwargs["project_root"] == expected_project_root
+        assert args["transcript_projection"] is True
+        plugin._resolved_project_scope = real_resolver
+        ok("structured tool activity correlates an untethered turn to its project")
         provider.project_root = expected_project_root
 
         # Non-primary execution contexts must not write turn state.
