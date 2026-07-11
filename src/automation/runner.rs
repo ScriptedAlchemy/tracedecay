@@ -603,7 +603,7 @@ async fn finalize_skill_writer_success(
     let rejected_count = proposal_outcome.rejected.len();
     let report = json!({
         "status": if config.auto_enable_skills { "auto_enabled" } else { "needs_approval" },
-        "dry_run": !config.auto_enable_skills,
+        "dry_run": true,
         "task": "skill_writer",
         "evidence_hash": evidence_hash,
         "activation_policy": activation_policy,
@@ -640,7 +640,7 @@ async fn finalize_skill_writer_success(
     record.rejected_ops = report.get("rejected_skills").cloned();
     record.validation_report = Some(json!({
         "status": report.get("status").cloned().unwrap_or_else(|| json!("needs_approval")),
-        "dry_run": !config.auto_enable_skills,
+        "dry_run": true,
         "activation_policy": activation_policy,
         "accepted_count": accepted_count,
         "rejected_count": rejected_count,
@@ -1367,7 +1367,7 @@ fn build_skill_writer_prompt(evidence: &Value) -> String {
         "\n",
         "An empty skills array is a real option when the session ran smoothly with no corrections and produced no new technique, but do not reach for it as a default.\n",
         "\n",
-        "Response contract: Return only JSON with a skills array of managed skill creates or updates. New skills may omit action or use action=create and must include id, title, summary, category, body_markdown, optional targets, optional support_files with text content, and reason. Targets, when present, must be an array using cursor, codex, claude, agents, opencode, kimi, kiro, or hermes; Hermes exports are generated read-only under the TraceDecay plugin package and never overwrite host-owned user skills. Updates must use action=update or action=patch, include id and base_checksum, and include at least one changed field among title, summary, category, targets, body_markdown/body, support_files, or pinned. For updates, support_files is a complete replacement list, not a partial file patch. Consolidations: when skill_overlap_candidates shows overlapping managed skills, you may propose action=merge (include id for the surviving skill, base_checksum, source_skill_id, source_base_checksum, reason, and optional merged title/summary/category/targets/body_markdown/support_files) or action=archive (include id, base_checksum, reason). Consolidations preserve archived source content. The runner stages them by default and may auto-apply only when auto_enable_skills is explicitly enabled and every ownership, checksum, pin, pending-update, and scheduled-job guard passes. Never propose merge or archive for pinned or user-authored skills. Activation is controlled only by the runner policy; do not assume activation from your response.\n",
+        "Response contract: Return only JSON with a skills array of managed skill creates or updates. New skills may omit action or use action=create and must include id, title, summary, category, body_markdown, optional targets, optional support_files with text content, and reason. Targets, when present, must be an array using cursor, codex, claude, agents, opencode, kimi, kiro, or hermes; Hermes exports are generated read-only under the TraceDecay plugin package and never overwrite host-owned user skills. Updates must use action=update or action=patch, include id and base_checksum, and include at least one changed field among title, summary, category, targets, body_markdown/body, support_files, or pinned. For updates, support_files is a complete replacement list, not a partial file patch. Consolidations: when skill_overlap_candidates shows overlapping managed skills, you may propose action=merge (include id for the surviving skill, base_checksum, source_skill_id, source_base_checksum, reason, and optional merged title/summary/category/targets/body_markdown/support_files) or action=archive (include id, base_checksum, reason). Consolidations are always staged for human approval and archive-only; content is never deleted. Never propose merge or archive for pinned or user-authored skills. Activation is controlled only by the runner policy; do not assume activation from your response.\n",
     );
     format!(
         "{POLICY}{}",

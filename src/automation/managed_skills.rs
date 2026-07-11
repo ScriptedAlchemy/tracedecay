@@ -1,10 +1,8 @@
 use std::collections::BTreeSet;
-use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};
 
 use super::config_error;
 use crate::errors::{Result, TraceDecayError};
-use fs2::FileExt;
 
 use super::managed_skill_model::current_metadata_timestamp;
 pub use super::managed_skill_model::{
@@ -21,156 +19,6 @@ use super::managed_skill_validation::{
 
 pub fn managed_skill_root(profile_root: &Path) -> PathBuf {
     profile_root.join("agent_managed").join("skills")
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SkillConsolidationResult {
-    pub target: Option<ManagedSkill>,
-    pub source: ManagedSkill,
-    pub target_before_checksum: Option<String>,
-    pub target_after_checksum: Option<String>,
-    pub source_before_checksum: String,
-    pub source_after_checksum: String,
-}
-
-struct SkillStoreLock(File);
-
-impl Drop for SkillStoreLock {
-    fn drop(&mut self) {
-        let _ = FileExt::unlock(&self.0);
-    }
-}
-
-fn lock_skill_store(profile_root: &Path) -> Result<SkillStoreLock> {
-    let root = managed_skill_root(profile_root);
-    std::fs::create_dir_all(&root).map_err(|e| {
-        config_error(format!(
-            "failed to create managed skill root '{}': {e}",
-            root.display()
-        ))
-    })?;
-    let path = root.join(".consolidation.lock");
-    let file = OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .read(true)
-        .write(true)
-        .open(&path)
-        .map_err(|e| {
-            config_error(format!(
-                "failed to open skill lock '{}': {e}",
-                path.display()
-            ))
-        })?;
-    file.lock_exclusive().map_err(|e| {
-        config_error(format!(
-            "failed to lock skill store '{}': {e}",
-            path.display()
-        ))
-    })?;
-    Ok(SkillStoreLock(file))
-}
-
-/// Re-loads and checksum-validates both revisions under one store lock, applies
-/// the target first, and archives (never deletes) the source second. A source
-/// persistence failure restores the target revision before returning.
-pub async fn apply_managed_skill_consolidation(
-    profile_root: &Path,
-    target_id: Option<&str>,
-    target_checksum: Option<&str>,
-    target_update: Option<ManagedSkillUpdate>,
-    source_id: &str,
-    source_checksum: &str,
-    reason: &str,
-) -> Result<SkillConsolidationResult> {
-    let _lock = lock_skill_store(profile_root)?;
-    let mut source = load_managed_skill(profile_root, source_id).await?;
-    validate_autonomous_consolidation_skill(&source, source_checksum)?;
-    let source_before_checksum = source.metadata.checksum.clone();
-
-    let mut original_target = None;
-    let mut target = match target_id {
-        Some(id) => {
-            let loaded = load_managed_skill(profile_root, id).await?;
-            let checksum =
-                target_checksum.ok_or_else(|| config_error("merge target checksum is required"))?;
-            validate_autonomous_consolidation_skill(&loaded, checksum)?;
-            original_target = Some(loaded.clone());
-            Some(loaded)
-        }
-        None => None,
-    };
-
-    if let (Some(target), Some(update)) = (&mut target, target_update) {
-        if apply_managed_skill_update(target, update)? {
-            target.touch();
-            target.refresh_checksum();
-        }
-        save_managed_skill(profile_root, target).await?;
-    }
-
-    // Re-read after the target write so a non-cooperating lifecycle writer
-    // cannot make us archive a source revision that changed mid-transaction.
-    let latest_source = load_managed_skill(profile_root, source_id).await?;
-    if let Err(error) = validate_autonomous_consolidation_skill(&latest_source, source_checksum) {
-        if let Some(original) = &original_target {
-            save_managed_skill(profile_root, original).await?;
-        }
-        return Err(error);
-    }
-    source = latest_source;
-
-    source.metadata.absorbed_into = target_id.map(ToOwned::to_owned);
-    source.metadata.archived_reason = Some(reason.to_string());
-    source.set_state(ManagedSkillState::Archived);
-    source.pending_update = None;
-    if let Err(error) = save_managed_skill(profile_root, &source).await {
-        if let Some(original) = &original_target {
-            save_managed_skill(profile_root, original).await?;
-        }
-        return Err(error);
-    }
-
-    Ok(SkillConsolidationResult {
-        target_before_checksum: original_target
-            .as_ref()
-            .map(|skill| skill.metadata.checksum.clone()),
-        target_after_checksum: target.as_ref().map(|skill| skill.metadata.checksum.clone()),
-        source_before_checksum,
-        source_after_checksum: source.metadata.checksum.clone(),
-        target,
-        source,
-    })
-}
-
-fn validate_autonomous_consolidation_skill(skill: &ManagedSkill, checksum: &str) -> Result<()> {
-    let id = &skill.metadata.id;
-    if skill.metadata.checksum != checksum {
-        return Err(config_error(format!(
-            "base_checksum for managed skill id '{id}' is stale"
-        )));
-    }
-    if skill.metadata.provenance.source != ManagedSkillSource::AutomationRun {
-        return Err(config_error(format!(
-            "managed skill '{id}' is not automation-owned"
-        )));
-    }
-    if skill.metadata.pinned {
-        return Err(config_error(format!(
-            "managed skill '{id}' is pinned and exempt from consolidation"
-        )));
-    }
-    if skill.metadata.state == ManagedSkillState::Archived {
-        return Err(config_error(format!(
-            "managed skill '{id}' is already archived"
-        )));
-    }
-    if skill.pending_update.is_some() {
-        return Err(config_error(format!(
-            "managed skill '{id}' already has a pending update"
-        )));
-    }
-    Ok(())
 }
 
 pub fn managed_skill_dir(profile_root: &Path, id: &str) -> Result<PathBuf> {
@@ -666,11 +514,5 @@ pub async fn archive_managed_skill(profile_root: &Path, id: &str) -> Result<Mana
 }
 
 pub async fn restore_managed_skill(profile_root: &Path, id: &str) -> Result<ManagedSkill> {
-    let mut skill = load_managed_skill(profile_root, id).await?;
-    skill.metadata.absorbed_into = None;
-    skill.metadata.archived_reason = None;
-    skill.set_state(ManagedSkillState::PendingApproval);
-    save_managed_skill(profile_root, &skill).await?;
-    record_skill_patch(profile_root, &skill, "restore".to_string()).await?;
-    Ok(skill)
+    set_managed_skill_state(profile_root, id, ManagedSkillState::PendingApproval).await
 }

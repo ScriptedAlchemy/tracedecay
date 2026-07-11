@@ -229,8 +229,6 @@ impl ManagedSkillDraft {
                 created_at: now,
                 updated_at: now,
                 approved_at: None,
-                absorbed_into: None,
-                archived_reason: None,
                 provenance: self.provenance,
             },
             body_markdown: self.body_markdown,
@@ -271,12 +269,6 @@ pub struct ManagedSkillMetadata {
     /// skills and records written before this field existed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub approved_at: Option<i64>,
-    /// Canonical managed-skill id that absorbed this archived skill.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub absorbed_into: Option<String>,
-    /// Structured lifecycle reason retained when a skill is archived.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub archived_reason: Option<String>,
     pub provenance: ManagedSkillProvenance,
 }
 
@@ -601,33 +593,5 @@ mod tests {
             frontmatter["description"].as_scalar(),
             Some(r#"Use when checking "quoted" paths like C:\tmp"#)
         );
-    }
-
-    #[test]
-    fn legacy_skill_without_consolidation_metadata_deserializes() {
-        let skill = ManagedSkillDraft {
-            id: "legacy-skill".to_string(),
-            title: "Legacy skill".to_string(),
-            summary: "Read records written before consolidation metadata.".to_string(),
-            category: "testing".to_string(),
-            targets: vec![SkillInstallTarget::Codex],
-            body_markdown: "# Legacy\n".to_string(),
-            support_files: Vec::new(),
-            provenance: ManagedSkillProvenance {
-                source: ManagedSkillSource::AutomationRun,
-                actor: "legacy".to_string(),
-                run_id: None,
-            },
-        }
-        .materialize()
-        .unwrap();
-        let mut value = serde_json::to_value(skill).unwrap();
-        let metadata = value["metadata"].as_object_mut().unwrap();
-        metadata.remove("absorbed_into");
-        metadata.remove("archived_reason");
-
-        let decoded: ManagedSkill = serde_json::from_value(value).unwrap();
-        assert_eq!(decoded.metadata.absorbed_into, None);
-        assert_eq!(decoded.metadata.archived_reason, None);
     }
 }
