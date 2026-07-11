@@ -1281,6 +1281,10 @@ def _resolve_hermes_home(config=None, hermes_home=None):
     for candidate in (
         hermes_home,
         _configured_hermes_home(config),
+        # The generated package physically belongs to <profile>/plugins.
+        # Prefer that stable owner over process-global helpers and inherited
+        # HERMES_HOME values when no explicit/configured home was supplied.
+        tools.hermes_home_dir(),
     ):
         if candidate:
             return str(candidate)
@@ -1291,8 +1295,7 @@ def _resolve_hermes_home(config=None, hermes_home=None):
                 return str(resolved)
         except Exception:
             pass
-    fallback = tools.hermes_home_dir()
-    return fallback or None
+    return str(tools.hermes_home_dir())
 
 def _configured_value(config, *names, default=None):
     if config is None:
@@ -4003,8 +4006,10 @@ def register(ctx):
         getattr(ctx, "hermes_home", None) or getattr(ctx, "_hermes_home", None)
     )
     context_hermes_home = _resolve_hermes_home(
-        context_config,
-        explicit_context_home or tools.hermes_home_dir(),
+        None,
+        explicit_context_home
+        or _configured_hermes_home(context_config)
+        or tools.hermes_home_dir(),
     )
 
     def bind_hermes_home(handler):
