@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.55](https://github.com/ScriptedAlchemy/tracedecay/compare/v0.0.54...v0.0.55) - 2026-07-11
+
+### Fixed
+
+- *(agents)* recover post-update integration state
+
 ## [0.0.54](https://github.com/ScriptedAlchemy/tracedecay/compare/v0.0.53...v0.0.54) - 2026-07-11
 
 ### Added
