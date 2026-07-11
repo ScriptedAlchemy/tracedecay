@@ -202,36 +202,46 @@ def main():
     os.makedirs(other_project, exist_ok=True)
     with open(os.path.join(other_project, "README.md"), "w", encoding="utf-8") as handle:
         handle.write("# project two\n")
-    subprocess.run(
+    init_result = subprocess.run(
         [loaded.module.tools.TRACEDECAY_BIN, "init"],
         cwd=other_project,
-        check=True,
+        check=False,
         capture_output=True,
         text=True,
     )
+    assert init_result.returncode == 0 or "already initialized" in (
+        init_result.stdout + init_result.stderr
+    ).lower(), init_result.stderr
     other_provider = load_memory_provider("tracedecay")
     assert other_provider is not None and other_provider is not provider
     other_provider.initialize("stock-check-session-two", cwd=other_project)
+    isolation_marker = "stock hermes project two isolated"
     unwrap_tool_json(
         other_provider.handle_tool_call(
             "fact_add",
-            {"content": "stock hermes project two isolated", "fact_type": "decision"},
+            {"content": isolation_marker, "fact_type": "decision"},
         )
     )
     first_project_result = unwrap_tool_json(
         provider.handle_tool_call(
             "fact_store",
-            {"action": "search", "query": "project two isolated", "limit": 1},
+            {"action": "list", "limit": 200},
         )
     )
     second_project_result = unwrap_tool_json(
         other_provider.handle_tool_call(
             "fact_store",
-            {"action": "search", "query": "project two isolated", "limit": 1},
+            {"action": "list", "limit": 200},
         )
     )
-    assert first_project_result.get("count", 0) == 0, first_project_result
-    assert second_project_result.get("count", 0) >= 1, second_project_result
+    first_contents = {
+        item.get("fact", item).get("content") for item in first_project_result.get("facts", [])
+    }
+    second_contents = {
+        item.get("fact", item).get("content") for item in second_project_result.get("facts", [])
+    }
+    assert isolation_marker not in first_contents, first_project_result
+    assert isolation_marker in second_contents, second_project_result
     ok("memory facts remain isolated between Hermes session projects")
 
     # Passive-ingest / recall hooks (sync_turn, queue_prefetch, on_memory_write).
