@@ -112,9 +112,13 @@ async fn migrate_legacy_hermes_stores_inner(
         )
         .await
         {
-            Ok(CandidateOutcome::Migrated(migration)) => report.migrated.push(migration),
-            Ok(CandidateOutcome::AlreadyMigrated(migration)) => {
+            Ok(CandidateOutcome::Migrated(migration, preserved_memory)) => {
+                report.migrated.push(migration);
+                report.unresolved.extend(preserved_memory);
+            }
+            Ok(CandidateOutcome::AlreadyMigrated(migration, preserved_memory)) => {
                 report.already_migrated.push(migration);
+                report.unresolved.extend(preserved_memory);
             }
             Err(CandidateError::Unresolved(reason)) => {
                 report
@@ -146,9 +150,13 @@ async fn migrate_legacy_hermes_stores_inner(
         )
         .await
         {
-            Ok(CandidateOutcome::Migrated(migration)) => report.migrated.push(migration),
-            Ok(CandidateOutcome::AlreadyMigrated(migration)) => {
+            Ok(CandidateOutcome::Migrated(migration, preserved_memory)) => {
+                report.migrated.push(migration);
+                report.unresolved.extend(preserved_memory);
+            }
+            Ok(CandidateOutcome::AlreadyMigrated(migration, preserved_memory)) => {
                 report.already_migrated.push(migration);
+                report.unresolved.extend(preserved_memory);
             }
             Err(CandidateError::Unresolved(reason)) => {
                 report.unresolved.push(LegacyHermesMigrationIssue {
@@ -289,8 +297,8 @@ fn legacy_profile_dirs_for_homes(hermes_homes: &[PathBuf]) -> Vec<PathBuf> {
 }
 
 enum CandidateOutcome {
-    Migrated(LegacyHermesMigration),
-    AlreadyMigrated(LegacyHermesMigration),
+    Migrated(LegacyHermesMigration, Option<LegacyHermesMigrationIssue>),
+    AlreadyMigrated(LegacyHermesMigration, Option<LegacyHermesMigrationIssue>),
 }
 
 enum CandidateError {
@@ -301,6 +309,13 @@ enum CandidateError {
 struct ResolvedTargetProject {
     root: PathBuf,
     registry_project_id: Option<String>,
+    user_scope: bool,
+}
+
+struct ResolvedTargetLayout {
+    sessions_db_path: PathBuf,
+    graph_db_path: Option<PathBuf>,
+    project_id: String,
 }
 
 async fn migrate_candidate(
@@ -384,9 +399,9 @@ async fn migrate_legacy_state_store(
         rows_copied,
     };
     Ok(if rows_copied == 0 {
-        CandidateOutcome::AlreadyMigrated(migration)
+        CandidateOutcome::AlreadyMigrated(migration, None)
     } else {
-        CandidateOutcome::Migrated(migration)
+        CandidateOutcome::Migrated(migration, None)
     })
 }
 
@@ -425,6 +440,18 @@ async fn migrate_candidate_snapshot(
     )
     .await
     .map_err(CandidateError::Unresolved)?;
+    let preserved_memory = if target_project.user_scope {
+        candidate
+            .source_memory_db
+            .as_ref()
+            .map(|source_db| LegacyHermesMigrationIssue {
+                source_db: source_db.clone(),
+                reason: "unscoped legacy memory was preserved because no durable project attribution exists"
+                    .to_string(),
+            })
+    } else {
+        None
+    };
     let target_layout = resolve_target_layout(&target_project, tracedecay_profile_root)
         .await
         .map_err(|error| {
@@ -442,13 +469,22 @@ async fn migrate_candidate_snapshot(
     if candidate
         .source_memory_db
         .as_deref()
-        .is_some_and(|source_path| same_path(source_path, &target_layout.graph_db_path))
+        .zip(target_layout.graph_db_path.as_deref())
+        .is_some_and(|(source_path, target_path)| same_path(source_path, target_path))
     {
         return Err(CandidateError::Failed(
             "source and target memory databases resolve to the same path".to_string(),
         ));
     }
-    let source_memory = match candidate.source_memory_db.as_deref() {
+    // Projectless sessions are safe to retain in the profile user-session
+    // store. Legacy memory facts are not: without a project pin or durable
+    // session attribution their scope cannot be proven, so leave that source
+    // database untouched for a later explicit recovery.
+    let source_memory = match candidate
+        .source_memory_db
+        .as_deref()
+        .filter(|_| !target_project.user_scope)
+    {
         Some(path) => {
             let (db, _) = Database::open_read_only(path).await.map_err(|error| {
                 CandidateError::Failed(format!(
@@ -490,11 +526,14 @@ async fn migrate_candidate_snapshot(
         .map_err(CandidateError::Failed)?;
     }
     let memory_rows = match source_memory.as_ref() {
-        Some(source_memory) => {
-            merge_memory_snapshot(source_memory.conn(), &target_layout.graph_db_path)
-                .await
-                .map_err(CandidateError::Failed)?
-        }
+        Some(source_memory) => merge_memory_snapshot(
+            source_memory.conn(),
+            target_layout.graph_db_path.as_deref().ok_or_else(|| {
+                CandidateError::Failed("project memory target disappeared".to_string())
+            })?,
+        )
+        .await
+        .map_err(CandidateError::Failed)?,
         None => 0,
     };
 
@@ -504,15 +543,7 @@ async fn migrate_candidate_snapshot(
         target_db.conn(),
         &target_layout.sessions_db_path,
         &target_project.root,
-        target_layout
-            .identity
-            .project_id
-            .as_deref()
-            .ok_or_else(|| {
-                CandidateError::Failed(
-                    "target user-profile shard has no durable project id".to_string(),
-                )
-            })?,
+        &target_layout.project_id,
         &fingerprint,
         source_schema_version,
         memory_rows,
@@ -535,16 +566,23 @@ async fn migrate_candidate_snapshot(
         rows_copied: result.rows_copied,
     };
     Ok(if result.already_migrated {
-        CandidateOutcome::AlreadyMigrated(migration)
+        CandidateOutcome::AlreadyMigrated(migration, preserved_memory)
     } else {
-        CandidateOutcome::Migrated(migration)
+        CandidateOutcome::Migrated(migration, preserved_memory)
     })
 }
 
 async fn resolve_target_layout(
     target_project: &ResolvedTargetProject,
     tracedecay_profile_root: &Path,
-) -> crate::errors::Result<crate::storage::StoreLayout> {
+) -> crate::errors::Result<ResolvedTargetLayout> {
+    if target_project.user_scope {
+        return Ok(ResolvedTargetLayout {
+            sessions_db_path: crate::sessions::user_sessions_db_path(tracedecay_profile_root),
+            graph_db_path: None,
+            project_id: "user".to_string(),
+        });
+    }
     if let Some(project_id) = target_project.registry_project_id.as_deref() {
         if let Some(layout) =
             crate::storage::resolve_persisted_layout(&target_project.root, tracedecay_profile_root)?
@@ -558,25 +596,41 @@ async fn resolve_target_layout(
                     ),
                 });
             }
-            return Ok(layout);
+            return project_layout(layout);
         }
-        return crate::storage::profile_sharded_layout(
+        return project_layout(crate::storage::profile_sharded_layout(
             &target_project.root,
             tracedecay_profile_root,
             &crate::storage::EnrollmentMarker {
                 project_id: project_id.to_string(),
                 storage_mode: crate::storage::StorageMode::ProfileSharded,
             },
-        );
+        )?);
     }
 
     let production_profile = crate::storage::default_profile_root()
         .is_ok_and(|default| same_path(&default, tracedecay_profile_root));
-    if production_profile {
+    let layout = if production_profile {
         crate::tracedecay::TraceDecay::resolve_store_layout_for_identity(&target_project.root).await
     } else {
         crate::storage::resolve_layout(&target_project.root, tracedecay_profile_root)
-    }
+    }?;
+    project_layout(layout)
+}
+
+fn project_layout(
+    layout: crate::storage::StoreLayout,
+) -> crate::errors::Result<ResolvedTargetLayout> {
+    let project_id = layout.identity.project_id.clone().ok_or_else(|| {
+        crate::errors::TraceDecayError::Config {
+            message: "target project shard has no durable project id".to_string(),
+        }
+    })?;
+    Ok(ResolvedTargetLayout {
+        sessions_db_path: layout.sessions_db_path,
+        graph_db_path: Some(layout.graph_db_path),
+        project_id,
+    })
 }
 
 async fn verify_source(source: &Connection) -> Result<(), String> {
@@ -749,12 +803,13 @@ async fn resolve_target_project(
         .query(&sql, ())
         .await
         .map_err(|error| format!("could not read source project metadata: {error}"))?;
-    let mut candidates = BTreeSet::new();
+    let mut candidate_rows = Vec::new();
     while let Some(row) = rows
         .next()
         .await
         .map_err(|error| format!("could not read source project metadata row: {error}"))?
     {
+        let mut candidates = BTreeSet::new();
         for candidate in [row.get::<Option<String>>(0), row.get::<Option<String>>(1)]
             .into_iter()
             .flatten()
@@ -762,50 +817,117 @@ async fn resolve_target_project(
         {
             candidates.insert(PathBuf::from(candidate));
         }
-        if let Ok(Some(metadata)) = row.get::<Option<String>>(2) {
-            collect_metadata_project_candidates(&metadata, &mut candidates);
-        }
+        let malformed_metadata = match row.get::<Option<String>>(2) {
+            Ok(Some(metadata)) => {
+                collect_metadata_project_candidates(&metadata, &mut candidates).is_err()
+            }
+            Ok(None) => false,
+            Err(_) => true,
+        };
+        candidate_rows.push((candidates, malformed_metadata));
     }
 
     let mut targets: BTreeMap<String, ResolvedTargetProject> = BTreeMap::new();
-    for candidate in candidates {
-        let Some(target) =
-            resolve_project_candidate(&candidate, user_home, hermes_homes, registry.as_ref())
-                .await?
-        else {
-            continue;
-        };
-        let key = target
-            .registry_project_id
-            .clone()
-            .unwrap_or_else(|| format!("path:{}", GlobalDb::canonical_project_key(&target.root)));
-        if let Some(existing) = targets.get(&key)
-            && !same_path(&existing.root, &target.root)
-        {
+    let mut has_projectless_evidence = false;
+    let mut has_unresolved_project_evidence = false;
+    for (candidates, malformed_metadata) in candidate_rows {
+        let mut row_targets: BTreeMap<String, ResolvedTargetProject> = BTreeMap::new();
+        let mut row_has_unresolved_project_evidence = malformed_metadata;
+        for candidate in candidates {
+            if is_projectless_candidate(&candidate, user_home, hermes_homes) {
+                continue;
+            }
+            let Some(target) =
+                resolve_project_candidate(&candidate, user_home, hermes_homes, registry.as_ref())
+                    .await?
+            else {
+                row_has_unresolved_project_evidence = true;
+                continue;
+            };
+            let key = target_key(&target);
+            if let Some(existing) = row_targets.get(&key)
+                && !same_path(&existing.root, &target.root)
+            {
+                return Err(project_identity_collision(&key, existing, &target));
+            }
+            row_targets.insert(key, target);
+        }
+        if row_targets.len() > 1 {
             return Err(format!(
-                "registered project identity '{key}' maps to both '{}' and '{}'; refusing a collision",
-                existing.root.display(),
-                target.root.display()
+                "one source session maps to {} projects; refusing an ambiguous migration",
+                row_targets.len()
             ));
         }
-        targets.insert(key, target);
+        if row_has_unresolved_project_evidence {
+            has_unresolved_project_evidence = true;
+        }
+        if let Some((key, target)) = row_targets.into_iter().next() {
+            if let Some(existing) = targets.get(&key)
+                && !same_path(&existing.root, &target.root)
+            {
+                return Err(project_identity_collision(&key, existing, &target));
+            }
+            targets.insert(key, target);
+        } else if !row_has_unresolved_project_evidence {
+            has_projectless_evidence = true;
+        }
     }
     match targets.len() {
-        1 => targets
+        1 if !has_projectless_evidence && !has_unresolved_project_evidence => targets
             .into_values()
             .next()
             .ok_or_else(|| "resolved project target disappeared".to_string()),
+        0 if !has_unresolved_project_evidence => Ok(ResolvedTargetProject {
+            root: PathBuf::from("user"),
+            registry_project_id: None,
+            user_scope: true,
+        }),
         0 => Err("no durable real project path exists in source session metadata".to_string()),
+        1 => Err(
+            "source session metadata mixes projectless or unresolved evidence with a project; refusing an ambiguous migration"
+                .to_string(),
+        ),
         count => Err(format!(
             "source session metadata maps to {count} projects; refusing an ambiguous migration"
         )),
     }
 }
 
-fn collect_metadata_project_candidates(raw: &str, candidates: &mut BTreeSet<PathBuf>) {
-    let Ok(metadata) = serde_json::from_str::<serde_json::Value>(raw) else {
-        return;
-    };
+fn target_key(target: &ResolvedTargetProject) -> String {
+    target
+        .registry_project_id
+        .clone()
+        .unwrap_or_else(|| format!("path:{}", GlobalDb::canonical_project_key(&target.root)))
+}
+
+fn project_identity_collision(
+    key: &str,
+    existing: &ResolvedTargetProject,
+    target: &ResolvedTargetProject,
+) -> String {
+    format!(
+        "registered project identity '{key}' maps to both '{}' and '{}'; refusing a collision",
+        existing.root.display(),
+        target.root.display()
+    )
+}
+
+fn is_projectless_candidate(candidate: &Path, user_home: &Path, hermes_homes: &[PathBuf]) -> bool {
+    if candidate.as_os_str().is_empty() || candidate == Path::new("user") {
+        return true;
+    }
+    same_path(candidate, user_home)
+        || hermes_homes
+            .iter()
+            .any(|hermes_home| same_path(candidate, hermes_home))
+}
+
+fn collect_metadata_project_candidates(
+    raw: &str,
+    candidates: &mut BTreeSet<PathBuf>,
+) -> Result<(), ()> {
+    let metadata = serde_json::from_str::<serde_json::Value>(raw).map_err(|_| ())?;
+    let metadata = metadata.as_object().ok_or(())?;
     for key in [
         "hermes_session_cwd",
         "hermes_session_worktree",
@@ -813,10 +935,12 @@ fn collect_metadata_project_candidates(raw: &str, candidates: &mut BTreeSet<Path
         "worktree",
         "project_root",
     ] {
-        if let Some(path) = metadata.get(key).and_then(serde_json::Value::as_str) {
+        if let Some(value) = metadata.get(key) {
+            let path = value.as_str().ok_or(())?;
             candidates.insert(PathBuf::from(path));
         }
     }
+    Ok(())
 }
 
 async fn resolve_project_candidate(
@@ -858,6 +982,7 @@ async fn resolve_project_candidate(
                 return Ok(Some(ResolvedTargetProject {
                     root,
                     registry_project_id: Some(context.project.project_id),
+                    user_scope: false,
                 }));
             }
         }
@@ -872,6 +997,7 @@ async fn resolve_project_candidate(
         real_project_root(candidate, user_home, hermes_homes).map(|root| ResolvedTargetProject {
             root,
             registry_project_id: None,
+            user_scope: false,
         }),
     )
 }
@@ -2846,7 +2972,7 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn removed_symlink_metadata_resolves_through_registered_canonical_alias() {
+    async fn removed_unprovable_symlink_metadata_is_preserved() {
         let temp = tempfile::tempdir().unwrap();
         let user_home = temp.path().join("home");
         let profile_root = temp.path().join("tracedecay-profile");
@@ -2887,13 +3013,10 @@ mod tests {
 
         let report = migrate_legacy_hermes_stores_to(&user_home, &profile_root).await;
 
-        assert_eq!(report.migrated.len(), 1, "{report:?}");
-        assert_eq!(
-            report.migrated[0].target_project,
-            current_project.canonicalize().unwrap()
-        );
+        assert!(report.migrated.is_empty(), "{report:?}");
+        assert_eq!(report.unresolved.len(), 1, "{report:?}");
         assert!(
-            profile_root
+            !profile_root
                 .join("projects/stable-project/sessions.db")
                 .is_file()
         );
@@ -3006,19 +3129,183 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn hermes_profile_path_is_never_a_migration_target() {
+    async fn projectless_profile_sessions_migrate_to_user_store_idempotently() {
         let temp = tempfile::tempdir().unwrap();
         let user_home = temp.path().join("home");
         let profile_root = temp.path().join("tracedecay-profile");
         let hermes = user_home.join(".hermes");
         let source = hermes.join(".tracedecay/sessions.db");
+        let source_memory = hermes.join(".tracedecay/tracedecay.db");
         fs::create_dir_all(source.parent().unwrap()).unwrap();
-        fs::write(hermes.join(".tracedecay/tracedecay.db"), []).unwrap();
+        let source_fact_id = seed_memory_fact(&source_memory, "unscoped legacy fact").await;
         seed_source(&source, &[("session", &hermes)]).await;
+
+        let report = migrate_legacy_hermes_stores_to(&user_home, &profile_root).await;
+        assert_eq!(report.migrated.len(), 1, "{report:?}");
+        assert_eq!(report.unresolved.len(), 1, "{report:?}");
+        assert_eq!(report.unresolved[0].source_db, source_memory);
+        assert!(report.unresolved[0].reason.contains("preserved"));
+        let target_path = crate::sessions::user_sessions_db_path(&profile_root);
+        let target = GlobalDb::open_read_only_at(&target_path).await.unwrap();
+        let session = target.get_session("hermes", "session").await.unwrap();
+        assert_eq!(session.project_path, "user");
+        assert!(!crate::memory::user::user_memory_db_path(&profile_root).exists());
+        let source_after = GlobalDb::open_read_only_at(&source).await.unwrap();
+        assert_eq!(count(source_after.conn(), "sessions").await, 1);
+        drop(source_after);
+        let (source_memory_after, _) = Database::open_read_only(&source_memory).await.unwrap();
+        assert!(
+            MemoryStore::new(source_memory_after.conn())
+                .get_fact(source_fact_id)
+                .await
+                .unwrap()
+                .is_some()
+        );
+
+        let retry = migrate_legacy_hermes_stores_to(&user_home, &profile_root).await;
+        assert_eq!(retry.already_migrated.len(), 1, "{retry:?}");
+        assert_eq!(retry.unresolved.len(), 1, "{retry:?}");
+        assert_eq!(count(target.conn(), "sessions").await, 1);
+    }
+
+    #[tokio::test]
+    async fn malformed_metadata_is_preserved_not_misrouted_to_user() {
+        let temp = tempfile::tempdir().unwrap();
+        let user_home = temp.path().join("home");
+        let profile_root = temp.path().join("tracedecay-profile");
+        let source = user_home.join(".hermes/.tracedecay/sessions.db");
+        fs::create_dir_all(source.parent().unwrap()).unwrap();
+        seed_source(&source, &[("session", &user_home)]).await;
+        let source_rw = GlobalDb::open_at(&source).await.unwrap();
+        source_rw
+            .conn()
+            .execute(
+                "UPDATE sessions SET project_key = '', project_path = '', metadata_json = '{invalid' WHERE session_id = 'session'",
+                (),
+            )
+            .await
+            .unwrap();
+        drop(source_rw);
+
+        let report = migrate_legacy_hermes_stores_to(&user_home, &profile_root).await;
+
+        assert_eq!(report.unresolved.len(), 1, "{report:?}");
+        assert!(report.migrated.is_empty());
+        assert!(!crate::sessions::user_sessions_db_path(&profile_root).exists());
+    }
+
+    #[tokio::test]
+    async fn structurally_invalid_metadata_is_preserved_not_misrouted_to_user() {
+        let temp = tempfile::tempdir().unwrap();
+        let user_home = temp.path().join("home");
+        let profile_root = temp.path().join("tracedecay-profile");
+        let source = user_home.join(".hermes/.tracedecay/sessions.db");
+        fs::create_dir_all(source.parent().unwrap()).unwrap();
+        seed_source(&source, &[("session", &user_home)]).await;
+        let source_rw = GlobalDb::open_at(&source).await.unwrap();
+        source_rw
+            .conn()
+            .execute(
+                "UPDATE sessions SET project_key = '', project_path = '', metadata_json = '{\"project_root\":42}' WHERE session_id = 'session'",
+                (),
+            )
+            .await
+            .unwrap();
+        drop(source_rw);
+
+        let report = migrate_legacy_hermes_stores_to(&user_home, &profile_root).await;
+
+        assert_eq!(report.unresolved.len(), 1, "{report:?}");
+        assert!(report.migrated.is_empty());
+        assert!(!crate::sessions::user_sessions_db_path(&profile_root).exists());
+    }
+
+    #[tokio::test]
+    async fn vanished_project_evidence_is_preserved_not_misrouted_to_user() {
+        let temp = tempfile::tempdir().unwrap();
+        let user_home = temp.path().join("home");
+        let profile_root = temp.path().join("tracedecay-profile");
+        let vanished_project = user_home.join(".hermes/plugins/vanished-project");
+        let source = user_home.join(".hermes/.tracedecay/sessions.db");
+        fs::create_dir_all(source.parent().unwrap()).unwrap();
+        seed_source(&source, &[("session", &vanished_project)]).await;
 
         let report = migrate_legacy_hermes_stores_to(&user_home, &profile_root).await;
         assert_eq!(report.unresolved.len(), 1, "{report:?}");
         assert!(report.migrated.is_empty());
+        assert!(!crate::sessions::user_sessions_db_path(&profile_root).exists());
+        let source_after = GlobalDb::open_read_only_at(&source).await.unwrap();
+        assert_eq!(count(source_after.conn(), "sessions").await, 1);
+    }
+
+    #[tokio::test]
+    async fn existing_unregistered_directory_is_not_assumed_projectless() {
+        let temp = tempfile::tempdir().unwrap();
+        let user_home = temp.path().join("home");
+        let profile_root = temp.path().join("tracedecay-profile");
+        let unregistered = temp.path().join("unregistered-project");
+        fs::create_dir_all(&unregistered).unwrap();
+        let source = user_home.join(".hermes/.tracedecay/sessions.db");
+        fs::create_dir_all(source.parent().unwrap()).unwrap();
+        seed_source(&source, &[("session", &unregistered)]).await;
+
+        let report = migrate_legacy_hermes_stores_to(&user_home, &profile_root).await;
+        assert_eq!(report.unresolved.len(), 1, "{report:?}");
+        assert!(report.migrated.is_empty());
+        assert!(!crate::sessions::user_sessions_db_path(&profile_root).exists());
+    }
+
+    #[tokio::test]
+    async fn same_session_resolved_and_unresolved_projects_fail_closed() {
+        let temp = tempfile::tempdir().unwrap();
+        let user_home = temp.path().join("home");
+        let profile_root = temp.path().join("tracedecay-profile");
+        let project = temp.path().join("project");
+        let vanished = temp.path().join("vanished-project");
+        mark_real_project(&project);
+        let source = user_home.join(".hermes/.tracedecay/sessions.db");
+        fs::create_dir_all(source.parent().unwrap()).unwrap();
+        seed_source(&source, &[("session", &project)]).await;
+        let source_rw = GlobalDb::open_at(&source).await.unwrap();
+        source_rw
+            .conn()
+            .execute(
+                "UPDATE sessions SET project_path = ?1 WHERE session_id = 'session'",
+                [vanished.to_string_lossy().to_string()],
+            )
+            .await
+            .unwrap();
+        drop(source_rw);
+
+        let report = migrate_legacy_hermes_stores_to(&user_home, &profile_root).await;
+
+        assert_eq!(report.unresolved.len(), 1, "{report:?}");
+        assert!(report.migrated.is_empty());
+        let layout = crate::storage::resolve_layout(&project, &profile_root).unwrap();
+        assert!(!layout.sessions_db_path.exists());
+    }
+
+    #[tokio::test]
+    async fn mixed_user_and_project_sessions_fail_closed() {
+        let temp = tempfile::tempdir().unwrap();
+        let user_home = temp.path().join("home");
+        let profile_root = temp.path().join("tracedecay-profile");
+        let project = temp.path().join("project");
+        mark_real_project(&project);
+        let source = user_home.join(".hermes/.tracedecay/sessions.db");
+        fs::create_dir_all(source.parent().unwrap()).unwrap();
+        seed_source(
+            &source,
+            &[("user-session", &user_home), ("project-session", &project)],
+        )
+        .await;
+
+        let report = migrate_legacy_hermes_stores_to(&user_home, &profile_root).await;
+        assert_eq!(report.unresolved.len(), 1, "{report:?}");
+        assert!(report.unresolved[0].reason.contains("ambiguous"));
+        assert!(!crate::sessions::user_sessions_db_path(&profile_root).exists());
+        let project_layout = crate::storage::resolve_layout(&project, &profile_root).unwrap();
+        assert!(!project_layout.sessions_db_path.exists());
     }
 
     #[tokio::test]

@@ -155,6 +155,49 @@ pub(crate) async fn migrate_legacy_hermes_data(home: &Path) -> tracedecay::error
     })
 }
 
+/// Automated upgrade reinstalls must not remain wedged on preserved legacy
+/// stores whose project evidence no longer resolves. Genuine read, integrity,
+/// or copy failures still block the reinstall; an explicit Hermes install
+/// continues to use the strict cutover above.
+async fn migrate_legacy_hermes_data_for_reinstall(home: &Path) -> tracedecay::errors::Result<()> {
+    let report = tracedecay::migrate::hermes::migrate_legacy_hermes_stores(home).await;
+    finish_legacy_hermes_reinstall_migration(report)
+}
+
+fn finish_legacy_hermes_reinstall_migration(
+    report: tracedecay::migrate::hermes::LegacyHermesMigrationReport,
+) -> tracedecay::errors::Result<()> {
+    for migration in report.migrated {
+        eprintln!(
+            "  \x1b[32m✔\x1b[0m Migrated legacy Hermes session store {} -> {} ({} rows)",
+            migration.source_db.display(),
+            migration.target_project.display(),
+            migration.rows_copied
+        );
+    }
+    for issue in report.unresolved {
+        eprintln!(
+            "  \x1b[33mwarning:\x1b[0m preserving unresolved legacy Hermes session store {}: {}",
+            issue.source_db.display(),
+            issue.reason
+        );
+    }
+    if report.failed.is_empty() {
+        return Ok(());
+    }
+    let issues = report
+        .failed
+        .into_iter()
+        .map(|issue| format!("{}: {}", issue.source_db.display(), issue.reason))
+        .collect::<Vec<_>>()
+        .join("; ");
+    Err(tracedecay::errors::TraceDecayError::Config {
+        message: format!(
+            "legacy Hermes session data migration failed; source data and project pins were preserved: {issues}"
+        ),
+    })
+}
+
 pub(crate) async fn handle_install_command(
     agent: Option<String>,
     local: bool,
@@ -384,7 +427,9 @@ pub(crate) async fn handle_reinstall_command() -> tracedecay::errors::Result<()>
 /// loop forever — `migrate_installed_agents` only ever adds ids, never prunes,
 /// so a stale id would never resolve and the markers would never advance. Only
 /// genuine `install()` failures are reported as `Err` so they still gate
-/// markers.
+/// markers. Unresolved legacy Hermes project evidence is preserved and warned
+/// during automated reinstall; actual source-integrity or copy failures still
+/// gate Hermes so corrupted or partially copied data cannot be hidden.
 pub(crate) async fn reinstall_agent_integrations(
     agent_ids: &[String],
     home: &Path,
@@ -393,7 +438,7 @@ pub(crate) async fn reinstall_agent_integrations(
     let project_path = std::env::current_dir().ok();
     let mut results = Vec::new();
     let hermes_migration_error = if agent_ids.iter().any(|id| id == "hermes") {
-        migrate_legacy_hermes_data(home)
+        migrate_legacy_hermes_data_for_reinstall(home)
             .await
             .err()
             .map(|error| error.to_string())
@@ -496,4 +541,42 @@ pub(crate) async fn handle_uninstall_command(
         eprintln!("All agent integrations removed.");
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use tracedecay::migrate::hermes::{LegacyHermesMigrationIssue, LegacyHermesMigrationReport};
+
+    use super::finish_legacy_hermes_reinstall_migration;
+
+    #[test]
+    fn automated_reinstall_preserves_unresolved_legacy_store_without_gating() {
+        let report = LegacyHermesMigrationReport {
+            unresolved: vec![LegacyHermesMigrationIssue {
+                source_db: PathBuf::from("legacy-sessions.db"),
+                reason: "project evidence is unresolved".to_string(),
+            }],
+            ..LegacyHermesMigrationReport::default()
+        };
+
+        assert!(finish_legacy_hermes_reinstall_migration(report).is_ok());
+    }
+
+    #[test]
+    fn automated_reinstall_gates_legacy_store_failures() {
+        let report = LegacyHermesMigrationReport {
+            failed: vec![LegacyHermesMigrationIssue {
+                source_db: PathBuf::from("legacy-sessions.db"),
+                reason: "integrity check failed".to_string(),
+            }],
+            ..LegacyHermesMigrationReport::default()
+        };
+
+        let error = finish_legacy_hermes_reinstall_migration(report)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("integrity check failed"));
+    }
 }
