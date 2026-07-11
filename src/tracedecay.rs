@@ -41,6 +41,7 @@ pub struct TraceDecay {
     config: TraceDecayConfig,
     project_root: PathBuf,
     store_layout: StoreLayout,
+    active_graph_layout: ActiveGraphLayout,
     open_options: TraceDecayOpenOptions,
     registry: LanguageRegistry,
     /// The active git branch (None if detached HEAD or not a git repo).
@@ -50,6 +51,12 @@ pub struct TraceDecay {
     /// Set when serving from a fallback (ancestor) DB instead of the exact branch.
     fallback_warning: Option<String>,
     read_only: bool,
+}
+
+#[derive(Debug, Clone)]
+struct ActiveGraphLayout {
+    dirty_path: PathBuf,
+    sync_lock_path: PathBuf,
 }
 
 #[derive(Debug, Clone, Default)]
