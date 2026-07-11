@@ -481,9 +481,9 @@ pub struct HostCapabilitySnapshotV1 {
     pub fresh_until: UtcMicros,
     pub snapshot_digest: ManifestDigest, // canonical subject/capabilities/times only; excludes this field
 }
-pub enum HookInvocationScopeV1 { ThreadStart, SubagentStart, Turn }
-pub enum HookDefinitionRepresentationV1 { JsonFile, InlineToml, PluginDefaultFile, PluginManifestPath, PluginManifestPathArray, PluginManifestInline, PluginManifestInlineArray, ManagedInline }
-pub enum HostConfigLayerV1 { System, Cloud, Mdm, ManagedRequirements, User, Project, Session, Plugin }
+pub enum HookInvocationScopeV1 { SessionLifecycle, Setup, Turn, ToolCall, ToolBatch, SubagentLifecycle, TaskLifecycle, TeamLifecycle, WorktreeLifecycle, ComponentLifecycle, Elicitation, AsyncObservation, DisplayStream }
+pub enum HookDefinitionRepresentationV1 { JsonFile, JsonSettings, InlineToml, PluginDefaultFile, PluginManifestPath, PluginManifestPathArray, PluginManifestInline, PluginManifestInlineArray, SkillFrontmatter, AgentFrontmatter, ManagedInline, SessionMemory, BuiltIn }
+pub enum HostConfigLayerV1 { System, Cloud, Mdm, ManagedRequirements, ManagedPolicy, User, Project, Local, Session, Plugin, Skill, Agent, BuiltIn }
 pub struct HostConfigSourceV1 {
     pub source_id: EntityId,
     pub layer: HostConfigLayerV1,
@@ -512,11 +512,32 @@ pub struct HookInvocationGroupRefV1 { pub group_id: EntityId, pub host_event_ide
 pub enum PermissionBehaviorV1 { Allow, Deny, NoDecision }
 pub enum HookContinuationTargetV1 { Turn, Subagent }
 pub enum HookHandlerResultV1 { Succeeded, TimedOut, Exited { code: i32 }, InvalidOutput { reason: RegistryEntryId }, SkippedUnsupported, SkippedTrust }
-pub enum HostHookTrustStateV1 { NeedsReview, Trusted, ManagedTrusted, Unknown }
+pub enum ClaudePermissionDestinationV1 { Session, LocalSettings, ProjectSettings, UserSettings }
+pub enum ClaudePermissionUpdateV1 {
+    AddRules { behavior: RegistryEntryId, rules: PayloadRef, destination: ClaudePermissionDestinationV1 },
+    ReplaceRules { behavior: RegistryEntryId, rules: PayloadRef, destination: ClaudePermissionDestinationV1 },
+    RemoveRules { behavior: RegistryEntryId, rules: PayloadRef, destination: ClaudePermissionDestinationV1 },
+    SetMode { mode: RegistryEntryId, destination: ClaudePermissionDestinationV1 },
+    AddDirectories { directories: PayloadRef, destination: ClaudePermissionDestinationV1 },
+    RemoveDirectories { directories: PayloadRef, destination: ClaudePermissionDestinationV1 },
+}
+pub struct ClaudePermissionRequestDecisionV1 { pub behavior: PermissionBehaviorV1, pub updated_input: Option<PayloadRef>, pub updates: BoundedVec<ClaudePermissionUpdateV1, 32>, pub message: Option<LogSafeText>, pub interrupt: bool }
+pub struct ProtectedHostLocatorHandleV1 { pub handle_id: EntityId, pub access_digest: AccessPolicyDigest, pub expires_at: UtcMicros }
+pub struct ProtectedHostLocatorRefV1 { pub handle: ProtectedHostLocatorHandleV1, pub locator_digest: PrivacyDomainBoundLocatorDigest }
+pub struct ValidatedHostDirectoryV1 { pub locator: ProtectedHostLocatorRefV1, pub validation_receipt: EntityRef }
+pub struct WatchPathSetV1 { pub paths: BoundedVec<ProtectedHostLocatorRefV1, 64>, pub coverage: CoverageReportV1 }
+pub enum ClaudeElicitationActionV1 { Accept, Decline, Cancel }
+pub struct ClaudeElicitationDecisionV1 { pub action: ClaudeElicitationActionV1, pub form_content: Option<PayloadRef>, pub sanitization_receipt: SanitizationReceiptId }
+pub struct ClaudeSessionBootstrapV1 { pub initial_user_message: Option<PayloadRef>, pub session_title: Option<PromptEligibleText>, pub watch_paths: Option<WatchPathSetV1>, pub reload_skills: bool }
+pub enum HostHookTrustStateV1 { NeedsReview, Trusted, ManagedTrusted, NotApplicable, Unknown }
 pub enum HostHookEligibilityStateV1 { Eligible, DisabledByUser, SkippedUntrustedProject, SkippedManagedOnly, SkippedFeatureDisabled }
-pub enum HostHookHandlerSupportV1 { SupportedCommand, UnsupportedPrompt, UnsupportedAgent, UnsupportedAsync }
+pub enum HostHookControlStateV1 { Enabled, DisabledAll, SuppressedManagedOnly, ManagedExempt, ComponentInactive }
+pub enum HostHookHandlerKindV1 { Command, Http, McpTool, Prompt, Agent }
+pub enum HostHookHandlerSupportV1 { Supported, VersionGated, Unsupported, Experimental }
+pub enum HostHookExecutionModeV1 { Synchronous, Async, AsyncRewake }
+pub enum HostHookHostDedupeV1 { NotApplicable, Executed, DedupedIdentical, Unobservable }
 pub enum HostHookDefinitionFreshnessV1 { Current, ChangedSinceReview }
-pub enum HostHookTrustRequirementV1 { ExactHashUserReview, ManagedPolicy }
+pub enum HostHookTrustRequirementV1 { ExactHashUserReview, ManagedPolicy, NotApplicable }
 pub enum HostHookRunVisibilityV1 { TraceDecayOwned, HostObserved, Unobservable }
 pub struct HostHookTrustReceiptRefV1 {
     pub receipt_id: EntityId,
@@ -528,12 +549,16 @@ pub struct HostHookTrustReceiptRefV1 {
 }
 pub struct HostHookDefinitionObservationV1 {
     pub definition: HookDefinitionRefV1,
+    pub handler_kind: HostHookHandlerKindV1,
+    pub execution_mode: HostHookExecutionModeV1,
     pub trust: HostHookTrustStateV1,
+    pub control: HostHookControlStateV1,
     pub eligibility: HostHookEligibilityStateV1,
     pub handler_support: HostHookHandlerSupportV1,
     pub freshness: HostHookDefinitionFreshnessV1,
     pub trust_receipt: Option<HostHookTrustReceiptRefV1>,
     pub run_visibility: HostHookRunVisibilityV1,
+    pub host_dedupe: HostHookHostDedupeV1,
 }
 pub struct SkillVersionRef {
     pub skill_id: SkillId,

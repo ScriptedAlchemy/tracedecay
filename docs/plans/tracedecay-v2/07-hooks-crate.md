@@ -77,7 +77,7 @@ Hooks own only host wire adaptation and bounded orchestration in [`19-system-def
 |---|---|---|
 | src/hooks/mod.rs | Shared JSON reading, project/session lookup, analytics, hint formatting/dedupe | Split wire/common adapters, application ports, and generated host descriptors. Delete only after all host cutovers. |
 | src/hooks/codex.rs | Historical subset of Codex hooks and workspace/context hints | Replace with the ten-event current Codex contract: `SessionStart`, `SubagentStart`, `PreToolUse`, `PermissionRequest`, `PostToolUse`, `PreCompact`, `PostCompact`, `UserPromptSubmit`, `SubagentStop`, and `Stop`; no direct memory/index/policy calls and no invented `PostToolUseFailure`. |
-| src/hooks/claude.rs | Pre-tool block, session/subagent start, post-tool, prompt submit, stop | ClaudeAdapter; preserve explicit block/allow semantics and tool matcher parity. |
+| src/hooks/claude.rs | Historical six-event subset: pre-tool, session/subagent start, post-tool, prompt submit, stop | Replace with the independent pinned 30-event Claude contract and generated per-event/type dispositions; preserve only fixture-proven semantics and never treat the six aliases as the current denominator. |
 | src/hooks/cursor.rs, cursor_compact.rs, cursor_shell.rs | Before prompt, post-tool, file/shell/workspace, precompact, session start/end/stop, bounded ingest | CursorAdapter plus capture scheduling effects; no inline transcript ingest. |
 | src/hooks/kiro.rs | Pre-tool, prompt, post-tool and transcript catch-up | KiroAdapter with explicit coverage where the host lacks richer lifecycle events. |
 | src/hooks/tool_hints.rs and classifiers/evals | Classification, routing, dedupe, cooldown, payload | Compatibility policy bundle in tracedecay-policy. Hooks only build RequestFacts and render the returned envelope. |
@@ -219,13 +219,29 @@ The domain companion module defines transport-neutral IDs and enums; adapters ma
 ~~~rust
 pub enum HookPoint {
     SessionStart,
+    Setup,
+    InstructionsLoaded,
     UserPromptSubmit,
+    UserPromptExpansion,
+    MessageDisplay,
     SubagentStart,
     SubagentStop,
     PreToolUse,
     PermissionRequest,
+    PermissionDenied,
     PostToolUse,
+    PostToolUseFailure,
+    PostToolBatch,
     ApprovalObserved,
+    Notification,
+    TaskCreated,
+    TaskCompleted,
+    TeammateIdle,
+    ConfigChange,
+    CwdChanged,
+    FileChanged,
+    WorktreeCreate,
+    WorktreeRemove,
     BeforeFileEdit,
     AfterFileEdit,
     AfterShell,
@@ -234,6 +250,9 @@ pub enum HookPoint {
     PreCompact,
     PostCompact,
     Stop,
+    StopFailure,
+    Elicitation,
+    ElicitationResult,
     SessionEnd,
     IncrementalSync,
 }
@@ -301,7 +320,7 @@ Raw paths, tokens, credentials, environment maps, query literals, prompts, argum
 
 Plan 01 PR 4 owns the complete definition/source/provenance/run/representation/trust vocabulary in `crates/tracedecay-domain/src/hooks_v1.rs`. Plan 20 consumes it in configuration views, plan 03 captures it, plan 08 binds immutable `HostHookBindingId` specs, and this crate adds only host-wire adapters and runtime behavior. `HookDefinitionProvenanceV1` is resolved, ambiguous candidate-set plus coverage, or generated-binding-only; the runtime never fabricates one source when Codex does not identify the launching definition.
 
-`HookInvocationScopeV1` is closed over `ThreadStart`, `SubagentStart`, and `Turn`. Codex `SessionStart` is thread-scoped, `SubagentStart` is subagent-start-scoped, and the other eight Codex events are Turn-scoped. `HookDefinitionRefV1` binds host/config source layer, JSON-versus-inline-versus-plugin/managed representation, definition digest, matcher-group ordinal, handler ordinal, managed bit, and installed bundle digest. `HookHandlerRunRefV1` binds the host hook-run ID when supplied, attempt ordinal, and exact definition ref. Every matching definition/run remains distinct evidence; retry dedupe may collapse only the same handler-run identity. A separate invocation-group projection correlates simultaneous runs for one session/Turn/tool/agent event and arbitrates at most one TraceDecay hint/effect without erasing any handler execution.
+`HookInvocationScopeV1` is the plan-01 lifecycle vocabulary covering session/setup/Turn/tool-call/tool-batch/subagent/task/team/worktree/component/elicitation/async/display scopes. Codex `SessionStart` maps to `SessionLifecycle`, `SubagentStart` to `SubagentLifecycle`, and its remaining events to `Turn`; Claude events retain native scope instead of being forced into a Turn. `HookDefinitionRefV1` binds resolved/ambiguous/generated-only source provenance, representation, content digest, host trust hash where applicable, matcher-group ordinal, handler ordinal, managed bit, and installed bundle digest. Configured definitions, host-deduped handlers, actual runs, and invocation groups remain distinct evidence.
 
 ### 7.1 Exact Codex wire and matcher contract
 
@@ -331,7 +350,17 @@ pub enum HookEffect {
     Allow,
     Block { code: BlockingDecisionCode, message: LogSafeText },
     RewriteToolInput(PayloadRef),
+    RewriteToolOutput(PayloadRef),
+    AskPermission { reason: LogSafeText },
+    DeferTool { reason: LogSafeText },
     PermissionDecision { behavior: PermissionBehaviorV1, message: Option<LogSafeText> },
+    ClaudePermissionRequestDecision(ClaudePermissionRequestDecisionV1),
+    RetryDeniedTool,
+    ReplaceDisplayContent(PromptEligibleText),
+    UpdateWatchPaths(WatchPathSetV1),
+    ElicitationDecision(ClaudeElicitationDecisionV1),
+    ProvideWorktreePath(ValidatedHostDirectoryV1),
+    ConfigureSessionBootstrap(ClaudeSessionBootstrapV1),
     ContinueTurn { reason: LogSafeText },
     ContinueSubagent { reason: LogSafeText },
     StopHookFlow { reason: Option<LogSafeText> },
@@ -364,6 +393,8 @@ pub struct HookCaptureResult {
 
 HookEffect is a proposal until the host adapter delivers it. A generated per-event output validator makes illegal combinations unrepresentable: `RewriteToolInput` is legal only for `PreToolUse` and must contain a complete string `command` for Bash/`apply_patch` or a complete arguments object for MCP; it accompanies allow only. `PermissionDecision` is legal only for `PermissionRequest`. Continuation effects target only their matching stop event and are always suppressed when `stop_hook_active` proves that host flow was already continued. Blocking is legal only for catalog-declared blocking hook points with a policy decision carrying a blocking rule ID. Notification and ordinary hint failures return an empty response, not denial.
 
+Host-specific legality further narrows this union. Claude `RewriteToolOutput`, retry, display replacement, watch-path, elicitation, validated worktree-path, session-bootstrap, ask/defer, typed permission update/destination/interrupt, and continuation effects require their exact event/version schema and policy authorization. MessageDisplay replacement is display-only. WorktreeCreate is generation-disabled unless the authorized root effect owns complete creation, validated directory, rollback, cleanup, and receipt. Elicitation accept/content crosses plan 21's form-secret and URL-auth boundary and cannot manufacture consent. CwdChanged/FileChanged watch updates never imply permission to read paths. Worktree/watch outputs carry expiring authorization-bound `ProtectedHostLocatorHandleV1`s plus privacy digests; only the root effect broker resolves them to strings at final host rendering, and raw paths never cross public/domain/UI serialization. Codex cannot receive these Claude-only effects. Unknown or version-gated output fields fail before publication rather than being emitted optimistically.
+
 Codex fields parsed but unsupported in the current release are rejected by conformance before install: `permissionDecision:"ask"`, legacy approve, PreTool `continue`/`stopReason`/`suppressOutput`, PermissionRequest `updatedInput`/`updatedPermissions`/`interrupt`, PostTool `updatedMCPToolOutput`/`suppressOutput`, and unsupported common/event combinations. TraceDecay emits neither `suppressOutput` nor handler types Codex currently skips. Parsed `suppressOutput` has no implemented effect where documented; PreTool invalid fields fail/report and the tool call continues unchanged, PermissionRequest reserved fields fail closed, and PostTool unsupported fields fail/report while ordinary result processing continues. Each outcome is a distinct receipt-tested handler result, never a generic continuation bucket.
 
 ### 7.2 Codex handler execution contract
@@ -371,6 +402,55 @@ Codex fields parsed but unsupported in the current release are rejected by confo
 Generated Codex hooks use exactly one `type:"command"` handler per TraceDecay matcher group. The generator never emits `prompt`, `agent`, or `async:true`; foreign instances of those parsed-but-skipped forms remain observed `UnsupportedHandler` rows and are never called healthy. Every generated command has a catalog-fixed executable/argv, explicit one-second host timeout (the internal 10/25 ms budgets still govern normal completion), optional catalog-owned `statusMessage` only when useful, and an independently escaped `commandWindows`; JSON uses `commandWindows`, while TOML input accepts `command_windows` or `commandWindows`. Omitting timeout and inheriting Codex's 600-second default is a generation failure.
 
 Commands execute with the session `cwd`; the entrypoint therefore never resolves itself or a package resource relative to cwd. Plugin `PLUGIN_ROOT` is contained read-only package state. Although Codex supplies writable `PLUGIN_DATA` and compatibility aliases, generated TraceDecay hooks never write them; no plugin-local spool, cache, identity, or state silo exists. None of these variables is profile/Brain identity, authorization, source scope, database storage, or permission to read a transcript. Repo-local foreign hooks are diagnosed with git-root guidance, but TraceDecay's generated plugin command invokes the separately installed signed `tracedecay` binary directly.
+
+### 7.3 Exact Claude Code wire, event, and handler contract
+
+The Claude adapter consumes a dated, content-digested official-reference oracle independent of generated output. The current oracle contains exactly 30 events:
+
+| Claude event | Cadence, matcher, and decisive fields | Control and TraceDecay disposition |
+|---|---|---|
+| `SessionStart` | session; `startup|resume|clear|compact`; `source`, optional `model|agent_type|session_title` | context plus `initialUserMessage|sessionTitle|watchPaths|reloadSkills`; command/MCP only; generated command capture/context, never writes `CLAUDE_ENV_FILE` |
+| `Setup` | explicit init/maintenance; `init|maintenance`; `trigger` | context only, command/MCP only; generated metadata capture when invoked |
+| `InstructionsLoaded` | async component load; `load_reason`; file/memory/load/include/glob metadata | no control; metadata capture with classified path fingerprints |
+| `UserPromptSubmit` | Turn; matcher ignored; `prompt` | context/block, session title, suppress-original behavior; generated synchronous capture/hint |
+| `UserPromptExpansion` | Turn; command-name matcher; original prompt plus expansion type/name/args/source | context/block; preserve expanded-versus-original lineage |
+| `MessageDisplay` | streaming display; matcher ignored; Turn/message/index/final/delta | display-only replacement never changes transcript/model evidence; policy-disabled metadata-only by default |
+| `PreToolUse` | tool call; tool matcher plus `if`; tool name/input/use ID | `deny > defer > ask > allow`, complete `updatedInput`, context; generated guardrail only with exact coverage/policy |
+| `PermissionRequest` | approval; tool matcher plus `if`; tool/input, suggestions, no guaranteed tool-use ID | allow/deny, updated input/permissions, deny message/interrupt; generated default is no decision |
+| `PermissionDenied` | auto-mode denial; tool matcher plus `if`; tool/input/denial evidence | only `retry:true` can affect flow; capture outcome, never auto-retry without policy |
+| `PostToolUse` | successful tool; tool matcher plus `if`; output and duration | feedback/block, schema-valid `updatedToolOutput`, context; cannot undo tool effect |
+| `PostToolUseFailure` | failed tool; tool matcher plus `if`; error, interrupt, duration | feedback/block only; retain separate failure semantics |
+| `PostToolBatch` | completed parallel batch; matcher ignored; complete serialized batch results | block before next model call/context; authoritative fan-out/fan-in boundary |
+| `Notification` | async notification; notification-type matcher | no control; bounded metadata capture |
+| `SubagentStart` | subagent lifecycle; agent-type matcher | context only; capture exact parent/agent identity |
+| `SubagentStop` | subagent terminal candidate; agent-type matcher; last message plus version-gated background tasks/session crons | continuation/context with host cap; missing registry fields are unknown and cannot prove terminal |
+| `TaskCreated` | task lifecycle; matcher ignored; native task fields | exit 2 rolls back creation; `continue:false` stops the teammate entirely; provider evidence never replaces plan-24 authority |
+| `TaskCompleted` | task lifecycle; matcher ignored; native task fields | exit 2 blocks completion; `continue:false` stops the teammate entirely; provider evidence never replaces plan-24 authority |
+| `Stop` | Turn terminal candidate; matcher ignored; last message plus version-gated background tasks/session crons | continue feedback, maximum eight host blocks; missing registry fields are unknown and cannot prove terminal |
+| `StopFailure` | API-error Turn end; error-type matcher | output and exit ignored; immutable failure observation only |
+| `TeammateIdle` | team lifecycle; matcher ignored; `teammate_name` and deprecated `team_name` | may keep teammate working; advisory evidence related to plan-24 coordination |
+| `ConfigChange` | async config lifecycle; config-source matcher | may block except policy settings; foreign config body never retained |
+| `CwdChanged` | async scope candidate; matcher ignored; `old_cwd|new_cwd` | no decision; may replace dynamic `watchPaths` and write `CLAUDE_ENV_FILE`; generated TraceDecay emits neither |
+| `FileChanged` | async watch event; literal filename watch-list semantics; path/event | no decision; may replace dynamic `watchPaths` and write `CLAUDE_ENV_FILE`; generated TraceDecay emits neither and performs no ambient read |
+| `WorktreeCreate` | worktree lifecycle; matcher ignored | registration replaces default Git behavior; generated TraceDecay omits it unless it owns full create/path/rollback effect; any nonzero/no path fails |
+| `WorktreeRemove` | worktree lifecycle; matcher ignored | no decision; cleanup evidence only |
+| `PreCompact` | Turn boundary; `manual|auto`; custom instructions | may block compaction; no synchronous transcript parse |
+| `PostCompact` | Turn boundary; `manual|auto`; compact summary | no decision; summary is unclassified content until sanitized |
+| `Elicitation` | MCP interaction; server-name matcher; requested form/schema | accept/decline/cancel and content override under exact policy; never bypass user authorization |
+| `ElicitationResult` | MCP interaction; server-name matcher; response | transform/decline under exact policy; preserve request/response lineage |
+| `SessionEnd` | session lifecycle; end-reason matcher; no deadline field in wire input | no decision; runtime budget defaults 1.5 s, settings timeout may raise overall budget to 60 s, plugin timeout does not raise it, and `CLAUDE_CODE_SESSIONEND_HOOKS_TIMEOUT_MS` override is versioned oracle evidence |
+
+Common Claude inputs include `session_id`, optional version-gated `prompt_id`, lagging `transcript_path`, `cwd`, event name, conditional `permission_mode=default|plan|acceptEdits|auto|dontAsk|bypassPermissions`, conditional `effort.level=low|medium|high|xhigh|max`, and conditional `agent_id|agent_type`. Only `SessionStart` may contain optional `model`. Generated schemas accept forward fields as bounded unknown evidence; they never guess authority or completeness.
+
+Claude matcher compilation is versioned catalog data. `*`, empty, or omitted matches all; simple character sets use exact/list matching, other patterns use unanchored JavaScript regex; comma/hyphen behavior is minimum-version gated; `FileChanged` uses literal watch-list semantics; declared no-matcher events silently ignore a matcher. Handler `if` contains one permission rule, applies only to documented tool-event families, has no boolean composition, and fails open on unparseable Bash. Matcher/`if` coverage is a guardrail denominator, never an enforcement claim. Plugin-scoped MCP tool and agent names remain exact native identities.
+
+Claude supports `command`, `http`, `mcp_tool`, `prompt`, and experimental `agent` handlers with event-specific eligibility. Native defaults are versioned oracle data: 600 s for command/HTTP/MCP, 30 s prompt, 60 s agent; UserPromptSubmit lowers command/HTTP/MCP to 30 s and MessageDisplay to 10 s. Generated TraceDecay bindings use only synchronous command exec form (`command:"tracedecay"`, closed `args`, `async:false`) with explicit tighter timeout and optional status text; they never use shell form, `asyncRewake`, HTTP, MCP, prompt, or agent handlers for capture/policy authority. Foreign definitions preserve command exec/shell/PowerShell fields; HTTP URL/header/`allowedEnvVars`; connected MCP server/tool/input substitution; prompt `$ARGUMENTS`/model/`continueOnBlock`; and experimental agent prompt/model/timeout semantics. HTTP non-2xx/network/timeout and disconnected/error MCP hooks are non-blocking, so neither is a durability or security boundary.
+
+Observed environment/path semantics distinguish placeholder substitution from exported process variables: `${CLAUDE_PROJECT_DIR}`, `${CLAUDE_PLUGIN_ROOT}`, `${CLAUDE_PLUGIN_DATA}`, plugin `${user_config.*}`, `CLAUDE_CODE_REMOTE`, version-gated `CLAUDE_CODE_BRIDGE_SESSION_ID`, `CLAUDE_EFFORT`, and event-limited `CLAUDE_ENV_FILE`. None supplies Brain identity, scope, authorization, or a store root. Exec form substitutes each closed argument without a shell. Shell/PowerShell foreign fixtures cover the v2.1.198 placeholder rewrite, `$env:CLAUDE_PROJECT_DIR`, and the unsafe bare `$CLAUDE_PROJECT_DIR` PowerShell spelling; generated TraceDecay avoids every shell/version branch.
+
+All matching Claude handlers launch in parallel. Within one event resolution the host deduplicates identical command handlers by `(command,args)` and HTTP handlers by URL, including async command definitions; async executions from separate event firings are not cross-fire deduplicated. Receipts conserve configured → matched → host-deduped → started → completed/timed-out → decision-applied/context-delivered states without fabricating foreign runs.
+
+Claude processes JSON only on exit 0. Exit 2 behavior is event-specific; other nonzero exits normally fail open, except `WorktreeCreate` where any nonzero aborts. HTTP status alone never blocks. Universal fields are `continue`, `stopReason`, `suppressOutput`, `systemMessage`, and allowlisted `terminalSequence`; event-specific output is schema-validated. Injected `additionalContext` over 10,000 characters spills to a host session file and becomes explicit privacy/coverage degradation—TraceDecay context remains below the cap and never asks a model to open the spill. Other large inputs/errors retain ordinary bounded-decode/privacy rules. Async results record produced-at and later model-visible-at Turns; stale resume replay and `asyncRewake` are not Context Scout delivery channels.
 
 The remaining boundary values are explicit:
 
@@ -643,7 +723,7 @@ The checked-in human-readable table below is a historical fixture inventory, not
 | Host | Historical V1/probe fixture seeds | Generated V2 coverage target |
 |---|---|---|
 | Codex | all ten current hidden bindings and stock-wire goldens | Exact `SessionStart`, `SubagentStart`, `PreToolUse`, `PermissionRequest`, `PostToolUse`, `PreCompact`, `PostCompact`, `UserPromptSubmit`, `SubagentStop`, and `Stop`; common/event inputs, matchers/aliases, command-only execution, trust/source/definition lineage, concurrent-handler grouping, stdout/JSON/exit-2 outputs, unsupported-field failures, interception gaps, Windows lowering, and continuation guards. |
-| Claude Code | hook_pre_tool_use/evaluate_hook_decision, hook_claude_session_start, hook_claude_subagent_start, hook_claude_post_tool_use, hook_prompt_submit, hook_stop | Pre-tool allow/deny, session/subagent/prompt/tool/stop, tool_use/tool_result pairing, parent tool-use IDs, workflow/handoff evidence, context render. |
+| Claude Code | six V1 aliases plus independent 30-event stock-wire oracle | Exact current 30 events from §7.3; common/event fields, versioned matcher/`if` semantics, five handler types, exec/shell/PowerShell, sync/async/rewake, source/frontmatter lifecycle, host dedupe/concurrency, universal/event outputs, exit/HTTP/MCP/prompt-agent behavior, spill/lag/terminal coverage, and explicit generated-versus-foreign dispositions. |
 | Cursor | hook_cursor_before_submit_prompt, subagent/post-tool, session start/end/stop, precompact, after file/shell, workspace open | Prompt/subagent/tool/session/compact/edit/shell/workspace, Composer/agent origin, file paths as classified locators, JSON reply. |
 | Kiro | pre-tool, prompt-submit, post-tool | Delegation/tool/prompt facts, bounded catch-up request, explicit gaps for unsupported lifecycle. |
 | MCP/daemon notification | FileEdit, Shell, WorkspaceOpen, SessionStart, IncrementalSync | Canonical hook observation plus async project-sync proposal; branch/worktree hints are candidates until identity/Git evidence resolves them. |
@@ -656,6 +736,7 @@ For every generated supported/version-gated row, fixtures cover:
 - multi-repo/project/worktree, generic zero-project, moved/adopted/linked/detached cases, `sessions.project_key` conflict, Claude first-CWD change, active-base-versus-PR-worktree graph mismatch, ignored dependency hint retaining scope, and stale registry/store candidates;
 - tool success/error/retry/missing result, approval allow/deny, edit/shell variants;
 - Codex all-source concurrency with reordered completion, no sibling-start suppression, advisory-only invocation-group CAS winner/losers, separately aggregated deny/rewrite/permission/continuation precedence, delivery-unknown no-redelivery, and observable handler-run audit conservation;
+- Claude configured/matched/host-deduped/started/completed/context-delivered conservation across parallel synchronous handlers and repeated async firings; event-specific exit/output precedence, eight-stop-block cap, lagging transcript, stale resume context, output spill, and no foreign-handler execution in replay;
 - exact V1 normalized fields and host response where compatibility is required;
 - no panic and safe empty response for unknown forward event.
 
@@ -693,6 +774,7 @@ Release gates:
 - secret corpus: zero secret-bearing search/vector/fact/metric/fixture/export hit;
 - host conformance: 100% generated documented/probe-validated event/reply rows have fixtures and every absent/unknown/version-gated row has a checked disposition with no fabricated adapter;
 - Codex conformance: an independent ten-event required matrix cannot shrink with generated output; every stock-client lane covers exact fields/nullability, matcher semantics, additive sources/concurrency, outputs/exit codes, handler type/timeout/cwd/platform, trust/managed/feature state, and explicit interception denominator;
+- Claude conformance: an independent, pinned 30-event × five-handler-type × supported-surface matrix cannot shrink with generated output; it covers all §7.3 fields/matchers/version gates/decisions, source/frontmatter/managed policy, parallel dedupe, sync/async delivery, exec/shell/PowerShell, HTTP/MCP failure, prompt/agent decisions, lag/spill/privacy, and the generated command-only subset;
 - outcome: >=90% eligible evaluations terminal within horizon, false attribution <1% on labeled corpus;
 - trust/noise: zero adversarial prompt/pasted-log promotion to trusted compiler/tool failure, repeated-hint budget and useful-silence fixtures pass, and every injected hint names its trusted routing evidence or abstains;
 - new production files target <=400 lines, remain <=800 lines absent a temporary plan-19 waiver, and contain no provider duplication of policy/capture logic.
@@ -725,7 +807,7 @@ Commands run from repository root with the checkout-local target directory. Do n
 
 **Files:** `src/v2/hooks/adapters/{codex,claude}.rs`; `src/v2/hooks/render/{mod,codex,claude}.rs`; `tests/fixtures/hooks_v2/{codex,claude}/`; `tests/hooks_v2/{host_conformance,v1_differential,outcome_evidence}.rs`.
 
-- [ ] Freeze redacted V1 fixtures and current stock Codex/Claude fixtures for every applicable generated entry point in Section 12. Codex covers all ten events, common/event fields, matcher aliases/ignored matchers, multiple additive source layers, concurrent handlers, command-only/unsupported handler forms, explicit timeout/status/cwd, Unix/Windows commands, tool/result/nonzero Bash, permission decisions, compact triggers, subagent/Turn continuation guards, plain-text/JSON/exit-2 output, invalid fields, and interception gaps; preserve unsupported historical entry points only as explicit absent/legacy evidence.
+- [ ] Freeze redacted V1 fixtures and current stock Codex/Claude fixtures for every applicable generated entry point in Section 12. Codex covers all ten events and its complete §7.1/7.2 contract. Claude covers the independent 30-event oracle, exact common/event schemas and matchers, all five handler kinds, generated exec-form command subset, source/frontmatter/managed policy, parallel host dedupe, sync/async/rewake, exit/HTTP/MCP/prompt-agent result semantics, platform lowering, lag/spill/privacy, terminal/task/team/worktree/elicitation lifecycles, and every version gate; preserve unsupported historical entry points only as explicit absent/legacy evidence.
 - [ ] Run differential tests. Expected: fail before adapters exist.
 - [ ] Implement mapping/render only; use catalog binding and application policy result.
 - [ ] Re-run. Expected: normalized/request/reply parity passes or a fixture records an intentional versioned difference.

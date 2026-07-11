@@ -123,7 +123,7 @@ All sources below were accessed for this design on **2026-07-10 UTC**. Source co
 | Claude marketplace | [Plugin marketplaces](https://code.claude.com/docs/en/plugin-marketplaces) | Catalog schema, strict mode, source pinning, managed restrictions, version resolution. |
 | Claude skills/commands | [Extend Claude with skills](https://code.claude.com/docs/en/slash-commands) | Command-to-skill migration, skill progressive disclosure, invocation control, supporting files, evals. |
 | Claude subagents | [Create custom subagents](https://code.claude.com/docs/en/sub-agents) | Agent scopes, packaged-agent restrictions, skills, memory, worktrees, delegation and nesting. |
-| Claude hooks | [Hooks reference](https://code.claude.com/docs/en/hooks) | Events, matchers, decisions, concurrency, async limitations, security practices. |
+| Claude hooks | [Hooks reference](https://code.claude.com/docs/en/hooks) plus Markdown snapshot digest recorded below | Independent 30-event oracle, five handler types, sources/frontmatter, matchers/`if`, decisions, parallel dedupe, sync/async/rewake, exec/shell/platform, managed controls, privacy/security, and min-version evidence. |
 | Claude MCP | [Connect Claude Code to tools via MCP](https://code.claude.com/docs/en/mcp) | Plugin MCP lifecycle, tool naming, resources, output bounds, Tool Search conditions and fallback. |
 | Claude permissions | [Configure permissions](https://code.claude.com/docs/en/permissions) | Deny/ask/allow precedence, MCP/agent rules, hook interaction, sandbox limits. |
 | Claude config | [Claude Code settings](https://code.claude.com/docs/en/configuration) | User/project/local/managed scopes, plugin enablement, organization restrictions. |
@@ -152,8 +152,14 @@ All sources below were accessed for this design on **2026-07-10 UTC**. Source co
 - `D` A regular skill contributes its description to initial context and loads its full body only when invoked. Supporting files are referenced for later reads. Invoked content remains in the conversation.
 - `D` Claude Tool Search defers MCP schemas by default on supported configurations, but `ENABLE_TOOL_SEARCH=false`, unsupported models, certain third-party endpoints, and some cloud configurations load tools eagerly or cannot use Tool Search.
 - `D` Plugin MCP servers start automatically with the plugin and are managed through plugin enablement, not ordinary `/mcp` removal.
-- `D` Plugin agents can be packaged and namespaced, but `hooks`, `mcpServers`, and `permissionMode` are ignored for plugin-shipped agents.
-- `D` Command hooks run with the user's full privileges. Inputs must be sanitized, paths contained, variables quoted, and sensitive files avoided.
+- `D` The current hook reference has an independent 30-event contract spanning session/setup/instructions, prompt expansion/display, tool/permission/batch, agent/task/team, config/file/worktree, compaction, MCP elicitation, stop failure, and session end lifecycles.
+- `D` Claude supports five handler types: command, HTTP, connected MCP tool, prompt, and experimental agent. Event/type support, matcher/`if`, output, exit, timeout, and async behavior are not interchangeable.
+- `D` Plugin agents can be packaged and namespaced. Current hook reference permits hooks in skill and agent frontmatter while active and converts agent `Stop` to `SubagentStop`; the compiler gates this against the exact stock version rather than retaining the older ignored-field assumption. `mcpServers` and `permissionMode` remain separately capability-probed.
+- `D` Command hooks run with the user's full privileges. Generated TraceDecay hooks use synchronous exec form with closed args; inputs are sanitized, paths contained, and no shell, environment, HTTP, MCP, prompt, or agent handler becomes an authority boundary.
+- `D` All matching handlers start in parallel; identical command+args and HTTP URL handlers are host-deduped, while repeated async firings are not. Configured definitions, deduped handlers, runs, and delivered outcomes need separate accounting.
+- `D` Sources include user/project/local/managed settings, plugin JSON, skill/agent frontmatter, and observed session/built-in definitions. `/hooks` is read-only; `disableAllHooks` has managed precedence, and `allowManagedHooksOnly` exempts plugins force-enabled by managed policy.
+- `D` Matcher semantics are versioned exact/list or unanchored JavaScript regex, with event-specific subjects/no-matcher behavior and literal FileChanged watches. Handler `if` is best-effort permission syntax and fails open on Bash parse uncertainty.
+- `D` The official Markdown snapshot retrieved 2026-07-11 has SHA-256 `e94e721874efc802248a7808e35ac917306088c5eaada2aa21e1def3fecc32e1`; PR 36R must refresh and anchor it rather than treating this planning hash as permanent support truth.
 - `D` Plugin `settings.json` accepts only a narrow documented set; `userConfig` is the plugin option mechanism. Plugin skills are not controlled by ordinary `skillOverrides`.
 - `D` Cache/version resolution and marketplace scope are Claude-specific. Explicit manifest version must be bumped or updates can be masked.
 
@@ -753,7 +759,7 @@ Adding “code explorer,” “session historian,” “memory curator,” or ot
 
 Host constraints:
 
-- Claude plugin agents cannot carry `hooks`, `mcpServers`, or `permissionMode`. The compiler emits documented tool restrictions, uses session/package facade separation, and relies on server grants.
+- Claude agent hook frontmatter is emitted only when the pinned stock version supports the exact field/event and is scoped/cleaned up with the agent; `Stop` auto-converts to `SubagentStop`. The compiler never assumes these hooks grant MCP or permission authority and retains session/package facade separation.
 - Codex plugin output contains no `agents/`. The installer generates separately owned `.codex/agents/*.toml` or `~/.codex/agents/*.toml` only when selected and supported, records its evolving schema version, and can omit it without breaking the base plugin.
 - Cursor agents inherit parent MCP. A session with `tracedecay-operator` enabled is incompatible with research/reviewer agent activation. The doctor and application reject that combination rather than trusting `readonly`.
 - Delegation depth is host-specific. Canonical roles never require nesting. A task packet may suggest parallel children only when the host probe permits it and plan-24 budgets/leases authorize it.
@@ -764,29 +770,48 @@ Host constraints:
 | Canonical event | Claude mapping | Codex mapping | Cursor mapping | Required dedupe/caveat |
 |---|---|---|---|---|
 | Host session start/resume/clear/compact | `SessionStart` | `SessionStart` | session/workspace event where documented | Codex source matcher; thread scope; fingerprint host+parent session+source+definition/run/bundle. |
+| Explicit host setup | `Setup` | absent | availability probed | Claude init/maintenance only; not normal startup; command/MCP only. |
+| Instruction/rule loaded | `InstructionsLoaded` | absent | availability probed | Claude async metadata observation; classified paths, no content inference or blocking. |
 | User prompt accepted | `UserPromptSubmit` | `UserPromptSubmit` | before-submit prompt event | Codex matcher ignored; Turn ID required; one delivery-arbiter effect per invocation group. |
+| User command/prompt expansion | `UserPromptExpansion` | absent | command expansion where documented | Preserve original/expanded lineage; matcher is command name. |
+| Assistant display stream | `MessageDisplay` | absent | display event where documented | Claude display-only transformation never changes model/transcript evidence; metadata-only default. |
 | Before supported tool | `PreToolUse` | `PreToolUse` | before tool/MCP hooks | Codex tool matcher includes `apply_patch`=`Edit|Write` and MCP regex; incomplete interception denominator is mandatory. |
-| Permission approval requested | host approval hook where documented | `PermissionRequest` | host approval hook where documented | Distinct from approval evidence; no event fires when no approval is needed; any host-collected deny wins. |
-| After tool completion | `PostToolUse`/documented failure event | `PostToolUse` for success and Bash nonzero | after tool/MCP/shell/edit events | Tool/call ID and outcome; cannot undo effects; no invented Codex failure event. |
+| Permission approval requested | `PermissionRequest` | `PermissionRequest` | host approval hook where documented | Distinct from approval evidence; no event fires when no approval is needed; host-specific precedence applies. |
+| Permission denied by classifier | `PermissionDenied` | absent | availability probed | Claude auto-mode only; retry is separately authorized, never inferred from denial. |
+| After successful tool | `PostToolUse` | `PostToolUse` including Bash nonzero | after tool/MCP/shell/edit events | Claude success-only with duration/output rewrite; Codex has no separate failure event. |
+| After failed tool | `PostToolUseFailure` | absent | failure event where documented | Claude error/interrupt/duration; never folded into successful result. |
+| After parallel tool batch | `PostToolBatch` | absent | batch event where documented | Authoritative fan-out/fan-in boundary before next model call. |
+| Host notification | `Notification` | absent | notification event where documented | Async bounded metadata only. |
 | Subagent start | `SubagentStart` | `SubagentStart` | agent/subagent start | Parent session plus agent/Turn identity; `continue:false` cannot stop Codex start. |
 | Subagent stop | `SubagentStop` | `SubagentStop` | agent/subagent stop | Distinct terminal/continuation event; preserve `stop_hook_active`; any `continue:false` wins. |
 | Before compaction | `PreCompact` | `PreCompact` | pre-compaction hook | `manual|auto` trigger matcher; stop occurs before boundary; no synchronous transcript parse. |
 | After compaction | `PostCompact` | `PostCompact` | post-compaction hook where documented | `manual|auto` trigger matcher; stop occurs after boundary; preserve boundary anchors. |
-| Turn/response stop | `Stop`/documented failure event | `Stop` | stop/session-end events | Codex matcher ignored; JSON-only exit-0 continuation, `stop_hook_active` loop guard, any `continue:false` wins. |
-| Worktree/workspace change | `WorktreeCreate/Remove`, `CwdChanged` | host worktree/session evidence, not a Codex hook event | workspace events with `workspace_roots` | Resolve set identities through plan 16; never invent a Codex lifecycle hook. |
+| Turn/response stop | `Stop` | `Stop` | stop/session-end events | Codex matcher ignored; JSON-only exit-0 continuation, `stop_hook_active` loop guard, any `continue:false` wins. Claude preserves background task/cron evidence and eight-block cap. |
+| Turn API failure | `StopFailure` | absent | failure-end where documented | Claude output/exit ignored; error type remains separate terminal evidence. |
+| Teammate about to idle | `TeammateIdle` | absent | team event where documented | Provider team evidence is advisory; continuation is bounded by task policy. |
+| Configuration changed | `ConfigChange` | observed config probe, not hook | config event where documented | Claude policy settings cannot be blocked; no raw config body retained. |
+| Working directory changed | `CwdChanged` | absent | workspace event where documented | Locator candidate only; never scope/auth truth. |
+| Watched file changed | `FileChanged` | absent | file event where documented | Claude literal watch-list semantics and no ambient file read. |
+| Worktree create/remove | `WorktreeCreate/Remove` | host worktree/session evidence, not a Codex hook event | workspace events with `workspace_roots` | Resolve set identities through plan 16; Claude create has nonzero/path contract; never invent a Codex event. |
 | Task created/completed | `TaskCreated/Completed` | host-native availability probe, not a current hook assumption | host-native availability probed | Provider-native task evidence relates to plan-24 work; never becomes authority. |
+| MCP elicitation request/result | `Elicitation`/`ElicitationResult` | absent | MCP lifecycle where documented | Server-scoped request/result lineage; transformation never manufactures consent. |
+| Host session ended | `SessionEnd` | absent | session-end where documented | Reason/deadline-bound final capture; no decision control. |
 
 Hook lowering rules:
 
-1. Every generated command is the minimum host-native invocation of `tracedecay host-event ingest --host <host> --event <event> --binding <catalog-binding-id> --stdin`; Codex emits only `type:"command"`, never `prompt`, `agent`, or `async:true`. The opaque release-manifest-bound binding selects immutable catalog semantics; arbitrary/stale bindings are capture-only or rejected and cannot authorize policy effects.
+1. Every generated command is the minimum host-native invocation of `tracedecay host-event ingest --host <host> --event <event> --binding <catalog-binding-id> --stdin`. Codex emits only its supported command shape. Claude emits command exec form with `command:"tracedecay"`, closed `args`, `async:false`, and no shell; neither host uses prompt/agent/HTTP/MCP handlers for TraceDecay authority. The opaque release-manifest-bound binding selects immutable catalog semantics; arbitrary/stale bindings are capture-only or rejected and cannot authorize policy effects.
 2. Hook JSON never contains database paths, profile secrets, query semantics, hint text, or tool lists. Codex output is one canonical `hooks/hooks.json`; `.codex-plugin/plugin.json` omits `hooks` so the default is unambiguous. The compiler still validates foreign manifest path/path-array/inline/inline-array forms, `./` prefix, root containment, and manifest-override-of-default semantics.
-3. Claude commands use `${CLAUDE_PLUGIN_ROOT}` only if a package-local non-executable resource is required; normal execution uses the installed CLI.
+3. Claude's generated plugin registers the catalog-selected subset of the independent 30-event oracle. It uses explicit short timeouts rather than host defaults; never writes `CLAUDE_ENV_FILE`, `${CLAUDE_PLUGIN_DATA}`, or user config; and uses `${CLAUDE_PLUGIN_ROOT}` only for a contained read-only package resource. Normal execution uses the installed CLI. `asyncRewake` is not a hint/scout channel.
 4. Codex receives fixed Unix `command` plus independently escaped `commandWindows`, explicit one-second timeout, and optional catalog-owned `statusMessage`; the compiler accepts JSON/TOML spelling differences only when parsing observed foreign state. Session cwd never resolves the executable. `PLUGIN_ROOT` plus supplied `PLUGIN_DATA` and compatibility aliases are tested but are not identity, authorization, scope, or database storage; generated TraceDecay hooks never write plugin data.
 5. Codex installation/enabling never trusts hooks. Exact-definition hash review/disable remains in `/hooks`; update creates `NeedsReview`. Managed hooks and `allow_managed_hooks_only` remain policy-owned/read-only. The dangerous one-off bypass is never generated or persisted.
 6. Cursor hook fail-closed is enabled only for an explicit security guardrail with proven coverage; ingestion and hints fail open.
 7. Cloud/desktop/IDE/CLI absence is recorded per event. The bundle never registers a polling loop to imitate an unavailable hook.
 8. All active Codex source layers compose. The host starts every matching command concurrently, and one result cannot prevent sibling start. TraceDecay retains every observable definition/handler run and groups them separately; retry dedupe is handler-run-specific. One CAS winner may return an advisory context/hint only. Blocking, rewrite, permission, and continuation follow exact host event aggregation; security deny is never suppressed, and only the current signed binding is eligible for a policy effect.
 9. Codex matchers are exact plan-07/catalog semantics: tool name/aliases for pre/permission/post, trigger for compact, source for session, agent type for subagent, ignored for prompt/Stop, and `*`/empty/omitted means all. A generated matcher on an ignored event is a compiler error.
+10. Claude source inventory preserves user/project/local/managed JSON settings, plugin JSON, skill/agent frontmatter, and observed session/built-in definitions. All compose; component-frontmatter hooks are active only with their component, agent `Stop` converts to `SubagentStop`, and `once` is effective only for skill frontmatter. `/hooks` remains host-owned read-only inspection; TraceDecay never exposes its full sensitive command/prompt/URL details.
+11. Claude handler inventory recognizes command, HTTP, MCP tool, prompt, and experimental agent types plus `if`, `once`, timeout/status, exec/shell/PowerShell, async/rewake, headers/env allowlist, model, and input substitution. Foreign definitions are inert evidence and never replay-executed. Generated TraceDecay uses the command subset only.
+12. Claude starts matches in parallel and, within one event resolution, host-deduplicates identical command+args and HTTP URLs including async command definitions. Configured, matched, host-deduped, started, completed/timed-out, decision-applied, and context-delivered states remain separate; async executions from separate event firings have no cross-fire dedupe.
+13. Claude `WorktreeCreate` is omitted by default because registering it replaces native Git worktree creation. It can be generated only for a cataloged root-owned complete create/path-validation/rollback/cleanup effect with stock-version fixtures; capture-only registration is forbidden. `WorktreeRemove` is paired with the same ownership receipt.
 
 ### 6.5 MCP
 
@@ -823,13 +848,15 @@ Host-specific lowering:
 |---|---|---|---|---|
 | Install scope | User/project/local/managed documented | Repo/personal marketplace and plugin enable config documented | Marketplace/project behavior documented per source | Normalize only desired scope enum; adapter preserves native meaning. |
 | Enable state | Plugin-scoped; project enable does not necessarily install external source | Per-plugin enable state in config | Host-specific | Store installed and enabled separately. |
-| Hook trust | Plugin trust plus org controls | Exact hook-definition hash trust | Marketplace/hook policy, fail-open/fail-closed | `AwaitingHostTrust` is first-class and blocks “healthy.” |
+| Hook trust/control | Additive user/project/local/managed/plugin/component sources; `/hooks` read-only; `disableAllHooks`; managed-only policy | Exact hook-definition hash trust | Marketplace/hook policy, fail-open/fail-closed | Preserve host-native axes; never project Codex hash review onto Claude or flatten managed policy into one “trusted” badge. |
 | MCP controls | Plugin-level lifecycle; permissions and managed MCP controls | Server enable, tool allowlist and approval policy | MCP config/permissions | Compile same profile; render host-native least-privilege settings. |
 | Secret config | `userConfig sensitive`/OAuth/keychain mechanisms | Host protected config/credential mechanism | Host protected mechanism; executable separate | Store opaque TraceDecay credential ref and host binding receipt only. |
 | Version key | Explicit plugin version or source SHA rules | Manifest version/cache directory | Reproducible pin/rollback `U` | Signed bundle version/digest is canonical; host cache is verified locator. |
 | Minimum host version | No reliable universal manifest gate established | Capability depends on current client schema | `U` | Runtime probe plus compatibility table; fail before mutation. |
 | Native rollback | Marketplace/update behavior host-specific | Cache/install behavior host-specific | `U` | TraceDecay-owned artifact/config compensation, never claimed as host-native rollback. |
 | Restart/reload | `/reload-plugins` and host restart cases | Desktop/client restart or config reload cases | Surface-specific | Install receipt reports exact required action; verification waits for new handshake. |
+
+Claude discovery preserves user `~/.claude/settings.json`, project `.claude/settings.json`, local `.claude/settings.local.json`, managed policy, enabled plugin `hooks/hooks.json`, active skill/agent frontmatter, and observable session/built-in definitions as separate sources. Plugin hooks merge with user/project/local hooks. Component hooks are removed when the component deactivates; agent `Stop` is observed as `SubagentStop`; `once` is effective only for skill frontmatter. `/hooks` is a read-only host browser that exposes sensitive full definitions, so TraceDecay renders a separately sanitized inventory and directs edits to the owning source. `disableAllHooks` cannot disable managed hooks from a lower layer; `allowManagedHooksOnly` suppresses ordinary sources while preserving managed-policy hooks and managed-force-enabled plugin exemptions. There is no Codex-style exact-hash trust or per-definition disable projection.
 
 Codex discovery preserves every active source independently: system/cloud/MDM/`requirements.toml`, user `~/.codex/hooks.json` and inline `~/.codex/config.toml`, trusted-project `<repo>/.codex/hooks.json` and inline `<repo>/.codex/config.toml`, session sources, and each enabled plugin's default or manifest-declared path/path-array/inline/inline-array source. Sources compose; precedence never erases lower-layer hook definitions. A same-layer JSON-plus-inline pair remains two merged sources with a startup-warning state. Untrusted projects suppress only their project layer. The compiler emits one plugin-default `hooks/hooks.json` and no manifest override; the deployment probe can observe every foreign representation but never normalize, delete, disable, or replace it.
 
@@ -1014,7 +1041,10 @@ Each optional companion is a separate plugin with only its manifest and `.mcp.js
 Claude-specific rules:
 
 - Skills live in `skills/`; no new `commands/` content is generated.
-- Plugin agent frontmatter contains documented fields only. The compiler does not emit ignored `hooks`, `mcpServers`, or `permissionMode` into agents.
+- The base `hooks/hooks.json` is generated from the pinned 30-event oracle and catalog-selected TraceDecay intents. Every generated handler is synchronous command exec form with `command:"tracedecay"`, closed `args`, explicit timeout, no shell/async/rewake, and one release-bound binding ID; output/event legality is generated, not script-local.
+- Plugin agent frontmatter contains only fields documented for the probed stock version. Hook frontmatter is emitted only for a role-scoped intent that cannot be expressed safely at plugin scope; its lifecycle cleanup and `Stop`→`SubagentStop` conversion have stock fixtures. The compiler never treats `mcpServers` or `permissionMode` as granted by agent hook support.
+- No generated handler uses HTTP, MCP tool, prompt, or agent hook types, but the probe, status, UI, migration, and conformance schemas fully recognize them. HTTP headers, MCP substituted input, prompt bodies, and agent instructions remain protected foreign evidence and are never replay-executed.
+- Generated hooks never write `CLAUDE_ENV_FILE` or `${CLAUDE_PLUGIN_DATA}`, never use `asyncRewake`, and never rely on MCP connection at `SessionStart`/`Setup`. MessageDisplay is omitted by default; FileChanged/watchPaths require a separately cataloged bounded need.
 - A role requiring `tracedecay-context` is activated only when the session has the companion enabled and the TraceDecay server confirms a compatible principal/profile; otherwise its portable skill workflow uses CLI.
 - `userConfig` exposes only bounded plugin ergonomics such as default output density and optional non-sensitive UI preferences. Canonical policy/config remains plan 20.
 - The install adapter validates with `claude plugin validate --strict` when available, records `claude plugin details` evidence, and reports `/reload-plugins` or restart as an explicit pending action.
@@ -1664,7 +1694,7 @@ The arbiter may emit at most one compact, route-specific suggestion per turn and
 4. **Workflow parity:** labelled intents produce the same `UseCaseId`, effect, scope, request/result schema, and anchors across skill+CLI, MCP, HTTP, SDK, and UI.
 5. **Trigger/discovery:** fresh-session positive/negative/ambiguous cases with empty, normal, and adversarially crowded skill inventories.
 6. **MCP:** all profiles in eager tools-only, documented deferred search, missing resources/prompts, reconnect, catalog change, narrower grant, and unauthorized cases.
-7. **Hook:** every mapped event, overlap, duplicate/retry, concurrency, timeout, compaction, subagent, cloud omission, hostile payload, and latency case.
+7. **Hook:** independent Codex ten-event and Claude 30-event oracles; every event/type/source/version disposition; matcher/`if`; overlap/retry/parallel host dedupe; sync/async/rewake; exec/shell/PowerShell; exit/HTTP/MCP/prompt-agent output; component lifetime/managed controls; compaction/subagent/task/team/worktree/elicitation; cloud omission; lag/spill/hostile payload; and latency.
 8. **Agent:** role discovery, read-only ceiling, output contract, parent/child limit, unsupported package fallback, context packet, and inherited-MCP denial.
 9. **Deployment:** clean install, multi-component selection, update, repair, internal compensation, uninstall, foreign edit, config conflict, trust/reload, crash at each durable transition, and concurrent operation.
 10. **Task edit:** the `working-task-graph` lifecycle and security corpus from `7.7`.
@@ -1679,7 +1709,7 @@ The release manifest lists exact tested versions; “latest” never appears in 
 
 | Host | Required surfaces | Required configurations |
 |---|---|---|
-| Claude Code | CLI/local plugin; other surfaces only when officially supported | core; each companion/profile; Tool Search on/off; packaged agents; trust/reload; user/project/local scope |
+| Claude Code | CLI/local plugin and remote web independently; other surfaces only when officially supported | core; each companion/profile; independent 30-event oracle; generated event subset; all five handler types; user/project/local/managed/plugin/skill/agent/session/built-in sources; matcher/`if`; parallel dedupe; exec/shell/PowerShell; sync/async/rewake; disable/managed-only policy; Tool Search on/off; packaged agents; reload; documented minimum-version cells |
 | Codex | CLI, desktop/app, and IDE surface independently where available | core; each companion/profile; eager inventory pressure; exact ten-event hook matrix; every additive source/representation; same-layer merge warning; exact-hash review/change/disable; trusted/untrusted project; managed/managed-only/feature states; concurrent handlers; Unix/Windows command lowering; external agents selected/omitted; repo/personal scope |
 | Cursor | IDE and CLI; cloud separately when available | core; each companion/profile; agents; hook overlap; `workspace_roots` set; operator-inheritance denial; cloud event omissions |
 | Hermes | CLI plus every officially supported chat/service surface | zero/one/many named host profiles; one shared TraceDecay `ProfileId`/store; session-workspace and projectless routing; context clone/reload; first-turn silence; CLI/MCP fallback parity |
@@ -1716,6 +1746,7 @@ Labels identify eligible skill/use case, relevant scope, expected binding/fallba
 | Unauthorized MCP/agent effect | Adversarial grant/inheritance/profile cases | Zero |
 | Hook duplicate delivery | Duplicate/retry/overlap event groups | Zero second hint/effect; all duplicate ingest dispositions explicit |
 | Hook source/run conservation | Every eligible observed TraceDecay definition and command-handler run across additive sources | 100% represented as separate definition/run evidence; exactly one invocation-group arbitration result; no flattened or silently skipped run |
+| Claude handler lifecycle conservation | Configured → matched → host-deduped → started → completed/timed-out → decision-applied/context-delivered per event/type/version | Exact conservation or explicit unobservable/partial coverage; no inferred foreign run, no async completion attributed to the trigger Turn |
 | Hook latency | Eligible invocations by host/event class | Plan-07 p50/p95/p99 budget; no regression beyond its gate |
 | Hint relevance | Human-labelled eligible deliveries | Plan-07/22 precision gate; zero repeated equivalent hint inside cooldown |
 | Scope coverage truth | Multi-root/cross-project cases | 100% covered/omitted roots reported; zero false all-scope claim |
@@ -1767,7 +1798,7 @@ Allowed bounded dimensions:
 - operation/transition/result/error class;
 - trust/reload/staleness state;
 - discovery route and fallback route;
-- hook canonical event, source-layer, managed/trust/result, invocation-group, and effect-arbitration class; exact definition/run/Turn/tool/build identities remain protected drill-down refs;
+- hook canonical event, handler kind/execution mode, source/component/control/managed/trust/result/version bucket, host-dedupe/invocation-group, and effect/delivery class; exact definition/run/Turn/tool/build identities remain protected drill-down refs;
 - install scope class, multi-root count bucket, and migration disposition.
 
 Never use user, raw project/repository/path, session/thread/agent/tool-call ID, URL, error text, config key/value, or retrieval-anchor ID as metric labels. Those correlations remain privacy-filtered trace/event attributes with access control.
@@ -1779,7 +1810,7 @@ Required denominators:
 - enabled and trusted components for actual availability;
 - labelled/online workflow-eligible turns for discovery/underuse;
 - selected workflows for completion/fallback outcome;
-- eligible observed hook definitions, handler runs, and invocation groups separately for source/run conservation, delivery/dedupe/arbitration, and latency;
+- eligible observed hook definitions, matches, host-deduped handlers, actual runs, completions/timeouts, decision applications, context deliveries, and invocation groups separately for source/run conservation, delivery/dedupe/arbitration, and latency;
 - initialized MCP connections for profile/authorization health;
 - started role invocations for role success;
 - integration operations/transitions for reliability;
@@ -1969,8 +2000,8 @@ Every PR starts with a failing focused test/fixture, lands the smallest implemen
 - Add `tracedecay-tool-catalog::host_bundles`, canonical `agent-assets`, and no new crate.
 - Implement Claude Code, Codex, Cursor pure lowering only.
 - Generate unsigned non-semantic `HostBundlePayloadV1`, artifacts, differences, omissions, source maps, and SBOM/license/provenance/conformance/scan/rebuild inputs.
-- Add six skills, three roles, hook maps, core and three companions, task-edit skill workflow.
-- Add deterministic build, release-scan input generation, pure path/control validation, host-schema parse, eager-MCP budget, and official-evidence fixtures; Codex output is one contained default `hooks/hooks.json` with all ten exact event contracts, command-only handlers, explicit timeout/status, Unix/Windows commands, and no invented failure event. Signing, runtime scan receipts, stock-host receipts, and publication remain PR 36R concerns.
+- Add six skills, three roles, exact Codex/Claude hook maps, core and three companions, task-edit skill workflow.
+- Add deterministic build, release-scan input generation, pure path/control validation, host-schema parse, eager-MCP budget, and official-evidence fixtures. Codex output follows its exact ten-event contract. Claude compilation consumes the independent 30-event oracle, emits only the catalog-selected synchronous exec-form command subset, and validates all five observed handler schemas, source/frontmatter forms, matcher/`if`, async, platform, and output legality. Signing, runtime scan receipts, stock-host receipts, and publication remain PR 36R concerns.
 
 **Tests first**
 
@@ -1979,6 +2010,7 @@ Every PR starts with a failing focused test/fixture, lands the smallest implemen
 - unsupported agent field, unknown capability, path escape, secret, eager overflow, and duplicated workflow fail;
 - semantic-source-ref test proves artifact manifest contains no copied semantics.
 - an independent fixed Codex ten-event oracle fails if generated coverage omits an event, adds one, emits an ignored matcher, unsupported field/handler, implicit 600-second timeout, unsafe cwd-relative command, or non-contained manifest path; foreign path-array/inline override forms still parse without becoming generated output.
+- an independent pinned Claude 30-event oracle fails if generated or probe coverage drops an event/type/source/version cell; generated output fails on shell/async/rewake/implicit timeout, ignored matcher, unsupported effect, MessageDisplay body capture, environment/plugin-data write, or transport-dependent authority.
 
 **Gate:** `cargo test -p tracedecay-tool-catalog` including host-bundle compiler/golden/security suites.
 
@@ -1992,6 +2024,7 @@ Every PR starts with a failing focused test/fixture, lands the smallest implemen
 - Generate exact CLI/HTTP/Rust/TypeScript/Python SDK bindings and plan-21 Markdown/JSON views.
 - Add plan-20 config keys/provenance/policy locks and `integrations.verify` doctor.
 - Enforce multi-root scope, trust/reload, ownership merge, foreign edits, component set, Cursor inherited-MCP conflict, and no path leakage.
+- Inventory Claude's user/project/local/managed/plugin/skill/agent/session/built-in sources and all 30 event × five handler-type/version dispositions through read-only probes; preserve disable/managed/component lifetime, host-dedupe, async completion, and run visibility without reading or executing protected foreign definitions.
 - Inventory all Codex hook source layers/representations and effective/skipped definitions through read-only probes; preserve managed/project/feature/exact-hash trust state, never mutate `/hooks` trust or persist the bypass, and expose definition/run/group receipts through redacted views.
 
 **Tests first**
@@ -2002,6 +2035,7 @@ Every PR starts with a failing focused test/fixture, lands the smallest implemen
 - install multiple companions and headless MCP-only selection;
 - exact API/CLI/SDK parity and no tenth use case;
 - V1 mode/state import and projection rebuild.
+- Claude source/frontmatter/control/version, five-handler, parallel-dedupe, async/platform, transport-failure, output/privacy, and configured→delivery conservation fixtures.
 - Codex source/trust/managed/feature/dual-representation probe fixtures and reordered concurrent-handler/effect-arbitration conservation.
 
 **Gate:** affected domain/store/projector/application/API/root tests, contract generation diff, and end-to-end local fake-host suite.
@@ -2012,6 +2046,7 @@ Every PR starts with a failing focused test/fixture, lands the smallest implemen
 
 - Add the one system-wide `/settings/integrations` workspace; host targets are a rail/pivot, not another screen.
 - Render package/effect/profile choices, skill/role/hook/MCP state, capability evidence, trust/reload/stale/foreign state, operations, migration, and exact remediation.
+- Render a redacted per-definition Claude table with source/component lifetime, 30-event/version disposition, matcher/`if`, handler/execution type, disable/managed state, host dedupe, run/completion/delivery coverage, lag/spill, and owning-source edit guidance; `/hooks` remains read-only and its sensitive details never render.
 - Render a redacted per-definition Codex hook table with source layer/representation, exact event/matcher behavior, definition digest, managed/project-trust/review/disable/effective/skip state, overlap group, run visibility, evidenced last handler run/arbitration only when observable, coverage gap, and `/hooks` remediation; never infer foreign execution or render command/path/payload/transcript/environment content.
 - Add plan-26 discovery/fallback/hook/agent/operation panels with numerator/denominator/watermark/coverage/privacy.
 - Link sessions/agents/tasks/timelines through retrieval anchors; never inspect host files from frontend.
@@ -2045,6 +2080,7 @@ Every PR starts with a failing focused test/fixture, lands the smallest implemen
 - current marketplace artifact round-trips to exact signed digest;
 - supported stock-client matrix and documented downgrade assertions.
 - Codex exact ten-event wire/output/matcher/exit matrix across every supported surface, additive source/concurrent completion permutations, exact-hash review/change/disable, trusted/untrusted project, feature off/on/alias, managed-only/managed immutable state, plugin manifest forms, arbitrary cwd, and Unix/Windows lowering.
+- Claude exact 30-event wire/matcher/input/output/exit matrix across supported CLI/remote versions; five handler types; source/frontmatter/component lifecycle; parallel host dedupe; exec/shell/PowerShell; async/rewake; HTTP/MCP failure; prompt/agent decisions; disable/managed-only policy; transcript lag, output spill, stop cap, and all documented minimum-version behaviors.
 
 **Gate:** two independent reproducible builds, full stock-host matrix, a clean plan-18 scan, verified provenance/signatures, and aggregate quality gates from `12.4`.
 
@@ -2128,6 +2164,7 @@ Normative conflict resolutions:
 
 - [ ] Claude Code, Codex, and Cursor core/companion artifacts parse on every supported stock surface/version.
 - [ ] Codex conformance covers exactly the current ten events and every source/trust/concurrency/output/interception state above; the fixed oracle is independent of generated artifacts and no separate `PostToolUseFailure` is claimed.
+- [ ] Claude conformance covers exactly the current pinned 30 events and every handler/source/matcher/concurrency/platform/async/output/privacy/version state above; the fixed oracle is independent of generated artifacts and every omitted generated event has an explicit catalog disposition.
 - [ ] Six skills and three roles have semantic parity, trigger/negative evals, CLI fallback, and anchor/coverage outputs.
 - [ ] No new command/rule/prompt duplication; bounded legacy aliases name removal versions.
 - [ ] Core installs no MCP; companions are independent; operator is never default/transitive/inherited into read roles.

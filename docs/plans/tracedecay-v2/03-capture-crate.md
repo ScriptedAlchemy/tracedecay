@@ -318,9 +318,13 @@ pub struct WorkClaimDraft {
 
 pub enum HookEventV1 {
     SessionStarted { source: NativeKindCode },
-    PromptSubmitted { turn_id: AliasRef, content: ProviderFieldValue },
+    SetupStarted { trigger: NativeKindCode },
+    InstructionsLoaded { load_reason: NativeKindCode, metadata: ProviderFieldValue },
+    PromptSubmitted { prompt_id: Option<AliasRef>, content: ProviderFieldValue },
+    PromptExpanded { prompt_id: Option<AliasRef>, expansion: ProviderFieldValue },
+    AssistantMessageDisplayed { turn_id: AliasRef, message_id: AliasRef, index: u32, final_chunk: bool, delta: ProviderFieldValue },
     AgentSpawned { child: NativeAgentId, task: ProviderFieldValue },
-    AgentStopped { child: NativeAgentId, stop_hook_active: bool, last_message: Option<ProviderFieldValue> },
+    AgentStopped { child: NativeAgentId, stop_hook_active: bool, last_message: Option<ProviderFieldValue>, background_tasks: Option<ProviderFieldValue>, session_crons: Option<ProviderFieldValue>, terminal_coverage: CoverageReportV1 },
     AgentMessage { recipient: NativeAgentId, content: ProviderFieldValue },
     AgentHandoff { recipient: NativeAgentId, state: ProviderFieldValue },
     AgentPresenceHeartbeat { status: PresenceStatus },
@@ -328,17 +332,33 @@ pub enum HookEventV1 {
     WorkClaimScopeChanged { claim_id: String, scope: WorkClaimScopeDraft },
     WorkClaimAcknowledged { claim_id: String, redundancy: RedundancyMode },
     CoordinationOutcomeObserved { claim_id: String, outcome: CoordinationOutcome },
-    PermissionRequested { turn_id: AliasRef, native_request_id: Option<AliasRef>, tool: String, input: ProviderFieldValue },
+    PermissionRequested { prompt_id: Option<AliasRef>, native_request_id: Option<AliasRef>, tool: String, input: ProviderFieldValue },
     PermissionDecisionObserved { permission_request: AliasRef, behavior: PermissionBehaviorV1 },
+    PermissionDenied { prompt_id: Option<AliasRef>, tool_use_id: Option<AliasRef>, tool: String, input: ProviderFieldValue, reason: ProviderFieldValue },
     ToolStarted { call_id: String, tool: String, input: ProviderFieldValue },
-    ToolFinished { call_id: String, outcome: ToolOutcome, output: ProviderFieldValue },
-    CompactStarted { trigger: NativeKindCode },
-    CompactFinished { trigger: NativeKindCode },
-    TurnStopRequested { turn_id: AliasRef, stop_hook_active: bool, last_message: Option<ProviderFieldValue> },
+    ToolFinished { call_id: String, outcome: ToolOutcome, output: ProviderFieldValue, duration_ms: Option<u64> },
+    ToolFailed { call_id: String, tool: String, error: ProviderFieldValue, is_interrupt: Option<bool>, duration_ms: Option<u64> },
+    ToolBatchFinished { prompt_id: Option<AliasRef>, results: ProviderFieldValue },
+    NotificationObserved { kind: NativeKindCode, message: ProviderFieldValue },
+    TaskCreated { task: ProviderFieldValue },
+    TaskCompleted { task: ProviderFieldValue },
+    TeammateIdle { teammate: ProviderFieldValue },
+    ConfigurationChanged { source: NativeKindCode, change: ProviderFieldValue },
+    CwdChanged { previous: ProviderFieldValue, current: ProviderFieldValue },
+    FileChanged { file: ProviderFieldValue, change: ProviderFieldValue },
+    WorktreeCreateRequested { request: ProviderFieldValue },
+    WorktreeCreated { worktree: ProviderFieldValue },
+    WorktreeRemoved { worktree: ProviderFieldValue },
+    CompactStarted { trigger: NativeKindCode, custom_instructions: Option<ProviderFieldValue> },
+    CompactFinished { trigger: NativeKindCode, compact_summary: Option<ProviderFieldValue> },
+    TurnStopRequested { prompt_id: Option<AliasRef>, stop_hook_active: bool, last_message: Option<ProviderFieldValue>, background_tasks: Option<ProviderFieldValue>, session_crons: Option<ProviderFieldValue>, terminal_coverage: CoverageReportV1 },
+    TurnStopFailed { prompt_id: Option<AliasRef>, error_type: NativeKindCode, error: ProviderFieldValue },
+    ElicitationRequested { server: AliasRef, request: ProviderFieldValue },
+    ElicitationAnswered { server: AliasRef, response: ProviderFieldValue },
     ContinuationDecisionObserved { target: HookContinuationTargetV1, continued: bool, reason: Option<ProviderFieldValue> },
     HookHandlerRunObserved { definition: HookDefinitionRefV1, run: HookHandlerRunRefV1, result: HookHandlerResultV1 },
     HintTerminal { hint_id: String, terminal: HintTerminalState },
-    SessionStopped { outcome: Option<String> },
+    SessionStopped { outcome: Option<String>, reason: Option<NativeKindCode> },
 }
 
 pub struct HookSpool;
@@ -357,6 +377,8 @@ impl HookSpool {
 Every TraceDecay-owned source adapter and hook draft carries the originating `TraceDecayBuildRefV1`; capture rejects a newly emitted log/hook/diagnostic record without it. Spool frames authenticate the producer build reference in their header, and drain/forward/import preserves it independently from the current drainer/collector build. This applies even before project/store initialization and during recovery failures. Pre-contract V1 JSONL/file logs enter migration as `KnownVersion` when component+SemVer are proven without a build manifest, otherwise explicit `UnknownLegacy`; neither is ever relabeled as the importing binary.
 
 Codex lowering preserves the exact parent-session `session_id`, Turn, agent, tool-use, hook-definition binding, matcher-group, handler, run/attempt, bundle, trust/source-layer evidence, producer-build, and optional collector-build identities available at that surface. `PermissionRequest` has no mandatory native call ID: capture accepts an optional native alias, while application persists a deterministic request identity over session/Turn/tool/sanitized-input digest and source generation. It appends every concurrently launched observable TraceDecay handler run; an invocation-group projection relates them and records host aggregation evidence separately. Shared definition/run/result/trust/source refs are owned by `tracedecay-domain`; capture imports them and never depends on root hook/config composition. `transcript_path`, `agent_transcript_path`, cwd, prompt, tool input/response, and last assistant message remain transient unclassified inputs and may persist only as sanitized payload refs or privacy-domain locator fingerprints. Stop/SubagentStop terminal observations asynchronously dirty only their exact thread/subagent automation scope; the hook never waits for reflection/curation, and unchanged terminal inputs remain fenced by plans 09/26.
+
+Claude lowering preserves the native 30-event identity, only the native correlation fields actually supplied (`prompt_id`, `tool_use_id`, MessageDisplay `turn_id`, and event-specific IDs), conditional effort, session/agent/task/team/tool/batch/worktree/MCP identities, event-specific duration/failure/interrupt/continuation fields, handler kind/execution mode, configured-definition versus host-deduped versus actual-run evidence, and produced-at versus later-delivered context time. It never manufactures a Turn ID from session/timing/text. `transcript_path` is explicitly lagging and never used to infer current-turn completeness. `MessageDisplay` is metadata-only by default—delta text is discarded after sanitizer classification unless a versioned bounded capture purpose passes privacy/performance evaluation. Version-gated background-task/session-cron fields are optional with coverage; missing/unreachable evidence cannot satisfy the Stop/SubagentStop terminal predicate. `StopFailure` remains a distinct non-controllable event.
 
 Capture owns the one hook spool and its drainer. There is exactly one spool implementation, one hash-chained frame format (below), and one always-spool ingress protocol; the store exposes only append transactions and never runs a handoff-first or fallback ingress spool of its own ([`02-store-crate.md`](02-store-crate.md) drains capture's spool through `ObservationJournal` appends). Plan [`07-hooks-crate.md`](07-hooks-crate.md) hook hosts write exclusively through capture's spool client (`spool/client.rs`) and receive durability acks carrying the domain `SpoolReceipt` from [`01-domain-crate.md`](01-domain-crate.md); no crate mints a spool-receipt variant.
 

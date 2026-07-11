@@ -853,6 +853,7 @@ Timing rules:
 - ready before Codex `UserPromptSubmit` (or the host's exact equivalent): inject through the event-supported developer/additional-context field, never by wrapping a normal prompt in a fake `UserPromptSubmit hook (completed)` user message;
 - ready after prompt submission but before a declared `PreToolUse` boundary: deliver only if the category remains relevant to that exact Turn and the host supports that context field;
 - ready mid-generation: use `ProviderSteer` only when explicitly advertised, semantically safe, and the envelope is urgent enough under policy; otherwise do not interrupt;
+- Claude `async` completion and `asyncRewake` are not provider-steer or suggestion channels: async context arrives on a later Turn, rewake surfaces exit-2 failure text, and neither preserves the addressed envelope's timing/decision semantics. Generated TraceDecay hooks remain synchronous; model/search work stays daemon-side and the next legal native context boundary claims the envelope.
 - ready after the useful boundary: mark `Late`, optionally reconsider as a new candidate against the next Turn only when the underlying evidence is independently relevant and a new envelope/address is created;
 - `NotificationOnly` is dashboard/host-visible status, not presumed model context;
 - no supported mode: suppress with `HostCannotDeliverSafely`;
@@ -869,6 +870,8 @@ Claim and delivery are separate:
 5. retries by the same invocation return the stored receipt while its policy/catalog/environment digest still matches and do not duplicate injection; a digest mismatch returns a typed stale-environment error rather than re-evaluating or redelivering (the plan 7 §8 retry rule).
 
 When additive Codex sources launch several matching TraceDecay handlers concurrently, every handler run is captured, but `claim_pending_suggestion` uses plan 07's invocation-group identity and the same hint-state CAS. Exactly one winner may render a model-visible suggestion; losers return an empty successful response and cannot suppress sibling start. Arrival order never changes the chosen envelope. `Stop`/`SubagentStop` continuation is a separate policy effect, never an incremental-scout delivery channel, and `stop_hook_active` prevents a suggestion from creating a continuation loop.
+
+For Claude, one generated exec-form handler is eligible for advisory delivery even when foreign handlers also match. Host parallelism and identical-handler dedupe remain observed facts, not scout arbitration. `PostToolBatch` is the preferred bounded fan-out/fan-in reconsideration boundary; per-tool completion may update evidence but cannot emit several sibling suggestions for one batch. Produced-at, eligible-at, host-hook completion, model-visible Turn, transcript-resume replay, and spill/coverage states are distinct timestamps/dispositions.
 
 ## 12. Feedback and outcome attribution
 
