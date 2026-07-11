@@ -192,13 +192,9 @@ async fn run_memory_curator_for_store(
     let request = AgentTaskRequest::new(
         run.run_id.clone(),
         AgentTaskKind::MemoryCurator,
-        build_memory_curator_prompt(&llm_review),
+        build_memory_curator_prompt(),
         evidence_hash.clone(),
-        json!({
-            "llm_review": llm_review,
-            "apply": false,
-            "min_confidence": min_confidence,
-        }),
+        memory_curator_backend_context(&llm_review, min_confidence),
     );
     let input_hash = Some(request.input_hash.clone());
     let finalizer = run.finalizer(input_hash.clone());
@@ -341,15 +337,22 @@ async fn skipped_run(
     })
 }
 
-fn build_memory_curator_prompt(llm_review: &Value) -> String {
-    let messages = llm_review
-        .get("messages")
-        .cloned()
-        .unwrap_or_else(|| json!([]));
-    format!(
-        "Run TraceDecay memory curation review. Return only the strict JSON object requested by these messages:\n{}",
-        serde_json::to_string_pretty(&messages).unwrap_or_else(|_| "[]".to_string())
-    )
+fn build_memory_curator_prompt() -> String {
+    "Run TraceDecay memory curation review using context.llm_review.messages. Return only the strict JSON object requested by those messages.".to_string()
+}
+
+fn memory_curator_backend_context(llm_review: &Value, min_confidence: f64) -> Value {
+    json!({
+        "llm_review": {
+            "status": llm_review.get("status"),
+            "clusters_reviewed": llm_review.get("clusters_reviewed"),
+            "allowed_fact_ids": llm_review.get("allowed_fact_ids"),
+            "min_confidence": llm_review.get("min_confidence"),
+            "messages": llm_review.get("messages"),
+        },
+        "apply": false,
+        "min_confidence": min_confidence,
+    })
 }
 
 fn memory_curation_apply_policy(
@@ -448,4 +451,57 @@ fn default_max_clusters() -> usize {
 
 fn default_min_confidence() -> f64 {
     CURATION_DEFAULT_MIN_CONFIDENCE
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn memory_curator_request_does_not_duplicate_review_messages() {
+        let marker = "cluster-evidence-that-must-appear-once";
+        let review = json!({
+            "status": "needs_llm_review",
+            "messages": [
+                { "role": "system", "content": "return strict JSON" },
+                { "role": "user", "content": marker },
+            ],
+        });
+
+        let prompt = build_memory_curator_prompt();
+        let request = AgentTaskRequest::new(
+            "run-1".to_string(),
+            AgentTaskKind::MemoryCurator,
+            prompt.clone(),
+            None,
+            memory_curator_backend_context(&review, 0.8),
+        );
+        let backend_message = request.backend_message().unwrap();
+
+        assert!(prompt.contains("TraceDecay memory curation review"));
+        assert_eq!(backend_message.matches(marker).count(), 1);
+    }
+
+    #[test]
+    fn memory_curator_request_stays_below_codex_limit_for_large_review() {
+        const CODEX_APP_SERVER_MAX_INPUT_CHARS: usize = 1_048_576;
+        let review = json!({
+            "status": "needs_llm_review",
+            "messages": [
+                { "role": "system", "content": "return strict JSON" },
+                { "role": "user", "content": "x".repeat(600_000) },
+            ],
+        });
+        let request = AgentTaskRequest::new(
+            "run-1".to_string(),
+            AgentTaskKind::MemoryCurator,
+            build_memory_curator_prompt(),
+            None,
+            memory_curator_backend_context(&review, 0.8),
+        );
+
+        let backend_message = request.backend_message().unwrap();
+
+        assert!(backend_message.len() < CODEX_APP_SERVER_MAX_INPUT_CHARS);
+    }
 }

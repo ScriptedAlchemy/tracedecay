@@ -729,8 +729,12 @@ async fn structured_backfill_migrates_legacy_global_marker() {
 /// with the background switch on: it would drop the sweep mid-parse on exit.
 #[tokio::test]
 async fn structured_backfill_one_shot_process_never_spawns() {
-    // Fresh process state (nextest runs each test in its own process): the
-    // background switch defaults on, but a one-shot process is not long-lived.
+    // Cargo's default test runner shares this process with tests that disable
+    // background backfill for deterministic manual sweeps. Restore the
+    // production default before asserting the independent long-lived gate.
+    tracedecay::global_db::set_background_structured_backfill_enabled(true);
+    // In fresh process state (including nextest), the background switch is on,
+    // but a one-shot process is not long-lived.
     assert!(
         !tracedecay::global_db::structured_backfill_will_spawn(),
         "a one-shot process must not spawn the sweep"

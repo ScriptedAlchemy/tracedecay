@@ -2592,6 +2592,31 @@ impl GlobalDb {
         paths
     }
 
+    /// Returns filesystem aliases from the modern project registry.
+    /// Synthetic identity aliases (for example `git-common-dir:...`) are
+    /// intentionally excluded because transcript attribution requires paths.
+    pub async fn list_project_alias_paths(&self) -> Vec<String> {
+        let Ok(mut rows) = self
+            .conn
+            .query(
+                "SELECT alias_path FROM project_aliases ORDER BY alias_path",
+                (),
+            )
+            .await
+        else {
+            return Vec::new();
+        };
+        let mut paths = Vec::new();
+        while let Ok(Some(row)) = rows.next().await {
+            if let Ok(path) = row.get::<String>(0)
+                && Path::new(&path).is_absolute()
+            {
+                paths.push(path);
+            }
+        }
+        paths
+    }
+
     /// Inserts or replaces a provider session. Returns `false` on any DB error.
     pub async fn upsert_session(&self, session: &SessionRecord) -> bool {
         self.conn

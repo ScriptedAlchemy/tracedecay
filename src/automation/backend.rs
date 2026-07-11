@@ -156,7 +156,16 @@ pub fn agent_task_failure_disposition(
     error: Option<&str>,
 ) -> AgentTaskFailureDisposition {
     let classification = error
-        .map(classify_agent_task_error_message)
+        .map(|message| {
+            if is_oversized_backend_input(message) {
+                // The next scheduled run rebuilds its request from current
+                // evidence and code, so an old oversize ledger must not block
+                // a now-bounded or otherwise changed input forever.
+                AgentTaskFailureClass::Retryable
+            } else {
+                classify_agent_task_error_message(message)
+            }
+        })
         .or(recorded_classification);
     let retryable = classification
         .map(AgentTaskFailureClass::is_retryable)
@@ -206,6 +215,12 @@ pub fn classify_agent_task_error_message(message: &str) -> AgentTaskFailureClass
         return AgentTaskFailureClass::Retryable;
     }
     AgentTaskFailureClass::Permanent
+}
+
+fn is_oversized_backend_input(message: &str) -> bool {
+    let normalized = message.to_ascii_lowercase();
+    normalized.contains("input_too_large")
+        || normalized.contains("input exceeds the maximum length")
 }
 
 pub fn agent_task_contract(task: AgentTaskKind) -> AgentTaskContract {

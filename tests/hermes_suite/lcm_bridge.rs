@@ -4369,6 +4369,25 @@ assert ctx.skills[0][1].name == "SKILL.md"
     );
 }
 
+/// Stock Hermes keeps plugin skills out of the flat skills index, so the
+/// first-turn code nudge must expose the qualified name that skill_view accepts.
+#[test]
+fn generated_nudge_makes_plugin_skill_discoverable() {
+    run_generated_plugin_script(
+        "check_skill_discovery_nudge.py",
+        r#"
+plugin._REGISTERED_TOOL_NAMES.add("tracedecay_search")
+text = plugin._pre_llm_call(
+    is_first_turn=True,
+    user_message="Find the callers of this Rust function",
+)
+assert "skill_view" in text, text
+assert "tracedecay:tracedecay" in text, text
+"#,
+        "generated nudge must reveal the qualified Hermes plugin skill name",
+    );
+}
+
 /// Host runtime config may identify a project, but a real session cwd or
 /// explicit call wins. The plugin-owned config block is filtered separately.
 #[test]

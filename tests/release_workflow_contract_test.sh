@@ -3,7 +3,9 @@ set -euo pipefail
 
 release_plz=".github/workflows/release-plz.yml"
 release_workflow=".github/workflows/release.yml"
+release_beta=".github/workflows/release-beta.yml"
 release_pr_integrity=".github/workflows/release-pr-integrity.yml"
+ci_workflow=".github/workflows/ci.yml"
 
 if grep -q 'GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}' "$release_plz"; then
   echo "release-plz must not publish releases with GITHUB_TOKEN" >&2
@@ -30,8 +32,21 @@ for name, step in [
         raise SystemExit(f"{name} step must use RELEASE_PLZ_TOKEN")
 PY
 
+grep -Fq "if: \${{ !cancelled() &&" "$ci_workflow"
+
 grep -q 'release:' "$release_workflow"
 grep -q 'types: \[published\]' "$release_workflow"
+
+python3 - "$release_plz" "$release_workflow" "$release_beta" <<'PY'
+import sys
+
+for path in sys.argv[1:]:
+    text = open(path, encoding="utf-8").read()
+    if "concurrency:" not in text:
+        raise SystemExit(f"{path} must serialize release mutations")
+    if "cancel-in-progress: false" not in text:
+        raise SystemExit(f"{path} must never cancel in-progress publication")
+PY
 
 python3 - "$release_pr_integrity" <<'PY'
 import sys
@@ -49,6 +64,7 @@ required = [
     "git show \"$BASE_SHA:scripts/check-release-pr-integrity.sh\"",
     "release-extra-files-approved",
     "scripts/check-release-pr-integrity.sh",
+    "cancel-in-progress: true",
 ]
 for item in required:
     if item not in text:

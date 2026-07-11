@@ -435,7 +435,8 @@ def _pre_llm_call(*args, **kwargs):
         return None
     return (
         "For this codebase request, prefer tracedecay tools for symbol lookup, call graphs, "
-        "impact analysis, affected files, and architectural navigation before broad file reads."
+        "impact analysis, affected files, and architectural navigation before broad file reads. "
+        "For the full workflow, load plugin skill `tracedecay:tracedecay` with `skill_view`."
     )
 
 _TERMINAL_TOOL_NAMES = frozenset((
