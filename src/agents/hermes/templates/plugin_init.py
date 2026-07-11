@@ -3628,6 +3628,7 @@ class TracedecayMemoryProvider(MemoryProvider):
 
     def __init__(self):
         self.hermes_home = None
+        self._registered_hermes_home = None
         self.project_root = None
         self.session_id = None
         self.agent_context = ""
@@ -3644,7 +3645,9 @@ class TracedecayMemoryProvider(MemoryProvider):
 
     def initialize(self, session_id=None, **kwargs):
         self.hermes_home = (
-            kwargs.get("hermes_home") or self.hermes_home or _resolve_hermes_home()
+            kwargs.get("hermes_home")
+            or self._registered_hermes_home
+            or _resolve_hermes_home()
         )
         config = _with_plugin_block(kwargs.get("config"), self.hermes_home)
         explicit_project_root = kwargs.get("project_root")
@@ -4046,6 +4049,7 @@ def register(ctx):
 
     if callable(getattr(ctx, "register_memory_provider", None)):
         memory_provider = TracedecayMemoryProvider()
+        memory_provider._registered_hermes_home = context_hermes_home
         memory_provider.hermes_home = context_hermes_home
         ctx.register_memory_provider(memory_provider)
 
