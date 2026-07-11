@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.54](https://github.com/ScriptedAlchemy/tracedecay/compare/v0.0.53...v0.0.54) - 2026-07-11
+
+### Added
+
+- *(memory)* add autonomous user-scoped learning
+- *(memory)* add transactional graph grooming
+- *(automation)* review Hermes terminal receipts
+- *(automation)* apply safe skill consolidations
+- *(hermes)* export managed skills through plugin discovery
+- *(automation)* wake reviews from fresh session activity
+- *(memory)* add profile-level user scope
+
+### Fixed
+
+- *(storage)* preserve fact relations in consolidation
+- *(memory)* bound and validate graph grooming
+- *(storage)* preserve branch snapshot recovery files
+- *(hermes)* gate receipt reviews on ingested turns
+- *(storage)* snapshot live branch databases safely
+- *(sessions)* backfill Hermes turns by project evidence
+- *(hermes)* correlate live turns with projects
+- *(mcp)* avoid panic in memory status schema
+- *(hermes)* configure all profile providers
+- *(hermes)* isolate memory routes and context clones
+- *(hermes)* route memory by session workspace
+- *(hermes)* guard plugin nudge and memory retrieval
+
+### Other
+
+- *(automation)* restore guarded skill consolidation
+- *(automation)* keep skill consolidations staged
+
 ## [0.0.53](https://github.com/ScriptedAlchemy/tracedecay/compare/v0.0.52...v0.0.53) - 2026-07-10
 
 ### Fixed
