@@ -7999,6 +7999,72 @@ async fn memory_status_project_selector_reports_registered_project_memory() {
 }
 
 #[tokio::test]
+async fn user_memory_scope_is_profile_level_and_isolated_from_project_memory() {
+    let (active, target, _env) = setup_cross_project_memory_projects().await;
+
+    handle_tool_call(
+        &active,
+        "tracedecay_fact_store",
+        json!({
+            "action": "add",
+            "content": "Project-only routing decision",
+            "category": "project"
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    handle_tool_call(
+        &active,
+        "tracedecay_fact_store",
+        json!({
+            "action": "add",
+            "content": "User prefers concise technical answers",
+            "category": "user_pref",
+            "memory_scope": "user"
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+
+    let project_facts = handle_tool_call(
+        &active,
+        "tracedecay_fact_store",
+        json!({"action": "list", "format": "json", "min_trust": 0.0}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let user_facts = handle_tool_call(
+        &active,
+        "tracedecay_fact_store",
+        json!({
+            "action": "list",
+            "format": "json",
+            "min_trust": 0.0,
+            "memory_scope": "user"
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let project_facts = extract_json(&project_facts.value).to_string();
+    let user_facts = extract_json(&user_facts.value).to_string();
+    assert!(project_facts.contains("Project-only routing decision"));
+    assert!(!project_facts.contains("User prefers concise technical answers"));
+    assert!(user_facts.contains("User prefers concise technical answers"));
+    assert!(!user_facts.contains("Project-only routing decision"));
+
+    close_test_graph(target).await;
+    close_test_graph(active).await;
+}
+
+#[tokio::test]
 async fn memory_fact_store_update_rejects_secret_like_content_with_diff_report() {
     let (cg, _env, _dir) = setup_empty_project().await;
     let added = handle_tool_call(

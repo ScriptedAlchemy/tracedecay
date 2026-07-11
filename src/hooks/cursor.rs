@@ -181,10 +181,14 @@ fn cursor_prompt_hint(event_json: &str) -> Option<ToolHint> {
 
 async fn cursor_prompt_memory_recall(event_json: &str) -> Option<String> {
     let parsed = serde_json::from_str::<Value>(event_json).ok()?;
-    let root = cursor_project_root_from_parsed_event_with_identity(&parsed).await?;
     let prompt = prompt_like_text(&parsed)?;
     let session_id = event_session_id(&parsed);
-    memory_inject::prompt_memory_recall(&root, session_id.as_deref(), &prompt).await
+    match cursor_project_root_from_parsed_event_with_identity(&parsed).await {
+        Some(root) => {
+            memory_inject::prompt_memory_recall(&root, session_id.as_deref(), &prompt).await
+        }
+        None => memory_inject::user_prompt_memory_recall(session_id.as_deref(), &prompt).await,
+    }
 }
 
 /// Cursor `sessionEnd` hook handler (fire-and-forget).
@@ -300,17 +304,21 @@ pub async fn hook_cursor_session_start() -> i32 {
     )
     .await;
     let mut context = cursor_session_context_for_root(root.as_deref()).await;
+    let session_id = serde_json::from_str::<Value>(&event)
+        .ok()
+        .as_ref()
+        .and_then(event_session_id);
+    let digest = match root.as_deref() {
+        Some(root) => memory_inject::session_memory_digest(root, session_id.as_deref()).await,
+        None => memory_inject::user_session_memory_digest(session_id.as_deref()).await,
+    };
+    if let Some(digest) = digest {
+        append_context_block(&mut context, &digest);
+    }
     if let Some(root) = root.as_deref() {
-        let session_id = serde_json::from_str::<Value>(&event)
-            .ok()
-            .as_ref()
-            .and_then(event_session_id);
-        if let Some(digest) =
-            memory_inject::session_memory_digest(root, session_id.as_deref()).await
-        {
-            append_context_block(&mut context, &digest);
-        }
         memory_inject::regenerate_cursor_memory_rule(root).await;
+    } else {
+        memory_inject::regenerate_cursor_user_memory_rule().await;
     }
     if session_start_from_compaction(&event) {
         append_context_recovery_hint(&mut context);

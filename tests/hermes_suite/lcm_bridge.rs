@@ -2155,6 +2155,7 @@ def fake_call_tracedecay_tool(name, args, **kwargs):
     return '{"content":[{"type":"text","text":"{\\"status\\":\\"ok\\"}"}]}'
 
 plugin.tools.call_tracedecay_tool = fake_call_tracedecay_tool
+plugin._project_scope_available = lambda root: True
 
 provider = plugin.TracedecayMemoryProvider()
 provider.initialize(session_id="session-1", hermes_home="/tmp/hermes", project_root="/tmp/project")

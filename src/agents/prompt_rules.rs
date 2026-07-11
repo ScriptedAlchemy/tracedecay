@@ -33,6 +33,8 @@ const STANDARD_PARAGRAPHS: &[&str] = &[
      queries that go beyond what the built-in tools expose.",
     "For durable project/user facts, prefer `tracedecay_fact_store`, \
      `tracedecay_fact_feedback`, and `tracedecay_memory_status` over ad-hoc notes. \
+     Use `memory_scope=user` for durable preferences or projectless chat and \
+     `memory_scope=project` for active-codebase facts. \
      Use `tracedecay_message_search` for active-project transcript recall when \
      prior conversation context matters. Do not store secrets, credentials, or \
      unnecessary PII in persistent facts.",

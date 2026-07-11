@@ -689,6 +689,19 @@ def _project_call_kwargs(project_root=None, kwargs=None):
         routed["project_root"] = str(project_root)
     return routed
 
+def _project_scope_available(project_root) -> bool:
+    if not project_root:
+        return False
+    try:
+        status = call_tracedecay_json(
+            "tracedecay_status",
+            {},
+            **_project_call_kwargs(project_root),
+        )
+    except Exception:
+        return False
+    return isinstance(status, dict) and not status.get("error")
+
 # Conventional config home: a `plugins.tracedecay` block in the profile
 # config.yaml (the same `plugins.<name>` convention bundled Hermes plugins
 # use). Keys are flat and mirror the host-config attribute names the
@@ -3162,11 +3175,12 @@ class TracedecayMemoryProvider(MemoryProvider):
     def initialize(self, session_id=None, **kwargs):
         self.hermes_home = kwargs.get("hermes_home") or _resolve_hermes_home()
         config = _with_plugin_block(kwargs.get("config"), self.hermes_home)
-        self.project_root = _code_project_root(
+        candidate_root = _code_project_root(
             explicit=kwargs.get("project_root"),
             cwd=kwargs.get("cwd"),
             configured=_configured_project_root(config),
         )
+        self.project_root = candidate_root if _project_scope_available(candidate_root) else None
         self.session_id = session_id
         # Execution context ("", "cron", "flush", ...): cron/flush runs are
         # not primary conversations and must not write turn state (cron
@@ -3194,7 +3208,7 @@ class TracedecayMemoryProvider(MemoryProvider):
         )
         status = call_tracedecay_json(
             "tracedecay_memory_status",
-            {},
+            {} if project_root else {"memory_scope": "user"},
             **_project_call_kwargs(project_root),
         )
         if isinstance(status, dict) and not status.get("error"):
@@ -3267,34 +3281,43 @@ class TracedecayMemoryProvider(MemoryProvider):
         text = str(query or "").strip()
         if not text:
             return ""
-        try:
-            args = {"action": "search", "query": text[:512], "limit": 3}
-            payload = call_tracedecay_json(
-                "tracedecay_fact_store",
-                args,
-                **_project_call_kwargs(self.project_root),
-            )
-        except Exception as exc:
-            logger.debug("tracedecay memory prefetch failed: %s", exc)
-            return ""
-        if not isinstance(payload, dict) or payload.get("error"):
-            return ""
-        facts = payload.get("facts") or payload.get("results") or []
+        payloads = []
+        scopes = ["user"] + (["project"] if self.project_root else [])
+        for scope in scopes:
+            try:
+                args = {
+                    "action": "search",
+                    "query": text[:512],
+                    "limit": 3,
+                    "memory_scope": scope,
+                }
+                payload = call_tracedecay_json(
+                    "tracedecay_fact_store",
+                    args,
+                    **_project_call_kwargs(self.project_root if scope == "project" else None),
+                )
+            except Exception as exc:
+                logger.debug("tracedecay %s memory prefetch failed: %s", scope, exc)
+                continue
+            if isinstance(payload, dict) and not payload.get("error"):
+                payloads.append((scope, payload))
         lines = []
-        for item in facts:
-            if not isinstance(item, dict):
-                continue
-            # Search results nest the row under "fact" (with match scores
-            # beside it); list results are flat fact rows.
-            fact = item.get("fact") if isinstance(item.get("fact"), dict) else item
-            content = str(fact.get("content") or "").strip()
-            if not content:
-                continue
-            if len(content) > 600:
-                content = content[:600].rstrip() + "..."
-            fact_id = fact.get("fact_id")
-            prefix = f"[fact {fact_id}] " if fact_id is not None else ""
-            lines.append(f"- {prefix}{content}")
+        seen_content = set()
+        for scope, payload in payloads:
+            facts = payload.get("facts") or payload.get("results") or []
+            for item in facts:
+                if not isinstance(item, dict):
+                    continue
+                fact = item.get("fact") if isinstance(item.get("fact"), dict) else item
+                content = str(fact.get("content") or "").strip()
+                if not content or content in seen_content:
+                    continue
+                seen_content.add(content)
+                if len(content) > 600:
+                    content = content[:600].rstrip() + "..."
+                fact_id = fact.get("fact_id")
+                prefix = f"[{scope} fact {fact_id}] " if fact_id is not None else f"[{scope}] "
+                lines.append(f"- {prefix}{content}")
         return "\n".join(lines)
 
     def sync_turn(self, user_content, assistant_content, *, session_id="", messages=None):
@@ -3304,6 +3327,8 @@ class TracedecayMemoryProvider(MemoryProvider):
         same content-cursored path the context engine uses), so the raw
         store grows every turn instead of only when compression fires.
         """
+        if not self.project_root:
+            return
         if not _plugin_toggle("sync_turn", True):
             return
         if self.agent_context in ("cron", "flush"):
@@ -3361,12 +3386,15 @@ class TracedecayMemoryProvider(MemoryProvider):
             "content": text,
             "category": "user_pref" if target == "user" else "general",
             "metadata": fact_metadata,
+            "memory_scope": "user" if target == "user" or not self.project_root else "project",
         }
         try:
             tools.call_tracedecay_tool(
                 "tracedecay_fact_store",
                 fact_args,
-                **_project_call_kwargs(self.project_root),
+                **_project_call_kwargs(
+                    self.project_root if fact_args["memory_scope"] == "project" else None
+                ),
             )
         except Exception as exc:
             logger.debug("tracedecay on_memory_write mirror failed: %s", exc)
@@ -3462,10 +3490,21 @@ class TracedecayMemoryProvider(MemoryProvider):
         if fixed_args:
             tool_args = dict(tool_args)
             tool_args.update(fixed_args)
+        if "memory_scope" not in tool_args:
+            action = str(tool_args.get("action") or "")
+            category = str(tool_args.get("category") or "")
+            if not self.project_root or (action in ("add", "update") and category == "user_pref"):
+                tool_args["memory_scope"] = "user"
+            else:
+                tool_args["memory_scope"] = "project"
+        routed_project = self.project_root if tool_args["memory_scope"] == "project" else None
+        routed_kwargs = dict(kwargs)
+        if routed_project is None:
+            routed_kwargs.pop("project_root", None)
         return tools.call_tracedecay_tool(
             tracedecay_name,
             tool_args,
-            **_project_call_kwargs(self.project_root, kwargs),
+            **_project_call_kwargs(routed_project, routed_kwargs),
         )
 
 def register(ctx):

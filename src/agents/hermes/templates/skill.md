@@ -27,11 +27,11 @@ selects a TraceDecay installation, store, or project. TraceDecay always uses
 the normal user-profile installation and the same profile-sharded project
 store used by every other host.
 
-The user profile is global, but holographic facts are project-sharded: each
-registered project's `tracedecay.db` owns its `memory_facts` and derived banks.
-`~/.tracedecay/global.db` is the cross-project registry/usage database, not one
-shared fact table with a project tag. Selecting the runtime project therefore
-selects the fact and LCM store before retrieval or mutation.
+Project facts remain sharded: each registered project's `tracedecay.db` owns
+its `memory_facts` and derived banks. Durable preferences and projectless chat
+facts use the profile-level `~/.tracedecay/user-memory.db` store.
+`~/.tracedecay/global.db` remains the cross-project registry/usage database,
+not a shared project-fact table with a project tag.
 
 Resolve the code project from an explicit runtime project root when the host
 provides one; otherwise use stock Hermes' logical session workspace
@@ -41,6 +41,12 @@ Project routing belongs to the CLI transport (`--project`), not to MCP tool
 arguments. Do not pass `storage_scope`, `hermes_home`, a Hermes profile name,
 or a configured project pin: those legacy routing inputs are not part of the
 current schemas and are rejected rather than translated.
+
+Use `memory_scope=user` for durable user preferences and untethered chat.
+Use `memory_scope=project` for codebase decisions and project knowledge. In a
+project, Hermes recall combines user facts with the active project's facts and
+labels their provenance. Without an initialized project, Hermes uses only user
+memory and does not write project LCM data into an arbitrary working directory.
 
 ## Memory
 

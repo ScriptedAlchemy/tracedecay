@@ -180,13 +180,13 @@ def run_checks(work: Path):
         assert plugin._code_project_root() == str(runtime_project)
         runtime_provider = plugin.TracedecayMemoryProvider()
         runtime_provider.initialize(session_id="runtime-cwd")
-        assert runtime_provider.project_root == str(runtime_project)
+        assert runtime_provider.project_root is None
     finally:
         if previous_terminal_cwd is None:
             os.environ.pop("TERMINAL_CWD", None)
         else:
             os.environ["TERMINAL_CWD"] = previous_terminal_cwd
-    ok("memory provider follows the stock Hermes runtime workspace")
+    ok("unindexed runtime workspace uses profile-level user memory")
 
     # ── 3. Registration split + provider dedup ──────────────────────────
     # The installer wrote memory.provider: tracedecay into the temp profile
@@ -451,8 +451,9 @@ def run_checks(work: Path):
     assert provider is not None
     provider.initialize("check-session", hermes_home=str(host_home))
     expected_project_root = plugin._runtime_working_directory()
-    assert provider.project_root == expected_project_root
+    assert provider.project_root is None
     assert provider.project_root != str(host_home)
+    provider.project_root = expected_project_root
     schema_names = [schema["name"] for schema in provider.get_tool_schemas()]
     assert schema_names == ["fact_store", "fact_feedback", "memory_status"], schema_names
     ok("memory schemas collapsed to 3")
@@ -467,6 +468,7 @@ def run_checks(work: Path):
         name, args, kwargs = calls[-1]
         assert name == "tracedecay_fact_store", calls
         assert "project_root" not in args, args
+        assert args["memory_scope"] == "project", args
         assert kwargs["project_root"] == expected_project_root, kwargs
         ok("memory tool calls stay bound to the provider's session project")
 
@@ -492,13 +494,25 @@ def run_checks(work: Path):
         name, args, kwargs = calls[-1]
         assert name == "tracedecay_fact_store", calls
         assert args["action"] == "add" and args["category"] == "user_pref"
+        assert args["memory_scope"] == "user"
         assert args["metadata"]["hermes_action"] == "add"
         assert "project_root" not in args, args
-        assert kwargs["project_root"] == expected_project_root, kwargs
+        assert "project_root" not in kwargs, kwargs
         before = len(calls)
         provider.on_memory_write("remove", "memory", "anything")
         assert len(calls) == before
         ok("on_memory_write mirrors adds and skips removals")
+
+        provider.project_root = None
+        before = len(calls)
+        provider.sync_turn("u", "a", session_id="untethered", messages=messages)
+        assert len(calls) == before
+        provider.handle_tool_call("fact_store", {"action": "add", "content": "pref"})
+        name, args, kwargs = calls[-1]
+        assert args["memory_scope"] == "user", args
+        assert "project_root" not in kwargs, kwargs
+        ok("untethered memory uses user scope and skips project LCM")
+        provider.project_root = expected_project_root
 
         # Non-primary execution contexts must not write turn state.
         before = len(calls)
@@ -532,8 +546,8 @@ def run_checks(work: Path):
             if text:
                 break
             time.sleep(0.05)
-        assert "zack prefers rust" in text and "[fact 7]" in text, text
-        assert "flat row" in text and "[fact 8]" in text, text
+        assert "zack prefers rust" in text and "[user fact 7]" in text, text
+        assert "flat row" in text and "[user fact 8]" in text, text
         # Consumed on read: the next prefetch starts empty again.
         assert provider.prefetch("rust preferences", session_id="check-session") == ""
         plugin.call_tracedecay_json = lambda name, args, **kw: {"error": "nope"}

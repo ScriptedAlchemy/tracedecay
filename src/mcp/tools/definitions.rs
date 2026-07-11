@@ -2170,6 +2170,11 @@ fn def_run_affected_tests() -> ToolDefinition {
 
 fn memory_fact_properties() -> Value {
     json!({
+        "memory_scope": {
+            "type": "string",
+            "enum": ["project", "user"],
+            "description": "Fact scope. project (default) uses the active project shard; user uses the profile-level store for durable preferences and projectless conversations."
+        },
         "action": {
             "type": "string",
             "enum": ["add", "search", "probe", "related", "reason", "contradict", "get", "update", "remove", "list"],
@@ -2371,6 +2376,11 @@ fn def_fact_feedback() -> ToolDefinition {
                 "note": {
                     "type": "string",
                     "description": "Optional feedback note."
+                },
+                "memory_scope": {
+                    "type": "string",
+                    "enum": ["project", "user"],
+                    "description": "Scope containing the fact id (default: project)."
                 }
             },
             "anyOf": [
@@ -2396,9 +2406,25 @@ fn def_memory_status() -> ToolDefinition {
         "Repair derived holographic memory vectors and banks, then return fact/entity counts, trust distribution, below-threshold and missing-vector signals, capacity-per-bank, and repair stats. Defaults to the active project; pass project_id or project_path only when intentionally checking another registered project. Human/operator equivalents: `tracedecay memory status` and `GET /api/plugins/holographic/status`.",
         json!({
             "type": "object",
-            "properties": project_selector_properties()
+            "properties": memory_status_properties()
         }),
     )
+}
+
+fn memory_status_properties() -> Value {
+    let mut properties = project_selector_properties();
+    properties
+        .as_object_mut()
+        .expect("project selector properties")
+        .insert(
+            "memory_scope".to_string(),
+            json!({
+                "type": "string",
+                "enum": ["project", "user"],
+                "description": "Memory scope to inspect (default: project)."
+            }),
+        );
+    properties
 }
 
 fn def_automation_run_artifact_view() -> ToolDefinition {

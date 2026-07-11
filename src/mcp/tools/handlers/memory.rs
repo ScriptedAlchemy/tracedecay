@@ -15,6 +15,7 @@ use crate::memory::types::{
     AddFactRequest, FactRecord, FactSearchResult, FeedbackAction, FeedbackRequest, MemoryCategory,
     SearchFactsRequest, UpdateFactRequest,
 };
+use crate::memory::user::open_user_memory_db;
 use crate::tracedecay::TraceDecay;
 
 use super::super::ToolResult;
@@ -30,6 +31,19 @@ const MAX_FACT_LIMIT: usize = 200;
 pub(super) struct TargetMemoryDb {
     pub(super) db: Database,
     pub(super) project_root: PathBuf,
+    pub(super) user_scope: bool,
+}
+
+fn requests_user_memory(args: &Value) -> bool {
+    args.get("memory_scope").and_then(Value::as_str) == Some("user")
+}
+
+async fn open_user_memory_target(profile_root: &Path) -> Result<TargetMemoryDb> {
+    Ok(TargetMemoryDb {
+        db: open_user_memory_db(profile_root).await?,
+        project_root: profile_root.to_path_buf(),
+        user_scope: true,
+    })
 }
 
 fn text_tool_result(text: &str) -> ToolResult {
@@ -57,6 +71,15 @@ pub(super) async fn open_target_memory_db(
     global_db: Option<&GlobalDb>,
     allow_default_registry_fallback: bool,
 ) -> Result<TargetMemoryDb> {
+    if requests_user_memory(args) {
+        if project_selector_present(args, &["project_path"]) {
+            return Err(config_error(
+                "memory_scope=user cannot be combined with a project selector",
+            ));
+        }
+        let profile_root = profile_root_for_global_db(global_db, allow_default_registry_fallback)?;
+        return open_user_memory_target(&profile_root).await;
+    }
     let Some(context) = project_registry_context(
         args,
         &["project_path"],
@@ -68,6 +91,7 @@ pub(super) async fn open_target_memory_db(
         return Ok(TargetMemoryDb {
             db: cg.open_project_store_db().await?,
             project_root: cg.project_root().to_path_buf(),
+            user_scope: false,
         });
     };
     let profile_root = profile_root_for_global_db(global_db, allow_default_registry_fallback)?;
@@ -94,6 +118,7 @@ pub(super) async fn open_target_memory_db(
     Ok(TargetMemoryDb {
         db,
         project_root: PathBuf::from(context.project.display_root),
+        user_scope: false,
     })
 }
 
@@ -286,6 +311,15 @@ pub(super) async fn handle_fact_store(
     }
     let target_memory =
         open_target_memory_db(cg, &args, global_db, allow_default_registry_fallback).await?;
+    handle_fact_store_for_target(args, cross_project_selector, target_memory).await
+}
+
+async fn handle_fact_store_for_target(
+    args: Value,
+    cross_project_selector: bool,
+    target_memory: TargetMemoryDb,
+) -> Result<ToolResult> {
+    let action = required_str(&args, "action")?;
     let conn = target_memory.db.conn();
     let store = MemoryStore::new(conn);
     let mut refresh_digest = false;
@@ -491,24 +525,30 @@ pub(super) async fn handle_fact_store(
         }
         other => return Err(config_error(format!("unknown fact_store action: {other}"))),
     };
-    if refresh_digest {
+    if refresh_digest && !target_memory.user_scope {
         refresh_memory_digest_after_memory_change(conn, &target_memory.project_root).await;
     }
     Ok(rendered_fact_store(
-        Some(&target_memory.project_root),
+        (!target_memory.user_scope).then_some(target_memory.project_root.as_path()),
         &args,
         &out,
     ))
 }
 
-pub(super) async fn handle_fact_feedback(cg: &TraceDecay, args: Value) -> Result<ToolResult> {
+pub(super) async fn handle_fact_feedback(
+    cg: &TraceDecay,
+    args: Value,
+    global_db: Option<&GlobalDb>,
+    allow_default_registry_fallback: bool,
+) -> Result<ToolResult> {
     let note = args
         .get("note")
         .or_else(|| args.get("reason"))
         .and_then(Value::as_str)
         .map(ToOwned::to_owned);
-    let db = cg.open_project_store_db().await?;
-    let result = MemoryStore::new(db.conn())
+    let target_memory =
+        open_target_memory_db(cg, &args, global_db, allow_default_registry_fallback).await?;
+    let result = MemoryStore::new(target_memory.db.conn())
         .record_feedback_event(FeedbackRequest {
             fact_id: fact_id(&args)?,
             action: feedback_action(&args)?,
@@ -519,9 +559,19 @@ pub(super) async fn handle_fact_feedback(cg: &TraceDecay, args: Value) -> Result
             note,
         })
         .await?;
-    refresh_memory_digest_after_memory_change(db.conn(), cg.project_root()).await;
+    if !target_memory.user_scope {
+        refresh_memory_digest_after_memory_change(
+            target_memory.db.conn(),
+            &target_memory.project_root,
+        )
+        .await;
+    }
     let value = json!({ "status": "recorded", "feedback": result });
-    Ok(rendered_tool_json(Some(cg.project_root()), &args, &value))
+    Ok(rendered_tool_json(
+        (!target_memory.user_scope).then_some(target_memory.project_root.as_path()),
+        &args,
+        &value,
+    ))
 }
 
 pub(super) async fn handle_memory_status(
@@ -535,8 +585,64 @@ pub(super) async fn handle_memory_status(
     let status = TraceDecay::memory_status_for_conn(target_memory.db.conn()).await?;
     let value = json!({ "status": "ok", "memory": status });
     Ok(rendered_tool_json(
-        Some(&target_memory.project_root),
+        (!target_memory.user_scope).then_some(target_memory.project_root.as_path()),
         &args,
         &value,
     ))
+}
+
+pub async fn handle_user_memory_tool(
+    tool_name: &str,
+    args: Value,
+    profile_root: &Path,
+) -> Result<ToolResult> {
+    if !requests_user_memory(&args) {
+        return Err(config_error(
+            "projectless memory dispatch requires memory_scope=user",
+        ));
+    }
+    let target_memory = open_user_memory_target(profile_root).await?;
+    match tool_name {
+        "tracedecay_fact_store" => {
+            required_str(&args, "action")?;
+            if project_selector_present(&args, &["project_path"]) {
+                return Err(config_error(
+                    "memory_scope=user cannot be combined with a project selector",
+                ));
+            }
+            handle_fact_store_for_target(args, false, target_memory).await
+        }
+        "tracedecay_fact_feedback" => {
+            let note = args
+                .get("note")
+                .or_else(|| args.get("reason"))
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned);
+            let result = MemoryStore::new(target_memory.db.conn())
+                .record_feedback_event(FeedbackRequest {
+                    fact_id: fact_id(&args)?,
+                    action: feedback_action(&args)?,
+                    source: args
+                        .get("source")
+                        .and_then(Value::as_str)
+                        .map(ToOwned::to_owned),
+                    note,
+                })
+                .await?;
+            Ok(rendered_tool_json(
+                None,
+                &args,
+                &json!({ "status": "recorded", "feedback": result }),
+            ))
+        }
+        "tracedecay_memory_status" => {
+            let status = TraceDecay::memory_status_for_conn(target_memory.db.conn()).await?;
+            Ok(rendered_tool_json(
+                None,
+                &args,
+                &json!({ "status": "ok", "memory": status }),
+            ))
+        }
+        other => Err(config_error(format!("{other} is not a user-memory tool"))),
+    }
 }

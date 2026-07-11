@@ -22,6 +22,7 @@ use crate::memory::hygiene::detect_secret_like;
 use crate::memory::retrieval::FactRetriever;
 use crate::memory::store::MemoryStore;
 use crate::memory::types::{FactRecord, FactSearchResult};
+use crate::memory::user::open_user_memory_db;
 
 /// Hard cap for the session-start "durable project memory" digest.
 pub const SESSION_DIGEST_CHAR_BUDGET: usize = 2_000;
@@ -47,12 +48,17 @@ const PROMPT_RECALL_MIN_SCORE: f64 = 0.18;
 const MAX_PERSISTED_SEEN_ENTRIES: usize = 4_096;
 
 const SEEN_FACTS_FILENAME: &str = "memory_inject_seen.json";
+const USER_SEEN_FACTS_FILENAME: &str = "user_memory_inject_seen.json";
 
 const DIGEST_HEADER: &str = "Durable project memory (tracedecay fact store; \
 rate with tracedecay_fact_feedback — unhelpful for a wrong fact counts as much as helpful; \
 correct via tracedecay_fact_store update):";
 const PROMPT_RECALL_HEADER: &str = "Possibly relevant project memory \
 (tracedecay fact store; rate with tracedecay_fact_feedback — unhelpful for wrong facts counts too):";
+const USER_DIGEST_HEADER: &str = "Durable user memory (tracedecay user fact store; \
+rate with tracedecay_fact_feedback using memory_scope=user):";
+const USER_PROMPT_RECALL_HEADER: &str = "Possibly relevant user memory \
+(tracedecay user fact store; rate with tracedecay_fact_feedback using memory_scope=user):";
 
 // ---------------------------------------------------------------------------
 // Config gate
@@ -346,6 +352,24 @@ fn record_injected_facts(root: &Path, session_id: Option<&str>, fact_ids: &[i64]
     let _ = seen.save(&path);
 }
 
+fn user_seen_facts_path() -> Option<std::path::PathBuf> {
+    crate::storage::default_profile_root()
+        .ok()
+        .map(|root| root.join(USER_SEEN_FACTS_FILENAME))
+}
+
+fn record_injected_user_facts(session_id: Option<&str>, fact_ids: &[i64]) {
+    let (Some(session_id), Some(path)) = (session_id, user_seen_facts_path()) else {
+        return;
+    };
+    if fact_ids.is_empty() {
+        return;
+    }
+    let mut seen = MemoryInjectSeen::load_or_default(&path);
+    seen.record(session_id, fact_ids);
+    let _ = seen.save(&path);
+}
+
 // ---------------------------------------------------------------------------
 // Async store-backed entry points (fail-open)
 // ---------------------------------------------------------------------------
@@ -426,6 +450,57 @@ pub async fn prompt_memory_recall(
     Some(text)
 }
 
+/// Builds a session-start digest from the profile-level user memory store.
+pub async fn user_session_memory_digest(session_id: Option<&str>) -> Option<String> {
+    if !memory_injection_enabled() {
+        return None;
+    }
+    let profile_root = crate::storage::default_profile_root().ok()?;
+    let db = open_user_memory_db(&profile_root).await.ok()?;
+    let facts = MemoryStore::new(db.conn())
+        .list_facts(
+            None,
+            Some(INJECTION_MIN_TRUST),
+            SESSION_DIGEST_FACT_COUNT * 4,
+        )
+        .await
+        .ok()?;
+    let facts = select_digest_facts(facts, SESSION_DIGEST_FACT_COUNT);
+    let (text, included) =
+        render_fact_block(USER_DIGEST_HEADER, &facts, SESSION_DIGEST_CHAR_BUDGET)?;
+    record_injected_user_facts(session_id, &included);
+    Some(text)
+}
+
+/// Recalls profile-level user facts for a projectless prompt.
+pub async fn user_prompt_memory_recall(session_id: Option<&str>, prompt: &str) -> Option<String> {
+    if !memory_injection_enabled() || prompt.trim().chars().count() < MIN_PROMPT_CHARS {
+        return None;
+    }
+    let profile_root = crate::storage::default_profile_root().ok()?;
+    let db = open_user_memory_db(&profile_root).await.ok()?;
+    let results = FactRetriever::new(db.conn())
+        .search_untracked(
+            prompt,
+            None,
+            Some(INJECTION_MIN_TRUST),
+            PROMPT_RECALL_FACT_COUNT * 4,
+        )
+        .await
+        .ok()?;
+    let already_injected = match (session_id, user_seen_facts_path()) {
+        (Some(session_id), Some(path)) => {
+            MemoryInjectSeen::load_or_default(&path).seen_for_session(session_id)
+        }
+        _ => HashSet::new(),
+    };
+    let facts = select_prompt_recall_facts(results, &already_injected, PROMPT_RECALL_FACT_COUNT);
+    let (text, included) =
+        render_fact_block(USER_PROMPT_RECALL_HEADER, &facts, PROMPT_RECALL_CHAR_BUDGET)?;
+    record_injected_user_facts(session_id, &included);
+    Some(text)
+}
+
 // ---------------------------------------------------------------------------
 // Cursor materialized memory rule
 // ---------------------------------------------------------------------------
@@ -464,6 +539,29 @@ pub fn render_cursor_memory_rule(project_root: Option<&str>, facts: &[FactRecord
     out
 }
 
+/// Renders Cursor's always-applied rule for a projectless session. Replacing
+/// the previous project rule prevents facts from the last workspace leaking
+/// into general chat.
+pub fn render_cursor_user_memory_rule(facts: &[FactRecord]) -> String {
+    let mut out = String::from(
+        "---\ndescription: Durable user memory from the tracedecay user fact store\nalwaysApply: true\n---\n\n",
+    );
+    out.push_str(CURSOR_MEMORY_RULE_MARKER);
+    out.push_str("\n\n# User memory (tracedecay)\n\n");
+    match render_fact_block(USER_DIGEST_HEADER, facts, SESSION_DIGEST_CHAR_BUDGET) {
+        Some((block, _)) => out.push_str(&block),
+        None => out.push_str(
+            "No durable user facts stored yet. Store lasting preferences with \
+             `tracedecay_fact_store` using `memory_scope=user`.\n",
+        ),
+    }
+    out.push_str(
+        "\nCurate via `tracedecay_fact_store` or `tracedecay_fact_feedback` with \
+         `memory_scope=user`.\n",
+    );
+    out
+}
+
 fn write_cursor_memory_rule_if_managed(rule_path: &Path, rendered: &str) -> bool {
     match std::fs::read_to_string(rule_path) {
         Ok(existing) if existing == rendered => return false,
@@ -488,6 +586,38 @@ pub async fn regenerate_cursor_memory_rule(root: &Path) -> bool {
         return false;
     };
     regenerate_cursor_memory_rule_with_home(root, &home).await
+}
+
+/// Replaces Cursor's managed project rule with profile-level user memory for
+/// a projectless session.
+pub async fn regenerate_cursor_user_memory_rule() -> bool {
+    if !memory_injection_enabled() {
+        return false;
+    }
+    let (Some(home), Ok(profile_root)) = (dirs::home_dir(), crate::storage::default_profile_root())
+    else {
+        return false;
+    };
+    let rule_path = crate::agents::cursor::cursor_memory_rule_path(&home);
+    let Some(plugin_dir) = rule_path.parent().and_then(Path::parent) else {
+        return false;
+    };
+    if !plugin_dir.join(".cursor-plugin/plugin.json").exists() {
+        return false;
+    }
+    let facts = match open_user_memory_db(&profile_root).await {
+        Ok(db) => MemoryStore::new(db.conn())
+            .list_facts(
+                None,
+                Some(INJECTION_MIN_TRUST),
+                SESSION_DIGEST_FACT_COUNT * 4,
+            )
+            .await
+            .unwrap_or_default(),
+        Err(_) => Vec::new(),
+    };
+    let facts = select_digest_facts(facts, SESSION_DIGEST_FACT_COUNT);
+    write_cursor_memory_rule_if_managed(&rule_path, &render_cursor_user_memory_rule(&facts))
 }
 
 async fn regenerate_cursor_memory_rule_with_home(root: &Path, home: &Path) -> bool {
@@ -780,6 +910,12 @@ mod tests {
         let empty = render_cursor_memory_rule(None, &[]);
         assert!(empty.contains("No durable facts stored yet"));
         assert!(empty.contains("alwaysApply: true"));
+
+        let user = render_cursor_user_memory_rule(&facts);
+        assert!(user.contains("# User memory (tracedecay)"));
+        assert!(user.contains("Ship digests via hooks"));
+        assert!(!user.contains("/home/user/proj"));
+        assert!(user.contains("memory_scope=user"));
     }
 
     #[tokio::test]

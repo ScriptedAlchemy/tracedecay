@@ -118,6 +118,18 @@ pub(crate) async fn run(
         return Ok(());
     }
 
+    if user_memory_dispatch(&def.name, &tool_args) {
+        let handshake = DaemonHandshake::for_current_client(None, None, false, false)?;
+        let result = tracedecay::mcp::tools::handle_user_memory_tool(
+            &def.name,
+            tool_args,
+            &handshake.client_identity.profile_root,
+        )
+        .await?;
+        print_tool_output(&result.value, raw_json);
+        return Ok(());
+    }
+
     let explicit_project = project.or(parsed_project);
     dispatch_daemon_tool(
         DaemonToolDispatch::project_scoped(explicit_project, &def.name),
@@ -126,6 +138,13 @@ pub(crate) async fn run(
         raw_json,
     )
     .await
+}
+
+fn user_memory_dispatch(tool_name: &str, args: &Value) -> bool {
+    matches!(
+        tool_name,
+        "tracedecay_fact_store" | "tracedecay_fact_feedback" | "tracedecay_memory_status"
+    ) && args.get("memory_scope").and_then(Value::as_str) == Some("user")
 }
 
 struct DaemonToolDispatch {

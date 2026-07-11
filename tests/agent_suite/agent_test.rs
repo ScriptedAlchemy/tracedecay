@@ -1265,7 +1265,7 @@ fn test_hermes_plugin_init_snapshot_matches_embedded_asset() {
     hasher.update(body.as_bytes());
     assert_eq!(
         hex::encode(hasher.finalize()),
-        "0d3d0edb20e79ce9639f83b25ebf74bee6a505536b1adbfc2f92558a49356e31",
+        "05f69298f093bf9bbd98abd6163b9893a643504ec3f463b0f742be1d0f8da4d2",
         "templates/plugin_init.py payload hash changed — verify the edit is intentional and update this snapshot"
     );
 }
@@ -1553,14 +1553,15 @@ assert provider.is_available() is False
 plugin.tools.TRACEDECAY_BIN = original_bin
 provider.initialize("session-123", hermes_home="/tmp/hermes-profile")
 assert provider.hermes_home == "/tmp/hermes-profile"
-assert provider.project_root == os.getcwd()
+assert provider.project_root is None
 assert provider.project_root != provider.hermes_home
 assert provider.session_id == "session-123"
 # Hermes home remains host config only; TraceDecay routing stays on cwd.
 provider.initialize("session-only")
 assert provider.hermes_home == str(plugin_dir.parent.parent)
-assert provider.project_root == os.getcwd()
+assert provider.project_root is None
 assert provider.session_id == "session-only"
+provider.project_root = os.getcwd()
 
 # Collapsed schema surface: fact_store(action=...) covers the nine legacy
 # fixed-action aliases, which stay dispatchable but cost no schema footprint.
@@ -1594,13 +1595,13 @@ assert json.loads(feedback_result)["name"] == "tracedecay_fact_feedback"
 assert json.loads(search_result)["name"] == "tracedecay_fact_store"
 assert json.loads(status_result)["name"] == "tracedecay_memory_status"
 assert calls[0][0] == "tracedecay_fact_store"
-assert calls[0][1] == {"action": "list"}
+assert calls[0][1] == {"action": "list", "memory_scope": "project"}
 assert calls[0][2]["request_id"] == "r1"
 assert calls[1][0] == "tracedecay_fact_feedback"
 assert calls[2][0] == "tracedecay_fact_store"
-assert calls[2][1] == {"query": "Project Phoenix", "action": "search"}
+assert calls[2][1] == {"query": "Project Phoenix", "action": "search", "memory_scope": "project"}
 assert calls[3][0] == "tracedecay_memory_status"
-assert calls[3][1] == {}
+assert calls[3][1] == {"memory_scope": "project"}
 
 class LegacyCtx:
     context_engine_tool_handlers_receive_messages = True

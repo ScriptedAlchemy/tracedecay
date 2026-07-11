@@ -53,16 +53,16 @@ pub async fn hook_codex_session_start() -> i32 {
     let _hook_telemetry =
         record_hook_invoked(root.as_deref(), HintAgent::Codex, "SessionStart", &event);
     let (mut context, _) = codex_session_context_for_event(&event).await;
-    if let Some(root) = root.as_deref() {
-        let session_id = serde_json::from_str::<Value>(&event)
-            .ok()
-            .as_ref()
-            .and_then(event_session_id);
-        if let Some(digest) =
-            memory_inject::session_memory_digest(root, session_id.as_deref()).await
-        {
-            append_context_block(&mut context, &digest);
-        }
+    let session_id = serde_json::from_str::<Value>(&event)
+        .ok()
+        .as_ref()
+        .and_then(event_session_id);
+    let digest = match root.as_deref() {
+        Some(root) => memory_inject::session_memory_digest(root, session_id.as_deref()).await,
+        None => memory_inject::user_session_memory_digest(session_id.as_deref()).await,
+    };
+    if let Some(digest) = digest {
+        append_context_block(&mut context, &digest);
     }
     if session_start_from_compaction(&event) {
         append_context_recovery_hint(&mut context);
@@ -101,19 +101,23 @@ pub async fn codex_user_prompt_submit_context_for_event(event: &str) -> String {
         if let Some(hint) = codex_prompt_hint(event) {
             append_tool_hint(&mut context, &hint);
         }
-        if let Some(recall) = codex_prompt_memory_recall(event).await {
-            append_context_block(&mut context, &recall);
-        }
+    }
+    if let Some(recall) = codex_prompt_memory_recall(event).await {
+        append_context_block(&mut context, &recall);
     }
     context
 }
 
 async fn codex_prompt_memory_recall(event_json: &str) -> Option<String> {
     let parsed = serde_json::from_str::<Value>(event_json).ok()?;
-    let root = codex_project_root_from_parsed_event_with_identity(&parsed).await?;
     let prompt = prompt_like_text(&parsed)?;
     let session_id = event_session_id(&parsed);
-    memory_inject::prompt_memory_recall(&root, session_id.as_deref(), &prompt).await
+    match codex_project_root_from_parsed_event_with_identity(&parsed).await {
+        Some(root) => {
+            memory_inject::prompt_memory_recall(&root, session_id.as_deref(), &prompt).await
+        }
+        None => memory_inject::user_prompt_memory_recall(session_id.as_deref(), &prompt).await,
+    }
 }
 
 /// Builds Codex session/prompt context.
@@ -147,7 +151,7 @@ pub async fn hook_codex_subagent_start() -> i32 {
     let output = evaluate_codex_subagent_start(&event);
     let digest = match root.as_deref() {
         Some(root) => memory_inject::session_memory_digest(root, None).await,
-        None => None,
+        None => memory_inject::user_session_memory_digest(None).await,
     };
     let output = merge_codex_subagent_output(output, digest);
     eprintln!(

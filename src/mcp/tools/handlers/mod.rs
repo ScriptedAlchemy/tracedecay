@@ -436,7 +436,15 @@ pub async fn handle_tool_call_with_registry_and_implicit_project(
             )
             .await
         }
-        "tracedecay_fact_feedback" => memory::handle_fact_feedback(cg, args).await,
+        "tracedecay_fact_feedback" => {
+            memory::handle_fact_feedback(
+                cg,
+                args,
+                options.global_db,
+                options.allow_default_registry_fallback,
+            )
+            .await
+        }
         "tracedecay_memory_status" => {
             memory::handle_memory_status(
                 cg,

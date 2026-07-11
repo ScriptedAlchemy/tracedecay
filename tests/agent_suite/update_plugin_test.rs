@@ -190,7 +190,7 @@ fn write_retired_codex_skill(plugin_dir: &Path, name: &str) {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn hermes_update_plugin_refreshes_user_install_and_retires_legacy_named_install() {
+fn hermes_update_plugin_refreshes_default_and_named_profile_installs() {
     let home = TempDir::new().unwrap();
     let _agent_env = AgentEnvLock::pin(home.path());
     let _hermes_home = EnvVarGuard::unset("HERMES_HOME");
@@ -198,7 +198,7 @@ fn hermes_update_plugin_refreshes_user_install_and_retires_legacy_named_install(
 
     hermes.install(&ctx(home.path(), OLD_BIN)).unwrap();
 
-    // A legacy named-profile install is retired once rather than refreshed.
+    // Named Hermes profiles are independent host homes and are refreshed too.
     let work_plugin = home.path().join(".hermes/profiles/work/plugins/tracedecay");
     std::fs::create_dir_all(&work_plugin).unwrap();
     std::fs::write(work_plugin.join("plugin.yaml"), "name: tracedecay\n").unwrap();
@@ -213,6 +213,7 @@ fn hermes_update_plugin_refreshes_user_install_and_retires_legacy_named_install(
     std::fs::write(&default_config, &customized).unwrap();
 
     let default_config_before = bytes(&default_config);
+    let work_config_before = bytes(&work_config);
 
     let outcome = hermes.update_plugin(&ctx(home.path(), NEW_BIN)).unwrap();
     let UpdatePluginOutcome::Refreshed(paths) = outcome else {
@@ -220,10 +221,11 @@ fn hermes_update_plugin_refreshes_user_install_and_retires_legacy_named_install(
     };
     let default_plugin = home.path().join(".hermes/plugins/tracedecay");
     let work_plugin = home.path().join(".hermes/profiles/work/plugins/tracedecay");
-    assert_eq!(paths, vec![default_plugin.clone()]);
+    assert_eq!(paths, vec![default_plugin.clone(), work_plugin.clone()]);
 
     // The supported user config remains byte-identical.
     assert_eq!(bytes(&default_config), default_config_before);
+    assert_eq!(bytes(&work_config), work_config_before);
 
     // Artifacts re-baked with the new binary path and current version stamp.
     assert!(text(&default_plugin.join("tools.py")).contains(NEW_BIN));
@@ -231,8 +233,9 @@ fn hermes_update_plugin_refreshes_user_install_and_retires_legacy_named_install(
         text(&default_plugin.join("plugin.yaml"))
             .contains(&format!("version: {}", env!("CARGO_PKG_VERSION")))
     );
-    assert!(!work_plugin.join("plugin.yaml").exists());
-    assert!(!text(&work_config).contains("tracedecay"));
+    assert!(text(&work_plugin.join("tools.py")).contains(NEW_BIN));
+    assert!(work_plugin.join("plugin.yaml").exists());
+    assert!(text(&work_config).contains("tracedecay"));
 
     // Dashboard page refreshes without a Hermes profile/project default.
     let api = text(&default_plugin.join("dashboard/plugin_api.py"));
@@ -286,7 +289,7 @@ fn hermes_update_plugin_reports_not_installed_when_nothing_is_detected() {
 }
 
 #[test]
-fn hermes_update_plugin_moves_legacy_named_only_install_to_user_home() {
+fn hermes_update_plugin_refreshes_named_only_install_in_place() {
     let home = TempDir::new().unwrap();
     let _agent_env = AgentEnvLock::pin(home.path());
     let _hermes_home = EnvVarGuard::unset("HERMES_HOME");
@@ -305,13 +308,13 @@ fn hermes_update_plugin_moves_legacy_named_only_install_to_user_home() {
         .update_plugin(&ctx(home.path(), NEW_BIN))
         .unwrap();
 
-    let default = home.path().join(".hermes/plugins/tracedecay");
     assert!(matches!(
         outcome,
-        UpdatePluginOutcome::Refreshed(paths) if paths == vec![default.clone()]
+        UpdatePluginOutcome::Refreshed(paths) if paths == vec![legacy.clone()]
     ));
-    assert!(text(&default.join("tools.py")).contains(NEW_BIN));
-    assert!(!legacy.join("plugin.yaml").exists());
+    assert!(text(&legacy.join("tools.py")).contains(NEW_BIN));
+    assert!(legacy.join("plugin.yaml").exists());
+    assert!(!home.path().join(".hermes/plugins/tracedecay").exists());
 }
 
 // ---------------------------------------------------------------------------
