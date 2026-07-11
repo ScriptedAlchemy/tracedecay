@@ -330,6 +330,10 @@ def run_checks(work: Path):
     # duplicates; transcript search has no provider twin and stays.
     ctx = StubCtx()
     plugin.register(ctx)
+    assert ctx.engine.hermes_home == str(host_home), (
+        ctx.engine.hermes_home,
+        str(host_home),
+    )
     assert ctx.skills == {
         "managed-test": managed_skill,
         "tracedecay": plugin_dir / "skills" / "tracedecay" / "SKILL.md",

@@ -3999,9 +3999,12 @@ class TracedecayMemoryProvider(MemoryProvider):
 def register(ctx):
     global _HOST_FORWARDS_MESSAGES
     context_config = getattr(ctx, "config", None)
+    explicit_context_home = (
+        getattr(ctx, "hermes_home", None) or getattr(ctx, "_hermes_home", None)
+    )
     context_hermes_home = _resolve_hermes_home(
         context_config,
-        getattr(ctx, "hermes_home", None) or getattr(ctx, "_hermes_home", None),
+        explicit_context_home or tools.hermes_home_dir(),
     )
 
     def bind_hermes_home(handler):
