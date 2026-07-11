@@ -457,12 +457,17 @@ pub async fn prepare_branch_tracking_in_layout(
         }
     })?;
     let new_db_path = branches_dir.join(format!("{stem}.db"));
-    // Only the main `.db` is copied here; the parent's -wal/-shm are already
-    // checkpointed into it, so a single-file clone is a complete copy. We hold
-    // the branch-add lock, so the parent is not being written mid-clone.
-    if let Err(e) = clone_or_copy_db(&parent_db, &new_db_path) {
+    // Copy through SQLite rather than cloning the live main file. The
+    // branch-add lock serializes metadata changes, but it does not stop other
+    // processes from writing or checkpointing the parent WAL.
+    let snapshot_result = async {
+        let (parent, _) = crate::db::Database::open(&parent_db).await?;
+        parent.snapshot_to(&new_db_path).await
+    }
+    .await;
+    if let Err(e) = snapshot_result {
         remove_branch_db_files(&new_db_path);
-        return Err(e.into());
+        return Err(e);
     }
 
     // Save metadata before the caller opens the new branch DB for sync.
@@ -580,21 +585,6 @@ fn remove_branch_db_files(db_path: &Path) {
     let _ = std::fs::remove_file(&sidecar);
     sidecar.set_extension("db-shm");
     let _ = std::fs::remove_file(&sidecar);
-}
-
-/// Clones `src` to `dst` using a reflink (copy-on-write, FICLONE) when the
-/// filesystem supports it (btrfs/xfs/APFS), so a ~110MB branch-add DB copy is
-/// an instant metadata operation. Falls back to a byte copy on ANY reflink
-/// error (unsupported FS, cross-device, older kernel), so the destination is
-/// always a complete, independent copy either way.
-fn clone_or_copy_db(src: &Path, dst: &Path) -> std::io::Result<()> {
-    if reflink_copy::reflink(src, dst).is_ok() {
-        return Ok(());
-    }
-    // A failed reflink can leave a partial/zero-length destination behind;
-    // remove it so the byte copy starts clean.
-    let _ = std::fs::remove_file(dst);
-    std::fs::copy(src, dst).map(|_| ())
 }
 
 /// Untracks a single non-default branch: removes its metadata entry and deletes

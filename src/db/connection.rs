@@ -266,6 +266,31 @@ impl Database {
         Ok(())
     }
 
+    /// Writes a transactionally consistent copy of this database.
+    ///
+    /// `VACUUM INTO` reads from one SQLite snapshot, so concurrent WAL
+    /// checkpoints cannot leave the destination with a partially copied
+    /// B-tree. The destination must not already exist.
+    pub async fn snapshot_to(&self, destination: &Path) -> Result<()> {
+        let destination = destination
+            .to_str()
+            .ok_or_else(|| TraceDecayError::Database {
+                message: format!(
+                    "snapshot destination is not valid UTF-8: '{}'",
+                    destination.display()
+                ),
+                operation: "snapshot".to_string(),
+            })?;
+        self.conn
+            .execute("VACUUM INTO ?1", libsql::params![destination])
+            .await
+            .map_err(|e| TraceDecayError::Database {
+                message: format!("failed to create consistent database snapshot: {e}"),
+                operation: "snapshot".to_string(),
+            })?;
+        Ok(())
+    }
+
     /// Runs VACUUM and ANALYZE to reclaim space and update query planner statistics.
     /// Returns the on-disk size of the database file in bytes.
     pub async fn size(&self) -> Result<u64> {

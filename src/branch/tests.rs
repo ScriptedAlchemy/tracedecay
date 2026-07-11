@@ -179,18 +179,31 @@ fn add_tracked_branch(
     db_path
 }
 
-#[test]
-fn clone_or_copy_db_produces_identical_bytes() {
+#[tokio::test]
+async fn sqlite_snapshot_includes_uncheckpointed_wal_data() {
     let dir = tempfile::tempdir().unwrap();
     let src = dir.path().join("src.db");
     let dst = dir.path().join("dst.db");
-    let payload: Vec<u8> = (0..4096u32).map(|i| (i % 251) as u8).collect();
-    std::fs::write(&src, &payload).unwrap();
+    let (writer, _) = crate::db::Database::initialize(&src).await.unwrap();
+    writer
+        .conn()
+        .execute_batch(
+            "CREATE TABLE snapshot_probe(value TEXT NOT NULL);
+             INSERT INTO snapshot_probe(value) VALUES ('committed-in-wal');",
+        )
+        .await
+        .unwrap();
 
-    clone_or_copy_db(&src, &dst).unwrap();
+    writer.snapshot_to(&dst).await.unwrap();
 
-    let copied = std::fs::read(&dst).unwrap();
-    assert_eq!(copied, payload, "reflink-or-copy must be byte-identical");
+    let (snapshot, _) = crate::db::Database::open_read_only(&dst).await.unwrap();
+    let mut rows = snapshot
+        .conn()
+        .query("SELECT value FROM snapshot_probe", ())
+        .await
+        .unwrap();
+    let row = rows.next().await.unwrap().unwrap();
+    assert_eq!(row.get::<String>(0).unwrap(), "committed-in-wal");
 }
 
 #[test]
