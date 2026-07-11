@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.58](https://github.com/ScriptedAlchemy/tracedecay/compare/v0.0.57...v0.0.58) - 2026-07-11
+
+### Fixed
+
+- *(windows)* skip unsupported migration runtime
+- *(windows)* harden migration recovery tests
+- *(windows)* exercise migration recovery
+- *(windows)* secure lifecycle handoff
+
+### Other
+
+- *(windows)* exercise consolidation suite
+- *(windows)* isolate offline migration locks
+- *(windows)* skip unsupported consolidation suite
+
 ## [0.0.57](https://github.com/ScriptedAlchemy/tracedecay/compare/v0.0.56...v0.0.57) - 2026-07-11
 
 ### Fixed
