@@ -971,20 +971,38 @@ impl GlobalDb {
     /// in-process and retried briefly to also cover a racing *external*
     /// process (e.g. two MCP servers starting simultaneously).
     pub async fn open_at(db_path: &std::path::Path) -> Option<Self> {
+        Self::open_at_with_backfill(db_path, true).await
+    }
+
+    /// Opens and ensures a writable session store without starting detached
+    /// structured backfill. Bulk multi-store catch-up uses this to avoid
+    /// launching one competing backfill task per registered project.
+    pub async fn open_at_without_structured_backfill(db_path: &std::path::Path) -> Option<Self> {
+        Self::open_at_with_backfill(db_path, false).await
+    }
+
+    async fn open_at_with_backfill(
+        db_path: &std::path::Path,
+        spawn_structured_backfill: bool,
+    ) -> Option<Self> {
         static OPEN_ENSURE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
         let _guard = OPEN_ENSURE_LOCK.lock().await;
         for attempt in 0..3_u64 {
             if attempt > 0 {
                 tokio::time::sleep(std::time::Duration::from_millis(50 * attempt)).await;
             }
-            if let Some(db) = Self::open_at_unsynchronized(db_path).await {
+            if let Some(db) = Self::open_at_unsynchronized(db_path, spawn_structured_backfill).await
+            {
                 return Some(db);
             }
         }
         None
     }
 
-    async fn open_at_unsynchronized(db_path: &std::path::Path) -> Option<Self> {
+    async fn open_at_unsynchronized(
+        db_path: &std::path::Path,
+        spawn_structured_backfill: bool,
+    ) -> Option<Self> {
         if let Some(parent) = db_path.parent() {
             std::fs::create_dir_all(parent).ok()?;
         }
@@ -1204,7 +1222,9 @@ impl GlobalDb {
         // runs on every open (per hook event, per CLI/MCP invocation), so it
         // must not block: schedule it on a detached background task rather than
         // synchronously reading and re-parsing a batch of multi-MB transcripts.
-        db.spawn_structured_backfill();
+        if spawn_structured_backfill {
+            db.spawn_structured_backfill();
+        }
 
         Some(db)
     }

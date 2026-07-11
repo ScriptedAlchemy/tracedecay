@@ -2,6 +2,30 @@ use super::*;
 use crate::mcp::response_handles::lock_response_handle_store;
 use crate::sessions::{SessionMessageRecord, SessionRecord};
 
+#[tokio::test]
+async fn identical_message_catch_ups_share_one_leader() {
+    let key = format!("test-singleflight-{}", std::process::id());
+    let leader = match claim_message_catch_up(key.clone()) {
+        MessageCatchUpClaim::Leader(leader) => leader,
+        MessageCatchUpClaim::Wait(_) => panic!("fresh key unexpectedly had a leader"),
+    };
+    let waiter = match claim_message_catch_up(key.clone()) {
+        MessageCatchUpClaim::Wait(waiter) => waiter,
+        MessageCatchUpClaim::Leader(_) => panic!("identical catch-up did not coalesce"),
+    };
+    drop(leader);
+    tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        wait_for_message_catch_up(waiter),
+    )
+    .await
+    .expect("waiter was not released when leader completed");
+    assert!(matches!(
+        claim_message_catch_up(key),
+        MessageCatchUpClaim::Leader(_)
+    ));
+}
+
 /// Build a search hit with a given relevance score, message timestamp, and
 /// stable ids — enough to exercise the cross-project merge ordering contract.
 fn merge_result(

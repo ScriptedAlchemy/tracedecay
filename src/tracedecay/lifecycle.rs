@@ -293,7 +293,7 @@ impl TraceDecay {
         project_root: &Path,
         open_options: TraceDecayOpenOptions,
     ) -> Result<Self> {
-        let store_layout =
+        let mut store_layout =
             Self::resolve_store_layout_for_project(project_root, &open_options).await?;
         let config = load_config_from_path(project_root, &store_layout.config_path)?;
         let active_branch = branch::current_branch(project_root);
@@ -310,6 +310,11 @@ impl TraceDecay {
             &store_layout.data_root,
             active_branch.as_deref(),
         );
+
+        // Sync state belongs to the concrete graph DB, not the repository-wide
+        // store root. Different tracked branches have independent databases
+        // and must never clear or inherit one another's dirty marker or lock.
+        activate_graph_layout(&mut store_layout, &db_path);
 
         if !db_path.exists() {
             return Err(TraceDecayError::Config {
@@ -401,7 +406,7 @@ impl TraceDecay {
         project_root: &Path,
         open_options: TraceDecayOpenOptions,
     ) -> Result<Self> {
-        let store_layout =
+        let mut store_layout =
             Self::resolve_store_layout_for_project_read_only(project_root, &open_options).await?;
         let config = load_config_from_path(project_root, &store_layout.config_path)?;
         let active_branch = branch::current_branch(project_root);
@@ -411,6 +416,7 @@ impl TraceDecay {
             &store_layout.data_root,
             active_branch.as_deref(),
         );
+        activate_graph_layout(&mut store_layout, &db_path);
 
         if !db_path.exists() {
             return Err(TraceDecayError::Config {
@@ -628,7 +634,7 @@ impl TraceDecay {
         branch_name: &str,
         open_options: TraceDecayOpenOptions,
     ) -> Result<Self> {
-        let store_layout =
+        let mut store_layout =
             Self::resolve_store_layout_for_project(project_root, &open_options).await?;
         let config = load_config_from_path(project_root, &store_layout.config_path)?;
 
@@ -643,6 +649,7 @@ impl TraceDecay {
             .ok_or_else(|| TraceDecayError::Config {
             message: format!("branch '{branch_name}' is not tracked"),
         })?;
+        activate_graph_layout(&mut store_layout, &db_path);
 
         if !db_path.exists() {
             return Err(TraceDecayError::Config {
@@ -953,6 +960,18 @@ impl TraceDecay {
     ) -> Result<StoreLayout> {
         Self::resolve_store_layout_with_identity_migration(project_root, open_options, false).await
     }
+}
+
+fn graph_sidecar_path(db_path: &Path, suffix: &str) -> PathBuf {
+    let mut file_name = db_path.file_name().unwrap_or_default().to_os_string();
+    file_name.push(suffix);
+    db_path.with_file_name(file_name)
+}
+
+fn activate_graph_layout(store_layout: &mut StoreLayout, db_path: &Path) {
+    store_layout.graph_db_path = db_path.to_path_buf();
+    store_layout.dirty_path = graph_sidecar_path(db_path, ".dirty");
+    store_layout.sync_lock_path = graph_sidecar_path(db_path, ".sync.lock");
 }
 
 #[derive(Debug)]

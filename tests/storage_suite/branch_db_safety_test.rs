@@ -74,6 +74,16 @@ async fn open_untracked_project() -> (IsolatedEnv, PathBuf, TraceDecay) {
     assert_eq!(feature.active_branch(), Some("feature/untracked"));
     assert_eq!(feature.serving_branch(), Some("feature/untracked"));
     assert!(!feature.is_fallback());
+    let layout = feature.store_layout();
+    assert_eq!(
+        layout.dirty_path,
+        PathBuf::from(format!("{}.dirty", layout.graph_db_path.display()))
+    );
+    assert_eq!(
+        layout.sync_lock_path,
+        PathBuf::from(format!("{}.sync.lock", layout.graph_db_path.display()))
+    );
+    assert_ne!(layout.dirty_path, layout.data_root.join("dirty"));
 
     (env, project, feature)
 }

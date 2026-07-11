@@ -378,6 +378,7 @@ impl TraceDecay {
             result.duration_ms > 0 || result.file_count == 0,
             "non-empty index completed in zero milliseconds"
         );
+        self.db.checkpoint().await?;
         clear_dirty_sentinel_at(&self.store_layout.dirty_path);
         Ok(result)
     }
@@ -422,6 +423,7 @@ impl TraceDecay {
         let Ok(lock) = try_acquire_sync_lock_at(&self.store_layout.sync_lock_path) else {
             return Ok(true);
         };
+        write_dirty_sentinel_at(&self.store_layout.dirty_path);
 
         let result = self.sync_single_files(&stale_files).await;
         drop(lock);
@@ -483,6 +485,7 @@ impl TraceDecay {
                 }
             }
         };
+        write_dirty_sentinel_at(&self.store_layout.dirty_path);
 
         let _ = self.sync_single_files(&stale_files).await;
         drop(lock);
@@ -594,6 +597,7 @@ impl TraceDecay {
             )
             .await?;
 
+        self.db.checkpoint().await?;
         clear_dirty_sentinel_at(&self.store_layout.dirty_path);
         Ok(())
     }
@@ -1043,6 +1047,7 @@ impl TraceDecay {
             .set_metadata("last_sync_duration_ms", &duration_ms.to_string())
             .await?;
 
+        self.db.checkpoint().await?;
         clear_dirty_sentinel_at(&self.store_layout.dirty_path);
         Ok(SyncResult {
             files_added: new_files.len(),
