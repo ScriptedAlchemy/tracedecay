@@ -201,6 +201,21 @@ pub struct ProfileId(pub uuid::Uuid);
 pub struct BrainId(pub uuid::Uuid);
 pub struct BrainNodeId(pub uuid::Uuid);
 pub struct StoreAuthorityId(pub uuid::Uuid);
+pub enum StoreIsolationModeV1 {
+    DedicatedServiceIdentity,
+    RemoteAuthorityOnly,
+    SameUserDegraded,
+}
+pub struct StoreIsolationStatusV1 {
+    pub mode: StoreIsolationModeV1,
+    pub database_read_denied_to_clients: bool,
+    pub database_write_denied_to_clients: bool,
+    pub service_identity_verified: bool,
+    pub endpoint_acl_verified: bool,
+    pub key_authority_verified: bool,
+    pub last_probe_at: UtcMicros,
+    pub evidence_digest: ManifestDigest,
+}
 pub struct ShardId(pub uuid::Uuid);
 pub struct PrivacyDomainId(pub uuid::Uuid);
 pub struct SourceInstanceId(pub uuid::Uuid);
@@ -309,6 +324,30 @@ pub struct HostSurfaceKindV1(String); // private, grammar-validated opaque host 
 pub struct LocaleId(String); // private, grammar-validated canonical BCP-47 language tag
 pub struct NativeAgentId(pub PrivacyDomainBoundLocatorDigest); // provider-native alias, never literal public text
 pub struct ComponentVersion(String); // bounded ASCII semver/build grammar
+pub struct TraceDecayBuildRefV1 {
+    pub version: ComponentVersion,
+    pub component: RegistryEntryId,
+    pub build_manifest_digest: Option<ManifestDigest>,
+}
+pub struct ComponentVersionRequirementV1(String); // bounded canonical semver requirement grammar
+pub enum TraceDecayVersionSelectionBasisV1 { All, CurrentRuntime, CompatibleProtocol }
+pub enum LegacyUnknownVersionPolicyV1 { Include, Exclude, Only }
+pub struct DiagnosticLogEventV1 {
+    pub event_id: EntityId,
+    pub occurred_at: UtcMicros,
+    pub producer: TraceDecayBuildRefV1,
+    pub collector: Option<TraceDecayBuildRefV1>,
+    pub severity: RegistryEntryId,
+    pub event_code: RegistryEntryId,
+    pub correlation_id: Option<EntityId>,
+    pub safe_message: LogSafeText,
+}
+pub struct TraceDecayVersionSelectorV1 {
+    pub basis: TraceDecayVersionSelectionBasisV1,
+    pub include: BoundedVec<ComponentVersionRequirementV1, 16>,
+    pub exclude: BoundedVec<ComponentVersionRequirementV1, 16>,
+    pub legacy_unknown: LegacyUnknownVersionPolicyV1,
+}
 pub struct MediaTypeCode(String); // allowlisted IANA/media grammar, no parameters with literals
 pub struct LegacyBindingCode(String); // bounded historical CLI/MCP/HTTP identifier grammar
 pub struct SanitizationReceiptId(pub uuid::Uuid);
@@ -901,6 +940,8 @@ pub struct ModelCapabilityRefV1 {
     pub discovered_at: UtcMicros,
 }
 ```
+
+`TraceDecayBuildRefV1.version` is required on every newly emitted TraceDecay log event and uses semantic-version precedence with prerelease/build handling; development artifacts use an explicit valid development/build version rather than an empty or inferred value. A forwarder sets `collector` but preserves `producer` byte-for-byte. Multi-line human diagnostics are one typed event or independently version-stamped continuation events. `TraceDecayVersionSelectionBasisV1::CurrentRuntime` resolves against the application server/CLI runtime captured at request admission; `CompatibleProtocol` resolves through the versioned compatibility manifest, never a string-prefix guess. Empty `include` means the selected basis population, then `exclude` subtracts. `LegacyUnknownVersionPolicyV1` exists only to query imported pre-contract records; a new `DiagnosticLogEventV1` cannot represent an unknown version. Metric labels still exclude arbitrary build/version cardinality—version is an indexed diagnostic predicate and evidence boundary, not a free-form metric dimension.
 
 `SavedViewV1` and `SavedViewDefinitionV1` are the one persisted/wire saved-view envelope. Plan 11 owns the UI-neutral `InvestigationStateV1` codec, bounded scene-trail interaction semantics, and `ExperimentViewSpecV1` presentation; plan 24 owns `TaskViewSpecV1` validation/lenses. All three variants live under this domain contract and share identity, name/owner scope, classification/redaction, live/frozen snapshot, optimistic version, expiry, revoke/reauthorize, and sharing lifecycle. Experiment views reference immutable experiment/run/cell/stage/comparison/comparison-cell/reduction/playhead identities and never embed inputs or outputs. A variant cannot introduce another saved-view ID, table, query scope, grant, route family, or command namespace. `PendingSanitization` is an automated safety state, not a human approval queue.
 

@@ -406,6 +406,17 @@ If the OS keyring is unavailable or locked, quarantine retention fails closed to
 - Bounded/truncated MCP/CLI/HTTP failure reasons are constructed from safe reason enums plus `LogSafeText`; adapters cannot attach the rejected request, raw error, command, query, or payload excerpt.
 - Dashboard/API startup refuses arbitrary unauthenticated host exposure. Every raw-content and metadata view is authorized and sanitizer-eligible before it reaches JSON, SSE, DOM, renderer workers, browser cache, or export.
 
+### 11.5A Database client isolation
+
+Application authorization does not make a SQLite pathname safe. Strong isolation requires one of two verifiable plan-01 modes:
+
+- `DedicatedServiceIdentity`: the daemon runs under a dedicated OS service identity. Its state/database/WAL/SHM/backup/key directories are owned by that identity with no client-user read/traverse ACL; the local Unix socket or Windows named pipe has a narrow client ACL and performs application authentication/authorization. Linux uses a dedicated system user plus systemd state/socket controls, macOS a dedicated service account/LaunchDaemon and ACL-owned state root, and Windows a service virtual account plus NTFS/named-pipe DACL. Database encryption/key material, when enabled, is owned by the service identity and never supplied to clients.
+- `RemoteAuthorityOnly`: no mutable or replicated database file exists on the client node; clients hold only the authorized encrypted spool/cache classes explicitly allowed by plan 28 and query the authority API.
+
+`SameUserDegraded` is supported only as an honestly labeled portability mode. `0700`/`0600`, hidden paths, SQLite locks, daemon leases, and an in-process keyring cannot prevent another process controlled by the same OS user from reading bytes; doctor/UI/API must report `database_read_denied_to_clients=false` and may never call this strong isolation. A user can migrate to a dedicated service identity or remote authority without changing Brain/profile identity.
+
+In every mode, clients receive no store pathname, SQLite URI, database file descriptor/handle, page/WAL bytes, raw backup, or key. All ordinary reads/exports are semantic application use cases. Strong-mode conformance launches an untrusted client under the real client identity and proves it can connect to the authorized socket but receives access denied when listing, statting, opening, memory-mapping, copying, or backing up every database/WAL/SHM/key/backup path; it also proves the daemon can operate them and that ACL drift closes readiness rather than silently degrading.
+
 ### 11.6 Fixtures, evaluation, exports, and release artifacts
 
 - A production DB/store/transcript/cache/export is never copied directly into a fixture.

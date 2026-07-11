@@ -105,7 +105,7 @@ The inventory records symbols and schema names, not private content. It uses sup
 7. **Thin transports.** CLI, MCP, HTTP, SSE, SDK, hook, and UI bind and render application behavior.
 8. **Generated parity.** Repeated public schemas and capability metadata are generated from one contract IR.
 9. **Extensions use SPIs.** New providers, detectors, projectors, operators, policies, and UI contributions register through bounded contracts with budgets and provenance.
-10. **Local-first scale.** One binary and embedded stores are the first deployment; contracts permit isolated workers or remote/federated backends without distributing semantics.
+10. **Local-first daemon authority.** One installed product may supply daemon and client entry points, but only the daemon service constructs store/query/application authority. Local CLI/MCP/hooks/dashboard/SDK use authenticated IPC/API; remote/federated nodes reuse the same semantics. No production client embeds or opens stores.
 11. **No permanent bridge.** Every compatibility adapter has a deletion gate when created.
 12. **Safe failure.** Ambiguity, partial coverage, stale generations, privacy uncertainty, budget exhaustion, and version mismatch are visible typed states, not fallback triggers.
 13. **Reuse mechanics, not meanings.** Registry/digest, projector, operation-fencing, host-install, extraction traversal, graph/timeline slice, rendering, cursor/page, and problem-envelope machinery has one implementation; domain admission, semantics, and state machines remain with their declared owner.
@@ -413,7 +413,7 @@ To preserve testability, repository and executor traits are owned by the consume
 
 ```mermaid
 flowchart LR
-    RC["Rust/TypeScript/Python client"] -->|"authenticated UDS or loopback HTTP/SSE"| API["root V2 API adapter"]
+    RC["Rust/TypeScript/Python client"] -->|"authenticated UDS/named pipe or HTTP/SSE"| API["daemon V2 API adapter"]
     UI["dashboard via TypeScript client"] -->|"authenticated HTTP/SSE"| API
     REMOTE["authorized remote public client"] -->|"HTTPS/mTLS"| API
     API -->|"generated request + caller context"| A["tracedecay-application"]
@@ -425,10 +425,10 @@ flowchart LR
     RB -->|"generated request + caller/node context"| A
     A -->|"typed receipt/snapshot/tail/problem"| RB
     RB -->|"bounded signed frame"| NODE
-    ROOT["root CLI/MCP adapters"] -->|"in-process application port; no loopback HTTP"| A
+    ROOT["root CLI/MCP adapters"] -->|"authenticated daemon local protocol"| API
 ```
 
-Runtime calls do not create compile dependencies in the opposite direction: application and API never import an SDK, and clients never reach store/domain/application APIs in-process. The optional Rust in-process conformance transport implements the generated public client transport trait in test/root composition and still targets the application contract without adding production client-to-server-crate dependencies. The enrolled-node path is separately generated and private; remote public clients never gain observation-upload, snapshot-page, tail, or acknowledgement bindings.
+Runtime calls do not create compile dependencies in the opposite direction: application and API never import an SDK, and production clients never reach store/domain/application APIs in-process. The optional Rust in-process conformance transport implements the generated public client transport trait only in hermetic tests and cannot construct production `StoreFactory`. The enrolled-node path is separately generated and private; remote public clients never gain observation-upload, snapshot-page, tail, or acknowledgement bindings.
 
 ### 6.4 Publication consequences
 
@@ -443,6 +443,7 @@ Plan 12 owns release execution, but its publication manifest is generated from `
 - Query contains no writes to canonical stores, transport rendering, provider discovery, policy decisions, or ambient CWD resolution.
 - Policy contains no store/network/filesystem/clock/random capability except injected deterministic inputs and bounded pure extension runtimes.
 - The root hook module contains no broad graph scan, migration, indexing, automation, remote request, or direct store/query implementation.
+- Production root CLI/MCP/dashboard/client modules cannot import store repositories, SQLite drivers, store layout/path helpers, or application implementations; they depend only on generated daemon-client contracts. Only daemon composition and the exclusive inherited-capability maintenance entry may construct store adapters.
 - Tool catalog contains metadata/validation/generation, never use-case execution.
 - `tracedecay-tool-catalog::host_bundles` is pure: no host/cache/config discovery, filesystem mutation, credential access, network/marketplace call, process launch, install state, or private backup body.
 - Root `v2::host_deploy` contains no capability/workflow/skill/hook/MCP semantics or manifest compiler; it applies signed resolved artifacts through application-owned operations and receipt-bounded I/O only.
@@ -627,7 +628,8 @@ Design and benchmark at minimum:
 
 ### 10.2 Writer and consistency topology
 
-- Per-profile and per-project writer ownership is explicit; processes do not race for implicit global SQLite writers.
+- One daemon authority owns every ordinary mutable writer, read pool, checkpoint, integrity probe, and consistent snapshot for its placed profile/project shards. Client processes cannot link/open SQLite; a generated maintenance worker may open only after explicit inherited exclusive-authority handoff.
+- Strong isolation is `DedicatedServiceIdentity` or `RemoteAuthorityOnly`; OS owner/ACL/key/endpoint probes prove clients cannot traverse/read database families while authorized IPC still works. `SameUserDegraded` is honest portability state, not a security claim.
 - Hooks append to per-producer durable spool segments with monotonic producer sequence and bounded synchronous deadline.
 - Drainers publish observations idempotently and acknowledge only after journal durability.
 - Journal/outbox drives projectors, representations, analytics, policy outcomes, and notifications.

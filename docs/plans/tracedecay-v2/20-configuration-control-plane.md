@@ -780,9 +780,11 @@ Phase 0 generates an inventory from source and blocks cutover until every public
 | Tasks/plans/executors | task graph/decomposition limits, legal work/gate/acceptance kinds, scheduler pause/concurrency/fairness/aging/batches, lease/heartbeat/start/cancel timeouts, executor adapters/hosts/capacity/workspace modes, provider/model/reasoning effort/routes/fallback, tool/effect grants, privacy/egress, worktree/branch policy, budgets/schedules/retries/circuit breakers, context-packet limits/expiry/materiality, saved task views/notifications |
 | Memory/knowledge | retrieval/trust/conflict/retention policies, autonomous curation cadence and quality constraints |
 | Automations/skills | scheduler, run budgets, autonomous curator/reflector/skill-writer policies, installation authority, health pauses |
-| Storage/projectors | data locations by allowed location class, WAL/lease budgets, blob/backup retention, projection/index generations, compaction |
+| Storage/projectors | declared `DedicatedServiceIdentity`/`RemoteAuthorityOnly`/`SameUserDegraded` isolation mode and immutable verified status, data locations by allowed location class, WAL/lease budgets, blob/backup retention, projection/index generations, compaction |
 | API/MCP/CLI/dashboard | loopback bind, session lifetime, request/page/budget caps, SSE caps, task-graph edit-bundle TTL/byte/file/item/sweeper bounds, host component set/install scope/registration-profile selection, optional context/work/operator MCP enable/narrow/approval/credential settings, renderer preferences, dashboard preferences; generated MCP IDs/digests/grant ceilings/definition budgets are visible immutable state |
-| Costs/observability | pricing catalog version, sampling, safe metrics, log levels, tracing budgets, accounting horizons |
+| Costs/observability | pricing catalog version, sampling, safe metrics, log levels, tracing budgets, accounting horizons, saved diagnostic producer-version filters and an explicit default view (`all`, `current_runtime`, or `compatible_protocol`) |
+
+The producer version field itself, its emission requirement, and legacy-unknown truth are hard invariants, not settings. A default log-view filter may change presentation only: every response echoes it and reports excluded/unknown counts, and no setting may delete, rewrite, or relabel old records.
 | Updates/migrations | update channel, daemon drain policy, compatibility windows, import schedules, retirement holds |
 | Extensions | enabled manifests, sandbox/resource budgets, privacy/egress permissions, version pins |
 

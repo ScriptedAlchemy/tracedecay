@@ -59,6 +59,7 @@
 43. `HostProfileId` is only a host installation/configuration target. It never selects or creates a TraceDecay user profile, Brain, database root, memory partition, or authorization domain.
 44. Every Hermes named profile, regardless of `HERMES_HOME` or profile count, binds the same user-global TraceDecay `ProfileId`, daemon, catalog, and stores used by Codex, Claude, and Cursor. Per-profile deployment/trust receipts remain distinct; data ownership does not.
 45. Host runtime context is invocation/session scoped. Logical workspace roots and explicit projectless state come from the provider event; process CWD, first/last session workspace, cached project, and host-profile directory cannot route memory, LCM, or retrieval.
+46. Every generated host integration, including each Hermes named-profile deployment, stamps its exact TraceDecay component version on every TraceDecay-owned log/diagnostic event. Host application version and connected daemon/collector version are separate fields; forwarding cannot overwrite the originating TraceDecay version.
 
 ## 1. Product objective and non-goals
 
@@ -1652,6 +1653,7 @@ The arbiter may emit at most one compact, route-specific suggestion per turn and
 11. **Privacy/security:** secret/private-path, traversal/symlink/archive, command injection, manifest tampering, signature/revocation, broad grant, and output leakage.
 12. **Migration:** every current integration row in `6.7`, stale caches/versions, duplicate registrations/hooks, owned/unowned files, and interrupted V1 cutover.
 13. **Hermes multi-profile/runtime context:** zero/one/many named profiles all bind one TraceDecay profile/store; parallel sessions retain distinct workspaces; projectless memory uses Profile scope; clone/reload shares only immutable config/circuit state; greetings and acknowledgements remain silent; cross-project retrieval retains selector/auth bindings.
+14. **Versioned diagnostics:** every generated core/companion/hook/role/installer log record carries its producer TraceDecay version; mixed old/current components, forwarding, rotation, and current-only/range/exclusion filters preserve truthful counts and producer/collector distinction.
 
 ### 12.2 Supported stock-host matrix
 

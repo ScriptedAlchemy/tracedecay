@@ -17,6 +17,7 @@
 ## 2. Non-goals and prohibited shortcuts
 
 - No SQLite database, `-wal`, or `-shm` file is opened through NFS, SMB, SSHFS, Taildrive, a Tailscale-mounted filesystem, or another network filesystem. SQLite WAL requires same-host shared memory and its locking assumptions are unsafe over many network filesystems.
+- Each mutable shard's placed daemon is its only SQLite opener. `RemoteAuthorityOnly` clients have no database files; `DedicatedServiceIdentity` authority/replica nodes keep stores under a service identity and ACL that client identities cannot read, while the authenticated API/socket remains reachable. A same-user node is explicitly degraded and cannot claim that SQLite locks or file mode alone prevent direct reads.
 - No client receives database paths, database credentials, SQL access, or a database URL. Remote clients call TraceDecay use cases.
 - No implicit multi-primary writes, last-write-wins state, clock-based conflict resolution, automatic offline authority promotion, or merge-by-hostname.
 - No assumption that the same remote URL means the same repository: forks, mirrors, upstream aliases, shallow clones, replacements, grafts, and rewritten history remain explicit evidence cases.

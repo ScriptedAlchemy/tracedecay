@@ -367,6 +367,7 @@ Bootstrap failure does not create a second “degraded MCP server.” Catalog an
 - Once a session is marked refresh-required, a call that depends on a replaced binding fails with `capability_replaced`/`client_update_required`; it never dispatches by a stale name to new semantics. A complete list refresh atomically pins the new generation. A protocol or binary-major change requires reinitialize/reconnect instead.
 - `resources/subscribe` is offered only for mutable typed resources with an application/projector change feed. `notifications/resources/updated` carries the authorized URI, not payload. Reads and every delivery reauthorize; revocation removes the subscription. Slow consumers receive one coalesced update/gap instruction and reread rather than accumulating unbounded deltas.
 - `logging/setLevel` stores a connection-local syslog threshold. Protocol log notifications contain safe structured diagnostics/correlation IDs, never result payloads, secrets, raw prompts, or progress that belongs in `notifications/progress`.
+- Every protocol log notification includes the immutable producer `TraceDecayBuildRefV1`; a daemon/proxy/collector adds its own collector build without replacing the producer. Generated log/diagnostic use cases accept the one `TraceDecayVersionSelectorV1`, exposed consistently as exact/range/include/exclude/current-runtime/legacy-unknown controls in CLI, MCP, HTTP, SDK, and dashboard. Output echoes the active runtime version and selector plus searched/returned/excluded/unknown counts. Human stderr lines carry the producer version; JSON/NDJSON uses the same typed field, never a renderer-only prefix.
 
 #### 5.4.2 Roots, scope, and client capability use
 
@@ -655,6 +656,8 @@ tracedecay help        catalog-backed discovery
 ```
 
 The `system` group also exposes plan 17's scoped, TTL-bound, revocable local API-token surface with exact effect classes: `api token list` binds the elevated read `auth.tokens.list`, while `api token create` and `api token revoke` bind audited commands. HTTP parity is `GET /api/v2/auth/tokens`, `POST /api/v2/commands/auth/tokens:create`, and `POST /api/v2/commands/auth/tokens:revoke`; MCP/CLI bindings preserve those semantics without copying HTTP route syntax. Plan 10's per-launch bearer remains only the bootstrap credential permitted to invoke the initial `auth.tokens.create` command.
+
+Database administration is daemon-only and generated under `tracedecay system storage authority|isolation|integrity|snapshots|checkpoint`. Reads expose safe authority/isolation/watermark/receipt state; operator mutations invoke the plan-09 workflows and never accept or print a path, SQLite URI, SQL, raw backup, WAL/page bytes, key, or file descriptor. MCP ordinary/context/work profiles expose no database administration or physical schema; the operator profile may expose only these typed daemon workflows.
 
 Plan 28 freezes this transport-agnostic subtree:
 
@@ -1194,7 +1197,7 @@ For every current and V2 command path:
 
 ### 19.4 Cross-transport semantic parity
 
-Run one canonical fixture per use case through in-process application, its generated native CLI JSON command, the schema-exact `tool <current-name>` CLI JSON fallback where applicable, MCP JSON where the pinned profile exposes it, HTTP, Rust SDK, TypeScript SDK, Python sync/async SDK, and dashboard client where applicable. Compare after removing transport-only request/framing/timing fields; no arbitrary hidden-binding CLI/MCP invocation bypass exists in the matrix:
+Run one canonical fixture per use case through the hermetic in-process application test oracle, the production daemon local-IPC protocol, its generated native CLI JSON command, the schema-exact `tool <current-name>` CLI JSON fallback where applicable, MCP JSON where the pinned profile exposes it, HTTP, Rust SDK, TypeScript SDK, Python sync/async SDK, and dashboard client where applicable. Compare after removing transport-only request/framing/timing fields; the oracle is not linked into production clients, and no arbitrary hidden-binding CLI/MCP invocation or direct-store bypass exists in the matrix:
 
 - scope resolution and active label;
 - rows/edges/facets/order/scores/count semantics;

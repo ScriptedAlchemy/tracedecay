@@ -279,6 +279,7 @@ pub fn detect_rewrite(
 ```rust
 pub struct RawHookObservationDraft {
     pub producer: HookProducerId,
+    pub tracedecay_build: TraceDecayBuildRefV1,
     pub provider: ProviderId,
     pub host: HostInstanceId,
     pub session_hint: Option<NativeSessionId>,
@@ -344,6 +345,8 @@ impl HookSpool {
     pub fn recover(&self) -> Result<SpoolRecoveryReport, HookSpoolError>;
 }
 ```
+
+Every TraceDecay-owned source adapter and hook draft carries the originating `TraceDecayBuildRefV1`; capture rejects a newly emitted log/hook/diagnostic record without it. Spool frames authenticate the producer build reference in their header, and drain/forward/import preserves it independently from the current drainer/collector build. This applies even before project/store initialization and during recovery failures. Pre-contract V1 JSONL/file logs enter migration as explicit `UnknownLegacy`, never as the version of the binary performing import.
 
 Capture owns the one hook spool and its drainer. There is exactly one spool implementation, one hash-chained frame format (below), and one always-spool ingress protocol; the store exposes only append transactions and never runs a handoff-first or fallback ingress spool of its own ([`02-store-crate.md`](02-store-crate.md) drains capture's spool through `ObservationJournal` appends). Plan [`07-hooks-crate.md`](07-hooks-crate.md) hook hosts write exclusively through capture's spool client (`spool/client.rs`) and receive durability acks carrying the domain `SpoolReceipt` from [`01-domain-crate.md`](01-domain-crate.md); no crate mints a spool-receipt variant.
 
