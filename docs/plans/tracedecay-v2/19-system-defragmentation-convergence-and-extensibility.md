@@ -129,6 +129,7 @@ The inventory records symbols and schema names, not private content. It uses sup
 | Capability/use-case/binding/schema generation | `tracedecay-tool-catalog` plus plan-17 contract IR | One reviewed capability manifest | MCP definitions, format/allow lists, CLI/API/SDK/host permission side registries |
 | Hook wire decode/normalize/response framing | Private root `v2::hooks` | `HostIntegrationManifestV1` hook facet plus irreducible host wire mappings | Hook-point switches, host response helpers, hook tool-name/permission side lists |
 | Host install/update/uninstall/config mutation | One root host-integration engine outside the hook hot path | `HostIntegrationManifestV1` installation facet: paths, formats, ownership, backup and health probes | Nine installer copies, exact Cline/Roo duplicates, provider config mutation forks |
+| Protected remote Brain transport wire | Private root `v2::remote_brain_transport` | Application/API/client contracts plus plan-28 connection/stream envelopes | TLS/mTLS listener/client, connection lifecycle, SSE and semantic snapshot/tail framing only; no enrollment, grant, placement, consistency, fencing, sync-policy, query, or store semantics |
 | Sealed page/problem/graph/timeline views and human document rendering | Application view types; private root `v2::presentation` renderer | Catalog presentation descriptors and domain lens schemas | Handler envelopes/renderers, dashboard/MCP/CLI graph transforms, raw-value Markdown |
 | Visual-semantic ontology, linked composition state, graph/timeline/metric envelope, interaction/query delta, accessibility/export frame | Application/catalog view contracts plus dashboard `VisualizationFrame` | Domain lens/entity/edge/lane/metric descriptors and five registered compositions | Feature-local chart wrappers, legends, selection/filter stores, workers/exporters, graph response types, lab visualization shells |
 
@@ -330,13 +331,14 @@ src/                            # root binary/composition, CLI/MCP/daemon/instal
     ├── hooks/                  # private bounded host event/delivery adapter (plan 07)
     ├── host_deploy/            # private local probe/stage/apply/activate/verify/repair/remove adapter over compiled bundles; no release publication
     ├── presentation/           # private sealed-view -> document/terminal/Markdown renderer (plan 21)
-    └── api/                    # private Axum HTTP/SSE/OpenAPI host adapter (plan 10)
+    ├── api/                    # private Axum HTTP/SSE/OpenAPI host adapter (plan 10)
+    └── remote_brain_transport/ # private HTTPS/mTLS and semantic sync wire adapter (plan 28); no authority/store semantics
 dashboard/                      # workbench using generated TypeScript client
 packages/tracedecay-client/     # official TypeScript client independent of dashboard state
 python/tracedecay-client/       # official typed sync/async Python client
 ```
 
-The target contains at most 11 Rust packages including root and `tracedecay-client`. Plans 07, 10, 21, and 27 retain separate design documents because hook, API, presentation, and cross-host bundle contracts need independent ownership/tests, but host-bundle compilation remains a `tracedecay-tool-catalog` module and deployment remains a root-private module; neither becomes a separately published Rust package. Do not create a generic `core`, `common`, `utils`, `services`, `plugin`, or `host-bundles` crate. Shared code moves to the package/module that owns its invariant. A new package requires:
+The target contains at most 11 Rust packages including root and `tracedecay-client`. Plans 07, 10, 21, 27, and 28 retain separate design documents because hook, API, presentation, cross-host bundle, and protected remote-transport contracts need independent ownership/tests, but host-bundle compilation remains a `tracedecay-tool-catalog` module and deployment/remote transport remain root-private modules; none becomes a separately published Rust package. Do not create a generic `core`, `common`, `utils`, `services`, `plugin`, `host-bundles`, or `remote-store` crate. Shared code moves to the package/module that owns its invariant. A new package requires:
 
 - at least two independent production consumers **or** a demonstrated optional-heavy, deployment, publication, or public-client dependency firewall;
 - a coherent domain or deployment boundary;
@@ -365,6 +367,7 @@ flowchart TD
     A --> P
     A --> T
     CONTRACT["generated public contracts + ApiProblem"]
+    NODECONTRACT["generated internal node protocol contracts"]
     CLIENT["tracedecay-client"] --> CONTRACT
     R["root composition and adapters"] --> A
     R --> S
@@ -388,16 +391,21 @@ flowchart TD
     API --> D
     API --> T
     API --> CONTRACT
+    RB["root::v2::remote_brain_transport"] --> A
+    RB --> D
+    RB --> NODECONTRACT
+    API --> NODECONTRACT
     R --> H
     R --> HD
     R --> PR
     R --> API
+    R --> RB
     TS["generated TypeScript client"] --> CONTRACT
     PY["generated Python client"] --> CONTRACT
     UI["dashboard"] --> TS
 ```
 
-These arrows are compile-time import/generation edges, not network calls. The four `root::v2` nodes are module-lint boundaries inside the root package and cannot use root-private internals outside their declared imports. `host_deploy` consumes resolved artifacts from `tracedecay-tool-catalog::host_bundles`; it cannot compile or reinterpret them. `generated public contracts + ApiProblem` is the plan-17 contract-IR output materialized into each client package; it is not a server facade or a new business crate. The Rust `tracedecay-client` may import only those generated request/response/event/problem definitions and its small client-owned transport/pagination/stream runtime. It has no Cargo dependency on `tracedecay-domain`, `tracedecay-store`, `tracedecay-application`, or the root API implementation. The TypeScript and Python clients have the equivalent package boundary.
+These arrows are compile-time import/generation edges, not network calls. The five `root::v2` nodes are module-lint boundaries inside the root package and cannot use root-private internals outside their declared imports. `host_deploy` consumes resolved artifacts from `tracedecay-tool-catalog::host_bundles`; it cannot compile or reinterpret them. `generated public contracts + ApiProblem` is the plan-17 contract-IR output materialized into each public client package; `generated internal node protocol contracts` is plan 10's private node-only IR and never enters public clients or agent tools. Neither is a server facade or a new business crate. The Rust `tracedecay-client` may import only public generated request/response/event/problem definitions and its small client-owned transport/pagination/stream runtime. It has no Cargo dependency on `tracedecay-domain`, `tracedecay-store`, `tracedecay-application`, or the root API implementation. The TypeScript and Python clients have the equivalent package boundary.
 
 To preserve testability, repository and executor traits are owned by the consumer: capture owns `ObservationSink`, query owns read capabilities, projectors own projection sinks, and application owns orchestration ports. Concrete cross-crate adapters live in application/root composition, not in the lower-level crates.
 
@@ -407,18 +415,24 @@ To preserve testability, repository and executor traits are owned by the consume
 flowchart LR
     RC["Rust/TypeScript/Python client"] -->|"authenticated UDS or loopback HTTP/SSE"| API["root V2 API adapter"]
     UI["dashboard via TypeScript client"] -->|"authenticated HTTP/SSE"| API
+    REMOTE["authorized remote public client"] -->|"HTTPS/mTLS"| API
     API -->|"generated request + caller context"| A["tracedecay-application"]
     A -->|"typed response/problem/event"| API
     API -->|"wire envelope"| RC
     API -->|"wire envelope"| UI
+    API -->|"wire envelope"| REMOTE
+    NODE["enrolled Brain node"] -->|"mTLS + internal node protocol"| RB["root remote Brain transport"]
+    RB -->|"generated request + caller/node context"| A
+    A -->|"typed receipt/snapshot/tail/problem"| RB
+    RB -->|"bounded signed frame"| NODE
     ROOT["root CLI/MCP adapters"] -->|"in-process application port; no loopback HTTP"| A
 ```
 
-Runtime calls do not create compile dependencies in the opposite direction: application and API never import an SDK, and clients never reach store/domain/application APIs in-process. The optional Rust in-process conformance transport implements the generated client transport trait in test/root composition and still targets the application contract without adding production client-to-server-crate dependencies.
+Runtime calls do not create compile dependencies in the opposite direction: application and API never import an SDK, and clients never reach store/domain/application APIs in-process. The optional Rust in-process conformance transport implements the generated public client transport trait in test/root composition and still targets the application contract without adding production client-to-server-crate dependencies. The enrolled-node path is separately generated and private; remote public clients never gain observation-upload, snapshot-page, tail, or acknowledgement bindings.
 
 ### 6.4 Publication consequences
 
-Plan 12 owns release execution, but its publication manifest is generated from `architecture-boundaries.toml` and must be a topological projection of this DAG: `tracedecay-domain`; then the domain-only implementation crates (`tracedecay-store`, `tracedecay-capture`, `tracedecay-projectors`, `tracedecay-code-index`, `tracedecay-query`, `tracedecay-policy`, and `tracedecay-tool-catalog`); then `tracedecay-application`; then the official `tracedecay-client` from the same frozen generated-contract digest and the root package containing private hook/host-deploy/presentation/API modules. After the root artifact is fixed, `tracedecay-tool-catalog::host_bundles` deterministically emits the native host package set and conformance manifests for plan 12's component-atomic marketplace publication; these are release artifacts, not Rust packages. Peers in a wave may publish concurrently only when `cargo metadata` and generated-contract edges prove they are independent. Every artifact must become registry-readable with the expected checksum before a dependent wave starts. No crates.io package is created for a root-only adapter.
+Plan 12 owns release execution, but its publication manifest is generated from `architecture-boundaries.toml` and must be a topological projection of this DAG: `tracedecay-domain`; then the domain-only implementation crates (`tracedecay-store`, `tracedecay-capture`, `tracedecay-projectors`, `tracedecay-code-index`, `tracedecay-query`, `tracedecay-policy`, and `tracedecay-tool-catalog`); then `tracedecay-application`; then the official `tracedecay-client` from the same frozen generated-contract digest and the root package containing private hook/host-deploy/presentation/API/remote-Brain-transport modules. After the root artifact is fixed, `tracedecay-tool-catalog::host_bundles` deterministically emits the native host package set and conformance manifests for plan 12's component-atomic marketplace publication; these are release artifacts, not Rust packages. Peers in a wave may publish concurrently only when `cargo metadata` and generated-contract edges prove they are independent. Every artifact must become registry-readable with the expected checksum before a dependent wave starts. No crates.io package is created for a root-only adapter.
 
 ### 6.5 Forbidden edges and capabilities
 
@@ -433,6 +447,7 @@ Plan 12 owns release execution, but its publication manifest is generated from `
 - `tracedecay-tool-catalog::host_bundles` is pure: no host/cache/config discovery, filesystem mutation, credential access, network/marketplace call, process launch, install state, or private backup body.
 - Root `v2::host_deploy` contains no capability/workflow/skill/hook/MCP semantics or manifest compiler; it applies signed resolved artifacts through application-owned operations and receipt-bounded I/O only.
 - The root API module contains no business mutation, SQL, ranking, policy, provider parsing, or V1 fallback.
+- Root `v2::remote_brain_transport` contains no enrollment, grant, placement, consistency, fencing, sync-policy, query, persistence, or public-client semantics; it performs authenticated connection lifecycle and bounded generated node-protocol framing before invoking application ports.
 - Client packages contain no domain/store/application/server imports, SQL, scope resolution, routing, retry invention, scheduler logic, or in-process business calls; they serialize generated contracts and invoke the service at runtime.
 - Root contains no new business rules; new behavior lands in its owning crate/application first.
 - Dashboard contains no private endpoint client, SQL-shaped request, capability-name literal registry, or independent error/status semantics.
@@ -628,7 +643,7 @@ Design and benchmark at minimum:
 - Graph and search generations are immutable and atomically published.
 - Large payloads are content-addressed in their privacy domain; projections carry safe locators/digests.
 - Rebalancing/moving a repository creates a resumable copy/verify/publish/retire receipt without changing logical IDs.
-- Plan 28's optional remote shared Brain reuses the same domain/store/application/query/API/client contracts: one fenced authority per mutable shard, host-local SQLite, semantic observation/snapshot/tail transfer, and explicit consistency/coverage. It adds no remote-store crate, second API, second query planner, second auth model, or Tailscale-specific business path. Future engine adapters must replace an existing physical mechanism behind these contracts and pass parity/fault/footprint gates before selection.
+- Plan 28's optional remote shared Brain reuses the same domain/store/application/query/API/client contracts: one fenced authority per mutable shard, host-local SQLite, semantic observation/snapshot/tail transfer, and explicit consistency/coverage. Root-private `v2::remote_brain_transport` adapts authenticated HTTPS/mTLS connections and snapshot/tail/SSE wire framing only. It adds no remote-store crate, second API, second query planner, second auth model, or Tailscale-specific business path. Future engine adapters must replace an existing physical mechanism behind these contracts and pass parity/fault/footprint gates before selection.
 
 ### 10.4 Performance budgets
 
@@ -826,7 +841,7 @@ These slices are program gates mapped into the master plan’s PRs, not a compet
 ### C0 — Phase 0 architecture inventory and ownership lock (`PR 1`, `PR 3`)
 
 - Generate the inventories in Section 2.3 from the accepted master base.
-- Author and lock checked `architecture-boundaries.toml`, then generate its DAG/owner/release/deletion reports; record package-admission/merger decisions, the <=11-package ceiling, and the root-private hook/presentation/API module boundaries.
+- Author and lock checked `architecture-boundaries.toml`, then generate its DAG/owner/release/deletion reports; record package-admission/merger decisions, the <=11-package ceiling, and the root-private hook/presentation/API/remote-Brain-transport module boundaries.
 - Add ADRs for canonical planes, ownership, DAG, config/error/status governance, shared mechanism map, extension tiers, complexity/negative-code/footprint budgets, and adapter expiry.
 - Baseline convergence scorecard and historical failure links (plan 14 `FM-###` row IDs).
 - Freeze representative semantic parity fixtures without private content.
@@ -940,7 +955,7 @@ These slices are program gates mapped into the master plan’s PRs, not a compet
 - [ ] Redaction is one mandatory typed boundary; no optional/provider/memory/output-specific path can bypass it.
 - [ ] Extension SPIs are bounded, versioned, budgeted, provenance-rich, sandboxed by trust tier, and incapable of bypassing scope/privacy/effect rules.
 - [ ] Crate dependency DAG has zero cycles and zero non-waived forbidden edges.
-- [ ] Workspace contains at most 11 Rust packages including root/client; hook, presentation, and API adapters are private root modules with independent lint/test boundaries and no published artifacts.
+- [ ] Workspace contains at most 11 Rust packages including root/client; hook, presentation, API, host-deployment, and remote-Brain-transport adapters are private root modules with independent lint/test boundaries and no published artifacts.
 - [ ] File/function/complexity/public-API budgets have no non-waived V2-default violations.
 - [ ] Every parity-replacement lane is net-negative handwritten code; generated output is separately accounted; default binary/RSS/hot/clean-build gates pass.
 - [ ] The reuse-disposition ledger closes the current host-installer, extractor, registry, query/ranking, operation, projection, rendering/envelope, dashboard-client, and conformance-test clusters with no unregistered infrastructure engine or definite live duplicate body >10 lines.

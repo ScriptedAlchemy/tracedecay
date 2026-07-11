@@ -271,6 +271,8 @@ SDKs never scan processes, ports, parent directories, dashboards, MCP config, or
 
 Plan 28's public family is imported exactly from plan 08: `brain.status.get`, `brain.topology.get`, `brain.nodes.list|get`, `brain.join|leave`, `brain.nodes.rotate|revoke`, `brain.placements.list|plan|apply|verify`, `brain.sync.status|run|pause|resume|repair`, `brain.replicas.list|seed|verify|retire`, `brain.backup.status|verify`, `brain.failover.plan|promote|verify`, and `brain.repositories.candidates|adopt|split`. OpenAPI operation IDs and Rust/TypeScript/Python methods are generated one-to-one; `join` is the enrollment workflow and no `nodes.enroll` alias exists. Read clients receive status/topology/list/get/candidates only. Admin clients receive effects according to grants; MCP/CLI/UI are bindings of the same rows.
 
+Plan 10 §8.8's enrolled-node synchronization routes are deliberately outside that public family. They are generated from a separate internal node-protocol IR into the server router and one private node client; they do not enter `contracts/api/tracedecay-contract-ir.v1.json`, public OpenAPI/JSON Schema, Rust/TypeScript/Python SDK packages, docs explorer, CLI, MCP, dashboard bindings, skills, hints, or agent capability discovery. Internal protocol rows have `BindingId` but no public `UseCaseId`; they invoke the existing `brain.sync.*`, membership, placement, replica, tombstone, and purge ports under mutual node authentication and fencing. Public clients can plan/start/status/repair synchronization but cannot send observation batches, fetch snapshot pages/tails, or forge acknowledgements.
+
 ## 8. Capability Parity and Agent-Friendly Discovery
 
 Every current V2 application use case must have exactly one catalog disposition:
@@ -984,6 +986,7 @@ Compare canonical semantic JSON after removing only declared transport fields su
 ### 24.2 Required test suites
 
 - Contract generation/determinism and route/catalog/schema/SDK manifest bijection.
+- Internal enrolled-node protocol conformance: the private client/server route set is byte-deterministic and mutually authenticated; epochs/placements/versions/grants/frontiers, bounded append receipts/acks, signed snapshot/tail pages, gaps/repair, tombstone/purge acknowledgements, and fault recovery pass, while every internal row remains absent from public contract IR/OpenAPI/SDK/docs/tool manifests and every database/WAL/path/key/raw-payload field is unrepresentable.
 - OpenAPI/JSON Schema validation, discriminator, unknown variant, optional/nullable, bigint, time, and round-trip properties.
 - Multi-repository/project/checkout/worktree/ref/session/agent/All scope resolution, ambiguity, stale registry, same basename, wrong active checkout, and denied store fixtures.
 - Cursor tamper/access/query/schema/ranking/index/retention/expiry and distributed-page stable-order fixtures.

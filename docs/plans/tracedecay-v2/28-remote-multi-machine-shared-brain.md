@@ -36,7 +36,7 @@ One binary can run in five declared roles:
 | `ReadReplica` | None | Signed snapshot plus canonical tail to a declared watermark | Read-only at last verified watermark |
 | `Standby` | None until an explicit fenced promotion receipt | Verified restore/replica state | Never self-promotes |
 
-`ShardPlacementV1` binds a logical shard to one `StoreAuthorityId`, `AuthorityEpoch`, schema/catalog/privacy versions, allowed replicas, and a placement version. Every command, append, snapshot, tail, and receipt carries those values. A stale epoch is rejected before mutation. Promotion increments the authority epoch and publishes a recovery receipt; the previous authority can never resume writes under its old lease.
+`ShardPlacementV1` binds a logical shard to one `StoreAuthorityId`, `AuthorityEpoch`, schema/catalog/privacy versions, allowed replicas, and a placement version. Every command, append, snapshot, tail, and receipt carries those values. In particular, signed sync receipts carry their own `ShardId`, `PrivacyDomainId`, authority/node/epoch, placement version, accepted causal frontier, committed vector watermark, batch digest, and distinct upload-manifest digest; verification never reconstructs signed claims from a mutable placement row or stream head. A stale epoch is rejected before mutation. Promotion increments the authority epoch and publishes a recovery receipt; the previous authority can never resume writes under its old lease.
 
 The first release does not pretend that an epoch number can fence a disconnected machine by itself. An authority may continue canonical writes while isolated, so standby promotion is prohibited until exclusivity is positively proven by one of: a signed graceful-shutdown/fence receipt from the old authority; verified revocation of an external exclusive storage/compute lease that physically prevents that node from serving or writing; or a configured independent quorum lease service whose term has expired and cannot be renewed by the old node. Mere unreachability, elapsed wall time, operator belief, or a newer catalog row is insufficient. Without proof, recovery waits for the authority or creates an explicitly separate forked Brain for forensic/export use; it never promotes under the same `BrainId`.
 
@@ -51,7 +51,7 @@ Multi-primary canonical replication is deferred. If later required, it must impl
 
 ## 4. Canonical identity and Git correlation
 
-Plan 01 is the sole owner of `BrainId`, `BrainNodeId`, `NodeEpoch`, `StoreAuthorityId`, `AuthorityEpoch`, `CheckoutId`, `EventDotV1`, bounded `CausalFrontierV1`, `ShardPlacementV1`, signed `SyncReceiptV1`, `RepositoryIdentityProofV1`, `AuthorityFenceProofV1`, `AuthorityRecoveryReceiptV1`, cache/grant bindings, remote cursor bindings, and remote coverage. This plan consumes those exact canonical shapes and never redeclares transport-local or storage-local variants.
+Plan 01 is the sole owner of `BrainId`, `BrainNodeId`, `NodeEpoch`, `StoreAuthorityId`, `AuthorityEpoch`, `CheckoutId`, `EventDotV1`, bounded `CausalFrontierV1`, `ShardPlacementV1`, signed `SyncReceiptV1`, `RepositoryIdentityProofV1`, `AuthorityFenceProofV1`, `AuthorityRecoveryReceiptV1`, `CacheAccessManifestV1`, `CacheGrantSnapshotV1`, remote cursor bindings, and remote coverage. This plan consumes those exact canonical shapes and never redeclares transport-local or storage-local variants.
 
 `BrainNodeId` is a TraceDecay enrollment/key identity. Hostnames, local paths, IP addresses, Tailscale node IDs, and OS user names are observations or transport evidence, never canonical node identity. Re-enrollment after key loss creates a new node epoch and auditable adoption link.
 
@@ -102,7 +102,7 @@ Local hooks never synchronously depend on remote connectivity. The capture path 
 4. Return `DurablyQueued` only after local durability; never claim canonical commit.
 5. Upload bounded ordered batches with idempotency keys and causal frontier.
 6. Authority validates enrollment, grants, placement/epoch, schema/privacy compatibility, continuity, digest, and policy before committing.
-7. Authority returns plan 01's signed `SyncReceiptV1` only after canonical commit. Canonical signing bytes bind Brain/node/source/batch range, payload/manifest digest, placement/authority epoch, causal frontier, committed watermark, signing key ID/epoch, issued/expiry times, and nonce. Clients verify trust chain, revocation generation, expiry, and replay uniqueness before retiring local bytes.
+7. Authority returns plan 01's signed `SyncReceiptV1` only after canonical commit. Canonical signing bytes bind Brain, shard, privacy domain, authority and authority node/epoch, source node/epoch/stream/batch range, batch digest, distinct upload-manifest digest, placement/schema/registry/privacy-policy versions, accepted causal frontier, committed watermark, revocation generation, signing key ID/epoch, issued/expiry times, and nonce. Clients verify the byte-identical receipt, trust chain, revocation generation, expiry, and replay uniqueness before retiring local bytes; mutable placement/schema/registry/privacy/head state cannot fill an omitted field.
 8. Client retires a spool range only after receipt verification and durable acknowledgement state.
 
 Gaps, duplicate/reordered uploads, crash-before-commit, crash-after-commit-before-ack, disk-full, schema skew, revoked enrollment, changed placement, and policy tightening have distinct states and remediations. Rejected records remain locally visible and bounded; they are never silently discarded or endlessly retried.
@@ -116,7 +116,7 @@ Offline reads declare one of:
 
 Pending local observations appear as a separate non-canonical overlay. Canonical commands fail closed offline. Complex task/config edits may be authored as non-authoritative validated bundles with expected versions, then submitted to the authority; conflicts return current versions and a repairable validation report, never last-write-wins.
 
-Every cache/replica manifest binds a signed `CacheGrantSnapshotV1` with principal/node, allowed fields/payload classes, scope, policy/privacy/catalog versions, revocation generation, `issued_at`, mandatory `not_after`, and purge/tombstone frontier. Offline reads stop and the cache locks when the grant expires. Validation uses the maximum of current wall time and the persisted last trusted authority time advanced by monotonic elapsed time; wall-clock rollback/reboot without a trustworthy continuation locks rather than extends access. Policy tightening/revocation is immediate for connected nodes and bounded by `not_after` while disconnected. On reconnect, tombstones/purge directives apply and acknowledge before cached content may serve again. UI/API report expired/locked and pending purge acknowledgements explicitly.
+Every cache/replica manifest binds a signed `CacheGrantSnapshotV1` containing the full immutable `CacheAccessManifestV1`: principal/node, exact resolved scope ID/digest, bounded allowed registry field IDs/payload classes, capability-grant set, policy version, privacy-policy digest, schema-registry digest, and capability-catalog generation/digest. Plan 02 persists that manifest by canonical digest beside the signed grant; offline validation never depends on an unavailable mutable authorization/catalog lookup. Offline reads stop and the cache locks when the grant expires or its manifest is absent, corrupt, or mismatched. Validation uses the maximum of current wall time and the persisted last trusted authority time advanced by monotonic elapsed time; wall-clock rollback/reboot without a trustworthy continuation locks rather than extends access. Policy/catalog tightening or revocation is immediate for connected nodes and bounded by `not_after` while disconnected. On reconnect, catalog/grant revalidation and tombstone/purge acknowledgement complete before cached content may serve again. UI/API report expired/locked/catalog-mismatched and pending purge acknowledgements explicitly.
 
 ## 7. Projectors, automation, hints, and coordination
 
@@ -281,9 +281,9 @@ Required deterministic/fault cases:
 
 | Slice | Deliverable | Depends on |
 |---|---|---|
-| PR 4H | `BrainId`, node/authority epochs, placement, frontier, receipt, sync-policy, and repository-proof domain contracts | PR 4B/4C/4G |
-| PR 7B companion | AEAD/key-epoch remote spool-frame fields, local durability, policy revalidation, remote acknowledgement retirement, and partition tests in the sole capture-owned spool | PR 7B, PR 4H |
-| PR 6H | Authority/placement/membership metadata, cache/replica manifests, receipt/gap/conflict persistence, backup/recovery additions; no spool implementation | PR 5A–6D, PR 4H |
+| PR 4H | `BrainId`, node/authority epochs, placement, frontier, lossless signed sync/fence/recovery receipts, signed cache-access manifest/grant, sync-policy, and repository-proof domain contracts plus canonical-byte/signature vectors | PR 4B/4C/4G |
+| Plan 03 PR 7B — remote-extension phase | After the base spool contract in the same PR: add AEAD/key-epoch remote frame fields, policy revalidation, remote acknowledgement retirement, and partition tests in the sole capture-owned spool | PR 4H and the earlier base-spool tasks inside plan 03's single PR 7B; this is not a distinct or self-dependent PR |
+| PR 6H | Authority/placement/membership metadata, lossless cache-access/grant and sync/fence/recovery receipt persistence, gap/conflict state, backup/recovery additions, restart/restore round trips and signature reverification; no spool implementation | PR 5A–6D, PR 4H |
 | PR 12D | Authority/replica query routing, consistency modes, coverage, signed snapshot/tail verification | PR 12A–12C, PR 6H |
 | PR 24S | Application/API/SDK/CLI node enrollment, topology, placement, sync, repository adoption, revoke, backup, and failover use cases | PR 12D, PR 24A–24D |
 | PR 25I | Brain Settings and Sync Observatory topology/operations UX | PR 24S, PR 25A–25C |
@@ -307,5 +307,7 @@ No slice enables remote mode before sanitizer, node identity, authority fencing,
 - No test, documentation, CLI, or adapter opens SQLite/WAL remotely or requires Tailscale.
 - Offline capture survives every acknowledgement crash boundary without loss or duplication; offline reads and pending overlays are unmistakable.
 - Authorization, expiring offline grants, revocation, privacy classes, tombstones, positive external fencing, wrapped-key recovery after total authority loss, backup/restore, and promotion pass adversarial tests; unreachability alone never promotes.
+- Every signed sync/grant/fence/recovery object round-trips domain -> store -> domain byte-identically across restart/restore; altering any shard/privacy/node/frontier/manifest/catalog/scope/field/payload/proof field fails signature reverification.
+- Offline caches lock on a missing/corrupt access manifest, catalog-generation mismatch, expiry, or unacknowledged purge; recovery/promotion locks on a missing or unverifiable full `AuthorityFenceProofV1`.
 - All/Brain and every transport report truthful placement, coverage, consistency, lag, and recovery actions.
 - PR 36S publishes fault/scale/security/RPO/RTO evidence; PR 37L proves obsolete routing is deleted.

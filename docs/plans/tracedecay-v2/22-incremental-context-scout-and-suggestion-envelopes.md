@@ -998,15 +998,18 @@ All bindings originate in the catalog/application manifest and follow [21-cli-mc
 | Use case | Effect | Purpose |
 |---|---|---|
 | `scout.status.get` | read | worker/model/tool/host/config/coverage status |
-| `scout.runs.list/get` | read | bounded runs and phase receipts |
-| `scout.envelopes.list/get` | read | authorized envelope lifecycle and anchors |
+| `scout.runs.list` | read | cursor-bounded runs and phase summary receipts |
+| `scout.runs.get` | read | one exact run and its phase receipts |
+| `scout.envelopes.list` | read | cursor-bounded authorized envelope lifecycle and anchors |
+| `scout.envelopes.get` | read | one exact addressed envelope lifecycle and anchors |
 | `scout.decision.explain` | read | feature/suppression/dedupe explanation |
 | `scout.evaluation.get` | read | corpus/experiment metrics and regressions |
 | `scout.feedback.record` | evidence append | explicit helpful/incorrect/late/repeated feedback |
-| `scout.runtime.pause/resume` | system control | stop/start optional work at safe boundaries |
+| `scout.runtime.pause` | system control | stop optional work at a safe boundary |
+| `scout.runtime.resume` | system control | restart optional work from durable state |
 | `scout.runtime.cancel` | system control | cancel selected active run; no envelope deletion |
 
-Configuration reads/writes use the generic `config.*` use cases and `scout.*` descriptors. Do not add scout-specific config files or endpoints.
+These eleven rows are the complete canonical family imported by plans 08, 09, 10, and 21. CLI `suggestions` and HTTP `/scout/suggestions` are presentation bindings of `scout.envelopes.*`; no `scout.suggestions.*` semantic alias exists. Configuration reads/writes use the generic `config.*` use cases and `scout.*` descriptors. Do not add scout-specific configuration files or configuration endpoints.
 
 Historical/current-best-effort scout replay uses the generic `experiments.draft_from_selection`, `experiments.create`, and `experiment_runs.create/get/cancel/resume/retry/minimize` family with `LabKindV1::Hint` plus the scout evaluator mode. No `scout.replay.*` use case, table, scheduler, or cancel path exists.
 
@@ -1041,6 +1044,7 @@ GET  /api/v2/scout/runs/{id}
 GET  /api/v2/scout/suggestions
 GET  /api/v2/scout/suggestions/{id}
 GET  /api/v2/scout/suggestions/{id}/explanation
+GET  /api/v2/scout/evaluation
 POST /api/v2/experiments:draft-from-selection       # LabKindV1::Hint + scout evaluator mode
 POST /api/v2/experiments:create
 POST /api/v2/experiments/{id}/runs:create

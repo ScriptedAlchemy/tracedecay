@@ -172,6 +172,15 @@ The list operations remain semantic tools; MCP `resources/list` only discovers t
 
 No `automation skip-episodes`, `automation frontiers`, retry/circuit/quarantine command, MCP alias, or writable resource is generated. The existing run-now binding has no force/ignore-digest option: it may shorten cadence only for an already-dirty scope and still refuses identical successful/`NoChange` input, backoff, open circuit, pause, quarantine, and incomplete coverage. Unchanged/historical inspection routes to the generic experiment family.
 
+Context Scout uses exactly the eleven plan-08/09/22 catalog rows:
+
+```text
+reads: scout.status.get; scout.runs.list; scout.runs.get; scout.envelopes.list; scout.envelopes.get; scout.decision.explain; scout.evaluation.get
+commands: scout.feedback.record; scout.runtime.pause; scout.runtime.resume; scout.runtime.cancel
+```
+
+The generated CLI tree is `tracedecay scout status`, `runs list|show`, `suggestions list|show|explain`, `evaluation show`, `feedback`, `pause`, `resume`, and `cancel`; `suggestions` is presentation over `scout.envelopes.*`, never a new operation family. HTTP binds the same rows under `/api/v2/scout/**`; SDK methods retain canonical semantic names. Reviewed context MCP profiles may expose compact status, addressed pending/history lookup, explanation, evaluation status, and feedback; runtime controls require an operator-capable profile. MCP list/detail output is paged and anchor-bearing and never includes an entire queue or model transcript. No `scout.replay.*` CLI/MCP/HTTP/SDK binding is generated: `experiment fork|create|run|...` with `LabKindV1::Hint` and scout evaluator mode is the sole replay lifecycle.
+
 Research provenance adds catalog operation IDs `research.manifests.list/get/create_version` and the canonical evidence operation family `retrieval_anchors.metadata_batch_get`, `retrieval_anchors.resolve`, and `retrieval_recipes.execute`. Generated bindings may accept `ResearchAnchorId` only for manifest navigation; evidence metadata/resolution/recipe execution accepts canonical `RetrievalAnchorId`/`RetrievalRecipeV1` and never treats safe metadata as payload authority. No CLI, MCP, HTTP, SDK, dashboard, or export binding invents a research-specific resolver or treats a manifest-entry ID as payload authority.
 
 Search evaluation uses only the canonical plan-15 family:
@@ -634,6 +643,7 @@ tracedecay git         refs, changes, delivery correlation
 tracedecay sessions    sessions, messages, Turns, agents, workflows, goals
 tracedecay memory      knowledge status, query, autonomous curation outcomes
 tracedecay automation  schedules, dirty scopes, admissions, runs, outcomes, authority, health
+tracedecay scout       status, addressed suggestions, explanation, evaluation, feedback, runtime control
 tracedecay config      complete plan-20 settings tree
 tracedecay integration generated host package/component/registration inventory and lifecycle
 tracedecay project     registry, repositories, worktrees, enrollment, sync

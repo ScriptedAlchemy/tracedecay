@@ -60,7 +60,27 @@ brain.failover.plan|promote|verify
 brain.repositories.candidates|adopt|split
 ```
 
-This family is closed. `join` owns enrollment plus initial placement compensation; there is no public `nodes.enroll` twin. `leave` owns self-revocation/cache retirement after authority-transfer checks. Status/list/get/candidates and operation-specific `plan` are read/preflight shaped as cataloged; rotate/revoke/apply/run/pause/resume/repair/seed/verify/retire/promote/adopt/split are versioned/idempotent effects or resumable operations. Every CLI/HTTP/SDK/MCP/UI spelling maps bijectively to one row.
+The `|` notation in this plan is presentation-only shorthand. Catalog generation expands it before validation into one checked-in definition row per canonical `UseCaseId`—for example `brain.nodes.list` and `brain.nodes.get`, never a runtime compound ID—and each row has exactly one application owner plus explicit CLI, HTTP, Rust/TypeScript/Python SDK, dashboard, and audience-filtered MCP binding or a reviewed unavailability disposition. The expanded family is closed. `join` owns enrollment plus initial placement compensation; there is no public `nodes.enroll` twin. `leave` owns self-revocation/cache retirement after authority-transfer checks. Status/list/get/candidates and operation-specific `plan` are read/preflight shaped as cataloged; rotate/revoke/apply/run/pause/resume/repair/seed/verify/retire/promote/adopt/split are versioned/idempotent effects or resumable operations.
+
+Plan 10's enrolled-node handshake/snapshot/tail/observation/ack protocol is a generated **internal protocol-binding facet**, not another application use-case family. It is excluded from agent tools, MCP resources/prompts, public CLI/help, dashboard actions, skills, hints, catalog search, and public SDK operation generation. Its rows bind only the authenticated node transport to the existing `brain.sync.*`, placement, membership, and replication application ports; they cannot be granted through a tool profile or invoked by generic catalog dispatch.
+
+Plan 22 contributes this exact generated Context Scout family:
+
+```text
+scout.status.get
+scout.runs.list
+scout.runs.get
+scout.envelopes.list
+scout.envelopes.get
+scout.decision.explain
+scout.evaluation.get
+scout.feedback.record
+scout.runtime.pause
+scout.runtime.resume
+scout.runtime.cancel
+```
+
+These eleven canonical rows follow the same one-row rule. CLI presentation may call envelopes `suggestions`, but the semantic IDs remain `scout.envelopes.*`; HTTP uses `/api/v2/scout/suggestions`; no `scout.suggestions.*` alias exists. Read rows generate CLI, HTTP/SDK, dashboard, and reviewed compact MCP bindings. Feedback is an audited evidence append; pause/resume/cancel are typed system controls. Historical replay uses only `experiments.draft_from_selection`, `experiments.create`, and `experiment_runs.*` with `LabKindV1::Hint` plus scout evaluator mode, so catalog generation rejects every `scout.replay.*` row.
 
 The exact host-integration family is likewise closed and generated:
 

@@ -136,7 +136,7 @@ Each channel returns a bounded candidate list with channel rank/score, matching 
 
 The private qrel store belongs to the active profile and is never committed. A redacted/synthetic subset plus aggregate metrics is checked in.
 
-The frozen research corpus this program draws on is pinned by its owner, plan [`13-research-provenance-and-context-anchors.md`](13-research-provenance-and-context-anchors.md): path set `/fast/tracedecay-redesign-research/*`, file mode `0600`, final user-message cutoff `2026-07-10T02:21:15.411Z`, integrity verified against plan 13's manifest hashes. The manifest distinguishes the broad supported-surface capture from the 28-record active-session raw-rollout fallback. Evaluation inputs derived from it cite that manifest, and no private content from it enters the repository.
+The frozen research corpus this program draws on is pinned by its owner, plan [`13-research-provenance-and-context-anchors.md`](13-research-provenance-and-context-anchors.md): path set `/fast/tracedecay-redesign-research/*`, file mode `0600`, final user-message cutoff `2026-07-11T01:04:10.875Z`, integrity verified against plan 13's final manifest hashes. The manifest distinguishes the broad supported-surface capture from the 47-record active-session raw-rollout fallback: the original 28 prompts, 11 reconciliation prompts, and 8 final cross-check prompts. Evaluation inputs derived from it cite that exact manifest version, and no private content from it enters the repository.
 
 ### 5.1 Query sources
 

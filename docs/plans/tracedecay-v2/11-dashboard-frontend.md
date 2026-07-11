@@ -177,7 +177,7 @@ Plan 13 PR 2A must assess Hermes dashboard files, tests, and interaction flows i
 | `/timeline` | What happened, in what order, and what did it affect? | `features/causal-loom` | density + virtualized causal lanes |
 | `/sessions`, `/sessions/:id`, `/turns/:id` | What context and work occurred in this thread/Turn? | `features/sessions` | session list / Turn evidence outline |
 | `/agents`, `/agents/:id` | Which agents collaborated and with what outcomes? | `features/agents` | delegation tree + Turn sequence |
-| `/work`, `/work/initiatives/:id`, `/work/plans/:id/versions/:version`, `/work/tasks/:id`, `/work/attempts/:id`, `/work/executors`, `/work/scheduler`, `/work/views/:id`, `/work/edit-bundles/:id`, `/work/notifications` | What work exists, how is it gated/routed/executed, and what context/outcomes connect it to the Brain? | `features/work` | initiative/plan outline + saved Kanban/DAG/task/attempt projection + managed declarative edit workspace |
+| `/work`, `/work/initiatives/:initiativeId`, `/work/plans/:planId/versions/:version`, `/work/tasks/:workItemId`, `/work/attempts/:attemptId`, `/work/offers/:offerId`, `/work/packets/:packetId`, `/work/executors`, `/work/scheduler`, `/work/views/:savedViewId`, `/work/edit-bundles/:editBundleId`, `/work/notifications`, `/work/notifications/:notificationId` | What work exists, how is it gated/routed/executed, and what context/outcomes connect it to the Brain? | `features/work` | initiative/plan outline + saved Kanban/DAG/task/attempt projection + managed declarative edit workspace; offer, packet, notification, and edit-workspace IDs deep-link to exact typed details |
 | `/coordination` | Which nearby agents may overlap, and what safe action is warranted? | `features/coordination` | evidence-ranked presence/overlap ledger + worktree map |
 | `/goals/:id` | How did this Codex goal or provider-native objective evolve and finish? | `features/agents` | versioned goal/plan/Turn evidence ledger |
 | `/workflows/:id`, `/automation/runs/:id` | How did the captured workflow/run execute? | `features/automations` | run waterfall + artifact lineage |
@@ -1048,6 +1048,7 @@ The cockpit interaction model follows the useful parts of [Phoenix Playground](h
 | Scheduler | task, effective config, ledger/activity/lease/policy snapshots, explicit time | due/skip/block tree, config source, watermark, proposed lease/work/effects, revalidation requirements |
 | Memory | candidate/source, sensitivity/transience, entity/fact/conflict/trust/retrieval/retention/autonomy-config snapshot | automatic effect/rejection/defer/quarantine/protect/no-change, duplicate/conflict/supersession, trust/retrieval/deletion descendant effects, explanation; never a human decision control |
 | Policy Diff | corpus plus two bundles | changed/unchanged/regression/win/unlabeled, case diff, latency/token distributions, affected categories, coverage/digest |
+| Evolution | bounded evidence collection or selected skill/memory/policy/automation version and historical use, actor/run/config/policy/catalog/index snapshots, old/current candidate versions | evidence→candidate→validation→autonomous decision/effect→use→outcome→revision/recovery lineage, structured version and decision/tool-route diffs, wins/regressions/unknown horizons, latency/token/cost/privacy/coverage, and zero-live-effect receipt; never applies, rejects, rolls back, or changes live curation |
 | Privacy | reserved/invalid synthetic canary, parser/detector/policy versions, bounded sink matrix | parse/decode tree, safe detection classes, overlap/marker/receipt, sink eligibility, latency/coverage/version diff; never loads a real candidate or mutates live findings/policy |
 
 The Search Quality workspace has generated, capability-gated subviews for corpus versions, qrel versions, candidate pools, judgments and supersession chains, adjudications, generic Search Quality experiments/runs/cells/comparisons, aggregate/redacted reports, fixtures, and retrieval profiles. Artifact reads bind the corresponding `retrieval.*.list/get` operations from plan 15 §0.1; experiment reads/runs bind plan 10 §8.5. Direct artifact actions bind only `retrieval.corpus_versions.create/freeze`, `retrieval.qrel_versions.create/freeze`, `retrieval.candidate_pools.create`, `retrieval.judgments.record/supersede`, `retrieval.adjudications.record`, `retrieval.evaluation_reports.publish`, `retrieval.profiles.publish/activate`, and the shared `experiments.fixtures.promote`. The UI shows immutable lineage, exact frozen inputs, authorization, sanitization/secret-scan and side-effect receipts, and operation state; it never rewrites a judgment, edits a frozen artifact, publishes private content, or changes a live query's pinned profile.
@@ -1572,21 +1573,21 @@ The phase-4 PR letters in this section are the authoritative sub-split ledger fo
 - [ ] Run `cd dashboard && npm test && npx playwright test tests/e2e/privacy-observatory.spec.ts tests/e2e/context-scout.spec.ts`. Expected: pass.
 - [ ] Commit separate PRs: `feat(dashboard): add privacy observatory workspace`; `feat(dashboard): add context scout observatory`.
 
-### Task 14: PR 25D/30H — Activity, saved views, and Settings
+### Task 14: PR 25D/30H — Activity and saved views
 
 **Files:**
 - Create: `dashboard/app/src/features/activity/src/*`
 - Create: `dashboard/app/src/features/saved-views/src/*`
-- Create: `dashboard/app/src/features/settings/src/*`
-- Test: `dashboard/tests/e2e/{activity,saved-views,settings}.spec.ts`
+- Test: `dashboard/tests/e2e/{activity,saved-views}.spec.ts`
 
-- [ ] Write failing activity live/frozen/filter/coverage, generated activity-model parity, all three `SavedViewDefinitionV1::{Investigation,Task,Experiment}` variants plus `CollectionV1`/`AnnotationV1` complete round-trip and size-envelope rejection (section 4.3), proof that no task/experiment-view table/ID/share command fork exists, simultaneous overlapping views, exact experiment/run/cell/stage/comparison/comparison-cell/reduction/playhead restore, exact frozen-input unavailable state, saved protected-query classification/redaction/share-plan/start/revoke/expiry, URL restore, declared-owner conflict, #425 identity-split consolidation inspect/plan/start/status/resume/recover and exact recovery-command fixtures, and full effective-source Settings parity tests (including the `/settings/context-scout` subroute rendering plan 22's scout controls through plan 20's registry forms).
+- [ ] Write failing activity live/frozen/filter/coverage, generated activity-model parity, all three `SavedViewDefinitionV1::{Investigation,Task,Experiment}` variants plus `CollectionV1`/`AnnotationV1` complete round-trip and size-envelope rejection (section 4.3), proof that no task/experiment-view table/ID/share command fork exists, simultaneous overlapping views, exact experiment/run/cell/stage/comparison/comparison-cell/reduction/playhead restore, exact frozen-input unavailable state, saved protected-query classification/redaction/share-plan/start/revoke/expiry, URL restore, declared-owner conflict, and #425 identity-split operation-link fixtures.
 - [ ] Implement cross-domain activity with consequential-event priority, project/domain facets, bounded live paging, inspector, table fallback, and no duplicate hidden counts.
 - [ ] Implement saved-view create/update/open/delete plus generated `saved_views.share.plan`, `saved_views.share.start`, and `saved_views.share.revoke` commands; protected query literals/annotations remain encrypted, published views expire locally, and sharing requires classification/redaction planning plus explicit confirmation. Generated binding-ID parity tests cover every CLI/MCP/HTTP/SDK/UI spelling.
-- [ ] Implement profile/project/integration/automation/storage settings reads and commands with explicit `DeclaredScope`, effective source/default, immutable environment source, validation, optimistic conflict, migration/resync/restart impact, and audit receipt. Launch #425 consolidation only through its separate admin workflow surface; Settings may link to an active diagnostic/operation but cannot auto-submit, merge stores, or expose it as curation.
-- [ ] Verify `/activity`, `/saved/:viewId`, and `/settings` direct reload/back/forward/mobile/offline/locked behavior.
-- [ ] Switch Settings to the current V2 route only after read/write parity and rollback drill; remove the old live binding atomically.
-- [ ] Commit independently: `feat(dashboard): add cross-domain activity`; `feat(dashboard): add protected saved investigations`; `feat(dashboard): add effective Settings workspace`.
+- [ ] Consume Settings links only through plan 20 PR 25E's generated workspace routes and typed operation descriptors; PR 25D/30H owns no setting form, registry behavior, direct configuration command, or Settings cutover.
+- [ ] Verify `/activity` and `/saved/:viewId` direct reload/back/forward/mobile/offline/locked behavior.
+- [ ] Commit independently: `feat(dashboard): add cross-domain activity`; `feat(dashboard): add protected saved investigations`.
+
+Plan 20 PR 25E exclusively creates `features/settings`, its E2E suite, complete generated forms, effective-source behavior, direct validated commands, activation/ack/drift views, and V1 Settings cutover. This frontend plan supplies the shared shell, visualization language, navigation, accessibility, and route-composition requirements that PR 25E consumes; it does not assign Settings implementation to PR 25D or 30H.
 
 ### Task 14A: PR 25H — Generated Integrations topology and operations workspace
 
@@ -1697,7 +1698,7 @@ Evolution is the fourteenth evaluator and ships with its product workspace in Ta
 
 ### 22.2 User-task gates on the fixed corpus
 
-Each user task has a scripted Playwright scenario with deterministic fixtures for repeatability and a matching human comprehension/orientation protocol from section 18; neither substitutes for the other. Script timing is measured from navigation start to the final assertion on the recorded reference machine, median of five runs. These eight scenarios define the "primary workflows" referenced by the section 19 long-task budget. "Survive typo/role ambiguity" is concrete: the script submits a fixed misspelled query and an ambiguous role facet and passes only if the disambiguation flow completes to the target result without a dead end or manual query retyping.
+Each user task has a scripted Playwright scenario with deterministic fixtures for repeatability and a matching human comprehension/orientation protocol from section 18; neither substitutes for the other. Script timing is measured from navigation start to the final assertion on the recorded reference machine, median of five runs. These thirteen scenarios define the "primary workflows" referenced by the section 19 long-task budget. "Survive typo/role ambiguity" is concrete: the script submits a fixed misspelled query and an ambiguous role facet and passes only if the disambiguation flow completes to the target result without a dead end or manual query retyping.
 
 - Find an exact historical direct-user prompt, expand its copied/delegated/native set, and prove sanitized source identity/export in `<= 30 s`.
 - Follow a parent agent through subagents and direct code/test/commit/PR impact in `<= 60 s`.
@@ -1707,6 +1708,11 @@ Each user task has a scripted Playwright scenario with deterministic fixtures fo
 - Open All Memory, verify complete cursor/coverage semantics, filter and inspect one memory/association, then find its source transcript/actor/run, validation, uses/outcomes, and any autonomous supersession/recovery in `<= 90 s`; repeat the source/use traversal for one managed skill.
 - Find an active nearby agent in a parallel worktree, prove direct overlap, inspect the safe summary/anchor, send or suppress one audited coordination action, and verify no repeat hint in `<= 60 s`.
 - Start at All, disambiguate same-name Rspack/Rsbuild/React Router scope candidates, traverse a cross-repo graph/search result, and export equivalent CLI/MCP/API retrieval recipes with matching provenance in `<= 60 s`.
+- Open a cross-repository initiative, trace plan version→dependency/gate→offer→packet→attempt→artifact/outcome, inspect one blocked task, and complete one legal versioned transition without losing scope/selection in `<= 90 s`.
+- From Evolution, trace one skill or memory from evidence through autonomous validation/materialization/use/outcome/recovery, replay old-versus-current without live effects, and explain an unresolved denominator or regression in `<= 90 s`.
+- Open Context Scout Observatory, distinguish useful silence from unavailable/late/suppressed delivery, inspect one addressed envelope and its anchors/coverage, pause and resume at a safe boundary, and verify no replay or counter mutation in `<= 60 s`.
+- Open Privacy, distinguish clean from unknown/locked/unscanned coverage, inspect one safe finding/remediation lineage, start only the authorized operation-specific workflow, and verify no candidate content leaks in `<= 60 s`.
+- From `/observatory/sync`, diagnose a stale-cache/authority-unavailable fixture, inspect node/store/placement and pending-spool coverage, follow the operation trace, then verify Settings shows the same desired/activated/observed state in `<= 90 s`.
 
 ### 22.3 Required commands
 

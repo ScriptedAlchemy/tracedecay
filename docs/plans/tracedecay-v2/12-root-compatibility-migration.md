@@ -4,7 +4,7 @@
 
 **Architecture:** The published root package wires immutable V2 crate contracts into process-specific service graphs. A generated migration inventory owns every legacy surface. Typed route modes select one effect owner per bounded context, V1 adapters exist only while that context is pre-cutover or during an explicit operator rollback, shadow comparators use frozen vector watermarks, and signed cutover receipts make data migration reversible. There is no live fallback for stale clients, protocols, plugins, or tool names. The root never becomes a second application layer.
 
-**Tech Stack:** Rust 2024 workspace; existing `tracedecay` binary/package; V2 workspace crates/surfaces from plans 01–27; Clap; Tokio; Axum; JSON-RPC/MCP; generated OpenAPI/SDK, capability, and host-bundle catalogs; SQLite V1 readers plus `tracedecay-store`; current provider manifests/installers; Cargo nextest; release-plz; crates.io and native host-marketplace coordinated publication.
+**Tech Stack:** Rust 2024 workspace; existing `tracedecay` binary/package; V2 workspace crates/surfaces from plans 01–28; Clap; Tokio; Axum; JSON-RPC/MCP; generated OpenAPI/SDK, capability, and host-bundle catalogs; SQLite V1 readers plus `tracedecay-store`; current provider manifests/installers; Cargo nextest; release-plz; crates.io and native host-marketplace coordinated publication.
 
 ---
 
@@ -161,14 +161,14 @@ store / capture / projectors / query / policy / tool-catalog
   ↑
 tracedecay-application
   ↑                         ↑
-root::v2::{hooks,presentation,api}
+root::v2::{hooks,presentation,api,remote_brain_transport}
           \             /
           root composition
        /      |       |      \
      CLI     MCP    daemon   host installers
 ```
 
-The root may implement infrastructure ports declared by application/capture/store, but the port trait remains in the lower crate. The root cannot expose V1 database rows, paths, global state, or transport types through those ports.
+The root may implement infrastructure ports declared by application/capture/store, but the port trait remains in the lower crate. Root-private `v2::remote_brain_transport` owns only HTTPS/mTLS listener/client, connection, stream, and semantic snapshot/tail wire adaptation; application/domain/store/query own enrollment, grants, placement, consistency, fencing, sync policy, and persistence. The root cannot expose V1 database rows, paths, global state, or transport types through those ports.
 
 ### 5.3 Root service graph
 
@@ -180,12 +180,23 @@ pub struct BootstrapContext {
     pub config: EffectiveConfigSnapshot,
     pub routes: RouteSnapshot,
     pub binary: BinaryBuildIdentity,
+    pub brain: BrainBootstrapBinding,
+}
+
+pub struct BrainBootstrapBinding {
+    pub role: BrainNodeRoleV1,
+    pub brain_id: BrainId,
+    pub node_id: BrainNodeId,
+    pub node_epoch: NodeEpoch,
+    pub authority_epoch: Option<AuthorityEpoch>,
+    pub placement_version: Option<EntityVersionId>,
 }
 
 pub struct RootServices {
     pub application: std::sync::Arc<ApplicationKernel>,
     pub hooks: Option<std::sync::Arc<HookRuntime>>,
     pub api: Option<std::sync::Arc<ApiRuntime>>,
+    pub remote_brain_transport: Option<std::sync::Arc<RemoteBrainTransportRuntime>>,
     pub operations: std::sync::Arc<OperationsAdapter>,
     pub compatibility: std::sync::Arc<CompatibilityRuntime>,
 }
@@ -199,6 +210,13 @@ pub struct RootServices {
 
 ```text
 src/
+├── v2/
+│   └── remote_brain_transport/   # HTTPS/mTLS and semantic sync wire adapters only; no authority or store semantics
+│       ├── mod.rs                # private runtime facade and application-port binding
+│       ├── listener.rs           # protected remote API/internal-node listener composition
+│       ├── client.rs             # generated internal node-protocol client adapter
+│       ├── handshake.rs          # framing only; semantic checks stay in application
+│       └── streams.rs            # bounded observation/snapshot/tail/receipt framing
 ├── composition/
 │   ├── mod.rs                    # exported RootServices factory only
 │   ├── bootstrap.rs              # profile/runtime/config/build resolution
@@ -299,7 +317,7 @@ tests/
     └── release-package-manifest.json
 ```
 
-Files remain under their current paths until a target adapter is active; early PRs add adapters and route calls without mass renames. Production files target at most 800 lines. `src/composition/service_graph.rs` targets at most 500 lines and delegates each process profile to a separate builder.
+Files remain under their current paths until a target adapter is active; early PRs add adapters and route calls without mass renames. Production files target at most 400 lines; 800 lines is the hard default ceiling and requires a temporary plan-19 waiver. `src/composition/service_graph.rs` targets at most 500 lines and delegates each process profile to a separate builder.
 
 ### 6.2 Files changed first
 
@@ -701,7 +719,7 @@ The root is published to crates.io today, so path-only unpublished dependencies 
 
 1. New V2 crates begin `publish = false` while contracts are experimental and no released root package depends on them.
 2. Before the first released root binary links V2, give every V2 crate the same workspace version as root and publish it as an implementation crate in topological order. Root dependencies use both `path` and exact `=x.y.z` version.
-3. Generate and freeze the package DAG from plan 19's `architecture-boundaries.toml`, `cargo metadata`, and the generated-public-contract edge. Enforce the <=11-package ceiling. Publish `tracedecay-domain`; then the domain-only implementation wave (`tracedecay-store`, `tracedecay-capture`, `tracedecay-projectors`, `tracedecay-code-index`, `tracedecay-query`, `tracedecay-policy`, and `tracedecay-tool-catalog`); then `tracedecay-application`; then the official Rust `tracedecay-client` built from the same frozen public-contract digest and root with its private hook/presentation/API modules. Peers may publish concurrently only when the generated DAG proves no dependency edge. The Rust client has no Cargo dependency on domain, application, API implementation, or root; no crates.io artifact exists for a root-only adapter.
+3. Generate and freeze the package DAG from plan 19's `architecture-boundaries.toml`, `cargo metadata`, and the generated-public-contract edge. Enforce the <=11-package ceiling. Publish `tracedecay-domain`; then the domain-only implementation wave (`tracedecay-store`, `tracedecay-capture`, `tracedecay-projectors`, `tracedecay-code-index`, `tracedecay-query`, `tracedecay-policy`, and `tracedecay-tool-catalog`); then `tracedecay-application`; then the official Rust `tracedecay-client` built from the same frozen public-contract digest and root with its private hook/presentation/API/remote-Brain-transport modules. Peers may publish concurrently only when the generated DAG proves no dependency edge. The Rust client has no Cargo dependency on domain, application, API implementation, or root; no crates.io artifact exists for a root-only adapter.
 4. The release job waits until every artifact in a wave is registry-readable and matches its expected checksum before starting a dependent wave. It package-tests each crate from the registry artifact, not a workspace path, and rejects any manifest edge absent from the generated DAG.
 5. `release-plz.toml` and workflows generate one coordinated release receipt containing the package DAG, package versions/checksums, frozen public-contract digest, lockfile, source commit, Rust toolchain, dashboard asset manifest, OpenAPI/client/catalog/policy digests, migration compatibility range, and the complete host release set: canonical integration-manifest digest, every unsigned host-bundle payload, signed release manifest/attestation, runtime-resolved bundle, package/component digest, capability-probe and difference report, stock-host-conformance receipt, signature/checksum, license/SBOM, supported-host matrix row, and secret-scan receipt.
 6. Publish all native-host packages from those already signed artifacts as one component-atomic release index. Verify every candidate locator/digest/signature/dependency before promotion; a marketplace without transactions uses disabled/unlisted candidates and one signed index flip, never a partially current set.
@@ -890,9 +908,9 @@ Companion PR 24G/24H and plan 17 SDK slices add generated scope/anchor/problem b
 
 - `cargo tree` and source lint: no V2 crate imports root, MCP, dashboard, CLI, or V1 modules; no root compatibility type leaks into public V2 contracts.
 - Compatibility inventory: 100% owned/dispositioned; zero duplicate/unmapped command/tool/route/action/config/store/provider/operation row.
-- Checked `architecture-boundaries.toml` plus its generated DAG/owner/release/deletion reports and plan-19 reuse/footprint reports: <=11 Rust packages including root/client; hook/presentation/API remain root-private modules; zero forbidden edge, unowned duplicate infrastructure engine, or package-admission drift.
+- Checked `architecture-boundaries.toml` plus its generated DAG/owner/release/deletion reports and plan-19 reuse/footprint reports: <=11 Rust packages including root/client; hook/presentation/API/remote-Brain-transport remain root-private modules; zero forbidden edge, unowned duplicate infrastructure engine, or package-admission drift.
 - Every parity replacement has a checked deletion receipt and is net-negative in handwritten production code after its V1 path/adapter retires; generated lines, dependencies/features, tables/indexes, workers, artifacts, binary/RSS/startup/build time, and stored bytes are reported separately.
-- Production file size: new bounded modules <=800 lines; root service graph <=500 lines.
+- Production file size: new bounded modules target <=400 lines and remain <=800 lines absent a temporary plan-19 waiver; root service graph <=500 lines.
 - Generated catalog/OpenAPI/client/plugin/dashboard artifacts and canonical/resolved host-bundle release trees: deterministic and clean after two runs; every package/component digest, signature, SBOM/license row, capability/difference/conformance report, supported-host cell, and marketplace locator reconciles to one signed PR 36R receipt.
 
 ### Data and migration

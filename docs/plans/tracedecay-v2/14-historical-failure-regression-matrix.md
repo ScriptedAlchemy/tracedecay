@@ -188,7 +188,7 @@ Cross-product evidence from the Hermes kanban backend (`hermes-agent` @ `732a9ff
 
 | ID | Failure | Evidence anchors | Prevention owner | Detection/product state | Recovery | Regression/cutover gate |
 |---|---|---|---|---|---|---|
-| FM-089 | Provider plugin schema/cache/permission/install paths drift | PR #268/#273/#278/#303/#307/#316/#400 | catalog/root | Generated manifest, installed/current version, host-native diagnostic | Reinstall generated manifests through an operation-specific install plan/start with backup and compensation | Stock-host install/update/uninstall/restart for every provider; no handwritten divergent copy |
+| FM-089 | Provider plugin schema/cache/permission/install paths drift | PR #268/#273/#278/#303/#307/#316/#400 | plan 27 cross-host bundles + catalog/root deployment | Generated manifest, installed/current version, host-native diagnostic | Reinstall generated manifests through an operation-specific install plan/start with backup and compensation | Stock-host install/update/uninstall/restart for every provider; no handwritten divergent copy |
 | FM-090 | Upgrade/release asset or version drift gives ambiguous failure | PR #310–#313 | root/release | Exact local/latest/release/asset/workflow state and action | Follow the exact recovery action for the named state; roll back to the prior release when required | Missing asset, unpublished version, replaced release PR, trigger token, rollback |
 | FM-091 | Stale client is silently accommodated by compatibility fallback | Explicit user correction in chronological corpus | catalog/API/root | Version/catalog mismatch with current replacement | Restart/update the client to the current binding; no behavioral fallback is served | Old MCP/daemon/plugin process receives restart/update error; no obsolete-name behavioral fallback |
 | FM-092 | Data migration is confused with client compatibility | Durable store/fact history | root/store | Migration receipt/read-only rollback state separate from protocol status | Run the migration/archive workflow in the current binary; protocol status is untouched | V1 evidence retained one rollback release; V1 live adapter removed at domain cutover |
@@ -239,6 +239,7 @@ Cross-product evidence from the Hermes kanban backend (`hermes-agent` @ `732a9ff
 - `24-canonical-task-plan-graph-and-multi-agent-executor`: profile-owned task/plan DAG, saved projections, scheduler/offers/fenced attempts, context packets, multi-host executors, and Hermes import.
 - `25-code-intelligence-indexing-crate`: code extraction, deterministic incremental reuse, immutable generations, lineage, diagnostics/test attribution, and graph migration; root/capture retains intake.
 - `26-observability-accounting-and-usage`: registered metrics, exact denominators/horizons/caps, usage/cost/savings ledgers, data quality, SLOs, and Observatory contracts.
+- `27-cross-host-agent-plugin-bundles`: canonical host integration source IR, deterministic Codex/Claude/Cursor bundle projections, stock-host conformance, signed release, install/update/repair/uninstall lifecycle, and copied-installer retirement.
 - `28-remote-multi-machine-shared-brain`: transport-agnostic node enrollment, fenced authority/placement, semantic sync, Git clone correlation, caches/replicas, privacy, backup/failover, and remote product surfaces.
 
 ## 9. Verification protocol

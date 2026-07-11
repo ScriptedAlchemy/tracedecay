@@ -2268,10 +2268,15 @@ pub struct ReplicaPlacementV1 {
 
 pub struct SyncReceiptV1 {
     pub brain_id: BrainId,
+    pub shard_id: ShardId,
+    pub privacy_domain_id: PrivacyDomainId,
     pub authority_id: StoreAuthorityId,
     pub authority_node_id: BrainNodeId,
     pub authority_epoch: AuthorityEpoch,
     pub placement_version: EntityVersionId,
+    pub schema_version: SchemaVersion,
+    pub registry_digest: RegistryManifestDigest,
+    pub privacy_policy_digest: PrivacyPolicyDigest,
     pub source_node_id: BrainNodeId,
     pub source_node_epoch: NodeEpoch,
     pub source_id: SourceInstanceId,
@@ -2300,13 +2305,26 @@ pub struct CausalFrontierCompactionV1 {
     pub manifest_digest: ManifestDigest,
 }
 
+pub struct CacheAccessManifestV1 {
+    pub brain_id: BrainId,
+    pub node_id: BrainNodeId,
+    pub principal_digest: AccessPolicyDigest,
+    pub resolved_scope_id: ScopeResolutionId,
+    pub resolved_scope_digest: ScopeSelectorDigest,
+    pub allowed_field_ids: BoundedVec<RegistryEntryId, 4_096>,
+    pub allowed_payload_classes: BoundedVec<RegistryEntryId, 64>,
+    pub capability_grants: CapabilityGrantSetId,
+    pub policy_version: ComponentVersion,
+    pub privacy_policy_digest: PrivacyPolicyDigest,
+    pub capability_catalog: CatalogSnapshotRefV1,
+    pub schema_registry_digest: RegistryManifestDigest,
+}
+
 pub struct CacheGrantSnapshotV1 {
     pub brain_id: BrainId,
     pub node_id: BrainNodeId,
-    pub capability_grants: CapabilityGrantSetId,
-    pub access_digest: AccessPolicyDigest,
-    pub privacy_policy_digest: PrivacyPolicyDigest,
-    pub registry_digest: RegistryManifestDigest,
+    pub access_manifest: CacheAccessManifestV1,
+    pub access_manifest_digest: ManifestDigest,
     pub revocation_generation: u64,
     pub issued_at: UtcMicros,
     pub not_after: UtcMicros,
@@ -2347,6 +2365,8 @@ pub struct AuthorityFenceProofV1 {
     pub evidence_anchors: BoundedVec<RetrievalAnchorId, 32>,
     pub observed_at: UtcMicros,
     pub proof_digest: ManifestDigest,
+    pub signing_key_id: NodeSigningKeyId,
+    pub signing_key_epoch: u64,
     pub signature: Ed25519SignatureV1,
 }
 
@@ -2361,7 +2381,13 @@ pub struct AuthorityRecoveryReceiptV1 {
     pub wrapped_key_manifest_digest: ManifestDigest,
     pub fence_proof: AuthorityFenceProofV1,
     pub privacy_scan_receipt: ManifestId,
+    pub rpo_micros: u64,
+    pub rto_micros: u64,
+    pub published_at: UtcMicros,
     pub receipt_digest: ManifestDigest,
+    pub signing_key_id: NodeSigningKeyId,
+    pub signing_key_epoch: u64,
+    pub signature: Ed25519SignatureV1,
 }
 
 pub struct FrozenSnapshot {
@@ -2454,9 +2480,13 @@ pub struct SpoolReceipt {
 
 Dots/frontiers describe replication provenance only. They never replace `ObservationId`, evidence causality, shard sequences, or vector watermarks. Frontier components are sorted/unique and hard-bounded; retired epochs compact only after every authority/replica acknowledges the compaction and tombstone/backup horizon. An older reconnecting node must re-seed and cannot append an omitted epoch.
 
-`SyncReceiptV1` is the signed envelope; there is no unsigned public receipt twin. Canonical signing bytes are the domain canonical encoding of every field except `signature`, prefixed by the receipt schema/domain-separation tag. The authority's enrolled Ed25519 public-key chain, key epoch, revocation generation, expiry, and nonce are verified before acknowledgement retirement; nonce uniqueness and accepted source range prevent replay. Key rotation preserves verification keys through the maximum receipt/cache/backup horizon. `CacheGrantSnapshotV1` uses the same trust root/domain separation and always expires; disconnected cache access cannot outlive `not_after`.
+`SyncReceiptV1` is the signed envelope; there is no unsigned public receipt twin. Canonical signing bytes are the domain canonical encoding of every field except `signature`, prefixed by the receipt schema/domain-separation tag. Those bytes include exact shard/privacy-domain identity, authority and authority-node identity, placement/schema/registry/privacy-policy versions, accepted causal frontier, committed vector watermark, batch digest, and the distinct upload manifest digest; no placement lookup or mutable stream head is needed to reconstruct the signed claim. The authority's enrolled Ed25519 public-key chain, key epoch, revocation generation, expiry, and nonce are verified before acknowledgement retirement; nonce uniqueness and accepted source range prevent replay. Key rotation preserves verification keys through the maximum receipt/cache/backup horizon. `CacheGrantSnapshotV1` signs the complete bounded `CacheAccessManifestV1` plus its independently recomputed `access_manifest_digest`, including principal, exact resolved scope, allowed fields/payload classes, policy/privacy/schema versions, and capability-catalog generation/digest; it always expires, and disconnected cache access cannot outlive `not_after` or depend on an unavailable mutable grant lookup.
+
+`CacheGrantSnapshotV1.brain_id/node_id` must equal the embedded access manifest values. `access_manifest_digest` hashes the canonical `CacheAccessManifestV1` bytes; the manifest does not contain its own digest. `AuthorityFenceProofV1.proof_digest` hashes canonical proof fields except `proof_digest` and `signature`; the signature covers the domain-separation tag, proof digest, and those same canonical fields, and the explicit signing-key ID/epoch selects the retained verification key. A mismatch at any layer is invalid rather than normalized.
 
 Plan 28 owns the complete placement, sync-policy, repository-proof, enrollment, replica, recovery, and failover behavior; all canonical encodings freeze with PR 4H. Plan 02 lowers these exact fields, and no transport/store creates a smaller receipt or placement type.
+
+PR 4H adds dependency-free golden canonical-byte/signature vectors and serde/JSON-Schema round trips for `SyncReceiptV1`, `CacheAccessManifestV1`, `CacheGrantSnapshotV1`, `AuthorityFenceProofV1`, and `AuthorityRecoveryReceiptV1`. Its tests mutate each shard/privacy/authority/node/frontier/watermark/manifest/catalog/scope/field/payload/fence field independently and require signature failure. Plan 02 PR 6H separately owns domain -> repository -> domain round trips after restart/restore, so the domain crate never depends on store.
 
 Rules:
 
@@ -2902,7 +2932,7 @@ git commit -m "feat(domain): define stable v2 identity"
 
 - [ ] **Step 1: Write failing boundary tests**
 
-Assert activity ownership for canonical messages and experiments; project ownership for Git/code; activity ownership for profile-scoped facts/skills/policy/automation; project ownership for project-scoped equivalents; rejection of missing/ambiguous declared scope; catalog rejection of literal strings; blob-domain inequality across privacy/key/retention domains; half-open time behavior; exact-cutoff retention; hold precedence; the seven content-horizon defaults; requested/actual replay invariants; one baseline/at-most-six variants; sole acyclic experiment branch ancestry; explicit sweep values, checked full-coordinate expansion, hard total-cell rejection, and unique run-cell coordinates; anchors for experiment/run/cell/stage/comparison/comparison-cell/reduction; running trace without and terminal trace with sealed receipt; complete resource budgets; a side-effect receipt whose production effect count is zero; automation invariants for all trigger frontiers, typed field selectors, sorted per-shard current/considered/consumed/included frontiers, fresh writer snapshot/quiescence, unknown/partial deferral, semantic-versus-evaluation digests, admitted-only identical-input fencing, pre-admission considered transitions, terminal consumed-cursor advancement, coalesced input-bound skip episodes, and exactly-once effect reconciliation; and host-integration invariants for one source-manifest digest, at most four unique components, exact install receipt/generation, typed capability dispositions, probe freshness/digest, no secret/path fields, and handshake failure on stale or mismatched component/catalog/probe identity.
+Assert activity ownership for canonical messages and experiments; project ownership for Git/code; activity ownership for profile-scoped facts/skills/policy/automation; project ownership for project-scoped equivalents; rejection of missing/ambiguous declared scope; catalog rejection of literal strings; blob-domain inequality across privacy/key/retention domains; the exact Plan 18 `SanitizationReceiptV1` field set, findings-total invariant, expiry/revocation/supersession validation, canonical-schema round trip, and rejection of receipt cycles or cross-observation supersession; half-open time behavior; exact-cutoff retention; hold precedence; the seven content-horizon defaults; requested/actual replay invariants; one baseline/at-most-six variants; sole acyclic experiment branch ancestry; explicit sweep values, checked full-coordinate expansion, hard total-cell rejection, and unique run-cell coordinates; anchors for experiment/run/cell/stage/comparison/comparison-cell/reduction; running trace without and terminal trace with sealed receipt; complete resource budgets; a side-effect receipt whose production effect count is zero; automation invariants for all trigger frontiers, typed field selectors, sorted per-shard current/considered/consumed/included frontiers, fresh writer snapshot/quiescence, unknown/partial deferral, semantic-versus-evaluation digests, admitted-only identical-input fencing, pre-admission considered transitions, terminal consumed-cursor advancement, coalesced input-bound skip episodes, and exactly-once effect reconciliation; and host-integration invariants for one source-manifest digest, at most four unique components, exact install receipt/generation, typed capability dispositions, probe freshness/digest, no secret/path fields, and handshake failure on stale or mismatched component/catalog/probe identity.
 
 - [ ] **Step 2: Verify failure**
 

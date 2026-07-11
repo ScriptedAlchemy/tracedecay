@@ -71,7 +71,7 @@ The V2 control plane makes configuration part of the observable system. An agent
 - No dashboard-side precedence, cross-field validation, impact inference, or restart logic.
 - No generic JSON map whose meaning is known only to a consumer.
 - No setting that bypasses typed application commands through direct file/database edits.
-- No remote control plane in the first V2 default. The official local API can later be bound remotely only under the security model in plans 10 and 17.
+- No mandatory hosted/vendor control plane or cloud dependency in the first V2 default. A Brain may remain standalone-local or use plan 28's first-class protected remote topology through the official authenticated HTTPS/mTLS application/API protocol under plans 10 and 17; remote binding never weakens local-first operation, authorization, privacy, fencing, or explicit placement.
 - No per-item curation proposal review, manual promotion inbox, approval gate, or item rollback workflow.
 - No automatic destructive migration merely because a setting changed.
 - No claim of all-or-nothing cross-shard database writes; only atomic effective-generation publication after every staged revision validates.

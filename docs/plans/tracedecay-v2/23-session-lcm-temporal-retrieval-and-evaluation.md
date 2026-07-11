@@ -656,7 +656,7 @@ Build a private, sanitized, versioned corpus from authorized local history:
 
 Queries are frozen at an `available_at` cutoff. Candidates, summaries, branches, facts, corrections, and labels created later cannot enter a historical replay. Replay also rebuilds index statistics (for example BM25 document frequencies) from the frozen `available_at < t` corpus, so ranking features cannot leak future corpus statistics.
 
-The frozen research corpus this program draws on is pinned by its owner, plan [`13-research-provenance-and-context-anchors.md`](13-research-provenance-and-context-anchors.md): path set `/fast/tracedecay-redesign-research/*`, file mode `0600`, final user-message cutoff `2026-07-10T02:21:15.411Z`, integrity verified against plan 13's manifest hashes. The manifest distinguishes the broad supported-surface capture from the 28-record active-session raw-rollout fallback. Session-temporal evaluation inputs derived from it cite that manifest, and no private content from it enters the repository.
+The frozen research corpus this program draws on is pinned by its owner, plan [`13-research-provenance-and-context-anchors.md`](13-research-provenance-and-context-anchors.md): path set `/fast/tracedecay-redesign-research/*`, file mode `0600`, final user-message cutoff `2026-07-11T01:04:10.875Z`, integrity verified against plan 13's final manifest hashes. The manifest distinguishes the broad supported-surface capture from the 47-record active-session raw-rollout fallback: the original 28 prompts, 11 reconciliation prompts, and 8 final cross-check prompts. Session-temporal evaluation inputs derived from it cite that exact manifest version, and no private content from it enters the repository.
 
 ### 8.2 Minimum evidence gates
 

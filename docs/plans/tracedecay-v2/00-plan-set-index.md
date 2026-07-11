@@ -112,7 +112,7 @@ Execution follows checked PR/TDD slices, current repository instructions, and wh
 
 ### Test/evaluation lead
 
-1. Plans 13–16 and 22–27.
+1. Plans 13–16 and 22–28.
 2. Every plan’s Definition of Done and verification sections.
 3. Master phase/PR gates and SLO section.
 
@@ -165,7 +165,7 @@ Execution follows checked PR/TDD slices, current repository instructions, and wh
 
 ## 4. Locked architectural decisions
 
-- Start as one Rust binary with bounded internal crates/ports; allow later daemon/query split without changing contracts. The workspace is capped at 11 Rust packages including root and the official Rust client. Root-only hook, presentation, and API adapters remain private `src/v2` modules with import lints rather than published crates.
+- Start as one Rust binary with bounded internal crates/ports; allow later daemon/query split without changing contracts. The workspace is capped at 11 Rust packages including root and the official Rust client. Root-only hook, presentation, API, host-deployment, and remote-Brain transport adapters remain private `src/v2` modules with import lints rather than published crates. Production files target at most 400 lines; 800 lines is the hard default ceiling and requires a temporary plan-19 waiver.
 - Checked `architecture-boundaries.toml` is the source authority for owners, allowed imports, package admission, release/deletion order, and plan/document links; its DAG/policy/document reports are generated. A new package needs two real production consumers or a demonstrated dependency/capability/publication firewall, an ADR, and a concrete merger/deletion alternative.
 - Reuse one narrow domain registry/canonical-encoding substrate, one projection runtime, one fenced application operation substrate, one scheduler kernel, one `HostIntegrationManifestV1`, one graph/timeline slice pipeline, one page/problem/presentation pipeline, and one saved-view lifecycle. Share mechanics without erasing typed domain meaning.
 - Replacement work is accepted only with a `reuse-dispositions.json` decision and negative-code/footprint receipt. At parity, handwritten replacement code must be smaller than the live V1 plus adapters it deletes; generated output, packages, dependencies/features, tables/indexes, workers, files, binary/RSS/startup/build time, and stored bytes are reported separately and cannot hide growth.

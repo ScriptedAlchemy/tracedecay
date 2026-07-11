@@ -642,7 +642,7 @@ Every tunable is a plan 20 typed descriptor: rollup windows and retention, SLO t
 | V1 analytics tables in the global store | Plan 12 migration (PR 33H rows in its inventory) | Historical usage/hint/tool counts import as evidence with `retained \| skipped \| quarantined \| redacted \| deleted` dispositions (plan 12's backfill-manifest vocabulary; plan 12 owns the schema); unattributable rows import with explicit `Unknown` populations. |
 | Dashboard-side counting in V1 views | Plan 11 rendering of sealed models | Client-side statistics deleted; parity via differential fixtures. |
 
-Migration is coordinated with plan 12's controller (its §14 phases) and gated by the plan 14 §6 analytics rows — "Analytics reports zero denominator or capped sample as whole" — whose `FM-###` IDs bind the PR 33H receipts, alongside the plan 14 §4 hint-outcome row. Cutover for analytics surfaces requires differential parity where V1 was correct and *documented divergence receipts* where V1 was wrong (a V1 zero that becomes `Unknown` is an expected, classified difference, not a parity failure).
+Migration is coordinated with plan 12's controller (its §14 phases) and gated by plan 14 `FM-086` for analytics denominator/cap truth and `FM-068` for hint outcomes; both IDs bind the PR 33H receipts. Cutover for analytics surfaces requires differential parity where V1 was correct and *documented divergence receipts* where V1 was wrong (a V1 zero that becomes `Unknown` is an expected, classified difference, not a parity failure).
 
 ## Fault and misreporting matrix
 
@@ -729,7 +729,7 @@ Migration is coordinated with plan 12's controller (its §14 phases) and gated b
 
 - [ ] Write failing tests named `v1_analytics_rows_get_exactly_one_disposition`, `v1_zero_with_existing_rows_becomes_unknown_not_zero`, `historical_hint_join_renders_with_unknowns`, `hook_jsonl_maps_to_outcome_records`, `divergence_receipts_classify_v1_bugs`, and `second_migration_run_is_idempotent`.
 - [ ] Map V1 analytics tables and hook JSONL through capture's backfill observations into V2 ledgers/rollups; emit plan 12 dispositions (`retained | skipped | quarantined | redacted | deleted`) per entity.
-- [ ] Bind receipts to the plan 14 §6 analytics-denominator and §4 hint-outcome `FM-###` rows; classify every V1/V2 difference as parity, expected-correction (documented V1 bug), or `unexplained` — `unexplained` blocks cutover.
+- [ ] Bind receipts to plan 14 `FM-086` (analytics denominator/cap) and `FM-068` (hint outcome); classify every V1/V2 difference as parity, expected-correction (documented V1 bug), or `unexplained` — `unexplained` blocks cutover.
 - [ ] Run `cargo test --test analytics_migration_parity`; expected: exit 0 with a machine-readable disposition manifest and zero `unexplained`.
 - [ ] Commit `feat(migration): migrate v1 analytics with receipts`.
 

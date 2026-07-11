@@ -1997,7 +1997,8 @@ tracedecay task-offer list|show|accept|decline|revoke
 tracedecay context-packet list|show|accept
 tracedecay executor list|show|match|drain
 tracedecay scheduler status|explain|pause|resume|run-once
-tracedecay task-view list|show|save|update|delete|share|revoke
+tracedecay saved-view list|show|create|update|delete
+tracedecay saved-view share plan|start|revoke
 tracedecay task-notification list|show|create|update|delete
 tracedecay task-graph status|doctor|events
 tracedecay task-graph edit start|get|validate|diff|rebase|submit|clean
@@ -2026,6 +2027,8 @@ An authorized human/orchestrator MCP surface exposes the exact catalog IDs `work
 ### 11.5 HTTP/SSE and public SDKs
 
 Plan 10 §8 is the sole exact HTTP route inventory. It generates bindings from these plan-24 operation families: `initiatives.*`, `plans.*`, `work_items.*`, `attempts.*`, `task_offers.*`, `context_packets.*`, `executors.*`, `scheduler.*`, `task_notifications.*`, `task_graph.*`, and `task_graph.edit_bundles.*`, plus canonical `subscriptions.create/revoke` and event reads. Task variants use plan-09/11 `saved_views.*` routes and methods with plan-24 validation. Plan 17 generates Rust/TypeScript/Python methods from the same entries, including contained stream/file helpers for edit bundles. This plan owns task semantics, not a second router, saved-view operation list, upload protocol, or filesystem-path API.
+
+Plan 11 owns the product route composition. Its Work route set includes `/work/edit-bundles/:editBundleId` alongside `/work`, initiative/plan/task/attempt/offer/packet/executor/scheduler/view/notification routes; the edit-bundle route is only a consumer of the generated operation/resource/diagnostic/diff/conflict/cleanup views and creates no dashboard-local task-edit contract.
 
 Exact HTTP design follows Plan 10 conventions (plan 10 §§8.6–8.7): reads are GET and every mutation is a POST command envelope (`CommandHttpRequest`) — no PATCH/PUT routes exist; commands use idempotency and expected-version headers/body fields, typed problems, operation refs for workflows, authenticated cursors, and no hidden write during GET. There is no `/task-events` route or second task SSE protocol. Clients create an authorized canonical `TraceQueryV1` subscription whose task read-model variants emit snapshot/delta/gap/heartbeat with journal sequence, scope/auth digest, graph versions, and reconnect cursor. Slow clients receive a gap/resync directive, not unbounded buffering.
 
@@ -2106,6 +2109,7 @@ Routes:
 /work/executors
 /work/scheduler
 /work/views/:savedViewId
+/work/edit-bundles/:editBundleId
 /work/notifications
 /work/notifications/:notificationId
 /playgrounds/orchestration
@@ -2629,7 +2633,7 @@ Host-native diagnostics run after adapter repair, separately from TraceDecay doc
 
 ## 18. Reviewable PR slices
 
-These suffixes were checked against plans 01–26. Plan 13 owns prerequisite heritage/research PR `2A`; Plan 20 owns `4C/6E/22C/24I/25E/31N/33C/37G`; Plan 22 owns `4F/6F/10D/10F/22D/23H/24O/24P/25F/31O/33D/37H`; Plan 23 owns `13D/13E/14D/15C/24L/31P/33E/35I/37I`; Plan 26 owns `22F/22G/22H/30J/33H`; plan 11 owns privacy/scout integration `30L`. `17B` already belongs to Plan 04, so this plan uses `17C`. Dashboard `30A–30H` and accounting contract `30J` are assigned, so this plan uses dependency-ordered `30K`. Declarative bulk editing uses new suffix `24R`; it does not collide with or reuse existing `24D` client/API work or `25A` dashboard application-foundation work.
+These suffixes were checked against plans 01–28. Plan 13 owns prerequisite heritage/research PR `2A`; Plan 20 owns `4C/6E/22C/24I/25E/31N/33C/37G`; Plan 22 owns `4F/6F/10D/10F/22D/23H/24O/24P/25F/31O/33D/37H`; Plan 23 owns `13D/13E/14D/15C/24L/31P/33E/35I/37I`; Plan 26 owns `22F/22G/22H/30J/33H`; Plan 27 owns `4G/22A/22I/24Q/25H/36R/37K`; Plan 28 owns `4H/6H/12D/24S/25I/33I/36S/37L`, while its remote-spool work is a component of capture PR 7B after 4H rather than a second PR or a self-dependency. Plan 11 owns privacy/scout integration `30L`. `17B` already belongs to Plan 04, so this plan uses `17C`. Dashboard `30A–30H` and accounting contract `30J` are assigned, so this plan uses dependency-ordered `30K`; plan 11 references to Settings under 25D/30H are shell/route consumers only, while plan 20 PR 25E exclusively owns the complete generated Settings workspace and cutover. Declarative bulk editing uses new suffix `24R`; it does not collide with or reuse existing `24D` client/API work, `24Q` host integration, `24S` remote Brain, or `25A` dashboard application-foundation work.
 
 ### PR 4E — Canonical initiative, plan, task, executor, lease, and packet domain contracts
 
@@ -2781,10 +2785,11 @@ These suffixes were checked against plans 01–26. Plan 13 owns prerequisite her
 ```text
 2A Hermes/research heritage ledger → 4E domain → 6G store → 10E projectors
 10E → 17C cross-graph relations → 21A packet lineage → 22E catalog/SPI → 23I policy → 24M application/scheduler → 24N adapters/transports
+24M + 22E → 24R managed declarative bulk editing
 4E → 22F accounting descriptors
 6G + 10E + 22F → 22G task/accounting projections
 24M + 22G → 22H liveness/scheduler/SLO/outcome rollups
-24N + 22H → 25G core Work UI
+24N + 24R + 22H → 25G core Work UI
 22H → 30J Observatory/Costs contracts
 25G + 30J → 30K advanced graph lenses → 31Q lab/evaluation
 24N + 22H → 33F task import/shadow
@@ -2812,7 +2817,7 @@ Architecture:
 - [ ] Exactly one profile activity-shard initiative/plan/work-item event graph owns task truth across every project/repository/worktree/provider.
 - [ ] No board/project/plugin/executor database, ambient current selector, CWD, or route owns dispatch or mutation scope.
 - [ ] Domain/store/projector/query/policy/catalog/application/API/root/UI dependency boundaries and architecture tests pass.
-- [ ] All plans 01–26 integrations in section 3 are implemented without duplicate identity, query, config, output, privacy, accounting, or scheduler paths.
+- [ ] All plans 01–28 integrations in section 3 are implemented without duplicate identity, query, config, output, privacy, accounting, transport, or scheduler paths.
 
 Domain and persistence:
 

@@ -135,7 +135,7 @@ V2 must add:
 - Explicit separation of human-authored messages from provider protocol rows.
 - A snapshot watermark so an export can prove completeness while live ingest continues.
 
-The private research artifact set is stored outside Git at `/fast/tracedecay-redesign-research/`: 34,344 chronological native `role=user` records in `user-messages-chronological.jsonl` (SHA-256 `edfe67d6baf9fd87faa9fd49c443a777bbb838c3eb36a79106c06f18a161baff`), a 9,980-record best-effort human-authored derivation in `human-messages-chronological.jsonl` (SHA-256 `5afb40d25f3fc43b86d620b25daea94a0b4f33ffc4421b5bb20b6a550b8c3bcb`), `manifest.json` with hashes/counts/caveats, and `intent-evolution.md`. The directory is mode `0700` and every corpus, manifest, report, and helper file is mode `0600`. Each row's `content_hash` is SHA-256 of retained sanitized UTF-8 content, never a residual pre-redaction fingerprint. The broad corpus came from supported TraceDecay surfaces; the active parent contributes 39 direct prompts with explicit `codex_rollout_raw_fallback` provenance—the original 28 plus 11 reconciliation prompts—and excludes three internal goal/environment context envelopes. The final user-message cutoff is 2026-07-10 20:26:39.847 UTC.
+The private research artifact set is stored outside Git at `/fast/tracedecay-redesign-research/`: 34,344 chronological native `role=user` records in `user-messages-chronological.jsonl` (SHA-256 `edfe67d6baf9fd87faa9fd49c443a777bbb838c3eb36a79106c06f18a161baff`), a 9,980-record best-effort human-authored derivation in `human-messages-chronological.jsonl` (SHA-256 `5afb40d25f3fc43b86d620b25daea94a0b4f33ffc4421b5bb20b6a550b8c3bcb`), `manifest.json` with hashes/counts/caveats, and `intent-evolution.md`. The directory is mode `0700` and every corpus, manifest, report, and helper file is mode `0600`. Each row's `content_hash` is SHA-256 of retained sanitized UTF-8 content, never a residual pre-redaction fingerprint. The broad corpus came from supported TraceDecay surfaces; the active parent contributes 47 direct prompts with explicit `codex_rollout_raw_fallback` provenance—the original 28, 11 from the first bounded refresh, and 8 from the final bounded refresh—and excludes three post-cutoff internal goal/environment context envelopes. The final user-message cutoff is 2026-07-11 01:04:10.875 UTC.
 
 ### 2.5 Git-tool discovery failure is product evidence
 
@@ -977,7 +977,7 @@ Release selects a retrieval profile only if it beats the lexical baseline on pre
 
 ## 10. HTTP V2 Surface
 
-HTTP V2 is an official supported public integration surface, not only a dashboard backend. Agents and developers may call it directly through authenticated loopback HTTP or a user-owned local socket, raw `curl`, or first-party Rust/TypeScript/Python SDKs. OpenAPI 3.1, JSON Schema, capability docs, examples, version/cutoff policy, direct-client discovery, conformance, and a hermetic sandbox are release artifacts. CLI and MCP share application/catalog semantics but do not loop through HTTP. Full ownership and rollout are specified in [`tracedecay-v2/17-official-public-api-and-sdks.md`](tracedecay-v2/17-official-public-api-and-sdks.md).
+HTTP V2 is an official supported public integration surface, not only a dashboard backend. Local-only remains the default: agents and developers may call it through authenticated loopback HTTP or a user-owned local socket, raw `curl`, or first-party Rust/TypeScript/Python SDKs. Protected remote shared-Brain mode may expose the same generated application/API contract through authenticated HTTPS with mTLS and enrolled-node grants; it adds no second API or transport-owned semantics. OpenAPI 3.1, JSON Schema, capability docs, examples, version/cutoff policy, direct-client discovery, conformance, and a hermetic sandbox are release artifacts. CLI and MCP share application/catalog semantics but do not loop through HTTP. Full ownership and rollout are specified in [`tracedecay-v2/17-official-public-api-and-sdks.md`](tracedecay-v2/17-official-public-api-and-sdks.md).
 
 [`tracedecay-v2/10-api-crate.md`](tracedecay-v2/10-api-crate.md) §8 is the only normative route/method/operation-ID inventory. It is generated from the plan-08 capability catalog and plan-09 use-case registry, then consumed unchanged by OpenAPI, SDKs, MCP/CLI bindings, dashboard clients, conformance tests, and migration dispositions. This master plan intentionally does not maintain a competing exact route list.
 
@@ -995,7 +995,7 @@ Every non-curation command has typed execution/result/audit schemas, idempotency
 
 All mutations require idempotency keys, optimistic version checks, and an audit event. Destructive non-curation actions require confirmation/explicit execution when meaningful. Policy-eligible curation effects execute autonomously after transactional revalidation and never require explicit per-item apply.
 
-Local HTTP security is mandatory even on loopback: bind only to loopback by default; mint a per-launch bearer/session token; enforce strict `Host` and `Origin`; use CSRF protection for browser mutations; ship a restrictive CSP; contain export paths; and never place sensitive query literals or entity payloads in URLs.
+HTTP security is mandatory. Bind only to loopback by default; mint a per-launch bearer/session token; enforce strict `Host` and `Origin`; use CSRF protection for browser mutations; ship a restrictive CSP; contain export paths; and never place sensitive query literals or entity payloads in URLs. Protected remote mode additionally requires HTTPS/mTLS, enrolled-node identity, scoped grants, revocation, placement, privacy, and authority-epoch enforcement before request dispatch.
 
 SSE is scope-filtered and authorized. It uses `Last-Event-ID`/sequence cursors, finite replay retention, heartbeat, backpressure/coalescing, slow-client termination, ordered resume, and explicit gap/resync events. The browser keeps last-known-good data, displays last-updated/stale/offline state, reconnects with backoff, repairs gaps, and handles out-of-order deltas idempotently.
 
@@ -1010,7 +1010,7 @@ SSE is scope-filtered and authorized. It uses `Last-Event-ID`/sequence cursors, 
 - `/sessions`, `/sessions/:id`, and `/turns/:id`; thread and Turn collections are `threads`/`turns` graph lenses over shared investigation state.
 - `/agents` and `/agents/:id`.
 - `/coordination` — nearby-agent presence, work claims, overlap, and safe actions.
-- `/work`, `/work/initiatives/:id`, `/work/plans/:id/versions/:version`, `/work/tasks/:id`, `/work/attempts/:id`, `/work/executors`, `/work/scheduler`, `/work/views/:id`, and `/work/notifications`.
+- `/work`, `/work/initiatives/:initiativeId`, `/work/plans/:planId/versions/:version`, `/work/tasks/:workItemId`, `/work/attempts/:attemptId`, `/work/offers/:offerId`, `/work/packets/:packetId`, `/work/executors`, `/work/scheduler`, `/work/views/:savedViewId`, `/work/edit-bundles/:editBundleId`, `/work/notifications`, and `/work/notifications/:notificationId`.
 - `/goals/:id`.
 - `/workflows/:id`, `/automation/runs/:id`.
 - `/code`, `/code/entities/:id`, and `/code/compare`.
@@ -1609,19 +1609,19 @@ Create only the bounded crates that provide a real dependency, capability, optio
 - `packages/tracedecay-client/` — official TypeScript client for Node/browser-authorized use, independent of dashboard state.
 - `python/tracedecay-client/` — official typed synchronous/asynchronous Python client.
 - `docs/api/` and `tests/public_api_conformance/` — generated/curated public docs, recipes, authenticated explorer/sandbox, semantic/security/stream/SDK parity.
-- Existing root crate — composition plus private bounded `src/v2/{hooks,presentation,api,host_deploy}/` adapters for hook host wires, shared CLI/MCP human rendering, Axum HTTP/SSE/OpenAPI hosting, daemon/MCP/CLI, host probes and approved config/install/update/repair/uninstall effects, and temporary V1 compatibility. These modules have independent architecture lints/tests but are not separately published crates because their only production consumer is root.
+- Existing root crate — composition plus private bounded `src/v2/{hooks,presentation,api,host_deploy,remote_brain_transport}/` adapters for hook host wires, shared CLI/MCP human rendering, Axum HTTP/SSE/OpenAPI hosting, daemon/MCP/CLI, host probes and approved config/install/update/repair/uninstall effects, protected remote HTTPS/mTLS and semantic sync wire adaptation, and temporary V1 compatibility. These modules have independent architecture lints/tests but are not separately published crates because their only production consumer is root.
 
 Dependency direction:
 
 `domain ← store/capture/code-index/projectors/query/policy/tool-catalog ← application ← root adapter modules`
 
-`domain + application view contracts ← root presentation/API/hook modules`; official Rust/TypeScript/Python clients consume generated API/catalog contracts, and the dashboard consumes the TypeScript client rather than importing server internals.
+`domain + application view contracts ← root presentation/API/hook/remote-transport modules`; official Rust/TypeScript/Python clients consume generated API/catalog contracts, and the dashboard consumes the TypeScript client rather than importing server internals.
 
-The private hook module may depend on domain policy request/receipt types, tool-catalog read models, capture, and narrow application ports; it may not depend on projectors, SQL repositories, dashboard code, or MCP rendering. The private presentation module may depend only on sealed application views, domain safe values, and catalog descriptors. The private API module may depend only on application/domain/catalog ports plus transport libraries. Architecture lints enforce these module edges just as strictly as crate edges. `tracedecay-tool-catalog` describes capabilities but never calls them, preventing discovery metadata from becoming a second application layer.
+The private hook module may depend on domain policy request/receipt types, tool-catalog read models, capture, and narrow application ports; it may not depend on projectors, SQL repositories, dashboard code, or MCP rendering. The private presentation module may depend only on sealed application views, domain safe values, and catalog descriptors. The private API module may depend only on application/domain/catalog ports plus transport libraries. The private `remote_brain_transport` module may implement only HTTPS/mTLS listener/client, connection, stream, and semantic snapshot/tail wire adapters over application/API/client contracts; enrollment, authorization, placement, consistency, fencing, sync policy, and persistence remain in their canonical owners. Architecture lints enforce these module edges just as strictly as crate edges. `tracedecay-tool-catalog` describes capabilities but never calls them, preventing discovery metadata from becoming a second application layer.
 
 Plan 19 owns one checked `architecture-boundaries.toml` manifest that generates the package/module DAG, owner map, forbidden imports, release waves, deletion obligations, and documentation fragments. Master/plan tables are explanatory projections, not independent topology registries. A new package requires two independent production consumers or a demonstrated dependency/capability/publication boundary, an ADR, measured build/runtime cost, and a deletion/merge alternative.
 
-New bounded-context modules target at most 800 lines per production file and may not import dashboard or MCP transport layers.
+New bounded-context production files target at most 400 lines; 800 lines is the hard default ceiling requiring the plan-19 temporary waiver. They may not import dashboard or MCP transport layers.
 
 ## 23. Compatibility and Parity Matrix
 
@@ -1706,7 +1706,7 @@ Lettered PR suffixes are stable identifiers ordered by dependency, not lexical o
 - [ ] Lock the evidence vocabulary and no-hidden-reasoning rule.
 - [ ] Lock compatibility, rollback, and V1 removal gates.
 - [ ] Lock activity-vs-project shard ownership, deterministic identity allocation, privacy/key-domain blobs, graph generation packing, exact retention/encryption defaults, and cursor/SSE semantics.
-- [ ] Lock canonical planes/owner matrix, package-admission decisions (including root-private hook/presentation/API adapters), the <=11-package ceiling, crate/module dependency DAG, extension tiers/SPIs, config/status/error governance, complexity and negative-code budgets, anti-corruption adapter contract, convergence scorecard, and deletion waves from plan 19.
+- [ ] Lock canonical planes/owner matrix, package-admission decisions (including root-private hook/presentation/API/host-deployment/remote-Brain-transport adapters), the <=11-package ceiling, crate/module dependency DAG, extension tiers/SPIs, config/status/error governance, complexity and negative-code budgets, anti-corruption adapter contract, convergence scorecard, and deletion waves from plan 19.
 - [ ] Select the dashboard bundler after a measured Rsbuild-versus-Vite comparison.
 - [ ] Add architecture lint tests for dependency direction and transport isolation.
 - [ ] Lock the hermetic-test-infrastructure contract from the §2.7 flaky-test row: no process-global mutable test state, hermetic clocks/env/ports/stores, declared nextest/libtest contract, deterministic shutdown, and platform matrix.
@@ -1836,17 +1836,13 @@ Cross-cutting evidence-plane companions:
 - Persist authority/placement/membership/revocation, signed sync receipt/gap/conflict, cache/replica manifest, repository proof, and recovery/fencing receipt contracts in store-owned schemas. Do not add a network database driver or capture spool implementation.
 - [ ] Reject network-mounted SQLite and stale authority epochs; prove cache/replica generations stay read-only and backup/restore retains wrapped recovery keys and authority history.
 
-#### PR 7: Provider capture conformance harness
+#### PR 7A: Capture crate, mandatory structured sanitizer, and provider conformance
 
-- Create `crates/tracedecay-capture/` and source adapter trait.
-- [ ] Wrap one provider at a time behind shadow capture.
-- [ ] Record source artifact/generation/offset/privacy-domain-keyed source fingerprint, sanitized-output digest, and sensitivity before projection; raw checksums remain transient/non-serializable.
-- [ ] Differential-test V1 session rows and V2 observations.
-
-#### PR 7A: Mandatory structured sanitizer and provider/hook conformance
-
+- Create `crates/tracedecay-capture/` and the source adapter, deterministic identity, journal runner, quarantine, and replay contracts specified by plan 03.
 - Implement parse-field-before-scan, built-in detector registry, bounded decoding, span merge/replacement, privacy-policy precedence, keyed fingerprints, safe markers/receipts, and fail-closed budgets.
-- Wrap every provider/hook in shadow/differential mode, then make sanitized content the only observation-journal input; record metadata may strengthen but never disable the safety floor.
+- Make sanitized content the only observation-journal input before any provider shadow capture or V2 observation comparison; record metadata may strengthen but never disable the safety floor.
+- Wrap one provider at a time behind shadow/differential capture; record source artifact/generation/offset/privacy-domain-keyed source fingerprint, sanitized-output digest, and sensitivity before projection while raw checksums remain transient/non-serializable.
+- [ ] Differential-test V1 session rows and V2 observations only through receipt-bound sanitized envelopes.
 - [ ] Test structured/malformed/encoded/chunked/Unicode/timeout/plugin/disk/process cases and every plan-18 secret class without real credentials.
 
 #### PR 7B companion: Remote-safe sole capture spool
@@ -2060,12 +2056,12 @@ Cross-cutting official-product companions:
 | PR | End-to-end product slice |
 |---|---|
 | 24I | Configuration resolver, direct commands, activation/ack/drift, generated HTTP/CLI/MCP/SDK bindings, and one semantic view model (plan 20). |
-| 24O | Incremental scout worker, bounded context explorer, optional capability-selected model gateway, cancellation/backpressure, and suggestion production (plan 22). |
-| 24P | Exact host/Thread/Turn delivery handshake, claim/revalidation, one shared hint selector, acknowledgements, and terminal outcomes (plan 22). |
-| 24Q | Application-owned host integration list/get/diff/status/install/update/repair/uninstall/verify lifecycle, root deployment/probe/config port, generated CLI/API/SDK bindings, operation polling, and ownership-safe compensation (plan 27). |
 | 24L | Unified temporal session/message/LCM query/context application and generated public bindings (plan 23). |
 | 24M | Canonical task/plan application use cases, authoritative scheduler, fairness, reservations, claims, heartbeats, completion, status, and doctor (plan 24). |
 | 24N | Codex/Claude/Cursor/Hermes/custom executor adapters, exact workspace lifecycle, cancellation/reconciliation, and generated public transports (plan 24). |
+| 24O | Incremental scout worker, bounded context explorer, optional capability-selected model gateway, cancellation/backpressure, and suggestion production after 24L/24M/24N (plan 22). |
+| 24P | Exact host/Thread/Turn delivery handshake, claim/revalidation, one shared hint selector, acknowledgements, and terminal outcomes after 24O (plan 22). |
+| 24Q | Application-owned host integration list/get/diff/status/install/update/repair/uninstall/verify lifecycle, root deployment/probe/config port, generated CLI/API/SDK bindings, operation polling, and ownership-safe compensation (plan 27). |
 | 24R | Managed declarative task-graph bulk editing: strict sharded CommonMark/frontmatter export, source-span validation, semantic diff/rebase, atomic expected-version submit, contained cleanup, and generated operation surfaces (plan 24). This suffix is new and does not reuse existing 24D client/API or 25A dashboard-foundation ownership. |
 | 25E | Complete Brain Settings workspace over the generated registry (plan 20). |
 | 25F | Scout Observatory, queue/currentness/delivery/feedback views, and exact Turn timeline integration (plan 22). |
@@ -2127,6 +2123,7 @@ Cross-cutting official-product companions:
 - Create `dashboard/app/` and shared packages.
 - [ ] Implement All scope, time/as-of/compare, secure URL/persistence state, command palette, universal inspector, status/coverage, saved views, Axum history fallback, legacy redirects, and shell coexistence.
 - [ ] Keyboard, screen-reader, table parity, mobile portrait/landscape, reduced-motion, and direct-link tests are required in this PR, not deferred.
+- Plan 20 PR 25E exclusively owns the complete generated Brain Settings workspace. Plan 11 PR 25D/30H references are limited to shared shell, activity, saved-view, and route-composition consumers; they do not own setting forms, registry semantics, or Settings cutover.
 - PR 25I adds Brain Settings and Sync Observatory topology, placement, repository-correlation, lag/cache/spool/conflict, enrollment/grant, backup, restore, and failover views over PR 24S.
 
 #### PR 25A: Dashboard generated-client consumption, bundler ADR, and application foundation
@@ -2226,7 +2223,7 @@ Cross-cutting migration companions:
 
 #### PR 35: Bounded-context cutovers
 
-- Cut over capture, sessions, graph, Git/delivery (plan 12's slice PR 35E), knowledge, policy, automation, accounting, then product reads independently, following plan 12's PR 35A–35H slice order.
+- Cut over capture, sessions/activity, graph, knowledge, Git/delivery, policy/hints/hooks, automation/skills/accounting, then product reads independently, following plan 12's PR 35A–35H slice order exactly.
 - Companion cutovers are sequenced explicitly: 35I (one temporal session/message/LCM path, plan 23) lands only after the sessions-context slice, and 35J (single canonical scheduler/lease owner, plan 24) lands only after the policy and automation slices; plan 12's route controller publishes every slice.
 - [ ] Require feature flag, migration receipt, rollback drill, telemetry gate, and current-client/catalog handshake per context.
 
@@ -2354,11 +2351,11 @@ Record the reference machine and corpus in benchmark output. Test current scale 
 - Lease, cancellation, retry, and fault corpora produce zero double-active leases, stale terminal commits, epoch regressions, unauthorized effects, or duplicate non-idempotent effects.
 - Task-aware scout delivery meets plan-22 useful-silence, privacy, expiry, dedupe, token, interruption, and exact-Thread/Turn gates; hook wait remains ≤ 2 ms p95 for pending-envelope claim/revalidation.
 - Architecture scorecard reports zero unowned duplicate semantic authorities, zero transport/direct-store bypasses, zero new compatibility-adapter call sites, and zero expired adapters at each cutover.
-- Rust package count is <=11 including root and the official Rust client; hook/presentation/API remain private root modules unless a later ADR proves independent production consumers. Registered dependency duplicates and unregistered infrastructure engines are zero.
+- Rust package count is <=11 including root and the official Rust client; hook/presentation/API/remote-Brain-transport remain private root modules unless a later ADR proves independent production consumers. Registered dependency duplicates and unregistered infrastructure engines are zero.
 - For every parity-only bounded-context cutover, handwritten V2 production lines are lower than the retired V1 plus adapter lines; generated lines are reported separately and cannot hide generator complexity. Every exception has a measured, expiring ADR.
 - Definite duplicate-body clusters longer than ten lines are zero across live V2 production paths unless a reviewed declarative/generated or performance-isolation exception names the owner. Shared host/install, extractor, registry, operation, projection, graph/timeline, and rendering machinery each have one implementation.
 - Default binary size and idle RSS are <=1.25x the frozen V1 baseline, hot rebuild time <=1.25x, and clean build time <=1.5x on the recorded reference machine; optional heavy language/model/UI features remain feature- or route-gated and report their incremental cost.
-- New bounded-context production files target ≤ 800 lines.
+- New bounded-context production files target ≤ 400 lines; 800 lines is the hard default ceiling and requires a temporary architecture waiver.
 
 Frontend delivery budgets:
 
@@ -2457,7 +2454,7 @@ The redesign program is complete only when:
 - Kanban, plan outline, DAG, critical path, timeline, causal, workload, executor, repository, agent, and All task lenses are projections over identical canonical IDs/versions and meet table/accessibility/export/performance gates.
 - Cross-repository task packets and material sibling suggestions preserve exact scope/anchors, prevent the named duplicate-work regressions, remain silent for irrelevant/intentional overlap, and never leak global-board context.
 - The convergence inventory proves there is one canonical owner for every domain semantic, generated binding parity, no serving bypass, and every temporary V1/anti-corruption adapter is retired by its deletion gate.
-- The architecture manifest proves <=11 Rust packages, zero unregistered infrastructure engines, no separately published root-only hook/presentation/API package, and one generated owner/DAG/release/deletion truth.
+- The architecture manifest proves <=11 Rust packages, zero unregistered infrastructure engines, no separately published root-only hook/presentation/API/remote-Brain-transport package, and one generated owner/DAG/release/deletion truth.
 - The negative-code ledger proves every parity lane retired more handwritten code than it added, definite live duplicate-body clusters are eliminated or narrowly waived, shared host/extractor/registry/projection/operation/graph/rendering mechanisms have one implementation, and binary/RSS/build/dependency/table/worker budgets pass.
 - Brain, Explorer, Causal Loom, domain workspaces, Observatory, Costs, and all replay evaluators meet functionality, accessibility, privacy, performance, approved-concept fidelity, visual comprehension, atlas-orientation, and hermetic experiment gates.
 - Store selection, coverage, freshness, inference, redaction, caps, ranking, and query plans are visible and correct.

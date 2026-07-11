@@ -6,7 +6,7 @@
 
 **Tech Stack:** Rust 2024; serde/serde_json; bytes; thiserror; async-trait or boxed futures matching workspace convention; tokio only for orchestration/tests; proptest; Criterion; V2 domain/capture/catalog/application contracts. Policy is reached only through the application port.
 
-The module consumes the hook facet of plan 08/27's one canonical `HostIntegrationManifestV1`; capture, installation, MCP tools, skills, roles, and executors consume sibling facets with identical host/version/event/capability codes. The bundle compiler lowers that source IR into unsigned host-specific `HostBundlePayloadV1` artifacts plus capability-difference and release inputs; PR 36R alone creates the signed `HostBundleManifestV1` release envelope. Neither generated representation nor this module copies workflow semantics. `v2::hooks` owns one wire framing/response/conformance implementation. Plan 09's application feature owns lifecycle authorization/idempotency/operation state, while plan 12's root-private deployment adapter performs approved install/update/uninstall/config effects; installer work never enters the hook hot path. The current Cline/Roo exact install/uninstall duplicates and the wider nine-installer/14-integration cluster are explicit deletion seeds, not adapters to preserve.
+The module consumes the hook facet of plan 08/27's one canonical `HostIntegrationManifestV1`; capture, installation, MCP tools, skills, roles, and executors consume sibling facets with identical host/version/event/capability codes. The bundle compiler lowers that source IR into unsigned host-specific `HostBundlePayloadV1` artifacts plus capability-difference and release inputs; PR 36R alone creates the signed `HostBundleManifestV1` release envelope. Neither generated representation nor this module copies workflow semantics. `v2::hooks` owns one wire framing/response/conformance implementation. Plan 09's application feature owns lifecycle authorization/idempotency/operation state, while plan 12's root-private deployment adapter performs approved install/update/uninstall/config effects; installer work never enters the hook hot path. The current Cline/Roo exact install/uninstall duplicates and the wider nine-installer/15-integration cluster are explicit deletion seeds, not adapters to preserve.
 
 ---
 
@@ -169,7 +169,7 @@ src/hooks/v2_compat.rs
 src/mcp/hook_events_v2.rs
 ~~~
 
-No production file may exceed 800 lines. Provider files contain mapping only; shared policy/identity/capture behavior cannot migrate into them.
+Production files target at most 400 lines and may not exceed the 800-line hard default ceiling without a temporary plan-19 waiver. Provider files contain mapping only; shared policy/identity/capture behavior cannot migrate into them.
 
 ## 6. Dependency and Ownership Rules
 
@@ -635,7 +635,7 @@ Release gates:
 - host conformance: 100% generated documented/probe-validated event/reply rows have fixtures and every absent/unknown/version-gated row has a checked disposition with no fabricated adapter;
 - outcome: >=90% eligible evaluations terminal within horizon, false attribution <1% on labeled corpus;
 - trust/noise: zero adversarial prompt/pasted-log promotion to trusted compiler/tool failure, repeated-hint budget and useful-silence fixtures pass, and every injected hint names its trusted routing evidence or abstains;
-- new production files <=800 lines and no provider duplication of policy/capture logic.
+- new production files target <=400 lines, remain <=800 lines absent a temporary plan-19 waiver, and contain no provider duplication of policy/capture logic.
 
 ## 15. PR 24F TDD and Commit Sequence
 

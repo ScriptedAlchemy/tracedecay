@@ -498,6 +498,8 @@ The `code_snapshot` adapter is the single sanctioned sanitizer-crossing entry po
 
 ## PR and task sequence
 
+Plan 03 is authoritative for capture slicing: the former master-plan PR 7 harness/bootstrap work is consolidated into PR 7A so the mandatory sanitizer and receipt types exist before the journal runner, shadow capture, or any V2 observation comparison. There is no separate implementation PR 7.
+
 ### PR 7A: Crate contracts, mandatory sanitizer, deterministic identity, and journal runner
 
 **Files:** create `Cargo.toml`, `src/{lib,error,source,identity,normalize,journal,runner,quarantine,replay}.rs`, the exact `src/privacy/**` tree from Plan 18, `tests/{contract_suite,privacy_security}.rs`; modify workspace `Cargo.toml`.

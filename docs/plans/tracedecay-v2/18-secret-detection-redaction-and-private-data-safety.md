@@ -162,17 +162,32 @@ pub struct SanitizationReceiptV1 {
     pub policy_digest: PrivacyPolicyDigest,
     pub detector_set_digest: DetectorSetDigest,
     pub parser_digest: ParserDigest,
+    pub sanitizer_version: ComponentVersion,
     pub input_domain: PrivacyDomainId,
     pub input_fingerprint: KeyedPayloadFingerprint,
     pub output_digest: SanitizedOutputDigest,
+    pub resulting_sensitivity: DataSensitivity,
+    pub findings_total: u64,
     pub findings_by_class: std::collections::BTreeMap<SecretClass, u64>,
     pub structured_fields_scanned: u64,
     pub raw_fallback_used: bool,
     pub decode_depth: u8,
     pub completeness: ScanCompleteness,
     pub occurred_at: UtcMicros,
+    pub expires_at: Option<UtcMicros>,
+    pub supersedes_receipt_id: Option<SanitizationReceiptId>,
+}
+
+pub struct SanitizationReceiptRevocationV1 {
+    pub revocation_id: ManifestId,
+    pub receipt_id: SanitizationReceiptId,
+    pub reason_code: RegistryEntryId,
+    pub revoked_at: UtcMicros,
+    pub receipt_digest: ManifestDigest,
 }
 ```
+
+This is the exact canonical field set generated from `tracedecay-domain` and losslessly lowered by plan 02. `findings_total` must equal the checked sum of `findings_by_class`; expiry and append-only `SanitizationReceiptRevocationV1` can only narrow eligibility; and `supersedes_receipt_id` points from the new receipt to the immediately previous receipt for the same source observation. Supersession is acyclic and single-successor, never crosses observations/privacy domains, and neither supersession nor later revocation mutates the historical receipt. Canonical schema/encoding and domain -> store -> domain round-trip fixtures fail on any missing, renamed, defaulted, or extra semantic field.
 
 Content taint types enforce sink eligibility:
 
@@ -338,6 +353,8 @@ Default behavior stores sanitized content plus a source locator only. Optional f
 - Expiry destroys the wrapped data key and blob; non-content tombstone/receipt remains.
 - Quarantine backup is disabled by default. If enabled, it is separately encrypted/restricted and restore-scanned in isolation.
 
+The durable object state machine is `Staged -> Attached -> Retiring -> Retired` for committed evidence and `Staged -> Retiring -> Retired` for unattached expiry. A hold appends `Attached -> Held`; release or hold expiry appends `Held -> Attached`, re-evaluates the original absolute retention deadline, and immediately enters `Retiring` when that deadline has passed. Repeated hold/release/retire requests are idempotent under optimistic version; a hold cannot revive `Retiring`/`Retired`, and a crash at every journal/key-destruction/blob-unlink boundary resumes from the append-only event chain without making plaintext readable or losing the non-content tombstone.
+
 If the OS keyring is unavailable or locked, quarantine retention fails closed to sanitized-only/drop; it never stores plaintext “temporarily.”
 
 ## 11. Sink firewalls by domain
@@ -421,7 +438,7 @@ Every domain resolves exactly one plan-28 sync class: `NeverSync`, `MetadataOnly
 - `FullEligible` still means sanitizer-approved fields allowed by domain/principal policy; it never means raw bypass.
 - Protected quarantine is `NeverSync` by default. A future protected transfer requires a distinct elevated design/ADR and is not inferred from ordinary remote eligibility.
 - Node revocation closes streams and blocks new reads/writes. Local cache/spool bytes remain encrypted, retention-bound, and purgeable; signed tombstones/purge proofs prevent offline resurrection.
-- Every cache/replica authorization is a signed `CacheGrantSnapshotV1` bound to principal/node, exact scope/fields/payload classes, policy/privacy/catalog and revocation generations, purge frontier, and mandatory `not_after`. Offline cache locks at expiry; clock rollback cannot extend it. Reconnect applies and acknowledges tombstones/purge directives before serving again, and UI/coverage exposes pending purge acknowledgements.
+- Every cache/replica authorization is a signed `CacheGrantSnapshotV1` containing plan 01's complete bounded `CacheAccessManifestV1`: principal/node, exact resolved scope, allowed registry field IDs and payload classes, capability-grant set, policy version, privacy-policy digest, schema-registry digest, and capability-catalog generation/digest. Offline validation uses this signed immutable manifest rather than an unavailable mutable grant lookup. The cache locks at mandatory `not_after`; clock rollback cannot extend it. Reconnect applies and acknowledges tombstones/purge directives before serving again, and UI/coverage exposes pending purge acknowledgements.
 - Sync manifests, receipts, logs, metrics, errors, topology, and backup catalogs contain only opaque IDs, safe counts/states/digests, and authorized anchors—never addresses, paths, remote credentials, token material, candidate fingerprints, or content.
 
 ## 12. Retroactive whole-profile audit
@@ -496,7 +513,7 @@ Rules:
 - Regex/string allowlists containing a candidate secret are prohibited.
 - Broad path/project/provider exclusions cannot bypass the mandatory safety floor.
 - Rule changes run read-only shadow scans and measure new/removed findings before activation.
-- Historical observations retain the old receipt; current projection uses the new rule version after controlled rescan/rebuild. Rescans issue superseding `SanitizationReceiptV1` rows that reference the superseded receipt ID; sinks honor the newest non-revoked receipt. The durable home for all receipts is the per-shard `sanitization_receipts` table owned by plan 02 (minted by plan 03, validated by plan 04's sink firewall), including supersession, expiry, and revocation columns.
+- Historical observations retain the old receipt; current projection uses the new rule version after controlled rescan/rebuild. Rescans issue superseding `SanitizationReceiptV1` rows that reference the superseded receipt ID; sinks honor the newest non-revoked receipt. The durable home is plan 02's per-shard immutable `sanitization_receipts` plus append-only `sanitization_receipt_revocations` tables (minted by plan 03, validated by plan 04's sink firewall), so supersession, expiry, and revocation never mutate a historical receipt.
 - False-positive review UI uses synthetic/structural metadata. Viewing plaintext requires separate quarantine authorization and is not required to mark common safe examples.
 
 Durable detector-registry state (owning shard: profile catalog; contains no secret content):
@@ -695,11 +712,13 @@ Integrate these slices into the master Phase 0–5 sequence.
 - Add sensitivity/detection/receipt/policy/fingerprint/marker/coverage/finding/remediation types.
 - Add `Unclassified` -> `Classified` -> `Sanitized` -> sink-eligible conversions and compile-fail architecture tests.
 - Remove secret lengths/unkeyed content digests from public marker contracts.
+- Freeze one golden `SanitizationReceiptV1` schema/canonical encoding; round-trip every field through plan 02 and reject findings-total mismatch, expired/revoked eligibility, cross-observation supersession, forks, and cycles.
 
 ### Companion requirements for PR 6B — Sanitized blob storage, protected quarantine, and key service
 
 - Add isolated random-ID encrypted blobs, per-record DEK wrapping, OS-keyring profile KEK, private I/O, TTL/holds, access audit, cryptographic deletion, and recovery tests.
 - Prove unavailable keyring fails to sanitized-only/drop without plaintext fallback.
+- Kill-test `Staged -> Attached -> Held -> Attached -> Retiring -> Retired`, unattached expiry, hold expiry after the original deadline, repeated release/retire, and crashes before/after journal append, key destruction, and unlink; attached data must retire unless an active hold exists and no terminal object may be revived.
 
 ### Companion requirements for PR 7A — Mandatory structured sanitizer and provider conformance
 
@@ -795,6 +814,8 @@ Reports never contain candidate values, raw snippets, or secret fingerprints.
 - [ ] Secret plaintext cannot compile through a store/projector/application/transport sink without an eligible wrapper.
 - [ ] Public markers reveal no secret length, prefix/suffix, unkeyed hash, or cross-domain equality.
 - [ ] Optional raw retention is encrypted, isolated, private, audited, short-lived, and cryptographically deletable.
+- [ ] `SanitizationReceiptV1` has one exact domain/schema lowering with byte-stable round trips and enforceable expiry/revocation/supersession.
+- [ ] Attached quarantine objects retire through the append-only hold/release/retirement state machine; crash recovery cannot leak, revive, or strand them beyond an active hold.
 - [ ] Runtime, offline, CI, release, fixture, export, backup, and restore scanners have explicit complementary roles.
 - [ ] Host-bundle source/rendered/marketplace artifacts are scanned independently; config/backup bodies and raw hook/probe/diagnostic payloads remain protected-operation data only, and foreign host state is preserved.
 - [ ] Detector plugins cannot access filesystem/network or emit content and fail closed on timeout/crash.
