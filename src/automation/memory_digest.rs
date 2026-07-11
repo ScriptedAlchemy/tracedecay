@@ -47,6 +47,12 @@ use crate::user_config::UserConfig;
 
 pub const MEMORY_DIGEST_START: &str = "<!-- TRACEDECAY MEMORY DIGEST START -->";
 pub const MEMORY_DIGEST_END: &str = "<!-- TRACEDECAY MEMORY DIGEST END -->";
+const MEMORY_DIGEST_HEADING: &str = "## TraceDecay memory digest";
+const MEMORY_DIGEST_BODY_PREAMBLE: &str = "Curated durable facts from TraceDecay project memory (trust-ranked, newest first). \
+     For deeper recall call MCP tool `tracedecay_recall`.\n\
+     Rate facts you rely on with `tracedecay_fact_feedback` (fact_id, helpful/unhelpful) \
+     — flagging a wrong or misleading fact unhelpful matters as much as confirming a \
+     helpful one; trust is earned only from this feedback.\n";
 
 /// Minimum trust score for a fact to enter the digest.
 pub const DEFAULT_DIGEST_MIN_TRUST: f64 = 0.6;
@@ -285,13 +291,7 @@ pub fn compose_digest_body(snapshot: &MemoryDigestSnapshot, char_budget: usize) 
             .then(left.project_key.cmp(&right.project_key))
     });
 
-    let mut body = String::from(
-        "Curated durable facts from TraceDecay project memory (trust-ranked, newest first). \
-         For deeper recall call MCP tool `tracedecay_recall`.\n\
-         Rate facts you rely on with `tracedecay_fact_feedback` (fact_id, helpful/unhelpful) \
-         — flagging a wrong or misleading fact unhelpful matters as much as confirming a \
-         helpful one; trust is earned only from this feedback.\n",
-    );
+    let mut body = String::from(MEMORY_DIGEST_BODY_PREAMBLE);
     let mut budget_hit = false;
     for section in sections {
         let header = format!("\n## {}\n\n", section.project_label);
@@ -569,49 +569,35 @@ fn remove_native_digest(target: SkillInstallTarget, plugin_root: &Path) -> Resul
 }
 
 fn render_prompt_digest_block(body: &str) -> String {
-    format!("{MEMORY_DIGEST_START}\n## TraceDecay memory digest\n\n{body}{MEMORY_DIGEST_END}\n")
+    format!("{MEMORY_DIGEST_START}\n{MEMORY_DIGEST_HEADING}\n\n{body}{MEMORY_DIGEST_END}\n")
 }
 
 fn replace_or_append_digest_block(existing: &str, block: &str) -> Result<String> {
-    match (
-        existing.find(MEMORY_DIGEST_START),
-        existing.find(MEMORY_DIGEST_END),
-    ) {
-        (Some(start), Some(end)) if start <= end => {
-            let end = end + MEMORY_DIGEST_END.len();
-            let mut updated = String::new();
-            updated.push_str(existing[..start].trim_end());
-            if !updated.is_empty() {
-                updated.push_str("\n\n");
-            }
-            updated.push_str(block.trim_end());
+    if let Some((start, end)) = digest_block_range(existing)? {
+        let mut updated = String::new();
+        updated.push_str(existing[..start].trim_end());
+        if !updated.is_empty() {
             updated.push_str("\n\n");
-            updated.push_str(existing[end..].trim_start());
-            let trimmed = updated.trim_end().to_string();
-            Ok(trimmed + "\n")
         }
-        (None, None) => {
-            let mut updated = String::new();
-            updated.push_str(existing.trim_end());
-            if !updated.is_empty() {
-                updated.push_str("\n\n");
-            }
-            updated.push_str(block);
-            Ok(updated)
+        updated.push_str(block.trim_end());
+        updated.push_str("\n\n");
+        updated.push_str(existing[end..].trim_start());
+        let trimmed = updated.trim_end().to_string();
+        Ok(trimmed + "\n")
+    } else {
+        let mut updated = String::new();
+        updated.push_str(existing.trim_end());
+        if !updated.is_empty() {
+            updated.push_str("\n\n");
         }
-        _ => Err(config_error(
-            "memory digest prompt markers are unbalanced".to_string(),
-        )),
+        updated.push_str(block);
+        Ok(updated)
     }
 }
 
 fn remove_digest_block(existing: &str) -> Result<String> {
-    match (
-        existing.find(MEMORY_DIGEST_START),
-        existing.find(MEMORY_DIGEST_END),
-    ) {
-        (Some(start), Some(end)) if start <= end => {
-            let end = end + MEMORY_DIGEST_END.len();
+    match digest_block_range(existing)? {
+        Some((start, end)) => {
             let mut updated = String::new();
             updated.push_str(existing[..start].trim_end());
             updated.push_str("\n\n");
@@ -621,7 +607,48 @@ fn remove_digest_block(existing: &str) -> Result<String> {
             }
             Ok(updated)
         }
-        (None, None) => Ok(existing.to_string()),
+        None => Ok(existing.to_string()),
+    }
+}
+
+fn digest_block_range(existing: &str) -> Result<Option<(usize, usize)>> {
+    match (
+        existing.find(MEMORY_DIGEST_START),
+        existing.find(MEMORY_DIGEST_END),
+    ) {
+        (Some(start), Some(end)) if start <= end => {
+            if existing.match_indices(MEMORY_DIGEST_START).count() != 1
+                || existing.match_indices(MEMORY_DIGEST_END).count() != 1
+            {
+                return Err(config_error(
+                    "memory digest prompt markers are ambiguous".to_string(),
+                ));
+            }
+            Ok(Some((start, end + MEMORY_DIGEST_END.len())))
+        }
+        (None, Some(end)) => {
+            if existing.match_indices(MEMORY_DIGEST_END).count() != 1 {
+                return Err(config_error(
+                    "memory digest prompt markers are unbalanced".to_string(),
+                ));
+            }
+            let preamble = format!("{MEMORY_DIGEST_HEADING}\n\n{MEMORY_DIGEST_BODY_PREAMBLE}");
+            let mut matches = existing[..end].match_indices(&preamble);
+            let Some((start, _)) = matches.next() else {
+                return Err(config_error(
+                    "memory digest prompt markers are unbalanced".to_string(),
+                ));
+            };
+            if matches.next().is_some()
+                || existing[end + MEMORY_DIGEST_END.len()..].contains(&preamble)
+            {
+                return Err(config_error(
+                    "memory digest prompt markers are unbalanced".to_string(),
+                ));
+            }
+            Ok(Some((start, end + MEMORY_DIGEST_END.len())))
+        }
+        (None, None) => Ok(None),
         _ => Err(config_error(
             "memory digest prompt markers are unbalanced".to_string(),
         )),

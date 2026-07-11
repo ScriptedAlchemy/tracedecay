@@ -268,6 +268,102 @@ async fn prompt_index_block_preserves_user_content_and_is_idempotent() {
 }
 
 #[tokio::test]
+async fn prompt_index_repairs_owned_orphan_end_marker() {
+    let temp = tempfile::tempdir().unwrap();
+    let profile_root = temp.path().join("profile");
+    let prompt_path = temp.path().join("CLAUDE.md");
+    std::fs::write(&prompt_path, "# User rules\n\nKeep before.\n").unwrap();
+
+    update_project_digest_section(
+        &profile_root,
+        build_project_section(
+            "proj",
+            "proj",
+            vec![fact(1, "Stale digest", 0.9, 100)],
+            &MemoryDigestOptions::default(),
+        ),
+    )
+    .unwrap();
+    export_memory_digest(&profile_root, SkillInstallTarget::Claude, &prompt_path).unwrap();
+    let orphaned = std::fs::read_to_string(&prompt_path)
+        .unwrap()
+        .replace(&format!("{MEMORY_DIGEST_START}\n"), "");
+    std::fs::write(&prompt_path, format!("{orphaned}\nKeep after.\n")).unwrap();
+
+    update_project_digest_section(
+        &profile_root,
+        build_project_section(
+            "proj",
+            "proj",
+            vec![fact(2, "Recovered digest", 0.9, 101)],
+            &MemoryDigestOptions::default(),
+        ),
+    )
+    .unwrap();
+    export_memory_digest(&profile_root, SkillInstallTarget::Claude, &prompt_path).unwrap();
+
+    let contents = std::fs::read_to_string(&prompt_path).unwrap();
+    assert!(contents.contains("Keep before."));
+    assert!(contents.contains("Keep after."));
+    assert!(contents.contains("Recovered digest"));
+    assert!(!contents.contains("Stale digest"));
+    assert_eq!(contents.matches(MEMORY_DIGEST_START).count(), 1);
+    assert_eq!(contents.matches(MEMORY_DIGEST_END).count(), 1);
+}
+
+#[tokio::test]
+async fn prompt_index_keeps_start_only_marker_fail_closed() {
+    let temp = tempfile::tempdir().unwrap();
+    let profile_root = temp.path().join("profile");
+    let prompt_path = temp.path().join("CLAUDE.md");
+    std::fs::write(
+        &prompt_path,
+        format!("# User rules\n\n{MEMORY_DIGEST_START}\n\nunknown content\n"),
+    )
+    .unwrap();
+
+    let error = export_memory_digest(&profile_root, SkillInstallTarget::Claude, &prompt_path)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("markers are unbalanced"));
+    assert!(
+        std::fs::read_to_string(&prompt_path)
+            .unwrap()
+            .contains("unknown content")
+    );
+}
+
+#[tokio::test]
+async fn prompt_index_duplicate_balanced_blocks_fail_closed() {
+    let temp = tempfile::tempdir().unwrap();
+    let profile_root = temp.path().join("profile");
+    let prompt_path = temp.path().join("CLAUDE.md");
+    std::fs::write(&prompt_path, "# User rules\n").unwrap();
+    update_project_digest_section(
+        &profile_root,
+        build_project_section(
+            "proj",
+            "proj",
+            vec![fact(1, "Digest", 0.9, 100)],
+            &MemoryDigestOptions::default(),
+        ),
+    )
+    .unwrap();
+    export_memory_digest(&profile_root, SkillInstallTarget::Claude, &prompt_path).unwrap();
+    let once = std::fs::read_to_string(&prompt_path).unwrap();
+    let block = &once[once.find(MEMORY_DIGEST_START).unwrap()..];
+    let duplicated = format!("{once}\n{block}");
+    std::fs::write(&prompt_path, &duplicated).unwrap();
+
+    let error = export_memory_digest(&profile_root, SkillInstallTarget::Claude, &prompt_path)
+        .unwrap_err()
+        .to_string();
+
+    assert!(error.contains("markers are ambiguous"));
+    assert_eq!(std::fs::read_to_string(&prompt_path).unwrap(), duplicated);
+}
+
+#[tokio::test]
 async fn config_gate_disables_export_and_strips_previous_artifacts() {
     let temp = tempfile::tempdir().unwrap();
     let profile_root = temp.path().join("profile");

@@ -7,7 +7,7 @@ use tracedecay::automation::managed_skills::{
 };
 use tracedecay::automation::skill_targets::{
     SkillInstallTarget, export_native_skill_overlay, export_prompt_skill_index,
-    install_managed_skills, remove_prompt_skill_index_for_target,
+    install_managed_skills, remove_prompt_skill_index, remove_prompt_skill_index_for_target,
 };
 
 fn draft(id: &str, title: &str) -> ManagedSkillDraft {
@@ -443,6 +443,169 @@ async fn prompt_index_preserves_user_content_and_routes_full_body_through_mcp() 
     assert!(second.contains("TRACEDECAY MANAGED SKILLS START agents"));
     assert!(second.contains("TRACEDECAY MANAGED SKILLS START claude"));
     assert!(second.contains("This Claude index lists"));
+}
+
+#[tokio::test]
+async fn prompt_index_repairs_slugged_orphan_end_without_claiming_user_text() {
+    let temp = tempfile::tempdir().unwrap();
+    let profile_root = temp.path().join("profile");
+    let prompt_path = temp.path().join("AGENTS.md");
+
+    create_managed_skill_draft(
+        &profile_root,
+        targeted_draft(
+            "repo-hygiene",
+            "Repository hygiene",
+            vec![SkillInstallTarget::Agents],
+        ),
+    )
+    .await
+    .unwrap();
+    approve_managed_skill(&profile_root, "repo-hygiene")
+        .await
+        .unwrap();
+    std::fs::write(&prompt_path, "# User rules\n\nKeep before.\n").unwrap();
+    export_prompt_skill_index(&profile_root, SkillInstallTarget::Agents, &prompt_path).unwrap();
+
+    let stale = std::fs::read_to_string(&prompt_path)
+        .unwrap()
+        .replace("<!-- TRACEDECAY MANAGED SKILLS START agents -->\n", "");
+    std::fs::write(&prompt_path, format!("{stale}\nKeep after.\n")).unwrap();
+
+    export_prompt_skill_index(&profile_root, SkillInstallTarget::Agents, &prompt_path).unwrap();
+    let repaired = std::fs::read_to_string(&prompt_path).unwrap();
+    assert!(repaired.contains("Keep before."));
+    assert!(repaired.contains("Keep after."));
+    assert_eq!(
+        repaired
+            .matches("<!-- TRACEDECAY MANAGED SKILLS START agents -->")
+            .count(),
+        1
+    );
+
+    export_prompt_skill_index(&profile_root, SkillInstallTarget::Agents, &prompt_path).unwrap();
+    assert_eq!(std::fs::read_to_string(&prompt_path).unwrap(), repaired);
+}
+
+#[test]
+fn uninstall_repairs_legacy_orphan_end_without_claiming_user_text() {
+    let temp = tempfile::tempdir().unwrap();
+    let prompt_path = temp.path().join("AGENTS.md");
+    let contents = concat!(
+        "# User rules\n\nKeep before.\n\n",
+        "## TraceDecay managed skills\n\n",
+        "This AGENTS.md index lists approved profile-managed skills. For full instructions, call MCP tool `tracedecay_skill_view` with the listed `id`.\n\n",
+        "- `generated`: Generated.\n",
+        "<!-- TRACEDECAY MANAGED SKILLS END -->\n\n",
+        "Keep after.\n",
+    );
+    std::fs::write(&prompt_path, contents).unwrap();
+
+    remove_prompt_skill_index_for_target(&prompt_path, SkillInstallTarget::Agents).unwrap();
+
+    let repaired = std::fs::read_to_string(&prompt_path).unwrap();
+    assert!(repaired.contains("Keep before."));
+    assert!(repaired.contains("Keep after."));
+    assert!(!repaired.contains("TraceDecay managed skills"));
+    assert!(!repaired.contains("`generated`"));
+
+    remove_prompt_skill_index_for_target(&prompt_path, SkillInstallTarget::Agents).unwrap();
+    assert_eq!(std::fs::read_to_string(&prompt_path).unwrap(), repaired);
+}
+
+#[test]
+fn prompt_index_start_only_remains_ambiguous_and_fails_closed() {
+    let temp = tempfile::tempdir().unwrap();
+    let prompt_path = temp.path().join("AGENTS.md");
+    let contents = concat!(
+        "# User rules\n\n",
+        "<!-- TRACEDECAY MANAGED SKILLS START agents -->\n",
+        "## TraceDecay managed skills\n\n",
+        "This AGENTS.md index lists approved profile-managed skills. For full instructions, call MCP tool `tracedecay_skill_view` with the listed `id`.\n",
+    );
+    std::fs::write(&prompt_path, contents).unwrap();
+
+    let error =
+        remove_prompt_skill_index_for_target(&prompt_path, SkillInstallTarget::Agents).unwrap_err();
+    assert!(error.to_string().contains("markers are unbalanced"));
+    assert_eq!(std::fs::read_to_string(&prompt_path).unwrap(), contents);
+}
+
+#[test]
+fn uninstall_all_removes_legacy_orphan_alongside_slugged_block() {
+    let temp = tempfile::tempdir().unwrap();
+    let prompt_path = temp.path().join("AGENTS.md");
+    let contents = concat!(
+        "# User rules\n\nKeep before.\n\n",
+        "## TraceDecay managed skills\n\n",
+        "This AGENTS.md index lists approved profile-managed skills. For full instructions, call MCP tool `tracedecay_skill_view` with the listed `id`.\n\n",
+        "- `legacy`: Legacy.\n",
+        "<!-- TRACEDECAY MANAGED SKILLS END -->\n\n",
+        "<!-- TRACEDECAY MANAGED SKILLS START claude -->\n",
+        "## TraceDecay managed skills\n\n",
+        "This Claude index lists approved profile-managed skills. For full instructions, call MCP tool `tracedecay_skill_view` with the listed `id`.\n\n",
+        "- `slugged`: Slugged.\n",
+        "<!-- TRACEDECAY MANAGED SKILLS END claude -->\n\n",
+        "Keep after.\n",
+    );
+    std::fs::write(&prompt_path, contents).unwrap();
+
+    remove_prompt_skill_index(&prompt_path).unwrap();
+
+    let repaired = std::fs::read_to_string(&prompt_path).unwrap();
+    assert!(repaired.contains("Keep before."));
+    assert!(repaired.contains("Keep after."));
+    assert!(!repaired.contains("TraceDecay managed skills"));
+    assert!(!repaired.contains("`legacy`"));
+    assert!(!repaired.contains("`slugged`"));
+}
+
+#[test]
+fn uninstall_all_removes_inverse_order_legacy_orphan_and_slugged_block() {
+    let temp = tempfile::tempdir().unwrap();
+    let prompt_path = temp.path().join("AGENTS.md");
+    let contents = concat!(
+        "# User rules\n\nKeep before.\n\n",
+        "## TraceDecay managed skills\n\n",
+        "This Claude index lists approved profile-managed skills. For full instructions, call MCP tool `tracedecay_skill_view` with the listed `id`.\n\n",
+        "- `legacy`: Legacy.\n",
+        "<!-- TRACEDECAY MANAGED SKILLS END -->\n\n",
+        "<!-- TRACEDECAY MANAGED SKILLS START agents -->\n",
+        "## TraceDecay managed skills\n\n",
+        "This AGENTS.md index lists approved profile-managed skills. For full instructions, call MCP tool `tracedecay_skill_view` with the listed `id`.\n\n",
+        "- `slugged`: Slugged.\n",
+        "<!-- TRACEDECAY MANAGED SKILLS END agents -->\n\n",
+        "Keep after.\n",
+    );
+    std::fs::write(&prompt_path, contents).unwrap();
+
+    remove_prompt_skill_index(&prompt_path).unwrap();
+
+    let repaired = std::fs::read_to_string(&prompt_path).unwrap();
+    assert!(repaired.contains("Keep before."));
+    assert!(repaired.contains("Keep after."));
+    assert!(!repaired.contains("TraceDecay managed skills"));
+}
+
+#[test]
+fn prompt_index_duplicate_balanced_blocks_fail_closed() {
+    let temp = tempfile::tempdir().unwrap();
+    let prompt_path = temp.path().join("AGENTS.md");
+    let block = concat!(
+        "<!-- TRACEDECAY MANAGED SKILLS START agents -->\n",
+        "## TraceDecay managed skills\n\n",
+        "This AGENTS.md index lists approved profile-managed skills. For full instructions, call MCP tool `tracedecay_skill_view` with the listed `id`.\n\n",
+        "<!-- TRACEDECAY MANAGED SKILLS END agents -->\n",
+    );
+    let contents = format!("# User rules\n\n{block}\n{block}");
+    std::fs::write(&prompt_path, &contents).unwrap();
+
+    let error = remove_prompt_skill_index_for_target(&prompt_path, SkillInstallTarget::Agents)
+        .unwrap_err()
+        .to_string();
+
+    assert!(error.contains("markers are ambiguous"));
+    assert_eq!(std::fs::read_to_string(&prompt_path).unwrap(), contents);
 }
 
 #[tokio::test]
