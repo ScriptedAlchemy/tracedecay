@@ -2,9 +2,9 @@
 
 **Goal:** Replace the project-tab dashboard with one profile-wide investigative workbench whose default Brain, Explorer, Causal Loom, domain workspaces, graph lenses, and replay labs make every captured agent, turn, tool, code, Git, delivery, memory, skill, automation, policy, and outcome relationship inspectable while preserving complete sanitized-native evidence and approved V1 semantics.
 
-**Architecture:** A route-lazy React/TypeScript application consumes generated HTTP V2 read-model and command contracts; one URL-addressable `InvestigationStateV1` coordinates scope, time, query, selection, comparison, renderer, and inspector across every route. Server-side aggregation and frozen vector watermarks bound data, TanStack Query owns snapshot caches, an explicit SSE state machine applies typed deltas, and focused Sigma/ELK/Canvas/ECharts/CodeMirror renderers expose synchronized outline/table fallbacks instead of attempting a universal graph hairball.
+**Architecture:** A route-lazy React/TypeScript application consumes generated HTTP V2 read-model and command contracts; one URL-addressable `InvestigationStateV1` coordinates scope, time, query, selection, linked composition, comparison, renderer, and inspector across every route. Server-side aggregation and frozen vector watermarks bound data, TanStack Query owns snapshot caches, an explicit SSE state machine applies typed deltas, and a measured WebGL/Canvas graph renderer plus ELK/ECharts/CodeMirror expose synchronized outline/table fallbacks instead of attempting a universal graph hairball.
 
-**Tech Stack:** React 19; TypeScript 5.9; bundler selected by the measured Rsbuild-versus-Vite ADR; React Router; TanStack Query and Virtual; Sigma.js/Graphology; ELK.js; ECharts; D3 scales; CodeMirror 6; Web Workers; Vitest/Testing Library; Playwright and `@axe-core/playwright`; Rust/Axum embedded assets and generated OpenAPI/JSON Schema client contracts.
+**Tech Stack:** React 19; TypeScript 5.9; bundler selected by the measured Rsbuild-versus-Vite ADR; React Router; TanStack Query and Virtual; large-graph renderer selected by PR 26's current/10× bakeoff (Sigma.js/Graphology, deck.gl/custom typed-buffer WebGL, and Canvas/worker are candidates); ELK.js; ECharts subject to visual/performance validation; D3 scales; CodeMirror 6; Web Workers; Vitest/Testing Library; Playwright and `@axe-core/playwright`; Rust/Axum embedded assets and generated OpenAPI/JSON Schema client contracts.
 
 [`20-configuration-control-plane.md`](20-configuration-control-plane.md) is authoritative for `/settings`: its registry generates every form, source chain, validation rule, impact, CLI/API recipe, and drift state. The frontend cannot retain dashboard-only toggles, hidden config, or its own defaults/precedence.
 
@@ -30,11 +30,11 @@ This plan refines master-plan PRs 4A and 25–32. It depends on the V2 domain, q
 4. Every aggregate states exact versus sampled counts, denominator, hidden count, coverage, watermark, and aggregation/layout version. Unknown is never displayed as zero; inferred is never displayed as observed; correlation is never styled as causation.
 5. Sanitized native records are never silently discarded. Merged PR #410's copied-subagent-prompt dedupe and domain `MessageOrigin`/`MessageView` become explicit UI modes with representative and hidden-copy counts plus source provenance; protected plaintext, if retained, is available only through the separate elevated quarantine workflow.
 6. Canonical V2 read models and commands are the application/API responsibility. Feature modules do not join raw endpoints, synthesize source-of-truth counts, interpret tool schemas, or write stores directly.
-7. All replay labs are read-only by default. Exact, recorded-result, and current best-effort are distinct, persistent labels; unavailable historical inputs are shown as unavailable, not substituted silently.
+7. Every lab evaluator is read-only against production state. The shared experiment operation may persist only immutable replay artifacts and explicitly granted model/egress cost. Exact, recorded-result, and current best-effort are distinct persistent labels; unavailable historical inputs are shown as unavailable, not substituted silently.
 8. The app is local-only and loopback-secured by default. Sensitive literals never enter URLs, browser history, analytics, SSE subscription URLs, cache keys persisted in clear text, clipboard links, or catalog rows.
 9. Accessibility, mobile behavior, table parity, partial/offline behavior, deterministic export, and visual QA are acceptance gates in every feature PR. PR 32 audits and polishes them; it does not introduce them for the first time.
 10. Existing plugins keep their complete read and write behavior until the owning V2 workspace passes behavior/action parity. There is no blanket read-only transition.
-11. No decorative dashboard-card grid, fake metric, gratuitous badge/pill, particle field, 3D graph, perpetual force animation, or color-only evidence encoding is allowed. Use open canvases, rails, lists, matrices, tables, timelines, and one clear focal artifact.
+11. No decorative dashboard-card grid, fake metric, gratuitous badge/pill, particle field, 3D graph, perpetual force animation, or color-only evidence encoding is allowed. Use open canvases, rails, lists, matrices, tables, timelines, and one clear focal artifact. “World class” means faster and more accurate investigation, not visual spectacle.
 12. The shipped UI is code-native. Image-generated concepts are implementation references, not rasterized application screens.
 13. Doctor/provider/daemon branding is evidence-driven: foreign-owned packages are informational, partial integrations are labeled partial, and upgrade completion requires a durable drain/recovery receipt rather than a green icon inferred from process exit.
 
@@ -56,20 +56,23 @@ profile
 identity + time + scope + evidence + provenance + coverage connect every lane
 ```
 
-The interface has one visual thesis: **a quiet investigative instrument with a living but stable map**. Dense evidence is revealed through semantic zoom, selection, and coordinated views rather than by surrounding the user with equally weighted cards.
+The interface has one visual thesis: **Evidence Cartography — a quiet investigative instrument whose stable atlas, temporal strata, and causal threads make a living system navigable without turning it into a hairball**. Dense evidence is revealed through semantic zoom, linked brushing, lens composition, and progressive disclosure rather than by surrounding the user with equally weighted cards. This is the north-star hypothesis, not permission to freeze a palette or renderer before concept validation.
 
 ### 2.1 Concept contract before implementation
 
-PR 4A/25A must use the frontend design workflow to create and approve these code-native UI reference images before production component work:
+PR 4A/25B must use the frontend design workflow to generate **three genuinely different, complete visual directions against the same frozen redacted corpus**. One direction must test Evidence Cartography; the other two must challenge its hierarchy, typography, spatial model, and interaction language rather than merely recolor it. The principal user selects one direction only after a recorded critique and task walkthrough. No production component, palette, typeface, icon family, renderer dependency, or motion token is frozen before this gate.
 
-- Brain desktop at `1440×1000`: first-scan claim, central profile topology, aligned activity rail, compact health strip, inspector.
-- Brain mobile portrait at `390×844`: claim, focused neighborhood, single activity lane, command and inspector sheets.
-- Causal Loom desktop at `1440×1000`: density overview, agent tree, lanes, selected Turn, code/diff inspector.
-- Universal Explorer desktop and mobile: query, result table, graph pivot, explain drawer, comparison collection.
-- Labs desktop: shared replay frame plus Hint Lab and Evolution Studio detail states.
-- Error-state board: loading, empty, stale, partial, offline, locked, redacted, incompatible, and fatal states.
+Each direction includes one coherent storyboard, not a hero-header fragment:
 
-Each concept must preserve the route and data anatomy in this plan, use the exact semantic color ledger, show realistic fixed-corpus data, and include all code-native labels. Review rejects generic card mosaics, illegible miniature charts, detached legends, hover-only values, and concepts that invent metrics or actions. Save approved concept images and an extraction ledger under `dashboard/design/concepts/`; implementation verification compares browser screenshots against them with `view_image`.
+- Brain desktop at `1440×1000` across L0 profile, L1 territory, L2 neighborhood, and L3 evidence, with stable positions through zoom/expansion;
+- Brain mobile portrait at `390×844` and landscape at `844×390`, with focused neighborhood, one temporal lane, command and inspector sheets;
+- Causal Loom desktop with overview density, agent tree, lanes, replay playhead, selected Turn, synchronized graph/transcript/code-diff, and impact wake;
+- Universal Explorer desktop/mobile with query, precise result table, graph/matrix pivot, explain drawer, derived timeline lane, and comparison collection;
+- Experiment cockpit with baseline/candidate columns, pipeline trace, branch graph, sweep matrix, explanation/output diff, and a saved reproducibility recipe;
+- Atlas, Trace, Compare, Lab, and Triage workspace compositions in dense, sparse, partial, error, light, dark, reduced-motion, and 200% text states;
+- the complete loading, empty, stale, partial, offline, locked, redacted, incompatible, context-loss, and fatal state board.
+
+Concepts use realistic fixed-corpus labels and distributions, preserve the route/data anatomy in this plan, and invent no metric or action. Review rejects generic card mosaics, default node-link diagrams, interchangeable SaaS styling, decorative glow, illegible miniature charts, detached legends, hover-only values, unstable layouts, and screens that cannot show dense real evidence. Approval records the chosen direction, rejected alternatives, design rationale, task failures, and an extraction ledger for container model, type system, icon/glyph family, semantic marks, spacing, motion, and responsive continuation. Save approved references under `dashboard/design/concepts/`; implementation verification compares exact-state browser captures and transition recordings against them with `view_image`.
 
 ### 2.2 Screen anatomy
 
@@ -88,9 +91,23 @@ Desktop, width `>= 1120px`:
 - Mobile landscape provides a two-region graph/timeline + inspector layout; it is not a stretched portrait stack.
 - Panel sizes are user preferences. Entity/time/query selection remains shared investigation state.
 
-### 2.3 Semantic color and mark ledger
+“Dominant canvas” means a clear focal surface, not one fixed renderer. Five registered compositions cover the product without creating five state systems:
 
-Create one ledger in `dashboard/packages/design-system/src/semantic-ledger.ts` and CSS variables in `tokens.css`:
+| Composition | Purpose | Bounded slots |
+|---|---|---|
+| **Atlas** | Orient across the whole Brain and move between semantic zoom levels. | stable topology + aligned temporal activity + inspector |
+| **Trace** | Follow a workflow, session, agent, Turn, or task through time and impact. | Causal Loom + transcript/code/diff + inspector |
+| **Compare** | Explain differences between entities, intervals, branches, versions, or runs. | A/B or baseline/variants + aligned diff + evidence ledger |
+| **Lab** | Replay, branch, sweep, minimize, and reproduce one engine decision. | pipeline/branch graph + synchronized result surfaces + manifest rail |
+| **Triage** | Rank and resolve health, privacy, coordination, retrieval, or work issues precisely. | table/matrix + trend or neighborhood + inspector |
+
+Each composition has one to four typed slots, a registered layout, bounded split geometry, dock state, and active slot. All slots share one frozen/live snapshot, scope/time/query, selection, brush, coverage, inspector, and history transaction. A user may replace a slot's renderer or save its geometry, but cannot create a renderer-local filter or second selection store.
+
+### 2.3 Generated visual-semantic ontology
+
+Create one catalog-generated ontology in `dashboard/packages/design-system/src/visual-ontology.ts` and semantic CSS variables in `tokens.css`. It is the only authority for entity-family silhouette/glyph, scope contour/cluster container, evidence ring, relation stroke/arrowhead, temporal/freshness treatment, coverage/privacy texture, label priority, semantic zoom/LOD representation, selection/focus/compare state, and icon meaning. Graph, timeline, table, chart, inspector, export, and accessibility outline consume the same entries; feature code may not create a local legend or reuse a mark for a different meaning. Unknown catalog entries render through an explicit neutral fallback and remain inspectable.
+
+The state-color portion is:
 
 | Meaning | Color role | Required redundant encoding |
 |---|---|---|
@@ -105,15 +122,15 @@ Create one ledger in `dashboard/packages/design-system/src/semantic-ledger.ts` a
 | Sensitive/redacted/locked | privacy scale | lock/redaction icon + text |
 | Late-arriving event | ingest accent | outlined timestamp marker + occurred/ingested times |
 
-The ledger is validated in contrast, grayscale, deuteranopia, protanopia, and tritanopia screenshots. Domain categories may choose shapes/icons but cannot repurpose state colors.
+The ontology is validated in contrast, grayscale, deuteranopia, protanopia, and tritanopia screenshots plus collision fixtures for adjacent entity families, edge classes, nested scopes, partial/privacy overlays, focus versus selection, and comparison variants. Generated legends are local to the current composition and expose only visible semantics. Domain categories register reviewed shapes/icons through the catalog; they cannot repurpose state colors or ship feature-local encodings.
 
 ### 2.4 Concrete design language and tokens
 
-The visual language is quiet, technical, high-density, and evidence-first: neutral surfaces, one focus color, restrained semantic accents, strong typography, direct labels, and open canvas bands instead of nested card chrome. Both light and dark are first-class; neither is an inversion filter. `tokens.css` publishes primitive values only through semantic aliases, and charts/Canvas/WebGL consume the generated token registry rather than hardcoded colors.
+The visual language is quiet, technical, high-density, and evidence-first: neutral surfaces, one focus color, restrained semantic accents, strong typography, direct labels, and open canvas bands instead of nested card chrome. Both light and dark are first-class; neither is an inversion filter. The table below is a measurable **starting hypothesis**, not a locked brand system: the approved §2.1 direction may replace fonts, palette values, radii, and spacing while preserving accessibility, density, semantic-role, local-font, and performance constraints. `tokens.css` publishes approved primitives only through semantic aliases, and charts/Canvas/WebGL consume the generated ontology rather than hardcoded colors.
 
 | Family | Required baseline tokens |
 |---|---|
-| Font | UI: `Inter, ui-sans-serif, system-ui, sans-serif` with local/system fallback and no network font dependency; evidence/code: `ui-monospace, SFMono-Regular, Menlo, Consolas, monospace`. Tabular numerals for time/count/cost. |
+| Font | Concept phase tests at least two locally bundled/system typography pairings with distinct information hierarchy; no network font dependency. Evidence/code uses a legible local monospace and all time/count/cost roles use tabular numerals. The extraction ledger records the approved families, weights, fallback metrics, and licensing. |
 | Type scale | `caption 12/16`, `body-sm 13/18`, `body 14/20`, `label 14/18/600`, `title-sm 16/24/600`, `title 20/28/650`, `display-sm 28/36/650`, `display 40/48/650`; no viewport-dependent type below `12 px`. |
 | Spacing | Base `4 px`; named steps `0, 4, 8, 12, 16, 24, 32, 48, 64`. Layout gutters `16/24/32`; evidence-row indentation `16`; no arbitrary one-off spacing without a concept-ledger exception. |
 | Density | `compact=.875`, `comfortable=1`, `spacious=1.125` applied to spacing/row-height tokens; list rows `32/40/48 px`. Pointer targets remain at least `44×44 px` regardless of density and may use invisible hit padding. |
@@ -122,7 +139,7 @@ The visual language is quiet, technical, high-density, and evidence-first: neutr
 | Focus | `2 px` focus ring plus `2 px` offset, tokenized and never clipped; focus color meets 3:1 against adjacent surfaces. Selected and focused are distinct states. |
 | Motion | durations `80 ms` feedback, `140 ms` selection, `220 ms` spatial transition; `cubic-bezier(.2,.8,.2,1)`. Nothing loops. Reduced motion makes state changes immediate while retaining non-motion marks and announcements. |
 
-Palette baselines, subject to automated contrast correction before token freeze:
+Palette hypotheses, subject to concept approval and automated contrast correction before token freeze:
 
 | Semantic token | Light | Dark |
 |---|---:|---:|
@@ -160,7 +177,7 @@ Plan 13 PR 2A must assess Hermes dashboard files, tests, and interaction flows i
 | `/timeline` | What happened, in what order, and what did it affect? | `features/causal-loom` | density + virtualized causal lanes |
 | `/sessions`, `/sessions/:id`, `/turns/:id` | What context and work occurred in this thread/Turn? | `features/sessions` | session list / Turn evidence outline |
 | `/agents`, `/agents/:id` | Which agents collaborated and with what outcomes? | `features/agents` | delegation tree + Turn sequence |
-| `/work`, `/work/initiatives/:id`, `/work/plans/:id/versions/:version`, `/work/tasks/:id`, `/work/attempts/:id`, `/work/executors`, `/work/scheduler`, `/work/views/:id`, `/work/notifications` | What work exists, how is it gated/routed/executed, and what context/outcomes connect it to the Brain? | `features/work` | initiative/plan outline + saved Kanban/DAG/task/attempt projection |
+| `/work`, `/work/initiatives/:id`, `/work/plans/:id/versions/:version`, `/work/tasks/:id`, `/work/attempts/:id`, `/work/executors`, `/work/scheduler`, `/work/views/:id`, `/work/edit-bundles/:id`, `/work/notifications` | What work exists, how is it gated/routed/executed, and what context/outcomes connect it to the Brain? | `features/work` | initiative/plan outline + saved Kanban/DAG/task/attempt projection + managed declarative edit workspace |
 | `/coordination` | Which nearby agents may overlap, and what safe action is warranted? | `features/coordination` | evidence-ranked presence/overlap ledger + worktree map |
 | `/goals/:id` | How did this Codex goal or provider-native objective evolve and finish? | `features/agents` | versioned goal/plan/Turn evidence ledger |
 | `/workflows/:id`, `/automation/runs/:id` | How did the captured workflow/run execute? | `features/automations` | run waterfall + artifact lineage |
@@ -168,7 +185,7 @@ Plan 13 PR 2A must assess Hermes dashboard files, tests, and interaction flows i
 | `/graphs/:lens` | Show one graph vocabulary over shared state | `features/graphs` | lens-specific renderer |
 | `/knowledge`, `/knowledge/facts/:id`, `/knowledge/entities/:id` | What does TraceDecay know and why? | `features/knowledge` | fact/version/provenance views |
 | `/delivery`, `/projects/:id`, `/projects/:id/branches/:branch`, `/pulls/:id` | What was produced, observed, or encountered in Git/delivery? | `features/delivery` | Git/PR graph + evidence ledger |
-| `/automations`, `/skills`, `/evolution` | How is the system autonomously curating and improving itself? | `features/automations` | autonomy decision/effect/outcome ledger + effectiveness views |
+| `/automations`, `/automation/runs/:id`, `/skills`, `/skills/:id`, `/evolution` | How is the system autonomously curating and improving itself? | `features/automations` | complete run/skill inventory + autonomy decision/effect/outcome ledger |
 | `/observatory` | Is capture, storage, projection, privacy, and query healthy? | `features/observatory` | project × subsystem matrix |
 | `/observatory/context-scout` | Is incremental suggestion preparation useful, timely, quiet, private, and healthy? | `features/observatory` + `features/hints` | trigger/silence/envelope/delivery/outcome funnel + queue/model/tool/host state |
 | `/privacy` | Is the mandatory sanitizer effective across every source/sink, and what is blocked or needs remediation? | `features/privacy` | coverage/unknown matrix + safe remediation lineage |
@@ -176,9 +193,9 @@ Plan 13 PR 2A must assess Hermes dashboard files, tests, and interaction flows i
 | `/playgrounds/:lab` | What would this versioned engine decide, and why? | `features/playgrounds` | shared replay workbench |
 | `/playgrounds/evolution` | How do skills, memories, policies, and automations evolve? | `features/evolution` | version/use/outcome lineage |
 | `/saved/:viewId` | Reopen a classified saved investigation | `features/saved-views` | saved route + state |
-| `/settings`, `/settings/context-scout` | Which effective settings and capabilities govern behavior? | `features/settings` | scoped settings form + source labels; the context-scout subroute renders plan 22's scout target/layer/effective-provenance controls through plan 20's generated registry forms |
+| `/settings`, `/settings/context-scout`, `/settings/integrations` | Which effective settings, capabilities, and host integrations govern behavior? | `features/settings` | scoped settings form + source labels; context-scout renders plan 22's controls, while integrations renders the generated host topology, capability differences, inventory, effective/drift state, and operation history from plans 09/10/20/21 |
 
-Legal `:lens` values are `git`, `code`, `threads`, `agents`, `turns`, `tasks`, `plans`, `timeline`, `memory`, and `automation`. Legal `:lab` values are `hints`, `retrieval`, `ingest`, `query`, `search-quality`, `scope-federation`, `correlation`, `coordination`, `orchestration`, `scheduler`, `memory`, `policy-diff`, and `privacy`; together with the named `/playgrounds/evolution` route these thirteen slugs form the canonical fourteen-lab inventory: Hint, Retrieval, Search Quality, Coordination, Orchestration, Ingest, Query, Correlation, Scheduler, Memory, Policy Diff, Evolution, Scope/Federation, and Privacy. The `privacy` slug displays as "Privacy & Secret Safety Lab" and supersedes the retired `secret-safety` route name; plan 23's temporal "Search Lab" content is folded into the Search Quality Lab, not a separate lab. Hint Lab includes deterministic and incremental-scout replay, Search Quality includes temporal session/LCM retrieval, and Orchestration replays plan/task/executor/context/lease decisions at `/playgrounds/orchestration` (the only route spelling) against plan 10 §8.5's generated `POST /api/v2/labs/orchestration:replay` endpoint. Evolution has a named route because it is both a lab and a product workspace.
+Legal `:lens` values are `git`, `code`, `threads`, `agents`, `turns`, `tasks`, `plans`, `timeline`, `memory`, and `automation`. Legal `:lab` values are `hints`, `retrieval`, `ingest`, `query`, `search-quality`, `scope-federation`, `correlation`, `coordination`, `orchestration`, `scheduler`, `memory`, `policy-diff`, and `privacy`; together with the named `/playgrounds/evolution` route these thirteen slugs form the canonical fourteen-lab inventory: Hint, Retrieval, Search Quality, Coordination, Orchestration, Ingest, Query, Correlation, Scheduler, Memory, Policy Diff, Evolution, Scope/Federation, and Privacy. The `privacy` slug displays as "Privacy & Secret Safety Lab" and supersedes the retired `secret-safety` route name; plan 23's temporal "Search Lab" content is folded into the Search Quality Lab, not a separate lab. Hint Lab includes deterministic and incremental-scout replay, Search Quality includes temporal session/LCM retrieval, and Orchestration replays plan/task/executor/context/lease decisions at `/playgrounds/orchestration` (the only route spelling). Every route is a configured view over plan 10 §8.5's generic experiment/run API and a catalog-owned typed evaluator; no lab gets a bespoke HTTP lifecycle. Evolution has a named route because it is both a lab and a product workspace.
 
 Route changes do not clear scope/time/query/selection unless the destination cannot represent the selected entity. In that case, the selection stays pinned in the inspector and the main view explains the unsupported relation. Browser back/forward restores complete committed investigation states, not only route names.
 
@@ -198,17 +215,9 @@ export type TranscriptMode =
   | "tool_results"
   | "provider_protocol";
 
-export type ComparableSelectionV1 =
-  | { kind: "entity"; id: string }
-  | { kind: "event"; id: string }
-  | { kind: "relation"; edgeKind: string; sourceId: string; targetId: string }
-  | { kind: "path"; nodeIds: readonly string[] }
-  | { kind: "aggregate"; tileId: string; memberCursor: string | null }
-  | { kind: "time_range"; from: string; to: string; laneIds: readonly string[] };
-
-export type SelectionV1 =
-  | ComparableSelectionV1
-  | { kind: "comparison"; a: ComparableSelectionV1; b: ComparableSelectionV1 };
+// VisualSelectionV1, VisualSelectionAtomV1, VisualSelectionOriginV1, and
+// SelectionActionV1 are generated from plan 01; query-state imports them and
+// defines no browser-local selection union.
 
 export type InspectorTabV1 =
   // universal tabs (every workspace)
@@ -216,6 +225,18 @@ export type InspectorTabV1 =
   // Work-workspace extension tabs (plan 24 §12.6 task/attempt inspectors)
   | "specification" | "dependencies" | "acceptance" | "assignments" | "attempts"
   | "packets" | "decisions" | "impact" | "costs" | "audit";
+
+export interface WorkspaceCompositionV1 {
+  kind: "atlas" | "trace" | "compare" | "lab" | "triage";
+  layoutId: string; // registered layout@version
+  slots: readonly {
+    id: string;
+    artifact: "graph" | "timeline" | "table" | "matrix" | "distribution" | "small_multiples" | "transcript" | "code_diff" | "manifest";
+    dock: "primary" | "left" | "right" | "bottom" | "overlay";
+    size: number;
+  }[]; // 1..=4, unique IDs; validated against the composition registry
+  activeSlotId: string;
+}
 
 export interface InvestigationStateV1 {
   version: 1;
@@ -237,7 +258,7 @@ export interface InvestigationStateV1 {
     transcriptMode: TranscriptMode;
   };
   focus: {
-    selected: SelectionV1 | null;
+    selected: VisualSelectionV1 | null;
     retrievalAnchors: readonly string[];
     retrievalRecipeId: string | null;
     pinned: readonly string[];
@@ -245,8 +266,8 @@ export interface InvestigationStateV1 {
     collectionId: string | null;
   };
   view: {
-    renderer: "graph" | "timeline" | "table" | "matrix" | "distribution" | "small_multiples";
-    graphLens: "git" | "code" | "threads" | "agents" | "turns" | "tasks" | "plans" | "timeline" | "memory" | "automation";
+    composition: WorkspaceCompositionV1;
+    graph: GraphCompositionSpecV1; // one primary lens, <=2 overlays, explicit bridge kinds
     layout: string; // registered "<algorithm>@<layoutVersion>" from the renderer registry
     visibleLanes: readonly string[]; // generated per-lens lane-vocabulary IDs only
     levelOfDetail: "auto" | "aggregate" | "neighborhood" | "evidence";
@@ -255,19 +276,19 @@ export interface InvestigationStateV1 {
 }
 ```
 
-Route lens slugs map explicitly to generated application enums: `git→Git`, `code→Code`, `threads→Thread`, `agents→Agent`, `turns→Turn`, `tasks→Task`, `plans→Plan`, `timeline→Timeline`, `memory→Memory`, and `automation→AutomationSkill`. This mapping is generated/fixture-tested; the fixture asserts that the route `:lens` slug list, the `view.graphLens` union members, and the generated application enum stay identical (ten entries each) so a lens can never be routable but URL-unrepresentable. Feature code never title-cases or guesses an enum.
+Route lens slugs map explicitly to generated application enums: `git→Git`, `code→Code`, `threads→Thread`, `agents→Agent`, `turns→Turn`, `tasks→Task`, `plans→Plan`, `timeline→Timeline`, `memory→Memory`, and `automation→AutomationSkill`. This mapping is generated/fixture-tested; the fixture asserts that the route `:lens` slug list and generated `GraphLensV1` enum stay identical (ten entries) so a lens can never be routable but URL-unrepresentable. `view.graph.primary_lens` follows the route; its bounded overlay lenses and bridge kinds remain explicit URL/saved state. Feature code never title-cases or guesses an enum.
 
 Selection, comparison, and inspector semantics:
 
-- Every selection kind the inspector supports (section 9.2) is a `SelectionV1` variant, so relation, aggregate, time-range, and comparison selections are URL-encodable, shareable, and restorable like entity selections. Selections serialize with sorted keys and default elision and carry only opaque IDs.
+- Every selection kind the inspector supports (section 9.2) is a generated domain `VisualSelectionV1` variant, including entity set/lasso, event, relation, path, aggregate membership digest, time range, facet, and bounded comparison. URL encoding is a generated safe opaque-ID/digest codec; protected facet values remain behind `protectedDraftId` and never enter the URL.
 - Period comparison lives in `time.compare` as explicit A/B ranges; entity/aggregate/path/relation/time-range pair comparison is a `comparison` selection. The section 9.1 compare toggle populates exactly one of these two homes; there is no third comparison shape.
 - `InspectorTabV1` is owned here; plan 24 cites it. Plan 24 §12.6's eleven task-inspector tabs map onto the union by a checked table: Overview/specification/constraints→`specification` (`summary` remains the universal landing tab), Dependencies/gates/critical path→`dependencies`, Acceptance/evaluations/exceptions→`acceptance`, Assignments/eligible executors/routing→`assignments`, Attempts/retries/cancellation→`attempts`, Context packets/omissions→`packets`, Decisions/handoffs/artifacts/outcomes→`decisions`, Thread/session/Turn/agent/goal/tool evidence→`evidence`, Code/Git/delivery impact→`impact`, Costs/budgets→`costs`, Audit/provenance/anchors→`audit`. The attempt inspector reuses the same union. Workspaces cannot invent tab values outside this union; non-Work routes ignore Work extension tabs with an explicit "tab unavailable here" state, never a silent reset.
 - The `audit`/`evidence` tabs for plans, documents, initiatives, work items, attempts, agents, and subagents expose versioned research manifests from plan 13: immutable manifest-entry `ResearchAnchorId`, nonempty canonical `RetrievalAnchorId` links, contributor/session/role/output attribution, unresolved attribution gaps, source/catalog/Git watermarks, drift, coverage, redaction state, and retrieval recipe. Selecting an entry resolves evidence only through its canonical retrieval anchors; the UI never treats a research entry ID, response handle, URL, or search rank as payload authority. "Copy evidence" copies the canonical anchor plus optional manifest-entry context.
-- `view.layout` values are registered `<algorithm>@<layoutVersion>` identifiers from the renderer registry; `view.visibleLanes` values come from the generated per-lens lane vocabulary, which is versioned with the application enums above. Restoring a URL whose layout or lane IDs are no longer registered shows an explicit "layout/lanes reset to default" notice and falls back to route defaults — a restored URL never silently no-ops.
+- `view.composition.layoutId` and `view.layout` values are registered `<algorithm>@<layoutVersion>` identifiers from the composition/renderer registries; `view.visibleLanes` values come from the generated per-lens lane vocabulary. Restoring a URL whose composition, slot artifact, layout, overlay lens, bridge kind, or lane ID is no longer registered shows an explicit reset notice and falls back to the closest legal preset — a restored URL never silently no-ops.
 
 ### 4.1 State ownership
 
-- **URL:** route; opaque profile/repository/project/worktree/ref/entity/saved-view IDs; non-sensitive time bounds; renderer/lens/layout; the committed `SelectionV1` (every variant, carrying only opaque IDs); facet IDs; transcript mode. Serialize arrays in stable sorted order and omit defaults.
+- **URL:** route; opaque profile/repository/project/worktree/ref/entity/saved-view IDs; non-sensitive time bounds; renderer/lens/layout; the committed generated `VisualSelectionV1` safe projection; facet IDs; transcript mode. Serialize arrays in stable sorted order and omit defaults.
 - **Encrypted profile storage:** query literals, annotations, collections, protected saved views, replay input payload references, redaction decisions. URLs hold only an opaque `protectedDraftId` scoped to the local profile.
 - **IndexedDB:** versioned bounded response cache, local uncommitted annotation drafts, route recovery checkpoint, deterministic layout coordinates keyed by snapshot/query/layout version. Payloads obey server sensitivity and retention metadata; locked/profile-sign-out purges protected records.
 - **Local preferences:** theme, density, keyboard layout, panel geometry, last nonsensitive route, reduced-motion override. Never store entity payloads here.
@@ -283,11 +304,11 @@ Scope defaults and ambiguity behavior are fixed:
 - Name/path/alias input calls generated scope resolution. Ambiguity opens a keyboard/touch-accessible candidate list; choosing one resubmits the preserved canonical request with its signed retry token in one step. The UI does not rebuild the query, guess by cwd, or ask the user to retype it.
 - CLI/MCP/API equivalents exported from the workbench use the same opaque IDs and resolution token; scope semantics, candidates/order, provenance, coverage, and errors must match exactly.
 
-`dashboard/packages/query-state/src/url.test.ts` must prove canonical round trips (including every `SelectionV1` variant and A/B compare ranges), default elision, back/forward, unknown-version refusal, the lens-slug/union/enum equality fixture, unknown layout/lane-ID reset behavior, and absence of sensitive literal fixtures. `history.ts` debounces replace-state during brushing but pushes selection, route, compare, and committed time changes.
+`dashboard/packages/query-state/src/url.test.ts` must prove canonical round trips (including every generated `VisualSelectionV1` variant and A/B compare range), default elision, back/forward, unknown-version refusal, the lens-slug/`GraphLensV1` equality fixture, legal/illegal overlay and bridge combinations, every registered composition/slot layout, unknown layout/lane-ID reset behavior, and absence of sensitive literal fixtures. `history.ts` debounces replace-state during brushing but pushes selection, route, compare, and committed time changes.
 
 ### 4.2 Transcript modes and #410 seam
 
-Every transcript/session/Turn/search surface shows a persistent mode control with the seven `TranscriptMode` values. Each response includes the generated `TranscriptVisibility` block — a plan 10/17 schema type re-exported through `packages/contracts`, reproduced here for reference and never redefined as a local interface:
+Every transcript/session/Turn/search surface shows a persistent mode control with the seven `TranscriptMode` values. Each response includes the generated `TranscriptVisibility` block — a plan 10/17 schema type re-exported through `app/src/contracts`, reproduced here for reference and never redefined as a local interface:
 
 ```ts
 export interface TranscriptVisibility {
@@ -321,26 +342,9 @@ No empty state says “no messages” when another mode contains records. It say
 
 ### 4.3 Saved-view, collection, and annotation records
 
-These are the shareability deliverables, so they have explicit shapes. All three are generated in the plan 10/17 schema (routes in plan 10 §8.6) and re-exported through `packages/contracts`; the browser defines no parallel record. Reference shapes:
+These are the shareability deliverables. All three are generated in the plan 10/17 schema (routes in plan 10 §8.6) and re-exported through `app/src/contracts`; the browser defines no parallel record. `SavedViewV1` is consumed exactly from plan 01—owner actor/scope, classification/redaction, `Investigation|Task|Experiment` definition, live-or-frozen snapshot manifest/watermark, complete sharing policy, active bundle, expiry, version/timestamps/revocation. Its experiment variant also preserves selected run, cell, stage, comparison, comparison cell, reduction, and playhead. This plan intentionally does not repeat a TypeScript `SavedViewV1` shape that could drift. Collection and annotation reference shapes add frontend size/interaction detail:
 
 ```ts
-export interface SavedViewV1 {
-  id: string;                          // PK: opaque server-issued ID
-  version: number;                     // optimistic-concurrency token
-  name: string;                        // unique per (ownerScope, name)
-  ownerScope: DeclaredScope;           // profile | cross-project | named project
-  classification: "private" | "profile" | "shareable";
-  redactionState: "none" | "redacted" | "pending_review";
-  route: string;
-  state: InvestigationStateV1;         // embedded; stateVersion checked on restore
-  recipeRef: string | null;            // RetrievalRecipeV1 ID (plan 01), never a response handle
-  watermark: string;                   // frozen snapshot/vector watermark
-  shareBundleDigest: string | null;    // set by saved_views.share.start; cleared by saved_views.share.revoke
-  expiresAt: string | null;            // local share expiry
-  createdAt: string;
-  updatedAt: string;
-}
-
 export interface CollectionV1 {
   id: string;                          // PK
   version: number;
@@ -363,14 +367,15 @@ export interface AnnotationV1 {
     | { kind: "anchor"; anchorId: string }
     | { kind: "range"; laneId: string; from: string; to: string };
   bodyRef: string;                     // encrypted-profile-storage ref; plaintext never leaves it
-  classification: "private" | "profile" | "shareable";
-  redactionState: "none" | "redacted" | "pending_review";
+  sensitivity: DataSensitivity;
+  audience: "private" | "profile" | "explicit_grants";
+  redactionState: "none" | "redacted" | "pending_sanitization";
   createdAt: string;
   updatedAt: string;
 }
 ```
 
-Keys, indexes, retention, and size envelopes: primary key is `id` for all three; uniqueness is `(ownerScope, name)` for saved views and collections; the server indexes saved views by owner/route/expiry, collections by owner, and annotations by target anchor. The owning store is the server-side saved-view/collection/annotation store behind plan 10 §8.6; the browser holds them only in the bounded IndexedDB cache (section 8.1), with annotation bodies and protected query literals confined to encrypted profile storage. Size envelopes: a serialized `SavedViewV1` is `<= 32 KiB` (state plus refs; no payload text); a `CollectionV1` holds `<= 10,000` member anchors/refs and serializes to `<= 256 KiB`; an `AnnotationV1` body is `<= 4 KiB`. Records over-envelope are rejected by the command preview with the exceeded bound, not truncated silently. Embedded `InvestigationStateV1` restores through the same versioned codec as URLs: unknown versions are refused with an explicit incompatible state.
+Keys, indexes, retention, and size envelopes: primary key is `id` for all three; uniqueness is `(ownerScope, name)` for saved views and collections; the server indexes saved views by owner/definition-kind/route-or-lens/expiry, collections by owner, and annotations by target anchor. Investigation, task, and experiment variants use the same store, optimistic version, classification/sharing/redaction state, share plan/start/revoke, grant/subscription invalidation, expiry, reopen/reauthorize, and frozen-input unavailable behavior; there is no `SavedTaskViewV1` or `SavedExperimentViewV1` table or ID. Investigation scenes form a merge-free parent-linked trail: the user can retrace, branch, narrate, share, and export a bounded evidence story while every reopen reauthorizes anchors and reports snapshot/layout drift. The experiment variant references immutable experiment/run/cell/stage/comparison/comparison-cell/reduction/playhead identity and never embeds manifests, inputs, or outputs. The browser holds records only in the bounded IndexedDB cache (section 8.1), with annotation bodies and protected query literals confined to encrypted profile storage. Size envelopes: a serialized `SavedViewV1` is `<= 32 KiB` (state plus refs; no payload text and at most `100` scene refs); a `CollectionV1` holds `<= 10,000` member anchors/refs and serializes to `<= 256 KiB`; an `AnnotationV1` body is `<= 4 KiB`. Records over-envelope are rejected by command validation with the exceeded bound, not truncated silently. Embedded `InvestigationStateV1` restores through the same versioned codec as URLs: unknown versions are refused with an explicit incompatible state.
 
 ## 5. Frontend repository and package structure
 
@@ -402,19 +407,42 @@ dashboard/
 │       │   ├── TimeBrushDock.tsx
 │       │   ├── CoverageStatusLine.tsx
 │       │   └── MobileSheets.tsx
+│       ├── contracts/                    # UI-safe aliases/compositions over official client types
+│       ├── shared/
+│       │   ├── inspector/                # universal typed evidence/history/actions inspector
+│       │   ├── renderers/                # graph/DAG/canvas/matrix/table + frozen export scene
+│       │   ├── charts/                   # ECharts wrapper, labels, descriptions, table parity
+│       │   └── code-viewer/              # code/diff/message/source/redaction views
+│       ├── features/
+│       │   ├── brain/                    # topology, aggregate/neighborhood LOD, matrix, workers
+│       │   ├── causal-loom/              # density/lane/agent/transcript/impact timeline
+│       │   ├── playgrounds/              # shared lab workbench plus typed lab pages
+│       │   ├── activity/                 # remaining entries are domain feature boundaries, not packages
+│       │   ├── explorer/
+│       │   ├── graphs/
+│       │   ├── sessions/
+│       │   ├── agents/
+│       │   ├── coordination/
+│       │   ├── work/
+│       │   ├── code/
+│       │   ├── knowledge/
+│       │   ├── delivery/
+│       │   ├── automations/
+│       │   ├── observatory/
+│       │   ├── hints/
+│       │   ├── privacy/
+│       │   ├── costs/
+│       │   ├── evolution/
+│       │   ├── saved-views/
+│       │   └── settings/
 │       └── migration-paths.ts           # bounded pre-cutover mappings; empty after cutover
 ├── packages/
-│   ├── api-client/                       # generated from tracedecay-api OpenAPI
+│   ├── api-client/                       # thin browser auth/bootstrap binding over root packages/tracedecay-client
 │   │   ├── package.json
-│   │   ├── src/generated/schema.ts
 │   │   ├── src/client.ts
 │   │   ├── src/errors.ts
 │   │   ├── src/sse.ts
 │   │   └── test/{contract,sse}.test.ts
-│   ├── contracts/src/                    # UI-safe aliases/compositions over generated API types
-│   │   ├── read-models.ts
-│   │   ├── commands.ts
-│   │   └── contract-version.ts
 │   ├── data-client/src/
 │   │   ├── query-client.ts
 │   │   ├── keys.ts
@@ -437,100 +465,19 @@ dashboard/
 │   │   ├── tokens.css
 │   │   ├── typography.css
 │   │   ├── reset.css
-│   │   ├── semantic-ledger.ts
+│   │   ├── visual-ontology.ts          # generated from plan-08 catalog; no feature-local semantics
 │   │   ├── icons.tsx
 │   │   ├── controls/
 │   │   ├── layout/
 │   │   ├── table/
 │   │   ├── states/
 │   │   └── a11y/
-│   ├── inspector/src/
-│   │   ├── UniversalInspector.tsx
-│   │   ├── SummaryTab.tsx
-│   │   ├── EvidenceTab.tsx
-│   │   ├── RelationsTab.tsx
-│   │   ├── RawTab.tsx
-│   │   ├── HistoryTab.tsx
-│   │   └── ActionsTab.tsx
-│   ├── brain/src/
-│   │   ├── BrainViewport.tsx
-│   │   ├── AggregateTileLayer.tsx
-│   │   ├── NeighborhoodLayer.tsx
-│   │   ├── BrainOutline.tsx
-│   │   ├── BrainMatrix.tsx
-│   │   ├── lod.ts
-│   │   ├── layout-cache.ts
-│   │   └── workers/layout.worker.ts
-│   ├── timeline/src/
-│   │   ├── CausalLoom.tsx
-│   │   ├── DensityBrush.tsx
-│   │   ├── LaneViewport.tsx
-│   │   ├── EventMark.tsx
-│   │   ├── AgentTreeRail.tsx
-│   │   ├── TranscriptWindow.tsx
-│   │   ├── ImpactRibbon.tsx
-│   │   ├── timeline-lod.ts
-│   │   └── workers/timeline.worker.ts
-│   ├── renderers/src/
-│   │   ├── registry.ts
-│   │   ├── RendererFrame.tsx
-│   │   ├── selection-adapter.ts
-│   │   ├── camera-adapter.ts
-│   │   ├── export-scene.ts
-│   │   ├── graph/SigmaRenderer.tsx
-│   │   ├── dag/ElkRenderer.tsx
-│   │   ├── canvas/DenseMarksRenderer.tsx
-│   │   ├── matrix/MatrixRenderer.tsx
-│   │   └── fallback/RelationshipTable.tsx
-│   ├── charts/src/
-│   │   ├── EChart.tsx
-│   │   ├── direct-labels.ts
-│   │   ├── descriptions.ts
-│   │   ├── accessible-table.ts
-│   │   └── chart-theme.ts
-│   ├── code-viewer/src/
-│   │   ├── CodeViewer.tsx
-│   │   ├── DiffViewer.tsx
-│   │   ├── MessageViewer.tsx
-│   │   ├── SourceLocation.tsx
-│   │   └── redaction-decorations.ts
-│   ├── labs/src/
-│   │   ├── LabWorkbench.tsx
-│   │   ├── ReplayModeBanner.tsx
-│   │   ├── InputManifest.tsx
-│   │   ├── DecisionTree.tsx
-│   │   ├── VersionPicker.tsx
-│   │   ├── SideEffectGuard.tsx
-│   │   ├── ComparisonDiff.tsx
-│   │   └── FixturePromotionDialog.tsx
 │   └── testing/src/
 │       ├── fixtures.ts
 │       ├── render.tsx
 │       ├── a11y.ts
 │       ├── fake-sse.ts
 │       └── deterministic-time.ts
-├── features/
-│   ├── brain/
-│   ├── activity/
-│   ├── explorer/
-│   ├── causal-loom/
-│   ├── graphs/
-│   ├── sessions/
-│   ├── agents/
-│   ├── coordination/
-│   ├── work/
-│   ├── code/
-│   ├── knowledge/
-│   ├── delivery/
-│   ├── automations/
-│   ├── observatory/
-│   ├── hints/
-│   ├── privacy/
-│   ├── costs/
-│   ├── playgrounds/
-│   ├── evolution/
-│   ├── saved-views/
-│   └── settings/
 ├── tests/
 │   ├── contract/
 │   ├── component/
@@ -551,10 +498,11 @@ dashboard/
 Rules:
 
 - A production file targets `<= 500` lines; no new file may exceed `800` lines. Route modules contain composition and data loading, not renderer algorithms or endpoint joins.
-- Root `packages/tracedecay-client` is the only OpenAPI-generated TypeScript HTTP/problem/SSE schema/runtime. Dashboard `packages/api-client` is a small browser cookie/CSRF/bootstrap binding and re-export layer over that official package; it contains no generated schema or competing pager/event/problem types. `packages/contracts` provides UI-safe aliases/compositions over the official generated schema and may not duplicate transport/domain types. Tool-catalog generation owns `app/src/generated/{catalog,commands}.ts`; `packages/contracts` re-exports their typed IDs/schemas rather than generating a second catalog.
+- Root `packages/tracedecay-client` is the only OpenAPI-generated TypeScript HTTP/problem/SSE schema/runtime. Dashboard `packages/api-client` is a small browser cookie/CSRF/bootstrap binding and re-export layer over that official package; it contains no generated schema or competing pager/event/problem types. `app/src/contracts` provides UI-safe aliases/compositions over the official generated schema and may not duplicate transport/domain types. Tool-catalog generation owns `app/src/generated/{catalog,commands}.ts`; UI contracts re-export their typed IDs/schemas rather than generating a second catalog.
+- Initial physical package admission is deliberately smaller than the responsibility map: only `api-client`, `data-client`, `query-state`, `design-system`, and `testing` are dashboard packages. UI-safe aliases live at `app/src/contracts/`; Brain, timeline, inspector, labs, renderers, charts, code viewer, and domain workspaces live under `app/src/features/` or `app/src/shared/`. Promote one to a package only after two independent production consumers and a measured bundle/build benefit; a route using two components is not two consumers. ESLint boundaries enforce ownership without package proliferation.
 - `packages/data-client` is the only owner of TanStack Query keys, snapshot caching, SSE, IndexedDB cache, and capability gating.
 - `packages/query-state` is the only owner of URL/history/persistence semantics.
-- `packages/renderers`, `brain`, `timeline`, and `charts` own drawing; feature modules supply typed models and callbacks.
+- `app/src/shared/renderers`, `app/src/shared/charts`, and the Brain/Causal-Loom feature visualization modules own drawing; other feature modules supply typed models and callbacks. These are ESLint ownership boundaries, not packages.
 - Every feature has a route/container boundary and pure presenters. Containers call generated-client query/command hooks, translate the one `InvestigationStateV1`, and select a generated read model; presenters accept sealed models plus typed callbacks and never fetch, join endpoints, read URL/storage, inspect raw problems, or infer legal actions.
 - Generated-client hooks are the sole network entry (`useSnapshotQuery`, `useCursorPage`, `useSubscription`, `useCapabilityCommand`, and `useOperation`). A lint forbids feature imports from `fetch`, Axum routes, raw OpenAPI internals, and V1 client modules.
 - Global state is limited to the committed investigation, auth/capability/theme, and query cache. Each open saved-view/render instance owns an isolated `ViewInstanceStateV1` keyed by `(saved_view_id, instance_id)` for draft facets, grouping, column geometry, expansion, local selection gesture, scroll/window cursor, and renderer camera. Closing an instance destroys it; changing one board cannot mutate another instance or a canonical task.
@@ -562,7 +510,7 @@ Rules:
 - Each renderer creates at most one Canvas/WebGL context and one worker pool. Hidden routes suspend workers and animation frames and release large GPU buffers after a bounded idle period.
 - `features/*` may depend on packages, never another feature's internal files. Shared functionality moves to a package after two proven consumers.
 - No package imports V1 plugin source. Migration adapters live at the route boundary only while the explicit migration flag is active and disappear at cutover.
-- The `dashboard/` workspace uses exactly one package manager: npm with the committed `package-lock.json` (`npm ci` in CI). Root `packages/tracedecay-client` is a separately managed workspace whose generation/test commands run under its own toolchain; the dashboard consumes only its built artifact. No pnpm lockfile, script, or command appears under `dashboard/`.
+- The frontend uses one package manager: npm with committed `package-lock.json` files (`npm ci` in CI) for both `dashboard/` and the separately versioned root `packages/tracedecay-client` workspace. The dashboard consumes only the client's built artifact. No pnpm lockfile, script, or command appears in either workspace.
 
 ## 6. Bundler ADR and embedded-asset boundary
 
@@ -611,8 +559,8 @@ Problems use the one generated `application/problem+json` `ApiProblem { problem_
 
 Commands use generated types and this interaction contract:
 
-1. Capability advertises action, scope, destructive class, preview requirement, and required version.
-2. UI opens a typed preview. Destructive previews list descendants, redactions, holds, irreversible effects, and exact scope.
+1. Capability advertises action, scope, destructive class, operation-specific inspection/plan requirement, and required version.
+2. When required, UI opens the named typed inspection/plan. It lists descendants, redactions, holds, irreversible effects, exact scope, and immutable confirmation; ordinary commands have no preview screen and autonomous curation has none.
 3. Confirm submits an opaque idempotency key and `ifVersion`/watermark; it never reuses a timed-out key for different input.
 4. `409` presents current-versus-requested state and offers refresh/review, never blind retry.
 5. Accepted commands return operation/event IDs; UI follows their projection status through the live feed and links to audit evidence.
@@ -681,7 +629,7 @@ The palette is generated from the versioned capability/tool catalog. Each item s
 
 ### 9.2 Universal inspector
 
-The inspector works for entity, event, aggregate, path, relation, time range, and comparison selections — each a `SelectionV1` variant (section 4), so every supported selection kind is shareable and restorable through the URL:
+The inspector works for entity/set, event, aggregate, path, relation, facet, time range, and comparison selections—each a generated `VisualSelectionV1` variant (section 4), so every supported safe selection kind is shareable and restorable through the URL:
 
 - **Summary:** type, label, time/scope, observed/inferred status, coverage, key measures.
 - **Evidence:** supporting observations/events, source position and privacy-domain-keyed fingerprint identity, evidence class, algorithm, and confidence.
@@ -691,6 +639,8 @@ The inspector works for entity, event, aggregate, path, relation, time range, an
 - **Actions:** generated allowed commands with preview/audit; no action is inferred from UI entity type alone.
 
 Every inspectable research entity exposes “copy stable anchor” and “re-run retrieval recipe.” Resolution shows identity/version/watermark drift and coverage before navigation. A cursor or old response handle can page a current result but is never displayed as the durable research identifier.
+
+Every message, Turn, session, agent, tool invocation/result, hint, fact/memory version, task/attempt, policy evaluation, code/Git entity, and saved selection also exposes the catalog-generated **Fork to Playground** action when at least one evaluator accepts it. The mapping preserves the stable anchor, scope, occurred/as-of time, snapshot/watermark, recorded component versions, current composition/selection, and a backlink to the source scene. The destination shows every editable overlay as a typed diff from the frozen source; unsupported or unavailable inputs remain visible. Feature code cannot hardcode lab routing or silently paste current state into a historical experiment.
 
 Aggregate selection lists exact or sampled membership, denominator, hidden counts, expansion cursor, watermark, and algorithm version. Relation selection explains endpoint identities and why the connector is causal, structural, inferred, similarity, or temporal. Inspector tabs are keyboard-addressable; closing restores focus to the selected mark/row.
 
@@ -707,29 +657,36 @@ The default Brain answers one question in this reading order:
 
 This is a spatial reading path, not six equal cards. On desktop the topology dominates; subordinate sections use open bands. On mobile the claim, one focused cluster, and one activity lane appear first; health/learning/resume live in sheets.
 
+First run never opens an empty analytics wall. With real evidence, a four-step guided investigation moves Brain territory → selected causal path → Turn in Loom → Fork to Playground and can be dismissed or resumed without creating a second state model. With no eligible evidence, the UI explains capture/project enrollment and offers an isolated bundled synthetic tour clearly labeled “example data”; it cannot mix example and real counts, persist example entities into production stores, or present a fabricated health claim. Returning users land on the truthful Brain and may resume any saved scene/experiment from the Resume band.
+
 All/Brain is federated across the selected repositories/projects/worktrees/refs. Nodes, aggregate membership, edges, inspector titles, tables, and exports retain canonical repository/snapshot identity and per-shard provenance/freshness/partial state. Same-name projects, branches, files, symbols, sessions, or agents use disambiguated labels and never merge by display text; cross-repository connectors require typed dependency/session/workflow/Git/evidence relations.
 
 ### 10.1 Brain aggregate tile contract
 
-`BrainTile` is the generated plan 10/17 aggregate-tile read model re-exported through `packages/contracts`; the browser never declares it as a local interface. Reference shape:
+`BrainTile` is the generated plan 10/17 aggregate-tile read model re-exported through `app/src/contracts`; the browser never declares it as a local interface. Reference shape:
 
 ```ts
 export interface BrainTile {
   id: string;
-  kind: "profile" | "project" | "workflow" | "agent_cluster" | "domain_cluster"
-    | "initiative" | "plan_cluster" | "task_cluster" | "attempt_cluster"
-    | "blocker_cluster" | "lease_cluster" | "acceptance_cluster";
-  label: string;
-  membership: { exact: boolean; count: number; denominator: number | null; sampled: number | null };
-  activity: Readonly<Record<string, number | null>>;
-  edgeCounts: readonly { kind: string; evidenceClass: string; count: number }[];
-  coverage: CoverageSummary;
-  hiddenChildren: number;
+  kind: RegistryEntryId;
+  label: SinkEligibleText;
+  membership: AggregateMeasureV1;
+  activity: ReadonlyMap<RegistryEntryId, AggregateMeasureV1>;
+  edgeMeasures: readonly {
+    relationKind: PredicateId;
+    evidenceClass: EvidenceClass;
+    measure: AggregateMeasureV1;
+    coverage: CoverageReportV1;
+  }[];
+  coverage: CoverageReportV1;
+  hiddenChildren: AggregateMeasureV1;
   expandable: boolean;
-  expansionCursor: string | null;
-  layout: { algorithm: string; version: string; seed: string; anchor: [number, number] | null };
+  expansionAnchor: RetrievalAnchorId | null;
+  layout: AtlasLayoutRefV1;
 }
 ```
+
+`AggregateMeasureV1` is the one generated discriminated union from plan 09: exact value/optional denominator, sampled estimate/sample/denominator/uncertainty, capped lower-bound/cap/denominator, or unknown/reason. Membership, activity, edges, hidden children, health, and learning-loop aggregates all use it; impossible boolean/null combinations and bare numbers are unrepresentable. Runtime labels arrive only through the plan-18 sink-eligible wrapper.
 
 Semantic zoom:
 
@@ -738,7 +695,9 @@ Semantic zoom:
 - L2 neighborhood: selected entities and bounded typed relations.
 - L3 evidence: exact message, visible reasoning artifact, tool event, diff, diagnostic, fact source, policy evaluation, artifact, or delivery record.
 
-Expansion preserves existing positions, requests only child tiles/neighborhood, and animates no more than 250 ms unless reduced motion is set. The legibility budget is numeric: at most `250` labeled marks in the viewport, at most `2` overlapping label pairs per `100` labels, and no effective label smaller than `11 px` after zoom. If topology exceeds any of these bounds, the UI increases aggregation or switches to matrix/outline; it never merely hides labels. The performance suite asserts the bounds against the fixture corpus.
+The server publishes a versioned profile-atlas tile pyramid independent of request snapshots. Every tile carries zoom band, fixed atlas geometry, parent/child identity, aggregate-to-canonical membership mapping, importance-ranked label candidates, scope contour, entry/exit anchor, generation lineage, coverage, and prefetch neighbors. Viewport requests use hysteresis between zoom bands and a one-ring prefetch so clusters do not flicker at thresholds. A new snapshot updates evidence within the current atlas generation; a new generation supplies an explicit anchor-lineage transition and never silently reshuffles the user's mental map. This follows map-like multiscale graph work such as [GraphMaps](https://arxiv.org/abs/1506.06745) and recent [graph tile pyramids](https://arxiv.org/abs/2605.17498), adapted to TraceDecay's typed identity/evidence rules.
+
+Expansion preserves existing positions, requests only child tiles/neighborhood, and animates no more than 250 ms unless reduced motion is set. The legibility budget is numeric: at most `250` labeled marks in the viewport, at most `2` overlapping label pairs per `100` labels, and no effective label smaller than `11 px` after zoom. If topology exceeds any of these bounds, the UI increases aggregation, folds a dense community into a node-link/matrix hybrid, or switches to matrix/outline; it never merely hides labels. Dense-community matrix thresholds and manual pin/unpin behavior are versioned and tested against temporal volatility, following the hybrid principle demonstrated by [DynTrix](https://onlinelibrary.wiley.com/doi/full/10.1111/cgf.15076). The performance suite asserts the bounds against the fixture corpus.
 
 ### 10.2 Graph-of-graphs lens contracts
 
@@ -755,7 +714,9 @@ Expansion preserves existing positions, requests only child tiles/neighborhood, 
 | Memory | facts/versions, entities, decisions, contradictions, retrievals, feedback | source, supports, contradicts, supersedes, retrieved, rated | provenance DAG/cluster | trust/version/retention |
 | Automation | jobs, schedules, runs, actors, candidates, artifacts, skill/memory versions, uses, outcomes | scheduled, spawned, proposed, validated, auto-decided, autonomously-applied, injected, observed, automatically-recovered | waterfall + lineage DAG | config/policy/actor identity |
 
-Selecting any node changes the common selected entity and reveals cross-lens pivots. Switching lenses preserves time/scope/selection/pins. Edge keys and inspector language are lens-specific; shared visual geometry does not erase semantics.
+`GraphCompositionSpecV1` is the single lens-stack contract: one primary lens, zero to two overlays, and an explicit bounded set of registered bridge kinds. The ordinary route selects the primary lens; the lens-stack control can overlay, for example, Git + code + Turns or agents + tasks + memory while retaining per-lens node/edge membership, bridge role, evidence style, legend, LOD, and disablement. It returns the same `GraphSliceViewV1`, not a second “combined graph” endpoint. A path such as PR → commit → symbol → Turn → agent → task → fact is therefore visible as typed cross-domain bridges rather than one semantically flattened edge soup.
+
+Selecting any node changes the common selected entity and reveals cross-lens pivots. Switching or composing lenses preserves time/scope/selection/pins and atlas position. Edge keys and inspector language are lens-specific; shared visual geometry does not erase semantics. A composition exceeding the overlay/bridge/legibility budget is rejected with a suggested filtered query, matrix, or sequence of focused neighborhoods.
 
 ## 11. Universal Explorer
 
@@ -779,6 +740,10 @@ The search builder exposes one versioned evaluated retrieval profile with inspec
 Users may disable stages or choose a benchmark-proven profile. The UI never claims embeddings improve results; vector-disabled/unavailable/regressed is visible, and exact literal/phrase hits cannot be demoted below a profile's locked exact-match floor. Search results state stage matches, score components, candidate universe, caps/exclusions, grouping membership, coverage, and benchmark profile/version.
 
 The result surface pivots between precise table, timeline, graph, matrix, distribution, small multiples, and saved collection. All pivots consume one response snapshot and disclose unsupported encodings. Result rows expose type, primary label, time, scope, evidence class, match reason, score components, coverage, and source mode; selecting opens the inspector.
+
+Memory and self-improvement data are ordinary first-class Explorer data, not content hidden behind an Evolution summary. The catalog-owned generated presets `preset.knowledge.all-memories`, `preset.skills.all`, and `preset.automation.all` exhaustively enumerate every authorized fact/fact-version, knowledge entity/version, decision, contradiction, relation assertion, retrieval, feedback, automation job/admission/skip-episode/run/artifact/candidate/decision/effect/recovery, skill/package/version/materialization, recorded use, and outcome. **All memories** instantiates the first preset as an explicit cursor-paged `TraceQueryV1` over active-profile All scope with owner, project, kind, state, tag, trust/evidence, updated-time, source-session/run, and retention filters; it never means “the rows currently loaded by this browser.” The same result set pivots to graph, table, timeline, similarity/matrix, or collection without changing identity or counts. From a transcript or run, users can follow what memory/skill artifacts it informed; from a memory, association, or skill, they can follow exact source Turns/runs and later retrievals, injections, uses, feedback, outcomes, revisions, or recoveries. A relation inspector exposes predicate, valid/observed time, evidence, confidence/trust inputs, producer/version, and supporting anchors; visual thickness or proximity is never the only explanation. This uses the shared query/graph/inspector contracts—there is no separate memory browser database, client-side association score, or required before/after graph mode.
+
+Brush, lasso, path, facet, time-range, table-row, cluster, and inspector-relation interactions never become hidden renderer filters. For **highlight**, **filter**, **exclude**, **compare**, or **derive lane**, the server `query.compose_from_selection` use case returns the canonical visible `TraceQueryV1` delta, explanation, cost, and reversible breadcrumb. Every coordinated slot applies the same accepted delta or declares it unsupported, so graph, timeline, table, and chart cannot drift into different result universes. **Add to collection** is deliberately separate: it resolves the selected stable anchors and invokes versioned `collections.update`; it is never previewed or recorded as a query delta.
 
 Query Explain shows canonical AST/fingerprint, validation, cost/budget, selected and pruned shards, pushed/residual filters, FTS/vector/graph/time operators, ranking components including absent features, candidate universe, per-stage caps, cap-induced exclusions, stable sort key, cursor/watermark, timing, coverage, truncation, message-origin/view semantics, and retention. Noisy ranking can be diagnosed from exact score components and bounded candidates; capped/ambiguous results never look complete. Export equivalent current CLI/MCP/HTTP requests plus a stable retrieval recipe from the server-generated representation so the UI does not reinvent syntax or preserve stale names.
 
@@ -846,9 +811,13 @@ Reasoning is excluded from search, embeddings, export, and saved annotations by 
 - Scrub as-of: project/worktree/ref/snapshot, visible messages/context, fact/memory versions, hint/policy/config/tool catalog, open goals/tasks/workflows, and observed delivery state.
 - Exact replay requires immutable artifact/config/candidate/index/memory/catalog manifest; recorded replay verifies stored result; best-effort lists substitutions.
 
+The Loom is also an experiential replay player. `ReplayFrameViewV1` supplies the current Turn/event, previous/next consequential anchors, before/after state refs, graph delta, code/diff refs, collaborator changes, impact wake, fidelity, and substitutions. Controls are play/pause, speed, step Turn, step event, next error, next mutation, next handoff, and scrub; graph, transcript, code/diff, inspector, and impact ribbon share one playhead and cross-highlight the same stable anchors. Playback never fabricates intermediate state between canonical frames. Reduced motion replaces interpolation with discrete frame changes and an announced change list.
+
+Any compatible `TraceQueryV1` event, interval, or counter result can become a bounded derived lane: name, query fingerprint, grouping facet, color/mark role, snapshot, coverage, and retrieval recipe are explicit; lanes are searchable, pinnable, reorderable, nestable, and saved with the workspace recipe. This adopts the inspectable query-derived-track pattern used by [Perfetto](https://perfetto.dev/docs/analysis/debug-tracks) without importing its trace model. Derived lanes remain server-query results and cannot mutate canonical event order or create client-only counts.
+
 ### 12.5 Timeline windowing contract
 
-The Loom's client data contract for large corpora is typed, generated in the plan 10/17 schema (density-bin fields lifted from master plan §14.2 into schema), and re-exported through `packages/contracts`:
+The Loom's client data contract for large corpora is typed, generated in the plan 10/17 schema (density-bin fields lifted from master plan §14.2 into schema), and re-exported through `app/src/contracts`:
 
 ```ts
 export interface DensityBinV1 {
@@ -901,7 +870,7 @@ Scope and persistence are visible product semantics, not hidden implementation d
 ### 13.0 Work, plans, tasks, and executors
 
 - The canonical selection is initiative/plan-version/work-item/attempt IDs plus frozen/live watermarks. A board is a protected saved `TraceQueryV1` and lens; changing board, repository, agent, executor, or layout never copies or rehomes tasks.
-- A `SavedTaskViewV1` round-trips the complete server contract: protected canonical query/digest with mandatory explicit `query.scope` and derived scope digest, projection/lens/group/sort/layout, owner/sharing grants, live or exact frozen plan/entity/projection versions and watermark, config/catalog/schema versions, optimistic view version, timestamps, and revocation. It defines no second saved-view scope selector. Multiple overlapping view instances remain isolated; reopen never falls back from missing frozen inputs to current state. Share revoke invalidates the exact grant/subscriptions without deleting the owner's view.
+- `SavedViewDefinitionV1::Task(TaskViewSpecV1)` round-trips the complete task-specific contract inside the ordinary `SavedViewV1`: protected canonical query/digest with mandatory explicit `query.scope` and derived scope digest, projection/lens/group/sort/layout, owner/sharing grants, live or exact frozen plan/entity/projection versions and watermark, config/catalog/schema versions, optimistic view version, timestamps, and revocation. It defines no second saved-view ID/store/scope/share lifecycle. Multiple overlapping view instances remain isolated; reopen never falls back from missing frozen inputs to current state. Share revoke invalidates the exact grant/subscriptions without deleting the owner's view.
 - Initiative overview shows exact cross-project scope, plan version, dependency/fan-in state, critical-path interval/slack, budgets/deadlines, active agents/executors, costs, outcomes, coverage, and links to Goals/workflows/code/Git/PR/check/release evidence.
 - Plan outline, Kanban, dependency DAG, critical path, timeline, causal, workload, executor-fleet, repository-work, initiative, agent-relevant, and All views preserve identical IDs/counts/selection. This is plan 24's projection vocabulary exactly: §0.21's saved projections plus §12.5's Executor Fleet/Repository Work lens names and §12.7's agent-relevant slice; 11 renders no view name outside that set. Drag/drop invokes only generated legal commands; derived readiness cannot be set directly. Workload and Executor Fleet runtime/cost/rate/denominator views consume plan 26/PR 30J generated accounting/liveness projections and retain attempt/work-item/executor/route/model/effort drill-down refs, methodology, watermark, and unknown/capped state; the browser never aggregates its loaded rows into a total.
 - One saved view exposes switchable Kanban, DAG, timeline, table, workload, and cross-repository bundle projections over the same authorized `TraceQueryV1`, frozen/live watermark, canonical membership, sort/group specification, and selection. Switching mode preserves filters, selected IDs, exact totals, and per-view camera/column/scroll state; it does not create another saved view or refetch an unbounded board.
@@ -921,6 +890,10 @@ Scope and persistence are visible product semantics, not hidden implementation d
 - Overlap overlay distinguishes authoritative leases/writable-resource reservations, advisory `WorkClaimV1`, intentional ensemble/shared-work children/parallel roles, canonical query-scope overlap, and weak proximity. It shows exact overlap evidence/TTL without sibling prompt text and never labels a work claim as execution ownership.
 - Agent default is the active attempt plus blockers/parents, material siblings, decisions, acceptance, handoffs, packet entries, and workspace conflicts. All work requires an explicit human authorization/scope expansion.
 - `/work/notifications` owns the plan 24 §12.7 human notification-subscription UI: explicit saved filters/channels with event classes, quiet hours, dedupe, rate budgets, and authorization, edited through direct validated `task_notifications.create/update/delete` commands with expected version/idempotency. Task state never auto-subscribes the creating profile/channel, and dashboard toasts, gateway messages, hook hints, and task comments share no accidental notification loop.
+- Every initiative/plan/query/view with edit authority offers **Edit as Markdown**. It first explains the exact frozen selection, external-stub closure, owner, base versions, size estimate, expiry, and destructive-intent rules, then starts `task_graph.edit_bundles.export`; it never downloads an inferred current board or exposes a server path. Small bundles may use an embedded CodeMirror workspace; large bundles use contained download/upload streams while the route retains only the opaque workspace ID and safe manifest summary.
+- `/work/edit-bundles/:id` is a resumable operation cockpit, not a second task editor. Its file tree follows the signed manifest; status shows upload digest, frozen base, TTL, limits, cleanup state, and operation history. Validation renders stable diagnostic code, severity, exact file/range, related spans, and safe fixes in editor, outline, and accessible table. The semantic-diff view groups add/change/retain/explicit-retire plus dependency/gate/assignment/route/budget changes, critical-path effects, and affected active attempts; a raw text diff is supplemental only.
+- Stale bases open an explicit three-way semantic conflict resolver backed by `rebase`; canonical/local/base values and evidence are distinct, conflicts cannot be bulk-accepted blindly, and rebase creates a successor workspace. Submit remains disabled until strict validation, secret scan, version checks, impact acknowledgement where required, and complete upload pass. The final dialog names exact owner/counts/retirements/active-attempt implications and invokes one atomic submit—never preview/apply/rollback or per-file CRUD.
+- Successful submit shows canonical ID mappings, new plan/version anchors, operation/audit receipt, and verified `Purged` cleanup before leaving the cockpit. Validation failure retains the workspace only until its visible TTL; delete/clean and expired/crash-reaped states are idempotent and recoverable only by a fresh export. Mobile is inspect/validate/diff/conflict-review/submit only; editing a large bundle directs the user to CLI/SDK without hiding cleanup or diagnostics. Offline or locked state never presents local bytes as canonical truth.
 
 ### 13.1 Sessions
 
@@ -955,7 +928,8 @@ Scope and persistence are visible product semantics, not hidden implementation d
 
 ### 13.4 Knowledge
 
-- Facts, versions, entities, decisions, contradictions, provenance, trust changes, feedback, retention, holds, supersession, and deletion lineage.
+- `/knowledge` is a complete, cursor-paged inventory of every authorized memory-bearing fact/version, knowledge entity/version, decision, contradiction, and relation assertion across All or an explicit narrower scope. It exposes table, graph, timeline, similarity/matrix, and collection views over one query/snapshot, with kind/state/tag/owner/project/source/trust/evidence/time/retention filters and exact searched/skipped/hidden/redacted/unknown coverage.
+- Fact, memory, entity, and relation selection opens the universal inspector with current content/state, version lineage, source transcript/Turn/run anchors, association predicates and evidence, trust changes, retrieval/use/feedback history, conflicts/supersession, retention/holds, and deletion impact. Previous/next/related navigation never loses the active query or scope.
 - Graph-resident holographic memory is durable user data, not a disposable code-index cache; graph-generation cleanup and reindex controls must never imply that facts or fact-entity relations will be deleted.
 - Retrieval history and candidate explanations.
 - Curator/reflection candidates and exact source→candidate→validation/policy→autonomous effect→use/outcome→autonomous revision/recovery chain; imported approval/apply events are labeled historical/provider evidence.
@@ -970,7 +944,10 @@ Scope and persistence are visible product semantics, not hidden implementation d
 
 ### 13.6 Automations, skills, and autonomous curation
 
-- Schedules, effective config/policy source, locks/leases, skip reasons, run waterfall, actors, artifacts, candidates, validation, autonomy decisions, automatic effects/recovery, and downstream adoption.
+- `/automations` inventories every authorized job, schedule, run, actor, artifact, candidate, validation, autonomy decision, automatic effect/recovery, use, and outcome; `/skills` inventories every skill/package/version/materialization and host state. Both are cursor-paged Explorer-backed views with All/project/type/state/time/source/outcome filters, table/graph/timeline pivots, coverage, and stable anchors—not dashboard samples or status cards.
+- Automation status separates cheap scheduler wakeups, dirty scopes, admission/defer decisions, coalesced skip episodes, actual runs, and nonterminal effect reconciliation. The pending-work view groups thread/project/profile dirty keys by task and trigger class, then shows reason, first/newest activity, coalesced delta, per-shard current/considered/consumed/included frontiers, finalized boundary, active-writer/coverage state, quiet/max-debounce countdown, dependency-selector/semantic-input/evaluation-snapshot digests, and next reconsideration. Admission history distinguishes `NoRelevantChange`, `IdenticalTerminalInput`, `QuietPeriodActive`, `BelowMinimumDelta`, dependency, lock, retry, budget, pause, unknown/partial/deferred/reconciliation state, and exposes model/tool/token/cost work avoided. One expandable skip episode shows first/last evaluation, count, exact frontier tuple, policy/config digest, and why the job is dormant; interval/lock noise never renders as thousands of fake runs.
+- Run detail includes immutable input-contract/manifest, included evidence, typed trigger and reevaluation policy, per-shard current/considered/consumed/included frontiers, active-writer snapshot and coverage, semantic effective-input versus evaluation-snapshot digests, generic operation attempts, backoff/deadline/circuit, poison quarantine or nonterminal effect-reconciliation state, and last-terminal cursor/effect receipt. An old dirty generation, `current > considered`, `considered > consumed`, unknown writer, repeatedly reopening circuit, or starved scope is unhealthy even if recent wakeups were “skipped successfully.” Selecting a frontier, writer, reconciliation receipt, or coalesced skip episode opens its exact source/evaluation anchors in Explorer and the Loom.
+- Run detail renders the exact curator/session-reflector/skill-writer waterfall and lets users traverse source sessions/Turns → artifacts/candidates → validation/evaluation → autonomous decision/effect → memory/skill versions → retrieval/injection/use → feedback/outcome → revision/recovery. Skill detail shows source evidence, content/version diff when authorized, validation/loadability, target hosts/materializations, referenced capabilities, uses/outcomes, drift, and revision/archive lineage. Selecting any step synchronizes the Brain graph, Loom interval, Explorer result, and inspector.
 - Capture Claude workflow runs, Codex goals, and Hermes-style curator/session-reflector/skill-writer concepts as typed related entities, not one ambiguous run type.
 - Managed skill lifecycle: evidence→candidate→validation/eval→policy decision→autonomous materialization→injection/use→outcome→autonomous revision/recovery/archive.
 - Managed memory lifecycle uses the same product spine while preserving fact-specific trust/conflict/supersession/deletion semantics.
@@ -979,6 +956,7 @@ Scope and persistence are visible product semantics, not hidden implementation d
 
 - Project × subsystem health matrix; ingest lag; rewrite/backfill/parser coverage; identity conflicts.
 - Catalog/activity/project/graph/blob health; migrations; projection lag; query latency/caps/partial results.
+- Every operational trend consumes plan 26's `VisualizationEnvelopeV1<MetricSeriesViewV1>`: descriptor, exact points/denominators, threshold bands, configuration/policy/model/catalog boundaries, incidents/remediations, comparison baseline, uncertainty/coverage, and drill-down anchors. Charts never receive an unannotated point bag or invent browser-local thresholds; selecting a boundary/incident opens the same evidence inspector and Causal Loom interval.
 - Doctor findings display severity, observed owner, remediation authority, evidence, and only legal actions. Foreign-owned packages are informational; the UI cannot render an update/repair button for foreign or unknown authority.
 - Storage identity split is a named conflict with both safe candidates, evidence, and no initialize action; it is never rendered as “no index.” An administrator may enter the merged-#425 consolidation workflow: inspect two nonempty source identities, review path-plus-file/inode holder/freeze/reservation state and per-table/artifact dispositions, create/verify backups, produce the deterministic plan/confirmation token, start or resume the durable staging/verification/cutover operation, and copy exact recovery. The UI never accepts arbitrary raw paths, performs client-side merge logic, or starts consolidation from Settings.
 - Store consolidation is operational administration, visually and permission-wise separate from Evolution/curation. It may require confirmation, pause on open holders or failed verification, and expose rollback/recovery receipts. Autonomous memory/fact/managed-skill/profile curation retains no per-item preview/apply/rollback queue and cannot invoke consolidation.
@@ -988,6 +966,28 @@ Scope and persistence are visible product semantics, not hidden implementation d
 - Generated Capability Registry for every current use case and MCP/CLI/HTTP/dashboard/skill/hook binding: semantic version, request/result schema, read/mutate/autonomous/confirmation/recovery mode, scope, privacy, cost, local/live/joined evidence, availability/gap, catalog digest, and “open guided action.” Old curation approval/apply names remain operator-only migration evidence, never current help/hints/catalog.
 - Storage growth, blob integrity/GC, retention, redaction/privacy, remote freshness, malformed rows.
 - Provider/project/domain coverage matrix and direct drill-down to evidence.
+
+### 13.7A Integrations workspace
+
+`/settings/integrations` is the generated administrative workspace for understanding and operating TraceDecay across supported agent hosts. It is not a plugin card grid or a filesystem editor. Its desktop composition is a synchronized target rail, topology canvas, capability-difference matrix, and inspector/history rail; narrow screens preserve the same selection in ordered sheets. The generated plan-10 client is the sole data/command path. Browser code never probes host processes, reads plugin caches/files, parses provider configuration, guesses installation paths, or constructs install commands.
+
+The topology uses stable layered geometry rather than an unconstrained force graph:
+
+```text
+release package set → host target/install scope → package/component
+                    → skills · roles · hooks · MCP facade
+                    → logical registration/profile → effective capability families
+```
+
+Nodes show desired/installed/observed/effective state, version and signed manifest/catalog/profile digest, owner/trust, last-probe cache age, and restart/reconnect requirement. Edges distinguish contains, installs, registers, exposes, depends-on, blocked-by, and drift; shape/line style/text duplicate color. Selecting any node synchronizes the matrix, exact status, current/previous operations, settings provenance, safe evidence anchors, and legal actions. Topology filters cover host, package/component kind, desired/effective/drift/health, owner/trust, stale observation, MCP registration/profile, restart class, and operation state without changing server truth.
+
+The capability-difference matrix is host × component/capability, virtualized and server-paged. Every cell renders plan 09's `HostIntegrationDifferenceRowV1` as separate desired, `HostCapabilityDispositionV1` support, installed, observed, and effective axes plus omissions/fallbacks/evidence/legal actions; it never flattens those axes into one state vocabulary. `Undocumented`, `Stale`, `TrustPending`, absent, disabled, installed-but-unobserved, and observed-but-ineffective remain visually and textually distinct, and none renders as healthy. Users may pivot to package/component inventory, MCP exposure, or compatibility view without issuing a different semantic query. A pinned legend, row/column summaries with exact denominators, compare-two-host mode, and saved filters make large fleets readable; the accessible table is feature-equivalent to the matrix and is the export/copy source.
+
+The inspector includes package/component/registration/profile versions and digests, desired install scope and enablement, generated dependencies/conflicts, ownership and trust authority, observation freshness/stale-cache reason, effective grants/scope/sensitivity/effect ceilings, eager/deferred MCP discovery behavior, inherited/unsupported host caveats, credential-reference status without values, drift, and exact restart/reconnect/reload impact. It links to immutable configuration revision, integration operation, audit/effect/compensation receipts, doctor evidence, and prior install/update/repair/uninstall/verify history. It never renders a raw host path, configuration body, command line, environment value, credential, or arbitrary manifest.
+
+`Install`, `Update`, `Repair`, `Uninstall`, and `Verify` are generated actions visible only when the application returns the corresponding legal admin capability. They submit the typed expected-version/idempotency command, immediately pin the returned `OperationRef`, stream/poll shared operation progress, preserve uncertain-effect reconciliation, and show terminal/restart instructions. `Verify` is the only action that requests a fresh probe; passive page refresh uses persisted observation. Foreign/unknown ownership disables mutation with named remediation authority. Desired-state forms edit plan-20 package/component/install-scope/trust/update/credential-reference settings, then show the separate pending integration operation; save never pretends to install.
+
+Accessibility is a release gate: complete keyboard traversal and roving focus, visible focus at every zoom, screen-reader names that include row/column and full state, matrix/table parity, reduced-motion topology transitions, 200% zoom/reflow, high-contrast and light/dark themes, non-color state encoding, and focus restoration after live deltas or dialogs. Loading, empty, denied, locked, partial, stale, offline, unsupported, foreign-owned, reconnect-required, operation-running, reconciliation, and terminal-error states have designed fixtures and cannot collapse into a spinner or generic red banner.
 
 ### 13.8 Costs
 
@@ -1005,7 +1005,29 @@ Scope and persistence are visible product semantics, not hidden implementation d
 
 ## 14. Replay labs and Evolution Studio
 
-`LabWorkbench` owns immutable input selection, mode/fidelity banner, version pickers, A/B setup, run/cancel, input/output manifests, decision/explanation tree, diff, coverage/substitutions, export, and separate fixture-promotion command. Its `SideEffectGuard` shows `read-only` from a server capability; UI labeling is not the enforcement mechanism.
+The playground is one **experiment cockpit**, not fourteen unrelated debug forms. `LabWorkbench` renders catalog-defined evaluator schemas inside the shared `ExperimentSpecV1`/`ExperimentRunV1` lifecycle and owns immutable input selection, source backlink, requested-mode/actual-fidelity banner, typed parameter controls, baseline plus bounded variants, pipeline DAG, run/cancel/resume/retry/minimize, branch history, sweeps/ablations, synchronized trace/output/explanation diff, metrics/cost/coverage, manifest/resource-access rail, annotations, saved recipe, reproducibility export, failure minimization, and the separate fixture-promotion command.
+
+The canonical desktop anatomy is:
+
+```text
+┌ source + fidelity + versions + budget + run controls + terminal receipt ┐
+├ input/parameter delta rail ┬ pipeline DAG / branch graph ┬ manifest rail ┤
+├ baseline + 1..5 variants: synchronized playhead, graph, timeline, output ┤
+├ case/sweep matrix · heatmap/small multiples/Pareto · causal drill-down   ┤
+└ coverage · substitutions · side-effect receipt · anchors · save/export ┘
+```
+
+One run is one operation-backed cohort. Its cursor-paged `ExperimentCellV1` rows explicitly address variant, evaluator, corpus case, repetition, and sweep values; the sweep matrix, Pareto point, trace, output, and cost all resolve to that cell and anchor. `ReplayTraceV1` pages stable stage IDs for one cell across input/context assembly, candidate generation, rule/policy decisions, tool/model calls, output, and evaluation. `ReplayComparisonV1` pages typed `ReplayComparisonCellV1` alignments across one baseline cell and at most five variant cells and records added, removed, substituted, changed, and unaligned stages. Moving the playhead cross-highlights the same comparison cell/stage in pipeline, timeline, graph delta, message/code/config diff, candidate waterfall, metrics, and explanation; missing stages occupy explicit gaps rather than shifting the comparison.
+
+Experiments form an immutable merge-free DAG through the sole `ExperimentBranchRefV1`. Forking creates a child experiment with parent experiment/run/variant, changed-field patch, source scene/anchor, parent manifest, and output relation; variants are coordinates inside a spec and never form a second ancestry. Bounded one-factor, grid, and pairwise sweeps declare typed values and require deterministic seeds, explicit corpus/cases, 2–6 variants, repetition count, evaluators, concurrency, wall/CPU/RSS/overlay/disk/network/output/FD/process/token/cost/egress budgets, and preflight estimate. They support cancel/resume/retry through the shared operation kernel and expose partial coverage. Heatmaps, small multiples, Pareto fronts, regression slices, and per-cell causal drill-down resolve to the same run/cell/stage anchors.
+
+The application, not a badge, proves isolation. Every run executes through a versioned worker protocol in a fresh process with empty environment, closed inherited descriptors, no ambient credentials, frozen clock/RNG, verified read-only input mounts, bounded disposable overlay, no production repository/store/query-counter/lease/cache/write access, and only brokered explicit model/network grants. The full resource budget is visible before launch; timeout/cancel kills and reaps the process tree. `ReplaySideEffectReceiptV1` lists every opened resource, broker call, granted model/cost use, denied attempt, overlay write, resource high-water mark, forced termination, and final zero-live-effect proof. A remote/model-dependent run can be reproducible in manifest and recorded outputs without claiming byte determinism.
+
+Guided, analyst, and expert modes are disclosure presets over the same experiment state, not separate products: guided narrates the next step and pins the minimum panels; analyst exposes comparison/sweep/evaluator controls; expert exposes complete manifests, schemas, receipts, and recipes. Switching modes never changes inputs, query, run, selection, or result and always exposes where a hidden panel moved.
+
+Every experiment, run, cell, stage, comparison, comparison cell, and minimized failure receives a canonical `RetrievalAnchorId`. The shared saved-view experiment variant can reopen the exact experiment/run/cell/stage/comparison/comparison-cell/reduction/playhead; ordinary annotations target those anchors. Reproducibility export contains the redacted manifest, variants, coordinates/cells, outputs, anchors, annotations, environment, CLI/MCP/HTTP/SDK recipe, side-effect receipt, and expiry. Deterministic delta-debugging can minimize typed removable dimensions—events, context blocks, candidate channels, rules, configuration patches, graph edges, or corpus cases—while preserving a named failing predicate, reduction tree, cap, and every attempted reduction. It may produce only a secret-scanned fixture candidate; the one `experiments.fixtures.promote` command remains separately authorized and never automatic.
+
+The cockpit interaction model follows the useful parts of [Phoenix Playground](https://arize.com/docs/phoenix/prompt-engineering/how-to-prompts/using-the-playground), [LangSmith experiment comparison](https://docs.langchain.com/langsmith/compare-experiment-results), and reactive [Observable notebooks](https://observablehq.com/documentation/notebooks/), while retaining TraceDecay's local-first evidence, privacy, and no-live-side-effect guarantees.
 
 | Lab | Input panels | Required output panels |
 |---|---|---|
@@ -1023,7 +1045,7 @@ Scope and persistence are visible product semantics, not hidden implementation d
 | Policy Diff | corpus plus two bundles | changed/unchanged/regression/win/unlabeled, case diff, latency/token distributions, affected categories, coverage/digest |
 | Privacy | reserved/invalid synthetic canary, parser/detector/policy versions, bounded sink matrix | parse/decode tree, safe detection classes, overlap/marker/receipt, sink eligibility, latency/coverage/version diff; never loads a real candidate or mutates live findings/policy |
 
-The Search Quality workspace has generated, capability-gated subviews for corpus versions, qrel versions, candidate pools, judgments and supersession chains, adjudications, evaluation runs, aggregate/redacted reports, fixtures, and retrieval profiles. Reads bind the corresponding `retrieval.*.list/get` operations from plan 15 §0.1. Actions bind only `retrieval.corpus_versions.create/freeze`, `retrieval.qrel_versions.create/freeze`, `retrieval.candidate_pools.create`, `retrieval.judgments.record/supersede`, `retrieval.adjudications.record`, `retrieval.evaluation_runs.run/cancel`, `retrieval.evaluation_reports.publish`, `retrieval.fixtures.promote`, and `retrieval.profiles.publish/activate`. The UI shows immutable lineage, exact frozen inputs, authorization, sanitization/secret-scan receipts, and operation state; it never rewrites a judgment, edits a frozen artifact, publishes private content, or changes a live query's pinned profile.
+The Search Quality workspace has generated, capability-gated subviews for corpus versions, qrel versions, candidate pools, judgments and supersession chains, adjudications, generic Search Quality experiments/runs/cells/comparisons, aggregate/redacted reports, fixtures, and retrieval profiles. Artifact reads bind the corresponding `retrieval.*.list/get` operations from plan 15 §0.1; experiment reads/runs bind plan 10 §8.5. Direct artifact actions bind only `retrieval.corpus_versions.create/freeze`, `retrieval.qrel_versions.create/freeze`, `retrieval.candidate_pools.create`, `retrieval.judgments.record/supersede`, `retrieval.adjudications.record`, `retrieval.evaluation_reports.publish`, `retrieval.profiles.publish/activate`, and the shared `experiments.fixtures.promote`. The UI shows immutable lineage, exact frozen inputs, authorization, sanitization/secret-scan and side-effect receipts, and operation state; it never rewrites a judgment, edits a frozen artifact, publishes private content, or changes a live query's pinned profile.
 
 ### 14.1 Evolution Studio
 
@@ -1053,13 +1075,15 @@ Present self-improvement as autonomous but evidence-bound, not infallible. Autom
 
 ## 15. Visualization, LOD, and interaction system
 
-Every substantial visual checks in a mini-brief at `dashboard/features/<feature>/visual-brief.md` containing analytical question, data grain, exact/sampled semantics, encoding, selection, keyboard/touch behavior, mobile continuation, URL state, synchronized fallback, export scene, benchmark fixture, and accepted desktop/mobile concept reference.
+Every substantial visual checks in a mini-brief at `dashboard/app/src/features/<feature>/visual-brief.md` containing analytical question, data grain, exact/sampled semantics, encoding, selection, keyboard/touch behavior, mobile continuation, URL state, synchronized fallback, export scene, benchmark fixture, and accepted desktop/mobile concept reference.
+
+One reusable `VisualizationFrame` owns snapshot/coverage chrome, visual-semantic ontology, legend, scale/brush/focus coordination, hit-test selection, visible query delta, camera, accessibility outline, renderer fallback, render-ready, context-loss recovery, and deterministic export. It consumes the shared `VisualizationEnvelopeV1<T>` and renderer registry. Domain features provide typed visual specs and inspector callbacks; they do not create chart wrappers, workers, query filters, selection stores, legends, exporters, or accessibility trees. Linked composition state follows the same scene/state principles as [Vega-Lite parameters](https://vega.github.io/vega-lite/docs/parameter.html) and [Grafana Scenes](https://grafana.com/developers/scenes/core-concepts), but the TraceDecay application remains the source of query/data truth.
 
 ### 15.1 Renderer choice matrix
 
 | Analytical artifact | Primary implementation | DOM/mark budget | Fallback and export |
 |---|---|---|---|
-| Brain/topology and large relationship graphs | Sigma.js + Graphology/WebGL | `50k` loaded nodes/`200k` edges benchmark; interactive/labeled subset bounded by legibility | searchable outline, relationship table, adjacency matrix; deterministic SVG/table export |
+| Brain/topology and large relationship graphs | winner of the PR 26 renderer bakeoff; Sigma.js/Graphology, deck.gl/custom typed-buffer WebGL, and Canvas/worker candidates are evaluated rather than preselected | `50k` loaded nodes/`200k` edges benchmark plus a 10× transfer/layout stress corpus; interactive/labeled subset bounded by legibility | searchable outline, relationship table, adjacency matrix; deterministic SVG/table export |
 | Workflow/provenance/Turn DAG | ELK worker + Canvas with DOM labels under budget | `< 2k` visible marks, otherwise collapsed groups | ordered relationship/evidence list; deterministic SVG |
 | Causal Loom | Canvas density/marks + virtualized DOM transcript | `250k` density marks benchmark; sanitized native/canonical events requested in bounded pages | chronological table/transcript; fixed-viewport Canvas or table export |
 | Time series, bars, heatmaps, distributions | ECharts with custom semantic theme | aggregate bins only | generated directly labeled table; SVG/PNG export |
@@ -1068,6 +1092,12 @@ Every substantial visual checks in a mini-brief at `dashboard/features/<feature>
 | Small precise lists/trees | DOM + TanStack Virtual | visible rows + overscan <= 3 viewports | same semantic DOM is fallback/export |
 
 Do not create a graph when a ranked list or matrix answers the question more precisely. Do not create a chart for one scalar. The user can switch any graph to outline/table, any chart to exact table, and any timeline to transcript.
+
+PR 26 freezes the graph renderer only after a code-backed bakeoff on the current and 10× corpora measures cold/warm render, incremental typed-buffer append, layout/update cost, GPU and JS memory, picking accuracy/latency, overdraw, label quality/collision, LOD transition churn, context loss/recovery, bundle size, accessibility/fallback integration, deterministic export, and concept fidelity on target hardware. The plan does not equate theoretical loaded-node capacity with usable visual quality; [Sigma's own documentation](https://www.sigmajs.org/docs/) and [deck.gl performance guidance](https://deck.gl/docs/developer-guide/performance) are inputs, not conclusions. The losing prototype/dependency is deleted before the foundation PR merges.
+
+The bakeoff ADR preregisters three reproducible hardware tiers before measurements: constrained 8 GiB/iGPU at DPR 1, reference 16 GiB/iGPU-or-entry-dGPU at DPR 1/2, and mobile 6 GiB/touch at portrait/landscape DPR. Browser/OS/GPU/driver, thermal/power mode, viewport, corpus, atlas generation, and five-run median/p95 are recorded. A candidate is disqualified—regardless of aggregate score—if it fails keyboard/screen-reader outline parity, deterministic export, selected-mark visibility, label/collision limits, context-loss recovery, reduced-motion behavior, CSP/offline constraints, reference-tier memory budgets, mobile fallback, or truthful 10× LOD degradation. Atlas tile first/prefetch transfer and decode must meet the same `first useful evidence <=2 s` and local interaction budgets; 10× may aggregate more but cannot lose selected/consequential entities, coverage, or navigation.
+
+Among candidates passing every hard gate, the committed scorecard weights perceptual legibility/object constancy 30%, interaction/render latency 20%, GPU+JS memory 15%, resilience/context loss 10%, accessibility/export integration 10%, bundle/initialization cost 10%, and implementation/maintenance surface 5%. Each metric has a frozen normalization range in the ADR; no post-result weight changes are allowed. A tie within 2 percentage points selects the smaller dependency/code footprint. The ADR includes raw results, screenshots/recordings, disqualifications, sensitivity analysis, winner, and deleted losing prototypes.
 
 ### 15.2 Product visual catalog
 
@@ -1090,13 +1120,14 @@ Do not create a graph when a ranked list or matrix answers the question more pre
 | Where do tokens/costs go? | time series, provider/model/tool heatmap, session small multiples | bin/model→Turn/message/tool ledger | exact cost ledger |
 | Is context being compressed safely? | source→summary DAG, depth distribution, compression line, missing-payload markers | node→source ranges/payload/decision | LCM node/source table |
 | Is data complete and durable? | storage-growth lines, shard/source coverage matrix, lag/disposition histograms | store/shard/source→health/receipts | exact operational table |
-| What would an engine decide? | lab decision tree, candidate score waterfall, A/B diff matrix | rule/candidate/diff→input/evidence/version | ordered explanation/result table |
+| What would an engine decide and where did variants diverge? | experiment pipeline DAG + synchronized replay playhead + baseline/variant trace/output/explanation diff | run→stage alignment→input/evidence/version/resource receipt | ordered stage/alignment/result ledger |
+| Which parameters/cases cause a regression? | branch DAG + sweep heatmap/small multiples/Pareto front + minimization tree | cell/branch/reduction→aligned causal trace and stable anchor | exact case/parameter/metric/reduction table |
 
 Every visual shares inspector, scope/time/selection, coverage status, export manifest, and direct table pivot. Each chart title states the question and data interval, not a vague noun such as “Insights.”
 
 ### 15.3 Stable layout contract
 
-`layout-cache.ts` keys positions by `(snapshotId, queryFingerprint, lens, layoutAlgorithm, layoutVersion, seed)`. Server-provided cluster anchors win; existing nodes keep positions during expansion; new nodes begin at the parent boundary and settle without moving unaffected clusters. A saved camera references the same key and is discarded with an explicit notice on incompatible layout version.
+`layout-cache.ts` keys stable Brain positions by `(profileAtlasGeneration, queryFamily, graphComposition, layoutAlgorithm, layoutVersion, seed)` and evidence-only layouts by `(snapshotId, queryFingerprint, graphComposition, layoutAlgorithm, layoutVersion, seed)`. Server-provided atlas anchors and generation lineage win; existing territories/nodes keep positions during snapshot updates and expansion; new nodes begin at the registered parent/entry boundary and settle without moving unaffected clusters. A saved camera references the same key and migrates through an explicit atlas-anchor lineage or is discarded with an incompatibility notice—never silently aimed at a different territory.
 
 - Force layout runs in a worker and stops at deterministic iteration/energy limits; it never depends on wall-clock frame count.
 - Reduced motion uses the final deterministic coordinates immediately.
@@ -1111,6 +1142,7 @@ Every visual shares inspector, scope/time/selection, coverage status, export man
 - Shift-click pins or adds to comparison; Escape returns to the previous committed selection.
 - Double-click/Enter expands one bounded neighborhood using the server cursor.
 - Lasso operates only in explicit selection mode and announces count; touch uses step-through/add buttons instead.
+- Committing a lasso, path, brush, cluster, or relation never changes the query implicitly: the action menu offers highlight/filter/exclude/compare/derive-lane, previews the canonical `TraceQueryV1` delta from `query.compose_from_selection`, then records the accepted breadcrumb across every linked slot. Collect is a separate `collections.update` command over resolved selected anchors and shows its own optimistic-version receipt.
 - Path mode requires explicit source and target, legal edge kinds, max depth/cost, and at most 20 alternatives.
 - Search results reveal and focus a bounded neighborhood; they do not re-run a whole-graph client filter.
 - Zoom-to-fit, reset, previous/next result, parent, expand, collapse, switch fallback, and open inspector are explicit controls and keyboard commands.
@@ -1134,7 +1166,7 @@ Target WCAG 2.2 AA and completion of every primary workflow by keyboard and scre
 
 - One skip link each for command bar, primary view, outline, inspector, and time brush.
 - Roving focus for graph outline/lane headers; DOM focus never enters thousands of Canvas marks.
-- Canvas/WebGL exposes a synchronized semantic outline with selected item, visible/hidden counts, relations, and viewport summary in an `aria-live="polite"` region.
+- Canvas/WebGL consumes the bounded structured `AccessibilitySceneV1` from the same sealed `VisualizationEnvelopeV1`: stable parent/child hierarchy, roles, sink-eligible labels, logical position/set size, selected/expanded state, relation IDs, legal action IDs, exact/sampled/capped/unknown visible and hidden measures, coverage, truncation, and continuation anchor. The synchronized outline and viewport summary derive deterministically from that scene; a free-text summary cannot substitute for it. DOM/Canvas/table/export parity fixtures compare entity/relation ordering and counts.
 - Timeline has lane list, previous/next consequential event, next Turn, jump to time, expand noise, and read selected chain commands.
 - Keyboard shortcuts are discoverable, remappable, disabled while typing, and never single-character-only without a modifier except standard spatial navigation.
 - Focus is restored after route lazy-load, sheet/dialog close, inspector close, mutation result, and renderer fallback.
@@ -1198,7 +1230,7 @@ The first-scan Brain claim is suppressed when coverage is insufficient to suppor
 
 ## 18. Deterministic export and visual QA
 
-Interactive Canvas/WebGL state is never screenshot directly as the only export. `packages/renderers/src/export-scene.ts` builds a separate frozen scene from:
+Interactive Canvas/WebGL state is never screenshot directly as the only export. `app/src/shared/renderers/export-scene.ts` builds a separate frozen scene from:
 
 - exact query/snapshot/vector watermark and retention watermark;
 - fixed viewport, DPR, font files, locale/time zone, layout seed/version, color theme;
@@ -1213,11 +1245,17 @@ Visual fixtures use a committed redacted corpus, fixed UTC time, fixed fonts, fi
 2. uses `view_image` on both in the same QA pass;
 3. records at least five comparisons across copy, layout, typography, palette, icon/mark semantics, spacing/container, responsive behavior, or motion;
 4. updates `dashboard/design/fidelity-ledger.md` with mismatch and fix;
-5. fails on unapproved visible copy, generic substituted icons, clipped content, overflow, unreadable chart text, empty Canvas, or concept drift.
+5. records semantic-zoom, lens-overlay, replay-playhead, live-arrival, comparison, and LOD-transition motion/storyboard captures where relevant;
+6. runs machine metrics for label collision, edge crossing/occlusion, overdraw, layout/territory churn, selection visibility, empty pixels versus evidence density, and fallback equivalence;
+7. fails on unapproved visible copy, generic substituted icons, clipped content, overflow, unreadable chart text, empty Canvas, feature-local semantic marks, or concept drift.
 
-A mismatch is **material** — and must be fixed or explicitly waived with rationale in the fidelity ledger — when it changes copy text, changes a semantic color/mark meaning from the section 2.3 ledger, adds or removes a UI element, breaks the stated screen anatomy (section 2.2), or shifts spacing/alignment by more than `8 px` at `1440×1000`. Anything below those thresholds is recordable but non-blocking; the reviewer applies the threshold list, not taste.
+A mismatch is **material** — and must be fixed or explicitly waived with rationale in the fidelity ledger — when it changes copy text, visual-semantic meaning, hierarchy, typography role, icon/glyph, focal artifact, composition, interaction affordance, responsive continuation, evidence density, or concept-authored motion; adds/removes a UI element; breaks the section 2.2 anatomy; or produces a perceptually obvious spacing/alignment drift. `8 px` at `1440×1000` is an automated tripwire, not a definition of visual quality. Perceptual screenshot review, transition review, and the principal user's design judgment remain release gates.
 
 Manual browser QA uses the in-app Browser first. Playwright Chromium/WebKit/Firefox supplies repeatable CI and mobile emulation, not visual taste approval.
+
+Visual fidelity is insufficient if users misread the data. Before PR 32 signoff, the principal user, an independent visualization reviewer, and an accessibility reviewer run the fixed corpus in guided, analyst, and expert density modes over the same state model. Measure time-to-first-correct-insight, false-causality rate, sampled/partial/redacted-state comprehension, lens-overlay disorientation, atlas-location recall after zoom/reload, replay-stage comprehension, task completion/error/abandonment, and interaction count. A screen that matches its concept but fails these tasks returns to concept/design work; PR 32 cannot waive it as polish.
+
+The study protocol and thresholds are frozen before the selected concept is implemented. It includes the principal user plus at least six independent participants spanning experienced agent-tool users, engineering newcomers, one visualization specialist, and one assistive-technology user; a person may fill two specialist roles but not reduce the independent count below six. Each participant runs a randomized subset of the fixed tasks once without coaching, then one retained-orientation task 24–72 hours later; scripted fixtures use identical data/version/coverage and the incumbent UI is measured for every overlapping task. Release requires 100% completion of privacy/coverage/causality-critical tasks, at least 85% first-attempt completion overall, false-causality answers `<=5%`, sampled/partial/redacted interpretation accuracy `>=90%`, replay-stage interpretation `>=90%`, atlas target recall `>=80%`, abandonment `<=10%` overall and zero on critical tasks, median recoverable errors `<=1` per task, and no overlapping task more than 20% slower or 20% more interactions than the incumbent without a documented capability gain. The principal user's eight primary workflows must all pass their section 22.2 time limits. Report per-role results, median/p95, errors, confidence intervals where meaningful, recordings/notes under consent, and every failure/retest; changing a task, corpus, threshold, or participant exclusion after results invalidates that run.
 
 ## 19. Performance budgets and degradation
 
@@ -1234,6 +1272,8 @@ Record reference machine, corpus manifest, build mode, browser/GPU, viewport, an
 | Worker progressive layout | first stable partial `<= 500 ms` |
 | Graph | `>= 55 FPS` at 50k loaded nodes/200k edges rendered at `aggregate` LOD, and `>= 55 FPS` at `neighborhood` LOD with 2k visible marks; the benchmark records the LOD level each run passed at |
 | Timeline | `>= 55 FPS` at 250k density marks; native/canonical event hydration bounded by `EventPageV1` (section 12.5: `<= 500` events and `<= 1 MiB` per page, one page prefetch each direction) |
+| Atlas object constancy | unchanged territories move `0 px` across ordinary snapshot refresh; atlas-generation migration reports mapped/unmapped anchors and keeps p95 mapped-territory displacement within the approved transition budget |
+| Visual legibility | zero selected-mark occlusion; `<=2` label collisions per `100` visible labels; edge/mark overdraw, crossing, and LOD-transition churn remain below the committed renderer-bakeoff baselines |
 | Default response payload | `<= 1 MiB`; page/stream larger authorized payloads |
 | Mobile route heap | `<= 300 MiB` JS heap measured via CDP `Performance.getMetrics` `JSHeapUsedSize` under Playwright 390×844 emulation, sampled 5 s after render-ready, median of five runs; hidden routes stop work |
 | Route lazy chunk | per-route budget recorded in a committed budget file; CI fails any chunk `> 10%` over its recorded budget unless the same PR updates the budget entry with a linked justification — an unamended budget file is the definition of "unexplained" |
@@ -1299,7 +1339,7 @@ The phase-4 PR letters in this section are the authoritative sub-split ledger fo
 - Test: `dashboard/tests/visual/brain-concept.spec.ts`
 - Test: `dashboard/tests/accessibility/brain-concept.spec.ts`
 
-- [ ] Generate the six concept/state reference sets in section 2.1 from the fixed information architecture; reject until copy, density, graph/timeline anatomy, mobile continuation, and state semantics are legible.
+- [ ] Generate all three complete section-2.1 directions from the identical frozen corpus; run the fixed user storyboards, record principal-user critique, select one, and reject until hierarchy, identity, density, graph/timeline/lab anatomy, mobile continuation, state semantics, and light/dark behavior are legible.
 - [ ] Record exact tokens, typography, component/container families, icons/marks, allowed copy, viewport composition, responsive continuation, and motion in `extraction-ledger.md`.
 - [ ] Write Playwright tests that expect the Brain claim, central bounded topology driven by real V1 aggregate data, activity rail, health strip, inspector selection, keyboard outline, and mobile sheets. Expected before implementation: route/locators fail.
 - [ ] Implement a feature-flagged, read-only workbench using existing V1 APIs with explicit unavailable/partial joins; it must not pretend project-scoped APIs are All data.
@@ -1307,24 +1347,24 @@ The phase-4 PR letters in this section are the authoritative sub-split ledger fo
 - [ ] Run `cd dashboard && npm test && npm run build && npx playwright test tests/visual/brain-concept.spec.ts tests/accessibility/brain-concept.spec.ts`. Expected: pass.
 - [ ] Commit: `docs(ui): lock Brain workbench product contract` for design/reference artifacts and `feat(ui): prototype V1-backed Brain workbench` for the guarded prototype.
 
-### Task 2: PR 24D/25A — Generated client, bundler ADR, and application foundation
+### Task 2: PR 25A — Generated client consumption, bundler ADR, and application foundation
 
 **Files:**
 - Create: `docs/adr/dashboard-v2-bundler.md`
-- Create: package tree under `dashboard/packages/api-client/`, `contracts/`, `data-client/`, and `testing/`
+- Create: package tree under `dashboard/packages/{api-client,data-client,query-state,design-system,testing}/` plus `dashboard/app/src/{contracts,features,shared}/`
 - Create: `dashboard/app/src/{main,app,router,routes,providers,error-boundary}.tsx`
 - Modify: `dashboard/{package.json,package-lock.json,build.mjs,tsconfig.json}`
 - Modify: selected bundler config, `build.rs`, `src/dashboard/assets.rs`, `src/dashboard/mod.rs`, `Cargo.toml`
 - Test: `dashboard/tests/contract/{generated-drift,asset-manifest,history-fallback}.test.ts`
 - Test: `tests/dashboard_api_test/api.rs`
 
-- [ ] Benchmark Rsbuild and Vite with the exact matrix in section 6 and land measurements/decision/rollback in the ADR as its own PR (PR 24D) that merges before any bundler config file or implementation commit in this task.
+- [ ] Benchmark Rsbuild and Vite with the exact matrix in section 6 and land measurements/decision/rollback in the ADR as the first reviewed commit in PR 25A, before any bundler config file or implementation commit. PR 24D remains exclusively the API-owned deterministic OpenAPI/generated-TypeScript-client slice consumed here.
 - [ ] Write failing generated-client drift, content-hashed asset manifest, CSP, base-path, lazy-chunk, history-fallback, `/api` non-fallback, two-clean-build determinism, and packaged-asset tests.
-- [ ] Run `cargo run -p tracedecay-api --bin generate-openapi -- --check`, then the root client workspace's own generate/test commands for `packages/tracedecay-client` (that workspace's toolchain, per the section 5 package-manager rule — the dashboard itself remains npm-only), and the dashboard browser-binding tests; expose only official typed HTTP/problem/SSE methods plus UI-safe contract aliases.
+- [ ] Run `cargo run -p tracedecay --bin generate-openapi -- --check`, then the root client workspace's own generate/test commands for `packages/tracedecay-client` (that workspace's toolchain, per the section 5 package-manager rule — the dashboard itself remains npm-only), and the dashboard browser-binding tests; expose only official typed HTTP/problem/SSE methods plus UI-safe contract aliases.
 - [ ] Implement one React root, router, providers, route-lazy error boundary, selected bundler, asset manifest, and Axum history fallback.
 - [ ] Preserve old shell/plugins only under the migration feature flag while parity work is active; direct old/new URLs work in that mode, and a cutover fixture proves old live routes/names stop resolving afterward.
 - [ ] Run `cd dashboard && npm ci && npm test && npm run build`; run `cargo test --test dashboard_api_test`; run `cargo package --allow-dirty --no-verify` followed by the repository package verification command. Expected: pass and no second-build diff.
-- [ ] Commit separately: `docs(adr): select dashboard V2 bundler` (PR 24D, first) and `build(dashboard): establish generated V2 application shell` (PR 25A).
+- [ ] Commit separately inside PR 25A: `docs(adr): select dashboard V2 bundler` first, then `build(dashboard): establish generated V2 application shell`; do not reuse PR 24D.
 
 ### Task 3: PR 25B — Investigation state, shell, persistence, and design system
 
@@ -1346,7 +1386,7 @@ The phase-4 PR letters in this section are the authoritative sub-split ledger fo
 ### Task 4: PR 25C — Universal inspector, cache, SSE, and capability commands
 
 **Files:**
-- Create: `dashboard/packages/inspector/src/*`
+- Create: `dashboard/app/src/shared/inspector/*`
 - Complete: `dashboard/packages/data-client/src/*`
 - Test: `dashboard/tests/component/{universal-inspector,coverage-status,command-preview}.vitest.tsx`
 - Test: `dashboard/tests/e2e/{sse-reconnect,partial-offline,optimistic-command}.spec.ts`
@@ -1361,24 +1401,26 @@ The phase-4 PR letters in this section are the authoritative sub-split ledger fo
 ### Task 5: PR 26A — Shared renderer, LOD, chart, export, and worker foundation
 
 **Files:**
-- Create: `dashboard/packages/renderers/src/*`
-- Create: `dashboard/packages/{brain,timeline,charts,code-viewer}/src/*` foundations
+- Create: `dashboard/app/src/shared/renderers/*`
+- Create: `dashboard/app/src/shared/{renderers,charts,code-viewer}/**/*`
+- Create: `dashboard/app/src/features/{brain,causal-loom}/visualization/**/*`
 - Test: `dashboard/tests/component/{renderer-registry,layout-cache,selection-adapter,accessible-chart}.vitest.tsx`
 - Test: `dashboard/tests/e2e/{renderer-context-loss,export-scene}.spec.ts`
 - Benchmark: `dashboard/tests/performance/{graph,timeline,main-thread}.spec.ts`
 
 - [ ] Write failing stable layout, deterministic worker, expansion position, selection/camera adapter, hidden-route suspension, reduced motion, table fallback, WebGL loss, render-ready, and export-manifest tests.
-- [ ] Implement renderer registry/frame, Graphology/Sigma, ELK worker, dense Canvas, matrix, relationship table, chart theme/accessibility, and CodeMirror payload slice primitives.
+- [ ] Implement the bakeoff winner behind the renderer registry/frame, plus ELK worker, dense Canvas, adaptive matrix, relationship table, chart theme/accessibility, and CodeMirror payload-slice primitives; delete losing graph prototypes and dependencies.
 - [ ] Implement deterministic export scene with fixed fonts/DPR/layout and fallback.
 - [ ] Run unit/E2E/performance tests. Expected: stable hashes across two runs, nonblank exports, fallback retains selection, initial route does not load renderer chunks.
+- [ ] Run the section 15.1 renderer bakeoff on current and 10× corpora, record the decision and deletion receipt for losing prototypes/dependencies, then implement one `VisualizationFrame`, renderer registry, visual-semantic ontology, linked scale/brush/focus/legend/export machinery, atlas tile client, and accessibility adapter. No feature-local selection store, chart wrapper, worker protocol, legend, or exporter survives review.
 - [ ] Commit: `feat(dashboard): add bounded visualization foundation`.
 
 ### Task 6: PR 26B — Observatory and non-topology Brain slice
 
 **Files:**
-- Create: `dashboard/features/observatory/src/*`
-- Create: `dashboard/features/brain/src/{BrainPage,FirstScanClaim,HealthStrip,LearningLoop,ResumeWork}.tsx`
-- Create: `dashboard/features/{observatory,brain}/visual-brief.md`
+- Create: `dashboard/app/src/features/observatory/src/*`
+- Create: `dashboard/app/src/features/brain/src/{BrainPage,FirstScanClaim,HealthStrip,LearningLoop,ResumeWork}.tsx`
+- Create: `dashboard/app/src/features/{observatory,brain}/visual-brief.md`
 - Test: `dashboard/tests/e2e/{observatory,brain-summary}.spec.ts`
 
 - [ ] Write failing tests for first-scan suppression under partial coverage, federated All/repository/project/worktree/ref scope and per-shard provenance, same-name disambiguation, Work/initiative/plan/task/attempt/blocker/lease/acceptance first-scan clusters, unfinished-work Resume ordering, project × subsystem health drill-down, foreign-owner doctor severity/actions, partial/degraded provider branding, daemon drain/update recovery receipts, hint/tool outcome denominators, storage/privacy/ingest states, complete current generated Capability Registry/guided action, and learning loop.
@@ -1390,11 +1432,11 @@ The phase-4 PR letters in this section are the authoritative sub-split ledger fo
 ### Task 7: PR 27 — Universal Explorer
 
 **Files:**
-- Create: `dashboard/features/explorer/src/{ExplorerPage,IntentInput,QueryBuilder,TraceQueryEditor,SearchStagePanel,ResultTable,PivotSwitcher,ExplainPanel,BenchmarkPanel,CollectionPanel,ComparePanel}.tsx`
-- Create: `dashboard/features/explorer/visual-brief.md`
+- Create: `dashboard/app/src/features/explorer/src/{ExplorerPage,IntentInput,QueryBuilder,TraceQueryEditor,SearchStagePanel,ResultTable,PivotSwitcher,ExplainPanel,BenchmarkPanel,CollectionPanel,ComparePanel}.tsx`
+- Create: `dashboard/app/src/features/explorer/visual-brief.md`
 - Test: `dashboard/tests/e2e/{explorer,query-explain,collections-compare}.spec.ts`
 
-- [ ] Write failing plain-language→visible-AST, builder/raw round-trip, All/repository/project/worktree/ref scope, same-name candidate retry, lexical/phrase/fuzzy/entity/semantic/graph/recency stage, origin/kind filter, grouping/dedupe/native expansion, validation/cost, candidate cap, pagination/cursor, ranking explanation, Rspack/Rsbuild/React Router cross-repo benchmark, pivot, selection, stable recipe, collection, compare, export, and exact CLI/MCP/API request/result parity tests.
+- [ ] Write failing plain-language→visible-AST, builder/raw round-trip, All/repository/project/worktree/ref scope, same-name candidate retry, lexical/phrase/fuzzy/entity/semantic/graph/recency stage, origin/kind filter, complete memory/skill/automation kind presets, grouping/dedupe/native expansion, validation/cost, candidate cap, pagination/cursor, ranking explanation, Rspack/Rsbuild/React Router cross-repo benchmark, pivot, selection, stable recipe, collection, compare, export, and exact CLI/MCP/API request/result parity tests.
 - [ ] Implement the three query authoring modes and pivots without client joins or SQL syntax.
 - [ ] Add transcript mode/origin facets and hidden-copy counts; prove every sanitized native row remains reachable.
 - [ ] Verify partial shards, unknown denominator, explicit candidate/ranking caps, ambiguous message-origin view, stable cursor plus cursor-independent research recipe, privacy-boundary graph frontier, mobile builder, keyboard results, and table/export parity.
@@ -1404,9 +1446,9 @@ The phase-4 PR letters in this section are the authoritative sub-split ledger fo
 ### Task 8: PR 28A/28B — Causal Loom density, lanes, transcript, and inspector
 
 **Files:**
-- Complete: `dashboard/packages/timeline/src/*`
-- Create: `dashboard/features/causal-loom/src/{CausalLoomPage,lane-model,turn-selection}.ts(x)`
-- Create: `dashboard/features/causal-loom/visual-brief.md`
+- Complete: `dashboard/app/src/features/causal-loom/timeline/*`
+- Create: `dashboard/app/src/features/causal-loom/src/{CausalLoomPage,lane-model,turn-selection}.ts(x)`
+- Create: `dashboard/app/src/features/causal-loom/visual-brief.md`
 - Test: `dashboard/tests/e2e/{loom-density,loom-turn,loom-transcript-modes}.spec.ts`
 
 - [ ] Write failing density exact/sample/hidden/late counts, bounded refinement, stable lanes, consequential event, transcript mode, Turn evidence, virtualized code/diff, and occurred/ingested tests.
@@ -1419,7 +1461,7 @@ The phase-4 PR letters in this section are the authoritative sub-split ledger fo
 ### Task 9: PR 28C/28D/28E — Agent follow, causal evidence, impact, as-of, compare, annotation, export
 
 **Files:**
-- Create: `dashboard/features/causal-loom/src/{AgentFollow,DelegationTree,CausalChain,ImpactRibbon,AsOfPanel,CompareLoom,AnnotationRange}.tsx`
+- Create: `dashboard/app/src/features/causal-loom/src/{AgentFollow,DelegationTree,CausalChain,ImpactRibbon,AsOfPanel,CompareLoom,AnnotationRange}.tsx`
 - Test: `dashboard/tests/e2e/{loom-follow,loom-impact-asof,loom-compare-export}.spec.ts`
 
 - [ ] Write failing parent/subagent/handoff, evidence-class connector, touched-versus-affected, time-machine fidelity, aligned comparison, range annotation, deep-link, and deterministic export tests.
@@ -1428,16 +1470,16 @@ The phase-4 PR letters in this section are the authoritative sub-split ledger fo
 - [ ] Run fixed-corpus user task “follow parent through subagents and code/test/commit/PR impact <=60 seconds.” Expected: pass.
 - [ ] Commit each sub-PR: `feat(timeline): add agent follow and evidence chains`; `feat(timeline): add impact and as-of state`; `feat(timeline): add compare and deterministic export`.
 
-### Task 10: PR 29 — Brain topology and eight graph lenses
+### Task 10: PR 29 — Brain topology and ten graph lenses
 
 **Files:**
-- Complete: `dashboard/packages/brain/src/*`
-- Create: `dashboard/features/brain/src/BrainTopology.tsx`
-- Create: `dashboard/features/graphs/src/{GraphLensPage,lens-registry,git-lens,code-lens,thread-lens,agent-lens,turn-lens,timeline-lens,memory-lens,automation-lens}.ts(x)`
+- Complete: `dashboard/app/src/features/brain/visualization/*`
+- Create: `dashboard/app/src/features/brain/src/BrainTopology.tsx`
+- Create: `dashboard/app/src/features/graphs/src/{GraphLensPage,lens-registry,git-lens,code-lens,thread-lens,agent-lens,turn-lens,timeline-lens,memory-lens,automation-lens}.ts(x)`
 - Test: `dashboard/tests/e2e/{brain-semantic-zoom,graph-lenses,git-drift}.spec.ts`
 
 - [ ] Write failing tile truth-contract, semantic zoom, stable expansion, federated multi-repo/worktree/ref scope, Work/plan/task/attempt/blocker/lease/acceptance cluster membership and cross-domain pivots, same-name node separation, per-shard stale/partial provenance, lens switch, legal edge vocabulary, cross-lens selection, fallback, dense LOD, and Git local/live drift tests.
-- [ ] Implement Brain topology only after PR 26 contracts pass; implement each of the eight base lens registry rows and its mini-brief (Task 10A's `tasks`/`plans` lenses complete the ten-slug union).
+- [ ] Implement Brain topology only after PR 26 contracts pass; implement each of the eight base lens registry rows and its mini-brief (Task 10A's `tasks`/`plans` lenses complete the ten-slug enum), profile-atlas tile pyramid/hysteresis/object-constancy contract, bounded overlay/bridge composition, and adaptive dense-community matrix.
 - [ ] Add generated Git tool actions and explicit semantic/live evidence requirements to Git inspector/palette.
 - [ ] Verify no hairball, aggregate versus evidence edge bundling, mobile focused neighborhood, 50k/200k benchmark, and table/matrix equality.
 - [ ] Commit: `feat(dashboard): connect the graph-of-graphs Brain`.
@@ -1445,17 +1487,19 @@ The phase-4 PR letters in this section are the authoritative sub-split ledger fo
 ### Task 10A: PR 25G/30K — Canonical Work workspace and advanced task lenses
 
 **Files:**
-- Create: `dashboard/features/work/src/**/*`
-- Create: `dashboard/features/graphs/src/{tasks-lens,plans-lens}.ts(x)`
-- Extend: `dashboard/features/{brain,graphs,causal-loom}/src/*`
-- Test: `dashboard/tests/e2e/{work-initiative-plan,work-kanban-dag,work-attempt-packet,work-executor-critical-path,work-notifications}.spec.ts`
+- Create: `dashboard/app/src/features/work/src/**/*`
+- Create: `dashboard/app/src/features/graphs/src/{tasks-lens,plans-lens}.ts(x)`
+- Extend: `dashboard/app/src/features/{brain,graphs,causal-loom}/src/*`
+- Test: `dashboard/tests/e2e/{work-initiative-plan,work-kanban-dag,work-attempt-packet,work-executor-critical-path,work-markdown-edit,work-notifications}.spec.ts`
 
 - [ ] Write failing one-canonical-ID/count/selection tests across initiative outline, saved Kanban, dependency DAG, critical path, timeline, causal, workload, executor-fleet, repository-work, initiative, agent-relevant, and All projections.
-- [ ] Add the `tasks` and `plans` lens-registry rows (`tasks-lens`/`plans-lens`), completing the ten-slug `graphLens` union; extend the section 4 lens-slug/union/enum fixture and prove `/graphs/tasks` and `/graphs/plans` round-trip through URL state.
+- [ ] Add the `tasks` and `plans` lens-registry rows (`tasks-lens`/`plans-lens`), completing the ten-value `GraphLensV1` enum; extend the section 4 lens-slug/enum/composition fixture and prove `/graphs/tasks` and `/graphs/plans` plus legal overlays round-trip through URL state.
 - [ ] Implement initiative/plan/task/attempt routes and inspectors from generated views/legal capabilities, using the section 4 `InspectorTabV1` Work extension tabs for plan 24 §12.6's task/attempt inspector content; board/query/layout state never becomes task or dispatch authority.
+- [ ] Implement the PR 24R **Edit as Markdown** consumer at `/work/edit-bundles/:id`: explicit selection/export, small embedded and large streamed bundle modes, signed manifest tree, source-span diagnostics, semantic graph/active-attempt diff, three-way conflict/rebase, atomic-submit confirmation, canonical-ID receipt, TTL/delete/crash/success cleanup state, and CLI/SDK handoff. Browser state stores only opaque IDs and safe summaries; HTTP never transports a server path.
 - [ ] Consume reviewed plan-13 PR 2A Hermes UI ledger rows, retaining required notices and source-to-test links for direct/behavioral ports; prove a redesigned interaction passes the named upstream regression before dropping the port candidate.
 - [ ] Implement `/work/notifications` (plan 24 §12.7): saved filters/channels with event classes, quiet hours, dedupe, and rate budgets via generated direct validated `task_notifications.create/update/delete` commands; prove task creation never auto-subscribes a channel.
-- [ ] Verify exact Rspack/Rsbuild/React Router scope, one transactional `assign_set` Codex/Claude route partition with all-or-none per-item receipt, fan-out/fan-in/shared-work child gates, attempt list/detail/timeline with immutable start/current accepted packet, registration-scoped offer list/get/accept/decline plus authorized revoke, fenced packet accept at a safe Turn, fully anchored packet entries, typed attestation/review/decision/exception/handoff actions, versioned reopen and exact reverse-transition with no generic undo, advisory-claim-versus-authoritative-lease distinction, query-scope overlap suppression, complete saved-view reopen/share/revoke, workspace/ref/snapshot, requested/actual route, brokered/non-preemptible effects, stale-fence/cancellation status, direct notification subscriptions, task-graph status/doctor, and canonical subscription deltas with no `/task-events` stream.
+- [ ] Verify exact Rspack/Rsbuild/React Router scope, one transactional `assign_set` Codex/Claude route partition with all-or-none per-item receipt, fan-out/fan-in/shared-work child gates, attempt list/detail/timeline with immutable start/current accepted packet, registration-scoped offer list/get/accept/decline plus authorized revoke, fenced packet accept at a safe Turn, fully anchored packet entries, typed attestation/review/decision/exception/handoff actions, versioned reopen and exact reverse-transition with no generic undo, advisory-claim-versus-authoritative-lease distinction, query-scope overlap suppression, complete saved-view reopen/share/revoke, workspace/ref/snapshot, requested/actual route, brokered/non-preemptible effects, stale-fence/cancellation status, direct notification subscriptions, task-graph status/doctor, complete edit-bundle operation/diagnostic/diff/conflict/cleanup parity, and canonical subscription deltas with no `/task-events` stream.
+- [ ] Replay a 100,000-item sharded fixture plus stale-base, partial-upload, explicit-retire, unsafe-archive, secret, concurrent-submit, validation-fix loop, process-death, expiry, and immediate-success-purge cases. Expected: responsive virtualized UI/table parity, precise accessible diagnostics, no omission-driven deletion, no partial canonical write, no leaked path/content, and terminal cleanup truth matches CLI/API/MCP/SDK receipts.
 - [ ] Gate Workload/Executor Fleet implementation on plan 26 PRs 22H/30J and verify cost/runtime/rate/denominator/unknown values and drill-down refs match generated application/CLI/MCP/API/SDK fixtures; no client aggregation.
 - [ ] Prove drag/drop maps to a legal versioned command, blocked work cannot be dragged ready, large graphs aggregate server-side, and every visual has table/mobile/keyboard/export parity.
 - [ ] Commit separately: `feat(dashboard): add canonical work and plan views`; `feat(dashboard): visualize work across the TraceDecay brain`.
@@ -1463,9 +1507,9 @@ The phase-4 PR letters in this section are the authoritative sub-split ledger fo
 ### Task 11: PR 30A/30B/30B2 — Sessions, Agents, and Coordination workspaces
 
 **Files:**
-- Create: `dashboard/features/sessions/src/*`
-- Create: `dashboard/features/agents/src/*`
-- Create: `dashboard/features/coordination/src/*`
+- Create: `dashboard/app/src/features/sessions/src/*`
+- Create: `dashboard/app/src/features/agents/src/*`
+- Create: `dashboard/app/src/features/coordination/src/*`
 - Test: `dashboard/tests/e2e/{sessions,session-raw-canonical,agents,coordination}.spec.ts`
 
 - [ ] Generate failing parity tests for every LCM row in section 20 and every #410 transcript mode/count/provenance behavior.
@@ -1479,8 +1523,8 @@ The phase-4 PR letters in this section are the authoritative sub-split ledger fo
 ### Task 12: PR 30C/30D — Code and Delivery workspaces
 
 **Files:**
-- Create: `dashboard/features/code/src/*`
-- Create: `dashboard/features/delivery/src/*`
+- Create: `dashboard/app/src/features/code/src/*`
+- Create: `dashboard/app/src/features/delivery/src/*`
 - Test: `dashboard/tests/e2e/{code-workspace,code-diff-impact,delivery-git-reconciliation}.spec.ts`
 
 - [ ] Generate failing Code Graph/Diagnostics parity tests plus snapshot/symbol-lineage/diff/impact/affected-test cases.
@@ -1493,14 +1537,14 @@ The phase-4 PR letters in this section are the authoritative sub-split ledger fo
 ### Task 13: PR 30E/30F/30G — Knowledge, Automations/Evolution, and Costs
 
 **Files:**
-- Create: `dashboard/features/knowledge/src/*`
-- Create: `dashboard/features/{automations,evolution}/src/*`
-- Create: `dashboard/features/costs/src/*`
+- Create: `dashboard/app/src/features/knowledge/src/*`
+- Create: `dashboard/app/src/features/{automations,evolution}/src/*`
+- Create: `dashboard/app/src/features/costs/src/*`
 - Test: `dashboard/tests/e2e/{knowledge,automation-skill-lifecycle,evolution,costs}.spec.ts`
 
-- [ ] Generate failing Holographic, Curation, Automation, managed-skills, analytics, and Savings parity tests from section 20, including profile/project declared-scope ownership and cross-project reuse without copied durable state.
-- [ ] Implement Knowledge fact/version/entity/provenance/trust/retrieval/similarity/autonomous-curation flows with decision/effect/outcome/recovery history and config/pause/pin/protect/exclude controls, not item commands.
-- [ ] Implement schedules/runs/actors/artifacts/candidates/skills and Evolution autonomy lineage/version/use/outcome/replay views.
+- [ ] Generate failing Holographic, Curation, Automation, managed-skills, analytics, and Savings parity tests from section 20, including a complete cursor-paged All-memory/All-skill inventory, profile/project declared-scope ownership, cross-project reuse without copied durable state, source-transcript/run traversal, typed trigger/input-contract and per-scope dirty/admission navigation, current-versus-considered-versus-consumed frontier drill-down, semantic-input-versus-evaluation-snapshot digests, active-writer/coverage deferral, grouped/coalesced skip episodes, quiet countdown, identical-input work avoided, generic retry/circuit/quarantine/nonterminal-effect-reconciliation state, and stalled/starved-dirty health.
+- [ ] Implement Knowledge fact/version/entity/relation/provenance/trust/retrieval/similarity/autonomous-curation flows with complete table/graph/timeline navigation, decision/effect/outcome/recovery history, and config/pause/pin/protect/exclude controls, not item commands.
+- [ ] Implement complete schedules/runs/actors/artifacts/candidates/skills inventory/detail plus Evolution autonomy lineage/version/use/outcome/replay views; every source session, produced memory/skill version, later use, and outcome remains traversable through stable anchors.
 - [ ] Implement Costs exact tier/methodology/pricing/recording/offline/unknown-model behavior and linked drill-down.
 - [ ] Switch each domain to its current V2 route only after read/write parity and rollback drill; remove the old live binding atomically.
 - [ ] Commit three reviewable PRs with feature-specific titles.
@@ -1508,10 +1552,10 @@ The phase-4 PR letters in this section are the authoritative sub-split ledger fo
 ### Task 13A: PR 25F/30L — Privacy workspace and Context Scout Observatory
 
 **Files:**
-- Create: `dashboard/features/privacy/src/*`
-- Create: `dashboard/features/hints/src/*`
-- Create: `dashboard/features/observatory/src/ContextScoutPage.tsx`
-- Create: `dashboard/features/{privacy,hints}/visual-brief.md`
+- Create: `dashboard/app/src/features/privacy/src/*`
+- Create: `dashboard/app/src/features/hints/src/*`
+- Create: `dashboard/app/src/features/observatory/src/ContextScoutPage.tsx`
+- Create: `dashboard/app/src/features/{privacy,hints}/visual-brief.md`
 - Test: `dashboard/tests/e2e/{privacy-observatory,context-scout}.spec.ts`
 
 - [ ] Write failing `/privacy` tests: `PrivacyProtectionStatusV1` rendering, source × sink × privacy-domain coverage matrix, unknown/locked/corrupt/skipped coverage blocking a clean claim, finding rows exposing only opaque ID/class/confidence/state (a fixture with candidate/substring/span/fingerprint fields must fail to render), elevated-auth scan/remediation previews, restore blocked until isolated scan/rebuild/promotion receipts, and each named current-gap regression row from section 13.9.
@@ -1524,12 +1568,12 @@ The phase-4 PR letters in this section are the authoritative sub-split ledger fo
 ### Task 14: PR 25D/30H — Activity, saved views, and Settings
 
 **Files:**
-- Create: `dashboard/features/activity/src/*`
-- Create: `dashboard/features/saved-views/src/*`
-- Create: `dashboard/features/settings/src/*`
+- Create: `dashboard/app/src/features/activity/src/*`
+- Create: `dashboard/app/src/features/saved-views/src/*`
+- Create: `dashboard/app/src/features/settings/src/*`
 - Test: `dashboard/tests/e2e/{activity,saved-views,settings}.spec.ts`
 
-- [ ] Write failing activity live/frozen/filter/coverage, generated activity-model parity, `SavedViewV1`/`SavedTaskViewV1`/`CollectionV1`/`AnnotationV1` complete round-trip and size-envelope rejection (section 4.3), simultaneous overlapping task views, exact frozen-input unavailable state, saved protected-query classification/redaction/share-plan/start/revoke/expiry, URL restore, declared-owner conflict, #425 identity-split consolidation inspect/plan/start/status/resume/recover and exact recovery-command fixtures, and full effective-source Settings parity tests (including the `/settings/context-scout` subroute rendering plan 22's scout controls through plan 20's registry forms).
+- [ ] Write failing activity live/frozen/filter/coverage, generated activity-model parity, all three `SavedViewDefinitionV1::{Investigation,Task,Experiment}` variants plus `CollectionV1`/`AnnotationV1` complete round-trip and size-envelope rejection (section 4.3), proof that no task/experiment-view table/ID/share command fork exists, simultaneous overlapping views, exact experiment/run/cell/stage/comparison/comparison-cell/reduction/playhead restore, exact frozen-input unavailable state, saved protected-query classification/redaction/share-plan/start/revoke/expiry, URL restore, declared-owner conflict, #425 identity-split consolidation inspect/plan/start/status/resume/recover and exact recovery-command fixtures, and full effective-source Settings parity tests (including the `/settings/context-scout` subroute rendering plan 22's scout controls through plan 20's registry forms).
 - [ ] Implement cross-domain activity with consequential-event priority, project/domain facets, bounded live paging, inspector, table fallback, and no duplicate hidden counts.
 - [ ] Implement saved-view create/update/open/delete plus generated `saved_views.share.plan`, `saved_views.share.start`, and `saved_views.share.revoke` commands; protected query literals/annotations remain encrypted, published views expire locally, and sharing requires classification/redaction planning plus explicit confirmation. Generated binding-ID parity tests cover every CLI/MCP/HTTP/SDK/UI spelling.
 - [ ] Implement profile/project/integration/automation/storage settings reads and commands with explicit `DeclaredScope`, effective source/default, immutable environment source, validation, optimistic conflict, migration/resync/restart impact, and audit receipt. Launch #425 consolidation only through its separate admin workflow surface; Settings may link to an active diagnostic/operation but cannot auto-submit, merge stores, or expose it as curation.
@@ -1537,21 +1581,59 @@ The phase-4 PR letters in this section are the authoritative sub-split ledger fo
 - [ ] Switch Settings to the current V2 route only after read/write parity and rollback drill; remove the old live binding atomically.
 - [ ] Commit independently: `feat(dashboard): add cross-domain activity`; `feat(dashboard): add protected saved investigations`; `feat(dashboard): add effective Settings workspace`.
 
-### Task 15: PR 31A–31M — One replay lab per PR
-
-Thirteen slug labs ship as PR 31A–31M in the section 14 table order; Evolution Studio (the fourteenth canonical lab) ships its product workspace in Task 13 and reuses the generated `labs/evolution:inspect`/`labs/evolution:simulate` bindings, so it needs no letter here. This letter mapping follows the section 21 tracking-truth rule.
+### Task 14A: PR 25H — Generated Integrations topology and operations workspace
 
 **Files:**
-- Complete: `dashboard/packages/labs/src/*`
-- Create: `dashboard/features/playgrounds/src/{HintLab,RetrievalLab,IngestLab,QueryLab,SearchQualityLab,ScopeFederationLab,CorrelationLab,CoordinationLab,OrchestrationLab,SchedulerLab,MemoryLab,PolicyDiffLab,PrivacyLab}.tsx`
+- Create: `dashboard/app/src/features/settings/src/integrations/*`
+- Create: `dashboard/app/src/features/settings/src/integrations/visual-brief.md`
+- Test: `dashboard/tests/e2e/integrations.spec.ts`
+
+- [ ] Write failing generated-client fixtures for multi-host/package/component topology; base plus zero/one/many companions; skills/roles/hooks/MCP enablement; logical registration/profile exposure; desired/documented/version-gated/absent/unknown/disabled/installed/observed/effective matrix states; version/digest drift; foreign/unknown ownership; trust; stale cache; credential-ref status; omissions/fallbacks; reconnect/reload/restart; and operation history.
+- [ ] Implement `/settings/integrations` per §13.7A with stable layered topology, virtualized capability-difference matrix and equivalent table, target/inventory pivots, filters/compare, synchronized inspector, exact counts/coverage, deep links, and preserved URL selection.
+- [ ] Bind desired package/component/install-scope/trust/update/credential settings only through plan 20's generated registry client. Prove save creates no host effect and cannot claim observed/effective state.
+- [ ] Bind `Install|Update|Repair|Uninstall|Verify` only to generated plan-10 commands and the shared `OperationRef` monitor. Test admin denial, expected-version/idempotency conflict, foreign-owner refusal, uncertain-effect reconciliation, Verify-only fresh probing, and restart/reconnect completion.
+- [ ] Add recursive fixtures containing host paths, config bodies, command lines, environment values, credentials, and arbitrary manifests; fail if any field reaches DOM, URL, telemetry, clipboard/export, error, or screenshot artifact. Assert the browser makes no host/filesystem/config probe outside the generated client.
+- [ ] Verify keyboard/screen-reader matrix navigation, table parity, focus restoration under deltas, reduced motion, non-color encoding, 200% zoom, high contrast, both themes, mobile sheets, direct reload/back/forward, and every loading/empty/denied/locked/partial/stale/offline/unsupported/reconciliation/error state.
+- [ ] Run `cd dashboard && npm test && npx playwright test tests/e2e/integrations.spec.ts`. Expected: pass with no accessibility, console, request-schema, or visual-regression failure.
+- [ ] Commit `feat(dashboard): add integrations topology workspace`.
+
+### Task 15: PR 31A–31Q — Shared cockpit, evaluator labs, and owned extensions
+
+The canonical mapping is explicit and is the only PR-to-lab truth:
+
+| PR | Owner |
+|---|---|
+| 31A | Shared hermetic experiment cockpit, operation/run/cell/trace/comparison/branch/sweep/minimize/anchor/save/export lifecycle, and universal Fork to Playground; no evaluator ships before it. |
+| 31B | Hint evaluator base. |
+| 31C | Retrieval evaluator. |
+| 31D | Ingest evaluator. |
+| 31E | Query evaluator. |
+| 31F | Correlation evaluator. |
+| 31G | Scheduler evaluator. |
+| 31H | Memory evaluator. |
+| 31I | Policy Diff evaluator, including configuration precedence/effect mode. |
+| 31J | Search Quality evaluator and qrel review (plan 15). |
+| 31K | Coordination evaluator. |
+| 31L | Scope/Federation evaluator, including configuration target-resolution mode. |
+| 31M | Privacy & Secret Safety evaluator plus Privacy Observatory integration; synthetic canaries only. |
+| 31N | Configuration/autonomy extensions to the existing Policy Diff and Scope/Federation evaluators; not a new lab. |
+| 31O | Incremental Context Scout extension to the existing Hint evaluator (plan 22), not a new lab. |
+| 31P | Temporal/session/LCM extension to the existing Search Quality evaluator (plan 23), not a new lab. |
+| 31Q | Orchestration evaluator (plan 24). |
+
+Evolution is the fourteenth evaluator and ships with its product workspace in Task 13/PR 30G over the same 31A cockpit. Thus there are exactly fourteen `LabKindV1` values, thirteen playground slugs plus named Evolution, one shared lifecycle, and no Configuration/Search/Scout extension masquerading as another lab.
+
+**Files:**
+- Complete: `dashboard/app/src/features/playgrounds/shared/*`
+- Create: `dashboard/app/src/features/playgrounds/src/{HintLab,RetrievalLab,IngestLab,QueryLab,SearchQualityLab,ScopeFederationLab,CorrelationLab,CoordinationLab,OrchestrationLab,SchedulerLab,MemoryLab,PolicyDiffLab,PrivacyLab}.tsx`
 - Test: `dashboard/tests/e2e/labs/*.spec.ts`
 
-- [ ] First write shared failing tests for fidelity label, immutable manifest, missing input, substitutions, comparison, cancellation, coverage, read-only proof, redaction, export, and separately authorized fixture promotion.
-- [ ] Implement shared `LabWorkbench` and server-enforced side-effect guard.
-- [ ] Implement one lab per PR with the exact panels in section 14; Query Lab reuses Explorer AST/editor; Search Quality consumes generated corpus/qrel/pool/judgment/adjudication/run/report/profile reads and the exact direct commands in §14, including supersession, cancel, aggregate publication, scanned fixture promotion, and profile activation; Scope/Federation reuses the generated selector/resolution/shard-plan models; Correlation reuses Git reconciliation; Coordination reuses proximity/overlap models but has no messaging port; Orchestration reuses plan/task/route/lease/packet views against plan 10 §8.5's generated `labs/orchestration:replay` endpoint but has no scheduling/executor/effect port; Memory reuses Knowledge inspector; and Privacy ("Privacy & Secret Safety Lab") accepts synthetic canaries only.
+- [ ] In PR 31A first write shared failing tests for requested/actual fidelity, complete immutable manifest, universal Fork to Playground mapping, source backlink, missing input/substitutions, explicit run-cell coordinates, paged stage/comparison cells, sole branch ancestry, typed sweep values, cancellation/resume/retry/minimize, partial coverage, enforced resource budgets/zero-effect receipt, every anchor, save/share/annotation/playhead, redacted reproducibility export, retention holds, and separately authorized fixture promotion.
+- [ ] Implement shared `LabWorkbench` over the generic experiment/operation lifecycle, synchronized cell-scoped `ReplayTraceV1`/paged `ReplayComparisonV1` playhead, schema-generated parameter controls, branch/sweep visualizations, and server-enforced hermetic worker runtime; no lab owns a scheduler, run table, comparison vocabulary, or side-effect guard.
+- [ ] Implement one catalog evaluator per PR with the exact panels in section 14 over plan 10 §8.5's generic experiment/run API; Query Lab reuses Explorer AST/editor; Search Quality consumes generated corpus/qrel/pool/judgment/adjudication/report/profile reads and the exact direct publication/activation commands in §14; Scope/Federation reuses selector/resolution/shard-plan models; Correlation reuses Git reconciliation; Coordination has no messaging port; Orchestration has no scheduling/executor/effect port; Memory reuses Knowledge inspector; and Privacy ("Privacy & Secret Safety Lab") accepts synthetic canaries only. Run/cancel/resume/retry is the shared experiment operation, not a domain evaluator command.
 - [ ] Run each lab twice and assert exact mode decision/explanation digest equality; recorded mode does not execute; best-effort lists every substitution.
-- [ ] Run Hint Lab fixed-corpus user task “replay then-versus-now and explain exact payload difference <=60 seconds.” Expected: pass.
-- [ ] Commit one feature PR per lab; no omnibus labs merge.
+- [ ] Run the no-documentation fixed-corpus task “select any Turn → Fork to Hint Lab → replay then/current → explain exact payload difference → branch one policy field → run a bounded sweep → minimize a failing case → save/share the anchored experiment” within the accepted comprehension/time budget. Expected: pass without a live-state write.
+- [ ] Commit according to the table; extension PRs add evaluator modes/corpora only, and no omnibus or duplicate lab lifecycle merges.
 
 ### Task 16: PR 32 — Cross-product accessibility, responsive, export, and visual signoff
 
@@ -1563,6 +1645,7 @@ Thirteen slug labs ship as PR 31A–31M in the section 14 table order; Evolution
 - [ ] Run automated axe (`@axe-core/playwright`, zero serious/critical violations per route) and manual keyboard/screen-reader/contrast/grayscale/color-deficiency/reduced-motion/table-parity audits for every route against a fixed per-route checklist derived from the section 16.1 requirements, on NVDA + Firefox (Windows) and VoiceOver + Safari (macOS and iOS); record pass/fail per checklist row in `dashboard/tests/accessibility/manual-audit.md` — an audit without a completed checklist does not count as passed.
 - [ ] Run desktop/laptop/mobile portrait/mobile landscape/200% text zoom fixtures and every sheet/gesture/orientation/focus path in sections 16 and 18.
 - [ ] Compare each route screenshot against its accepted concept with `view_image`; fix every reviewable mismatch and close the fidelity ledger.
+- [ ] Run section 18's preregistered study with the principal user and at least six independent participants spanning agent-tool, newcomer, visualization, and assistive-technology roles; record incumbent comparison, time/interactions, errors, false-causality, partial-state comprehension, atlas recall, replay comprehension, abandonment, exclusions, and retests. Expected: every frozen release threshold passes.
 - [ ] Run deterministic JSON/Markdown/SVG/PNG export twice and compare manifests/hashes; verify WebGL fallback and no hover-only data.
 - [ ] Run performance budgets and fixed-corpus user tasks; fix unexplained bundle/chunk/heap/FPS regressions.
 - [ ] Run `cd dashboard && npm ci && npm test && npm run build && npx playwright test`; run `cargo test --test dashboard_api_test`; run package verification. Expected: all pass.
@@ -1599,14 +1682,14 @@ Thirteen slug labs ship as PR 31A–31M in the section 14 table order; Evolution
 
 ### 22.2 User-task gates on the fixed corpus
 
-Each user task is a scripted Playwright scenario with a fixed step script and deterministic fixtures — not a human trial. Timing is measured from navigation start to the scenario's final assertion pass on the recorded reference machine, median of five runs. These eight scenarios define the "primary workflows" referenced by the section 19 long-task budget. "Survive typo/role ambiguity" is concrete: the script submits a fixed misspelled query and an ambiguous role facet and passes only if the disambiguation flow completes to the target result without a dead end or manual query retyping.
+Each user task has a scripted Playwright scenario with deterministic fixtures for repeatability and a matching human comprehension/orientation protocol from section 18; neither substitutes for the other. Script timing is measured from navigation start to the final assertion on the recorded reference machine, median of five runs. These eight scenarios define the "primary workflows" referenced by the section 19 long-task budget. "Survive typo/role ambiguity" is concrete: the script submits a fixed misspelled query and an ambiguous role facet and passes only if the disambiguation flow completes to the target result without a dead end or manual query retyping.
 
 - Find an exact historical direct-user prompt, expand its copied/delegated/native set, and prove sanitized source identity/export in `<= 30 s`.
 - Follow a parent agent through subagents and direct code/test/commit/PR impact in `<= 60 s`.
 - Inspect an inferred relation and find its evidence/confidence/algorithm in `<= 30 s`.
-- Replay one hint then-versus-now and explain the exact payload difference in `<= 60 s`.
+- From a selected Turn, Fork to Playground, replay one hint then-versus-now, align changed stages, and explain the exact payload difference in `<= 60 s`; the extended manual protocol branches one field, sweeps, minimizes, and saves the anchored experiment.
 - Compare two sessions and export complete evidence with coverage/caveats in `<= 90 s`.
-- Find why a managed skill or memory version changed, the actor/run that changed it, validation, uses, outcomes, and any autonomous supersession/recovery in `<= 90 s`.
+- Open All Memory, verify complete cursor/coverage semantics, filter and inspect one memory/association, then find its source transcript/actor/run, validation, uses/outcomes, and any autonomous supersession/recovery in `<= 90 s`; repeat the source/use traversal for one managed skill.
 - Find an active nearby agent in a parallel worktree, prove direct overlap, inspect the safe summary/anchor, send or suppress one audited coordination action, and verify no repeat hint in `<= 60 s`.
 - Start at All, disambiguate same-name Rspack/Rsbuild/React Router scope candidates, traverse a cross-repo graph/search result, and export equivalent CLI/MCP/API retrieval recipes with matching provenance in `<= 60 s`.
 
@@ -1630,17 +1713,17 @@ Expected: all pass. Before executing Rust compiler/check commands, use TraceDeca
 
 - `/` opens a truthful All/Brain view across the active profile; project selection is a filter, not another app.
 - All/repository/project/worktree/ref scopes are explicit and ambiguity-safe — the section 22.2 scope task and its typo/ambiguity script complete without dead ends — and semantically identical across dashboard/CLI/MCP/API; federated Rspack/Rsbuild/React Router fixtures retain same-name disambiguation and per-shard provenance/stale/partial state.
-- Git, code, thread, agent, Turn, timeline, memory, and automation/skill graph lenses preserve distinct semantics and coordinated state.
+- Git, code, thread, agent, Turn, task, plan, timeline, memory, and automation/skill graph lenses preserve distinct semantics, compose through bounded typed overlays/bridges, and retain a stable profile-atlas mental map across ordinary refresh.
 - Causal Loom follows agents/sessions/Turns through context, visible reasoning, tools, code, tests, Git/delivery, hints/memory, goals, and outcomes with evidence-class connectors.
 - Claude workflows, Codex goals, and Hermes-style curator/reflector/skill-writer actors are captured and visible as typed related entities.
 - Evolution Studio makes skill, memory, policy, and automation evolution inspectable from evidence through autonomous version/use/outcome/supersession/recovery.
 - Agent coordination exposes expiring evidence-backed same/parallel-worktree proximity, direct overlap, safe summaries, stable anchors, audited actions, one deduped hint, and read-only historical replay without claiming presence from silence.
-- Every lab exposes exact/recorded/best-effort fidelity and cannot mutate live state by default.
+- Every lab uses one experiment/run lifecycle, exposes exact/recorded/best-effort fidelity, aligned stage traces, branches/sweeps, canonical anchors, and a resource-access receipt proving it cannot mutate live state.
 - #410 native/representative/human-best-effort/direct-user/delegated-agent/tool-result/provider-protocol modes, counts, provenance, and copy membership are explicit; no record is silently omitted.
 - Every V1 read, filter, state, action, capability, route, and error behavior is inventoried and parity-proven or documented as an approved semantic change before retirement.
 - Every view has loading/empty/stale/partial/offline/locked/redacted/incompatible/error behavior, table/outline parity, desktop/mobile behavior, keyboard/screen-reader support, reduced motion, and deterministic export.
 - Initial bundle, response, render, FPS, main-thread, heap, and user-task budgets pass on the recorded corpus/reference machine.
-- Approved concepts and final browser screenshots pass `view_image` fidelity review with no material mismatch, as defined by the section 18 threshold list (copy, semantic color/mark, element add/remove, anatomy, `> 8 px` spacing at `1440×1000`).
+- Three complete concept directions are critiqued against identical data before one is approved; final screenshots and transition recordings pass `view_image`/storyboard fidelity review, perceptual and legibility metrics, principal-user approval, independent visualization/accessibility critique, and section-18 comprehension/orientation gates.
 - Legacy plugins retire independently after bounded migration/rollback receipts close; no stale live name/fallback survives V2 default, and no frontend cutover deletes user data or backend evidence.
 - No production frontend file exceeds `800` lines and no route/application component becomes a feature, data, and renderer hairball.
 
@@ -1652,7 +1735,7 @@ Expected: all pass. Before executing Rust compiler/check commands, use TraceDeca
 - [ ] Every graph lens names legal nodes/edges/layout/fallback/evidence.
 - [ ] Agent proximity/coordination preserves expiring claim evidence, same/parallel-worktree semantics, safe summary/anchor/recipe, audited actions, one-hint dedupe, Coordination Lab, and analytics.
 - [ ] Explorer exposes lexical/phrase/fuzzy/entity/semantic/graph/recency stages, origin/kind filters, grouping/dedupe/native expansion, Query Explain caps, and per-slice benchmark gates without assuming embeddings help.
-- [ ] Every V1 mutation has preview/command/audit/parity ownership.
+- [ ] Every V1 mutation has direct or operation-specific command/audit/parity ownership; no generic preview/apply/rollback lifecycle returns through the UI.
 - [ ] URL/local/IndexedDB/encrypted storage ownership excludes sensitive literals from unsafe locations.
 - [ ] SSE gap/resync/offline/coverage semantics preserve last-known-good evidence.
 - [ ] Mobile, keyboard, screen reader, reduced motion, table fallback, deterministic export, and visual fidelity start in feature PRs.

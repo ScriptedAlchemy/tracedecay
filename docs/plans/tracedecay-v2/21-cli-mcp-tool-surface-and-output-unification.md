@@ -2,9 +2,9 @@
 
 > **For agentic workers:** implement this plan only inside the existing V2 program. Do not create a parallel command system, renderer stack, scope resolver, error model, or configuration registry.
 
-**Goal:** Replace TraceDecay's independently evolved CLI commands and hand-written MCP protocol/tool stack, routing allowlists, output switches, raw-JSON renderers, pagination conventions, response truncation, help text, and compatibility aliases with one generated semantic surface and a first-class MCP adapter. Every current command, tool, resource, protocol method, and host behavior receives an explicit keep/replace/remove disposition; every surviving binding invokes one application use case and renders one typed result consistently.
+**Goal:** Replace TraceDecay's independently evolved CLI commands and hand-written MCP protocol/tool stack, routing allowlists, output switches, raw-JSON renderers, pagination conventions, response truncation, help text, and compatibility aliases with one generated semantic surface and one first-class MCP adapter. Skills plus CLI remain the universal baseline; optional MCP exposes only a generated immutable role profile. Every current command, tool, resource, protocol method, and host behavior receives an explicit keep/replace/remove disposition; every surviving binding invokes one application use case and renders one typed result consistently.
 
-**Architecture:** [`08-tool-catalog-crate.md`](08-tool-catalog-crate.md) owns stable capabilities, use cases, binding IDs, effect metadata, and generated surface definitions. [`09-application-crate.md`](09-application-crate.md) owns execution and canonical `ApplicationResponse<T>` views. A small pure `tracedecay-presentation` crate converts only sealed typed views into a transport-neutral document model and renders Markdown or terminal text; canonical JSON serializes the same view without passing through the document model. Generated CLI and MCP adapters resolve the same [`ScopeSelectorV2`](16-cross-project-repository-worktree-scope.md), call the same application port, map the same errors, and apply catalog-declared output, pagination, privacy, and budget policy. The root MCP adapter uses the official Rust MCP SDK behind a pinned protocol/conformance boundary, owns lifecycle/session/framing only, and generates tools, resources, prompts, completion, notifications, and task support from the catalog. HTTP/SDK JSON, NDJSON, and SSE remain owned by plans [`10`](10-api-crate.md) and [`17`](17-official-public-api-and-sdks.md); MCP Streamable HTTP is a distinct protocol endpoint, not a REST wrapper.
+**Architecture:** [`08-tool-catalog-crate.md`](08-tool-catalog-crate.md) owns stable capabilities, use cases, binding IDs, effect metadata, generated surface definitions, host component sets/install scopes, and immutable MCP exposure profiles. [`09-application-crate.md`](09-application-crate.md) owns execution and canonical `ApplicationResponse<T>` views. A small pure root `v2::presentation` module converts only sealed typed views into a transport-neutral document model and renders Markdown or terminal text; canonical JSON serializes the same view without passing through the document model. It remains private because CLI and MCP are both root adapters and snapshots/conformance are test consumers, not independent production packages. Generated CLI and MCP adapters resolve the same [`ScopeSelectorV2`](16-cross-project-repository-worktree-scope.md), call the same application port, map the same errors, and apply catalog-declared output, pagination, privacy, and budget policy. One root MCP adapter/binary uses the official Rust MCP SDK behind a pinned protocol/conformance boundary, owns lifecycle/session/framing only, and projects tools, resources, prompts, completion, notifications, and task support from the connection-pinned profile. The three logical registration names are trust-boundary façades over that adapter, not separate services. HTTP/SDK JSON, NDJSON, and SSE remain owned by plans [`10`](10-api-crate.md) and [`17`](17-official-public-api-and-sdks.md); MCP Streamable HTTP is a distinct protocol endpoint, not a REST wrapper.
 
 **Normative dependencies:** [`01-domain-crate.md`](01-domain-crate.md), [`05-query-crate.md`](05-query-crate.md), [`08-tool-catalog-crate.md`](08-tool-catalog-crate.md), [`09-application-crate.md`](09-application-crate.md), [`10-api-crate.md`](10-api-crate.md), [`12-root-compatibility-migration.md`](12-root-compatibility-migration.md), [`16-cross-project-repository-worktree-scope.md`](16-cross-project-repository-worktree-scope.md), [`17-official-public-api-and-sdks.md`](17-official-public-api-and-sdks.md), [`18-secret-detection-redaction-and-private-data-safety.md`](18-secret-detection-redaction-and-private-data-safety.md), [`19-system-defragmentation-convergence-and-extensibility.md`](19-system-defragmentation-convergence-and-extensibility.md), [`20-configuration-control-plane.md`](20-configuration-control-plane.md), [`22-incremental-context-scout-and-suggestion-envelopes.md`](22-incremental-context-scout-and-suggestion-envelopes.md), [`23-session-lcm-temporal-retrieval-and-evaluation.md`](23-session-lcm-temporal-retrieval-and-evaluation.md), and [`24-canonical-task-plan-graph-and-multi-agent-executor.md`](24-canonical-task-plan-graph-and-multi-agent-executor.md).
 
@@ -37,6 +37,13 @@
 21. An advertised MCP capability is a tested promise. The server never advertises `listChanged`, subscription, logging, prompts, completion, sampling, elicitation, or task support unless the corresponding send/receive path, authorization boundary, and host conformance fixture exist.
 22. Plan 24 domain work items/attempts and MCP protocol tasks are distinct identities. MCP task augmentation is only an asynchronous execution envelope around an `OperationRef`; it never aliases `WorkItemId` or `ExecutionAttemptId`.
 23. No V2 MCP resource teaches callers to query an internal database or exposes a physical schema as a supported product API. Durable evidence resolves through typed resources/retrieval anchors and application use cases.
+24. Skills plus generated CLI are the complete portable baseline. MCP is an optional component selected in `HostInstallSetV1`; omitting it cannot remove a semantic capability from help, hints, skills, CLI, HTTP, or the official API. `HostInstallModeV1` is legacy migration input only and never a current configuration or execution branch.
+25. There is one MCP implementation and exactly three generated logical registrations: `tracedecay-context`, `tracedecay-work`, and explicitly opted-in `tracedecay-operator`. They share binary, daemon, catalog, application, presentation, lifecycle, and conformance code.
+26. A connection pins one explicit `McpSurfaceProfileV1` whose fully materialized `BindingId` set contains no glob. Visibility is `profile ∩ negotiated host features ∩ grant ceiling ∩ current authorization`; profile membership and effect ceiling cannot change until reconnect.
+27. `listChanged` is not per-turn progressive disclosure. It reports a real catalog/availability/authorization change within the pinned profile. Native deferred tool search may lazily load definitions already in the profile, but eager-list hosts and skills-only hosts remain first-class conformance targets.
+28. No MCP or CLI god tool accepts an arbitrary hidden `BindingId` plus untyped arguments. Discovery returns the exact supported binding/command/API recipe; it never bypasses per-use-case schema, annotations, grants, profile ceilings, or audit.
+29. Complex plan/task edits use exactly `task_graph.edit_bundles.export|get|validate|diff|rebase|submit|delete`. The frontmatter-Markdown bundle is protected temporary staging compiled back into canonical task commands, never a second task store or writable resource.
+30. Only the `tracedecay-work` `orchestrator` profile exposes edit-bundle mutations. Large MCP bundle results use authorized resource links; diagnostics default to compact Markdown with the same explicit JSON view available on demand.
 
 ## 2. Source audit and concrete fragmentation evidence
 
@@ -121,8 +128,8 @@ The generated recursive clap inventory is authoritative. The following human mat
 | Current path family | Every current path | V2 disposition |
 |---|---|---|
 | Core index and status | `init`, `sync`, `status`, `list`, `wipe`, `gitignore` | Bind typed project enrollment, capture/index workflow, system status, registry query, confirmed destructive retirement, and configuration use cases. Remove local output/scope logic. |
-| Generic tool bridge | `tool`, generated `help` | Keep a generated direct binding bridge, but make canonical input/output semantics unambiguous; discovery comes from the catalog. |
-| Agent integration | `install`/`claude-install`, `reinstall`, `update-plugin`/`update-plugins`, `uninstall`/`claude-uninstall` | Replace aliases at cutoff with cataloged host-integration workflows, effect receipts, safe progress, and one current name. |
+| Schema-exact CLI tool bridge | `tool`, generated `help` | Keep `tool <current-name>` as a generated CLI-only fallback for skills/MCP-optional hosts, with the same per-use-case schema/effect/grant/scope/auth/output contract as native commands. It cannot accept hidden `BindingId` values or appear as an MCP god tool; catalog help/search/schema remains the discovery surface. |
+| Agent integration | `install`/`claude-install`, `reinstall`, `update-plugin`/`update-plugins`, `uninstall`/`claude-uninstall` | Inventory-only deprecated aliases map respectively to `integration install`, `integration repair`, `integration update`, and `integration uninstall` until their generated cutoff. They never appear as current help/MCP/API bindings and perform no work after cutoff. |
 | Runtime surfaces | `dashboard`, `serve`, `daemon run`, `daemon install-service`, `daemon uninstall-service`, `daemon restart`, `daemon status` | Bind lifecycle workflows/status; generated auth/effect/progress/output rules. |
 | Update lifecycle | `upgrade`, `update`, `channel`, hidden `post-update` | Separate query/config/direct workflow/internal lifecycle bindings. Parent-child lease token remains internal and never appears in public help/output. |
 | Accounting | `current-counter`, `reset-counter`, `disable-upload-counter`, `enable-upload-counter`, `cost`, `bench`, `gain`, `monitor` | Consolidate query/config/command/stream use cases; canonical JSON/NDJSON and terminal views replace local tables/export switches. |
@@ -133,7 +140,7 @@ The generated recursive clap inventory is authoritative. The following human mat
 | Branches | `branch list`, `branch add`, `branch remove`, `branch removeall`, `branch gc`, `branch autotrack status`, `branch autotrack enable`, `branch autotrack disable` | Recast reads, configuration, enrollment, and confirmed retirement as distinct use cases; `removeall` gets a normalized name before cutoff. |
 | Memory | `memory status`, `memory curate` | Keep status. Remove manual curate preview/apply/LLM-ops surface; autonomous curation exposes policy, health, runs, decisions, outcomes, pin/protect/exclude, feedback, pause/resume, and run-now only. |
 | Automation config | `automation config get`, `explain`, `enable`, `disable`, `set` | Replace with generated plan-20 `config` use cases; automation module is one navigable branch of the complete registry. |
-| Automation runs | `automation run memory-curation`, `session-reflection`, `skill-writing`; `automation runs list`, `view`, `artifact` | Remove dry-run/proposal semantics. Keep autonomous run-now and read-only run/artifact/outcome views with pinned policy/config/eval digests. |
+| Automation runs | `automation run memory-curation`, `session-reflection`, `skill-writing`; `automation runs list`, `view`, `artifact` | Remove dry-run/proposal semantics. Keep autonomous run-now and read-only dirty-scope/admission/run/artifact/outcome views with pinned policy/config/eval digests. Run-now never bypasses identical successful/`NoChange` input fencing. |
 | Managed skills | `automation skills list`, `view`, `draft`, `update`, `approve`, `disable`, `archive`, `restore`, `install` | Remove per-item authoring/approval/promotion bindings from autonomous evolution. Replace with inventory, history, decisions, outcomes, authority, pin/protect/exclude, health, and feedback. |
 | Fact proposals | `automation facts list`, `view`, `apply`, `reject` | Remove proposal queue and item mutations. Replace with autonomous decision/effect history and policy/quality controls. |
 | Store migration | `migrate plan`, `export`, `apply`, `verify`, `reconstruct`, `registry-gc`, `rollback`, `cleanup-sources` | Map to typed inventory, export, verified migration workflows, confirmed destructive cleanup, and recovery. Curation autonomy does not remove system migration safety. Rename V1 ceremony terms where the V2 workflow model supersedes them. |
@@ -143,18 +150,38 @@ The generated recursive clap inventory is authoritative. The following human mat
 | Hidden Cursor hooks | `hook-cursor-subagent-start`, `hook-cursor-post-tool-use`, `hook-cursor-before-submit-prompt`, `hook-cursor-pre-compact`, `hook-cursor-after-file-edit`, `hook-cursor-session-start`, `hook-cursor-session-end`, `hook-cursor-after-shell`, `hook-cursor-workspace-open`, `hook-cursor-stop` | Same internal hook contract. |
 | Hidden Codex hooks | `hook-codex-session-start`, `hook-codex-user-prompt-submit`, `hook-codex-subagent-start`, `hook-codex-post-tool-use`, `hook-codex-post-compact` | Same internal hook contract. |
 
-Plan 24 adds generated V2-only `initiative`, `plan`, `task`, `executor`, `scheduler`, `task-view`, and `task-graph` groups plus audience-filtered executor lifecycle bindings. They are not shoehorned into legacy `automation`, `projects`, `branch`, or generic `tool` semantics. The binding manifest preserves exact commands `work_items.record_attestation`, `work_items.record_review`, `work_items.record_decision`, `work_items.record_exception`, `work_items.handoff`, `work_items.reopen`, `work_items.reverse_transition`, `task_offers.accept|decline|revoke`, `attempts.heartbeat|progress|complete|block`, `context_packets.accept`, `task_notifications.create|update|delete`, and protected `task_views.share.plan`, `task_views.share.start`, `task_views.share.revoke`. `task_offers.accept` is the sole public execution-admission binding; no CLI/MCP alias named `work_items.acquire_lease` exists. Every CLI/MCP/HTTP/SDK/dashboard exposure maps to one catalog use case and sealed task/plan/executor view; compact output always retains canonical IDs/versions, blockers, coverage, packet/lease/route status, anchors, and legal next actions. Fence proofs, credentials, protected logs, and private sibling content never render.
+All provider hook executables lower to one catalog-generated hidden binding:
+
+```text
+tracedecay host-event ingest --host <host-code> --event <event-code> --stdin
+```
+
+It is `InternalHostLifecycle`, absent from normal help, shell completion, MCP, HTTP, SDKs, dashboard actions, and public catalog search. The installer binds only generated closed host/event codes. `--stdin` consumes exactly one bounded versioned event envelope and EOF; inline payload flags, positional payload, file/path input, arbitrary event names, multiple envelopes, and trailing bytes are rejected. The adapter authenticates the installed host context, sanitizes before capture, and returns only machine status on stdout; it never echoes raw arguments/body or prints diagnostics on stdout. Deprecated hidden hook paths remain migration launchers only and are removed host-by-host after receipt parity.
+
+Plan 24 adds generated V2-only `initiative`, `plan`, `task`, `executor`, `scheduler`, and `task-graph` groups plus audience-filtered executor lifecycle bindings. Task definitions use the existing `saved-view` group and `saved_views.*` operations; no `task-view` command namespace exists. The binding manifest preserves exact commands `work_items.record_attestation`, `work_items.record_review`, `work_items.record_decision`, `work_items.record_exception`, `work_items.handoff`, `work_items.reopen`, `work_items.reverse_transition`, `task_offers.accept|decline|revoke`, `attempts.heartbeat|progress|complete|block`, `context_packets.accept`, `task_notifications.create|update|delete`, and protected `saved_views.share.plan|start|revoke`. `task_offers.accept` is the sole public execution-admission binding; no CLI/MCP alias named `work_items.acquire_lease` exists. Every CLI/MCP/HTTP/SDK/dashboard exposure maps to one catalog use case and sealed task/plan/executor view; compact output always retains canonical IDs/versions, blockers, coverage, packet/lease/route status, anchors, and legal next actions. Fence proofs, credentials, protected logs, and private sibling content never render.
+
+Autonomous-loop observation has exactly three catalog operations and generated CLI/MCP bindings:
+
+| Operation | CLI | MCP tool/resource |
+|---|---|---|
+| `automation.dirty_scopes.list` | `tracedecay automation dirty-scopes list` | `automation_dirty_scopes_list` tool |
+| `automation.admissions.list` | `tracedecay automation admissions list` | `automation_admissions_list` tool |
+| `automation.admissions.get` | `tracedecay automation admissions get <admission-id>` | `automation_admissions_get` tool and read-only `tracedecay://automation/admissions/{admission_id}` resource template |
+
+The list operations remain semantic tools; MCP `resources/list` only discovers the addressable receipt template and never substitutes for them. `admissions list --representation receipts|coalesced-skip-episodes` and MCP `representation = receipts|coalesced_skip_episodes` are generated spellings of one request enum, not distinct operations. Exact-receipt and coalesced-episode output comes from one sealed application view: episodes preserve stable anchor, first/last evaluation time, evaluation count, latest policy-evaluation ID, job/scope, exact reason, semantic-input/frontier tuple, next reconsideration, and model/tool/token/cost work avoided. Dirty-scope output places per-shard current, considered, consumed, and included frontiers beside pending delta, unconsumed generation/count/reasons, active-writer/coverage state, and quiet/retry deadlines. Jobs/scheduler/dirty/admission output reuse generic operation, retry directive, policy-health/circuit/pause, privacy-quarantine/reconciliation, and coverage types; renderers cannot infer or rename them. Compact output keeps exact IDs, frontier tuple, reason/state, reconsideration, and coverage.
+
+No `automation skip-episodes`, `automation frontiers`, retry/circuit/quarantine command, MCP alias, or writable resource is generated. The existing run-now binding has no force/ignore-digest option: it may shorten cadence only for an already-dirty scope and still refuses identical successful/`NoChange` input, backoff, open circuit, pause, quarantine, and incomplete coverage. Unchanged/historical inspection routes to the generic experiment family.
 
 Research provenance adds catalog operation IDs `research.manifests.list/get/create_version` and the canonical evidence operation family `retrieval_anchors.metadata_batch_get`, `retrieval_anchors.resolve`, and `retrieval_recipes.execute`. Generated bindings may accept `ResearchAnchorId` only for manifest navigation; evidence metadata/resolution/recipe execution accepts canonical `RetrievalAnchorId`/`RetrievalRecipeV1` and never treats safe metadata as payload authority. No CLI, MCP, HTTP, SDK, dashboard, or export binding invents a research-specific resolver or treats a manifest-entry ID as payload authority.
 
 Search evaluation uses only the canonical plan-15 family:
 
 ```text
-reads: retrieval.{corpus_versions,qrel_versions,candidate_pools,judgments,adjudications,evaluation_runs,evaluation_reports,profiles}.list|get
-commands: retrieval.corpus_versions.create|freeze; retrieval.qrel_versions.create|freeze; retrieval.candidate_pools.create; retrieval.judgments.record|supersede; retrieval.adjudications.record; retrieval.evaluation_runs.run|cancel; retrieval.evaluation_reports.publish; retrieval.fixtures.promote; retrieval.profiles.publish|activate
+reads: retrieval.{corpus_versions,qrel_versions,candidate_pools,judgments,adjudications,evaluation_reports,profiles}.list|get; generic experiments/experiment_runs/experiment_cells/replay_stages/replay_comparisons/replay_comparison_cells/replay_reductions list|get filtered to LabKindV1::SearchQuality; experiments.evaluator_catalog.get; experiments.draft_from_selection
+commands: retrieval.corpus_versions.create|freeze; retrieval.qrel_versions.create|freeze; retrieval.candidate_pools.create; retrieval.judgments.record|supersede; retrieval.adjudications.record; generic experiments.create and experiment_runs.create|cancel|resume|retry|minimize; retrieval.evaluation_reports.publish; experiments.fixtures.promote; retrieval.profiles.publish|activate
 ```
 
-Each read generates one semantic CLI binding, MCP tool, read-only MCP resource/resource-template where addressable, HTTP/SDK binding, and Search Quality UI view metadata from the same typed result. MCP `resources/list` discovers resources; it never replaces the canonical `.list` use case. Commands generate CLI/MCP/HTTP/SDK/UI actions and no writable resource. No transport may add `eval`, `benchmark`, `golden`, `retrieval.fixtures.list/get`, or any other alias/use case absent above.
+Each read generates one semantic CLI binding, MCP tool, read-only MCP resource/resource-template where addressable, HTTP/SDK binding, and Search Quality UI view metadata from the same typed result. MCP `resources/list` discovers resources; it never replaces the canonical `.list` use case. Commands generate CLI/MCP/HTTP/SDK/UI actions and no writable resource. No transport may add `eval`, `benchmark`, `golden`, `retrieval.fixtures.*`, or any other alias/use case absent above.
 
 The extractor also records every flag, positional, alias, conflict, required relationship, enum/range, default, env source, hidden state, TTY behavior, stdin/file behavior, color behavior, output family, exit path, effect, and called handler. A command path without a reviewed disposition blocks catalog generation.
 
@@ -207,13 +234,7 @@ Client features are separate: roots can seed scope candidates; sampling and elic
 
 Use plan 08's identity model without surface-derived business identity:
 
-```rust
-// CapabilityId, UseCaseId, and BindingId are imported unchanged from plan 01.
-pub struct IntentId(String);          // intent.code.find-symbol
-pub struct PresentationId(String);    // presentation.code.search-results
-```
-
-`IntentId` and `PresentationId` are plan-21-private registry keys. Their fields stay private and constructors enforce the same bounded lowercase dotted-token grammar and length limit as `BindingId`; no generic validation wrapper or transport-owned identifier enters the shared domain.
+`CapabilityId`, `UseCaseId`, `IntentId`, `BindingId`, and `PresentationId` are imported unchanged from plan 08's `id.rs` (using the primitive domain ID vocabulary where plan 08 specifies it). Plan 21 owns presentation descriptors and rendering behavior, not identifier types, constructors, or grammars; it cannot mint a private intent/presentation key.
 
 All five ID kinds follow plan 08 §8's grammar exactly — `capability.<domain>.<noun>`, `usecase.<domain>.<verb-noun>`, `intent.<domain>.<task>`, `binding.<surface>.<stable-name>`, and `presentation.<domain>.<view>` (registered in plan 08's `id.rs`). Capability/use-case storage types remain the plan-01 definitions; versions are separate SemVer fields, and IDs never embed v1/v2 or transport names except BindingId.
 
@@ -229,6 +250,7 @@ generated/                  # canonical home and names: plan 08 §6
 ├── cli-bindings.json
 ├── cli-command-tree.json
 ├── mcp-protocol.json       # pinned revision, method/capability profile, extension metadata
+├── mcp-surface-profiles.json # logical registrations, explicit binding sets, install/effect/grant/host/budget ceilings
 ├── mcp-tools.json          # emitted tool/input/output/annotation/task definitions
 ├── mcp-resources.json      # resources/templates/subscriptions/list generations
 ├── mcp-prompts.json        # prompts, arguments, completion eligibility/list generations
@@ -276,7 +298,7 @@ CI rejects:
 - raw `Value` accepted by a public renderer;
 - a mutation without one exact effect mode;
 - curation item approval/apply/reject/rollback bindings;
-- missing or duplicate search-evaluation CLI/MCP/resource/HTTP/SDK/UI mapping, writable evaluation resource, fixture read invented beyond `retrieval.fixtures.promote`, or any non-canonical search-evaluation alias;
+- missing or duplicate search-evaluation CLI/MCP/resource/HTTP/SDK/UI mapping, writable evaluation resource, any invented `retrieval.fixtures.*` binding instead of shared `experiments.fixtures.promote`, or any non-canonical search-evaluation alias;
 - an active alias past cutoff;
 - generated output drift or non-deterministic order.
 
@@ -316,11 +338,11 @@ src/mcp/
 
 The official Rust SDK owns JSON-RPC types, framing, request/response multiplexing, standard method names, and stdio/Streamable HTTP protocol mechanics. TraceDecay pins the SDK/protocol versions and wraps them behind its root adapter; catalog generation supplies definitions and dispatch rows instead of per-handler macros or match arms. If a required stable-protocol feature is missing upstream, one bounded protocol adapter may be registered in plan 19's adapter ledger with an upstream issue, conformance fixtures, and a deletion release. No application behavior enters that adapter.
 
-`McpSessionContext` is isolated per client connection and contains only negotiated protocol revision, client implementation/capabilities, authenticated principal/grants, captured roots, pinned `CatalogSnapshotRefV1`, config-registry digest, resolved default scope candidate, logging level, request/task cancellation registry, subscriptions, and list generations. The shared daemon engine, stores, caches, and application services are not connection state. A session state machine enforces:
+`McpSessionContext` is isolated per client connection and contains only negotiated protocol revision, client implementation/capabilities, authenticated principal/grants, captured roots, pinned `CatalogSnapshotRefV1`, `McpLogicalRegistrationId`, `McpSurfaceProfileId`, profile definition digest/effect/grant ceilings, config-registry digest, resolved default scope candidate, logging level, request/task cancellation registry, subscriptions, and list generations. The shared daemon engine, stores, caches, and application services are not connection state. A session state machine enforces:
 
 1. `initialize` is the first request; only ping is tolerated around initialization as the stable specification permits.
 2. The server compares the client revision to its generated supported set. It returns the same revision when supported or its current supported revision otherwise; an incompatible client disconnects/updates before application/store access. V2 does not retain the current `2024-11-05` live protocol.
-3. The initialize result advertises only implemented standard capabilities and carries `CatalogSnapshotRefV1`, config-registry digest, and daemon generation in namespaced `_meta["io.tracedecay/catalog-v1"]`.
+3. The initialize result advertises only implemented standard capabilities and carries `CatalogSnapshotRefV1`, logical registration/profile IDs and profile digest, config-registry digest, and daemon generation in namespaced `_meta["io.tracedecay/catalog-v1"]`. Server composition validates the configured registration/profile pair before store access and never accepts a tool argument or client root as a profile selector.
 4. Normal requests begin only after `notifications/initialized`. Server-to-client requests other than allowed ping/logging do not run earlier.
 5. Every operation captures session/auth/catalog/scope state once. Concurrent requests may complete out of order by JSON-RPC ID, while one bounded writer task serializes valid protocol messages; no task writes directly to stdout.
 6. Reader progress never waits for a long handler. Cancellation, client responses, root changes, pings, and drain signals remain processable while application work runs under bounded per-principal and per-capability concurrency.
@@ -330,9 +352,9 @@ Bootstrap failure does not create a second “degraded MCP server.” Catalog an
 
 #### 5.4.1 Catalog refresh and dynamic lists
 
-- `tools/list`, `resources/list`, `resources/templates/list`, and `prompts/list` are generated, access-filtered, and protocol-paginated. Their opaque cursor binds principal, protocol revision, catalog/list generation, and ordering, so pages never mix snapshots.
+- `tools/list`, `resources/list`, `resources/templates/list`, and `prompts/list` are generated from the pinned profile, access-filtered, and protocol-paginated. Their opaque cursor binds principal, protocol revision, logical registration, profile digest, catalog/list generation, and ordering, so pages never mix snapshots or profiles.
 - Missing host prerequisites remain visible as safe unavailable tool metadata when visibility is authorized; a capability is hidden entirely when even its existence is unauthorized. Counts, completion, list-change events, and errors cannot reveal hidden rows.
-- A catalog or grant change increments the affected primitive generation. A per-session notification hub emits at most one coalesced `notifications/tools/list_changed`, `notifications/resources/list_changed`, or `notifications/prompts/list_changed` for that generation, and only when the matching capability was advertised.
+- A catalog, availability, or grant change inside the fixed profile increments the affected primitive generation. A per-session notification hub emits at most one coalesced `notifications/tools/list_changed`, `notifications/resources/list_changed`, or `notifications/prompts/list_changed` for that generation, and only when the matching capability was advertised. List change cannot select another profile, cross a registration trust boundary, or disclose a prompt-specific tool; widening requires installer/config change plus reconnect.
 - Once a session is marked refresh-required, a call that depends on a replaced binding fails with `capability_replaced`/`client_update_required`; it never dispatches by a stale name to new semantics. A complete list refresh atomically pins the new generation. A protocol or binary-major change requires reinitialize/reconnect instead.
 - `resources/subscribe` is offered only for mutable typed resources with an application/projector change feed. `notifications/resources/updated` carries the authorized URI, not payload. Reads and every delivery reauthorize; revocation removes the subscription. Slow consumers receive one coalesced update/gap instruction and reread rather than accumulating unbounded deltas.
 - `logging/setLevel` stores a connection-local syslog threshold. Protocol log notifications contain safe structured diagnostics/correlation IDs, never result payloads, secrets, raw prompts, or progress that belongs in `notifications/progress`.
@@ -359,6 +381,24 @@ Long-running use cases may declare MCP `execution.taskSupport = optional|require
 Stdio is the mandatory local host transport. It authenticates the installation/launch context, accepts only MCP JSON on stdout/stdin, sends diagnostics only to stderr or negotiated logging, minimizes inherited environment, and applies catalog grants exactly like every other surface.
 
 An optional `/mcp` endpoint implements current Streamable HTTP directly through the official SDK; it is not `/api/v2`, an OpenAPI bridge, or the removed HTTP+SSE transport. It validates `Origin`/Host, binds loopback by default, accepts the negotiated `MCP-Protocol-Version` header, uses cryptographically strong `MCP-Session-Id` where stateful sessions are enabled, supports safe SSE resumption without cross-stream replay, and applies bounded connection/session/request queues. Loopback authentication consumes plan 17's scoped token registry. Any future non-loopback deployment must implement the official MCP OAuth protected-resource/resource-indicator contract, TLS, audience validation, incremental scopes, and a separate reviewed threat model. TraceDecay never accepts tokens in URLs/tool arguments, passes the client token through to another service, or uses MCP annotations as authorization.
+
+### 5.5 One adapter, optional exposure profiles, and component sets
+
+TraceDecay ships one MCP implementation. The generated host installer may write up to three logical registration entries, but every entry starts the same binary, connects to the same daemon/application, and loads the same catalog snapshot. Registration names exist only to establish visible-surface and grant trust boundaries:
+
+| Registration | Allowed profiles | Intended surface | Initial hard ceiling |
+|---|---|---|---|
+| `tracedecay-context` | `agent-core`, `developer`, `research` | read-only capability/scope/project/search/anchor/operation core plus reviewed code/Git or session/knowledge research reads | 12/8k, 32/24k, or 24/18k tools/definition tokens respectively |
+| `tracedecay-work` | `task-worker`, `orchestrator` | addressed task/packet/attempt lifecycle or authorized initiative/plan/task orchestration and edit bundles | 24/16k or 32/24k respectively |
+| `tracedecay-operator` | `operator`, `admin-lab` | configuration/system/automation/migration administration or explicitly budgeted administration labs | 24/18k or 32/24k respectively; explicit opt-in only |
+
+The generated install state is a nonempty `HostInstallSetV1`: optional `CoreSkillsCli` plus at most one `McpFacade { registration, profile }` component for each logical registration. Empty means no desired deployment and is represented by absent/retired desired state through uninstall, not an empty set. Core is complete and portable on shell-capable hosts: every skill declares `UseCaseId` requirements, resolves the cheapest legal installed binding, and can issue the generated CLI or documented HTTP recipe when MCP is absent. A headless facade-only set is explicit and retains the same use cases; it is not the preferred shell-capable install. Core plus zero/one/many companions compose without copying semantics. Installation never silently adds operator, and uninstall/update removes or rewrites only manifest-owned component entries after foreign-ownership checks.
+
+Plan 08 generates `mcp-surface-profiles.json`. Every row is a canonical, sorted, explicit `BindingId` set with registration, audience, required host features, allowed execution modes, required grants and grant ceiling, tools-only fallback bindings, maximum tool count, maximum definition tokens plus the versioned estimator, and definition digest. Prefix/category/domain globs are forbidden: a newly cataloged tool is not exposed until a reviewed profile diff names it. The session computes `profile bindings ∩ negotiated primitive support ∩ authenticated grants ∩ current authorization`; denial wins and a profile never grants authority.
+
+Deferred tool search is an optional host optimization over that already fixed set. Eager hosts receive the complete profile definition list and must pass the same tool-selection, token, latency, and task-completion corpus. A host that lacks resources/prompts/completion receives only cataloged tools-only fallbacks of the same `UseCaseId`; it does not receive a generic `invoke(binding,args)` escape hatch. Resource and prompt assistance can improve ergonomics but cannot be required for task completion unless the host manifest says the feature is mandatory.
+
+Multiple registrations do not partition data or create independent business services. They isolate connection state, visible bindings, and grant ceilings only. Cross-domain graph/query results still come from the one application/query platform, and a saved/retrieval anchor is equally resolvable when the receiving principal/profile is authorized. Profile analytics record installation mode, registration/profile digest, eager/deferred discovery, candidate/selected/missed binding, definition tokens, and unavailable fallback without recording tool arguments or results.
 
 ## 6. Canonical ownership and dependency flow
 
@@ -391,7 +431,7 @@ domain schemas + application use cases + reviewed presentation specs
 | Capability/use-case/binding metadata | tool catalog | handler match lists and plugin schema forks |
 | Scope resolution | application scope resolver | CWD/route/daemon/handler first-match logic |
 | Machine JSON | sealed `ApplicationResponse<T>` serializer | JSON assembled in renderers or parsed from Markdown |
-| Human presentation | `tracedecay-presentation` | native-command `println!` layouts and raw-Value Markdown |
+| Human presentation | Root `v2::presentation` module | native-command `println!` layouts and raw-Value Markdown |
 | HTTP/NDJSON/SSE envelopes | API plan 10 | CLI/MCP transport inventing stream protocols |
 | MCP lifecycle/framing/session/standard methods | official SDK + root MCP adapter | daemon proxy, degraded server, or tool handler reimplementing protocol state |
 | MCP primitive definitions/capability requirements | tool-catalog generated manifests | server-local resource/tool/prompt arrays or notification allowlists |
@@ -400,26 +440,26 @@ domain schemas + application use cases + reviewed presentation specs
 | stdout/stderr/exit mapping | generated CLI adapter | command-module process exits |
 | MCP result/problem mapping | generated MCP adapter | handler-local status prose |
 
-### 6.1 `tracedecay-presentation` scope
+### 6.1 Root `v2::presentation` scope
 
-Add the small pure crate below. This is a locked deployment choice, not an implementation-time crate-versus-root option: CLI, MCP, documentation snapshots, and the conformance runner are independent consumers and need byte-identical human rendering without importing root transport code.
+Add the small pure root-private module below. Plan 19 locks this deployment choice: CLI and MCP share it inside root, while documentation snapshots and conformance runners test the same facade. A separately published crate would add a package/release boundary without a second production consumer.
 
 ```text
-crates/tracedecay-presentation/
-├── Cargo.toml
-├── src/
-│   ├── lib.rs
-│   ├── document.rs
-│   ├── spec.rs
-│   ├── budget.rs
-│   ├── markdown.rs
-│   ├── terminal.rs
-│   ├── table.rs
-│   ├── labels.rs
-│   ├── problems.rs
-│   ├── progress.rs
-│   └── escape.rs
-└── tests/
+src/v2/presentation/
+├── mod.rs
+├── document.rs
+├── spec.rs
+├── budget.rs
+├── markdown.rs
+├── terminal.rs
+├── table.rs
+├── labels.rs
+├── problems.rs
+├── progress.rs
+└── escape.rs
+tests/
+├── presentation_v2.rs             # integration-test harness
+└── presentation_v2/
     ├── golden.rs
     ├── parity.rs
     ├── width.rs
@@ -431,7 +471,9 @@ Allowed imports: domain safe value types, application public view types, generat
 
 Forbidden imports: stores, queries, policy execution, hooks, providers, Axum, rmcp, clap parsing, SQL, Git/network clients, filesystem/process access, environment/time reads, and `serde_json::Value` in public renderer APIs.
 
-Plan 19's target workspace and allowed-edge DAG must include `tracedecay-presentation -> tracedecay-domain` and `tracedecay-presentation -> tracedecay-application` public view contracts; root CLI/MCP adapters depend on presentation. The presentation crate has no edge to store/capture/projectors/query/policy/hooks/API implementations. No root-local presenter is permitted after this crate lands.
+Plan 19's allowed-edge manifest permits root `v2::presentation -> tracedecay-domain`, `tracedecay-application` public view contracts, and generated catalog presentation descriptors only. The module has no edge to store/capture/projectors/query/policy/hooks/API implementations or ambient root services. CLI/MCP adapters depend on this one presenter; no second root-local presenter is permitted after it lands.
+
+Migration starts by extracting the useful pure pieces already present in `src/mcp/tools/render.rs` (`OutputFormat`, Markdown escaping/document helpers, truncation metadata) behind the new typed facade, then deletes or declarativizes the 36 inventoried handler-local `render_*` functions. Existing behavior is a differential fixture, not permission to wrap both paths indefinitely.
 
 ## 7. Typed view and presentation model
 
@@ -553,7 +595,7 @@ Generated public commands share only applicable global switches:
 
 Ergonomic flags are lossless builders for `ScopeSelectorV2`. They are mutually exclusive with `--scope` when they overlap. Generated help shows the canonical selector before invocation. Mutations require an explicit durable target; queries use a default only when the catalog declares it, such as profile-wide `AllAuthorized` for Brain.
 
-No global flag shadows a semantic input field. Transport-side schema validation becomes `tracedecay invoke <binding> --validate-input`; semantic `dry_run` is removed in favor of the use case's declared execution mode. Debugging the raw transport envelope uses a hidden developer command, never public `--json`.
+No global flag shadows a semantic input field. Catalog-backed `tracedecay help schema <binding>` exposes the input contract, while each generated command validates its own typed input before dispatch; there is no public generic `invoke(binding,args)` bridge. Semantic `dry_run` is removed in favor of the use case's declared execution mode. Debugging the raw transport envelope uses a hidden test-only developer command, never public `--json`.
 
 ### 8.3 Canonical MCP result
 
@@ -590,16 +632,64 @@ tracedecay code        code graph, health, diagnostics, edit
 tracedecay git         refs, changes, delivery correlation
 tracedecay sessions    sessions, messages, Turns, agents, workflows, goals
 tracedecay memory      knowledge status, query, autonomous curation outcomes
-tracedecay automation  schedules, runs, outcomes, authority, health
+tracedecay automation  schedules, dirty scopes, admissions, runs, outcomes, authority, health
 tracedecay config      complete plan-20 settings tree
+tracedecay integration generated host package/component/registration inventory and lifecycle
 tracedecay project     registry, repositories, worktrees, enrollment, sync
 tracedecay system      status, doctor, daemon, update, migration, accounting
-tracedecay lab         query/search/hint/coordination/config/privacy replay
-tracedecay invoke      generated direct binding bridge
+tracedecay experiment  fork/create/run/list/get/cancel/resume/retry/minimize/export replay
+tracedecay task-graph  status, doctor, events, and edit-bundle workflow
+tracedecay tool        schema-exact named CLI fallback over current generated bindings
 tracedecay help        catalog-backed discovery
 ```
 
 The `system` group also exposes plan 17's scoped, TTL-bound, revocable local API-token surface with exact effect classes: `api token list` binds the elevated read `auth.tokens.list`, while `api token create` and `api token revoke` bind audited commands. HTTP parity is `GET /api/v2/auth/tokens`, `POST /api/v2/commands/auth/tokens:create`, and `POST /api/v2/commands/auth/tokens:revoke`; MCP/CLI bindings preserve those semantics without copying HTTP route syntax. Plan 10's per-launch bearer remains only the bootstrap credential permitted to invoke the initial `auth.tokens.create` command.
+
+`experiment fork` accepts any catalog-compatible message/Turn/session/agent/tool/hint/fact/task/policy/code/Git/retrieval anchor and returns the same typed draft/source backlink as the dashboard's Fork to Playground. `create` consumes the tagged `LabKindV1` schema; `run` returns the shared `OperationRef`; experiment/run/cell/stage/comparison/comparison-cell/reduction list/get use the one generated top-level filtered operation and addressable read-only MCP resources where supported; cancel/resume/retry/minimize are generated tools/CLI commands over the one operation lifecycle. Every cell renders its variant/evaluator/corpus-case/repetition/sweep coordinate and anchor. MCP protocol task augmentation may wrap a long experiment run, but `McpTaskId`, `OperationId`, plan-24 `WorkItemId`, and `ExperimentRunId` remain distinct. No per-lab tool-name explosion or lab-owned progress/cancel schema is generated.
+
+Host integration freezes this exact public CLI tree:
+
+```text
+tracedecay integration list
+tracedecay integration show <installation-ref>
+tracedecay integration diff <target-or-installation-ref>
+tracedecay integration status <target-or-installation-ref>
+tracedecay integration install <target-ref>
+tracedecay integration update <installation-ref>
+tracedecay integration repair <installation-ref>
+tracedecay integration uninstall <installation-ref>
+tracedecay integration verify <installation-ref>
+```
+
+`list|show|diff|status` bind `integrations.list|get|diff|status` and are admin-scoped reads; status uses persisted observation and never probes. The five operation bindings map to `integrations.install|update|repair|uninstall|verify`, require the admin host-integration grant plus expected desired/observed/manifest versions and idempotency, return the shared `OperationRef`, and use ordinary operation status/progress/recovery rendering. Install/update/repair/uninstall may change owned host state; `verify` performs only the fresh probe. All selectors are opaque catalog refs; no flag accepts a host path, raw configuration body, command line, environment, credential value, arbitrary manifest, or generic action name.
+
+`install` and `update` accept generated selection flags for the target's desired `HostInstallSetV1`: signed base/companion package IDs, install scope, skills/roles/hooks component enablement, and zero/one/many context/work/operator logical registrations with one allowed profile each. The CLI sends the same typed request as HTTP/SDK/MCP; it never writes host state itself. `diff` renders the canonical capability-difference matrix and `show|status` retain package/component versions and digests, ownership/trust/stale-cache, MCP exposure, effective/drift/restart, active operation, and legal next actions. Markdown/terminal and JSON come from the same view.
+
+The deprecated aliases `install`, `claude-install`, `reinstall`, `update-plugin`, `update-plugins`, `uninstall`, and `claude-uninstall` live only in the migration inventory with replacement/cutoff metadata. Before cutoff they lower to the corresponding canonical use case and emit the generated typed deprecation notice; at cutoff they return `capability_replaced` without performing work. They are never generated as MCP tools, HTTP routes, SDK methods, or current skills.
+
+MCP remains optional. Core skills and generated CLI recipes can execute every integration workflow on a shell-capable host; the official admin HTTP/SDK is the headless fallback. If MCP exposure is explicitly installed, only the `tracedecay-operator` registration receives the reviewed admin integration bindings and their same schemas/operations—there is no installer god tool or second implementation. The three logical registrations, component-set configuration, CLI, API, SDK, dashboard, and optional MCP all call plan 09's one application feature and root `HostDeploymentPort`.
+
+Complex task/plan graph editing uses this exact CLI tree:
+
+```text
+tracedecay task-graph edit start <selection-ref> [--managed-dir|--archive <path>]
+tracedecay task-graph edit get <workspace-id> [--managed-dir|--archive <path>]
+tracedecay task-graph edit validate <workspace-id> (--bundle-dir <path>|--archive <path>)
+tracedecay task-graph edit diff <workspace-id> --candidate-generation <n> --candidate-digest <digest>
+tracedecay task-graph edit rebase <workspace-id> --candidate-generation <n> --candidate-digest <digest>
+tracedecay task-graph edit submit <workspace-id> --candidate-generation <n> --candidate-digest <digest> --expected-plan-version <n>
+tracedecay task-graph edit clean <workspace-id>
+```
+
+`start` invokes `task_graph.edit_bundles.export`, freezes the authorized plan/task graph version and scope, persists a protected expiring staging bundle through the shared operation/structured-staging kernel, and materializes either a sharded directory or the deterministic contained tar. The managed default is a TraceDecay-owned `0700` directory containing `0600` `manifest.md`, plan/work-item shards, reference stubs, and lock files; a CLI-local cleanup sidecar records workspace ID, owned root, complete member/device/inode manifest, and expiry. `--archive` creates a caller-owned tar that TraceDecay never deletes. `get` rematerializes the exact current candidate in either form after authorization. The server stores protected staged content, candidate reference, validation/diff receipts, and expiry; it never stores or returns the client-local path through MCP/HTTP.
+
+`manifest.md` carries exact `TaskGraphEditManifestV1`; every editable CommonMark shard begins with one closed, versioned YAML 1.2-subset frontmatter mapping. Stable IDs/local keys, explicit retain/replace/retire intent, and the plan-24 file grammar own structured plan/item/dependency/gate/acceptance/route state; Markdown bodies own narrative only. Duplicate keys, aliases/custom tags, multiple YAML documents, unknown fields, excessive nesting, invalid UTF-8/control text, implicit deletion, and editable lease/fence/attempt/readiness/status/outcome/audit fields are rejected. Omission preserves an existing item. Frontmatter and bodies pass plan 18 before staging or diagnostics.
+
+`validate` is the only CLI stage that uploads edited bytes. It deterministically packs `--bundle-dir` or checks the supplied `--archive`, then performs parse, schema, identity/version, reference, graph, policy, scope/authorization, active-lease, route/budget, and privacy validation. Success returns application-minted `TaskGraphEditCandidateRefV1 { workspace_id, generation, digest }`; failure returns ordered exact `TaskGraphEditDiagnosticV1` values and enclosing coverage. Markdown is the human/MCP default; explicit JSON preserves the identical typed values. `diff` accepts only that pinned candidate reference and returns the canonical semantic delta without re-reading or re-uploading a local path.
+
+`rebase` consumes the pinned candidate reference, creates a successor candidate over the newest plan version, and reports exact `TaskGraphEditConflictV1`; it never reads another local path, writes conflict markers, or guesses a merge. `submit` consumes the same pinned reference, re-runs every validation against its digest/base/catalog/config/scope, and commits one bounded owner-shard plan/work-item/edge transaction with expected versions, idempotency, per-item dispositions, event/audit records, and one receipt. It cannot steal an active lease, set derived status, execute a task, or perform an external effect. `clean` invokes idempotent `task_graph.edit_bundles.delete`, makes protected payload GC-eligible, and recursively deletes a local managed directory only after root containment, owner, complete member/device/inode, non-link, and recorded-manifest checks. Submit success also performs that safe managed cleanup; validation/conflict failure retains the directory. Expired server workspaces are consumed from an indexed due queue rather than a repeated all-workspace scan; CLI startup processes only due managed-directory sidecars under its owned staging root and refuses changed or foreign entries.
+
+MCP exposes generated tools for export/get/validate/diff/rebase/submit/delete and the read-only template `tracedecay://v2/task-graph/edit-bundles/{workspace_id}`. Small authorized documents may be embedded; a bundle above the binding's plan-08 `SurfaceBudgetV1.max_inline_bytes` returns a compact Markdown summary plus `resource_link`, current `TaskGraphEditCandidateRefV1`, size/expiry, and the exact CLI/API continuation. Resources are never writable. Only `validate` accepts candidate bytes; diff/rebase/submit require the pinned candidate reference. Only the `tracedecay-work` `orchestrator` profile contains the mutating export/rebase/submit/delete bindings; tools-only hosts get cataloged same-use-case read fallbacks, not a generic dispatcher.
 
 This taxonomy is a target navigation model, not authorization to rename everything at once. Each current path receives an alias/cutoff migration, generated replacement, and differential fixture. Frequently used native paths may stay short when their meaning is already canonical.
 
@@ -635,7 +725,7 @@ Search covers names, stable IDs, old aliases, intents, task-fit phrases, inputs,
 
 Policy/hook hints reference stable intent/capability/binding IDs and a generated summary. They never paste the full tool list. A hint may recommend the cheapest applicable binding, the exact scope it would use, and one command. Hint analytics record offered/acted/missed/corrected/suppressed outcomes by IDs, not free-text matching.
 
-Managed skills declare versioned capability requirements and allowed effects. Installation validates binding availability/catalog digest. Skills cannot resurrect removed aliases, invoke curation item approval paths, or teach surface-local scope/output behavior.
+Managed skills declare versioned `UseCaseId` requirements and allowed effects rather than assuming an MCP tool name. Installation validates catalog digest and resolves each requirement through the pinned MCP profile when present, otherwise the generated CLI, then the documented official API when explicitly configured; an unavailable result names the exact missing profile/grant/prerequisite and safe install/command action. Skills plus CLI therefore remain complete when MCP is omitted. Skills cannot resurrect removed aliases, request a profile switch during a turn, invoke curation item approval paths, teach a generic invocation escape hatch, or teach surface-local scope/output behavior.
 
 ## 10. Scope, project, repository, worktree, and ref parity
 
@@ -702,17 +792,10 @@ Repeated basenames use a safe parent-path/common-directory or explicit registry 
 The closed effect enum is owned by plan 08's `effect.rs` as `EffectSpec.execution_mode`; this plan consumes it and defines no surface-local effect mode:
 
 ```rust
-pub enum ExecutionModeV2 {
-    ReadOnly,
-    DirectCommit,
-    ConfirmedDestructive,
-    AutonomousPolicyEffect,
-    ResumableWorkflow,
-    InternalHostLifecycle,
-}
+pub use tracedecay_tool_catalog::ExecutionModeV2;
 ```
 
-Each binding exposes grants, idempotency, expected-version policy, audit schema, progress/receipt shape, cancellation boundary, and recovery. CLI/MCP annotations are generated from this enum. Read-only hosts cannot obtain mutation bindings merely through a name alias.
+Its exact variants are `ReadOnly`, `DirectCommit`, `ConfirmedDestructive`, `AutonomousPolicyEffect`, `ResumableWorkflow`, and `InternalHostLifecycle`. Each binding exposes grants, idempotency, expected-version policy, audit schema, progress/receipt shape, cancellation boundary, and recovery. CLI/MCP annotations are generated from this imported enum. Read-only hosts cannot obtain mutation bindings merely through a name alias.
 
 MCP `readOnlyHint`, `destructiveHint`, `idempotentHint`, and `openWorldHint` are derived mechanically from this effect contract and egress policy. They are explanatory hints for trusted hosts, not enforcement inputs: every invocation still passes authenticated-principal, catalog grant, scope, plan-18 eligibility, and application policy checks. A mismatch between annotation and effect metadata blocks generation.
 
@@ -734,6 +817,8 @@ Remove these V1 public semantics after outcome/status parity:
 - capability metadata suggesting curation candidates require human approval.
 
 Expose only policy/configuration, schedule, budgets, authority, quality floors, run-now, pause/resume, circuit-breaker health, pin/protect/exclude, feedback, history, decisions, effects, outcomes, and incident diagnostics. Autonomous runs pin catalog/policy/config/eval digests. Human views explain what happened; they do not authorize each item after the fact.
+
+The generated observation subtree is exactly `dirty-scopes list`, `admissions list`, and `admissions get`; it binds the three operations in Section 3 with the same typed pages/resources as HTTP/SDK/dashboard. Receipt representation shows every durable admission decision. Coalesced-skip-episode representation compresses repeated safe skips without inventing runs or losing the bounded evaluation-time/frontier range or latest evaluation anchor. Dirty scopes show pending versus consumed frontiers and shared retry/circuit/pause/quarantine/coverage state. `run-now` carries no force/ignore-digest flag and cannot cross the application's identical-terminal-input fence.
 
 ### 11.4 Confirmed destructive operations
 
@@ -891,7 +976,7 @@ CLI/MCP help and Settings link every privacy/redactor use case to plan 20's cano
 
 ## 16. Performance, latency, and token budgets
 
-Every binding declares a `SurfaceBudgetV1`; defaults are reviewed by use-case family rather than copied into handlers.
+Every binding imports plan 08's `SurfaceBudgetV1` unchanged; plan 21 defines no surface-local budget type, and defaults are reviewed by use-case family rather than copied into handlers.
 
 Targets on the reference machine:
 
@@ -904,6 +989,9 @@ Targets on the reference machine:
 - default MCP Markdown: <=4,000 estimated tokens soft budget; catalog-declared hard transport cap with cursor/retrieval recovery;
 - default discovery result: <=1,000 tokens; one capability detail <=2,000 tokens;
 - tool definition descriptions and examples: compact static metadata, with full docs retrieved explicitly rather than loaded into every host prompt;
+- generated MCP profile ceilings are hard after tools-only fallback projection: `agent-core` 12/8k, `developer` 32/24k, `research` 24/18k, `task-worker` 24/16k, `orchestrator` 32/24k, `operator` 24/18k, and `admin-lab` 32/24k tools/estimated-definition tokens; generator failure is preferable to silent prompt growth;
+- eager and deferred hosts run the same role-intent corpus; deferred loading may reduce presented definitions but cannot excuse a missing role-required binding, while an eager host may not exceed its pinned profile budget;
+- task edit bundles declare total document/item/depth/body/diagnostic/diff/inline-MCP byte caps; a result above the inline cap returns one authorized resource link and compact continuation rather than truncating the document or placing it in tool text;
 - default collection pages: normally 20–50 items, hard cap declared per use case; no unbounded `limit`;
 - NDJSON/SSE queues: bounded items/bytes and explicit gap/resync behavior;
 - MCP per-session requests, server requests, subscriptions, protocol tasks, progress events, and notifications each have reviewed count/byte/deadline caps; list-change/resource-update events coalesce by generation/URI and never form an unbounded queue;
@@ -959,18 +1047,20 @@ For each bounded context:
 4. generate shadow CLI/MCP bindings;
 5. run V1/V2 semantic and presentation differential fixtures;
 6. publish the new binding; keep warning-only exact aliases only on catalog-approved CLI surfaces during their bounded window, while MCP/plugin descriptors switch atomically and old MCP sessions fail current-version checks;
-7. update installers/plugins/skills/docs/completion in one release;
-8. reject stale protocol/catalog clients with one replacement/update action;
-9. remove aliases and old dispatch from live surfaces at cutoff;
-10. delete handler-local args, allowlists, renderers, prints/exits, and docs;
-11. retain only frozen inventory/replay fixtures until the data rollback window ends;
-12. publish a deletion receipt proving zero live references.
+7. publish `CoreSkillsCli` as the portable baseline, generate independently installable `tracedecay-context`/`tracedecay-work` and explicitly opted-in `tracedecay-operator` facade components, compose zero/one/many without duplicate semantics, and pin one allowed profile/digest per connection; migrate a legacy full-catalog registration rather than wrapping it;
+8. update installers/plugins/skills/docs/completion in one release; skills route by `UseCaseId` and retain CLI/API recipes when MCP is absent or intentionally narrower;
+9. reject stale protocol/catalog/profile clients with one replacement/update/reconnect action;
+10. remove aliases, every arbitrary hidden-binding CLI/MCP invoke bridge, and old dispatch from live surfaces at cutoff; retain only the generated schema-exact `tool <current-name>` CLI fallback;
+11. delete handler-local args, allowlists, renderers, prints/exits, and docs;
+12. retain only frozen inventory/replay fixtures until the data rollback window ends;
+13. publish a deletion receipt proving zero live references.
 
 ### 17.3 Mandatory deletions
 
 After final cutover delete or reduce to generated adapters:
 
 - hand-maintained MCP definition, format-capable, project-selector, profile-tool, first-touch, and dispatch lists;
+- the monolithic full-catalog default registration, per-host copied MCP installers, dynamic per-turn exposure/allowlists, and any generic invoke/god tool that bypasses an explicit generated binding;
 - manual MCP JSON-RPC transport/types, hard-coded protocol version, degraded/replay server, static/raw-schema resources, daemon-side handshake/list-change parser, global pending notifications, and any old protocol/name/schema compatibility branch;
 - native command-local output tables/JSON branches/progress/exit logic;
 - `generic_md` over arbitrary JSON and handler-specific format parsing;
@@ -980,6 +1070,7 @@ After final cutover delete or reduce to generated adapters:
 - V1 curation approval/apply/reject/draft/install surfaces;
 - active aliases beyond cutoff;
 - live legacy CLI/MCP fallback paths.
+- any task-graph bulk editor, temporary-file janitor, document parser, validation schema, or submit transaction outside the shared application operation/structured-staging and canonical task-command path.
 
 ## 18. Generated documentation, schemas, completion, and parity matrix
 
@@ -1009,6 +1100,8 @@ The parity matrix has one row per use case and one column per applicable binding
 - explicit source 104 versus installed 103 drift fixture, including `ast_grep_search`, conditional `ast_grep_rewrite`, and `move_symbol`;
 - deliberately add one uncataloged command/tool/format/scope allowlist entry and require named CI failure;
 - deterministic generation across map order, locale, timezone, width, platform path separators, and host capability sets.
+- snapshot `mcp-surface-profiles.json` and prove every profile is an explicit sorted `BindingId` set with the correct logical registration, effect/grant/host ceiling, eager tools-only fallback projection, count/token budget, and digest; inject a glob, cross-registration binding, implicit operator install, generic invoke binding, and over-budget definition and require named failures;
+- assert exactly seven task edit-bundle use cases and one generated binding disposition per supported surface, with export/rebase/submit/delete absent from context/task-worker profiles and present only in `tracedecay-work`/`orchestrator`.
 
 ### 19.2 Every-tool format conformance
 
@@ -1039,7 +1132,12 @@ For every mutation/internal tool, assert effect class, auth, idempotency/version
 - Negotiate sampling and elicitation independently. Assert no request when absent, no background-scout/curation sampling, no form-mode secret request, URL/state validation, and untrusted-result sanitization.
 - Stdio tests forbid non-protocol stdout and unnecessary secret-bearing environment inheritance. Streamable HTTP tests cover Origin/Host, loopback, bearer/OAuth audience, protocol/session headers, SSE resumption without cross-stream replay, token passthrough rejection, rate limits, and reconnect after daemon drain.
 - Maintain real host profiles for Codex, Claude Code, Cursor, Hermes, Gemini, OpenCode, Copilot, Roo/Kilo, Zed, and MCP Inspector. Record actual support for structured content, resource links, prompts, resources, completion, list changes, progress/cancellation, sampling/elicitation, and protocol tasks. Tools-only hosts remain functional; optional features never become assumed semantics.
+- Run core-only, every allowed zero/one/many facade-component combination, explicit headless facade-only deployment, each logical registration/profile pair, eager tools-only fallback, and native deferred discovery against the same labelled role corpus. Assert role-required binding coverage, zero cross-profile/operator leakage, definition budgets, exact CLI/API fallback when absent, one binary/daemon/application path, and no semantic difference by discovery mode.
+- Change prompt intent during an open connection and assert the tool set/profile digest does not change. Exercise genuine catalog/availability/grant changes and assert coalesced `listChanged` never widens beyond the pinned profile; a requested profile change returns reconnect guidance.
+- Exercise `task_graph.edit_bundles.export|get|validate|diff|rebase|submit|delete`: small inline and large resource-link reads, tools-only read fallback, Markdown-default and explicit-JSON diagnostics equality, resource immutability, stale base/rebase conflict, submit idempotency/atomicity, and orchestrator-only mutation authorization.
 - Run the exact canonical search-evaluation family through generated CLI, MCP tools, MCP resources/templates, HTTP/SDK, and Search Quality UI metadata. Assert every read/command appears once, resources are read-only, list/get share typed views, fixture promotion has no invented fixture read, and no alias is emitted.
+- Run `automation.dirty_scopes.list` and `automation.admissions.list|get` through generated CLI, MCP tools/resource template, HTTP/SDK, and dashboard metadata. Assert one catalog mapping per declared primitive and exactly the primitive set above, exact receipt/episode and frontier parity, generic retry/circuit/quarantine types, no fake run, no fourth operation/alias, and no `run-now` identical-input bypass.
+- Run the generic experiment family through CLI, MCP tools/resources/progress/cancellation/protocol tasks, HTTP/SDK, and every Playground route. Assert one draft/create/run/status/cancel/resume/retry/minimize lifecycle, identical experiment/run/cell/stage/comparison/comparison-cell/reduction coordinates/anchors/receipts, `replay_stages.list(cell)` returning exact `ReplayTraceV1`, one top-level filtered list operation per resource, no per-lab run tool, no protocol-task/work-item ID confusion, and no MCP sampling without the explicit experiment model/egress grant.
 
 ### 19.3 Every-command CLI conformance
 
@@ -1057,10 +1155,11 @@ For every current and V2 command path:
 - `--json` and `--jsonl` exact alias equivalence;
 - shell-safe examples and stdin/file payload behavior;
 - current `cost --export` invalid-format nonzero regression.
+- every `task-graph edit start|get|validate|diff|rebase|submit|clean` path, managed-directory versus caller-owned archive output, validate-only upload, pinned-candidate continuation, exact nonzero validation/conflict exits, and no public generic `invoke` command.
 
 ### 19.4 Cross-transport semantic parity
 
-Run one canonical fixture per use case through in-process application, native CLI JSON, generic CLI invoke JSON, MCP JSON, HTTP, Rust SDK, TypeScript SDK, Python sync/async SDK, and dashboard client where applicable. Compare after removing transport-only request/framing/timing fields:
+Run one canonical fixture per use case through in-process application, its generated native CLI JSON command, the schema-exact `tool <current-name>` CLI JSON fallback where applicable, MCP JSON where the pinned profile exposes it, HTTP, Rust SDK, TypeScript SDK, Python sync/async SDK, and dashboard client where applicable. Compare after removing transport-only request/framing/timing fields; no arbitrary hidden-binding CLI/MCP invocation bypass exists in the matrix:
 
 - scope resolution and active label;
 - rows/edges/facets/order/scores/count semantics;
@@ -1082,6 +1181,8 @@ Run one canonical fixture per use case through in-process application, native CL
 - terminal widths 40/80/120/200, screen-reader/no-color/high-contrast copy behavior, and deterministic tables;
 - explicit TTY versus pipe/file/tool capture, including `TERM=dumb` plus `NO_COLOR=1`; noninteractive status/help/results contain zero ANSI/OSC/cursor/half-block cells and stay within the declared output budget (FM-116);
 - property tests proving renderer never changes semantic row membership.
+- frontmatter edit-bundle fuzz for duplicate YAML keys, aliases/tags, multiple documents, depth/size/item limits, invalid UTF-8/control/bidi/Markdown/link content, unknown/read-only fields, secret canaries, JSON-pointer/source-span stability, and diagnostic rendering injection;
+- managed-directory cleanup races: changed member/device/inode, symlink swap, missing/modified member, crash/restart/expiry, submit/clean idempotency, validation retention, and proof that caller-owned `--archive` is never removed.
 
 ### 19.6 Scale and fault matrix
 
@@ -1091,6 +1192,7 @@ Run one canonical fixture per use case through in-process application, native CL
 - slow NDJSON/SSE consumers, bounded backpressure, gap/resync, and exact final coverage;
 - renderer panic/serialization failure converts to safe invariant problem without partial stdout;
 - identity-cutover conflict returns the same candidates/remediation through CLI/MCP/HTTP.
+- edit bundles at maximum item/edge/body size, concurrent plan-version change, active lease, cycle/dangling reference, validation cancellation, rebase conflict fanout, submit kill points, staged-payload GC, and indexed expiry cleanup without a full-bundle scan.
 
 ## 20. Implementation slices inside the existing master program
 
@@ -1100,6 +1202,7 @@ These are sub-slices of existing PRs, not a separate architecture track.
 
 - Generate the recursive CLI and full MCP source/runtime inventories.
 - Record every current inconsistency from Section 2 and every row from Sections 3–4.
+- Freeze all seven integration aliases, the nine-command canonical `integration` tree, and every provider hook launcher lowering to the hidden stdin-only `host-event ingest` binding.
 - Add source/runtime/release drift and TraceDecay identity-conflict fixtures.
 
 ### PR 4/9 companion — output-safe domain and store contracts
@@ -1109,19 +1212,25 @@ These are sub-slices of existing PRs, not a separate architecture track.
 
 ### PR 22A companion — binding and presentation specs
 
-- Extend the capability catalog with formats, presentation IDs, effect modes, exit classes, stream/export support, cursor/anchor, budgets, and the complete MCP primitive/capability/task/subscription/completion contract.
-- Generate `mcp-protocol.json`, tools with input/output schemas, resources/templates, prompts, completion eligibility, list generations, CLI schemas/help/docs, and parity matrix; reject every duplicate allowlist.
+- Extend the capability catalog with formats, presentation IDs, effect modes, exit classes, stream/export support, cursor/anchor, budgets, component-set/install-scope/profile selection, `McpSurfaceProfileV1`, and the complete MCP primitive/capability/task/subscription/completion contract.
+- Generate `mcp-protocol.json`, `mcp-surface-profiles.json`, tools with input/output schemas, resources/templates, prompts, completion eligibility, list generations, CLI schemas/help/docs, and parity matrix; reject every duplicate allowlist, profile glob, cross-trust binding, generic invoke tool, or budget overflow.
+- Catalog the exact task edit-bundle family and profile visibility, including the large-bundle resource-link contract and typed diagnostics/diff/receipt presentations.
+- Catalog `integrations.list|get|diff|status|install|update|repair|uninstall|verify`, their admin/effect/operation/output contracts, operator-only optional MCP exposure, and the internal `host-event ingest` binding; generate no legacy alias tool.
 
 ### PR 24A companion — sealed typed application views
 
 - Replace raw result maps with domain-clustered transport-eligible views.
 - Standardize coverage, empty/missing/partial states, labels, errors, and operations.
 - Carve autonomous curation and direct configuration out of any generic preview/apply command abstraction.
+- Add sealed integration inventory/detail/difference/status views and the one application-owned operation lifecycle; root composition remains only the deployment/probe/config effect port.
+- Reuse the generic operation and structured-staging kernel for protected task edit bundles; compile submit into canonical plan/work-item/edge commands and add no document-specific scheduler, retry engine, or task store.
 
 ### PR 24E1–24E8 companion — pure presentation plus generated adapters
 
-- Land the mandatory `tracedecay-presentation` crate and its plan-19 DAG edge; delete root-local human renderers as each domain cuts over.
+- Land the mandatory root `v2::presentation` module and its plan-19 module-lint edge; delete all other root/handler-local human renderers as each domain cuts over.
 - Pin the official Rust SDK/current stable protocol, land the connection/session state machine, generated service router, per-session notification/cancellation/subscription state, stdio transport, and optional secured Streamable HTTP transport.
+- Replace copied/full-catalog host installers with the generated skills+CLI baseline and optional context/work/operator registration façades over that one adapter; pin profile/digest at initialize and require reconnect to change it.
+- Generate the exact `tracedecay integration` tree, hidden stdin-only host-event adapter, alias cutoff shims, admin HTTP/SDK/dashboard parity, and optional operator MCP bindings from one catalog/application implementation; cover component-set and zero/one/many registration fixtures.
 - Cut MCP tools, structured results/errors, resources/templates, prompts/completion, roots/logging/list changes, progress/cancellation, then protocol tasks and explicitly authorized sampling/elicitation; each capability lands only with its conformance/host matrix.
 - Cut CLI and MCP semantic domains over one at a time with application/presentation differential tests; wire behavior remains transport-native.
 - Normalize stdout/stderr/exits, format switches, scope builders, help, cursors, and retrieval anchors.
@@ -1155,14 +1264,16 @@ Implementation verification from the repository root includes:
 ```bash
 cargo test -p tracedecay-tool-catalog complete_inventory transport_parity
 cargo test -p tracedecay-tool-catalog mcp_protocol_generation
+cargo test -p tracedecay-tool-catalog mcp_surface_profiles task_graph_edit_bundle_bindings
 cargo test -p tracedecay-application surface_views
-cargo test -p tracedecay-presentation
-cargo test -p tracedecay-api cli_mcp_http_sdk_parity
+cargo test --test presentation_v2
+cargo test cli_mcp_http_sdk_parity
 cargo test mcp_protocol_conformance
 cargo test mcp_host_profiles
+cargo test task_graph_edit_bundles
 cargo nextest run --workspace --no-fail-fast
-pnpm --dir dashboard test -- settings command-palette
-pnpm --dir dashboard exec playwright test settings output-inspector autonomy
+(cd dashboard && npm test -- settings command-palette)
+(cd dashboard && npx playwright test settings output-inspector autonomy)
 gitleaks git --redact --no-banner
 gitleaks dir generated docs dashboard packages python tests --redact --max-archive-depth 2
 ```
@@ -1172,6 +1283,8 @@ Required artifacts:
 - source/runtime CLI and MCP inventory manifests with digests;
 - full disposition and parity matrices;
 - generated help/schema/docs/completion hashes;
+- generated MCP install-mode/logical-registration/profile manifest and eager/deferred host budget report;
+- task edit-bundle schema, lifecycle, diagnostics/diff, large-resource-link, atomic-submit, and managed-cleanup receipts;
 - official MCP conformance/Inspector reports for stdio and enabled Streamable HTTP plus per-host capability profiles;
 - semantic and presentation golden fixtures;
 - current/V2 differential report by binding/use case;
@@ -1197,7 +1310,13 @@ The fence test is supplemented by a parser that requires an even fence count and
 - [ ] One catalog generates names, descriptions, params/defaults, scope, effects, auth, formats, help, docs, completion, and parity fixtures.
 - [ ] The current stable MCP revision and official Rust SDK are pinned and conformance-tested; initialize/version/capability/initialized/drain/reconnect state is enforced before application/store access.
 - [ ] Catalog generation owns tools with input/output schemas, resources/templates, prompts, completion, annotations, task support, subscriptions, and list generations; every advertised capability has an implementation and host fixture.
+- [ ] Skills plus CLI are semantically complete without MCP. Optional MCP uses one adapter and only `tracedecay-context`, `tracedecay-work`, or explicitly opted-in `tracedecay-operator`, with a fixed explicit profile/digest and profile∩host∩grant∩authorization visibility.
+- [ ] Profile sets contain no globs or generic invoke/god tool, stay inside eager-host count/token budgets, never switch per turn, and use `listChanged` only for real changes inside the pinned profile; deferred tool search is optional.
+- [ ] `task_graph.edit_bundles.export|get|validate|diff|rebase|submit|delete` is the sole complex bulk-edit family; CLI exposes `task-graph edit start|get|validate|diff|rebase|submit|clean`, only validate uploads a sharded directory/archive, later stages consume one pinned `TaskGraphEditCandidateRefV1`, large MCP bundles return authorized resource links, and only `tracedecay-work`/`orchestrator` exposes edit mutations.
+- [ ] Frontmatter Markdown has closed schemas and source-spanned typed diagnostics; validate/diff are nonauthoritative, rebase reports conflicts, submit is one expected-version/idempotent owner-shard transaction, and safe cleanup never deletes caller-owned or replaced files.
 - [ ] The canonical search-evaluation reads/commands have exact generated CLI/MCP/resource/HTTP/SDK/Search Quality UI parity, with read-only resources and zero invented aliases/use cases.
+- [ ] Automation dirty-scope/admission list/get reads have exact generated CLI/MCP/resource/HTTP/SDK/dashboard parity; coalesced skip episodes preserve evaluation-time/frontier tuples and stable anchors, current/considered/consumed/included frontiers remain explicit, shared health/reconciliation state is not forked, and run-now cannot bypass identical-input fencing.
+- [ ] The generic experiment draft/create/run/status/cancel/resume/retry/minimize and experiment/run/cell/stage/comparison/comparison-cell/reduction list/get reads have exact CLI/MCP/HTTP/SDK/dashboard parity; every lab is a catalog evaluator, not a second tool or lifecycle family.
 - [ ] One application use case executes each semantic operation; CLI/MCP contain no store/query/policy behavior.
 - [ ] Machine JSON is canonical typed semantic data across CLI/MCP/HTTP/SDK and is never a double-encoded transport wrapper.
 - [ ] MCP defaults to compact Markdown; CLI defaults to deterministic human output; all explicit formats are schema-advertised and tested.

@@ -18,11 +18,12 @@ Plan [`24-canonical-task-plan-graph-and-multi-agent-executor.md`](24-canonical-t
 - Canonical entity, scope, time, evidence, sensitivity, shard, watermark, and schema identifiers come from `tracedecay-domain`; this crate does not introduce parallel string IDs.
 - Catalog/projector/store implementations remain in `tracedecay-store` and `tracedecay-projectors`. This crate defines read ports and logical fragments, not SQL migrations or projector write paths.
 - `tracedecay-application` owns authorization decisions, saved-view mutations, annotations, export job lifecycle, and use-case composition. It passes an already-authorized `QueryAccess` to this crate.
-- `tracedecay-api` owns HTTP/OpenAPI/SSE framing, `Last-Event-ID`, heartbeat bytes, and bearer/CSRF/CSP enforcement. It maps query snapshot/delta/gap types without changing semantics.
+- Root `v2::api` owns HTTP/OpenAPI/SSE framing, `Last-Event-ID`, heartbeat bytes, and bearer/CSRF/CSP enforcement. It maps query snapshot/delta/gap types without changing semantics.
 - Exact public replay mode names shared with capture and policy are `ReplayMode::ExactDeterministic`, `ReplayMode::RecordedResult`, and `ReplayMode::CurrentBestEffort`. Query Lab uses the query engine's own versioned plan/index/ranker references; policy evaluators use the policy crate.
 - A frozen query never observes rows above its captured per-shard high-watermarks. A live query starts with the same frozen snapshot and then emits ordered deltas.
 - A missing, corrupt, stale, incompatible, locked, or redacted shard never disappears silently. Its disposition is present in `CoverageReportV1`, the shared domain type owned by [`01-domain-crate.md`](01-domain-crate.md).
 - Read-only execution never updates usage, retrieval, hint, ranking, or memory counters. Adoption/feedback is recorded later as an explicit application/domain event.
+- Query limits, budget accounting, signed cursor paging, shard fan-out, deterministic merge, rank-profile evaluation, coverage assembly, and explain metadata each have one implementation shared by every query family. Session/LCM, memory, code, tasks, graph, timeline, and observability register typed operators/profiles; they cannot copy their own cap, cursor, ranker, or hydration loop.
 - [`23-session-lcm-temporal-retrieval-and-evaluation.md`](23-session-lcm-temporal-retrieval-and-evaluation.md) is the normative session/LCM specialization: this crate owns its occurrence/logical-copy/summary-DAG candidate channels, temporal current/as-of/evolution/forensic resolver, authority/supersession features, federated fusion, context assembly, explanations, and evaluation execution — all inside this crate's Section 5 module tree (`session/`, `context/`, `eval/`), which is the single home for ranking, fusion, and evaluation-metrics code; plans 15 and 23 state requirements against these modules and declare no parallel `retrieval/` or `session/` trees. Context assembly executes here in `context/assembler.rs`; [`09-application-crate.md`](09-application-crate.md) composes and authorizes assembly/packet use cases, and [`24-canonical-task-plan-graph-and-multi-agent-executor.md`](24-canonical-task-plan-graph-and-multi-agent-executor.md) supplies task-graph selectors only. No legacy `message_search` or LCM binding retains independent rank semantics.
 
 ## 2. Goals
@@ -133,7 +134,8 @@ crates/tracedecay-query/
 │   │   ├── entity.rs             # entity/alias candidate channel (plan 15 §4.2 requirement)
 │   │   ├── vector.rs             # metric/model/version/exact-fallback contract
 │   │   ├── learned_sparse.rs     # optional learned-sparse channel behind RepresentationQueryPort (plan 15 §4.2)
-│   │   ├── graph.rs              # bounded neighborhood/path/impact/affected-tests contract
+│   │   ├── graph.rs              # bounded neighborhood/path/impact/affected-tests/composition contract
+│   │   ├── atlas.rs              # viewport/zoom-band/hysteresis/prefetch reads over projected atlas tiles
 │   │   ├── summary.rs            # summary-DAG channel with source horizon/coverage (plan 23 §6)
 │   │   ├── coordination.rs       # nearby agents, claim overlap, TTL/redundancy contract
 │   │   ├── time.rs               # event windows and bitemporal/as-of contract
@@ -179,9 +181,7 @@ crates/tracedecay-query/
 │   │   ├── mod.rs                # live query subscription entry point
 │   │   ├── delta.rs              # snapshot/delta/progress/gap/resync types
 │   │   └── coalesce.rs           # bounded idempotent delta coalescing
-│   └── labs/
-│       ├── mod.rs                # read-only lab gateway
-│       └── query.rs              # Query Lab plan/version/corpus comparison
+│   # Query Lab uses eval/replay plus application generic experiments; no query-owned lab gateway/lifecycle.
 ├── tests/
 │   ├── support/mod.rs            # deterministic catalog/shard/change-feed fixtures
 │   ├── ast_validation.rs
@@ -213,13 +213,13 @@ Required companion files, owned by other plans/PRs:
 ```text
 crates/tracedecay-domain/src/query/{mod.rs,predicate.rs,scope.rs,text.rs,semantic.rs,relation.rs,time.rs,aggregate.rs,sort.rs}
 src/v2_adapters/query_store/{mod.rs,catalog.rs,sqlite_shard.rs,fts.rs,vector.rs,graph.rs,time.rs,coordination.rs}
-crates/tracedecay-projectors/src/read_models/{facets.rs,timeline.rs,observatory.rs}
-crates/tracedecay-application/src/use_cases/{query.rs,search.rs,graph.rs,timeline.rs,export.rs,subscribe.rs}
-crates/tracedecay-api/src/http/{query.rs,search.rs,graph.rs,timeline.rs,exports.rs}
-crates/tracedecay-api/src/sse/{mod.rs,resume.rs}
+crates/tracedecay-projectors/src/read_models/{facets.rs,timeline.rs,observatory.rs,profile_atlas.rs}
+crates/tracedecay-application/src/features/{query,search,graph,timeline,export,subscriptions}/**
+src/v2/api/http/generated.rs             # generated bindings for query/search/graph/timeline/export use cases
+src/v2/api/sse/{mod.rs,resume.rs}
 ```
 
-Plan [`04-projectors-crate.md`](04-projectors-crate.md) owns the `read_models/{facets,timeline,observatory}` projector family named above and defines those read models; this crate only consumes them through query ports.
+Plan [`04-projectors-crate.md`](04-projectors-crate.md) owns the `read_models/{facets,timeline,observatory,profile_atlas}` projector family named above and defines those read models; this crate only consumes them through query ports. Atlas reads never recompute geometry from the current result snapshot.
 
 The root composition crate owns `src/v2_adapters/query_store/**`; application owns only the use-case/query ports. Query and application never import `rusqlite`, graph files, or another concrete store.
 
@@ -228,40 +228,10 @@ The root composition crate owns `src/v2_adapters/query_store/**`; application ow
 PR 4 must land these names before PR 11. `tracedecay-query::ast` re-exports `TraceQueryV1`, `ScopeSelectorV2`, `MessageView`, `TimePredicate`, `TemporalClauseV1`, `AttributePredicate`, `TextPredicate`, `SemanticPredicate`, `TraversalPredicate`, `ProvenancePredicate`, `SensitivityFilter`, `FacetRequest`, `AggregateRequest`, `FieldProjection`, `SortKey`, `PageSize`, `SnapshotMode`, `ExplainMode`, `QueryBudget`, `CursorClaimsV1`, `FrozenSnapshot`, and `VectorWatermark` unchanged.
 
 ```rust
-pub struct TraceQueryV1 {
-    pub query_id: QueryId,
-    pub scope: ScopeSelectorV2,
-    pub entity_kinds: Vec<EntityKind>,
-    pub message_view: Option<MessageView>,
-    pub time: Option<TimePredicate>,
-    pub temporal: Option<TemporalClauseV1>,
-    pub attributes: Vec<AttributePredicate>,
-    pub text: Option<TextPredicate>,
-    pub semantic: Option<SemanticPredicate>,
-    pub traversal: Option<TraversalPredicate>,
-    pub provenance: Option<ProvenancePredicate>,
-    pub sensitivity: SensitivityFilter,
-    pub facets: Vec<FacetRequest>,
-    pub aggregates: Vec<AggregateRequest>,
-    pub projection: FieldProjection,
-    pub sort: Vec<SortKey>,
-    pub page_size: PageSize,
-    pub snapshot: SnapshotMode,
-    pub explain: ExplainMode,
-    pub budget: QueryBudget,
-}
+pub use tracedecay_domain::{TemporalClauseV1, TraceQueryV1};
 ```
 
-```rust
-pub enum TemporalClauseV1 {
-    Current,
-    AsOf { valid_time: UtcMicros, knowledge_time: UtcMicros },
-    Evolution,
-    Forensic,
-}
-```
-
-`TemporalClauseV1` is owned by `tracedecay-domain` ([`01-domain-crate.md`](01-domain-crate.md)); this crate re-exports and executes that exact enum (Section 11.4). `AsOf` requires both `valid_time` and `knowledge_time` — a single-timestamp as-of is rejected at validation, because “what was known then” needs both cutoffs (Section 11.4). `Evolution` bounds come only from the enclosing `TraceQueryV1.time` predicate. Plan [`23-session-lcm-temporal-retrieval-and-evaluation.md`](23-session-lcm-temporal-retrieval-and-evaluation.md) rides this clause for current/as-of/evolution/forensic session retrieval and defines no parallel AST.
+The imported `TraceQueryV1` fields are exactly `query_id`, `scope`, `entity_kinds`, `message_view`, `time`, `temporal`, `attributes`, `text`, `semantic`, `traversal`, `provenance`, `sensitivity`, `facets`, `aggregates`, `projection`, `sort`, `page_size`, `snapshot`, `explain`, and `budget`; plan 01 owns their types and serialization. `TemporalClauseV1` is owned by `tracedecay-domain` ([`01-domain-crate.md`](01-domain-crate.md)); this crate re-exports and executes its exact `Current | AsOf { valid_time, knowledge_time } | Evolution | Forensic` variants (Section 11.4). `AsOf` requires both timestamps—a single-timestamp as-of is rejected because “what was known then” needs both cutoffs. `Evolution` bounds come only from the enclosing `TraceQueryV1.time` predicate. Plan [`23-session-lcm-temporal-retrieval-and-evaluation.md`](23-session-lcm-temporal-retrieval-and-evaluation.md) rides this clause for current/as-of/evolution/forensic session retrieval and defines no parallel AST.
 
 Grouping, comparison intervals, relation evidence filters, code predicates, sampling/downsampling, and saved-collection expansion are encoded through registered attributes/predicates and query profiles until a versioned domain schema adds fields; the query crate must not fork `TraceQueryV1` to add them.
 
@@ -285,6 +255,12 @@ Plan 23's session/LCM filters ride `TraceQueryV1` through these registered attri
 | `summary.freshness` | enum `{ fresh, stale, imported_unverified }` | in | Summary-horizon freshness filters (23 §6.1) |
 
 Each key is registered in the domain schema/predicate registries with its value type and operator set; the planner lowers registered-attribute predicates to shard operators exactly like built-in predicates, and unsupported keys fail validation with `invalid_query`.
+
+### 6.1A Registered host-integration attributes and preset
+
+Host installation/package/component state remains ordinary versioned `Installation` entities and `TraceQueryV1`, not a host-specific query AST. Plan 27 registers the bounded keys `integration.host`, `integration.surface`, `integration.package`, `integration.component`, `integration.state`, `integration.capability_disposition`, `integration.trust_state`, `integration.install_scope`, and `integration.owner_class` with exact enum/ID types and `equals`/`in` operators; version and manifest/component/probe digests are projected drill-down fields, not facet dimensions. The named `host_integrations` preset selects `Installation`, applies those registered attributes, joins its host/profile/package/component and signed-manifest relations, and returns the shared installation/capability-difference view. All/profile/project filters still arrive through `ScopeSelectorV2`. CLI, API, SDK, dashboard, doctor, and MCP reads lower to this same preset; none opens config files, host caches, or installer state directly.
+
+Registry tests require every plan-27 component/capability disposition to round-trip through the generic query, facet, cursor, export, and saved-view paths; unknown keys fail validation, unsupported/version-gated states remain visible, and no query result includes a host path, credential, config body, backup body, or cache contents.
 
 ### 6.2 Session and message list intents
 
@@ -925,15 +901,15 @@ pub enum RowDelta {
 - Query sets bounded channel capacity and returns a slow-consumer error when coalescing cannot preserve correctness. API maps this to explicit SSE termination/reconnect behavior.
 - API owns heartbeat events and `Last-Event-ID`; it encodes `StreamSequence` without exposing query literals.
 
-## 14. Query and Cross-Domain Lab Contracts
+## 14. Query evaluator contribution to generic experiments
 
-`labs/query.rs` implements Query Lab directly:
+`eval/replay.rs` exposes the pure Query evaluator adapter consumed by plan 09's generic experiment registry; this crate implements no lab gateway, run lifecycle, comparison store, scheduler, or artifact sink:
 
 - Inputs: immutable `TraceQueryV1`, query/index/planner/ranking versions, access fixture, vector watermark, budget, and recorded shard fixture manifest.
 - Outputs: canonical AST, validation, cost estimate, selected/pruned shards, pushed/residual filters, FTS/vector/graph/time operators, merge/rank explanations, cursor state with secrets removed, timing, and coverage.
-- Comparison: planner/index/ranking A/B over the same input/watermark; output changed entities/order/scores/facets/coverage/cost and stable digest.
+- Variant stages: planner/index/ranking variants over the same input/watermark emit typed stages/outputs; the generic `ReplayComparisonV1` aligns changed entities/order/scores/facets/coverage/cost.
 - Request export: equivalent CLI args, MCP arguments, HTTP JSON, and raw AST generated from one canonical query.
-- Read-only proof: fixture ports panic on write; no usage/retrieval/ranking counters exist in query ports.
+- Isolation proof: the evaluator accepts immutable query/archive ports only; the application hermetic runtime owns resource receipts and artifact persistence. No usage/retrieval/ranking counter or write port exists here.
 
 Other labs consume query contracts without moving policy into this crate:
 
@@ -948,7 +924,7 @@ Other labs consume query contracts without moving policy into this crate:
 | Memory | Fact/version/trust/conflict/retrieval/deletion-impact read models | `tracedecay-policy` |
 | Policy Diff | Enumerate saved corpus inputs and hydrate recorded/executed decisions | `tracedecay-policy` |
 
-All labs use domain `ReplayMode::{ExactDeterministic, RecordedResult, CurrentBestEffort}`. Query Lab exactness is stated independently as `ExactQueryReplay` only when all shard fixtures, index generations, ranking profile, planner version, schema, and watermarks are present; otherwise it returns recorded inspection or current best-effort with named substitutions.
+All evaluator adapters use domain `ReplayMode::{ExactDeterministic, RecordedResult, CurrentBestEffort}` through the one experiment manifest. Query exactness is stated independently as `ExactQueryReplay` only when all shard fixtures, index generations, ranking profile, planner version, schema, and watermarks are present; otherwise it returns recorded inspection or current best effort with named substitutions. The application, not this crate, persists those substitutions and stage anchors.
 
 ## 15. Consumes and Produces
 
@@ -956,10 +932,10 @@ All labs use domain `ReplayMode::{ExactDeterministic, RecordedResult, CurrentBes
 |---|---|---|
 | `tracedecay-domain` | IDs, `TraceQueryV1`, entity/relation/evidence/time/sensitivity/schema types | No domain writes; canonical query fingerprints and read-only result references |
 | Store-backed query ports | Catalog inventory, shard capabilities/statistics/health, captured watermarks, bounded fragment pages, payload slices, representation results | Typed `ShardRequest`, resume positions, cancellation, safe explain requests; no `tracedecay-store` import |
-| Projected read models through query ports | Facets, aggregates, timeline density, search docs, rank features, outbox deltas and source watermarks | Read-model requirements and version/capability contracts; no `tracedecay-projectors` import |
+| Projected read models through query ports | Facets, aggregates, timeline density, profile-atlas generations/tiles/anchor lineage, search docs, rank features, outbox deltas and source watermarks | Read-model requirements and version/capability contracts; no `tracedecay-projectors` import |
 | Policy-selected domain refs supplied by application | Ranking profile refs and immutable policy candidate requirements | Candidate sets, rank explanations, query snapshots, no feedback mutation and no `tracedecay-policy` import |
 | `tracedecay-application` | Authorized request, clock, deadlines, budgets, saved-query content | `QueryResponse`, `ExportStream`, `LiveQueryStream`, typed errors/restart reasons |
-| `tracedecay-api`/CLI/MCP | No transport types imported | Stable schemas mapped without semantic changes |
+| root `v2::api`/CLI/MCP | No transport types imported | Stable schemas mapped without semantic changes |
 | Dashboard/Explorer/Loom/labs | No frontend state imported | Coverage, explain, facets, LOD, cursors, deterministic rows/edges/deltas |
 
 Dependency direction remains `tracedecay-domain <- tracedecay-query <- tracedecay-application <- adapters`; store/projector implementations satisfy query-owned ports without causing domain/query to import concrete persistence.
@@ -1134,16 +1110,17 @@ Program numbering is authoritative: PR 12 is implemented in dependency order as 
 - [ ] Run focused lifecycle/security/release tests plus accepted PR 14A–14C quality/resource gates on clean cache, warm cache, offline, revoked, OOM, and eviction fixtures. Expected: exact manifests/coverage/fallback; zero raw model inputs/vectors/credentials/paths in logs or artifacts.
 - [ ] Commit `feat(query): manage signed local representation artifacts`; if no profile passes PR 14A/14C gates, land only the disabled catalog/contract tests and do not ship dormant download/runtime code.
 
-### PR 15A: Graph, impact, timeline, coordination, and bitemporal/as-of operators
+### PR 15A: Graph composition, atlas, impact, timeline, coordination, and bitemporal/as-of operators
 
-**Files:** `src/operators/{graph,time,coordination}.rs`, application-owned query/store graph/time/coordination adapters, `tests/{graph_time_as_of,coordination_proximity}.rs`, `benches/{timeline,graph}.rs`.
+**Files:** `src/operators/{graph,atlas,time,coordination}.rs`, application-owned query/store graph/atlas/time/coordination adapters, `tests/{graph_time_as_of,graph_composition_atlas,coordination_proximity}.rs`, `benches/{timeline,graph}.rs`.
 
-- [ ] Add graph/time tests plus `nearby_agents_caps_at_100`, `expired_claim_is_historical_only`, `parallel_worktree_overlap_is_evidenced`, and `planned_redundancy_is_not_duplicate`. Freeze parent prefix `019f4906`, PR #359 child agents `agent-ac3ce9b1ebf998cfb`, `agent-a245d2442cefc621d`, `agent-a96d21dc6391ceba8`, `agent-a6661fd133491631c`, and Cursor session `ebc96a27-b046-4c88-865f-b38d76da9d2d` in the coordination fixture manifest.
-- [ ] Run `cargo test -p tracedecay-query --test graph_time_as_of --test coordination_proximity -- --nocapture`. Expected: tests fail because graph/time/coordination lowering is absent.
+- [ ] Add graph/time tests plus `composition_accepts_one_primary_and_two_overlays`, `bridge_edges_retain_lens_membership_and_evidence`, `atlas_viewport_uses_published_generation_not_current_layout`, `zoom_hysteresis_prevents_tile_flicker`, `prefetch_is_one_bounded_neighbor_ring`, `every_visual_selection_and_action_lowers_to_canonical_inverse_query_delta`, `unsupported_linked_slots_are_explicit`, `nearby_agents_caps_at_100`, `expired_claim_is_historical_only`, `parallel_worktree_overlap_is_evidenced`, and `planned_redundancy_is_not_duplicate`. Freeze parent prefix `019f4906`, PR #359 child agents `agent-ac3ce9b1ebf998cfb`, `agent-a245d2442cefc621d`, `agent-a96d21dc6391ceba8`, `agent-a6661fd133491631c`, and Cursor session `ebc96a27-b046-4c88-865f-b38d76da9d2d` in the coordination fixture manifest.
+- [ ] Run `cargo test -p tracedecay-query --test graph_time_as_of --test graph_composition_atlas --test coordination_proximity -- --nocapture`. Expected: tests fail because graph/atlas/time/coordination lowering is absent.
+- [ ] Lower `GraphCompositionSpecV1` through the same graph operators/cursor/coverage contract, read atlas tiles by generation/viewport/zoom band with hysteresis and prefetch caps, and implement domain `ComposeFromSelectionRequestV1`→`ComposeFromSelectionResultV1` for every atom/set/comparison/action with canonical/inverse query, cost, snapshot, coverage, and supported/unsupported slots. Overlay planning may share hydration but cannot merge edge semantics or create another result envelope.
 - [ ] Implement Sections 11.4–11.5, reference store traversal, optional CSR adapter, stable paths, density buckets, bounded claim-overlap queries, and evidence/provenance hydration.
 - [ ] Re-run the command. Expected: graph/time and coordination tests pass with deterministic result/overlap order and byte-identical store/CSR entity/edge sets.
 - [ ] Run both Criterion benches. Expected: current neighborhood p95 <=100 ms; 10x bounded two-hop p95 <=500 ms; timeline first page <=200 ms current and <=700 ms 10x; output records corpus/watermark/reference machine.
-- [ ] Commit `feat(query): add graph and bitemporal operators`.
+- [ ] Commit `feat(query): add graph atlas and bitemporal operators`.
 
 ### PR 15B: Deterministic export and live read models
 
@@ -1155,16 +1132,16 @@ Program numbering is authoritative: PR 12 is implemented in dependency order as 
 - [ ] Re-run the command. Expected: all tests pass; JSONL/Parquet logical row digests match; reasoning text is absent; gap sequence is explicit.
 - [ ] Commit `feat(query): stream complete exports and live deltas`.
 
-### PR 16: Aggregate projections and Query Lab
+### PR 16: Aggregate projections and Query experiment evaluator
 
-**Files:** `src/labs/*.rs`, projector read-model files, `tests/query_lab.rs`, `benches/planner.rs`.
+**Files:** `src/eval/replay.rs`, projector read-model files, `tests/query_replay_evaluator.rs`, `benches/planner.rs`.
 
-- [ ] Add tests `all_scope_rollups_preserve_source_watermarks`, `unknown_denominator_is_null`, `lab_compare_reports_rank_and_plan_changes`, `lab_emits_equivalent_transport_requests`, and `lab_ports_cannot_mutate`.
-- [ ] Run `cargo test -p tracedecay-query --test query_lab -- --nocapture`. Expected: tests fail because lab/rollup ports do not exist.
-- [ ] Add project/day/kind/provider/model/tool/hint/automation/health/cost read-model capabilities and the Query Lab contract from Section 14. Mutation methods must not appear on any lab trait.
+- [ ] Add tests `all_scope_rollups_preserve_source_watermarks`, `unknown_denominator_is_null`, `evaluator_emits_stable_stage_digests`, `variant_outputs_report_rank_and_plan_changes`, `evaluator_emits_equivalent_transport_recipe`, and `evaluator_ports_cannot_mutate_or_persist`.
+- [ ] Run `cargo test -p tracedecay-query --test query_replay_evaluator -- --nocapture`. Expected: tests fail because evaluator/rollup ports do not exist.
+- [ ] Add project/day/kind/provider/model/tool/hint/automation/health/cost read-model capabilities and the Query evaluator contract from Section 14. Mutation, lifecycle, comparison-persistence, and artifact-write methods must not appear on its trait.
 - [ ] Re-run the command. Expected: all tests pass; A/B digest is stable; unknown denominator serializes as null plus reason.
 - [ ] Run `cargo bench -p tracedecay-query --bench planner -- --save-baseline pr16`. Expected: planner avoids irrelevant shard opens and reports current/10x p95 plus pruning ratio.
-- [ ] Commit `feat(query): add aggregate read models and Query Lab`.
+- [ ] Commit `feat(query): add aggregate views and replay evaluator`.
 
 ### PR 24C/24E: Application, API/SSE, CLI, MCP, and dashboard adapters
 

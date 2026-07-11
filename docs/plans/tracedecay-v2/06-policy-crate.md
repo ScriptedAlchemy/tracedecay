@@ -129,7 +129,7 @@ crates/tracedecay-policy/
 │   │   ├── snapshot.rs              # immutable input/environment snapshot
 │   │   ├── recorded.rs              # stored-result verification
 │   │   ├── substitution.rs          # best-effort gap/substitution report
-│   │   └── diff.rs                  # canonical decision/explanation diff
+│   │   └── diff.rs                  # policy decision content diff emitted as stages; no run alignment/lifecycle
 │   ├── evaluators/
 │   │   ├── mod.rs                   # EvaluatorKind and typed dispatch
 │   │   ├── hint.rs                  # classify/suppress/dedupe/escalate/render
@@ -141,21 +141,11 @@ crates/tracedecay-policy/
 │   │   ├── curation.rs              # policy/skill/fact proposal eligibility
 │   │   ├── scheduler.rs             # due/skip/lock proposal/effective config
 │   │   └── memory.rs                # fact proposal/trust/conflict/supersession/deletion impact
-│   ├── git/
+│   └── git/
 │   │   ├── mod.rs                   # GitIntent and evidence-source vocabulary
 │   │   ├── catalog.rs               # eight required tool-route descriptors
 │   │   ├── snapshot.rs              # local semantic vs live delivery snapshots
-│   │   └── reconcile.rs             # merge-base/head/changed-file drift rules
-│   └── labs/
-│       ├── mod.rs                   # LabRunner and read-only external adapter
-│       ├── hint.rs
-│       ├── retrieval.rs
-│       ├── correlation.rs
-│       ├── coordination.rs
-│       ├── scheduler.rs
-│       ├── memory.rs
-│       ├── policy_diff.rs
-│       └── external.rs              # Ingest/Query recorded/exact/best-effort adapter contract
+│       └── reconcile.rs             # merge-base/head/changed-file drift rules
 ├── bundles/
 │   ├── v1-hints-2026-07/manifest.json
 │   ├── v1-retrieval-2026-07/manifest.json
@@ -188,11 +178,11 @@ crates/tracedecay-policy/
 Companion files owned by other plans:
 
 ```text
-crates/tracedecay-domain/src/policy/{mod.rs,bundle.rs,evaluation.rs,outcome.rs}.rs
+crates/tracedecay-domain/src/policy/{mod,bundle,evaluation,outcome}.rs
 src/v2_adapters/policy_archive/{mod.rs,bundle_archive.rs,input_archive.rs,evaluation_repository.rs}
 crates/tracedecay-projectors/src/policy.rs
-crates/tracedecay-application/src/use_cases/labs/{hint.rs,retrieval.rs,ingest.rs,query.rs,correlation.rs,coordination.rs,scheduler.rs,memory.rs,policy_diff.rs,evolution.rs}
-crates/tracedecay-api/src/http/labs/{mod.rs,hints.rs,retrieval.rs,ingest.rs,query.rs,correlation.rs,coordination.rs,scheduler.rs,memory.rs,policy_diff.rs,evolution.rs}
+crates/tracedecay-application/src/features/experiments/evaluators/**
+src/v2/api/http/generated.rs             # generated generic experiment bindings; no per-lab API module
 ```
 
 The root composition crate owns `src/v2_adapters/policy_archive/**`; application owns only the immutable archive/replay ports and use cases. Policy and application never import a concrete storage/archive implementation.
@@ -318,26 +308,23 @@ pub struct EvaluationRecord {
     pub evaluation_id: PolicyEvaluationId,
     pub evaluator: EvaluatorKind,
     pub requested_mode: tracedecay_domain::ReplayMode,
-    pub fidelity: ReplayFidelity,
+    pub fidelity: tracedecay_domain::ReplayFidelityV1,
     pub bundle: PolicyBundleRef,
     pub input_digest: ManifestDigest,
     pub environment_digest: ManifestDigest,
     pub decision: EvaluationDecision,
     pub explanation: DecisionExplanation,
     pub proposed_effects: Vec<ProposedEffect>,
-    pub substitutions: Vec<ReplaySubstitution>,
+    pub substitutions: BoundedVec<tracedecay_domain::ReplaySubstitutionV1, 64>,
+    pub unavailable_inputs: BoundedVec<tracedecay_domain::ReplayUnavailableInputV1, 64>,
     pub decision_digest: ManifestDigest,
     pub explanation_digest: ManifestDigest,
     pub duration_micros: u64,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub enum ReplayFidelity {
-    ExactDeterministic { verified: bool },
-    RecordedResult { digest_verified: bool },
-    CurrentBestEffort { incomplete: bool },
-}
 ```
+
+Policy imports the domain-owned requested mode, achieved fidelity, substitution, and unavailable-input contracts unchanged. It may decide or explain fidelity, but cannot define a policy-local replay vocabulary.
 
 ```rust
 pub struct PolicyRuntime<A, S, R> {
@@ -478,7 +465,7 @@ pub struct ScopeResolutionSnapshot {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct HintEvaluationInput {
     pub provider_event: NormalizedProviderEvent,
-    pub host: HostProfileRef,
+    pub host_capabilities: HostCapabilitySnapshotV1,
     pub session: SessionId,
     pub scope: ScopeSelectorV2,
     pub scope_resolution: ScopeResolutionSnapshot,
@@ -514,6 +501,8 @@ Scope is preserved end-to-end in evaluation/input/output digests. A tool/skill/d
 
 `available_tools` and `EvaluationEnvironment.tool_catalog` must carry the same pinned plan-01 `CatalogSnapshotRefV1`; the catalog snapshot itself is loaded once through `BundleArchivePort`-adjacent reads at evaluation start, so no full-catalog canonical-CBOR digest is computed inside the evaluation stage budget.
 
+Host availability is never a Boolean or an unversioned host name. `HostCapabilitySnapshotV1` pins an explicit `Target` pre-install subject or `Installed` runtime subject, its independent snapshot digest, observation/freshness interval, and a typed disposition for each evaluated capability: `Supported`, `VersionGated`, `Absent`, `Undocumented`, `PolicyDisabled`, `Stale`, or `TrustPending`. Installation planning may inspect a `Target` subject; executable routing requires `Installed`, a matching active runtime handshake, supported/fresh capability, and current principal grants. Every other disposition or subject mismatch produces a distinct checked rejection/fallback reason, survives the input and decision digests, and is replayed against the pinned snapshot rather than current host state. Policy never probes the host itself.
+
 #### 9.1.1 Request facts and candidate shapes
 
 `RequestFacts` is the typed, digestable input snapshot the application assembles for every evaluative hook invocation; Plan [`07`](07-hooks-crate.md) §11's fact inventory is exactly this structure, `HintEvaluationInput` is its evaluator-facing decode (same `facts_digest`), and Hint Lab and `HookApplicationPort` reference it by digest.
@@ -523,7 +512,7 @@ Scope is preserved end-to-end in evaluation/input/output digests. A tool/skill/d
 pub struct RequestFacts {
     pub schema: SchemaVersion,
     pub invocation_id: HookInvocationId,
-    pub host: HostProfileRef,
+    pub host_capabilities: HostCapabilitySnapshotV1,
     pub hook_point: HookPoint,
     pub prompt_origin: Option<PromptOrigin>,
     pub session: SessionId,
@@ -532,7 +521,6 @@ pub struct RequestFacts {
     pub scope_resolution: ScopeResolutionSnapshot,
     pub hook_facts: HookFacts,
     pub tool_catalog: CatalogSnapshotRefV1,
-    pub host_tool_availability: BTreeMap<CapabilityId, bool>,
     pub memory_candidates: Vec<PolicyCandidate>,
     pub skill_candidates: Vec<PolicyCandidate>,
     pub query_candidates: Vec<PolicyCandidate>,
@@ -700,7 +688,7 @@ pub enum PendingSlotOp {
 }
 ```
 
-Category dedupe rides the category clocks; the four fingerprint sets carry plan-01 `PrivacyDomainKeyedFingerprintV1` values with explicit privacy domain/key epoch. Fingerprint-bearing structs deliberately do not derive public `Serialize`/`Deserialize`. Policy's store adapter uses one audited fixed-layout `HintStatePrivateCodecV1` whose encode/decode functions accept/return only these internal types; the codec is unavailable to transport/presentation crates and its bytes live only in the encrypted activity-shard state blob. Public/API/replay views expose counts, category clocks, budgets, decision reasons, and state version—not fingerprint bytes/domain/epoch. Compile-fail tests reject serde/public-view conversion for `PrivacyDomainKeyedFingerprintV1`, `DedupeDecision`, `HintStateSnapshot`, and `HintStateProposal`. Storage envelope: one row per `HintStateTarget`; primary key and uniqueness = the target digest (profile, session, agent, thread); required index on `updated_at`; each set is bounded at 256 entries with oldest-first eviction recorded through `evict_fingerprints`, keeping a row under 32 KiB. Key rotation rebuilds sets from eligible retained evidence or safely forgets them; it never compares epochs. The column-level table schema lands in plan 02.
+Category dedupe rides the category clocks; the four fingerprint sets carry plan-01 `PrivacyDomainKeyedFingerprintV1` values with explicit privacy domain/key epoch. Fingerprint-bearing structs deliberately do not derive public `Serialize`/`Deserialize`. Policy's store adapter uses one audited fixed-layout `HintStatePrivateCodecV1` whose encode/decode functions accept/return only these internal types; the codec is unavailable to transport adapters or root `v2::presentation`, and its bytes live only in the encrypted activity-shard state blob. Public/API/replay views expose counts, category clocks, budgets, decision reasons, and state version—not fingerprint bytes/domain/epoch. Compile-fail tests reject serde/public-view conversion for `PrivacyDomainKeyedFingerprintV1`, `DedupeDecision`, `HintStateSnapshot`, and `HintStateProposal`. Storage envelope: one row per `HintStateTarget`; primary key and uniqueness = the target digest (profile, session, agent, thread); required index on `updated_at`; each set is bounded at 256 entries with oldest-first eviction recorded through `evict_fingerprints`, keeping a row under 32 KiB. Key rotation rebuilds sets from eligible retained evidence or safely forgets them; it never compares epochs. The column-level table schema lands in plan 02.
 
 #### 9.1.3 DeliveryArbiterV1: the one delivery selector
 
@@ -881,25 +869,27 @@ Diagnostics input contains captured compiler/tool diagnostic, mapped symbol cand
 ```rust
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SchedulerEvaluationInput {
-    pub task: AutomationTaskKind,
+    pub work: tracedecay_domain::AutomationWorkKeyV1,
+    pub input_contract: tracedecay_domain::AutomationInputContractV1,
+    pub input_manifest: tracedecay_domain::AutomationInputManifestV1,
     pub effective_config: EffectiveAutomationConfig,
     pub now: i64,
-    pub ledger: RunLedgerSnapshot,
-    pub session_activity: SessionActivitySnapshot,
+    pub cursor: tracedecay_domain::AutomationScopeCursorV1,
+    pub dirty_generation: u64,
+    pub dirty_reasons: BoundedVec<tracedecay_domain::AutomationDirtyReasonV1, 32>,
     pub lease: LeaseObservation,
     pub policy: ApplyPolicySnapshot,
-    pub source_watermark: VectorWatermark,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum SchedulerDecision {
     Run { proposed_lease: LeaseProposal, proposed_work: WorkProposal },
-    Skip { reason: SchedulerSkipReason, reconsider_at: Option<i64> },
-    Blocked { reason: SchedulerBlockReason },
+    Skip { reason: tracedecay_domain::AutomationSkipReasonV1, reconsider_at: Option<i64> },
+    Defer { reason: tracedecay_domain::AutomationDeferReasonV1, reconsider_at: Option<i64> },
 }
 ```
 
-Schedule/cron parsing, due time, no-new-activity, pause, last-success/non-skipped, stale lease, apply policy, and proposed work are deterministic. PID liveness and lock-file metadata are captured observations supplied to input; policy does not inspect processes/files. Application revalidates config/activity/lease versions before acquiring a lease or launching a run.
+Schedule/cron parsing, explicit typed trigger frontier, registered field-level dependency selectors, per-scope dirty generation, expected cursor version, current/considered/consumed/included shard frontiers, finalized boundary, sealed writer-registry snapshot/freshness/coverage, quiet/max-debounce boundary, minimum delta/high-value trigger, semantic versus evaluation-snapshot digests, last terminal input/outcome, retry backoff/circuit, pause, stale lease, budget, and proposed work are deterministic. `EvidenceDriven` jobs require a relevant frontier advance; due time alone cannot return `Run`. `TimeDriven`, `ExternalEvent`, and `Manual` jobs require their declared boundary/source/request frontier, and dependency-version changes enter only through the job's explicit reevaluation policy. `NoRelevantChange`, `IdenticalTerminalInput`, `QuietPeriodActive`, `BelowMinimumDelta`, `DependencyUnchanged`, and retry/lock/budget reasons remain distinct. Active writers, unknown/stale activity, partial coverage, prior unresolved effects, and launch-snapshot drift defer rather than assert idle. Invalid/disabled/quarantined job definitions are application job-health state and never a fourth scheduler disposition. PID liveness and lock-file metadata are captured observations supplied to input; policy does not inspect processes/files. Application seals and launch-revalidates the exact contract/manifest/cursor/dirty generation/config/lease before atomic admission. An exact prior successful or `NoChange` semantic input must skip; only failed/incomplete input may retry under the same operation/input and generic backoff/deadline/circuit policy. Ordinary run-now cannot bypass this policy—unchanged historical testing uses the experiment harness.
 
 ### 9.8 Memory
 
@@ -1041,54 +1031,54 @@ Domain `CoordinationOutcome` supplies eligible/emitted/suppressed/acted/handoff/
 - Outcome metrics report eligible denominator, horizon, unresolved count, evidence class, caps, and coverage. A missing denominator is unknown, never zero.
 - Target gate: >=90% terminal classification of eligible hints and <1% false attribution on the labeled corpus; this measures observability, not obedience.
 
-## 11. Replay Lab Contracts
+## 11. Pure evaluator contracts for generic experiments
 
-All lab methods require `ReadOnlyLabContext`; its ports expose only immutable loads/query snapshots — the ports structurally lack write methods, which is the replay-isolation mechanism every replay surface (including Plan 22's scout Hint Lab) cites. Lab and replay outputs that must persist — policy diff reports, A/B artifacts, adjudication relabels, counterfactual runs — land only in the dedicated `replay_artifacts` store, a separate artifact family on its own shard (column-level schema in [`02-store-crate.md`](02-store-crate.md)); they never write analytics, facts, claims, policies, hints, or live coordination state. Fixture promotion is a separate application command after secret scan and explicit confirmation.
+Policy exposes pure evaluators plus its deterministic `ReplayEngine`; it does not implement a LabRunner, job/control API, artifact store, comparison lifecycle, or transport gateway. Every adapter accepts immutable pinned inputs/query snapshots and returns typed `ReplayStageV1` decisions/explanations. Plan 09's hermetic experiment runner supplies frozen clock/RNG, immutable mounts, disposable overlay, deny-by-default capabilities, explicit model/egress grants, persistence, stage alignment, anchors, cancellation, and `ReplaySideEffectReceiptV1`. Policy ports structurally lack writes, counters, caches, leases, transports, files, processes, and network. Outputs persist only through the generic experiment/run/stage family in plan 02; there is no dedicated `replay_artifacts` shard. Fixture promotion remains a separate application command after secret scan and explicit confirmation.
 
-### Hint Lab
+### Hint evaluator
 
 - Input historical message/event/session position or synthetic redacted fixture; provider/host; project/worktree/ref/snapshot; bundle/config/index/memory/tool-catalog snapshots; explicit time/seed.
 - Output raw source ref, normalized hook input, rule tree, matched/rejected/suppressed/deduped/cooldown/escalation/budget decisions, candidates/scores, exact payload, token/latency estimate, and outcome evidence.
 - Compare then-vs-now, bundle/config A/B, branch/snapshot A/B, and provider/host A/B.
 
-### Retrieval Lab
+### Retrieval evaluator
 
 - Show lexical/entity/vector/recent candidates, eligibility/exclusions/redactions/dedupe, trust/decay/usage effects, model/index/memory versions, component scores, coverage, and final order.
 - Use recorded candidate snapshot for exact replay; requerying a current index is best-effort even when the same text is used.
 - No retrieval/usage counter mutation.
 
-### Ingest Lab
+### Ingest evaluator adapter
 
-- Application supplies `ExternalLabEvaluator` backed by `tracedecay-capture`/projectors: source event -> observation -> canonical events -> projection rows.
+- Application supplies a catalog-typed external evaluator adapter backed by `tracedecay-capture`/projectors: source event -> observation -> canonical events -> projection rows.
 - Exact requires parser artifact/version, source bytes/hash/offset, classification/redaction config, identity snapshot, and projector versions. Policy runtime only standardizes replay modes, digests, diff, budgets, and read-only enforcement.
 
-### Query Lab
+### Query evaluator adapter
 
 - Application supplies the `tracedecay-query` lab evaluator: AST, cost, selected shards, pushed filters, operators, rank/merge, cursor, coverage, and equivalent transport requests.
 - Exact requires recorded shard/index fixtures and vector watermark. Current-shard re-execution is best-effort.
 
-### Correlation Lab
+### Correlation evaluator
 
 - Show candidates, local/live source split, merge-base/head/changed-file reconciliation, evidence windows/events, confidence features, conflicts, alternatives, abstention, and proposed relation assertion.
 - Labeled promotion creates a separate sanitized eval proposal, never a live relation mutation.
 
-### Coordination Lab
+### Coordination evaluator
 
 - Replay presence/claim/heartbeat/scope/redundancy state at a frozen vector, run the nearby-agent query, and show overlap evidence/materiality, allowed trigger, dedupe/cooldown/ack state, emitted or suppressed compact payload, and downstream coordination outcomes.
 - Compare policy/threshold/catalog/query versions and then-vs-now TTL state. Exact replay requires the recorded claim/presence/query/policy inputs; current live agents are best-effort only.
 - Read-only by construction: no claim mutation, agent message, cancellation, reassignment, lock, handoff, or hint counter write. Fixture promotion is separately reviewed and secret-scanned.
 
-### Scheduler Lab
+### Scheduler evaluator
 
 - Re-evaluate due/skip/no-new-activity/pause/apply-policy/lease decisions as of explicit time.
 - Show effective config source/digest, ledger/activity/lease snapshots, watermarks, skip/block reason, proposed lease/work/effects, and revalidation requirements.
 
-### Memory Lab
+### Memory evaluator
 
 - Show secret/transience classification, entity extraction, duplicate/conflict/supersession, trust change, retrieval consequence, retention/hold, and deletion descendant impact.
 - The lab never mutates live memory. Autonomous application effects execute independently through the application curation worker.
 
-### Policy Diff Lab
+### Policy Diff evaluator
 
 ```rust
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -1128,11 +1118,11 @@ Regression/win requires a versioned human label/metric; unlabeled change is `cha
 | `tracedecay-store` | Immutable bundles/artifacts/input snapshots/recorded evaluations through read ports | No direct writes; application stores returned records/events transactionally |
 | `tracedecay-projectors` | Query candidates, projected state, tool catalog, correlation/activity/fact read models, source watermarks/coverage | Evaluation/outcome projection requirements and versioned schemas |
 | `tracedecay-query` | Candidate rows, component explanations, relation evidence, as-of snapshots, vector watermarks, stale/partial/redacted coverage | Ranking/eligibility requirements and immutable query refs; no query mutation |
-| `tracedecay-application` | Authorized evaluation/replay/diff request and pinned inputs | `EvaluationRecord`, `PolicyDiffReport`, typed errors, effect proposals, revalidation tokens |
+| `tracedecay-application` | Authorized generic experiment/evaluation request, immutable manifest, and pinned inputs | `ReplayStageV1`, `EvaluationRecord`, `PolicyDiffReport`, typed errors, effect proposals, revalidation tokens; no lifecycle persistence |
 | Capture/hooks/automation/memory services | Normalized input and current version refs through application | Decisions/payloads/proposals; never direct injection, lock, fact, file, or counter mutation |
-| API/CLI/MCP/dashboard labs | No transport/frontend imports | Stable schemas and explanations mapped without semantic changes |
+| API/CLI/MCP/dashboard playgrounds | No transport/frontend imports | Stable evaluator schemas/stages/explanations mapped through the generic experiment contract without semantic changes |
 
-Dependency direction remains `tracedecay-domain <- tracedecay-policy <- tracedecay-application <- adapters`. Query and policy are siblings; application composes them and supplies external Ingest/Query lab adapters.
+Dependency direction remains `tracedecay-domain <- tracedecay-policy <- tracedecay-application <- adapters`. Query and policy are siblings; application composes them and supplies external Ingest/Query evaluator adapters inside its one experiment registry.
 
 ## 13. PR and TDD Execution Plan
 
@@ -1154,7 +1144,7 @@ PR 23 is split into reviewable 23A–23G. Plan 22's PR 23H later lands `src/scou
 
 - [ ] Add tests `exact_refuses_missing_artifact`, `recorded_verifies_without_executing`, `recorded_rejects_digest_tamper`, `best_effort_lists_every_substitution`, `redacted_input_disables_exact`, and `unlabeled_change_is_not_regression`.
 - [ ] Run `cargo test -p tracedecay-policy --test replay_modes --test policy_diff -- --nocapture`. Expected: tests fail because replay/diff modules are absent.
-- [ ] Re-export domain `ReplayMode`, then implement policy `ReplayFidelity`, exact/recorded/best-effort flows, stored-record verification, substitution taxonomy, canonical decision/explanation diff, and corpus coverage without defining another mode enum.
+- [ ] Import domain `ReplayMode`, `ReplayFidelityV1`, `ReplaySubstitutionV1`, and `ReplayUnavailableInputV1`, then implement exact/recorded/best-effort flows, stored-record verification, canonical decision/explanation diff, and corpus coverage without defining another mode/substitution enum.
 - [ ] Re-run the command. Expected: all tests pass; recorded fixture VM execution counter remains zero; best-effort report names bundle/config/index substitutions.
 - [ ] Commit `feat(policy): add explicit replay fidelity and policy diffs`.
 
@@ -1163,6 +1153,7 @@ PR 23 is split into reviewable 23A–23G. Plan 22's PR 23H later lands `src/scou
 **Files:** `src/evaluators/{hint,routing,coordination}.rs`, `src/git/{mod,catalog}.rs`, `src/{outcome,delivery}.rs`, V1 hint bundles, `tests/{hint_parity,git_tool_routing,coordination_policy,outcome_attribution}.rs`.
 
 - [ ] Port hint/routing fixtures plus multi-repo/worktree scope preservation, `sessions.project_key` conflict, Claude first-CWD ambiguity, active-base-versus-PR-worktree graph mismatch, ignored dependency hint retaining scope, stale registry pollution, trusted failure evidence, repeated generic-search prompts, useful silence, and noisy-hint rejection.
+- [ ] Add a host-capability disposition matrix for supported, version-gated, absent, undocumented, policy-disabled, stale, and trust-pending tools; assert bundle/component/probe digest changes alter the evaluation digest, stale or mismatched runtime snapshots are rejected, and exact replay never substitutes current host state.
 - [ ] Add outcome tests `missed_capability_is_not_counted_emitted`, `human_correction_references_evidence`, `correction_does_not_imply_negative_outcome`, `acted_requires_linked_tool_event`, and `projector_terminal_state_is_idempotent`.
 - [ ] Add delivery-arbiter tests `one_winner_per_invocation`, `scout_and_deterministic_never_both_deliver`, `lost_cas_never_double_delivers`, and `claim_rides_the_same_version_token` against Section 9.1.3.
 - [ ] Add coordination cases for the five allowed triggers, same/parallel worktrees, file/symbol/query overlap, deliberate redundancy suppression, unchanged-scope cooldown, acknowledgement/handoff, false positive, partial claims, one-compact-hint maximum, and the exact parent/PR #359/Cursor anchors from Section 9.5.
@@ -1198,31 +1189,31 @@ PR 23 is split into reviewable 23A–23G. Plan 22's PR 23H later lands `src/scou
 
 **Files:** `src/evaluators/{scheduler,diagnostics,curation,memory}.rs`, V1 scheduler/memory bundles, `tests/{scheduler_policy,memory_policy,concurrency,security_privacy}.rs`, `benches/scheduler.rs`.
 
-- [ ] Port V1 interval/cron/pause/no-new-activity/last-run/stale-lock/apply-policy cases. Add `lease_version_conflict_preserves_original_decision`, `policy_never_checks_pid_or_creates_lock`, and concurrent activity watermark cases.
+- [ ] Port V1 interval/cron/pause/no-new-activity/last-run/stale-lock/apply-policy cases, then strengthen them with all four trigger classes, due-but-clean, per-thread/project/profile dirty scope, per-shard consumed/current frontiers, finalized boundary, active writer, quiet/max-debounce, unknown/partial deferral, minimum-delta/high-value trigger, identical successful/`NoChange` input, explicit dependency-version reevaluation, failed-input retry/backoff/circuit, poison quarantine, uncertain-effect reconciliation, late ingress, and self-effect suppression fixtures. Add `due_time_alone_never_admits`, `thousand_unchanged_ticks_create_zero_runs_or_model_calls`, `unrelated_project_activity_cannot_dirty_scope`, `sixty_four_schedulers_admit_one_effective_input`, `crash_at_each_atomic_boundary_is_recoverable`, `lease_version_conflict_preserves_original_decision`, `policy_never_checks_pid_or_creates_lock`, and concurrent activity-watermark cases.
 - [ ] Add memory cases for secret/transient rejection, duplicate, contradiction, supersession, entity ambiguity, trust change, deletion descendant/hold, retrieval consequence, and concurrent fact version.
 - [ ] Add diagnostic compiler/type versus behavioral-test classification and autonomous curation validation/usage/evidence gates, including Hermes curator/reflector/skill-writer lineage, #411 self-owned/foreign/legacy skill materialization with remediation-capability agreement, weak/self-referential/provider-mismatched evidence rejection, staged rollout, monitoring/recovery eligibility, and proof that no per-item approval state is emitted.
 - [ ] Run `cargo test -p tracedecay-policy --test scheduler_policy --test memory_policy --test concurrency --test security_privacy -- --nocapture`. Expected: tests fail because evaluators are absent.
 - [ ] Implement pure evaluators and checked-in compatibility bundles. Every mutation is a `ProposedEffect` with expected versions; no application/store/process/file APIs are imported.
 - [ ] Re-run the command. Expected: all tests pass; fixture write/PID/network sentinels remain zero; conflicting lease/fact writes do not alter the pinned decision digest.
-- [ ] Run scheduler benchmark. Expected: reports 10k-decision p50/p95 and allocations; no I/O occurs.
+- [ ] Run scheduler benchmark. Expected: reports 10k-decision p50/p95 and allocations; the 1,000-unchanged-tick fixture records zero run/model/tool work, and no I/O occurs.
 - [ ] Commit `feat(policy): add scheduler and memory policy evaluators`.
 
-### PR 23G: Headless labs and external Ingest/Query adapters
+### PR 23G: Pure replay evaluators and external Ingest/Query adapters
 
-**Files:** `src/labs/*.rs`, `tests/{policy_diff,replay_modes,security_privacy}.rs`, `benches/policy_diff.rs`.
+**Files:** `src/replay/*.rs`, evaluator modules above, `tests/{policy_diff,replay_modes,security_privacy}.rs`, `benches/policy_diff.rs`.
 
-- [ ] Add one exact, recorded, and best-effort case for Hint, Retrieval, Correlation, Coordination, Scheduler, and Memory; add external adapter cases for Ingest and Query; add `lab_cannot_write`, `coordination_lab_cannot_message_or_mutate_claim`, `promotion_is_not_a_lab_method`, and cancellation between corpus cases.
-- [ ] Run `cargo test -p tracedecay-policy --test replay_modes --test policy_diff labs -- --nocapture`. Expected: tests fail because lab runner/external adapter are absent.
-- [ ] Implement Section 11, read-only port wrappers, external result schema validation, stable diff aggregation, label-aware regression/win counts, and corpus coverage.
-- [ ] Re-run the command. Expected: all lab cases pass; write sentinel panics are unreachable; exact external result digest verifies; missing external evaluator returns typed error.
+- [ ] Add one exact, recorded, and best-effort case for Hint, Retrieval, Correlation, Coordination, Scheduler, and Memory; add external adapter cases for Ingest and Query; add `evaluator_cannot_write_persist_schedule_or_cancel`, `coordination_evaluator_cannot_message_or_mutate_claim`, `promotion_is_not_an_evaluator_method`, and stable cancellation checkpoints supplied by the caller between corpus cases.
+- [ ] Run `cargo test -p tracedecay-policy --test replay_modes --test policy_diff -- --nocapture`. Expected: tests fail because pure evaluator/external adapters are absent.
+- [ ] Implement Section 11 pure adapters, immutable port wrappers, external result schema validation, typed stage output, policy-case diff content, label-aware regression/win counts, and corpus coverage. Do not implement generic run alignment/persistence or a lab facade.
+- [ ] Re-run the command. Expected: all evaluator cases pass; write/persistence/lifecycle sentinels are unreachable; exact external result digest verifies; missing external evaluator returns typed error.
 - [ ] Run `cargo bench -p tracedecay-policy --bench policy_diff -- --save-baseline pr23g`. Expected: reports corpus cases/versions/p50/p95/peak memory and cancellation latency.
-- [ ] Commit `feat(policy): add read-only replay labs`.
+- [ ] Commit `feat(policy): add pure replay evaluators`.
 
-### PR 31 series: Application/API/UI replay labs
+### PR 31 series: Application/API/UI experiment playgrounds
 
-**Files:** application/API lab files in Section 5; generated TypeScript; dashboard Hint/Retrieval/Ingest/Query/Correlation/Scheduler/Memory/Policy Diff/Evolution routes and tests.
+**Files:** application experiment/evaluator adapters in Section 5; generic generated API/TypeScript; dashboard Hint/Retrieval/Ingest/Query/Correlation/Scheduler/Memory/Policy Diff/Evolution routes and tests.
 
-- [ ] Add contract tests proving every endpoint preserves requested mode, actual fidelity, bundle/input/environment refs, vector watermark, substitutions, stale/partial/redacted coverage, decision/explanation digests, and no-write guarantees.
+- [ ] Add contract tests proving every route uses the same experiment create/run/status/cancel/resume/retry lifecycle and preserves requested mode, actual fidelity, bundle/input/environment refs, vector watermark, substitutions, stages/anchors, stale/partial/redacted coverage, decision/explanation digests, and zero-production-effect receipt.
 - [ ] Add E2E fixtures for then-vs-now, A/B, missing artifact -> recorded, redacted input -> best-effort/refusal, drifted Git truth, concurrent new bundle, keyboard/table/mobile, and safe fixture-promotion confirmation.
 - [ ] Run focused application/API/UI tests. Expected: fail while labs call V1 functions or omit fidelity/coverage.
 - [ ] Wire one lab per PR to policy/query/capture services; generated clients must drift-test; UI cannot label best-effort as historical.

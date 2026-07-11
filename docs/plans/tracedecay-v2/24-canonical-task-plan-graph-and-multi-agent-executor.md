@@ -49,6 +49,10 @@ This is the plan for a **native TraceDecay port-and-redesign of Hermes Kanban**,
 31. Task reads use registered `EntityKind`, attribute, traversal, facet, aggregate, projection, and sort values inside the one domain `TraceQueryV1`; `TaskQueryV1`, `TaskContextSelectorV1`, board filter DSLs, and transport-specific task query bodies are forbidden. Convenience selectors compile losslessly to `TraceQueryV1` and expose the canonical digest.
 32. Every accepted task command appends one canonical `task_graph_events` record and its projection/external-effect outbox entries in the same owner-shard transaction. Projectors, scheduler checkpoints, subscriptions, audit views, and replay consume that committed journal; notifier/SSE/outbox delivery is never a second event truth.
 33. `RedundancyMode::SharedExecution` is coordination intent, not permission for two authoritative executors on one work item. Concurrent collaborators are explicit child work items under an aggregate parent; provider-internal subagents remain attached to the one primary attempt and use only its brokered grants.
+34. A large human- or agent-authored plan edit may round-trip through one managed CommonMark/frontmatter bundle, but the bundle is an expiring operation artifact rather than another board, task store, plan draft aggregate, or mutation authority. Only its final expected-version submit may create canonical plan/work-item versions and events.
+35. Bulk edit scope, owner, selection, dependency closure, base plan heads, schema, catalog, configuration, policy, authorization, redaction, and content digests are explicit pins. No command infers them from CWD, the current route, the current board, a workspace path, or the first matching project.
+36. Removing a file, field, dependency, criterion, assignment, or omitted protected value from an edit workspace never means delete or retire. Every semantic removal is explicit and typed; absent exported entities fail validation.
+37. Export, validation, semantic diff, rebase, submit, cleanup, progress, cancellation, receipts, and crash recovery reuse the shared operation/export/import/contained-workspace kernels. A task-specific staging database, parser daemon, job engine, receipt store, or cleanup scheduler is forbidden.
 
 ## 1. Product objective and non-goals
 
@@ -64,6 +68,7 @@ TraceDecay should expose work as part of the same “brain” as conversations, 
 - workers receive narrow context packets and capability grants, execute in isolated exact workspaces, and publish structured handoffs/artifacts/outcomes;
 - verifier and synthesizer work items join parallel research before implementation tasks unlock;
 - the dashboard can pivot the same selection between plan, board, DAG, timeline, causal, repository, workload, executor, and critical-path views;
+- an authorized agent can export a bounded plan/initiative selection into a private sharded Markdown workspace, edit long specifications and typed graph fields offline, receive exact file/span validation, inspect the semantic graph impact, and atomically submit a new plan version without issuing hundreds of fragile item commands;
 - agents see only their relevant slice, while authorized humans can query All without copying tasks into global boards;
 - every decision is replayable from versions, evidence, anchors, policy/config/catalog manifests, and receipts.
 
@@ -79,6 +84,7 @@ TraceDecay should expose work as part of the same “brain” as conversations, 
 - No global board notifications, polling spam, repeated sibling hints, or raw reasoning exchange between agents.
 - No automatic merge, force push, review approval, deployment, release, or external message without the separately cataloged grant and application workflow.
 - No item-by-item curation approval or rollback workflow.
+- No Git-style directory import in which file deletion implies task deletion, YAML shape becomes business identity, merge markers become plan state, or a partially valid shard is committed while another shard fails.
 
 Explicitly rejected architectures:
 
@@ -183,27 +189,27 @@ Do not create a monolithic `tracedecay-tasks` crate. The graph is a cross-cuttin
 
 | Plan | Contract consumed or extended here |
 |---|---|
-| [01-domain-crate.md](./01-domain-crate.md) | Owns all IDs, entities, versions, events, relations, evidence, scopes, privacy wrappers, leases, cursors, errors, and typed task/plan/execution contracts proposed here. |
-| [02-store-crate.md](./02-store-crate.md) | Owns activity-shard schema, immutable event/history storage, transactions, fenced leases, outbox, blobs, retention, backup/restore, and repositories. |
+| [01-domain-crate.md](./01-domain-crate.md) | Owns all IDs, entities, versions, events, relations, evidence, scopes, privacy wrappers, leases, cursors, errors, and typed task/plan/execution contracts proposed here, including the sole public edit-workspace/manifest/local-ref/diagnostic/diff/conflict/receipt shapes imported in section 4.12. |
+| [02-store-crate.md](./02-store-crate.md) | Owns activity-shard schema, immutable event/history storage, transactions, fenced leases, outbox, blobs, retention, backup/restore, repositories, and reuse of generic operation/export/import staging and receipt retention for edit bundles; it adds no task-edit source table. |
 | [03-capture-crate.md](./03-capture-crate.md) | Captures provider-native goals/plans/workflows/tool events, locations, external tasks, Git/delivery facts, and executor observations without granting task authority. |
 | [04-projectors-crate.md](./04-projectors-crate.md) | Builds current task/plan/attempt/dependency/critical-path/workload/context-materiality projections and links them to every graph. |
 | [05-query-crate.md](./05-query-crate.md) | Registers task entity kinds, attributes, predicates, traversal relations, facets, projections, and saved profiles consumed through the unchanged `TraceQueryV1`; it supplies deterministic traversal, aggregation, explanation, pagination, and context assembly. No task-specific source/operator vocabulary or second query engine. |
 | [06-policy-crate.md](./06-policy-crate.md) | Owns pure decomposition validation, routing, readiness, priority/fairness, retry/circuit-breaker, packet relevance, and sibling-materiality decisions. |
 | [07-hooks-crate.md](./07-hooks-crate.md) | Receives only validated plan-22 suggestion envelopes and bounded task lifecycle signals at supported host boundaries; it never schedules or claims work. |
-| [08-tool-catalog-crate.md](./08-tool-catalog-crate.md) | Declares task capabilities, effect/scope/privacy/cost metadata, executor adapter manifests, grant eligibility, generated schemas, and bindings. |
-| [09-application-crate.md](./09-application-crate.md) | Owns task/plan commands and queries, authorization, graph transactions, scheduler, lease lifecycle, packet assembly, executor workflows, cancellation, and receipts. |
-| [10-api-crate.md](./10-api-crate.md) | Exposes versioned HTTP/SSE, auth, problems, cursors, idempotency, generated schemas, and executor control-plane protocol. |
-| [11-dashboard-frontend.md](./11-dashboard-frontend.md) | Owns all human projections, inspectors, saved views, interaction state, accessibility, visual/performance tests, and Orchestration Lab UI. |
+| [08-tool-catalog-crate.md](./08-tool-catalog-crate.md) | Declares task capabilities, effect/scope/privacy/cost metadata, executor adapter manifests, grant eligibility, generated schemas/bindings, and the one `task_graph.edit_bundles.*` family/audience profile. |
+| [09-application-crate.md](./09-application-crate.md) | Owns task/plan commands and queries, authorization, graph transactions, scheduler, lease lifecycle, packet assembly, executor workflows, cancellation, receipts, edit-bundle validation/diff/rebase orchestration, and final atomic submit. |
+| [10-api-crate.md](./10-api-crate.md) | Exposes versioned HTTP/SSE, auth, problems, cursors, idempotency, generated schemas, executor control-plane protocol, and exact contained edit-bundle operation routes without accepting server paths. |
+| [11-dashboard-frontend.md](./11-dashboard-frontend.md) | Owns all human projections, inspectors, saved views, interaction state, accessibility, visual/performance tests, Orchestration Lab UI, and the Edit-as-Markdown workspace/diagnostic/diff/conflict/cleanup experience. |
 | [12-root-compatibility-migration.md](./12-root-compatibility-migration.md) | Owns root composition, V1/external adapters, daemon wiring, shadow/cutover, one-scheduler selection, deletion receipts, and rollback window. |
 | [13-research-provenance-and-context-anchors.md](./13-research-provenance-and-context-anchors.md) | Owns research manifests and stable implementation/session/source anchors, including the Hermes evidence registry. |
 | [14-historical-failure-regression-matrix.md](./14-historical-failure-regression-matrix.md) | Registers duplicate work, wrong scope/worktree, stale lease, retry storm, board ambiguity, output, privacy, and provider failures as cutover cases. |
 | [15-search-quality-evaluation-and-retrieval-research.md](./15-search-quality-evaluation-and-retrieval-research.md) | Supplies qrels, relevance metrics, hard negatives, optional semantic channels, and retrieval-quality promotion gates for context packets and task queries. |
 | [16-cross-project-repository-worktree-scope.md](./16-cross-project-repository-worktree-scope.md) | Resolves immutable multi-project/repository/worktree/ref/snapshot sets, authorization, federation, and Rspack/Rsbuild/React Router fixtures before any task effect. |
-| [17-official-public-api-and-sdks.md](./17-official-public-api-and-sdks.md) | Owns stable public API/SDK compatibility, generated clients, auth scopes, event subscriptions, examples, deprecation, and conformance. |
+| [17-official-public-api-and-sdks.md](./17-official-public-api-and-sdks.md) | Owns stable public API/SDK compatibility, generated clients, edit-bundle stream/file helpers, auth scopes, event subscriptions, examples, deprecation, and conformance. |
 | [18-secret-detection-redaction-and-private-data-safety.md](./18-secret-detection-redaction-and-private-data-safety.md) | Owns sanitizer/taint types, protected payloads, logs/artifacts/packets, secret scanning, quarantine, egress, retention, and deletion. |
 | [19-system-defragmentation-convergence-and-extensibility.md](./19-system-defragmentation-convergence-and-extensibility.md) | Enforces the allowed dependency DAG, one canonical activity graph, SPI rules, entropy budget, and deletion of parallel systems. |
-| [20-configuration-control-plane.md](./20-configuration-control-plane.md) | Exclusively owns typed task/executor/scheduler/model/budget/grant/privacy settings, precedence, history, activation, status, and all configuration UIs/bindings. |
-| [21-cli-mcp-tool-surface-and-output-unification.md](./21-cli-mcp-tool-surface-and-output-unification.md) | Owns generated semantic bindings, the pure `tracedecay-presentation` renderer/document model, Markdown-default/explicit-JSON rules, stable pagination/handles/errors, and parity; plan 09 owns semantic typed view models. |
+| [20-configuration-control-plane.md](./20-configuration-control-plane.md) | Exclusively owns typed task/executor/scheduler/model/budget/grant/privacy settings plus edit-workspace TTL/root/caps/sharding/cleanup/offline-lock descriptors, precedence, history, activation, status, and all configuration UIs/bindings. |
+| [21-cli-mcp-tool-surface-and-output-unification.md](./21-cli-mcp-tool-surface-and-output-unification.md) | Owns generated semantic bindings, local edit-workspace CLI ergonomics, an optional zero-to-three logical MCP registration/profile component set backed by one implementation/binary/daemon/catalog, resource links/skills+CLI fallback, the pure root `v2::presentation` renderer/document module, Markdown-default/explicit-JSON rules, stable pagination/handles/errors, and parity; plan 09 owns semantic typed view models. |
 | [22-incremental-context-scout-and-suggestion-envelopes.md](./22-incremental-context-scout-and-suggestion-envelopes.md) | Consumes task events/context-packet refs as evidence and delivers at most one material, deduped, privacy-safe advisory to an exact Thread/Turn/Agent. |
 | [23-session-lcm-temporal-retrieval-and-evaluation.md](./23-session-lcm-temporal-retrieval-and-evaluation.md) | Owns temporal retrieval, logical-message copies, current/as-of semantics, source horizons, representative selection, and packet context assembly quality. |
 | [26-observability-accounting-and-usage.md](./26-observability-accounting-and-usage.md) | Owns generated task/executor accounting descriptors, liveness/scheduler rollups, attempt/work-item/executor/route/model/effort attribution, SLOs, unknown/cap semantics, and Observatory/Costs view contracts consumed here. |
@@ -280,49 +286,25 @@ crates/tracedecay-domain/src/task_graph/
 ### 4.1 Canonical identities and versions
 
 ```rust
-pub struct InitiativeId(pub EntityId);
-pub struct PlanId(pub EntityId);
-pub struct PlanVersionId(pub EntityVersionId);
-pub struct WorkItemId(pub EntityId);
-pub struct WorkItemVersionId(pub EntityVersionId);
-pub struct DependencyId(pub EntityId);
-pub struct AcceptanceCriterionId(pub EntityId);
-pub struct TaskDecisionId(pub EntityId);
-pub struct AssignmentId(pub EntityId);
-pub struct TaskOfferId(pub EntityId);
-pub struct TaskLeaseId(pub EntityId);
-pub struct ExecutionAttemptId(pub EntityId);
-pub struct ExecutorRegistrationId(pub EntityId);
-pub struct ExecutorInstanceId(pub EntityId);
-pub struct WorkspaceBindingId(pub EntityId);
-pub struct ContextPacketManifestId(pub EntityId);
-pub struct HandoffId(pub EntityId);
-pub struct TaskArtifactId(pub EntityId);
-pub struct TaskOutcomeId(pub EntityId);
-pub struct SavedTaskViewId(pub EntityId);
+pub use crate::{
+    AcceptanceCriterionId, AssignmentId, ContextPacketManifestId,
+    ContextPacketManifestRefV1, DependencyId, ExecutionAttemptId,
+    ExecutorInstanceId, ExecutorRegistrationId, HandoffId, InitiativeId,
+    PlanId, PlanVersionId, SavedViewId, TaskArtifactId, TaskDecisionId,
+    TaskLeaseId, TaskOfferId, TaskOutcomeId, WorkClaimRefV1, WorkItemId,
+    WorkItemVersionId, WorkspaceBindingId,
+};
 
 pub struct VersionPin<T> {
     pub id: T,
     pub version: EntityVersionId,
     pub data_version_digest: DataVersionDigest,
 }
-
-pub struct WorkClaimRefV1 {
-    pub claim: EntityRef,
-    pub observed_event: EventId,
-    pub observed_at: UtcMicros,
-}
-
-pub struct ContextPacketManifestRefV1 {
-    pub packet_id: ContextPacketManifestId,
-    pub ordinal: u64,
-    pub manifest_digest: ManifestDigest,
-}
 ```
 
 IDs are allocated under the deterministic/native allocation rules in Plan 01. Provider task IDs, GitHub issue numbers, external board IDs, Codex goal IDs, Claude workflow IDs, and automation run IDs become aliases or related entities with evidence; they never replace canonical IDs. Every public ref includes owner shard, version, and safe label projection where authorized.
 
-`DependencyId`, `WorkClaimRefV1`, and `ContextPacketManifestRefV1` are the only task dependency/advisory-claim/packet reference shapes. Their canonical definitions live in plan 01; the matching forms above are an integration excerpt, not a second owner. Other plans and generated bindings import them unchanged; names such as `TaskDependencyId`, `TaskClaimRefV1`, `WorkClaimId`, `ContextPacketRefV1`, or a packet `EntityVersionId` are invalid. Work claims are immutable observations referenced by event/time, while packets are immutable sealed manifests referenced by ordinal/digest.
+`DependencyId`, `WorkClaimRefV1`, and `ContextPacketManifestRefV1` are the only task dependency/advisory-claim/packet reference shapes. Their canonical definitions live in plan 01 and `task_graph::ids` re-exports them as shown rather than redefining them. Other plans and generated bindings import them unchanged; names such as `TaskDependencyId`, `TaskClaimRefV1`, `WorkClaimId`, `ContextPacketRefV1`, or a packet `EntityVersionId` are invalid. Work claims are immutable observations referenced by event/time, while packets are immutable sealed manifests referenced by ordinal/digest.
 
 `ScopeResolutionId` and `ScopeResolutionV2` are plan 01 scope contracts ([01-domain-crate.md](01-domain-crate.md)), not task-graph identities: wherever this plan pins a resolved scope (plan versions, context packets, capability grants), the record carries the `ScopeResolutionId` of one immutable plan 01 `ScopeResolutionV2`. No `Ref`/`Resolved` renaming of that type exists.
 
@@ -718,6 +700,21 @@ pub enum ReasoningEffortV1 {
 
 pub enum ExecutorAdapterKindV1 { Codex, Claude, Cursor, Hermes, Custom(NativeKindCode) }
 
+pub enum HostToolInheritanceModeV1 {
+    None,
+    ExplicitSubset,
+    AllParentBindings,
+}
+
+pub struct HostToolInheritanceConstraintV1 {
+    pub mode: HostToolInheritanceModeV1,
+    pub inherited_binding_set_digest: Option<ManifestDigest>,
+    pub maximum_effect: EffectClass,
+    pub per_child_narrowing_supported: bool,
+    pub isolated_session_required_to_narrow: bool,
+    pub constraint_digest: ManifestDigest,
+}
+
 pub struct ExecutorRegistrationV1 {
     pub id: ExecutorRegistrationId,
     pub class: ExecutorClassId,
@@ -725,6 +722,8 @@ pub struct ExecutorRegistrationV1 {
     pub adapter_version: ComponentVersion,
     pub host: HostInstanceId,
     pub profile: Option<ProfileId>,
+    pub host_capabilities: HostCapabilitySnapshotV1,
+    pub tool_inheritance: HostToolInheritanceConstraintV1,
     pub capabilities: ExecutorCapabilityManifestV1,
     pub supported_providers: BTreeSet<ProviderId>,
     pub supported_models: BTreeSet<ModelCapabilityRefV1>,
@@ -751,6 +750,8 @@ pub struct ExecutorRouteV1 {
 ```
 
 `ActualExecutorRouteV1` records what ran, including fallback reason, actual provider/model/revision/effort, host/runtime, tool schema digest, loaded skill versions, and the capability-grant-set ID/digest pair. Silent fallback to a more expensive, less private, remote, or unauthorized route is forbidden.
+
+Registration and every actual route require `host_capabilities.subject=Installed` and pin that exact plan-01 `HostIntegrationRuntimeRefV1`: host profile/instance/surface, integration manifest, installed component set, bundle/component payload and signed-release refs, install receipt/generation, and adapter version; the independently pinned capability-snapshot digest records the probe without a reverse runtime reference. Heartbeat re-probes without mutating the prior snapshot; changed runtime/capability state produces a successor registration generation and blocks new offers until policy reroutes or reconnects. A provider's declared agent `readonly` flag is never an authority proof. If the host gives a child all parent MCP bindings and has no per-agent allowlist (including current Cursor behavior), `AllParentBindings` is explicit: a parent with work/operator mutations cannot spawn a supposedly read-only/research child inside that session. The scheduler must choose a separately registered narrow session or refuse the route; it cannot rely on prompts, role names, or downstream broker denial to erase visible privileged tools.
 
 ### 4.8 Workspace binding and Git/delivery safety
 
@@ -957,6 +958,58 @@ use tracedecay_domain::{DiagnosticActionV1, DiagnosticEnvelopeV1};
 
 Unknown action kinds remain visible as disabled informational rows with their code, evidence, and update requirement; renderers never drop them, guess a command, or execute free text. `legal_capabilities` and application authorization remain authoritative at invocation time, so an envelope is evidence plus a proposal—not authority, a lease, or an approval queue. Storage retains diagnostic envelopes through their subject/evidence horizon and indexes `(diagnostic_code, observed_at)`, `(subject, state)`, and `expires_at` in the subject's owning shard.
 
+### 4.12 Agent-native declarative bulk editing
+
+Long plans such as this redesign cannot be maintained safely through hundreds of singular CRUD calls or one enormous JSON argument. TraceDecay therefore exposes a **managed task-graph edit bundle**: a private, expiring, sharded filesystem representation of an exact frozen graph selection. It is an editing transport over canonical versions, not another persisted plan model. Plan 01 owns the public IDs/types and their complete fields; this plan imports them unchanged:
+
+```rust
+use tracedecay_domain::{
+    EditLocalKeyV1, EditableEntityRefV1, TaskGraphEditConflictV1,
+    TaskGraphEditCandidateRefV1,
+    TaskGraphEditDiagnosticV1, TaskGraphEditManifestV1,
+    TaskGraphEditReceiptV1, TaskGraphEditWorkspaceId,
+    TaskGraphSemanticDiffV1,
+};
+```
+
+The plan-01 definitions lock the following complete semantics: the manifest carries workspace/owner/scope resolution/frozen selection/closure, base plan-head and entity-version maps, schema/catalog/config/policy/access/sanitizer pins, base content digest, and creation/expiry; diagnostics carry stable code/severity, contained relative file, exact UTF-8 source span, optional editable entity/field path, safe message, optional bounded deterministic text edit, and evidence anchors; semantic diff carries base heads, candidate digest, typed entity/relation changes, active-graph impact, and diagnostics; conflict carries base/current heads plus typed field/relation conflicts and a safe rebase action; receipt carries the exact candidate reference and operation, base/committed versions, local-key allocations, validation/diff digests, changed entities, audit/anchor/sanitizer, and cleanup disposition. No other plan may redefine or narrow those shapes.
+
+`TaskGraphEditWorkspaceId` is a UUID-backed opaque ephemeral operation identity, never an `EntityId`, board ID, plan ID, path, bearer token, or saved-view ID. After export, successful validate, or successful rebase, application alone mints `TaskGraphEditCandidateRefV1 { workspace_id, generation, digest }`; diff/rebase/submit consume that exact immutable reference and never infer or re-upload a candidate. New entities use unique `EditLocalKeyV1` values inside the bundle; `EditableEntityRefV1::Local` allows dependencies, gates, assignments, and subplans to refer to them. The final owner-shard submit allocates all canonical IDs transactionally from `(workspace, local key, idempotency key, candidate digest)`, so an exact retry yields the same mapping and a rejected bundle allocates nothing.
+
+#### 4.12.1 Exact file grammar and sharding
+
+The bundle is UTF-8 CommonMark whose files begin at byte zero with `---`, contain a restricted YAML 1.2 frontmatter mapping, close with `---`, then contain the narrative body. The parser rejects custom tags, anchors, aliases, merge keys, duplicate keys, implicit timestamps, unknown fields, non-finite numbers, executable/includes, excessive scalar/container/depth/count/byte budgets, invalid UTF-8, and more than one frontmatter document. Strings that YAML could coerce ambiguously are quoted by the deterministic writer and interpreted only through the pinned field schema. Markdown is inert content: renderers sanitize HTML and never fetch links, includes, images, or code.
+
+```text
+manifest.md
+plans/<PlanId>/plan.md
+plans/<PlanId>/work-items/<stable-id-prefix>/<WorkItemId-or-local-key>.md
+references/<entity-kind>/<stable-id-prefix>/<EntityId>.md   # immutable omitted/closure stubs
+locks/schema.json
+locks/catalog.json
+locks/config.json
+```
+
+`manifest.md` carries exactly `TaskGraphEditManifestV1`; filenames use stable IDs/local keys, never titles or array ordinals. `plan.md` frontmatter owns membership, gates, subplans, and explicit edit intent while its body owns the long plan narrative/objective. Each work-item frontmatter owns ID/local key, base version, kind, title, scope, priority, schedule, budget, retry, constraints, typed acceptance, desired assignment, executor/provider/model/effort/tool route constraints, evidence anchors, outgoing dependency/gate edges, and explicit `retain | replace | retire` intent; its body owns only the specification. Readiness, resolution, attempts, leases, outcomes, current executor, accounting, and projector fields are reference-only and cannot be submitted.
+
+Entity files are ordered by kind then canonical ID/local key; set-valued fields sort by registered stable key, while semantically ordered values carry explicit ordinals. Directories fan out by stable ID prefix, so the same grammar handles a small plan and a 100,000-item bundle without a giant file or directory. Plan 01's four closure modes are exact: `ExactSelection` includes only explicitly selected items, `CompletePlan` includes selected plans plus descendants, `SelectionWithDependencyClosure` includes selected items plus dependencies and dependents, and `CompleteInitiative` includes the whole initiative. A reference outside the authorized editable closure is an immutable digest-bearing stub; changing it requires a new export that includes that entity. Deleting a file, omitting an exported item, deleting a protected/unknown field, or editing a stub is an error, never implicit retirement or information loss.
+
+#### 4.12.2 Validation, semantic diff, rebase, and submit
+
+Validation is offline-capable against the signed lock slice and always reruns server-side before submit. It proceeds in fixed order: contained archive/path checks; syntax and schema; manifest/lock signatures and budgets; unique IDs/local keys and complete exported membership; reference/closure integrity; scope/owner/auth/privacy; sanitizer and secret scan; dependency/gate cycles; acceptance/assignment/route/catalog legality; budgets/schedules; active-attempt impact; then deterministic canonicalization and semantic digest. Every failure returns `TaskGraphEditDiagnosticV1` with a relative file and exact UTF-8 byte plus one-based line/column span. Deterministic formatting fixes may be offered as bounded text edits; semantic fixes are never guessed.
+
+`TaskGraphSemanticDiffV1` reports adds/replacements/retirements, field/edge/gate/criterion/assignment/route changes, cycle witnesses, readiness and critical-path changes, scope/privacy/budget effects, and affected active attempts, leases, workspaces, packets, and downstream gates. It is a read result, not a preview token or mutation stage. A zero semantic diff returns `NoChange` and creates no plan version.
+
+Submit CAS-checks the complete candidate reference, every base plan head, edited entity version, scope resolution, schema/catalog/config/policy/access pin, and active-attempt decision. A mismatch returns `TaskGraphEditConflictV1`; it never last-write-wins or auto-cancels work. Rebase performs a semantic three-way merge over base/current/local graphs: disjoint field and edge changes merge deterministically, while conflicting values/relations produce a non-submittable conflict report in a **new** workspace and preserve the original. YAML conflict markers are forbidden. After all parsing, scanning, normalization, allocation planning, and impact checks complete outside the writer transaction, one profile activity-shard transaction appends every new plan/work-item/dependency/acceptance/assignment version, canonical event, current-head change, audit/outbox entry, and idempotency result or none. Cross-profile/multi-owner input and bundles above the atomic hard cap are rejected rather than partially committed.
+
+#### 4.12.3 Operation, containment, cleanup, and receipts
+
+The sole operation family is `task_graph.edit_bundles.export|get|validate|diff|rebase|submit|delete`. It composes the existing generic `OperationRef`, contained export, staged typed import, command-idempotency, sanitizer, retrieval-anchor, and cleanup machinery. Export/large validation/diff/rebase may run asynchronously; submit is a named expected-version command whose operation performs bounded pre-transaction work and whose only canonical mutation is the final atomic commit. There is no `TaskGraphEditStore`, draft-plan table, edit event journal, bulk worker, parser daemon, task-specific upload protocol, preview/apply pair, or rollback command.
+
+The default local materialization is a daemon-selected private runtime directory outside every repository, capture root, backup set, and content index. It has owner-only directory/file modes and a catalog/config-bounded TTL; no API or remote MCP request accepts an arbitrary server path. Extraction uses contained dirfd/openat-style traversal and rejects absolute/parent/drive/UNC paths, normalized duplicates, symlinks, hardlinks, devices, FIFOs, sockets, special files, and archive bombs. Export and submit both secret-scan; secret/quarantine/raw-reasoning/credential content is ineligible, and a detector diagnostic exposes code/span/fingerprint only, never the matched literal.
+
+Successful submit durably writes `TaskGraphEditReceiptV1` and immediately purges the raw workspace. Validation/conflict failure keeps the private workspace only until its bounded expiry so the agent can repair it. A crash sweeper resumes `Submitting` from the operation/idempotency receipt or finishes `PurgePending`; it cannot recommit a completed candidate. Cleanup failure is visible on the already-committed receipt and retried idempotently, never misreported as a failed canonical submit. Durable history retains only IDs, versions, counts, digests, pins, allocation map, audit/anchor, sanitizer, and cleanup disposition—never raw Markdown, frontmatter, temporary absolute paths, or workspace contents.
+
 ## 5. Store design and transactions
 
 ### 5.1 One profile activity owner
@@ -1022,12 +1075,14 @@ task_outcomes
 task_cost_events
 task_graph_events
 task_idempotency_results
-saved_task_views
-task_view_shares
+saved_views                    -- all investigation/task view variants
+saved_view_shares              -- one grant/revoke lifecycle
 task_notification_subscriptions
 ```
 
 Existing generic `events`, `entities`, `entity_versions`, `relation_assertions`, `retrieval_anchor_records`, blobs, outbox, leases, audit, retention, and holds remain shared infrastructure. Specialized tables are typed indexes/current materialization over canonical entities/events, not parallel sources.
+
+Managed edit workspace metadata and normalized candidates remain in plan 02's generic `structured_edit_workspaces` plus shared operation/operation-artifact staging until submit or expiry. No `task_graph_edit_*` table, candidate plan head, draft task row, second journal, or filesystem scan participates in task reads. A successful submit persists only ordinary canonical versions/events plus exact `TaskGraphEditReceiptV1` as the typed blob of generic `structured_edit_receipts` and through the shared command/operation/retrieval-anchor families; expiry or deletion purges staged bytes without touching task history.
 
 Free text, packet content, handoffs, metadata, logs, annotations, saved queries, and model payloads live in encrypted/sanitized owner-shard blobs. Catalog routes and project locator rows carry only opaque IDs, keyed digests, safe enums/counts/timestamps/health, and provenance.
 
@@ -1043,6 +1098,7 @@ Owner-shard transactions must support:
 - cancellation request + lease state + workflow step idempotency atomically;
 - executor registration heartbeat/expiry and capacity reservation without scanning all attempts;
 - save/update/delete an authorized view without copying result rows.
+- publish every validated edit-bundle plan/work-item/dependency/gate/acceptance/assignment change, canonical event, head pointer, audit/outbox row, ID allocation, and idempotency result together after CAS-checking the complete pinned base vector; validation failure, conflict, cancellation, or kill before commit publishes none.
 
 External effects happen only after the canonical intent event and outbox step commit. Git/worktree/process/provider/PR/message operations use that outbox/workflow step with idempotency key, expected fence epoch, effect receipt, and reconciliation; the outbox is delivery intent, not a second event stream. No SQL transaction remains open across network, process, filesystem, Git, or model calls.
 
@@ -1080,6 +1136,7 @@ Retention rules:
 - packet payload expiry may leave a manifest/tombstone with anchors, entry kinds, digests, omissions, and access disposition;
 - executor heartbeats expire current visibility but retain registration history;
 - saved view definitions remain encrypted and are reauthorized on every open;
+- raw edit workspaces expire under their operation TTL, successful submit schedules immediate purge, crash recovery distinguishes pre-commit staging from committed-receipt cleanup, and durable receipts contain no Markdown/frontmatter/path bytes;
 - deletion follows plan 18 descendant invalidation and anchor tombstone rules.
 
 Startup recovery verifies schema/integrity, active lease/attempt bijection, monotonic epochs, dangling reservations, graph cycles, topological manifests, packet refs, outbox steps, and executor registrations. Corruption never triggers silent empty database initialization; quarantine, restore, or typed repair is required.
@@ -1206,9 +1263,9 @@ Fixtures serialize through generic query, task convenience endpoint, saved view,
 
 ### 7.4 Saved authorized projections
 
-`SavedTaskViewV1` stores an encrypted canonical `TraceQueryV1` with its mandatory explicit `query.scope`, canonical query/scope digests, projection/lens and grouping/sort specs, layout/presentation preferences, owner, sharing policy/grants, live-versus-frozen mode, frozen plan/entity/projection versions plus vector watermark when selected, config/catalog/schema versions, optimistic view version, timestamps, and revocation state. It stores no copied result set and no second scope selector. Opening it reauthorizes and replans against current or exactly pinned frozen versions; a missing retired frozen input is explicit unavailable coverage, never silent current fallback.
+`SavedViewDefinitionV1::Task(TaskViewSpecV1)` stores an encrypted canonical `TraceQueryV1` with its mandatory explicit `query.scope`, canonical query/scope digests, projection/lens and grouping/sort specs, layout/presentation preferences, live-versus-frozen mode, and frozen plan/entity/projection versions plus vector watermark when selected. The enclosing ordinary `SavedViewV1` owns the one `SavedViewId`, owner, sharing policy/grants, config/catalog/schema versions, optimistic version, timestamps, expiry, and revocation state. It stores no copied result set and no second scope selector/table/share lifecycle. Opening it reauthorizes and replans against current or exactly pinned frozen versions; a missing retired frozen input is explicit unavailable coverage, never silent current fallback.
 
-Plan 02/PR 6G lowers those fields losslessly: `saved_task_views` retains protected query ref/digest, derived scope digest, lens/projection/group/sort/layout blobs, owner/sharing refs, snapshot mode and frozen manifest/watermark refs, config/catalog/schema generations, version, timestamps, and revocation; `task_view_shares` retains grant version, grantee, classification, expiry, and revocation event. The same sealed model powers reopen, simultaneous overlapping board instances, API/SDK/CLI/MCP reads, and migration fixtures.
+Plan 02/PR 6G lowers those fields losslessly through the shared `saved_views` family: `SavedViewDefinitionV1::Task(TaskViewSpecV1)` retains protected query ref/digest, derived scope digest, lens/projection/group/sort/layout blobs, owner/sharing refs, snapshot mode and frozen manifest/watermark refs, config/catalog/schema generations, version, timestamps, and revocation; `saved_view_shares` retains grant version, grantee, classification, expiry, and revocation event. The same sealed model powers investigation, task, and experiment reopen, simultaneous overlapping board instances, API/SDK/CLI/MCP reads, and migration fixtures; task semantics never inspect experiment payloads.
 
 Built-in lenses:
 
@@ -1416,8 +1473,9 @@ Application re-reads all referenced versions and evidence before applying a prop
 Add task orchestration as application modules, not root commands or transport handlers:
 
 ```text
-crates/tracedecay-application/src/
-├── ports/task_graph/
+crates/tracedecay-application/src/features/task_graph/
+├── mod.rs
+├── ports/
 │   ├── repository.rs
 │   ├── projection.rs
 │   ├── executor_registry.rs
@@ -1427,24 +1485,36 @@ crates/tracedecay-application/src/
 │   ├── context.rs
 │   ├── cost.rs
 │   └── clock.rs
-├── use_cases/task_graph/
+├── queries/
 │   ├── initiatives.rs
 │   ├── plans.rs
 │   ├── work_items.rs
 │   ├── dependencies.rs
-│   ├── assignments.rs
 │   ├── attempts.rs
 │   ├── offers.rs
+│   ├── executors.rs
+│   ├── packets.rs
+│   ├── notifications.rs
+│   ├── status.rs
+│   └── doctor.rs
+├── commands/
+│   ├── assignments.rs
+│   ├── offers.rs
+│   ├── attempts.rs
 │   ├── executors.rs
 │   ├── packets.rs
 │   ├── notifications.rs
 │   ├── acceptance.rs
 │   ├── decisions.rs
 │   ├── handoffs.rs
-│   ├── views.rs
-│   ├── status.rs
-│   └── doctor.rs
-├── outputs/task_graph/
+│   ├── scheduler.rs
+│   ├── executor.rs
+│   └── workflows/
+│       ├── decomposition.rs
+│       ├── cancellation.rs
+│       ├── workspace_lifecycle.rs
+│       └── external_effect_reconciliation.rs
+├── views/
 │   ├── initiatives.rs
 │   ├── plans.rs
 │   ├── work_items.rs
@@ -1454,16 +1524,11 @@ crates/tracedecay-application/src/
 │   ├── notifications.rs
 │   ├── evidence.rs
 │   └── operations.rs
-├── workers/task_scheduler.rs
-├── workers/task_executor.rs
-├── workflows/task_decomposition.rs
-├── workflows/task_cancellation.rs
-├── workflows/workspace_lifecycle.rs
-├── workflows/external_effect_reconciliation.rs
-└── tests/task_graph/
+└── reason_codes.rs
+crates/tracedecay-application/tests/task_graph/
 ```
 
-`offers.rs`, `packets.rs`, and `notifications.rs` each own both their query and command handlers; transports never reach repositories directly. `outputs/task_graph` owns the sealed transport-neutral views and command receipts for these modules plus acceptance/decision/handoff operations. Plan 21 renderers and plan 08/10/17 bindings consume those outputs without reconstructing state, legal actions, revisions, or deep links.
+The matching `queries/{offers,packets,notifications}.rs` and `commands/{offers,packets,notifications}.rs` modules share only typed feature ports/views; transports never reach repositories directly. `features/task_graph/views` owns the sealed transport-neutral views and command receipts for these modules plus acceptance/decision/handoff operations. This is the plan-09 `features/<domain>/{queries,commands,views,ports}` layout, not a second flat application architecture. Plan 21 renderers and plan 08/10/17 bindings consume those views without reconstructing state, legal actions, revisions, or deep links.
 
 ### 9.1 Query use cases
 
@@ -1482,7 +1547,8 @@ crates/tracedecay-application/src/
 | `executors.list/get/match` | Registered capability/health/capacity/provider/model/effort/workspace/privacy state and explained eligible/ineligible task matches. `match` is read-only. |
 | `scheduler.status/explain` | Queue snapshot, fairness/resource/budget decisions, next wakeups, circuit breakers, coverage, and exact no-action reasons. |
 | `task_graph.status/doctor/events` | `status` returns authoritative graph/scheduler/lease/attempt/projector/outbox health; `doctor` performs bounded protected diagnostics without mutation; `events` creates or resumes the canonical authorized task read-model subscription with journal cursor/gap semantics, never a second event stream. |
-| `task_views.list/get` | Saved authorized query/lens definitions and current/frozen result manifests; result data is queried, not copied into the view record. |
+| `task_graph.edit_bundles.get/validate/diff` | Exact operation/workspace/candidate reference/expiry/cleanup state, source-span diagnostics, and semantic graph/active-attempt impact for a manifest-pinned bundle. Validation and diff are read semantics even when a large input uses generic operation staging; neither creates a plan version or mutation token. |
+| Shared `saved_views.list/get` filtered to `definition_kind=task` | Saved authorized query/lens definitions and current/frozen result manifests; result data is queried, not copied into the view record. This is the plan-09/11 saved-view use case, not a task-specific operation ID. |
 
 Queries use read ports only. They cannot create anchors by mutating during a nominal read unless the caller explicitly requests the durable anchor workflow and receives its operation status. Catch-up ingestion, remote refresh, graph rebuild, and Git fetch are separate explicit capabilities.
 
@@ -1511,16 +1577,25 @@ Queries use read ports only. They cannot create anchors by mutating during a nom
 | `work_items.retry` | New attempt under retry policy/budget; never mutates prior attempt; unknown effects reconcile first. |
 | `executors.register/heartbeat/drain/unregister` | Authenticated adapter/host manifest and TTL; drain stops new leases but preserves existing recovery. |
 | `scheduler.pause/resume/run_once` | Scoped operational control with receipts. `run_once` reuses the same scheduler path and cannot bypass policy or concurrency. |
-| `task_views.create/update/delete`, `task_views.share.plan`, `task_views.share.start`, `task_views.share.revoke` | Direct create/update/delete preserve the protected canonical `TraceQueryV1`/lens with mandatory `query.scope`, ownership, grouping/layout/snapshot/version/watermark, and no result-row copy or second scope selector. Share plan computes classification/redaction/expiry and a confirmation digest without disclosure; start creates the exact authorized expiring bundle; revoke invalidates its grant/version and active subscriptions without deleting the owner view. |
+| `task_graph.edit_bundles.export/rebase/submit/delete` | Operation-backed managed workspace lifecycle from section 4.12. Export freezes explicit scope/selection/base/pins; rebase creates a new workspace; submit CAS-validates and atomically publishes all canonical changes or none; delete purges only staged workspace bytes. Exact operation retry is idempotent and no action is named preview/apply/rollback. |
+| Shared `saved_views.create/update/delete`, `saved_views.share.plan/start/revoke` with `SavedViewDefinitionV1::Task` | Direct create/update/delete preserve the protected canonical `TraceQueryV1`/lens with mandatory `query.scope`, ownership, grouping/layout/snapshot/version/watermark, and no result-row copy or second scope selector. Plan 24 supplies task-spec validation only. The plan-09/11 lifecycle computes classification/redaction/expiry, creates the exact authorized expiring bundle, and invalidates its grant/version/subscriptions on revoke; no `task_views.*` operation exists. |
 | `task_notifications.create/update/delete` | Direct validated subscription command with expected version/idempotency over saved filter, channel, event classes, quiet hours, dedupe and rate budget. No generic preview/apply pair and no implicit subscription on task creation. |
 
 The seven manual-work commands have distinct generated input schemas but share exact work-item/plan expected versions, actor/grant, `IdempotencyKeyV1`, sanitizer/evidence refs, policy/config/catalog pins, and a canonical event/receipt. Their stable catalog IDs are exactly `work_items.record_attestation`, `work_items.record_review`, `work_items.record_decision`, `work_items.record_exception`, `work_items.handoff`, `work_items.reopen`, and `work_items.reverse_transition`; transports may map naming style but may not merge them into a generic mutation.
 
 Ordinary task/plan mutations commit directly after validation. Destructive external consequences—worktree deletion, force-affecting Git operation, PR merge, deployment, release, protected-data deletion—remain separate plan-09 commands with explicit confirmation/authorization and receipts. They are never hidden inside `attempts.complete` or inferred from work-item readiness.
 
+### 9.2A Managed edit-bundle workflow
+
+The application composes, rather than forks, shared kernels. Export resolves and authorizes an explicit `TraceQueryV1`/saved selection, expands the declared closure, captures base entity/plan versions and policy/config/catalog/access pins, sanitizes eligible content, writes the deterministic sharded bundle into a contained operation workspace, and returns `TaskGraphEditWorkspaceId`, the initial `TaskGraphEditCandidateRefV1`, exact location only to an authorized local binding, expiry, and operation anchor. Remote bindings receive a contained artifact/resource plus the candidate reference, never a server path.
+
+Local validation may run offline from the bundle's signed lock slice; authoritative validation is the only stage that uploads/stages edited bytes, reauthorizes every entity, and returns an application-minted `TaskGraphEditCandidateRefV1`. Diff accepts that exact reference, lowers its immutable candidate to the same domain plan-version builder used by singular commands, then returns `TaskGraphSemanticDiffV1`. Rebase accepts the same reference, loads exact base/current/candidate graphs, creates a successor workspace and candidate reference, and records parent/current/candidate digests plus conflicts; it never changes the source workspace or canonical heads.
+
+Submit reserves idempotency by `(principal, task_graph.edit_bundles.submit, IdempotencyKeyV1, candidate_ref.digest)`, revalidates the exact workspace/generation/digest plus all pins outside the writer transaction, rejects an unavailable/expired/mismatched candidate reference, and passes one normalized bounded mutation set to the owner-shard unit of work. The transaction performs version CAS, local identifier allocation, cycle/gate/route/acceptance/budget checks, active-attempt policy checks, all canonical inserts and head advances, audit/outbox/idempotency, and receipt publication. A concurrent head or entity change returns `TaskGraphEditConflictV1`; a later exact retry returns the stored `TaskGraphEditReceiptV1` carrying that candidate reference. No bundle can update a running attempt's immutable route, packet, grant, workspace, budget, or lease; an affected attempt is preserved, explicitly superseded/cancelled by a separate legal decision, or blocks submit.
+
 ### 9.3 Scheduler tick
 
-The scheduler is an application worker consuming canonical `task_graph_events` journal ranges plus registered exact-time wakeups. The outbox carries only post-commit wakeup/external-effect delivery intents that reference those journal events; the scheduler never treats outbox delivery state as task truth. It does not scan every project database or board. Committed owner-shard mutations signal an in-process/cross-process notifier only after commit; the notifier carries a sequence range, never task payload or authority. The scheduler drains from its durable journal checkpoint, so a lost/coalesced notifier or outbox wakeup loses latency but not work. A plan-20 `scheduler.repair_poll_interval=30s` fallback compares the journal high watermark, scheduled-wakeup heap, lease deadlines, and checkpoint only when no notification arrived or a gap is detected; it never becomes Hermes's ambient 60-second board scan.
+The scheduler is an application worker consuming canonical `task_graph_events` journal ranges plus registered exact-time wakeups. It reuses plan 09's one `SchedulerKernelV1` for wakeup ingestion, backoff, fairness queues, outbox-consumer lease/checkpoint mechanics, and fenced admission; this plan owns task readiness, offers, leases, routes, and execution semantics above that kernel. Automation uses the same mechanics with its own job/run policy and cannot create a second polling/lock/dispatch engine. The outbox carries only post-commit wakeup/external-effect delivery intents that reference those journal events; the scheduler never treats outbox delivery state as task truth. It does not scan every project database or board. Committed owner-shard mutations signal an in-process/cross-process notifier only after commit; the notifier carries a sequence range, never task payload or authority. The scheduler drains from its durable journal checkpoint, so a lost/coalesced notifier or outbox wakeup loses latency but not work. A plan-20 `scheduler.repair_poll_interval=30s` fallback compares the journal high watermark, scheduled-wakeup heap, lease deadlines, and checkpoint only when no notification arrived or a gap is detected; it never becomes Hermes's ambient 60-second board scan.
 
 Latency gates at the reference corpus are: commit-to-eligible scheduler observation p95 ≤ `1s`, terminal/cancellation safety event observation p95 ≤ `250ms`, eligible-to-offer p95 ≤ `2s` when capacity is available, dashboard subscription delta p95 ≤ `1s`, and missed-notification recovery ≤ one `30s` repair interval. Benchmarks inject dropped/coalesced notifier messages to prove the durable journal is authoritative. Hermes's historical 60 s dispatcher, 5 s notifier, and 300 ms dashboard polls remain comparison fixtures, not V2 constants.
 
@@ -1574,6 +1649,8 @@ pub struct TaskStartManifestV1 {
     pub plan_version: PlanVersionId,
     pub assignment: AssignmentId,
     pub route: ExecutorRouteV1,
+    pub host_capabilities: HostCapabilitySnapshotV1,
+    pub tool_inheritance: HostToolInheritanceConstraintV1,
     pub workspace: WorkspaceBindingId,
     pub context_packet: ContextPacketManifestRefV1,
     pub capability_grant_set_id: CapabilityGrantSetId,
@@ -1588,7 +1665,7 @@ pub struct TaskStartManifestV1 {
 }
 ```
 
-An offer is not a lease and expires harmlessly. Only `TaskStartManifestV1` authorizes start; its `accepted_offer_revision` is the post-CAS accepted revision and its receipt names the accepted event. Adapter acknowledgement records actual route/runtime before attempt becomes `Running`. Start timeout enters reconciliation; it does not immediately issue a second live lease.
+An offer is not a lease and expires harmlessly. Only `TaskStartManifestV1` authorizes start; its `accepted_offer_revision` is the post-CAS accepted revision and its receipt names the accepted event. The start transaction revalidates that its host runtime/probe and inheritance-constraint digests equal the selected registration and current active handshake. Adapter acknowledgement records the same exact actual route/runtime before attempt becomes `Running`; a capability/install/probe change during admission fails stale instead of substituting the new host state. Start timeout enters reconciliation; it does not immediately issue a second live lease.
 
 ```rust
 pub struct TaskOfferV1 {
@@ -1714,6 +1791,8 @@ Models and executor workers propose; application authorizes. The scheduler canno
 ### 10.1 Consumer-owned SPI
 
 Application owns the port; root composition owns concrete adapters:
+
+Every concrete adapter consumes the executor facet of plan 08/27's one canonical `HostIntegrationManifestV1`, sharing host/version/identity/capability/event codes with capture, hooks, and installation; the resolved signed host bundle is a generated artifact, not a second semantic manifest. Executor-specific protocol/state remains behind this SPI; host names, tool/effect permissions, install paths, and conformance fixtures are not copied into adapter-local registries.
 
 ```rust
 pub enum ExecutorOfferDeliveryActionV1 { Offer, Revoke }
@@ -1867,9 +1946,10 @@ task_offers.list|get|accept|decline|revoke
 context_packets.list|get|accept
 executors.list|get|match|register|heartbeat|drain|unregister
 scheduler.status|explain|pause|resume|run_once
-task_views.list|get|create|update|delete|share.plan|share.start|share.revoke
+saved_views.list|get|create|update|delete|share.plan|share.start|share.revoke
 task_notifications.list|get|create|update|delete
 task_graph.status|doctor|events
+task_graph.edit_bundles.export|get|validate|diff|rebase|submit|delete
 ```
 
 Each definition declares audience (human, orchestrator, executor, admin), effect, confirmation, idempotency, scope, grant, auth, privacy, egress, budget, streaming, pagination, output view, error mapping, and deprecation metadata. Executor lifecycle capabilities are hidden unless the host has an active registration/attempt grant. `all/*` never enables mutations by accident.
@@ -1879,10 +1959,10 @@ Each definition declares audience (human, orchestrator, executor, admin), effect
 Application returns transport-neutral sealed views:
 
 - `InitiativeSummaryViewV1` and `InitiativeDetailViewV1`;
-- `PlanGraphViewV1` and `PlanDiffViewV1`;
+- `PlanGraphLensV1` and `PlanDiffViewV1`;
 - `WorkItemSummaryViewV1`, `WorkItemDetailViewV1`, and `AgentWorkSliceViewV1`;
 - `DependencyStateViewV1` and `CriticalPathViewV1`;
-- `AttemptSummaryViewV1`, `AttemptDetailViewV1`, and `AttemptTimelineViewV1`;
+- `AttemptSummaryViewV1`, `AttemptDetailViewV1`, and `AttemptTimelineLaneSetV1`;
 - `TaskOfferSummaryViewV1` and `TaskOfferDetailViewV1`, including immutable revision/pins and legal CAS actions;
 - `ContextPacketSummaryViewV1` and `ContextPacketDetailViewV1`, including ordinal/start/accepted state, omissions, coverage, and anchors;
 - `TaskNotificationSummaryViewV1` and `TaskNotificationDetailViewV1`, including subscription revision, safe channel, health, dedupe, and rate state;
@@ -1890,6 +1970,9 @@ Application returns transport-neutral sealed views:
 - `HandoffViewV1`, `ArtifactViewV1`, and `OutcomeViewV1`;
 - `AcceptanceActionReceiptViewV1`, `DecisionReceiptViewV1`, `HandoffReceiptViewV1`, and `TransitionReversalReceiptViewV1`;
 - `TaskGraphStatusViewV1` and `TaskDoctorReportViewV1`.
+- plan-01 `TaskGraphEditManifestV1`, `TaskGraphEditCandidateRefV1`, `TaskGraphEditDiagnosticV1`, `TaskGraphSemanticDiffV1`, `TaskGraphEditConflictV1`, and `TaskGraphEditReceiptV1`, sealed in ordinary application response/operation views rather than transport-local file-parser results.
+
+`PlanGraphLensV1` is a registered task node/edge/cluster/allowed-pivot preset embedded in plan 09's canonical `GraphSliceViewV1`; `AttemptTimelineLaneSetV1` is a registered lane/event preset embedded in `TimelineSliceViewV1`. Neither is a response envelope and neither defines nodes/events, cursor, ordering, LOD, coverage, snapshot/watermark, table/export, or pagination fields. Plan/detail/diff/status views above remain ordinary sealed details; every graph/timeline result uses the one application/query slice pipeline.
 
 Every view includes canonical refs/versions, coverage, freshness/watermarks, provenance/evidence, access/redaction status, stable anchors, operation refs where asynchronous, and legal next capabilities. No view contains raw SQL rows, absolute private paths without authorization, credentials, unrestricted logs, or free-form metadata maps.
 
@@ -1915,9 +1998,10 @@ tracedecay scheduler status|explain|pause|resume|run-once
 tracedecay task-view list|show|save|update|delete|share|revoke
 tracedecay task-notification list|show|create|update|delete
 tracedecay task-graph status|doctor|events
+tracedecay task-graph edit start|get|validate|diff|rebase|submit|clean
 ```
 
-All commands accept explicit generated scope selectors; CWD is a locator hint only and ambiguity stops. `--format markdown|json`, cursor/page controls, time/as-of, plan version, and saved view use common plan-21 flags. Human commands never expose raw lease tokens/epochs as copy-paste secrets. Executor lifecycle uses authenticated protocol bindings, with a diagnostic CLI only under an explicit executor-admin grant.
+All commands accept explicit generated scope selectors; CWD is a locator hint only and ambiguity stops. The edit group additionally requires an exact workspace ID after `start`; `start` requires the editable plan/initiative plus frozen query or saved-view selection and returns the managed path only to the authorized local process. No later command searches the current directory for a manifest. `--format markdown|json`, cursor/page controls, time/as-of, plan version, and saved view use common plan-21 flags. Human commands never expose raw lease tokens/epochs as copy-paste secrets. Executor lifecycle uses authenticated protocol bindings, with a diagnostic CLI only under an explicit executor-admin grant.
 
 ### 11.4 MCP
 
@@ -1931,19 +2015,21 @@ MCP exposes the same catalog definitions with generated schemas and audience fil
 - create/link follow-up work only when orchestrator/fan-out grant allows;
 - query broader initiatives/tasks only within explicit scope and role grants.
 
-The model never receives raw CLI syntax, store paths, bearer tokens, fence tokens, or arbitrary application tool invocation. Lifecycle calls bind the current host registration/attempt out of band. Tool-search/progressive disclosure may defer noncore query/control tools but cannot hide the required lifecycle terminator from an active worker.
+The model never receives raw CLI syntax, store paths, bearer tokens, fence tokens, or arbitrary application tool invocation. Lifecycle calls bind the current host registration/attempt out of band. Every active worker uses a fixed eager-safe work profile containing its required lifecycle bindings; host-native deferred tool search may omit additional noncore query/control schemas as an optimization, but correctness never depends on it and the lifecycle terminator is always present.
+
+Task-graph bulk editing is an orchestrator capability, absent from an ordinary executor's active-attempt surface. An authorized local orchestrator may start the operation and receive the managed workspace ref; remote MCP returns an operation/resource link, never a server filesystem path or inline huge archive. Validation, diff, rebase, submit, and cleanup consume that exact workspace/bundle ref. A plugin may ship the agent skill and CLI workflow without registering MCP at all. Plan 21's separate `context`, `work`, and `operator` logical registration connections/packages are real least-privilege boundaries, but all invoke one generated MCP protocol/application adapter, binary/daemon, catalog, auth/audit model, and data root; they are not independent domain servers. Fixed explicit binding profiles are authoritative, while host-native progressive disclosure is optional acceleration only.
 
 An authorized human/orchestrator MCP surface exposes the exact catalog IDs `work_items.record_attestation`, `work_items.record_review`, `work_items.record_decision`, `work_items.record_exception`, `work_items.handoff`, `work_items.reopen`, and `work_items.reverse_transition`; it exposes no generic status setter, preview/apply pair, or rollback alias. Rust/TypeScript/Python SDK methods and the CLI/HTTP spellings above are generated from those same entries and command/view schemas.
 
 ### 11.5 HTTP/SSE and public SDKs
 
-Plan 10 §8 is the sole exact HTTP route inventory. It generates bindings from these plan-24 operation families: `initiatives.*`, `plans.*`, `work_items.*`, `attempts.*`, `task_offers.*`, `context_packets.*`, `executors.*`, `scheduler.*`, `task_views.*`, `task_notifications.*`, and `task_graph.*`, plus canonical `subscriptions.create/revoke` and event reads. Plan 17 generates Rust/TypeScript/Python methods from the same entries. This plan owns semantics and operation IDs, not a second router list.
+Plan 10 §8 is the sole exact HTTP route inventory. It generates bindings from these plan-24 operation families: `initiatives.*`, `plans.*`, `work_items.*`, `attempts.*`, `task_offers.*`, `context_packets.*`, `executors.*`, `scheduler.*`, `task_notifications.*`, `task_graph.*`, and `task_graph.edit_bundles.*`, plus canonical `subscriptions.create/revoke` and event reads. Task variants use plan-09/11 `saved_views.*` routes and methods with plan-24 validation. Plan 17 generates Rust/TypeScript/Python methods from the same entries, including contained stream/file helpers for edit bundles. This plan owns task semantics, not a second router, saved-view operation list, upload protocol, or filesystem-path API.
 
 Exact HTTP design follows Plan 10 conventions (plan 10 §§8.6–8.7): reads are GET and every mutation is a POST command envelope (`CommandHttpRequest`) — no PATCH/PUT routes exist; commands use idempotency and expected-version headers/body fields, typed problems, operation refs for workflows, authenticated cursors, and no hidden write during GET. There is no `/task-events` route or second task SSE protocol. Clients create an authorized canonical `TraceQueryV1` subscription whose task read-model variants emit snapshot/delta/gap/heartbeat with journal sequence, scope/auth digest, graph versions, and reconnect cursor. Slow clients receive a gap/resync directive, not unbounded buffering.
 
 The kebab-case manual-work route suffixes map bijectively to the seven underscore catalog IDs above. In particular, `:reverse-transition` is a new-version inverse command; there is no `rollback`, `undo`, `preview`, or `apply` task route.
 
-`scheduler.explain` and `task_graph.doctor` are read-shaped POSTs because their protected scope/evidence bodies do not belong in URLs. `task_graph.events` binds only to a canonical task read-model subscription; no `/task-events` route exists. Plan 08 generates a bijection test over every capability above and its CLI, MCP, HTTP operation, Rust/TypeScript/Python SDK method, application use case, auth/effect metadata, and view/problem type. A missing or extra binding, including scheduler explain/status/doctor/events or any work-item mutation, blocks release.
+`scheduler.explain` and `task_graph.doctor` are read-shaped POSTs because their protected scope/evidence bodies do not belong in URLs. `task_graph.events` binds only to a canonical task read-model subscription; no `/task-events` route exists. Edit-bundle transports exchange contained artifact bytes or an opaque bundle/workspace ref, never an arbitrary server path; operations above the synchronous budget return the common `OperationRef` with progress/cancel/status. Plan 08 generates a bijection test over every capability above and its CLI, MCP, HTTP operation, Rust/TypeScript/Python SDK method, application use case, auth/effect metadata, and view/problem type. A missing or extra binding, including scheduler explain/status/doctor/events, edit-bundle lifecycle, or any work-item mutation, blocks release.
 
 Plan 17 generates Rust/TypeScript/Python clients and examples for human orchestration, read-only monitoring, and custom executor adapters. Executor registration/start/event protocol is documented separately from ordinary task CRUD and has a stricter compatibility/security matrix.
 
@@ -1988,6 +2074,13 @@ task_budget_exhausted
 task_circuit_open
 task_scope_ambiguous
 task_scope_denied
+task_graph_edit_workspace_not_found
+task_graph_edit_workspace_expired
+task_graph_edit_bundle_invalid
+task_graph_edit_pin_conflict
+task_graph_edit_base_conflict
+task_graph_edit_atomic_limit_exceeded
+task_graph_edit_cleanup_pending
 ```
 
 Problems contain safe IDs, current versions, reason codes, retry/rebind/stop directives, operation ref, and correlation ID. They never echo raw task text, prompt, provider error, command, path, token, or log.
@@ -2033,6 +2126,12 @@ Initiative overview contains:
 - plan-version timeline/diff and affected active attempts.
 
 Plan outline is a hierarchical graph-of-graphs: work item may expand into a child plan; compact rows show readiness, assignment/route, acceptance, dependency, estimate, actual runtime/cost, and evidence. Users can switch to DAG without losing selection/filters/time.
+
+### 12.2A Edit as Markdown
+
+The initiative/plan command surface includes **Edit as Markdown** for callers with the generated bulk-edit grant. It shows the exact scope/selection/base versions, closure, pins, sensitivity, item/file estimate, expiry, and affected active attempts before starting the ordinary operation; it never exposes or accepts a user-entered server path. Local UI may reveal the managed path after creation, while remote UI downloads/uploads the contained artifact.
+
+The workspace panel exposes operation progress, file/shard inventory, last validation, source-span diagnostics, semantic entity/edge/gate/assignment/route diff, cycle witness, critical-path/readiness/active-attempt impact, base/current versions, conflicts, expiry, and cleanup state. Diagnostics open the exact file/span. Rebase produces a new workspace and side-by-side graph/file conflicts; submit remains disabled until every error/conflict is resolved and the candidate digest matches validation. A successful receipt deep-links to the committed plan versions and proves raw-workspace purge. The browser's optional multi-file editor consumes the same bundle grammar and validator as CLI/SDK rather than implementing a dashboard plan model.
 
 ### 12.3 Kanban/board projection
 
@@ -2126,6 +2225,7 @@ Configuration families:
 | Family | Examples |
 |---|---|
 | Task graph | enabled, plan/decomposition limits, legal work kinds/dependencies/gates, version retention, saved-view limits |
+| Task graph declarative editing | enabled audiences, export closure/selection/file/item/byte/depth/atomic caps, workspace root policy, TTL, sharding, validation resource budgets, cleanup grace, offline lock compatibility |
 | Scheduler | enabled/paused, concurrency hierarchy, fairness weights/floors, priority aging, batch/backpressure, heartbeat/lease/start/cancel timeouts |
 | Executors | allowed adapter classes/versions/hosts, registration auth/TTL, workspace modes, capacity, drain/update policy |
 | Providers/models | allowed providers/models/revisions, reasoning effort, residency, fallback policy, context/tool limits, pricing source |
@@ -2148,6 +2248,7 @@ Roles/capabilities distinguish:
 - inspect initiative/project/repository work;
 - query All authorized work;
 - create/version/assign/cancel work;
+- export/validate/diff/rebase/submit/delete managed task-graph edit bundles;
 - attest/review/except acceptance;
 - operate scheduler/executors;
 - write workspace/Git/delivery/external systems;
@@ -2174,6 +2275,7 @@ Rules:
 - task graph events/audit use safe reason codes and keyed digests, not raw text;
 - log viewing is separately authorized, bounded, redacted, and never injected automatically;
 - fixture/export promotion runs secret scan and excludes private session content.
+- managed edit export/import scans every eligible body/frontmatter/archive entry, represents denied/omitted fields as immutable digest-bearing stubs, excludes secret/quarantine/raw-reasoning/credential content, and retains no raw bytes or temporary path in its receipt.
 
 ### 13.4 API/adapter security
 
@@ -2401,6 +2503,7 @@ Build sanitized/synthetic fixtures plus authorized local replay manifests for:
 - ambient board/store confusion from Hermes issue/session evidence;
 - scheduler starvation, capacity imbalance, retry storm, circuit breaker;
 - secret in task/comment/log/artifact/model output/tool result;
+- 10/10,000/100,000-item declarative edit bundles, concurrent base changes, validation failures, archive attacks, secret canaries, and crashes at every stage/commit/purge boundary;
 - transport pagination/render/auth/config/catalog version drift.
 
 Private corpus content stays in encrypted local eval stores. Committed fixtures use synthetic semantics and canary secrets only. Each real replay case stores retrieval anchors, source horizons, scope/auth manifests, expected labels, and no raw transcript text.
@@ -2413,6 +2516,7 @@ Required named regressions:
 | `TD-TASK-002 thread-task-many-to-many` | `session:20260617_210811_5cd728` plus sanitized 424-message relation manifest | One Thread may link temporally to many work items/branches/PRs and each work item to many Turns/agents; no session-as-task collapse; task packets select only relevant Turns; current/as-of relation queries remain correct. |
 | `TD-TASK-003 cross-repo-plan-bundle` | Plan-16 Rspack/Rsbuild/React Router project set and Plan-13 anchors | One profile initiative spans all repositories; decomposition creates independent diverse triage and gated verifier/synthesizer/implementation work; packets preserve exact scope/snapshot/visibility/query/config/token digests; Codex/Claude/Cursor/Hermes routes pin models/effort/tools/budgets; material sibling changes reach only exact recipients. |
 | `TD-TASK-004 claim-overlap-and-fence` | Synthetic many-host/worktree/file/symbol/artifact conflict fixture | CAS revision, active lease, TTL/heartbeat, writable artifact/resource overlap, and unforgeable lease proof prevent duplicate authority; planned read-only/ensemble overlap remains legal; completion/cancel revokes proof/reservations and stale workers cannot commit. |
+| `TD-TASK-005 declarative-plan-bulk-edit` | This redesign's sanitized graph shape plus synthetic 100,000-item/sharded variants | Byte-stable export/re-export; strict frontmatter/schema/source spans; no omission-delete; exact local-key allocation; semantic diff/reference parity; disjoint rebase and explicit conflicts; zero partial canonical rows across validation/CAS/disk/crash failures; exact retry returns one receipt; successful purge leaves no raw content. |
 
 ### 17.2 Core correctness metrics and gates
 
@@ -2427,6 +2531,7 @@ Required named regressions:
 | Retry/cancel | No retry storm; bounded time to breaker; cancellation terminal/reconciliation states correct under every kill point. |
 | Privacy | Zero canary occurrence in forbidden DB/index/log/event/metric/prompt/output/export sinks; complete sanitizer receipts and deletion propagation. |
 | Surface parity | Generated CLI/MCP/API/SDK/dashboard semantic fixtures and legal-action/error/status snapshots match. |
+| Declarative editing | Zero implicit deletion, partial commit, stale-base overwrite, secret/path escape, duplicate allocation, raw-receipt content, or unrecovered expired workspace; 100,000-item validation/diff remains within catalog budgets. |
 | UX | Fixed tasks complete within target time/error budget; graph/table equality; keyboard/screen-reader/mobile/large-data gates pass. |
 
 Do not use aggregate success rate alone. Report per project, executor adapter, provider/model/effort, workspace mode, task kind, dependency shape, effect class, privacy class, and failure class. Unknown/missing host telemetry is its own denominator.
@@ -2455,6 +2560,7 @@ Run deterministic and soak tests with many hosts/processes competing for the sam
 - adapter start acknowledgement lost, duplicate event page, sequence gap, reconnect, host restart;
 - DB busy/locked, disk full, WAL recovery, corrupted row/blob/index, clock skew;
 - workspace create crash, branch collision, dirty takeover attempt, cleanup crash;
+- edit export/upload/parse/validate/diff/rebase/submit crashes, submit-versus-head-change races, disk-full during staging/atomic commit/receipt/purge, and daemon restart with `Submitting` or `PurgePending` workspace;
 - provider timeout/rate limit/auth revoke/model disappearance;
 - Git/PR effect succeeds but receipt is lost;
 - cancellation while a non-idempotent tool is in flight;
@@ -2472,6 +2578,9 @@ Property assert at most one active lease, epoch monotonicity, event/outbox/idemp
 - acceptance validator/exceptions;
 - offer immutable-pin/revision CAS, push/pull single-acceptance, and expiry/revoke races;
 - direct attestation/review/decision/exception/handoff/reopen/reverse-transition expected-version, authorization, event, and receipt semantics;
+- strict CommonMark/YAML-subset golden/parser/property/fuzz corpus: duplicate/unknown keys, tags/aliases/merge, coercion traps, invalid UTF-8, nesting/count/byte bombs, missing files, edited stubs, implicit removal, dangling/local refs, and precise UTF-8 source spans;
+- deterministic sharded export/re-export/canonical digest at 10, 10,000, and 100,000 items; semantic `NoChange`; local-key allocation/idempotency; cycle/gate/acceptance/route/active-attempt diff parity; disjoint/conflicting three-way rebase;
+- edit-bundle all-or-none owner-shard transaction and kill-point recovery; no task-edit source table, journal, scheduler, or retained raw workspace bytes;
 - task/attempt/lease state-machine properties;
 - transaction kill points and idempotent retries;
 - retention/tombstone/anchor/blob referential integrity;
@@ -2513,17 +2622,18 @@ Host-native diagnostics run after adapter repair, separately from TraceDecay doc
 - 50k/200k node aggregate/neighborhood performance without full-browser load;
 - keyboard, focus, screen reader, contrast, reduced motion, table fallback, 200% zoom, mobile portrait/landscape;
 - deterministic Markdown/JSON/SVG/PNG export with privacy manifest;
+- edit-bundle local-workspace/resource-link/upload parity across CLI/MCP/HTTP/Rust/TypeScript/Python/UI, offline-versus-authoritative diagnostics, exact file/span navigation, graph diff/conflict/impact, expiry and cleanup receipts;
 - Orchestration Lab side-effect guard and replay digest stability.
 
 ## 18. Reviewable PR slices
 
-These suffixes were checked against plans 01–26. Plan 13 owns prerequisite heritage/research PR `2A`; Plan 20 owns `4C/6E/22C/24I/25E/31N/33C/37G`; Plan 22 owns `4F/6F/10D/10F/22D/23H/24O/24P/25F/31O/33D/37H`; Plan 23 owns `13D/13E/14D/15C/24L/31P/33E/35I/37I`; Plan 26 owns `22F/22G/22H/30J/33H`; plan 11 owns privacy/scout integration `30L`. `17B` already belongs to Plan 04, so this plan uses `17C`. Dashboard `30A–30H` and accounting contract `30J` are assigned, so this plan uses dependency-ordered `30K`.
+These suffixes were checked against plans 01–26. Plan 13 owns prerequisite heritage/research PR `2A`; Plan 20 owns `4C/6E/22C/24I/25E/31N/33C/37G`; Plan 22 owns `4F/6F/10D/10F/22D/23H/24O/24P/25F/31O/33D/37H`; Plan 23 owns `13D/13E/14D/15C/24L/31P/33E/35I/37I`; Plan 26 owns `22F/22G/22H/30J/33H`; plan 11 owns privacy/scout integration `30L`. `17B` already belongs to Plan 04, so this plan uses `17C`. Dashboard `30A–30H` and accounting contract `30J` are assigned, so this plan uses dependency-ordered `30K`. Declarative bulk editing uses new suffix `24R`; it does not collide with or reuse existing `24D` client/API work or `25A` dashboard application-foundation work.
 
 ### PR 4E — Canonical initiative, plan, task, executor, lease, and packet domain contracts
 
 **Files:** `crates/tracedecay-domain/src/task_graph/**/*`; schema registry fixtures; architecture tests.
 
-- Add IDs, versions, initiative/plan/work-item/dependency/gate/acceptance/decision/assignment/lease/executor/attempt/workspace/packet/handoff/artifact/outcome/budget/cost/event/query/view/status/error types.
+- Add IDs, versions, initiative/plan/work-item/dependency/gate/acceptance/decision/assignment/lease/executor/attempt/workspace/packet/handoff/artifact/outcome/budget/cost/event/query/view/status/error types, including the plan-01-owned declarative edit workspace/manifest/local-ref/diagnostic/diff/conflict/receipt contracts imported in section 4.12.
 - Consume reviewed PR 2A Hermes heritage rows for every domain type/algorithm/test being directly or behaviorally ported; carry license/source-to-test metadata into the implementation manifest.
 - Property-test state machines, plan versioning, cycle/gate validation, epoch monotonicity, typed extension rejection, privacy wrappers, and schema round trips.
 - Add compile-time dependency/import boundaries and generated schema fixtures.
@@ -2571,7 +2681,8 @@ These suffixes were checked against plans 01–26. Plan 13 owns prerequisite her
 
 - Declare every query/control/lifecycle/adapter capability with audience/effect/scope/grant/privacy/egress/idempotency/output metadata.
 - Generate tool schemas, executor manifests, API/CLI/MCP/SDK bindings, config refs, and drift inventories.
-- Test wildcard exclusion, deny precedence, attempt-bound lifecycle surface, and protocol compatibility.
+- Test wildcard exclusion, deny precedence, attempt-bound lifecycle surface, protocol compatibility, exact bundle/component/probe pins, and every host tool-inheritance mode; prove a child that inherits all parent MCP bindings cannot be routed as a narrower researcher when the parent has work/operator authority.
+- Register the one `task_graph.edit_bundles.export|get|validate|diff|rebase|submit|delete` family with exact audience/effect/operation/resource/privacy/idempotency metadata; do not generate it for an ordinary executor grant.
 - Commit: `feat(catalog): generate task and executor capabilities`.
 
 ### PR 23I — Pure decomposition, readiness, routing, fairness, retry, and materiality policy
@@ -2597,15 +2708,26 @@ These suffixes were checked against plans 01–26. Plan 13 owns prerequisite her
 **Files:** `src/v2_adapters/task_executors/**/*`; workspace/delivery adapters; API routes; generated root CLI/MCP/SDK adapters; conformance tests.
 
 - Implement Codex, Claude, Cursor, Hermes, and custom protocol adapters behind the SPI with registration/start/status/cancel/collect.
+- Generate each adapter from the plan-27 capability ledger; bind registration/start/actual-route receipts to runtime/component/probe digests, reject stale admission, and require an isolated narrow registration wherever the host cannot restrict inherited child tools.
 - Implement exact workspace/worktree/branch binding, brokered consequential effects, revocable credentials/grants, non-preemptible-effect quarantine, safe cleanup, effect reconciliation, and requested/actual route receipts.
 - Expose versioned HTTP/SSE and generated CLI/MCP/SDK surfaces with auth/idempotency/cursors/errors/output parity.
 - Commit: `feat(executors): run fenced work across agent hosts`.
 
+### PR 24R — Managed declarative task-graph bulk editing
+
+**Files:** application task-graph edit feature; shared contained export/import/operation adapters; generated catalog/API/CLI/MCP/SDK bindings; parser, concurrency, privacy, and fault tests. Plan 11/PR 25G owns the Work UI consumer.
+
+- Implement strict CommonMark/restricted-YAML deterministic export, ID-prefix sharding, signed schema/catalog/config lock slice, offline and authoritative validation with exact UTF-8 spans, typed semantic diff/active-attempt impact, and semantic three-way rebase into a successor workspace.
+- Compose shared operation/export/import/idempotency/sanitizer/anchor/cleanup kernels; introduce no task-edit table, draft aggregate, second journal, parser service, upload protocol, worker, or cleanup scheduler.
+- Implement one bounded owner-shard submit that revalidates all scope/base/schema/catalog/config/policy/access/content pins, allocates local IDs, commits all canonical versions/events/heads/receipts or none, and returns exact stored receipt on retry.
+- Prove no omission-delete, partial shard commit, stale-base overwrite, implicit active-attempt mutation, YAML conflict state, path/archive escape, secret leakage, raw receipt retention, or crash-orphaned workspace. Generate local workspace refs versus remote contained resource links without semantic drift.
+- Commit: `feat(tasks): add atomic declarative plan editing`.
+
 ### PR 25G — Work workspace, plan outline, Kanban projection, DAG, and inspectors
 
-**Files:** `dashboard/features/work/**/*`; generated client integration; E2E/visual/accessibility tests.
+**Files:** `dashboard/app/src/features/work/**/*`; generated client integration; E2E/visual/accessibility tests.
 
-- Consume the PR 2A UI ledger, directly/behaviorally port compatible Hermes interactions/tests under provenance, and add routes, complete saved scope/view shell, initiative/plan/task/attempt inspectors, plan outline, board projection, DAG, legal commands, and table parity.
+- Consume the PR 2A UI ledger, directly/behaviorally port compatible Hermes interactions/tests under provenance, and add routes, complete saved scope/view shell, initiative/plan/task/attempt inspectors, plan outline, board projection, DAG, legal commands, table parity, and the PR 24R Edit-as-Markdown operation/diagnostic/diff/conflict/cleanup consumer.
 - Prove drag operations map to domain commands, no ambient current board, no dashboard business logic, and exact selection/version/coverage state.
 - Commit: `feat(dashboard): add canonical work and plan views`.
 
@@ -2619,11 +2741,11 @@ These suffixes were checked against plans 01–26. Plan 13 owns prerequisite her
 
 ### PR 31Q — Orchestration Lab and real-world evaluation harness
 
-**Files:** `dashboard/features/playgrounds/src/OrchestrationLab.tsx`; application labs; corpora/qrels/replay/metrics.
+**Files:** `dashboard/app/src/features/playgrounds/src/OrchestrationLab.tsx`; application experiment evaluator adapter; corpora/qrels/replay/metrics.
 
-- Add decomposition/readiness/routing/fairness/retry/packet/materiality/lease/cancel exact/recorded/current-best-effort replay and comparison.
+- Register the Orchestration evaluator in the one generic experiment catalog; add decomposition/readiness/routing/fairness/retry/packet/materiality/lease/cancel exact/recorded/current-best-effort stages, immutable branches, bounded sweeps, and aligned comparison.
 - Add Rspack/Rsbuild/React Router, Hermes board ambiguity, multi-host, privacy, and failure strata with sanitized manifests/anchors.
-- Prove read-only side-effect guard, deterministic replay, fixture secret scan, and separate authorized promotion.
+- Prove the hermetic resource-access receipt reports zero production effects, deterministic stages reproduce when inputs permit, fixture secret scan passes, and promotion remains separately authorized.
 - Commit: `feat(labs): replay task orchestration decisions`.
 
 ### PR 33F — Legacy/external task evidence import and shadow parity
@@ -2695,6 +2817,8 @@ Domain and persistence:
 - [ ] Initiative/Plan/PlanVersion/WorkItem/dependency/gate/acceptance/decision/assignment/lease/attempt/executor/workspace/packet/handoff/artifact/outcome/cost contracts and versions are complete.
 - [ ] `DependencyId`, `WorkClaimRefV1`, and manifest-ID/ordinal/digest `ContextPacketManifestRefV1` are the only generated refs; all task reads compile to canonical `TraceQueryV1`.
 - [ ] Gating DAG cycle checks, graph-of-graphs expansion, plan diffs/replacements, readiness, and critical-path reference parity pass.
+- [ ] Plan-01-owned `TaskGraphEditWorkspaceId`, `TaskGraphEditCandidateRefV1`, `TaskGraphEditManifestV1`, `EditLocalKeyV1`, `EditableEntityRefV1`, `TaskGraphEditDiagnosticV1`, `TaskGraphSemanticDiffV1`, `TaskGraphEditConflictV1`, and `TaskGraphEditReceiptV1` round-trip without duplicate/narrowed definitions.
+- [ ] Declarative export is deterministic/sharded/contained, omission cannot delete, validation returns exact source spans, semantic diff/rebase preserves graph meaning, and submit CAS-commits every normalized change or none.
 - [ ] Owner-shard transactions prove one active lease, monotonic fencing, atomic terminal/release, idempotency, outbox, recovery, retention, backup/restore, and corruption quarantine.
 - [ ] Scheduler commits/delivers only a revisioned immutable offer; accepting its exact revision uses one transaction to activate the pinned assignment and insert the complete sealed packet/entries, attempt, lease, grant set, reservations, canonical journal events, referenced adapter-start outbox, and idempotency result; decline/revoke/expiry create none of that authority.
 - [ ] Advisory `WorkClaimV1` and authoritative `TaskLeaseV1` remain distinct in schema, policy, UI, API, and tests.
@@ -2720,6 +2844,7 @@ Surfaces and product:
 
 - [ ] One catalog/application/view model generates API/CLI/MCP/SDK/dashboard semantics, errors, legal actions, pagination, anchors, and Markdown/JSON output.
 - [ ] Offer, packet, and notification list/detail views and owned deep links round-trip exact IDs/revisions; all seven manual-work commands have generated API/CLI/MCP/SDK/UI parity with no generic status, preview/apply, undo, or rollback alias.
+- [ ] `task_graph.edit_bundles.export|get|validate|diff|rebase|submit|delete` has generated operation/view parity across authorized CLI/MCP/API/SDK/UI bindings; skills plus CLI remain sufficient when MCP is not installed, and no domain-specific MCP server forks task semantics.
 - [ ] Kanban, DAG, plan, timeline, causal, critical-path, workload, executor, repository, initiative, agent slice, and All lenses are saved authorized projections over the same selected entities/versions.
 - [ ] Agent default views are relevance-filtered; humans with grants can query All; no board/event notification spam exists.
 - [ ] Brain/Explorer/Loom/Sessions/Agents/Code/Delivery/Knowledge/Skills/Automations/Costs/Settings/Labs pivot through canonical links without losing selection, scope, time, provenance, or coverage.
@@ -2729,9 +2854,10 @@ Surfaces and product:
 Privacy, operations, and convergence:
 
 - [ ] Secret canaries have zero forbidden sink occurrences across stores/indexes/events/logs/metrics/prompts/tools/packets/APIs/exports; sanitizer and descendant invalidation receipts are complete.
+- [ ] Managed edit workspaces stay outside repositories/indexes/backups, enforce owner-only path/archive containment and TTL, purge after submit/expiry with crash recovery, and retain only digest/count/version/audit/cleanup receipts rather than raw Markdown/frontmatter/path content.
 - [ ] Config is fully navigable/editable through Plan 20 UI/CLI/MCP/API/SDK with declared owner/effective source/history/impact and safe floors.
 - [ ] Status/doctor expose scheduler, graph, leases, attempts, executors, packets, workspaces, costs, privacy, lag, coverage, and exact recovery evidence.
-- [ ] Transactional `work_items.assign_set`, `task_views.share.plan`, `task_views.share.start`, `task_views.share.revoke`, canonical subscription task deltas, complete saved-view state, and plan-26 workload/fleet accounting pass generated CLI/MCP/API/SDK/UI parity.
+- [ ] Transactional `work_items.assign_set`, shared `saved_views.share.plan/start/revoke` over the Task variant, canonical subscription task deltas, complete saved-view state, and plan-26 workload/fleet accounting pass generated CLI/MCP/API/SDK/UI parity; no `task_views.*` binding exists.
 - [ ] Rspack/Rsbuild/React Router cross-repository initiative passes decomposition → diverse parallel triage → verifier → synthesizer → isolated implementation → integration → delivery fixtures.
 - [ ] Hermes strengths are preserved and every rejected weakness in section 2.4 is absent from live architecture.
 - [ ] Migration/import/shadow/cutover/rollback receipts prove one live scheduler/lease owner and no unauthorized materialization of provider/external work.

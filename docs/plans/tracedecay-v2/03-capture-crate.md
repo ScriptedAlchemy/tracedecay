@@ -36,6 +36,8 @@ Plan [`24-canonical-task-plan-graph-and-multi-agent-executor.md`](24-canonical-t
 
 Capture is the sole runtime content-ingress/sanitizer owner in [`19-system-defragmentation-convergence-and-extensibility.md`](19-system-defragmentation-convergence-and-extensibility.md) and [`18-secret-detection-redaction-and-private-data-safety.md`](18-secret-detection-redaction-and-private-data-safety.md). It consumes the exact domain taint/scope/evidence types from [`01-domain-crate.md`](01-domain-crate.md), uses store ports from [`02-store-crate.md`](02-store-crate.md), and emits only observations for [`04-projectors-crate.md`](04-projectors-crate.md). Scout/model/delivery evidence from [`22`](22-incremental-context-scout-and-suggestion-envelopes.md) and occurrence/correction/summary evidence required by [`23`](23-session-lcm-temporal-retrieval-and-evaluation.md) enter through the same sanitized observation contract; capture never ranks or addresses them.
 
+Capture consumes the capture facet of plan 08/27's one canonical `HostIntegrationManifestV1`; hooks, installers, skills/roles, MCP facades, and executors consume sibling facets from that same host/version/event/capability identity, while generated `HostBundleManifestV1` artifacts only reference it. Capture owns parser/source descriptors and offsets, not a competing host registry. Shared adapter mechanics—artifact discovery limits, bounded decoding/framing, offset/rewrite continuity, structured-field maps, normalization, sanitizer call, coverage, and conformance runner—are implemented once in `source.rs`/`runner.rs`; provider modules contain only true wire/schema differences.
+
 | Boundary | Contract |
 |---|---|
 | Enters | Provider-owned source artifacts, bounded raw records in transient memory, explicit `ScopeSelectorV2`, source state, privacy policy/detector snapshot, and store ports. |
@@ -104,6 +106,8 @@ The dependency boundary is `tracedecay-domain <- tracedecay-capture`; store impl
 
 Root-composition companion glue is `src/v2_adapters/capture_store.rs`: it implements capture-owned `ObservationSink` over store `ObservationJournal`/blob/quarantine ports. Neither capture nor application imports a concrete store implementation, and the adapter adds no parsing, identity, retry, or policy semantics.
 
+Phase 0's reuse ledger inventories provider switch statements, duplicate file readers/decoders, host-name/capability lists, offset stores, and redactors. Every adapter cutover records handwritten V1/adaptor/V2 lines and deleted call sites; a shared runner that still delegates to duplicate live V1 parsing does not pass. The provider conformance matrix is generated from the registry so adding a provider cannot require another hand-written test/router/permission list.
+
 ## Public API and fixed signatures
 
 ```rust
@@ -135,6 +139,22 @@ pub struct SourceDescriptor {
     pub provider: Option<ProviderId>,
     pub record_families: &'static [RecordFamily],
     pub ordering: SourceOrdering,
+    pub required_host_capabilities: &'static [CapabilityId],
+}
+
+pub struct SourceAdapterExecutionRefV1 {
+    pub descriptor_digest: ManifestDigest,
+    pub adapter_id: RegistryEntryId,
+    pub adapter_version: ComponentVersion,
+    pub host_integration: Option<HostIntegrationRuntimeRefV1>,
+    pub host_capability_snapshot_digest: Option<ManifestDigest>,
+    pub execution_ref_digest: ManifestDigest,
+}
+
+pub struct NormalizeContext {
+    pub execution: SourceAdapterExecutionRefV1,
+    pub host_capabilities: Option<HostCapabilitySnapshotV1>,
+    pub replay_manifest_digest: ManifestDigest,
 }
 
 pub struct SourceArtifact {
@@ -220,6 +240,8 @@ impl<A: SourceAdapter, S: ObservationSink> CaptureRunner<A, S> {
 
 `ObservationSanitizer` is the only implementation permitted to construct `SanitizedObservation` or mint `SanitizationReceiptV1`. For a protected candidate, `CaptureRunner` moves its non-cloneable `ProtectedQuarantineIngress` through `ObservationSink::stage_protected`, then moves the returned private attachment token into `ObservationQuarantineDispositionV1`; ordinary observations require no staging. It moves every envelope/receipt/disposition intact into `ObservationAppendItemV1`. Capture mints every receipt; the durable receipt home is the per-shard `sanitization_receipts` table defined in [`02-store-crate.md`](02-store-crate.md), and `ObservationSink::commit` persists each receipt in the same transaction as its envelope. Plan [`04-projectors-crate.md`](04-projectors-crate.md)'s sink firewall validates receipts against that table; [`18-secret-detection-redaction-and-private-data-safety.md`](18-secret-detection-redaction-and-private-data-safety.md) defines the receipt's fields and invariants. Adapters parse and identify structured fields but cannot classify eligibility themselves. `ObservationSink` rejects an envelope whose receipt, output digest, privacy domain, parser/detector/policy digest, completeness, or protected attachment token does not match. Incomplete/timeout/unsupported scans become receipt-bearing non-content items inside the same append batch; only unattached encrypted staging can remain after failure, and the protected service retires it without advancing the source head.
 
+Every normalized observation and replay-manifest member carries the exact `SourceAdapterExecutionRefV1` that produced it. For an installed host-derived source this pins the shared plan-01 `HostIntegrationRuntimeRefV1`, component-set and bundle payload/signed-release digests, adapter version, and install receipt/generation; `NormalizeContext.host_capabilities.subject` must be the matching `Installed` runtime and its independently pinned snapshot digest must be fresh at scan start. A provider-owned or pre-install source records no invented runtime: it uses the `Target` capability subject plus descriptor/adapter digests where a probe exists, or `None` with explicit coverage otherwise. These fields are provenance and replay inputs, not identity inputs: updating or reinstalling an adapter cannot mint a second observation for the same provider-native record, while a replay can still distinguish the exact parser/bundle/probe that produced an old result. Projectors expose stale/unsupported adapter provenance as coverage rather than silently treating it as current.
+
 ### Deterministic identity, rewrite, offsets, and ordering
 
 ```rust
@@ -249,6 +271,8 @@ pub fn detect_rewrite(
 - The final unterminated JSONL line is not acknowledged. Malformed complete records are quarantined and the cursor advances only when the quarantine skeleton and outbox marker commit atomically.
 - Duplicates preserve one canonical observation plus duplicate-seen metrics. Late/out-of-order records retain occurred time, ingested time, source position, and `late_by`; capture never rewrites prior order.
 - A per-source sequence gap emits `capture.sequence_gap_detected`; later arrival emits `capture.sequence_gap_filled`. The drainer waits only for the configured bounded reorder window and never invents missing records.
+
+“Host installation” in `SourceInstanceId` means the stable host-installation entity identity, never its bundle version, component digest, adapter build, install generation, or capability-snapshot digest. The latter belong only to `SourceAdapterExecutionRefV1`/`ProvenanceV1`. The contract suite ingests one native record under two adapter/bundle generations and requires one `ObservationId`, two distinguishable replay/provenance receipts, and an explicit projector supersession/coverage result rather than a duplicate entity.
 
 ### Hook hot path and concurrent-agent contract
 
@@ -414,8 +438,8 @@ pub struct CaptureReplayManifestV1 {
     pub index_watermarks: Vec<ManifestWatermark>,
     pub memory_manifest_digest: Option<ManifestDigest>,
     pub tool_catalog: Option<CatalogSnapshotRefV1>,
-    pub substitutions: Vec<ReplaySubstitution>,
-    pub unavailable_inputs: Vec<UnavailableInput>,
+    pub substitutions: BoundedVec<tracedecay_domain::ReplaySubstitutionV1, 64>,
+    pub unavailable_inputs: BoundedVec<tracedecay_domain::ReplayUnavailableInputV1, 64>,
 }
 ```
 
@@ -475,11 +499,11 @@ The `code_snapshot` adapter is the single sanctioned sanitizer-crossing entry po
 
 **Files:** create `Cargo.toml`, `src/{lib,error,source,identity,normalize,journal,runner,quarantine,replay}.rs`, the exact `src/privacy/**` tree from Plan 18, `tests/{contract_suite,privacy_security}.rs`; modify workspace `Cargo.toml`.
 
-- [ ] Write failing tests named `same_record_has_same_observation_id`, `key_rotation_keeps_observation_id_and_requires_continuity_receipt`, `append_growth_keeps_generation`, `rewrite_increments_generation`, `partial_line_does_not_advance_cursor`, `journal_commit_is_idempotent`, `quarantine_advances_atomically`, `unclassified_cannot_serialize_or_enter_sink`, `complete_receipt_required_for_observation`, `serialized_fields_scan_independently`, `scan_failure_commits_skeleton_not_content`, `exact_replay_rejects_digest_substitution`, `capture_preserves_multi_repo_worktree_generation_scope`, `empty_scope_is_not_current_project`, and `scope_candidates_never_replace_requested_scope`.
+- [ ] Write failing tests named `same_record_has_same_observation_id`, `adapter_generation_changes_provenance_not_observation_id`, `host_capability_snapshot_must_match_runtime`, `key_rotation_keeps_observation_id_and_requires_continuity_receipt`, `append_growth_keeps_generation`, `rewrite_increments_generation`, `partial_line_does_not_advance_cursor`, `journal_commit_is_idempotent`, `quarantine_advances_atomically`, `unclassified_cannot_serialize_or_enter_sink`, `complete_receipt_required_for_observation`, `serialized_fields_scan_independently`, `scan_failure_commits_skeleton_not_content`, `exact_replay_rejects_digest_substitution`, `capture_preserves_multi_repo_worktree_generation_scope`, `empty_scope_is_not_current_project`, and `scope_candidates_never_replace_requested_scope`.
 - [ ] Add the public signatures above and exhaustive enums with serde tags fixed to `snake_case`.
 - [ ] Implement canonical identity bytes, compare-and-set source state, record framing, Plan 18's parse-before-scan engine/policy/receipts/bounded detector registry, replay manifests, and runner retry semantics. Make sanitized observation the only journal/spool input; retire message-metadata opt-out semantics.
 - [ ] Add architecture lint that rejects imports matching `tracedecay::sessions`, `tracedecay::hooks`, `tracedecay::automation`, `mcp`, or `dashboard` from the crate.
-- [ ] Run `cargo test -p tracedecay-capture --test contract_suite`; expected: exit 0 and all fifteen named contracts pass.
+- [ ] Run `cargo test -p tracedecay-capture --test contract_suite`; expected: exit 0 and all seventeen named contracts pass.
 - [ ] Run `cargo clippy -p tracedecay-capture --all-targets --all-features -- -D warnings`; expected: exit 0 with no warnings.
 - [ ] Commit `feat(capture): add deterministic observation runner`.
 

@@ -558,7 +558,7 @@ Integrate these into the parent PR sequence; do not create a second parallel roa
 - Add capability discovery and one-step retry payloads.
 - Remove active-CWD routing from globally addressable retrieval refs.
 
-### PR 25A — All/system scope UI
+### PR 25B — All/system scope UI
 
 - Ship hierarchical scope picker, saved project systems, coverage inspector, disambiguation, explicit focus/expand behavior, and deep-link state.
 

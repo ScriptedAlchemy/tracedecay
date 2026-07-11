@@ -1,10 +1,12 @@
-# TraceDecay V2 Hooks Crate Implementation Plan
+# TraceDecay V2 Root Hooks Boundary Implementation Plan
 
 **Goal:** Build a bounded host-hook runtime that losslessly captures provider events, obtains replayable hint decisions, and acknowledges Codex, Claude Code, Cursor, and Kiro without coupling host latency to indexing, projection, cross-project queries, or storage internals.
 
-**Architecture:** tracedecay-hooks owns host wire normalization, hot-path orchestration, deadline and durability policy, reply rendering, and provider conformance. It delegates durable frames to tracedecay-capture, policy/context work to narrow tracedecay-application ports, and capability metadata to tracedecay-tool-catalog; it never opens a database, mutates policy state directly, or implements provider transcript parsing twice.
+**Architecture:** the private root `v2::hooks` module owns host wire normalization, hot-path orchestration, deadline and durability policy, reply rendering, and provider conformance. It delegates durable frames to `tracedecay-capture`, policy/context work to narrow `tracedecay-application` ports, and capability metadata to `tracedecay-tool-catalog`; it never opens a database, mutates policy state directly, or implements provider transcript parsing twice. It remains a module because root is its only production consumer; plan-19 import lints preserve the boundary without publishing another crate.
 
 **Tech Stack:** Rust 2024; serde/serde_json; bytes; thiserror; async-trait or boxed futures matching workspace convention; tokio only for orchestration/tests; proptest; Criterion; V2 domain/capture/catalog/application contracts. Policy is reached only through the application port.
+
+The module consumes the hook facet of plan 08/27's one canonical `HostIntegrationManifestV1`; capture, installation, MCP tools, skills, roles, and executors consume sibling facets with identical host/version/event/capability codes. The bundle compiler lowers that source IR into unsigned host-specific `HostBundlePayloadV1` artifacts plus capability-difference and release inputs; PR 36R alone creates the signed `HostBundleManifestV1` release envelope. Neither generated representation nor this module copies workflow semantics. `v2::hooks` owns one wire framing/response/conformance implementation. Plan 09's application feature owns lifecycle authorization/idempotency/operation state, while plan 12's root-private deployment adapter performs approved install/update/uninstall/config effects; installer work never enters the hook hot path. The current Cline/Roo exact install/uninstall duplicates and the wider nine-installer/14-integration cluster are explicit deletion seeds, not adapters to preserve.
 
 ---
 
@@ -15,12 +17,12 @@ This plan owns master-plan PR 24F. It lands after application PR 24A establishes
 Plan [`24-canonical-task-plan-graph-and-multi-agent-executor.md`](24-canonical-task-plan-graph-and-multi-agent-executor.md) may supply exact task/attempt/context-packet refs to plan-22 suggestions and bounded executor lifecycle signals. Hooks never enumerate boards, schedule/claim/cancel/complete work, widen an executor grant, or inject unaddressed sibling context.
 
 - tracedecay-capture owns spool files, framing, fsync, recovery scans, source continuity, rewrite generations, immutable observation appends, and capture manifests.
-- tracedecay-hooks owns host request decoding, normalization into HookRequestV1, deadline/durability selection, application-policy invocation, host response encoding, and acknowledgement receipts.
+- Root `v2::hooks` owns host request decoding, normalization into `HookRequestV1`, deadline/durability selection, application-policy invocation, host response encoding, and acknowledgement receipts.
 - tracedecay-policy owns deterministic intent, hint, routing, suppression, dedupe, cooldown, escalation, budget, rendering decisions, and missed-capability/correction outcome proposals.
 - tracedecay-tool-catalog owns immutable capability/use-case metadata and host/tool bindings. Hooks may resolve a pinned snapshot; they may not hard-code a second tool catalog.
 - tracedecay-application composes captured request facts, authorized query/memory/skill candidates, policy evaluation, evaluation/state recording, and explicit proposed effects.
 - [`22-incremental-context-scout-and-suggestion-envelopes.md`](22-incremental-context-scout-and-suggestion-envelopes.md) owns optional asynchronous model/read exploration and durable suggestion envelopes. Hooks only claim/revalidate/render an already prepared envelope through `HookApplicationPort`; they never start or wait for scout work.
-- tracedecay-store and tracedecay-projectors are behind capture/application ports. This crate has no SQL, connection, migration, projection, blob, Git, network, or filesystem implementation.
+- tracedecay-store and tracedecay-projectors are behind capture/application ports. This module has no SQL, connection, migration, projection, blob, Git, network, or filesystem implementation.
 - Exact replay mode names are domain `ReplayMode::ExactDeterministic`, `ReplayMode::RecordedResult`, and `ReplayMode::CurrentBestEffort`.
 - A host acknowledgement is not an observation commit, hint emission, or acted outcome. Each has a separate typed receipt/event.
 - Deterministic candidates and incremental-scout candidates enter one application/policy delivery selector — `DeliveryArbiterV1` in [`06-policy-crate.md`](06-policy-crate.md) §9.1.3, which arbitrates both as `DeliveryCandidateV1` submissions under one `HintStateSnapshot` version compare-and-swap — plus one dedupe/cooldown/budget state and one outcome model. A host invocation cannot receive both engines' duplicate advice and receives at most one `InjectContext`.
@@ -97,80 +99,72 @@ Before PR 24F begins, refresh open PRs, master, installed host versions, hook ma
 ## 5. Exact File and Module Tree
 
 ~~~text
-crates/tracedecay-hooks/
-├── Cargo.toml
-├── src/
-│   ├── lib.rs                    # curated runtime/adapter/public contracts
-│   ├── error.rs                  # stable failure and host-response codes
-│   ├── request.rs                # HookRequestV1, origin, native identity
-│   ├── response.rs               # HookResponseV1 and host-neutral effects
-│   ├── receipt.rs                # append/evaluation/delivery/ack receipts
-│   ├── budget.rs                 # latency, bytes, tokens, candidates, deadlines
-│   ├── durability.rs             # required durability and acknowledgement rules
-│   ├── backpressure.rs           # tier selection and typed degraded behavior
-│   ├── runtime.rs                # HookRuntime orchestration only
-│   ├── ports.rs                  # capture, application, clock, metrics traits
-│   ├── facts/
-│   │   ├── mod.rs
-│   │   ├── prompt.rs             # direct/subagent/protocol origin facts
-│   │   ├── tool.rs               # call/result/approval/edit/shell/error facts
-│   │   ├── agent.rs              # spawn/handoff/join/interrupt/goal facts
-│   │   ├── coordination.rs       # presence, work claim, TTL, scope/redundancy facts
-│   │   ├── workspace.rs          # cwd/ref/worktree hints, never canonical IDs
-│   │   └── lifecycle.rs          # session/compact/stop/workspace lifecycle
-│   ├── adapters/
-│   │   ├── mod.rs                # HostHookAdapter and immutable registry
-│   │   ├── common.rs             # bounded JSON/wire helpers
-│   │   ├── codex.rs
-│   │   ├── claude.rs
-│   │   ├── cursor.rs
-│   │   └── kiro.rs
-│   ├── render/
-│   │   ├── mod.rs                # host response selection
-│   │   ├── codex.rs
-│   │   ├── claude.rs
-│   │   ├── cursor.rs
-│   │   └── kiro.rs
-│   ├── conformance/
-│   │   ├── mod.rs                # descriptor-driven fixture runner
-│   │   ├── manifest.rs           # host versions/events/coverage/digests
-│   │   └── differential.rs       # V1/V2 normalized/reply comparison
-│   └── telemetry.rs              # bounded labels and timing summaries
-├── tests/
-│   ├── support/mod.rs
-│   ├── request_contract.rs
-│   ├── host_conformance.rs
-│   ├── hot_path.rs
-│   ├── durability_ack.rs
-│   ├── concurrency_ordering.rs
-│   ├── backpressure.rs
-│   ├── crash_recovery.rs
-│   ├── hint_replay.rs
-│   ├── outcome_evidence.rs
-│   ├── privacy_security.rs
-│   └── v1_differential.rs
-├── fixtures/
-│   ├── codex/
-│   ├── claude/
-│   ├── cursor/
-│   ├── kiro/
-│   └── manifests/
-└── benches/
-    ├── notification.rs
-    ├── prompt.rs
-    ├── concurrent_agents.rs
-    └── host_render.rs
+src/v2/hooks/
+├── mod.rs                        # curated root-private facade
+├── error.rs                      # stable failure and host-response codes
+├── request.rs                    # HookRequestV1, origin, native identity
+├── response.rs                   # HookResponseV1 and host-neutral effects
+├── receipt.rs                    # append/evaluation/delivery/ack receipts
+├── budget.rs                     # latency, bytes, tokens, candidates, deadlines
+├── durability.rs                 # required durability and acknowledgement rules
+├── backpressure.rs               # tier selection and typed degraded behavior
+├── runtime.rs                    # HookRuntime orchestration only
+├── ports.rs                      # capture, application, clock, metrics traits
+├── facts/
+│   ├── mod.rs
+│   ├── prompt.rs                 # direct/subagent/protocol origin facts
+│   ├── tool.rs                   # call/result/approval/edit/shell/error facts
+│   ├── agent.rs                  # spawn/handoff/join/interrupt/goal facts
+│   ├── coordination.rs           # presence, work claim, TTL, scope/redundancy facts
+│   ├── workspace.rs              # cwd/ref/worktree hints, never canonical IDs
+│   └── lifecycle.rs              # session/compact/stop/workspace lifecycle
+├── adapters/
+│   ├── mod.rs                    # generated capability-ledger mappings
+│   ├── common.rs                 # bounded JSON/wire helpers
+│   ├── codex.rs
+│   ├── claude.rs
+│   ├── cursor.rs
+│   └── kiro.rs
+├── render/
+│   ├── mod.rs                    # host response selection
+│   ├── codex.rs
+│   ├── claude.rs
+│   ├── cursor.rs
+│   └── kiro.rs
+├── conformance/
+│   ├── mod.rs                    # descriptor-driven fixture runner
+│   ├── manifest.rs               # host versions/events/coverage/digests
+│   └── differential.rs           # V1/V2 normalized/reply comparison
+└── telemetry.rs                  # bounded labels and timing summaries
+
+tests/
+├── hooks_v2.rs                    # integration-test harness
+└── hooks_v2/
+    ├── support.rs
+    ├── request_contract.rs
+    ├── host_conformance.rs
+    ├── hot_path.rs
+    ├── durability_ack.rs
+    ├── concurrency_ordering.rs
+    ├── backpressure.rs
+    ├── crash_recovery.rs
+    ├── hint_replay.rs
+    ├── outcome_evidence.rs
+    ├── privacy_security.rs
+    └── v1_differential.rs
+
+tests/fixtures/hooks_v2/{codex,claude,cursor,kiro,manifests}/
+benches/{hooks_v2_notification,hooks_v2_prompt,hooks_v2_concurrent_agents,hooks_v2_host_render}.rs
 ~~~
 
 Companion files owned elsewhere:
 
 ~~~text
-crates/tracedecay-domain/src/hooks/{mod.rs,request.rs,receipt.rs}.rs
-crates/tracedecay-capture/src/spool/{client.rs,frame.rs,recovery.rs}.rs
+crates/tracedecay-domain/src/hooks/{mod,request,receipt}.rs
+crates/tracedecay-capture/src/spool/{client,frame,recovery}.rs
 crates/tracedecay-policy/src/evaluators/{hint.rs,routing.rs}
 crates/tracedecay-tool-catalog/src/{runtime.rs,bindings/hook.rs}
-crates/tracedecay-application/src/ports/hooks.rs
-crates/tracedecay-application/src/use_cases/hooks/{capture.rs,evaluate.rs,deliver.rs}.rs
+crates/tracedecay-application/src/features/hooks/{ports,queries,commands,views}.rs
 src/hooks/v2_compat.rs
 src/mcp/hook_events_v2.rs
 ~~~
@@ -182,14 +176,14 @@ No production file may exceed 800 lines. Provider files contain mapping only; sh
 Allowed direction:
 
 ~~~text
-tracedecay-domain
-  ↑          ↑                         ↑
-capture      tool-catalog              tracedecay-application
-  ↑          ↑                         ↑
-  └── capture client ──├── catalog snapshot ─────────┘
-                         tracedecay-hooks
-                               ↑
-                   host executable/MCP notification
+host executable / MCP notification
+                  │
+                  ▼
+          root::v2::hooks
+          ├──→ tracedecay-domain values
+          ├──→ tracedecay-capture client
+          ├──→ tracedecay-tool-catalog snapshot
+          └──→ tracedecay-application hook port
 ~~~
 
 Hooks may depend on domain request/receipt value types, capture client contracts, catalog snapshots, and narrow application hook ports. It may not import `tracedecay-policy` directly; application owns policy/query/memory/skill composition and returns one pinned result. It also may not depend on store/projectors/query implementations, root McpServer/DashboardState, provider session parsers, or V1 global singletons.
@@ -205,24 +199,22 @@ Hooks may depend on domain request/receipt value types, capture client contracts
 | Host executable/MCP notification | Bounded provider wire request and invocation context | Host wire response, explicit acknowledgement/degradation, safe diagnostics |
 | Observability | Safe clock/metric sink | Low-cardinality stage timings, durability/coverage/reason codes; never payload literals |
 
-The crate never produces canonical events, projections, policy state, tool definitions, Git state, memory/facts, or automation mutations. Those effects occur only through the declared capture/application boundaries.
+The module never produces canonical events, projections, policy state, tool definitions, Git state, memory/facts, or automation mutations. Those effects occur only through the declared capture/application boundaries.
 
 CI runs:
 
 ~~~bash
-cargo tree -p tracedecay-hooks --edges normal
-rg -n 'rusqlite|libsql|sqlx|axum|reqwest|octocrab|git2|std::process|Command::|src/dashboard|src/mcp' crates/tracedecay-hooks/src
+cargo tree -p tracedecay --edges normal
+rg -n 'rusqlite|libsql|sqlx|axum|reqwest|octocrab|git2|std::process|Command::|src/dashboard|src/mcp' src/v2/hooks
 ~~~
 
 Expected: no forbidden dependency or source match. std::fs is also forbidden except a compile-gated conformance-fixture loader in tests; production spool I/O belongs to capture.
 
 ## 7. Public Request, Response, and Port Contracts
 
-The domain companion module defines transport-neutral IDs and enums; adapters may add private wire structs.
+The domain companion module defines transport-neutral IDs and enums; adapters may add private wire structs. Host identity always uses the domain-owned opaque `HostProfileRef` plus `HostSurfaceKindV1`, backed by the generated host registry. A fixed Codex/Claude/Cursor/Kiro enum is forbidden because it would exclude the remaining registered hosts and leak a root-private type into catalog/scout contracts.
 
 ~~~rust
-pub enum HostKind { Codex, ClaudeCode, Cursor, Kiro }
-
 pub enum HookPoint {
     SessionStart,
     PromptSubmit,
@@ -269,7 +261,8 @@ pub struct NativeEventIdentity {
 pub struct HookRequestV1 {
     pub invocation_id: HookInvocationId,
     pub profile_id: ProfileId,
-    pub host: HostKind,
+    pub host_profile: HostProfileRef,
+    pub host_surface: HostSurfaceKindV1,
     pub hook_point: HookPoint,
     pub source: SourceInstanceId,
     pub requested_scope: ScopeSelectorV2,
@@ -586,9 +579,11 @@ Hint Lab receives the stored HookRequestV1 ref, RequestFacts snapshot, bundle/ca
 
 Coordination evaluation runs only at session start, subagent start, `BeforeFileEdit` (or a catalog-declared edit pre-tool equivalent), catalog-declared expensive-research `PreToolUse`, or `ScopeChanged`. It may add at most one compact advisory context item. Planned redundancy, acknowledgement, cooldown, unchanged material overlap, or partial/unsafe claims suppress it. It cannot cancel, reassign, lock, message another agent, or mutate claims on the synchronous path.
 
-## 12. Provider Conformance Matrix
+## 12. Generated Provider Conformance Matrix
 
-| Host | Required V1 entry points/events | V2 required normalized coverage |
+The checked-in human-readable table below is a historical fixture inventory, not support truth. The normative matrix is generated from the plan-27 host capability ledger at a pinned host version and assigns every `(host, surface, event, response)` one disposition: documented supported, version-gated, absent, undocumented/unknown, policy-disabled, or trust-pending. Only documented or probe-validated support can become a required adapter row. Unknown support stays unknown; it cannot be inferred from another host, a similarly named hook, an old TraceDecay handler, or a generated bundle field. CI regenerates this table and the plan-27 difference report from the same source, failing on handwritten drift, an uncovered supported row, or a required unknown/absent row.
+
+| Host | Historical V1/probe fixture seeds | Generated V2 coverage target |
 |---|---|---|
 | Codex | hook_codex_session_start, hook_codex_user_prompt_submit, hook_codex_subagent_start, hook_codex_post_tool_use, hook_codex_post_compact | Session/prompt/subagent/tool/compact; response-item tool kinds; goal create/update; parent/subagent IDs; additional_context render; explicit absent coverage for unsupported approvals/events. |
 | Claude Code | hook_pre_tool_use/evaluate_hook_decision, hook_claude_session_start, hook_claude_subagent_start, hook_claude_post_tool_use, hook_prompt_submit, hook_stop | Pre-tool allow/deny, session/subagent/prompt/tool/stop, tool_use/tool_result pairing, parent tool-use IDs, workflow/handoff evidence, context render. |
@@ -596,7 +591,7 @@ Coordination evaluation runs only at session start, subagent start, `BeforeFileE
 | Kiro | pre-tool, prompt-submit, post-tool | Delegation/tool/prompt facts, bounded catch-up request, explicit gaps for unsupported lifecycle. |
 | MCP/daemon notification | FileEdit, Shell, WorkspaceOpen, SessionStart, IncrementalSync | Canonical hook observation plus async project-sync proposal; branch/worktree hints are candidates until identity/Git evidence resolves them. |
 
-For every row, fixtures cover:
+For every generated supported/version-gated row, fixtures cover:
 
 - minimal valid, maximal valid, unknown forward field, malformed, oversized, missing ID/time/path, secret, Unicode, retry, duplicate, late, gap, rewrite;
 - direct user, copied parent prompt, subagent instruction, protocol tool result, unknown origin;
@@ -637,7 +632,7 @@ Release gates:
 - process kill at every Section 10 point: complete commit or safe retry, zero false durable/emitted claims;
 - disk/WAL pressure reaches explicit degradation tiers and recovers without unbounded memory;
 - secret corpus: zero secret-bearing search/vector/fact/metric/fixture/export hit;
-- host conformance: 100% declared event/reply rows have fixture and parity disposition;
+- host conformance: 100% generated documented/probe-validated event/reply rows have fixtures and every absent/unknown/version-gated row has a checked disposition with no fabricated adapter;
 - outcome: >=90% eligible evaluations terminal within horizon, false attribution <1% on labeled corpus;
 - trust/noise: zero adversarial prompt/pasted-log promotion to trusted compiler/tool failure, repeated-hint budget and useful-silence fixtures pass, and every injected hint names its trusted routing evidence or abstains;
 - new production files <=800 lines and no provider duplication of policy/capture logic.
@@ -648,17 +643,17 @@ Commands run from repository root with the checkout-local target directory. Do n
 
 ### Commit 1: Contracts, budgets, and adapter registry
 
-**Files:** Cargo.toml/workspace; crate Cargo.toml; src/{lib,error,request,response,receipt,budget,durability,ports}.rs; src/adapters/{mod,common}.rs; tests/{request_contract,host_conformance,privacy_security}.rs.
+**Files:** root `Cargo.toml`; `src/v2/hooks/{mod,error,request,response,receipt,budget,durability,ports}.rs`; `src/v2/hooks/adapters/{mod,common}.rs`; `tests/hooks_v2.rs`; `tests/hooks_v2/{request_contract,host_conformance,privacy_security}.rs`.
 
-- [ ] Write failing schema/validation tests for every HookPoint, PromptOrigin, `ScopeSelectorV2`, missing-time rule, payload sensitivity, budget bound, unsupported blocking point, and adapter descriptor uniqueness; include multi-repo/worktree, empty explicit selector, first-CWD, base-checkout/PR-worktree, and stale-registry cases.
-- [ ] Run cargo test -p tracedecay-hooks --test request_contract --test host_conformance --test privacy_security. Expected: fail because crate/types do not exist.
+- [ ] Write failing schema/validation tests for every generated supported HookPoint, PromptOrigin, `ScopeSelectorV2`, missing-time rule, payload sensitivity, budget bound, unsupported blocking point, host-bundle/runtime/probe digest binding, capability disposition, and adapter descriptor uniqueness; include multi-repo/worktree, empty explicit selector, first-CWD, base-checkout/PR-worktree, and stale-registry cases. Generate the cases from the plan-27 ledger and fail if an unknown/absent capability appears as required.
+- [ ] Run `cargo test --test hooks_v2 -- --nocapture`. Expected: fail because the root V2 hook module/types do not exist.
 - [ ] Implement the pure contracts and immutable adapter registry; generate JSON Schema fixtures and stable digests.
 - [ ] Re-run. Expected: all tests pass and unknown forward host event maps to typed UnsupportedEvent without panic.
 - [ ] Commit: feat(hooks): define bounded host hook contracts.
 
 ### Commit 2: Capture durability and hot-path runtime
 
-**Files:** src/{runtime,backpressure,telemetry}.rs; capture spool client companion; tests/{hot_path,durability_ack,backpressure}.rs; benches/{notification,prompt}.rs.
+**Files:** `src/v2/hooks/{runtime,backpressure,telemetry}.rs`; capture spool client companion; `tests/hooks_v2/{hot_path,durability_ack,backpressure}.rs`; `benches/{hooks_v2_notification,hooks_v2_prompt}.rs`.
 
 - [ ] Add failing tests ack_never_overstates_durability, canonical_event_never_coalesces, optional_sync_coalesces_after_representative, timeout_returns_silent_degradation, duplicate_returns_same_observation, and queue_budget_is_bounded.
 - [ ] Run focused tests. Expected: fail because HookRuntime/capture client are absent.
@@ -668,9 +663,9 @@ Commands run from repository root with the checkout-local target directory. Do n
 
 ### Commit 3: Codex and Claude adapters
 
-**Files:** src/adapters/{codex,claude}.rs; src/render/{mod,codex,claude}.rs; fixtures/codex; fixtures/claude; tests/{host_conformance,v1_differential,outcome_evidence}.rs.
+**Files:** `src/v2/hooks/adapters/{codex,claude}.rs`; `src/v2/hooks/render/{mod,codex,claude}.rs`; `tests/fixtures/hooks_v2/{codex,claude}/`; `tests/hooks_v2/{host_conformance,v1_differential,outcome_evidence}.rs`.
 
-- [ ] Freeze redacted V1 fixtures for every entry point in Section 12, including tool/result/error, subagent parent IDs, pre-tool deny, compact, direct/copy/subagent/protocol origins.
+- [ ] Freeze redacted V1 fixtures for every applicable generated entry point in Section 12, including tool/result/error, subagent parent IDs, supported blocking/deny points, compact, direct/copy/subagent/protocol origins; preserve unsupported historical entry points only as explicit absent/legacy evidence.
 - [ ] Run differential tests. Expected: fail before adapters exist.
 - [ ] Implement mapping/render only; use catalog binding and application policy result.
 - [ ] Re-run. Expected: normalized/request/reply parity passes or a fixture records an intentional versioned difference.
@@ -678,7 +673,7 @@ Commands run from repository root with the checkout-local target directory. Do n
 
 ### Commit 4: Cursor, Kiro, and MCP/daemon notification adapters
 
-**Files:** src/adapters/{cursor,kiro}.rs; src/render/{cursor,kiro}.rs; src/conformance/*; root internal-shadow adapters; fixtures/{cursor,kiro}; tests/{host_conformance,v1_differential}.rs.
+**Files:** `src/v2/hooks/adapters/{cursor,kiro}.rs`; `src/v2/hooks/render/{cursor,kiro}.rs`; `src/v2/hooks/conformance/*`; root internal-shadow adapters; `tests/fixtures/hooks_v2/{cursor,kiro}/`; `tests/hooks_v2/{host_conformance,v1_differential}.rs`.
 
 - [ ] Add all Section 12 fixtures, linked-worktree/detached/moved/adopted-store cases, and #410 prompt-origin cases.
 - [ ] Run conformance/differential tests. Expected: fail before mappings exist.
@@ -688,17 +683,17 @@ Commands run from repository root with the checkout-local target directory. Do n
 
 ### Commit 5: Concurrent-agent, crash, replay, and privacy harness
 
-**Files:** tests/{concurrency_ordering,crash_recovery,hint_replay,privacy_security}.rs; benches/{concurrent_agents,host_render}.rs.
+**Files:** `tests/hooks_v2/{concurrency_ordering,crash_recovery,hint_replay,privacy_security}.rs`; `benches/{hooks_v2_concurrent_agents,hooks_v2_host_render}.rs`.
 
 - [ ] Add deterministic scheduler/load tests for 100 parent/subagents, presence/work-claim heartbeat/TTL, same/parallel-worktree overlap, planned redundancy, five coordination gates, one-hint/dedupe/cooldown/ack, duplicate/gap/late/rewrite, daemon loss, fallback segment collision, disk full, locked reader, bundle/catalog publication, kill points, exact/recorded/best-effort replay, delivery unknown, human correction, and secret corpus. Replay parent prefix `019f4906`, four PR #359 child agents, and Cursor session `ebc96a27-b046-4c88-865f-b38d76da9d2d` from the shared coordination manifest.
 - [ ] Run tests. Expected: at least one ordering/durability/replay assertion fails before final recovery/reconciliation handling.
 - [ ] Complete idempotent retry, fair writer scheduling contracts, delivery reconciliation, and no-write replay adapters.
-- [ ] Re-run all crate tests/benches. Expected: all Section 14 gates pass.
+- [ ] Re-run the root hook test target and four hook benches. Expected: all Section 14 gates pass.
 - [ ] Commit: test(hooks): prove concurrent capture and replay safety.
 
 ### Commit 6: Shadow migration and cutover receipts
 
-**Files:** src/conformance/differential.rs; src/hooks/v2_compat.rs; integration manifests/config; compatibility tests/docs.
+**Files:** `src/v2/hooks/conformance/differential.rs`; `src/hooks/v2_compat.rs`; integration manifests/config; compatibility tests/docs.
 
 - [ ] Add shadow tests proving one host invocation yields one V1 effect owner, one non-effecting V2 evaluation, no double hint, comparable normalized/evaluation/reply digests, and explicit uncomparable coverage.
 - [ ] Enable v2_hooks_shadow per host/hook point; collect 24-hour parity/latency/privacy/continuity report.
@@ -735,8 +730,8 @@ Do not delete sanitized native copied-subagent prompt rows under #410; only reti
 ## 17. Final Verification
 
 - [ ] cargo fmt --check. Expected: exit 0.
-- [ ] cargo clippy -p tracedecay-domain -p tracedecay-capture -p tracedecay-policy -p tracedecay-tool-catalog -p tracedecay-hooks --all-targets -- -D warnings. Expected: exit 0.
-- [ ] cargo test -p tracedecay-hooks --all-features. Expected: all unit/integration/property tests pass, none ignored.
+- [ ] `cargo clippy -p tracedecay-domain -p tracedecay-capture -p tracedecay-policy -p tracedecay-tool-catalog -p tracedecay --all-targets -- -D warnings`. Expected: exit 0.
+- [ ] Run the root hook unit/integration/property/conformance suites under all root features. Expected: all pass, none ignored.
 - [ ] Run all existing src/hooks, installer/plugin, MCP hook-event, session ingest/search, analytics/hint outcome, automation, and provider fixture suites. Expected: compatibility passes.
 - [ ] Run four hook benchmarks and 100-agent load/crash matrix on the recorded reference machine. Expected: every Section 14 gate passes.
 - [ ] Run secret/fuzz/permission/path/symlink corpus. Expected: zero secret-bearing index/metric/fixture/export and no escape.

@@ -4,13 +4,15 @@
 
 **Parent plan:** [`../2026-07-09-tracedecay-brain-rewrite.md`](../2026-07-09-tracedecay-brain-rewrite.md)
 
-**Related plans:** [`01-domain-crate.md`](01-domain-crate.md), [`02-store-crate.md`](02-store-crate.md), [`03-capture-crate.md`](03-capture-crate.md), [`04-projectors-crate.md`](04-projectors-crate.md), [`05-query-crate.md`](05-query-crate.md), [`09-application-crate.md`](09-application-crate.md), [`10-api-crate.md`](10-api-crate.md), [`11-dashboard-frontend.md`](11-dashboard-frontend.md), [`12-root-compatibility-migration.md`](12-root-compatibility-migration.md), [`13-research-provenance-and-context-anchors.md`](13-research-provenance-and-context-anchors.md), [`14-historical-failure-regression-matrix.md`](14-historical-failure-regression-matrix.md), [`17-official-public-api-and-sdks.md`](17-official-public-api-and-sdks.md), [`20-configuration-control-plane.md`](20-configuration-control-plane.md), [`21-cli-mcp-tool-surface-and-output-unification.md`](21-cli-mcp-tool-surface-and-output-unification.md), [`22-incremental-context-scout-and-suggestion-envelopes.md`](22-incremental-context-scout-and-suggestion-envelopes.md), [`23-session-lcm-temporal-retrieval-and-evaluation.md`](23-session-lcm-temporal-retrieval-and-evaluation.md), and [`24-canonical-task-plan-graph-and-multi-agent-executor.md`](24-canonical-task-plan-graph-and-multi-agent-executor.md).
+**Related plans:** [`01-domain-crate.md`](01-domain-crate.md), [`02-store-crate.md`](02-store-crate.md), [`03-capture-crate.md`](03-capture-crate.md), [`04-projectors-crate.md`](04-projectors-crate.md), [`05-query-crate.md`](05-query-crate.md), [`09-application-crate.md`](09-application-crate.md), [`10-api-crate.md`](10-api-crate.md), [`11-dashboard-frontend.md`](11-dashboard-frontend.md), [`12-root-compatibility-migration.md`](12-root-compatibility-migration.md), [`13-research-provenance-and-context-anchors.md`](13-research-provenance-and-context-anchors.md), [`14-historical-failure-regression-matrix.md`](14-historical-failure-regression-matrix.md), [`17-official-public-api-and-sdks.md`](17-official-public-api-and-sdks.md), [`20-configuration-control-plane.md`](20-configuration-control-plane.md), [`21-cli-mcp-tool-surface-and-output-unification.md`](21-cli-mcp-tool-surface-and-output-unification.md), [`22-incremental-context-scout-and-suggestion-envelopes.md`](22-incremental-context-scout-and-suggestion-envelopes.md), [`23-session-lcm-temporal-retrieval-and-evaluation.md`](23-session-lcm-temporal-retrieval-and-evaluation.md), [`24-canonical-task-plan-graph-and-multi-agent-executor.md`](24-canonical-task-plan-graph-and-multi-agent-executor.md), and [`27-cross-host-agent-plugin-bundles.md`](27-cross-host-agent-plugin-bundles.md).
 
 Plan 20 is the only user-control surface for this plan's detector/redactor/privacy/retention/quarantine configuration. It must render the mandatory floor, effective source, coverage, consumer acknowledgement, and rescan/reproject/reindex impact in Brain Settings and generated CLI/MCP/API/SDK bindings; no provider metadata or hidden file may weaken the floor.
 
 Plans 22–23 add model prompts/outputs, suggestion envelopes, query literals/logs, temporal assertions, summary DAGs, logical-copy fingerprints, evaluation qrels, and context bundles as explicit source/sink classes. They require authorization before hydration, privacy-domain-keyed identity, local-only defaults, egress grants, deletion lineage, and zero unsafe content in hints, indexes, fixtures, reports, or transport explanations.
 
 Plan 24 adds initiative/plan/task text, dependency/acceptance/decision records, executor manifests/routes, capability grants, context packets, sibling summaries, workspaces, logs, handoffs, artifacts, outcomes, costs, adapter streams, task views, and orchestration fixtures as explicit sources/sinks. Lease proofs and credentials are protected control-plane values that never enter ordinary stores, prompts, logs, transports, screenshots, exports, or research anchors.
+
+Plan 27 adds canonical host-bundle sources, every rendered host/package tree, signed manifests, native marketplace payloads/release indexes, license/SBOM files, owned host-config semantic diffs and rollback backups, raw hook stdin envelopes, capability probes, doctor output, and conformance diagnostics as explicit scanner surfaces. General stores retain only safe component IDs, bounded states, digests, path fingerprints, coverage, and protected receipt references. Config bodies, config hunks, backup bytes, raw hook input, environment values, and unsanitized diagnostics live only in the protected operation/rollback/quarantine boundary for the minimum TTL; they are never searchable, indexed, exported, or copied into research/accounting stores.
 
 **Publication snapshot:** [master §2.6](../2026-07-09-tracedecay-brain-rewrite.md#26-current-master-accepted-changes) plus [plan 13](13-research-provenance-and-context-anchors.md) are normative. Branch/session variants, consolidation indexes and retirement ledgers, lifecycle/registry repair diagnostics, FTS maintenance evidence, graph checkpoint artifacts, both source families/backups, and every doctor/command output are separate privacy canary surfaces.
 
@@ -84,6 +86,7 @@ The private chronological research corpus remains outside Git and mode `0600`. I
 10. A detected credential is assumed compromised. TraceDecay explains rotation/revocation as the first remediation step; deletion/redaction alone is not presented as sufficient.
 11. “Zero findings” is claimed only with complete named coverage and scanner/policy versions. Locked, skipped, corrupt, incompatible, too-large, timed-out, and unsupported inputs remain explicit unknowns.
 12. V1 rollback stores/backups cannot reintroduce unsafe content. They are rescanned/migrated in isolation before becoming eligible for restore.
+13. Host installation metadata is not permission to retain host content. Config/backup bodies and raw hook/probe/diagnostic payloads are protected-operation data only; general projections contain content-free digests/counts/states and authorized receipt references, and retirement preserves foreign or ownership-ambiguous bytes.
 
 ## 4. Threat model
 
@@ -95,6 +98,8 @@ The private chronological research corpus remains outside Git and mode `0600`. I
 - Hooks, notifications, session spools, LCM summary/compression/replay fields, goals, workflows, inter-agent messages, work claims, and automation artifacts.
 - Repository files, Git diffs/commits/remotes/config, diagnostics, build logs, generated source, dependency files, fixtures, and archives.
 - Facts, memories, skill drafts/support files, proposals, annotations, saved views, imports, exports, support bundles, and API/SDK requests.
+- Canonical host-bundle skill/rule/command/agent/hook/MCP sources; resolved rendered package trees; plugin/marketplace manifests, upload payloads, release indexes, signatures, SBOM/license inventories, install selections, and component archives.
+- Host-config parse trees and owned semantic diffs, pre-change rollback backups, hook stdin/output envelopes, capability probes, host/version/surface diagnostics, conformance fixtures/results, doctor/repair output, cache/package inventories, and reload/trust state.
 - V1 stores, SQLite WAL/SHM/temp files, graph generations, payload directories, caches, backups, recovery sets, and crash artifacts.
 
 ### 4.2 Forbidden sinks
@@ -109,6 +114,7 @@ The private chronological research corpus remains outside Git and mode `0600`. I
 - Logs, traces, metrics labels, analytics metadata, errors, panic/crash reports, doctor output.
 - HTTP/MCP/CLI responses, SSE events, cursors, pagination tokens, deep links, browser history/storage, source maps.
 - Query/result caches, response handles, summary DAGs, replay bundles, exports/shares/support bundles.
+- Raw host config or backup bodies, config diff hunks, hook stdin/tool payloads, environment snapshots, host probe command output, unclassified doctor/conformance diagnostics, rendered plugin trees, marketplace staging payloads, and failed publication/install archives.
 - Tests, fixtures, snapshots, benchmark/qrel corpora, docs/examples, generated OpenAPI/SDK/frontend bundles, release archives.
 
 ### 4.3 Adversaries and accidents
@@ -121,6 +127,15 @@ The private chronological research corpus remains outside Git and mode `0600`. I
 - A stale projection/backup/cache restoring content after apparent deletion.
 - Cross-project HMAC/equality correlation leaking that two privacy domains contain the same secret.
 - A detector plugin exfiltrating candidate text or using the network.
+
+### 4.4 Host-bundle and installation containment
+
+- Scan the exact canonical source tree, each deterministic rendered package tree, every signed manifest/SBOM/license file, component archive, and marketplace upload/index before signing and again from the downloaded candidate. A source-tree pass cannot stand in for a rendered-artifact pass.
+- Parse host config by its native typed format. The deploy adapter computes a bounded owned semantic diff and stores prior owned bytes/hunks only in the encrypted protected rollback store with private modes, a short TTL, ownership/device/inode checks, and an opaque receipt. General integration state stores relative component identity, privacy-bound path fingerprint, pre/post digest, mode, and receipt reference only.
+- Raw config bodies, backups, hook stdin, environment data, capability-probe output, and unclassified doctor/conformance diagnostics never enter the observation journal, activity/project stores, FTS/vector indexes, metrics, research manifests, support exports, or release receipts. Sanitization occurs in memory before any safe event; scanner failure produces an unknown/quarantined skeleton.
+- Hook stdin is schema-bounded per event and sent directly to the mandatory sanitizer. The hook dispatcher may retain safe IDs, event kind, byte counts, timing, coverage, and a sanitization receipt; it cannot spool the original envelope for later analysis.
+- Probe and doctor commands use static argv and a restricted environment. Their structured output crosses the same sanitizer and safe-error boundary before persistence or rendering; raw stdout/stderr exists only inside the protected operation workspace until success/failure cleanup.
+- Uninstall/retirement removes only bytes proven owned by signed install receipts. Foreign cache entries, user/team/workspace config, unknown fields, backups, unmanaged plugins, and ownership-ambiguous files are preserved and reported without body content.
 
 ## 5. Domain contracts
 
@@ -380,6 +395,20 @@ If the OS keyring is unavailable or locked, quarantine retention fails closed to
 - Export/share/support-bundle jobs rescan output bytes/archives before publication and include privacy manifest/coverage.
 - CI scans staged diff, introduced history, archives, snapshots, generated API/SDK/docs/frontend/source maps, binaries/packages where supported, and release bundles.
 
+### 11.7 Task-graph edit-bundle containment and retirement
+
+The plan-10/17 `task_graph.edit_bundles.*` workflow treats every exported, downloaded, edited, uploaded, rebased, and submitted byte as protected temporary user data. It never accepts or returns a server path. The API streams only the generated uncompressed edit-bundle media type containing strict-frontmatter `manifest.md` and sharded CommonMark; local CLI/SDK helpers may open a caller-owned directory or archive, but that path is consumed in the caller process and is absent from requests, errors, telemetry, anchors, and receipts.
+
+- Composition owns one profile-private runtime root at `0700`; each random bundle/generation directory is `0700` and each manifest/shard/staging file is `0600`. Creation uses exclusive no-follow/open-beneath semantics where supported and a component-by-component descriptor walk elsewhere. Publication verifies parent/child device and inode identity before atomic rename.
+- Archive intake is single-pass and bounded before extraction. Absolute paths, `..`, empty/dot components, normalization or case-fold collisions, duplicate entries, undeclared entries, symlinks, hardlinks, devices, sockets, FIFOs, sparse/overlapping entries, extended-header path rewriting, nested archives, depth greater than eight, or names longer than 128 normalized UTF-8 bytes fail closed. No archive metadata may change owner, group, mode, time, xattr, ACL, or destination.
+- The strict YAML subset permits only bounded maps, sequences, strings, booleans, integers, and null. Tags, anchors, aliases, mapping-merge syntax, repeated or structured mapping names, inferred timestamps, floats/non-finite numbers, multiple documents, unknown schema fields, and executable constructors are forbidden. CommonMark is parsed with raw HTML disabled; code fences and links are data, never executable UI or filesystem instructions.
+- Every candidate generation is scanned after streaming/containment and again after parse/canonicalization; submit and rebase verify the exact scan/policy/input digests. A zero-findings claim requires complete manifest/file/byte coverage. A finding, scanner timeout/crash/version gap, unsupported encoding, truncated upload, or unknown coverage purges the candidate immediately and retains only a safe failure receipt; secret-like bytes are never kept merely to help the agent repair them.
+- Ordinary secret-clean syntax, reference, CAS, or semantic validation failures remain in the private runtime only so the agent can fetch diagnostics and resubmit before expiry. Defaults are two hours, 64 MiB total uncompressed bytes, 2 MiB per file, 4,096 files, and 50,000 items; hard ceilings are 24 hours, 256 MiB, 8 MiB, 16,384 files, and 100,000 items. Bounds are checked against declared and observed counts throughout streaming.
+- Successful atomic submit purges every bundle byte before returning terminal success. Explicit delete, token/profile revocation, lease/TTL expiry, failed containment, and policy invalidation also purge immediately. A startup scan plus a five-minute sweeper retires crash residue using descriptor/inode checks; it never follows a discovered link or trusts a filename from a receipt.
+- Durable submit/delete/expiry/sweeper receipts contain only `TaskGraphEditWorkspaceId`, `TaskGraphEditCandidateRefV1`, source/manifest/policy digests, safe part/item/byte counts, disposition/reason enums, timestamps, and audit/retrieval anchors. They contain no Markdown/YAML/archive content, logical filename, client path, physical path, candidate excerpt, secret fingerprint, or inode/device value.
+
+Line-addressed validation output is plan 01's exact transient `TaskGraphEditDiagnosticV1`, not durable content: safe code/severity/phase, optional contained relative-file byte and line/column span, optional editable subject and field path, safe message, optional bounded deterministic text edit, and evidence anchors. Parser/library exceptions, YAML tokens, source lines, archive entry bytes, and surrounding text never reach the diagnostic.
+
 ## 12. Retroactive whole-profile audit
 
 Create a read-only-first privacy auditor. It uses store APIs/manifests, not ad hoc SQL or raw renderer output.
@@ -485,7 +514,7 @@ Default output contains safe counts/classes/coverage/actions only. JSON has the 
 ### 14.2 Official API/MCP
 
 - `GET /api/v2/privacy/status`, `/scans`, `/scans/{id}`, `/findings`, `/findings/{safe-id}`, `/remediations/{id}`, and `/quarantine/status` (the last under elevated authorization); read-shaped `POST /api/v2/privacy/scans:inspect` accepts protected scope/source selectors and performs no scan persistence.
-- `GET /api/v2/privacy/detectors` and `POST /api/v2/privacy/detectors:diff` using synthetic caller-supplied fixtures only; the richer synthetic detector run is `POST /api/v2/labs/privacy:test`.
+- `GET /api/v2/privacy/detectors` and `POST /api/v2/privacy/detectors:diff` using synthetic caller-supplied fixtures only; the richer synthetic detector run uses plan 10 §8.5's generic experiment lifecycle with `LabKindV1::Privacy`. No privacy-specific lab endpoint or real-candidate input exists.
 - Mutations use the same generated command routes as plan 10: `POST /api/v2/commands/privacy/scans/{start,cancel}`, `/commands/privacy/remediations/{plan,start,verify}`, and `/commands/privacy/quarantine/{hold,release}`.
 - SSE emits safe scan/remediation progress and gaps, never findings content.
 
@@ -576,6 +605,8 @@ For every positive class, drive a unique invalid synthetic canary through:
 - query/search/graph/timeline/replay/hint/nearby-agent APIs.
 - CLI/MCP/HTTP/SSE/SDK/dashboard/browser/source maps/logs/errors/cursors/anchors.
 - fixture promotion/export/share/support/backup/restore/migration/recovery/rebuild/release packages.
+- task-graph edit-bundle export stream, strict-frontmatter `manifest.md` and CommonMark shards, validate upload, candidate-ref diff/rebase/submit, retained invalid candidate, runtime staging tree, explicit delete, expiry, startup sweep, and content-free receipts.
+- host-bundle canonical sources, every host/package rendered tree, component archives, signed manifests/SBOMs/licenses, marketplace staging/download/index artifacts, install/update/repair/uninstall owned-config diffs and backups, hook stdin/output, capability probes, doctor/conformance diagnostics, crash staging, and content-free receipts.
 
 Assertions:
 
@@ -642,6 +673,7 @@ Integrate these slices into the master Phase 0–5 sequence.
 - Pin `gitleaks` CI/offline scan and a second differential detector; record scanner versions and zero-findings artifacts without candidate content.
 - Import historical session anchors and current LCM/memory/remote/tool-preview tests.
 - Replace all nine credential-shaped repository fixtures with reserved/invalid scanner-safe canaries and freeze their detector-coverage equivalence plus zero-findings repository scan.
+- Inventory and scan plan 27's exact canonical host-bundle sources, all deterministic rendered host/package trees, component archives, marketplace candidates/indexes, owned-config diff/backup lane, hook stdin lane, and probe/doctor/conformance diagnostic lane independently; store only safe manifests and protected receipt refs.
 
 ### PR 4B — Privacy domain and taint-state contracts
 
@@ -683,6 +715,7 @@ Integrate these slices into the master Phase 0–5 sequence.
 - Ship status/scan/findings/remediation/verify/detector/quarantine use cases and official contracts.
 - Direct-agent credentials remain read-only and cannot access quarantine plaintext.
 - Run whole-transport secret-canary conformance.
+- Add the edit-bundle archive/path/link/inode/permission/size/TTL/crash matrix; prove ordinary validation retention is repairable while secret/unknown/containment failure and successful submit purge bytes immediately, and prove every durable receipt is content/path-free.
 - Replace lossy-row-derived “enabled” status with one generated `PrivacyProtectionStatusV1` reporting policy/effective-floor/source/sink/detector/legacy/last-scan evidence; add authenticated-loopback dashboard and safe bounded-error conformance.
 
 ### PR 31M — Privacy Observatory and Secret Safety Lab
@@ -693,6 +726,7 @@ Integrate these slices into the master Phase 0–5 sequence.
 
 - Scan every named sink/store/artifact/backup with complete coverage manifests.
 - Include both #425 split-store source families, canonical-path aliases, WAL/SHM/temp files, backups, consolidation ledger/staging/table/collision reports, remapped LCM source edges, doctor commands/errors, and candidate rebuilt store as separate coverage rows; neither family inherits the other’s clean status.
+- Include installed/generated host-package trees, downloaded marketplace artifacts, owned config/current/backup generations, hook spool/runtime remnants, probe/doctor/conformance workspaces, and legacy host-installer fragments as separate coverage rows. Config and backup bodies stay in the protected rollback/quarantine domain; foreign caches/config and unproven ownership remain preserved and non-serving rather than copied into a general scan store.
 - Block flagged descendants, guide rotation, rebuild sanitized generations, retire old WAL/DB/cache/export artifacts, rescan, and issue verification receipts.
 - Cutover requires zero forbidden-sink canary hits and zero unexplained serving unknowns.
 
@@ -716,7 +750,7 @@ cargo test -p tracedecay-store privacy quarantine restore
 cargo test -p tracedecay-projectors privacy sink_firewall
 cargo test -p tracedecay-query privacy containment
 cargo test -p tracedecay-application privacy
-cargo test -p tracedecay-api privacy public_api_conformance
+cargo test privacy public_api_conformance
 cargo nextest run --workspace --no-fail-fast
 gitleaks git --redact --no-banner
 gitleaks dir dashboard packages python docs tests --redact --max-archive-depth 2
@@ -733,6 +767,7 @@ Artifacts:
 - remediation descendant/rebuild/retirement/rotation acknowledgement receipt.
 - backup/restore eligibility manifest.
 - generated API/SDK/frontend/release scan receipt.
+- host-bundle source/rendered-tree/marketplace/config-backup/hook-input/probe-diagnostic coverage and release scan receipt, containing digests/counts/states only.
 
 Reports never contain candidate values, raw snippets, or secret fingerprints.
 
@@ -746,6 +781,7 @@ Reports never contain candidate values, raw snippets, or secret fingerprints.
 - [ ] Public markers reveal no secret length, prefix/suffix, unkeyed hash, or cross-domain equality.
 - [ ] Optional raw retention is encrypted, isolated, private, audited, short-lived, and cryptographically deletable.
 - [ ] Runtime, offline, CI, release, fixture, export, backup, and restore scanners have explicit complementary roles.
+- [ ] Host-bundle source/rendered/marketplace artifacts are scanned independently; config/backup bodies and raw hook/probe/diagnostic payloads remain protected-operation data only, and foreign host state is preserved.
 - [ ] Detector plugins cannot access filesystem/network or emit content and fail closed on timeout/crash.
 - [ ] Facts/memory/skills/automation/hints/coordination/analytics never receive candidate plaintext.
 - [ ] Code/Git/diagnostic/tool/session/LCM content uses the same boundary and retains source provenance.

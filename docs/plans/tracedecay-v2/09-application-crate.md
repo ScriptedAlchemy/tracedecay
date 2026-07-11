@@ -27,7 +27,7 @@ Plan [`24-canonical-task-plan-graph-and-multi-agent-executor.md`](24-canonical-t
 - Store/projector/archive implementations enter through narrow ports or sibling-crate public traits. No connection, transaction, SQL string, filesystem path, Axum, MCP, CLI, React, renderer, or provider hook type crosses this boundary.
 - One command transaction has exactly one canonical owning shard. Cross-shard work is an explicit durable workflow with steps, expected versions, idempotency keys, compensations where safe, and partial/failure state; V2 does not emulate distributed atomicity.
 - A query may span shards but captures one vector watermark and preserves every stale, unavailable, incompatible, locked, skipped, redacted, sampled, and truncated disposition.
-- Labs are read-only use cases. Fixture promotion, policy/config activation, export publication, and non-curation mutations are separate audited commands. Curation labs are inspectors only: the autonomous curation worker applies policy-eligible fact/memory/skill evolution independently, with no per-item preview/apply/rollback UI.
+- Lab evaluators are read-only against production state. The generic experiment/run operation may persist only immutable replay artifacts and explicitly granted model/egress cost; fixture promotion, policy/config activation, export publication, and non-curation mutations are separate audited commands. Curation labs are inspectors only: the autonomous curation worker applies policy-eligible fact/memory/skill evolution independently, with no per-item preview/apply/rollback UI.
 - Canonical transcript enumeration preserves every sanitized native row and is lossless for retained non-secret structure/semantics. Message enumeration/search consumes domain `MessageOrigin`/`MessageView` unchanged, exposing native, representative, human-best-effort, direct-user, delegated-agent, tool-result, and provider-protocol views; query-time dedupe never deletes or rewrites sanitized source observations.
 - `All` means the active `ProfileId`. Additional profiles require an explicit collection/scope and separate authorization; there is no implicit Hermes profile.
 - Every fact, skill, policy, automation, saved investigation, and annotation carries domain `DeclaredScope`. Profile/zero-project/cross-project instances are activity-owned; explicitly project-scoped instances are project-owned. A selected project, route, working directory, or active filter is never an ownership default, and unresolved scope blocks mutation rather than guessing.
@@ -94,7 +94,9 @@ Before each PR 24 slice, refresh open PRs, accepted merge bases, catalog digests
 | `src/automation/**` | Config, scheduling, leases, runs, skills, proposals, artifacts, outcomes | Expose status/read models and typed commands. Scheduler policy proposes; application revalidates and acquires fenced lease before launch. |
 | Doctor/index/watch/daemon/migration/backup code | Operational reads and side effects selected ad hoc by caller | Separate inspect/preview queries from execute commands/jobs. Every long operation has durable progress, cancellation rules, receipt, and recovery state. |
 
-## 5. Exact Crate and Companion File Tree
+## 5. Responsibility inventory and exact physical layout rule
+
+The expanded tree below is a responsibility inventory for review coverage; its flat names are not permitted implementation paths. The normative physical rule after the inventory is `kernel/**` plus `features/<domain>/{queries,commands,views,ports}/**`, which collapses the inventory into bounded feature modules and prevents a second flat `use_cases`/`commands` architecture.
 
 ```text
 crates/tracedecay-application/
@@ -125,13 +127,14 @@ crates/tracedecay-application/
 │   │   ├── capture.rs                 # source ingest/status/cutover command port
 │   │   ├── projection.rs              # projector status/rebuild/cutover command port
 │   │   ├── operations.rs              # doctor/index/watch/backup/repair/GC adapters
+│   │   ├── host_deployment.rs          # root-owned host probe/config/install/reload effects
 │   │   ├── hooks.rs                   # HookApplicationPort evaluation/delivery boundary
 │   │   └── event_sink.rs              # canonical command/evaluation/outcome append port
 │   └── use_cases/
 │       ├── mod.rs                     # only executable capability registry entrypoints
 │       ├── query.rs                   # generic TraceQueryV1 execution
 │       ├── search.rs                  # universal search profile
-│       ├── search_evaluation.rs       # corpus/qrel/pool/judgment/run/report/profile reads
+│       ├── search_evaluation.rs       # corpus/qrel/pool/judgment/report/profile reads; runs use experiments
 │       ├── graph.rs                   # neighborhood/path/impact/lens composition
 │       ├── timeline.rs                # density/lanes/as-of/follow/compare compositions
 │       ├── export.rs                  # export creation/status composition
@@ -152,6 +155,7 @@ crates/tracedecay-application/
 │       ├── accounting.rs              # usage/cost/savings and denominators
 │       ├── settings.rs                # effective values, sources, scope, and impact
 │       ├── operations.rs              # durable command/job/workflow status/recovery
+│       ├── integrations.rs             # generated host inventory/difference/status views
 │       ├── research.rs                # stable evidence anchors and retrieval recipes
 │       ├── saved.rs                   # saved views, collections, annotations reads
 │       ├── hooks/
@@ -164,6 +168,7 @@ crates/tracedecay-application/
 │       │   ├── runner.rs              # execution-mode dispatch and command receipts
 │       │   ├── projects.rs            # register/alias/unenroll
 │       │   ├── operations.rs          # index/watch/doctor/repair/backup
+│       │   ├── integrations.rs         # install/update/repair/uninstall/verify workflows
 │       │   ├── automation.rs          # job CRUD/run/pause/resume/cancel
 │       │   ├── curation.rs            # autonomous fact/memory/skill evolution worker
 │       │   ├── curation_control.rs    # config, pause/resume/run-now, pin/protect/exclude
@@ -178,27 +183,21 @@ crates/tracedecay-application/
 │       │   ├── delivery.rs            # read-only remote evidence refresh
 │       │   ├── coordination.rs        # message/handoff/ack/suppress overlap actions
 │       │   ├── research.rs            # append immutable research-manifest versions
-│       │   ├── search_evaluation.rs   # immutable eval artifacts, runs, reports, profile activation
+│       │   ├── search_evaluation.rs   # immutable eval artifacts/reports/profile activation; no run lifecycle
 │       │   ├── exports.rs             # create/cancel/publish/delete export jobs
 │       │   ├── tokens.rs              # auth.tokens.create/list/revoke over plan 17 §18.2's registry
 │       │   ├── saved.rs               # save/share/update/delete investigation state
-│       │   └── labs.rs                # sanitized fixture-promotion command only
-│       └── labs/
+│       │   ├── experiments.rs          # create/run/cancel/resume/retry/minimize through OperationKernelV1
+│       │   └── fixture_promotion.rs    # sanitized fixture-promotion command only
+│       └── experiments/
 │           ├── mod.rs
-│           ├── hint.rs
-│           ├── retrieval.rs
-│           ├── ingest.rs
-│           ├── query.rs
-│           ├── search_quality.rs
-│           ├── scope_federation.rs
-│           ├── privacy.rs
-│           ├── correlation.rs
-│           ├── coordination.rs
-│           ├── scheduler.rs
-│           ├── orchestration.rs
-│           ├── memory.rs
-│           ├── policy_diff.rs
-│           └── evolution.rs
+│           ├── manifest.rs             # exact/recorded/best-effort input/version/environment closure
+│           ├── hermetic.rs             # frozen clock/RNG, immutable mounts, overlay, capability deny/receipt
+│           ├── runner.rs               # one operation-backed lifecycle over evaluator registry
+│           ├── trace.rs                # stable stages/anchors
+│           ├── comparison.rs           # one alignment vocabulary
+│           ├── minimize.rs             # bounded typed delta debugging
+│           └── evaluators/             # fourteen typed adapters; no lifecycle/persistence/effect ports
 ├── tests/
 │   ├── support/mod.rs
 │   ├── registry_completeness.rs
@@ -209,7 +208,7 @@ crates/tracedecay-application/
 │   ├── command_pipeline.rs
 │   ├── idempotency_optimistic.rs
 │   ├── workflow_recovery.rs
-│   ├── labs_read_only.rs
+│   ├── experiments_replay.rs
 │   ├── future_master_migration.rs
 │   └── v1_parity.rs
 └── benches/
@@ -221,21 +220,23 @@ crates/tracedecay-application/
 Companion implementations owned by later adapter PRs:
 
 ```text
-crates/tracedecay-api/src/**
+src/v2/api/**
 src/cli/v2_adapter/**
 src/mcp/v2_adapter/**
-src/hooks/v2_adapter/**
+src/v2/hooks/**
 src/dashboard/v2_compat_api/**
 tests/v2_transport_parity/**
 tests/fixtures/v2/use-case-catalog.json
 tests/fixtures/v2/v1-compatibility.json
 ```
 
-Canonical composition rule: concrete glue for capture, projectors, query, and policy archives lives only at `src/v2_adapters/{capture_store,projector_store,query_store,policy_archive}/**`. Application retains only the ports above. The `src/use_cases/{query,search,graph,timeline,export,subscribe}.rs`, `src/use_cases/hooks/**`, and `src/use_cases/labs/**` paths remain exactly as plans 05–07 require.
+Canonical composition rule: concrete glue for capture, projectors, query, and policy archives lives only at `src/v2_adapters/{capture_store,projector_store,query_store,policy_archive}/**`. Application retains only the ports above. Query/search/graph/timeline/export/subscription compose under their `src/features/<domain>/` owners; hook integration is `src/features/hooks/`; host-integration orchestration is `src/features/integrations/{queries,commands,views,ports}.rs`; the generic experiment harness and evaluator adapters are `src/features/experiments/`. No flat `src/use_cases/**`, parallel `src/commands/**`, or `src/labs/**` tree is created.
 
-The later agent-coordination/search-quality requirement adds bounded companion files under existing lower-crate owners: `tracedecay-projectors/src/read_models/coordination.rs`, `tracedecay-query/src/profiles/{hybrid_search,search_benchmark,agent_proximity}.rs`, `tracedecay-policy/src/evaluators/coordination.rs`, and generated tool-catalog definitions/bindings. Application consumes those ports; it does not reimplement projection, ranking, or hint policy. These additions extend PRs 16/17/23C/22A before PR 24A4/24A7 and require their own registry/parity receipts.
+The later agent-coordination/search-quality requirement extends bounded files under existing lower-crate owners: `tracedecay-projectors/src/read_models/coordination.rs`, plan 05's existing `operators/coordination.rs`, `rank/**`, and `eval/**` modules, `tracedecay-policy/src/evaluators/coordination.rs`, and generated tool-catalog definitions/bindings. No `profiles/search_benchmark` production module or lab-specific runner is added. Application consumes those ports; it does not reimplement projection, ranking, evaluation metrics, or hint policy. These additions extend PRs 16/17/23C/22A before PR 24A4/24A7 and require their own registry/parity receipts.
 
-Production modules target at most 800 lines. Domain-specific orchestration stays in its query/command file; transport-specific mapping stays in adapters.
+Production modules target at most 800 lines. The physical layout is `kernel/{context,access,uow,idempotency,operations,subscriptions,audit}` plus `features/<domain>/{queries,commands,views,ports}`; the inventory above names responsibilities, not permission for parallel flat registries or a giant `commands/runner` match. Kernel cannot import features. Features cross only through explicit registered workflows, import `UseCaseId`/descriptors from plans 01/08, and register handlers through generated bindings. Domain-specific orchestration stays in its feature; transport-specific mapping stays in adapters.
+
+Reuse is measured, not aspirational. The V1 seeds include separate automation run ledgers/dashboard task endpoints, index `sync_with_progress`, consolidation ledgers, cancel-on-drop guards, daemon `operation_in_flight`, query/result envelopes, and transport-specific error helpers. PRs 24A1/24A5/24A6 extract one application kernel and delete those mechanics as each feature cuts over; wrapping them behind ports does not satisfy the plan-19 negative-code gate.
 
 ## 6. Dependency and Forbidden-Import Rules
 
@@ -256,7 +257,7 @@ tracedecay-domain
 - Application may depend on public contracts from domain, query, policy, tool catalog, capture, projectors, and store. It may not depend on the root crate or any V1 concrete type.
 - Query/policy/tool-catalog/store/projectors/capture may not depend on application.
 - `queries/**` may use read ports only. A compile-time architecture test rejects `CommandStorePort`, workflow mutation, effect apply, or usage-counter ports from those modules.
-- `labs/**` may use immutable archive/query/evaluator ports only. The only fixture-write operation is `commands/labs.rs`, which requires a sanitized artifact and explicit confirmation receipt.
+- `experiments/evaluators/**` may use immutable archive/query/policy ports only. `experiments/runner.rs` may write only operation and experiment artifacts through its narrow repository; architecture tests deny every production write/counter/cache/lease/effect port. The only fixture-write operation is `commands/fixture_promotion.rs`, which requires a sanitized artifact and explicit confirmation receipt.
 - `commands/**` cannot call an HTTP/GitHub/process/filesystem adapter while a unit of work is open. External operations run before revalidation or after durable workflow-step commit.
 - Reject imports containing `axum`, `tower`, `rmcp`, `clap`, dashboard packages, `rusqlite`, `libsql`, `git2`, `octocrab`, `reqwest`, `std::process`, or provider-specific hook modules.
 - A `cargo metadata` architecture test asserts adapters point inward and no cycle exists among application/query/policy/store/projectors.
@@ -449,8 +450,8 @@ pub trait UnitOfWork: Send {
 Transaction order is fixed:
 
 1. Authorize the requested effect and resolve canonical owner without opening a writer transaction.
-2. Build preview from a frozen read snapshot; return impact, required approvals, and digest.
-3. On apply, validate confirmation and deadline, then perform any safe external preflight outside the transaction.
+2. For a catalog-declared destructive operation only, execute its named inspect/plan use case against a frozen read snapshot and return the operation-specific impact, requirements, and immutable confirmation token. Ordinary commands have no preview phase.
+3. Execute the exact named command; when its catalog metadata requires confirmation, validate the matching unexpired operation-specific token and deadline, then perform any safe external preflight outside the transaction. There is no generic apply route.
 4. Open one owning-shard unit of work and fence the writer lease.
 5. Reserve idempotency; exact prior completion returns the prior receipt.
 6. Load aggregate and compare expected/preview versions, holds, permissions, and policy/capability digests.
@@ -559,6 +560,18 @@ Cross-shard workflows cover retention/delete descendants, profile/project settin
 - Cancellation stops before the next step. It cannot undo a committed canonical observation, audit event, or externally completed effect.
 - Workflow terminal states are `Succeeded`, `Failed`, `Cancelled`, `CompensationRequired`, or `Blocked`; `Blocked` names the missing authority/version/capability.
 
+### 8.4 Shared fenced operation substrate
+
+`OperationKernelV1<K>` is mechanical infrastructure, not a generic domain workflow. It supplies `OperationId`, typed kind key `K`, owner, epoch/heartbeat, expected versions, idempotency, phase/checkpoint ordinal, progress, cancellation intent, retry/takeover, effect/compensation refs, terminal disposition, and audit/status receipts. Its one attempt contract records immutable input, attempt ordinal/classification, bounded jittered backoff, `next_retry_at`, deadline, circuit state, idempotency/effect receipt, and uncertain-effect reconciliation. Migration, export, privacy repair, projection/index rebuild, daemon maintenance, automation, and task execution wrap it with closed domain admission/state/effect policies; none builds a private retry engine. Task leases remain execution authority and projection outbox leases remain consumer authority; they reuse the fenced-epoch/CAS primitives but are not interchangeable aliases.
+
+One `OperationStorePort` and one generated operation-status view replace feature-local ledger/status/cancel/recovery engines. No worker holds a shard transaction across process, Git/network/model, filesystem, or user wait. Autonomous curation still performs eligible owned effects directly through its typed worker; this substrate does not create preview/apply/rollback proposals.
+
+One narrow `SchedulerKernelV1` similarly supplies wakeup ingestion, backoff, fairness queues, checkpointing, and fenced admission. Task readiness/lease/offer semantics and automation job/run semantics remain separate registered policies above it; agent-bearing automation materializes canonical task work, and no second polling loop or executor-dispatch authority survives.
+
+`StructuredEditWorkspaceKernelV1` is the equally narrow mechanical substrate for contained, expiring, user-editable representations. It owns opaque workspace allocation, owner/principal binding, frozen-base pins, byte/file/count limits, streamed upload/download staging, source-span diagnostics, candidate digests, TTL extension rules, purge state, and crash reaping under the profile runtime root. It never defines a document grammar, converts omission into deletion, allocates domain entity IDs, resolves semantic conflicts, or exposes server filesystem paths. The task-graph feature is the first consumer: it owns the strict Markdown/frontmatter compiler, graph validation, semantic diff/rebase, active-attempt impact, and atomic owner-shard submit described by plan 24. Any later consumer must register a separate closed format and semantic compiler while reusing this kernel; there is no public arbitrary-document workspace API.
+
+Workspace bytes are transient private staging, not canonical events or drafts. Export and submit cross plan 18's sanitizer and secret-scan boundaries; a successful submit or explicit delete purges bytes immediately, failed validation retains them only for a bounded retry TTL, and the durable receipt keeps digests/counts/anchors/cleanup outcome but no content or local path. Archive ingestion rejects traversal, absolute paths, links, devices, duplicate members, decompression/count overrun, and non-UTF-8 before a domain parser runs.
+
 ## 9. Complete Read Use-Case Inventory
 
 The tables below use compact operation slugs to stay readable. They are not a second ID grammar: `tracedecay-tool-catalog` supplies canonical `UseCaseId` (`usecase.<domain>.<verb-noun>`) mappings for current bindings; V1 alias mappings live only in the internal migration manifest. For example, `git.branches.list` maps to `usecase.git.list-branches`. Application code accepts only the generated typed ID and cannot construct it from a slug. Each read returns `ApplicationResponse<T>` and therefore cannot omit coverage/freshness/redaction/retention.
@@ -578,6 +591,7 @@ The tables below use compact operation slugs to stay readable. They are not a se
 | `privacy.detectors.list` / `privacy.detectors.diff` / `privacy.remediations.get` / `privacy.quarantine.status` | Detector metadata, synthetic-only comparison, descendant/rebuild/rotation state, and elevated quarantine metadata without plaintext. |
 | `system.daemon.status` / `system.watchers.list` / `system.index.status` | Operational status and freshness only; lifecycle changes are commands. |
 | `settings.effective.get` / `settings.sources.list` | Effective profile/project/integration/automation/storage settings, declared owner, source layer, default, validation, restart/reindex/privacy impact; environment is an immutable source, not a writable target. |
+| `integrations.list` / `integrations.get` / `integrations.diff` / `integrations.status` | Administrative host-integration inventory, one installation, desired-versus-supported-versus-observed capability difference, or effective/drift/restart/health status. Views carry opaque host/installation/package/component/registration/profile refs, versions and digests, ownership/trust, cache freshness, omissions/fallbacks, and legal operations; they never expose host filesystem paths, raw host configuration bodies, environment values, or credentials. `diff` and `status` are read-shaped and cannot probe or rewrite a host; use `integrations.verify` for a fresh external probe. |
 | `operations.list` / `operations.get` | Durable command/job/workflow/export/migration/automation progress, effect receipts, audit ref, retry/cancel capability, blocked reason, and explicit terminal disposition. |
 | `auth.tokens.list` | Elevated owner-only enumeration of token IDs, scopes, grants, issued/expiry/last-used/revoked state and affected streams/operations; never token secrets or hashes. |
 | `retrieval_anchors.metadata_batch_get` / `retrieval_anchors.resolve` / `retrieval_recipes.execute` | Batch-load bounded safe anchor metadata without content, resolve authorized records/payloads at a frozen watermark, or re-execute a versioned protected retrieval recipe with drift/coverage. These are three distinct reads; none accepts an ephemeral response handle as the sole locator. |
@@ -620,51 +634,119 @@ Scope resolution uses domain `ScopeSelectorV2`, `ScopeRootV2`/`ScopeTargetV2`, `
 
 ### 9.2 Universal query, Brain, graphs, and timeline
 
+All graph-shaped use cases return one sealed `GraphSliceViewV1` (nodes, registered edges, per-node/edge lens membership and bridge role, frontier, atlas tiles/anchor lineage, clusters, LOD, ordering, cursor, explain, coverage, snapshot/watermarks, allowed pivots); all time-shaped use cases return one `TimelineSliceViewV1` (half-open interval, density buckets or typed lanes/events, late/hidden counts, cursor, explain, coverage, snapshot/watermarks). Both travel in one `VisualizationEnvelopeV1<T>` carrying the generated visual-semantic registry ref, selection/query-delta capabilities, camera/layout hint, accessibility summary, deterministic export metadata, and the same coverage/snapshot truth. Domain lenses provide registered node/edge/lane schemas and view presets only. CLI/MCP/API/dashboard render these views through plan 21/11; no domain endpoint owns another pagination, LOD, layout, selection, table, visual-semantic, accessibility, or export transform.
+
 | Use-case ID | Input/output contract |
 |---|---|
 | `query.execute` | Authorized `TraceQueryV1` to typed rows/edges/facets/aggregates/cursor/explain/coverage. |
+| `query.compose_from_selection` | Accept domain `ComposeFromSelectionRequestV1` and return `ComposeFromSelectionResultV1` losslessly: canonical query/inverse breadcrumb, cost, snapshot, coverage, and supported/unsupported linked slots. No renderer-local selection or filter shape is accepted. |
 | `search.universal` | Evaluated lexical/exact-phrase/fuzzy/entity/semantic/graph/recency hybrid with explicit origin/kind filters, grouping/dedupe, caps, candidate/rank explanation, and profile/corpus version; embeddings are one optional feature, never presumed beneficial. |
 | `representations.artifacts.list/get/status` / `representations.generations.list` | Signed catalog versus local bytes/verification/activation/revocation, license/runtime/resource envelope, leases/pins/cache pressure, affected index generations, cold/warm status, and typed unavailable/fallback coverage from plan 05 §11.2A; never model input/vector values or raw cache paths. |
-| `search.benchmark.evaluate` | Read-only execution of one or two ranking profiles over the versioned redacted benchmark corpus with per-slice quality/latency/candidate/coverage deltas and promotion blockers. |
+| Search benchmark launch | There is no `search.benchmark.evaluate` use case. Explorer drafts and runs a bounded generic `LabKindV1::SearchQuality` experiment over the frozen benchmark corpus, then renders its ordinary run/cell/comparison/report reads. |
 | `entities.batch_get` | Bounded inspector hydration for canonical IDs, evidence, provenance, authorized payload slices. |
 | `brain.overview.get` | First-scan claim; focal project/workflow/agent plus initiative/plan/task/attempt/blocker/lease/acceptance clusters; aligned work and domain activity; health strip; feedback loop; unfinished work/resume queue; source watermarks. |
-| `brain.lens.get` | One bounded Git/code/thread/agent/turn/timeline/memory/automation-skill graph lens with legal node/edge schema and LOD. |
-| `brain.cluster.expand` | Stable aggregate cluster membership/counts, child cursor, denominator, sampling, algorithm/layout version. |
+| `brain.lens.get` | One bounded domain `GraphCompositionSpecV1` (primary lens, at most two overlays, explicit bridge kinds) lowered to the shared graph slice; illegal or over-budget compositions return typed alternatives, never a flattened mixed graph. |
+| `brain.atlas.tiles.get` / `brain.cluster.expand` | Versioned profile-atlas tile pyramid with zoom bands/hysteresis/prefetch neighbors, stable geometry/label priority/parent-entry anchors, generation lineage, aggregate→canonical identity, membership/counts, child cursor, denominator, sampling, algorithm/layout version. |
 | `graph.neighborhood.get` / `graph.path.get` / `graph.subgraph.get` / `graph.diff.get` | Bounded evidence-filtered neighborhood/path/query-driven subgraph/frozen comparison with confidence, redacted frontier, stable ordering, exact snapshot identities, and legal relation schemas. |
 | `graph.impact.get` / `graph.affected_tests.get` | Direct versus inferred impact with algorithm/evidence and source snapshot. |
 | `timeline.density.get` / `timeline.events.get` | Bounded buckets or event lanes with hidden/late counts, half-open interval, LOD and cursor. |
 | `timeline.as_of.get` | Known state at valid and observed time: scope, context, facts, policies, catalog, goals, delivery, coverage. |
 | `timeline.follow_agent` / `timeline.compare` | Stable agent/subagent lanes or aligned sessions/agents/branches/models/policies/time ranges with anchors. |
+| `timeline.replay_frames.get` | Consequential frame stream with current Turn/event, previous/next anchors, before/after state, graph delta, code/diff refs, collaborator changes, impact wake, fidelity, and substitutions for one synchronized playhead. |
+| `timeline.derived_lane.get` | Compile one compatible canonical query result into a bounded event/interval/counter lane with grouping, snapshot, coverage, anchor, and recipe; it never creates client-owned event order or counts. |
 | `activity.events.get` / `activity.facets.get` | Consequential cross-domain activity and project/domain/actor/kind/health facets over the same event/timeline model, with routine-noise hidden counts and live/frozen coverage; no UI-side merge. |
 | `coordination.presence.get` / `coordination.nearby.get` / `coordination.overlaps.get` | Expiring evidence-bearing presence/work claims and nearby-agent overlap across the same or parallel worktrees, refs, files, symbols, tests, goals, and review/delivery surfaces; includes safe compact summary plus research anchors/recipes. |
 
 Brain, graph, timeline, search, impact, and Explorer accept domain `ScopeSelectorV2` unchanged and return `ScopeResolutionV2`. Every node/edge/row retains repository and snapshot identity; same-name symbols/files/refs never collapse without canonical entity lineage. Cross-repository edges require registered dependency/session/workflow/Git/evidence relations, and each shard contributes explicit provenance/freshness/coverage rather than a synthetic global timestamp.
 
-Graph-of-graphs selection is one application composition:
+Graph-of-graphs selection is one application composition over the domain-owned lens vocabulary:
 
 ```rust
 pub struct InvestigationSelection {
     pub scope: ScopeSelectorV2,
     pub time: InvestigationTime,
-    pub selected: Vec<EntityRef>,
+    pub selected: Option<VisualSelectionV1>,
     pub pinned: Vec<EntityRef>,
-    pub lens: GraphLensKind,
+    pub graph: GraphCompositionSpecV1,
     pub snapshot: SnapshotMode,
     pub lod: LevelOfDetail,
 }
 
-pub enum GraphLensKind { Git, Code, Thread, Agent, Turn, Timeline, Memory, AutomationSkill, Task, Plan }
+pub struct VisualizationEnvelopeV1<T> {
+    pub data: T,
+    pub visual_semantic_registry: RegistryManifestDigest,
+    pub snapshot: SnapshotManifestRefV1,
+    pub coverage: CoverageReportV1,
+    pub interaction_schema: SchemaRef,
+    pub camera_layout_hint: Option<PayloadRef>,
+    pub accessibility_scene: AccessibilitySceneV1,
+    pub export_manifest: ManifestId,
+}
 
-pub struct GraphLensResponse {
-    pub schema: LensSchema,
-    pub nodes: Vec<LensNode>,
-    pub edges: Vec<LensEdge>,
-    pub aggregates: Vec<LensAggregate>,
-    pub inspector_refs: Vec<EntityRef>,
-    pub timeline_refs: Vec<EventId>,
-    pub expansion: Option<OpaqueCursor>,
+pub struct AccessibilityNodeId(pub u64); // scene-local deterministic identity, not registry/domain entity identity
+
+pub struct AccessibilityNodeV1 {
+    pub id: AccessibilityNodeId,
+    pub parent_id: Option<AccessibilityNodeId>,
+    pub role: RegistryEntryId,
+    pub label: SinkEligible<LogSafeText>,
+    pub logical_position: u32,
+    pub logical_set_size: u32,
+    pub selected: bool,
+    pub expanded: Option<bool>,
+    pub relation_ids: BoundedVec<RelationId, 128>,
+    pub action_ids: BoundedVec<UseCaseId, 32>,
+}
+
+pub struct AccessibilitySceneV1 {
+    pub root_id: AccessibilityNodeId,
+    pub nodes: BoundedVec<AccessibilityNodeV1, 5_000>,
+    pub visible_measure: AggregateMeasureV1,
+    pub hidden_measure: AggregateMeasureV1,
+    pub coverage: CoverageReportV1,
+    pub truncated: bool,
+    pub continuation_anchor: Option<RetrievalAnchorId>,
+}
+
+pub enum AggregateMeasureV1 {
+    Exact { value: u64, denominator: Option<u64> },
+    Sampled { estimate: u64, sampled: u64, denominator: Option<u64>, uncertainty_micros: u64 },
+    Capped { lower_bound: u64, cap: u64, denominator: Option<u64> },
+    Unknown { reason: ReasonCode },
+}
+
+pub struct BrainEdgeMeasureV1 {
+    pub relation_kind: PredicateId,
+    pub evidence_class: EvidenceClass,
+    pub measure: AggregateMeasureV1,
+    pub coverage: CoverageReportV1,
+}
+
+pub struct AtlasLayoutRefV1 {
+    pub algorithm: RegistryEntryId,
+    pub version: ComponentVersion,
+    pub seed_digest: ManifestDigest,
+    pub anchor_microunits: Option<(i64, i64)>,
+}
+
+pub struct BrainTileViewV1 {
+    pub id: ProfileAtlasTileId,
+    pub kind: RegistryEntryId,
+    pub label: SinkEligible<LogSafeText>,
+    pub membership: AggregateMeasureV1,
+    pub activity: BTreeMap<RegistryEntryId, AggregateMeasureV1>,
+    pub edge_measures: BoundedVec<BrainEdgeMeasureV1, 128>,
+    pub coverage: CoverageReportV1,
+    pub hidden_children: AggregateMeasureV1,
+    pub expandable: bool,
+    pub expansion_anchor: Option<RetrievalAnchorId>,
+    pub layout: AtlasLayoutRefV1,
 }
 ```
+
+`AccessibilityNodeId` is deterministically derived from the sealed scene snapshot, composition slot, logical path, and subject identity and is unique only within that scene. Registry IDs remain role/semantic/action vocabulary; they never stand in for dynamic node identity. Rebuilding the same scene is byte-stable, while a changed snapshot may publish a new scene-local ID set without minting canonical entities.
+
+`GraphSliceViewV1` and `TimelineSliceViewV1` remain the sole data payloads inside this envelope. The client may store camera/composition preferences but cannot rewrite server semantics, coverage, query deltas, atlas anchors, or accessibility counts. `ReplayFrameViewV1` is a registered timeline payload/preset over the same envelope and pagination, not another event API.
 
 Stable investigation handoff exposes domain `RetrievalAnchorId`; the owning store resolves it to domain `RetrievalAnchorRecordV1` under current authorization. Plan 13's research bundle/context manifest cites those IDs. Application consumes plan 01's portable multi-anchor `RetrievalRecipeV1` unchanged — recipe ID, owning use case, anchor list, optional protected input ref, privacy-domain-bound canonical input digest, scope selector, investigation time, optional message view, schema/catalog/ranking version set, and freshness requirement — and defines neither a second recipe type nor a second anchor record.
 
@@ -757,10 +839,10 @@ pub struct MessageReadModel {
 | Git semantic tools | `git.branches.list`, `git.branches.search`, `git.branches.diff`, `git.pr.context`, `git.changelog`, `git.commit.context`, `git.sessions_for`, `git.workflows_for`. Each result states local indexed ref/merge-base/generation/watermark and fallback state. A corrupt/missing optional diagnostics, test-annotation, session, or workflow enrichment returns healthy direct Git/diff context with typed component-level partial coverage and a rebuild anchor; it never aborts the whole answer (FM-117). |
 | Delivery truth | `delivery.repositories.get`, `delivery.pull.get`, `delivery.checks.list`, `delivery.reviews.list`, `delivery.releases.list`, `delivery.reconcile`. Live state carries provider/fetched-at/ETag/base/head/cap/coverage separately from local semantic state. |
 | Knowledge | `knowledge.facts.list/get/search`, `knowledge.entities.list/get`, `knowledge.trust.history`, `knowledge.conflicts.list`, `knowledge.retrieval.history`, `knowledge.feedback.history`, `knowledge.deletion_impact`. |
-| Automation | `automation.jobs.list/get`, `automation.scheduler.status`, `automation.runs.list/get`, `automation.artifacts.get`, `automation.candidates.list/get`, `automation.decisions.list/get`, `automation.effects.list/get`, `automation.outcomes.list/get`, `automation.recoveries.list/get`, `automation.history.list`, `automation.skills.list/get`, `automation.workflow_graph.get`. Imported V1/provider proposals, approvals, and applies appear only as labeled historical records in `automation.history.list`. |
+| Automation | `automation.jobs.list/get`, `automation.scheduler.status`, `automation.dirty_scopes.list`, `automation.admissions.list/get`, `automation.runs.list/get`, `automation.artifacts.get`, `automation.candidates.list/get`, `automation.decisions.list/get`, `automation.effects.list/get`, `automation.outcomes.list/get`, `automation.recoveries.list/get`, `automation.history.list`, `automation.skills.list/get`, `automation.workflow_graph.get`. Dirty/admission views expose exact job/scope/dependency watermarks, coalesced delta, quiet/backoff time, input-digest dedupe, skip reason, and model/tool work avoided. Imported V1/provider proposals, approvals, and applies appear only as labeled historical records in `automation.history.list`. |
 | Research provenance | `research.manifests.list/get`. Manifest reads expose immutable `ResearchAnchorId` entry identity plus each entry's nonempty canonical `RetrievalAnchorId` references; the sole anchor metadata/resolution/recipe operations are inventoried once in §9.1. |
-| Search evaluation | `retrieval.corpus_versions.list/get`, `retrieval.qrel_versions.list/get`, `retrieval.candidate_pools.list/get`, `retrieval.judgments.list/get`, `retrieval.adjudications.list/get`, `retrieval.evaluation_runs.list/get`, `retrieval.evaluation_reports.list/get`, `retrieval.profiles.list/get`. Every read names owner, immutable version/cutoff, sanitization state, source/index/model/config/catalog watermarks, coverage, and authorization; protected rationales or examples require an eligible payload policy and never enter list metadata. |
-| Tasks/orchestration | `initiatives.list/get`, `initiatives.graph`, `plans.list/get/diff`, `work_items.list/get/query`, `work_items.context`, `work_items.dependencies`, `attempts.list/get/timeline`, `task_offers.list/get`, `context_packets.list/get`, `task_notifications.list/get`, `executors.list/get/match`, `scheduler.status/explain`, `task_graph.status/doctor/events`, `task_views.list/get`. Plan 24 §9.1 owns semantics and module files: reads use read ports only, offer reads are registration-scoped, packet reads are attempt-scoped, `executors.match` is read-only, and `task_graph.events` is a subscription read-model kind under `subscriptions.create`, never a second stream vocabulary. |
+| Search evaluation | `retrieval.corpus_versions.list/get`, `retrieval.qrel_versions.list/get`, `retrieval.candidate_pools.list/get`, `retrieval.judgments.list/get`, `retrieval.adjudications.list/get`, `retrieval.evaluation_reports.list/get`, `retrieval.profiles.list/get`; Search Quality runs are generic experiment/run/stage/comparison reads filtered by `LabKindV1::SearchQuality`. Every read names owner, immutable version/cutoff, sanitization state, source/index/model/config/catalog watermarks, coverage, and authorization; protected rationales or examples require an eligible payload policy and never enter list metadata. |
+| Tasks/orchestration | `initiatives.list/get`, `initiatives.graph`, `plans.list/get/diff`, `work_items.list/get/query`, `work_items.context`, `work_items.dependencies`, `attempts.list/get/timeline`, `task_offers.list/get`, `context_packets.list/get`, `task_notifications.list/get`, `executors.list/get/match`, `scheduler.status/explain`, `task_graph.status/doctor/events`, `task_graph.edit_bundles.get/validate/diff`. Plan 24 §9.1 and §4.12 own semantics and module files: reads use read ports only, offer reads are registration-scoped, packet reads are attempt-scoped, `executors.match` is read-only, and `task_graph.events` is a subscription read-model kind under `subscriptions.create`, never a second stream vocabulary. Edit-bundle reads return opaque workspace/operation state, source-span diagnostics, candidate digest, semantic graph/active-attempt impact, expiry, and cleanup state; large validation/diff may use generic operation staging but never publishes a plan version or mutation token. Task saved views are filtered `saved_views.list/get` results from the shared row below. |
 | Hints and policy | `hints.evaluations.list/get`, `hints.outcomes.get`, `hints.opportunities.get`, `policy.bundles.list/get`, `policy.coverage.get`. |
 | Accounting | `accounting.usage.get`, `accounting.costs.get`, `accounting.savings.get`, `accounting.adoption.get`, `accounting.denominators.get`. Unknown/capped denominators are typed, never zero. |
 
@@ -773,13 +855,10 @@ Current Git tools are not hidden behind the generic query alone: their stable us
 | `saved_views.list/get`, `collections.list/get`, `annotations.list/get` | Authorized profile content storage; sensitive literals never enter catalog or URL-safe summaries. |
 | `exports.get`, `exports.list` | Job state, frozen watermark, parts, hashes, counts, redaction, completeness, expiry; bytes served by API after authorization. |
 | `subscriptions.create` / `subscriptions.revoke` | Create authorizes a query/read-model request, captures a snapshot, and returns `SubscriptionId` plus a finite replay contract. Revoke is an idempotent principal-bound command that terminates delivery, releases replay/snapshot pins, and appends an audit receipt; transport disconnect alone is not revocation. |
-| `labs.hints.evaluate`, `labs.retrieval.evaluate`, `labs.ingest.evaluate`, `labs.query.evaluate`, `labs.correlation.evaluate`, `labs.scheduler.evaluate`, `labs.memory.evaluate`, `labs.policy_diff.evaluate` | Immutable exact/recorded/best-effort input and typed explanation/diff with no writes. |
-| `labs.search_quality.evaluate/compare` / `labs.scope_federation.evaluate` / `labs.privacy.evaluate` | Read-only retrieval-profile/corpus comparison, selector-resolution/shard-plan replay, and reserved/invalid synthetic sanitizer evaluation with exact anchors, versions, coverage, resource costs, and zero live registry/qrel/finding/policy mutation. |
-| `labs.coordination.evaluate` | Replay presence/overlap classification, proximity ranking, one-hint selection/suppression/dedupe, safe summary, legal action set, and outcome attribution with exact versions/coverage; message/handoff/ack/suppress are simulated only. |
-| `labs.orchestration.replay` | Read-only replay of plan 24 scheduler/executor decisions — readiness evaluation, route resolution, lease-acquisition fencing, and context-packet assembly — against recorded task-graph state with exact versions/coverage; work claims, leases, attempts, and views are never mutated. |
-| `labs.evolution.inspect` / `labs.evolution.simulate` | Evidence collection through curator/reflector/skill-writer graph, proposal/version diff, validation, historical corpus simulation, rollout/rollback prediction. |
+| `experiments.draft_from_selection`, `experiments.list/get`, `experiment_runs.list/get`, `experiment_cells.list/get`, `replay_stages.list/get`, `replay_comparisons.list/get`, `replay_comparison_cells.list/get`, `replay_reductions.list/get` | Draft is a read-shaped, nonpersisting domain `VisualSelectionV1`→typed spec/source-backlink operation. `replay_stages.list` requires a cell and returns exact `ReplayTraceV1`; stage get returns one stage. Other reads expose the immutable branch DAG, operation-backed run cohort, typed coordinates/cells/alignment/reductions, every canonical anchor, actual fidelity/substitutions/coverage, terminal and side-effect receipts. Reads never execute an evaluator or mutate live metrics. |
+| `experiments.evaluator_catalog.get` | Generated `LabKindV1` input/parameter/stage/output schemas, source-selection compatibility, cost/capability policy, and dashboard/CLI/MCP/API bindings used by universal Fork to Playground; there is no feature-local lab router. |
 
-Evolution Studio preserves Hermes-style self-improvement as ordinary evidence-bearing actors, goals, turns, tools, artifacts, skills, memories, autonomy decisions, automatic applies, uses, outcomes, revisions, automatic recoveries, archives, and deletions. Simulation is an inspector and never mutates live state; it returns changed decisions/tool routes/outcomes, regressions/wins only where labels exist, unknown horizons, privacy exclusions, and cost/latency deltas. The live autonomous worker does not wait for the inspector.
+One internal evaluator registry covers Hint, Retrieval, Search Quality, Coordination, Orchestration, Ingest, Query, Correlation, Scheduler, Memory, Policy Diff, Evolution, Scope/Federation, and Privacy. The generic experiment runner validates the tagged input/parameter schema, then calls the selected pure evaluator with read-only archive ports. The evaluator may emit typed `ReplayStageV1` records and explanations but cannot own run state, cancellation, scheduling, comparison alignment, anchors, manifests, resource grants, or persistence. Evolution preserves Hermes-style self-improvement as ordinary evidence-bearing actors, goals, turns, tools, artifacts, skills, memories, autonomy decisions, automatic applies, uses, outcomes, revisions, automatic recoveries, archives, and deletions. Simulation is an experiment and never mutates live state; it returns changed decisions/tool routes/outcomes, regressions/wins only where labels exist, unknown horizons, privacy exclusions, and cost/latency deltas. The live autonomous worker does not wait for it.
 
 ## 10. Complete Command Use-Case Inventory
 
@@ -790,35 +869,96 @@ Every non-curation mutation has an explicit typed execution contract; destructiv
 | Projects/indexing | `projects.register`, `projects.update_alias`, `projects.unenroll`, `index.refresh`, `index.pause`, `index.resume`, `watchers.start`, `watchers.stop`. Unenroll returns an operation-specific retained-evidence impact/confirmation and never deletes content implicitly. |
 | Runtime/daemon/update | `daemon.start`, `daemon.stop`, `daemon.drain`, `daemon.restart`, `runtime.update.plan`, `runtime.update.start`, `runtime.update.recover`. Drain/update are durable workflows carrying lifecycle lease epoch, accepting/draining/stopped state, in-flight work, checkpoint/receipt, restart requirement, takeover, recovery artifact, and current client-binding version. |
 | Diagnostics/repair | `diagnostics.refresh`, `doctor.run`, `repair.inspect`, `repair.start`, `backup.create`, `backup.restore`. Inspect is read-only; start is a confirmed resumable lifecycle-fenced workflow with exact repair kind/input version. Restore is a durable workflow with preflight and recovery point. |
+| Host integrations | `integrations.install`, `integrations.update`, `integrations.repair`, `integrations.uninstall`, `integrations.verify`. All require the administrative host-integration grant, an opaque target or installation reference, expected desired/observed/manifest versions, and an idempotency key. They return `OperationRef` immediately and run through one durable lifecycle; no command accepts a host path, raw configuration body, arbitrary component manifest, or credential value. |
 | Store administration | `storage.consolidation.inspect`, `storage.consolidation.plan`, `storage.consolidation.start`, `storage.consolidation.status`, `storage.consolidation.resume`, `storage.consolidation.recover`. This is the operator-only merged-#425 workflow for two nonempty profile shards: fail closed on unsupported/path-or-file-identity holders, freeze/reserve both sources, back up, stage, verify every table/artifact/disposition, cut markers atomically, and return exact recovery. `start` requires the recomputed deterministic confirmation token and administrative grant. It never runs from scheduler, task execution, Settings auto-save, or autonomous curation. V1 `preview/apply` names remain only in the compatibility adapter/inventory. |
 | Capture/LCM | `capture.ingest`, `capture.pause`, `capture.resume`, `lcm.compress.plan`, `lcm.compress.start`, `lcm.boundary.create`, `lcm.lifecycle.preflight`, `lcm.lifecycle.repair`. Source offsets advance only through capture/store receipts. |
-| Automations | `automation.jobs.create/update/delete`, `automation.run`, `automation.cancel`, `automation.pause`, `automation.resume`, `automation.scheduler.enable/disable`. Run revalidates policy/config/activity/lease before fenced acquisition. |
-| Autonomous curation | `curation.run_now`, `curation.pause`, `curation.resume`, `curation.status`, `curation.history`, `curation.pin`, `curation.protect`, `curation.exclude`, `facts.feedback`. Candidate create/update/supersede/archive/quarantine and owned skill validate/materialize/revise/recover are internal autonomous effects, not public per-item commands. Each records artifact/evidence/validation/config/policy/expected-version/staged-monitoring/outcome receipts; foreign-owned targets are skipped. Explicit administrative deletion remains the separate descendant/hold/index/blob workflow. |
+| Automations | `automation.jobs.create/update/delete`, `automation.run`, `automation.cancel`, `automation.pause`, `automation.resume`, `automation.scheduler.enable/disable`. Run revalidates dirty generation, dependency/input digest, policy/config/activity/lease before fenced acquisition; a due or run-now request cannot bypass unchanged-input admission. |
+| Autonomous curation | `curation.run_now`, `curation.pause`, `curation.resume`, `curation.status`, `curation.history`, `curation.pin`, `curation.protect`, `curation.exclude`, `facts.feedback`. `run_now` evaluates current dirty scopes immediately but still skips an identical terminal input; unchanged historical trials use Evolution/Memory experiments. Candidate create/update/supersede/archive/quarantine and owned skill validate/materialize/revise/recover are internal autonomous effects, not public per-item commands. Each records artifact/evidence/validation/config/policy/expected-version/staged-monitoring/outcome receipts; foreign-owned targets are skipped. Explicit administrative deletion remains the separate descendant/hold/index/blob workflow. |
 | Policy | `policy.publish`, `policy.activate`, `policy.rollback`. Exact artifact validation and immutable registry CAS are required; activation never changes an in-flight evaluation. |
 | Representation artifacts | `representations.artifacts.install/import/activate/deactivate/evict/verify`, `representations.generations.rebuild`. Plan 05 §11.2A/PR 14E owns lifecycle semantics. Commands pin signed manifest/digest/license/runtime/config, enforce allowlisted egress and disk/RAM/device budgets, stage/verify before publish, preserve active/replay/index pins, and emit operation/audit receipts; query execution never invokes them. |
 | Settings | `settings.profile.patch`, `settings.project.patch`, `settings.integration.patch`, `settings.automation.patch`, `settings.storage.patch`. Inline validation shows declared owner, source/default, restart/reindex/privacy/migration impact before the direct expected-version save; environment-derived values are read-only and storage relocation is a separate durable workflow, never an arbitrary path write. |
 | Payload/privacy | `payloads.gc.plan`, `payloads.gc.start`, `retention.run.plan`, `retention.run.start`, `holds.create`, `holds.release`, `entities.retire.plan`, `entities.retire.start`, `privacy.scan.start/cancel`, `privacy.remediation.plan/start/verify`, `privacy.quarantine.hold/release`. Privacy commands use safe finding/scan IDs, elevated grants where required, durable jobs, and candidate-free audit receipts. |
 | Projections/migration | `projections.rebuild`, `projections.pause`, `projections.resume`, `projections.publish`, `projections.rollback`, `migrations.backfill`, `migrations.reconcile`, `migrations.cutover`, `migrations.rollback`. |
 | Delivery refresh | `delivery.refresh`. Read-only remote fetch into captured evidence; repository allowlist, credential capability, rate/cap state, and fetched revision are audited. No PR write command. |
-| Saved investigations | `saved_views.create/update/delete`, `saved_views.share.plan/start/revoke`, `collections.create/update/delete`, `annotations.create/update/delete`. Protected content stays with its declared activity/project owner; sharing creates a separately authorized, redacted, expiring local published view readable through `saved_views.get`, never publishes remotely, and never copies source content into catalog metadata. |
+| Saved views and investigations | `saved_views.create/update/delete`, `saved_views.share.plan/start/revoke`, `collections.create/update/delete`, `annotations.create/update/delete`. `SavedViewDefinitionV1::{Investigation,Task,Experiment}` shares this exact lifecycle; plan 11 owns investigation/experiment-view validation and plan 24 owns task-spec validation. Protected content stays with its declared activity/project owner; sharing creates a separately authorized, redacted, expiring local published view readable through `saved_views.get`, never publishes remotely, and never copies source content into catalog metadata. |
 | Research provenance | `research.manifests.create_version`. Appends one immutable successor after validating owner, expected predecessor/version, classification and secret-scan receipts, and every manifest entry's nonempty canonical `RetrievalAnchorId` set; it never creates a parallel evidence locator or resolves `ResearchAnchorId` directly. |
-| Search evaluation | `retrieval.corpus_versions.create/freeze`, `retrieval.qrel_versions.create/freeze`, `retrieval.candidate_pools.create`, `retrieval.judgments.record/supersede`, `retrieval.adjudications.record`, `retrieval.evaluation_runs.run/cancel`, `retrieval.evaluation_reports.publish`, `retrieval.fixtures.promote`, `retrieval.profiles.publish/activate`. These are direct expected-version, idempotent commands over immutable/superseding artifacts: freezes never rewrite members; supersession retains the prior judgment; adjudication retains every source label; run/cancel records a durable evaluation operation; report publication exposes only aggregate/redacted output; fixture promotion requires a synthetic or reviewed sanitized manifest plus secret-scan receipt; profile activation revalidates locked promotion gates and never alters an in-flight query. |
+| Search evaluation | `retrieval.corpus_versions.create/freeze`, `retrieval.qrel_versions.create/freeze`, `retrieval.candidate_pools.create`, `retrieval.judgments.record/supersede`, `retrieval.adjudications.record`, `retrieval.evaluation_reports.publish`, `retrieval.profiles.publish/activate`; Search Quality run/cancel/resume/retry/minimize uses the generic experiment row below and all sanitized evaluator-fixture promotion uses the one `experiments.fixtures.promote` row. These are direct expected-version, idempotent commands over immutable/superseding artifacts: freezes never rewrite members; supersession retains the prior judgment; adjudication retains every source label; report publication exposes only aggregate/redacted output; profile activation revalidates locked promotion gates and never alters an in-flight query. |
 | Agent coordination | `coordination.message`, `coordination.handoff`, `coordination.ack`, `coordination.suppress`. Every direct/resumable command targets one presence/overlap claim and stable anchor, checks host/agent capability and expiry, returns the inline disclosed summary/effects with its receipt, records delivery/acceptance separately, and cannot mutate another agent's state without an authorized provider action. |
-| Tasks/orchestration | `initiatives.create/update/pause/resume/retire`, `plans.create_version/activate`, `plans.decompose`, `work_items.create/update/replace/retire`, `work_items.link/unlink`, `work_items.assign/reassign/assign_set`, `work_items.pause/resume/cancel/reopen/archive`, `work_items.record_attestation/record_review/record_decision/record_exception/handoff/reverse_transition`, `work_items.retry`, `task_offers.accept/decline/revoke`, `attempts.heartbeat/progress/complete/block`, `context_packets.accept`, `task_notifications.create/update/delete`, `executors.register/heartbeat/drain/unregister`, `scheduler.pause/resume/run_once`, `task_views.create/update/delete`, `task_views.share.plan`, `task_views.share.start`, `task_views.share.revoke`. Plan 24 §9.2 owns semantics and module files; every one is a POST command-envelope use case (plan 10 §8.7). Attestation/review/decision/exception/handoff commands append typed evidence and never set readiness or acceptance directly; `reverse_transition` is a registered optimistic compensating transition with exact prior/new versions and a receipt, while `reopen` creates a new work-item version and never reopens a terminal attempt. `task_offers.accept` is the sole public execution-admission command: it CAS-checks the offer/readiness and invokes the single internal transaction that creates the sealed packet/attempt/lease set atomically. Attempt lifecycle commands require that fence, packet acceptance is fenced at a safe Turn boundary, and notification subscription changes are direct expected-version commands. `work_items.assign_set` is one bounded all-or-none owner-shard transaction with plan/item expected versions and per-item receipts. No task command creates advisory `WorkClaimV1`. Task-view sharing uses the same classification/redaction/expiry plan, confirmed start, and grant revocation protocol as other protected saved views; it preserves the complete protected `TraceQueryV1` (including its scope), projection/group/layout, snapshot/version/watermark, and never copies result rows or invents a second selector. |
+| Tasks/orchestration | `initiatives.create/update/pause/resume/retire`, `plans.create_version/activate`, `plans.decompose`, `work_items.create/update/replace/retire`, `work_items.link/unlink`, `work_items.assign/reassign/assign_set`, `work_items.pause/resume/cancel/reopen/archive`, `work_items.record_attestation/record_review/record_decision/record_exception/handoff/reverse_transition`, `work_items.retry`, `task_offers.accept/decline/revoke`, `attempts.heartbeat/progress/complete/block`, `context_packets.accept`, `task_notifications.create/update/delete`, `executors.register/heartbeat/drain/unregister`, `scheduler.pause/resume/run_once`, `task_graph.edit_bundles.export/rebase/submit/delete`. Plan 24 §9.2 and §4.12 own semantics and module files; every mutation is a POST command-envelope use case (plan 10 §8.7). Edit export freezes an explicit selection/base/pins, rebase creates a successor workspace rather than rewriting the stale one, submit performs parse/validation/diff/secret scanning outside the transaction then CAS-validates and publishes the bounded normalized owner-shard mutation set atomically, and delete purges staging only. Omission never deletes, local keys allocate canonical IDs only inside the successful transaction, and no action is named preview/apply/rollback. Attestation/review/decision/exception/handoff commands append typed evidence and never set readiness or acceptance directly; `reverse_transition` is a registered optimistic compensating transition with exact prior/new versions and a receipt, while `reopen` creates a new work-item version and never reopens a terminal attempt. `task_offers.accept` is the sole public execution-admission command: it CAS-checks the offer/readiness and invokes the single internal transaction that creates the sealed packet/attempt/lease set atomically. Attempt lifecycle commands require that fence, packet acceptance is fenced at a safe Turn boundary, and notification subscription changes are direct expected-version commands. `work_items.assign_set` is one bounded all-or-none owner-shard transaction with plan/item expected versions and per-item receipts. No task command creates advisory `WorkClaimV1`. A task view is created, updated, read, and shared only through the shared `saved_views.*` row above using `SavedViewDefinitionV1::Task(TaskViewSpecV1)`; task-specific validation/lenses remain plan-24-owned, and no parallel task-view command namespace exists. |
 | API tokens | `auth.tokens.create`, `auth.tokens.revoke`. Audited commands mint and revoke the scoped/TTL/revocable tokens of plan 17 §18.2; creation returns the secret exactly once through the secure flow, storage keeps only the hash and token ID, revocation declares stream/operation implications, and the per-launch bootstrap bearer (plan 10 §10.2) may execute only `auth.tokens.create` for the initial admin-class token. Token listing is the owner-only read use case above, never a mutation command. |
 | Exports | `exports.create`, `exports.cancel`, `exports.delete`. Create freezes query/access/redaction, stages parts under profile export root, and publishes only after final manifest hash. |
-| Lab promotion | `labs.fixtures.promote`. Requires sanitized redacted payload, secret scan receipt, exact source manifest, explicit confirmation, and repository-write capability outside lab runtime. |
+| Experiments and replay | `experiments.create`, `experiment_runs.create/cancel/resume/retry/minimize`. Create freezes one typed `ExperimentSpecV1`; a changed spec or branch creates an immutable successor/child through the sole `ExperimentBranchRefV1` rather than editing its parent. One run operation owns a bounded cell cohort; cancel/resume/retry/minimize use the generic operation state/receipts. They may persist experiment artifacts and explicitly granted model/egress cost only, never production facts, hints, claims, leases, files, counters, caches, judgments, profiles, policies, or findings. |
+| Experiment fixture promotion | `experiments.fixtures.promote`. This is the only evaluator-fixture promotion command, including Search Quality. Its typed target names evaluator/fixture registry destination rather than a path; it requires reviewed sanitized/redacted payload, secret-scan receipt, exact source experiment/run/cell/manifest, explicit confirmation, durable promotion receipt, and repository-write capability outside the hermetic evaluator runtime. |
 | Code edits | `code.move_symbol.commit`. It consumes the digest/version from the separate read-shaped `code.move_symbol.inspect`, requires repository/worktree grant and typed confirmation, revalidates both endpoints, performs the destination-first write with source recovery receipt, schedules reindex, and never rewrites callers implicitly. |
 
 V1 writable dashboard actions not represented by a row above block V1 retirement. PR 3's generated inventory and the application registry jointly enforce this: each mutation has exactly one V2 use case or an explicit retired-with-replacement decision.
 
 Scope-sensitive command rules are exhaustive and fixture-locked:
 
-- Create/import operations for facts, skills, policies, automations, saved investigations, and annotations require explicit `DeclaredScope`; there is no “current project” fallback. Autonomous curation candidates derive scope from sealed evidence and policy rather than a public proposal command.
+- Create/import operations for facts, skills, policies, automations, saved investigations, experiments, and annotations require explicit `DeclaredScope`; there is no “current project” fallback. Autonomous curation candidates derive scope from sealed evidence and policy rather than a public proposal command.
 - Updates, archives, restores, and deletes resolve the canonical owner from the target entity and reject a conflicting request scope before validation or execution; autonomous curation has no item approval/apply/rollback commands.
 - Cross-project reuse creates evidence relations from the original owner. It never copies a profile fact/skill/policy into a project shard or promotes project state to profile scope implicitly.
 - All-scope reads may combine profile-owned and project-owned rows, but each result and command capability retains `owner`, `declared_scope`, privacy domain, and authorization state.
 - Moving ownership is a named migration workflow with source/target versions, conflict checks, copy/delete receipts, rollback boundary, and no in-place owner-field edit.
+
+### 10.1 Host-integration lifecycle boundary
+
+Application owns the complete host-integration state machine. It authorizes every read and command; resolves canonical `HostProfileRef` and `HostInstanceId`; loads the generated desired package/component/registration profile; compares it with probed support and persisted ownership evidence; reserves idempotency; validates expected manifest/config/observation versions; advances durable operation phases; records audit/effect/compensation receipts; and decides whether retry, reconciliation, repair, restart, or terminal failure is legal. The lifecycle phases cover discovery, probe, plan, stage, validate, trust wait, install/enable, reload wait, verify, healthy/degraded, update/repair, uninstall, reconciliation, and terminal disposition without making root composition a second workflow owner.
+
+```rust
+pub enum HostDeploymentStateV1 {
+    Discovered, Probed, Planned, Staged, Validated, AwaitingHostTrust,
+    InstalledDisabled, Enabled, ReloadRequired, Verifying, Healthy, Degraded,
+    Updating, Repairing, CompensationPending, Compensating, Uninstalling, Removed,
+    CancelRequested, Cancelled, FailedRecoverable, FailedTerminal,
+}
+
+pub struct ResolvedHostPackageV1 {
+    pub package_id: RegistryEntryId,
+    pub bundle_payload_digest: ManifestDigest,
+    pub signed_release_manifest_digest: ManifestDigest,
+    pub release_attestation: EntityRef,
+    pub components: BoundedVec<HostBundleComponentRefV1, 4>,
+}
+
+pub struct ResolvedHostBundleV1 {
+    pub source_integration_manifest: ManifestDigest,
+    pub host_profile: HostProfileRef,
+    pub capability_snapshot: HostCapabilitySnapshotV1,
+    pub adapter_version: ComponentVersion,
+    pub packages: BoundedVec<ResolvedHostPackageV1, 4>,
+    pub omissions: BoundedVec<HostComponentOmissionV1, 1024>,
+    pub difference_ledger: ManifestDigest,
+    pub stock_host_conformance_receipt: EntityRef,
+    pub resolved_digest: ManifestDigest,
+}
+```
+
+These are the sole resolved package/bundle contracts. Application creates them only after verifying plan 12's signed release manifest and release attestation, then binding that immutable payload to a current `HostCapabilitySnapshotV1` whose subject is the matching `Installed` runtime. A pre-install `Target` snapshot can drive diff/install planning but cannot create a resolved installed bundle. Neither plan 08's pure compiler nor root's effect adapter may construct one.
+
+Every effectful state has explicit failure and cancellation edges. A pre-effect cancellation reaches `Cancelled`; after any uncertain/committed host effect it enters `CompensationPending` or reconciliation, never claims cancellation complete early. A retryable fault reaches `FailedRecoverable` with the same operation/idempotency/input and a typed retry/resume directive; retry resumes from the last verified receipt after revalidating desired/observed generations. Exhausted, incompatible, unsafe, ownership-conflicted, or uncompensatable faults reach `FailedTerminal` with repair/manual-reconciliation evidence. Compensation may restore only a verified receipt-owned snapshot and exits to the prior verified state, `Cancelled`, `FailedRecoverable`, or `FailedTerminal`. Generic `operations.cancel|resume|retry` drives these edges; no integration-specific rollback command exists.
+
+Root composition supplies one narrow `HostDeploymentPort` with only typed `probe`, `stage`, `apply_owned_delta`, `request_reload`, `verify`, `restore_owned_snapshot`, and `remove_owned_delta` calls. Each call consumes a generated manifest plus opaque target/component refs and returns sanitized capability observations and effect receipts. The port may use host CLIs, files, caches, or configuration APIs internally, but application views, events, errors, HTTP/SDK/MCP payloads, and audit summaries receive no raw path, file body, command line, environment, or credential. Foreign/unknown ownership is an application-visible blocked state, never permission for an adapter to overwrite.
+
+`integrations.install|update|repair|uninstall|verify` share `OperationKernelV1`, one operation-kind family, and the same polling/recovery semantics as `operations.get`; a killed process resumes from the last receipted step. An identical idempotency retry returns the original operation, a changed request under the same key conflicts, and an uncertain host effect enters typed reconciliation before any retry. Configuration writes express desired state only: they do not call `HostDeploymentPort` or claim effective state until the authorized integration operation probes and acknowledges it.
+
+The application owns one non-flattened matrix cell used by every difference view:
+
+```rust
+pub struct HostIntegrationDifferenceRowV1 {
+    pub capability: CapabilityId,
+    pub desired: HostDesiredCapabilityStateV1,
+    pub support: HostCapabilityDispositionV1,
+    pub installed: HostInstalledCapabilityStateV1,
+    pub observed: HostObservedCapabilityStateV1,
+    pub effective: HostEffectiveCapabilityStateV1,
+    pub evidence: BoundedVec<RetrievalAnchorId, 16>,
+    pub reason: Option<ReasonCode>,
+    pub legal_actions: BoundedVec<RegisteredDiagnosticActionKind, 8>,
+}
+```
+
+`desired`, documented support, physical installation, latest probe observation, and effective usable state are independent axes. `HostCapabilityDispositionV1` is used unchanged—especially `Undocumented`, `PolicyDisabled`, `Stale`, and `TrustPending`; no transport renames it to a generic `Unknown` or mixes it with desired/installed/effective lifecycle state. The other four state enums are closed application view types generated into plan 17 clients. A cell is healthy/effective only when all required axes and current authorization agree.
 
 ## 11. Orchestration Rules for Key Product Flows
 
@@ -826,11 +966,29 @@ Scope-sensitive command rules are exhaustive and fixture-locked:
 
 `brain.overview.get` captures one authorized scope and vector watermark, then requests bounded rollups, health, active-workflow summaries, feedback outcomes, and a focal lens. Components may finish partially; the response retains component coverage rather than failing the whole Brain. It does not open every project shard: catalog statistics and All rollups select candidate shards, and expansion is explicit.
 
-`brain.lens.get` calls query graph/time operators with a lens schema from projectors/tool catalog, then batch-hydrates inspector references. Cross-lens links carry `RelationAssertionV1`, evidence class, confidence, producer/version, supporting events/observations, and validity. Temporal adjacency alone is never exposed as causation.
+`brain.lens.get` calls query graph/time operators with one validated `GraphCompositionSpecV1`, resolves the current profile-atlas generation/tile viewport, then batch-hydrates inspector references. Nodes and edges retain primary/overlay membership; cross-lens bridges carry `RelationAssertionV1`, evidence class, confidence, producer/version, supporting events/observations, and validity. Ordinary snapshot refresh updates evidence inside stable atlas geometry; generation changes emit anchor lineage. Temporal adjacency alone is never exposed as causation.
 
 ### 11.2 Session/agent investigation
 
 One Causal Loom request composes density, lane events, Turn hubs, agent tree, tool results, code/Git/delivery evidence, knowledge/policy/automation links, and impact ribbon at the same frozen watermark. Missing project/Git/reasoning data creates lane coverage markers. Follow-agent retains collaborator and delivery context through bounded relation traversal; it does not filter away parent/subagent causation anchors.
+
+### 11.2A Experiment and replay execution
+
+`experiments.draft_from_selection` validates `VisualSelectionV1` against the evaluator catalog and returns a nonpersisted typed draft plus source backlink. `experiments.create` authorizes the source anchor/scene, resolves and freezes exact input/version/environment/privacy manifests, validates one-to-six variants, explicit sweep values, optional branch ancestry, and budgets, expands the complete checked coordinate product, estimates cost/egress, rejects overflow or a total above the spec/hard cell caps, and writes an immutable `ExperimentSpecV1`. `experiment_runs.create` repeats that expansion against the pinned corpus/evaluator manifests before admitting one generic operation whose bounded `ExperimentCellV1` cohort covers every selected variant × evaluator × corpus case × repetition × sweep coordinate. Its steps are manifest verification, hermetic worker launch, cell/evaluator stages, trace alignment/evaluation, side-effect verification, artifact publication, and terminal receipt. Cells reuse the application scheduler/operation kernel with bounded concurrency; they do not own another operation, job system, heartbeat, or cancellation state. `experiment_runs.minimize` is a bounded child operation over a named failing run/cell/predicate and typed removable dimensions.
+
+The replay worker protocol is versioned and digest-pinned. The broker spawns a fresh process with an empty environment, closed inherited file descriptors, no ambient credentials, read-only verified input mounts, a size-limited disposable overlay, frozen clock/RNG, and only explicit brokered model/network grants. OS/container controls enforce wall time, CPU, RSS, overlay/disk-read/network/output bytes, FD count, and process count from `ExperimentBudgetV1`; timeout/cancel kills and reaps the full process tree. Production repositories, stores, query usage counters, hint outcomes, leases/claims, live caches, configuration activation, task execution, Git writes, and external effects have no mount, descriptor, credential, or port. Every allowed open, denied attempt, usage high-water mark, broker call, and forced termination is recorded. Publication atomically fails unless the receipt digest matches, all limits hold, and `ReplaySideEffectReceiptV1.production_effect_count == 0`. Cancellation/resume/retry begins at a receipted operation step and never reruns an uncertain external model call without a recorded-output/idempotency contract. Experiment, run, cell, stage, comparison, comparison-cell, and reduction outputs receive canonical retrieval anchors.
+
+`experiments.evaluator_catalog.get` supplies the universal selection-to-lab mapping. “Fork to Playground” accepts a canonical source anchor plus current scene/snapshot and emits a typed draft spec whose editable fields are explicit patches. Failure minimization is a bounded experiment child operation using evaluator-declared removable dimensions and a named predicate; it records its reduction tree and can produce only a sanitized fixture candidate for the separate promotion command.
+
+### 11.2B Managed declarative task-graph editing
+
+`task_graph.edit_bundles.export` authorizes one explicit full-plan, initiative, saved-query, or saved-view selection; freezes owner, canonical base versions, catalog/config/privacy digests, external immutable stubs, and closure mode; then emits a strict sharded Markdown/frontmatter bundle through a contained stream. The managed local CLI may materialize those bytes in a private `0700` runtime directory with `0600` files, but HTTP/MCP/SDK callers receive streams or resource links and never a server path. Frontmatter owns structured graph state; Markdown bodies own narrative only. Every editable entity carries its canonical version or an `EditLocalKeyV1`, and every destructive intent is explicit `replace`/`retire`; absence means retain.
+
+`get` reports the opaque workspace, frozen base, limits, expiry, uploaded digest, operation, and cleanup state. `validate` performs archive safety, strict UTF-8/CommonMark plus YAML-1.2-subset parsing, schema/source-span validation, reference and graph invariants, permissions/privacy/secret checks, task gates, route/budget constraints, and active-attempt policy without canonical writes. It returns stable machine-readable diagnostic codes, precise file/range spans, related spans, and safe suggested edits. `diff` returns a typed semantic graph delta and affected active attempts rather than a line diff. `rebase` performs a three-way semantic merge against current canonical heads and creates a new workspace with explicit `TaskGraphEditConflictV1` records; it never silently accepts last-writer-wins.
+
+`submit` binds idempotency to principal, workspace, normalized candidate digest, and key; re-runs all safety/semantic validation; checks every frozen version and active-attempt invariant; then passes one normalized bounded mutation set to a single owner-shard unit of work. Canonical ID allocation for local keys, all entity/head/relation writes, audit/outbox, idempotency receipt, and version publication commit together or not at all. Exact retry returns the stored `TaskGraphEditReceiptV1`; stale base returns structured conflicts; partial upload, expired workspace, cross-owner mutation, illegal cycle, or running-attempt route/lease mutation writes nothing. Success purges staging before reporting clean completion, while failed validation retains only through the declared retry TTL. `delete` and crash reaping are idempotent, preserve a content-free cleanup receipt, and cannot touch canonical plans.
+
+CLI `task-graph edit start|get|validate|diff|rebase|submit|clean`, HTTP streams, optional MCP resource links/tools, generated SDK helpers, and Work UI all bind this same family. The intended agent loop is export → edit locally → validate/fix until clean → inspect semantic/active-work impact → submit once → verify receipt and cleanup. Skills teach this loop even when MCP is absent; no transport invents bulk JSON, path inference, per-file CRUD, or an alternate task model.
 
 ### 11.3 Hint evaluation and injection
 
@@ -853,7 +1011,13 @@ Live refresh is a command because it performs network I/O and appends new eviden
 
 ### 11.6 Evolution Studio and autonomous curation boundary
 
-Inspection/simulation are lab reads and never gates live progress. The application curation worker consumes policy decisions continuously, revalidates exact candidate/version/evidence/validation/config/privacy/ownership state transactionally, and autonomously creates/updates/supersedes/archives/quarantines/materializes eligible owned facts, memories, and skills. It monitors staged outcomes and automatically revises/recovers when thresholds fire. No `approve`, `reject`, `preview`, `apply`, or user-triggered `rollback` command exists for a curation item; operators configure policy, inspect history, pause/resume/run-now, pin/protect/exclude, or submit feedback.
+Evolution inspection/simulation runs through the generic experiment artifact lifecycle but has no live curation effect and never gates live progress. Every job version publishes an `AutomationInputContractV1` and one of `EvidenceDriven | TimeDriven | ExternalEvent | Manual`; schedule time is never an implicit input. The live automation scheduler is event-driven over `automation_dirty_scopes`; its clock tick reads only due jobs plus bounded dirty keys and never scans every thread/project/store. Typed field-level dependency selectors map new terminal Turns/messages, fact/relation/trust changes, feedback/outcomes, diagnostics/patterns, skill use/drift, retention horizons, and semantic config/policy/catalog/model changes to exact thread/project/profile jobs. Evidence, registered time-boundary ordinal, external source sequence/event, or idempotent manual request advances one typed trigger frontier and dirty generation. Irrelevant events and self-produced effects are excluded; a produced effect can dirty a downstream task only through a registered noncyclic dependency or later outcome/feedback event. An evidence-driven job becomes dormant after considered no-relevant/unchanged input or terminal `NoChange` until a relevant frontier advances. A dependency-version change reprocesses prior evidence only when the versioned reevaluation policy authorizes a bounded scope/window.
+
+For each key, application loads the expected cursor version and current per-shard frontiers, coalesces the dirty generation, and proves scope-local quiescence from a finalized Turn/session boundary, no relevant ingress during `min_quiet`, and a sealed active-writer registry generation/frontier/freshness/coverage receipt, bounded by `max_debounce`. It then enforces minimum eligible event/token delta and seals `AutomationInputManifestV1` with trigger frontier, typed selector/contract and dependency digests, expected cursor/dirty generation, current/considered/consumed/included frontiers, boundary, predecessor, coverage, semantic effective-input digest, and distinct evaluation-snapshot digest. Unknown/stale activity or partial coverage is deferred rather than guessed idle. Immediately before launch it revalidates the entire manifest, config/policy, lease, and writer snapshot.
+
+Policy evaluation, expected-frontier comparison, unique admitted-semantic-input claim, admission receipt, generic operation/run creation, and scheduler checkpoint commit atomically in the owner shard. `NoRelevantChange`, `IdenticalTerminalInput`, and `DependencyUnchanged` call no model/search/tool, CAS-advance only the considered frontier, and close only their expected dirty generation; they never write a consumed frontier or terminal outcome. Quiet/minimum-delta/lock/backoff/budget/pause/defer reasons advance neither considered nor consumed and retain dirty eligibility. Equivalent observations update one input-bound skip episode and shared metrics, not a row per tick. A retryable failure resumes the same operation/run/input through the generic attempt/backoff/deadline/circuit contract; deterministic poison input is quarantined. Uncertain effects leave the operation nonterminal and block retry/cursor movement until one typed reconciliation receipt proves the effect state and finalizes exactly once. Only committed effects or legitimate terminal `NoChange` atomically advance considered plus consumed frontiers and clear the run's expected dirty generation, so concurrent new activity remains pending. Combined curator/reflector/skill-writer execution may share one immutable evidence batch, but every job keeps its own admission, validation, outcome, and cursor.
+
+After admission, the application curation worker consumes policy decisions, revalidates exact candidate/version/evidence/validation/config/privacy/ownership state transactionally, and autonomously creates/updates/supersedes/archives/quarantines/materializes eligible owned facts, memories, and skills. It monitors staged outcomes and automatically revises/recovers when thresholds fire. No `approve`, `reject`, `preview`, `apply`, or user-triggered `rollback` command exists for a curation item; operators configure policy, inspect history, pause/resume/run-now, pin/protect/exclude, or submit feedback. `run_now` shortens cadence/quiet wait for an already-dirty evidence-driven scope; on a `Manual` job it appends an idempotent request frontier as declared input. Neither form can force an identical successful input; the hermetic playground is the deliberate unchanged/historical replay surface.
 
 ## 12. Internal Parity and Bounded Migration
 
@@ -887,7 +1051,7 @@ pub struct UseCaseParityReceipt {
 2. Land read-only system/query/session vertical slice, including sanitized-native/representative messages and partial coverage.
 3. Shadow read use cases and compare typed semantic results.
 4. Land command kernel and no-op fixture commands; prove idempotency/version/audit/workflow recovery.
-5. Move domains independently: sessions, graph/code, Git/delivery, knowledge, policy/hints, automation/skills, accounting/operations, saved/export/labs.
+5. Move domains independently: sessions, graph/code, Git/delivery, knowledge, policy/hints, automation/skills, accounting/operations, saved/export/experiments.
 6. For each domain, record freeze watermark, parity receipt, active implementation, rollback procedure, and monitoring gate.
 7. Default transports to V2 only after all exposed use cases are parity-proven; atomically disable old live bindings/names and return typed restart/update/current-binding guidance to stale clients.
 8. Archive receipts and retain V1 source stores only for the bounded rollback/data-verification period defined by the cutover receipt, then explicitly archive/remove them without deleting unmigrated user data.
@@ -910,7 +1074,7 @@ Commands run from the repository root with the checkout-local `target/`; do not 
 
 ### PR 24A2: Authorization, query composition, and explicit coverage
 
-**Files:** `src/{access,response}.rs`; `src/ports/{catalog,evidence}.rs`; `src/use_cases/{capabilities,scopes,query,search,settings}.rs`; `tests/{authorization_privacy,query_coverage}.rs`.
+**Files:** `src/kernel/{access,response}.rs`; `src/features/{capabilities,scopes,query,search,settings}/{queries,views,ports}.rs`; `tests/{authorization_privacy,query_coverage}.rs`.
 
 - [ ] Add tests `catalog_default_is_materialized_before_execution`, `brain_default_is_active_profile_all`, `current_invocation_is_reported_and_never_overrides_explicit_target`, `cwd_and_last_project_never_narrow_scope`, `same_name_scope_returns_ordered_candidates`, `candidate_token_retries_original_request_once`, `scope_result_is_identical_across_cli_mcp_http`, `denies_before_scope_expansion`, `binds_access_digest_to_query`, `locked_shard_returns_metadata_coverage`, `partial_query_preserves_every_disposition`, `query_does_not_write_usage_counter`, `reasoning_requires_explicit_grant`, `settings_report_effective_source_and_owner`, `environment_setting_is_not_writable`, `foreign_doctor_finding_has_no_update_action`, and `partial_provider_is_not_healthy`.
 - [ ] Run `cargo test -p tracedecay-application --test authorization_privacy --test query_coverage -- --nocapture`. Expected: tests fail because access/query services are absent.
@@ -920,7 +1084,7 @@ Commands run from the repository root with the checkout-local `target/`; do not 
 
 ### PR 24A3: Native and representative message/session contracts
 
-**Files:** `src/use_cases/{sessions,agents}.rs`; `tests/message_representation.rs`; redacted #410 compatibility fixtures.
+**Files:** `src/features/{sessions,agents}/{queries,views,ports}.rs`; `tests/message_representation.rs`; redacted #410 compatibility fixtures.
 
 - [ ] Add tests `native_rows_preserve_retained_structure`, `representative_preserves_source_ids_and_rule`, `representative_expansion_cannot_double_count`, `direct_user_excludes_delegated_and_protocol_rows`, `unknown_origin_remains_visible`, and `native_expansion_is_cursor_bounded`.
 - [ ] Run `cargo test -p tracedecay-application --test message_representation -- --nocapture`. Expected: tests fail because audience/representation contracts do not exist.
@@ -930,7 +1094,7 @@ Commands run from the repository root with the checkout-local `target/`; do not 
 
 ### PR 24A4: Brain, graph-of-graphs, timeline, and domain reads
 
-**Files:** `src/use_cases/{brain,activity,graph,timeline,sessions,agents,coordination,code,delivery,knowledge,automation,observatory,accounting,research}.rs`; `tests/graph_of_graphs.rs`; `benches/brain.rs`.
+**Files:** `src/features/{brain,activity,graph,timeline,sessions,agents,coordination,code,delivery,knowledge,automation,observatory,accounting,research}/{queries,views,ports}.rs`; `tests/graph_of_graphs.rs`; `benches/brain.rs`.
 
 - [ ] Add tests `brain_uses_rollups_before_project_shards`, `federated_graph_preserves_repo_snapshot_identity`, `same_name_symbol_never_collapses_cross_repo`, `rspack_rsbuild_react_router_fixture_keeps_provenance`, `each_lens_rejects_illegal_edge_kind`, `selection_pivots_at_same_watermark`, `temporal_correlation_is_not_causation`, `git_drift_blocks_joined_impact`, `turn_hub_preserves_native_semantics`, `codex_goal_updates_remain_first_class`, `research_anchor_survives_cursor_and_handle_expiry`, `recipe_reports_version_and_watermark_drift`, `nearby_parallel_worktree_has_direct_overlap_evidence`, `expired_presence_is_unknown_not_absent`, `safe_summary_contains_no_secret_payload`, and `partial_component_does_not_fail_brain`.
 - [ ] Run `cargo test -p tracedecay-application --test graph_of_graphs -- --nocapture`. Expected: tests fail because graph/Brain compositions are absent.
@@ -941,7 +1105,7 @@ Commands run from the repository root with the checkout-local `target/`; do not 
 
 ### PR 24A5: Command unit of work, idempotency, optimistic versions, and audit
 
-**Files:** `src/{unit_of_work,idempotency,audit,optimistic}.rs`; `src/ports/{command_store,event_sink}.rs`; `src/use_cases/commands/{mod,runner}.rs`; `tests/{command_pipeline,idempotency_optimistic}.rs`; `benches/commands.rs`.
+**Files:** `src/kernel/{unit_of_work,idempotency,audit,optimistic}.rs`; per-domain `src/features/<domain>/{commands,ports}.rs`; `tests/{command_pipeline,idempotency_optimistic}.rs`; `benches/commands.rs`.
 
 - [ ] Add tests `identical_retry_returns_stored_receipt`, `changed_payload_same_key_conflicts`, `version_conflict_writes_nothing`, `confirmed_operation_preflight_token_must_match`, `scope_sensitive_create_requires_declared_scope`, `route_scope_never_selects_owner`, `target_owner_conflict_writes_nothing`, `canonical_event_audit_outbox_and_result_commit_atomically`, `outbox_cannot_create_domain_truth`, `external_effect_never_runs_inside_uow`, and `writer_takeover_fences_stale_commit`.
 - [ ] Run `cargo test -p tracedecay-application --test command_pipeline --test idempotency_optimistic -- --nocapture`. Expected: tests fail because command runner/unit-of-work contracts are absent.
@@ -952,23 +1116,25 @@ Commands run from the repository root with the checkout-local `target/`; do not 
 
 ### PR 24A6: Resumable workflows and operational commands
 
-**Files:** `src/{jobs}.rs`; `src/ports/{workflow_store,operations,capture,projection,remote_delivery}.rs`; `src/use_cases/operations.rs`; all `src/use_cases/commands/*.rs` except runner; `tests/workflow_recovery.rs`.
+**Files:** `src/kernel/operations.rs`; `src/features/{operations,capture,projection,delivery,integrations}/{commands,ports}.rs`; `src/ports/host_deployment.rs`; all registered per-domain command handlers; `tests/workflow_recovery.rs`.
 
-- [ ] Add workflow fault cases for process death before/after step effect and receipt, duplicate worker, stale lifecycle lease, drain with active MCP/watch/index work, upgrade process exit before durable drain receipt, update restart/takeover/recovery, version drift, disk pressure, cancelled export, projection publish failure, retention hold, migration ambiguity, #425 split-store open-holder refusal/freeze/write-reservation/backup/staging/verification/cutover/restart recovery, remote refresh followed by ref rewrite, coordination target expiry/delivery-without-ack/duplicate handoff/suppression, scope-owner move conflict, share-bundle expiry/revocation, and irreversible delete grace.
+- [ ] Add workflow fault cases for process death before/after step effect and receipt, duplicate worker, stale lifecycle lease, drain with active MCP/watch/index work, upgrade process exit before durable drain receipt, update restart/takeover/recovery, version drift, disk pressure, cancelled export, projection publish failure, retention hold, migration ambiguity, #425 split-store open-holder refusal/freeze/write-reservation/backup/staging/verification/cutover/restart recovery, host-integration probe/install/reload/verify interruption, stale manifest/config observation, foreign-owned component refusal, idempotent re-entry, uncertain host effect reconciliation, uninstall compensation and restart-required recovery, remote refresh followed by ref rewrite, coordination target expiry/delivery-without-ack/duplicate handoff/suppression, scope-owner move conflict, share-bundle expiry/revocation, irreversible delete grace, and automation admission races: 1,000 unchanged wakeups, unrelated-project activity, concurrent dirty event after snapshot, active/unknown writer, identical terminal input, quiet/max-debounce boundary, `NoChange` atomic frontier advance, retryable failure retention/backoff/circuit, poison quarantine, uncertain-effect reconciliation, self-trigger suppression, 64 concurrent schedulers, crash at every admission boundary, and combined evidence batch with independent job receipts.
 - [ ] Run `cargo test -p tracedecay-application --test workflow_recovery -- --nocapture`. Expected: tests fail because workflow runner/definitions are absent.
-- [ ] Implement each Section 10 command descriptor, pollable operation status, and the workflows named in Section 8.3; every external effect is a separately receipted step and every owner transaction is idempotent.
+- [ ] Implement each Section 10 command descriptor, pollable operation status, the workflows named in Section 8.3, and Section 11.6's bounded dirty-scope automation admission; every external effect is a separately receipted step and every owner transaction is idempotent. One thousand unchanged ticks produce zero runs/model/tool calls, no all-scope scan, and only a bounded skip-episode/metric update.
 - [ ] Re-run the command. Expected: every fault fixture reaches one named recoverable/terminal state, no duplicate effect receipt, and unaffected shard reads remain available.
 - [ ] Commit `feat(application): orchestrate recoverable operational workflows`.
 
 ### PR 24A7: Replay labs and Evolution Studio
 
-**Files:** `src/use_cases/labs/*.rs`; `src/use_cases/commands/labs.rs`; `src/ports/archive.rs`; `tests/labs_read_only.rs`.
+**Files:** `src/kernel/operations/*`; `src/features/experiments/{queries,commands,views,ports,evaluators}/*`; `tests/experiments_replay.rs`.
 
-- [ ] Add exact/recorded/best-effort fixtures for every lab plus `search_quality_preserves_cutoff_qrels_and_anchor`, `scope_federation_replays_resolution_and_shard_plan`, `privacy_lab_accepts_synthetic_canary_only`, `coordination_selects_at_most_one_hint`, `coordination_replay_preserves_suppression_and_anchor`, `coordination_lab_cannot_message`, `evolution_tracks_skill_and_memory_lifecycle`, `simulation_reports_unknown_outcome_horizon`, `lab_ports_have_no_write_method`, `simulation_does_not_increment_counters`, and `promotion_requires_scan_and_confirmation`.
-- [ ] Run `cargo test -p tracedecay-application --test labs_read_only -- --nocapture`. Expected: tests fail because application lab compositions are absent.
-- [ ] Compose policy/query/capture/projector evaluators with immutable refs, preserve fidelity/substitutions/coverage, implement Evolution inspection/simulation, and keep fixture promotion in the separate command path.
-- [ ] Re-run the command. Expected: all tests pass; write sentinels remain zero; exact digests verify; unavailable artifacts downgrade/refuse explicitly.
-- [ ] Commit `feat(application): add read-only replay and evolution labs`.
+- [ ] Add requested/actual exact/recorded/best-effort fixtures for every evaluator plus `selection_forks_typed_experiment_with_source_backlink`, `run_cohort_cells_have_unique_variant_evaluator_case_repetition_sweep_coordinates`, `all_experiment_artifacts_have_stable_anchors`, `branch_ref_is_sole_immutable_merge_free_ancestry`, `typed_sweep_caps_cost_and_resumes_from_receipt`, `paged_comparison_cells_align_added_removed_substituted_and_unaligned_stages`, `running_trace_has_no_sealed_receipt_and_terminal_trace_requires_one`, `hermetic_worker_has_empty_env_closed_fds_read_only_mounts_and_denies_every_production_port`, `resource_budget_kills_and_reaps_process_tree`, `resource_receipt_lists_granted_denied_and_high_water_marks`, `frozen_clock_rng_and_recorded_model_output_reproduce`, `minimizer_preserves_predicate_and_never_promotes`, `search_quality_preserves_cutoff_qrels_and_anchor`, `scope_federation_replays_resolution_and_shard_plan`, `privacy_lab_accepts_synthetic_canary_only`, `coordination_selects_at_most_one_hint`, `coordination_lab_cannot_message`, `evolution_tracks_skill_and_memory_lifecycle`, `simulation_does_not_increment_counters`, and `promotion_requires_scan_and_confirmation`.
+- [ ] Run `cargo test -p tracedecay-application --test experiments_replay -- --nocapture`. Expected: tests fail because the shared lifecycle/evaluator registry/hermetic runtime are absent.
+- [ ] Implement one experiment/run-cohort operation, explicit cells, requested/actual manifest and side-effect receipts, evaluator registry, sole immutable branch ref, bounded typed sweeps/ablations, paged stage/comparison cells, reduction, all anchors, enforced worker protocol/budgets, and read-only archive ports. Compose policy/query/capture/projector evaluators with immutable refs, preserve fidelity/substitutions/coverage, implement Evolution evaluation, and keep the one typed fixture promotion in the separate command path.
+- [ ] Re-run the command. Expected: all tests pass; production write/counter/cache/lease sentinels remain zero; exact digests verify; unavailable artifacts downgrade/refuse explicitly; no evaluator owns lifecycle code.
+- [ ] Commit `feat(application): add hermetic experiment and replay workbench`.
+
+Plan 24's PR 24R extends the same application kernel with `features/task_graph/{queries,commands,views,ports}/edit_bundles.rs` and the contained structured-edit adapter. Its red tests cover strict parser/source-span diagnostics, explicit-retire semantics, local-key allocation, semantic diff/rebase/conflicts, stale-base and active-attempt refusal, all-or-none 100,000-item bounded submit, identical retry, unsafe archives, secret rejection, expiry, process death, immediate success purge, TTL/crash cleanup, and byte-for-byte semantic parity across CLI/HTTP/MCP/SDK/UI. It imports plan-01 public edit types and plan-24 graph semantics; it does not add another application kernel, draft store, task model, or transport-specific mutation path.
 
 Plan 18's PR 24H extends these same application registries/ports with privacy status, scan, safe finding, remediation, verify, detector, and quarantine use cases after PRs 7A/10A/12C/22B. It is not a second privacy service or transport-specific workflow. The official API/SDK slices in plan 17 generate from the same registry after PR 24A/24B contracts are stable.
 
@@ -1006,6 +1172,7 @@ Plan 18's PR 24H extends these same application registries/ports with privacy st
 - Local/live Git drift never yields a joined semantic/live conclusion; refresh/reindex action is explicit.
 - Nearby-agent results distinguish same/parallel worktree and direct/weak overlap evidence, expose safe anchor-backed summaries, expire presence honestly, and never send/ack/handoff without a separate authorized receipt. One eligible overlap horizon emits at most one deduped dynamic hint.
 - Search gates pass per-slice lexical/phrase/fuzzy/entity/semantic/graph/recency benchmarks; exact-match and origin/kind-filter regressions block release even when aggregate hybrid scores improve, and embeddings may be disabled by profile.
+- Managed task-graph editing accepts only contained, strict, bounded bundles; omission never deletes, stale/concurrent/partial submissions write nothing, 100,000-item validation and semantic diff remain bounded, and success/expiry/crash tests prove private staging cleanup without losing content-free receipts.
 - Every current read/mutation in generated compatibility inventory has one use-case owner and status; no dashboard-only behavior remains before retirement.
 - Every scope-sensitive row and command exposes declared scope/canonical owner; route/project selection never changes ownership, and cross-project reuse never duplicates durable memory/skill/policy/automation state.
 - All/repository/project/worktree/ref scopes have identical generated semantics across CLI/MCP/API/dashboard; same-name ambiguity is candidate-based with one-step retry, and federated results retain per-repository provenance/stale/partial state.
@@ -1033,4 +1200,5 @@ Plan 18's PR 24H extends these same application registries/ports with privacy st
 - [ ] Run `rg -n 'axum|tower|rmcp|clap|rusqlite|libsql|git2|octocrab|reqwest|std::process|dashboard/' crates/tracedecay-application/src`. Expected: no matches.
 - [ ] Inspect `cargo metadata` dependency graph. Expected: application depends inward on contracts; no lower crate imports application; adapters are the only outward dependents.
 - [ ] Compare the generated capability/use-case inventory with V1 MCP, CLI, dashboard, hook, config, schema, and sidecar inventories. Expected: no orphan read, mutation, or compatibility alias.
+- [ ] Run the PR 24R edit-bundle parser/property/fuzz/concurrency/crash/privacy/cross-transport suites. Expected: one semantic candidate and receipt across surfaces, zero partial canonical writes, zero unsafe extracted members, zero retained secret bytes after rejection/submit/expiry, and every terminal workspace has a verified cleanup state.
 - [ ] Complete #405/#407/#410 ownership/message migration, #411 doctor authority, #412 drain/update recovery, #413 inventory refresh, stable research anchor/recipe, cross-shard recovery, local/live Git drift, lab read-only, privacy, cutover, stale-client failure, and rollback drills before V2 application becomes default.

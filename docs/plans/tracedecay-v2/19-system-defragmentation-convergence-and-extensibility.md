@@ -4,7 +4,7 @@
 
 **Parent plan:** [`../2026-07-09-tracedecay-brain-rewrite.md`](../2026-07-09-tracedecay-brain-rewrite.md)
 
-**Normative supporting plans:** [`01-domain-crate.md`](01-domain-crate.md), [`02-store-crate.md`](02-store-crate.md), [`03-capture-crate.md`](03-capture-crate.md), [`04-projectors-crate.md`](04-projectors-crate.md), [`05-query-crate.md`](05-query-crate.md), [`06-policy-crate.md`](06-policy-crate.md), [`07-hooks-crate.md`](07-hooks-crate.md), [`08-tool-catalog-crate.md`](08-tool-catalog-crate.md), [`09-application-crate.md`](09-application-crate.md), [`10-api-crate.md`](10-api-crate.md), [`11-dashboard-frontend.md`](11-dashboard-frontend.md), [`12-root-compatibility-migration.md`](12-root-compatibility-migration.md), [`13-research-provenance-and-context-anchors.md`](13-research-provenance-and-context-anchors.md), [`14-historical-failure-regression-matrix.md`](14-historical-failure-regression-matrix.md), [`15-search-quality-evaluation-and-retrieval-research.md`](15-search-quality-evaluation-and-retrieval-research.md), [`16-cross-project-repository-worktree-scope.md`](16-cross-project-repository-worktree-scope.md), [`17-official-public-api-and-sdks.md`](17-official-public-api-and-sdks.md), [`18-secret-detection-redaction-and-private-data-safety.md`](18-secret-detection-redaction-and-private-data-safety.md), [`20-configuration-control-plane.md`](20-configuration-control-plane.md), [`21-cli-mcp-tool-surface-and-output-unification.md`](21-cli-mcp-tool-surface-and-output-unification.md), [`22-incremental-context-scout-and-suggestion-envelopes.md`](22-incremental-context-scout-and-suggestion-envelopes.md), [`23-session-lcm-temporal-retrieval-and-evaluation.md`](23-session-lcm-temporal-retrieval-and-evaluation.md), [`24-canonical-task-plan-graph-and-multi-agent-executor.md`](24-canonical-task-plan-graph-and-multi-agent-executor.md), [`25-code-intelligence-indexing-crate.md`](25-code-intelligence-indexing-crate.md), and [`26-observability-accounting-and-usage.md`](26-observability-accounting-and-usage.md).
+**Normative supporting plans:** [`01-domain-crate.md`](01-domain-crate.md), [`02-store-crate.md`](02-store-crate.md), [`03-capture-crate.md`](03-capture-crate.md), [`04-projectors-crate.md`](04-projectors-crate.md), [`05-query-crate.md`](05-query-crate.md), [`06-policy-crate.md`](06-policy-crate.md), [`07-hooks-crate.md`](07-hooks-crate.md), [`08-tool-catalog-crate.md`](08-tool-catalog-crate.md), [`09-application-crate.md`](09-application-crate.md), [`10-api-crate.md`](10-api-crate.md), [`11-dashboard-frontend.md`](11-dashboard-frontend.md), [`12-root-compatibility-migration.md`](12-root-compatibility-migration.md), [`13-research-provenance-and-context-anchors.md`](13-research-provenance-and-context-anchors.md), [`14-historical-failure-regression-matrix.md`](14-historical-failure-regression-matrix.md), [`15-search-quality-evaluation-and-retrieval-research.md`](15-search-quality-evaluation-and-retrieval-research.md), [`16-cross-project-repository-worktree-scope.md`](16-cross-project-repository-worktree-scope.md), [`17-official-public-api-and-sdks.md`](17-official-public-api-and-sdks.md), [`18-secret-detection-redaction-and-private-data-safety.md`](18-secret-detection-redaction-and-private-data-safety.md), [`20-configuration-control-plane.md`](20-configuration-control-plane.md), [`21-cli-mcp-tool-surface-and-output-unification.md`](21-cli-mcp-tool-surface-and-output-unification.md), [`22-incremental-context-scout-and-suggestion-envelopes.md`](22-incremental-context-scout-and-suggestion-envelopes.md), [`23-session-lcm-temporal-retrieval-and-evaluation.md`](23-session-lcm-temporal-retrieval-and-evaluation.md), [`24-canonical-task-plan-graph-and-multi-agent-executor.md`](24-canonical-task-plan-graph-and-multi-agent-executor.md), [`25-code-intelligence-indexing-crate.md`](25-code-intelligence-indexing-crate.md), [`26-observability-accounting-and-usage.md`](26-observability-accounting-and-usage.md), and [`27-cross-host-agent-plugin-bundles.md`](27-cross-host-agent-plugin-bundles.md).
 
 ## 1. Program objective
 
@@ -44,6 +44,8 @@ Merged PR #425 (`de3d05dc`, final head `d3bb28b5`) is accepted V1 behavior: offl
 
 V2 must retain the safe refusal while making ambiguity inspectable and repairable through the same canonical identity, command, status, and receipt contracts used by CLI, MCP, API, SDKs, and dashboard.
 
+The final simplification probe on 0.0.53 adds a second concrete baseline. The current workspace is already one Rust package, yet it contains 59 top-level library modules, 416 Rust source files, roughly 267,715 source lines, a 286-file strongly connected component in the indexed graph, and a 7,108/10,000 health score whose weakest dimensions are acyclicity (0.5067; 2,475 cyclic edges) and equality (0.383; Gini 0.617). `src/global_db.rs` is 4,904 lines; `src/mcp/server.rs` is 3,284; `src/mcp/tools/definitions.rs` is 3,874; `src/sessions/lcm/query.rs` is 3,534. A Rust-scoped redundancy scan found 6,255 candidates, including copied host installers, extractor traversal/result builders, database-error helpers, scalar parsers, and row decoders. Therefore package count alone is not convergence: V2 packages must be dependency firewalls, while actual footprint reduction comes from generated descriptors, shared mechanics, and deletion of the implementations they replace.
+
 ### 2.2 Fragmentation inventory
 
 The Phase 0 inventory generator must produce this table from source, schemas, routes, catalogs, configs, and store manifests. The human rows below establish the minimum audit surface.
@@ -61,8 +63,8 @@ The Phase 0 inventory generator must produce this table from source, schemas, ro
 | Search ranking | Exact/FTS/BM25-like paths, fuzzy matching, embeddings, graph expansion, copied-message behavior, per-tool filtering | Versioned retrieval pipeline in `tracedecay-query`, evaluated by plan 15 | All rankers registered/versioned; no unmeasured ranking fork remains |
 | Evidence and relations | Provider facts, correlation records, Git links, memory provenance, agent trees, tool results, code impact, PR links | Immutable observations plus bitemporal `RelationAssertion` and deterministic projections | Correlation never becomes fact by transport formatting; legacy relation tables are imported or retired |
 | Policy | Hint classification, routing, retrieval choices, curation, memory injection, diagnostics, scheduling, coordination, automation decisions | `tracedecay-policy` bundles and deterministic replay | Every live decision identifies policy bundle/evaluator/input digest; ad hoc condition stacks removed |
-| Hooks | Host-specific scripts, event matchers, spool behavior, hint rendering, acknowledgement, latency/error behavior | `tracedecay-hooks` over capture/application/policy ports | Hosts pass one conformance suite; hook cannot own query, indexing, migration, or long-running work |
-| Tools/capabilities | CLI commands, MCP tool names/schemas, HTTP routes, dashboard actions, skills, hook hints, aliases | `tracedecay-tool-catalog` source of truth | Catalog generation covers every public action; hand-maintained semantic duplicates fail CI |
+| Hooks | Host-specific scripts, event matchers, spool behavior, hint rendering, acknowledgement, latency/error behavior | Private root `v2::hooks` module over capture/application/policy ports | Hosts pass one conformance suite; hook cannot own query, indexing, migration, or long-running work; copied installers/config writers are deleted |
+| Tools/capabilities and host bundles | CLI commands, MCP tool names/schemas, HTTP routes, dashboard actions, skills, hook hints, aliases, host package/component manifests, and copied provider overlays | `tracedecay-tool-catalog` source of truth, including its pure `host_bundles` compiler; root-private deploy adapter owns host I/O only | Catalog/bundle generation covers every public action and supported host projection; hand-maintained semantic/manifest copies fail CI and retire in PR 37K |
 | Application behavior | Mutations and queries embedded in CLI, MCP, dashboard routes, daemon tasks, doctor/remediation, installers | `tracedecay-application` use cases | Transports contain binding/rendering only; behavior conformance proves identical outcomes |
 | Transports | CLI output/flags, MCP JSON/Markdown, HTTP envelopes, SSE events, SDK helpers | Thin adapters generated from catalog/application/API contracts | Semantic drift suite passes; stale clients fail explicitly before store access |
 | Dashboard | Per-project pages, bespoke SQL endpoints, duplicated filters, separate graph products, action-specific state | V2 workbench over generated client and shared investigation state | No frontend data adapter bypasses the official client; legacy shell/routes retired after parity |
@@ -81,7 +83,9 @@ Phase 0 generates `target/tracedecay-v2-inventory/` artifacts, never hand-edited
 - `tables.json`: table/index/trigger/FTS owner, reader/writer call sites, canonical target;
 - `public-surfaces.json`: CLI, MCP, HTTP, SSE, SDK, dashboard, skill, hook, installer, config, and file-format surfaces;
 - `semantic-implementations.json`: ID derivation, scope resolution, redaction, search/ranking, hinting, status, error mapping, config resolution, retry, and rendering implementations;
+- `reuse-dispositions.json`: every duplicate/near-duplicate cluster and infrastructure mechanism with `retain | extract | declarativize | generate | replace | delete`, owner, target, evidence, parity gate, and deletion PR;
 - `dependency-graph.json`: crate/module dependency edges, cycles, forbidden imports, SQL/file-system/network use;
+- `footprint-baseline.json`: packages/published artifacts, handwritten/generated production lines, files/public items, dependencies/features, duplicate clusters, tables/indexes/triggers, workers, binary/assets, idle RSS, startup, clean/hot build, and stored file/byte counts;
 - `adapter-ledger.json`: every anti-corruption adapter with owner, creation PR, traffic, parity gate, rollback dependency, and deletion PR;
 - `convergence-scorecard.json`: metrics in Section 13 with baseline and target;
 - `inventory.md`: safe human summary with no store content or secret candidates.
@@ -104,6 +108,31 @@ The inventory records symbols and schema names, not private content. It uses sup
 10. **Local-first scale.** One binary and embedded stores are the first deployment; contracts permit isolated workers or remote/federated backends without distributing semantics.
 11. **No permanent bridge.** Every compatibility adapter has a deletion gate when created.
 12. **Safe failure.** Ambiguity, partial coverage, stale generations, privacy uncertainty, budget exhaustion, and version mismatch are visible typed states, not fallback triggers.
+13. **Reuse mechanics, not meanings.** Registry/digest, projector, operation-fencing, host-install, extraction traversal, graph/timeline slice, rendering, cursor/page, and problem-envelope machinery has one implementation; domain admission, semantics, and state machines remain with their declared owner.
+14. **Default to a module.** A new Rust package requires two independent production consumers or a demonstrated optional-heavy/deployment/publication capability firewall. Root-only adapters stay private modules with the same forbidden-edge linting.
+15. **Replacement must delete.** Every new abstraction names the existing implementations, dependencies, schemas, tests, and adapters it removes; moving or wrapping them is not convergence.
+
+### 3.1 Reusable mechanism map
+
+| Mechanism reused system-wide | Sole implementation owner | Declarative/domain inputs | Implementations retired |
+|---|---|---|---|
+| Canonical IDs, time, scope, evidence, privacy-safe values, watermarks, canonical encoding/digests | Narrow `tracedecay-domain` kernel | Owner registries and invariant-heavy validators | Per-subsystem newtypes, string codecs, hash builders, enum spellings |
+| Registry identity/version/owner/schema/deprecation/cross-reference/loading/digest/drift | Domain registry substrate; each registry retains semantic ownership | Domain, capability, use-case, configuration, metric, problem/status, SPI manifests | Registry-local loaders, canonicalizers, digest/version/replacement/codegen plumbing |
+| Observation adapter framing/offset/rewrite/sanitize/publish conformance | `tracedecay-capture` | Provider/source descriptors and parsers | Provider runner switches, direct writes, provider-specific redaction/storage |
+| Projection lease/checkpoint/gap/dead-letter/rebuild/publication/lag runtime | `tracedecay-projectors` | `ProjectionSpecV1` plus domain reducers/builders | Accounting/code/session/knowledge/automation runner and retry forks |
+| Tree-sitter parse/traversal/result construction | `tracedecay-code-index` | Grammar descriptors and language-family query packs/hooks | Repeated `visit_children`, `build_result`, `extract_source`, C/C++ and BASIC helper bodies |
+| Query cursor/budget/page, lexical/hybrid/rank/time/graph operators | `tracedecay-query` | Registered query profiles/operators | LCM/memory/context/dashboard/tool-specific ranking, limit, pagination, traversal forks |
+| Pure evaluator/replay runtime | `tracedecay-policy` | Registered hint/retrieval/curation/routing/scheduler evaluators | Condition stacks and evaluator-specific replay harnesses |
+| Fenced durable operation lifecycle | `tracedecay-application` | Domain-specific admission, state, steps, compensation/effect policy | Migration, export, repair, index, automation, task, daemon job/lock/progress engines |
+| Hermetic experiment/run/trace/comparison/minimization harness | `tracedecay-application` over the operation kernel and policy evaluator registry | `ExperimentSpecV1`, catalog evaluator schemas, immutable manifests, explicit model/egress grants | Per-lab run tables/routes/schedulers, A/B vocabularies, replay sandboxes, progress/cancel paths, fixture minimizers |
+| Wakeup/coalescing/backoff/fairness/checkpoint/fenced-admission scheduler | `tracedecay-application` `SchedulerKernelV1` | Task, automation, scout, maintenance, and index-trigger scheduling policies | Poll loops, per-feature timers/queues/backoff, scheduler-local checkpoint and fairness engines |
+| Capability/use-case/binding/schema generation | `tracedecay-tool-catalog` plus plan-17 contract IR | One reviewed capability manifest | MCP definitions, format/allow lists, CLI/API/SDK/host permission side registries |
+| Hook wire decode/normalize/response framing | Private root `v2::hooks` | `HostIntegrationManifestV1` hook facet plus irreducible host wire mappings | Hook-point switches, host response helpers, hook tool-name/permission side lists |
+| Host install/update/uninstall/config mutation | One root host-integration engine outside the hook hot path | `HostIntegrationManifestV1` installation facet: paths, formats, ownership, backup and health probes | Nine installer copies, exact Cline/Roo duplicates, provider config mutation forks |
+| Sealed page/problem/graph/timeline views and human document rendering | Application view types; private root `v2::presentation` renderer | Catalog presentation descriptors and domain lens schemas | Handler envelopes/renderers, dashboard/MCP/CLI graph transforms, raw-value Markdown |
+| Visual-semantic ontology, linked composition state, graph/timeline/metric envelope, interaction/query delta, accessibility/export frame | Application/catalog view contracts plus dashboard `VisualizationFrame` | Domain lens/entity/edge/lane/metric descriptors and five registered compositions | Feature-local chart wrappers, legends, selection/filter stores, workers/exporters, graph response types, lab visualization shells |
+
+No row authorizes a generic `common` crate. If two uses only look similar but have different invariants, their owners keep separate typed implementations and the reuse-disposition ledger records `retain` with evidence.
 
 ## 4. Target canonical planes
 
@@ -179,7 +208,7 @@ Required convergence:
 - A `PolicyBundle` pins evaluator versions, configuration, catalog, index/snapshot watermarks, memory/skill versions, seed, time source, and budgets.
 - Evaluation cannot write stores, call transports, read ambient CWD, or silently fetch live state.
 - Exact replay uses matching artifacts; recorded replay returns stored decisions; best-effort replay declares every substitution.
-- Labs and offline evaluation use the same evaluator path as live operation but an effect sink that cannot mutate live state or contaminate analytics.
+- Labs and offline evaluation use the same evaluator path as live operation inside the one hermetic experiment harness: immutable mounts, frozen clock/RNG, disposable overlay, deny-by-default capabilities, explicit model/egress grants, shared operation lifecycle, and a `ReplaySideEffectReceiptV1` proving zero production effects. No evaluator owns another run table/route/scheduler/comparison/minimizer.
 - Hint/retrieval/coordination analytics distinguish eligible, emitted, suppressed, acted-on, useful, false-positive, repeated, ignored, and outcome-unknown states.
 - Policy code cannot define capability names, scope rules, redaction rules, query ranking, or output rendering independently.
 
@@ -196,6 +225,8 @@ Required convergence:
 - telemetry event IDs and conformance fixtures.
 
 Catalog generation produces CLI metadata, MCP schemas, OpenAPI/JSON Schema references, SDK method manifests, dashboard action metadata, skill/hint discovery, docs, and drift tests. It does not generate business behavior; every binding resolves to one application use case.
+
+The plan-27 host-bundle compiler is a pure module family inside `tracedecay-tool-catalog::host_bundles`, not a new crate, package, registry, or semantic manifest. It lowers the same `HostIntegrationManifestV1` and catalog snapshot into deterministic per-host/package trees, signed-manifest inputs, component/source maps, capability/difference/conformance reports, and stock-host fixtures. It performs no host discovery, filesystem/config mutation, marketplace publication, credential access, process launch, or install state transition. The root-private `v2::host_deploy` adapter alone probes hosts and applies the compiler's resolved artifacts through application operations, protected backups, atomic replacement, verification, compensation, and receipt-owned removal. This split preserves the eleven-package ceiling and makes package generation reusable without moving privileged host mechanics into the catalog crate.
 
 ### 4.7 Application command/query layer
 
@@ -255,17 +286,18 @@ The same convergence pattern applies to identity, search, policy, config, status
 | Code extraction and immutable graph-generation builds | Domain code/evidence contracts plus plan-25 extractor registry | `tracedecay-code-index`; root only adapts its producer into the projector-owned build port | Store generation writer under the projector transaction | Projector/query/application status; never a direct transport |
 | Query AST/value/schema | Domain | Query parses/validates/canonicalizes | None | Query/application/generated bindings |
 | Query planning/ranking/execution | Query | Query | Query cache/eval artifacts through ports | Application |
-| Retrieval-evaluation truth | Domain retrieval-evaluation contracts plus plan-15 corpus/profile registries | Query evaluation runner under application authorization | Store-owned activity-shard corpus, qrel, pool, judgment, adjudication, run, report, fixture, and profile families | Application, Research Lab, Observatory, and generated bindings |
+| Retrieval-evaluation truth | Domain retrieval-evaluation contracts plus plan-15 corpus/profile registries | Query evaluator under the generic hermetic experiment runner and application authorization | Store-owned activity-shard corpus, qrel, pool, judgment, adjudication, metric/report, fixture, and profile families plus shared experiment/run rows | Application, Search Quality Lab, Observatory, and generated bindings |
 | Research manifests and durable anchors | Domain research/anchor contracts | Application manifest use cases plus query anchor resolver | Store owner-shard research manifests, entries, tombstones, and route metadata | Query/application and authorized CLI/MCP/API/SDK/UI views |
 | Session/LCM temporal lineage and answers | Domain message/summary/`TraceQueryV1` temporal contracts | Capture/projectors/query/application in their bounded roles | Activity-shard native message and summary-lineage projections plus privacy-domain blobs | Query/application, Timeline, LCM Lab, and generated bindings |
 | Policy bundles/evaluators | Policy | Policy | Policy artifacts/results through ports | Application/labs |
 | Capability metadata | Tool catalog | Catalog generation/runtime lookup | Generated/catalog snapshots | All transports/UI/docs |
+| Cross-host bundle projection and deployment | Tool-catalog `host_bundles` module defines pure lowering from canonical manifest/catalog; plan 27 fixes host overlay/conformance contracts | Pure compiler in tool catalog; root-private `v2::host_deploy` performs privileged local probe/stage/apply/atomic-activate/verify/repair/remove effects through application ports; plan 12/PR 36R alone owns release/marketplace publication | Signed release artifacts plus store-owned safe integration/operation projections; protected config backups remain outside general stores | Settings/doctor/generated bindings and native host packages; no second catalog or installer crate |
 | Use-case semantics | Application | Application | Injected repositories/job/audit ledger | CLI/MCP/API/SDK/UI/hooks |
 | Task/plan graph truth | Domain plan-24 graph/version/event contracts | Application commands and deterministic projectors | Activity-owner task event ledger and current projections | Query/application, Work/Resume, and generated bindings |
 | Scheduling, offers, admission, leases, grants, and writable-resource reservations | Domain plan-24 lifecycle contracts; policy proposes only | Application scheduler/admission transaction and executor adapters | Activity-owner offers, assignments, attempts, fenced leases, grant sets, reservations, and receipts | Executor SPI, status/doctor, task views, and generated bindings |
 | Context scouting and suggestion delivery | Domain suggestion/envelope contracts plus policy delivery arbiter | Application scout worker; hooks claim/deliver only the accepted envelope | Activity-owner candidates, envelopes, claims, delivery/outcome receipts, and checkpoints | Hint Lab, Observatory, status, and generated bindings |
 | Accounting and observability semantics | Domain accounting contracts plus plan-26 metric-descriptor registry | Projectors/accounting services and application SLO monitors | Owner-shard accounting events and versioned accounting/operations/all-scope rollups | Observatory, Costs, status/doctor, and generated bindings |
-| Human-facing Markdown/terminal presentation | `tracedecay-presentation` document/render contracts over catalog descriptors and sealed application views | `tracedecay-presentation` pure renderers | None | CLI/MCP/root adapters |
+| Human-facing Markdown/terminal presentation | Plan-21 root `v2::presentation` document/render contracts over catalog descriptors and sealed application views | Root-private pure renderers | None | CLI/MCP/root adapters |
 | HTTP/SSE protocol envelopes and public contract artifacts | API/generated contract IR | Thin API adapter and generators | None except safe request audit through application ports | HTTP/SSE and official SDK packages |
 | MCP lifecycle, primitives, progress/cancellation/tasks, and framing | Official MCP SDK boundary plus generated tool-catalog bindings | Root MCP adapter only | No protocol state beyond the connection; safe application audit/operation records use their canonical stores | MCP clients through negotiated tools/resources/prompts/completion/notifications/tasks |
 | Official client transport runtimes | Generated public contract IR | Each Rust/TypeScript/Python client package | Client-local ephemeral transport state only | External callers; never in-process store/application access |
@@ -289,21 +321,24 @@ crates/
 ├── tracedecay-code-index/      # code extraction, incremental indexing, packed graph-generation builds (plan 25)
 ├── tracedecay-query/           # TraceQueryV1 parser/execution, federation, search, graph/time, explain
 ├── tracedecay-policy/          # pure versioned evaluators and replay
-├── tracedecay-hooks/           # bounded host event/delivery adapters
 ├── tracedecay-tool-catalog/    # capability IR, validation, generators, runtime snapshot
+│   └── src/host_bundles/       # pure canonical-manifest -> host package compiler/conformance artifacts (plan 27)
 ├── tracedecay-application/     # commands, queries, workflows, ports, typed status/errors
-├── tracedecay-presentation/    # pure sealed-view -> document/terminal/Markdown rendering (plan 21)
-├── tracedecay-api/             # HTTP/SSE and generated public contract artifacts
 └── tracedecay-client/          # official Rust transport client over generated public contracts only
-src/                            # root binary, composition, CLI/MCP, host install/update, V1 adapters
+src/                            # root binary/composition, CLI/MCP/daemon/install/update, V1 adapters
+└── v2/
+    ├── hooks/                  # private bounded host event/delivery adapter (plan 07)
+    ├── host_deploy/            # private local probe/stage/apply/activate/verify/repair/remove adapter over compiled bundles; no release publication
+    ├── presentation/           # private sealed-view -> document/terminal/Markdown renderer (plan 21)
+    └── api/                    # private Axum HTTP/SSE/OpenAPI host adapter (plan 10)
 dashboard/                      # workbench using generated TypeScript client
 packages/tracedecay-client/     # official TypeScript client independent of dashboard state
 python/tracedecay-client/       # official typed sync/async Python client
 ```
 
-Do not create a generic `core`, `common`, `utils`, `services`, or `plugin` crate. Shared code moves to the crate that owns its invariant. A new crate requires:
+The target contains at most 11 Rust packages including root and `tracedecay-client`. Plans 07, 10, 21, and 27 retain separate design documents because hook, API, presentation, and cross-host bundle contracts need independent ownership/tests, but host-bundle compilation remains a `tracedecay-tool-catalog` module and deployment remains a root-private module; neither becomes a separately published Rust package. Do not create a generic `core`, `common`, `utils`, `services`, `plugin`, or `host-bundles` crate. Shared code moves to the package/module that owns its invariant. A new package requires:
 
-- at least two real consumers;
+- at least two independent production consumers **or** a demonstrated optional-heavy, deployment, publication, or public-client dependency firewall;
 - a coherent domain or deployment boundary;
 - a dependency direction that reduces, not hides, cycles;
 - public contract and non-goals;
@@ -322,7 +357,6 @@ flowchart TD
     Q["tracedecay-query"] --> D
     P["tracedecay-policy"] --> D
     T["tracedecay-tool-catalog"] --> D
-    H["tracedecay-hooks"] --> D
     A["tracedecay-application"] --> D
     A --> S
     A --> C
@@ -330,32 +364,40 @@ flowchart TD
     A --> Q
     A --> P
     A --> T
-    H --> A
-    PR["tracedecay-presentation"] --> A
-    PR --> D
-    API["tracedecay-api"] --> A
-    API --> D
-    API --> T
     CONTRACT["generated public contracts + ApiProblem"]
-    API --> CONTRACT
     CLIENT["tracedecay-client"] --> CONTRACT
     R["root composition and adapters"] --> A
-    R --> API
     R --> S
     R --> C
     R --> J
     R --> CI
     R --> Q
     R --> P
-    R --> H
     R --> T
+    H["root::v2::hooks"] --> A
+    H --> D
+    H --> C
+    H --> T
+    HD["root::v2::host_deploy"] --> A
+    HD --> D
+    HD --> T
+    PR["root::v2::presentation"] --> A
+    PR --> D
+    PR --> T
+    API["root::v2::api"] --> A
+    API --> D
+    API --> T
+    API --> CONTRACT
+    R --> H
+    R --> HD
     R --> PR
+    R --> API
     TS["generated TypeScript client"] --> CONTRACT
     PY["generated Python client"] --> CONTRACT
     UI["dashboard"] --> TS
 ```
 
-These arrows are compile-time import/generation edges, not network calls. `generated public contracts + ApiProblem` is the plan-17 contract-IR output materialized into each client package; it is not a server facade or a new business crate. The Rust `tracedecay-client` may import only those generated request/response/event/problem definitions and its small client-owned transport/pagination/stream runtime. It has no Cargo dependency on `tracedecay-domain`, `tracedecay-store`, `tracedecay-application`, or the server implementation in `tracedecay-api`. The TypeScript and Python clients have the equivalent package boundary.
+These arrows are compile-time import/generation edges, not network calls. The four `root::v2` nodes are module-lint boundaries inside the root package and cannot use root-private internals outside their declared imports. `host_deploy` consumes resolved artifacts from `tracedecay-tool-catalog::host_bundles`; it cannot compile or reinterpret them. `generated public contracts + ApiProblem` is the plan-17 contract-IR output materialized into each client package; it is not a server facade or a new business crate. The Rust `tracedecay-client` may import only those generated request/response/event/problem definitions and its small client-owned transport/pagination/stream runtime. It has no Cargo dependency on `tracedecay-domain`, `tracedecay-store`, `tracedecay-application`, or the root API implementation. The TypeScript and Python clients have the equivalent package boundary.
 
 To preserve testability, repository and executor traits are owned by the consumer: capture owns `ObservationSink`, query owns read capabilities, projectors own projection sinks, and application owns orchestration ports. Concrete cross-crate adapters live in application/root composition, not in the lower-level crates.
 
@@ -363,7 +405,7 @@ To preserve testability, repository and executor traits are owned by the consume
 
 ```mermaid
 flowchart LR
-    RC["Rust/TypeScript/Python client"] -->|"authenticated UDS or loopback HTTP/SSE"| API["tracedecay-api adapter"]
+    RC["Rust/TypeScript/Python client"] -->|"authenticated UDS or loopback HTTP/SSE"| API["root V2 API adapter"]
     UI["dashboard via TypeScript client"] -->|"authenticated HTTP/SSE"| API
     API -->|"generated request + caller context"| A["tracedecay-application"]
     A -->|"typed response/problem/event"| API
@@ -376,7 +418,7 @@ Runtime calls do not create compile dependencies in the opposite direction: appl
 
 ### 6.4 Publication consequences
 
-Plan 12 owns release execution, but its publication manifest must be a topological projection of this DAG: `tracedecay-domain`; then the domain-only implementation crates (`tracedecay-store`, `tracedecay-capture`, `tracedecay-projectors`, `tracedecay-code-index`, `tracedecay-query`, `tracedecay-policy`, and `tracedecay-tool-catalog`); then `tracedecay-application`; then `tracedecay-hooks`, `tracedecay-presentation`, and `tracedecay-api`; then the official `tracedecay-client` from the same frozen generated-contract digest; and finally the root package. Peers in a wave may publish concurrently only when `cargo metadata` and generated-contract edges prove they are independent. Every artifact must become registry-readable with the expected checksum before a dependent wave starts.
+Plan 12 owns release execution, but its publication manifest is generated from `architecture-boundaries.toml` and must be a topological projection of this DAG: `tracedecay-domain`; then the domain-only implementation crates (`tracedecay-store`, `tracedecay-capture`, `tracedecay-projectors`, `tracedecay-code-index`, `tracedecay-query`, `tracedecay-policy`, and `tracedecay-tool-catalog`); then `tracedecay-application`; then the official `tracedecay-client` from the same frozen generated-contract digest and the root package containing private hook/host-deploy/presentation/API modules. After the root artifact is fixed, `tracedecay-tool-catalog::host_bundles` deterministically emits the native host package set and conformance manifests for plan 12's component-atomic marketplace publication; these are release artifacts, not Rust packages. Peers in a wave may publish concurrently only when `cargo metadata` and generated-contract edges prove they are independent. Every artifact must become registry-readable with the expected checksum before a dependent wave starts. No crates.io package is created for a root-only adapter.
 
 ### 6.5 Forbidden edges and capabilities
 
@@ -386,14 +428,18 @@ Plan 12 owns release execution, but its publication manifest must be a topologic
 - Projectors contain no transport, UI, provider discovery, live network, policy decision, or ad hoc ID derivation.
 - Query contains no writes to canonical stores, transport rendering, provider discovery, policy decisions, or ambient CWD resolution.
 - Policy contains no store/network/filesystem/clock/random capability except injected deterministic inputs and bounded pure extension runtimes.
-- Hooks contain no broad graph scan, migration, indexing, automation, remote request, or direct store/query implementation.
+- The root hook module contains no broad graph scan, migration, indexing, automation, remote request, or direct store/query implementation.
 - Tool catalog contains metadata/validation/generation, never use-case execution.
-- API contains no business mutation, SQL, ranking, policy, provider parsing, or V1 fallback.
+- `tracedecay-tool-catalog::host_bundles` is pure: no host/cache/config discovery, filesystem mutation, credential access, network/marketplace call, process launch, install state, or private backup body.
+- Root `v2::host_deploy` contains no capability/workflow/skill/hook/MCP semantics or manifest compiler; it applies signed resolved artifacts through application-owned operations and receipt-bounded I/O only.
+- The root API module contains no business mutation, SQL, ranking, policy, provider parsing, or V1 fallback.
 - Client packages contain no domain/store/application/server imports, SQL, scope resolution, routing, retry invention, scheduler logic, or in-process business calls; they serialize generated contracts and invoke the service at runtime.
 - Root contains no new business rules; new behavior lands in its owning crate/application first.
 - Dashboard contains no private endpoint client, SQL-shaped request, capability-name literal registry, or independent error/status semantics.
 
 CI validates these constraints through `cargo metadata`, import/source scans, feature matrices, compile-fail tests, and a checked dependency policy file.
+
+One checked `architecture-boundaries.toml` is the machine authority for packages/modules, owners, public facades, allowed/forbidden edges, capabilities, stores, release waves, budgets, replaced V1 clusters, and deletion PRs. It generates the dependency-policy file, release DAG, ownership documentation fragments, and scorecard skeleton. Hand-maintained topology copies are explanatory only and CI fails if they drift from the generated fragments.
 
 ## 7. Extension and plugin SPIs
 
@@ -625,6 +671,17 @@ The exact numeric SLOs remain those in owning plans and the master performance s
 
 CI/reporting records file/function/complexity deltas, new public items, new dependencies/features, unsafe blocks, SQL locations, stringly typed IDs, duplicate detectors/resolvers/rankers, and adapter count. A budget violation blocks the slice unless the waiver is reviewed with the architecture owner and has a specific expiry.
 
+### 11.4 Reuse, negative-code, and footprint budgets
+
+- PR 1 freezes `footprint-baseline.json`; every implementation PR emits a comparable delta and classifies work as `parity_replacement`, `net_new_product`, `generated`, `migration_only`, or `test_fixture`.
+- A parity-replacement lane cannot cut over until handwritten live V2 lines are lower than the V1 plus adapter lines it retires. Generated output is reported separately with generator handwritten size and generation time; generated bulk cannot manufacture a favorable ratio.
+- Every new package, public item, dependency/feature, table/index/trigger, background worker, cache, and durable file family names the existing mechanism it replaces or a net-new requirement. Package count is capped at 11 including root/client; a new package requires a reviewed merger alternative and another package removal or ceiling ADR.
+- Rust-scoped duplicate-body scanning gates live V2 production code. Definite duplicates longer than ten lines must be extracted/declarativized/deleted or receive a narrow generated/performance-isolation waiver; unreliable cross-language/TSX similarity signals remain advisory until labeled.
+- `cargo tree -d`, feature unification, artifact-size, idle-RSS/startup, and clean/hot-build reports prevent equivalent dependency stacks or adapter packages from hiding footprint. Default binary and idle RSS target <=1.25x V1, hot rebuild <=1.25x, clean build <=1.5x on the frozen reference machine.
+- Root loses V1 composition and adapter lines monotonically after each cutover. A wrapper around unchanged V1 code counts as adapter debt, not deleted code.
+- Data footprint reports canonical versus derived bytes, store/file/table counts, graph pack reuse, index generations, cache/sidecar families, and migration amplification. A new representation must state its source lineage, rebuild path, reuse/deduplication, retention, and bytes-at-current/10x scale.
+- Reuse is rejected when it would erase domain invariants, add optional-heavy dependencies to common paths, or create high fan-in/public-API instability. Such a decision is recorded as `retain` in `reuse-dispositions.json`, not silently duplicated.
+
 ## 12. Strangler migration and mandatory deletion schedule
 
 ### 12.1 Anti-corruption adapter contract
@@ -706,6 +763,13 @@ For split identity/store/session/graph cases:
 | Error/status/config parity | Registered variants with mappings on all supported surfaces | 100% |
 | Dependency cycles/forbidden imports | Violations in workspace/module graph | 0 |
 | Complexity debt | Non-waived hard file/function/complexity violations introduced by V2 | 0 |
+| Rust package count | Published/workspace Rust packages including root and official client | <=11; no package for root-only adapters |
+| Negative-code parity | Cut-over parity lanes whose handwritten V2 is not smaller than retired V1+adapter code | 0 non-waived |
+| Definite duplicate bodies | Live V2 production pairs >10 lines classified definite by the Rust-scoped labeled scanner | 0 non-waived |
+| Infrastructure engine count | Unregistered registry/encoder/projector/operation/host-install/extractor-driver/render/page/problem engines | 0 |
+| Generated binding coverage | Mechanical public bindings/schemas/docs emitted from registered manifests | 100%; handwritten business behavior excluded |
+| Dependency and artifact footprint | Equivalent dependency stacks, unjustified features, or root-only published adapter artifacts | 0 |
+| Runtime/build footprint | Default binary/RSS/hot-build/clean-build versus frozen V1 | <=1.25x / <=1.25x / <=1.5x |
 | Replayability | Policy/query/capture cases with pinned artifacts and declared substitutions | 100% for supported exact paths |
 | Coverage truth | Responses/status that omit required partial/stale/unknown declarations | 0 known cases |
 | Hook budget conformance | Hook points meeting plan 07's canonical-path notification/prompt-evaluation p95 budgets | 100% |
@@ -734,7 +798,9 @@ Add deterministic tests/tools for:
 - semantic conformance across application, CLI, MCP, HTTP, SDKs, hooks, and dashboard client;
 - split-store identity reconciliation inspect/plan/start/recover/idempotency;
 - cross-repo/worktree/ref scope and graph/search routing;
-- file/function/complexity/public-API/dependency budget deltas.
+- file/function/complexity/public-API/dependency budget deltas;
+- architecture-manifest drift, package ceiling/admission, generated-versus-handwritten lines, negative-code disposition, duplicate-body clusters, dependency duplication/features, table/worker/artifact counts, binary/RSS/startup/build and data-footprint deltas;
+- exactly one registry substrate, canonical encoder/digest kernel, projection runtime, operation substrate, hermetic experiment harness, host installer, extractor driver, graph/timeline/metric visualization envelope, linked `VisualizationFrame`, page/problem envelope, and presentation renderer.
 
 ### 13.3 Architecture observatory
 
@@ -746,6 +812,7 @@ Expose a read-only `Architecture`/`Convergence` view in Observatory and CLI/API:
 - projection lag/version/watermarks;
 - generated-contract digest parity;
 - adapter burn-down and live traffic;
+- package/module/dependency graph, reuse-disposition clusters, negative-code ledger, retired/live path counts, schema/worker/artifact footprint, binary/RSS/startup/build/data trends, and every active waiver/expiry;
 - complexity and public-surface trends;
 - reconciliation jobs/receipts and blockers;
 - exact retrieval anchors to safe evidence and plan 14 `FM-###` failure rows.
@@ -759,7 +826,8 @@ These slices are program gates mapped into the master plan’s PRs, not a compet
 ### C0 — Phase 0 architecture inventory and ownership lock (`PR 1`, `PR 3`)
 
 - Generate the inventories in Section 2.3 from the accepted master base.
-- Add ADRs for canonical planes, ownership, DAG, config/error/status governance, extension tiers, complexity budgets, and adapter expiry.
+- Author and lock checked `architecture-boundaries.toml`, then generate its DAG/owner/release/deletion reports; record package-admission/merger decisions, the <=11-package ceiling, and the root-private hook/presentation/API module boundaries.
+- Add ADRs for canonical planes, ownership, DAG, config/error/status governance, shared mechanism map, extension tiers, complexity/negative-code/footprint budgets, and adapter expiry.
 - Baseline convergence scorecard and historical failure links (plan 14 `FM-###` row IDs).
 - Freeze representative semantic parity fixtures without private content.
 - Import #425's table-disposition/collision/canonical-path/holder/reservation/dual-backup/confirmation/ledger/remapped-edge/marker/doctor inventory as the V1 reconciliation seam and assign each behavior one V2 owner and deletion gate.
@@ -795,6 +863,7 @@ These slices are program gates mapped into the master plan’s PRs, not a compet
 ### C5 — One capability and policy runtime (`PR 22A`, `PR 23 series`)
 
 - Generate all public bindings from the capability catalog.
+- Add the pure `tracedecay-tool-catalog::host_bundles` compiler over that same catalog/`HostIntegrationManifestV1`; generate host package/component trees and capability/difference/conformance artifacts without host I/O or another package.
 - Move hints/retrieval/correlation/coordination/curation/scheduler/memory decisions into versioned pure evaluators.
 - Run shadow/calibration/replay gates; delete replaced condition stacks.
 - Gate: live and lab evaluations share code, but labs cannot apply effects or pollute analytics.
@@ -803,6 +872,7 @@ These slices are program gates mapped into the master plan’s PRs, not a compet
 
 - Move public use cases, remediation, jobs, status, config, access, idempotency, and audit into application handlers.
 - Bind CLI, MCP, HTTP/SSE, SDKs, and hooks as thin adapters.
+- Bind root-private `v2::host_deploy` to application-owned integration operations and compiler-resolved signed artifacts; it owns narrow host I/O/compensation only and cannot reinterpret host-bundle semantics.
 - Run semantic transport conformance and current-version handshake tests.
 - Gate: no public transport owns SQL, scope resolution, ranking, policy, or business mutation.
 
@@ -824,7 +894,9 @@ These slices are program gates mapped into the master plan’s PRs, not a compet
 ### C9 — Delete V1 and close entropy budget (`PR 37`)
 
 - Remove V1 routes/adapters/writers/readers/stores eligible for retirement, obsolete flags/config/docs/tests/dependencies, and expired waivers.
+- In PR 37K, remove copied per-host installer/config/manifest fragments after generated-bundle parity; preserve every foreign cache/config/backup/unmanaged package and any path without receipt ownership.
 - Regenerate inventory and scorecard from the final tree/runtime manifests.
+- Prove every parity lane is net-negative handwritten code, all named duplicate/infrastructure clusters are deleted or narrowly waived, package/artifact/dependency/table/worker/runtime/build/data budgets pass, and root-only adapters never became published packages.
 - Archive only minimal redacted evidence, manifests, benchmark/calibration/parity/privacy/reconciliation/rollback receipts.
 - Gate: every scorecard target passes and no active use case depends on V1 code or a compatibility adapter.
 
@@ -847,6 +919,9 @@ These slices are program gates mapped into the master plan’s PRs, not a compet
 | Policy centralization becomes a god engine | Independent pure evaluators under bundle registry; application owns effects; no I/O in policy |
 | Redaction unification destroys useful evidence | Typed classification, marker/quarantine policy, false-positive adjudication, receipts, synthetic regression corpus |
 | Complexity metrics encourage superficial splitting | Pair numeric budgets with responsibility/ownership review and prohibit continuation/helper dumping grounds |
+| Fewer packages recreate the root monolith | Collapse only root-only adapters; preserve core dependency firewalls, enforce private module import lints, and keep independent contract/performance/conformance tests |
+| Reuse creates a generic god kernel | Reuse stable mechanics only; owners retain domain state/admission, ports remain consumer-owned, and fan-in/public-item/downstream-rebuild budgets gate the domain/application facades |
+| Generated code hides generator complexity | Report generated and handwritten lines separately, gate generator size/time, diff generated artifacts, and never count generated bulk as negative code |
 | Open PR/master changes invalidate inventory | Refresh base and open PR state before each slice; manifests pin commit/catalog/schema digests |
 
 ## 16. Definition of done
@@ -865,7 +940,10 @@ These slices are program gates mapped into the master plan’s PRs, not a compet
 - [ ] Redaction is one mandatory typed boundary; no optional/provider/memory/output-specific path can bypass it.
 - [ ] Extension SPIs are bounded, versioned, budgeted, provenance-rich, sandboxed by trust tier, and incapable of bypassing scope/privacy/effect rules.
 - [ ] Crate dependency DAG has zero cycles and zero non-waived forbidden edges.
+- [ ] Workspace contains at most 11 Rust packages including root/client; hook, presentation, and API adapters are private root modules with independent lint/test boundaries and no published artifacts.
 - [ ] File/function/complexity/public-API budgets have no non-waived V2-default violations.
+- [ ] Every parity-replacement lane is net-negative handwritten code; generated output is separately accounted; default binary/RSS/hot/clean-build gates pass.
+- [ ] The reuse-disposition ledger closes the current host-installer, extractor, registry, query/ranking, operation, projection, rendering/envelope, dashboard-client, and conformance-test clusters with no unregistered infrastructure engine or definite live duplicate body >10 lines.
 - [ ] PR 37 completes with zero live compatibility adapters; every waiver has an expiry that precedes PR 37; expired waivers block CI. Each retired adapter's ledger row links its deletion PR, and any earlier bounded rollback obligation was discharged before PR 37, never carried past it.
 - [ ] Generated schema/catalog/client/docs artifacts are reproducible, privacy-scanned, and current with the binary handshake.
 - [ ] Convergence scorecard reaches every hard target; critical privacy/durability/identity/coverage gates cannot be averaged away.

@@ -1,8 +1,8 @@
 # TraceDecay V2 Observability, Accounting, and Usage Plan
 
-**Goal:** Own the Observability and Accounting bounded context (master §5.2 #12) end to end: usage/cost/savings accounting events, ingest/projection lag, data-quality metrics, denominator and unknown-population semantics, cap/truncation telemetry with retrieval anchors, per-capability adoption analytics, hint outcome rollups, SLO monitors, and the Observatory/Costs data contracts — so that every number TraceDecay shows about itself declares its population, horizon, cap, watermark, and unknown state, and no misleading zero survives.
+**Goal:** Own the Observability and Accounting bounded context (master §5.2 #12) end to end: usage/cost/savings accounting events, ingest/projection lag, data-quality metrics, denominator and unknown-population semantics, cap/truncation telemetry with retrieval anchors, per-capability adoption analytics, hint outcome rollups, autonomous-automation admission/useful-work metrics, SLO monitors, and the Observatory/Costs data contracts — so that every number TraceDecay shows about itself declares its population, horizon, cap, watermark, and unknown state, and no misleading zero survives.
 
-**Architecture:** Accounting facts are ordinary canonical events projected by plan 04's `accounting_v1`/`operations_v1`/`all_scope_rollup_v1`; this plan defines their payload contracts, the versioned metric-descriptor registry every exposed metric must register in, the denominator-safe rollup tables, and the SLO monitors sampled from latency events and projector checkpoints. Plan 05 serves the read models, plan 09/10 expose them as use cases and HTTP reads, plan 11's Observatory and Costs workspaces render the typed view models, and plan 20's configuration registry owns every tunable. This plan expands master PR 22 — currently four lines for the thinnest of the fifteen bounded contexts — into owned slices with schemas and gates.
+**Architecture:** Accounting facts are ordinary canonical events projected by plan 04's `accounting_v1`/`operations_v1`/`all_scope_rollup_v1`; this plan defines their payload contracts, the versioned metric-descriptor registry every exposed metric must register in, the denominator-safe rollup tables, and the SLO monitors sampled from latency events and projector checkpoints. Automation admission metrics consume plan 01/02's dirty-scope, cursor, admission, operation, terminal-outcome, and effect truth through the same descriptors and rollups; they do not add a scheduler telemetry log, fake run rows, or another aggregation subsystem. Plan 05 serves the read models, plan 09/10 expose them as use cases and HTTP reads, plan 11's Observatory and Costs workspaces render the typed view models, and plan 20's configuration registry owns every tunable. This plan expands master PR 22 — currently four lines for the thinnest of the fifteen bounded contexts — into owned slices with schemas and gates.
 
 **Tech Stack:** Rust workspace; `tracedecay-domain` accounting/metric contracts; projections and rollups over SQLite/WAL through plan 02 store ports; generated metric-descriptor registry artifacts; property, differential, copied-store, and misreporting-lint tests.
 
@@ -18,7 +18,9 @@ The binding evidence is V1's own telemetry failing its user: analytics `message_
 - Measure ingest and projection lag from capture watermarks and plan 04 checkpoints as queryable time series with per-shard vectors, not a single global gauge.
 - Emit cap/truncation telemetry wherever a limit changes an answer, carrying `RetrievalAnchorId` (ID-only, per plan 01's anchor rule) so a truncated population can be recovered exactly.
 - Roll up per-capability adoption across hook/MCP/CLI/API/dashboard/automation surfaces with explicit eligible-population denominators, making the 59,618-vs-522 asymmetry a measurable, drillable fact instead of a one-off audit.
+- Measure cross-host bundle adoption with bounded host-profile/surface/component-kind/install-scope/MCP-registration/profile dimensions and a strict eligibility funnel: exact host support, signed package installed, component enabled, health/conformance current, and caller authorized. Bundle versions, commits, digests, locators, cache paths, and host instances are drill-down/boundary evidence only, never metric labels.
 - Consume plan 06 §10's `HintOutcomeRecordV1` for hint outcome rollups by policy version, category, and horizon — the join that turns "1,182 emitted / three acted" into an attributable time series.
+- Make autonomous work prove it is event-driven and useful: measure relevant frontier advances, dirty-scope age/lag, admissions and skips, evidence-to-run latency, effect/`NoChange` yield, retry recovery, prevented self-triggers, and honestly qualified model/tool/token/cost work avoided; alert on stalled dirty work or any repeated-terminal-input run.
 - Monitor the master §26 operational SLOs continuously: notification-hook p95 ≤ 10 ms and prompt-evaluation-hook p95 ≤ 25 ms with ≤ 14 ms evaluation stage (master §5.3's budgets with plan 06's stage split), ingest append p95 ≤ 20 ms, projected visibility p95 ≤ 2 s, scoped FTS p95 ≤ 150 ms, and the query/timeline budgets, with breach records and drill-down.
 - Give plan 11's Observatory and Costs workspaces typed data contracts so the browser renders sealed view models and never derives a statistic client-side.
 - Migrate V1 analytics and hook JSONL under plan 12 with per-entity dispositions, and gate cutover on the plan 14 §6 analytics-denominator regression rows.
@@ -36,10 +38,12 @@ The binding evidence is V1's own telemetry failing its user: analytics `message_
 
 This plan is the single owner of accounting/metric semantics in [`19-system-defragmentation-convergence-and-extensibility.md`](19-system-defragmentation-convergence-and-extensibility.md)'s ownership matrix: V1's scattered `src/analytics.rs`, `src/analytics_bridge.rs`, `src/accounting/**`, `src/hooks/analytics.rs`, and dashboard-side counting converge on one event vocabulary, one descriptor registry, and one rollup family. It consumes contracts from [`01-domain-crate.md`](01-domain-crate.md), storage from [`02-store-crate.md`](02-store-crate.md), projection execution from [`04-projectors-crate.md`](04-projectors-crate.md), queries from [`05-query-crate.md`](05-query-crate.md), outcome records from [`06-policy-crate.md`](06-policy-crate.md) §10, configuration from [`20-configuration-control-plane.md`](20-configuration-control-plane.md), and renders through [`11-dashboard-frontend.md`](11-dashboard-frontend.md) §13.7/§13.8 and [`21-cli-mcp-tool-surface-and-output-unification.md`](21-cli-mcp-tool-surface-and-output-unification.md) sealed views.
 
+The metric registry reuses plan 01's `RegistryManifestV1` infrastructure for identity/version/owner/schema/deprecation/cross-reference/digest and its `CanonicalEncode` kernel for dimension tuples and descriptor artifacts. This plan owns metric populations, units, dimensions, denominators, horizons, caps, and SLO semantics; it does not build another generic registry loader, canonicalizer, or drift engine. Accounting reducers register as plan-04 `ProjectionSpecV1` implementations and reuse its lease/checkpoint/dead-letter/rebuild runtime.
+
 | Boundary | Contract |
 |---|---|
-| Enters | Canonical usage/latency/cost events, hint outcome records, projector checkpoints/watermarks, capture coverage, dead letters, cap events, pricing/config descriptors, and V1 analytics migration rows. |
-| Exits | Metric descriptor registry artifacts, denominator-safe rollup rows, SLO window records, adoption/hint-outcome/data-quality/lag time series, cap-truncation telemetry, and typed Observatory/Costs view models. |
+| Enters | Canonical usage/latency/cost events, hint outcome records, automation dirty-scope/cursor/admission/run/terminal/effect records, projector checkpoints/watermarks, capture coverage, dead letters, cap events, pricing/config descriptors, and V1 analytics migration rows. |
+| Exits | Metric descriptor registry artifacts, one denominator-safe rollup family, SLO window records, registered adoption/hint-outcome/task-scheduler/automation-admission/data-quality/lag series, cap-truncation telemetry, and application-owned Observatory/Costs view inputs. |
 | Upstream owner | Domain owns types; capture/projectors own event truth and execution; policy owns outcome semantics; configuration owns tunables and pricing tables. |
 | Downstream owner | Query serves; application authorizes; API/CLI/MCP/dashboard render sealed views; no surface computes a ratio, percentage, or "savings" a registered descriptor does not define. |
 | Extension seam | A new metric registers a descriptor (population/denominator/horizon/cap/watermark/unknown semantics) plus a rollup owner and fixture; an unregistered metric cannot be rendered on any surface. |
@@ -51,18 +55,20 @@ This plan is the single owner of accounting/metric semantics in [`19-system-defr
 ### Consumes
 
 - `tracedecay-domain`: `EntityRef`, `CanonicalEventV1`, `VectorWatermark`, `CoverageReportV1`, `RetrievalAnchorId`, `ScopeSelectorV2`, sensitivity/retention classes, and the accounting/metric types this plan adds to the domain crate.
-- Plan 04: `accounting_v1`/`operations_v1`/`all_scope_rollup_v1` projector execution, checkpoints and lag-visible outbox positions, dead-letter counts, and the `read_models/{facets,timeline,observatory}` projector family for Observatory view models.
+- Plan 04: `accounting_v1`/`operations_v1`/`all_scope_rollup_v1` projector execution, checkpoints and lag-visible outbox positions, dead-letter counts, and persisted `read_models/observatory` metric/SLO/lag rows. Projectors do not own transport-facing Observatory panel models.
 - Plan 06 §10: `HintOutcomeRecordV1` rows (stored per plan 02's hint state/outcome tables) with terminal states, horizons, and attribution evidence.
 - Plan 05: list intents, aggregate reads, frozen-snapshot cursors, and `CoverageReportV1` on every answer this plan's surfaces serve.
 - Plan 20: typed descriptors for sampling windows, rollup retention, SLO thresholds, pricing table versions, and Observatory refresh cadence; no hidden tunable.
 - Plan 24: canonical `ExecutorAdapterKindV1` and `WorkItemKindV1` dimensions plus task lease/liveness/scheduler events; accounting normalizes and aggregates them but does not define executor or task semantics.
+- Plan 01 owns the opaque `HostProfileId`, `HostSurfaceKindV1`, `HostInstallScopeV1`, `McpLogicalRegistrationId`, and `McpSurfaceProfileId` value types needed by domain/accounting contracts. Plan 08 owns the closed surface/registration/profile specs and budgets; plan 27 owns signed deployment state, registered component/surface evidence, capability-probe/difference/conformance snapshots, health, and authorization evidence. Accounting projects bounded adoption dimensions and the eligibility denominator; it does not infer install state from cache paths or define host capability or MCP-profile semantics.
+- Plans 01/02/04/09: canonical `AutomationInputContractV1`, `AutomationInputManifestV1`, `AutomationTriggerClassV1`, `AutomationReevaluationPolicyV1`, `AutomationDirtyReasonV1`, `AutomationSkipReasonV1`, `AutomationDeferReasonV1`, `AutomationTerminalOutcomeV1`, `AutomationSkipEpisodeV1`, dirty generations/frontiers, scope cursors, admission receipts, generic operation lifecycle, terminal effects, and atomic cursor advances; accounting observes them but never decides admission or synthesizes runs.
 - Plan 03/07: capture and hook latency/coverage metrics (spool depth, ack lag, backpressure, budget exhaustion) as sanitized observations.
 
 ### Produces
 
 - The generated metric-descriptor registry (artifact + catalog rows) and the domain accounting/metric contract modules.
-- Rollup, SLO, adoption, hint-outcome, data-quality, lag, and cap-truncation table schemas (G4, below) and their projector requirements.
-- Semantic Observatory/Costs view models owned by plan 09, consumed by plan 11, and rendered by the mandatory plan 21 presentation crate.
+- One generic rollup, SLO, lag, sample/evidence, and cap-truncation schema family (G4, below) and its projector requirements; adoption, hint outcomes, task/scheduler, and data quality are registered metric IDs/dimensions, not parallel wide tables.
+- Projection rows consumed by plan 09's semantic Observatory/Costs view assemblers, then plan 11 and root plan-21 presentation renderers.
 - Migration parity manifests for V1 analytics/hook JSONL with plan 12 dispositions.
 - No canonical event of its own invention: every accounting event family is registered in plan 01/04's registries like any other event.
 
@@ -70,17 +76,18 @@ This plan is the single owner of accounting/metric semantics in [`19-system-defr
 
 | File/artifact | Owner | Responsibility |
 |---|---|---|
-| `crates/tracedecay-domain/src/accounting/{mod,events,metrics,slo}.rs` | This plan, under plan 01's crate conventions | `AccountingEventKind`, `MetricDescriptorV1`, `PopulationSpecV1`, `DenominatorState`, `MetricPointV1`, `SloDescriptorV1`, `SavingsMethodologyV1`. |
+| `crates/tracedecay-domain/src/accounting/{mod,events,metrics,slo}.rs` | This plan, under plan 01's crate conventions | `AccountingEventKind`, `MetricDescriptorV1`, `PopulationSpecV1`, `DenominatorState`, `MetricPointV1`, annotated `MetricSeriesViewV1`, `SloDescriptorV1`, `SavingsMethodologyV1`. |
 | `crates/tracedecay-projectors/src/accounting.rs` | Plan 04 file; contract fixed here | Usage/cost/savings ledgers, denominator-aware rows, idempotency by source event. |
 | `crates/tracedecay-projectors/src/aggregates.rs` | Plan 04 file; contract fixed here | Windowed rollups with full source vectors; All-scope separation. |
-| `crates/tracedecay-projectors/src/read_models/observatory.rs` | Plan 04's read-model family; view models specified here | `ObservatoryOverviewV1`, `CostsPanelV1`, `AdoptionPanelV1`, `SloPanelV1`, `DataQualityPanelV1`. |
+| `crates/tracedecay-projectors/src/read_models/observatory.rs` | Plan 04's read-model family | Persisted `MetricProjectionRowV1`/SLO/lag rows only; no transport-facing panel model. |
 | `crates/tracedecay-query` list/aggregate intents | Plan 05 | Metric/rollup/SLO/adoption reads with cursors, coverage, and scope. |
-| `crates/tracedecay-application/src/usecases/` accounting reads | Plan 09 §9.4 inventory | `accounting.usage`, `accounting.costs`, `accounting.adoption`, `observability.slo`, `observability.lag`, `observability.data_quality` use cases. |
+| `crates/tracedecay-application/src/features/{accounting,observatory}/` | Plan 09 §9.4 inventory | `accounting.usage`, `accounting.costs`, `accounting.adoption`, `observability.slo`, `observability.lag`, `observability.data_quality` use cases and sealed `Observatory*ViewV1` assembly. |
 | HTTP reads under domain workspaces | Plan 10 §8.4 | Observatory/Costs routes serving the view models; SSE lag/SLO deltas per plan 05 §13. |
 | `generated/metric-registry.{json,md}` | This plan's generator, alongside plan 08's catalog artifacts | Frozen descriptor inventory; drift gate against rendered surfaces. |
-| Dashboard `features/observatory`, `features/costs` | Plan 11 §13.7/§13.8 | Rendering only; no client-side statistic derivation. |
+| Dashboard `app/src/features/{observatory,costs}` | Plan 11 §13.7/§13.8 | Rendering only; no client-side statistic derivation. |
 | `crates/tracedecay-projectors/tests/accounting_semantics.rs` | This plan | Denominator/unknown/cap/watermark misreporting suite. |
-| `crates/tracedecay-projectors/tests/slo_adoption_suite.rs` | This plan | SLO windows, adoption denominators, hint-outcome rollups. |
+| `crates/tracedecay-projectors/tests/slo_adoption_suite.rs` | This plan | SLO windows, adoption denominators, hint-outcome and automation-admission rollups. |
+| `crates/tracedecay-projectors/tests/automation_admission_observability.rs` | This plan | Admission/frontier/yield/avoidance invariants and deterministic concurrency/fault scenarios. |
 | `tests/analytics_migration_parity.rs` (root) | This plan with plan 12 | V1 analytics/hook JSONL parity and dispositions. |
 
 ## Contract inventory and fixed signatures
@@ -113,6 +120,7 @@ pub enum UnknownPopulationReason {
     SourceNotBackfilled,
     CoverageIncomplete,
     DescriptorUnavailable,
+    BaselineUnavailable,
     PricingUnavailable,
     AuthorizationFiltered,
     CorruptOrQuarantined,
@@ -133,12 +141,27 @@ pub enum MetricDimensionKeyV1 {
     Model,
     UseCase,
     Surface,
+    HostProfile,
+    HostSurface,
+    HostComponentKind,
+    HostInstallScope,
+    McpRegistration,
+    McpProfile,
     Projector,
     ExecutorAdapter,
     WorkItemKind,
+    AutomationTriggerClass,
+    AutomationAdmissionDisposition,
+    AutomationSkipReason,
+    AutomationDeferReason,
+    AutomationReevaluationPolicy,
+    AutomationTerminalOutcome,
     FailureClass,
     Sensitivity,
 }
+
+pub enum AutomationAdmissionDispositionClassV1 { Admitted, Skipped, Deferred }
+pub enum AutomationReevaluationPolicyClassV1 { FutureEvidenceOnly, ReevaluateDirtyScopes, BoundedHistoricalWindow }
 
 pub struct ModelDimensionRefV1 {
     pub provider: ProviderId,
@@ -164,9 +187,21 @@ pub struct MetricDimensionSetV1 {
     pub model: Option<ModelDimensionRefV1>,
     pub use_case: Option<UseCaseId>,
     pub surface: Option<SurfaceKind>,
+    pub host_profile: Option<HostProfileId>,
+    pub host_surface: Option<HostSurfaceKindV1>,
+    pub host_component_kind: Option<RegistryEntryId>,
+    pub host_install_scope: Option<HostInstallScopeV1>,
+    pub mcp_registration: Option<McpLogicalRegistrationId>,
+    pub mcp_profile: Option<McpSurfaceProfileId>,
     pub projector: Option<ProjectorId>,
     pub executor_adapter: Option<ExecutorAdapterKindV1>,
     pub work_item_kind: Option<WorkItemKindV1>,
+    pub automation_trigger_class: Option<AutomationTriggerClassV1>,
+    pub automation_admission_disposition: Option<AutomationAdmissionDispositionClassV1>,
+    pub automation_skip_reason: Option<AutomationSkipReasonV1>,
+    pub automation_defer_reason: Option<AutomationDeferReasonV1>,
+    pub automation_reevaluation_policy: Option<AutomationReevaluationPolicyClassV1>,
+    pub automation_terminal_outcome: Option<AutomationTerminalOutcomeV1>,
     pub failure_class: Option<AccountingFailureClassV1>,
     pub sensitivity: Option<SensitivityClass>,
     pub digest: MetricDimensionDigest,
@@ -225,7 +260,52 @@ pub struct MetricPointV1 {
     pub watermark: VectorWatermark,
     pub cap_events: Vec<CapEventId>,
 }
+
+pub struct MetricThresholdBandV1 {
+    pub lower: Option<MetricValue>,
+    pub upper: Option<MetricValue>,
+    pub state: RegistryEntryId,
+    pub source: ConfigDescriptorRefV1,
+}
+
+pub struct MetricBoundaryMarkerV1 {
+    pub at: UtcMicros,
+    pub kind: RegistryEntryId,
+    pub version_digest: ManifestDigest,
+    pub anchor: RetrievalAnchorId,
+}
+
+pub struct MetricIncidentAnnotationV1 {
+    pub from: UtcMicros,
+    pub to: Option<UtcMicros>,
+    pub kind: RegistryEntryId,
+    pub safe_summary: LogSafeText,
+    pub anchor: RetrievalAnchorId,
+}
+
+pub struct MetricSeriesBaselineRefV1 {
+    pub series_id: EntityId,
+    pub series_digest: ManifestDigest,
+    pub watermark: VectorWatermark,
+    pub coverage: CoverageReportV1,
+}
+
+pub struct MetricSeriesViewV1 {
+    pub series_id: EntityId,
+    pub descriptor: MetricDescriptorV1,
+    pub ordered_points: Vec<MetricPointV1>,
+    pub threshold_bands: Vec<MetricThresholdBandV1>,
+    pub boundary_markers: Vec<MetricBoundaryMarkerV1>, // config/policy/model/catalog/index versions
+    pub incidents: Vec<MetricIncidentAnnotationV1>,    // breach, remediation, deployment, recovery
+    pub comparison_baseline: Option<MetricSeriesBaselineRefV1>,
+    pub uncertainty: DenominatorState,
+    pub coverage: CoverageReportV1,
+    pub drill_down_anchors: Vec<RetrievalAnchorId>,
+    pub series_digest: ManifestDigest,
+}
 ```
+
+`MetricSeriesViewV1` is the one annotated-trend contract. Points retain their exact per-window denominator/cap/watermark state; `uncertainty` summarizes the series envelope but never replaces point truth. Boundary/incident markers name typed version/effect/receipt refs rather than browser-authored labels. A comparison baseline carries its own digest/watermark/coverage and is never rescaled silently. Graph/timeline/chart transport uses plan 09's shared `VisualizationEnvelopeV1<MetricSeriesViewV1>`; the dashboard adds no ECharts-local series model.
 
 ```rust
 pub struct SloDescriptorV1 {
@@ -257,12 +337,18 @@ pub struct CapTruncationRecordV1 {
 
 `SurfaceKind` is plan 08's generated closed vocabulary (`cli`, `mcp`, `http`, `sdk`, `dashboard`, `hook`, `skill`, `automation`, `executor`, `context_scout`, `internal_host`). Accounting consumes its stable generated code/name pair; it does not define an analytics-local enum. This makes direct SDK calls, executor attempts, scout work, host lifecycle, hooks, and human surfaces comparable without collapsing them into `api` or dropping them.
 
-`MetricWindow` is always a non-empty half-open UTC interval. Fixed minute/hour/day/week windows must align to their UTC boundary; `Rolling` width comes from a plan-20 descriptor and is never inferred from request time. `MetricDimensionSetV1.digest` is the domain-separated digest of the canonical field-tag/value encoding in the enum order above. Empty and absent are distinct, each key occurs at most once, a model's provider must equal `provider` when both exist, and a metric point rejects any populated key absent from its descriptor's `allowed_dimensions`. No free-form label, display name, path, prompt, model alias, or failure message can become a dimension; new dimensions require a domain enum/schema version and a cardinality review.
+`MetricWindow` is always a non-empty half-open UTC interval. Fixed minute/hour/day/week windows must align to their UTC boundary; `Rolling` width comes from a plan-20 descriptor and is never inferred from request time. `MetricDimensionSetV1.digest` is the domain-separated digest of the canonical field-tag/value encoding in the enum order above. Empty and absent are distinct, each key occurs at most once, a model's provider must equal `provider` when both exist, and a metric point rejects any populated key absent from its descriptor's `allowed_dimensions`. `AutomationTriggerClassV1`, `AutomationSkipReasonV1`, `AutomationDeferReasonV1`, and `AutomationTerminalOutcomeV1` are imported unchanged from plan 01; the accounting-only disposition class losslessly strips the payload from `Admitted`, `Skipped`, or `Deferred`, and the reevaluation class strips only the bounded-window duration from `AutomationReevaluationPolicyV1` (the exact horizon remains in the boundary marker/evidence). Trigger attribution comes from the frozen job version's `AutomationInputContractV1`, never a heuristic over observed text or dirty reasons. Host adoption uses only plan-27 registry-backed host profile, execution surface, component kind, desired install scope, logical MCP registration, and immutable profile ID. `HostInstanceId`, bundle/component/source version, source commit, manifest/content digest, marketplace locator, cache/config path, package name, and deployment/operation ID are prohibited as dimensions; exact versions and digests appear only in `MetricBoundaryMarkerV1`, the safe integration-state drill-down, and authorized retrieval anchors. No free-form label, display name, path, prompt, model alias, failure message, job ID, or scope ID can become a dimension; task kind uses the registered `UseCase` dimension and exact job/scope identity remains in authorized drill-down evidence. New dimensions require a domain enum/schema version and a cardinality review.
 
 ```rust
 pub struct AdoptionRowV1 {
     pub capability: UseCaseId,
     pub surface: SurfaceKind,
+    pub host_profile: Option<HostProfileId>,
+    pub host_surface: Option<HostSurfaceKindV1>,
+    pub host_component_kind: Option<RegistryEntryId>,
+    pub host_install_scope: Option<HostInstallScopeV1>,
+    pub mcp_registration: Option<McpLogicalRegistrationId>,
+    pub mcp_profile: Option<McpSurfaceProfileId>,
     pub provider: Option<ProviderId>,
     pub invocations: u64,
     pub distinct_sessions: u64,
@@ -344,12 +430,15 @@ Legal renderings per state, enforced across every surface by the shared conforma
 
 ### Per-capability adoption analytics
 
-- Adoption rows key on `(capability_id, surface, provider, scope_digest, window)` with invocation counts, distinct sessions, and an eligible-population denominator (sessions where the capability was installed/available — from plan 08's catalog availability states). The V1 evidence (59,618 hook calls vs 522 sampled MCP tool calls; hook-to-tool adoption "weak and must be measurable by category and session", master §2.1) becomes a standing, segmentable series.
+- Registered adoption metric rows key through `metric_rollups` on capability/use-case, generic surface, the bounded plan-27 host profile/surface/component-kind/install-scope/registration/profile tuple when applicable, provider/model, scope digest, window, and descriptor version. Separate metric IDs cover invocation count, distinct sessions, each eligibility-funnel population, and final eligible-population ratio; there is no `adoption_rollups` schema.
+- A session/Turn is in the adoption denominator only when the frozen evidence for that interval proves all five predicates: the exact host version/surface supports the capability; the required signed package/component is installed; the component or MCP registration/profile is enabled; its binary/daemon handshake plus required stock-host conformance/doctor state is healthy and fresh; and the principal is authorized for the capability/effect ceiling. `supported && installed && enabled && healthy && authorized` is one conjunction, not “installed or available.” A false predicate excludes the unit with its bounded reason; an unavailable/stale/unscanned predicate makes the denominator `Partial` or `Unknown` instead of silently shrinking it.
+- Funnel counts for supported, installed, enabled, healthy, and authorized populations make configuration, trust/reload, health, and grant drop-off visible without changing the adoption numerator. Exact host instance, bundle/package/component version, catalog/integration/difference/conformance digest, source commit, cache path, and marketplace locator resolve only through boundary markers and authorized drill-down anchors, preventing unbounded metric cardinality.
+- The V1 evidence (59,618 hook calls vs 522 sampled MCP tool calls; hook-to-tool adoption "weak and must be measurable by category and session", master §2.1) becomes a standing, segmentable series. An IDE success never fills a CLI/cloud cell, and an installed but disabled/unhealthy/unauthorized companion never inflates eligibility.
 - Tool/fact/skill/automation/query adoption required by master §21 all use the same descriptor + rollup machinery; no bespoke counter paths.
 
 ### Hint outcome rollups
 
-- Source of truth is plan 06 §10's `HintOutcomeRecordV1` (defined there, stored per plan 02's hint outcome tables, projected terminal by plan 04's `policy_hint_v1`). This plan owns only the rollup: counts of eligible/emitted/delivered/observed/acted/ignored/corrected/missed/unresolvable plus every closed `OutcomeTerminalV2` variant per policy version, hint category, horizon bucket, and scope, each with explicit denominators and unresolved-horizon visibility.
+- Source of truth is plan 06 §10's `HintOutcomeRecordV1` (defined there, stored per plan 02's hint outcome tables, projected terminal by plan 04's `policy_hint_v1`). This plan owns only registered metric descriptors/rollups: eligible/emitted/delivered/observed/acted/ignored/corrected/missed/unresolvable plus every closed `OutcomeTerminalV2` variant per policy version, hint category, horizon bucket, and scope, each with explicit denominators and unresolved-horizon visibility. Each lifecycle/terminal value is a metric ID plus bounded dimensions in `metric_rollups`, not a wide `hint_outcome_rollups` column.
 - No adoption "rate" renders without denominator and horizon (plan 14 §4's hint-outcome row); `unresolvable` is a visible bucket, never dropped from the population.
 - The V1 join impossibility (1,182 emitted / three acted, weakly joined across analytics and hook JSONL) is closed by plan 12's migration mapping V1 analytics/hook JSONL into V2 outcome records; PR 33H proves the historical join renders with correct unknown-states for rows whose outcomes are genuinely unattributable.
 - `missed_capability{capability_id}` is an opportunity denominator, not an emitted/delivered/ignored hint. `PreventedDuplicateWork` requires plan-06 linked claim/handoff/scope evidence and is separate from generic `Acted`. `HumanHelpful`, `HumanNotHelpful`, `HumanIncorrect`, `HumanTooLate`, `HumanRepeated`, and `HumanTooVerbose` each retain their own count and feedback-evidence drill-down; no `Human*` value is collapsed into corrected/negative. One record may contribute to its lifecycle stage plus exactly one terminal-variant bucket, never two terminal buckets.
@@ -367,7 +456,48 @@ Plan 24 owns liveness decisions and plan 02 owns attempt/lease/liveness/sentinel
 
 Thrash is a typed derived episode: two or more attempts for one work item within the configured window where a prior attempt had positive liveness or a later stale worker event. It always reports the definition/version/window/evidence; temporal proximity alone cannot blame the scheduler. Cardinality dimensions are bounded to adapter/provider/model/decision class and opaque scope digest—never task title, path, prompt, or raw error.
 
-The projector consumes the closed plan-24 `TaskLivenessEventClassV1` registry through a generated exhaustive match: every variant maps to exactly one primary liveness column and may additionally contribute to explicitly declared orthogonal episode/latency columns. There is no wildcard/default arm. Schema-generation tests fail when plan 24 adds or renames a lease, probe, revocation, replacement, requeue, crash, cancellation, reconciliation, effect-unknown, or terminal class without a column and fixture; unknown imported V1 classes increment a visible `imported_unknown` column and never masquerade as zero.
+The projector consumes the closed plan-24 `TaskLivenessEventClassV1` registry through a generated exhaustive match: every variant maps to exactly one primary registered metric ID and may additionally contribute to explicitly declared orthogonal episode/latency metric IDs. There is no wildcard/default arm. Registry-generation tests fail when plan 24 adds or renames a lease, probe, revocation, replacement, requeue, crash, cancellation, reconciliation, effect-unknown, or terminal class without a descriptor and fixture; unknown imported V1 classes map only to visible `metric.task_liveness.imported_unknown` and never masquerade as zero. Scheduler counters/latencies follow the same rule; no liveness/scheduler wide table or bespoke hydrator exists.
+
+### Autonomous automation admission, efficiency, and evolution-loop health
+
+Plans 01/02/04/06/09 own the automation state machine and admission decision. This plan observes the canonical chain `relevant frontier advance -> dirty generation -> admission disposition -> optional operation/run -> terminal outcome/effect -> atomic consumed-frontier advance` through the existing descriptor, dimension-set, rollup, sample, incident, and retrieval-anchor contracts. There is no `automation_metrics` table, polling ledger, scheduler-local counter, or dashboard-derived statistic. A scheduler tick is neither evidence nor a run.
+
+Definitions are fixed:
+
+- A **relevant frontier advance** is an eligible source event or registered dependency/config selector change admitted by the job version's input contract. Clock passage does not advance an `EvidenceDriven` job; time/external/manual jobs advance only through their typed boundary/source/request frontier, never merely because the scheduler ticked. An unrelated project's activity, an excluded self-origin event, and scheduler/run bookkeeping do not advance it. The projector exhaustively maps plan 01's `AutomationDirtyReasonV1`; an unrecognized reason fails/quarantines projection instead of entering an `other` bucket.
+- A **dirty scope** is one live `(job version, scope digest, dirty generation)` whose current typed trigger frontier is ahead of both the applicable considered and consumed frontiers. A no-relevant/dependency-unchanged/identical-input decision may close its expected generation by advancing considered only; admitted effects/`NoChange` advance considered and consumed. Quiet/backoff/defer/failure closes neither. Entry, coalesced-event count, oldest/newest evidence age, clear, and re-dirty-during-run are metrics; no thread/project identifiers enter a label.
+- **Frontier lag** is not subtraction of opaque vector digests. It reports separately the per-source count/time distance from current eligible frontier to considered and to consumed, plus oldest unconsidered and unconsumed eligible-event age. Missing components yield `Partial`/`Unknown`; considered lag may reach zero after a safe pre-admission skip while consumed lag correctly shows that no run processed it.
+- An **admission decision** is exactly one durable `AutomationAdmissionReceiptV1`. The admitted/skipped/deferred total is counted once without a trigger dimension; the by-trigger view reads the canonical `AutomationInputContractV1.trigger_class` frozen into the input contract/manifest, so `EvidenceDriven`, `TimeDriven`, `ExternalEvent`, and `Manual` rows partition the same total exactly. `use_case` is the registered curator/reflector/skill-writer/evolution-loop kind; exact job/admission/scope IDs are authorized drill-down anchors only.
+- A **skip episode** is plan 01's canonical `AutomationSkipEpisodeV1`: repeated equivalent skip decisions for one work key/reason and the same input-contract/effective-input/current/considered/consumed frontier tuple plus policy/config digests coalesce into first/last evaluated time, evaluation count, and next reconsideration. `IntervalNotElapsed`, `NoRelevantChange`, `IdenticalTerminalInput`, `QuietPeriodActive`, `BelowMinimumDelta`, `DependencyUnchanged`, `LockActive`, `RetryBackoff`, `BudgetUnavailable`, and `Paused` remain separate `AutomationSkipReasonV1` series. `Deferred` receipts are not mislabeled skips: `ActiveWriters`, `ActivityStateUnknown`, `CoverageIncomplete`, `LaunchSnapshotChanged`, and `EffectsRequireReconciliation` remain separate `AutomationDeferReasonV1` series. Coalescing changes storage cardinality, never reason count/duration, and creates neither `automation_runs` nor fake admission receipts where plan 02 deliberately aggregates tick noise.
+- **Evidence-to-run latency** has two named intervals: first unconsumed relevant evidence -> admitted receipt and first unconsumed relevant evidence -> generic operation start. Quiet time and configured backoff remain visible components rather than being removed from the sample; a no-run skip has no zero-duration sample.
+- **Terminal yield** uses terminal admitted runs as its denominator and keeps `EffectsCommitted`, `NoChange`, `FailedRetryable`, `PoisonInputQuarantined`, `FailedTerminal`, and `Cancelled` distinct. `EffectsRequireReconciliation` is a nonterminal operation/automation phase with age and resolution metrics, never a terminal-outcome bucket. Effect yield counts committed effect receipts, not candidate/proposal count. `NoChange` is useful terminal work for cursor advancement but is reported separately so a chronically low-evidence loop cannot look productive; poison and unresolved effects never advance the consumed frontier.
+- **Retry recovery** requires the same effective input digest to move from `FailedRetryable` through the generic operation attempt/backoff/circuit contract to `EffectsCommitted` or `NoChange`; metrics include attempts, time in backoff, recovered/unrecovered population, circuit-open duration, poison-input quarantine entries/exits, effect-reconciliation time, and terminal failure. Circuit/quarantine/reconciliation states come from registered operation/automation recovery records, never inference from silence.
+- **Self-trigger prevention** counts a dependency-mapper exclusion only when the source effect lineage resolves to the same originating job/generation and no registered noncyclic downstream dependency applies. A downstream outcome/feedback event is new evidence, not a prevented self-trigger. Each count retains an ID-only evidence anchor; content never enters the metric.
+- **Dependency/config reevaluation** reports the changed registered channel/digest class, `AutomationReevaluationPolicyV1`, eligible scope population, scopes dirtied, scopes unchanged, and bounded historical horizon. `FutureEvidenceOnly` cannot appear as historical reprocessing; `ReevaluateDirtyScopes` cannot scan clean scopes; `BoundedHistoricalWindow` reports its explicit cap/coverage. Raw component IDs remain anchored evidence, not metric labels.
+- **Work avoided** is honest accounting, not a multiplied skip count. A prevented live-run launch is exact only when `NoRelevantChange`, `IdenticalTerminalInput`, or `DependencyUnchanged` makes that effective input ineligible until a declared frontier/dependency changes. Quiet/minimum-delta/interval/lock/backoff/budget/pause decisions and all `Deferred` states count delayed work and claim zero avoidance because they may run later. Model/tool invocation, token, and priced-cost avoidance is `Known` only from a versioned fixed execution envelope or a recorded comparable-run/replay baseline under `SavingsMethodologyV1`; otherwise that component is `Unknown{BaselineUnavailable}` or `Unknown{PricingUnavailable}`, never zero. Coalesced observations cannot repeatedly claim the same avoided work: one work key/effective-input digest may contribute at most once until its relevant frontier or dependency snapshot changes.
+
+The shared registry seeds these automation families; every row uses `metric_rollups` and optional `metric_sample_sets`:
+
+| Metric family | Population and dimensions | Required semantics |
+|---|---|---|
+| `metric.automation.frontier_advances` / `metric.automation.dirty_scopes` | Eligible dependency advances and live dirty generations by registered use case | Entered/current/cleared/re-dirtied counts; current and consumed vector coverage visible |
+| `metric.automation.frontier_lag` / `metric.automation.dirty_age` | Live dirty scopes per window | Separate current→considered and current→consumed component lag plus oldest ages; never digest arithmetic |
+| `metric.automation.admissions` | Admission receipts by canonical trigger class and admitted/skipped/deferred disposition | Unsegmented total equals trigger and disposition partitions; due time cannot become an evidence-driven trigger |
+| `metric.automation.skip_episodes` / `metric.automation.defer_decisions` | Canonical coalesced skip episodes plus decision counts by exact skip/defer reason | Episode duration/count exposes quiet/no-relevant-change/identical-input and distinct defer states without fake runs |
+| `metric.automation.evidence_to_admission` / `metric.automation.evidence_to_run` | Admitted scopes with known first relevant evidence | p50/p95/p99 samples; skipped scopes excluded from latency denominator |
+| `metric.automation.run_yield` / `metric.automation.effects` | Terminal admitted runs by terminal outcome | `NoChange` and effects shown separately; effects count committed receipts only |
+| `metric.automation.retry_recovery` / `metric.automation.backoff` / `metric.automation.circuit_quarantine` | Retryable effective-input episodes and registered recovery states | Same-input recovery ratio, attempts, delay, circuit/quarantine/reconciliation time, terminal result |
+| `metric.automation.self_trigger_prevented` | Validated same-origin exclusions | Counts once per source effect/job mapping; drill-down anchor required |
+| `metric.automation.reevaluation` | Relevant dependency/config changes under the canonical reevaluation policy | Eligible/dirtied/unchanged scopes and bounded horizon/coverage; irrelevant changes count only as exclusions |
+| `metric.automation.work_avoided` | Unique terminal-suppression work-key/effective-input pairs | Launch/model/tool/token/cost components carry exact methodology, baseline, pricing, and unknown states |
+| `metric.automation.starvation` / `metric.automation.stalled_dirty` | Eligible dirty scopes past fairness/service boundaries | Incident plus age/rank/reason series; paused/backoff/quarantine is classified, not silently omitted |
+| `metric.automation.repeated_input_violation` | Admitted/run effective inputs matching a prior successful/`NoChange` terminal digest without relevant dependency change | Zero-tolerance invariant metric; any point is a blocking incident with anchors to both receipts |
+
+`metric.automation.work_avoided` is a family, not a polymorphic point: separate descriptors ending in `.launches`, `.model_invocations`, `.tool_invocations`, `.tokens`, and `.cost` each declare their own `MetricUnit`, denominator, and methodology/baseline requirements. The UI may group them, but no renderer converts or sums across units.
+
+Starvation and stalled-dirty detection use plan-20 descriptors, not hard-coded dashboard timers. A scope is stalled when its current frontier remains ahead of its consumed frontier beyond the applicable maximum-dirty-age plus scheduler service budget without a classified pause/backoff/circuit/quarantine/coverage reason. Starvation requires an eligible scope to be repeatedly bypassed under the declared oldest-dirty/fair-share order while younger peer scopes are admitted. Every incident records effective configuration, current/consumed watermarks, safe reason, first/last time, and retrieval anchors. Recovery closes the same incident; repeated samples do not page repeatedly.
+
+The zero-tolerance invariant is evaluated before aggregation: if an admitted receipt or run effective-input digest equals the last terminal `EffectsCommitted`/`NoChange` input for the same work key and no registered dependency component changed, projection records `metric.automation.repeated_input_violation`, opens a blocking incident, and preserves both anchors. It does not hide the source run to make the dashboard green. The invariant also rejects double counting one skip as avoided work, clearing a concurrent newer dirty generation, or advancing the consumed frontier after retryable failure, poison-input quarantine, or unresolved effects.
 
 ### SLO monitors
 
@@ -396,19 +526,16 @@ Rollup and telemetry tables are derived, rebuildable state (plan 02's schema-own
 | `metric_descriptors` | `metric_id TEXT`, `version INTEGER`, `unit TEXT`, `population_kind TEXT`, `population_rule TEXT`, `denominator_source TEXT`, `default_horizon TEXT`, `cap_policy TEXT`, `watermark_requirement TEXT`, `unknown_semantics TEXT`, `sensitivity TEXT`, `owner_use_case TEXT NULL`, `allowed_dimension_mask INTEGER NOT NULL`. PK `(metric_id, version)`. Catalog shard; regenerated from the registry artifact; drift against the artifact fails CI. |
 | `usage_ledger` | `row_id TEXT PK (UUIDv7)`, `occurred_day INTEGER NOT NULL`, `provider_id BLOB NULL`, `model_entry_id BLOB NULL`, `model_revision_id BLOB NULL`, `capability_id TEXT NULL`, `surface_code INTEGER NOT NULL`, `catalog_generation INTEGER NOT NULL`, `catalog_digest BLOB NOT NULL`, `session_id BLOB NULL`, `tokens_in INTEGER NULL`, `tokens_out INTEGER NULL`, `tokens_cached INTEGER NULL`, `latency_us INTEGER NULL`, `cost_micros INTEGER NULL`, `pricing_version TEXT NULL`, `methodology_version TEXT NULL`, `source_event_id TEXT NOT NULL`, `watermark BLOB NOT NULL`. Surface/provider/model IDs are generated/canonical; projection validates them against the bound catalog generation and quarantines unknown codes instead of storing labels. UNIQUE `(source_event_id)` (idempotent projection). Indexes `(occurred_day)`, `(capability_id, occurred_day)`, `(surface_code, occurred_day)`, `(provider_id, model_entry_id, occurred_day)`. Volume tracks the hook/tool stream; append-only; retention follows event retention. |
 | `task_execution_usage` | `row_id TEXT PRIMARY KEY REFERENCES usage_ledger(row_id)`, nullable exact refs `initiative_id`, `plan_version_id`, `work_item_id`, `attempt_id`, `executor_registration_id`, plus `adapter_code INTEGER`, `provider_id BLOB`, `model_entry_id BLOB`, `model_revision_id BLOB NULL`, `reasoning_effort_code INTEGER`, `route_manifest_digest BLOB`, `work_item_kind_code INTEGER`, `source_event_id TEXT NOT NULL UNIQUE`. Indexes `(work_item_id, row_id)`, `(attempt_id, row_id)`, `(executor_registration_id, row_id)`, `(provider_id, model_entry_id, reasoning_effort_code, row_id)`. This protected high-cardinality child is the authorized drill-down/join projection for Workload, Executor Fleet, task/attempt/cost, and source-event views. Canonical IDs never enter metric labels or `metric_dimension_sets`; deleting/retiring task evidence follows plan-18 lineage and removes or tombstones this join consistently with the source ledger. |
-| `metric_dimension_sets` | `dimension_digest BLOB(32) PK`, nullable typed columns `provider_id`, `model_ref_blob_id`, `use_case_id`, `surface_code`, `projector_id`, `executor_adapter_code`, `work_item_kind_code`, `failure_class_code`, `sensitivity_code`, plus `canonical_blob_id BLOB NOT NULL`, `registry_digest BLOB(32) NOT NULL`, `catalog_generation INTEGER NOT NULL`, `catalog_digest BLOB(32) NOT NULL`. CHECKs enforce registered closed-enum codes and provider/model consistency; write revalidates every code against the pinned registry/catalog and rehashes canonical bytes. UNIQUE over the canonical typed tuple. No display labels or free-form values. Indexes `(provider_id)`, `(use_case_id, surface_code)`, `(projector_id)`, `(executor_adapter_code, work_item_kind_code)`. Rebuildable with rollups. |
+| `metric_dimension_sets` | `dimension_digest BLOB(32) PK`, nullable typed columns `provider_id`, `model_ref_blob_id`, `use_case_id`, `surface_code`, `projector_id`, `executor_adapter_code`, `work_item_kind_code`, `automation_trigger_class_code`, `automation_admission_disposition_code`, `automation_skip_reason_code`, `automation_defer_reason_code`, `automation_reevaluation_policy_code`, `automation_terminal_outcome_code`, `failure_class_code`, `sensitivity_code`, plus `canonical_blob_id BLOB NOT NULL`, `registry_digest BLOB(32) NOT NULL`, `catalog_generation INTEGER NOT NULL`, `catalog_digest BLOB(32) NOT NULL`. CHECKs enforce registered closed-enum codes and provider/model consistency; automation CHECKs require a skip reason iff disposition is skipped, a defer reason iff deferred, and neither for admitted, while terminal outcome cannot coexist with admission-disposition/skip/defer codes. Write revalidates every code against the pinned registry/catalog and rehashes canonical bytes. UNIQUE over the canonical typed tuple. No display labels or free-form values. Indexes `(provider_id)`, `(use_case_id, surface_code)`, `(projector_id)`, `(executor_adapter_code, work_item_kind_code)`, `(use_case_id, automation_admission_disposition_code, automation_skip_reason_code, automation_defer_reason_code)`, `(automation_reevaluation_policy_code)`, and `(automation_terminal_outcome_code)`. Rebuildable with rollups. |
 | `denominator_states` | `denominator_id BLOB PRIMARY KEY`, `state TEXT CHECK (state IN ('known','capped','partial','unknown')) NOT NULL`, mutually exclusive payload columns `known_value INTEGER NULL`, `observed_value INTEGER NULL`, `cap_value INTEGER NULL`, `partial_watermark_blob_id BLOB NULL`, `reason_set_blob_id BLOB NULL`, `unknown_reason TEXT NULL`, `canonical_digest BLOB(32) NOT NULL UNIQUE`. Exhaustive CHECKs require exactly the payload legal for the state. This is the one physical lowering of `DenominatorState`; every table below references it rather than inventing nullable state/value columns. Rebuild/retention follows the parent rows that reference it. |
 | `metric_rollups` | PK `(metric_id, metric_version, scope_digest, dimension_digest, window_kind, window_start, effective_config_digest)` with FK `dimension_digest -> metric_dimension_sets`; `window_end INTEGER NOT NULL`, `numerator INTEGER NOT NULL`, `denominator_id BLOB NOT NULL REFERENCES denominator_states`, plus mutually exclusive typed value columns `value_kind TEXT NOT NULL`, `value_u64 INTEGER NULL`, `value_ratio_ppm INTEGER NULL`, `value_unknown_reason TEXT NULL`, `effective_config_snapshot_id BLOB NOT NULL`, `effective_config_digest BLOB(32) NOT NULL`, `watermark BLOB NOT NULL`, `built_by TEXT NOT NULL`. Value CHECKs make the row a lossless lowering of `MetricValue`; fixed windows are half-open/aligned, and descriptor unit/dimension masks are checked on projection. A rollup cannot combine children with different effective-config digests; a config boundary creates separate points instead of colliding in the PK. Indexes `(metric_id, dimension_digest, window_start)`, `(scope_digest, window_start)`, and `denominator_id`. Day windows retained 2 years by default (plan 20 descriptor); hour windows 90 days; fully rebuildable. |
 | `slo_window_records` | PK `(slo_id, window_start, effective_config_digest)`; `observed_p50_us INTEGER`, `observed_p95_us INTEGER`, `observed_p99_us INTEGER`, `sample_count INTEGER NOT NULL`, `sample_state TEXT NOT NULL`, `threshold_ref TEXT NOT NULL`, `effective_config_snapshot_id BLOB NOT NULL`, `breach INTEGER NOT NULL`, `breach_reason TEXT NULL`, `watermark BLOB NOT NULL`. Index `(slo_id, breach, window_start)`. A threshold change splits the window rather than retroactively reinterpreting samples. Retained 1 year. |
-| `adoption_rollups` | PK `(capability_id, dimension_digest, scope_digest, window_start)` with FK `dimension_digest -> metric_dimension_sets`; the dimension set carries generated `surface_code` and canonical provider/model IDs. `invocations INTEGER NOT NULL`, `distinct_sessions INTEGER NOT NULL`, `eligible_population_denominator_id BLOB NOT NULL REFERENCES denominator_states`, `watermark BLOB NOT NULL`. Indexes `(capability_id, window_start)`, `(dimension_digest, window_start)`, `eligible_population_denominator_id`. Rebuildable; day windows. |
-| `hint_outcome_rollups` | PK `(policy_version, hint_category, horizon_bucket, scope_digest, window_start)`; lifecycle counts `eligible, emitted, delivered, observed, acted, ignored, corrected, missed_capability, unresolvable` and terminal counts `prevented_duplicate_work, human_helpful, human_not_helpful, human_incorrect, human_too_late, human_repeated, human_too_verbose` all `INTEGER NOT NULL`; `denominator_id BLOB NOT NULL REFERENCES denominator_states`, `watermark BLOB NOT NULL`. Indexes `(policy_version, window_start)`, `denominator_id`. Source rows are plan 06 §10 records; rollups rebuildable; schema-generation tests require one terminal column/mapping per closed `OutcomeTerminalV2` variant. |
-| `task_liveness_rollups` | PK `(dimension_digest, decision_class_code, scope_digest, window_start)` with FK `dimension_digest -> metric_dimension_sets`; the dimension row carries generated executor-adapter/work-item/reasoning codes and canonical provider/model IDs. Counts `lease_issued, heartbeat, alive_extended, expired, fenced, revoked, reclaimed, replacement_started, requeued, probe_positive, probe_negative, probe_unknown, probe_timeout, probe_unsupported, rate_limit_sentinel, deferred_rate_limit, rate_limit_requeued, protocol_violation, crash, stale_write_rejected, zombie_completion_rejected, max_runtime_stop, heartbeat_backstop_stop, cancellation_requested, cancellation_terminal, effect_unknown, reconciliation_started, reconciliation_terminal, terminal_succeeded, terminal_failed, terminal_cancelled, terminal_timed_out, terminal_lost, thrash_episode, imported_unknown` are `INTEGER NOT NULL`; latency histograms/quantile inputs reference bounded `sample_set_id`, plus `definition_version TEXT NOT NULL`, `watermark BLOB NOT NULL`. Indexes `(decision_class_code, window_start)`, `(dimension_digest, window_start)`. Day windows 2 years; rebuildable from plan-02 canonical rows. Generated enum/code fixtures require every plan-24 liveness class to map, reject unknown live codes, and preserve explicitly classified unknown imports. |
-| `scheduler_rollups` | PK `(scheduler_generation, scope_digest, window_start)`; `journal_events, notifications, notifications_coalesced, repair_poll_recoveries, checkpoint_gaps, offers, starts, deferred, no_eligible_executor, fairness_deferrals, starvation_preventions INTEGER NOT NULL`; latency distribution refs for commit→observe, observe→offer, queue age, wakeup error; `watermark BLOB NOT NULL`. Index `(scheduler_generation, window_start)`. Hour windows 90 days/day windows 2 years. |
+| `metric_sample_sets` / `metric_samples` | `metric_sample_sets(sample_set_id BLOB PRIMARY KEY, metric_id TEXT NOT NULL, metric_version INTEGER NOT NULL, scope_digest BLOB NOT NULL, dimension_digest BLOB NOT NULL REFERENCES metric_dimension_sets, window_kind TEXT NOT NULL, window_start INTEGER NOT NULL, effective_config_digest BLOB NOT NULL, sample_method TEXT NOT NULL, population_denominator_id BLOB NOT NULL REFERENCES denominator_states, max_samples INTEGER NOT NULL, watermark BLOB NOT NULL)` with UNIQUE on the metric-rollup key; `metric_samples(sample_set_id BLOB, ordinal INTEGER, value_i64 INTEGER NULL, value_u64 INTEGER NULL, evidence_ref BLOB NULL, PRIMARY KEY(sample_set_id, ordinal))`. CHECKs enforce one typed value, bounded cardinality, and safe opaque evidence refs. Percentile/latency/quality drill-down metrics reference this one family; adoption/hint/task/scheduler counts and ratios need no samples. Rebuild/retention follows the parent descriptor/window. |
 | `cap_truncation_events` | `cap_event_id TEXT PK`, `surface_code INTEGER NOT NULL`, `cap_kind_code INTEGER NOT NULL`, `catalog_generation INTEGER NOT NULL`, `catalog_digest BLOB NOT NULL`, `limit_value INTEGER NOT NULL`, `observed_denominator_id BLOB NOT NULL REFERENCES denominator_states`, `retrieval_anchor_id TEXT NULL`, `occurred_at INTEGER NOT NULL`. Indexes `(surface_code, occurred_at)`, `observed_denominator_id`. Both codes are generated closed catalog values; unknown live codes are rejected/quarantined, never stored as text. The safe, content-free event skeleton is retained until `max(occurred_at + 180 days, latest retention horizon of every referencing rollup)`; with default day rollups that means at least 2 years. Anchor payload availability follows its own retention and may resolve to a tombstone, but the anchor ID/event skeleton stays auditable. FK-restricted cleanup cannot delete a referenced skeleton. No fingerprint/string derived from protected content is stored or rendered. |
 | `metric_rollup_cap_events` | Full parent FK `(metric_id, metric_version, scope_digest, dimension_digest, window_kind, window_start, effective_config_digest) REFERENCES metric_rollups ON DELETE CASCADE` plus `ordinal INTEGER NOT NULL`, `cap_event_id TEXT NOT NULL REFERENCES cap_truncation_events ON DELETE RESTRICT`; PK is the full parent key plus `ordinal`, UNIQUE parent+`cap_event_id`, index `(cap_event_id)`. Parent deletion cascades membership only after the parent horizon; event cleanup then evaluates remaining references. It losslessly lowers `MetricPointV1.cap_events`; `cap_event_count` is the normalized `COUNT(*)` for the full parent key, never a stored counter. Rebuilt/retained with the parent rollup. |
 | `lag_snapshots` | PK `(shard_id, projector_id, sampled_at)`; `outbox_head INTEGER`, `contiguous_sequence INTEGER`, `lag_us INTEGER NOT NULL`, `watermark BLOB NOT NULL`. Index `(projector_id, sampled_at)`. Retained 90 days. |
-| `data_quality_rollups` | PK `(quality_kind, scope_digest, window_start)`; `count INTEGER NOT NULL`, `watermark BLOB NOT NULL`. Retained 1 year; rebuildable from dead letters/coverage/quarantine rows. |
-| `data_quality_rollup_samples` | `(quality_kind, scope_digest, window_start, ordinal) PK`, `sample_ref TEXT NOT NULL`; FK is the composite rollup key and UNIQUE `(quality_kind, scope_digest, window_start, sample_ref)`. Safe opaque IDs only, bounded by the metric descriptor's sample cap, retained/rebuilt with the parent. No delimited reference lists. |
+
+There are deliberately no `adoption_rollups`, `hint_outcome_rollups`, `task_liveness_rollups`, `scheduler_rollups`, `automation_admission_rollups`, or `data_quality_rollups` tables. Their measures are registered `metric_id`s, their bounded labels are `metric_dimension_sets`, their values/denominators are `metric_rollups`, and optional latency/evidence samples use `metric_sample_sets`. This removes six schema/migration/hydrator/index/retention families while preserving typed source ledgers and exhaustive event-to-metric mappings.
 
 ### Seed metric inventory
 
@@ -420,10 +547,11 @@ The registry ships with descriptors for at least the master §21 families; each 
 | `metric.projection.lag` / `metric.projection.dead_letters` | Events per `(shard, projector)` | Checkpoint positions | Blocking vs quarantined dead letters split |
 | `metric.usage.hook_calls` | Hook invocations | Known from ledger | Per-provider/producer segmentation |
 | `metric.usage.tool_calls` | Tool invocations by capability/surface | Known from ledger | Sampled V1 history imports as `Capped` |
-| `metric.adoption.capability` | Sessions with capability available | Plan 08 availability states | `Unknown` before catalog backfill |
+| `metric.adoption.capability` | Distinct sessions/Turns invoking a capability over the final supported + installed + enabled + healthy + authorized population, segmentable by bounded host/surface/component/install/registration/profile codes | Plan 08 catalog plus plan 27 signed deployment, capability/conformance health, and current authorization states | `Partial`/`Unknown` when any eligibility predicate is unavailable, stale, or unscanned; versions/digests remain drill-down only |
 | `metric.hints.outcomes` | Emitted hints per policy version | `HintOutcomeRecordV1` rows | `unresolvable` bucket always visible |
 | `metric.tasks.liveness` / `metric.tasks.thrash` | Attempt/lease/liveness events | Plan-02 canonical attempt/liveness rows | alive-extension, rate-limit, protocol, zombie, and reconciliation never collapsed |
 | `metric.scheduler.latency` / `metric.scheduler.repair` | Scheduler journal/checkpoint windows | Known journal positions | repair-poll recovery visible; lost notifier is not lost work |
+| `metric.automation.*` admission/frontier/yield/recovery/avoidance families | Dirty generations, admission/terminal receipts, and registered recovery/effect records | Exact plan-02 cursors/receipts; baseline-bound for avoided work | Trigger/skip/outcome partitions, current-vs-consumed lag, stalled work, and repeated-input violations remain visible |
 | `metric.cost.tokens` / `metric.cost.spend` | Costed invocations | Priced rows only | `Unknown{unpriced}` for unpriced spans |
 | `metric.savings.cache` | Cache-hit spans with recorded baseline | Baseline events | Refused without methodology binding |
 | `metric.query.latency` / `metric.search.latency` | Query executions per intent family | Known | Safe fingerprints only, no literals |
@@ -435,18 +563,18 @@ The registry ships with descriptors for at least the master §21 families; each 
 
 ```rust
 pub struct ObservatoryOverviewV1 {
-    pub ingest_lag: Vec<MetricPointV1>,
-    pub projection_lag: Vec<MetricPointV1>,
+    pub ingest_lag: Vec<MetricSeriesViewV1>,
+    pub projection_lag: Vec<MetricSeriesViewV1>,
     pub checkpoints: Vec<ProjectorCheckpointViewV1>,
-    pub data_quality: Vec<MetricPointV1>,
+    pub data_quality: Vec<MetricSeriesViewV1>,
     pub slo_breaches: Vec<SloWindowViewV1>,
     pub coverage: CoverageReportV1,
     pub watermark: VectorWatermark,
 }
 
 pub struct CostsPanelV1 {
-    pub usage: Vec<MetricPointV1>,
-    pub spend: Vec<MetricPointV1>,
+    pub usage: Vec<MetricSeriesViewV1>,
+    pub spend: Vec<MetricSeriesViewV1>,
     pub savings: Vec<SavingsRowV1>, // each row names methodology + pricing versions
     pub by_provider_model: Vec<UsageBreakdownRowV1>,
     pub coverage: CoverageReportV1,
@@ -463,7 +591,7 @@ pub struct AdoptionPanelV1 {
 
 pub struct HintOutcomePanelV1 {
     pub rollups: Vec<HintOutcomeRowV1>, // per policy version/category/horizon bucket
-    pub unresolved_horizons: Vec<MetricPointV1>,
+    pub unresolved_horizons: Vec<MetricSeriesViewV1>,
     pub coverage: CoverageReportV1,
     pub watermark: VectorWatermark,
 }
@@ -473,18 +601,29 @@ pub struct SloPanelV1 {
     pub descriptors: Vec<SloDescriptorV1>,
     pub watermark: VectorWatermark,
 }
+
+pub struct AutomationAdmissionPanelV1 {
+    pub frontier_and_dirty: Vec<MetricSeriesViewV1>,
+    pub admissions_and_skips: Vec<MetricSeriesViewV1>,
+    pub latency_and_yield: Vec<MetricSeriesViewV1>,
+    pub recovery_and_avoidance: Vec<MetricSeriesViewV1>,
+    pub open_incidents: Vec<MetricIncidentAnnotationV1>,
+    pub coverage: CoverageReportV1,
+    pub watermark: VectorWatermark,
+}
 ```
 
-- `ObservatoryOverviewV1`: ingest/projection lag series, per-projector checkpoint state, data-quality counts, coverage summaries, SLO breach list — each field a `MetricPointV1` or typed record, never a pre-formatted string. Consumed by plan 11 §13.7 and the plan 04 `read_models/observatory` family.
+- `ObservatoryOverviewV1`: annotated ingest/projection lag series, per-projector checkpoint state, data-quality trends, coverage summaries, SLO breach list — each trend a `MetricSeriesViewV1`, never a pre-formatted string or raw point bag. Plan 09 assembles it from plan-04-persisted `read_models/observatory` rows; plan 11 §13.7 consumes the sealed view.
 - `CostsPanelV1`: usage/cost/savings series by provider/model/capability with pricing/methodology versions visible; satisfies plan 11 §13.8 and the master §15 Costs workspace. A savings figure always names its `SavingsMethodologyV1` version and baseline event class.
 - `AdoptionPanelV1` and `HintOutcomePanelV1`: the adoption and hint rollups above with denominators, horizons, caps, and unresolved buckets; plan 11's "Analytics hints/usage/underused" parity row (exact counts, denominators, sample/caps, policy version, unresolved horizon) binds to these models.
+- `AutomationAdmissionPanelV1`: the exact current-vs-consumed frontier, dirty-scope, admission/skip/defer, evidence-to-run, outcome-yield, recovery/backoff/circuit/quarantine/reconciliation, self-trigger-prevention, and methodology-bound avoided-work series. Its incidents link to the same dirty/admission/run/cursor evidence rendered in plan 11's Automations workspace; it never infers state from missing runs.
 - `SloPanelV1` and `DataQualityPanelV1`: SLO windows with thresholds/sources and quality drill-downs to source events via plan 05 queries.
-- Plan 09 owns these sealed semantic typed views. The mandatory plan 21 `tracedecay-presentation` crate renders them (Markdown-default MCP, canonical JSON on request); CLI `tracedecay analytics`-successor commands and the dashboard consume identical models, closing the V1 class of divergent CLI-vs-MCP analytics answers. Plan 21 may add presentation metadata but cannot redefine metric semantics or duplicate a view model.
-- SSE: lag/SLO/data-quality panels subscribe through plan 05 §13's snapshot/delta contract; no push path invents its own aggregation.
+- Plan 09 owns these sealed semantic typed views. The mandatory root plan-21 `v2::presentation` module renders them (Markdown-default MCP, canonical JSON on request); CLI `tracedecay analytics`-successor commands and the dashboard consume identical models, closing the V1 class of divergent CLI-vs-MCP analytics answers. Plan 21 may add presentation metadata but cannot redefine metric semantics or duplicate a view model.
+- SSE: lag/SLO/data-quality/automation-admission panels subscribe through plan 05 §13's snapshot/delta contract; no push path invents its own aggregation.
 
 ## Configuration
 
-Every tunable is a plan 20 typed descriptor: rollup windows and retention, SLO thresholds (defaulting to master §26/§5.3 values; lowering a threshold below the master gate is legal, raising above it requires the descriptor's declared impact class), sampling caps, lag sampling cadence, pricing table versions, Observatory refresh cadence, and adoption population rules. The metric-descriptor registry generation follows the configuration-metadata direction fixed in plans 20/08: plan 20's registry generator feeds typed descriptors into plan 08's catalog build, and surfaces render only from generated artifacts — this plan adds the metric registry as a parallel generated artifact with the same drift gates, one direction, no second emitter.
+Every tunable is a plan 20 typed descriptor: rollup windows and retention, SLO thresholds (defaulting to master §26/§5.3 values; lowering a threshold below the master gate is legal, raising above it requires the descriptor's declared impact class), sampling caps, lag sampling cadence, pricing table versions, Observatory refresh cadence, adoption population rules, and automation quiet/minimum-delta/max-dirty-age/fairness/backoff/circuit/quarantine/skip-episode windows. Metrics bind the effective configuration snapshot that governed each decision; this plan does not define a second automation threshold. The metric-descriptor registry generation follows the configuration-metadata direction fixed in plans 20/08: plan 20's registry generator feeds typed descriptors into plan 08's catalog build, and surfaces render only from generated artifacts — this plan adds the metric registry as a parallel generated artifact with the same drift gates, one direction, no second emitter.
 
 ## V1 seam map and migration
 
@@ -493,7 +632,7 @@ Every tunable is a plan 20 typed descriptor: rollup windows and retention, SLO t
 | `src/analytics.rs`, `src/analytics_bridge.rs` | Descriptor registry + `metric_rollups` + plan 05 reads | Ad-hoc counting with silent-zero denominators becomes registered denominator-safe metrics; the `message_count=0` defect class is structurally impossible. |
 | Merged PR #424 `src/global_db.rs`, MCP/dashboard analytics handlers | Plan-26 projector/query/application contracts | Keep aggregate-before-sample and upgrade-safe access-path lessons; replace global-DB bespoke aggregate helpers and surface-specific shaping with registered rollups and one sealed view after parity receipts. |
 | `src/accounting/{classifier,metrics,parser,pricing}.rs` | Domain accounting contracts + `usage_ledger` | Token/cost parsing becomes captured events; pricing becomes versioned config; classification evidence retained. |
-| `src/hooks/analytics.rs`, `src/hooks/hint_outcomes.rs` + hook JSONL | Plan 06 §10 records + `hint_outcome_rollups` | Weak JSONL joins become typed outcome records with horizons; rollups are rebuildable. |
+| `src/hooks/analytics.rs`, `src/hooks/hint_outcomes.rs` + hook JSONL | Plan 06 §10 records + registered `metric_rollups` | Weak JSONL joins become typed outcome records with horizons; descriptor-driven rollups are rebuildable without a hint-specific table. |
 | `src/cost_cmd.rs`, analytics CLI/MCP surfaces | Plan 09 §9.4 use cases + plan 21 sealed views | One computation, every surface; disposition rows in plan 21's inventory. |
 | V1 analytics tables in the global store | Plan 12 migration (PR 33H rows in its inventory) | Historical usage/hint/tool counts import as evidence with `retained \| skipped \| quarantined \| redacted \| deleted` dispositions (plan 12's backfill-manifest vocabulary; plan 12 owns the schema); unattributable rows import with explicit `Unknown` populations. |
 | Dashboard-side counting in V1 views | Plan 11 rendering of sealed models | Client-side statistics deleted; parity via differential fixtures. |
@@ -512,6 +651,12 @@ Migration is coordinated with plan 12's controller (its §14 phases) and gated b
 | Cost without pricing version | Ledger CHECK + projector validation | `cost = Unknown{unpriced}`, never zero or a guess | `unpriced_cost_is_unknown` |
 | Savings without recorded baseline | Methodology validation | Claim refused; data-quality row emitted | `savings_requires_recorded_baseline` |
 | Acted-hint without linked tool event | Plan 06 attribution rules upstream | Rollup counts it `observed`/`unresolvable`, not `acted` | Shared fixture with plan 06 outcome tests |
+| Unchanged scheduler ticks create runs/model calls | Join tick, dirty frontier, admission, operation, and usage ledgers | Record coalesced skip episode; zero runs/model/tool usage | 1,000-unchanged-ticks fixture |
+| Unrelated or self-produced activity dirties a scope | Dependency-mask and effect-lineage mapping receipts | Exclude and count validated self-trigger prevention; do not admit | unrelated-project and self-effect fixtures |
+| Current eligible frontier stays ahead of consumed frontier | Frontier-lag plus max-dirty-age/fairness monitor | Open one anchored stalled/starvation incident; close it on recovery | late-ingress/fairness fixtures |
+| Successful/`NoChange` terminal input admitted again unchanged | Pre-aggregation digest/dependency invariant | Preserve offending records, emit zero-tolerance metric and blocking incident | `repeated_terminal_input_is_never_admitted` |
+| Skip repeatedly claims avoided model/tool/token/cost work | Unique generation/input contribution plus savings methodology validation | Deduplicate launch saving; unknown ungrounded resource/cost components | `avoided_work_requires_unique_input_and_baseline` |
+| Crash separates effect, terminal receipt, and cursor advance | Atomic-boundary reconciliation fixture | Reconcile to exactly one terminal/effect/cursor result; never clear newer dirt | crash-at-every-boundary matrix |
 | Metric rendered without descriptor | Registry drift gate | Surface build fails; no orphan metrics | Generated-artifact drift CI |
 | Content leakage into metrics | Sink firewall + log-safe types | Only safe IDs/fingerprints; violation fails closed | Secret-corpus canary over all telemetry tables |
 
@@ -523,7 +668,7 @@ Migration is coordinated with plan 12's controller (its §14 phases) and gated b
 
 **Files:** create `crates/tracedecay-domain/src/accounting/{mod,events,metrics,slo}.rs`, registry generator under the plan 08 artifact pipeline, `generated/metric-registry.json`; extend domain schema tests.
 
-- [ ] Write failing tests named `every_metric_requires_registered_descriptor`, `denominator_state_is_closed_and_total`, `unknown_never_renders_as_zero`, `capped_rollup_stays_capped_upward`, `partial_propagates_through_windows`, `ratio_type_without_denominator_state_does_not_compile` (compile-fail), `dimension_digest_is_order_independent_and_domain_separated`, `unregistered_dimension_does_not_compile` (compile-fail), `model_dimension_provider_must_match`, `window_is_half_open_and_aligned`, `pricing_binding_is_versioned`, and `savings_requires_recorded_baseline`.
+- [ ] Write failing tests named `every_metric_requires_registered_descriptor`, `denominator_state_is_closed_and_total`, `unknown_never_renders_as_zero`, `capped_rollup_stays_capped_upward`, `partial_propagates_through_windows`, `ratio_type_without_denominator_state_does_not_compile` (compile-fail), `dimension_digest_is_order_independent_and_domain_separated`, `unregistered_dimension_does_not_compile` (compile-fail), `model_dimension_provider_must_match`, `host_adoption_dimensions_are_bounded`, `versions_digests_instances_and_paths_are_not_dimensions`, `automation_trigger_skip_defer_reevaluation_outcome_codes_are_exhaustive`, `canonical_trigger_partition_does_not_double_count`, `window_is_half_open_and_aligned`, `pricing_binding_is_versioned`, and `savings_requires_recorded_baseline`.
 - [ ] Add the fixed signatures above with serde tags `snake_case`; register `AccountingEventKind` families in the schema/predicate registry with sensitivity/retention rules.
 - [ ] Generate the metric-descriptor registry artifact and its drift gate; seed descriptors for every metric named in master §21's list.
 - [ ] Run `cargo test -p tracedecay-domain accounting`; expected: exit 0 and stable registry digest across two generations.
@@ -533,7 +678,7 @@ Migration is coordinated with plan 12's controller (its §14 phases) and gated b
 
 **Ordering:** extends plan 04 PR 22's projector slice; consumes its `accounting_v1`/`operations_v1` outputs.
 
-**Files:** create `crates/tracedecay-projectors/tests/accounting_semantics.rs`; add the projector repository/row contracts and extend `aggregates.rs` plus rollup hydration/query projection for the normalized cap-event join. In the same implementation slice, plan 02's store-owned migration companion lands `usage_ledger`, `metric_dimension_sets`, `denominator_states`, `metric_rollups`, `metric_rollup_cap_events`, `cap_truncation_events`, `lag_snapshots`, and `data_quality_rollups`; projectors never own SQL or open the database.
+**Files:** create `crates/tracedecay-projectors/tests/accounting_semantics.rs`; add the projector repository/row contracts and extend `aggregates.rs` plus rollup hydration/query projection for the normalized cap-event join. In the same implementation slice, plan 02's store-owned migration companion lands `usage_ledger`, `metric_dimension_sets`, `denominator_states`, `metric_rollups`, `metric_sample_sets`, `metric_samples`, `metric_rollup_cap_events`, `cap_truncation_events`, and `lag_snapshots`; projectors never own SQL or open the database.
 
 - [ ] Write failing tests named `ledger_is_idempotent_by_source_event`, `rollup_carries_full_source_vector`, `rollup_never_merges_dimension_sets`, `rollup_recomputes_ratio_instead_of_averaging`, `unknown_child_makes_observed_parent_partial`, `rollup_checked_add_rejects_overflow`, `lag_series_matches_checkpoint_positions`, `dead_letters_appear_in_data_quality`, `cap_event_binds_optional_retrieval_anchor`, `anchor_is_id_only_in_rows`, `cap_event_join_round_trips_exact_order`, `cap_event_count_is_normalized_join_count`, `cap_event_skeleton_outlives_referencing_rollup_horizon`, `referenced_cap_event_cannot_be_collected`, and `all_scope_rollup_requires_complete_vector`.
 - [ ] Implement rollup building inside plan 04's transaction discipline; windows are deterministic and rebuildable; two rebuilds at one watermark produce identical rows.
@@ -541,17 +686,20 @@ Migration is coordinated with plan 12's controller (its §14 phases) and gated b
 - [ ] Run `cargo test -p tracedecay-projectors --test accounting_semantics`; expected: exit 0; replay-twice inserts zero rows.
 - [ ] Commit `feat(projectors): add denominator-safe accounting rollups`.
 
-### PR 22H: SLO monitors, adoption analytics, hint outcome rollups, and savings
+### PR 22H: SLO, adoption, hint-outcome, and automation-admission rollups
 
 **Ordering:** after plan 06's outcome records project (its PR 23-series) and plan 08's availability states exist.
 
-**Files:** create `crates/tracedecay-projectors/tests/slo_adoption_suite.rs`; land `slo_window_records`, `adoption_rollups`, `hint_outcome_rollups` schemas; SLO descriptor seeds; savings methodology v1.
+**Files:** create `crates/tracedecay-projectors/tests/{slo_adoption_suite,automation_admission_observability}.rs`; land `slo_window_records` plus adoption/hint/task/scheduler/automation-admission/data-quality descriptor seeds and exhaustive event-to-metric mappings over the shared rollup/sample tables; add savings methodology v1. No specialized rollup schema lands.
 
-- [ ] Write failing tests named `slo_breach_is_recorded_not_sampled_away`, `prompt_eval_slo_tracks_total_and_stage`, `adoption_denominator_uses_catalog_availability`, `hook_vs_tool_asymmetry_is_segmentable`, `hint_rollup_preserves_unresolvable_bucket`, `no_rate_without_denominator_and_horizon`, and `acted_requires_upstream_attribution`.
+- [ ] Write failing tests named `slo_breach_is_recorded_not_sampled_away`, `prompt_eval_slo_tracks_total_and_stage`, `adoption_denominator_requires_supported_installed_enabled_healthy_authorized`, `unknown_host_eligibility_does_not_shrink_denominator`, `host_surface_cells_do_not_inherit_support`, `hook_vs_tool_asymmetry_is_segmentable`, `hint_rollup_preserves_unresolvable_bucket`, `no_rate_without_denominator_and_horizon`, `acted_requires_upstream_attribution`, `automation_trigger_partition_equals_total_decisions`, `frontier_lag_compares_current_to_consumed_not_considered`, `skip_episode_coalesces_without_fake_runs`, `deferred_receipt_is_not_counted_as_skip`, `nochange_and_effect_yield_are_distinct`, `retry_recovery_preserves_effective_input_digest`, `self_trigger_prevention_requires_lineage`, `repeated_terminal_input_is_never_admitted`, and `avoided_work_requires_unique_input_and_baseline`.
+- [ ] Build the host-adoption seed matrix across Claude/Codex/Cursor desktop/IDE/CLI/cloud cells and core/context/work/operator components: toggle each eligibility predicate independently, expire health/conformance, revoke authorization, and omit one probe. Assert final eligibility only for the five-predicate conjunction, exact bounded dimension tuples, explicit partial/unknown coverage, no cross-surface inheritance, and versions/digests visible only through boundary/drill-down evidence.
+- [ ] Build the deterministic automation seed matrix: 1,000 unchanged ticks produce zero admitted dispositions/runs/model/tool calls, at most one unique skipped decision receipt for the unchanged effective input, and one bounded coalesced skip episode; activity in an unrelated project changes no target dirty frontier; late ingress during a run remains in a newer generation after terminal commit; self effects do not re-dirty their origin but registered downstream outcome/feedback does; relevant dependency/config reevaluation dirties only matching typed selectors while irrelevant change does nothing; 64 concurrent schedulers produce one admitted receipt/operation for one generation; and process death at every atomic boundary between admission, operation start, effect, reconciliation receipt, terminal receipt, cursor advance, and dirty clear reconciles to exactly one valid state.
+- [ ] Assert every seed exports its `AutomationAdmissionPanelV1`: current/consumed frontier and coverage, canonical trigger/disposition partition, exact skip/defer reasons and skip-episode count, evidence-to-admission/run latency, outcome yield, retry/circuit/quarantine/reconciliation state, self-trigger exclusions, stalled/starvation incidents, and methodology/unknown state for avoided model/tool/token/cost work.
 - [ ] Seed the SLO table from the master §26/§5.3 budget list; monitors compute windowed percentiles from latency events with explicit sample states.
 - [ ] Build the historical fixture: V2 rollups over migrated V1-era records render the 1,182-emitted series with correct acted/unresolvable buckets and the 59,618-vs-522 adoption series by surface.
-- [ ] Run `cargo test -p tracedecay-projectors --test slo_adoption_suite`; expected: exit 0 with denominator/horizon present on every emitted rate.
-- [ ] Commit `feat(projectors): add slo and adoption rollups`.
+- [ ] Run `cargo test -p tracedecay-projectors --test slo_adoption_suite --test automation_admission_observability`; expected: exit 0 with denominator/horizon present on every emitted rate, zero repeated-input violations, and no extra row after deterministic replay.
+- [ ] Commit `feat(projectors): add slo and automation rollups`.
 
 ### PR 30J: Observatory and Costs data contracts
 
@@ -559,8 +707,8 @@ Migration is coordinated with plan 12's controller (its §14 phases) and gated b
 
 **Files:** create observatory/costs view-model contracts in the plan 04 `read_models/observatory.rs` seam, application use cases per plan 09 §9.4, HTTP reads per plan 10 §8.4; conformance fixtures shared with plan 11.
 
-- [ ] Write failing tests named `view_models_are_sealed_typed_views`, `no_preformatted_statistic_strings`, `cli_mcp_dashboard_render_identical_models`, `costs_panel_names_methodology_and_pricing_versions`, `observatory_drills_to_source_events`, and `sse_deltas_reuse_snapshot_contract`.
-- [ ] Implement the five panel models over plan 05 reads with `CoverageReportV1` and watermarks on every response.
+- [ ] Write failing tests named `view_models_are_sealed_typed_views`, `metric_series_orders_points_and_preserves_point_denominators`, `thresholds_name_config_source`, `boundaries_link_exact_config_policy_model_catalog_versions`, `incident_and_remediation_markers_have_anchors`, `comparison_baseline_preserves_own_coverage`, `no_preformatted_statistic_strings`, `cli_mcp_dashboard_render_identical_models`, `costs_panel_names_methodology_and_pricing_versions`, `automation_panel_reuses_registered_metric_series`, `observatory_drills_to_source_events`, and `sse_deltas_reuse_snapshot_contract`.
+- [ ] Implement the six explicit panel models over plan 05 reads with annotated `MetricSeriesViewV1`, `CoverageReportV1`, watermarks, boundary/incident anchors, and plan 09's shared visualization envelope on every response; no dashboard-local point-to-series transform remains.
 - [ ] Run the cross-surface parity fixture through plan 21's renderer conformance harness; expected: identical semantic values on CLI/MCP/API/dashboard.
 - [ ] Commit `feat(application): add observatory data contracts`.
 
@@ -592,12 +740,16 @@ Migration is coordinated with plan 12's controller (its §14 phases) and gated b
 - 100% of rendered metrics resolve to a registered descriptor; the drift gate proves no surface renders an unregistered number.
 - The misreporting matrix passes on every surface: no unknown-as-zero, no capped-as-whole, no empty-section-with-skipped-shards, no fresh-looking stale data, no rate without denominator and horizon.
 - Historical fixtures reproduce the V1 evidence correctly: the migrated corpus renders the 388k-row population where V1 printed zero, and the hint/adoption series carry explicit unknown buckets.
+- Host adoption fixtures conserve the five-stage funnel per exact host/surface/component/install/registration/profile tuple: only supported + installed + enabled + healthy + authorized units enter the final denominator; stale/missing evidence remains partial/unknown; no version, digest, instance, locator, or path appears as a metric dimension.
+- Automation admission metrics conserve their populations: trigger partitions equal total receipts, skip episodes expand to the recorded observation count, terminal outcomes equal terminal admitted runs, and current-vs-consumed frontier lag reaches zero only when the exact generation is consumed.
+- The automation seed matrix passes unchanged ticks, unrelated-project activity, late ingress, self effects, relevant/irrelevant dependency/config reevaluation, 64-scheduler contention, and crash-at-every-atomic-boundary scenarios. It produces zero repeated-terminal-input violations and zero duplicated avoided-work claims.
 
 ### Performance
 
 - Ledger append and rollup projection stay within plan 04's projection budgets (visibility p95 ≤ 2 s under concurrent capture); accounting adds no synchronous work to the hook path (hooks emit events; the hook budgets are monitored, not consumed, by this plan).
 - Observatory/Costs first page p95 ≤ 200 ms at current scale from rollup rows, without scanning ledgers; drill-down queries are cursor-bounded.
 - SLO monitor sampling overhead is measured and bounded; monitors run in background lanes, never in hook or query hot paths.
+- Automation rollups consume durable transition/receipt evidence and coalesced tick episodes; observing 1,000 unchanged ticks adds zero automation runs/model/tool calls and bounded metric cardinality.
 
 ### Privacy
 
@@ -609,20 +761,23 @@ Migration is coordinated with plan 12's controller (its §14 phases) and gated b
 
 - Lag, dead-letter, and data-quality series cover the accounting projectors too; a stalled accounting projector is visible in the Observatory it feeds within one sampling window.
 - Every panel names its watermark, coverage, caps, and descriptor versions; every SLO record names its threshold source.
+- Every dirty automation scope exposes current/considered/consumed frontiers, age, classified defer/backoff/circuit/quarantine state, and next boundary. Stalled/starved scopes and repeated-input violations open deduplicated anchored incidents; recovery closes rather than duplicates them.
 
 ## Verification
 
 Run after the last slice of each phase touchpoint, on copied real stores plus the redacted fixture corpus:
 
 1. `cargo test -p tracedecay-domain accounting` — contract, registry, compile-fail, and rendering-law tests pass; registry digest stable across two generations.
-2. `cargo test -p tracedecay-projectors --test accounting_semantics --test slo_adoption_suite` — idempotent ledgers, deterministic rollups, SLO windows, denominator propagation, exact cap-event joins, and parent-horizon skeleton retention.
+2. `cargo test -p tracedecay-projectors --test accounting_semantics --test slo_adoption_suite --test automation_admission_observability` — idempotent ledgers, deterministic rollups, SLO windows, denominator propagation, exact cap-event joins, parent-horizon skeleton retention, and the complete automation seed/fault matrix.
 3. `cargo test --test analytics_migration_parity` — dispositions complete, historical fixtures correct, zero `unexplained`.
-4. Cross-surface parity: render the five panel fixtures through plan 21's conformance harness for CLI, MCP (Markdown and canonical JSON), HTTP, and dashboard snapshot; semantic values identical, states preserved.
+4. Cross-surface parity: render the six explicit panel fixtures through plan 21's conformance harness for CLI, MCP (Markdown and canonical JSON), HTTP, and dashboard snapshot; semantic values identical, states preserved.
 5. Misreporting lint sweep over every rendering call site: zero unknown-as-zero, capped-as-whole, or coverage-suppressing paths.
 6. Secret-corpus canary over `usage_ledger`, all rollup tables including `metric_rollup_cap_events`, `cap_truncation_events`, `lag_snapshots`, SLO records, logs, and exported panel payloads: zero content-bearing bytes.
 7. Rebuild drill: drop all rollup/telemetry tables, rebuild from canonical events at a frozen watermark, and diff against the pre-drop manifest — identical.
 8. Lag-gate rehearsal: drive the 24-hour projection-lag window from `lag_snapshots` on the shadow profile and confirm the cutover gate consumes these rows and nothing else.
 9. Observatory self-visibility: stall the accounting projector in a test profile and confirm the stall is visible in the Observatory within one sampling window.
+10. Automation conservation replay: freeze the canonical dirty/cursor/admission/run/effect corpus, build every automation series twice, and diff descriptors, dimensions, denominators, samples, incidents, anchors, and avoided-work methodology — identical; then expand coalesced episodes and reconcile to the source observation count.
+11. Host-adoption replay: freeze plan-27 deployment/probe/conformance/health/authorization events for every supported surface, rebuild twice, and prove exact five-stage funnel conservation, bounded dimensions, no cross-surface inheritance, explicit unknowns, and zero version/digest/instance/path label cardinality.
 
 ## Definition of done
 
@@ -630,6 +785,9 @@ Run after the last slice of each phase touchpoint, on copied real stores plus th
 - Every metric on every surface declares population, horizon, cap, watermark, and unknown state; the no-misleading-zeros law is enforced by types, lints, and cross-surface fixtures.
 - Cap/truncation telemetry with ID-only retrieval anchors makes every bounded answer recoverable and every sampled statistic honest.
 - Per-capability adoption and hint-outcome rollups are standing series with denominators; the 59,618/522 and 1,182/3 asymmetries are reproducible queries, and the historical join renders with correct unknowns.
+- Cross-host adoption is segmentable on bounded profile/surface/component/install/registration/profile codes, with supported/installed/enabled/healthy/authorized funnel evidence and version/digest detail available only through safe drill-down.
+- Automation admission is observable without becoming another subsystem: relevant frontiers, dirty scopes, trigger-partitioned admissions, coalesced skip reasons, current-vs-consumed lag, latency, yield, recovery, self-trigger prevention, stalled/starvation incidents, and baseline-qualified work avoidance all use the shared descriptor/rollup/view contracts.
+- The unchanged-work law is executable: 1,000 unchanged ticks and unrelated/self activity create no run or model/tool work; 64 schedulers and crashes at every atomic boundary still yield at most one valid admission/effect/cursor transition; any repeated successful/`NoChange` input is a blocking anchored incident.
 - SLO monitors continuously track the master §26/§5.3 budgets with breach records; the 24-hour lag cutover gate reads from this plan's series.
 - Plan 11 renders sealed models only; plan 20 owns every tunable; plan 12 migration landed with dispositions and FM-bound receipts; plan 14 §6 regression tests pass; plan 19's ownership matrix shows the V1 analytics stack retired.
 - All release gates above pass on copied real stores, and the divergence receipts for corrected V1 defects are published with the cutover.

@@ -877,9 +877,9 @@ Exact transport names derive from Plan 08/21's catalog. Anchor operations are ex
 - task/ticket context assembly through the same route with typed task/initiative/dependency/claim selectors;
 - `POST /api/v2/sessions/{id}/replay` and `POST /api/v2/threads/{id}/replay`;
 - `GET /api/v2/temporal-assertions/{id}/lineage`;
-- `POST /api/v2/labs/search-quality:replay` and `POST /api/v2/labs/search-quality:compare` (the plan 15 §9 Search Quality Lab routes; no separate session-lab endpoint);
-- versioned reads for corpus versions, qrel versions, candidate pools, judgments, adjudications, evaluation runs/reports, and retrieval profiles;
-- direct commands for corpus/qrel create/freeze, pool create, judgment record/supersede, adjudication record, evaluation run/cancel, aggregate report publish, sanitized fixture promotion, and retrieval-profile publish/activate;
+- plan 10 §8.5's generic experiment create/run/trace/comparison routes with `LabKindV1::SearchQuality` (plan 15 §9 evaluator; no separate session-lab endpoint or lifecycle);
+- versioned reads for corpus versions, qrel versions, candidate pools, judgments, adjudications, evaluation reports, retrieval profiles, and generic Search Quality experiments/runs/stages/comparisons;
+- direct commands for corpus/qrel create/freeze, pool create, judgment record/supersede, adjudication record, aggregate report publish, sanitized fixture promotion, and retrieval-profile publish/activate; Search Quality execution uses the generic experiment create/run/cancel/resume/retry/minimize family;
 - generated TypeScript client and official SDK parity from Plan 17.
 
 ### Settings
@@ -1106,7 +1106,7 @@ These suffixes were unused in the plan set when authored. Recheck the master pla
 
 ### PR 31P — Search Quality Lab temporal and LCM replay workspaces
 
-- Ship the Search Quality Lab's session-temporal workspaces: candidate waterfall, temporal lineage, copy cluster, summary DAG, context budget, corpus/qrel/pool version browsers, judgment supersession and adjudication, durable run/cancel, aggregate report publication, scanned fixture promotion, retrieval-profile publish/activation, then-versus-now replay, and aggregate comparisons through the exact plan 15 §0.1 operations.
+- Ship the Search Quality Lab's session-temporal workspaces: candidate waterfall, temporal lineage, copy cluster, summary DAG, context budget, corpus/qrel/pool version browsers, judgment supersession and adjudication, generic durable experiment run/cancel/resume/retry/minimize, aggregate report publication, scanned fixture promotion, retrieval-profile publish/activation, then-versus-now replay, and aggregate comparisons through plan 15 §0.1 plus plan 10 §8.5.
 - Consume generated clients and shared evaluation artifacts only.
 
 ### PR 33E — V1 import, backfill, and shadow comparison

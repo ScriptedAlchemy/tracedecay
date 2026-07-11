@@ -6,6 +6,8 @@
 
 **Architecture:** Generic configuration identity, value, provenance, impact, and version contracts live in `tracedecay-domain`; each owning subsystem contributes a typed module manifest; build-time generation produces one configuration registry; `tracedecay-application` is the only resolver and mutation owner; profile/project repositories persist immutable layer revisions and activation manifests; root composition supplies process/environment observations and applies runtime changes. All surfaces consume generated application contracts. Safety floors, especially redaction, are constraints over effective values and cannot be disabled or weakened by any lower layer.
 
+The simplification audit treats every independently parsed default, environment alias, provider install mutation, dashboard-only toggle, runtime cache, and subsystem-local validation branch as a migration candidate in one generated inventory. V2 does not centralize configuration by wrapping all of those paths: the typed registry generates schemas/forms/help/bindings, the application resolver is the only merge/validation/impact engine, host manifests generate irreducible file mutations, and cutover deletes the predecessor parser/default/validation path in the same slice.
+
 **Normative dependencies:** [`01-domain-crate.md`](01-domain-crate.md), [`02-store-crate.md`](02-store-crate.md), [`06-policy-crate.md`](06-policy-crate.md), [`08-tool-catalog-crate.md`](08-tool-catalog-crate.md), [`09-application-crate.md`](09-application-crate.md), [`10-api-crate.md`](10-api-crate.md), [`11-dashboard-frontend.md`](11-dashboard-frontend.md), [`12-root-compatibility-migration.md`](12-root-compatibility-migration.md), [`16-cross-project-repository-worktree-scope.md`](16-cross-project-repository-worktree-scope.md), [`17-official-public-api-and-sdks.md`](17-official-public-api-and-sdks.md), [`18-secret-detection-redaction-and-private-data-safety.md`](18-secret-detection-redaction-and-private-data-safety.md), [`19-system-defragmentation-convergence-and-extensibility.md`](19-system-defragmentation-convergence-and-extensibility.md), the binding/presentation contract in [`21-cli-mcp-tool-surface-and-output-unification.md`](21-cli-mcp-tool-surface-and-output-unification.md), the optional scout controls in [`22-incremental-context-scout-and-suggestion-envelopes.md`](22-incremental-context-scout-and-suggestion-envelopes.md), temporal retrieval profiles in [`23-session-lcm-temporal-retrieval-and-evaluation.md`](23-session-lcm-temporal-retrieval-and-evaluation.md), and task/executor control families in [`24-canonical-task-plan-graph-and-multi-agent-executor.md`](24-canonical-task-plan-graph-and-multi-agent-executor.md).
 
 ---
@@ -22,7 +24,7 @@
 8. Inline impact is informational and exact: hot reload, next request, new agent session, host restart, daemon restart, store reopen, rescan, reproject, reindex, migration, or unsupported. A separate destructive system operation may require explicit confirmation; saving a non-destructive setting does not.
 9. Configuration history is append-only. Returning to prior non-secret values creates a new forward revision and revalidates the current schema and safety floor; history is never rewritten and an old unsafe effective state cannot be resurrected.
 10. Curation is fully autonomous. Memory curation, session reflection, skill writing/evolution, fact reconciliation, and related self-improvement do not expose per-item preview, apply, reject, approval, or rollback queues. Configuration controls the global/scoped autonomy policy, schedules, budgets, quality floors, and failure behavior; the autonomous engine executes and audits items itself.
-11. Replay labs are read-only. They can resolve historical versus current effective configuration and measure resulting policy behavior, but they cannot mutate settings or become an approval path for curation.
+11. Replay evaluators have no production write ports. A generic experiment may persist immutable run artifacts and explicitly granted model/egress cost while resolving historical versus current effective configuration, but it cannot mutate settings or become an approval path for curation.
 12. Generated bindings and the Settings workspace are projections of the same registry and application use cases. Hand-authored forms, CLI switches, MCP schemas, OpenAPI fields, or SDK options that introduce an unregistered setting fail CI.
 13. The control plane records desired, activated, effective, and observed runtime state separately. A persisted value is not claimed effective until its consuming component acknowledges the exact configuration generation.
 14. Cross-shard updates do not pretend SQLite provides distributed transactions. Revisions are staged in their owning shards and become visible together only through an atomically published activation manifest; failures before publication leave the previous generation effective.
@@ -312,7 +314,7 @@ pub enum ConfigTargetRefV1 {
     Repository(EntityRef),
     Worktree(EntityRef),
     Provider(EntityRef),
-    Host(EntityRef),
+    HostIntegration { host_profile: HostProfileRef, host_instance: HostInstanceId },
 }
 ```
 
@@ -669,6 +671,8 @@ Events include safe IDs, key IDs when authorized, versions, impact/status, and s
 
 MCP tools are generated from the same capability entries and use the same request/result schemas. Human-facing MCP output defaults to concise markdown with effective value, source, target, impact, pending state, and exact next command; `format=json` returns the stable agent contract. Rust, TypeScript, and Python SDKs expose the same typed use cases, pagination, conflicts, SSE events, and credential-reference states.
 
+Configuration exposes Section 13.4's target-scoped host component set, install scope, registration/profile selection, enablement, trust, approval, update, and credential-reference settings, while returning generated profile IDs/digests/grant ceilings/definition budgets as read-only integrity state. MCP registration files are generated projections of that state, not another config source. A widening commit can become desired/activated but remains `pending_reconnect` until the named host acknowledges a fresh connection with the exact profile/catalog/credential digests; it is never reported effective merely because a client accepted `tools/list_changed`.
+
 No SDK constructor takes a plaintext secret as a configuration field. Protected credential installation uses a host/keyring integration that returns `CredentialRefId`, after which configuration binds only that reference.
 
 ## 11. CLI: navigable for humans, deterministic for agents
@@ -777,7 +781,7 @@ Phase 0 generates an inventory from source and blocks cutover until every public
 | Memory/knowledge | retrieval/trust/conflict/retention policies, autonomous curation cadence and quality constraints |
 | Automations/skills | scheduler, run budgets, autonomous curator/reflector/skill-writer policies, installation authority, health pauses |
 | Storage/projectors | data locations by allowed location class, WAL/lease budgets, blob/backup retention, projection/index generations, compaction |
-| API/MCP/CLI/dashboard | loopback bind, session lifetime, request/page/budget caps, SSE caps, renderer preferences, dashboard preferences |
+| API/MCP/CLI/dashboard | loopback bind, session lifetime, request/page/budget caps, SSE caps, task-graph edit-bundle TTL/byte/file/item/sweeper bounds, host component set/install scope/registration-profile selection, optional context/work/operator MCP enable/narrow/approval/credential settings, renderer preferences, dashboard preferences; generated MCP IDs/digests/grant ceilings/definition budgets are visible immutable state |
 | Costs/observability | pricing catalog version, sampling, safe metrics, log levels, tracing budgets, accounting horizons |
 | Updates/migrations | update channel, daemon drain policy, compatibility windows, import schedules, retirement holds |
 | Extensions | enabled manifests, sandbox/resource budgets, privacy/egress permissions, version pins |
@@ -803,6 +807,111 @@ Plan 24 §8.7 owns the liveness/sentinel policy semantics; this registry is the 
 | `query.cursor.interactive_ttl` | duration / `15m` | `1m..24h`; catalog-bound interactive cursors only. Export/bulk continuations use their declared job lifetime; key retirement covers the maximum outstanding declared lifetime. |
 
 The ten liveness descriptors plus the cursor-lifetime descriptor are profile defaults with optional initiative/executor/provider narrowing only where the descriptor declares that scope. Deny/safety floors win. Settings shows desired/activated/effective/observed values, source, generation, affected active-attempt count, and whether activation is hot, next-heartbeat, or workflow-mediated. Tests compare generated liveness values to plan-24 fixtures and cursor expiry/rotation values to plans 01/05/10/17 so a renamed key, unit drift, or conflicting default blocks both PRs.
+
+### 13.2 Autonomous automation admission descriptors
+
+These descriptors govern curator/reflector/skill-writer/profile-learning admission. The catalog-owned trigger class, input contract, relevant event/projection channels, materiality predicate, self-origin exclusion, and active-writer/coverage safety floor are visible but not weakenable settings; a plugin may extend them only through a versioned validated manifest.
+
+| Key | Type/default | Validation and impact |
+|---|---|---|
+| `automation.admission.event_driven` | bool / `true` | Safety/performance floor for production loops; clock ticks may wake bounded dirty scopes but cannot enable periodic all-scope scans. |
+| `automation.admission.session_quiet_period` | duration / `5m` | `0..2h`; terminal thread/session boundary or registered high-value event may satisfy early. |
+| `automation.admission.project_quiet_period` | duration / `15m` | `0..6h`; coalesces related project activity before cross-session curation. |
+| `automation.admission.max_dirty_age` | duration / `6h` | `5m..7d`; the maximum debounce boundary prevents perpetual postponement under continuous activity without pretending active/unknown writers are idle or bypassing input-digest dedupe. |
+| `automation.admission.minimum_events` | integer / `1` | `1..10_000`; combined with task-specific eligible-token/pattern gates, never counts the scheduler's own events. |
+| `automation.admission.minimum_tokens` | integer / `256` | `0..1_000_000`; high-value correction/failure/feedback/boundary events may bypass; exact bypass reason is receipted. |
+| `automation.admission.max_scopes_per_batch` | integer / `32` | `1..256`; fairness/oldest-dirty ordering and per-owner caps prevent one project starving others. |
+| `automation.admission.maximum_pending_scopes` | integer / `10_000` | `100..1_000_000`; overflow coalesces by owner/task and raises degraded coverage, never drops the source events. |
+| `automation.admission.dependency_reevaluation` | enum / `future_evidence_only` | `future_evidence_only`, `dirty_scopes`, or bounded historical window; a version change cannot silently rescan all history. |
+| `automation.admission.retry_backoff_initial` / `max` | duration / `5m` / `6h` | Exponential+jittered, `initial<=max<=7d`; retry binds the same failed input digest and preserves new concurrent dirty generations. |
+| `automation.admission.retry_attempt_cap` / `deadline` | integer + duration / `5` / `24h` | `1..32`, `5m..7d`; implemented by the shared operation attempt substrate, never a curation-only retry loop. |
+| `automation.admission.circuit_failure_threshold` / `cooldown` | integer + duration / `3` / `1h` | `1..32`, `1m..7d`; poison input quarantines and uncertain effects require reconciliation rather than blind retry. |
+| `automation.admission.skip_episode_rollup_interval` | duration / `1h` | `1m..24h`; equivalent interval/lock/no-change observations update one episode/metric rollup instead of appending receipts or fake run rows. |
+
+Per-task descriptors select authoritative scope and eligible minimums, but cannot change a job's registered trigger class, turn schedule time into sufficient admission, bypass identical-terminal-input suppression, infer idle from unknown/partial writer state, include self-generated scheduler/run events as new evidence, or erase dirty state on failure/reconciliation. A config change dirties only jobs whose generated dependency/input-contract digest changes. Evidence-driven jobs remain dormant after terminal `NoChange` until a relevant frontier advances; the rollup interval refreshes observability only and performs no model/tool work.
+
+### 13.3 Task-graph edit-bundle descriptors
+
+Plan 24 owns task-graph semantics and plans 10/17 own the public transport/SDK workflow. This registry owns the bounded temporary-edit policy consumed unchanged by CLI, HTTP, SDK, and optional MCP bindings:
+
+| Key | Type/default | Validation and impact |
+|---|---|---|
+| `task_graph.edit_bundles.ttl` | duration / `2h` | `5m..24h`; applies to unsubmitted bundle generations and ordinary failed-validation repair windows. Shortening retires already-expired bundles immediately. |
+| `task_graph.edit_bundles.max_total_bytes` | bytes / `64MiB` | `1MiB..256MiB` hard ceiling over observed uncompressed bytes; checked while streaming, never after full buffering. |
+| `task_graph.edit_bundles.max_file_bytes` | bytes / `2MiB` | `64KiB..8MiB`, and `<= max_total_bytes`; forces sharding instead of one unbounded frontmatter document. |
+| `task_graph.edit_bundles.max_files` | integer / `4096` | `1..16384`; includes manifest and every archive entry, declared or observed. |
+| `task_graph.edit_bundles.max_items` | integer / `50000` | `1..100000`; counts canonical graph items across all shards before referential validation and cannot exceed the domain/transport vector ceiling. |
+| `task_graph.edit_bundles.sweep_interval` | duration / `5m` | `1m..1h`; startup sweep is mandatory and cannot be disabled. Sweeping performs no parsing/model work and follows no link. |
+
+Archive depth eight, normalized-name length 128 bytes, strict YAML/CommonMark grammar, owner-only `0700`/`0600` modes, no-follow/inode containment, complete secret scanning, immediate successful-submit purge, and purge on secret/unknown/containment failure are non-weakenable floors, not settings. The managed runtime root is composition-owned; no registry key, environment alias, API field, CLI flag, or plugin manifest accepts a server path. UI/CLI display desired/effective bounds, current bundle counts/bytes/oldest expiry, sweep state, and safe retirement receipts without content or paths.
+
+### 13.4 Plugin installation and MCP registration profiles
+
+Host integration is a first-class configuration target, not a collection of provider-specific booleans. `ConfigTargetRefV1::HostIntegration { host_profile: HostProfileRef, host_instance: HostInstanceId }` resolves an opaque host target through the application; install scope is a typed desired value, and config keys/values never contain a path or raw host config body. Plan 20 solely owns `HostIntegrationDesiredStateV1`, `DesiredPackageStateV1`, `DesiredComponentStateV1`, `HostHookComponentPolicyV1`, `McpRegistrationNarrowingV1`, `HostTrustPolicyV1`, and `HostBundleUpdatePolicyV1`; plan 08 owns `HostInstallSetV1` and MCP profile specs, while plan 27 only consumes and projects them:
+
+```rust
+pub struct HostIntegrationDesiredStateV1 {
+    pub host_profile: HostProfileRef,
+    pub host_instance: HostInstanceId,
+    pub install_scope: HostInstallScopeV1,
+    pub packages: BTreeMap<RegistryEntryId, DesiredPackageStateV1>,
+    pub install_set: HostInstallSetV1,
+    pub roles: BTreeMap<RegistryEntryId, DesiredComponentStateV1>,
+    pub hook_policy: HostHookComponentPolicyV1,
+    pub mcp_narrowing: BTreeMap<McpLogicalRegistrationId, McpRegistrationNarrowingV1>,
+    pub trust_policy: HostTrustPolicyV1,
+    pub update_policy: HostBundleUpdatePolicyV1,
+    pub credential_ref: Option<CredentialRefId>,
+}
+
+pub struct HostBundleUpdatePolicyV1 {
+    pub channel: HostBundleUpdateChannelV1,
+    pub automatic: BoundedAutomaticUpdatePolicyV1,
+}
+```
+
+`McpRegistrationNarrowingV1` can only remove exact plan-08 `BindingId`s or lower scope/sensitivity/grant ceilings for a registration already present in `install_set`; the selected `McpSurfaceProfileId` exists only inside that set. `BoundedAutomaticUpdatePolicyV1` carries enablement, maintenance window, and restart behavior under the target's authority. The remaining child types are closed validated value/policy records with no path, body, prompt, executable, URL, or secret field.
+
+| Key | Typed value | Contract |
+|---|---|---|
+| `host_integrations.packages` | `BTreeMap<RegistryEntryId, DesiredPackageStateV1>` | Closed signed base/companion package set, exact/version-channel constraints, and generated skill/component enablement or intentional omission; no URL/path/arbitrary package entry. |
+| `host_integrations.install_scope` | `HostInstallScopeV1` | One adapter-documented user, machine, or managed-host scope; unsupported or privilege-escalating scope is a typed incompatibility, never silent fallback. |
+| `host_integrations.install_set` | `HostInstallSetV1` | Canonical `CoreSkillsCli` plus zero/one/many context/work/operator facade components; dependencies and conflicts are manifest-validated. |
+| `host_integrations.roles` | `BTreeMap<RegistryEntryId, DesiredComponentStateV1>` | Generated specialist-role enablement constrained to roles supplied by selected signed packages; no arbitrary prompt/body. |
+| `host_integrations.hook_policy` | generated hook-component policy | Per canonical hook-intent enablement, delivery limits, and host trust requirements; cannot add arbitrary executable/event definitions. |
+| `host_integrations.mcp_narrowing` | `BTreeMap<McpLogicalRegistrationId, McpRegistrationNarrowingV1>` | Optional narrowing only for registrations/profiles selected exactly once by `install_set`; cannot select or switch a profile. |
+| `host_integrations.trust_policy` | `HostTrustPolicyV1` | Ownership acceptance, signature/publisher policy, foreign-state behavior, and host-interaction approval class; cannot waive safety/privacy floors. |
+| `host_integrations.update_policy` | `HostBundleUpdatePolicyV1` | Pinned/current/channel selection plus bounded automatic-check policy, maintenance window, and restart behavior; automatic mutation remains bounded by the target's authority. |
+| `host_integrations.credential_ref` | `Option<CredentialRefId>` | Opaque least-privilege credential reference and safe status only; no secret or provider config payload. |
+
+The desired value is declarative. Saving it publishes configuration impact and legal next actions but never installs packages, edits a host file, registers MCP, reloads a host, or claims success. Only plan 09's authorized `integrations.install|update|repair|uninstall|verify` workflows cross the root `HostDeploymentPort`; their operation receipts advance observed/effective state.
+
+The published host bundle is a generated component set, not two mutually exclusive install modes. `core` installs generated skills, CLI recipes, and thin hooks without registering MCP and is the default on a host with an available shell and compatible TraceDecay CLI. Independently installable `context`, `work`, and `operator` facade companions may be added in any supported subset. A host without a shell/CLI prerequisite receives typed `shell_or_cli_unavailable` and must explicitly install one or more facade companions; a facade-only deployment is not a second workflow implementation. Every component records the same `HostIntegrationManifestV1` and catalog digest, and signed `HostBundleManifestV1` package metadata carries no duplicate workflow prose.
+
+The facade companions expose three generated logical server registrations, all invoking the same binary and application/catalog implementation:
+
+| Registration | Immutable registration-manifest ID | Generated grant ceiling | Generated profile/definition budget |
+|---|---|---|---|
+| `tracedecay-context` | `tracedecay.mcp.context.v1` | Read-only sanitized context/search/graph/session/memory/task reads; no protected quarantine plaintext or mutation. | exact profile ceilings from plan 08: `agent-core` 12/8k, `research` 24/18k, `developer` 32/24k tools/estimated-definition tokens; registration hard cap 32 tools/24k tokens/128 KiB serialized definitions, 8 KiB per input schema, 512 UTF-8 bytes per description |
+| `tracedecay-work` | `tracedecay.mcp.work.v1` | Owner-scoped task/plan/coordination edits and edit-bundle workflow; no config/privacy/automation/storage administration. | `task-worker` 24/16k and `orchestrator` 32/24k tools/estimated-definition tokens; same 32/24k/128-KiB registration hard cap, 8 KiB per input schema, 512 UTF-8 bytes per description |
+| `tracedecay-operator` | `tracedecay.mcp.operator.v1` | Explicit administrative operations within existing confirmation/privacy floors; never a generic unrestricted write or quarantine-plaintext grant. | `operator` 24/18k and `admin-lab` 32/24k tools/estimated-definition tokens; same 32/24k/128-KiB registration hard cap, 8 KiB per input schema, 512 UTF-8 bytes per description; explicit opt-in only |
+
+Each release consumes plan 08's exact `McpSurfaceProfileV1` and generated profile manifest, which bind the profile/version/registration, exact ordered `BindingId` set, host features, execution modes, required grants and grant ceiling, tools-only fallbacks, tool/token/serialized-definition/input-schema/description ceilings, estimator, catalog/protocol compatibility, and definition digest. Plan 20 defines no `McpRegistrationProfileV1`. Those generated fields and the table's registration names are integrity inputs, not writable configuration. CI canonicalizes and digests the exact ordered definitions and fails if a profile exceeds any plan-08 ceiling; a release must simplify/coalesce the surface or introduce a reviewed new profile version rather than silently raise a ceiling.
+
+Writable host-target settings are exactly the descriptor set above plus each selected registration's allowlist/scope/sensitivity/grant narrowing fields; legacy `integration.mcp.profiles.<context|work|operator>.enabled` values migrate into `host_integrations.install_set` plus `host_integrations.mcp_narrowing` and are not a second live resolver. Facades are absent/disabled in a core-only desired set; adding a facade or switching its one profile is an explicit install-set update, `context` may be recommended, and `work`/`operator` remain opt-in. No setting can select a second profile for a registration, move an operation between profiles, widen a grant ceiling, raise a definition budget, change an ID/digest, inject a tool schema/description, create another server implementation, trust foreign ownership implicitly, or convert an opaque credential reference into a secret value.
+
+Enablement, operation addition, restored availability, any scope/effect/sensitivity widening, profile/catalog/component digest change, or credential-ceiling change takes effect only after a fresh MCP connection and capability handshake. Disablement, token revocation, capability loss, or narrowing becomes authoritative immediately: the effective set may shrink through a generated list-generation change when supported, otherwise the stale connection terminates; every subsequent call is still reauthorized. A client may support `notifications/tools/list_changed` or deferred tool search, but MCP does not guarantee that behavior; some clients eagerly collect every paginated tool schema. The configured surface therefore remains correct and bounded without progressive disclosure. The pinned profile membership ceiling never changes within a connection, and effective visibility never varies by selected board, thread, task, prompt, or previous call.
+
+Every host target exposes all state planes together:
+
+- `desired`: current target revision, package/component/registration selection, install scope, trust/update policy, and credential refs;
+- `activated`: desired revision accepted by configuration and its pending integration operation, if any;
+- `observed`: last sanitized host probe, adapter/manifest version, cache age/staleness, installed/enabled versions and digests, ownership/trust evidence, and host reload state;
+- `effective`: intersection of desired, generated support, trust/authorization, observed installation, live registration/profile handshake, and current credential availability;
+- `drift`: typed missing/extra/version/digest/config/ownership/trust/registration/profile/cache difference with exact remediation authority;
+- `restart`: none, agent reconnect, MCP reconnect, host reload, daemon restart, or unsupported/unknown, with affected components and operation reference.
+
+Observed data is probe evidence, never a writable layer. Status cannot report effective from desired alone, and stale/unknown cache cannot become healthy. Foreign-owned files or registrations remain visible but immutable unless a separately authorized adoption workflow exists; `repair` changes only TraceDecay-owned state. Settings, CLI, HTTP/SDK, MCP, doctor, and the Integrations workspace render this same generated status/difference view.
 
 ## 14. Privacy, redactor, detector, and credential controls
 
@@ -883,12 +992,15 @@ Applies to:
 Settings exposes autonomy policy, not individual candidates:
 
 - enabled workflows and authoritative scope;
-- schedule/cadence and concurrency;
+- schedule/cadence and concurrency; cadence is an upper eligibility window, never permission to run unchanged input;
+- registered trigger class, input contract, event/projection dependency channels, per-thread/project/profile dirty-scope policy, and bounded dependency-version reevaluation;
+- finalized boundary, active-writer/coverage gate, quiet period, maximum debounce/dirty age, minimum eligible event/token delta, and high-value immediate triggers;
+- indefinite identical-terminal-input suppression until relevant-frontier advance, terminal-`NoChange` frontier behavior, coalesced skip episodes, and self-effect loop suppression;
 - source eligibility, evidence/quality/trust thresholds, and retention horizons;
 - compute/token/time/cost budgets;
 - model/provider/credential reference;
 - sandbox/capability grants and repository-write boundaries;
-- retry/backoff, circuit breaker, health pause, and incident behavior;
+- shared-operation retry/backoff/deadline/circuit, poison-input quarantine, uncertain-effect reconciliation, health pause, and incident behavior;
 - evaluation corpus/version and promotion quality gates;
 - notification/summary verbosity;
 - audit retention and outcome measurement.
@@ -896,6 +1008,8 @@ Settings exposes autonomy policy, not individual candidates:
 There are no “pending curation proposals,” Approve, Reject, Apply, or Roll Back controls. The autonomous workflow evaluates, validates, commits, supersedes, or retires under its active policy and writes a complete decision/effect receipt. Brain/Evolution surfaces show what happened, evidence class, policy/config digest, impact, quality, and failure state for investigation—not authorization after the fact.
 
 Changing autonomy configuration applies to future workflow decisions at the next safe boundary. In-flight runs remain pinned to their starting digest or stop at a declared cancellation boundary; they do not mix generations. Re-evaluating historical material is a new autonomous run with a new manifest, not manual per-item replay/apply.
+
+The generated defaults favor event-driven coalescing: session reflection becomes dirty only from new eligible thread activity and normally waits for a finalized terminal/quiet boundary; skill writing consumes new completed reflections, diagnostics/pattern evidence, or skill outcomes; memory curation consumes changed facts/relations/trust/feedback/conflicts/retention horizons. Dependency config/policy/catalog/model changes dirty only jobs whose registered semantic input contract changed and follow its reevaluation policy. Unknown/partial activity defers; no activity means no run. `run_now` shortens cadence for already-dirty scopes but cannot bypass identical successful/`NoChange` input suppression; unchanged/historical testing opens the hermetic lab. The UI and CLI show effective values, source, trigger/input contract, per-shard current/considered/consumed/included frontiers, quiescence/writer/coverage, dirty scopes, skip episode, semantic and evaluation digests, last-terminal input, retry/circuit/reconciliation state, and model/tool work avoided.
 
 Safety floors remain mandatory: secret-like/quarantined content cannot be curated into searchable facts, fixtures, prompts, or skills; extension and repository writes remain within explicit authority; system-destructive effects can require a separate confirmation. These constraints do not create a curation approval queue.
 
@@ -913,6 +1027,7 @@ drift: activated/effective/observed mismatch by owner
 migration: legacy inputs, imported, blocked, retired
 privacy: floor/policy/detector coverage and last verified scan
 credentials: available/missing/expired/foreign without values
+integrations: desired/activated/observed/effective package-component-registration state, ownership/trust, compatibility differences, cache freshness, drift, restart, and active operation refs
 ```
 
 Drift detectors use registered safe observations:
@@ -924,6 +1039,7 @@ Drift detectors use registered safe observations:
 - store/index/projection manifest pins another config digest;
 - registry/schema version differs across client/server;
 - a credential reference is missing, expired, locked, or foreign-owned;
+- a host-integration package/component/registration is missing, extra, stale, version/digest-incompatible, disabled, foreign-owned, untrusted, or awaiting reconnect/reload compared with the target's activated desired state;
 - a legacy config reader remains active after its cutoff.
 
 Doctor reports source, owner, first/last observed time, severity, safe evidence, affected components, and exact registered remediation. It does not suggest blind file deletion or print raw configuration. Reconciliation is allowed only for TraceDecay-owned non-destructive state; foreign-owned state is informational unless the user explicitly grants authority.
@@ -984,7 +1100,7 @@ Run V1 and V2 resolution against a sanitized fixture corpus, compare effective v
 
 ## 18. Replay and evaluation
 
-Add a read-only Configuration Lab under `/playgrounds/configuration` and generated CLI/API equivalents.
+Configuration replay does **not** create a fifteenth lab or `/playgrounds/configuration` route. Registry precedence/activation/policy-effect cases are a typed evaluator mode inside the existing Policy Diff Lab; scope-target resolution cases are a typed evaluator mode inside Scope/Federation Lab. Both use the generic experiment lifecycle and generated CLI/MCP/API equivalents. Settings links to a prefilled experiment draft, never a bespoke configuration runner.
 
 Inputs:
 
@@ -1090,6 +1206,8 @@ For every use case, run one fixture through in-process application, CLI JSON, MC
 
 Generated artifacts must leave a clean tree. An inventory test compares every registry key against CLI completion, MCP/OpenAPI schemas, SDKs, dashboard renderer coverage, and docs.
 
+Add host-profile fixtures for a core-only component set with no MCP dependency; explicit zero/one/many context/work/operator facade companions from one binary; explicit headless facade-only deployment; target-scoped base/companion package selection; skills/roles/hooks/MCP component enablement; user/machine/managed install scopes; trust/update/credential-reference policy; immutable integration/profile/catalog/grant/budget digest verification; desired/activated/observed/effective separation; stale-cache/foreign-owner/version-digest/registration drift; every restart directive; allowlist/ceiling narrowing; immediate disable/revocation; pending reconnect on every widening; eager-all-tools, paginated-list, ignored-list-change, and deferred-tool-search clients. Prove config save has no host effect and every host effect has one integration operation receipt. No fixture may rely on protocol-guaranteed progressive disclosure.
+
 ### 21.4 UI and CLI
 
 - Full keyboard/tree/search/edit/save/conflict/history/diff/import/export/status flows.
@@ -1111,6 +1229,7 @@ Generated artifacts must leave a clean tree. An inventory test compares every re
 ### 21.6 Fault and scale
 
 - Thousands of keys/targets, hundreds of concurrent readers, many simultaneous agent writers, slow consumers, daemon restart, store lock, shard unavailability, registry upgrade, clock skew, and disk-full faults.
+- Edit-bundle tests cover every configurable bound and hard ceiling, stream cancellation, ordinary failed-validation retention, secret/unknown immediate purge, success/delete/expiry/revocation cleanup, startup/periodic sweep, `0700`/`0600`, and proof that no config/request/receipt can carry the managed runtime path.
 - Resolver p95 and allocation budgets on profile All and exact target reads.
 - SSE queue/backpressure and snapshot reload bounds.
 - Cross-shard batch staging failure at every step; previous activation remains effective.
@@ -1124,10 +1243,10 @@ cargo test -p tracedecay-domain config
 cargo test -p tracedecay-store config
 cargo test -p tracedecay-application configuration
 cargo test -p tracedecay-tool-catalog config_registry
-cargo test -p tracedecay-api config_conformance
+cargo test config_conformance
 cargo nextest run --workspace --no-fail-fast
-pnpm --dir dashboard test -- settings
-pnpm --dir dashboard exec playwright test settings configuration-lab
+(cd dashboard && npm test -- settings)
+(cd dashboard && npx playwright test settings policy-diff scope-federation)
 gitleaks git --redact --no-banner
 gitleaks dir dashboard packages python docs tests --redact --max-archive-depth 2
 ```
@@ -1158,16 +1277,17 @@ These slices extend the master program without forming a separate architecture:
 - Implement resolve/explain/validate/impact/patch/batch/history/import/export/status/drift use cases.
 - Ship navigable CLI tree and deterministic JSON/JSONL.
 - Add transport parity and configuration SSE.
+- Add task-graph edit-bundle bound descriptors plus the target-scoped host-integration desired package/component/install-scope/trust/update/credential descriptors and three generated one-binary MCP registration profiles; profile widening remains pending until reconnect, host effects run only through plan 09 operations, and every host/profile receipt is content/path-free.
 
 ### PR 25E — Complete Brain Settings workspace
 
 - Replace partial settings/plugins with the generated profile-wide workspace.
-- Add target tree, search/forms, provenance, impact, conflicts, history, status, drift, and credential references.
+- Add target tree, search/forms, provenance, impact, conflicts, history, status, drift, credential references, and links into plan 11's `/settings/integrations` topology/difference/operation workspace.
 - Keep all old write behavior until module parity passes, then remove old bindings atomically.
 
-### PR 31N — Configuration and autonomy replay lab
+### PR 31N — Configuration and autonomy replay extensions
 
-- Add historical/current resolution, impact, consumer, hint/search/privacy/autonomy comparisons.
+- Extend the existing Policy Diff and Scope/Federation evaluators with historical/current resolution, impact, consumer, hint/search/privacy/autonomy comparisons; do not add another `LabKindV1`, route, lifecycle, or scheduler.
 - Enforce read-only and synthetic-only privacy fixtures.
 - Prove there is no per-item curation approval capability.
 
@@ -1200,7 +1320,7 @@ Each PR updates the master plan/index, architecture ownership table, schema inve
 - [ ] Every consuming runtime acknowledges the exact activation/effective digest; pending restart/session/rescan/reproject/reindex/migration is visible and actionable.
 - [ ] Configuration SSE, status, doctor, and Settings agree under slow clients, restarts, stale clients, split identity, locked stores, and partial shards.
 - [ ] Import/export is typed, scoped, versioned, sanitized, non-secret, and atomic at activation; V1 inputs have complete migration/differential receipts.
-- [ ] Configuration Lab replays historical/current resolution and policy effects without mutation or unsafe fixture access.
+- [ ] Policy Diff and Scope/Federation evaluator modes replay historical/current configuration resolution and policy effects without mutation or unsafe fixture access; no Configuration lab kind, route, runner, or lifecycle exists.
 - [ ] Registry generation leaves a clean tree and parity tests cover CLI, MCP, HTTP, SDKs, dashboard, hooks, daemons, automations, and extensions.
 - [ ] Legacy live config readers, duplicate defaults, transport-local settings, env-only controls, and fallback paths are deleted after verified cutover.
 - [ ] Full workspace, dashboard, fault, accessibility, performance, privacy, and secret-scan gates pass.

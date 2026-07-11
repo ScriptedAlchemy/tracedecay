@@ -1,6 +1,6 @@
 # TraceDecay V2 Code Intelligence Indexing Crate Implementation Plan
 
-**Goal:** Build `tracedecay-code-index`, the deterministic code-intelligence indexing crate that owns language extraction (a versioned tree-sitter parser/grammar registry), watcher intake planning, incremental indexing with bounded dirty overlays, immutable packed snapshot/generation builds, symbol identity/lineage computation, and diagnostics/test-attribution mapping — the production side of the master plan's Code Intelligence bounded context (master §5.2 #6) whose write owner the master names in §7.7 ("Code indexer owns graph snapshots").
+**Goal:** Build `tracedecay-code-index`, the deterministic code-intelligence indexing crate that owns language extraction (a versioned tree-sitter parser/grammar registry), incremental reuse with bounded dirty overlays, immutable packed snapshot/generation builds, symbol identity/lineage computation, and diagnostics/test-attribution mapping — the production side of the master plan's Code Intelligence bounded context (master §5.2 #6) whose write owner the master names in §7.7 ("Code indexer owns graph snapshots"). Root/capture owns watcher intake/coalescing and emits canonical sanitized snapshot events; this crate never creates a second intake path.
 
 **Architecture:** Repository content enters exactly once through plan 03's `code_snapshot` extractor adapter, crosses the one mandatory Plan 18 sanitizer, and lands as immutable receipt-bound snapshot/file observations. The indexer library consumes only those sanitized observations: it parses receipt-bound file content with registered versioned grammars, derives symbol occurrences, code edges, diagnostics, and test attributions, and plans deterministic packed-generation builds. V1 migration follows the same boundary: plan 02's store-owned read-only importer and the root migration adapter discover/open legacy SQLite families and emit receipt-bound logical graph-import batches; this crate never opens a V1 database. Plan 04's `code_evidence_v1` projector executes each build transactionally through a projector-owned port over plan 02's `GraphGenerationRepository`; plan 05 queries the published generations. One packed generation set plus bounded overlays and movable ref pointers replaces V1's physical database per branch.
 
@@ -12,7 +12,7 @@ Plan [`16-cross-project-repository-worktree-scope.md`](16-cross-project-reposito
 
 ## Goals
 
-- Give the Code Intelligence context one production owner: extraction, incremental indexing, dirty-overlay computation, watcher intake planning, generation build planning, symbol identity/lineage, and diagnostics/test attribution live in this crate and nowhere else.
+- Give the Code Intelligence context one production owner: extraction, incremental reuse, dirty-overlay computation, generation build planning, symbol identity/lineage, and diagnostics/test attribution live in this crate and nowhere else.
 - Parse only receipt-bound sanitized file content delivered through plan 03's `code_snapshot` adapter; raw repository bytes, unkeyed content checksums, and unsanitized drafts never enter this crate (the locked pipeline: repo content → capture sanitizer → indexer → store generations → query).
 - Make every generation build deterministic: the same sanitized source rows, grammar set, extractor set, resolver version, and build plan produce byte-identical canonical rows and the same generation content digest on every machine.
 - Hold the observed scale envelope with headroom: 36k+ nodes, 71k+ edges, 978 files in the current TraceDecay graph, and the master §26 10× gate of one million symbols in a large project.
@@ -36,16 +36,16 @@ Plan [`16-cross-project-repository-worktree-scope.md`](16-cross-project-reposito
 
 This crate is the sole extraction/indexing/generation-build owner in [`19-system-defragmentation-convergence-and-extensibility.md`](19-system-defragmentation-convergence-and-extensibility.md); third-party language support plugs into its registry through the plan 19 §7.2 code extractor/grammar SPI (isolated-subprocess tier for native runtimes, per 19 §7.3). It consumes domain contracts from [`01-domain-crate.md`](01-domain-crate.md), sanitized observations produced by [`03-capture-crate.md`](03-capture-crate.md), and store ports from [`02-store-crate.md`](02-store-crate.md) ("Graph generation store"); it produces builds executed inside [`04-projectors-crate.md`](04-projectors-crate.md) PR 18 and queried by [`05-query-crate.md`](05-query-crate.md) §11.4.
 
-Adding this crate satisfies the plan 19 §6.1 new-crate criteria explicitly: two real consumers in root composition (the production adapter implementing projectors' consumer-owned `code_evidence_v1` build port, and the daemon intake planner), a coherent bounded-context boundary (Code Intelligence production side), a dependency direction that only points at `tracedecay-domain`, the public contract and non-goals in this plan, independent tests/benchmarks, and the PR 33G/37C deletion/migration path for the V1 code it replaces. The workspace/dependency-DAG listing gains `tracedecay-code-index` in the plan 19 C0/C1 inventory slices.
+Adding this crate satisfies the plan 19 §6.1 package-admission rule through a demonstrated optional-heavy capability firewall: it isolates the tree-sitter runtime and dozens of grammar feature tiers from domain/application/query and can be omitted from read-only/minimal builds. It has a coherent Code Intelligence boundary, depends only on `tracedecay-domain`, has independent determinism/per-language/scale tests, and enables deletion of V1 extraction/graph/index code in PR 33G/37C. It does not claim a second consumer by duplicating daemon intake.
 
 | Boundary | Contract |
 |---|---|
-| Enters | Receipt-bound sanitized snapshot/file observations, registered grammar/extractor descriptors, explicit `ScopeSelectorV2` intake events, committed generation manifests, and identity-allocation results. |
+| Enters | Receipt-bound sanitized snapshot/file observations, projector-issued exact build requests with resolved scope/snapshot/dirty set, registered grammar/extractor descriptors, committed generation manifests, and identity-allocation results. |
 | Exits | Deterministic extraction outputs, reuse/build plans, canonical generation rows and digests, overlay/compaction plans, symbol-entity proposals and lineage candidates, diagnostic/test attributions, and per-language coverage. |
 | Upstream owner | Domain owns types and legal relations; capture owns ingress/sanitization; Plan 18 owns security invariants; store owns physical generations. |
 | Downstream owner | Projectors alone commit rows/relations/generations; query alone plans/ranks/federates; no consumer re-parses repository content outside this crate. |
 | Extension seam | A language adds a grammar descriptor, extraction query pack, extractor descriptor, redacted conformance fixtures, and determinism proof; it cannot add its own identity rules, generation schema, or sanitizer. |
-| Scale/concurrency | Per-repository intake lanes, bounded parse budgets, per-file reuse, bounded overlay depth, streaming canonical row emission, and cancellation checkpoints; no cross-repository global lock. |
+| Scale/concurrency | Root/application schedules per-repository operation lanes; this crate uses bounded parse budgets, per-file reuse, bounded overlay depth, streaming canonical row emission, and cancellation checkpoints; no cross-repository global lock. |
 | Migration/retirement | V1 extractors/graph DBs are read-only parity fixtures and migration sources. After PR 33G receipts and plan 12 §15 PR 37C, the V1 extraction/branch-store stack is deleted under plan 19 §12.3 deletion waves. |
 
 ## Cross-crate contract
@@ -66,7 +66,7 @@ Adding this crate satisfies the plan 19 §6.1 new-crate criteria explicitly: two
 - Intake decisions (capture-snapshot triggers with explicit dirty sets) consumed by root daemon composition; the daemon schedules plan 03 capture runs, this crate never invokes providers or the journal.
 - No canonical event, no store row, no query result, no transport payload.
 
-The dependency boundary is `tracedecay-domain <- tracedecay-code-index`; root composition depends on code-index, while `tracedecay-projectors` does not. Plan 04 owns `CodeIndexBuildPortV1` and the consumer transaction. Root adapter `src/v2_adapters/code_index.rs` implements that port by composing this crate's `CodeIndexBuilderV1` with plan 02's `GenerationWriter`/`CanonicalRowSinkV1`, and separately wires the intake planner to the daemon watcher. The builder only emits canonical rows and their digest; the adapter adds no extraction, identity, publication, or policy semantics. Neither capture, projectors, nor query imports this crate.
+The dependency boundary is `tracedecay-domain <- tracedecay-code-index`; root composition depends on code-index, while `tracedecay-projectors` does not. Plan 04 owns `CodeIndexBuildPortV1` and the consumer transaction. Root adapter `src/v2_adapters/code_index.rs` implements that port by composing this crate's `CodeIndexBuilderV1` with plan 02's `GenerationWriter`/`CanonicalRowSinkV1`. The builder only emits canonical rows and their digest; the adapter adds no intake, extraction, identity, publication, or policy semantics. Neither capture, projectors, nor query imports this crate.
 
 ## Exact crate and module layout
 
@@ -82,19 +82,17 @@ The dependency boundary is `tracedecay-domain <- tracedecay-code-index`; root co
 | `crates/tracedecay-code-index/src/extract/queries.rs` | Versioned extraction query packs per language; declarative capture-to-draft lowering. |
 | `crates/tracedecay-code-index/src/extract/langs/` | Per-language extractor specs superseding V1's ~60 `src/extraction/*_extractor.rs` modules; one file per language family. |
 | `crates/tracedecay-code-index/src/identity.rs` | `SymbolIdentitySeedV1`, occurrence-ID derivation, disambiguators, collision handling. |
-| `crates/tracedecay-code-index/src/intake.rs` | Watcher intake planner: debounce, coalescing, per-repository lanes, storm rejection, explicit-scope preservation. |
 | `crates/tracedecay-code-index/src/incremental.rs` | `ReusePlanV1`: per-file reuse keys, language-scoped invalidation, resolver-only refresh, full-rebuild reasons. |
 | `crates/tracedecay-code-index/src/overlay.rs` | Bounded dirty-overlay computation, depth/ratio thresholds, compaction eligibility. |
 | `crates/tracedecay-code-index/src/build/mod.rs` | `GenerationBuildPlanV1`, concrete `CodeIndexBuilderV1`, and bounded `CanonicalRowSinkV1` emission; no staging/publication ownership. |
 | `crates/tracedecay-code-index/src/build/rows.rs` | Canonical row types and total ordering for every generation table. |
-| `crates/tracedecay-code-index/src/build/digest.rs` | Streaming canonical-row digest; digest excludes compression and physical layout. |
 | `crates/tracedecay-code-index/src/resolve.rs` | Edge resolution (call/type/use/import/impl/annotation), resolver versioning, unresolved-target retention. |
 | `crates/tracedecay-code-index/src/lineage.rs` | `LineageCandidateV1` computation: rename/move/split/merge evidence and confidence. |
 | `crates/tracedecay-code-index/src/diagnostics.rs` | `DiagnosticAttributionV1`: diagnostic-to-occurrence mapping with evidence and coverage. |
 | `crates/tracedecay-code-index/src/test_attribution.rs` | `TestAttributionV1`: static candidate mapping plus recorded-run exact evidence. |
 | `crates/tracedecay-code-index/src/migrate_v1.rs` | Validation and differential lowering of bounded logical `V1GraphImportBatchV1` rows; no SQLite/path/file API. Physical discovery/read ownership stays in plan 02's importer and `src/v2_adapters/v1_graph_import.rs`. |
 | `crates/tracedecay-code-index/tests/extraction_conformance.rs` | Per-language redacted golden fixtures, determinism, error-range and redaction-marker behavior. |
-| `crates/tracedecay-code-index/tests/incremental_suite.rs` | Reuse keys, invalidation matrix, overlay bounds, intake debounce/storm cases. |
+| `crates/tracedecay-code-index/tests/incremental_suite.rs` | Reuse keys, invalidation matrix, exact dirty-set validation, overlay bounds. |
 | `crates/tracedecay-code-index/tests/generation_suite.rs` | Canonical ordering, digest determinism, plan/port contracts, schema conformance. |
 | `crates/tracedecay-code-index/tests/lineage_attribution_suite.rs` | Rename/move/split/merge cases, diagnostic/test mapping evidence classes. |
 | `crates/tracedecay-code-index/tests/migration_parity.rs` | Sanitized logical V1 graph batches, differential parity, disposition manifests, and disk math. Store/root integration tests own copied SQLite fixtures. |
@@ -271,47 +269,15 @@ Every row this crate derives (occurrence, edge, diagnostic mapping, test attribu
 
 - A symbol entity's seed identity is `(repository, language, qualified_path, kind, disambiguator)`; the disambiguator covers overload arity/signature and same-name siblings. Seeds propose; the store's identity ledger allocates (plan 01's `AllocationRequest` path for entities lacking an exact native key). A seed collision with a live different-lineage entity is surfaced as an `identity_collision` conflict, never silently reused — the regression class behind PR #269/#371 in plan 14 §2 (its `FM-###` row IDs bind PR 33G/18F receipts).
 - Occurrence identity is `(snapshot, file, byte range, kind)` — deterministic, snapshot-scoped, and independent of allocation order.
-- Canonical row ordering is total and fixed: files by path bytes, occurrences by `(file, byte_start, kind, qualified_path)`, edges by `(source_occurrence, kind, target)`, diagnostics by `(file, byte_start, tool, code)`, test-map rows by `(test, covered_entity)`. The generation digest is computed over the canonical uncompressed ordered rows plus `BuildInputDigests`; compression, page layout, and physical file boundaries are excluded.
+- Canonical row ordering is total and fixed: files by path bytes, occurrences by `(file, byte_start, kind, qualified_path)`, edges by `(source_occurrence, kind, target)`, diagnostics by `(file, byte_start, tool, code)`, test-map rows by `(test, covered_entity)`. Rows and `BuildInputDigests` implement plan 01's versioned `CanonicalEncode`; the generation digest streams those canonical uncompressed bytes through the domain-owned manifest-digest builder. Compression, page layout, and physical file boundaries are excluded. This crate declares row field order but owns no second codec/hash kernel or `build/digest.rs` implementation.
 - Same sanitized source rows + same `BuildInputDigests` ⇒ same `GenerationDigest`, on any machine, in any parallelism configuration. Two consecutive builds asserting digest equality is a release gate.
 - Content fingerprints stored in generation tables are the full privacy-domain-keyed identity tuple carried from capture — privacy domain, key epoch, and keyed digest — never a bare digest. No unkeyed hash of file content is computed or stored in this crate (the master's sanitize-before-persist and keyed-fingerprint invariant).
 
-### Watcher intake and incremental indexing
+### Canonical snapshot demand and incremental indexing
 
-```rust
-pub struct IndexIntakeEventV1 {
-    pub scope: ScopeSelectorV2,
-    pub kind: IntakeKind,
-    pub observed_at: UtcMicros,
-}
-
-pub enum IntakeKind {
-    CommitDetected { checkout: EntityRef, commit: EntityRef },
-    RefMoved { checkout: EntityRef, reference: EntityRef },
-    WorktreeDirty { worktree: EntityRef, paths: Vec<ClassifiedLocator> },
-    ManualRefresh,
-    GrammarOrExtractorUpgrade { languages: Vec<LanguageId> },
-}
-
-pub struct IntakePlanner;
-
-impl IntakePlanner {
-    pub fn decide(
-        &self,
-        events: &[IndexIntakeEventV1],
-        state: &IntakeLaneState,
-    ) -> IntakeDecision;
-}
-
-pub enum IntakeDecision {
-    CaptureSnapshot { scope: ScopeSelectorV2, dirty_set: DirtySet },
-    Coalesce { until: UtcMicros },
-    Defer { reason: DeferReason, until: UtcMicros },
-    RejectStorm { window: UtcMicros, dropped_events: u64 },
-}
-```
-
-- The daemon watcher (root composition; V1 seam `src/daemon/git_watch.rs`, source-framed by plan 03's `adapters/git.rs`) feeds intake events; the planner debounces (default 500 ms), coalesces per `(repository, checkout, worktree)` lane, and rejects event storms with a visible marker instead of unbounded queueing.
-- Every `CaptureSnapshot` decision preserves the explicit `ScopeSelectorV2`; the planner never substitutes CWD, active base checkout, or current branch, and an empty selector is rejected exactly as in plan 03.
+- Root/application's shared scheduler kernel consumes watcher/manual/config events, debounces/coalesces per resolved repository/checkout/worktree lane, applies storm/backpressure policy, and invokes plan 03 capture. Every trigger becomes a sanitized observation/canonical event with exact `ScopeResolutionV2`; there is no direct watcher -> index call.
+- Plan 04's `code_evidence_v1` projector derives the exact snapshot and dirty-set input for `CodeIndexBuildPortV1`. The root adapter lowers that already-authorized request to `GenerationBuildPlanV1`; this crate validates snapshot/dirty-set completeness but never re-resolves CWD, refs, paths, or registry state.
+- Grammar/extractor/resolver/schema changes are registered build-invalidations attached to the same operation/snapshot request, not synthetic watcher events. Coalescing, fairness, retries, progress, cancellation, and recovery reuse plan 09's scheduler/operation substrate; this crate owns only reuse/extraction/build decisions.
 ```rust
 pub struct ReusePlanV1 {
     pub reused_files: Vec<FileReuseRef>,
@@ -432,15 +398,17 @@ Plan 02 owns the physical `GraphGenerationRepository`, every SQL column/migratio
 
 ## V1 seam map and ownership
 
+The 0.0.53 reuse baseline inventories 51 `*_extractor.rs` modules, 37 isomorphic `build_result` bodies, 15 copied `visit_children` bodies, and definite duplicated C/C++ enum/union/storage-class, GW-BASIC/MS-BASIC, annotation, signature, and `extract_source` logic. PR 18B classifies each cluster as declarative query-pack data, shared traversal/result helper, language-family hook, or intentionally distinct semantics. PR 18F/37C requires zero unexplained definite duplicate body over ten lines in live V2 extractors and deletion of every replaced V1 body; a shared driver that merely calls old extractors fails the gate.
+
 | V1 seam | V2 owner | Result |
 |---|---|---|
 | `src/extraction/*_extractor.rs` (~60 per-language tree-sitter extractors), `src/extraction/{common,basic_common,batch_extractor,annotations,complexity}.rs` | `src/extract/**`, `src/registry.rs` | Declarative query packs + shared driver replace per-language imperative extractors; V1 outputs become differential fixtures; unknown-language behavior becomes explicit `Unsupported` coverage. |
-| `src/extraction_worker.rs`, `src/sync.rs` (read/hash/change detection) | `src/intake.rs`, `src/incremental.rs`, plan 03 `code_snapshot` adapter | Ingest-side reading/hashing moves behind capture's sanitizer; reuse planning replaces rescan heuristics; UTF-16/BOM handling is adapter framing. |
+| `src/extraction_worker.rs`, `src/sync.rs` (read/hash/change detection) | `src/incremental.rs`, plan 03 `code_snapshot` adapter, plan 09 scheduler/operation kernel | Ingest-side reading/hashing moves behind capture's sanitizer; root schedules canonical snapshot demand; reuse planning replaces rescan heuristics; UTF-16/BOM handling is adapter framing. |
 | `src/db/{nodes,edges,files,fingerprints,coverage,search,unresolved,redundancy_pairs}.rs`, `src/db/migrations.rs` (`LATEST_VERSION`, currently 17) | Logical generation IR above + plan 02 "Graph generation store" and store-owned V1 importer | Mutable per-branch tables become immutable packed generation tables; V1 schema version, logical inventory digest, and domain+epoch keyed source-file fingerprint become import-manifest evidence. No raw database hash crosses the adapter. |
 | `src/branch.rs`, `src/branch_meta.rs`, per-branch DB layout in `src/storage.rs` | Plan 02 manifests + ref pointers + merged-#426 metadata-less discovery | A branch is a movable ref naming a snapshot/generation; no branch owns a database. Store/root inventory scans confined `branches/*.db` artifacts as well as metadata, assigns deterministic recovered source manifests, preserves them from GC until disposition, and never treats absent metadata as unreachable. Retirement under plan 12 §15 PR 37C. |
 | `src/graph/{queries,traversal,scc}.rs`, `src/graph/health/**` (incl. `test_risk.rs`) | Plan 05 §11.4 operators over published generations | Query semantics move to the query crate; this crate supplies the data and the differential fixtures. |
 | `src/diagnostics/{rust,python,typescript}.rs`, `src/diagnostics/lsp/**`, `src/diagnostics/{cache,fingerprint}.rs` | `src/diagnostics.rs` + capture diagnostic observations | Tool output is captured/sanitized once; mapping is deterministic against the diagnosed snapshot; caches become rebuildable derived state. |
-| `src/daemon/git_watch.rs` index-trigger behavior | `src/intake.rs` hosted by root daemon (plan 12 §13) | Watcher events become typed intake events with debounce/coalesce/storm policy and explicit scope. |
+| `src/daemon/git_watch.rs` index-trigger behavior | root/capture event adapter plus plan 09 scheduler kernel (plan 12 §13) | Watcher/manual/config events become sanitized canonical observations, then projector-issued build requests; no index-local intake queue or source identity path. |
 | `src/redundancy.rs`, `src/ast_grep_search.rs` graph-build dependencies | Auxiliary generation families + plan 05 | Redundancy/fingerprint data are rebuildable generation rows; search surfaces route through the query crate. |
 
 ## Per-language conformance matrix
@@ -525,16 +493,16 @@ Import receipts are durable rows (G4), written through plan 02 PR 33S storage ow
 - [ ] Run `cargo clippy -p tracedecay-code-index --all-targets --all-features -- -D warnings`; expected: exit 0 with no warnings.
 - [ ] Commit `feat(code-index): add deterministic extraction registry`.
 
-### PR 18C: Watcher intake, incremental reuse, and bounded overlays
+### PR 18C: Incremental reuse and bounded overlays
 
-**Files:** create `src/{intake,incremental,overlay}.rs`, `tests/incremental_suite.rs`; extend `benches/code_index.rs`.
+**Files:** create `src/{incremental,overlay}.rs`, `tests/incremental_suite.rs`; extend `benches/code_index.rs`; add root/capture/projector conformance fixtures for the canonical snapshot-demand handoff in their owning plans.
 
-- [ ] Write failing tests named `unchanged_reuse_key_skips_reparse`, `grammar_bump_invalidates_only_its_languages`, `resolver_bump_reresolves_without_reparse`, `full_rebuild_requires_declared_reason`, `overlay_depth_beyond_bound_is_compaction_eligible`, `intake_coalesces_per_lane`, `intake_rejects_storm_with_visible_count`, `explicit_scope_never_falls_back_to_cwd`, and `dirty_set_is_exact_not_directory_wide`.
-- [ ] Implement reuse keys, the invalidation matrix, `FullRebuildReason`, overlay planning against plan 02's ADR depth constants, and the intake planner with per-repository lanes.
-- [ ] Wire the root daemon glue signature (`src/v2_adapters/code_index.rs`) so the planner's `CaptureSnapshot` decisions schedule plan 03 `code_snapshot` capture runs; the crate itself gains no I/O.
-- [ ] Run `cargo test -p tracedecay-code-index --test incremental_suite`; expected: exit 0; storm fixture holds peak memory below the declared bound.
+- [ ] Write failing tests named `unchanged_reuse_key_skips_reparse`, `grammar_bump_invalidates_only_its_languages`, `resolver_bump_reresolves_without_reparse`, `full_rebuild_requires_declared_reason`, `overlay_depth_beyond_bound_is_compaction_eligible`, `build_request_requires_canonical_snapshot_event`, `build_request_rejects_unresolved_scope`, and `dirty_set_is_exact_not_directory_wide`.
+- [ ] Implement reuse keys, the invalidation matrix, `FullRebuildReason`, overlay planning against plan 02's ADR depth constants, and exact build-request validation. Root/capture/projector tests prove lane coalescing/storm visibility and explicit scope before this crate is invoked.
+- [ ] Wire `src/v2_adapters/code_index.rs` to accept only plan 04's canonical `CodeIndexBuildRequestV1` plus its already captured snapshot manifest, invoke the plan-25 builder, and return canonical rows/digest to the projector-owned publication transaction. It cannot schedule capture, consume watcher events, resolve scope, or add I/O policy.
+- [ ] Run `cargo test -p tracedecay-code-index --test incremental_suite`; expected: exit 0 with exact reused/reparsed sets and bounded overlay memory. Run trigger-storm/coalescing/backpressure assertions in the root scheduler/capture/projector handoff suite, not this crate.
 - [ ] Run `cargo bench -p tracedecay-code-index --bench code_index -- incremental`; expected: report records single-file-change re-index p95 at current scale and the reused/reparsed file counts.
-- [ ] Commit `feat(code-index): add intake and incremental planning`.
+- [ ] Commit `feat(code-index): add incremental reuse planning`.
 
 ### PR 18D: Generation build plans, canonical row IR, and digests
 
@@ -614,7 +582,7 @@ Import receipts are durable rows (G4), written through plan 02 PR 33S storage ow
 
 ### Observability
 
-- Metrics expose intake lane depth/debounce/storms, files parsed/reused/degraded per language, extraction coverage by `ExtractionCoverage` kind, build duration/rows/digest, overlay depth/compaction eligibility, index freshness watermark per repository, lineage candidate counts, and migration dispositions.
+- Metrics expose files parsed/reused/degraded per language, extraction coverage by `ExtractionCoverage` kind, build duration/rows/digest, overlay depth/compaction eligibility, index freshness watermark per repository, lineage candidate counts, and migration dispositions. Root/application metrics own intake lane depth/debounce/storms and join them to the resulting operation/build anchor.
 - Every index answer surface can report `CoverageReportV1` (plan 01): searched/skipped/unavailable/stale/truncated/redacted with freshness watermarks — an unindexed snapshot is explicit coverage, never an empty success.
 - Logs carry language IDs, versions, counts, and keyed fingerprints only; never file paths joined with content, symbol bodies, or diagnostic message literals.
 

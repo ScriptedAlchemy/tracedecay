@@ -18,7 +18,7 @@
 - Plan 23 is the normative message/session/LCM temporal specialization and contributes logical-copy, summary-horizon, current/as-of/evolution/forensic, supersession, and context-assembly strata to this shared corpus/evaluation program. Plan 22 consumes promoted retrieval profiles through bounded anchored reads for the optional Context Scout; scout outcomes never become relevance truth automatically.
 - Plan 24 consumes promoted retrieval profiles for task query, decomposition evidence, temporally correct context packets, prior-attempt recovery, and sibling-materiality selection. Task completion, route success, or a model's use of a packet is outcome evidence, never an automatic relevance label; packet qrels include mandatory, useful, redundant, stale, forbidden, and missing-with-coverage classes.
 - Evaluation rows carry canonical `RetrievalAnchorId`s. Safe bulk labels use `retrieval_anchors.metadata_batch_get` at `POST /api/v2/retrieval-anchors:metadata-batch`; exact evidence inspection uses separately authorized `retrieval_anchors.resolve` at `POST /api/v2/retrieval-anchors:resolve`; a replayable recipe uses `retrieval_recipes.execute` at `POST /api/v2/retrieval-recipes:execute`. Evaluation code defines no alias, GET-by-anchor route, or combined metadata/payload hydration operation.
-- Search replay and corpus evaluation are read-only. Creating/freezing a corpus or qrel version, recording/superseding a judgment, adjudicating, promoting a synthetic fixture, publishing a profile, or activating it is a separate direct typed command with expected version, idempotency, sanitization evidence where applicable, and an audit receipt. Immutable versions are superseded, never edited or fictionally rolled back.
+- Search evaluators are read-only against production retrieval state. Corpus runs use plan 10 §8.5's generic experiment lifecycle, which may persist immutable replay artifacts and explicitly granted model/egress cost but cannot update live profiles, judgments, counters, or indexes. Creating/freezing a corpus or qrel version, recording/superseding a judgment, adjudicating, publishing a report, promoting a synthetic fixture, publishing a profile, or activating it is a separate direct typed command with expected version, idempotency, sanitization evidence where applicable, and an audit receipt. Immutable versions are superseded, never edited or fictionally rolled back.
 
 ### 0.1 Canonical evaluation operation family
 
@@ -27,14 +27,14 @@ Plan 09 owns these application operations; plans 10/17 generate HTTP and SDK bin
 | Class | Canonical operations | Contract |
 |---|---|---|
 | Artifact reads | `retrieval.corpus_versions.list/get`, `retrieval.qrel_versions.list/get`, `retrieval.candidate_pools.list/get`, `retrieval.judgments.list/get`, `retrieval.adjudications.list/get` | Return immutable version/cutoff/owner/member digests, supersession/adjudication lineage, protected-payload availability, and coverage; list metadata contains no query/rationale text. |
-| Run/report reads | `retrieval.evaluation_runs.list/get`, `retrieval.evaluation_reports.list/get` | Return frozen inputs, operation state, metrics/strata/denominators, privacy/resource receipts, regressions, and publication state. |
+| Run/report reads | Generic experiment/run/cell/stage/comparison/comparison-cell/reduction `list/get` filtered to `LabKindV1::SearchQuality`; `retrieval.evaluation_reports.list/get` | Experiments return frozen inputs, operation state, explicit variant/evaluator/corpus-case/repetition/sweep coordinates, stages, metrics/strata/denominators, privacy/resource receipts, regressions, anchors, and zero-live-effect proof. Reports return immutable publication state. No retrieval-local run resource exists. |
 | Profile reads | `retrieval.profiles.list/get` | Return immutable ranking/config/model/index manifests, promotion evidence, activation history, compatibility, and typed unavailable state. |
 | Corpus/qrel commands | `retrieval.corpus_versions.create/freeze`, `retrieval.qrel_versions.create/freeze`, `retrieval.candidate_pools.create` | Create a new draft version or freeze its exact membership/cutoff/digest. Freeze is one-way; later evidence creates a successor. |
 | Ground-truth commands | `retrieval.judgments.record/supersede`, `retrieval.adjudications.record` | Append human or explicitly secondary labels; correction points to the prior judgment; adjudication retains every source label/rationale and never rewrites disagreement. |
-| Evaluation commands | `retrieval.evaluation_runs.run/cancel`, `retrieval.evaluation_reports.publish` | Start/cancel a durable frozen run and publish only a reviewed aggregate/redacted report whose metric rows bind the exact run and artifact versions. Cancellation cannot erase completed work. |
-| Promotion commands | `retrieval.fixtures.promote`, `retrieval.profiles.publish/activate` | Promote only synthetic or reviewed sanitized fixtures with source/secret-scan receipts; publish an immutable profile; activate only after locked gates and expected active-version CAS. Running queries remain pinned. |
+| Evaluation commands | Generic `experiments.create`, `experiment_runs.create/cancel/resume/retry/minimize`; `retrieval.evaluation_reports.publish` | Run a durable frozen Search Quality experiment through the one operation lifecycle and publish only a reviewed aggregate/redacted report whose metric rows bind the exact experiment run and artifact versions. Cancellation cannot erase completed work. |
+| Promotion commands | Shared `experiments.fixtures.promote`; `retrieval.profiles.publish/activate` | Promote any evaluator fixture, including Search Quality, only through the typed synthetic/reviewed-sanitized source/cell/secret-scan receipt command; publish an immutable retrieval profile; activate only after locked gates and expected active-version CAS. Running queries remain pinned. |
 
-Each command returns one ordinary command/operation receipt. Permission to label, adjudicate, run, publish reports, promote fixtures, publish profiles, and activate profiles is separate; a broad search-read grant conveys none of them.
+Each command returns one ordinary command/operation receipt. Permission to label, adjudicate, run experiments, grant model/egress spend, publish reports, promote fixtures, publish profiles, and activate profiles is separate; a broad search-read grant conveys none of them.
 
 ## 1. Current supported-surface probe
 
@@ -366,7 +366,7 @@ Outputs:
 - Per-query labels/metrics plus aggregate/per-stratum comparison and inspected regressions.
 - Equivalent CLI/MCP/HTTP request and deterministic aggregate/redacted evaluation receipt.
 
-Lab mode is read-only. The canonical commands in §0.1 perform corpus/qrel creation and freeze, judgment/supersession/adjudication, run/cancel, aggregate report publication, sanitized fixture promotion, and profile publish/activation with stable anchors, optimistic versions, and audit.
+The evaluator has no production write ports. The canonical commands in §0.1 perform corpus/qrel creation and freeze, judgment/supersession/adjudication, generic experiment run/cancel/resume/retry/minimize, aggregate report publication, sanitized fixture promotion, and profile publish/activation with stable anchors, optimistic versions, and audit.
 
 ## 9. Implementation file plan
 
@@ -398,9 +398,9 @@ Companion ownership:
 - Projectors build typed search documents, representative clusters, entities, summaries, and relation indexes.
 - Store owns privacy-domain representation bytes/manifests and immutable eval artifacts.
 - Policy chooses an approved retrieval profile for hints/memory/coordination; it does not execute search.
-- Application owns Search/Explorer/lab/eval reads and every §0.1 command.
-- API exposes `POST /api/v2/search`, `/search/benchmark`, `/labs/search-quality:replay`, and `/labs/search-quality:compare` plus the complete versioned evaluation read/command family in plan 10 §8; CLI/MCP/SDK bindings derive from the same catalog entries.
-- Dashboard owns Search Quality Lab, corpus/pool/qrel/judgment/adjudication/run/report/profile workspaces, explanations, and aggregate charts/tables. It invokes only generated operations and never edits an artifact locally.
+- Application owns Search/Explorer/evaluator reads, the generic experiment harness, and every §0.1 command.
+- API exposes `POST /api/v2/search` for live bounded retrieval and uses plan 10 §8.5's generic experiment draft/create/run/cell/trace/comparison routes with `LabKindV1::SearchQuality` for every benchmark/evaluation, plus the complete versioned evaluation read/command family in plan 10 §8; no `/search/benchmark` or `search.benchmark.evaluate` duplicate exists. CLI/MCP/SDK bindings derive from the same catalog entries. Search Quality owns evaluator stages and metrics, not a lab-specific run/status/cancel endpoint.
+- Dashboard owns Search Quality Lab, corpus/pool/qrel/judgment/adjudication/experiment/report/profile workspaces, explanations, and aggregate charts/tables. It invokes only generated operations and never edits an artifact locally.
 
 ## 10. PR sequence
 
@@ -434,7 +434,7 @@ Companion ownership:
 
 ### PR 31J: Search Quality Lab and qrel review
 
-- Ship corpus/qrel version and candidate-pool browsers; append-only judgment/supersession/adjudication review; durable evaluation run/cancel; profile comparison; per-stage waterfall; labels/disagreement; metrics/strata/regressions; reviewed aggregate report publication; sanitized fixture promotion; and immutable retrieval-profile publish/activation through the exact §0.1 generated operations.
+- Ship corpus/qrel version and candidate-pool browsers; append-only judgment/supersession/adjudication review; generic durable experiment create/run/cell/cancel/resume/retry/minimize; profile comparison; per-stage waterfall; labels/disagreement; metrics/strata/regressions; reviewed aggregate report publication; shared `experiments.fixtures.promote`; and immutable retrieval-profile publish/activation through the exact §0.1 generated operations.
 - Consume the shared plan 09 lab result and plan 10/17 generated client; do not add a dashboard-only evaluator, qrel store, scope parser, or replay endpoint.
 
 ## 11. Verification commands and artifacts

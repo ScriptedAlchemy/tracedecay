@@ -13,7 +13,7 @@
 5. A deliverable suggestion is addressed to exactly one `ThreadId`, `TurnId`, `SessionId`, and `AgentId`. Unresolved or ambiguous identity is a suppression reason, never permission to deliver to the current or first session.
 6. Every suggestion cites durable `RetrievalAnchorId`s and evidence/provenance. Model prose without anchors, tool receipts, and a pinned input manifest cannot enter a host prompt.
 7. Model assistance is optional and capability-selected. A Codex app-server adapter may use a low-latency model such as Spark when the app server advertises it and configuration selects it; no model name, provider, executable, or fallback is hardcoded in domain or application code.
-8. The model proposes bounded structured exploration and candidate semantics. The application authorizes and executes tools; pure policy ranks, deduplicates, suppresses, budgets, and selects; the hooks crate renders and delivers. The model cannot call arbitrary shell, MCP, network, filesystem, mutation, or curation operations.
+8. The model proposes bounded structured exploration and candidate semantics. The application authorizes and executes tools; pure policy ranks, deduplicates, suppresses, budgets, and selects; root `v2::hooks` renders and delivers. The model cannot call arbitrary shell, MCP, network, filesystem, mutation, or curation operations.
 9. Read-only is the default and V2 launch maximum effect class. Local query/search/memory/LCM/code/Git/coordination reads are eligible only through cataloged application use cases. Remote read/egress requires an explicit grant and remains separately labeled.
 10. Suggestions are compact, specific, and non-overbearing. Static capability boilerplate, repeated categories, restated user prompts, vague advice, and uncited generated claims are invalid output.
 11. Late, stale, expired, superseded, redacted, or already-observed suggestions are recorded with a disposition and never silently injected into a later logical message.
@@ -21,6 +21,7 @@
 13. Replay, shadow, A/B evaluation, and “what would happen now?” are read-only. They never deliver, mutate counters, affect dedupe, or create per-item approval/apply/rollback flows.
 14. Existing deterministic hint classifiers remain a candidate source during migration, then move behind the same policy contract. There is one delivery selector at cutover: plan 6's `DeliveryArbiterV1` ([06-policy-crate.md](./06-policy-crate.md) §9.1.3), which arbitrates deterministic and scout `DeliveryCandidateV1` submissions under one `HintStateSnapshot` version compare-and-swap.
 15. Canonical initiative/task/ticket/dependency/claim/context-packet events are eligible evidence, not a broadcast feed. A sibling-task change reaches an exact Thread/Turn only when evidence proves material overlap, a blocker, a handoff, or an invalidated assumption.
+16. Scout wakeups/coalescing/backoff/fairness use plan 09's one `SchedulerKernelV1`; each admitted run wraps `OperationKernelV1<ScoutRunKind>` for epoch, heartbeat, steps, progress, cancellation, retry/takeover, and terminal receipts. Scout owns trigger/materiality/model/exploration/envelope policy only and cannot add another scheduler or job ledger.
 
 This plan extends the contracts in [01-domain-crate.md](./01-domain-crate.md), [06-policy-crate.md](./06-policy-crate.md), [07-hooks-crate.md](./07-hooks-crate.md), and [09-application-crate.md](./09-application-crate.md). Configuration is exclusively owned by [20-configuration-control-plane.md](./20-configuration-control-plane.md); plan 09 owns semantic response views while capability, binding, rendering, and format parity are exclusively owned by [21-cli-mcp-tool-surface-and-output-unification.md](./21-cli-mcp-tool-surface-and-output-unification.md); every message/LCM/context read and current/as-of decision is owned by [23-session-lcm-temporal-retrieval-and-evaluation.md](./23-session-lcm-temporal-retrieval-and-evaluation.md) through the sole `TraceQueryV1` path; canonical task refs/events are owned by [24-canonical-task-plan-graph-and-multi-agent-executor.md](./24-canonical-task-plan-graph-and-multi-agent-executor.md).
 
@@ -74,7 +75,7 @@ Do not create a new crate. Scouting has one deployment consumer, and its invaria
 
 ```mermaid
 flowchart LR
-    Host["Host events"] --> Hooks["tracedecay-hooks"]
+    Host["Host events"] --> Hooks["root v2::hooks adapter"]
     Hooks --> Capture["tracedecay-capture"]
     Capture --> Store["tracedecay-store journal"]
     Store --> Projectors["tracedecay-projectors"]
@@ -134,7 +135,8 @@ pub struct SuggestionAddressV1 {
     pub session_id: SessionId,
     pub agent_id: AgentId,
     pub logical_message_id: LogicalMessageId,
-    pub host: HostKind,
+    pub host_profile: HostProfileRef,
+    pub host_surface: HostSurfaceKindV1,
     pub source_instance_id: SourceInstanceId,
 }
 ```
@@ -381,20 +383,22 @@ pub enum SuggestionSuppressionReasonV1 {
 
 Reason codes are closed, cataloged, safely rendered, and metric dimensions. Arbitrary model explanations never become status codes. `SuggestionSuppressionReasonV1` is the one suppression registry for both delivery engines: plan 6's `SuppressionReason` re-exports exactly this set, so deterministic hints and scout envelopes suppress with the same codes and a new variant is a versioned enum revision recorded in [06-policy-crate.md](./06-policy-crate.md).
 
+`ScoutRunStateV1` is a domain phase projection over a linked `OperationKernelV1<ScoutRunKind>`, not an independent lifecycle. Coalescing through Persisting are scout phase codes; generic running/waiting/cancelling/succeeded/failed/blocked state, epoch/heartbeat, current step, progress, cancel intent, retry/takeover, and receipts come only from the operation kernel. `CompletedSilent` and `CompletedWithEnvelope` are typed scout terminal dispositions on a generically succeeded operation.
+
 ## 5. Event stream, checkpoints, and incremental scheduler
 
-The scout registers one independent outbox consumer group, `context_scout.v1`. It never shares a checkpoint with projectors, hint outcome jobs, automation, or dashboard subscriptions.
+The scout registers one independent outbox consumer group, `context_scout.v1`. It never shares checkpoint state with projectors, hint outcome jobs, automation, or dashboard subscriptions, but it reuses plan 01/02's sole mechanical `OutboxConsumerLeaseV1<K>`/`OutboxConsumerCheckpointV1<K>` epoch/CAS codec and tables. Outbox wakeups enter plan 09's `SchedulerKernelV1`, whose scout policy supplies coalescing windows, priorities, per-address fairness, backpressure/silence, and admission budgets. The kernel supplies the queue, timers, backoff, checkpoint wakeups, and fenced admission; no scout-local poller or fairness queue exists.
 
 ```rust
-pub struct ScoutStreamCheckpointV1 {
+pub struct ScoutConsumerKeyV1 {
     pub consumer_id: ScoutConsumerId,
+    pub consumer_version: ComponentVersion,
     pub shard_id: ShardId,
-    pub lease_epoch: u64,
-    pub last_examined_sequence: u64,
-    pub last_committed_sequence: u64,
-    pub event_watermark: VectorWatermark,
+    pub generation: ProjectionGenerationId,
+}
+
+pub struct ScoutCheckpointExtensionV1 {
     pub config_snapshot_id: EffectiveConfigSnapshotId,
-    pub updated_at: UtcMicros,
 }
 
 pub struct ScoutTurnStateV1 {
@@ -410,7 +414,7 @@ pub struct ScoutTurnStateV1 {
 }
 ```
 
-`prior_category_state` is the shared `HintStateSnapshot` of [06-policy-crate.md](./06-policy-crate.md) §9.1.2 — it carries the full logical/semantic/anchor/coordination-pair fingerprint sets, per-category cooldown clocks, turn/session/scout/token ledgers, pending-suggestion slot, and CAS version token. `last_envelope_fingerprint` is only a fast-path check on the most recent payload, never the dedupe state itself.
+The persisted checkpoint is `OutboxConsumerCheckpointV1<ScoutConsumerKeyV1>` plus `ScoutCheckpointExtensionV1` in the same transaction. `prior_category_state` is the shared `HintStateSnapshot` of [06-policy-crate.md](./06-policy-crate.md) §9.1.2 — it carries the full logical/semantic/anchor/coordination-pair fingerprint sets, per-category cooldown clocks, turn/session/scout/token ledgers, pending-suggestion slot, and CAS version token. `last_envelope_fingerprint` is only a fast-path check on the most recent payload, never the dedupe state itself.
 
 ### 5.1 Trigger eligibility
 
@@ -810,11 +814,14 @@ The daemon and each host adapter negotiate a versioned capability session:
 
 ```rust
 pub struct SuggestionHostHelloV1 {
-    pub host: HostKind,
+    pub host_profile: HostProfileRef,
+    pub host_surface: HostSurfaceKindV1,
     pub host_version: ComponentVersion,
     pub source_instance_id: SourceInstanceId,
-    pub supported_modes: BTreeSet<SuggestionDeliveryModeV1>,
-    pub supported_hook_points: BTreeSet<HookPoint>,
+    pub host_capabilities: HostCapabilitySnapshotV1,
+    pub offered_modes: BTreeSet<SuggestionDeliveryModeV1>,
+    pub offered_hook_points: BTreeSet<HookPoint>,
+    pub tool_catalog: CatalogSnapshotRefV1,
     pub max_payload_tokens: u32,
     pub max_payload_bytes: u32,
     pub protocol_version: SchemaVersion,
@@ -836,6 +843,8 @@ pub struct PendingSuggestionRequestV1 {
     pub access_policy_digest: AccessPolicyDigest,
 }
 ```
+
+The hello is accepted only when its `HostCapabilitySnapshotV1.subject` is `Installed` and that `HostIntegrationRuntimeRefV1` matches the active plan-01 runtime handshake: host profile/instance/surface, integration manifest, component set, bundle/component, install receipt/generation, and adapter version all bind; the independently carried snapshot digest pins the current probe without a reverse reference. `offered_modes` and `offered_hook_points` are a mechanically derived intersection of the plan-27 host capability ledger, the installed components, current probe, trust/policy state, catalog generation, and host version; they are not self-asserted support. `Supported` and fresh may negotiate, `VersionGated` returns the exact remediation, and absent/undocumented/policy-disabled/stale/trust-pending entries cannot deliver. A reconnect after install, trust, probe, catalog, or profile change creates a new session; an in-flight envelope remains pinned to the old digest and is safely expired or reconciled rather than widened.
 
 `HookApplicationPort` gains a narrow `claim_pending_suggestion` operation. The claim is a `DeliveryArbiterV1` operation ([06-policy-crate.md](./06-policy-crate.md) §9.1.3), not a parallel scout-side CAS: one transactional compare-and-swap on the `HintStateSnapshot` version token that revalidates address, logical message, scope/access digest, expiry, current hint state, payload budget, host mode, and envelope sequence, and claims the pending-suggestion slot. Deterministic candidates arbitrated in the same invocation ride the same version token, so at most one engine delivers. It performs no query or model work.
 
@@ -929,6 +938,7 @@ Hint Lab accepts any authorized message, Turn, session position, event, suggesti
 - recorded-result verification;
 - current-best-effort “what would the scout suggest now?” with every substituted config/policy/catalog/index/model/memory/tool snapshot listed;
 - A/B deterministic-only versus model-assisted, old versus new bundle, model capability, budget, threshold, debounce, and tool-grant variants;
+- immutable branch-at-any-parameter, bounded sweeps/ablations, aligned stage playhead, cost/quality Pareto views, and typed failure minimization through the shared experiment cockpit;
 - shadow replay of an entire session with cumulative dedupe/cooldown/budget state;
 - step view: trigger -> context delta -> hypotheses -> requested reads -> returned anchors -> feature scores -> suppression/selection -> rendered envelope;
 - exact payload/token count and host-specific rendering preview;
@@ -936,7 +946,7 @@ Hint Lab accepts any authorized message, Turn, session position, event, suggesti
 - outcome relabeling workflow with adjudicator identity and agreement, never production delivery;
 - fixture promotion as a separate explicit test-artifact command.
 
-The lab is read-only by construction: it runs on plan 6's write-free lab ports (`ReadOnlyLabContext`; the ports structurally lack write methods — [06-policy-crate.md](./06-policy-crate.md) §11), not a runtime flag, and its only persistence surface is the dedicated `replay_artifacts` store named there — outcome-relabeling adjudications (with adjudicator identity and agreement) and A/B artifacts land in that store, never in live analytics, facts, claims, policies, hints, or coordination state. It cannot claim/deliver an envelope, mutate live hint state, invoke mutation tools, or approve/apply/rollback curation. A current-best-effort replay that invokes a live model is a separately metered egress action requiring an explicit grant and budget; such calls are non-reproducible and are excluded from the deterministic replay gates in Section 19.
+The evaluator is production-read-only by construction: plan 6 exposes immutable evaluator ports only, while plan 9's one hermetic experiment runner freezes clock/RNG, mounts immutable inputs plus a disposable overlay, denies production write/counter/cache/lease/effect ports, and records opened/denied resources in `ReplaySideEffectReceiptV1`. Results, relabeling evidence, variants, traces, and comparisons persist only through plan 2's generic experiment/run/stage family, never a scout/lab/replay-artifact store. It cannot claim/deliver an envelope, mutate live hint state, invoke mutation tools, or approve/apply/rollback curation. A current-best-effort live-model stage requires an explicit metered egress/model grant and budget; the manifest can reproduce inputs and recorded output but cannot claim byte determinism.
 
 ### 13.4 Controls and feedback
 
@@ -991,7 +1001,6 @@ All bindings originate in the catalog/application manifest and follow [21-cli-mc
 | `scout.runs.list/get` | read | bounded runs and phase receipts |
 | `scout.envelopes.list/get` | read | authorized envelope lifecycle and anchors |
 | `scout.decision.explain` | read | feature/suppression/dedupe explanation |
-| `scout.replay.start/get/cancel` | read-only lab job/control | historical/current-best-effort replay |
 | `scout.evaluation.get` | read | corpus/experiment metrics and regressions |
 | `scout.feedback.record` | evidence append | explicit helpful/incorrect/late/repeated feedback |
 | `scout.runtime.pause/resume` | system control | stop/start optional work at safe boundaries |
@@ -999,13 +1008,15 @@ All bindings originate in the catalog/application manifest and follow [21-cli-mc
 
 Configuration reads/writes use the generic `config.*` use cases and `scout.*` descriptors. Do not add scout-specific config files or endpoints.
 
+Historical/current-best-effort scout replay uses the generic `experiments.draft_from_selection`, `experiments.create`, and `experiment_runs.create/get/cancel/resume/retry/minimize` family with `LabKindV1::Hint` plus the scout evaluator mode. No `scout.replay.*` use case, table, scheduler, or cancel path exists.
+
 ### 15.2 CLI
 
 ```text
 tracedecay scout status [scope flags] [--format human|markdown|json]
 tracedecay scout runs list|get ...
 tracedecay scout suggestions list|get|explain ...
-tracedecay scout replay --turn <id>|--message <id>|--session <id> --mode exact|recorded|current-best-effort [--compare <variant>]
+tracedecay experiment fork --turn <id>|--message <id>|--session <id> --lab hints --set evaluator_mode=scout --mode exact|recorded|current-best-effort
 tracedecay scout evaluation show [--corpus <id>] [--experiment <id>]
 tracedecay scout feedback <envelope-id> --rating helpful|not-helpful|incorrect|too-late|repeated|too-verbose [--reason-code <code>]
 tracedecay scout pause|resume [--target <scope>]
@@ -1017,7 +1028,7 @@ Streams use NDJSON only when explicit. Human output includes exact scope, freshn
 
 ### 15.3 MCP
 
-Generated MCP bindings expose concise agent-oriented reads such as status, pending/history lookup, explanation, replay, and feedback. Default Markdown begins with result/silence and the exact addressee/scope, followed by bounded anchors and coverage. `format=json` returns the same canonical typed view. No tool returns the entire scout queue or model transcript in prompt-sized output; pagination and retrieval anchors apply.
+Generated MCP bindings expose concise agent-oriented reads such as status, pending/history lookup, explanation, generic experiment fork/run/status, and feedback. Default Markdown begins with result/silence and the exact addressee/scope, followed by bounded anchors and coverage. `format=json` returns the same canonical typed view. No tool returns the entire scout queue or model transcript in prompt-sized output; pagination and retrieval anchors apply.
 
 MCP replay requires an exact message/Turn/session anchor and defaults to `RecordedResult` or current best effort as declared. It cannot deliver or alter live counters. Agents receive typed late/stale/partial flags rather than prose warnings.
 
@@ -1030,8 +1041,10 @@ GET  /api/v2/scout/runs/{id}
 GET  /api/v2/scout/suggestions
 GET  /api/v2/scout/suggestions/{id}
 GET  /api/v2/scout/suggestions/{id}/explanation
-POST /api/v2/labs/hints/scout-replays
-GET  /api/v2/labs/hints/scout-replays/{id}
+POST /api/v2/experiments:draft-from-selection       # LabKindV1::Hint + scout evaluator mode
+POST /api/v2/experiments:create
+POST /api/v2/experiments/{id}/runs:create
+GET  /api/v2/experiment-runs/{id}
 POST /api/v2/commands/scout/{pause,resume,cancel}
 POST /api/v2/commands/scout/feedback
 POST /api/v2/subscriptions
@@ -1044,9 +1057,9 @@ SSE event families include safe `scout_status_changed`, `scout_run_progress`, `s
 
 [02-store-crate.md](./02-store-crate.md) owns activity-shard repositories and migrations:
 
-- `scout_consumer_checkpoints` keyed by consumer/shard with lease epoch/version;
+- one scout extension row keyed to plan-02 `outbox_consumer_checkpoints`; no `scout_consumer_checkpoints` or scout-local lease table exists;
 - `scout_turn_states` keyed by exact address/logical message;
-- `scout_runs` plus immutable phase receipts/input manifests;
+- `scout_runs` as a scout-specific extension keyed one-to-one to `OperationKernelV1<ScoutRunKind>` plus immutable input manifests; generic phase-step/progress/cancel/takeover/terminal receipts use plan 02's shared `operations`/`operation_steps` family;
 - `scout_tool_receipts` referencing catalog capabilities and retrieval anchors;
 - `suggestion_candidates` with bounded protected payload refs;
 - `suggestion_envelopes` with sequence/state/expiry and privacy-domain/key-epoch-bound fingerprint;
@@ -1249,7 +1262,8 @@ Numbers extend the existing program without colliding with plans 1–24. Canonic
 ### PR 24P — Host suggestion handshake and single delivery selector
 
 - **Ordering:** after PR 24O and the plan-07 hook delivery port.
-- Add pending claim/revalidation (a plan 6 `DeliveryArbiterV1` operation), delivery modes, timing/expiry, receipts, provider conformance, and no-hook-wait benchmarks.
+- Add pending claim/revalidation (a plan 6 `DeliveryArbiterV1` operation), runtime/component/probe-bound host hello, capability-derived delivery modes/hook points, timing/expiry, receipts, provider conformance, and no-hook-wait benchmarks.
+- Test every typed capability disposition, stale/mismatched/reinstalled bundle and probe, reconnect-on-change, and a host-advertised mode absent from the generated ledger; none may silently widen delivery or fall back to a similarly named hook.
 - Shadow current delivery before selecting one V2 owner.
 
 ### PR 25F — Context Scout Observatory and Turn timeline
@@ -1259,8 +1273,8 @@ Numbers extend the existing program without colliding with plans 1–24. Canonic
 
 ### PR 31O — Incremental Scout Hint Lab and evaluation harness
 
-- Add exact/recorded/current-best-effort replay, session-level state, A/B/shadow, counterfactual timing, qrels, corpus metrics, exports, and fixture promotion.
-- Verify plan 6's write-free lab ports and zero live counter/delivery mutations; assert relabel and A/B artifacts land only in the dedicated `replay_artifacts` store.
+- Register the Hint/scout evaluator in the generic experiment catalog; add exact/recorded/current-best-effort replay, session-level state, immutable branches, bounded sweeps/ablations, aligned stage playback, shadow/counterfactual timing, qrels, corpus metrics, minimization, saved/exported reproducibility, and fixture promotion.
+- Verify plan 6's immutable evaluator ports plus plan 9's hermetic resource receipt and zero live counter/delivery/cache/lease/effect mutations; assert every artifact lands only in the generic experiment/run/stage family and no scout-specific lifecycle/store/route exists.
 
 ### PR 33D — Historical evidence migration and shadow parity
 
@@ -1333,7 +1347,7 @@ Numbers extend the existing program without colliding with plans 1–24. Canonic
 - every MCP tool defaults to compact Markdown and explicit JSON decodes to the same typed view; no double encoding or giant model transcripts;
 - SSE tests snapshot/resume/gap/backpressure/resync and never drop semantic state silently;
 - browser tests cover Observatory, Loom, Hint Lab, Settings, keyboard/screen-reader, responsive, empty/silent/stale/partial/offline/overload/privacy states;
-- Hint Lab tests prove plan 6's write-free lab ports admit zero envelope claims, deliveries, counters, feedback, config, curation, or tool mutations, and that lab persistence reaches only the `replay_artifacts` store.
+- Hint Lab tests prove plan 6's immutable evaluator ports admit zero envelope claims, deliveries, counters, feedback, config, curation, or tool mutations; plan 9's side-effect receipt reports zero production effects; persistence reaches only generic experiment/run/stage rows.
 
 ### 23.5 Evaluation artifacts
 

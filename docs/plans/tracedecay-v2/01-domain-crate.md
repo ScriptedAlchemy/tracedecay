@@ -90,6 +90,7 @@ crates/tracedecay-domain/
 │   ├── privacy.rs
 │   ├── retention.rs
 │   ├── replay.rs
+│   ├── automation.rs
 │   ├── protocol.rs
 │   ├── payload.rs
 │   ├── provenance.rs
@@ -97,8 +98,12 @@ crates/tracedecay-domain/
 │   ├── event.rs
 │   ├── message.rs
 │   ├── coordination.rs
+│   ├── task_graph_edit.rs
 │   ├── relation.rs
 │   ├── registry.rs
+│   ├── registry_manifest.rs
+│   ├── canonical.rs
+│   ├── generated_contracts.rs        # checked nominal IDs/enums/codecs from contracts/domain-registry.toml
 │   ├── policy/
 │   │   ├── mod.rs
 │   │   ├── bundle.rs
@@ -129,6 +134,8 @@ crates/tracedecay-domain/
     ├── observation_contract.rs
     ├── message_origin_contract.rs
     ├── coordination_contract.rs
+    ├── automation_contract.rs
+    ├── task_graph_edit_contract.rs
     ├── policy_hook_contract.rs
     ├── relation_registry_contract.rs
     ├── retention_contract.rs
@@ -139,6 +146,7 @@ crates/tracedecay-domain/
         ├── observation-envelope-v1.json
         ├── relation-assertion-v1.json
         ├── trace-query-v1.json
+        ├── automation-input-manifest-v1.json
         └── schema-digests.json
 ```
 
@@ -153,8 +161,13 @@ File ownership is strict:
 - `protocol.rs` defines exact runtime handshake/mismatch/remediation value contracts; it contains no fallback-name table.
 - `payload.rs` defines hashes, payload descriptors, reasoning visibility, and typed opaque extension fields.
 - `registry.rs` is the only authority for legal entity/event/predicate schemas and indexed attributes.
+- `registry_manifest.rs` supplies the one pure `RegistryEntryId`/version/owner/schema/deprecation/cross-reference/canonical-digest substrate reused by capability, use-case, configuration, metric, problem/status, and SPI registries. Each consumer still owns semantic validation; none writes another loader/digest/replacement engine.
+- `canonical.rs` owns versioned `CanonicalEncode`, fixed field-order encoders, public manifest digests, and privacy-domain keyed builders. Code-index generations, metric dimension sets, capability/config manifests, and receipts supply field declarations to this kernel rather than implement local canonicalizers.
+- `contracts/domain-registry.toml` generates only mechanical nominal ID wrappers, closed token enums, kind/schema mappings, checked conversions, JSON Schema registration, and fixtures into `generated_contracts.rs`. Invariant-heavy types and validators remain handwritten. CI regenerates/diffs; no proc-macro or build-script crate is added.
 - `message.rs` defines native message origin, derivation/evidence, representative membership, and lossless query-view semantics; it never classifies content itself.
 - `coordination.rs` defines privacy-safe agent presence, work claims, scopes, redundancy modes, TTL/status, acknowledgements, and coordination outcome vocabulary; it never performs overlap inference or sends hints.
+- `automation.rs` defines the one trigger, relevant-input, scope-frontier, quiescence, admission, skip-episode, and terminal-disposition vocabulary for autonomous jobs; it never schedules, scans, leases, calls a model, or mutates a cursor.
+- `task_graph_edit.rs` defines the one contained Markdown-edit manifest, local reference, source diagnostic, semantic diff/conflict, and receipt vocabulary; it never parses YAML/Markdown, touches a filesystem, allocates IDs, or mutates task truth.
 - `policy/` defines policy bundle/evaluation/outcome references and proposed-effect value contracts, never evaluator execution.
 - `hooks/` defines host-neutral hook request/receipt IDs, origin/effect/durability vocabulary, never wire decoding, host rendering, or orchestration.
 - `ordering.rs` defines per-source continuity states; `watermark.rs` defines per-shard progress.
@@ -280,6 +293,9 @@ pub struct PredicateId(String); // private, grammar-validated predicate registry
 pub struct HintCategoryId(String); // private, grammar-validated policy category token
 pub struct LanguageId(String); // private, grammar-validated language registry token
 pub struct BindingId(String); // private, grammar-validated generated catalog binding token
+pub struct McpLogicalRegistrationId(String); // private, grammar-validated opaque registration identity; semantics owned by plan 08
+pub struct McpSurfaceProfileId(String); // private, grammar-validated opaque profile identity; membership/budgets owned by plan 08
+pub struct HostSurfaceKindV1(String); // private, grammar-validated opaque host surface identity; registry/evidence owned by plans 08/27
 pub struct LocaleId(String); // private, grammar-validated canonical BCP-47 language tag
 pub struct NativeAgentId(pub PrivacyDomainBoundLocatorDigest); // provider-native alias, never literal public text
 pub struct ComponentVersion(String); // bounded ASCII semver/build grammar
@@ -299,6 +315,70 @@ pub struct HostProfileRef {
     pub id: HostProfileId,
     pub version: EntityVersionId,
     pub manifest_digest: ManifestDigest,
+}
+pub enum HostInstallScopeV1 {
+    User,
+    Machine,
+    ManagedHost,
+}
+pub enum SurfaceKind {
+    Cli,
+    Mcp,
+    Http,
+    Sdk,
+    Dashboard,
+    Hook,
+    Skill,
+    Automation,
+    Executor,
+    ContextScout,
+    InternalHost,
+}
+pub enum HostCapabilityDispositionV1 {
+    Supported,
+    VersionGated { minimum: Option<ComponentVersion>, maximum_exclusive: Option<ComponentVersion> },
+    Absent,
+    Undocumented,
+    PolicyDisabled,
+    Stale,
+    TrustPending,
+}
+pub struct HostBundleComponentRefV1 {
+    pub installation: EntityVersionRef,
+    pub component_kind: RegistryEntryId,
+    pub bundle_payload_digest: ManifestDigest,
+    pub signed_release_manifest_digest: ManifestDigest,
+    pub release_attestation: EntityRef,
+    pub component_digest: ManifestDigest,
+}
+pub struct HostIntegrationRuntimeRefV1 {
+    pub host_profile: HostProfileRef,
+    pub host_instance: HostInstanceId,
+    pub surface: HostSurfaceKindV1,
+    pub integration_manifest_digest: ManifestDigest,
+    pub installed_components: BoundedVec<HostBundleComponentRefV1, 4>,
+    pub component_set_digest: ManifestDigest,
+    pub install_generation: u64,
+    pub install_receipt: EntityRef,
+    pub adapter_version: ComponentVersion,
+}
+pub enum HostCapabilitySubjectV1 {
+    // Legal before any TraceDecay component or installation receipt exists.
+    Target {
+        host_profile: HostProfileRef,
+        host_instance: HostInstanceId,
+        surface: HostSurfaceKindV1,
+        adapter_version: ComponentVersion,
+    },
+    // Legal only after all installed-runtime refs verify.
+    Installed(HostIntegrationRuntimeRefV1),
+}
+pub struct HostCapabilitySnapshotV1 {
+    pub subject: HostCapabilitySubjectV1,
+    pub capabilities: BTreeMap<CapabilityId, HostCapabilityDispositionV1>,
+    pub observed_at: UtcMicros,
+    pub fresh_until: UtcMicros,
+    pub snapshot_digest: ManifestDigest, // canonical subject/capabilities/times only; excludes this field
 }
 pub struct SkillVersionRef {
     pub skill_id: SkillId,
@@ -326,7 +406,6 @@ pub struct QrelVersionId(pub EntityVersionId);
 pub struct CandidatePoolId(pub EntityId);
 pub struct JudgmentId(pub EntityId);
 pub struct AdjudicationId(pub EntityId);
-pub struct EvaluationRunId(pub EntityId);
 pub struct EvaluationReportId(pub EntityId);
 pub struct RetrievalProfileId(pub EntityId);
 pub struct RetrievalProfileVersionId(pub EntityVersionId);
@@ -364,7 +443,17 @@ pub struct CanonicalRequestRef {
     pub protected_payload: Option<PayloadRef>,
 }
 
-pub enum OperationStateV1 { Pending, Running, Completed, Failed, CancelRequested, Cancelled, Expired }
+pub enum OperationStateV1 {
+    Admitted,
+    Running,
+    Waiting,
+    Cancelling,
+    Succeeded,
+    Failed,
+    Cancelled,
+    CompensationRequired,
+    Blocked,
+}
 pub struct OperationRef {
     pub operation_id: OperationId,
     pub capability_id: CapabilityId,
@@ -399,12 +488,110 @@ pub struct ContextPacketManifestId(pub EntityId);
 pub struct HandoffId(pub EntityId);
 pub struct TaskArtifactId(pub EntityId);
 pub struct TaskOutcomeId(pub EntityId);
-pub struct SavedTaskViewId(pub EntityId);
+pub struct TaskGraphEditWorkspaceId(pub uuid::Uuid); // ephemeral operation artifact, never a canonical EntityId
+pub struct TaskGraphEditCandidateRefV1 {
+    pub workspace_id: TaskGraphEditWorkspaceId,
+    pub generation: u64,
+    pub digest: ManifestDigest,
+}
+pub struct SavedViewId(pub EntityId);
+pub struct InvestigationRouteId(pub EntityId);
+pub struct ExperimentId(pub EntityId);
+pub struct ExperimentVariantId(pub EntityId);
+pub struct ExperimentRunId(pub EntityId);
+pub struct ExperimentCellId(pub EntityId);
+pub struct ReplayStageId(pub EntityId);
+pub struct ReplayComparisonId(pub EntityId);
+pub struct ReplayComparisonCellId(pub EntityId);
+pub struct ReplayReductionId(pub EntityId);
+pub struct AutomationJobId(pub EntityId);
+pub struct AutomationRunId(pub EntityId);
+pub struct AutomationAdmissionId(pub EntityId);
+pub struct AutomationSkipEpisodeId(pub EntityId);
+pub struct AutomationEffectReconciliationId(pub EntityId);
+pub struct ProfileAtlasGenerationId(pub EntityId);
+pub struct ProfileAtlasTileId(pub EntityId); // derived visualization identity, never EntityKind truth
 pub struct CatalogGenerationId(pub u64);
 pub struct ProjectorVersion(pub ComponentVersion);
 pub struct ProjectionGenerationId(pub EntityId);
 pub struct ModelCatalogEntryId(pub EntityId);
 pub struct ModelRevisionId(pub EntityId);
+
+pub struct SavedViewV1 {
+    pub id: SavedViewId,
+    pub version: u64,
+    pub name: SafeLabel,
+    pub owner_actor_id: ActorId,
+    pub owner_scope: DeclaredScope,
+    pub classification: DataSensitivity,
+    pub redaction_state: SavedViewRedactionStateV1,
+    pub definition: SavedViewDefinitionV1,
+    pub snapshot: SavedViewSnapshotV1,
+    pub sharing_policy: SavedViewSharingPolicyV1,
+    pub active_share_bundle_digest: Option<ManifestDigest>,
+    pub expires_at: Option<UtcMicros>,
+    pub created_at: UtcMicros,
+    pub updated_at: UtcMicros,
+    pub revoked_at: Option<UtcMicros>,
+}
+
+pub enum SavedViewDefinitionV1 {
+    Investigation(InvestigationViewSpecV1),
+    Task(TaskViewSpecV1),
+    Experiment(ExperimentViewSpecV1),
+}
+
+pub struct InvestigationViewSpecV1 {
+    pub route: InvestigationRouteId,
+    pub state: InvestigationStateV1,
+    pub retrieval_recipe_id: Option<RetrievalRecipeId>,
+    pub scenes: BoundedVec<InvestigationSceneRefV1, 100>,
+}
+
+pub struct InvestigationSceneRefV1 {
+    pub scene_id: EntityId,
+    pub parent_scene_id: Option<EntityId>,
+    pub state_digest: ManifestDigest,
+    pub composition_id: RegistryEntryId,
+    pub camera_ref: Option<PayloadRef>,
+    pub selected_anchors: BoundedVec<RetrievalAnchorId, 100>,
+    pub snapshot: SnapshotManifestRefV1,
+    pub annotation_ids: BoundedVec<EntityId, 100>,
+}
+
+pub struct ExperimentViewSpecV1 {
+    pub experiment_id: ExperimentId,
+    pub selected_run_id: Option<ExperimentRunId>,
+    pub selected_cell_id: Option<ExperimentCellId>,
+    pub selected_stage_id: Option<ReplayStageId>,
+    pub selected_comparison_id: Option<ReplayComparisonId>,
+    pub selected_comparison_cell_id: Option<ReplayComparisonCellId>,
+    pub selected_reduction_id: Option<ReplayReductionId>,
+    pub playhead_ordinal: Option<u32>,
+}
+
+pub struct SavedViewSharingPolicyV1 {
+    pub audience: SavedViewAudienceV1,
+    pub maximum_sensitivity: DataSensitivity,
+    pub default_grant_ttl: Option<DurationMicros>,
+}
+
+pub enum SavedViewAudienceV1 { Private, Profile, ExplicitGrants }
+
+pub struct SnapshotManifestRefV1 {
+    pub manifest_id: EntityId,
+    pub digest: ManifestDigest,
+}
+
+pub enum SavedViewSnapshotV1 {
+    Live,
+    Frozen {
+        manifest: SnapshotManifestRefV1,
+        watermark: VectorWatermark,
+    },
+}
+
+pub enum SavedViewRedactionStateV1 { None, Redacted, PendingSanitization }
 
 pub struct CatalogSnapshotRefV1 {
     pub generation: CatalogGenerationId,
@@ -418,13 +605,28 @@ pub struct ProjectionCheckpointKeyV1 {
     pub generation: ProjectionGenerationId,
 }
 
+pub struct OutboxConsumerCheckpointV1<K> {
+    pub key: K,
+    pub lease_epoch: u64,
+    pub last_examined_sequence: u64,
+    pub last_committed_sequence: u64,
+    pub event_watermark: VectorWatermark,
+    pub updated_at: UtcMicros,
+}
+
+pub struct OutboxConsumerLeaseV1<K> {
+    pub key: K,
+    pub lease_id: LeaseId,
+    pub owner_instance_id: ConsumerInstanceId,
+    pub epoch: u64,
+    pub leased_until: UtcMicros,
+}
+
 pub enum ProjectionCheckpointStatusV1 { Active, Blocked, Rebuilding, Quarantined, Complete }
 
 pub struct ProjectionCheckpointV1 {
-    pub key: ProjectionCheckpointKeyV1,
-    pub last_contiguous_sequence: u64,
+    pub consumer: OutboxConsumerCheckpointV1<ProjectionCheckpointKeyV1>,
     pub highest_seen_sequence: u64,
-    pub source_watermarks: VectorWatermark,
     pub schema_registry_version: RegistryVersion,
     pub builder_version: ComponentVersion,
     pub status: ProjectionCheckpointStatusV1,
@@ -526,6 +728,141 @@ pub struct ContextPacketManifestRefV1 {
     pub manifest_digest: ManifestDigest,
 }
 
+pub struct EditLocalKeyV1(pub SafeLabel); // bundle-local grammar; never canonical identity
+
+pub enum EditableEntityRefV1 {
+    Existing { entity: EntityRef, expected_version: EntityVersionId, data_version_digest: DataVersionDigest },
+    Local(EditLocalKeyV1),
+}
+
+pub enum TaskGraphEditScopeV1 {
+    Initiative(InitiativeId),
+    Plan(PlanId),
+    Query { query: TraceQueryV1, snapshot: SnapshotManifestRefV1 },
+    SavedView { view_id: SavedViewId, expected_version: u64 },
+}
+
+pub enum TaskGraphEditClosureModeV1 {
+    ExactSelection,
+    CompletePlan,
+    SelectionWithDependencyClosure,
+    CompleteInitiative,
+}
+pub enum TaskGraphEditFormatV1 { CommonMarkWithStrictYaml12Frontmatter }
+pub enum TaskGraphEditEntityIntentV1 { Retain, Replace, Retire }
+
+pub struct TaskGraphEditBaseVersionV1 {
+    pub entity: EntityRef,
+    pub version: EntityVersionId,
+    pub data_version_digest: DataVersionDigest,
+}
+
+pub struct TaskGraphEditManifestV1 {
+    pub workspace_id: TaskGraphEditWorkspaceId,
+    pub owner_scope: DeclaredScope,
+    pub scope_resolution_id: ScopeResolutionId,
+    pub edit_scope: TaskGraphEditScopeV1,
+    pub closure_mode: TaskGraphEditClosureModeV1,
+    pub format: TaskGraphEditFormatV1,
+    pub base_versions: BoundedVec<TaskGraphEditBaseVersionV1, 100_000>,
+    pub export_operation: OperationRef,
+    pub export_digest: ManifestDigest,
+    pub file_manifest: PayloadRef,
+    pub file_manifest_digest: ManifestDigest,
+    pub file_count: u64,
+    pub schema: SchemaRef,
+    pub catalog_snapshot: CatalogSnapshotRefV1,
+    pub config_digest: ManifestDigest,
+    pub policy_bundle: PolicyBundleRef,
+    pub authorization_digest: ManifestDigest,
+    pub redaction_digest: ManifestDigest,
+    pub created_at: UtcMicros,
+    pub expires_at: UtcMicros,
+}
+
+pub struct TaskGraphEditRelativePathV1(pub SinkEligible<LogSafeText>);
+
+pub struct TaskGraphEditSourceSpanV1 {
+    pub relative_file: TaskGraphEditRelativePathV1,
+    pub byte_start: u64,
+    pub byte_end: u64,
+    pub line_start: u32,
+    pub column_start: u32,
+    pub line_end: u32,
+    pub column_end: u32,
+}
+
+pub enum TaskGraphEditDiagnosticSeverityV1 { Error, Warning, Information }
+
+pub struct TaskGraphEditTextEditV1 {
+    pub span: TaskGraphEditSourceSpanV1,
+    pub replacement: PayloadRef,
+    pub replacement_digest: ManifestDigest,
+}
+
+pub struct TaskGraphEditDiagnosticV1 {
+    pub code: ReasonCode,
+    pub severity: TaskGraphEditDiagnosticSeverityV1,
+    pub phase: RegistryEntryId,
+    pub span: Option<TaskGraphEditSourceSpanV1>,
+    pub subject: Option<EditableEntityRefV1>,
+    pub field_path: Option<SinkEligible<LogSafeText>>,
+    pub safe_message: SinkEligible<LogSafeText>,
+    pub suggested_edit: Option<TaskGraphEditTextEditV1>,
+    pub evidence_anchors: BoundedVec<RetrievalAnchorId, 32>,
+}
+
+pub enum TaskGraphSemanticChangeKindV1 { Add, Replace, Retire, Field, Dependency, Gate, Acceptance, Assignment, Route }
+
+pub struct TaskGraphSemanticChangeV1 {
+    pub subject: EditableEntityRefV1,
+    pub kind: TaskGraphSemanticChangeKindV1,
+    pub field_path: Option<SinkEligible<LogSafeText>>,
+    pub before_digest: Option<ManifestDigest>,
+    pub after_digest: Option<ManifestDigest>,
+    pub source_spans: BoundedVec<TaskGraphEditSourceSpanV1, 8>,
+}
+
+pub struct TaskGraphSemanticDiffV1 {
+    pub workspace_id: TaskGraphEditWorkspaceId,
+    pub base_digest: ManifestDigest,
+    pub edited_semantic_digest: ManifestDigest,
+    pub changes: BoundedVec<TaskGraphSemanticChangeV1, 100_000>,
+    pub cycle_witnesses: BoundedVec<PayloadRef, 100>,
+    pub readiness_impact: PayloadRef,
+    pub critical_path_impact: PayloadRef,
+    pub active_attempt_impact: PayloadRef,
+    pub budget_scope_privacy_impact: PayloadRef,
+    pub coverage: CoverageReportV1,
+}
+
+pub struct TaskGraphEditConflictV1 {
+    pub workspace_id: TaskGraphEditWorkspaceId,
+    pub rebased_workspace_id: Option<TaskGraphEditWorkspaceId>,
+    pub current_base_versions: BoundedVec<TaskGraphEditBaseVersionV1, 100_000>,
+    pub conflicting_subjects: BoundedVec<EditableEntityRefV1, 10_000>,
+    pub diagnostics: BoundedVec<TaskGraphEditDiagnosticV1, 10_000>,
+    pub conflict_digest: ManifestDigest,
+}
+
+pub enum TaskGraphEditCleanupStateV1 { RetainedForRepair, PurgePending, Purged, Expired, CleanupBlocked }
+
+pub struct TaskGraphEditReceiptV1 {
+    pub candidate: TaskGraphEditCandidateRefV1,
+    pub operation: OperationRef,
+    pub base_versions_digest: ManifestDigest,
+    pub new_versions: BoundedVec<TaskGraphEditBaseVersionV1, 100_000>,
+    pub changed_entities: BoundedVec<EntityRef, 100_000>,
+    pub allocation_manifest: PayloadRef,
+    pub semantic_diff_digest: ManifestDigest,
+    pub validation_digest: ManifestDigest,
+    pub secret_scan_receipt: SanitizationReceiptId,
+    pub audit_anchor: RetrievalAnchorId,
+    pub cleanup_state: TaskGraphEditCleanupStateV1,
+    pub committed_at: UtcMicros,
+    pub receipt_digest: ManifestDigest,
+}
+
 pub struct PolicyBundleRef {
     pub bundle_id: PolicyBundleId,
     pub version: EntityVersionId,
@@ -553,6 +890,8 @@ pub struct ModelCapabilityRefV1 {
     pub discovered_at: UtcMicros,
 }
 ```
+
+`SavedViewV1` and `SavedViewDefinitionV1` are the one persisted/wire saved-view envelope. Plan 11 owns the UI-neutral `InvestigationStateV1` codec, bounded scene-trail interaction semantics, and `ExperimentViewSpecV1` presentation; plan 24 owns `TaskViewSpecV1` validation/lenses. All three variants live under this domain contract and share identity, name/owner scope, classification/redaction, live/frozen snapshot, optimistic version, expiry, revoke/reauthorize, and sharing lifecycle. Experiment views reference immutable experiment/run/cell/stage/comparison/comparison-cell/reduction/playhead identities and never embed inputs or outputs. A variant cannot introduce another saved-view ID, table, query scope, grant, route family, or command namespace. `PendingSanitization` is an automated safety state, not a human approval queue.
 
 Deterministic derivation uses fixed UUIDv5 namespaces published by `id.rs`. Input encoding is version byte `1`, then big-endian length-prefixed UTF-8 fields and fixed-width hash/integer fields. Enum tags use their registry snake-case names. No locale, platform path syntax, JSON object order, wall clock, or process randomness participates.
 
@@ -719,6 +1058,31 @@ All tuple fields above are private. `Unclassified<T>` is transient capture/parse
 
 Architecture/compile-fail tests forbid raw `String`, `serde_json::Value`, `Vec<u8>`, `Bytes`, or slices at application-to-store, projector-to-index, policy-to-hint, and application-to-transport content ports. Static catalog metadata uses reviewed `CatalogText`, which is not a conversion from runtime content. Safe redaction markers expose class plus random receipt reference only; no original length, prefix/suffix, plaintext digest, or cross-domain fingerprint is public.
 
+Graph composition is one bounded vocabulary shared by query, application, API, saved investigations, dashboard, and export:
+
+```rust
+pub enum GraphLensV1 {
+    Git,
+    Code,
+    Thread,
+    Agent,
+    Turn,
+    Task,
+    Plan,
+    Timeline,
+    Memory,
+    AutomationSkill,
+}
+
+pub struct GraphCompositionSpecV1 {
+    pub primary_lens: GraphLensV1,
+    pub overlay_lenses: BoundedVec<GraphLensV1, 2>,
+    pub bridge_kinds: BoundedVec<RegistryEntryId, 16>,
+}
+```
+
+Construction rejects repeated lenses, unregistered bridges, inaccessible lens data, and combinations over catalog cost/legibility limits. Overlay membership and bridge roles stay explicit in every returned node/edge; composition never flattens edge semantics or creates another graph query family.
+
 Replay fidelity is one domain vocabulary shared unchanged by capture, projectors, query, policy, hooks, application, API, and labs:
 
 ```rust
@@ -728,16 +1092,532 @@ pub enum ReplayMode {
     CurrentBestEffort,
 }
 
+pub enum ReplayFidelityV1 {
+    ExactDeterministic { verified: bool },
+    RecordedResult { digest_verified: bool },
+    CurrentBestEffort { incomplete: bool },
+}
+
+pub struct ReplayVersionSetV1 {
+    pub schema_registry: RegistryManifestDigest,
+    pub evaluator_executable: Option<ManifestDigest>,
+    pub configuration: ManifestDigest,
+    pub policy: ManifestDigest,
+    pub catalog: CatalogSnapshotRefV1,
+    pub code_indexes: BoundedVec<ManifestDigest, 32>,
+    pub memory_snapshot: Option<ManifestDigest>,
+    pub model_revisions: BoundedVec<ManifestDigest, 16>,
+}
+
 pub struct ReplayManifestRef {
     pub manifest_id: ManifestId,
-    pub mode: ReplayMode,
-    pub payload: PayloadRef,
+    pub requested_mode: ReplayMode,
+    pub payload: PayloadRef, // immutable requested-input manifest; typed fields below are checked projections
     pub digest: ManifestDigest,
+    pub input_digest: ManifestDigest,
+    pub environment_digest: ManifestDigest,
+    pub scope_resolution_digest: ManifestDigest,
+    pub watermark: VectorWatermark,
+    pub frozen_clock: UtcMicros,
+    pub rng_seed: [u8; 32],
+    pub versions: ReplayVersionSetV1,
+    pub recorded_model_outputs: BoundedVec<PayloadRef, 64>,
+    pub privacy_receipts: BoundedVec<SanitizationReceiptId, 64>,
     pub created_at: UtcMicros,
+}
+
+pub struct ReplaySubstitutionV1 {
+    pub component: RegistryEntryId,
+    pub requested_digest: Option<ManifestDigest>,
+    pub actual_digest: ManifestDigest,
+    pub reason: ReasonCode,
+}
+
+pub struct ReplayUnavailableInputV1 {
+    pub component: RegistryEntryId,
+    pub requested_digest: Option<ManifestDigest>,
+    pub reason: ReasonCode,
+}
+
+pub struct ReplayResolutionV1 {
+    pub requested_mode: ReplayMode,
+    pub actual_fidelity: ReplayFidelityV1,
+    pub substitutions: BoundedVec<ReplaySubstitutionV1, 64>,
+    pub unavailable_inputs: BoundedVec<ReplayUnavailableInputV1, 64>,
+}
+
+pub enum LabKindV1 {
+    Hint,
+    Retrieval,
+    SearchQuality,
+    Coordination,
+    Orchestration,
+    Ingest,
+    Query,
+    Correlation,
+    Scheduler,
+    Memory,
+    PolicyDiff,
+    Evolution,
+    ScopeFederation,
+    Privacy,
+}
+
+pub struct ExperimentBudgetV1 {
+    pub deadline_micros: u64,
+    pub maximum_cases: BoundedU32<1, 256>,
+    pub maximum_run_cells: BoundedU32<1, 100_000>,
+    pub maximum_concurrency: BoundedU32<1, 32>,
+    pub maximum_cpu_micros: u64,
+    pub maximum_rss_bytes: u64,
+    pub maximum_overlay_bytes: u64,
+    pub maximum_disk_read_bytes: u64,
+    pub maximum_network_bytes: u64,
+    pub maximum_output_bytes: u64,
+    pub maximum_open_file_descriptors: BoundedU32<3, 4096>,
+    pub maximum_processes: BoundedU32<1, 64>,
+    pub maximum_model_tokens: u64,
+    pub maximum_cost_micros: u64,
+    pub model_and_egress_grants: BoundedVec<CapabilityId, 16>,
+}
+
+pub struct ExperimentBranchRefV1 {
+    pub parent_experiment_id: ExperimentId,
+    pub parent_run_id: ExperimentRunId,
+    pub parent_variant_id: ExperimentVariantId,
+    pub parent_manifest_digest: ManifestDigest,
+    pub changed_field_patch: PayloadRef,
+    pub changed_field_patch_digest: ManifestDigest,
+    pub output_relation: PredicateId,
+}
+
+pub struct ExperimentSpecV1 {
+    pub id: ExperimentId,
+    pub lab: LabKindV1,
+    pub source_anchor: RetrievalAnchorId,
+    pub source_scene_id: Option<EntityId>,
+    pub anchor_id: RetrievalAnchorId,
+    pub branch: Option<ExperimentBranchRefV1>,
+    pub manifest: ReplayManifestRef,
+    pub variants: BoundedVec<ExperimentVariantV1, 6>, // nonempty; exactly one baseline
+    pub corpus_manifest: Option<SnapshotManifestRefV1>,
+    pub repetitions: BoundedU32<1, 100>,
+    pub evaluator_ids: BoundedVec<RegistryEntryId, 16>,
+    pub sweep: Option<ExperimentSweepSpecV1>,
+    pub budget: ExperimentBudgetV1,
+}
+
+pub struct ExperimentVariantV1 {
+    pub id: ExperimentVariantId,
+    pub baseline: bool,
+    pub label: SafeLabel,
+    pub parameter_patch: PayloadRef,
+    pub parameter_patch_digest: ManifestDigest,
+}
+
+pub struct ExperimentSweepValueV1 {
+    pub value: PayloadRef,
+    pub digest: ManifestDigest,
+    pub safe_label: SafeLabel,
+}
+
+pub struct ExperimentSweepDimensionV1 {
+    pub dimension: RegistryEntryId,
+    pub values: BoundedVec<ExperimentSweepValueV1, 32>,
+}
+
+pub enum ExperimentSweepSpecV1 {
+    OneFactor { dimensions: BoundedVec<ExperimentSweepDimensionV1, 16> },
+    Grid { dimensions: BoundedVec<ExperimentSweepDimensionV1, 4>, maximum_cells: BoundedU32<1, 256> },
+    Pairwise { dimensions: BoundedVec<ExperimentSweepDimensionV1, 16>, maximum_cases: BoundedU32<1, 256> },
+}
+
+pub struct ExperimentRunV1 {
+    pub id: ExperimentRunId,
+    pub experiment_id: ExperimentId,
+    pub anchor_id: RetrievalAnchorId,
+    pub operation: OperationRef,
+    pub manifest: ReplayManifestRef,
+    pub resolution: ReplayResolutionV1,
+    pub trace_digest: Option<ManifestDigest>,
+    pub output_digest: Option<ManifestDigest>,
+    pub side_effect_receipt_digest: Option<ManifestDigest>,
+    pub created_at: UtcMicros,
+    pub completed_at: Option<UtcMicros>,
+}
+
+pub struct ExperimentSweepCoordinateV1 {
+    pub dimension: RegistryEntryId,
+    pub value_digest: ManifestDigest,
+}
+
+pub struct ExperimentCellCoordinateV1 {
+    pub variant_id: ExperimentVariantId,
+    pub evaluator_id: RegistryEntryId,
+    pub corpus_case_anchor: Option<RetrievalAnchorId>,
+    pub repetition_ordinal: u32,
+    pub sweep: BoundedVec<ExperimentSweepCoordinateV1, 16>,
+}
+
+pub enum ExperimentCellStateV1 { Pending, Running, Succeeded, Failed, Cancelled, Unavailable }
+
+pub struct ExperimentCellV1 {
+    pub id: ExperimentCellId,
+    pub run_id: ExperimentRunId,
+    pub coordinate: ExperimentCellCoordinateV1,
+    pub coordinate_digest: ManifestDigest,
+    pub state: ExperimentCellStateV1,
+    pub resolution: ReplayResolutionV1,
+    pub anchor_id: RetrievalAnchorId,
+    pub output_digest: Option<ManifestDigest>,
+    pub coverage: CoverageReportV1,
+}
+
+pub struct ReplayStageV1 {
+    pub id: ReplayStageId,
+    pub run_id: ExperimentRunId,
+    pub cell_id: ExperimentCellId,
+    pub stage_kind: RegistryEntryId,
+    pub ordinal: u32,
+    pub input_digest: ManifestDigest,
+    pub output_digest: Option<ManifestDigest>,
+    pub actual_fidelity: ReplayFidelityV1,
+    pub anchor_id: RetrievalAnchorId,
+    pub coverage: CoverageReportV1,
+}
+
+pub struct ReplayTraceV1 {
+    pub run: ExperimentRunV1,
+    pub cell: ExperimentCellV1,
+    pub stage_window: BoundedVec<ReplayStageV1, 500>,
+    pub next_stage_after: Option<ReplayStageId>,
+    pub total_stage_count: u64,
+    pub sealed_terminal_receipt_digest: Option<ManifestDigest>,
+    pub coverage: CoverageReportV1,
+}
+
+pub enum ReplayStageAlignmentV1 { Unchanged, Added, Removed, Changed, Substituted, Unaligned }
+
+pub struct ExperimentCellRefV1 {
+    pub run_id: ExperimentRunId,
+    pub cell_id: ExperimentCellId,
+}
+
+pub struct ComparedReplayStageV1 {
+    pub cell: ExperimentCellRefV1,
+    pub stage_id: Option<ReplayStageId>,
+    pub alignment: ReplayStageAlignmentV1,
+}
+
+pub struct ReplayComparisonCellV1 {
+    pub id: ReplayComparisonCellId,
+    pub comparison_id: ReplayComparisonId,
+    pub ordinal: u32,
+    pub baseline_stage_id: Option<ReplayStageId>,
+    pub variants: BoundedVec<ComparedReplayStageV1, 5>,
+    pub anchor_id: RetrievalAnchorId,
+    pub coverage: CoverageReportV1,
+}
+
+pub struct ReplayComparisonV1 {
+    pub id: ReplayComparisonId,
+    pub experiment_id: ExperimentId,
+    pub baseline: ExperimentCellRefV1,
+    pub variants: BoundedVec<ExperimentCellRefV1, 5>,
+    pub cell_window: BoundedVec<ReplayComparisonCellV1, 500>,
+    pub next_cell_after: Option<ReplayComparisonCellId>,
+    pub total_cell_count: u64,
+    pub anchor_id: RetrievalAnchorId,
+    pub coverage: CoverageReportV1,
+}
+
+pub struct ReplayReductionV1 {
+    pub id: ReplayReductionId,
+    pub run_id: ExperimentRunId,
+    pub cell_id: ExperimentCellId,
+    pub parent_reduction_id: Option<ReplayReductionId>,
+    pub dimension_kind: RegistryEntryId,
+    pub patch: PayloadRef,
+    pub patch_digest: ManifestDigest,
+    pub predicate_digest: ManifestDigest,
+    pub disposition: RegistryEntryId,
+    pub output_digest: Option<ManifestDigest>,
+    pub anchor_id: RetrievalAnchorId,
+    pub ordinal: u32,
+}
+
+pub struct ReplayResourceAccessV1 {
+    pub resource_kind: RegistryEntryId,
+    pub resource_digest: ManifestDigest,
+    pub access: RegistryEntryId,
+    pub disposition: RegistryEntryId,
+}
+
+pub struct ReplaySideEffectReceiptV1 {
+    pub run_id: ExperimentRunId,
+    pub opened_resources: BoundedVec<ReplayResourceAccessV1, 4096>,
+    pub denied_attempts: BoundedVec<ReplayResourceAccessV1, 4096>,
+    pub overlay_write_digest: ManifestDigest,
+    pub model_and_egress_cost_digest: ManifestDigest,
+    pub worker_protocol_digest: ManifestDigest,
+    pub cpu_micros: u64,
+    pub peak_rss_bytes: u64,
+    pub overlay_bytes: u64,
+    pub disk_read_bytes: u64,
+    pub network_bytes: u64,
+    pub output_bytes: u64,
+    pub peak_open_file_descriptors: u32,
+    pub peak_processes: u32,
+    pub forced_termination: bool,
+    pub production_effect_count: u64,
+    pub receipt_digest: ManifestDigest,
 }
 ```
 
-`ExactDeterministic` means the executable artifact and every declared input/version/digest are available and verified. `RecordedResult` verifies and renders the stored result without executing. `CurrentBestEffort` runs current or substituted components, reports every substitution/omission, and can never be labeled historical truth.
+`ExactDeterministic` means the executable artifact and every declared input/version/digest are available and verified. `RecordedResult` verifies and renders the stored result without executing. `CurrentBestEffort` runs current or substituted components, reports every substitution/omission, and can never be labeled historical truth. Requested mode lives only in the immutable input manifest; achieved fidelity and bounded substitutions live in `ReplayResolutionV1` on the run/cell and are repeated on stages where fidelity can differ. An `ExperimentRunV1` is one operation-backed cohort over all bounded variant × evaluator × corpus-case × repetition × sweep coordinates; `ExperimentCellV1` is the addressable result unit and every sweep/Pareto/comparison point resolves to its cell anchor. Before create and again before run admission, checked arithmetic expands that full Cartesian coordinate set and rejects zero, overflow, any dimension cap violation, or a total above both `budget.maximum_run_cells` and the hard 100,000-cell platform ceiling; `maximum_cases` limits corpus cases and never substitutes for the total-cell cap. Variants do not form ancestry. A changed experiment creates an immutable child whose sole ancestry is `ExperimentBranchRefV1`; parent owner/lab/schema must match, ancestry is acyclic, and no merge exists. The shared operation kernel owns queue/run/wait/cancel/resume/retry/terminal mechanics. A lab evaluator owns only typed stages and explanations. Every experiment/run/cell/stage/comparison/comparison-cell/reduction receives a stable retrieval anchor. A running trace has no sealed terminal receipt; a terminal trace must have one, enforced by invariant tests. The hermetic replay worker starts with an empty environment and closed inherited descriptors, read-only verified mounts, a bounded disposable overlay, brokered allowlisted model/network access, frozen clock/RNG, and hard wall/CPU/RSS/disk/network/output/FD/process limits. Timeout/cancel kills and reaps the process tree. Every allowed open, denied attempt, usage high-water mark, and forced termination enters `ReplaySideEffectReceiptV1`; publication requires `production_effect_count == 0` and every budget within bounds.
+
+Autonomous self-improvement admission is also one domain vocabulary:
+
+```rust
+pub enum AutomationTriggerClassV1 {
+    EvidenceDriven,
+    TimeDriven,
+    ExternalEvent,
+    Manual,
+}
+
+pub enum AutomationDependencyChannelV1 {
+    EventFamily(RegistryEntryId),
+    ProjectionFamily(RegistryEntryId),
+    ComponentVersion(RegistryEntryId),
+    RetentionHorizon(RegistryEntryId),
+    ExternalSource(RegistryEntryId),
+}
+
+pub struct AutomationDependencySelectorV1 {
+    pub channel: AutomationDependencyChannelV1,
+    pub indexed_fields: BoundedVec<AttrKeyId, 64>,
+    pub scope_projection: RegistryEntryId,
+    pub materiality_fields: BoundedVec<AttrKeyId, 64>,
+}
+
+pub enum AutomationTriggerFrontierV1 {
+    Evidence { watermark: VectorWatermark },
+    TimeBoundary { boundary_kind: RegistryEntryId, ordinal: u64, boundary_at: UtcMicros },
+    ExternalEvent { source: SourceInstanceId, source_sequence: u64, event_id: Option<EventId> },
+    ManualRequest { request_id: CommandId, idempotency_digest: ManifestDigest },
+}
+
+pub enum AutomationReevaluationPolicyV1 {
+    FutureEvidenceOnly,
+    ReevaluateDirtyScopes,
+    BoundedHistoricalWindow { horizon: DurationMicros },
+}
+
+pub struct AutomationInputContractV1 {
+    pub trigger_class: AutomationTriggerClassV1,
+    pub dependency_selectors: BoundedVec<AutomationDependencySelectorV1, 128>,
+    pub ignored_self_origin_families: BoundedVec<RegistryEntryId, 32>,
+    pub materiality_policy: RegistryEntryId,
+    pub quiet_policy: RegistryEntryId,
+    pub reevaluation_policy: AutomationReevaluationPolicyV1,
+    pub contract_digest: ManifestDigest,
+}
+
+pub struct AutomationWorkKeyV1 {
+    pub job_id: AutomationJobId,
+    pub job_version_id: EntityVersionId,
+    pub task_kind: RegistryEntryId,
+    pub declared_scope: DeclaredScope,
+    pub scope_resolution_id: ScopeResolutionId,
+}
+
+pub enum AutomationDirtyReasonV1 {
+    NewEligibleActivity,
+    ThreadReachedBoundary,
+    FactOrRelationChanged,
+    FeedbackOrOutcomeArrived,
+    DiagnosticOrFailurePatternChanged,
+    SkillUseOrDriftChanged,
+    RetentionHorizonReached,
+    TimeBoundaryAdvanced { boundary_kind: RegistryEntryId, ordinal: u64 },
+    ExternalEventArrived { source: SourceInstanceId, source_sequence: u64 },
+    ManualRequestAccepted { request_id: CommandId },
+    RelevantDependencyChanged { component: RegistryEntryId },
+    FailedInputRetry,
+}
+
+pub struct AutomationDependencySnapshotV1 {
+    pub activity_watermark: VectorWatermark,
+    pub component_digests: BTreeMap<RegistryEntryId, ManifestDigest>,
+    pub dependency_selector_digest: ManifestDigest,
+    pub eligible_evidence_manifest: PayloadRef,
+    pub eligible_evidence_digest: ManifestDigest,
+    pub eligible_event_count: u64,
+    pub eligible_token_count: u64,
+    pub newest_eligible_event_at: Option<UtcMicros>,
+}
+
+pub struct AutomationShardFrontierV1 {
+    pub shard: ShardRef,
+    pub consumed: ShardWatermark,
+    pub considered: ShardWatermark,
+    pub current: ShardWatermark,
+    pub included_through: ShardWatermark,
+}
+
+pub enum AutomationQuiescenceStateV1 {
+    Quiescent,
+    ActiveWriters { count: u32 },
+    WaitingForQuietBoundary,
+    UnknownActivity,
+    PartialCoverage,
+}
+
+pub struct AutomationActiveWriterSnapshotV1 {
+    pub writer_registry_generation: u64,
+    pub observation_frontier: VectorWatermark,
+    pub active_writers: BoundedVec<EntityRef, 128>,
+    pub observed_at: UtcMicros,
+    pub fresh_until: UtcMicros,
+    pub coverage: CoverageReportV1,
+    pub receipt_digest: ManifestDigest,
+}
+
+pub struct AutomationQuiescenceV1 {
+    pub state: AutomationQuiescenceStateV1,
+    pub writer_snapshot: AutomationActiveWriterSnapshotV1,
+    pub finalized_boundary: Option<EntityRef>,
+    pub newest_relevant_ingress_at: Option<UtcMicros>,
+    pub quiet_since: Option<UtcMicros>,
+    pub eligible_at: Option<UtcMicros>,
+    pub max_debounce_at: UtcMicros,
+    pub observed_at: UtcMicros,
+}
+
+pub struct AutomationInputManifestV1 {
+    pub work: AutomationWorkKeyV1,
+    pub expected_cursor_version: u64,
+    pub dirty_generation: u64,
+    pub input_contract_digest: ManifestDigest,
+    pub trigger_frontier: AutomationTriggerFrontierV1,
+    pub frontiers: BoundedVec<AutomationShardFrontierV1, 64>,
+    pub dependency_snapshot: AutomationDependencySnapshotV1,
+    pub quiescence: AutomationQuiescenceV1,
+    pub predecessor_run: Option<AutomationRunId>,
+    pub predecessor_terminal_receipt_digest: Option<ManifestDigest>,
+    pub coverage: CoverageReportV1,
+    pub effective_input_digest: ManifestDigest,
+    pub evaluation_snapshot_digest: ManifestDigest,
+}
+
+pub struct AutomationScopeCursorV1 {
+    pub work: AutomationWorkKeyV1,
+    pub last_considered_watermark: VectorWatermark,
+    pub last_considered_reason: Option<AutomationSkipReasonV1>,
+    pub last_terminal_watermark: Option<VectorWatermark>,
+    pub last_terminal_input_digest: Option<ManifestDigest>,
+    pub last_terminal_outcome: Option<AutomationTerminalOutcomeV1>,
+    pub dirty_since: Option<UtcMicros>,
+    pub dirty_reasons: BoundedVec<AutomationDirtyReasonV1, 32>,
+    pub quiet_until: Option<UtcMicros>,
+    pub retry_not_before: Option<UtcMicros>,
+    pub cursor_version: u64,
+}
+
+pub enum AutomationSkipReasonV1 {
+    IntervalNotElapsed,
+    NoRelevantChange,
+    IdenticalTerminalInput,
+    QuietPeriodActive,
+    BelowMinimumDelta,
+    DependencyUnchanged,
+    LockActive,
+    RetryBackoff,
+    BudgetUnavailable,
+    Paused,
+}
+
+pub enum AutomationDeferReasonV1 {
+    ActiveWriters,
+    ActivityStateUnknown,
+    CoverageIncomplete,
+    LaunchSnapshotChanged,
+    EffectsRequireReconciliation,
+}
+
+pub enum AutomationAdmissionDispositionV1 {
+    Admitted { operation: OperationRef },
+    Skipped { reason: AutomationSkipReasonV1, reconsider_at: Option<UtcMicros> },
+    Deferred { reason: AutomationDeferReasonV1, reconsider_at: Option<UtcMicros> },
+}
+
+pub enum AutomationTerminalOutcomeV1 {
+    EffectsCommitted,
+    NoChange,
+    FailedRetryable,
+    PoisonInputQuarantined,
+    FailedTerminal,
+    Cancelled,
+}
+
+pub struct AutomationAdmissionReceiptV1 {
+    pub id: AutomationAdmissionId,
+    pub work: AutomationWorkKeyV1,
+    pub input_manifest: AutomationInputManifestV1,
+    pub prior_terminal_input_digest: Option<ManifestDigest>,
+    pub disposition: AutomationAdmissionDispositionV1,
+    pub coalesced_dirty_event_count: u64,
+    pub decision_policy_digest: ManifestDigest,
+    pub created_at: UtcMicros,
+    pub receipt_digest: ManifestDigest,
+}
+
+pub struct AutomationSkipEpisodeV1 {
+    pub id: AutomationSkipEpisodeId,
+    pub anchor_id: RetrievalAnchorId,
+    pub work: AutomationWorkKeyV1,
+    pub reason: AutomationSkipReasonV1,
+    pub input_contract_digest: ManifestDigest,
+    pub effective_input_digest: ManifestDigest,
+    pub first_evaluated_at: UtcMicros,
+    pub last_evaluated_at: UtcMicros,
+    pub evaluation_count: u64,
+    pub consumed_frontier_digest: ManifestDigest,
+    pub considered_frontier_digest: ManifestDigest,
+    pub current_frontier_digest: ManifestDigest,
+    pub next_reconsideration: Option<UtcMicros>,
+    pub latest_policy_evaluation_id: PolicyEvaluationId,
+    pub policy_digest: ManifestDigest,
+    pub config_digest: ManifestDigest,
+}
+
+pub enum AutomationObservedEffectStateV1 { VerifiedCommitted, VerifiedNoEffect, PartialEffectsQuarantined }
+pub enum AutomationCursorResolutionV1 { AdvanceConsumedFrontier, RetainConsumedFrontier }
+
+pub struct AutomationEffectReconciliationReceiptV1 {
+    pub id: AutomationEffectReconciliationId,
+    pub run_id: AutomationRunId,
+    pub operation: OperationRef,
+    pub expected_cursor_version: u64,
+    pub dirty_generation: u64,
+    pub effective_input_digest: ManifestDigest,
+    pub observed_effect_state: AutomationObservedEffectStateV1,
+    pub final_outcome: AutomationTerminalOutcomeV1,
+    pub cursor_resolution: AutomationCursorResolutionV1,
+    pub evidence_anchors: BoundedVec<RetrievalAnchorId, 64>,
+    pub reconciled_at: UtcMicros,
+    pub receipt_digest: ManifestDigest,
+}
+```
+
+A scheduler tick is not an automation run. Each trigger class advances a typed monotonic frontier: source watermarks for evidence, registered boundary ordinals for time, source sequence/event identity for external triggers, and idempotent command identity for manual jobs. Projectors/SchedulerKernel map only those declared selectors to exact scopes. `EvidenceDriven` jobs become dormant after `NoRelevantChange`, `DependencyUnchanged`, or identical-terminal-input consideration until a declared relevant frontier advances; a clock becoming due cannot wake unchanged curation. `TimeDriven` means a boundary ordinal is itself declared input, not a loophole for evidence-driven curation. An `automation.run` request for an evidence-driven job only shortens cadence on an already-dirty scope; for a `Manual` job the command's idempotent request frontier becomes declared semantic input and dirties exactly that scope. Neither is a force bypass.
+
+The application evaluates only registered dirty scopes, waits for a real scope-local finalized Turn/session boundary and quiet interval (bounded by maximum debounce), and seals the active-writer registry generation, observation frontier, freshness bound, identities, and coverage in `AutomationActiveWriterSnapshotV1`. Unknown/stale writer state or partial coverage is `Deferred`, never inferred idle. It then enforces meaningful delta and seals `AutomationInputManifestV1`. `effective_input_digest` covers semantic trigger/dependency/evidence input and excludes observation time, quiet countdown, and other evaluation-only state; `evaluation_snapshot_digest` covers the complete cursor version, dirty generation, frontiers, quiescence/writer snapshot, coverage, config, and policy view used for this decision. Admission revalidates both at launch.
+
+Pre-admission `NoRelevantChange`, `DependencyUnchanged`, and `IdenticalTerminalInput` advance `last_considered_watermark` and atomically close only the evaluated dirty generation, but never change `last_terminal_watermark`, terminal outcome, or terminal input digest. Quiet/backoff/lock/budget/pause/defer decisions advance neither frontier and retain dirty eligibility. An admitted run that commits effects or legitimate terminal `NoChange` advances both considered and consumed frontiers and clears only its expected dirty generation; retryable/failed/cancelled/poison outcomes do not advance consumed. Later evidence remains a newer dirty generation. Thus current, considered, and consumed frontiers remain separately observable and `NoRelevantChange` can make a scope dormant without pretending a model run occurred.
+
+Only admitted semantic inputs are uniquely fenced; repeated skip/defer observations may carry new evaluation snapshots and coalesce into one anchored `AutomationSkipEpisodeV1` rather than fake runs or unbounded receipts. A retryable failure resumes the same operation/run/input under the generic operation attempt/backoff/circuit contract; a deterministic poison input is terminally quarantined. An uncertain external effect is a nonterminal blocked operation phase, not `AutomationTerminalOutcomeV1`: it admits no retry and advances no cursor until exactly one `AutomationEffectReconciliationReceiptV1` proves the effect state and CAS-finalizes an allowed terminal outcome. `AdvanceConsumedFrontier` is valid only with `EffectsCommitted` or `NoChange`; every other outcome must retain it. Dependency-version changes reprocess history only under the declared reevaluation policy. Generated effects do not recursively dirty their originating task unless a registered downstream outcome/feedback dependency changes. Historical or unchanged experimentation belongs in the hermetic playground.
 
 ```rust
 pub struct ProtocolEpoch(pub u32);
@@ -748,6 +1628,7 @@ pub struct RuntimeHandshakeV1 {
     pub tool_catalog: Option<CatalogSnapshotRefV1>,
     pub client_kind: RuntimeClientKind,
     pub client_version: ComponentVersion,
+    pub host_integration: Option<HostIntegrationRuntimeRefV1>,
 }
 
 pub enum ProtocolMismatchRemediation {
@@ -760,7 +1641,7 @@ pub enum ProtocolMismatchRemediation {
 
 Handshake acceptance requires the current exact protocol epoch and compatible current digests. Mismatch returns a typed remediation and current catalog digest; it cannot carry or execute an old tool-name alias/fallback.
 
-`EntityKind` includes every master-plan kind: profile/project/project-set/repository/remote/checkout/worktree/ref/commit/tree/pull-request/check/review/release; provider/host/model/installation/actor/agent/agent-presence/work-claim/session/thread/workflow/run/turn/message/content-part; tool definition/invocation/result/approval/goal/provider-native-task/provider-native-plan; initiative/plan/plan-version/work-item/work-item-version/task-dependency/acceptance-criterion/task-decision/task-assignment/task-offer/task-lease/execution-attempt/executor-registration/workspace-binding/context-packet/handoff/task-artifact/task-outcome; research-manifest/research-entry/research-contribution; code snapshot/file and symbol identity/occurrence/diagnostic/test/build; fact/version/knowledge entity/decision/contradiction/retrieval/feedback; policy bundle/evaluation/hint; automation job/run/artifact/skill/skill-package/proposal/doctor-finding/remediation; lifecycle lease/drain/checkpoint/service-state receipt; query/saved view/annotation/export/payload blob. Provider-native task/plan records remain observed entities or aliases until an authorized materialization command creates canonical work.
+`EntityKind` includes every master-plan kind: profile/project/project-set/repository/remote/checkout/worktree/ref/commit/tree/pull-request/check/review/release; provider/host/model/installation/actor/agent/agent-presence/work-claim/session/thread/workflow/run/turn/message/content-part; tool definition/invocation/result/approval/goal/provider-native-task/provider-native-plan; initiative/plan/plan-version/work-item/work-item-version/task-dependency/acceptance-criterion/task-decision/task-assignment/task-offer/task-lease/execution-attempt/executor-registration/workspace-binding/context-packet/handoff/task-artifact/task-outcome/task-graph-edit-workspace; experiment/experiment-variant/experiment-run/experiment-cell/replay-stage/replay-comparison/replay-comparison-cell/replay-reduction; research-manifest/research-entry/research-contribution; code snapshot/file and symbol identity/occurrence/diagnostic/test/build; fact/fact-version/knowledge-entity/knowledge-version/decision/contradiction/retrieval/feedback; policy-bundle/policy-evaluation/hint; automation-job/automation-admission/automation-skip-episode/automation-run/automation-effect-reconciliation/automation-artifact/curation-candidate/autonomy-decision/autonomous-effect/automatic-recovery; skill/skill-package/skill-version/skill-materialization/recorded-use/outcome; proposal/doctor-finding/remediation; lifecycle lease/drain/checkpoint/service-state receipt; query/saved view/annotation/export/payload blob. Host bundle packages/components do not add parallel entity kinds: each materialized component is a versioned `installation` entity with registered package/component/scope/state attributes, relations to host/profile and signed manifest artifacts, and operation/audit receipts. Provider-native task/plan records remain observed entities or aliases until an authorized materialization command creates canonical work.
 
 The shared diagnostic/action family is defined once in this domain crate; plan 24 §4.11 owns its cross-product use, not a second type definition:
 
@@ -770,6 +1651,7 @@ pub struct EntityVersionRef {
     pub version: Option<EntityVersionId>,
 }
 pub struct BoundedVec<T, const N: usize>(Vec<T>); // private field; checked constructor rejects >N
+pub struct BoundedU32<const MIN: u32, const MAX: u32>(u32); // checked constructor enforces inclusive bounds
 pub struct DiagnosticCode(NativeKindCode);
 pub struct RegisteredDiagnosticActionKind(NativeKindCode);
 pub struct ReasonCode(NativeKindCode);
@@ -1593,6 +2475,61 @@ pub struct TraceQueryV1 {
     pub budget: QueryBudget,
 }
 
+pub enum VisualSelectionAtomV1 {
+    Entity(EntityRef),
+    Event(EventId),
+    Relation { relation_id: RelationId, subject: EntityRef, predicate: PredicateId, object: EntityRef },
+    Path { node_ids: BoundedVec<EntityRef, 256>, relation_ids: BoundedVec<RelationId, 255> },
+    Aggregate { generation_id: ProfileAtlasGenerationId, tile_id: ProfileAtlasTileId, membership_digest: ManifestDigest },
+    TimeRange { interval: TimeInterval, lane_ids: BoundedVec<RegistryEntryId, 64> },
+    Facet { attribute: AttrKeyId, protected_value: PayloadRef, value_digest: ManifestDigest },
+}
+
+pub enum VisualSelectionOriginV1 { Click, TableRow, Lasso, Brush, Path, Facet, Cluster, InspectorRelation }
+
+pub enum VisualSelectionV1 {
+    One { atom: VisualSelectionAtomV1, origin: VisualSelectionOriginV1 },
+    Set { atoms: BoundedVec<VisualSelectionAtomV1, 5_000>, origin: VisualSelectionOriginV1 },
+    Comparison { baseline: VisualSelectionAtomV1, variants: BoundedVec<VisualSelectionAtomV1, 5> },
+}
+
+pub enum SelectionActionV1 { Highlight, Filter, Exclude, Compare, DeriveLane }
+
+pub struct ComposeFromSelectionRequestV1 {
+    pub query: TraceQueryV1,
+    pub selection: VisualSelectionV1,
+    pub action: SelectionActionV1,
+    pub originating_slot: RegistryEntryId,
+    pub composition: GraphCompositionSpecV1,
+    pub snapshot: SnapshotManifestRefV1,
+}
+
+pub struct QueryDeltaBreadcrumbV1 {
+    pub before_query_digest: ManifestDigest,
+    pub after_query_digest: ManifestDigest,
+    pub changed_fields: BoundedVec<RegistryEntryId, 64>,
+    pub inverse_query: TraceQueryV1,
+    pub safe_explanation: LogSafeText,
+}
+
+pub struct QueryCostEstimateV1 {
+    pub candidate_shards: u32,
+    pub estimated_rows: Option<u64>,
+    pub estimated_cpu_micros: Option<u64>,
+    pub estimated_read_bytes: Option<u64>,
+    pub exact: bool,
+}
+
+pub struct ComposeFromSelectionResultV1 {
+    pub query: TraceQueryV1,
+    pub breadcrumb: QueryDeltaBreadcrumbV1,
+    pub estimated_cost: QueryCostEstimateV1,
+    pub supported_slots: BoundedVec<RegistryEntryId, 4>,
+    pub unsupported_slots: BoundedVec<RegistryEntryId, 4>,
+    pub snapshot: SnapshotManifestRefV1,
+    pub coverage: CoverageReportV1,
+}
+
 pub struct CursorClaimsV1 {
     pub version: u16,
     pub issued_at: UtcMicros,
@@ -1669,13 +2606,15 @@ Task/plan/executor reads also use this exact `TraceQueryV1`. `EntityKind`, regis
 | `tracedecay-code-index` | code snapshot/generation/symbol/evidence IDs, scope resolution, sensitivity/retention, and sink-eligible text | Deterministic extraction/build/lineage/attribution rows consumed only through the projector-owned build port |
 | `tracedecay-query` | `TraceQueryV1`, cursor claims, scopes, predicates, evidence, watermarks | Signed cursor and query response types owned outside this crate |
 | `tracedecay-policy` | immutable input refs, policy entities, evidence/retention | Versioned evaluation events/relations |
-| `tracedecay-hooks` | hook request/receipt identities, safe coordination and suggestion envelopes, protocol/catalog refs | Bounded host events and delivery receipts submitted through application/capture ports |
+| root `v2::hooks` | hook request/receipt identities, safe coordination and suggestion envelopes, protocol/catalog refs | Bounded host events and delivery receipts submitted through application/capture ports |
 | `tracedecay-tool-catalog` | capability/use-case/binding/presentation IDs, schema refs, effects, and safe registry values | Generated catalog/schema artifacts consumed by adapters and presentation |
 | `tracedecay-application` | commands, queries, entity/evidence contracts | Use-case results rendered by adapters |
-| `tracedecay-presentation` | sink-eligible/log-safe values, canonical IDs, anchors, coverage, and safe problem fields embedded in sealed application views | Pure document/terminal/Markdown render values for root CLI/MCP adapters |
-| `tracedecay-api` | generated domain schemas, IDs, cursor/anchor/coverage and error primitives | Public wire-contract artifacts consumed by official clients |
+| root `v2::presentation` | sink-eligible/log-safe values, canonical IDs, anchors, coverage, and safe problem fields embedded in sealed application views | Pure document/terminal/Markdown render values for root CLI/MCP adapters |
+| root `v2::api` | generated domain schemas, IDs, cursor/anchor/coverage and error primitives | Public wire-contract artifacts consumed by official clients |
 
 No consumer may duplicate enum spellings or legal predicate matrices. Rust/OpenAPI/TypeScript schemas derive from the registry digest and fail CI on drift. The official Rust/TypeScript/Python clients are deliberately not domain consumers: they compile or package the frozen generated public wire contracts and transport runtime only, so no client imports this crate or acquires in-process business behavior.
+
+The domain facade is deliberately narrow despite the large contract vocabulary. PR 4 records handwritten/generated public-item counts, downstream rebuild fan-out, and feature dependencies. A type remains public only when it is persisted/wire-stable or has at least two independent owner consumers; feature-specific builders/views stay in their owner. Generated nominal boilerplate does not justify moving query, task, policy, accounting, hook, or protocol semantics into a god `domain` API.
 
 ## Implementation sequence
 
@@ -1762,31 +2701,33 @@ git commit -m "feat(domain): define stable v2 identity"
 - Create: `crates/tracedecay-domain/src/payload.rs`
 - Create: `crates/tracedecay-domain/tests/ownership_contract.rs`
 - Create: `crates/tracedecay-domain/tests/retention_contract.rs`
+- Create: `crates/tracedecay-domain/tests/replay_contract.rs`
+- Create: `crates/tracedecay-domain/tests/protocol_contract.rs`
 
 - [ ] **Step 1: Write failing boundary tests**
 
-Assert activity ownership for canonical messages; project ownership for Git/code; activity ownership for profile-scoped facts/skills/policy/automation; project ownership for project-scoped equivalents; rejection of missing/ambiguous declared scope; catalog rejection of literal strings; blob-domain inequality across privacy/key/retention domains; half-open time behavior; exact-cutoff retention; hold precedence; and the seven content-horizon defaults.
+Assert activity ownership for canonical messages and experiments; project ownership for Git/code; activity ownership for profile-scoped facts/skills/policy/automation; project ownership for project-scoped equivalents; rejection of missing/ambiguous declared scope; catalog rejection of literal strings; blob-domain inequality across privacy/key/retention domains; half-open time behavior; exact-cutoff retention; hold precedence; the seven content-horizon defaults; requested/actual replay invariants; one baseline/at-most-six variants; sole acyclic experiment branch ancestry; explicit sweep values, checked full-coordinate expansion, hard total-cell rejection, and unique run-cell coordinates; anchors for experiment/run/cell/stage/comparison/comparison-cell/reduction; running trace without and terminal trace with sealed receipt; complete resource budgets; a side-effect receipt whose production effect count is zero; automation invariants for all trigger frontiers, typed field selectors, sorted per-shard current/considered/consumed/included frontiers, fresh writer snapshot/quiescence, unknown/partial deferral, semantic-versus-evaluation digests, admitted-only identical-input fencing, pre-admission considered transitions, terminal consumed-cursor advancement, coalesced input-bound skip episodes, and exactly-once effect reconciliation; and host-integration invariants for one source-manifest digest, at most four unique components, exact install receipt/generation, typed capability dispositions, probe freshness/digest, no secret/path fields, and handshake failure on stale or mismatched component/catalog/probe identity.
 
 - [ ] **Step 2: Verify failure**
 
-Run: `cargo test -p tracedecay-domain --test ownership_contract --test retention_contract`
+Run: `cargo test -p tracedecay-domain --test ownership_contract --test retention_contract --test replay_contract --test protocol_contract`
 
 Expected: FAIL with unresolved ownership and retention types.
 
 - [ ] **Step 3: Implement the ownership and retention matrices**
 
-Implement `ShardKind`, `ShardRef`, `DeclaredScope`, `BlobDomainId`, `CatalogValue`, `UtcMicros`, `TimeInterval`, the Plan 18 `DataSensitivity`/receipt/taint/sink-eligibility types, `RetentionClass`, `RetentionPolicyV1`, `EvidenceRetentionWatermark`, `ReplayMode`, `RuntimeHandshakeV1`, `PayloadRef`, and reasoning format/visibility. Put kind-plus-declared-scope ownership in one exhaustive match so a new kind or scope class causes a compile error.
+Implement `ShardKind`, `ShardRef`, `DeclaredScope`, `BlobDomainId`, `CatalogValue`, `UtcMicros`, `TimeInterval`, the Plan 18 `DataSensitivity`/receipt/taint/sink-eligibility types, `RetentionClass`, `RetentionPolicyV1`, `EvidenceRetentionWatermark`, the complete replay manifest/fidelity/branch/experiment/variant/run/cell/stage/comparison/comparison-cell/reduction/resource-budget/receipt family, the automation input-contract/manifest/frontier/quiescence/admission/skip-episode family, `SurfaceKind`, opaque `HostSurfaceKindV1`/`McpLogicalRegistrationId`/`McpSurfaceProfileId`, `HostInstallScopeV1`, `HostCapabilityDispositionV1`, `HostBundleComponentRefV1`, `HostIntegrationRuntimeRefV1`, `HostCapabilitySubjectV1`, `HostCapabilitySnapshotV1`, `RuntimeHandshakeV1`, `PayloadRef`, and reasoning format/visibility. Put kind-plus-declared-scope ownership in one exhaustive match so a new kind or scope class causes a compile error.
 
 - [ ] **Step 4: Verify pass and schema serialization**
 
-Run: `cargo test -p tracedecay-domain --test ownership_contract --test retention_contract`
+Run: `cargo test -p tracedecay-domain --test ownership_contract --test retention_contract --test replay_contract --test protocol_contract`
 
 Expected: PASS.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add crates/tracedecay-domain/src/ownership.rs crates/tracedecay-domain/src/time.rs crates/tracedecay-domain/src/privacy.rs crates/tracedecay-domain/src/retention.rs crates/tracedecay-domain/src/replay.rs crates/tracedecay-domain/src/protocol.rs crates/tracedecay-domain/src/payload.rs crates/tracedecay-domain/tests/ownership_contract.rs crates/tracedecay-domain/tests/retention_contract.rs
+git add crates/tracedecay-domain/src/ownership.rs crates/tracedecay-domain/src/time.rs crates/tracedecay-domain/src/privacy.rs crates/tracedecay-domain/src/retention.rs crates/tracedecay-domain/src/replay.rs crates/tracedecay-domain/src/protocol.rs crates/tracedecay-domain/src/payload.rs crates/tracedecay-domain/tests/ownership_contract.rs crates/tracedecay-domain/tests/retention_contract.rs crates/tracedecay-domain/tests/replay_contract.rs crates/tracedecay-domain/tests/protocol_contract.rs
 git commit -m "feat(domain): lock ownership and retention semantics"
 ```
 
@@ -1906,6 +2847,7 @@ git commit -m "feat(domain): model concurrent source progress"
 
 **Files:**
 - Create: `crates/tracedecay-domain/src/command.rs`
+- Create: `crates/tracedecay-domain/src/task_graph_edit.rs`
 - Create: `crates/tracedecay-domain/src/query/mod.rs`
 - Create: `crates/tracedecay-domain/src/query/scope.rs`
 - Create: `crates/tracedecay-domain/src/query/predicate.rs`
@@ -1918,32 +2860,33 @@ git commit -m "feat(domain): model concurrent source progress"
 - Create: `crates/tracedecay-domain/src/query/sort.rs`
 - Create: `crates/tracedecay-domain/src/query/cursor.rs`
 - Create: `crates/tracedecay-domain/tests/query_contract.rs`
+- Create: `crates/tracedecay-domain/tests/task_graph_edit_contract.rs`
 - Create: `crates/tracedecay-domain/tests/fixtures/trace-query-v1.json`
 
 - [ ] **Step 1: Write failing query/command tests**
 
-Cover every master-plan scope; multi-repo/project/checkout/worktree/ref/snapshot/graph-generation selectors; explicit `AllAuthorized`; empty-selector rejection; candidate-versus-error ambiguity; exact repository/checkout/worktree/ref/snapshot/generation tuple preservation; no CWD/current-project/first-row fallback; occurred/ingested/valid/as-of time; temporal clause modes with both `AsOf` cutoffs required; registry predicates; lexical/semantic filters; evidence traversal; facets/aggregates; page-size/depth/budget bounds; cursor expiry/invalidation; cursor claims binding scope digest, catalog generation, temporal clause, intent-profile version, and shard dispositions; sensitivity; idempotency; and optimistic conflicts.
+Cover every master-plan scope; multi-repo/project/checkout/worktree/ref/snapshot/graph-generation selectors; explicit `AllAuthorized`; empty-selector rejection; candidate-versus-error ambiguity; exact repository/checkout/worktree/ref/snapshot/generation tuple preservation; no CWD/current-project/first-row fallback; occurred/ingested/valid/as-of time; temporal clause modes with both `AsOf` cutoffs required; registry predicates; lexical/semantic filters; evidence traversal; facets/aggregates; page-size/depth/budget bounds; cursor expiry/invalidation; cursor claims binding scope digest, catalog generation, temporal clause, intent-profile version, and shard dispositions; bounded `GraphCompositionSpecV1`; every `VisualSelectionV1` atom/set/comparison origin and query action lowering to canonical/inverse query with slot/coverage truth; collection mutation excluded from query actions; unified `SavedViewDefinitionV1::{Investigation,Task,Experiment}` identity/share/snapshot rules; complete task-graph edit manifest/local-reference/strict-format/source-span diagnostic/semantic-diff/conflict/receipt schemas; sensitivity; idempotency; and optimistic conflicts.
 
 - [ ] **Step 2: Verify failure**
 
-Run: `cargo test -p tracedecay-domain --test query_contract`
+Run: `cargo test -p tracedecay-domain --test query_contract --test task_graph_edit_contract`
 
 Expected: FAIL with unresolved query and command types.
 
 - [ ] **Step 3: Implement the AST and validators**
 
-Implement the exact `TraceQueryV1`, `CursorClaimsV1`, and `CommandEnvelopeV1` contracts. Keep signing, SQL compilation, ranking, execution, and authorization outside the crate.
+Implement the exact `TraceQueryV1`, visual-selection/compose request-result, `CursorClaimsV1`, `CommandEnvelopeV1`, and task-graph edit manifest/reference/diagnostic/diff/conflict/receipt contracts. Keep Markdown/YAML parsing, filesystem staging, signing, SQL compilation, ranking, execution, authorization, ID allocation, and mutation outside the crate.
 
 - [ ] **Step 4: Verify pass**
 
-Run: `cargo test -p tracedecay-domain --test query_contract`
+Run: `cargo test -p tracedecay-domain --test query_contract --test task_graph_edit_contract`
 
 Expected: PASS with deterministic canonical query digest and fixture round trip.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add crates/tracedecay-domain/src/command.rs crates/tracedecay-domain/src/query crates/tracedecay-domain/tests/query_contract.rs crates/tracedecay-domain/tests/fixtures/trace-query-v1.json
+git add crates/tracedecay-domain/src/command.rs crates/tracedecay-domain/src/task_graph_edit.rs crates/tracedecay-domain/src/query crates/tracedecay-domain/tests/query_contract.rs crates/tracedecay-domain/tests/task_graph_edit_contract.rs crates/tracedecay-domain/tests/fixtures/trace-query-v1.json
 git commit -m "feat(domain): define bounded query contracts"
 ```
 
