@@ -442,7 +442,7 @@ async fn interrupted_apply_retries_without_duplicates_and_cuts_over_last() {
             path.display()
         );
     }
-    let global = GlobalDb::open_at(&fixture.profile.join("global.db"))
+    let global = GlobalDb::open_at_without_structured_backfill(&fixture.profile.join("global.db"))
         .await
         .unwrap();
     let owners = global
@@ -701,7 +701,10 @@ async fn version_one_premerge_ledger_migrates_before_resume() {
     )
     .await
     .unwrap_err();
-    assert!(error.to_string().contains("synthetic interruption"));
+    assert!(
+        error.to_string().contains("synthetic interruption"),
+        "{error:#}"
+    );
 
     let mut ledger = load_ledger(&report.ledger_path).unwrap().unwrap();
     ledger.schema_version = 1;
@@ -730,7 +733,10 @@ async fn version_one_postmerge_ledger_fails_closed() {
     )
     .await
     .unwrap_err();
-    assert!(error.to_string().contains("synthetic interruption"));
+    assert!(
+        error.to_string().contains("synthetic interruption"),
+        "{error}"
+    );
 
     let mut ledger = load_ledger(&report.ledger_path).unwrap().unwrap();
     ledger.schema_version = 1;
@@ -956,7 +962,9 @@ async fn lcm_representation_drift_uses_the_selected_target_row() {
         .await
         .unwrap();
     target.close();
-    let source = GlobalDb::open_at(&source_sessions).await.unwrap();
+    let source = GlobalDb::open_at_without_structured_backfill(&source_sessions)
+        .await
+        .unwrap();
     source
         .conn()
         .execute(
@@ -1135,7 +1143,9 @@ async fn distinct_external_content_variant_preserves_owner_expansion_and_retry()
         if session_id == "legacy-session" {
             source_ref = Some(payload.payload_ref.clone());
         }
-        let db = GlobalDb::open_at(&layout.sessions_db_path).await.unwrap();
+        let db = GlobalDb::open_at_without_structured_backfill(&layout.sessions_db_path)
+            .await
+            .unwrap();
         crate::sessions::lcm::payload::upsert_payload_metadata(db.conn(), &payload)
             .await
             .unwrap();
@@ -1479,7 +1489,9 @@ async fn indexed_message_family_materialization_handles_deep_and_wide_graph() {
         .await
         .unwrap();
 
-    let target_db = GlobalDb::open_at(&target.sessions_db_path).await.unwrap();
+    let target_db = GlobalDb::open_at_without_structured_backfill(&target.sessions_db_path)
+        .await
+        .unwrap();
     target_db
         .conn()
         .execute(
@@ -1653,7 +1665,9 @@ async fn synthetic_message_key_parent_reference_collision_fails_before_merge() {
     let fixture = fixture().await;
     let source = layout_for_id(&fixture.project, &fixture.profile, &fixture.source_id).unwrap();
     let synthetic = format!("consolidated/{}/message-current-session", fixture.source_id);
-    let source_db = GlobalDb::open_at(&source.sessions_db_path).await.unwrap();
+    let source_db = GlobalDb::open_at_without_structured_backfill(&source.sessions_db_path)
+        .await
+        .unwrap();
     source_db
         .conn()
         .execute(
@@ -1690,7 +1704,9 @@ async fn synthetic_message_key_collision_fails_before_merge() {
         .join(&fixture.source_id)
         .join(storage::SESSIONS_DB_FILENAME);
     let synthetic = format!("consolidated/{}/message-current-session", fixture.source_id);
-    let source = GlobalDb::open_at(&source_sessions).await.unwrap();
+    let source = GlobalDb::open_at_without_structured_backfill(&source_sessions)
+        .await
+        .unwrap();
     source
         .conn()
         .execute(
@@ -2122,7 +2138,7 @@ async fn summary_raw_sources_follow_remapped_store_ids() {
     let options = fixture.options();
     let planned = plan(&options).await.unwrap();
     let applied = apply(&options, &planned.confirmation_token).await.unwrap();
-    let sessions = GlobalDb::open_at(
+    let sessions = GlobalDb::open_at_without_structured_backfill(
         &applied
             .destination_data_root
             .join(storage::SESSIONS_DB_FILENAME),
@@ -2220,6 +2236,27 @@ fn atomic_copy_recovers_an_interrupted_temp_and_reopens_cleanly() {
 
     assert_eq!(fs::read(&target).unwrap(), b"durable source bytes");
     assert!(!interrupted.exists());
+}
+
+#[test]
+fn atomic_copy_preserves_read_only_files_without_losing_durability() {
+    let temp = TempDir::new().unwrap();
+    let source = temp.path().join("source.bin");
+    let target = temp.path().join("backup/target.bin");
+    fs::write(&source, b"read-only source bytes").unwrap();
+    let original_permissions = fs::metadata(&source).unwrap().permissions();
+    let mut permissions = original_permissions.clone();
+    permissions.set_readonly(true);
+    fs::set_permissions(&source, permissions).unwrap();
+
+    copy_file_atomic(&source, &target).unwrap();
+    files::copy_file_exact(&source, &target).unwrap();
+
+    assert_eq!(fs::read(&target).unwrap(), b"read-only source bytes");
+    assert!(fs::metadata(&target).unwrap().permissions().readonly());
+    for path in [&source, &target] {
+        fs::set_permissions(path, original_permissions.clone()).unwrap();
+    }
 }
 
 #[tokio::test]
@@ -2361,7 +2398,9 @@ async fn fixture() -> Fixture {
         false,
     )
     .await;
-    let global = GlobalDb::open_at(&profile.join("global.db")).await.unwrap();
+    let global = GlobalDb::open_at_without_structured_backfill(&profile.join("global.db"))
+        .await
+        .unwrap();
     let git_common_dir = crate::worktree::git_common_dir(&project).unwrap();
     for project_id in [&source_id, &target_id] {
         global
@@ -2448,7 +2487,9 @@ async fn create_shard(
     graph.checkpoint().await.unwrap();
     graph.close();
 
-    let sessions = GlobalDb::open_at(&layout.sessions_db_path).await.unwrap();
+    let sessions = GlobalDb::open_at_without_structured_backfill(&layout.sessions_db_path)
+        .await
+        .unwrap();
     assert!(
         sessions
             .upsert_session(&SessionRecord {

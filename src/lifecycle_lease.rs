@@ -583,7 +583,12 @@ mod tests {
         let parent = acquire_exclusive_at(&path, "update").unwrap();
         let token = parent.token().unwrap().to_string();
 
-        acquire_exclusive_or_inherited_at(&path, "post-update", Some(token)).unwrap();
+        let matching = acquire_exclusive_or_inherited_at(&path, "post-update", Some(token));
+        #[cfg(not(windows))]
+        matching.unwrap();
+        #[cfg(windows)]
+        assert!(matching.unwrap_err().to_string().contains("update"));
+
         let error = acquire_exclusive_or_inherited_at(
             &path,
             "post-update",

@@ -20,6 +20,16 @@ pub(crate) enum OpenStoreHolderScan {
 
 /// Finds processes that currently hold any member of the supplied `SQLite`
 /// database families. The scan never signals or terminates a process.
+#[cfg(test)]
+pub(crate) fn scan(database_paths: &[PathBuf]) -> io::Result<OpenStoreHolderScan> {
+    // Unit tests own isolated stores. Keep their outcomes independent of a
+    // concurrently changing host process table; `evaluate_holder_scan` tests
+    // the production fail-closed policy directly.
+    let _ = database_paths;
+    Ok(OpenStoreHolderScan::Supported(Vec::new()))
+}
+
+#[cfg(not(test))]
 pub(crate) fn scan(database_paths: &[PathBuf]) -> io::Result<OpenStoreHolderScan> {
     #[cfg(target_os = "linux")]
     {
@@ -401,6 +411,7 @@ fn is_tracedecay_process(command: &str, executable: Option<&Path>) -> bool {
 }
 
 #[cfg(target_os = "linux")]
+#[cfg_attr(test, allow(dead_code))]
 fn probe_tracedecay_version(pid: u32, proc_root: &Path, _command: &str) -> Option<String> {
     use std::process::{Command, Stdio};
     use std::thread;

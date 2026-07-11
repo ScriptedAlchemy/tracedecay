@@ -28,14 +28,6 @@ pub(super) fn ensure_profile_offline(options: &ConsolidationOptions) -> Result<(
 }
 
 pub(super) fn ensure_no_open_store_holders(database_paths: &[PathBuf]) -> Result<()> {
-    #[cfg(all(test, windows))]
-    {
-        // Consolidation unit tests own isolated stores and exercise migration
-        // semantics, while `unsupported_holder_discovery_never_silently_weakens_offline_safety`
-        // separately proves the production fail-closed policy on unsupported hosts.
-        let _ = database_paths;
-        return Ok(());
-    }
     evaluate_holder_scan(crate::open_store_holders::scan(database_paths).map_err(io_error)?)
 }
 
