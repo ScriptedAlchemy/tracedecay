@@ -48,6 +48,28 @@ for path in sys.argv[1:]:
         raise SystemExit(f"{path} must never cancel in-progress publication")
 PY
 
+python3 - "$release_workflow" "$release_beta" <<'PY'
+import sys
+
+stable = open(sys.argv[1], encoding="utf-8").read()
+beta = open(sys.argv[2], encoding="utf-8").read()
+
+for name, text in [("stable", stable), ("beta", beta)]:
+    if "required: true" not in text:
+        raise SystemExit(f"{name} manual rebuild must require an explicit release tag")
+    expected = "github.event_name == 'workflow_dispatch' && inputs.release_tag || github.event.release.tag_name"
+    if expected not in text:
+        raise SystemExit(f"{name} release identity must normalize to the release tag")
+
+for item in [
+    "Validate manual prerelease rebuild",
+    "gh release view \"$RELEASE_TAG\"",
+    "ref: ${{ env.RELEASE_TAG }}",
+]:
+    if item not in beta:
+        raise SystemExit(f"beta manual rebuild contract missing {item!r}")
+PY
+
 python3 - "$release_pr_integrity" <<'PY'
 import sys
 
