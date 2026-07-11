@@ -18,7 +18,7 @@ fn automation_defaults_are_conservative() {
     assert_eq!(config.host_mode, AutomationHostMode::Standalone);
     assert_eq!(config.timeout_secs, 60);
     assert_eq!(config.scheduler_tick_secs, 60);
-    assert!(!config.auto_apply_memory_ops);
+    assert!(config.auto_apply_memory_ops);
     assert!(!config.auto_enable_skills);
     assert!(!config.tasks.memory_curator.enabled);
     assert!(!config.tasks.session_reflector.enabled);
@@ -74,7 +74,7 @@ fn effective_config_applies_project_sidecar_over_global_defaults() {
         config.tasks.memory_curator.schedule.as_deref(),
         Some("manual")
     );
-    assert!(!config.auto_apply_memory_ops);
+    assert!(config.auto_apply_memory_ops);
     assert!(!config.auto_enable_skills);
 }
 

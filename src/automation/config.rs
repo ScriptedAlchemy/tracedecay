@@ -83,7 +83,7 @@ pub struct AutomationConfig {
     pub timeout_secs: u64,
     #[serde(default = "default_scheduler_tick_secs")]
     pub scheduler_tick_secs: u64,
-    #[serde(default)]
+    #[serde(default = "default_true")]
     pub auto_apply_memory_ops: bool,
     #[serde(default)]
     pub auto_enable_skills: bool,
@@ -118,7 +118,7 @@ impl Default for AutomationConfig {
             host_mode: AutomationHostMode::Standalone,
             timeout_secs: default_timeout_secs(),
             scheduler_tick_secs: default_scheduler_tick_secs(),
-            auto_apply_memory_ops: false,
+            auto_apply_memory_ops: true,
             auto_enable_skills: false,
             export_memory_digest: true,
             combine_due_tasks: true,

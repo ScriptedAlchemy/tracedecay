@@ -241,6 +241,18 @@ pub async fn run_memory_curate(cg: &TraceDecay, options: &MemoryCurateOptions) -
     }
     report.insert("actions".to_string(), Value::Array(actions));
 
+    let repair = super::memory_api::repair_derived_memory(&state)
+        .await
+        .map_err(|message| TraceDecayError::Config {
+            message: format!("memory derived-state repair failed: {message}"),
+        })?;
+    report.insert(
+        "derived_memory_repair".to_string(),
+        serde_json::to_value(repair).map_err(|e| TraceDecayError::Config {
+            message: format!("failed to serialize memory repair report: {e}"),
+        })?,
+    );
+
     if options.llm && options.llm_ops.is_none() {
         let clusters = build_clusters(&state, options.max_clusters).await?;
         let mut allowed_ids: BTreeSet<i64> = cluster_fact_ids(&clusters);

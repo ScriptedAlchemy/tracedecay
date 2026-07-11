@@ -130,7 +130,7 @@ async fn memory_curator_runner_validates_backend_ops_and_records_ledger() {
     );
     assert_eq!(
         run.ledger_record.validation_report.as_ref().unwrap()["apply_policy"]["decision"],
-        json!("dry_run_only")
+        json!("auto_apply_allowed")
     );
     assert_eq!(
         run.ledger_record.validation_report.as_ref().unwrap()["apply_policy"]["permanent_delete_count"],
@@ -138,12 +138,13 @@ async fn memory_curator_runner_validates_backend_ops_and_records_ledger() {
     );
     assert_eq!(
         run.ledger_record.validation_report.as_ref().unwrap()["apply_policy"]["mutates_store"],
-        json!(false)
+        json!(true)
     );
     assert_eq!(
         run.report["automation_apply_policy"]["autonomous_memory_apply"],
-        json!(false)
+        json!(true)
     );
+    assert!(!fact_exists(&cg, 102).await);
     assert_eq!(
         run.report["automation_apply_policy"]["require_dashboard_approval"],
         json!(false)
@@ -213,7 +214,7 @@ async fn memory_curator_runner_validates_backend_ops_and_records_ledger() {
     );
     assert_eq!(
         validation_payload["improvement_gate"]["criteria"]["auto_apply_allowed"],
-        json!(false)
+        json!(true)
     );
     assert_eq!(
         validation_payload["improvement_gate"]["source_refs"]
@@ -479,7 +480,7 @@ async fn memory_curator_runner_validates_backend_ops_and_records_ledger() {
     assert_eq!(handoff_payload["readiness"]["eval_count"], json!(2));
     assert_eq!(
         handoff_payload["readiness"]["auto_apply_allowed"],
-        json!(false)
+        json!(true)
     );
     assert_eq!(
         handoff_payload["machine_summary"]["next_stage"],
@@ -487,7 +488,7 @@ async fn memory_curator_runner_validates_backend_ops_and_records_ledger() {
     );
     assert_eq!(
         handoff_payload["validation_requirements"]["must_not_auto_apply"],
-        json!(true)
+        json!(false)
     );
     assert_eq!(
         handoff_payload["source_refs"][0]["kind"],
@@ -544,8 +545,8 @@ async fn memory_curator_runner_validates_backend_ops_and_records_ledger() {
     assert_eq!(records[0].rejected_count, 1);
     assert_eq!(records[0].artifacts.len(), 6);
     assert!(
-        fact_exists(&cg, 102).await,
-        "dry-run memory curator must not delete accepted ops before approval"
+        !fact_exists(&cg, 102).await,
+        "default memory curation must apply accepted validated ops"
     );
 }
 

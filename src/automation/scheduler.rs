@@ -357,6 +357,19 @@ pub fn schedule_decision(
         }
     }
 
+    // Session-evidence tasks are event-driven across every supported host.
+    // Cursor, Claude, Codex, and Hermes all ingest completed-turn evidence
+    // into the project session store; a newer activity watermark should wake
+    // reflection as soon as the idle window closes instead of waiting for the
+    // periodic interval. The interval remains the repair/backstop schedule.
+    let fresh_session_activity = task_consumes_session_evidence(task)
+        && latest_successful_record(records, task).is_some_and(|record| {
+            let started_at = record.started_at.parse::<i64>().ok().unwrap_or(0);
+            activity
+                .last_activity_secs
+                .is_some_and(|last_activity| last_activity > started_at)
+        });
+
     if let Some(record) =
         latest_non_skipped_record(records, task, Some(AutomationTrigger::Scheduler))
     {
@@ -378,12 +391,12 @@ pub fn schedule_decision(
             }
             return AutomationScheduleDecision::due();
         }
-        if let Some(interval_secs) = interval_secs {
+        if let Some(interval_secs) = interval_secs.filter(|_| !fresh_session_activity) {
             if elapsed_secs(completed_at, now_secs) < interval_secs {
                 return AutomationScheduleDecision::skipped("scheduler_interval_not_elapsed");
             }
         }
-        if let Some(cron) = cron {
+        if let Some(cron) = cron.filter(|_| !fresh_session_activity) {
             if !cron_is_due(&cron, Some(completed_at), now_secs) {
                 return AutomationScheduleDecision::skipped("scheduler_cron_not_due");
             }
