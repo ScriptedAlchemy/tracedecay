@@ -374,20 +374,55 @@ def _host_forwards_registered_tool_messages(ctx) -> bool:
             return False
     return bool(capability)
 
+_NUDGE_CODE_REQUEST_RE = re.compile(
+    r"\b("
+    r"codebase|repo(?:sitory)?|project|workspace|symbol|function|method|class|"
+    r"call\s*graph|caller|callee|impact|architecture|module|file|path|diff|"
+    r"git|branch|commit|pr|pull\s*request|ci|test|build|compile|lint|"
+    r"bug|fix|debug|implement|refactor|review|traceback|stack\s*trace|error"
+    r")\b",
+    re.IGNORECASE,
+)
+
+_NUDGE_PATH_OR_CODE_RE = re.compile(
+    r"(```|`[^`]+`|(?:^|\s)[\w./-]+\.(?:py|rs|ts|tsx|js|jsx|go|java|kt|rb|php|c|cc|cpp|h|hpp|cs|swift|toml|ya?ml|json|md)\b|(?:^|\s)[\w.-]+/[\w./-]+)",
+    re.IGNORECASE,
+)
+
+_NUDGE_GREETING_RE = re.compile(
+    r"^\s*(?:hi|hello|hey|yo|sup|howdy|good\s+(?:morning|afternoon|evening)|thanks?|thank\s+you|ok(?:ay)?|yes|no)[\s!.?,~-]*$",
+    re.IGNORECASE,
+)
+
+def _should_emit_tracedecay_nudge(user_message) -> bool:
+    """Return true only when the first user turn is actually code/project work.
+
+    The hook text is appended to the user's first message. For greetings like
+    "Hi", an unconditional nudge becomes the most salient content and the model
+    may answer by talking about tracedecay instead of simply greeting back.
+    """
+    text = str(user_message or "").strip()
+    if not text or _NUDGE_GREETING_RE.match(text):
+        return False
+    return bool(_NUDGE_CODE_REQUEST_RE.search(text) or _NUDGE_PATH_OR_CODE_RE.search(text))
+
 def _pre_llm_call(*args, **kwargs):
-    # Inject guidance ONLY on the first turn: the hook result is appended to
-    # the user message, so emitting it every turn would change every turn
-    # boundary and break the conversation's prompt-cache prefix. Skip it
-    # entirely when no tracedecay tools actually registered on this host —
-    # advertising unregistered tools invites hallucinated calls.
+    # Inject guidance only for first-turn code/project requests. The hook result
+    # is appended to the user message, so unconditional text on a greeting ("Hi")
+    # can hijack the assistant's response and surface tracedecay when the user
+    # did not ask for code work. Keep it first-turn-only for prompt-cache
+    # stability, and skip it entirely when no tracedecay tools registered on
+    # this host — advertising unregistered tools invites hallucinated calls.
     if not kwargs.get("is_first_turn"):
         return None
     if not _REGISTERED_TOOL_NAMES:
         return None
     if not _plugin_toggle("nudge", True):
         return None
+    if not _should_emit_tracedecay_nudge(kwargs.get("user_message")):
+        return None
     return (
-        "Prefer tracedecay tools for codebase exploration, symbol lookup, call graphs, "
+        "For this codebase request, prefer tracedecay tools for symbol lookup, call graphs, "
         "impact analysis, affected files, and architectural navigation before broad file reads."
     )
 
@@ -518,7 +553,7 @@ def _decode_tool_payload(value, name: str, args: dict, kwargs: dict, depth: int 
         return value
 
     handle = _retrieval_handle(value)
-    if handle and name.startswith("tracedecay_lcm_"):
+    if handle and name != "tracedecay_retrieve":
         if handle in seen_handles:
             return value
         seen_handles.add(handle)
@@ -653,7 +688,7 @@ def _project_call_kwargs(project_root=None, kwargs=None):
 # register_config_defaults()/get_config_field_meta() expose the real
 # surface instead of just the install pin.
 PLUGIN_CONFIG_FIELDS = {
-    "nudge": (True, "Inject the first-turn tracedecay tool guidance nudge."),
+    "nudge": (True, "Inject a first-turn tracedecay guidance nudge only for codebase/navigation requests."),
     "sync_turn": (True, "Mirror each completed turn into the LCM raw store."),
     "prefetch": (True, "Background fact recall injected at turn start."),
     "context_threshold": ("", "Compression trigger as a fraction of the context window (default: hermes compression.threshold)."),

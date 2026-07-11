@@ -14,7 +14,8 @@ exists. It asserts the host contracts the 2026-06 review found broken:
      flag; the messages-dependent LCM verbs stay gated.
   4. The memory provider implements sync_turn / prefetch / on_memory_write
      and calls the right subprocess verbs.
-  5. pre_llm_call returns None on non-first turns (prompt-cache safety).
+  5. pre_llm_call returns None on non-first turns and on first-turn greetings
+     (prompt-cache safety without hijacking small talk).
   6. Hermes host-home state cannot redirect the TraceDecay install, store, or
      project, and removed storage-routing fields stay out of tool schemas.
 
@@ -207,13 +208,19 @@ def run_checks(work: Path):
     assert "lcm_grep" in fwd.tools, sorted(fwd.tools)
     ok("LCM live-ingest verbs register when the host forwards messages")
 
-    # ── 5. pre_llm_call cache safety ─────────────────────────────────────
+    # ── 5. pre_llm_call cache safety + small-talk guard ───────────────────
     hook = ctx.hooks["pre_llm_call"]
-    assert hook(is_first_turn=False) is None
+    assert hook(is_first_turn=False, user_message="Can you debug src/main.rs?") is None
     assert hook() is None
-    first = hook(is_first_turn=True)
+    assert hook(is_first_turn=True) is None
+    assert hook(is_first_turn=True, user_message="Hi") is None
+    assert hook(is_first_turn=True, user_message="hello!") is None
+    assert hook(is_first_turn=True, user_message="What time is it?") is None
+    first = hook(is_first_turn=True, user_message="Can you debug this bug in src/main.rs?")
     assert isinstance(first, str) and "tracedecay" in first
-    ok("pre_llm_call injects on first turn only")
+    path_first = hook(is_first_turn=True, user_message="Please review scripts/check.py")
+    assert isinstance(path_first, str) and "tracedecay" in path_first
+    ok("pre_llm_call only nudges first-turn code/project requests")
     saved_names = set(plugin._REGISTERED_TOOL_NAMES)
     plugin._REGISTERED_TOOL_NAMES.clear()
     assert hook(is_first_turn=True) is None
@@ -223,10 +230,45 @@ def run_checks(work: Path):
     real_block = plugin.tools.plugin_config_block
     try:
         plugin.tools.plugin_config_block = lambda *_args, **_kwargs: {"nudge": False}
-        assert hook(is_first_turn=True) is None
+        assert hook(is_first_turn=True, user_message="Can you debug src/main.rs?") is None
     finally:
         plugin.tools.plugin_config_block = real_block
     ok("plugins.tracedecay.nudge kill switch silences the nudge")
+
+    # Response handles are a generic MCP transport feature, not LCM-only.
+    # Large fact-store searches must dereference their handle before the
+    # Hermes memory provider tries to read count/facts from the payload.
+    real_tool = plugin.tools.call_tracedecay_tool
+    bridge_calls = []
+    try:
+        def _handled_response(name, args, **kwargs):
+            bridge_calls.append((name, args, kwargs))
+            if name == "tracedecay_retrieve":
+                payload = {
+                    "count": 1,
+                    "facts": [{"fact": {"fact_id": 7, "content": "remember me"}}],
+                }
+            else:
+                payload = {
+                    "truncated": True,
+                    "handle": "rh_fact_search",
+                    "retrieve_tool": "tracedecay_retrieve",
+                    "preview": "{\"count\":1",
+                }
+            return json.dumps({"content": [{"type": "text", "text": json.dumps(payload)}]})
+
+        plugin.tools.call_tracedecay_tool = _handled_response
+        resolved = plugin.call_tracedecay_json(
+            "tracedecay_fact_store", {"action": "search", "query": "remember"}
+        )
+        assert resolved.get("count") == 1, resolved
+        assert [call[0] for call in bridge_calls] == [
+            "tracedecay_fact_store",
+            "tracedecay_retrieve",
+        ], bridge_calls
+        ok("generic response handles dereference for memory-provider results")
+    finally:
+        plugin.tools.call_tracedecay_tool = real_tool
 
     # ── 1. compress() message-list contract ──────────────────────────────
     engine = ctx.engine

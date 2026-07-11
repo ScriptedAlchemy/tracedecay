@@ -168,7 +168,12 @@ def main():
     assert fact.get("content") == "stock hermes integration verified", added
     found = unwrap_tool_json(
         provider.handle_tool_call(
-            "fact_store", {"action": "search", "query": "stock hermes integration"}
+            "fact_store",
+            {
+                "action": "search",
+                "query": "stock hermes integration",
+                "limit": 1,
+            },
         )
     )
     assert found.get("count", 0) >= 1, found
@@ -199,7 +204,12 @@ def main():
     )
     mirrored = unwrap_tool_json(
         provider.handle_tool_call(
-            "fact_store", {"action": "search", "query": "on-memory-write mirror"}
+            "fact_store",
+            {
+                "action": "search",
+                "query": "on-memory-write mirror",
+                "limit": 1,
+            },
         )
     )
     assert mirrored.get("count", 0) >= 1, mirrored
@@ -208,7 +218,7 @@ def main():
     # 4. Graph tool dispatch through generated tools.py against the real cwd,
     #    never the Hermes plugin/config directory.
     plugin = loaded.module
-    graph_status = unwrap_tool_json(plugin.tools.call_tracedecay_tool("tracedecay_status", {}))
+    graph_status = plugin.call_tracedecay_json("tracedecay_status", {})
     assert graph_status.get("file_count", 0) >= 1, graph_status
     assert graph_status.get("node_count", 0) >= 1, graph_status
     ok(
