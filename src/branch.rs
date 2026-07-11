@@ -229,7 +229,13 @@ fn unique_branch_db_stem(
     if !conflicts(&base) {
         return Some(base);
     }
-    Some(format!("{base}-{}", short_branch_hash(branch_name)))
+    let hashed = format!("{base}-{}", short_branch_hash(branch_name));
+    if !conflicts(&hashed) {
+        return Some(hashed);
+    }
+    (1..10_000)
+        .map(|suffix| format!("{hashed}-{suffix}"))
+        .find(|candidate| !conflicts(candidate))
 }
 
 /// Short, stable hex digest of a branch name for DB-stem disambiguation.
@@ -460,15 +466,8 @@ pub async fn prepare_branch_tracking_in_layout(
     // Copy through SQLite rather than cloning the live main file. The
     // branch-add lock serializes metadata changes, but it does not stop other
     // processes from writing or checkpointing the parent WAL.
-    let snapshot_result = async {
-        let (parent, _) = crate::db::Database::open(&parent_db).await?;
-        parent.snapshot_to(&new_db_path).await
-    }
-    .await;
-    if let Err(e) = snapshot_result {
-        remove_branch_db_files(&new_db_path);
-        return Err(e);
-    }
+    let snapshot_result = create_consistent_branch_snapshot(&parent_db, &new_db_path).await;
+    snapshot_result?;
 
     // Save metadata before the caller opens the new branch DB for sync.
     let db_file = format!("branches/{stem}.db");
@@ -585,6 +584,42 @@ fn remove_branch_db_files(db_path: &Path) {
     let _ = std::fs::remove_file(&sidecar);
     sidecar.set_extension("db-shm");
     let _ = std::fs::remove_file(&sidecar);
+}
+
+async fn create_consistent_branch_snapshot(src: &Path, dst: &Path) -> crate::errors::Result<()> {
+    let parent_dir = dst
+        .parent()
+        .ok_or_else(|| crate::errors::TraceDecayError::Config {
+            message: format!("branch snapshot path '{}' has no parent", dst.display()),
+        })?;
+    let stem = dst
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or("branch");
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let temp = parent_dir.join(format!(
+        ".{stem}.snapshot-{}-{nonce}.db",
+        std::process::id()
+    ));
+    let result = async {
+        let (source, _) = crate::db::Database::open_read_only(src).await?;
+        source.snapshot_to(&temp).await?;
+        std::fs::hard_link(&temp, dst).map_err(|error| {
+            crate::errors::TraceDecayError::Config {
+                message: format!(
+                    "failed to publish branch snapshot '{}' without replacing an existing store: {error}",
+                    dst.display()
+                ),
+            }
+        })?;
+        Ok(())
+    }
+    .await;
+    remove_branch_db_files(&temp);
+    result
 }
 
 /// Untracks a single non-default branch: removes its metadata entry and deletes

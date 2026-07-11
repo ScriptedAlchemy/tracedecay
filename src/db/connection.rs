@@ -268,7 +268,7 @@ impl Database {
 
     /// Writes a transactionally consistent copy of this database.
     ///
-    /// `VACUUM INTO` reads from one SQLite snapshot, so concurrent WAL
+    /// `VACUUM INTO` reads from one `SQLite` snapshot, so concurrent WAL
     /// checkpoints cannot leave the destination with a partially copied
     /// B-tree. The destination must not already exist.
     pub async fn snapshot_to(&self, destination: &Path) -> Result<()> {

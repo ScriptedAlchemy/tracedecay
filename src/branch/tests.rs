@@ -48,6 +48,20 @@ fn unique_stem_disambiguates_sanitization_collision() {
 }
 
 #[test]
+fn unique_stem_preserves_hashed_orphan_recovery_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut meta = crate::branch_meta::BranchMeta::new("main");
+    meta.add_branch("feature/foo", "branches/feature_foo.db", "main");
+    let hashed = format!("feature_foo-{}", short_branch_hash("feature_foo"));
+    std::fs::write(dir.path().join(format!("{hashed}.db")), b"recovery").unwrap();
+
+    assert_eq!(
+        unique_branch_db_stem(&meta, dir.path(), "feature_foo").unwrap(),
+        format!("{hashed}-1")
+    );
+}
+
+#[test]
 fn unique_stem_is_idempotent_for_same_branch() {
     // Recomputing for a branch already in meta must not treat its own entry
     // as a conflict.
@@ -180,7 +194,7 @@ fn add_tracked_branch(
 }
 
 #[tokio::test]
-async fn sqlite_snapshot_includes_uncheckpointed_wal_data() {
+async fn read_only_sqlite_snapshot_includes_committed_data() {
     let dir = tempfile::tempdir().unwrap();
     let src = dir.path().join("src.db");
     let dst = dir.path().join("dst.db");
