@@ -2413,10 +2413,8 @@ fn def_memory_status() -> ToolDefinition {
 
 fn memory_status_properties() -> Value {
     let mut properties = project_selector_properties();
-    properties
-        .as_object_mut()
-        .expect("project selector properties")
-        .insert(
+    if let Some(properties) = properties.as_object_mut() {
+        properties.insert(
             "memory_scope".to_string(),
             json!({
                 "type": "string",
@@ -2424,6 +2422,7 @@ fn memory_status_properties() -> Value {
                 "description": "Memory scope to inspect (default: project)."
             }),
         );
+    }
     properties
 }
 
