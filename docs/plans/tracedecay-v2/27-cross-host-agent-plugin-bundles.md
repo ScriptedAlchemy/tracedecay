@@ -8,7 +8,9 @@
 
 **Architecture:** Plan 08's existing `tracedecay-tool-catalog` and canonical `HostIntegrationManifestV1` remain the semantic source of truth. Its pure `host_bundles` module validates and deterministically compiles Claude Code, Codex, and Cursor release artifacts. Plan 09 owns `HostDeploymentPort`; root-private `v2::host_deploy` implements it using plan 12's host-effect mechanics for probing, config merge, install, update, repair, owned-state compensation, and removal. This preserves plan 19's at-most-11-package ceiling: no `tracedecay-host-bundles` crate or package is added. Plans 07, 17, 18, 20, 21, and 24 continue to own hook runtime, public API, privacy, configuration, surface rendering, and task execution. Every generated host artifact calls the same separately installed TraceDecay binary/daemon and pins the same integration-manifest and catalog digests.
 
-**Decision:** `HostIntegrationManifestV1` is extended, never renamed or duplicated. `HostBundleManifestV1` means only a signed generated per-host/per-package release artifact manifest: it references the canonical integration-manifest/catalog digests and carries files, omissions, compatibility, provenance, and conformance receipts, but no second workflow, permission, hook, task, or tool semantics. There is one semantic manifest, one compiler path, one binary, one daemon, one catalog, one authorization path, and one install state machine.
+**Decision:** `HostIntegrationManifestV1` is extended, never renamed or duplicated. `HostBundleManifestV1` means only a signed generated per-host/per-package release artifact manifest: it references the canonical integration-manifest/catalog digests and carries files, omissions, compatibility, provenance, and conformance receipts, but no second workflow, permission, hook, task, or tool semantics. There is one semantic manifest, one compiler path, one thin `tracedecay` integration binary launched by hosts, one private `tracedecayd` authority binary managed by the OS service manager, one catalog, one authorization path, and one install state machine.
+
+The base package may carry both executables, but its generated launch manifest is closed: shells, hooks, skills, and every MCP registration invoke only `tracedecay`; service definitions and the privileged maintenance/probe lifecycle invoke only `tracedecayd` or the packaged probe helper. Host overlays cannot swap those targets, expose a daemon subcommand, or grant a host process the service identity.
 
 ---
 
@@ -19,7 +21,7 @@
 3. The separately installed `tracedecay` CLI and daemon are the executable product. No plugin package embeds a second TraceDecay binary, database engine, scheduler, tool registry, or copy of application logic.
 4. The universal baseline is TraceDecay skills plus the generated CLI. A host without MCP, with MCP disabled, or with MCP temporarily broken retains every semantic capability through CLI and documented HTTP/API fallback recipes.
 5. MCP is optional and split into exactly three logical registrations from plan 08: `tracedecay-context`, `tracedecay-work`, and `tracedecay-operator`.
-6. The package catalog exposes a base `tracedecay` integration plus independently installable `tracedecay-context`, `tracedecay-work`, and `tracedecay-operator` companion integrations. All companions launch the same binary and catalog; none copies skills, agents, hooks, or domain code.
+6. The package catalog exposes a base `tracedecay` integration plus independently installable `tracedecay-context`, `tracedecay-work`, and `tracedecay-operator` companion integrations. All companions launch the thin `tracedecay` integration binary and connect to the same private `tracedecayd` authority/catalog; none launches the daemon directly or copies skills, agents, hooks, or domain code.
 7. `tracedecay-context` is the only MCP companion eligible for a recommended ordinary-agent install. `tracedecay-work` requires explicit task-worker/orchestrator intent. `tracedecay-operator` is never installed, enabled, inherited, or advertised by default.
 8. Every MCP connection pins one registration, one exact `McpSurfaceProfileV1`, one catalog digest, one protocol digest, and one grant ceiling. A host config, prompt, skill, agent, or broader credential cannot widen it in place.
 9. Progressive tool-schema disclosure is an optional client optimization, not an MCP protocol guarantee and not a plugin guarantee. Every profile passes eager-client context, routing, security, and latency tests.
@@ -1505,7 +1507,7 @@ Compilation is unprivileged and pure. Installation is a narrow privileged bounda
 - Local transport still authenticates the host instance/principal and validates catalog/profile/policy/config/privacy digests.
 - Server process receives no long-lived plaintext credential in argv, manifest, environment dump, or diagnostics. Use protected secret refs/handles.
 - Initialization returns exact registration/profile/effect ceiling and degraded capability flags. A mismatch closes the connection.
-- Read-only, work, and operator servers use independent process/config identities and grants even if one binary implements them.
+- Read-only, work, and operator registrations use independent process/config identities and grants even though the thin `tracedecay` integration binary implements each and connects to the private daemon.
 - Operator methods require exact grant, idempotency, expected generation, reason, and audit receipt. Agent role metadata cannot elevate them.
 - Tool descriptions/results contain no ambient project list, hidden transcript content, task fences, raw edit bundles, secrets, or private paths.
 - MCP roots are hints to scope resolution, never authorization. Plan 16 resolves registered repositories/worktrees and reports omissions.
@@ -1653,7 +1655,7 @@ The arbiter may emit at most one compact, route-specific suggestion per turn and
 11. **Privacy/security:** secret/private-path, traversal/symlink/archive, command injection, manifest tampering, signature/revocation, broad grant, and output leakage.
 12. **Migration:** every current integration row in `6.7`, stale caches/versions, duplicate registrations/hooks, owned/unowned files, and interrupted V1 cutover.
 13. **Hermes multi-profile/runtime context:** zero/one/many named profiles all bind one TraceDecay profile/store; parallel sessions retain distinct workspaces; projectless memory uses Profile scope; clone/reload shares only immutable config/circuit state; greetings and acknowledgements remain silent; cross-project retrieval retains selector/auth bindings.
-14. **Versioned diagnostics:** every generated core/companion/hook/role/installer log record carries its producer TraceDecay version; mixed old/current components, forwarding, rotation, and current-only/range/exclusion filters preserve truthful counts and producer/collector distinction.
+14. **Versioned diagnostics:** every generated core/companion/hook/role/installer log record carries its producer TraceDecay build reference; mixed old/current components, forwarding, rotation/retention, and current-runtime-set/compatible-protocol/range/exclusion filters preserve truthful included/excluded/legacy-unknown counts and producer/collector distinction.
 
 ### 12.2 Supported stock-host matrix
 
@@ -2094,7 +2096,7 @@ Normative conflict resolutions:
 
 - [ ] One extended `HostIntegrationManifestV1` owns semantics; generated bundles contain only artifact/provenance metadata.
 - [ ] No new crate/package; architecture manifest reports at most 11 Rust packages.
-- [ ] One catalog, one binary/daemon/application path, one root deployment adapter, one hook runtime, one authorization path.
+- [ ] One catalog, one thin integration-binary/private-daemon/application path, one root deployment adapter, one hook runtime, one authorization path; every host registration launches `tracedecay`, never `tracedecayd`.
 - [ ] `HostInstallSetV1` represents `CoreSkillsCli` plus any exact `McpFacade` subset and headless facade-only deployment without semantic duplication.
 - [ ] Exactly nine integration use cases exist and generate every surface.
 - [ ] Every capability has `Supported`, `VersionGated`, `Absent`, `Undocumented`, `PolicyDisabled`, `Stale`, or `TrustPending` plus evidence.

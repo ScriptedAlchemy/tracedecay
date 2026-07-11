@@ -6,7 +6,7 @@
 
 **Architecture:** `tracedecay-application` remains the sole use-case boundary and `tracedecay-tool-catalog` remains the capability registry. The private root `v2::api` module serves the official HTTP/SSE/OpenAPI contract; generated schema packages and small hand-written runtimes expose it as idiomatic SDKs. CLI and MCP use the same application/catalog definitions but do not loop through HTTP. Every binding is verified against the same semantic fixtures, typed scopes, stable anchors, errors, coverage, and replay rules. External callers consume protocol artifacts/SDKs, so the server adapter is not separately published.
 
-**Initial deployment:** Local-first. A user-owned Unix-domain socket or authenticated loopback HTTP endpoint is supported. Remote or hosted service operation is not assumed by this plan and must not weaken the local trust, privacy, or authorization contract.
+**Initial deployment:** Local-first. Strong mode uses a service-owned Unix-domain socket or Windows named pipe with connect-only client ACL; authenticated loopback HTTP is also supported. Portable same-user local transport is explicitly degraded. Remote or hosted service operation is not assumed by this plan and must not weaken the local trust, privacy, or authorization contract.
 
 **Publication snapshot:** [master §2.6](../2026-07-09-tracedecay-brain-rewrite.md#26-current-master-accepted-changes) plus [plan 13](13-research-provenance-and-context-anchors.md) are normative. Historical 0.0.47/0.0.48 fixture counts remain version-labelled evidence, not the current surface. The official surface includes ordinary-profile Hermes, current message views, doctor authority, race-safe `move_symbol`, typed identity split and merged consolidation (`de3d05dc`), release-integrity gates, proxy/reconnect/no-write-replay, negotiated catalog refresh, fact rank/counters, exact analytics, untracked/divergent data recovery, lifecycle-safe maintenance, restart-safe applied-manifest retirement, and operator-only consolidation/recovery.
 
@@ -255,7 +255,7 @@ Discovery precedence for SDKs is explicit:
 1. caller-supplied endpoint and credential;
 2. `TRACEDECAY_API_ENDPOINT` and a supported credential provider, never a token embedded in the endpoint URL;
 3. user-owned runtime discovery file with mode `0600`, process identity, expiry, endpoint, and public digests;
-4. deterministic default Unix socket or loopback status probe;
+4. deterministic default service-owned Unix socket/Windows named-pipe or loopback status probe;
 5. typed `endpoint_not_found` with the exact command to start/check the service.
 
 SDKs never scan processes, ports, parent directories, dashboards, MCP config, or transcript files to guess an endpoint.
@@ -771,7 +771,7 @@ SDKs separate `ReadClient` and `AdminClient` surfaces where the language permits
 
 ### 18.1 Transports
 
-- Prefer a user-owned Unix-domain socket with OS ownership/mode checks for local nonbrowser clients, plus application authentication. Plan 10 builds the socket listener and its peer-credential checks (plan 10 §10.1); this plan owns UDS conformance (Section 24).
+- Prefer the service-owned Unix-domain socket or Windows named pipe for local nonbrowser clients in strong mode. The endpoint ACL grants connect-only access to authorized client identities while the daemon identity retains ownership; peer identity and application authentication are both required. Plan 10 builds the platform adapters (plan 10 §10.1); this plan owns UDS/named-pipe conformance (Section 24). Owner-only same-user sockets are portable degraded mode, never isolation proof.
 - Loopback HTTP binds only exact loopback by default and enforces strict Host/Origin/forwarded-header policy.
 - Browser uses per-launch bootstrap, secure session cookie, and CSRF token.
 - Agent/SDK uses a bearer token or local credential-provider handshake. Tokens never appear in URLs, process titles, command history examples, OpenAPI examples, or logs.
@@ -1001,11 +1001,11 @@ Compare canonical semantic JSON after removing only declared transport fields su
 - Rate/body/decompression/header/URI/JSON depth/batch/export/stream queue/deadline/cancellation tests.
 - SSE duplicate/out-of-order/resume/expiry/gap/resync/coalescing/slow client/auth change/protocol cutoff tests.
 - Command idempotency/version conflict/operation-specific inspection/confirmation/recovery/audit/destructive-grant tests.
-- Unix-domain socket transport conformance: ownership/mode checks, peer-credential mismatch, token authentication over the socket, and browser-credential rejection (listener built by plan 10 §10.1).
+- Local transport conformance on Linux/macOS/Windows: service ownership, endpoint ACL/DACL, connect-only ordinary-client access, peer-credential/token mismatch, token authentication, browser-credential rejection, and negative database-root traversal/read/open probes executed as the client identity (adapters built by plan 10 §10.1).
 - Executor-adapter compatibility/security matrix from plan 24 as a dedicated conformance lane: provider/model/route constraint enforcement, fenced lease-acquisition/heartbeat/terminal transitions, advisory-claim separation, broker/grant revocation, non-preemptible-effect quarantine, and workspace-safety refusals.
 - Task orchestration parity lane: canonical `DependencyId`/`WorkClaimRefV1`/manifest-ID+ordinal+digest `ContextPacketManifestRefV1`, canonical `TraceQueryV1`, complete saved-view round trip/share revoke, transactional assignment-set receipt, fully anchored packet entries, attempt list/get/timeline with immutable start plus current accepted packet, registration-scoped offer list/get/accept/decline and admin revoke, fenced packet accept, direct notification list/get/create/update/delete with no preview/apply alias, journal-sequence subscription deltas with no `/task-events`, and plan-26 workload/fleet accounting attribution. Every operation must match application/HTTP/Rust/TypeScript/Python/CLI/MCP manifests.
 - Task-graph edit-bundle lane: all seven `task_graph.edit_bundles.*` operation IDs and HTTP/SDK methods are bijective; streamed export/get/validate preserves bounded memory; no request serializes a path; strict YAML/CommonMark, sharding, line/column diagnostics, semantic diff, explicit rebase, submit CAS/atomicity, ordinary validation retention, secret/containment immediate purge, explicit delete, expiry, and crash cleanup behave identically across runtimes; success leaves only content-free digest/count/anchor receipts.
-- Plugin/MCP exposure lane: skills/CLI-only install has no MCP dependency; optional context/work/operator registrations share one binary but distinct immutable profile/grant/budget digests; eager all-tools, paginated-list, deferred-tool-search, ignored-list-change, no-resource, and no-experimental-task client fixtures all remain usable and least-privilege; widening is unavailable until reconnect.
+- Plugin/MCP exposure lane: skills/CLI-only install has no MCP dependency; optional context/work/operator registrations all launch the thin `tracedecay` integration binary and connect to private `tracedecayd`, while retaining distinct immutable profile/grant/budget digests; eager all-tools, paginated-list, deferred-tool-search, ignored-list-change, no-resource, and no-experimental-task client fixtures all remain usable and least-privilege; widening is unavailable until reconnect.
 - Operator storage lane for merged #425: AdminClient-only consolidation discovery, deterministic plan/confirmation, path-plus-file/inode holder/freeze/backup/stage/verify/cutover/resume/recover state, uncertain-write non-replay, exact recovery action, and proof that curation/task credentials cannot discover or invoke it.
 - Secret corpus across source, generated artifacts, examples, logs, errors, cursors, anchors, exports, docs, source maps, and telemetry.
 - SDK compile/type/lint/unit/integration examples on supported Rust/Node/browser/Python matrices.

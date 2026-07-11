@@ -110,8 +110,11 @@ src/v2/api/
 │   ├── launch.rs                  # per-launch secret and one-time bootstrap nonce
 │   ├── session.rs                 # browser session/bearer lifecycle
 │   ├── csrf.rs                    # mutation token validation/rotation
-│   ├── token.rs                   # constant-time token digest/expiry/revocation
-│   └── uds.rs                     # user-owned Unix-domain socket listener and peer-credential checks
+│   └── token.rs                   # constant-time token digest/expiry/revocation
+├── local_transport/
+│   ├── mod.rs                     # service-owned endpoint facade and authentication handoff
+│   ├── uds.rs                     # Linux/macOS UDS ownership, ACL, and peer credentials
+│   └── named_pipe.rs              # Windows service DACL and client-token verification
 ├── security/
 │   ├── mod.rs
 │   ├── host.rs                    # strict Host and forwarded-header rejection
@@ -723,7 +726,8 @@ pub enum ApiStreamEvent {
 - Non-loopback bind is disabled unless plan 28's explicit protected-remote profile names allowlisted interfaces/authorities, TLS 1.3, enrolled-node mTLS or a scoped revocable token, proxy-trust pins when applicable, and strict origin policy. Wildcard bind/CORS remains forbidden. This is supported optional operation, never the local default.
 - Accept only exact configured authorities: `127.0.0.1:<port>`, `[::1]:<port>`, and `localhost:<port>` when enabled. Reject missing, malformed, multiple, userinfo, trailing-dot, wildcard, unexpected port, and untrusted `Forwarded`/`X-Forwarded-*` headers.
 - Absolute-form request targets and proxy mode are rejected by default, preventing DNS-rebinding/proxy confusion.
-- A user-owned Unix-domain socket listener is a first-class transport built by this root API boundary (plan 17 §18.1 prefers it for local nonbrowser clients; plan 17 §24 owns its conformance suite). The socket directory and file are owner-only (`0700`/`0600`), peer credentials (`SO_PEERCRED`/`getpeereid`) must match the profile owner, and application token authentication still applies. Cookie, CSRF, and Host/Origin rules are HTTP-listener browser rules and neither apply to nor weaken over the socket; browser sessions are not accepted on it.
+- Local nonbrowser transport is service-owned in strong mode: the dedicated daemon identity creates the Unix-domain socket directory/file or Windows named pipe, retains endpoint ownership, and grants connect-only access to authorized client identities through an explicit ACL. Unix peers are verified with `SO_PEERCRED`/`getpeereid`; Windows peers are verified from the named-pipe client token and service DACL. Application-token authentication remains mandatory. A portable same-user endpoint may use owner-only `0700`/`0600`, but is reported as `SameUserDegraded` and never proves database read denial. Cookie, CSRF, and Host/Origin rules are HTTP-listener browser rules and neither apply to nor weaken local transport; browser sessions are not accepted on it. Plan 17 §24 owns Linux, macOS, and Windows conformance fixtures.
+- `daemon.start`, `daemon.status`, install, upgrade, and dead-daemon recovery may use a manifest-only service-manager bootstrap adapter before the application endpoint exists. This narrow lifecycle adapter can discover service identity and endpoint metadata but cannot resolve a store path, link `StoreFactory`, open SQLite, or execute any business/query operation; after startup all such operations traverse the authenticated daemon protocol.
 - Tailscale, another VPN, LAN, reverse proxy, or tunnel supplies reachability only. Optional Tailscale identity/grants/posture may narrow access, but the API still authenticates TraceDecay enrollment and authorizes `BrainId`, use case, project/privacy domain, placement, and authority epoch.
 
 ### 10.2 Launch, browser session, and bearer authentication

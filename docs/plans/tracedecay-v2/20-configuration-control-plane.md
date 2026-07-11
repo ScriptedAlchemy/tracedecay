@@ -771,7 +771,7 @@ Phase 0 generates an inventory from source and blocks cutover until every public
 |---|---|
 | Profile and identity | active profile behavior, privacy domain, labels, locale/time display, retention class defaults |
 | Capture and providers | enabled sources, provider adapters, transcript/tool/reasoning capture classes, framing limits, polling/watch behavior |
-| Hosts and hooks | installed host integration, hook enablement, latency budgets, fail-closed mode, hint delivery budgets, session pinning |
+| Hosts and hooks | installed host integration, hook enablement, latency budgets, fail-closed mode, hint delivery budgets, session pinning, source-broker registered-source classes, user-effect-broker per-operation policy ceilings, service-manager isolation-probe identity/interval/health (no path or grant body) |
 | Privacy/redaction | detector sets, thresholds, structured field policies, actions, decode/archive limits, custom manifests, retention/quarantine roles, scan schedules |
 | Sessions and activity | attribution modes, message views, compaction/summary policy, workflow/goal capture, evidence retention |
 | Code/Git/delivery | index modes, graph generation triggers, refs/worktrees, ignore policy, delivery refresh, diagnostics capture |
@@ -780,9 +780,11 @@ Phase 0 generates an inventory from source and blocks cutover until every public
 | Tasks/plans/executors | task graph/decomposition limits, legal work/gate/acceptance kinds, scheduler pause/concurrency/fairness/aging/batches, lease/heartbeat/start/cancel timeouts, executor adapters/hosts/capacity/workspace modes, provider/model/reasoning effort/routes/fallback, tool/effect grants, privacy/egress, worktree/branch policy, budgets/schedules/retries/circuit breakers, context-packet limits/expiry/materiality, saved task views/notifications |
 | Memory/knowledge | retrieval/trust/conflict/retention policies, autonomous curation cadence and quality constraints |
 | Automations/skills | scheduler, run budgets, autonomous curator/reflector/skill-writer policies, installation authority, health pauses |
-| Storage/projectors | declared `DedicatedServiceIdentity`/`RemoteAuthorityOnly`/`SameUserDegraded` isolation mode and immutable verified status, data locations by allowed location class, WAL/lease budgets, blob/backup retention, projection/index generations, compaction |
+| Storage/projectors | desired `StoreIsolationModeV1` (`DedicatedServiceIdentity`/`RemoteAuthorityOnly`/`SameUserDegraded`), read-only observed `StoreIsolationStatusV1` proof with validity/receipts, data locations by allowed location class, WAL/lease budgets, blob/backup/log retention, projection/index generations, compaction |
 | API/MCP/CLI/dashboard | loopback bind, session lifetime, request/page/budget caps, SSE caps, task-graph edit-bundle TTL/byte/file/item/sweeper bounds, host component set/install scope/registration-profile selection, optional context/work/operator MCP enable/narrow/approval/credential settings, renderer preferences, dashboard preferences; generated MCP IDs/digests/grant ceilings/definition budgets are visible immutable state |
-| Costs/observability | pricing catalog version, sampling, safe metrics, log levels, tracing budgets, accounting horizons, saved diagnostic producer-version filters and an explicit default view (`all`, `current_runtime`, or `compatible_protocol`) |
+| Costs/observability | pricing catalog version, sampling, safe metrics, log levels, tracing budgets, accounting horizons, diagnostic segment rotation/retention/quota/hold policy, saved diagnostic producer-version filters and an explicit default view (`all`, `current_runtime_set`, or `compatible_protocol`) |
+
+`StoreIsolationModeV1` is desired configuration. `StoreIsolationStatusV1` is observed, expiring operational evidence and is never editable configuration: each platform probe writes a successor proof variant or a degraded finding without mutating history. UI/CLI derive convenience statements such as “client database read denied” only from the active variant and its unexpired receipts. `RemoteAuthorityOnly` validates local-absence/cache evidence and does not pretend to own local database/key receipts; `DedicatedServiceIdentity` requires service identity, database-root, endpoint, and key-authority receipts; `SameUserDegraded` carries reasons, not false booleans.
 
 The producer version field itself, its emission requirement, and legacy-unknown truth are hard invariants, not settings. A default log-view filter may change presentation only: every response echoes it and reports excluded/unknown counts, and no setting may delete, rewrite, or relabel old records.
 | Updates/migrations | update channel, daemon drain policy, compatibility windows, import schedules, retirement holds |
@@ -890,7 +892,7 @@ The desired value is declarative. Saving it publishes configuration impact and l
 
 The published host bundle is a generated component set, not two mutually exclusive install modes. `core` installs generated skills, CLI recipes, and thin hooks without registering MCP and is the default on a host with an available shell and compatible TraceDecay CLI. Independently installable `context`, `work`, and `operator` facade companions may be added in any supported subset. A host without a shell/CLI prerequisite receives typed `shell_or_cli_unavailable` and must explicitly install one or more facade companions; a facade-only deployment is not a second workflow implementation. Every component records the same `HostIntegrationManifestV1` and catalog digest, and signed `HostBundleManifestV1` package metadata carries no duplicate workflow prose.
 
-The facade companions expose three generated logical server registrations, all invoking the same binary and application/catalog implementation:
+The facade companions expose three generated logical server registrations, all invoking the thin `tracedecay` integration binary and the same private `tracedecayd` application/catalog authority:
 
 | Registration | Immutable registration-manifest ID | Generated grant ceiling | Generated profile/definition budget |
 |---|---|---|---|
@@ -934,6 +936,16 @@ Plan 28 supplies topology semantics; this registry owns desired configuration an
 | `brain.recovery.key_provider` | offline recovery-bundle or external KMS/escrow reference / required before standby | Separately wraps retained data-key epochs; never stores unwrap secret in config/export/backup or weakens restore privacy scan. |
 
 `BrainId`, `BrainNodeId`, node keys, authority epochs, memberships, revocations, observed topology, causal frontiers, and recovery receipts are not writable config values. `/settings/brain`, CLI, API/SDK, and optional operator MCP render the same desired/activated/observed/effective/drift/restart model. Local-only users see no remote warning merely because no endpoint exists.
+
+### 13.6 Diagnostic storage descriptors
+
+| Key | Typed value/default | Contract |
+|---|---|---|
+| `observability.logs.segment_max_bytes` | bounded bytes / 64 MiB | Rotation ceiling; a lower layer cannot raise the release hard ceiling. |
+| `observability.logs.segment_max_age` | bounded duration / 1 day | Rotation age; crash recovery seals or safely resumes the current segment. |
+| `observability.logs.retention` | bounded duration / 90 days | Applies atomically to event rows, safe-message blobs, and pre-store segments; legal/incident holds may extend, never shorten, it. |
+| `observability.logs.total_quota_bytes` | bounded bytes / platform profile | Admission/GC budget with reserve; pressure reduces verbosity before deleting held or in-horizon evidence. |
+| `observability.logs.default_version_view` | `All | CurrentRuntimeSet | CompatibleProtocol` / `CurrentRuntimeSet` | Presentation default only; responses disclose selected runtime/compatibility manifest and included/excluded/legacy-unknown coverage. |
 
 ## 14. Privacy, redactor, detector, and credential controls
 
@@ -1228,7 +1240,7 @@ For every use case, run one fixture through in-process application, CLI JSON, MC
 
 Generated artifacts must leave a clean tree. An inventory test compares every registry key against CLI completion, MCP/OpenAPI schemas, SDKs, dashboard renderer coverage, and docs.
 
-Add host-profile fixtures for a core-only component set with no MCP dependency; explicit zero/one/many context/work/operator facade companions from one binary; explicit headless facade-only deployment; target-scoped base/companion package selection; skills/roles/hooks/MCP component enablement; user/machine/managed install scopes; trust/update/credential-reference policy; immutable integration/profile/catalog/grant/budget digest verification; desired/activated/observed/effective separation; stale-cache/foreign-owner/version-digest/registration drift; every restart directive; allowlist/ceiling narrowing; immediate disable/revocation; pending reconnect on every widening; eager-all-tools, paginated-list, ignored-list-change, and deferred-tool-search clients. Prove config save has no host effect and every host effect has one integration operation receipt. No fixture may rely on protocol-guaranteed progressive disclosure.
+Add host-profile fixtures for a core-only component set with no MCP dependency; explicit zero/one/many context/work/operator facade companions from the thin `tracedecay` integration binary connected to private `tracedecayd`; explicit headless facade-only deployment; target-scoped base/companion package selection; skills/roles/hooks/MCP component enablement; user/machine/managed install scopes; trust/update/credential-reference policy; immutable integration/profile/catalog/grant/budget digest verification; desired/activated/observed/effective separation; stale-cache/foreign-owner/version-digest/registration drift; every restart directive; allowlist/ceiling narrowing; immediate disable/revocation; pending reconnect on every widening; eager-all-tools, paginated-list, ignored-list-change, and deferred-tool-search clients. Prove config save has no host effect and every host effect has one integration operation receipt. No fixture may rely on protocol-guaranteed progressive disclosure.
 
 ### 21.4 UI and CLI
 

@@ -129,6 +129,7 @@ crates/tracedecay-application/
 │   │   ├── projection.rs              # projector status/rebuild/cutover command port
 │   │   ├── operations.rs              # doctor/index/watch/backup/repair/GC adapters
 │   │   ├── host_deployment.rs          # root-owned host probe/config/install/reload effects
+│   │   ├── user_effects.rs              # signed scoped user-identity effect grants/receipts/reconciliation
 │   │   ├── hooks.rs                   # HookApplicationPort evaluation/delivery boundary
 │   │   └── event_sink.rs              # canonical command/evaluation/outcome append port
 │   └── use_cases/
@@ -262,6 +263,8 @@ tracedecay-domain
 - `commands/**` cannot call an HTTP/GitHub/process/filesystem adapter while a unit of work is open. External operations run before revalidation or after durable workflow-step commit.
 - Reject imports containing `axum`, `tower`, `rmcp`, `clap`, dashboard packages, `rusqlite`, `libsql`, `git2`, `octocrab`, `reqwest`, `std::process`, or provider-specific hook modules.
 - A `cargo metadata` architecture test asserts adapters point inward and no cycle exists among application/query/policy/store/projectors.
+
+`UserEffectPortV1` is the one generic application boundary for filesystem/Git/worktree/owned-host-config/contained-workspace effects that must execute under the ordinary user identity while strong database isolation runs the daemon under a service identity. Application owns authorization, exact resource/precondition manifests, capability intersection, idempotency, revocation generation, expiry, audit, and uncertain-effect reconciliation; root plan 12 PR 24E0 implements the local broker transport and race-safe primitives. Plan 24 task effects reuse this kernel and add lease/attempt proof rather than defining another broker. Source capture remains a separate read-only port. Neither application nor the daemon receives ambient filesystem/process capability or a TraceDecay store path through this port.
 
 ## 7. Application Kernel Contracts
 

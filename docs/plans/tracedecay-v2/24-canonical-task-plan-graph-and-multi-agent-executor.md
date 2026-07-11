@@ -1917,7 +1917,7 @@ Grant calculation intersects safe floors, actor/initiative/project/repository/wo
 
 Required distinct effect classes include read local, read protected, read remote, write workspace files, execute process, mutate Git worktree, mutate remote Git/delivery, external message, configuration, automation, curation, secret access, and administrative/destructive. A task can request a class but cannot grant it to itself.
 
-Consequential effects are host-mediated, not trusted merely because an adapter once received a start manifest. Remote Git/delivery/message/provider calls and privileged local operations go through an application-owned effect broker carrying `TaskLeaseProofV1`, capability-grant-set ID/digest, `grant_id`, revocation epoch, canonical scope/resource, `IdempotencyKeyV1`, and preconditions on every call. The broker rejects any grant whose set does not match the current attempt and lease. Local agent processes run in a per-attempt process group and scoped workspace namespace with no inherited broad credentials. Where a provider/runtime cannot broker or revoke a write after start, its manifest declares that effect `NonPreemptible`; cancellation fences canonical writes immediately, quarantines that workspace/effect, attempts process-group termination/reconciliation, and forbids a replacement writer until stop or an explicit effect-unknown resolution is durable. TraceDecay therefore never promises to reject an unmediated byte already issued outside its boundary.
+Consequential effects are host-mediated, not trusted merely because an adapter once received a start manifest. Remote Git/delivery/message/provider calls and privileged local operations reuse plan 09's one application-owned `UserEffectPortV1`/effect kernel and plan 12's user-identity adapter; task execution extends each call with `TaskLeaseProofV1`, capability-grant-set ID/digest, `grant_id`, revocation epoch, canonical scope/resource, `IdempotencyKeyV1`, and preconditions rather than defining another broker. The broker rejects any grant whose set does not match the current attempt and lease. Local agent processes run in a per-attempt process group and scoped workspace namespace with no inherited broad credentials. Where a provider/runtime cannot broker or revoke a write after start, its manifest declares that effect `NonPreemptible`; cancellation fences canonical writes immediately, quarantines that workspace/effect, attempts process-group termination/reconciliation, and forbids a replacement writer until stop or an explicit effect-unknown resolution is durable. TraceDecay therefore never promises to reject an unmediated byte already issued outside its boundary.
 
 ### 10.6 Tool and side-effect idempotency
 
@@ -2633,7 +2633,7 @@ Host-native diagnostics run after adapter repair, separately from TraceDecay doc
 
 ## 18. Reviewable PR slices
 
-These suffixes were checked against plans 01–28. Plan 13 owns prerequisite heritage/research PR `2A`; Plan 20 owns `4C/6E/22C/24I/25E/31N/33C/37G`; Plan 22 owns `4F/6F/10D/10F/22D/23H/24O/24P/25F/31O/33D/37H`; Plan 23 owns `13D/13E/14D/15C/24L/31P/33E/35I/37I`; Plan 26 owns `22F/22G/22H/30J/33H`; Plan 27 owns `4G/22A/22I/24Q/25H/36R/37K`; Plan 28 owns `4H/6H/12D/24S/25I/33I/36S/37L`, while its remote-spool work is a component of capture PR 7B after 4H rather than a second PR or a self-dependency. Plan 11 owns privacy/scout integration `30L`. `17B` already belongs to Plan 04, so this plan uses `17C`. Dashboard `30A–30H` and accounting contract `30J` are assigned, so this plan uses dependency-ordered `30K`; plan 11 references to Settings under 25D/30H are shell/route consumers only, while plan 20 PR 25E exclusively owns the complete generated Settings workspace and cutover. Declarative bulk editing uses new suffix `24R`; it does not collide with or reuse existing `24D` client/API work, `24Q` host integration, `24S` remote Brain, or `25A` dashboard application-foundation work.
+These suffixes were checked against plans 01–28. Plan 13 owns prerequisite heritage/research PR `2A`; Plan 20 owns `4C/6E/22C/24I/25E/31N/33C/37G`; Plan 22 owns `4F/6F/10D/10F/22D/23H/24O/24P/25F/31O/33D/37H`; Plan 23 owns `13D/13E/14D/15C/24L/31P/33E/35I/37I`; plan 02 owns store companion `22F-LS`, while Plan 26 owns `22F/22F-LE/22G/22H/30J/33H`; Plan 27 owns `4G/22A/22I/24Q/25H/36R/37K`; Plan 28 owns `4H/6H/12D/24S/25I/33I/36S/37L`, while its remote-spool work is a component of capture PR 7B after 4H rather than a second PR or a self-dependency. Plan 11 owns privacy/scout integration `30L`. `17B` already belongs to Plan 04, so this plan uses `17C`. Dashboard `30A–30H` and accounting contract `30J` are assigned, so this plan uses dependency-ordered `30K`; plan 11 references to Settings under 25D/30H are shell/route consumers only, while plan 20 PR 25E exclusively owns the complete generated Settings workspace and cutover. Declarative bulk editing uses new suffix `24R`; it does not collide with or reuse existing `24D` client/API work, `24Q` host integration, `24S` remote Brain, or `25A` dashboard application-foundation work.
 
 ### PR 4E — Canonical initiative, plan, task, executor, lease, and packet domain contracts
 
@@ -2787,7 +2787,9 @@ These suffixes were checked against plans 01–28. Plan 13 owns prerequisite her
 10E → 17C cross-graph relations → 21A packet lineage → 22E catalog/SPI → 23I policy → 24M application/scheduler → 24N adapters/transports
 24M + 22E → 24R managed declarative bulk editing
 4E → 22F accounting descriptors
-6G + 10E + 22F → 22G task/accounting projections
+22F → 22F-LS store-owned diagnostic version/build/runtime-set persistence
+22F-LS → 22F-LE versioned diagnostic emission/application query
+6G + 10E + 22F-LE → 22G task/accounting projections
 24M + 22G → 22H liveness/scheduler/SLO/outcome rollups
 24N + 24R + 22H → 25G core Work UI
 22H → 30J Observatory/Costs contracts
@@ -2805,7 +2807,7 @@ Parallelism is allowed only after owning contracts land:
 - 25G concepts/tests may use read-only V1/synthetic fixtures but cannot invent API/view schemas;
 - 31Q corpus/judgment work can begin early, but live replay waits for 23I/24M manifests;
 - migration inventory can begin read-only before 33F; no live import writes before privacy/store gates;
-- 22F may begin after 4E; 22G requires 6G/10E journal/cost fixtures; 22H requires 24M liveness/scheduler events; 30K consumes 30J rather than inventing accounting views;
+- 22F may begin after 4E; store-owned 22F-LS follows 22F and root/application 22F-LE follows 22F-LS; 22G requires 6G/10E journal/cost fixtures plus 22F-LE; 22H requires 24M liveness/scheduler events; 30K consumes 30J rather than inventing accounting views;
 - no scheduler cutover before 22H/30J/33H observability and migration conformance plus aggregate multi-host, cancellation, workspace, privacy, transport, and dashboard verification are stable.
 
 Each PR must stay within its listed owner/files, update generated inventories, add focused tests first, run affected/architecture/schema checks, and record research anchors/manifest versions. Subagents receive exact files and acceptance commands; the lead reviews diffs before force-adding ignored plan artifacts or publishing implementation branches.

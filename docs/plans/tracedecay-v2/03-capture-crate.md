@@ -65,6 +65,8 @@ Capture consumes the capture facet of plan 08/27's one canonical `HostIntegratio
 
 The dependency boundary is `tracedecay-domain <- tracedecay-capture`; store implementations are injected by the root/application composition crate. `tracedecay-capture` may not import `src/sessions`, `src/hooks`, `src/automation`, `src/mcp`, or `src/dashboard`.
 
+In `DedicatedServiceIdentity` deployments, filesystem/provider discovery and `SourceAdapter` execution run in plan 12 PR 24E0's user-side source-broker composition, not in the daemon identity. The broker is granted only registered source/repository capabilities, runs this crate's normalize/sanitize/framing path, and submits typed receipt-bearing observations or code snapshots over authenticated local capture ports. Provider-source SQLite readers remain read-only adapters here; neither they nor the broker can import TraceDecay store layout, `StoreFactory`, canonical repositories, or database paths. The daemon therefore needs no broad user-home access, while capture semantics and sanitization remain identical to portable mode.
+
 ## Exact crate and module layout
 
 | File | Responsibility |
@@ -346,7 +348,7 @@ impl HookSpool {
 }
 ```
 
-Every TraceDecay-owned source adapter and hook draft carries the originating `TraceDecayBuildRefV1`; capture rejects a newly emitted log/hook/diagnostic record without it. Spool frames authenticate the producer build reference in their header, and drain/forward/import preserves it independently from the current drainer/collector build. This applies even before project/store initialization and during recovery failures. Pre-contract V1 JSONL/file logs enter migration as explicit `UnknownLegacy`, never as the version of the binary performing import.
+Every TraceDecay-owned source adapter and hook draft carries the originating `TraceDecayBuildRefV1`; capture rejects a newly emitted log/hook/diagnostic record without it. Spool frames authenticate the producer build reference in their header, and drain/forward/import preserves it independently from the current drainer/collector build. This applies even before project/store initialization and during recovery failures. Pre-contract V1 JSONL/file logs enter migration as `KnownVersion` when component+SemVer are proven without a build manifest, otherwise explicit `UnknownLegacy`; neither is ever relabeled as the importing binary.
 
 Capture owns the one hook spool and its drainer. There is exactly one spool implementation, one hash-chained frame format (below), and one always-spool ingress protocol; the store exposes only append transactions and never runs a handoff-first or fallback ingress spool of its own ([`02-store-crate.md`](02-store-crate.md) drains capture's spool through `ObservationJournal` appends). Plan [`07-hooks-crate.md`](07-hooks-crate.md) hook hosts write exclusively through capture's spool client (`spool/client.rs`) and receive durability acks carrying the domain `SpoolReceipt` from [`01-domain-crate.md`](01-domain-crate.md); no crate mints a spool-receipt variant.
 

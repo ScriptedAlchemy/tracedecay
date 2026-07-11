@@ -206,15 +206,36 @@ pub enum StoreIsolationModeV1 {
     RemoteAuthorityOnly,
     SameUserDegraded,
 }
-pub struct StoreIsolationStatusV1 {
-    pub mode: StoreIsolationModeV1,
-    pub database_read_denied_to_clients: bool,
-    pub database_write_denied_to_clients: bool,
-    pub service_identity_verified: bool,
-    pub endpoint_acl_verified: bool,
-    pub key_authority_verified: bool,
-    pub last_probe_at: UtcMicros,
-    pub evidence_digest: ManifestDigest,
+pub enum StoreIsolationStatusV1 {
+    DedicatedServiceIdentity {
+        profile_id: ProfileId,
+        authority_id: StoreAuthorityId,
+        authority_epoch: AuthorityEpoch,
+        proof_generation: u64,
+        service_identity_receipt: EntityId,
+        database_root_acl_receipt: EntityId,
+        endpoint_acl_receipt: EntityId,
+        key_authority_receipt: EntityId,
+        verified_at: UtcMicros,
+        valid_until: UtcMicros,
+        evidence_digest: ManifestDigest,
+    },
+    RemoteAuthorityOnly {
+        profile_id: ProfileId,
+        authority_id: StoreAuthorityId,
+        authority_epoch: AuthorityEpoch,
+        local_absence_receipt: EntityId,
+        cache_policy_digest: ManifestDigest,
+        verified_at: UtcMicros,
+        valid_until: UtcMicros,
+        evidence_digest: ManifestDigest,
+    },
+    SameUserDegraded {
+        profile_id: ProfileId,
+        reason_codes: BoundedVec<RegistryEntryId, 8>,
+        observed_at: UtcMicros,
+        evidence_digest: ManifestDigest,
+    },
 }
 pub struct ShardId(pub uuid::Uuid);
 pub struct PrivacyDomainId(pub uuid::Uuid);
@@ -327,25 +348,53 @@ pub struct ComponentVersion(String); // bounded ASCII semver/build grammar
 pub struct TraceDecayBuildRefV1 {
     pub version: ComponentVersion,
     pub component: RegistryEntryId,
-    pub build_manifest_digest: Option<ManifestDigest>,
+    pub build_manifest_digest: ManifestDigest,
 }
 pub struct ComponentVersionRequirementV1(String); // bounded canonical semver requirement grammar
-pub enum TraceDecayVersionSelectionBasisV1 { All, CurrentRuntime, CompatibleProtocol }
+pub struct RuntimeBuildSetRefV1 {
+    pub set_id: EntityId,
+    pub component_builds_digest: ManifestDigest,
+    pub member_count: u16,
+    pub admitted_at: UtcMicros,
+}
+pub struct RuntimeBuildSetMemberV1 {
+    pub component: RegistryEntryId,
+    pub build: TraceDecayBuildRefV1,
+}
+pub enum TraceDecayVersionSelectionBasisV1 {
+    All,
+    CurrentRuntimeSet(RuntimeBuildSetRefV1),
+    CompatibleProtocol { protocol: ProtocolRef, compatibility_manifest_digest: ManifestDigest },
+}
 pub enum LegacyUnknownVersionPolicyV1 { Include, Exclude, Only }
-pub struct DiagnosticLogEventV1 {
+pub struct DiagnosticLogCoreV1 {
     pub event_id: EntityId,
     pub occurred_at: UtcMicros,
-    pub producer: TraceDecayBuildRefV1,
     pub collector: Option<TraceDecayBuildRefV1>,
     pub severity: RegistryEntryId,
     pub event_code: RegistryEntryId,
     pub correlation_id: Option<EntityId>,
     pub safe_message: LogSafeText,
 }
+pub struct DiagnosticLogEventV1 {
+    pub core: DiagnosticLogCoreV1,
+    pub producer: TraceDecayBuildRefV1,
+}
+pub enum StoredProducerVersionV1 {
+    KnownExactBuild(TraceDecayBuildRefV1),
+    KnownVersion { component: RegistryEntryId, version: ComponentVersion, source_manifest_id: ManifestId },
+    UnknownLegacy { source_manifest_id: ManifestId, reason: RegistryEntryId },
+}
+pub struct StoredDiagnosticLogRecordV1 {
+    pub core: DiagnosticLogCoreV1,
+    pub producer_version: StoredProducerVersionV1,
+}
 pub struct TraceDecayVersionSelectorV1 {
     pub basis: TraceDecayVersionSelectionBasisV1,
+    pub producer_components: BoundedVec<RegistryEntryId, 16>,
     pub include: BoundedVec<ComponentVersionRequirementV1, 16>,
     pub exclude: BoundedVec<ComponentVersionRequirementV1, 16>,
+    pub exact_build_digests: BoundedVec<ManifestDigest, 16>,
     pub legacy_unknown: LegacyUnknownVersionPolicyV1,
 }
 pub struct MediaTypeCode(String); // allowlisted IANA/media grammar, no parameters with literals
@@ -941,7 +990,9 @@ pub struct ModelCapabilityRefV1 {
 }
 ```
 
-`TraceDecayBuildRefV1.version` is required on every newly emitted TraceDecay log event and uses semantic-version precedence with prerelease/build handling; development artifacts use an explicit valid development/build version rather than an empty or inferred value. A forwarder sets `collector` but preserves `producer` byte-for-byte. Multi-line human diagnostics are one typed event or independently version-stamped continuation events. `TraceDecayVersionSelectionBasisV1::CurrentRuntime` resolves against the application server/CLI runtime captured at request admission; `CompatibleProtocol` resolves through the versioned compatibility manifest, never a string-prefix guess. Empty `include` means the selected basis population, then `exclude` subtracts. `LegacyUnknownVersionPolicyV1` exists only to query imported pre-contract records; a new `DiagnosticLogEventV1` cannot represent an unknown version. Metric labels still exclude arbitrary build/version cardinality—version is an indexed diagnostic predicate and evidence boundary, not a free-form metric dimension.
+`TraceDecayBuildRefV1.version` and `build_manifest_digest` are required on every newly emitted TraceDecay log event and use semantic-version precedence with prerelease/build handling; development artifacts generate an explicit valid development/build version and manifest digest rather than an empty or inferred value. A forwarder sets `collector` but preserves `producer` byte-for-byte. Multi-line human diagnostics are one typed event or independently version-stamped continuation events. Live emission can construct only `DiagnosticLogEventV1`/`StoredProducerVersionV1::KnownExactBuild`. The importer may construct `KnownVersion` only when the source proves component+SemVer but lacks an exact build manifest, and may construct `UnknownLegacy` only with source manifest and reason; it never fabricates a digest or downgrades proven version evidence. `CurrentRuntimeSet` resolves through immutable persisted `RuntimeBuildSetMemberV1` rows admitted for the requesting daemon session, not one ambiguous CLI or server version; the reference digest/count must rederive exactly and the set remains replayable after process loss. `CompatibleProtocol` binds the exact protocol and compatibility-manifest digest. SemVer requirements operate on normalized parsed precedence; build metadata does not affect precedence and is selectable only through `exact_build_digests`. Empty `producer_components` means every component in the selected basis; empty `include` means the selected basis population, then `exclude` subtracts. Metric labels still exclude arbitrary build/version cardinality—version is an indexed diagnostic predicate and evidence boundary, not a free-form metric dimension.
+
+`StoreIsolationStatusV1` is observed proof, not desired configuration. Each variant contains only evidence legal for that mode and is bound to the profile plus authority epoch where applicable. `database_read_denied_to_clients` and similar UI/API booleans are derived generated view fields: `true` only for an unexpired `DedicatedServiceIdentity` or `RemoteAuthorityOnly` proof, never caller-set state. Plan 20 owns desired `StoreIsolationModeV1`; root/plan 18 owns proof issuance and expiry.
 
 `SavedViewV1` and `SavedViewDefinitionV1` are the one persisted/wire saved-view envelope. Plan 11 owns the UI-neutral `InvestigationStateV1` codec, bounded scene-trail interaction semantics, and `ExperimentViewSpecV1` presentation; plan 24 owns `TaskViewSpecV1` validation/lenses. All three variants live under this domain contract and share identity, name/owner scope, classification/redaction, live/frozen snapshot, optimistic version, expiry, revoke/reauthorize, and sharing lifecycle. Experiment views reference immutable experiment/run/cell/stage/comparison/comparison-cell/reduction/playhead identities and never embed inputs or outputs. A variant cannot introduce another saved-view ID, table, query scope, grant, route family, or command namespace. `PendingSanitization` is an automated safety state, not a human approval queue.
 
