@@ -877,7 +877,7 @@ assert "extraction backend unavailable" in payload["pre_compaction_extraction"][
 }
 
 #[test]
-fn generated_context_engine_home_default_is_host_config_only() {
+fn generated_context_engine_home_default_uses_installed_profile() {
     run_generated_plugin_script(
         "check_context_engine_default_home.py",
         r#"
@@ -892,25 +892,22 @@ with tempfile.TemporaryDirectory() as tmp:
     # expanduser reads HOME on POSIX and USERPROFILE on Windows.
     os.environ["HOME"] = str(home)
     os.environ["USERPROFILE"] = str(home)
-    expected = str(home / ".hermes")
-    assert not pathlib.Path(expected).exists()
+    expected = str(plugin_dir.parent.parent)
 
     engine = plugin.TraceDecayContextEngine()
     engine.initialize(session_id="session-1")
 
     def normalized(path):
-        # Windows expanduser("~/.hermes") emits mixed separators for the same
-        # location; normalize separators only there so Unix stays byte-exact.
-        return os.path.normpath(path) if os.name == "nt" else path
+        return os.path.normcase(os.path.realpath(path))
 
     assert normalized(engine.hermes_home) == normalized(expected), engine.hermes_home
     status = engine.get_status()
     assert "storage_scope" not in status
     assert "hermes_home" not in status
     assert "lcm_project_root" not in status
-    assert normalized(status["project_root"]) != normalized(expected), status
+    assert status["project_root"] is None, status
 "#,
-        "Hermes home defaults may configure the host but never TraceDecay storage",
+        "Hermes home defaults to the installed profile but never TraceDecay storage",
     );
 }
 
