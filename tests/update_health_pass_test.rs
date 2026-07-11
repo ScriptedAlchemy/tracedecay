@@ -1,5 +1,4 @@
 #![allow(clippy::collapsible_if)]
-#![cfg(not(windows))]
 //! Integration tests for the post-update health pass that runs at the end of
 //! `tracedecay update` / `tracedecay post-update` (skippable via `--no-heal`).
 //!
@@ -150,7 +149,7 @@ fn post_update_quarantines_corrupt_branch_meta() {
     );
 
     let mut command = post_update_command(&home_root);
-    command.arg("post-update");
+    command.args(["post-update", "--no-reinstall"]);
     let output = run_with_timeout(command, cli_timeout());
 
     assert_success(&output, "post-update");
@@ -192,7 +191,7 @@ fn post_update_quarantines_schema_corrupt_branch_meta() {
         write_branch_meta(&profile_root, "proj_schema", r#"{"default_branch": 5}"#);
 
     let mut command = post_update_command(&home_root);
-    command.arg("post-update");
+    command.args(["post-update", "--no-reinstall"]);
     let output = run_with_timeout(command, cli_timeout());
 
     assert_success(&output, "post-update");
@@ -226,7 +225,7 @@ fn post_update_no_heal_skips_health_pass() {
     let corrupt = write_branch_meta(&profile_root, "proj_corrupt", "{not valid json");
 
     let mut command = post_update_command(&home_root);
-    command.args(["post-update", "--no-heal"]);
+    command.args(["post-update", "--no-heal", "--no-reinstall"]);
     let output = run_with_timeout(command, cli_timeout());
 
     assert_success(&output, "post-update --no-heal");
@@ -293,7 +292,7 @@ async fn post_update_gcs_stale_registry_rows_under_temp_dir_only() {
 
     let mut command = post_update_command(&home_root);
     command
-        .arg("post-update")
+        .args(["post-update", "--no-reinstall"])
         .env("TMPDIR", &fake_tmp)
         .env("TMP", &fake_tmp)
         .env("TEMP", &fake_tmp);

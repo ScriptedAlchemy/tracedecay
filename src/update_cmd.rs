@@ -84,6 +84,9 @@ pub(crate) async fn refresh_generated_plugins() -> tracedecay::errors::Result<()
 fn refresh_daemon_service(
     previous_state: tracedecay::daemon::DaemonServiceState,
 ) -> tracedecay::errors::Result<Option<(PathBuf, PathBuf)>> {
+    if !cfg!(any(target_os = "linux", target_os = "macos")) {
+        return Ok(None);
+    }
     let tracedecay_bin = tracedecay_bin_on_path()?;
     let spec = tracedecay::daemon::service_spec(tracedecay_bin, None)?;
     let socket_path = tracedecay::daemon::installed_service_socket_path()?
@@ -246,10 +249,21 @@ pub(crate) fn run_update_command(
             message: "update lifecycle lease did not provide an owner token".to_string(),
         })?
         .to_string();
+    let mut lifecycle_lease = Some(lifecycle_lease);
     run_install_then_refresh(
         RefreshPolicy::Always,
         tracedecay::upgrade::run_upgrade,
-        |binary| run_post_update_subcommand(no_heal, no_reinstall, binary, &lease_token),
+        move |binary| {
+            let held_lease =
+                prepare_post_update_lease(lifecycle_lease.take().ok_or_else(|| {
+                    tracedecay::errors::TraceDecayError::Config {
+                        message: "update lifecycle lease was already consumed".to_string(),
+                    }
+                })?);
+            let result = run_post_update_subcommand(no_heal, no_reinstall, binary, &lease_token);
+            drop(held_lease);
+            result
+        },
     )
 }
 
@@ -264,11 +278,34 @@ pub(crate) fn run_upgrade_command(
             message: "upgrade lifecycle lease did not provide an owner token".to_string(),
         })?
         .to_string();
+    let mut lifecycle_lease = Some(lifecycle_lease);
     run_install_then_refresh(
         RefreshPolicy::AfterInstall,
         tracedecay::upgrade::run_upgrade,
-        |binary| run_post_update_subcommand(no_heal, no_reinstall, binary, &lease_token),
+        move |binary| {
+            let held_lease =
+                prepare_post_update_lease(lifecycle_lease.take().ok_or_else(|| {
+                    tracedecay::errors::TraceDecayError::Config {
+                        message: "upgrade lifecycle lease was already consumed".to_string(),
+                    }
+                })?);
+            let result = run_post_update_subcommand(no_heal, no_reinstall, binary, &lease_token);
+            drop(held_lease);
+            result
+        },
     )
+}
+
+fn prepare_post_update_lease(
+    lease: tracedecay::lifecycle_lease::LifecycleLease,
+) -> Option<tracedecay::lifecycle_lease::LifecycleLease> {
+    #[cfg(windows)]
+    {
+        drop(lease);
+        None
+    }
+    #[cfg(not(windows))]
+    Some(lease)
 }
 
 /// The binary to re-exec for `post-update`: the freshly installed one when
@@ -498,10 +535,30 @@ mod tests {
     use super::{
         RefreshPolicy, ReinstallOutcome, current_tracedecay_exe_from, normalize_bin_path,
         partition_reinstall_results, post_update_binary, post_update_binary_from,
-        run_install_then_refresh,
+        prepare_post_update_lease, run_install_then_refresh,
     };
     use tempfile::TempDir;
     use tracedecay::upgrade::UpgradeOutcome;
+
+    #[test]
+    fn post_update_lease_handoff_matches_platform_contract() {
+        let profile = TempDir::new().unwrap();
+        let lease =
+            tracedecay::lifecycle_lease::acquire_exclusive_for_profile(profile.path(), "update")
+                .unwrap();
+
+        let held = prepare_post_update_lease(lease);
+        let reacquired = tracedecay::lifecycle_lease::acquire_exclusive_for_profile(
+            profile.path(),
+            "post-update",
+        );
+
+        #[cfg(windows)]
+        assert!(reacquired.is_ok());
+        #[cfg(not(windows))]
+        assert!(reacquired.is_err());
+        drop(held);
+    }
     use tracedecay::user_config::UserConfig;
 
     fn config_err(message: &str) -> tracedecay::errors::TraceDecayError {
