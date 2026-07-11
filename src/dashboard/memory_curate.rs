@@ -489,6 +489,13 @@ fn validate_llm_ops(
     allowed_ids: &BTreeSet<i64>,
     min_confidence: f64,
 ) -> (Vec<Value>, Vec<Value>) {
+    const GROOMING_OPS: [&str; 5] = [
+        "normalize_tags",
+        "merge_entities",
+        "add_alias",
+        "link_facts",
+        "repair_vector",
+    ];
     let mut valid = Vec::new();
     let mut rejected = Vec::new();
     for raw in raw_ops {
@@ -504,13 +511,6 @@ fn validate_llm_ops(
         if op == "keep" {
             continue;
         }
-        const GROOMING_OPS: [&str; 5] = [
-            "normalize_tags",
-            "merge_entities",
-            "add_alias",
-            "link_facts",
-            "repair_vector",
-        ];
         if op != "merge" && op != "delete" && !GROOMING_OPS.contains(&op) {
             rejected.push(reject(raw, &format!("unknown op '{op}'")));
             continue;
@@ -662,6 +662,28 @@ fn parse_grooming_ops(valid: &[Value]) -> Result<Vec<MemoryGroomingOperation>> {
 }
 
 async fn prevalidate_destructive_ops(state: &DashboardState, ops: &[Value]) -> Result<()> {
+    let destructive_count = ops
+        .iter()
+        .filter(|op| {
+            matches!(
+                op.get("op").and_then(Value::as_str),
+                Some("delete" | "merge")
+            )
+        })
+        .count();
+    let has_grooming = ops.iter().any(|op| {
+        matches!(
+            op.get("op").and_then(Value::as_str),
+            Some(
+                "normalize_tags" | "merge_entities" | "add_alias" | "link_facts" | "repair_vector"
+            )
+        )
+    });
+    if destructive_count > 1 || (destructive_count == 1 && has_grooming) {
+        return Err(TraceDecayError::Config {
+            message: "curation batches may contain one destructive operation or an atomic grooming batch, not both".to_string(),
+        });
+    }
     let mut mutation_targets = BTreeSet::new();
     let mut merge_winners = BTreeSet::new();
     let mut required_facts = BTreeSet::new();

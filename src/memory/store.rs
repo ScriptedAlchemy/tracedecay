@@ -17,8 +17,8 @@ use super::trust::{DEFAULT_MIN_TRUST, apply_feedback, clamp_trust};
 use super::types::{
     AddFactDiff, AddFactDiffKind, AddFactOutcome, AddFactRequest, EntityGroomingResult, FactRecord,
     FactRelationKind, FactRelationRecord, FeedbackAction, FeedbackRequest, FeedbackResult,
-    MemoryCategory, MemoryGroomingOperation, MemoryGroomingReport, MemoryRepairStats,
-    TrustHistoryEntry, UpdateFactRequest,
+    MemoryCategory, MemoryGroomingOperation, MemoryGroomingReport, TrustHistoryEntry,
+    UpdateFactRequest,
 };
 use crate::errors::{Result, TraceDecayError};
 use crate::sync::content_hash;
@@ -1335,6 +1335,48 @@ impl<'a> MemoryStore<'a> {
         Ok(relations)
     }
 
+    pub async fn related_fact_ids(&self, fact_ids: &[i64], limit: usize) -> Result<Vec<i64>> {
+        if fact_ids.is_empty() || limit == 0 {
+            return Ok(Vec::new());
+        }
+        let fact_ids = &fact_ids[..fact_ids.len().min(128)];
+        let placeholders = std::iter::repeat_n("?", fact_ids.len())
+            .collect::<Vec<_>>()
+            .join(",");
+        let mut values = Vec::with_capacity(fact_ids.len() * 3 + 1);
+        for _ in 0..3 {
+            values.extend(fact_ids.iter().copied().map(libsql::Value::Integer));
+        }
+        values.push(libsql::Value::Integer(limit.min(256) as i64));
+        let mut rows = self
+            .conn
+            .query(
+                &format!(
+                    "SELECT CASE WHEN source_fact_id IN ({placeholders})
+                                 THEN target_fact_id ELSE source_fact_id END AS related_fact_id
+                     FROM memory_fact_relations
+                     WHERE source_fact_id IN ({placeholders}) OR target_fact_id IN ({placeholders})
+                     ORDER BY confidence DESC, updated_at DESC
+                     LIMIT ?"
+                ),
+                values,
+            )
+            .await
+            .map_err(|e| db_error("related_fact_ids", e))?;
+        let mut related = BTreeSet::new();
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|e| db_error("related_fact_ids", e))?
+        {
+            related.insert(
+                row.get::<i64>(0)
+                    .map_err(|e| db_error("related_fact_ids", e))?,
+            );
+        }
+        Ok(related.into_iter().collect())
+    }
+
     pub async fn remove_fact_relation(
         &self,
         source_fact_id: i64,
@@ -1591,11 +1633,17 @@ impl<'a> MemoryStore<'a> {
         operations: &[MemoryGroomingOperation],
         min_confidence: f64,
     ) -> Result<MemoryGroomingReport> {
-        self.with_immediate_tx(
-            "apply_grooming_batch",
-            self.apply_grooming_batch_inner(operations, min_confidence),
-        )
-        .await
+        let mut report = self
+            .with_immediate_tx(
+                "apply_grooming_batch",
+                self.apply_grooming_batch_inner(operations, min_confidence),
+            )
+            .await?;
+        // Derived state is resumable. Keep its CPU-heavy work outside the
+        // logical mutation transaction and cap each pass.
+        report.derived_repair.missing_vectors_repaired = self.compute_missing_vectors(500).await?;
+        report.derived_repair.banks_rebuilt = self.rebuild_dirty_banks().await?;
+        Ok(report)
     }
 
     async fn apply_grooming_batch_inner(
@@ -1654,19 +1702,6 @@ impl<'a> MemoryStore<'a> {
                 }
             }
         }
-        let mut missing_vectors_repaired = 0;
-        loop {
-            let repaired = self.compute_missing_vectors(500).await?;
-            missing_vectors_repaired += repaired;
-            if repaired == 0 {
-                break;
-            }
-        }
-        let banks_rebuilt = self.rebuild_dirty_banks().await?;
-        report.derived_repair = MemoryRepairStats {
-            missing_vectors_repaired,
-            banks_rebuilt,
-        };
         Ok(report)
     }
 
@@ -1745,6 +1780,7 @@ impl<'a> MemoryStore<'a> {
                 MemoryGroomingOperation::MergeEntities {
                     winner_entity_id,
                     loser_entity_ids,
+                    evidence_fact_ids,
                     ..
                 } => {
                     if loser_entity_ids.is_empty() {
@@ -1766,15 +1802,40 @@ impl<'a> MemoryStore<'a> {
                                 format!("entity {entity_id} does not exist"),
                             ));
                         }
+                        if !self
+                            .entity_linked_to_evidence(*entity_id, evidence_fact_ids)
+                            .await?
+                        {
+                            return Err(db_message(
+                                "apply_grooming_batch",
+                                format!(
+                                    "entity {entity_id} is not linked to the supplied evidence facts"
+                                ),
+                            ));
+                        }
                     }
                 }
                 MemoryGroomingOperation::AddAlias {
-                    entity_id, alias, ..
+                    entity_id,
+                    alias,
+                    evidence_fact_ids,
+                    ..
                 } => {
                     if !self.entity_exists(*entity_id).await? {
                         return Err(db_message(
                             "apply_grooming_batch",
                             format!("entity {entity_id} does not exist"),
+                        ));
+                    }
+                    if !self
+                        .entity_linked_to_evidence(*entity_id, evidence_fact_ids)
+                        .await?
+                    {
+                        return Err(db_message(
+                            "apply_grooming_batch",
+                            format!(
+                                "entity {entity_id} is not linked to the supplied evidence facts"
+                            ),
                         ));
                     }
                     normalize_entity_alias(alias)
@@ -1838,6 +1899,33 @@ impl<'a> MemoryStore<'a> {
             .next()
             .await
             .map_err(|e| db_error("entity_exists", e))?
+            .is_some())
+    }
+
+    async fn entity_linked_to_evidence(&self, entity_id: i64, fact_ids: &[i64]) -> Result<bool> {
+        if fact_ids.is_empty() {
+            return Ok(false);
+        }
+        let placeholders = std::iter::repeat_n("?", fact_ids.len())
+            .collect::<Vec<_>>()
+            .join(",");
+        let mut values = Vec::with_capacity(fact_ids.len() + 1);
+        values.push(libsql::Value::Integer(entity_id));
+        values.extend(fact_ids.iter().copied().map(libsql::Value::Integer));
+        let mut rows = self
+            .conn
+            .query(
+                &format!(
+                    "SELECT 1 FROM memory_fact_entities WHERE entity_id = ? AND fact_id IN ({placeholders}) LIMIT 1"
+                ),
+                values,
+            )
+            .await
+            .map_err(|e| db_error("entity_linked_to_evidence", e))?;
+        Ok(rows
+            .next()
+            .await
+            .map_err(|e| db_error("entity_linked_to_evidence", e))?
             .is_some())
     }
 

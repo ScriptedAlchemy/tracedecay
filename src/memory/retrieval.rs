@@ -80,6 +80,20 @@ impl<'a> FactRetriever<'a> {
                 limit.saturating_mul(10),
             )
             .await?;
+        let direct_ids: HashSet<i64> = fts_scores
+            .keys()
+            .copied()
+            .chain(entity_candidate_ids)
+            .collect();
+        let related_ids: HashSet<i64> = self
+            .store
+            .related_fact_ids(
+                &direct_ids.iter().copied().collect::<Vec<_>>(),
+                limit.saturating_mul(5),
+            )
+            .await?
+            .into_iter()
+            .collect();
         let mut candidates = self
             .store
             .list_facts(category, Some(min_trust), limit.saturating_mul(10))
@@ -89,7 +103,7 @@ impl<'a> FactRetriever<'a> {
         // `list_facts` baseline did not already include, then hydrate them with a
         // single batched `get_facts` call instead of one round-trip per id.
         let mut missing_ids: Vec<i64> = Vec::new();
-        for fact_id in fts_scores.keys().copied().chain(entity_candidate_ids) {
+        for fact_id in direct_ids.iter().chain(&related_ids).copied() {
             if candidate_ids.insert(fact_id) {
                 missing_ids.push(fact_id);
             }
@@ -102,11 +116,14 @@ impl<'a> FactRetriever<'a> {
                 }
             }
         }
+        candidates.retain(|fact| {
+            fact.trust_score >= min_trust && category.is_none_or(|value| fact.category == value)
+        });
 
         if !query_tokens.is_empty() {
-            let fts_ids: HashSet<i64> = fts_scores.keys().copied().collect();
             candidates.retain(|fact| {
-                fts_ids.contains(&fact.fact_id)
+                direct_ids.contains(&fact.fact_id)
+                    || related_ids.contains(&fact.fact_id)
                     || token_overlap(&query_tokens, &fact_search_tokens(fact)) > 0
             });
         }
