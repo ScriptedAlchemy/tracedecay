@@ -64,18 +64,18 @@ python3 .codex/skills/executing-tracedecay-v2-plan/scripts/plan_execution.py \
 
 `--root` is mandatory: validation recomputes the authoritative plan-inventory/source-block digest in that checkout and resolves `--canonical-ref` (`HEAD` only when explicitly intended). Markdown is the bounded human/MCP-default view. Use `--format json` for the sealed `tracedecay.v2.next-ready-view/v1`. Both formats contain the same validity/source/digest/revision pins, diagnostics, packets, and blocker reasons. Invalid input or any Git/source observation failure exits 2 and always returns an empty ready set (`Unknown`, never guessed false/true).
 
-The canonical DAG must pin repository identity, exact current canonical source/integration SHA, source-set digest, positive graph revision, graph digest, nodes, and a byte-matching activation receipt. Nodes have unique IDs and unique owners plus explicit prerequisites. The helper rejects duplicate IDs/owners, unknown/self/retired prerequisites, cycles, stale graph or activation pins, missing packets, and any reference to retired corrected tombstone `FM-168`.
+The canonical DAG must pin repository identity, exact current canonical source/integration SHA, source-set digest, positive graph revision, graph digest, nodes, and a byte-matching activation receipt. Nodes have unique IDs and unique owners, explicit prerequisites, and a canonical digest over the complete dispatch/test/workspace packet. The helper rejects duplicate IDs/owners, unknown/self/retired prerequisites, cycles, stale graph or activation pins, packet rewrites that no longer match that canonical digest, missing packets, and any reference to retired corrected tombstone `FM-168`.
 
 Every ledger entry repeats the current source commit, source-set digest, graph revision, and graph digest and contains:
 
-- candidate commit/digest and exact declared branch/worktree;
+- candidate commit/digest and a fresh live clean-worktree observation proving the exact canonically declared branch/worktree;
 - implementation task/actor plus parent/review/remediation/successor-review/integration task lineage;
 - exact-candidate independent review verdict and anchored receipt, with reviewer principal and authority distinct from implementation;
 - complete named required tests bound to exact declared acceptance commands, with exit code and candidate pins;
-- canonical integration receipt embedding the live sealed `git merge-base --is-ancestor` observation for the exact candidate/current canonical commit and repository identity;
+- canonical integration receipt embedding the live sealed `git merge-base --is-ancestor` observation for the exact candidate/current canonical commit, resolved full canonical ref, and repository identity;
 - the attempt/lease fence, observed steering watermark, terminal-CAS sequence, every required steering directive through that cutoff, and canonical disposition receipts binding directive/attempt/fence/event/delivery/ack/disposition/actor/authority.
 
-Candidate, review, test, integration, ancestry-observation, and steering receipt digests are recomputed from canonical payload bytes. Shape-valid digest strings and asserted ancestry/independence booleans are never trusted. Required steering delivered after the recorded observation but before terminal CAS invalidates the attempted completion; required steering arriving after terminal CAS opens an explicit remediation/successor path without rewriting history. Advisory steering does not fence completion.
+Candidate, workspace, review, test, integration, ancestry-observation, and steering receipt digests are recomputed from canonical payload bytes. Shape-valid digest strings and asserted ancestry/independence booleans are never trusted. Every Git subprocess has a finite timeout and bounded output; failures are `Unknown`. Required steering delivered after the recorded observation but before terminal CAS invalidates the attempted completion; required steering arriving after terminal CAS must bind exact remediation and successor-review task IDs in lineage before opening that path without rewriting history. Advisory steering does not fence completion.
 
 The validator rejects duplicate/ambiguous entries and stale or mismatched receipt pins. Candidate-only or otherwise incomplete entries remain valid evidence but are explicitly blocked; they are never completion. The helper never reads a card/task status field and its exact schemas reject such extra fields.
 

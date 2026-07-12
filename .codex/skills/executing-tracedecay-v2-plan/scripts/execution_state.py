@@ -9,6 +9,8 @@ Kanban/card status and never mutates task, Git, review, or integration state.
 from __future__ import annotations
 
 import hashlib
+import html
+import json
 import re
 from dataclasses import dataclass
 from typing import Any, cast
@@ -27,6 +29,7 @@ MAX_FILES = 32
 MAX_COMMANDS = 32
 MAX_ANCHORS = 64
 MAX_TEXT = 2048
+MAX_DIAGNOSTICS = 256
 
 
 @dataclass(frozen=True)
@@ -67,6 +70,11 @@ def graph_digest(graph: dict[str, Any]) -> str:
     })
 
 
+def dispatch_digest(value: dict[str, Any]) -> str:
+    """Seal one complete bounded dispatch/test/workspace contract."""
+    return _digest(value)
+
+
 def _keys(value: object, expected: set[str], label: str, errors: list[str]) -> bool:
     if not isinstance(value, dict):
         errors.append(f"{label}: must be an object")
@@ -96,9 +104,41 @@ def _strings(value: object, label: str, errors: list[str], *, maximum: int | Non
     return True
 
 
+def _bounded_scalars(value: object, label: str, errors: list[str]) -> None:
+    """Reject every oversized string reachable from a worker packet contract."""
+    if isinstance(value, str):
+        if len(value) > MAX_TEXT:
+            errors.append(f"{label}: scalar exceeds {MAX_TEXT} characters")
+    elif isinstance(value, list):
+        for index, item in enumerate(value):
+            _bounded_scalars(item, f"{label}[{index}]", errors)
+    elif isinstance(value, dict):
+        for key, item in value.items():
+            _bounded_scalars(item, f"{label}.{key}", errors)
+
+
 def _pin_equal(label: str, actual: object, expected: object, errors: list[str]) -> None:
     if actual != expected:
         errors.append(f"{label}: stale pin {actual!r}; expected {expected!r}")
+
+
+def _finalize_errors(errors: list[str]) -> tuple[str, ...]:
+    """Bound diagnostics in the shared view while retaining deterministic handles."""
+    bounded: list[str] = []
+    for error in errors:
+        if len(error) <= MAX_TEXT:
+            bounded.append(error)
+            continue
+        handle = hashlib.sha256(error.encode("utf-8")).hexdigest()
+        suffix = f" [truncated sha256:{handle}]"
+        bounded.append(error[:MAX_TEXT - len(suffix)] + suffix)
+    canonical = sorted(set(bounded))
+    if len(canonical) <= MAX_DIAGNOSTICS:
+        return tuple(canonical)
+    omitted = canonical[MAX_DIAGNOSTICS - 1:]
+    handle = hashlib.sha256("\n".join(omitted).encode("utf-8")).hexdigest()
+    summary = f"diagnostics: omitted {len(omitted)} entries; sha256:{handle}"
+    return tuple([*canonical[:MAX_DIAGNOSTICS - 1], summary])
 
 
 def validate(document: dict[str, Any], live: le.LiveEvidence | None = None) -> ValidationResult:
@@ -112,7 +152,7 @@ def validate(document: dict[str, Any], live: le.LiveEvidence | None = None) -> V
         "schema", "canonical_dag", "completion_ledger", "dispatch_specs",
         "retired_obligations",
     }, "export", errors):
-        return ValidationResult(tuple(sorted(set(errors))), nodes, entries, dispatch, graph)
+        return ValidationResult(_finalize_errors(errors), nodes, entries, dispatch, graph)
     if document.get("schema") != EXPORT_SCHEMA:
         errors.append(f"export.schema: expected {EXPORT_SCHEMA!r}")
     if live is None:
@@ -171,7 +211,7 @@ def validate(document: dict[str, Any], live: le.LiveEvidence | None = None) -> V
     ledger = document.get("completion_ledger")
     entries = _validate_ledger(ledger, graph, nodes, dispatch, retired_set, live, errors)
 
-    return ValidationResult(tuple(sorted(set(errors))), nodes, entries, dispatch, graph)
+    return ValidationResult(_finalize_errors(errors), nodes, entries, dispatch, graph)
 
 
 def _validate_activation(graph: dict[str, Any], errors: list[str]) -> None:
@@ -196,7 +236,8 @@ def _validate_nodes(raw: object, retired: set[str], errors: list[str]) -> dict[s
     if not isinstance(raw, list):
         errors.append("canonical_dag.nodes: must be an array")
         return result
-    fields = {"id", "owner", "content_digest", "dependencies"}
+    fields = {"id", "owner", "content_digest", "dispatch_digest", "dependencies"}
+    owners: dict[str, str] = {}
     for index, node in enumerate(raw):
         label = f"canonical_dag.nodes[{index}]"
         if not _keys(node, fields, label, errors):
@@ -223,12 +264,22 @@ def _validate_nodes(raw: object, retired: set[str], errors: list[str]) -> dict[s
         owner = node["owner"]
         if not isinstance(owner, str) or not owner:
             errors.append(f"{node_id}.owner: must be non-empty")
+        elif owner in owners and owners[owner] != node_id:
+            errors.append(
+                f"canonical_dag.nodes: duplicate owner {owner!r} reused by "
+                f"{owners[owner]} and {node_id}"
+            )
+        else:
+            owners[owner] = node_id
         if not isinstance(node["content_digest"], str) or not SHA256.fullmatch(node["content_digest"]):
             errors.append(f"{node_id}.content_digest: must be sha256:<64 lowercase hex>")
+        if not isinstance(node["dispatch_digest"], str) or not SHA256.fullmatch(node["dispatch_digest"]):
+            errors.append(f"{node_id}.dispatch_digest: must be sha256:<64 lowercase hex>")
         if _strings(node["dependencies"], f"{node_id}.dependencies", errors):
             if node["dependencies"] != sorted(node["dependencies"]):
                 errors.append(f"{node_id}.dependencies: values must be in canonical order")
         result[node_id] = node
+        _bounded_scalars(node, label, errors)
 
     declared_ids = [node.get("id") for node in raw if isinstance(node, dict)]
     if all(isinstance(node_id, str) for node_id in declared_ids):
@@ -280,7 +331,7 @@ def _validate_dispatch(raw: object, nodes: dict[str, dict[str, Any]], errors: li
         return result
     fields = {
         "slice_id", "owner", "exact_files", "acceptance_commands", "workspace",
-        "lane", "optional_claude_review", "gates", "retrieval_anchors",
+        "required_tests", "lane", "optional_claude_review", "gates", "retrieval_anchors",
     }
     for index, spec in enumerate(raw):
         label = f"dispatch_specs[{index}]"
@@ -298,8 +349,15 @@ def _validate_dispatch(raw: object, nodes: dict[str, dict[str, Any]], errors: li
             errors.append(f"dispatch_specs: unknown slice {slice_id}")
         if spec["owner"] != nodes.get(slice_id, {}).get("owner"):
             errors.append(f"{slice_id}.dispatch.owner: does not match canonical owner")
+        if nodes.get(slice_id, {}).get("dispatch_digest") != dispatch_digest(spec):
+            errors.append(
+                f"{slice_id}.dispatch: complete packet/test/workspace contract does not match "
+                "canonical DAG dispatch_digest"
+            )
         _strings(spec["exact_files"], f"{slice_id}.exact_files", errors, maximum=MAX_FILES)
         _strings(spec["acceptance_commands"], f"{slice_id}.acceptance_commands", errors,
+                 maximum=MAX_COMMANDS)
+        _strings(spec["required_tests"], f"{slice_id}.required_tests", errors,
                  maximum=MAX_COMMANDS)
         _strings(spec["retrieval_anchors"], f"{slice_id}.retrieval_anchors", errors,
                  maximum=MAX_ANCHORS)
@@ -307,12 +365,15 @@ def _validate_dispatch(raw: object, nodes: dict[str, dict[str, Any]], errors: li
             errors.append(f"{slice_id}.exact_files: bounded packet requires at least one file")
         if isinstance(spec["acceptance_commands"], list) and not spec["acceptance_commands"]:
             errors.append(f"{slice_id}.acceptance_commands: requires at least one command")
+        if isinstance(spec["required_tests"], list) and not spec["required_tests"]:
+            errors.append(f"{slice_id}.required_tests: requires at least one named test")
         if isinstance(spec["retrieval_anchors"], list) and not spec["retrieval_anchors"]:
             errors.append(f"{slice_id}.retrieval_anchors: requires at least one anchor")
         _validate_workspace(spec["workspace"], slice_id, errors)
         _validate_lane(spec["lane"], slice_id, errors)
         _validate_claude(spec["optional_claude_review"], slice_id, errors)
         _validate_gates(spec["gates"], slice_id, errors)
+        _bounded_scalars(spec, label, errors)
         result[slice_id] = spec
     declared_ids = [spec.get("slice_id") for spec in raw if isinstance(spec, dict)]
     if all(isinstance(slice_id, str) for slice_id in declared_ids):
@@ -413,9 +474,15 @@ def _validate_ledger(raw: object, graph: dict[str, Any], nodes: dict[str, dict[s
             errors.append(f"completion_ledger.entries: retired obligation {slice_id} cannot complete")
         for field in ["source_commit", "source_set_digest", "graph_revision", "graph_digest"]:
             _pin_equal(f"{slice_id}.{field}", entry[field], graph.get(field), errors)
-        candidate = _validate_candidate(entry["candidate"], slice_id, dispatch.get(slice_id), errors)
+        candidate = _validate_candidate(
+            entry["candidate"], slice_id, dispatch.get(slice_id), live, errors
+        )
         _validate_lineage(entry["task_lineage"], slice_id, errors)
         _strings(entry["required_tests"], f"{slice_id}.required_tests", errors)
+        _pin_equal(
+            f"{slice_id}.required_tests", entry["required_tests"],
+            dispatch.get(slice_id, {}).get("required_tests"), errors,
+        )
         tests = _validate_tests(
             entry["test_receipts"], entry["required_tests"], slice_id, candidate,
             dispatch.get(slice_id), errors
@@ -445,8 +512,8 @@ def _validate_ledger(raw: object, graph: dict[str, Any], nodes: dict[str, dict[s
 
 
 def _validate_candidate(value: object, slice_id: str, spec: dict[str, Any] | None,
-                        errors: list[str]) -> dict[str, Any]:
-    fields = {"commit", "digest", "branch", "worktree"}
+                        live: le.LiveEvidence | None, errors: list[str]) -> dict[str, Any]:
+    fields = {"commit", "digest", "branch", "worktree", "workspace_observation"}
     if not _keys(value, fields, f"{slice_id}.candidate", errors):
         return {}
     value = cast(dict[str, Any], value)
@@ -459,6 +526,20 @@ def _validate_candidate(value: object, slice_id: str, spec: dict[str, Any] | Non
     workspace = spec.get("workspace", {}) if isinstance(spec, dict) else {}
     _pin_equal(f"{slice_id}.candidate.branch", value["branch"], workspace.get("branch"), errors)
     _pin_equal(f"{slice_id}.candidate.worktree", value["worktree"], workspace.get("worktree"), errors)
+    branch_ref = value["branch"] if str(value["branch"]).startswith("refs/") else f"refs/heads/{value['branch']}"
+    expected_observation = None
+    if live is not None:
+        expected_observation = live.workspaces.get(
+            le.workspace_key(str(value["commit"]), branch_ref, str(value["worktree"]))
+        )
+    if expected_observation is None:
+        errors.append(f"{slice_id}.candidate.workspace_observation: no fresh live Git association")
+    elif value["workspace_observation"] != expected_observation:
+        errors.append(
+            f"{slice_id}.candidate.workspace_observation: does not match fresh live Git association"
+        )
+    elif expected_observation.get("clean") is not True:
+        errors.append(f"{slice_id}.candidate.workspace_observation: worktree is not clean")
     return value
 
 
@@ -602,6 +683,11 @@ def _validate_integration(value: object, slice_id: str, candidate: dict[str, Any
         _pin_equal(f"{slice_id}.integration.{field}", value[field], graph.get(graph_field), errors)
     if not isinstance(value["canonical_branch"], str) or not value["canonical_branch"]:
         errors.append(f"{slice_id}.integration.canonical_branch: must be non-empty")
+    elif live is not None:
+        _pin_equal(
+            f"{slice_id}.integration.canonical_branch", value["canonical_branch"],
+            live.canonical_ref, errors,
+        )
     attempt_object = cast(dict[str, Any], attempt) if isinstance(attempt, dict) else {}
     for integration_field, attempt_field in [
         ("attempt_id", "attempt_id"),
@@ -659,7 +745,10 @@ def _validate_steering(entry: dict[str, Any], slice_id: str,
 
     directives = entry["steering_directives"]
     receipts = entry["steering_receipts"]
-    directive_fields = {"directive_id", "classification", "event_sequence", "delivery_boundary"}
+    directive_fields = {
+        "directive_id", "classification", "event_sequence", "delivery_boundary",
+        "remediation_task", "successor_review_task",
+    }
     receipt_fields = {
         "directive_id", "attempt_id", "lease_fence_epoch", "event_sequence",
         "delivery_boundary", "delivered", "acknowledged", "disposition",
@@ -693,6 +782,11 @@ def _validate_steering(entry: dict[str, Any], slice_id: str,
             sequence_ids.add(sequence)
         if not isinstance(directive["delivery_boundary"], str) or not directive["delivery_boundary"]:
             errors.append(f"{label}.delivery_boundary: must be non-empty")
+        for field in ["remediation_task", "successor_review_task"]:
+            if directive[field] is not None and (
+                not isinstance(directive[field], str) or not directive[field]
+            ):
+                errors.append(f"{label}.{field}: must be null or a non-empty task ID")
         directive_map[directive_id] = directive
 
     receipt_map: dict[str, dict[str, Any]] = {}
@@ -739,6 +833,27 @@ def _validate_steering(entry: dict[str, Any], slice_id: str,
             errors.append(f"{slice_id}.steering: late required directive before terminal CAS {directive_id}")
         elif sequence > terminal:
             reasons.append(f"late_required_steering_remediation:{directive_id}")
+            lineage = entry.get("task_lineage", {})
+            remediation_task = directive.get("remediation_task")
+            successor_task = directive.get("successor_review_task")
+            if (
+                not isinstance(lineage, dict)
+                or not isinstance(remediation_task, str)
+                or remediation_task not in lineage.get("remediation_tasks", [])
+            ):
+                errors.append(
+                    f"{slice_id}.steering: post-CAS required directive {directive_id} "
+                    "requires an explicitly bound remediation task in lineage"
+                )
+            if (
+                not isinstance(lineage, dict)
+                or not isinstance(successor_task, str)
+                or successor_task not in lineage.get("successor_review_tasks", [])
+            ):
+                errors.append(
+                    f"{slice_id}.steering: post-CAS required directive {directive_id} "
+                    "requires an explicitly bound successor-review task in lineage"
+                )
     return sorted(set(reasons))
 
 
@@ -829,6 +944,7 @@ def next_ready(result: ValidationResult) -> dict[str, Any]:
             "prerequisites": sorted(node["dependencies"]),
             "exact_files": spec["exact_files"],
             "acceptance_commands": spec["acceptance_commands"],
+            "required_tests": spec["required_tests"],
             "workspace": spec["workspace"],
             "lane": spec["lane"],
             "optional_claude_review": spec["optional_claude_review"],
@@ -844,36 +960,68 @@ def next_ready(result: ValidationResult) -> dict[str, Any]:
 
 def markdown(view: dict[str, Any]) -> str:
     """Render the same sealed view as bounded Markdown for humans and MCP defaults."""
+    def scalar(value: object) -> str:
+        encoded = html.escape(json.dumps(value, ensure_ascii=False), quote=False)
+        return f"<code>{encoded}</code>"
+
+    def values(items: list[object]) -> str:
+        return ", ".join(scalar(item) for item in items) or "none"
+
     lines = [
         "# TraceDecay V2 next-ready",
         "",
         f"- Valid: {'yes' if view['valid'] else 'no'}",
-        f"- Repository: `{view.get('repository') or 'unavailable'}`",
-        f"- Source commit: `{view.get('source_commit') or 'unavailable'}`",
-        f"- Graph revision: `{view.get('graph_revision') or 'unavailable'}`",
-        f"- Graph digest: `{view.get('graph_digest') or 'unavailable'}`",
+        f"- Schema: {scalar(view['schema'])}",
+        f"- Repository: {scalar(view.get('repository'))}",
+        f"- Source commit: {scalar(view.get('source_commit'))}",
+        f"- Source-set digest: {scalar(view.get('source_set_digest'))}",
+        f"- Graph revision: {scalar(view.get('graph_revision'))}",
+        f"- Graph digest: {scalar(view.get('graph_digest'))}",
     ]
     if view["errors"]:
         lines.extend(["", "## Errors"])
-        lines.extend(f"- `{error}`" for error in view["errors"])
+        lines.extend(f"- {scalar(error)}" for error in view["errors"])
     lines.extend(["", "## Next ready"])
     if not view["next_ready"]:
         lines.append("- None.")
     for packet in view["next_ready"]:
         lines.extend([
             f"### {packet['slice_id']}",
-            f"- Owner: `{packet['owner']}`",
-            f"- Workspace: `{packet['workspace']['worktree']}` on `{packet['workspace']['branch']}`",
-            f"- Prerequisites: {', '.join(f'`{item}`' for item in packet['prerequisites']) or 'none'}",
-            "- Exact files: " + ", ".join(f"`{item}`" for item in packet["exact_files"]),
+            f"- Slice ID: {scalar(packet['slice_id'])}",
+            f"- Owner: {scalar(packet['owner'])}",
+            f"- Prerequisites: {values(packet['prerequisites'])}",
+            f"- Source commit: {scalar(packet['source_commit'])}",
+            f"- Source-set digest: {scalar(packet['source_set_digest'])}",
+            f"- Graph revision: {scalar(packet['graph_revision'])}",
+            f"- Graph digest: {scalar(packet['graph_digest'])}",
+            f"- Workspace branch: {scalar(packet['workspace']['branch'])}",
+            f"- Workspace worktree: {scalar(packet['workspace']['worktree'])}",
+            "- Exact files: " + values(packet["exact_files"]),
             "- Acceptance commands:",
         ])
-        lines.extend(f"  - `{command}`" for command in packet["acceptance_commands"])
-        lines.append("- Retrieval anchors: " + ", ".join(
-            f"`{anchor}`" for anchor in packet["retrieval_anchors"]))
+        lines.extend(f"  - {scalar(command)}" for command in packet["acceptance_commands"])
+        lines.append("- Required tests: " + values(packet["required_tests"]))
+        lines.extend([
+            "- Lane:",
+            f"  - Reasoning owner: {scalar(packet['lane']['reasoning_owner'])}",
+            f"  - Lifecycle owner: {scalar(packet['lane']['lifecycle_owner'])}",
+            f"  - Acting runtime: {scalar(packet['lane']['acting_runtime'])}",
+            "- Optional Claude review:",
+            f"  - Enabled: {scalar(packet['optional_claude_review']['enabled'])}",
+            f"  - Mode: {scalar(packet['optional_claude_review']['mode'])}",
+            f"  - Max steps: {scalar(packet['optional_claude_review']['max_steps'])}",
+            "  - Acceptance criteria: "
+            + values(packet["optional_claude_review"]["acceptance_criteria"]),
+            "  - Untrusted until GPT verified: "
+            + scalar(packet["optional_claude_review"]["untrusted_until_gpt_verified"]),
+            "- Gates:",
+        ])
+        for gate in ["independent_review", "remediation", "successor_review", "integration"]:
+            lines.append(f"  - {gate}: {scalar(packet['gates'][gate])}")
+        lines.append("- Retrieval anchors: " + values(packet["retrieval_anchors"]))
     lines.extend(["", "## Blocked"])
     if not view["blocked"]:
         lines.append("- None.")
     for item in view["blocked"]:
-        lines.append(f"- `{item['slice_id']}`: " + ", ".join(f"`{reason}`" for reason in item["reasons"]))
+        lines.append(f"- {scalar(item['slice_id'])}: " + values(item["reasons"]))
     return "\n".join(lines) + "\n"
