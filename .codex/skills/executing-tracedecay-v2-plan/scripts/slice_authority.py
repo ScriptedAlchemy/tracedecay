@@ -18,7 +18,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import re
+import subprocess
 import unicodedata
 import urllib.parse
 from dataclasses import dataclass, field
@@ -161,6 +163,29 @@ def validate_source_anchor(anchor: Anchor,
         if expected_hash != anchor.block_sha256:
             mismatch(anchor.block_sha256, "block hash does not match the expected anchor")
     return sort_diagnostics(diagnostics)
+
+
+def _validate_pinned_anchor(anchor: Anchor, repo_root: Path, source_commit: str) -> list[Diagnostic]:
+    """Verify an anchor against the exact bytes in one pinned Git tree."""
+    try:
+        source = subprocess.run(
+            ["git", "show", f"{source_commit}:{anchor.path}"], cwd=repo_root,
+            check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        ).stdout
+    except (OSError, subprocess.CalledProcessError):
+        return [_error("source_anchor_mismatch", anchor, anchor.path,
+                       "anchor path is absent or unreadable in the pinned Git source commit")]
+    lines = source.splitlines(keepends=True)
+    if anchor.end_line > len(lines):
+        return [_error("source_anchor_mismatch", anchor,
+                       f"{anchor.start_line}-{anchor.end_line}",
+                       "anchor line range is outside the pinned Git source block")]
+    block = b"".join(lines[anchor.start_line - 1:anchor.end_line])
+    actual = hashlib.sha256(block).hexdigest()
+    if actual != anchor.block_sha256:
+        return [_error("source_anchor_mismatch", anchor, anchor.block_sha256,
+                       "block hash does not match the pinned Git source block")]
+    return []
 
 
 # ---------------------------------------------------------------------------
@@ -412,6 +437,7 @@ class Section:
 class SliceRecord:
     normalized_id: str
     owner: Anchor
+    owner_heading: str = ""
     companions: list[Anchor] = field(default_factory=list)
     phase: int | None = None
     commit_subject: str | None = None
@@ -425,7 +451,15 @@ class SliceRecord:
         """The digested body: everything except digest/key/lifecycle fields (§2.1)."""
         return {
             "normalized_id": self.normalized_id,
-            "owner": self.owner.as_dict(),
+            "owner": {
+                "path": self.owner.path,
+                "heading": self.owner_heading,
+                "anchor": {
+                    "start_line": self.owner.start_line,
+                    "end_line": self.owner.end_line,
+                    "block_sha256": self.owner.block_sha256,
+                },
+            },
             "companions": [anchor.as_dict() for anchor in sorted(self.companions)],
             "phase": self.phase,
             "commit_subject": self.commit_subject,
@@ -438,8 +472,11 @@ class SliceRecord:
                 for crit in sorted(self.acceptance, key=lambda c: c.criterion_id)
             ],
             "dependencies": [
-                {"parent": dep.parent, "kind": dep.kind, "payload": dict(dep.payload)}
-                for dep in sorted(self.dependencies, key=lambda d: (d.parent, d.kind))
+                {"parent": dep.parent, "kind": dep.kind, "payload": dict(dep.payload),
+                 "source_anchors": ([dep.source_anchor] if dep.source_anchor else [])}
+                for dep in sorted(self.dependencies,
+                                  key=lambda d: (d.parent, d.kind, d.payload,
+                                                 d.source_anchor or ""))
             ],
             "source_anchors": [anchor.as_dict() for anchor in sorted(self.source_anchors)],
         }
@@ -469,7 +506,69 @@ def criterion_digest(text: str) -> str:
 
 
 def _canonical_json(obj: object) -> str:
-    return json.dumps(obj, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    """Serialize JSON-compatible I-JSON data according to RFC 8785 (JCS)."""
+    if obj is None:
+        return "null"
+    if obj is True:
+        return "true"
+    if obj is False:
+        return "false"
+    if isinstance(obj, int):
+        try:
+            binary64 = float(obj)
+        except OverflowError as exc:
+            raise ValueError("JCS integers must be exactly representable as binary64") from exc
+        if not math.isfinite(binary64) or int(binary64) != obj:
+            raise ValueError("JCS integers must be exactly representable as binary64")
+        return _canonical_number(binary64)
+    if isinstance(obj, float):
+        return _canonical_number(obj)
+    if isinstance(obj, str):
+        try:
+            obj.encode("utf-8")
+        except UnicodeEncodeError as exc:
+            raise ValueError("JCS strings may not contain lone surrogates") from exc
+        return json.dumps(obj, ensure_ascii=False, separators=(",", ":"))
+    if isinstance(obj, (list, tuple)):
+        return "[" + ",".join(_canonical_json(value) for value in obj) + "]"
+    if isinstance(obj, dict):
+        if not all(isinstance(key, str) for key in obj):
+            raise ValueError("JCS object keys must be strings")
+        keys = sorted(obj, key=lambda key: key.encode("utf-16-be", "surrogatepass"))
+        return "{" + ",".join(
+            f"{_canonical_json(key)}:{_canonical_json(obj[key])}" for key in keys
+        ) + "}"
+    raise ValueError(f"value of type {type(obj).__name__} is not JSON-compatible")
+
+
+def _canonical_number(value: float) -> str:
+    """Render a finite binary64 using ECMAScript's JSON number spelling."""
+    if not math.isfinite(value):
+        raise ValueError("JCS numbers must be finite")
+    if value == 0:
+        return "0"
+    sign = "-" if value < 0 else ""
+    mantissa, marker, exponent_text = repr(abs(value)).lower().partition("e")
+    exponent = int(exponent_text) if marker else 0
+    integer, _, fraction = mantissa.partition(".")
+    combined = integer + fraction
+    leading_zeroes = len(combined) - len(combined.lstrip("0"))
+    digits = combined.lstrip("0")
+    if fraction:
+        digits = digits.rstrip("0")
+    decimal_position = len(integer) - leading_zeroes + exponent
+    scientific_exponent = decimal_position - 1
+    if -6 <= scientific_exponent < 21:
+        if decimal_position <= 0:
+            body = "0." + "0" * (-decimal_position) + digits
+        elif decimal_position >= len(digits):
+            body = digits + "0" * (decimal_position - len(digits))
+        else:
+            body = digits[:decimal_position] + "." + digits[decimal_position:]
+        return sign + body
+    tail = digits[1:]
+    exponent_out = f"+{scientific_exponent}" if scientific_exponent >= 0 else str(scientific_exponent)
+    return f"{sign}{digits[0]}{'.' + tail if tail else ''}e{exponent_out}"
 
 
 def content_digest(body: dict[str, object]) -> str:
@@ -524,13 +623,17 @@ def _merge_acceptance(record: SliceRecord, section: Section, is_owner: bool,
 
 
 def reconcile(sections: list[Section], authority_keys: frozenset[str] | None = None,
-              series: dict[str, tuple[str, ...]] | None = None) -> ReconcileResult:
+              series: dict[str, tuple[str, ...]] | None = None,
+              repo_root: Path | None = None, source_commit: str | None = None,
+              indexed_plan_paths: frozenset[str] | None = None) -> ReconcileResult:
     """Reconcile declaring sections into one owner record per normalized scalar ID.
 
     ``authority_keys`` is the explicit key set from the bootstrap manifest (pre-cutover)
     or the activated canonical graph (post-cutover). When provided, every declaration must
     map to a key and every key must have a declaration (``missing_id``); ``None`` skips the
-    authority join (classification-only fixtures).
+    authority join (classification-only fixtures). Authoritative validation supplies
+    ``repo_root`` plus ``source_commit`` to hash every anchored Git block, and
+    ``indexed_plan_paths`` to constrain owner selection to the ordered plan set.
     """
     errors: list[Diagnostic] = []
     warnings: list[Diagnostic] = []
@@ -539,6 +642,8 @@ def reconcile(sections: list[Section], authority_keys: frozenset[str] | None = N
 
     for section in sections:
         errors.extend(validate_source_anchor(section.anchor))
+        if repo_root is not None and source_commit is not None:
+            errors.extend(_validate_pinned_anchor(section.anchor, repo_root, source_commit))
         classification = classify_token(section.raw_id)
         if section.incidental:
             warnings.append(_warning("incidental_reference", section.anchor, section.raw_id,
@@ -559,6 +664,13 @@ def reconcile(sections: list[Section], authority_keys: frozenset[str] | None = N
     for normalized_id in sorted(grouped):
         entries = grouped[normalized_id]
         owners = [section for section, is_owner in entries if is_owner]
+        if indexed_plan_paths is not None:
+            for owner in owners:
+                if owner.anchor.path not in indexed_plan_paths:
+                    errors.append(_error(
+                        "source_anchor_mismatch", owner.anchor, owner.anchor.path,
+                        "owner path is outside the indexed plan set", normalized_id,
+                    ))
         if authority_keys is not None and normalized_id not in authority_keys:
             first = entries[0][0]
             errors.append(_error("missing_id", first.anchor, first.raw_id,
@@ -593,7 +705,8 @@ def reconcile(sections: list[Section], authority_keys: frozenset[str] | None = N
 
 def _build_record(normalized_id: str, entries: list[tuple[Section, bool]], owner: Section,
                   warnings: list[Diagnostic], errors: list[Diagnostic]) -> SliceRecord:
-    record = SliceRecord(normalized_id=normalized_id, owner=owner.anchor)
+    record = SliceRecord(normalized_id=normalized_id, owner=owner.anchor,
+                         owner_heading=owner.heading)
     if not isinstance(owner.phase, int) or not 0 <= owner.phase <= 5:
         errors.append(_error("invalid_phase", owner.anchor, str(owner.phase),
                              "phase must be an integer 0..5", normalized_id))
@@ -861,14 +974,25 @@ def reconcile_against_authority(records: dict[str, SliceRecord], authority: dict
         record = records[normalized_id]
         expected = authority_slices[normalized_id]
         expected_digest = expected.get("content_digest") if isinstance(expected, dict) else None
-        if expected_digest is not None and expected_digest != record.content_digest:
+        if expected_digest is None:
+            diagnostics.append(_error("reconciliation_mismatch", record.owner, normalized_id,
+                                      f"{phase} authority requires content_digest",
+                                      normalized_id))
+        elif expected_digest != record.content_digest:
             diagnostics.append(_error("reconciliation_mismatch", record.owner,
                                       record.content_digest,
                                       f"content digest differs from {phase} authority",
                                       normalized_id))
+        expected_owner = expected.get("owner") if isinstance(expected, dict) else None
+        if not _authority_owner_matches(record, expected_owner):
+            diagnostics.append(_error("reconciliation_mismatch", record.owner, normalized_id,
+                                      f"owner differs from {phase} authority",
+                                      normalized_id))
         expected_edges = _edge_set(expected.get("dependencies", []) if isinstance(expected, dict) else [])
         candidate_edges = _edge_set(
-            [{"parent": dep.parent, "kind": dep.kind} for dep in record.dependencies])
+            [{"parent": dep.parent, "kind": dep.kind, "payload": dict(dep.payload),
+              "source_anchors": ([dep.source_anchor] if dep.source_anchor else [])}
+             for dep in record.dependencies])
         if expected_edges != candidate_edges:
             diagnostics.append(_error("reconciliation_mismatch", record.owner, normalized_id,
                                       f"dependency edges differ from {phase} authority",
@@ -876,11 +1000,32 @@ def reconcile_against_authority(records: dict[str, SliceRecord], authority: dict
     return sort_diagnostics(diagnostics)
 
 
-def _edge_set(edges: object) -> frozenset[tuple[str, str]]:
+def _authority_owner_matches(record: SliceRecord, owner: object) -> bool:
+    """Compare both compact anchors and the normative nested owner identity."""
+    if not isinstance(owner, dict) or not isinstance(owner.get("path"), str):
+        return False
+    anchor = owner.get("anchor")
+    if isinstance(anchor, dict):
+        expected = {"path": owner["path"], "start_line": anchor.get("start_line"),
+                    "end_line": anchor.get("end_line"),
+                    "block_sha256": anchor.get("block_sha256")}
+        return expected == record.owner.as_dict() and owner.get("heading") == record.owner_heading
+    expected = {field: owner.get(field) for field in
+                ("path", "start_line", "end_line", "block_sha256")}
+    return expected == record.owner.as_dict()
+
+
+def _edge_set(edges: object) -> frozenset[tuple[str, str, str, str]]:
     result = set()
     for edge in edges or []:
         if isinstance(edge, dict) and "parent" in edge and "kind" in edge:
-            result.add((str(edge["parent"]), str(edge["kind"])))
+            payload = edge.get("payload", {})
+            anchors = edge.get("source_anchors")
+            if anchors is None:
+                singular = edge.get("source_anchor")
+                anchors = [singular] if singular is not None else []
+            result.add((str(edge["parent"]), str(edge["kind"]),
+                        _canonical_json(payload), _canonical_json(anchors)))
     return frozenset(result)
 
 

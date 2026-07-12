@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -396,6 +397,25 @@ class DigestTests(unittest.TestCase):
         self.assertRegex(digest, r"^sha256:[0-9a-f]{64}$")
         self.assertEqual(digest, sa.source_set_digest(records))
 
+    def test_rfc8785_numbers_strings_and_utf16_key_order(self) -> None:
+        value = {"\ue000": 1.0, "😀": 1e-7, "text": "\b\n\u0000/é"}
+        self.assertEqual(
+            sa._canonical_json(value),
+            '{"text":"\\b\\n\\u0000/é","😀":1e-7,"\ue000":1}',
+        )
+        self.assertEqual(sa._canonical_json([1e-6, 1e20, -0.0]),
+                         '[0.000001,100000000000000000000,0]')
+        self.assertEqual(
+            sa._canonical_json([333333333.33333329, 1e30, 4.50, 2e-3, 1e-27]),
+            '[333333333.3333333,1e+30,4.5,0.002,1e-27]',
+        )
+
+    def test_rfc8785_rejects_nonfinite_lossy_numbers_and_lone_surrogates(self) -> None:
+        for value in [float("nan"), float("inf"), float("-inf"), "\ud800",
+                      9007199254740993]:
+            with self.assertRaises(ValueError, msg=repr(value)):
+                sa._canonical_json(value)
+
 
 # ---------------------------------------------------------------------------
 # Typed dependency edges and payloads
@@ -567,6 +587,43 @@ class SourceAnchorTests(unittest.TestCase):
         self.assertTrue(any(error.code == "source_anchor_mismatch"
                             for error in result.errors))
 
+    def test_reconcile_verifies_pinned_git_blocks_and_indexed_owner_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+            subprocess.run(["git", "config", "user.email", "test@example.invalid"],
+                           cwd=root, check=True)
+            subprocess.run(["git", "config", "user.name", "Test"], cwd=root, check=True)
+            plan = root / "docs" / "plans" / "indexed.md"
+            plan.parent.mkdir(parents=True)
+            plan.write_text("one\ntwo\nthree\n", encoding="utf-8")
+            outside = plan.with_name("outside.md")
+            outside.write_text("outside\n", encoding="utf-8")
+            subprocess.run(["git", "add", "."], cwd=root, check=True)
+            subprocess.run(["git", "commit", "-qm", "test: fixture"], cwd=root, check=True)
+            commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root,
+                                             text=True).strip()
+            good = sa.Section("PR 1", "owner", sa.Anchor(
+                "docs/plans/indexed.md", 2, 3, _sha("two\nthree\n")),
+                phase=0, commit_subject="feat: x")
+            result = sa.reconcile([good], repo_root=root, source_commit=commit,
+                                  indexed_plan_paths=frozenset({"docs/plans/indexed.md"}))
+            self.assertEqual(result.errors, [])
+
+            stale = sa.Section("PR 1", "owner", sa.Anchor(
+                "docs/plans/indexed.md", 2, 3, "0" * 64), phase=0, commit_subject="feat: x")
+            outside_owner = sa.Section("PR 2", "owner", sa.Anchor(
+                "docs/plans/outside.md", 1, 1, _sha("outside\n")),
+                phase=0, commit_subject="feat: x")
+            errors = sa.reconcile(
+                [stale, outside_owner], repo_root=root, source_commit=commit,
+                indexed_plan_paths=frozenset({"docs/plans/indexed.md"}),
+            ).errors
+            self.assertEqual({error.code for error in errors}, {"source_anchor_mismatch"})
+            self.assertTrue(any("pinned Git source block" in error.violated_rule
+                                for error in errors))
+            self.assertTrue(any("indexed plan set" in error.violated_rule for error in errors))
+
 
 # ---------------------------------------------------------------------------
 # Bootstrap manifest locator (§2.1 precedence and typed failures)
@@ -694,8 +751,17 @@ class ReconcileAgainstAuthorityTests(unittest.TestCase):
     def test_matching_candidate_produces_no_diagnostics(self) -> None:
         records = self._records()
         authority = {"slices": {
-            nid: {"content_digest": rec.content_digest,
-                  "dependencies": [{"parent": dep.parent, "kind": dep.kind}
+            nid: {"owner": {
+                      "path": rec.owner.path,
+                      "heading": rec.owner_heading,
+                      "anchor": {"start_line": rec.owner.start_line,
+                                 "end_line": rec.owner.end_line,
+                                 "block_sha256": rec.owner.block_sha256},
+                  },
+                  "content_digest": rec.content_digest,
+                  "dependencies": [{"parent": dep.parent, "kind": dep.kind,
+                                    "payload": dict(dep.payload),
+                                    "source_anchor": dep.source_anchor}
                                    for dep in rec.dependencies]}
             for nid, rec in records.items()}}
         self.assertEqual(sa.reconcile_against_authority(records, authority, "pre"), [])
@@ -728,6 +794,37 @@ class ReconcileAgainstAuthorityTests(unittest.TestCase):
             "PR 2": {"content_digest": records["PR 2"].content_digest,
                      "dependencies": []}}}
         diagnostics = sa.reconcile_against_authority(records, authority, "pre")
+        self.assertTrue(any("dependency edges differ" in d.violated_rule
+                            for d in diagnostics))
+
+    def test_missing_digest_and_owner_drift_are_mismatches(self) -> None:
+        records = self._records()
+        authority = {"slices": {
+            nid: {"owner": ({**rec.owner.as_dict(), "path": "wrong.md"}
+                            if nid == "PR 1" else rec.owner.as_dict()),
+                  "dependencies": [{"parent": dep.parent, "kind": dep.kind,
+                                    "payload": dict(dep.payload),
+                                    "source_anchor": dep.source_anchor}
+                                   for dep in rec.dependencies]}
+            for nid, rec in records.items()}}
+        diagnostics = sa.reconcile_against_authority(records, authority, "pre")
+        rules = {diagnostic.violated_rule for diagnostic in diagnostics}
+        self.assertTrue(any("requires content_digest" in rule for rule in rules))
+        self.assertTrue(any("owner differs" in rule for rule in rules))
+
+    def test_typed_payload_and_edge_source_anchor_drift_are_mismatches(self) -> None:
+        owner = _owner("PR 1", dependencies=(sa.Dependency(
+            "PR 2", "requires_artifact", (("artifact", "report"),), "owner#edge-1"),))
+        records = sa.reconcile([owner, _owner("PR 2")]).records
+        authority = {"slices": {
+            nid: {"owner": rec.owner.as_dict(), "content_digest": rec.content_digest,
+                  "dependencies": [
+                      {"parent": dep.parent, "kind": dep.kind,
+                       "payload": {"artifact": "different"},
+                       "source_anchor": "owner#edge-2"}
+                      for dep in rec.dependencies]}
+            for nid, rec in records.items()}}
+        diagnostics = sa.reconcile_against_authority(records, authority, "post")
         self.assertTrue(any("dependency edges differ" in d.violated_rule
                             for d in diagnostics))
 
