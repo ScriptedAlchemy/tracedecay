@@ -56,13 +56,6 @@ pub(super) fn tree_stats(root: &Path) -> Result<(usize, u64)> {
     Ok((files.len(), bytes))
 }
 
-pub(super) fn copy_tree_exact(source: &Path, target: &Path) -> Result<()> {
-    for (relative, path) in relative_file_map(source)? {
-        copy_file_exact(&path, &target.join(relative))?;
-    }
-    Ok(())
-}
-
 pub(super) fn copy_file_exact(source: &Path, target: &Path) -> Result<()> {
     if target.exists() {
         if file_digest(source)? == file_digest(target)? {

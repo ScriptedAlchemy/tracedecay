@@ -27,7 +27,7 @@ use evidence::{GraphStoreEvidence, InputReadEvidence, capture_input_evidence};
 #[cfg(test)]
 use files::sqlite_sidecar;
 use files::{
-    copy_file_atomic, copy_sqlite_family_exact, copy_tree_exact, excluded_source_artifact,
+    copy_file_atomic, copy_file_exact, copy_sqlite_family_exact, excluded_source_artifact,
     file_digest, is_reference_artifact, is_runtime_lock, is_sqlite_database, is_sqlite_sidecar,
     relative_file_map, tree_stats,
 };
@@ -1438,7 +1438,14 @@ fn read_optional_regular_file(path: &Path) -> Result<Option<Vec<u8>>> {
 
 fn backup_store(layout: &StoreLayout, backup_root: &Path) -> Result<()> {
     let project_id = layout.identity.project_id.as_deref().unwrap_or("unknown");
-    copy_tree_exact(&layout.data_root, &backup_root.join(project_id))
+    let destination = backup_root.join(project_id);
+    for (relative, path) in relative_file_map(&layout.data_root)? {
+        if is_runtime_lock(&relative) {
+            continue;
+        }
+        copy_file_exact(&path, &destination.join(relative))?;
+    }
+    Ok(())
 }
 
 async fn merge_databases(resolved: &ResolvedPlan, ledger: &mut ConsolidationLedger) -> Result<()> {
