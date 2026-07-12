@@ -401,31 +401,36 @@ facade = "internal-node-protocol"
 [[stores]]
 id = "profile-catalog-db"
 owner = "store"
-writer = "store"
+physical_writer = "store"
+semantic_producers = ["application"]
 readers = ["application", "query"]
 classification = "canonical"
 [[stores]]
 id = "profile-activity-db"
 owner = "store"
-writer = "capture"
+physical_writer = "store"
+semantic_producers = ["capture", "projectors", "application"]
 readers = ["query", "application"]
 classification = "canonical"
 [[stores]]
 id = "repository-project-db"
 owner = "store"
-writer = "capture"
+physical_writer = "store"
+semantic_producers = ["capture", "projectors", "application"]
 readers = ["query", "application"]
 classification = "canonical"
 [[stores]]
 id = "immutable-graph-generations"
 owner = "store"
-writer = "projectors"
+physical_writer = "store"
+semantic_producers = ["projectors"]
 readers = ["query", "application"]
 classification = "rebuildable-derived"
 [[stores]]
 id = "privacy-domain-content-addressed-blobs"
 owner = "store"
-writer = "capture"
+physical_writer = "store"
+semantic_producers = ["capture", "projectors", "application"]
 readers = ["projectors", "query", "application"]
 classification = "canonical"
 

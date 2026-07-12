@@ -99,7 +99,8 @@ struct Capability {
 struct Store {
     id: String,
     owner: String,
-    writer: String,
+    physical_writer: String,
+    semantic_producers: Vec<String>,
     readers: Vec<String>,
     classification: String,
 }
@@ -543,7 +544,15 @@ fn machine_authority_has_complete_governance_schema() {
     for store in &architecture.stores {
         assert!(!store.id.is_empty());
         assert!(architecture.owners.contains_key(&store.owner));
-        assert!(architecture.owners.contains_key(&store.writer));
+        assert_eq!(store.physical_writer, "store");
+        assert!(architecture.owners.contains_key(&store.physical_writer));
+        assert!(!store.semantic_producers.is_empty());
+        assert!(
+            store
+                .semantic_producers
+                .iter()
+                .all(|owner| architecture.owners.contains_key(owner))
+        );
         assert!(
             store
                 .readers
