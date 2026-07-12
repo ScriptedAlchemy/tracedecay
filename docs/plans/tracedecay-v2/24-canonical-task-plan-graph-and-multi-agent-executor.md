@@ -824,28 +824,56 @@ journal/outbox, idempotency result, and updated head atomically. A comment is
 historical annotation only until this transaction succeeds; editing,
 tombstoning, notifying, or subscribing to it never prompts an executor.
 
-The lifecycle is append-only:
-`Admitted -> PendingDelivery -> Claimed -> Delivered|Deferred|NextTurnOnly|DeliveryUnknown|Unsupported|BlockedByLimitChange|RejectedStale -> Acknowledged -> Applied|Rejected|Superseded|Cancelled`.
-Delivery observations may skip `Acknowledged` only when the host declares it
-unobservable; they never skip the required terminal disposition. Duplicate or
-stale claim/ack/disposition requests insert-or-read or reject without advancing
-the target cursor. Plan 02's partial-unique active-member rule must commit
-before any adapter receives renderable bytes. A stale pre-handoff reservation
-may be taken over under a higher claim epoch; any stale post-handoff claim is
-`DeliveryUnknown` and cannot be automatically reinjected.
+The lifecycle is append-only but intentionally branched; acknowledgement is
+not an artificial prerequisite for content that was never delivered:
+
+- `Admitted -> PendingDelivery`.
+- `PendingDelivery`, `Claimed` before `handoff_issued_at`, and
+  `BlockedByLimitChange` may terminalize directly as `Superseded` or
+  controller-authorized `Cancelled`. The same direct branch applies to a
+  proved-no-delivery `Deferred`, `NextTurnOnly`, `Unsupported`, or
+  `RejectedStale` receipt after its claim is closed. None accepts
+  `Acknowledged`, `Applied`, or `Rejected` because no model-visible delivery
+  exists.
+- `Claimed` after handoff progresses to a delivered receipt or
+  `DeliveryUnknown`; it cannot cancel as pre-delivery. When host acknowledgement
+  is observable, actual delivery must progress
+  `Delivered -> Acknowledged -> Applied|Rejected`. Before acknowledgement its
+  only executor action is `acknowledge`; resolve is ineligible.
+- When the pinned host declares acknowledgement unobservable, a
+  `DeliveredNoAcknowledgementObservable` receipt may progress directly to
+  `Applied|Rejected` only with the catalog-required delivery/application
+  evidence. It never fabricates an acknowledgement.
+- `Superseded` after actual delivery is legal only when the delivery has an
+  acknowledgement or equivalent host evidence and the higher-sequence
+  directive records an explicit replacement relation. `DeliveryUnknown` cannot
+  acknowledge, resolve, cancel, or silently supersede; it remains fenced until
+  delivery reconciliation proves a delivered or proved-not-delivered branch.
+
+Duplicate or stale claim/ack/disposition requests insert-or-read or reject
+without advancing the target cursor. Plan 02's partial-unique active-member
+rule must commit before any adapter receives renderable bytes. A stale
+pre-handoff reservation may be taken over under a higher claim epoch; any stale
+post-handoff claim is `DeliveryUnknown` and cannot be automatically reinjected.
 
 An unresolved `Required` directive—including `DeliveryUnknown`, unsupported
-current-Turn delivery, expiry, or queued overflow—participates in the same
-owner-shard CAS as `attempts.complete`, block/review verdict publication,
-lease release, review/integration admission, and task outcome publication.
-That transaction returns `required_steering_unresolved` with the exact legal
-acknowledge/resolve/supersede actions and performs zero terminal mutation.
-`Advisory` never blocks terminal state. A submit racing a terminal command has
-exactly one winner: admitted steering establishes the fence, or the late
-command returns `attempt_already_terminal` and cannot target a successor.
-Expiry and rate limits stop or defer delivery but never erase an admitted
-required fence. Limits are measured from the pinned Plan-01 catalog/config and
-tokenizer snapshot; batches and Turns never exceed member/byte/token ceilings.
+current-Turn delivery, expiry, queued overflow, or `BlockedByLimitChange`—
+participates in the same owner-shard CAS as `attempts.complete`, block/review
+verdict publication, lease release, review/integration admission, and task
+outcome publication. `required_steering_unresolved` derives legal actions from
+the exact state: pre-delivery/limit-blocked returns cancel and, when a valid
+higher sequence can replace it, supersede; delivered-with-observable-ack
+returns acknowledge only; acknowledged or evidence-qualified unobservable
+delivery returns resolve and any evidence-qualified supersede; delivery-unknown
+returns reconciliation/status only. Ineligible actions are absent, not disabled
+suggestions, and every rejected direct invocation returns a typed zero-mutation
+state conflict. `Advisory` never blocks terminal state. A submit racing a
+terminal command has exactly one winner: admitted steering establishes the
+fence, or the late command returns `attempt_already_terminal` and cannot target
+a successor. Expiry and rate limits stop or defer delivery but never erase an
+admitted required fence. Limits are measured from the pinned Plan-01
+catalog/config and tokenizer snapshot; batches and Turns never exceed
+member/byte/token ceilings.
 
 One work item has at most one active lease and one primary executor. When a user or decomposition policy requests `RedundancyMode::SharedExecution`, application atomically creates independently leasable child work items with explicit `ExpandsTo`/dependency/handoff relations and makes the parent an aggregate gate; it never issues participant leases against one work item. A provider may spawn internal subagents inside the primary attempt, but they are related Agent/Thread/Turn evidence, inherit only the primary attempt's brokered capabilities, and cannot obtain an independent lease, budget, writable reservation, or terminal authority. Sequential handoff between agents creates a new attempt/epoch unless it stays inside one adapter-owned attempt under the same primary authority. UI/API/SDK describe this as a shared-work group, not “multiple owners of one task.”
 
