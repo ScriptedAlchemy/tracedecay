@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import pathlib
 import sys
 import tomllib
@@ -55,8 +56,18 @@ def scorecard_view(data: dict) -> str:
 def dependency_policy(data: dict) -> str:
     lines = ["# Generated from architecture-boundaries.toml; do not edit.", f"version = {data['version']}", ""]
     for name, owner in data["owners"].items():
-        lines += [f"[owners.{name}]", f"path = {owner['path']!r}", f"allowed = {owner.get('allowed_dependencies', [])!r}", f"forbidden = {owner.get('forbidden_dependencies', [])!r}", f"forbidden_source_patterns = {owner.get('forbidden_source_patterns', [])!r}", ""]
-    return "\n".join(lines).replace("'", '"')
+        lines += [
+            f"[owners.{name}]",
+            f"path = {json.dumps(owner['path'], ensure_ascii=False)}",
+            f"allowed = {json.dumps(owner.get('allowed_dependencies', []), ensure_ascii=False)}",
+            f"forbidden = {json.dumps(owner.get('forbidden_dependencies', []), ensure_ascii=False)}",
+            "forbidden_source_patterns = "
+            f"{json.dumps(owner.get('forbidden_source_patterns', []), ensure_ascii=False)}",
+            "",
+        ]
+    rendered = "\n".join(lines)
+    tomllib.loads(rendered)
+    return rendered
 
 
 def render(data: dict) -> dict[pathlib.Path, str]:

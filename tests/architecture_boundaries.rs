@@ -136,10 +136,193 @@ struct ScorecardMetric {
     target: String,
 }
 
+#[derive(Debug, Deserialize)]
+struct CargoMetadata {
+    packages: Vec<CargoPackage>,
+    workspace_members: BTreeSet<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CargoPackage {
+    id: String,
+    manifest_path: String,
+    dependencies: Vec<CargoDependency>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CargoDependency {
+    name: String,
+    path: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DependencyPolicy {
+    version: u32,
+    owners: BTreeMap<String, DependencyOwner>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DependencyOwner {
+    path: String,
+    allowed: Vec<String>,
+    forbidden: Vec<String>,
+    forbidden_source_patterns: Vec<String>,
+}
+
 fn load() -> Architecture {
     let text = fs::read_to_string("architecture-boundaries.toml")
         .expect("architecture-boundaries.toml is required");
     toml::from_str(&text).expect("architecture-boundaries.toml must parse")
+}
+
+fn canonical(path: &Path) -> Result<std::path::PathBuf, String> {
+    path.canonicalize()
+        .map_err(|error| format!("cannot canonicalize {}: {error}", path.display()))
+}
+
+fn validate_cargo_edges(
+    architecture: &Architecture,
+    metadata: &CargoMetadata,
+) -> Result<(), String> {
+    let mut materialized = BTreeMap::new();
+    for (name, owner) in &architecture.owners {
+        if owner.kind == "rust-package" && Path::new(&owner.path).join("Cargo.toml").exists() {
+            materialized.insert(canonical(Path::new(&owner.path))?, name.as_str());
+        }
+    }
+
+    for (package_path, name) in materialized {
+        let package = metadata
+            .packages
+            .iter()
+            .find(|package| {
+                Path::new(&package.manifest_path)
+                    .parent()
+                    .and_then(|path| path.canonicalize().ok())
+                    .as_ref()
+                    == Some(&package_path)
+            })
+            .ok_or_else(|| format!("materialized package {name} missing from cargo metadata"))?;
+        if !metadata.workspace_members.contains(&package.id) {
+            return Err(format!(
+                "materialized package {name} is not a workspace member"
+            ));
+        }
+        let owner = &architecture.owners[name];
+        for dependency in package
+            .dependencies
+            .iter()
+            .filter(|dependency| dependency.path.is_some())
+        {
+            let dependency_path = canonical(Path::new(dependency.path.as_deref().unwrap()))?;
+            let dependency_owner = architecture
+                .owners
+                .iter()
+                .find_map(|(candidate, policy)| {
+                    (policy.kind == "rust-package"
+                        && Path::new(&policy.path).canonicalize().ok().as_ref()
+                            == Some(&dependency_path))
+                    .then_some(candidate.as_str())
+                })
+                .ok_or_else(|| {
+                    format!(
+                        "{name} has unowned local Cargo dependency {}",
+                        dependency.name
+                    )
+                })?;
+            if !owner
+                .allowed_dependencies
+                .iter()
+                .any(|allowed| allowed == dependency_owner)
+            {
+                return Err(format!(
+                    "{name} has forbidden real Cargo edge to {dependency_owner}"
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_source(name: &str, owner: &Owner, path: &Path, source: &str) -> Result<(), String> {
+    for pattern in &owner.forbidden_source_patterns {
+        if source.contains(pattern) {
+            return Err(format!(
+                "{name} source {} imports forbidden {pattern}",
+                path.display()
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_owner_imports(
+    architecture: &Architecture,
+    name: &str,
+    owner: &Owner,
+    path: &Path,
+    source: &str,
+) -> Result<(), String> {
+    validate_source(name, owner, path, source)?;
+    for (dependency_name, dependency) in &architecture.owners {
+        if dependency_name == name || dependency.kind != "rust-package" {
+            continue;
+        }
+        let crate_name = Path::new(&dependency.path)
+            .file_name()
+            .and_then(|value| value.to_str())
+            .unwrap_or(dependency_name)
+            .replace('-', "_");
+        let imported = [
+            format!("use {crate_name}::"),
+            format!("{crate_name}::"),
+            format!("extern crate {crate_name}"),
+        ]
+        .iter()
+        .any(|pattern| source.contains(pattern));
+        if imported
+            && !owner
+                .allowed_dependencies
+                .iter()
+                .any(|allowed| allowed == dependency_name)
+        {
+            return Err(format!(
+                "{name} source {} has forbidden real import of {dependency_name}",
+                path.display()
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn rust_sources(path: &Path) -> Result<Vec<std::path::PathBuf>, String> {
+    let mut pending = Vec::new();
+    let mut sources = Vec::new();
+    if path.exists() {
+        pending.push(path.to_path_buf());
+    }
+    let sibling = path.with_extension("rs");
+    if sibling.exists() {
+        pending.push(sibling);
+    }
+    while let Some(entry) = pending.pop() {
+        if entry.is_dir() {
+            pending.extend(
+                fs::read_dir(&entry)
+                    .map_err(|error| format!("cannot read {}: {error}", entry.display()))?
+                    .map(|item| item.map(|item| item.path()))
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(|error| format!("cannot walk {}: {error}", entry.display()))?,
+            );
+        } else if entry.extension().is_some_and(|extension| extension == "rs") {
+            sources.push(entry);
+        }
+    }
+    sources.sort();
+    sources.dedup();
+    Ok(sources)
 }
 
 #[test]
@@ -284,6 +467,22 @@ fn generated_views_and_release_gates_are_checked_in() {
         .status()
         .expect("python3 is required to check deterministic architecture views");
     assert!(status.success(), "generated architecture views drifted");
+    let policy_text = fs::read_to_string("architecture-dependency-policy.toml")
+        .expect("generated dependency policy is required");
+    let policy: DependencyPolicy =
+        toml::from_str(&policy_text).expect("generated dependency policy must parse");
+    assert_eq!(policy.version, architecture.version);
+    assert_eq!(policy.owners.len(), architecture.owners.len());
+    for (name, generated) in &policy.owners {
+        let authority = &architecture.owners[name];
+        assert_eq!(generated.path, authority.path);
+        assert_eq!(generated.allowed, authority.allowed_dependencies);
+        assert_eq!(generated.forbidden, authority.forbidden_dependencies);
+        assert_eq!(
+            generated.forbidden_source_patterns,
+            authority.forbidden_source_patterns
+        );
+    }
     assert!(!architecture.release.compatibility_gate.is_empty());
     assert!(!architecture.release.rollback_gate.is_empty());
     assert!(!architecture.release.v1_removal_gate.is_empty());
@@ -391,44 +590,125 @@ fn cargo_and_source_policy_enforce_materialized_boundaries() {
         .output()
         .expect("cargo metadata must run");
     assert!(output.status.success());
-    let metadata: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    let packages = metadata["packages"].as_array().unwrap();
-    assert!(packages.len() <= architecture.package_ceiling);
+    let metadata: CargoMetadata = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(metadata.packages.len() <= architecture.package_ceiling);
+    validate_cargo_edges(&architecture, &metadata).unwrap();
     for (name, owner) in &architecture.owners {
         let path = Path::new(&owner.path);
-        if owner.kind == "rust-package" && path.join("Cargo.toml").exists() {
-            let canonical = path.canonicalize().unwrap();
-            assert!(
-                packages.iter().any(|package| Path::new(
-                    package["manifest_path"].as_str().unwrap()
-                )
-                .parent()
-                    == Some(canonical.as_path())),
-                "materialized package {name} missing from cargo metadata"
-            );
-        }
-        if owner.kind == "root-private-module" && path.exists() {
-            let mut pending = vec![path.to_path_buf()];
-            while let Some(entry) = pending.pop() {
-                if entry.is_dir() {
-                    pending.extend(
-                        fs::read_dir(entry)
-                            .unwrap()
-                            .map(|item| item.unwrap().path()),
-                    );
-                } else if entry.extension().is_some_and(|ext| ext == "rs") {
-                    let source = fs::read_to_string(&entry).unwrap();
-                    for pattern in &owner.forbidden_source_patterns {
-                        assert!(
-                            !source.contains(pattern),
-                            "{name} source {} imports forbidden {pattern}",
-                            entry.display()
-                        );
-                    }
-                }
+        if owner.kind == "root-private-module" {
+            for entry in rust_sources(path).unwrap() {
+                let source = fs::read_to_string(&entry).unwrap();
+                validate_owner_imports(&architecture, name, owner, &entry, &source).unwrap();
             }
         }
     }
+}
+
+#[test]
+fn forbidden_source_pattern_is_rejected_by_focused_fixture() {
+    let architecture = load();
+    let owner = &architecture.owners["api"];
+    let error = validate_source(
+        "api",
+        owner,
+        Path::new("src/v2/api/fixture.rs"),
+        "use libsql::Connection;",
+    )
+    .unwrap_err();
+    assert!(error.contains("imports forbidden libsql::"));
+}
+
+#[test]
+fn dependency_policy_generator_escapes_apostrophes_as_valid_toml() {
+    let script = r#"
+import importlib.util
+import pathlib
+import tomllib
+path = pathlib.Path('scripts/generate_architecture_views.py')
+spec = importlib.util.spec_from_file_location('architecture_generator', path)
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+rendered = module.dependency_policy({'version': 1, 'owners': {'owner': {
+    'path': "crates/owner's-package",
+    'allowed_dependencies': ["friend's-owner"],
+    'forbidden_dependencies': ["stranger's-owner"],
+    'forbidden_source_patterns': ["Owner'sType"],
+}}})
+parsed = tomllib.loads(rendered)
+assert parsed['owners']['owner']['path'] == "crates/owner's-package"
+"#;
+    let status = Command::new("python3")
+        .args(["-c", script])
+        .status()
+        .expect("python3 is required to verify generated TOML escaping");
+    assert!(
+        status.success(),
+        "apostrophe fixture generated invalid TOML"
+    );
+}
+
+#[test]
+fn forbidden_owner_import_is_rejected_by_focused_fixture() {
+    let architecture = load();
+    let owner = &architecture.owners["api"];
+    let error = validate_owner_imports(
+        &architecture,
+        "api",
+        owner,
+        Path::new("src/v2/api/fixture.rs"),
+        "use tracedecay_store::Store;",
+    )
+    .unwrap_err();
+    assert!(error.contains("forbidden real import of store"));
+}
+
+#[test]
+fn forbidden_real_cargo_edge_is_rejected_by_focused_fixture() {
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path().join("root");
+    let domain = temporary.path().join("domain");
+    fs::create_dir_all(&root).unwrap();
+    fs::create_dir_all(&domain).unwrap();
+    fs::write(
+        root.join("Cargo.toml"),
+        "[package]\nname='root'\nversion='0.1.0'\n",
+    )
+    .unwrap();
+    fs::write(
+        domain.join("Cargo.toml"),
+        "[package]\nname='domain'\nversion='0.1.0'\n",
+    )
+    .unwrap();
+
+    let mut architecture = load();
+    architecture.owners.get_mut("root").unwrap().path = root.to_string_lossy().into_owned();
+    architecture.owners.get_mut("domain").unwrap().path = domain.to_string_lossy().into_owned();
+    architecture
+        .owners
+        .get_mut("root")
+        .unwrap()
+        .allowed_dependencies
+        .clear();
+    let metadata = CargoMetadata {
+        packages: vec![
+            CargoPackage {
+                id: "root-id".into(),
+                manifest_path: root.join("Cargo.toml").to_string_lossy().into_owned(),
+                dependencies: vec![CargoDependency {
+                    name: "domain".into(),
+                    path: Some(domain.to_string_lossy().into_owned()),
+                }],
+            },
+            CargoPackage {
+                id: "domain-id".into(),
+                manifest_path: domain.join("Cargo.toml").to_string_lossy().into_owned(),
+                dependencies: vec![],
+            },
+        ],
+        workspace_members: ["root-id".into(), "domain-id".into()].into(),
+    };
+    let error = validate_cargo_edges(&architecture, &metadata).unwrap_err();
+    assert!(error.contains("root has forbidden real Cargo edge to domain"));
 }
 
 #[test]

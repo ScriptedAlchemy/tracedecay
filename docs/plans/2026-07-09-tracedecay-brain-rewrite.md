@@ -1729,7 +1729,7 @@ Lettered PR suffixes are stable identifiers ordered by dependency, not lexical o
 - [ ] Lock compatibility, rollback, and V1 removal gates.
 - [ ] Lock activity-vs-project shard ownership, deterministic identity allocation, privacy/key-domain blobs, graph generation packing, exact retention/encryption defaults, and cursor/SSE semantics.
 - [ ] Lock canonical planes/owner matrix, package-admission decisions (including root-private hook/presentation/API/host-deployment/remote-Brain-transport adapters), the <=11-package ceiling, crate/module dependency DAG, extension tiers/SPIs, config/status/error governance, complexity and negative-code budgets, anti-corruption adapter contract, convergence scorecard, and deletion waves from plan 19.
-- [ ] Select the dashboard bundler after a measured Rsbuild-versus-Vite comparison.
+- [ ] Lock Vite as the provisional dashboard baseline and the reproducible Rsbuild-versus-Vite measurement protocol in ADR-007. The final measured selection is intentionally deferred to PR 25A, where the generated client and representative application corpus exist; PR 1 does not claim that later selection is complete.
 - [ ] Add architecture lint tests for dependency direction and transport isolation.
 - [ ] Lock the hermetic-test-infrastructure contract from the §2.7 flaky-test row: no process-global mutable test state, hermetic clocks/env/ports/stores, declared nextest/libtest contract, deterministic shutdown, and platform matrix.
 
@@ -2151,7 +2151,7 @@ Cross-cutting official-product companions:
 
 #### PR 25A: Dashboard generated-client consumption, bundler ADR, and application foundation
 
-- Consume PR 24D's generated TypeScript client; land the measured Rsbuild-versus-Vite ADR as the first reviewed commit; create one React root/router/provider shell, deterministic asset manifest, CSP/base-path/history fallback, and packaged-asset verification.
+- Consume PR 24D's generated TypeScript client; execute ADR-007's locked benchmark protocol and land the measured Rsbuild-versus-Vite selection as the first reviewed commit; create one React root/router/provider shell, deterministic asset manifest, CSP/base-path/history fallback, and packaged-asset verification.
 - [ ] Prove two clean builds are byte-identical, `/api` never falls through to the app shell, legacy shell coexistence is feature-gated, and no second hand-maintained HTTP client exists.
 
 #### PR 25B: Investigation shell, All/system scope explorer, and coverage inspector
