@@ -102,8 +102,13 @@ pub(super) async fn open_target_memory_db<'a>(
     )
     .await?
     else {
+        let db = if cg.db_path() == cg.store_layout().graph_db_path {
+            TargetMemoryDbHandle::Active(cg.db())
+        } else {
+            TargetMemoryDbHandle::Owned(Box::new(cg.open_project_store_db().await?))
+        };
         return Ok(TargetMemoryDb {
-            db: TargetMemoryDbHandle::Active(cg.db()),
+            db,
             project_root: cg.project_root().to_path_buf(),
             user_scope: false,
         });
