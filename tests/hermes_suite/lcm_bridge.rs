@@ -2010,6 +2010,206 @@ assert engine.last_compress_result["reason"] == "noop_summarizer"
 }
 
 #[test]
+fn context_engine_rejects_orphan_heavy_replay_at_host_boundary() {
+    run_generated_plugin_script(
+        "check_orphan_heavy_replay_rejected.py",
+        r#"
+messages = [
+    {"role": "user", "content": "original valid transcript " * 80},
+    {"role": "assistant", "content": "still valid"},
+]
+replay = [
+    {"role": "system", "content": "Useful compact summary"},
+    {"role": "tool", "tool_call_id": "orphan-result", "content": "unmatched output"},
+    {
+        "role": "assistant",
+        "content": "",
+        "tool_calls": [{
+            "id": "orphan-call",
+            "type": "function",
+            "function": {"name": "lookup", "arguments": "{}"},
+        }],
+    },
+]
+
+engine = plugin.TraceDecayContextEngine()
+engine.initialize(session_id="session-1", project_root="/tmp/project")
+engine.last_real_prompt_tokens = 100
+engine._compress_to_result = lambda *args, **kwargs: {
+    "status": "ok",
+    "reason": "compressed_backlog",
+    "replay_messages": replay,
+    "replay_token_estimate": 40,
+}
+
+compressed = engine.compress(list(messages), current_tokens=107)
+
+assert compressed == messages
+assert engine._last_compress_aborted is True
+assert engine._last_summary_error == "invalid_replay_tool_pairs"
+assert engine.compression_count == 0
+assert engine.last_compress_result["status"] == "aborted"
+assert engine.last_compress_result["replay_messages"] == []
+diagnostic = engine.last_compress_result["compression_diagnostic"]
+assert diagnostic["type"] == "replay_boundary_rejection"
+assert diagnostic["code"] == "invalid_replay_tool_pairs"
+assert {issue["tool_call_id"] for issue in diagnostic["issues"]} == {"orphan-result"}
+assert engine.should_defer_preflight_to_real_usage(rough_tokens=107) is True
+"#,
+        "generated context engine should reject orphan-heavy replay before host adoption",
+    );
+}
+
+#[test]
+fn context_engine_rejects_reported_107_to_201_token_expansion() {
+    run_generated_plugin_script(
+        "check_expanding_replay_rejected.py",
+        r#"
+messages = [{"role": "user", "content": "small live input"}]
+replay = [{"role": "system", "content": "expanded replay " * 100}]
+
+engine = plugin.TraceDecayContextEngine()
+engine.initialize(session_id="session-1", project_root="/tmp/project")
+engine.last_real_prompt_tokens = 100
+engine._compress_to_result = lambda *args, **kwargs: {
+    "status": "ok",
+    "reason": "compressed_backlog",
+    "replay_messages": replay,
+    "replay_token_estimate": 201,
+}
+
+compressed = engine.compress(list(messages), current_tokens=107)
+
+assert compressed == messages
+assert engine._last_compress_aborted is True
+assert engine.compression_count == 0
+diagnostic = engine.last_compress_result["compression_diagnostic"]
+assert diagnostic["type"] == "replay_boundary_rejection"
+assert diagnostic["code"] in ("non_shrinking_replay", "non_shrinking_reported_replay")
+assert diagnostic["reported_source_tokens"] == 107
+assert diagnostic["reported_replay_tokens"] == 201
+assert engine.last_compress_result["replay_messages"] == []
+assert engine.should_defer_preflight_to_real_usage(rough_tokens=107) is True
+"#,
+        "generated context engine should reject the observed 107-to-201 token expansion",
+    );
+}
+
+#[test]
+fn context_engine_prefers_reported_shrink_over_host_estimator_tie() {
+    run_generated_plugin_script(
+        "check_reported_shrink_wins.py",
+        r#"
+messages = [
+    {"role": "user", "content": "first"},
+    {"role": "assistant", "content": "second"},
+]
+replay = [
+    {"role": "system", "content": "short"},
+    {"role": "user", "content": "tail"},
+]
+
+engine = plugin.TraceDecayContextEngine()
+engine.initialize(session_id="session-1", project_root="/tmp/project")
+engine._compress_to_result = lambda *args, **kwargs: {
+    "status": "ok",
+    "reason": "compressed_backlog",
+    "replay_messages": replay,
+    "replay_token_estimate": 3,
+}
+
+compressed = engine.compress(list(messages), current_tokens=50)
+
+assert compressed == replay
+assert engine._last_compress_aborted is False
+assert engine.compression_count == 1
+"#,
+        "backend shrink estimates should override a tied secondary host estimate",
+    );
+}
+
+#[test]
+fn context_engine_preserves_valid_tool_pairs_and_summary() {
+    run_generated_plugin_script(
+        "check_valid_tool_pair_replay.py",
+        r#"
+messages = [{"role": "user", "content": "old backlog " * 300}]
+replay = [
+    {"role": "system", "content": "Useful compact summary"},
+    {
+        "role": "assistant",
+        "content": "",
+        "tool_calls": [{
+            "id": "call-1",
+            "type": "function",
+            "function": {"name": "lookup", "arguments": "{}"},
+        }],
+    },
+    {"role": "tool", "tool_call_id": "call-1", "content": "bounded result"},
+]
+
+engine = plugin.TraceDecayContextEngine()
+engine.initialize(session_id="session-1", project_root="/tmp/project")
+engine._compress_to_result = lambda *args, **kwargs: {
+    "status": "ok",
+    "reason": "compressed_backlog",
+    "replay_messages": replay,
+    "replay_token_estimate": 30,
+}
+
+compressed = engine.compress(list(messages), current_tokens=500)
+
+assert compressed == replay
+assert compressed[0]["content"] == "Useful compact summary"
+assert compressed[1]["tool_calls"][0]["id"] == "call-1"
+assert compressed[2]["tool_call_id"] == "call-1"
+assert engine._last_compress_aborted is False
+assert engine.compression_count == 1
+"#,
+        "generated context engine should preserve valid summaries and paired tool events",
+    );
+}
+
+#[test]
+fn context_engine_preserves_trailing_open_tool_call() {
+    run_generated_plugin_script(
+        "check_trailing_open_tool_call.py",
+        r#"
+messages = [{"role": "user", "content": "old backlog " * 200}]
+replay = [
+    {"role": "system", "content": "Useful compact summary"},
+    {
+        "role": "assistant",
+        "content": "",
+        "tool_calls": [{
+            "id": "call-open",
+            "type": "function",
+            "function": {"name": "lookup", "arguments": "{}"},
+        }],
+    },
+]
+
+engine = plugin.TraceDecayContextEngine()
+engine.initialize(session_id="session-1", project_root="/tmp/project")
+engine._compress_to_result = lambda *args, **kwargs: {
+    "status": "ok",
+    "reason": "compressed_backlog",
+    "replay_messages": replay,
+    "replay_token_estimate": 20,
+}
+
+compressed = engine.compress(list(messages), current_tokens=500)
+
+assert compressed == replay
+assert compressed[-1]["tool_calls"][0]["id"] == "call-open"
+assert engine._last_compress_aborted is False
+assert engine.compression_count == 1
+"#,
+        "generated context engine should preserve a trailing call awaiting its tool result",
+    );
+}
+
+#[test]
 fn context_engine_treats_identical_replay_as_clean_noop() {
     run_generated_plugin_script(
         "check_identical_replay_noop.py",
@@ -2311,9 +2511,15 @@ def fake_call_tracedecay_tool(name, args, **kwargs):
     return '{"content":[{"type":"text","text":"{\\"status\\":\\"ok\\"}"}]}'
 
 plugin.tools.call_tracedecay_tool = fake_call_tracedecay_tool
-plugin._project_scope_resolution = lambda path, *_args: (
-    ("registered", str(path)) if str(path).startswith("/repos/") else ("unregistered", None)
-)
+def fake_project_scope_resolution(path, *_args):
+    normalized = str(path).replace("\\", "/")
+    marker = "/repos/"
+    marker_index = normalized.find(marker)
+    if marker_index < 0:
+        return ("unregistered", None)
+    return ("registered", normalized[marker_index:])
+
+plugin._project_scope_resolution = fake_project_scope_resolution
 plugin._notify_turn_completed = lambda sid, root, watermark: completed.append((sid, root, watermark))
 plugin._notify_turn_ingested = lambda sid, root, watermark: ingested.append((sid, root, watermark))
 
@@ -3819,7 +4025,7 @@ engine = plugin.TraceDecayContextEngine(config={"context_length": 100000, "conte
 engine.initialize(session_id="session-1", project_root="/tmp/project")
 
 compressed = engine.compress(
-    [{"role": "user", "content": "compress me"}],
+    [{"role": "user", "content": "compress this oversized turn now"}],
     current_tokens=90000,
     force=True,
 )

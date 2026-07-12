@@ -56,13 +56,6 @@ pub(super) fn tree_stats(root: &Path) -> Result<(usize, u64)> {
     Ok((files.len(), bytes))
 }
 
-pub(super) fn copy_tree_exact(source: &Path, target: &Path) -> Result<()> {
-    for (relative, path) in relative_file_map(source)? {
-        copy_file_exact(&path, &target.join(relative))?;
-    }
-    Ok(())
-}
-
 pub(super) fn copy_file_exact(source: &Path, target: &Path) -> Result<()> {
     if target.exists() {
         if file_digest(source)? == file_digest(target)? {
@@ -98,13 +91,33 @@ pub(super) fn copy_file_atomic(source: &Path, target: &Path) -> Result<()> {
         Err(error) if error.kind() == io::ErrorKind::NotFound => {}
         Err(error) => return Err(io_error(error)),
     }
-    let mut input = File::open(source).map_err(io_error)?;
+    let mut input = File::open(source).map_err(|error| {
+        config_error(format!(
+            "failed to open migration source '{}' for copy to '{}': {error}",
+            source.display(),
+            target.display()
+        ))
+    })?;
     let mut output = OpenOptions::new()
         .write(true)
         .create_new(true)
         .open(&temp)
-        .map_err(io_error)?;
-    io::copy(&mut input, &mut output).map_err(io_error)?;
+        .map_err(|error| {
+            config_error(format!(
+                "failed to create migration temp '{}' while copying '{}' to '{}': {error}",
+                temp.display(),
+                source.display(),
+                target.display()
+            ))
+        })?;
+    io::copy(&mut input, &mut output).map_err(|error| {
+        config_error(format!(
+            "failed to copy migration source '{}' to temp '{}' for '{}': {error}",
+            source.display(),
+            temp.display(),
+            target.display()
+        ))
+    })?;
     fs::set_permissions(&temp, fs::metadata(source).map_err(io_error)?.permissions())
         .map_err(io_error)?;
     output.sync_all().map_err(io_error)?;
@@ -183,9 +196,14 @@ pub(super) fn excluded_source_artifact(relative: &Path) -> bool {
 }
 
 pub(super) fn is_runtime_lock(relative: &Path) -> bool {
+    is_coordination_lock(relative)
+        || relative.file_name().and_then(|value| value.to_str()) == Some(".dirty")
+}
+
+pub(super) fn is_coordination_lock(relative: &Path) -> bool {
     matches!(
         relative.file_name().and_then(|value| value.to_str()),
-        Some("sync.lock" | ".branch-add.lock" | ".dirty")
+        Some("sync.lock" | ".branch-add.lock")
     )
 }
 
