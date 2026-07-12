@@ -2087,7 +2087,7 @@ async fn identity_survives_symlink_and_repository_move() {
 }
 
 #[tokio::test]
-async fn untracked_branch_databases_are_recovered_into_the_destination() {
+async fn untracked_branch_databases_with_mixed_case_extensions_are_recovered() {
     const SOURCE_ORPHAN_FACT: &str = "fact unique to the source orphan branch";
     const TARGET_ORPHAN_FACT: &str = "fact unique to the target orphan branch";
     let fixture = fixture().await;
@@ -2095,6 +2095,11 @@ async fn untracked_branch_databases_are_recovered_into_the_destination() {
     let target = layout_for_id(&fixture.project, &fixture.profile, &fixture.target_id).unwrap();
     add_untracked_branch(&source, "orphan-source", SOURCE_ORPHAN_FACT).await;
     add_untracked_branch(&target, "orphan-target", TARGET_ORPHAN_FACT).await;
+    fs::rename(
+        target.data_root.join("branches/orphan-target.db"),
+        target.data_root.join("branches/orphan-target.DB"),
+    )
+    .unwrap();
 
     let options = fixture.options();
     let planned = plan(&options).await.unwrap();
@@ -2116,7 +2121,7 @@ async fn untracked_branch_databases_are_recovered_into_the_destination() {
         .collect::<Vec<_>>();
     assert_eq!(recovered.len(), 2);
     assert!(recovered.iter().any(|(name, db_file)| {
-        name.starts_with("recovered/orphan-target-") && db_file == "branches/orphan-target.db"
+        name.starts_with("recovered/orphan-target-") && db_file == "branches/orphan-target.DB"
     }));
     assert!(recovered.iter().any(|(name, db_file)| {
         name.starts_with(&format!(

@@ -4,7 +4,6 @@
 //! dir.
 
 use std::collections::{BTreeMap, HashMap};
-use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -204,7 +203,10 @@ fn validate_db_file(name: &str, entry: &BranchEntry, is_default: bool) -> Result
         ));
     }
     if !is_default
-        && (!relative.starts_with("branches") || relative.extension() != Some(OsStr::new("db")))
+        && (!relative.starts_with("branches")
+            || !relative
+                .extension()
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("db")))
     {
         return Err(format!(
             "non-default branch '{name}' database path '{}' must be under 'branches/' with a .db extension",
@@ -403,6 +405,16 @@ mod tests {
                 "accepted invalid metadata: {content}"
             );
         }
+    }
+
+    #[test]
+    fn parse_accepts_case_insensitive_branch_database_extensions() {
+        let mut meta = BranchMeta::new("main");
+        meta.add_branch("legacy", "branches/legacy.DB", "main");
+
+        let content = serde_json::to_string(&meta).unwrap();
+
+        assert!(parse(&content).is_ok());
     }
 
     #[test]
