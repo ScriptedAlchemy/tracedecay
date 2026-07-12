@@ -278,7 +278,7 @@ fn prepare_one(
             SnapshotMode::Copy
         }
     } else {
-        SnapshotMode::DirectImmutable
+        checkpointed_snapshot_mode()
     };
     let mut copy_bytes = if matches!(mode, SnapshotMode::Copy) {
         main.bytes
@@ -306,6 +306,20 @@ fn prepare_one(
         mode,
         copy_bytes,
     })
+}
+
+fn checkpointed_snapshot_mode() -> SnapshotMode {
+    // SQLite's immutable connection still holds a byte-range lock on Windows.
+    // Consolidation retains read snapshots while copying the frozen inputs, so
+    // opening a private copy keeps those handles off the source database.
+    #[cfg(windows)]
+    {
+        SnapshotMode::Copy
+    }
+    #[cfg(not(windows))]
+    {
+        SnapshotMode::DirectImmutable
+    }
 }
 
 async fn finish_one(
@@ -631,6 +645,7 @@ mod tests {
         assert_eq!(family_state(&path).unwrap(), before);
     }
 
+    #[cfg(not(windows))]
     #[tokio::test]
     async fn checkpointed_database_reads_directly_without_copy_or_metadata_change() {
         let temp = TempDir::new().unwrap();
@@ -668,6 +683,27 @@ mod tests {
             "checkpointed"
         );
         assert_eq!(family_state(&path).unwrap(), before);
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn checkpointed_snapshot_does_not_lock_source_against_copying() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("source.db");
+        let database = Builder::new_local(&path).build().await.unwrap();
+        database
+            .connect()
+            .unwrap()
+            .execute_batch("CREATE TABLE durable(value TEXT NOT NULL);")
+            .await
+            .unwrap();
+        drop(database);
+
+        let snapshots = SnapshotSet::capture(std::slice::from_ref(&path))
+            .await
+            .unwrap();
+        assert_eq!(snapshots.copied_bytes(), fs::metadata(&path).unwrap().len());
+        fs::copy(&path, temp.path().join("backup.db")).unwrap();
     }
 
     #[test]
