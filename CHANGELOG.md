@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.61](https://github.com/ScriptedAlchemy/tracedecay/compare/v0.0.60...v0.0.61) - 2026-07-12
+
+### Fixed
+
+- *(automation)* isolate managed skill test exports
+
 ## [0.0.60](https://github.com/ScriptedAlchemy/tracedecay/compare/v0.0.59...v0.0.60) - 2026-07-12
 
 ### Fixed
