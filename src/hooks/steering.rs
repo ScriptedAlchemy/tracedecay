@@ -132,6 +132,12 @@ pub fn build_codex_session_context_for_workspace(
                  tracedecay_diagnostics for fresh errors or pass captured output to \
                  tracedecay_diagnose; both map errors to symbols and callers.\n",
             );
+            s.push_str(
+                "Agents: tracedecay-code-explorer,tracedecay-code-health-auditor,\
+                 tracedecay-session-historian,tracedecay-runtime-storage-doctor,\
+                 tracedecay-cross-host-integration-auditor,tracedecay-change-risk-reviewer,\
+                 tracedecay-usage-intelligence-analyst,tracedecay-automation-auditor\n",
+            );
             s.push_str(crate::agents::CLI_FALLBACK_PROMPT_RULES);
             s.push('\n');
             append_codex_recall_and_registry_guidance(&mut s);
