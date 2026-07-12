@@ -3181,6 +3181,18 @@ async fn upsert_live_transcript_projection(
         if text.trim().is_empty() {
             continue;
         }
+        let mut metadata = json!({
+            "source": "lcm_preflight_live",
+            "project_root": project,
+            "storage_scope": storage_scope,
+            "location_provenance": "host_live_route"
+        });
+        if let Some(roots) = message
+            .get("associated_project_roots")
+            .filter(|value| value.is_array())
+        {
+            metadata["associated_project_roots"] = roots.clone();
+        }
         projected.push(SessionMessageRecord {
             provider: provider.to_string(),
             message_id: message_id.to_string(),
@@ -3200,15 +3212,7 @@ async fn upsert_live_transcript_projection(
             tool_names: (!tool_names.is_empty()).then(|| tool_names.join(",")),
             source_path: Some(source_path.clone()),
             source_offset: Some(ordinal as i64),
-            metadata_json: Some(
-                json!({
-                    "source": "lcm_preflight_live",
-                    "project_root": project,
-                    "storage_scope": storage_scope,
-                    "location_provenance": "host_live_route"
-                })
-                .to_string(),
-            ),
+            metadata_json: Some(metadata.to_string()),
         });
     }
     if projected.is_empty() {

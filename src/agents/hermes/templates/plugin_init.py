@@ -435,7 +435,8 @@ def _pre_llm_call(*args, **kwargs):
         return None
     return (
         "For this codebase request, prefer tracedecay tools for symbol lookup, call graphs, "
-        "impact analysis, affected files, and architectural navigation before broad file reads."
+        "impact analysis, affected files, and architectural navigation before broad file reads. "
+        "For the full workflow, load plugin skill `tracedecay:tracedecay` with `skill_view`."
     )
 
 _TERMINAL_TOOL_NAMES = frozenset((
@@ -864,9 +865,9 @@ def _project_scope_resolution(project_root, hermes_home=None):
     if not project_root:
         return "unregistered", None
     try:
-        if os.path.realpath(str(project_root)) == os.path.realpath(
-            _resolve_hermes_home(hermes_home=hermes_home)
-        ):
+        project_real = os.path.realpath(str(project_root))
+        hermes_real = os.path.realpath(_resolve_hermes_home(hermes_home=hermes_home))
+        if os.path.commonpath((hermes_real, project_real)) == hermes_real:
             return "rejected", None
     except (OSError, TypeError, ValueError):
         return "unregistered", None
@@ -885,23 +886,32 @@ def _project_scope_resolution(project_root, hermes_home=None):
         return unresolved_state, unresolved_root
     try:
         status = call_tracedecay_json(
-            "tracedecay_active_project",
-            {},
-            **_project_call_kwargs(candidate),
+            "tracedecay_project_context",
+            {"project_path": candidate},
         )
     except Exception:
         return unresolved_state, unresolved_root
     if not isinstance(status, dict) or status.get("error"):
         return unresolved_state, unresolved_root
-    resolved = status.get("project_root") or status.get("root")
+    project = status.get("project") if isinstance(status.get("project"), dict) else status
+    resolved = project.get("project_root") or project.get("canonical_root") or project.get("root")
     if not resolved:
         return unresolved_state, unresolved_root
     if not _code_project_root(explicit=resolved, hermes_home=hermes_home):
         return "rejected", None
     try:
-        resolved_real = os.path.realpath(str(resolved))
         candidate_real = os.path.realpath(str(candidate))
-        if os.path.commonpath((resolved_real, candidate_real)) != resolved_real:
+        registered_roots = [resolved]
+        for alias in status.get("aliases") or []:
+            if isinstance(alias, dict) and alias.get("alias_path"):
+                registered_roots.append(alias["alias_path"])
+        matched = False
+        for root in registered_roots:
+            root_real = os.path.realpath(str(root))
+            if os.path.commonpath((root_real, candidate_real)) == root_real:
+                matched = True
+                break
+        if not matched:
             return unresolved_state, unresolved_root
     except (OSError, TypeError, ValueError):
         return unresolved_state, unresolved_root
@@ -968,15 +978,23 @@ def _tool_project_candidates(messages):
                 candidates.extend(_terminal_cd_candidates(arguments.get("command") or arguments.get("cmd")))
     return candidates
 
-def _turn_project_root(messages, hermes_home=None):
+def _turn_project_roots(messages, hermes_home=None):
+    roots = []
+    seen = set()
     for candidate in reversed(_tool_project_candidates(messages)):
         expanded = os.path.abspath(os.path.expanduser(candidate))
         if os.path.isfile(expanded):
             expanded = os.path.dirname(expanded)
         resolved = _resolved_project_scope(expanded, hermes_home)
-        if resolved:
-            return resolved
-    return None
+        if resolved and resolved not in seen:
+            seen.add(resolved)
+            roots.append(resolved)
+    roots.reverse()
+    return roots
+
+def _turn_project_root(messages, hermes_home=None):
+    roots = _turn_project_roots(messages, hermes_home)
+    return roots[-1] if roots else None
 
 _UNSCOPED_DIRECT_TOOLS = frozenset((
     "tracedecay_project_list",
@@ -1268,9 +1286,9 @@ def _code_project_root(explicit=None, cwd=None, configured=None, hermes_home=Non
     if isinstance(candidate, str) and candidate.strip() and os.path.isabs(candidate):
         candidate = candidate.strip()
         try:
-            if os.path.realpath(candidate) == os.path.realpath(
-                _resolve_hermes_home(hermes_home=hermes_home)
-            ):
+            candidate_real = os.path.realpath(candidate)
+            hermes_real = os.path.realpath(_resolve_hermes_home(hermes_home=hermes_home))
+            if os.path.commonpath((hermes_real, candidate_real)) == hermes_real:
                 return None
         except (OSError, TypeError, ValueError):
             return None
@@ -3513,6 +3531,10 @@ class TraceDecayContextEngine(ContextEngine):
             "focus_topic": focus_topic,
             "summarizer": summarizer,
         })
+        args = _lcm_store_args(
+            args,
+            kwargs.get("project_root") or self.project_root,
+        )
         if self.project_root:
             args["response_handle_project_root"] = self.project_root
         _apply_lcm_option_overrides(args, kwargs, lcm_option_keys)
@@ -3816,7 +3838,9 @@ class TracedecayMemoryProvider(MemoryProvider):
         same content-cursored path the context engine uses), so the raw
         store grows every turn instead of only when compression fires.
         """
-        project_root = _turn_project_root(messages, self.hermes_home) or self.project_root
+        project_roots = _turn_project_roots(messages, self.hermes_home)
+        if not project_roots and self.project_root:
+            project_roots = [self.project_root]
         if not _plugin_toggle("sync_turn", True):
             return
         if self.agent_context in ("cron", "flush"):
@@ -3840,25 +3864,39 @@ class TracedecayMemoryProvider(MemoryProvider):
             role = str(entry.get("role") or "user")
             entry["id"] = f"tracedecay_sync_{batch_id}_{timestamp_ns}_{idx}_{role}"
             entry["timestamp"] = timestamp
-        args = _lcm_store_args({
-            "provider": STANDARD_HERMES_LCM_PROVIDER,
-            "session_id": sid,
-            "messages": turn_messages,
-            "transcript_projection": True,
-        }, project_root)
-        try:
-            result = call_tracedecay_json(
-                "tracedecay_lcm_preflight",
-                args,
-                **_project_call_kwargs(project_root),
-            )
-            if not result.get("error"):
-                _notify_turn_completed(sid, project_root, turn_messages[-1]["id"])
-                _notify_turn_ingested(sid, project_root, turn_messages[-1]["id"])
-            else:
-                logger.debug("tracedecay sync_turn ingest rejected: %s", result.get("error"))
-        except Exception as exc:
-            logger.debug("tracedecay sync_turn ingest failed: %s", exc)
+            entry["associated_project_roots"] = list(project_roots)
+        # The profile-level user store is the canonical Hermes conversation.
+        # Project shards receive projections with the same stable message IDs,
+        # so one turn can be searched from every repository it actually touched
+        # without binding the long-lived host session to any one project.
+        for project_root in [None, *project_roots]:
+            args = _lcm_store_args({
+                "provider": STANDARD_HERMES_LCM_PROVIDER,
+                "session_id": sid,
+                "messages": turn_messages,
+                "transcript_projection": True,
+            }, project_root)
+            try:
+                result = call_tracedecay_json(
+                    "tracedecay_lcm_preflight",
+                    args,
+                    **_project_call_kwargs(project_root),
+                )
+                if not result.get("error"):
+                    _notify_turn_completed(sid, project_root, turn_messages[-1]["id"])
+                    _notify_turn_ingested(sid, project_root, turn_messages[-1]["id"])
+                else:
+                    logger.debug(
+                        "tracedecay sync_turn ingest rejected for %s: %s",
+                        project_root or "user",
+                        result.get("error"),
+                    )
+            except Exception as exc:
+                logger.debug(
+                    "tracedecay sync_turn ingest failed for %s: %s",
+                    project_root or "user",
+                    exc,
+                )
 
     def on_memory_write(self, action, target, content, metadata=None):
         """Mirror built-in memory tool writes into the fact store."""

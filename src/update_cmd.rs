@@ -296,6 +296,28 @@ pub(crate) fn run_upgrade_command(
     )
 }
 
+pub(crate) fn run_dogfood_command() -> tracedecay::errors::Result<()> {
+    let current_exe =
+        std::env::current_exe().map_err(|error| tracedecay::errors::TraceDecayError::Config {
+            message: format!("could not resolve source-built executable: {error}"),
+        })?;
+    let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/dogfood.sh");
+    let status = std::process::Command::new("bash")
+        .arg(&script)
+        .env("TRACEDECAY_DOGFOOD_SOURCE_BINARY", &current_exe)
+        .status()
+        .map_err(|error| tracedecay::errors::TraceDecayError::Config {
+            message: format!("failed to launch {}: {error}", script.display()),
+        })?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(tracedecay::errors::TraceDecayError::Config {
+            message: format!("dogfood installer failed with status: {status}"),
+        })
+    }
+}
+
 fn prepare_post_update_lease(
     lease: tracedecay::lifecycle_lease::LifecycleLease,
 ) -> Option<tracedecay::lifecycle_lease::LifecycleLease> {

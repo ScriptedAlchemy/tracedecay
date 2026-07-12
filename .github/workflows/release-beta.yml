@@ -8,6 +8,11 @@ on:
   release:
     types: [published]
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Existing prerelease tag to rebuild and publish, for example v0.1.0-beta.1"
+        required: true
+        type: string
 
 # Only runs for prerelease tags — stable releases handled by release.yml
 
@@ -16,11 +21,16 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.event.release.tag_name }}
+
+concurrency:
+  group: release-beta-${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.event.release.tag_name }}
+  cancel-in-progress: false
 
 jobs:
   build:
     name: Build ${{ matrix.name }}
-    if: vars.BETA_CHANNEL_ENABLED == 'true' && github.event.release.prerelease
+    if: vars.BETA_CHANNEL_ENABLED == 'true' && (github.event_name == 'workflow_dispatch' || github.event.release.prerelease)
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
@@ -46,7 +56,17 @@ jobs:
             archive: zip
 
     steps:
+      - name: Validate manual prerelease rebuild
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          test "$(gh release view "$RELEASE_TAG" --repo "${{ github.repository }}" --json isPrerelease --jq .isPrerelease)" = true
+
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.RELEASE_TAG }}
 
       - uses: actions/setup-node@v4
         with:
@@ -93,7 +113,7 @@ jobs:
         id: version
         shell: bash
         run: |
-          VERSION="${GITHUB_REF_NAME#v}"
+          VERSION="${RELEASE_TAG#v}"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
       # --- Binary archive (all platforms) ---
@@ -102,20 +122,20 @@ jobs:
         if: matrix.archive == 'tar.gz'
         run: |
           cd target/${{ matrix.target }}/release
-          tar czf ../../../tracedecay-beta-${{ github.ref_name }}-${{ matrix.name }}.tar.gz tracedecay
+          tar czf ../../../tracedecay-beta-${{ env.RELEASE_TAG }}-${{ matrix.name }}.tar.gz tracedecay
           cd ../../..
 
       - name: Package binary (windows)
         if: matrix.archive == 'zip'
         shell: pwsh
         run: |
-          Compress-Archive -Path target/${{ matrix.target }}/release/tracedecay.exe -DestinationPath tracedecay-beta-${{ github.ref_name }}-${{ matrix.name }}.zip
+          Compress-Archive -Path target/${{ matrix.target }}/release/tracedecay.exe -DestinationPath tracedecay-beta-${{ env.RELEASE_TAG }}-${{ matrix.name }}.zip
 
       - name: Upload binary archive
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         shell: bash
-        run: gh release upload ${{ github.ref_name }} tracedecay-beta-${{ github.ref_name }}-${{ matrix.name }}.${{ matrix.archive }} --clobber
+        run: gh release upload "$RELEASE_TAG" tracedecay-beta-${{ env.RELEASE_TAG }}-${{ matrix.name }}.${{ matrix.archive }} --clobber
 
       # --- Homebrew bottle (only for platforms with bottle_tag) ---
 
@@ -138,7 +158,7 @@ jobs:
 
   update-homebrew:
     name: Update Homebrew tap (beta)
-    if: vars.BETA_CHANNEL_ENABLED == 'true' && github.event.release.prerelease && needs.build.result == 'success'
+    if: vars.BETA_CHANNEL_ENABLED == 'true' && needs.build.result == 'success'
     needs: build
     runs-on: ubuntu-latest
     steps:
@@ -147,7 +167,7 @@ jobs:
       - name: Get version
         id: version
         run: |
-          VERSION="${GITHUB_REF_NAME#v}"
+          VERSION="${RELEASE_TAG#v}"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
       - name: Download bottle artifacts
@@ -161,12 +181,12 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           for f in bottles/tracedecay-beta-*.bottle.tar.gz; do
-            gh release upload "${GITHUB_REF_NAME}" "$f" --clobber
+            gh release upload "$RELEASE_TAG" "$f" --clobber
           done
 
       - name: Download source tarball
         run: |
-          curl -sL "https://github.com/${{ github.repository }}/archive/refs/tags/${GITHUB_REF_NAME}.tar.gz" -o "source.tar.gz"
+          curl -sL "https://github.com/${{ github.repository }}/archive/refs/tags/${RELEASE_TAG}.tar.gz" -o "source.tar.gz"
 
       - name: Compute SHA256 hashes
         id: hashes
@@ -232,7 +252,7 @@ jobs:
 
   update-scoop:
     name: Update Scoop bucket (beta)
-    if: vars.BETA_CHANNEL_ENABLED == 'true' && github.event.release.prerelease && needs.build.result == 'success'
+    if: vars.BETA_CHANNEL_ENABLED == 'true' && needs.build.result == 'success'
     needs: build
     runs-on: ubuntu-latest
     steps:
@@ -241,15 +261,15 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          VERSION="${GITHUB_REF_NAME#v}"
+          VERSION="${RELEASE_TAG#v}"
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
-          echo "tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          echo "tag=${RELEASE_TAG}" >> "$GITHUB_OUTPUT"
 
-          gh release download "${GITHUB_REF_NAME}" \
+          gh release download "${RELEASE_TAG}" \
             --repo "${{ github.repository }}" \
-            --pattern "tracedecay-beta-${GITHUB_REF_NAME}-x86_64-windows.zip" \
+            --pattern "tracedecay-beta-${RELEASE_TAG}-x86_64-windows.zip" \
             --dir .
-          SHA256=$(sha256sum "tracedecay-beta-${GITHUB_REF_NAME}-x86_64-windows.zip" | cut -d' ' -f1)
+          SHA256=$(sha256sum "tracedecay-beta-${RELEASE_TAG}-x86_64-windows.zip" | cut -d' ' -f1)
           echo "sha256_win64=${SHA256}" >> "$GITHUB_OUTPUT"
 
       # NOTE: the Scoop bucket (ScriptedAlchemy/scoop-bucket) is an external
