@@ -1,5 +1,13 @@
 # TraceDecay V2 Store Crate Implementation Plan
 
+> **Accepted-base refresh delta (audit 29 / packet 30):** preserve daemon-owned
+> physical writers (`f18f0f14`, machine-enforced by `tests/architecture_boundaries.rs`)
+> and deferred live-fact vacuum (`remove_fact` no longer inline-vacuums, PR #455);
+> **add** an explicit periodic exclusive-maintenance cadence with reclamation
+> receipts, independent of upgrades. See
+> [`30-baseline-refresh-candidate-packet.md`](30-baseline-refresh-candidate-packet.md)
+> §5, §7.2 and FM-164 for the required gate.
+
 **Goal:** Create a `tracedecay-store` crate that durably implements the V2 catalog, profile activity, task-associated worktree lifecycle, project evidence, graph generation, privacy-domain blob, outbox, migration, retention, integrity, backup, recovery, and V1 import contracts under concurrent live ingest.
 
 **Architecture:** One logical Brain uses host-local SQLite shards and privacy-domain blob roots. Each live mutable shard has one fenced authority, one cross-process writer lease, a bounded in-process queue, WAL-backed read snapshots, transactionally coupled domain rows/outbox/source cursors, idempotent replay, and per-shard sequences combined as vector watermarks; immutable graph generations and staged blobs use manifest-driven atomic publication and crash recovery. Multi-machine clients reach the authority through application/API contracts and exchange semantic batches/signed manifests, never database files.

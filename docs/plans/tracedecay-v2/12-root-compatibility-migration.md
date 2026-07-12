@@ -130,6 +130,33 @@ The 2026-07-09 planning baseline is:
 | PR #451, release v0.0.58 | Merged as `81fe404c`, head `c5625c9e`, after #452 | Publication-only. Preserve merge order, source/tag/package/catalog/schema digests, and checks; the release receipt does not prove an installed runtime upgraded. |
 | PR #409, superseded release attempt | Closed without merge | Historical inventory only. Do not require its version or deleted spec. |
 
+### Post-baseline accepted-change refresh (`B`→`M`→`D`)
+
+The table above pins the `81fe404c`/v0.0.58 baseline (`B`). The accepted base is
+refreshed forward to implementation endpoint `M`
+(`e560005610ac296018c3a16b9e6bded90de0eff5`, merge #462, v0.0.63) and design HEAD
+`D` (`f18f0f14b3e7e2da30eefd9f1ed88862c0d73e57`). Canonical evidence:
+[`29-baseline-delta-audit.md`](29-baseline-delta-audit.md); operationalized
+dispositions and fixtures: [`30-baseline-refresh-candidate-packet.md`](30-baseline-refresh-candidate-packet.md).
+The `M`→`D` range is plan/architecture/governance only — intermediate drafts are
+superseded by the surviving numbered files at `D` — so it carries no new V1
+migration seam. The `B`→`M` runtime deltas below are the migration consequences.
+
+| Change | State observed | Root migration consequence |
+|---|---|---|
+| PRs #454/#456/#458/#460/#462, releases v0.0.59–v0.0.63 | Merged `b1a3a13f`/`655296e4`/`2f3fac96`/`313d84c1`/`e5600056`; endpoint `M` = #462 | Publication-only accepted inputs. Refresh version/Cargo/manifest/catalog/schema digests and checks; no architectural dependency on release contents. |
+| PR #453, runtime/CI hardening | Merged `8001a1f4` | Preserve Hermes projectless-compression routing (`STANDARD_HERMES_LCM_PROVIDER` `cursor`→`hermes`), registry/alias-aware `tracedecay_project_context` session-project resolution, Hermes-home prefix-containment rejection, cross-scope Turn correlation, and fixture normalization. Migration must add **provider continuity**: historical Hermes records labeled `cursor` are not remapped to `hermes` — backfill continuity or make the split explicitly queryable as two eras (FM-166). |
+| PR #455, defer live-fact vacuum | Merged `41b2bdd4` | Preserve deferred exclusive-maintenance reclamation: `MemoryStore::remove_fact` no longer inline-vacuums; freed pages remain until exclusive maintenance. Migration/store must schedule a **periodic exclusive-maintenance cadence with reclamation receipts**, independent of upgrades (FM-164). Also carries replay identity during Hermes compression, compact hook routing, and bounded daemon teardown. |
+| PRs #457/#459, managed-skill export isolation | Merged `a01ac4d9`/`227fad0b` | Preserve `AutomationRun`-only overwrite protection (`UserDraft`/`Import` foreign ownership authoritative) and default-profile export isolation. Migration must **canonicalize both sides** of the `uses_default_user_profile` predicate (symlinked `$HOME`/relocated `TRACEDECAY_DATA_DIR` must not silently no-op) and emit an explicit intentional-skip receipt (FM-161). |
+| PR #461, safe upgrade shutdown messaging | Merged `ab983634` | Preserve quiesce/maintenance receipts in `src/update_cmd.rs`; the messaging adds no interrupt guard, so the lifecycle contract — not the print statements — owns bounded shutdown (FM-163). |
+| Session sweep bump `user-turn-v1`→`user-turn-v2` (`src/sessions/hermes.rs`, via #453/#455) | In `B`→`M` | Migration must specify a **resweep budget** (CPU/IO/storage), prove interruption/resumption idempotency, and define orphan v1-cursor disposition (`skipped` reason `unavailable` or explicit cleanup); a new cursor namespace triggers a full user resweep (FM-165). |
+| Per-destination projection fan-out and notifications (`plugin_init.py`, `session.rs`, analytics via #453) | In `B`→`M` | One turn projects sequentially to `[None, *project_roots]` (fail-open per root) and emits `1 + unique_project_roots` notifications. Migration/projectors must add **per-shard idempotent receipts and catch-up reconciliation** (FM-162) and pin notification count/dedupe/partial-failure behavior (FM-167). |
+| Design HEAD `D`, daemon-owned physical writers | `f18f0f14`; `architecture-boundaries.toml` + `tests/architecture_boundaries.rs` | Governance only: all five store entries are `physical_writer = "store"` plus semantic producers, machine-enforced. Preserve as the store-ownership boundary; no V1 migration seam. |
+
+Every affected owner also carries the packet-30 §5 pointer. See
+[plan 14 §7.6](14-historical-failure-regression-matrix.md) (FM-161–FM-171) for
+the detection/recovery gates behind these consequences.
+
 #418 and #425–#440 above are accepted-base behavior at the pinned publication commit where applicable. Any new open PR touching an owned V1 seam receives a live state/direct-file/check/semantic receipt before coding.
 
 ### Known baseline test behavior

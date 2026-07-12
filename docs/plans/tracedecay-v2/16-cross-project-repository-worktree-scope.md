@@ -1,5 +1,13 @@
 # TraceDecay V2 Cross-Project, Repository, and Worktree Scope Plan
 
+> **Accepted-base refresh delta (audit 29 / packet 30):** registry/alias-aware
+> `tracedecay_project_context` session-project resolution and Hermes-home
+> prefix-containment rejection (PR #453) are preserved; the per-project
+> projection fan-out requires per-shard reconciliation so "searchable from every
+> touched repo" survives a partial fan-out failure. See
+> [`30-baseline-refresh-candidate-packet.md`](30-baseline-refresh-candidate-packet.md)
+> §5, §7.1 and FM-162.
+
 **Status:** implementation plan; product code is out of scope for this pull request.
 
 **Parent plan:** [`../2026-07-09-tracedecay-brain-rewrite.md`](../2026-07-09-tracedecay-brain-rewrite.md)

@@ -1,5 +1,13 @@
 # TraceDecay V2 Projectors Crate Implementation Plan
 
+> **Accepted-base refresh delta (audit 29 / packet 30):** preserve the
+> user-canonical plus per-project projection fan-out over `[None, *project_roots]`
+> (PR #453); **add** per-shard idempotent receipts and catch-up reconciliation so
+> a mid-loop shard failure is later reconciled with the same message ID and no
+> duplicate. See
+> [`30-baseline-refresh-candidate-packet.md`](30-baseline-refresh-candidate-packet.md)
+> §5, §7.1 and FM-162.
+
 **Goal:** Build `tracedecay-projectors`, the deterministic framework and complete domain projector registry that turns immutable observations/events into versioned, evidence-bearing, rebuildable activity and project read models.
 
 **Architecture:** A canonical-event projector converts captured observations into immutable typed events; independent domain projectors then consume shard outboxes at least once and commit output rows plus checkpoints atomically. Registry versions, per-shard contiguous checkpoints, vector watermarks, bounded gap handling, dead letters, build generations, validation manifests, and atomic pointer swaps make every projection replayable without stopping capture or corrupting the active generation.

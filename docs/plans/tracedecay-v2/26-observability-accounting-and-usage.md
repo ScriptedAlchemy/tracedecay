@@ -1,5 +1,13 @@
 # TraceDecay V2 Observability, Accounting, and Usage Plan
 
+> **Accepted-base refresh delta (audit 29 / packet 30):** distinguish, as
+> separate observable outcomes, skipped managed-skill export, partial multi-shard
+> projection, compression retry exhaustion, runtime-drop timeout, and async
+> shutdown timeout; pin Hermes notification cardinality (`1 + unique_project_roots`)
+> with dedupe and partial-failure behavior. See
+> [`30-baseline-refresh-candidate-packet.md`](30-baseline-refresh-candidate-packet.md)
+> §5, §6, §7.6 and FM-161/FM-162/FM-163/FM-167/FM-168.
+
 **Goal:** Own the Observability and Accounting bounded context (master §5.2 #12) end to end: usage/cost/savings accounting events, ingest/projection lag, data-quality metrics, denominator and unknown-population semantics, cap/truncation telemetry with retrieval anchors, per-capability adoption analytics, hint outcome rollups, autonomous-automation admission/useful-work metrics, SLO monitors, and the Observatory/Costs data contracts — so that every number TraceDecay shows about itself declares its population, horizon, cap, watermark, and unknown state, and no misleading zero survives.
 
 **Architecture:** Accounting facts are ordinary canonical events projected by plan 04's `accounting_v1`/`operations_v1`/`all_scope_rollup_v1`; this plan defines their payload contracts, the versioned metric-descriptor registry every exposed metric must register in, the denominator-safe rollup tables, and the SLO monitors sampled from latency events and projector checkpoints. Automation admission metrics consume plan 01/02's dirty-scope, cursor, admission, operation, terminal-outcome, and effect truth through the same descriptors and rollups; they do not add a scheduler telemetry log, fake run rows, or another aggregation subsystem. Plan 05 serves the read models, plan 09/10 expose them as use cases and HTTP reads, plan 11's Observatory and Costs workspaces render the typed view models, and plan 20's configuration registry owns every tunable. This plan expands master PR 22 — currently four lines for the thinnest of the fifteen bounded contexts — into owned slices with schemas and gates.

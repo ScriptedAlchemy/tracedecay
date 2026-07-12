@@ -3179,3 +3179,11 @@ Privacy, operations, and convergence:
 - [ ] Migration/shadow/cutover/rollback receipts prove one live scheduler/lease owner and no unauthorized materialization of provider/external work; Hermes/external-board inputs used here remain sanitized frozen fixtures, and no production external-board import path exists without a separately approved feature.
 - [ ] Legacy board/current-file/direct-DB/assignee-string/free-JSON/PID-lease/duplicate-render/config/scheduler paths are deleted after the bounded window.
 - [ ] Final architecture/import/catalog/config/route/source scans find one canonical task system and no compatibility write path.
+
+## 17. Accepted-base refresh delta (audit 29 / packet 30)
+
+Executor retry and shutdown behavior must be explicit bounded state-machine
+transitions, not best-effort prose: a never-resolving background task must not
+prevent process exit beyond the declared shutdown deadline. See
+[`30-baseline-refresh-candidate-packet.md`](30-baseline-refresh-candidate-packet.md)
+§5, §7.4 and FM-163.

@@ -1,5 +1,13 @@
 # TraceDecay V2 Application Crate Implementation Plan
 
+> **Accepted-base refresh delta (audit 29 / packet 30):** make retries and
+> shutdown deadlines explicit bounded state-machine transitions, not best-effort
+> prose. **Add** a compression-path oversize-retry ceiling with a terminal
+> disposition (FM-168) and an end-to-end bounded-shutdown contract for a
+> never-resolving outer `shutdown_background_tasks().await` (FM-163). See
+> [`30-baseline-refresh-candidate-packet.md`](30-baseline-refresh-candidate-packet.md)
+> §5, §7.2, §7.4.
+
 **Goal:** Build `tracedecay-application`, the transport-neutral use-case layer that authorizes and orchestrates every TraceDecay V2 read, command, replay lab, export, migration, and internal parity operation through one auditable contract.
 
 **Architecture:** Queries compose catalog, query, policy, tool-catalog, projector, and immutable archive ports under one captured request context and return explicit snapshot, coverage, freshness, redaction, and provenance. Non-curation commands use typed execution contracts and, when destructive, an operation-specific inspect or immutable plan followed by confirmed start/commit; all commands use idempotency, optimistic aggregate versions, one owning-shard unit of work, one authoritative canonical command-event journal, referenced audit/outbox entries, and resumable workflows for cross-shard effects. Autonomous curation effects have no per-item command. HTTP, CLI, MCP, hooks, and dashboard adapters only map transport data to these use cases.

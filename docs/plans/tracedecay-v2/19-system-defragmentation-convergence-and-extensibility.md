@@ -974,3 +974,12 @@ These slices are program gates mapped into the master plan’s PRs, not a compet
 ## 17. Implementation handoff rule
 
 Before implementing any slice, the lead must refresh master/open-PR state, regenerate the relevant inventory subset, resolve the research/failure/privacy/convergence anchors from plans 13–19, identify the exact owner and adapter/deletion rows, and add the slice’s scorecard delta to the PR description. A change that creates a second semantic implementation without a registered adapter and deletion PR is incomplete even if its local tests pass.
+
+## 18. Accepted-base refresh delta (audit 29 / packet 30)
+
+The convergence map preserves one canonical daemon-owned physical writer per
+store (`f18f0f14`). Deferred live-fact reclamation (PR #455) requires an
+explicit periodic exclusive-maintenance cadence in the maintenance-owner
+boundary. See
+[`30-baseline-refresh-candidate-packet.md`](30-baseline-refresh-candidate-packet.md)
+§5, §7.2 and FM-164.

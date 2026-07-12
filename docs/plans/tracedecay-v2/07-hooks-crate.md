@@ -1,5 +1,15 @@
 # TraceDecay V2 Root Hooks Boundary Implementation Plan
 
+> **Accepted-base refresh delta (audit 29 / packet 30):** host-hook registration,
+> dispatch, event mapping, error handling, and uninstall are byte-identical
+> `B`→`D` (only `src/hooks/steering.rs` changed). Preserve current asymmetries
+> (Codex six-hook `config.toml` + trust table; Claude seven-entry bundle with
+> unique `PostToolUseFailure`; absent Codex `PreToolUse`; Hermes in-process
+> callbacks) until deliberately migrated; **decide** the hook-trust-state owner
+> and restore a compact Codex parent-owns-writes token. See
+> [`30-baseline-refresh-candidate-packet.md`](30-baseline-refresh-candidate-packet.md)
+> §5, §7.5 and FM-169/FM-170.
+
 **Goal:** Build a bounded host-lifecycle runtime that losslessly captures provider events, obtains replayable hint decisions, and acknowledges Codex, Claude Code, Cursor, Hermes, and Kiro without coupling host latency to indexing, projection, cross-project queries, or storage internals. “Hook” is the canonical lifecycle boundary, not a claim that every host exposes a hook file: Hermes plugin/session/tool/gateway/delegation/scheduler callbacks and source-broker catch-up lower into the same request/receipt state machine with an exact capability disposition.
 
 **Architecture:** the private root `v2::hooks` module owns host wire normalization, hot-path orchestration, deadline and durability policy, reply rendering, and provider conformance. It delegates durable frames to `tracedecay-capture`, policy/context work to narrow `tracedecay-application` ports, and capability metadata to `tracedecay-tool-catalog`; it never opens a database, mutates policy state directly, or implements provider transcript parsing twice. It remains a module because root is its only production consumer; plan-19 import lints preserve the boundary without publishing another crate.

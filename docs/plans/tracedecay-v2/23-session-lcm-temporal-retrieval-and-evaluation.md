@@ -1,5 +1,14 @@
 # TraceDecay V2 Session, LCM, Temporal Retrieval, and Evaluation Plan
 
+> **Accepted-base refresh delta (audit 29 / packet 30):** preserve compression
+> replay identity (summarized messages with non-empty `lcm_summary_node_id`
+> bypass raw re-ingest; PR #455) and the `user-turn-v1`→`user-turn-v2` sweep;
+> **add** provider continuity across the `cursor`→`hermes` LCM-provider change so
+> historical `cursor` records are migrated or intentionally queryable as two
+> eras. See
+> [`30-baseline-refresh-candidate-packet.md`](30-baseline-refresh-candidate-packet.md)
+> §5, §7.6 and FM-165/FM-166.
+
 > **For implementation agents:** Session recall quality claims require replayable real queries, frozen time cutoffs, stable retrieval anchors, manually judged results, explicit current-versus-historical semantics, per-stage explanations, and privacy/resource measurements. A larger index, embeddings, or a newer model is not evidence of better retrieval.
 
 **Goal:** Make message, Turn, session, thread, agent, workflow, and LCM retrieval return the smallest useful and temporally correct context across every authorized provider, project, repository, checkout, worktree, branch, and profile shard, while preserving exact technical recall, history, provenance, privacy, stable anchors, and calibrated abstention.
