@@ -1309,7 +1309,7 @@ async fn compact_vectors_keep_recall_ordering_after_bank_rebuild() {
 }
 
 #[tokio::test]
-async fn remove_fact_incremental_vacuum_reclaims_blob_pages() {
+async fn remove_fact_defers_vacuum_while_peer_connections_are_live() {
     let (db, tmp) = make_memory_store().await;
     let store = MemoryStore::new(db.conn());
     let db_path = tmp.path().join("tracedecay.db");
@@ -1351,6 +1351,7 @@ async fn remove_fact_incremental_vacuum_reclaims_blob_pages() {
         .await
         .unwrap();
     let size_after_insert = std::fs::metadata(&db_path).unwrap().len();
+    let (peer, _) = Database::open(&db_path).await.unwrap();
 
     for fact_id in fact_ids {
         assert!(store.remove_fact(fact_id).await.unwrap());
@@ -1362,8 +1363,23 @@ async fn remove_fact_incremental_vacuum_reclaims_blob_pages() {
     let size_after_delete = std::fs::metadata(&db_path).unwrap().len();
 
     assert!(
-        size_after_delete < size_after_insert,
-        "incremental_vacuum should shrink the DB file after deleting compact HRR blobs; before={size_after_insert}, after={size_after_delete}"
+        scalar_i64(&db, "PRAGMA freelist_count").await > 0,
+        "fact deletion must leave page reclamation for exclusive maintenance"
+    );
+    assert_eq!(
+        scalar_i64(&peer, "SELECT COUNT(*) FROM memory_facts").await,
+        0,
+        "a peer opened before deletion must remain usable"
+    );
+    let (fresh, _) = Database::open(&db_path).await.unwrap();
+    assert_eq!(
+        scalar_i64(&fresh, "SELECT COUNT(*) FROM memory_facts").await,
+        0,
+        "a fresh peer must open after repeated fact deletion"
+    );
+    assert!(
+        size_after_delete >= size_after_insert,
+        "online deletion must not compact a live peer store; before={size_after_insert}, after={size_after_delete}"
     );
 }
 

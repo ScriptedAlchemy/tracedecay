@@ -1199,6 +1199,14 @@ fn test_hermes_user_install_writes_single_plugin() {
         skill.contains("instead of querying"),
         "Hermes skill must warn against querying .tracedecay databases directly"
     );
+    assert!(
+        skill.contains("Do not invent per-key CLI flags")
+            && skill.contains("\"mode\":\"explore\"")
+            && skill.contains("\"max_nodes\":20")
+            && skill.contains("supported modes are `explore` and `plan`")
+            && skill.contains("`--max-tokens` or `--paths`"),
+        "Hermes skill must give schema-safe context fallback guidance"
+    );
 
     assert_hermes_config_enables_tracedecay_memory(&home.path().join(".hermes/config.yaml"));
     assert!(!home.path().join(".hermes/profiles").exists());
@@ -1268,7 +1276,7 @@ fn test_hermes_plugin_init_snapshot_matches_embedded_asset() {
     hasher.update(body.as_bytes());
     assert_eq!(
         hex::encode(hasher.finalize()),
-        "d92997d9bef2c033022ac3b8ee559720ce08779099d2d8b58df6e5d849d428df",
+        "954dfa34aad7753f3ad6ff5e536061066e8339f3ee167e65ea3f27ca5a879575",
         "templates/plugin_init.py payload hash changed — verify the edit is intentional and update this snapshot"
     );
 }

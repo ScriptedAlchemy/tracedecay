@@ -44,6 +44,11 @@ fn prompt_rules_teach_the_json_args_contract() {
         !rules.contains("<name> --key value"),
         "prompt rules must not lead with the per-key grammar"
     );
+    let source = read_repo_file("src/agents/mod.rs");
+    assert!(
+        source.contains("never invent per-key flags or enum values from memory"),
+        "CLI fallback prompt rules must prohibit guessed flags and enum values"
+    );
 }
 
 #[test]

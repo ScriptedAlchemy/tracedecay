@@ -1866,6 +1866,16 @@ async fn ingest_active_messages(
         let original_content = message_content_value(message);
         let storage_text = message_storage_text(&original_content);
         let search_text = message_content(message);
+        if message
+            .get("lcm_summary_node_id")
+            .and_then(Value::as_str)
+            .is_some_and(|node_id| !node_id.is_empty())
+        {
+            let mut replay = message.clone();
+            replay["role"] = Value::String(role);
+            replay_messages.push(replay);
+            continue;
+        }
         if security::ignore_message_reason_with_compiled(&search_text, &compiled_ignore_patterns)
             .is_some()
         {
@@ -1874,15 +1884,26 @@ async fn ingest_active_messages(
             replay_messages.push(replay);
             continue;
         }
-        let message_id = message
+        let explicit_message_id = message
             .get("id")
             .or_else(|| message.get("message_id"))
             .and_then(Value::as_str)
             .filter(|value| !value.is_empty())
-            .map_or_else(
-                || deterministic_message_id(provider, session_id, idx, &role, &storage_text),
-                str::to_string,
-            );
+            .map(str::to_string);
+        let stored_message_id = match (explicit_message_id.as_ref(), message.get("store_id")) {
+            (None, Some(store_id)) => match store_id.as_i64() {
+                Some(store_id) => {
+                    message_id_for_store_id(conn, provider, session_id, store_id).await?
+                }
+                None => None,
+            },
+            _ => None,
+        };
+        let message_id = explicit_message_id
+            .or(stored_message_id)
+            .unwrap_or_else(|| {
+                deterministic_message_id(provider, session_id, idx, &role, &storage_text)
+            });
         let existing_state = existing_active_message_state(conn, provider, &message_id).await?;
         let ordinal = if let Some(existing) = existing_state.as_ref() {
             existing.ordinal
@@ -1966,6 +1987,26 @@ async fn ingest_active_messages(
     Ok(IngestedActiveMessages {
         replay_messages,
         changed_replay,
+    })
+}
+
+async fn message_id_for_store_id(
+    conn: &Connection,
+    provider: &str,
+    session_id: &str,
+    store_id: i64,
+) -> Result<Option<String>, LcmError> {
+    let mut rows = conn
+        .query(
+            "SELECT message_id
+             FROM lcm_raw_messages
+             WHERE provider = ?1 AND session_id = ?2 AND store_id = ?3",
+            params![provider, session_id, store_id],
+        )
+        .await?;
+    Ok(match rows.next().await? {
+        Some(row) => Some(row.get(0)?),
+        None => None,
     })
 }
 

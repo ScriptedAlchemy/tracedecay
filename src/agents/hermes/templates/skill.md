@@ -20,6 +20,18 @@ shows parameters). Hermes tool calls already run through this CLI under the hood
 execution path without the plugin wrapper. Fall back to it instead of querying
 `.tracedecay` databases directly or abandoning tracedecay.
 
+Do not invent per-key CLI flags or enum values from memory. Preserve the native
+tool's exact JSON schema through `--args`; for example:
+
+```sh
+tracedecay tool context --args '{"task":"trace project routing","mode":"explore","max_nodes":20,"include_code":true}'
+```
+
+For `context`, the supported modes are `explore` and `plan`, and its result
+budget is expressed with `max_nodes` / `max_code_blocks`, not guessed flags such
+as `--max-tokens` or `--paths`. When uncertain, run
+`tracedecay tool <name> --help` before invoking the fallback.
+
 ## Storage and project identity
 
 Hermes may keep its own host files under its Hermes home, but that path never

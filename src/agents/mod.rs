@@ -825,6 +825,7 @@ or the server is disconnected, every tool is also available as a shell command: 
     cli_fallback_args_invocation_lit!(),
     " \
 (`tracedecay tool` lists all tools, `tracedecay tool <name> --help` shows parameters). \
+Pass schema fields inside the JSON object; never invent per-key flags or enum values from memory. \
 Fall back to that CLI instead of querying `.tracedecay` databases directly or abandoning tracedecay."
 );
 
