@@ -1764,7 +1764,7 @@ The matching `queries/{offers,packets,notifications}.rs` and `commands/{offers,p
 | `work_items.dependencies` | Parents/children/blockers/unblockable/closure/path/cycle witness/critical-path and gate explanations. |
 | `work_items.workspaces` | Every associated project/repository/checkout/worktree generation/branch/commit/PR and attempt, including proposed/confirmed/contradicted/historical provenance, confidence, freshness, ownership/delegation, active authorities, retention, cleanup eligibility/blockers/receipts, and legal actions. No ambient-CWD association or inferred ownership. |
 | `attempts.list/get/timeline` | Requested/actual route, lease, packet, workspace, tools, Turns, costs, events, outcome, cancellation/reconciliation, and evidence. |
-| `workspaces.get` | Exact binding/generation, canonical Git identity, all related work items/attempts/participants and evidence signals, current Git/delivery observation, cleanup/retention state, proof expiry, blockers, receipts, and safe restore/rebind status. Paths hydrate only for an authorized local principal. |
+| `worktrees.get` | Exact binding/generation, canonical Git identity, all related work items/attempts/participants and evidence signals, current Git/delivery observation, cleanup/retention state, proof expiry, blockers, receipts, and safe reopen/rebind guidance. Paths hydrate only for an authorized local principal. |
 | `task_offers.list/get` | Registration-scoped open/terminal offers with immutable revision, work/assignment/route/rationale and policy/config/catalog pins, readiness digest, expiry, and legal CAS actions; no lease proof or unrelated queue contents. |
 | `context_packets.list/get` | Attempt-scoped sealed packet ordinals, start/accepted/superseded/expired state, effective Turn boundary, omissions, coverage, and anchors. |
 | `task_notifications.list/get` | Owner-scoped saved filter/channel/event-class/quiet-hours/dedupe/rate-budget subscriptions with current version and delivery health; never implicit subscriptions or unrelated recipients. |
@@ -2003,7 +2003,7 @@ During execution, capture file/tool/Git events and correlate them to attempt/lea
 - preserve failed/dirty worktrees for investigation under retention policy;
 - on attempt terminal/reconciliation or archive/merged-PR evidence, release the reservation and request cleanup evaluation; remove only under the delegated proof/state machine in §4.8.
 
-Host `CwdChanged`, `WorktreeCreate`, `WorktreeRemove`, `Stop`, `SubagentStop`, `SessionEnd`, and equivalent IDE/executor terminal events are observation sources only. Hooks submit bounded event/tool/CWD/Git identity evidence to `workspaces.observe` or wake reconciliation; they never run Git removal, change a sealed binding, or decide cleanup. The lifecycle-owner terminal command remains authoritative for attempt completion. An externally removed worktree is reconciled to `RemovedExternally`/historical association with provenance; a missing directory is not recorded as a successful TraceDecay cleanup receipt.
+Host `CwdChanged`, `WorktreeCreate`, `WorktreeRemove`, `Stop`, `SubagentStop`, `SessionEnd`, and equivalent IDE/executor terminal events are observation sources only. Hooks submit bounded event/tool/CWD/Git identity evidence to `worktrees.discover` or wake reconciliation; they never run Git removal, change a sealed binding, or decide cleanup. The lifecycle-owner terminal command remains authoritative for attempt completion. An externally removed worktree is reconciled to `RemovedExternally`/historical association with provenance; a missing directory is not recorded as a successful TraceDecay cleanup receipt.
 
 ### 9.9 Human and autonomous boundaries
 
@@ -2922,7 +2922,7 @@ Host-native diagnostics run after adapter repair, separately from TraceDecay doc
 - keyboard, focus, screen reader, contrast, reduced motion, table fallback, 200% zoom, mobile portrait/landscape;
 - deterministic Markdown/JSON/SVG/PNG export with privacy manifest;
 - edit-bundle local-workspace/resource-link/upload parity across CLI/MCP/HTTP/Rust/TypeScript/Python/UI, offline-versus-authoritative diagnostics, exact file/span navigation, graph diff/conflict/impact, expiry and cleanup receipts;
-- worktree observe/confirm/reject/evaluate-cleanup/cleanup/retain/restore parity across CLI/MCP/HTTP/SDK/UI; archive and merged PR expose evaluation only; every blocker disables cleanup; expired proof/revoked delegation fails; receipt and reopened-task history survive refresh/restart;
+- `worktrees.discover`, `task_worktree_associations.*`, and `worktree_cleanup.inspect|status|request` parity across CLI/MCP/HTTP/SDK/UI; archive and merged PR expose evaluation only; every blocker disables cleanup; expired proof/revoked delegation fails; receipt and reopened-task history survive refresh/restart;
 - Orchestration Lab side-effect guard and replay digest stability.
 
 ## 18. Reviewable PR slices
@@ -3029,7 +3029,7 @@ These suffixes were checked against plans 01–28. Plan 13 owns bounded comparis
 
 **Files:** `dashboard/app/src/features/work/**/*`; generated client integration; E2E/visual/accessibility tests.
 
-- Build routes and components from generated TraceDecay contracts and view models: complete saved scope/view shell, initiative/plan/task/attempt/workspace inspectors, complete per-ticket workspace/branch/PR association history, proposed-confirm-reject and blocker-first cleanup/retain/restore controls, plan outline, board projection, DAG, legal commands, table parity, and the PR 24R Edit-as-Markdown operation/diagnostic/diff/conflict/cleanup consumer. Use the PR 2A Hermes UI ledger as comparative usability/regression evidence; directly or behaviorally port only an explicitly approved bounded interaction/test row under provenance.
+- Build routes and components from generated TraceDecay contracts and view models: complete saved scope/view shell, initiative/plan/task/attempt/worktree inspectors, complete per-ticket worktree/branch/PR association history, proposed-confirm-reject and blocker-first cleanup controls plus reopen/rebind guidance, plan outline, board projection, DAG, legal commands, table parity, and the PR 24R Edit-as-Markdown operation/diagnostic/diff/conflict/cleanup consumer. Use the PR 2A Hermes UI ledger as comparative usability/regression evidence; directly or behaviorally port only an explicitly approved bounded interaction/test row under provenance.
 - Prove drag operations map to domain commands, no ambient current board, no dashboard business logic, archive/merged PR never deletes, blocked cleanup cannot be invoked, restore never provisions, and exact selection/version/coverage state.
 - Commit: `feat(dashboard): add canonical work and plan views`.
 
