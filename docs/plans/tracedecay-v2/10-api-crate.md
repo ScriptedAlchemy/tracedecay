@@ -303,6 +303,8 @@ Status mapping is fixed:
 
 Problem `detail` never reflects raw parser input, query literal, filesystem path, token, provider payload, or secret. Server logs record request ID, operation/use-case ID, safe error code, timing, byte counts, and coverage—not request bodies or sensitive URLs.
 
+Task dispatch/integration responses serialize plan 24 Appendix A's repository resolution, board authority, workspace actionability, review authority, effect state, sealed evidence coverage, operation/receipt ref, and safe unknown/protected-handoff fields without collapsing them into one status. `idempotency_conflict`, `stale_snapshot`, identity/ownership conflict, and changed-payload reuse are 409 zero-mutation problems; pending/unknown external effects remain pollable operations rather than success or automatic retries. Redaction may hide path text but preserves path digests, change class, owner class, unknown reason, and prohibited-action contract. No route accepts an equivalence verdict, fence state, or repaired snapshot from the client.
+
 Transport-created reasons—including JSON/schema failures, bounded/truncated MCP parity failures, export errors, static-route errors, and upstream disconnects—must be converted to safe reason enums plus `LogSafeText` before `ApiProblem`. The API cannot wrap `Display` from an arbitrary error. A unique synthetic canary in each request/error field proves it reaches neither problem JSON, headers, logs, traces, response handles, nor SSE notices.
 
 ### 7.3 Versioning and content negotiation

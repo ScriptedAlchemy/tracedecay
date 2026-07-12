@@ -3250,3 +3250,101 @@ lifecycle (with plan 09's `run(cli)` composition surface), not this executor
 plan; FM-163 therefore creates no plan-24 delta. See
 [`30-baseline-refresh-candidate-packet.md`](30-baseline-refresh-candidate-packet.md)
 §5, §7.4 and FM-163.
+
+## Appendix A. Deterministic pre-dispatch and pre-integration reconciliation gate
+
+One application-owned `TaskReconciliationGateV1` runs immediately before an offer/claim transaction and immediately before integration authorization, then revalidates again immediately before the first external mutation. Inspection is read-only. It never fetches, pulls, switches, resets, stashes, cleans, restores, stages, commits, rebases, merges, cherry-picks, pushes, prunes, repairs, moves, removes, overwrites, deletes, adopts, or claims ownership. A proposal is inert data until its exact board-only transaction or external-effect state transition wins the required owner-shard CAS and fence checks.
+
+The gate records orthogonal normalized dimensions; there is no single outcome whose precedence erases coexisting facts:
+
+```rust
+pub struct TaskReconciliationVerdictV1 {
+    pub repository_resolution: RepositoryResolutionV1,
+    pub board_authority: BoardAuthorityV1,
+    pub workspace_actionability: WorkspaceActionabilityV1,
+    pub review_authority: ReviewAuthorityV1,
+    pub effect_state: ReconciliationEffectStateV1,
+    pub snapshot: ReconciliationSnapshotTokenV1,
+    pub evidence: ReconciliationEvidenceV1,
+}
+
+pub enum RepositoryResolutionV1 {
+    NotApplicable,
+    NotIntegrated,
+    SatisfiedExactly,
+    SatisfiedByAuthorizedEquivalent,
+    Unknown,
+}
+pub enum BoardAuthorityV1 {
+    NoChange,
+    ReconcileNoOp,
+    InvalidateStaleAuthority,
+    RecomputeReadiness,
+    Conflict,
+    Unknown,
+}
+pub enum WorkspaceActionabilityV1 {
+    NotRequired,
+    AllowInspectOnly,
+    AllowDispatch,
+    AllowIntegrationOnce,
+    BlockProtectWorkspace,
+    BlockIdentity,
+    BlockStaleSnapshot,
+    BlockUnknown,
+}
+pub enum ReviewAuthorityV1 { Valid, Stale, Superseded, Invalidated, Ineligible, Unknown }
+pub enum ReconciliationEffectStateV1 {
+    None,
+    Prepared,
+    Applying,
+    ObservedApplied,
+    Recorded,
+    AbortedProvenNotApplied,
+    InDoubtPendingReconciliation,
+}
+```
+
+Precedence applies only to `workspace_actionability`: stale action-boundary evidence, unknown identity/ownership/freshness, conflicting idempotency, or an in-doubt effect blocks every workspace/Git effect; dirty or mixed/unknown-owned paths always produce `BlockProtectWorkspace`. These action blocks do not erase independently sealed repository, review, or board facts. In particular, fresh exact ancestry may yield `SatisfiedExactly + ReconcileNoOp + BlockProtectWorkspace`: the CAS-protected board-only reconciliation remains legal because its proof does not depend on workspace cleanliness, while every Git/workspace effect remains prohibited. Audit-only evidence append is a distinct append-only command with its own idempotency key and expected journal cursor; it cannot change current projections, create authority, or bypass proposal CAS.
+
+Inspection is total and ordered: normalize request; capture exact board/work-item/plan/dependency/review/idempotency versions; evaluate gates; resolve repository, checkout, Git common-dir, target workspace, branch, binding, generation, and ownership identity; inspect the relevant target workspace; pin local and authoritative remote full refs; classify exact ancestry before any equivalence; validate acceptance and active leases/fences/effect receipts; derive all dimensions and inert proposals; then reread every action-sensitive field and CAS/fence. A dispatch that will use an existing workspace inspects that exact binding. A dispatch whose separately authorized future effect creates an isolated workspace instead pins the parent repository/common-dir, base/ref, branch-ownership set, creation fence, and target identity; unrelated checkout dirt does not grant or deny that isolated effect, but dirt in any checkout the effect could touch blocks it. Every missing object, network/auth/parse failure, stale TTL, ambiguous owner, redacted acceptance field, incomplete path scope, or unverified ref is `Unknown`, never clean, absent, safe, or not integrated.
+
+`ReconciliationSnapshotTokenV1` seals gate/run kind and ID; repository/toplevel/Git/common-dir identities and normalized remote; work-item/version, graph revision, plan head, dependency-closure digest; exact review-cycle authority and acceptance tuple; candidate/base/full canonical ref plus local and authoritative remote SHAs; merge base and ancestry observations; target workspace physical identity/binding/generation/branch/HEAD/owner/authority; porcelain-v2 status digest and classified redacted path records; active offers, attempts, leases, reservations, fences and effect receipts; policy/config/catalog/sanitizer versions; board revision/journal cursor; observation start/end/expiry; command method/status and normalized-output digests. `ReconciliationEvidenceV1` additionally seals every applicable condition, unknown reason, old/new value at boundary drift, proposal/effect canonical payload digest and idempotency key, and evidence quality/coverage. Renderers may redact names but must preserve stable per-path digests, owner class, staged/unstaged/untracked/conflict/submodule class, and explicit `Unknown`.
+
+Board transition and effect idempotency are payload-bound owner-shard reservations. Equal key plus byte-identical canonical payload is insert-or-read: an in-progress replay returns the existing operation and a completed replay returns the same receipt, with no new event, projection change, offer, fence, or effect. Equal key plus a different canonical payload returns typed `idempotency_conflict` carrying the key, both payload digests, source events, and uniqueness evidence, with zero mutation; neither contender wins by time or insertion order. New writes enforce owner-shard uniqueness. Legacy collisions remain blocked until one immutable, CAS-selected `CanonicalizationDecisionV1` names the policy/version and stable tie-break inputs; prior IDs/timestamps alone never select a winner, and duplicate history is retained through `DuplicateOf` evidence rather than deleted.
+
+Every integration effect uses one logical effect ID derived from purpose, repository, canonical full ref, candidate or accepted-content identity, and canonical payload digest. Its durable state machine is:
+
+```text
+PREPARED -> APPLYING -> OBSERVED_APPLIED -> RECORDED
+PREPARED -> ABORTED_PROVEN_NOT_APPLIED
+PREPARED|APPLYING -> IN_DOUBT_PENDING_RECONCILIATION
+IN_DOUBT_PENDING_RECONCILIATION -> APPLYING | OBSERVED_APPLIED
+```
+
+`PREPARED` is committed before any external effect and seals expected canonical SHA, candidate/base, payload, acceptance/review authority, workspace identity/status digest, logical effect ID, fence generation, and boundary token. Fence acquisition/renewal, first-mutation intent, command attempt/result, and post-effect observation are durable checkpoints. A current recovery owner may take over only with a higher fencing generation for the same logical effect and payload. It first observes authoritative canonical and workspace state: proved exact or authorized-equivalent application advances without replay; proved non-application may mark `AbortedProvenNotApplied` or resume the same effect after fresh full revalidation; unknown enters/remains `InDoubtPendingReconciliation`. Process death, lease expiry, missing receipt, or a consumed fence is never proof of either application or non-application. `Recorded` atomically stores the effect receipt, reconciles board projections, revokes stale offers, and recomputes descendants. No retry mints a second logical effect or blindly repeats Git.
+
+Alternate-path equivalence is non-authoritative by default. `RepositoryResolutionV1::SatisfiedByAuthorizedEquivalent` requires one sealed `EquivalenceDecisionV1` issued under the versioned acceptance policy by an independent eligible reviewer. It names logical effect ID; candidate/base/canonical ref and observed SHA; exact acceptance manifest and complete path/object scope; canonical serialization and accepted-content digest; algorithm/tier and implementation version; policy/config/catalog versions; reviewer principal/class/grant and review-cycle authority; source events and observation times; and complete proofs for mode, rename/copy, merge-parent/conflict resolution, submodule, symlink, executable-bit, metadata, generated/binary and deleted-object semantics. The policy must explicitly declare which semantics are included and excluded. Missing scope, field, authority, freshness, or semantic proof yields `Unknown`/pending reconciliation. Commit message, title, partial path equality, tree similarity, or patch-id alone cannot terminalize work. Exact ancestry remains separately labeled. The resulting no-op reconciliation is keyed by logical effect, canonical ref, and accepted-content digest, so an equivalent effect cannot be applied again through another path.
+
+If action-boundary reread changes any board revision, plan head, dependency digest, review authority, lease/fence, workspace identity/owner/status, branch/HEAD, canonical remote SHA, policy pin, or effect receipt, the current run records `BlockStaleSnapshot`, an explicit zero-effect receipt, and no proposal/effect. It is never patched or upgraded in place. A fresh run may classify a newer descendant as exactly/equivalently satisfied and reconcile it independently.
+
+Unknown or mixed edits produce a protected handoff containing all sealed fields above, each path's known owner/task/lease or explicit `Unknown`, current authority/effect evidence, exact prohibited actions, and safe questions: who owns each path; whether the confirmed owner will finish or separately move it; whether this physical workspace generation is authorized; which candidate/acceptance version is current; whether a conflicting effect can be fenced without touching the workspace; and whether a fresh observation can be supplied. Mandatory wording is: **No reset, stash, clean, restore, checkout/switch, overwrite, delete, move, adopt, stage, commit, merge, rebase, cherry-pick, fetch, pull, push, worktree repair/prune, or implicit ownership claim is authorized by this handoff.**
+
+The normative acceptance corpus contains twelve canonical fixtures. Each fixture seals complete input bytes and expects the exact sorted journal events, all five verdict dimensions, proposal/zero-mutation result, and effect receipt:
+
+| ID | Fixture and exact effective result |
+|---|---|
+| RG-01 | Candidate already an ancestor of fresh canonical while integration remains queued: `SatisfiedExactly + ReconcileNoOp`; dirty/unknown workspace independently remains `BlockProtectWorkspace`; one board receipt, zero Git effects. |
+| RG-02 | Review tuple/digest drift: old review `Stale`/`Invalidated`; explicit successor separately makes the old work version superseded; exact repository reconciliation, if proved, remains visible. |
+| RG-03 | Staged/unstaged/untracked/conflicted edits with unknown or mixed owners: protected handoff, `BlockProtectWorkspace`, zero workspace effects; an independent RG-01 board receipt remains legal. |
+| RG-04 | Stale/unavailable remote or changed/missing base: repository `Unknown`, board/effect pending, `BlockUnknown`, zero fetch and zero effect. |
+| RG-05 | Wrong repository/branch/worktree/binding/generation or ambiguous authority: `BlockIdentity` or `BlockProtectWorkspace`, zero switching/repair/adoption. |
+| RG-06 | Failed parent yields semantic negative only when its exact predicate fails; unresolved/unknown parent blocks; `RequiresTerminal` accepts only its declared terminal set; descendants are recomputed, never status-inherited. |
+| RG-07 | Equal key/equal payload returns the existing receipt with no append; equal key/different payload returns `idempotency_conflict` with zero mutation; unresolved legacy collisions remain blocked. |
+| RG-08 | Non-ancestor equivalent content is pending unless the complete sealed equivalence decision passes; then one accepted-content-keyed no-op receipt is emitted and no merge occurs. |
+| RG-09 | Clean dispatch with exact current gates, exclusive target authority and fresh evidence yields one offer/claim CAS receipt and `AllowDispatch`; replay returns it. |
+| RG-10 | Clean integration yields one `PREPARED` logical effect and `AllowIntegrationOnce`; only its fenced state machine may progress, and completion requires authoritative post-effect observation. |
+| RG-11 | Any inspection-to-action drift yields `BlockStaleSnapshot`, zero proposal/effect, and a fresh-run requirement even when the new canonical tip benignly contains the candidate. |
+| RG-12 | Crashes before/after fence, first mutation, observation, or receipt enter durable recovery; proved non-application resumes only the same effect, proved application reconciles without replay, and unknown blocks. |
+
+Tests execute each fixture twice and under every causally legal permutation of board/Git observation events and assert byte-identical effective projection and receipt sets. Property tests cover equal/different payload key reuse, concurrent owner-shard insertion, legacy canonicalization, every `Unknown` source, and dirty-plus-exact-reconciliation coexistence. Crash injection covers every boundary before/after `PREPARED`, fence acquisition, `APPLYING`, first mutation, post-effect observation, and receipt commit and proves at-most-one logical effect plus eventual reconciliation when authoritative evidence becomes available. These suites are mandatory for scheduler, integration, store, application, API, and replay acceptance; no implementation may collapse the five dimensions for storage or transport convenience.
