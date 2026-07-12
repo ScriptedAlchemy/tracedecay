@@ -63,11 +63,10 @@ pub(crate) fn replay_units<'a>(messages: &[&'a LcmRawMessage]) -> Vec<ReplayUnit
     let mut units = Vec::new();
     let mut index = 0;
     while index < messages.len() {
-        if transaction_by_start
-            .peek()
-            .is_some_and(|(start, _)| *start == index)
+        if let Some((start, end)) = transaction_by_start.peek().copied()
+            && start == index
         {
-            let (_, end) = transaction_by_start.next().expect("peeked transaction");
+            let _ = transaction_by_start.next();
             units.push(ReplayUnit {
                 messages: messages[index..end].to_vec(),
             });
@@ -169,12 +168,12 @@ fn replay_message_tokens(message: &LcmRawMessage) -> i64 {
             object.remove("store_id");
         }
         let serialized = replay.to_string();
-        tokens += ((serialized.len() + 3) / 4) as i64;
+        tokens += serialized.len().div_ceil(4) as i64;
     }
     tokens
 }
 
-pub(crate) fn normalize_replay_tool_pairs(messages: Vec<Value>) -> Vec<Value> {
+pub(crate) fn normalize_replay_tool_pairs(messages: &[Value]) -> Vec<Value> {
     let mut normalized = Vec::with_capacity(messages.len());
     let mut index = 0;
     while index < messages.len() {

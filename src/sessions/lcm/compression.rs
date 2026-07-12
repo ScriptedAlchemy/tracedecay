@@ -1172,7 +1172,7 @@ fn replay_without_summary(
             .iter()
             .map(replay_transactions::raw_replay_message),
     );
-    replay_transactions::normalize_replay_tool_pairs(replay_messages)
+    replay_transactions::normalize_replay_tool_pairs(&replay_messages)
 }
 
 const SUMMARY_REPLAY_PRIORITY: u8 = 0;
@@ -1239,7 +1239,7 @@ async fn assemble_overflow_recovery_replay(
                     .iter()
                     .map(|message| replay_transactions::raw_replay_message(message)),
             );
-            return Ok(replay_transactions::normalize_replay_tool_pairs(replay));
+            return Ok(replay_transactions::normalize_replay_tool_pairs(&replay));
         }
     }
     Ok(candidate)
@@ -1352,12 +1352,11 @@ fn assemble_replay_messages(
         )
     }));
     replay_items.sort_by_key(|(store_id, priority, _)| (*store_id, *priority));
-    replay_transactions::normalize_replay_tool_pairs(
-        replay_items
-            .into_iter()
-            .map(|(_, _, message)| message)
-            .collect(),
-    )
+    let replay = replay_items
+        .into_iter()
+        .map(|(_, _, message)| message)
+        .collect::<Vec<_>>();
+    replay_transactions::normalize_replay_tool_pairs(&replay)
 }
 
 /// Mirrors hermes-lcm `_assemble_context` tail selection: keep the newest

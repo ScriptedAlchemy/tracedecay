@@ -3619,18 +3619,25 @@ class TraceDecayContextEngine(ContextEngine):
             reported_replay_tokens = int(result.get("replay_token_estimate"))
         except (TypeError, ValueError):
             reported_replay_tokens = None
-        boundary_code = None
-        if replay_issues:
-            boundary_code = "invalid_replay_tool_pairs"
-        elif source_token_estimate > 0 and replay_token_estimate >= source_token_estimate:
-            boundary_code = "non_shrinking_replay"
-        elif (
+        has_reported_estimates = (
             reported_source_tokens is not None
             and reported_source_tokens > 0
             and reported_replay_tokens is not None
+        )
+        boundary_code = None
+        if replay_issues:
+            boundary_code = "invalid_replay_tool_pairs"
+        elif (
+            has_reported_estimates
             and reported_replay_tokens >= reported_source_tokens
         ):
             boundary_code = "non_shrinking_reported_replay"
+        elif (
+            not has_reported_estimates
+            and source_token_estimate > 0
+            and replay_token_estimate >= source_token_estimate
+        ):
+            boundary_code = "non_shrinking_replay"
         if boundary_code is not None:
             result = _compression_boundary_abort(
                 result,

@@ -2096,6 +2096,39 @@ assert engine.should_defer_preflight_to_real_usage(rough_tokens=107) is True
 }
 
 #[test]
+fn context_engine_prefers_reported_shrink_over_host_estimator_tie() {
+    run_generated_plugin_script(
+        "check_reported_shrink_wins.py",
+        r#"
+messages = [
+    {"role": "user", "content": "first"},
+    {"role": "assistant", "content": "second"},
+]
+replay = [
+    {"role": "system", "content": "short"},
+    {"role": "user", "content": "tail"},
+]
+
+engine = plugin.TraceDecayContextEngine()
+engine.initialize(session_id="session-1", project_root="/tmp/project")
+engine._compress_to_result = lambda *args, **kwargs: {
+    "status": "ok",
+    "reason": "compressed_backlog",
+    "replay_messages": replay,
+    "replay_token_estimate": 3,
+}
+
+compressed = engine.compress(list(messages), current_tokens=50)
+
+assert compressed == replay
+assert engine._last_compress_aborted is False
+assert engine.compression_count == 1
+"#,
+        "backend shrink estimates should override a tied secondary host estimate",
+    );
+}
+
+#[test]
 fn context_engine_preserves_valid_tool_pairs_and_summary() {
     run_generated_plugin_script(
         "check_valid_tool_pair_replay.py",
