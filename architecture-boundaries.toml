@@ -99,7 +99,7 @@ kind = "rust-package"
 path = "."
 plan = "docs/plans/tracedecay-v2/12-root-compatibility-migration.md"
 release_tier = 5
-allowed_dependencies = ["domain", "store", "capture", "projectors", "code-index", "query", "policy", "tool-catalog", "application", "api", "hooks", "presentation", "host-deploy", "remote-brain-transport"]
+allowed_dependencies = ["domain", "store", "capture", "projectors", "code-index", "query", "policy", "tool-catalog", "application", "api", "hooks", "presentation", "host-deploy", "native-semantic-runtime", "remote-brain-transport"]
 forbidden_dependencies = ["new-business-semantics"]
 
 [owners.public-contracts]
@@ -154,6 +154,15 @@ allowed_dependencies = ["domain", "application", "tool-catalog"]
 forbidden_dependencies = ["store-implementation", "catalog-reinterpretation"]
 forbidden_source_patterns = ["StoreFactory", "libsql::", "rusqlite::"]
 
+[owners.native-semantic-runtime]
+kind = "root-private-module"
+path = "src/v2/native_semantic_runtime"
+plan = "docs/plans/tracedecay-v2/31-native-fastembed-semantic-code-search.md"
+release_tier = 5
+allowed_dependencies = ["domain", "projectors", "code-index", "query", "application"]
+forbidden_dependencies = ["store-implementation", "transport", "network", "query-policy"]
+forbidden_source_patterns = ["StoreFactory", "libsql::", "rusqlite::", "ort::", "nomic"]
+
 [owners.remote-brain-transport]
 kind = "root-private-module"
 path = "src/v2/remote_brain_transport"
@@ -199,6 +208,21 @@ to = "domain"
 [[edges]]
 from = "code-index"
 to = "domain"
+[[edges]]
+from = "native-semantic-runtime"
+to = "domain"
+[[edges]]
+from = "native-semantic-runtime"
+to = "code-index"
+[[edges]]
+from = "native-semantic-runtime"
+to = "projectors"
+[[edges]]
+from = "native-semantic-runtime"
+to = "query"
+[[edges]]
+from = "native-semantic-runtime"
+to = "application"
 [[edges]]
 from = "query"
 to = "domain"
@@ -331,6 +355,9 @@ to = "projectors"
 [[edges]]
 from = "root"
 to = "code-index"
+[[edges]]
+from = "root"
+to = "native-semantic-runtime"
 [[edges]]
 from = "root"
 to = "query"

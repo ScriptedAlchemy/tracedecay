@@ -805,6 +805,29 @@ The generated session-summary descriptors are explicit:
 
 Provider/project/session layers may narrow privacy, budgets, or disable synthesis, but cannot create a host-profile-specific TraceDecay store or silently replace the profile default. Settings, CLI, MCP, API, and SDK show desired, activated, effective, requested, and last-actual values with override provenance and capability gaps.
 
+### Optional semantic code-search and rerank descriptors
+
+Epoch one registers no semantic-backend selector. Optional native semantic code search is FastEmbed-only and uses an exact benchmark-promoted embedding artifact plus a separately promoted optional `BGERerankerV2M3` artifact, both managed by `representations.artifacts.*`; generations remain managed by `representations.generations.*`. `JinaEmbeddingsV2BaseCode` is the primary embedding candidate and `GTELargeENV15Q` the required comparator, not a runtime fallback. `search.universal` and `code.search_symbols` consume the resolved profile. These descriptors are the sole writable intent. Activated, effective, and observed state are read-only daemon/application evidence with exact artifact, model, runtime, device, generation, coverage, and receipt provenance; no resolver derives one state from another or selects an alternate model.
+
+| Key | Built-in default | Contract |
+|---|---|---|
+| `query.search.semantic.enabled` | `false` | Desired native semantic contribution; remains disabled until a qualifying benchmark promotion receipt exists. |
+| `query.search.semantic.embedding_artifact` | none | Exact verified FastEmbed-compatible, benchmark-promoted embedding `RepresentationArtifactId`; required before activation, never a family/latest selector. |
+| `query.search.semantic.native_rerank.enabled` | `false` | Separate desired native BGE rerank stage. |
+| `query.search.semantic.native_rerank.artifact` | none | Exact verified BGE rerank artifact; no alternate on absence/incompatibility. |
+| `query.search.semantic.rerank_top_n` | `25` | Integer `1..25`; hard cap 25 applies to every native or model-assisted route. |
+| `query.search.semantic.strict` | `false` | `true` returns a typed semantic/rerank availability error; `false` preserves the byte-stable lexical result/order when optional stages cannot run. |
+| `representations.artifacts.automatic_download_authorized` | `false` | Explicit consent for allowlisted artifact download; install/import still pins manifest, digest, license, and exact model. |
+| `representations.artifacts.offline_only` | `true` | Forbids artifact network fetch; verified local import/cache remains usable. |
+| `representations.runtime.device` | `cpu` | Exact allowed device; no silent device or runtime change. |
+| `representations.runtime.cpu_threads` | bounded auto | Positive host-budgeted thread ceiling recorded as requested/actual. |
+| `representations.runtime.batch_size` | benchmark-qualified bounded auto | Positive batch ceiling; requested/actual batch is observed. |
+| `representations.runtime.max_resident_bytes` | `2 GiB` | Shared representation-runtime residency ceiling. |
+| `representations.runtime.max_disk_bytes` | `4 GiB` | Verified artifact/cache/generation disk ceiling. |
+| `representations.runtime.idle_unload` | enabled bounded duration | Daemon-owned residency policy; clients cannot keep a native session alive. |
+
+Optional model-assisted reranking is a different registered route, never an embedding backend or fallback model for the promoted FastEmbed embedding or native BGE reranker. `query.search.model_rerank.enabled` defaults `false`; `capability`, `credential`, and `model` have no default and must resolve to one discovered Codex Spark/app-server-style capability, credential reference, and exact model. `privacy_egress_policy`, `max_cost`, `max_input_tokens`, `deadline_ms`, and `top_n` (default 25, range `1..25`) are required bounded profile fields. Status exposes desired/activated/effective/observed plus discovered capability and requested/actual route/model/cost/tokens/deadline. Unavailable, denied, timed-out, or malformed output preserves the pre-rerank order. Search Quality Lab replay/ablation and plan 22 active hinting/scout consume these same descriptors and receipts; neither creates a hidden override or grants model access merely because the capability was discovered.
+
 The lifecycle checkpoint's maximum inward continuation is a correctness constant of one, not a writable setting. Claude's larger native stop-block cap or environment override never widens it.
 
 Hard-coded correctness constants and safety maxima are not mislabeled as user settings. They still appear in capability/status documentation when relevant, but are not writable. Conversely, a behavior marketed or documented as configurable cannot remain an unregistered constant.

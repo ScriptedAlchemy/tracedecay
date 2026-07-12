@@ -68,12 +68,13 @@ Core product surfaces:
 | [`28-remote-multi-machine-shared-brain.md`](28-remote-multi-machine-shared-brain.md) | Transport-agnostic remote/shared Brain topology; node enrollment, one fenced authority per shard, offline sanitized capture, replicas/caches, Git clone correlation, consistency/coverage, privacy/auth, backup/failover, API/CLI/MCP/UI, and multi-machine fault gates. |
 | [`29-baseline-delta-audit.md`](29-baseline-delta-audit.md) | Evidence-only review artifact for exact audited endpoint `D`: verified `{B} ∪ (B..D)` baseline-delta evidence. It changes no plan and never overrides the master/owner plans. |
 | [`30-baseline-refresh-candidate-packet.md`](30-baseline-refresh-candidate-packet.md) | Temporary generated candidate packet used only to review and route audit-29 evidence. It has no standing authority and is archived/deleted after accepted deltas are bound to canonical PR slices and FM rows. |
+| [`31-native-fastembed-semantic-code-search.md`](31-native-fastembed-semantic-code-search.md) | Optional disabled-by-default native FastEmbed semantic code search: deterministic code representations, exact model/runtime pins, incremental vector generations, Jina/GTE/BGE evaluation, signed offline artifact lifecycle, bounded optional model-assisted reranking, lexical-preserving failure, generated surfaces, and rebuild-only migration. |
 
 When documents overlap:
 
 1. The master plan owns outcome, global constraints, dependency order, and cutover gates.
 2. A numbered crate/surface plan owns implementation details in its boundary.
-3. Plans 13–28 own cross-cutting evidence, regression, retrieval, scope, public-contract, privacy, convergence, configuration, tool/output, incremental-context, temporal-session, task/executor, code-indexing, observability/accounting, cross-host bundle, and remote shared-Brain requirements; bounded crates must satisfy them rather than reimplement them.
+3. Plans 13–28 and 31 own cross-cutting evidence, regression, retrieval, scope, public-contract, privacy, convergence, configuration, tool/output, incremental-context, temporal-session, task/executor, code-indexing, observability/accounting, cross-host bundle, remote shared-Brain, and native semantic-code-search requirements; bounded crates must satisfy them rather than reimplement them. Plans 29–30 are evidence/review artifacts, not implementation authorities.
 4. An implementation decision that changes a locked domain contract requires an ADR and coordinated plan update before code diverges.
 
 ### 2.1 Canonical V2 slice authority and bootstrap contract
@@ -170,7 +171,7 @@ Execution follows checked PR/TDD slices, current repository instructions, and wh
 
 1. Master sections 1–9, 18–24.
 2. Plans 01, 02, 05, 06, 09, and 12.
-3. Plans 13–28 as non-negotiable evidence/scope/API/privacy/convergence/task-execution/code-indexing/observability/host-integration/remote-authority gates.
+3. Plans 13–28 and 31 as non-negotiable evidence/scope/API/privacy/convergence/task-execution/code-indexing/observability/host-integration/remote-authority/native-semantic-search gates.
 
 ### Storage and migration implementer
 
@@ -180,6 +181,7 @@ Execution follows checked PR/TDD slices, current repository instructions, and wh
 4. Plan 16 registry/activity/routing sections.
 5. Plan 25 for code extraction, incremental indexing, and V1 per-branch graph-store migration.
 6. Plan 28 for authority placement, replication units, offline spool, backup/failover, and the prohibition on remote SQLite files.
+7. Plan 31 for immutable model-pinned vector generations, rebuild-only migration, and machine-local model-cache boundaries.
 
 ### Search/query implementer
 
@@ -187,18 +189,19 @@ Execution follows checked PR/TDD slices, current repository instructions, and wh
 2. Plans 15 and 23 in full.
 3. Plan 16 federated planner/search-to-retrieval requirements.
 4. Plan 13 for exact private anchor recovery.
+5. Plan 31 in full for the only native semantic-code-search runtime/profile/evaluation path.
 
 ### Hint/hook/tool implementer
 
 1. Plans 06–09.
 2. Master sections 5.3–5.5 and 16.
-3. Plans 21–22 for generated surfaces and the asynchronous context-scout/delivery boundary.
+3. Plans 21–22 and 31 for generated surfaces, the asynchronous context-scout/delivery boundary, and the separately gated model-assisted rerank purpose.
 4. Plan 14 hint/tool/remediation rows.
 5. Plans 15–16 and 23 for search precision, nearby agents, temporal truth, and scope behavior.
 
 ### API/SDK implementer
 
-1. Plans 01, 05, 08, 09, 10, and 17.
+1. Plans 01, 05, 08, 09, 10, 17, and 31.
 2. Plan 16 for selector/routing semantics.
 3. Plans 12 and 27 for cutover/current-client and generated host-bundle rules.
 
@@ -206,13 +209,13 @@ Execution follows checked PR/TDD slices, current repository instructions, and wh
 
 1. Master sections 11–18.
 2. Plan 11 in full.
-3. Plans 15–17 and 27 for labs, All/system scope, explanations, official client contracts, and host integration visibility.
+3. Plans 15–17, 27, and 31 for labs, All/system scope, explanations, official client contracts, host integration visibility, and semantic-code-search controls/diagnostics.
 4. Plan 14 dashboard/API/observability regressions.
 5. Plan 26 for usage/cost/savings accounting and Observatory data contracts.
 
 ### Test/evaluation lead
 
-1. Plans 13–16 and 22–28.
+1. Plans 13–16, 22–28, and 31.
 2. Every plan’s Definition of Done and verification sections.
 3. Master phase/PR gates and SLO section.
 
@@ -225,13 +228,13 @@ Execution follows checked PR/TDD slices, current repository instructions, and wh
 
 ### Configuration/control-plane lead
 
-1. Plan 20 in full plus plans 01, 02, 08–12, 17–19.
+1. Plan 20 in full plus plans 01, 02, 08–12, 17–19, and 31.
 2. Every current config file/flag/env/default/dashboard/provider/hook/daemon setting inventory.
 3. Redactor/privacy floor, credential references, autonomous-curation policy, generated Settings/CLI/MCP/API parity, and activation/ack/drift gates.
 
 ### CLI/MCP/output lead
 
-1. Plan 21 in full plus plans 08–10, 12, 17–20, and 27.
+1. Plan 21 in full plus plans 08–10, 12, 17–20, 27, and 31.
 2. The generated recursive CLI inventory and all 104 source MCP definitions, including hidden, conditional, aliased, runtime-filtered, and unavailable bindings.
 3. Typed-view, Markdown-default MCP, explicit canonical JSON/NDJSON, error/exit, cursor/retrieval-anchor, stdout/stderr, safe-rendering, and cross-transport parity gates.
 
@@ -243,7 +246,7 @@ Execution follows checked PR/TDD slices, current repository instructions, and wh
 
 ### Code-intelligence implementer
 
-1. Plan 25 in full plus plans 01–05, 12, 14, 16, 18, and 19.
+1. Plan 25 in full plus plans 01–05, 12, 14, 16, 18, 19, and 31.
 2. Parser/grammar registry, capture-sanitized payload references and projector-issued build requests, deterministic incremental reuse, packed generations/overlays, symbol lineage, diagnostics/test attribution, V1 graph-store dispositions, and 10× scale gates; root/capture watcher intake is not duplicated here.
 
 ### Observability/accounting implementer
@@ -259,7 +262,7 @@ Execution follows checked PR/TDD slices, current repository instructions, and wh
 
 ### Remote shared-Brain implementer
 
-1. Plan 28 in full plus plans 01–05, 09–12, 16–18, 20–21, and 26.
+1. Plan 28 in full plus plans 01–05, 09–12, 16–18, 20–21, 26, and 31.
 2. Preserve one fenced authority per mutable shard, semantic replication through the application/API boundary, local-only SQLite/WAL families, explicit consistency/coverage, and transport-independent node authorization.
 3. Validate cross-machine Git identity, offline idempotency, revocation, privacy classes, replica/cache lag, backup/restore, standby promotion, and old-authority fencing before remote mode releases.
 

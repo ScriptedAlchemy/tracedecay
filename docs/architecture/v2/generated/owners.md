@@ -20,6 +20,7 @@
 | hooks | Root Private Module | `src/v2/hooks` | 5 | `private` | `docs/plans/tracedecay-v2/07-hooks-crate.md` |
 | presentation | Root Private Module | `src/v2/presentation` | 5 | `private` | `docs/plans/tracedecay-v2/21-cli-mcp-tool-surface-and-output-unification.md` |
 | host-deploy | Root Private Module | `src/v2/host_deploy` | 5 | `private` | `docs/plans/tracedecay-v2/27-cross-host-agent-plugin-bundles.md` |
+| native-semantic-runtime | Root Private Module | `src/v2/native_semantic_runtime` | 5 | `private` | `docs/plans/tracedecay-v2/31-native-fastembed-semantic-code-search.md` |
 | remote-brain-transport | Root Private Module | `src/v2/remote_brain_transport` | 5 | `private` | `docs/plans/tracedecay-v2/28-remote-multi-machine-shared-brain.md` |
 | client-typescript | Public Package | `packages/tracedecay-client` | 5 | `private` | `docs/plans/tracedecay-v2/17-official-public-api-and-sdks.md` |
 | client-python | Public Package | `python/tracedecay-client` | 5 | `private` | `docs/plans/tracedecay-v2/17-official-public-api-and-sdks.md` |

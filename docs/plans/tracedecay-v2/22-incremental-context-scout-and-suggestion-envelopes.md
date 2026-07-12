@@ -551,7 +551,7 @@ Recommended launch families:
 | sibling tasks/tickets | task/dependency/claim/context-packet reads | task/claim/packet anchors, material relation, version/freshness |
 | search gap | status/coverage/scope resolver | one exact recovery action |
 
-The search and ranking implementation remains owned by [05-query-crate.md](./05-query-crate.md) and evaluated under [15-search-quality-evaluation-and-retrieval-research.md](./15-search-quality-evaluation-and-retrieval-research.md); the scout does not implement its own lexical/vector search.
+The search and ranking implementation remains owned by [05-query-crate.md](./05-query-crate.md) and evaluated under [15-search-quality-evaluation-and-retrieval-research.md](./15-search-quality-evaluation-and-retrieval-research.md); the scout does not implement its own lexical/vector search. When plan 05's separately gated model-assisted rerank profile is enabled, a scout query may consume its canonical ranked result and explanation exactly like any other `TraceQueryV1` result. The scout never sends candidate pairs through `ScoutModelRequestV1`, invents another reranker, or treats model prose as rank evidence. A query rerank failure preserves the declared pre-rerank order and typed coverage before scout policy evaluates whether any suggestion remains useful.
 
 ## 8. Model gateway and optional App Server Spark path
 
@@ -623,6 +623,8 @@ pub trait ModelGatewayPort: Send + Sync {
 ```
 
 Root composition provides adapters under `src/v2_adapters/model_gateway/`. The first optional adapter may reuse protocol knowledge from the current Codex app-server integration, but not import its automation task types or environment-owned defaults. It must support persistent/warm connection management, capability refresh, per-invocation cancellation, structured schema validation, actual-model receipt capture, deadlines, and process reaping.
+
+The provider-neutral transport and bounded warm-process pool may also serve plan 05's distinct `RetrievalRerank` purpose when that independently configured capability is advertised and benchmark-promoted. Purpose separation is strict: retrieval reranking accepts only a sanitized query plus at most the configured bounded candidate IDs/content slices, returns a closed rank-only schema, receives no scout tools, and cannot emit suggestions or retrieval requests. Scout planning and retrieval reranking have separate eligibility, privacy/egress, token/cost/deadline, circuit-breaker, and evaluation receipts even when they reuse one app-server process. One Turn manifest accounts for both invocations and forbids recursive query -> scout -> query loops or hidden duplicate model calls. Spark is only a safe display label for a discovered opaque capability; absence or drift never selects another model implicitly.
 
 Model selection:
 

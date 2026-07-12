@@ -6,6 +6,8 @@
 
 **Tech Stack:** Rust workspace; `tracedecay-domain` contracts; `tree-sitter` 0.26-line runtime with bundled grammar crates pinned per release; deterministic canonical row encoding and SHA-256 digests; store `GenerationWriter`/manifest ports supplied by `tracedecay-store`; property, differential, copied-store, crash/disk-full, and Criterion tests.
 
+**Optional native semantic-search boundary:** FastEmbed is the sole V2 native embedding runtime. It is not a new crate and does not enter `tracedecay-code-index`: the root-private `src/v2/native_semantic_runtime` adapter owns FastEmbed loading/inference and implements a projector-owned port over the stable eligible-document/chunk IR defined here. This crate owns deterministic semantic input construction only; plan 04 owns scheduling, plan 02 owns physical vector generations/publication, and plan 05 owns retrieval/ranking. Direct `ort`, direct model-specific integration, and brute-force vector paths are superseded historical designs and cannot coexist with this adapter.
+
 Plan [`16-cross-project-repository-worktree-scope.md`](16-cross-project-repository-worktree-scope.md) §8 requires federated selection by explicit repository/checkout/worktree/ref/snapshot/generation tuples; this crate produces the immutable generations those tuples name and never substitutes an active base checkout or currently published generation for a selected one.
 
 ---
@@ -31,6 +33,21 @@ Plan [`16-cross-project-repository-worktree-scope.md`](16-cross-project-reposito
 - No per-branch physical databases, no mutable published generation, and no in-place historical rewrite.
 - No secret detection or redaction; extraction consumes sanitizer output and can only propagate or narrow eligibility, never widen it.
 - No LLM calls, network access, or ambient CWD/branch resolution anywhere in the crate.
+- No embedding runtime, model download, vector persistence, similarity scan, or FastEmbed dependency in this crate. It emits stable eligible inputs; the root-private adapter performs optional inference through the consumer-owned port.
+
+## Native semantic code-document and chunk contract
+
+`SemanticCodeDocumentV1` is the stable eligible input unit: repository/project/privacy-domain identity; exact checkout/worktree/ref/snapshot and graph-generation IDs; file and optional symbol-occurrence identity; language; sanitizer receipt; eligibility disposition; canonical formatter version; normalized qualified name/signature/doc-comment/body-summary fields; and the source-generation digest. `SemanticCodeChunkV1` adds deterministic chunk ordinal, byte/token boundaries over the sanitized formatted document, overlap policy version, and `chunk_digest`. Raw source, rejected/redacted bytes, ambient paths, and query-time text never enter the runtime adapter.
+
+The canonical input digest covers the ordered eligible document/chunk rows plus formatter, chunk-policy, privacy-domain/key epoch, sanitizer-policy, code extractor/resolver, and source generation digests. Unchanged eligible documents with the same complete pin tuple reuse their prior vector row; changed text, eligibility, formatter/chunk policy, privacy/key epoch, extractor/resolver, model/runtime contract, dimension, metric, or normalization starts an incompatible rebuild. Missing fields fail closed as unavailable semantic coverage; they never fall back to an unpinned string.
+
+Every semantic generation manifest persists or references by immutable digest the complete `NativeFastEmbedRuntimeManifestV1` and representation profile, while repeating the vector-space-critical compatibility pins: adapter contract; model ID/revision/artifact; tokenizer ID/revision/artifact; runtime version/ABI/build; target/CPU/execution provider; requested/actual threads, sessions, and batch; determinism class; output dimension; quantization; pooling; query/document prefixes; truncation/maximum-input/overlap; distance metric; normalization; formatter/chunk policy; privacy domain/key epoch; ordered source/input digest; vector-generation ID; and creation/verification receipts. These pins are inputs to generation identity, not labels added after inference. Vectors from V1, an unpinned model, another vector space/runtime/profile/privacy domain, or any old direct-runtime path are never imported or mixed; the eligible source documents are rebuilt instead.
+
+The native adapter result and plan-02 writer protocol use the exact tuple `(document_id, chunk_id, vector, runtime_manifest_digest, representation_profile_digest)`. `chunk_id` is never inferred from ordering or collapsed into `document_id`; deletion, reuse, checkpoint, membership closure, and query hydration all key the same document/chunk identity.
+
+This semantic-vector family is distinct from holographic memory. FastEmbed encodes eligible code-document chunks for semantic retrieval; holographic memory retains its own algebra, dimensions, serialization, facts/banks, trust, and reasoning semantics. Neither vector family imports, compares, normalizes, or stores the other's values.
+
+Remote vector-generation replication and multi-host compatibility are owned exclusively by plan 28 and cannot alter this plan's local generation identity, pins, eligibility, document/chunk tuple, or activation semantics. Model artifacts and warm FastEmbed runtime/session caches are machine-local and are never replication units.
 
 ## Convergence boundary
 
@@ -514,8 +531,9 @@ Import receipts are durable rows (G4), written through plan 02 PR 33S storage ow
 
 - [ ] Write failing tests named `two_builds_same_inputs_same_digest`, `digest_ignores_compression_and_layout`, `row_order_is_total_and_fixed`, `sink_failure_aborts_without_hidden_retry`, `edge_targets_are_exactly_one_of_occurrence_entity_unresolved`, `every_content_row_binds_a_receipt`, `overlay_build_never_mutates_base_generation`, and `parallel_build_matches_serial_digest`.
 - [ ] Implement `GenerationBuildPlanV1`, streaming canonical row emission for every table in the packed schema above, edge resolution with retained unresolved targets, and the generation digest.
+- [ ] Emit the deterministic `SemanticCodeDocumentV1`/`SemanticCodeChunkV1` IR and ordered eligible-input digest from the same canonical rows, with symbol-first structural chunking, sanitizer eligibility, source spans, formatter/chunker versions, and complete scope/snapshot/generation identity. This is pure rebuildable input for plan 04's PR 14E scheduling companion; no embedding, vector, model, cache, or query behavior enters this crate.
 - [ ] Land the canonical logical row IR for `generation_manifest`, snapshots, file payload refs/files, symbol occurrences, edges, diagnostics, tests/test-map, and overlays. Plan 02 PR 6C alone owns their SQL columns, migrations, triggers, packed files, and publication. A lossless IR→store→IR conformance fixture must prove every logical field survives physical lowering, generation files contain no source body bytes, and every payload reference resolves through plan 02.
-- [ ] Run `cargo test -p tracedecay-code-index --test generation_suite`; expected: exit 0 and identical digests across two full builds and across serial-vs-parallel builds.
+- [ ] Run `cargo test -p tracedecay-code-index --test generation_suite --test semantic_documents`; expected: exit 0, identical graph and semantic-document digests across two full builds and serial-vs-parallel builds, and zero ineligible bytes in semantic inputs.
 - [ ] Run `cargo bench -p tracedecay-code-index --bench code_index -- build`; expected: current-scale full build and 10× symbol-scale build record throughput, peak RSS, and digest stability.
 - [ ] Commit `feat(code-index): add deterministic generation builds`.
 

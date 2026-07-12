@@ -923,6 +923,12 @@ These slices are program gates mapped into the master plan’s PRs, not a compet
 
 ## 15. Risks and mitigations
 
+### Native semantic code-search convergence
+
+FastEmbed is the single optional V2 native embedding runtime, isolated in root-private `src/v2/native_semantic_runtime`; no new package is admitted. Plan 25 owns eligible code-document/chunk semantics and input digests, plan 04 owns incremental scheduling, plan 02 owns immutable vector generations and atomic activation, plan 05 owns retrieval/ranking, and root owns only runtime adaptation. PR 14E must extend architecture lint with a repository-wide dependency/import exclusivity rule: `fastembed` is legal only in the root-private adapter, while direct `ort`, Nomic, alternate embedding runtimes, and duplicate vector/store/scheduler/query implementations are rejected everywhere. The lint includes negative fixtures for an illegal root-module `fastembed` import and direct runtime imports; no plan may claim this boundary is enforced before those fixtures pass.
+
+Convergence requires one manifest vocabulary carrying model/revision/artifact, tokenizer, runtime ABI, dimension, metric, normalization, formatter/chunk, privacy/key, source/input digest, and generation pins. Unchanged compatible rows reuse; incompatibility rebuilds; generations never mix. The February 2026 direct-runtime designs remain historical provenance but cannot govern V2. Holographic-memory algebra remains a separate memory representation and retrieval signal, never an embedding backend, compatible vector generation, or migration source for code semantic search.
+
 | Risk | Mitigation/gate |
 |---|---|
 | “Canonical” crates become monoliths | Bounded contexts, module/file budgets, consumer-owned ports, owner maps, architecture reviews |

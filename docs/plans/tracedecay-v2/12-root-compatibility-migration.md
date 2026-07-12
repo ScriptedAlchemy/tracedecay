@@ -724,6 +724,12 @@ No slice shares a context or publishes a receipt under a broader surrogate; rout
 
 Each slice runs V1 -> shadow -> V2-authoritative+compatibility, holds for the plan's observation window, drills rollback, and only then permits the dependent slice.
 
+### Native semantic code-search cutover for slice 35C
+
+The optional V2 native semantic lane has one runtime authority: root-private `src/v2/native_semantic_runtime`, using FastEmbed behind plan 04's consumer-owned port. It is a module in the existing root package, not another crate, service, database owner, query engine, or model downloader. The module accepts only plan-25 eligible document/chunk requests with the complete immutable model/revision/artifact/tokenizer/runtime-ABI/dimension/metric/normalization/formatter/chunk/privacy/key/source-generation pins and returns bounded vectors plus runtime receipts; it cannot open stores or publish generations.
+
+PR 35C shadows lexical/graph results and FastEmbed semantic generations separately, reports semantic coverage explicitly, and cuts semantic reads over only after staged-build determinism, last-good rollback, reader-drain, incompatible-pin rebuild, no-mixed-vector, and performance receipts pass. V1 vectors and the February 2026 direct-`ort`/Nomic/brute-force design are never imported. Source documents are re-formed through plan 25 and rebuilt. Retirement removes direct runtime/model wiring and any parallel vector scan/query/storage path; rollback points to the retained last-good generation, never to the superseded implementation.
+
 Master Phase 5 additionally defines PR 35I (plan 23 session/LCM/temporal retrieval cutover) and PR 35J (single scheduler/lease owner cutover, plan 24). PR 35I begins only after 35B and 35F complete their observation windows; PR 35J only after 35F and 35G; PR 35H publishes `V2Authoritative` for product reads/transports only after 35I and 35J complete theirs. Root owns route publication for all ten slices. The Section 8 Hermes kanban board / task-graph import is staged by the PR 33R controller (Section 14.1 phase 6) and its task-graph ownership cuts over inside PR 35J; the board slug/dir layout and single-host dispatcher are dropped, not ported (plan 24 §16.2; FM-097, FM-098, FM-099, FM-102).
 
 ### 14.3 Archive and physical deletion

@@ -427,18 +427,21 @@ Companion ownership:
 
 - Add character channel, alias handling, MMR/session-project-provider diversity, adversarial typo corpus, and resource caps.
 
-### Companion requirements for PR 14A: Optional dense and learned-sparse channels
+### Companion requirements for PR 14A: Optional native FastEmbed semantic code channel
 
-- Benchmark local dense and SPLADE-style candidates inside privacy domains; version model/dimension/tokenizer/index.
-- Keep both disabled by default until gates pass.
+- Consume plan 31's frozen code corpus and compare exact/lexical/nonsemantic baselines against FastEmbed `JinaEmbeddingsV2BaseCode`; run `GTELargeENV15Q` as the required comparator under the same pool, resource, and snapshot budgets.
+- Pin exact FastEmbed/runtime/model/tokenizer/chunker/dimension/metric/normalization/index/session/batch manifests; report exact-hit retention, wrong-scope/no-answer behavior, per-language/intent/worst-stratum quality, full/incremental build, cold/warm latency, session reuse, RSS, and bytes.
+- Keep every semantic profile disabled by default until the predeclared promotion gates pass. Generic learned-sparse evidence may remain research-only but creates no second production code-embedding runtime.
 
 ### Companion requirements for PR 14B: Hybrid fusion, bounded graph, and hard-negative loop
 
 - Add RRF profiles, typed bounded graph expansion, hard-negative mining, cross-project/provider/time holdouts, and ablations.
 
-### Companion requirements for PR 14C: Optional late interaction/cross-encoder rerank
+### Companion requirements for PR 14C: Optional native and model-assisted rerank
 
-- Compare no rerank, late interaction, and local cross-encoder on a bounded pool; include warm/cold/resource measurements and deterministic fallback.
+- Compare no rerank with native FastEmbed `BGERerankerV2M3` over at most the top 25 fused candidates; this is the no-external-process acceptance baseline.
+- Separately benchmark an explicit opt-in registered Codex Spark/app-server-style model capability or equivalent discovered capability over a bounded top-N projection. Pin privacy/egress, token/cost, deadline/cancellation/concurrency budgets and requested/actual model receipts; permit no vector generation or relevance-label writeback.
+- Ablate native versus model-assisted reranking on identical pools. Missing capability, substitution, refusal, timeout, malformed output, or budget failure preserves the exact pre-rerank order and never silently selects another route. Reuse plan 22 capability/gateway receipt conventions without coupling evaluation to Context Scout delivery.
 
 ### PR 31J: Search Quality Lab and qrel review
 

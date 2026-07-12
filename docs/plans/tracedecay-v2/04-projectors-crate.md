@@ -571,6 +571,16 @@ Each step is independently resumable by `(projector, version, shard, generation,
 - [ ] Run `cargo test -p tracedecay-projectors --test domain_suite code --test backfill_parity code` plus plan 25's extraction/generation/lineage suites; expected: production integration passes without changing the PR-18 projector contract.
 - [ ] Commit `feat(projectors): integrate production code indexing`.
 
+### Native semantic generation scheduling companion
+
+**Owner and ordering:** this companion lands inside plan 05 PR 14E after PR 18G, plan 02 PR 6C semantic-generation support, and PR 14A's accepted profile receipt; it completes before accepted PR 14B/14C semantic fusion or rerank routes activate. This extends the existing `code_evidence_v1` operation lane; it creates no projector, crate, scheduler, queue, writer authority, or additional executable slice.
+
+- [ ] Add a consumer-owned `SemanticCodeEmbeddingPortV1` request/result contract using only plan 25's ordered `SemanticCodeDocumentV1`/`SemanticCodeChunkV1` rows and the complete model/tokenizer/runtime/dimension/metric/normalization/formatter/chunk/privacy/key/source-generation pin tuple.
+- [ ] On a committed code-generation advance, compare the eligible input digest and complete pin tuple. Reuse unchanged document/chunk vectors; enqueue only changed eligible inputs; force a staged full semantic rebuild for any incompatible pin; coalesce duplicate triggers by target semantic-generation identity.
+- [ ] Drive FastEmbed only through root `src/v2/native_semantic_runtime`. Projector tests use a deterministic fake port. Projectors never import FastEmbed, open model artifacts, persist vectors, or compute similarity.
+- [ ] Commit a durable semantic build request and source fence, run inference outside SQLite writer transactions, then ask plan 02 to verify and atomically activate the sealed vector generation with the code-generation checkpoint. Failure leaves the last-good semantic generation active and reports stale/unavailable semantic coverage.
+- [ ] Add unchanged-document reuse, formatter/chunker/model/tokenizer/runtime-ABI/privacy-key invalidation, duplicate-trigger coalescing, cancellation/restart, partial-batch failure, and no-mixed-generation tests.
+
 ### PR 19: Git and delivery evidence
 
 **Files:** create `src/git_delivery/{mod,core}.rs`; extend `tests/domain_suite.rs` and `tests/backfill_parity.rs`.
