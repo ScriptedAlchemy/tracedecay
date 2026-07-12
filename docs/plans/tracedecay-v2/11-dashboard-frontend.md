@@ -4,7 +4,7 @@
 
 **Architecture:** A route-lazy React/TypeScript application consumes generated HTTP V2 read-model and command contracts; one URL-addressable `InvestigationStateV1` coordinates scope, time, query, selection, linked composition, comparison, renderer, and inspector across every route. Server-side aggregation and frozen vector watermarks bound data, TanStack Query owns snapshot caches, an explicit SSE state machine applies typed deltas, and a measured WebGL/Canvas graph renderer plus ELK/ECharts/CodeMirror expose synchronized outline/table fallbacks instead of attempting a universal graph hairball.
 
-**Tech Stack:** React 19; TypeScript 5.9; bundler selected by the measured Rsbuild-versus-Vite ADR; React Router; TanStack Query and Virtual; large-graph renderer selected by PR 26's current/10× bakeoff (Sigma.js/Graphology, deck.gl/custom typed-buffer WebGL, and Canvas/worker are candidates); ELK.js; ECharts subject to visual/performance validation; D3 scales; CodeMirror 6; Web Workers; Vitest/Testing Library; Playwright and `@axe-core/playwright`; Rust/Axum embedded assets and generated OpenAPI/JSON Schema client contracts.
+**Tech Stack:** React 19; TypeScript 5.9; the repository's existing Rsbuild/Rspack dashboard pipeline; React Router; TanStack Query and Virtual; large-graph renderer selected by PR 26's current/10× bakeoff (Sigma.js/Graphology, deck.gl/custom typed-buffer WebGL, and Canvas/worker are candidates); ELK.js; ECharts subject to visual/performance validation; D3 scales; CodeMirror 6; Web Workers; Vitest/Testing Library; Playwright and `@axe-core/playwright`; Rust/Axum embedded assets and generated OpenAPI/JSON Schema client contracts.
 
 [`20-configuration-control-plane.md`](20-configuration-control-plane.md) is authoritative for `/settings`: its registry generates every form, source chain, validation rule, impact, CLI/API recipe, and drift state. The frontend cannot retain dashboard-only toggles, hidden config, or its own defaults/precedence.
 
@@ -491,7 +491,7 @@ dashboard/
 │   ├── performance/
 │   └── fixtures/
 ├── build.mjs
-├── rsbuild.config.ts or vite.config.ts   # exactly one, selected by ADR
+├── rsbuild.config.ts                     # existing build pipeline; migrate only by separate approved ADR
 ├── vitest.config.mts
 ├── playwright.config.ts
 ├── tsconfig.json
@@ -516,9 +516,9 @@ Rules:
 - No package imports V1 plugin source. Migration adapters live at the route boundary only while the explicit migration flag is active and disappear at cutover.
 - The frontend uses one package manager: npm with committed `package-lock.json` files (`npm ci` in CI) for both `dashboard/` and the separately versioned root `packages/tracedecay-client` workspace. The dashboard consumes only the client's built artifact. No pnpm lockfile, script, or command appears in either workspace.
 
-## 6. Bundler ADR and embedded-asset boundary
+## 6. Frontend build ADR and embedded-asset boundary
 
-Create `docs/adr/dashboard-v2-bundler.md` before choosing a config filename. Measure the current Rsbuild/Rspack pipeline against a Vite prototype using the same shell route and lazy graph chunk. The ADR (benchmark evidence, decision, rollback path) lands as its own reviewable PR and merges before any bundler config file or implementation commit; Task 2's application-shell work starts from the merged decision so the ADR gate stays independent of the winning bundler's implementation.
+Create `docs/adr/dashboard-v2-build-boundary.md` before changing the build topology. It records the existing Rsbuild/Rspack pipeline, embedded-asset contract, deterministic build requirements, and rollback path. Historical Rsbuild/Vite discussions remain scenario evidence for scope and temporal-retrieval tests; they do not require a TraceDecay bakeoff. Any future migration must arrive as a separate approved proposal with evidence against the same boundary matrix; Task 2 does not reopen the bundler choice.
 
 The ADR matrix records:
 
@@ -1372,24 +1372,24 @@ The phase-4 PR letters in this section are the authoritative sub-split ledger fo
 - [ ] Run `cd dashboard && npm test && npm run build && npx playwright test tests/visual/brain-concept.spec.ts tests/accessibility/brain-concept.spec.ts`. Expected: pass.
 - [ ] Commit: `docs(ui): lock Brain workbench product contract` for design/reference artifacts and `feat(ui): prototype V1-backed Brain workbench` for the guarded prototype.
 
-### Task 2: PR 25A — Generated client consumption, bundler ADR, and application foundation
+### Task 2: PR 25A — Generated client consumption, build-boundary ADR, and application foundation
 
 **Files:**
-- Create: `docs/adr/dashboard-v2-bundler.md`
+- Create: `docs/adr/dashboard-v2-build-boundary.md`
 - Create: package tree under `dashboard/packages/{api-client,data-client,query-state,design-system,testing}/` plus `dashboard/app/src/{contracts,features,shared}/`
 - Create: `dashboard/app/src/{main,app,router,routes,providers,error-boundary}.tsx`
 - Modify: `dashboard/{package.json,package-lock.json,build.mjs,tsconfig.json}`
-- Modify: selected bundler config, `build.rs`, `src/dashboard/assets.rs`, `src/dashboard/mod.rs`, `Cargo.toml`
+- Modify: existing Rsbuild configuration as needed, `build.rs`, `src/dashboard/assets.rs`, `src/dashboard/mod.rs`, `Cargo.toml`
 - Test: `dashboard/tests/contract/{generated-drift,asset-manifest,history-fallback}.test.ts`
 - Test: `tests/dashboard_api_test/api.rs`
 
-- [ ] Benchmark Rsbuild and Vite with the exact matrix in section 6 and land measurements/decision/rollback in the ADR as the first reviewed commit in PR 25A, before any bundler config file or implementation commit. PR 24D remains exclusively the API-owned deterministic OpenAPI/generated-TypeScript-client slice consumed here.
+- [ ] Land the current Rsbuild/Rspack build-boundary, determinism, embedding, and rollback ADR as the first reviewed commit in PR 25A. Do not infer a migration or benchmark requirement from historical cross-project scenarios. PR 24D remains exclusively the API-owned deterministic OpenAPI/generated-TypeScript-client slice consumed here.
 - [ ] Write failing generated-client drift, content-hashed asset manifest, CSP, base-path, lazy-chunk, history-fallback, `/api` non-fallback, two-clean-build determinism, and packaged-asset tests.
 - [ ] Run `cargo run -p tracedecay --bin generate-openapi -- --check`, then the root client workspace's own generate/test commands for `packages/tracedecay-client` (that workspace's toolchain, per the section 5 package-manager rule — the dashboard itself remains npm-only), and the dashboard browser-binding tests; expose only official typed HTTP/problem/SSE methods plus UI-safe contract aliases.
-- [ ] Implement one React root, router, providers, route-lazy error boundary, selected bundler, asset manifest, and Axum history fallback.
+- [ ] Implement one React root, router, providers, route-lazy error boundary, existing Rsbuild/Rspack build integration, asset manifest, and Axum history fallback.
 - [ ] Preserve old shell/plugins only under the migration feature flag while parity work is active; direct old/new URLs work in that mode, and a cutover fixture proves old live routes/names stop resolving afterward.
 - [ ] Run `cd dashboard && npm ci && npm test && npm run build`; run `cargo test --test dashboard_api_test`; run `cargo package --allow-dirty --no-verify` followed by the repository package verification command. Expected: pass and no second-build diff.
-- [ ] Commit separately inside PR 25A: `docs(adr): select dashboard V2 bundler` first, then `build(dashboard): establish generated V2 application shell`; do not reuse PR 24D.
+- [ ] Commit separately inside PR 25A: `docs(adr): lock dashboard V2 build boundary` first, then `build(dashboard): establish generated V2 application shell`; do not reuse PR 24D.
 
 ### Task 3: PR 25B — Investigation state, shell, persistence, and design system
 

@@ -734,9 +734,12 @@ fn seven_v2_adrs_lock_the_phase_zero_decisions() {
             assert!(text.contains(heading), "{path} omits {heading}");
         }
         if name == "frontend-build-and-embedding.md" {
-            assert!(text.contains("Pending measured Rsbuild-versus-Vite comparison"));
-            assert!(text.contains("evidence/frontend-build-comparison.md"));
-            assert!(!text.contains("Accepted for V2 Phase 0 after a measured"));
+            assert!(text.contains("# ADR-007: Rsbuild/Rspack Frontend Build"));
+            assert!(text.contains("Accepted. This ADR records the build system already used"));
+            assert!(text.contains("dashboard/build.shared.mjs"));
+            assert!(text.contains("historical scenario as a migration request"));
+            assert!(!text.contains("Pending measured Rsbuild-versus-Vite comparison"));
+            assert!(!text.contains("evidence/frontend-build-comparison.md"));
         }
     }
 }

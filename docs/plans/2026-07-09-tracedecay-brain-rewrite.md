@@ -1504,7 +1504,7 @@ Rules:
 
 These are the only initial dashboard packages. Brain, Explorer, Work/Plans/Tasks/Executors, Sessions, Agents, Code, Knowledge, Delivery, Automations, Observatory, Costs, Playgrounds, inspector, renderers, charts, and code viewing stay inside `dashboard/app/src/{features,shared}`. Promote a module only after two independent production consumers and measured bundle/build benefit; ESLint boundaries provide ownership without package proliferation.
 
-Before selecting the new dashboard bundler, commit an ADR comparing the current Rsbuild/plugin asset pipeline with Vite: dev/prod build, embedded Rust assets, code splitting/lazy routes, CSP, base paths, source maps, legacy plugin loading, test tooling, and migration cost. React/TypeScript and package boundaries are fixed; the bundler follows the ADR evidence.
+Keep the repository's existing Rsbuild/Rspack dashboard pipeline for V2 unless a separately approved migration proposal demonstrates a product need and passes the build, embedding, security, determinism, and rollback gates. Historical Rspack/Rsbuild/React Router and Vite discussions are retrieval and cross-project conformance evidence; they are not instructions to reopen TraceDecay's bundler choice. Record the current build boundary and migration criteria in the frontend-build ADR without manufacturing a comparison requirement.
 
 ### 18.2 Ownership rules
 
@@ -1729,7 +1729,7 @@ Lettered PR suffixes are stable identifiers ordered by dependency, not lexical o
 - [ ] Lock compatibility, rollback, and V1 removal gates.
 - [ ] Lock activity-vs-project shard ownership, deterministic identity allocation, privacy/key-domain blobs, graph generation packing, exact retention/encryption defaults, and cursor/SSE semantics.
 - [ ] Lock canonical planes/owner matrix, package-admission decisions (including root-private hook/presentation/API/host-deployment/remote-Brain-transport adapters), the <=11-package ceiling, crate/module dependency DAG, extension tiers/SPIs, config/status/error governance, complexity and negative-code budgets, anti-corruption adapter contract, convergence scorecard, and deletion waves from plan 19.
-- [ ] Lock Vite as the provisional dashboard baseline and the reproducible Rsbuild-versus-Vite measurement protocol in ADR-007. The final measured selection is intentionally deferred to PR 25A, where the generated client and representative application corpus exist; PR 1 does not claim that later selection is complete.
+- [ ] Record the existing Rsbuild/Rspack dashboard build and hermetic embedding boundary. Treat historical Rsbuild/Vite material as cross-project retrieval scenarios, not product authority; require a separate approved proposal before any bundler migration.
 - [ ] Add architecture lint tests for dependency direction and transport isolation.
 - [ ] Lock the hermetic-test-infrastructure contract from the §2.7 flaky-test row: no process-global mutable test state, hermetic clocks/env/ports/stores, declared nextest/libtest contract, deterministic shutdown, and platform matrix.
 
@@ -2149,9 +2149,9 @@ Cross-cutting official-product companions:
 - Plan 20 PR 25E exclusively owns the complete generated Brain Settings workspace. Plan 11 PR 25D/30H references are limited to shared shell, activity, saved-view, and route-composition consumers; they do not own setting forms, registry semantics, or Settings cutover.
 - PR 25I adds Brain Settings and Sync Observatory topology, placement, repository-correlation, lag/cache/spool/conflict, enrollment/grant, backup, restore, and failover views over PR 24S.
 
-#### PR 25A: Dashboard generated-client consumption, bundler ADR, and application foundation
+#### PR 25A: Dashboard generated-client consumption, build-boundary ADR, and application foundation
 
-- Consume PR 24D's generated TypeScript client; execute ADR-007's locked benchmark protocol and land the measured Rsbuild-versus-Vite selection as the first reviewed commit; create one React root/router/provider shell, deterministic asset manifest, CSP/base-path/history fallback, and packaged-asset verification.
+- Consume PR 24D's generated TypeScript client; retain the repository's existing Rsbuild/Rspack pipeline and document its build/embedding boundary; create one React root/router/provider shell, deterministic asset manifest, CSP/base-path/history fallback, and packaged-asset verification. A bundler migration is out of scope unless separately proposed and approved.
 - [ ] Prove two clean builds are byte-identical, `/api` never falls through to the app shell, legacy shell coexistence is feature-gated, and no second hand-maintained HTTP client exists.
 
 #### PR 25B: Investigation shell, All/system scope explorer, and coverage inspector
