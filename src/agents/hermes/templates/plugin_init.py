@@ -2243,6 +2243,116 @@ def _replay_message_list(value):
             return None
     return list(value)
 
+def _normalize_replay_tool_pairs(messages):
+    """Return a replay containing only structurally paired tool events.
+
+    The returned issue list is intentionally separate from the normalized
+    candidate: callers must reject any replay that required repair instead of
+    silently persisting a transcript different from the one TraceDecay built.
+    """
+    issues = []
+    normalized = []
+    index = 0
+    messages = list(messages or [])
+    while index < len(messages):
+        message = messages[index]
+        if not isinstance(message, dict):
+            index += 1
+            continue
+        if message.get("role") == "tool":
+            issues.append({
+                "code": "orphan_tool_result",
+                "tool_call_id": str(message.get("tool_call_id") or "").strip(),
+                "message_index": index,
+            })
+            index += 1
+            continue
+        tool_calls = message.get("tool_calls")
+        if tool_calls is None:
+            normalized.append(message)
+            index += 1
+            continue
+        if message.get("role") != "assistant" or not isinstance(tool_calls, list) or not tool_calls:
+            issues.append({"code": "invalid_tool_calls", "message_index": index})
+            cleaned = dict(message)
+            cleaned.pop("tool_calls", None)
+            if str(cleaned.get("content") or "").strip():
+                normalized.append(cleaned)
+            index += 1
+            continue
+
+        call_ids = [_summary_tool_call_id(call) for call in tool_calls]
+        result_end = index + 1
+        while result_end < len(messages) and isinstance(messages[result_end], dict) \
+                and messages[result_end].get("role") == "tool":
+            result_end += 1
+        results = messages[index + 1:result_end]
+        result_ids = [str(result.get("tool_call_id") or "").strip() for result in results]
+        trailing_open = (
+            result_end == len(messages)
+            and not results
+            and all(call_ids)
+            and len(set(call_ids)) == len(call_ids)
+        )
+        if trailing_open:
+            normalized.append(message)
+            index = result_end
+            continue
+        complete = (
+            all(call_ids)
+            and len(set(call_ids)) == len(call_ids)
+            and all(result_ids)
+            and len(set(result_ids)) == len(result_ids)
+            and set(result_ids) == set(call_ids)
+            and len(results) == len(tool_calls)
+        )
+        if complete:
+            normalized.append(message)
+            normalized.extend(results)
+        else:
+            for tool_call_id in sorted(set(call_ids) | set(result_ids)):
+                issues.append({
+                    "code": "unmatched_tool_pair",
+                    "tool_call_id": tool_call_id,
+                    "call_count": call_ids.count(tool_call_id),
+                    "result_count": result_ids.count(tool_call_id),
+                    "message_index": index,
+                })
+            cleaned = dict(message)
+            cleaned.pop("tool_calls", None)
+            if str(cleaned.get("content") or "").strip():
+                normalized.append(cleaned)
+        index = result_end
+    return normalized, issues
+
+def _compression_boundary_abort(
+    result,
+    code,
+    *,
+    source_token_estimate,
+    replay_token_estimate,
+    reported_source_tokens=None,
+    reported_replay_tokens=None,
+    issues=None,
+):
+    payload = dict(result) if isinstance(result, dict) else {}
+    raw_replay = payload.pop("replay_messages", None)
+    payload["status"] = "aborted"
+    payload["reason"] = code
+    payload["replay_messages"] = []
+    payload["compression_diagnostic"] = {
+        "type": "replay_boundary_rejection",
+        "code": code,
+        "defer_preflight_to_real_usage": True,
+        "source_token_estimate": source_token_estimate,
+        "replay_token_estimate": replay_token_estimate,
+        "reported_source_tokens": reported_source_tokens,
+        "reported_replay_tokens": reported_replay_tokens,
+        "rejected_replay_message_count": len(raw_replay) if isinstance(raw_replay, list) else 0,
+        "issues": list(issues or []),
+    }
+    return payload
+
 def _compression_replay_is_compacted(result):
     if not isinstance(result, dict):
         return False
@@ -2911,7 +3021,17 @@ class TraceDecayContextEngine(ContextEngine):
         return len(non_empty) >= 2
 
     def should_defer_preflight_to_real_usage(self, rough_tokens=None):
-        if not (
+        diagnostic = (
+            self.last_compress_result.get("compression_diagnostic")
+            if isinstance(self.last_compress_result, dict)
+            else None
+        )
+        replay_boundary_deferred = bool(
+            isinstance(diagnostic, dict)
+            and diagnostic.get("type") == "replay_boundary_rejection"
+            and diagnostic.get("defer_preflight_to_real_usage")
+        )
+        if not replay_boundary_deferred and not (
             isinstance(self.last_compress_result, dict)
             and self.last_compress_result.get("status") == "compressed"
         ):
@@ -3488,6 +3608,44 @@ class TraceDecayContextEngine(ContextEngine):
             return original
         if replay == original:
             return original
+        normalized_replay, replay_issues = _normalize_replay_tool_pairs(replay)
+        source_token_estimate = _count_messages_tokens(original)
+        replay_token_estimate = _count_messages_tokens(normalized_replay)
+        try:
+            reported_source_tokens = int(current_tokens) if current_tokens is not None else None
+        except (TypeError, ValueError):
+            reported_source_tokens = None
+        try:
+            reported_replay_tokens = int(result.get("replay_token_estimate"))
+        except (TypeError, ValueError):
+            reported_replay_tokens = None
+        boundary_code = None
+        if replay_issues:
+            boundary_code = "invalid_replay_tool_pairs"
+        elif source_token_estimate > 0 and replay_token_estimate >= source_token_estimate:
+            boundary_code = "non_shrinking_replay"
+        elif (
+            reported_source_tokens is not None
+            and reported_source_tokens > 0
+            and reported_replay_tokens is not None
+            and reported_replay_tokens >= reported_source_tokens
+        ):
+            boundary_code = "non_shrinking_reported_replay"
+        if boundary_code is not None:
+            result = _compression_boundary_abort(
+                result,
+                boundary_code,
+                source_token_estimate=source_token_estimate,
+                replay_token_estimate=replay_token_estimate,
+                reported_source_tokens=reported_source_tokens,
+                reported_replay_tokens=reported_replay_tokens,
+                issues=replay_issues,
+            )
+            self.last_compress_result = result
+            self._last_compress_aborted = True
+            self._last_summary_error = boundary_code
+            return original
+        replay = normalized_replay
         if replay != original:
             self.compression_count += 1
         return replay
