@@ -841,10 +841,10 @@ Host constraints:
 | After parallel tool batch | `PostToolBatch` | absent | batch event where documented | Authoritative fan-out/fan-in boundary before next model call. |
 | Host notification | `Notification` | absent | notification event where documented | Async bounded metadata only. |
 | Subagent start | `SubagentStart` | `SubagentStart` | agent/subagent start | Parent session plus agent/Turn identity; `continue:false` cannot stop Codex start. |
-| Subagent stop | `SubagentStop` | `SubagentStop` | agent/subagent stop | Distinct terminal/continuation event; preserve `stop_hook_active`; any `continue:false` wins. |
+| Subagent stop | `SubagentStop` | `SubagentStop` | agent/subagent stop | Distinct terminal/continuation event; preserve `stop_hook_active`; one generated command may issue plan 07's one-shot same-agent task checkpoint; any `continue:false` wins. |
 | Before compaction | `PreCompact` | `PreCompact` | pre-compaction hook | `manual|auto` trigger matcher; stop occurs before boundary; no synchronous transcript parse. |
 | After compaction | `PostCompact` | `PostCompact` | post-compaction hook where documented | `manual|auto` trigger matcher; stop occurs after boundary; preserve boundary anchors. |
-| Turn/response stop | `Stop` | `Stop` | stop/session-end events | Codex matcher ignored; JSON-only exit-0 continuation, `stop_hook_active` loop guard, any `continue:false` wins. Claude preserves background task/cron evidence and eight-block cap. |
+| Turn/response stop | `Stop` | `Stop` | stop/session-end events | Codex matcher ignored; JSON-only exit-0 same-agent continuation, `stop_hook_active` loop guard, any `continue:false` wins. Claude preserves background task/cron evidence and its host block cap; TraceDecay's task checkpoint hard-caps itself at one. |
 | Turn API failure | `StopFailure` | absent | failure-end where documented | Claude output/exit ignored; error type remains separate terminal evidence. |
 | Teammate about to idle | `TeammateIdle` | absent | team event where documented | Provider team evidence is advisory; continuation is bounded by task policy. |
 | Configuration changed | `ConfigChange` | observed config probe, not hook | config event where documented | Claude policy settings cannot be blocked; no raw config body retained. |
@@ -870,6 +870,7 @@ Hook lowering rules:
 11. Claude handler inventory recognizes command, HTTP, MCP tool, prompt, and experimental agent types plus `if`, `once`, timeout/status, exec/shell/PowerShell, async/rewake, headers/env allowlist, model, and input substitution. Foreign definitions are inert evidence and never replay-executed. Generated TraceDecay uses the command subset only.
 12. Claude starts matches in parallel and, within one event resolution, host-deduplicates identical command+args and HTTP URLs including async command definitions. Configured, matched, host-deduped, started, completed/timed-out, decision-applied, and context-delivered states remain separate; async executions from separate event firings have no cross-fire dedupe.
 13. Claude `WorktreeCreate` is omitted by default because registering it replaces native Git worktree creation. It can be generated only for a cataloged root-owned complete create/path-validation/rollback/cleanup effect with stock-version fixtures; capture-only registration is forbidden. `WorktreeRemove` is paired with the same ownership receipt.
+14. Task lifecycle continuation compiles only as the generated synchronous command binding for `Stop`/`SubagentStop`. The compiler rejects a `Stop` matcher, missing explicit timeout, `async`, HTTP, MCP, `prompt`, `agent`, shell, or any reliance on Claude frontmatter `once`. Same-host continuation is proven with stock CLI fixtures and selects plan-24 lifecycle-owner commands only for the owner while non-owners receive `participant_handoff`; it must not invoke an external provider, Anthropic API, Hermes provider profile, or second agent. The daemon's persisted plan-07 CAS and `stop_hook_active` implement at-most-once; host-native larger block limits never widen it.
 
 ### 6.5 MCP
 
@@ -934,6 +935,7 @@ Hermes is an epoch-one compiler target with a different native shape, not a migr
 | Tool discovery | Plugin-native tools plus native MCP client, generated skills, CLI, and deferred tool loading/toolsets | Exact use-case binding and grant ceiling; toolset/profile selection cannot widen server authorization or leak operator tools |
 | Delegation | `delegate_task`, orchestrator/leaf depth, route-aware children, isolated context, and exact handoff packets | Children receive authorized task/context slices and no ambient parent transcript; non-durable delegation cannot masquerade as durable work |
 | Durable execution | Background processes, cron jobs, webhooks, gateway-triggered sessions, and native TraceDecay task-worker adapter | Durable task authority remains plan-24 attempt/lease/fence; Hermes cron/Kanban IDs are execution evidence/adapters, not a second canonical board |
+| Native acting CLI | `ai-coding-agents` may invoke a separately installed Claude Code/Codex CLI under a Hermes/Sol lifecycle owner | Probe executable identity/version/auth/model resolution independently; record it as a plan-24 acting participant. Never translate it into a Hermes provider/MoA route, direct Anthropic/OpenAI API profile, or fallback credential. |
 | Model routing | Hermes provider/model/reasoning route capabilities and health are executor capability evidence | Plan-24 route policy chooses from legal routes using privacy, tools, cost, quality, availability, and user policy; TraceDecay does not rewrite Hermes provider credentials |
 | Delivery | Gateway replies and notifications across supported chat/service surfaces | Delivery target is explicit effect scope with privacy/audience policy; delivery success is not task success or memory scope |
 | Feedback/evolution | Completed-turn evidence, explicit feedback, skill usage/patch telemetry, and automation outcomes | TraceDecay autonomously curates facts/skills/policies from evidence; Hermes curator lifecycle remains host evidence and cannot delete TraceDecay-managed canonical source |
@@ -1548,6 +1550,7 @@ Plan 20 owns configuration. A host instance is `ConfigTargetRefV1::HostIntegrati
 | `host_integrations.trust_policy` | `HostTrustPolicyV1` |
 | `host_integrations.update_policy` | Plan-20 `HostBundleUpdatePolicyV1` |
 | `host_integrations.credential_ref` | `Option<CredentialRefId>` |
+| `host_integrations.native_acting_cli` | Optional closed executable/version/auth/capability probe plus allowed task roles/models/effort; stores no provider credential and cannot become lifecycle owner implicitly |
 
 The resolved descriptors project into one `HostIntegrationDesiredStateV1`; they are not a second desired-state model. Saving desired config never installs, edits, reloads, probes, or claims effectiveness. Only authorized `integrations.install/update/repair/uninstall/verify` operations cross `HostDeploymentPort`. Every descriptor has scope, provenance, mutability, secrecy, policy-lock behavior, restart/reload impact, validation, and audit metadata. Credential values remain plan-18 secret refs; host-native config keys/bodies are adapter-private effects.
 
@@ -1562,11 +1565,12 @@ The resolved descriptors project into one `HostIntegrationDesiredStateV1`; they 
 5. package discovery, manifest/version/digest/signature, cache/source consistency;
 6. skill inventory presence, description budget, core omission, and duplicate legacy command/rule;
 7. role schema, effect ceiling, custom-agent ownership, delegation/inheritance conflicts;
-8. hook trust, registration, event coverage, duplicate mapping, latency, and last safe delivery;
-9. MCP package state, exact profile/binding set, eager budget, authorization, active handshake, and operator inheritance;
-10. stale/foreign-modified/orphan owned artifacts and compensation snapshot health;
-11. release revocation, pending update/reload/restart, and conformance age;
-12. secret/private-path scan of owned artifacts and sanitized diagnostic output.
+8. native acting-CLI executable identity/version/auth/model capability independently from provider/MoA health; mismatched or missing CLI cannot fall back to a direct provider profile;
+9. hook trust, registration, event coverage, duplicate mapping, latency, and last safe delivery;
+10. MCP package state, exact profile/binding set, eager budget, authorization, active handshake, and operator inheritance;
+11. stale/foreign-modified/orphan owned artifacts and compensation snapshot health;
+12. release revocation, pending update/reload/restart, and conformance age;
+13. secret/private-path scan of owned artifacts and sanitized diagnostic output.
 
 Each result is `Healthy`, `Degraded`, `Blocked`, `Unknown`, or `NotApplicable` with stable code, evidence age, affected component, exact next action, and optional operation link. Unknown never renders as supported.
 

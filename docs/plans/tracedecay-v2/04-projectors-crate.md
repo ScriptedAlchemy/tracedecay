@@ -520,6 +520,8 @@ Each step is independently resumable by `(projector, version, shard, generation,
 
 - [ ] Write fixtures for sanitized-native message/source enumeration, external payload ranges, summary fan-in/source ranges, nested DAG, compression boundary/decision, context assembly, lifecycle, missing/locked/redacted payload, tombstone, and retention crossing.
 - [ ] Implement `lcm_context_v1` after canonical message IDs exist; enforce DAG acyclicity, exact source coverage, payload hash, and tombstone lineage.
+- [ ] Publish each V2 summary node, protected content, complete source ranges, claim refs, validated anchor manifest/entries, requested/actual model+effort, model-run receipt, and projector event atomically. A partial node or orphan manifest is quarantined, never queryable.
+- [ ] Propagate source correction, redaction, deletion, lock, retention, authorization, and horizon changes through the transitive summary DAG. Mark affected nodes stale/ineligible without rewriting them; a policy-approved refresh creates a successor node whose manifest cites current eligible sources.
 - [ ] Build exact/recorded/best-effort projection replay manifests and prove unavailable retained inputs are reported instead of substituted silently.
 - [ ] Run `cargo test -p tracedecay-projectors --test activity_suite lcm`; expected: exit 0 and all source ranges/hashes/DAG edges match the fixture manifest.
 - [ ] Run `cargo test -p tracedecay-projectors --test backfill_parity lcm`; expected: V1 raw/summary/payload/compression counts and hashes reconcile with zero unexplained omission.

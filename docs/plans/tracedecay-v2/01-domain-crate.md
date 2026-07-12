@@ -1234,6 +1234,50 @@ pub struct ModelCapabilityRefV1 {
     pub residency: ModelResidencyV1,
     pub discovered_at: UtcMicros,
 }
+
+pub enum ModelReasoningEffortV1 {
+    Minimal,
+    Low,
+    Medium,
+    High,
+    ExtraHigh,
+    Maximum,
+    ProviderSpecific(NativeKindCode),
+}
+
+pub struct ModelFallbackPolicyRefV1 {
+    pub policy_id: RegistryEntryId,
+    pub policy_version: ComponentVersion,
+    pub manifest_digest: ManifestDigest,
+}
+
+pub struct ExecutableIdentityRefV1 {
+    pub catalog_entry: RegistryEntryId,
+    pub binary_digest: ManifestDigest,
+    pub version: ComponentVersion,
+    pub locator_digest: PrivacyDomainBoundLocatorDigest,
+    pub probe_receipt_digest: ManifestDigest,
+}
+
+pub struct SummarizerPolicyRefV1 {
+    pub policy_manifest: PolicyManifestRef,
+    pub requested_model: ModelCapabilityRefV1,
+    pub requested_effort: ModelReasoningEffortV1,
+    pub fallback_policy: ModelFallbackPolicyRefV1,
+}
+
+pub struct SummaryAnchorMarkerV1(pub SafeLabel); // canonical display form: S1..S256
+
+pub enum SummaryAnchorRelationV1 {
+    SupportsClaim,
+    DecisionSource,
+    CorrectionSource,
+    BlockerSource,
+    CodeOrGitEffect,
+    TaskStateSource,
+    UnresolvedQuestionSource,
+    RangeCoverage,
+}
 ```
 
 `TraceDecayBuildRefV1.version` and `build_manifest_digest` are required on every newly emitted TraceDecay log event and use semantic-version precedence with prerelease/build handling; development artifacts generate an explicit valid development/build version and manifest digest rather than an empty or inferred value. A forwarder sets `collector` but preserves `producer` byte-for-byte. Multi-line human diagnostics are one typed event or independently version-stamped continuation events. Live emission can construct only `DiagnosticLogEventV1`/`StoredProducerVersionV1::KnownExactBuild`. The importer may construct `KnownVersion` only when the source proves component+SemVer but lacks an exact build manifest, and may construct `UnknownLegacy` only with source manifest and reason; it never fabricates a digest or downgrades proven version evidence. `CurrentRuntimeSet` resolves through immutable persisted `RuntimeBuildSetMemberV1` rows admitted for the requesting daemon session, not one ambiguous CLI or server version; the reference digest/count must rederive exactly and the set remains replayable after process loss. `CompatibleProtocol` binds the exact protocol and compatibility-manifest digest. SemVer requirements operate on normalized parsed precedence; build metadata does not affect precedence and is selectable only through `exact_build_digests`. Empty `producer_components` means every component in the selected basis; empty `include` means the selected basis population, then `exclude` subtracts. Metric labels still exclude arbitrary build/version cardinality—version is an indexed diagnostic predicate and evidence boundary, not a free-form metric dimension.

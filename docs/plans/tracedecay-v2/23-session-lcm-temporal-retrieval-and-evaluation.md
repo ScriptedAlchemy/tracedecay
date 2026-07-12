@@ -466,22 +466,66 @@ pub struct SummaryNodeV2 {
     pub source_watermark: VectorWatermark,
     pub temporal_horizon: TimeInterval,
     pub created_at: UtcMicros,
-    pub summarizer: SummarizerDescriptor,
-    pub prompt_version: PromptVersion,
+    pub provenance: SummaryProvenanceV1,
     pub sanitization_receipt_id: SanitizationReceiptId,
     pub content_ref: PayloadRef,
     pub claim_refs: Vec<TemporalAssertionId>,
     pub lossiness: SummaryLossiness,
     pub status: SummaryStatus,
 }
+
+pub enum SummaryProvenanceV1 {
+    Generated {
+        summarizer: SummarizerDescriptor,
+        summarizer_policy: SummarizerPolicyRefV1,
+        prompt_version: PromptVersion,
+        model_run_receipt: PayloadRef,
+        anchor_manifest: SummaryAnchorManifestV1,
+    },
+    ImportedUnverified {
+        source_manifest: PayloadRef,
+        source_node_key_digest: PrivacyDomainBoundLocatorDigest,
+        missing_provenance_reason: NativeKindCode,
+    },
+}
+
+pub struct SummaryAnchorManifestV1 {
+    pub summary_node_id: SummaryNodeId,
+    pub summary_content_digest: SanitizedOutputDigest,
+    pub marker_map_digest: ManifestDigest,
+    pub entries: BoundedVec<SummaryAnchorEntryV1, 256>,
+    pub source_watermark: VectorWatermark,
+    pub authorization_digest: AccessPolicyDigest,
+    pub sanitization_receipt_id: SanitizationReceiptId,
+    pub manifest_digest: ManifestDigest,
+}
+
+pub struct SummaryAnchorEntryV1 {
+    pub marker: SummaryAnchorMarkerV1,
+    pub anchor: RetrievalAnchorId,
+    pub relation: SummaryAnchorRelationV1,
+    pub source_range: SourceRangeRef,
+    pub claim_refs: BoundedVec<TemporalAssertionId, 16>,
+}
 ```
 
 - DAG sources are exact raw ranges or prior summary nodes; cycles and missing source coverage fail validation.
-- `SummaryStatus` includes `imported_unverified` for §12.1 V1 imports whose source coverage cannot be proven: such a node carries a single whole-thread `SourceRangeRef` marked unverified, is stale for current mode by default, may navigate/expand, and never satisfies a source-coverage proof; DAG validation accepts missing provable coverage only in this status.
+- `SummaryStatus` includes `imported_unverified` for §12.1 V1 imports whose source coverage cannot be proven: such a node carries `SummaryProvenanceV1::ImportedUnverified`, a single whole-thread `SourceRangeRef` marked unverified, and no provenance-marker chips. It is stale for current mode by default, may navigate/expand, and never satisfies a source-coverage proof; DAG validation accepts missing provable coverage only in this status. A verified successor is generated from authorized sources and does not retrofit model/anchor provenance onto the imported row.
 - New raw/correction evidence after the node horizon does not mutate the node. It marks the node stale for current mode and creates a successor summary if policy allows.
 - Deleted/redacted/locked sources update eligibility and coverage; a non-content tombstone remains.
 - Summary embeddings/indexes use the same privacy domain and versioned horizon.
 - Summary text can retrieve sources but cannot independently prove a claim.
+- Every generated summary has a validated anchor manifest. Consequential claims, decisions, corrections, blockers, code/Git effects, task state, and unresolved questions carry compact stable markers that resolve through the manifest to exact authorized sources. Narrative glue may cite a range-level marker; it does not need an opaque ID in every sentence.
+- An anchor marker is navigation and provenance, not authority. Resolution rechecks authorization, retention, redaction, deletion, current owner routing, temporal cutoff, and manifest digest. Missing, stale, locked, or revoked anchors remain explicit omissions; the summarizer may not fabricate, silently drop, or replace them with uncited prose.
+- Source coverage and claim support are separately measured. A summary can be fluent yet fail publication when required source ranges or consequential claims lack eligible anchors. Re-summarization publishes a successor node and manifest; it never rewrites prior anchor bindings.
+
+### 6.1.1 Default compaction and LCM summarizer policy
+
+The product default for TraceDecay-owned compaction, LCM summarization, and equivalent transcript-summary jobs is the cataloged `gpt-5.6-terra` model at `extra_high` reasoning effort. This is a versioned Plan 20 policy default, not a hard-coded provider call: every run pins requested and actual model identity/revision, reasoning effort, endpoint/runtime, prompt/schema versions, privacy eligibility, budget, source watermark, anchor-manifest digest, and terminal receipt. All Hermes profiles, Codex, Claude, and Cursor share the same TraceDecay user-profile policy; a host profile does not create a separate summary database or default.
+
+An authorized higher-precedence policy may select another capable summarizer for offline, privacy, availability, cost, or compatibility reasons, but the UI/CLI/API must show the override and resulting capability gap. If Terra is unavailable or the content cannot legally reach its runtime, the system does not silently downgrade: policy chooses an explicitly cataloged fallback with a recorded reason, or produces deterministic evidence-only compaction with source anchors and `synthesis_unavailable`. Host-native compaction remains captured as provider evidence and is never mislabeled as a TraceDecay Terra run.
+
+Publication requires structured-output validation for summary text, omissions, lossiness, claim refs, and `SummaryAnchorManifestV1`. Application canonicalizes the rendered marker occurrences and rederives `summary_content_digest` plus `marker_map_digest`; every marker in text must occur exactly in the manifest and every non-range manifest marker must occur in text. Open/replay rechecks both digests before rendering a chip. The model may propose marker-to-source relations only from the bounded source inventory supplied by the assembler; application code resolves and validates the canonical `RetrievalAnchorId`s. Model output cannot mint anchors, widen scope, read the database, or declare a source current.
 
 ### 6.2 Context assembly profile
 
@@ -831,6 +875,8 @@ This plan's replay/lineage/copy/summary/evaluation surfaces are workspaces insid
 - representative plus hidden occurrence tree by provider/session/project/store;
 - provider-native/linkage/copy evidence and uncertainty;
 - summary DAG source ranges, horizon, coverage, model/prompt version, lossiness, stale state;
+- readable `[S1]` marker chips linked to the manifest entry, relation, exact source range, and current resolution state; source content resolves only on explicit authorized open;
+- requested versus actual summarizer model/revision/effort, fallback reason, run receipt, anchor coverage, omissions, and stale/locked/redacted/revoked markers;
 - raw-source expansion with exact omissions/truncation;
 - context-assembly token/byte budget and selected/omitted blocks.
 
@@ -1032,6 +1078,10 @@ Application/API/UI use the shared Plan 09/10/11/21 locations. Root V1 adapters l
 - duplicate source replay, rewrite, late event, missing parent link, and store replica import;
 - copied parent prompts, compaction replays, workflow delegation, and independent same-text messages;
 - summary DAG cycle/missing source/stale horizon/deletion/redaction;
+- atomic node/content/source/claim/anchor-manifest/model-receipt publication and kill recovery; no partial summary becomes queryable;
+- Terra `extra_high` requested/actual receipt, explicit cataloged fallback, privacy-ineligible route, model timeout, and anchored evidence-only output without silent downgrade;
+- forged, duplicate, missing, out-of-range, unauthorized, stale, locked, redacted, deleted, and revoked summary markers; the model cannot mint or rewrite a `RetrievalAnchorId`;
+- source correction/redaction/deletion transitively stales every descendant summary and produces immutable successor lineage rather than in-place edits;
 - temporal assertion backfill, relation revision, conflicting authority, and scope isolation;
 - crash/restart at every cluster/index/summary/eval publication boundary;
 - concurrent capture/projector/query snapshots across many agents/shards.
@@ -1058,6 +1108,8 @@ Application/API/UI use the shared Plan 09/10/11/21 locations. Root V1 adapters l
 - 64 identical refresh requests join one operation and receive the same terminal coverage/error receipt; leader death/takeover, cancellation, skewed projection checkpoints, and malformed-middle-row recovery do not duplicate or skip committed observations.
 
 ### Evaluation/replay tests
+
+- exact replay preserves the original summary text, anchor manifest, model/config/prompt/source watermark, and recorded fallback while enforcing current authorization on anchor open; current-best-effort lists every substituted model/source/config and publishes a successor rather than altering history;
 
 - every qrel/corpus/replay artifact has a digest, cutoff, privacy receipt, anchor coverage, and engine/config versions;
 - metrics recompute from live results rather than trusting fixture summaries;
@@ -1144,6 +1196,8 @@ These suffixes were unused in the plan set when authored. Recheck the master pla
 - Current mode follows explicit valid-time/supersession/authority evidence; as-of mode has zero future leakage; evolution and forensic modes preserve history/conflict.
 - Recency is intent-scoped, bounded, explained, and never the sole truth rule.
 - Raw, summary, entity, semantic, graph, and time candidates have source horizons, versions, ablations, and rank explanations.
+- TraceDecay-owned compaction/LCM summaries request cataloged `gpt-5.6-terra` with `ModelReasoningEffortV1::ExtraHigh` by profile default, record requested/actual/fallback routes, and never silently downgrade or conflate host-native compaction.
+- Every V2 summary publishes atomically with a validated marker/anchor manifest; consequential claims resolve to exact authorized sources, stale/revoked markers remain explicit, models cannot mint anchors, and successor summaries preserve immutable lineage.
 - Cross-shard ranking does not compare uncalibrated BM25 scores or hide skipped/conflicted stores.
 - Default output is compact Markdown; explicit JSON/NDJSON uses the same typed view, stable pagination, coverage, and hydration anchors.
 - At least 500 real query episodes and 5,000 manually grounded judgments satisfy the coverage gates; human labels remain authoritative.

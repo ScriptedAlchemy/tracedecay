@@ -1,0 +1,4 @@
+interface:
+  display_name: "Execute TraceDecay V2 Plan"
+  short_description: "Find the next dependency-safe V2 plan task"
+  default_prompt: "Use $executing-tracedecay-v2-plan to identify the next dependency-safe TraceDecay V2 implementation task and its acceptance evidence."

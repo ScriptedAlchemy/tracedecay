@@ -790,6 +790,21 @@ The producer version field itself, its emission requirement, and legacy-unknown 
 | Updates/migrations | update channel, daemon drain policy, compatibility windows, import schedules, retirement holds |
 | Extensions | enabled manifests, sandbox/resource budgets, privacy/egress permissions, version pins |
 
+The generated session-summary descriptors are explicit:
+
+| Key | Built-in profile default | Contract |
+|---|---|---|
+| `sessions.summary.model` | catalog entry `gpt-5.6-terra` | `ModelCapabilityRefV1`; TraceDecay user-profile-wide across every host/Hermes profile; requested and actual model/revision are receipted. |
+| `sessions.summary.reasoning_effort` | `extra_high` | Canonical `ModelReasoningEffortV1::ExtraHigh`; validated against the selected runtime capability. |
+| `sessions.summary.fallback_policy` | explicit eligible fallback, otherwise anchored evidence-only | Never silent downgrade. Records unavailability/privacy/budget reason, selected actual route, or `synthesis_unavailable`. |
+| `sessions.summary.anchor_policy` | consequential-claim markers required | Requires plan-23 source coverage, validated marker manifest, maximum 256 entries, authorization and sanitizer digests. Cannot permit model-minted anchors. |
+| `task_graph.lifecycle_checkpoint.enabled` | `true` for supported/trusted local hook bindings | Advisory same-agent stop checkpoint; absence/disablement fails open to lease reconciliation and is visible in integration status. |
+| `task_graph.lifecycle_checkpoint.materiality_policy` | cataloged progress/block/terminal-debt policy | Versioned eligibility only; cannot infer completion, create work, widen grants, or compete with ordinary hints. |
+
+Provider/project/session layers may narrow privacy, budgets, or disable synthesis, but cannot create a host-profile-specific TraceDecay store or silently replace the profile default. Settings, CLI, MCP, API, and SDK show desired, activated, effective, requested, and last-actual values with override provenance and capability gaps.
+
+The lifecycle checkpoint's maximum inward continuation is a correctness constant of one, not a writable setting. Claude's larger native stop-block cap or environment override never widens it.
+
 Hard-coded correctness constants and safety maxima are not mislabeled as user settings. They still appear in capability/status documentation when relevant, but are not writable. Conversely, a behavior marketed or documented as configurable cannot remain an unregistered constant.
 
 ### 13.0 Provider freshness descriptors

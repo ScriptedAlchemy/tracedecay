@@ -1,6 +1,6 @@
 # TraceDecay V2 Rewrite Plan Set Index
 
-**Status:** navigation and ownership index for the total-rewrite plan. This pull request contains plans only.
+**Status:** navigation and ownership index for the total-rewrite plan. This pull request contains plans plus the repo-local read-only execution helper at [`.codex/skills/executing-tracedecay-v2-plan`](../../../.codex/skills/executing-tracedecay-v2-plan/SKILL.md); it contains no product implementation.
 
 **Canonical master plan:** [`../2026-07-09-tracedecay-brain-rewrite.md`](../2026-07-09-tracedecay-brain-rewrite.md). This tracked path is authoritative; there is intentionally no second `docs/architecture/tracedecay-v2-master-plan.md` copy that could drift.
 
@@ -64,7 +64,7 @@ When documents overlap:
 3. Plans 13–28 own cross-cutting evidence, regression, retrieval, scope, public-contract, privacy, convergence, configuration, tool/output, incremental-context, temporal-session, task/executor, code-indexing, observability/accounting, cross-host bundle, and remote shared-Brain requirements; bounded crates must satisfy them rather than reimplement them.
 4. An implementation decision that changes a locked domain contract requires an ADR and coordinated plan update before code diverges.
 
-Execution follows checked PR/TDD slices, current repository instructions, and whatever orchestration tools are available at implementation time. No optional named agent skill is a dependency of this plan set.
+Execution follows checked PR/TDD slices, current repository instructions, and whatever orchestration tools are available at implementation time. No optional named agent skill is a dependency of this plan set. The repo-local `executing-tracedecay-v2-plan` skill is an optional parser/checklist aid: its inventory output is never completion or dependency authority without Git/review/test/task evidence.
 
 ## 3. Reading paths
 

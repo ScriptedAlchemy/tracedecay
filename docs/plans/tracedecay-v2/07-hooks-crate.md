@@ -455,6 +455,24 @@ All matching Claude handlers launch in parallel. Within one event resolution the
 
 Claude processes JSON only on exit 0. Exit 2 behavior is event-specific; other nonzero exits normally fail open, except `WorktreeCreate` where any nonzero aborts. HTTP status alone never blocks. Universal fields are `continue`, `stopReason`, `suppressOutput`, `systemMessage`, and allowlisted `terminalSequence`; event-specific output is schema-validated. Injected `additionalContext` over 10,000 characters spills to a host session file and becomes explicit privacy/coverage degradation—TraceDecay context remains below the cap and never asks a model to open the spill. Other large inputs/errors retain ordinary bounded-decode/privacy rules. Async results record produced-at and later model-visible-at Turns; stale resume replay and `asyncRewake` are not Context Scout delivery channels.
 
+### 7.4 One-shot task lifecycle continuation
+
+TraceDecay may use only the stock same-host continuation semantics at `Stop` and `SubagentStop` to ask the current root agent or subagent to reconcile a bound plan-24 attempt before it exits. The generated synchronous command calls the local daemon; when eligible it returns exit-0 JSON with `decision:"block"` and one compact reason. Codex converts that reason into a new continuation prompt; Claude delivers it to the same agent as the next instruction. This path never invokes an Anthropic API, a Hermes provider profile, HTTP/MCP, or Claude `prompt`/`agent` hooks. It is a lifecycle reminder, not a model route.
+
+The daemon evaluates plan 24's `LifecycleCheckpointNeedV1` only for an unambiguous current `WorkItemVersionId` + `ExecutionAttemptId` + fenced `TaskLeaseId/lease_epoch` + participant binding. Eligibility requires material unreported progress, blocker, handoff, or terminal-candidate evidence. A `LifecycleOwner` continuation says to invoke exactly one canonical `attempts.progress`, `attempts.block`, `attempts.complete`, or explicit handoff command with the pinned refs. An acting/reviewer/provider-internal subagent continuation can request only `attempts.participant_handoff`; it cannot heartbeat or terminalize the attempt. The hook may record terminal-candidate evidence, but it cannot infer completion from prose, mark a task terminal, create work, widen a grant, accept a review, or mutate the graph directly.
+
+One persisted compare-and-swap winner is selected across additive/concurrent hook definitions by:
+
+```text
+(profile, host_instance, session_or_thread, turn, root_or_agent,
+ work_item_version, attempt, lease_epoch, terminal_candidate,
+ lifecycle_protocol_version)
+```
+
+Lifecycle checkpoint state is closed: `Ineligible | Reserved | PromptIssued | ContinuedObserved | ConfirmedByLifecycleCommand | SuppressedLoopGuard | Missed | DeliveryUnknown`. When `stop_hook_active=true`, a `PromptIssued`/uncertain-delivery reservation already exists, the lease is stale, the binding is ambiguous, or the daemon/config/trust path is unavailable, the handler returns empty success and allows the agent to stop. TraceDecay deliberately caps this feature at **one** inward continuation even though Claude currently has a larger host block cap and an override. Delivery uncertainty is at-most-once, never an automatic retry. Explicit lifecycle commands and lease reconciliation remain authoritative when hooks are absent, disabled, untrusted, interrupted, or bypassed.
+
+Task lifecycle continuation owns a separate decision/effect slot from hints and Plan 22 suggestion envelopes. A hint cannot consume, trigger, or disguise the one-shot reminder; a reminder cannot carry exploratory context. If foreign hooks return conflicting outcomes, native host precedence still applies and the receipt records that TraceDecay could not prove delivery.
+
 The remaining boundary values are explicit:
 
 ~~~rust
@@ -611,6 +629,7 @@ Idempotency:
 - When neither exists, application insert-or-reads a persisted allocation keyed by host/session/hook-point/native digest. Random process-local IDs cannot determine duplicate identity.
 - Definition/handler/run identity is preserved separately from canonical event identity. A generated release-manifest-bound `HostHookBindingId` in fixed argv resolves the current catalog definition; stale bindings and foreign/ambiguous copies are capture-only. Because Codex supplies no definition/run ID, application persists run allocation keyed by binding, canonical host-event identity, source candidate set, and attempt evidence; indistinguishable copied definitions remain one partial-coverage group rather than fabricated distinct runs. Exact retry dedupe is handler-run-specific. A CAS/lease arbitrates only advisory context/hints so one deterministic current binding can inject them. Blocking, rewrite, permission, and continuation responses use event-specific host aggregation: security deny is never suppressed by advisory arbitration, `PermissionRequest` defaults to `NoDecision` and may allow only under separately authorized managed policy bound to exact tool/input/grant, and current signed duplicate bindings render identical policy results.
 - The host retry of one invocation returns acknowledgement-only plus the stored delivery state when its policy/catalog/environment digest still matches; it never reprints a possibly delivered effect. A digest mismatch returns typed `stale_environment` with no re-evaluation/redelivery. Delivery-unknown is never automatically retried (plan 22 §11 envelope claims follow the same rule).
+- Task lifecycle continuation uses §7.4's stricter persisted CAS. Exactly one current signed binding may reserve `PromptIssued`; concurrent losers, retries, a second stop with `stop_hook_active=true`, and uncertain delivery return empty success. A later explicit lifecycle command correlates to the reservation but never causes re-delivery.
 - A transcript rewrite increments generation, emits RewriteDetected, and appends superseding observations. It never overwrites old evidence.
 - Late records retain occurred/ingested times and source continuity. They do not renumber established Turns or imply causation.
 - Continuity is orthogonal, not one mutually exclusive label. A record may be both late and part of a rewrite generation, or fill a previously recorded gap. The receipt preserves duplicate identity, generation/supersession lineage, source-range relation, lateness, and remaining gaps independently; replay cannot erase an earlier uncertainty merely by receiving a later record.
@@ -747,6 +766,7 @@ For every generated supported/version-gated row, fixtures cover:
 - tool success/error/retry/missing result, approval allow/deny, edit/shell variants;
 - Codex all-source concurrency with reordered completion, no sibling-start suppression, advisory-only invocation-group CAS winner/losers, separately aggregated deny/rewrite/permission/continuation precedence, delivery-unknown no-redelivery, and observable handler-run audit conservation;
 - Claude configured/matched/host-deduped/started/completed/context-delivered conservation across parallel synchronous handlers and repeated async firings; event-specific exit/output precedence, eight-stop-block cap, lagging transcript, stale resume context, output spill, and no foreign-handler execution in replay;
+- one-shot task lifecycle continuation for root and subagent: lifecycle-owner command versus non-owner `participant_handoff`, rejection of subagent terminal authority, duplicate plugin/user definitions, parallel handlers, first stop with `stop_hook_active=false`, second with `true`, persisted CAS winner, explicit confirmation, no task binding, stale lease, daemon timeout/contention, trust/feature absence, user interrupt, Claude `StopFailure`, delivery unknown, and proof that no Anthropic/provider/prompt/agent/MCP route ran;
 - exact V1 normalized fields and host response where compatibility is required;
 - no panic and safe empty response for unknown forward event.
 
