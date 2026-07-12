@@ -1,5 +1,6 @@
 use serde_json::Value;
 
+use super::replay_transactions;
 use super::summarizer::CompressionSummarizerAdapter;
 use super::{
     LCM_COMPRESSION_BOUNDARY_COOLDOWN_SECONDS, LCM_DEFAULT_SUMMARY_FAN_IN, LcmCompressionRequest,
@@ -324,7 +325,7 @@ pub fn bounded_leaf_chunk_len(
         selected_tokens += message_tokens;
         selected_len += 1;
     }
-    selected_len
+    replay_transactions::bounded_atomic_prefix_len(backlog, selected_len)
 }
 
 pub fn progress_leaf_chunk_len(
@@ -334,7 +335,7 @@ pub fn progress_leaf_chunk_len(
 ) -> usize {
     let selected_len = bounded_leaf_chunk_len(backlog, leaf_chunk_tokens, max_source_messages);
     if selected_len == 0 && !backlog.is_empty() {
-        1
+        replay_transactions::first_atomic_unit_len(backlog)
     } else {
         selected_len
     }

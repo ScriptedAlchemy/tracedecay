@@ -16,6 +16,10 @@ const FAKE_LSP_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(1
 // recovery helper keeps the diagnostics quiet window small so success stays
 // cheap.
 const FAKE_LSP_RECOVERY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+// macOS full-suite runs can briefly starve a newly spawned /usr/bin/python3
+// while other test binaries are starting. Keep that harness-only startup
+// allowance independent from the deliberately short diagnostics quiet window.
+const FAKE_LSP_START_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 const OUTER_ASYNC_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(6);
 const HANGING_WRITE_LINE_COUNT: usize = 64_000;
 
@@ -33,6 +37,15 @@ fn recovery_fake_lsp_timeouts() -> lsp::client::LspRefreshTimeouts {
         FAKE_LSP_RECOVERY_TIMEOUT + FAKE_LSP_TIMEOUT,
         FAKE_LSP_RECOVERY_TIMEOUT,
         FAKE_LSP_RECOVERY_TIMEOUT,
+        FAKE_LSP_TIMEOUT,
+    )
+}
+
+fn loaded_runner_fake_lsp_timeouts() -> lsp::client::LspRefreshTimeouts {
+    lsp::client::LspRefreshTimeouts::new(
+        FAKE_LSP_TIMEOUT,
+        FAKE_LSP_START_TIMEOUT,
+        FAKE_LSP_START_TIMEOUT,
         FAKE_LSP_TIMEOUT,
     )
 }
@@ -238,18 +251,18 @@ async fn broker_keeps_diagnostics_for_multiple_languages_in_one_snapshot() {
     );
 
     broker
-        .refresh_documents(
+        .refresh_documents_with_timeouts(
             "alpha",
             vec![fake_document("alpha", "src/lib.alpha", "alpha nope")],
-            FAKE_LSP_TIMEOUT,
+            loaded_runner_fake_lsp_timeouts(),
         )
         .await
         .unwrap();
     broker
-        .refresh_documents(
+        .refresh_documents_with_timeouts(
             "beta",
             vec![fake_document("beta", "src/lib.beta", "beta nope")],
-            FAKE_LSP_TIMEOUT,
+            loaded_runner_fake_lsp_timeouts(),
         )
         .await
         .unwrap();
@@ -743,11 +756,15 @@ async fn broker_ignores_stale_refresh_completion() {
         .unwrap()
         .expect("latest refresh should prepare");
 
-    let latest_completed = latest.collect_diagnostics(FAKE_LSP_TIMEOUT).await;
+    let latest_completed = latest
+        .collect_diagnostics_with_timeouts(loaded_runner_fake_lsp_timeouts())
+        .await;
     assert!(latest_completed.is_ok());
     broker.finish_refresh(latest_completed).unwrap();
 
-    let stale_completed = stale.collect_diagnostics(FAKE_LSP_TIMEOUT).await;
+    let stale_completed = stale
+        .collect_diagnostics_with_timeouts(loaded_runner_fake_lsp_timeouts())
+        .await;
     assert!(stale_completed.is_ok());
     broker.finish_refresh(stale_completed).unwrap();
 
@@ -825,11 +842,15 @@ async fn broker_keys_warm_lsp_clients_by_workspace_root() {
     ];
 
     broker
-        .refresh_documents("fake", documents.clone(), FAKE_LSP_TIMEOUT)
+        .refresh_documents_with_timeouts(
+            "fake",
+            documents.clone(),
+            loaded_runner_fake_lsp_timeouts(),
+        )
         .await
         .unwrap();
     broker
-        .refresh_documents("fake", documents, FAKE_LSP_TIMEOUT)
+        .refresh_documents_with_timeouts("fake", documents, loaded_runner_fake_lsp_timeouts())
         .await
         .unwrap();
 

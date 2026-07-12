@@ -442,7 +442,6 @@ async fn facts_section(
             }
         };
     let query = target
-        .db
         .conn()
         .query(
             "SELECT COUNT(*),
