@@ -41,12 +41,13 @@ def _owner(raw: str, *, phase: int = 0, subject: str = "feat: x", **kw) -> sa.Se
     """
     digest = _sha(raw)
     line = int(digest[:8], 16) % 9000 + 1
+    anchor = A(f"docs/plans/{raw}.md", line, line + 5, digest)
     dependencies = tuple(
         dep if dep.all_source_anchors() else sa.Dependency(
-            dep.parent, dep.kind, dep.payload, source_anchors=("owner#dependency",))
+            dep.parent, dep.kind, dep.payload, source_anchors=(anchor.ref(),))
         for dep in kw.pop("dependencies", ())
     )
-    return sa.Section(raw, "owner", A(f"docs/plans/{raw}.md", line, line + 5, digest),
+    return sa.Section(raw, "owner", anchor,
                       heading=f"{raw} exact owner", phase=phase, commit_subject=subject,
                       dependencies=dependencies, **kw)
 
@@ -468,13 +469,14 @@ class EdgeTests(unittest.TestCase):
 
     def test_payload_bearing_kinds_require_their_field(self) -> None:
         for kind, payload in [
-            ("requires_artifact", (("artifact", "artifact-kind:v1"),)),
-            ("requires_acceptance", (("acceptance", "PR-2-AC-001"),)),
-            ("requires_decision", (("decision", "decision:1"), ("allowed", ["approved"]))),
-            ("requires_plan_outcome", (("plan_outcome", "plan:1"),
+            ("requires_artifact", (("artifact_kind", {"kind": "report", "schema": "schema:v1"}),)),
+            ("requires_acceptance", (("criterion", "PR-2-AC-001"),)),
+            ("requires_decision", (("decision", "decision:1"), ("allowed", [
+                {"registry_code": "approved", "schema_version": "v1"}]))),
+            ("requires_plan_outcome", (("child_plan", "plan:1"),
                                        ("allowed", ["accepted"]))),
-            ("requires_terminal", (("terminal_set", ["succeeded", "failed"]),)),
-            ("not_before", (("timestamp", "2026-01-01T00:00:00Z"),)),
+            ("requires_terminal", (("allowed", ["succeeded", "failed"]),)),
+            ("not_before", (("not_before", "2026-01-01T00:00:00Z"),)),
         ]:
             missing = self._graph([sa.Dependency("PR 2", kind)])
             self.assertEqual([e.code for e in missing.errors],
@@ -513,6 +515,33 @@ class EdgeTests(unittest.TestCase):
         result = sa.reconcile([owner, _owner("PR 2")])
         self.assertEqual([error.code for error in result.errors], ["source_anchor_mismatch"])
 
+    def test_calendar_invalid_offsets_and_leap_seconds_are_rejected(self) -> None:
+        for timestamp in [
+            "2026-02-30T00:00:00Z", "2026-01-01T24:00:00Z",
+            "2026-01-01T00:00:00+24:00", "2026-01-01T00:00:60Z",
+        ]:
+            dependency = sa.Dependency(
+                "PR 2", "not_before", (("not_before", timestamp),))
+            self.assertEqual([error.code for error in self._graph([dependency]).errors],
+                             ["invalid_edge_type_or_payload"])
+
+    def test_reordered_btreesets_collapse_before_merge_and_digest(self) -> None:
+        values = [
+            {"registry_code": "z", "schema_version": "v1"},
+            {"registry_code": "a", "schema_version": "v1"},
+        ]
+        owner = _owner("PR 1", dependencies=(
+            sa.Dependency("PR 2", "requires_decision",
+                          (("decision", "decision:1"), ("allowed", values))),
+            sa.Dependency("PR 2", "requires_decision",
+                          (("decision", "decision:1"), ("allowed", list(reversed(values))))),
+        ))
+        result = sa.reconcile([owner, _owner("PR 2")])
+        self.assertEqual(result.errors, [])
+        self.assertEqual(len(result.records["PR 1"].dependencies), 1)
+        self.assertEqual(result.records["PR 1"].reconciled_body()["dependencies"][0]
+                         ["payload"]["allowed"][0]["registry_code"], "a")
+
     def test_unknown_edge_kind_is_rejected(self) -> None:
         result = self._graph([sa.Dependency("PR 2", "requires_magic")])
         self.assertEqual([e.code for e in result.errors],
@@ -537,16 +566,25 @@ class EdgeTests(unittest.TestCase):
         self.assertEqual(len(result.records["PR 1"].dependencies), 1)
 
     def test_semantically_identical_edges_union_and_sort_source_anchors(self) -> None:
-        owner = _owner("PR 1", dependencies=(
-            sa.Dependency("PR 2", "requires_artifact", (("artifact", "report"),), "z"),
-            sa.Dependency("PR 2", "requires_artifact", (("artifact", "report"),), "a"),
-            sa.Dependency("PR 2", "requires_artifact", (("artifact", "report"),), "z"),
-        ))
-        record = sa.reconcile([owner, _owner("PR 2")]).records["PR 1"]
+        anchor = A("docs/plans/PR 1.md", 1, 6, "owner")
+        companion = A("docs/plans/companion.md", 8, 9, "companion")
+        payload = (("artifact_kind", {"kind": "report", "schema": "schema:v1"}),)
+        owner = sa.Section(
+            "PR 1", "owner", anchor, heading="PR 1 exact owner", phase=0,
+            commit_subject="feat: x", dependencies=(
+                sa.Dependency("PR 2", "requires_artifact", payload,
+                              source_anchors=(companion.ref(), anchor.ref())),
+                sa.Dependency("PR 2", "requires_artifact", payload,
+                              source_anchors=(anchor.ref(),)),
+            ))
+        record = sa.reconcile([
+            owner, sa.Section("PR 1", "companion", companion), _owner("PR 2")
+        ]).records["PR 1"]
         self.assertEqual(len(record.dependencies), 1)
-        self.assertEqual(record.dependencies[0].all_source_anchors(), ("a", "z"))
+        self.assertEqual(record.dependencies[0].all_source_anchors(),
+                         tuple(sorted((anchor.ref(), companion.ref()))))
         self.assertEqual(record.reconciled_body()["dependencies"][0]["source_anchors"],
-                         ["a", "z"])
+                         sorted((anchor.ref(), companion.ref())))
 
     def test_authority_keys_resolve_edge_endpoints(self) -> None:
         # An endpoint absent from records but present in the authority key set is known.
@@ -584,7 +622,7 @@ class CycleTests(unittest.TestCase):
     def test_not_before_edge_does_not_form_a_cycle(self) -> None:
         # not_before is temporal, not gating: it never participates in acyclicity.
         a = _owner("PR 1", dependencies=(
-            sa.Dependency("PR 2", "not_before", (("timestamp", "2026-01-01T00:00:00Z"),)),))
+            sa.Dependency("PR 2", "not_before", (("not_before", "2026-01-01T00:00:00Z"),)),))
         b = _owner("PR 2", dependencies=(sa.Dependency("PR 1", "requires_success"),))
         self.assertEqual(sa.reconcile([a, b]).errors, [])
 
@@ -884,6 +922,18 @@ class BootstrapLocatorTests(unittest.TestCase):
         self.assertEqual(failure.reason, "unreadable")
 
 
+    def test_duplicate_raw_json_keys_are_rejected_at_every_object_level(self) -> None:
+        root = self._repo(self._stack)
+        path = root / ".tracedecay" / "v2-execution-manifest.json"
+        for raw in [
+            '{"schema":"tracedecay.v2.slice-dag/v1","schema":"x","slices":{}}',
+            '{"schema":"tracedecay.v2.slice-dag/v1","slices":{"PR 1":{"payload":{},"payload":{}}}}',
+        ]:
+            path.write_text(raw, encoding="utf-8")
+            _, failure = sa.locate_bootstrap_manifest(root)
+            self.assertEqual(failure.reason, "invalid_json")
+
+
 # ---------------------------------------------------------------------------
 # Pre/post-cutover reconciliation gate (§2.1 step 6)
 # ---------------------------------------------------------------------------
@@ -963,6 +1013,27 @@ class ReconcileAgainstAuthorityTests(unittest.TestCase):
             diagnostics = sa.reconcile_against_authority(records, authority, "pre")
             self.assertTrue(any("malformed dependency" in d.violated_rule
                                 for d in diagnostics), malformed)
+
+    def test_series_tamper_and_noncanonical_series_are_rejected(self) -> None:
+        records = self._records()
+        series = {"PR 1 series": ("PR 1", "PR 2")}
+        authority = _authority(records)
+        authority["series"] = {"PR 1 series": ["PR 1", "PR 9"]}
+        diagnostics = sa.reconcile_against_authority(
+            records, authority, "post", canonical_series=series)
+        self.assertIn("reconciliation_mismatch", {item.code for item in diagnostics})
+        malformed = {"PR 1 series": ("PR 2", "PR 1")}
+        diagnostics = sa.reconcile_against_authority(
+            records, authority, "post", canonical_series=malformed)
+        self.assertIn("invalid_series", {item.code for item in diagnostics})
+
+    def test_authority_dependency_rejects_bogus_provenance_anchor(self) -> None:
+        records = self._records()
+        authority = _authority(records)
+        authority["slices"]["PR 1"]["dependencies"][0]["source_anchors"] = ["bogus"]
+        diagnostics = sa.reconcile_against_authority(records, authority, "post")
+        self.assertTrue(any("malformed dependency" in item.violated_rule
+                            for item in diagnostics))
 
     def test_reconciled_body_and_manifest_projection_are_golden(self) -> None:
         companion = sa.Section("PR 1", "companion", A("companion.md", 4, 5, "c"))

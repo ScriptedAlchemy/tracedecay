@@ -24,6 +24,7 @@ import subprocess
 import unicodedata
 import urllib.parse
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 
 EN_DASH = "–"
@@ -72,12 +73,15 @@ EDGE_KINDS = frozenset(
     }
 )
 PAYLOAD_FREE_KINDS = frozenset({"requires_success"})
-TERMINAL_VALUES = frozenset(
-    {"succeeded", "failed", "cancelled", "timed_out", "lost", "superseded", "deferred"}
-)
-OUTCOME_VALUES = frozenset(
-    {"accepted", "accepted_with_exception", "rejected", "inconclusive", "no_op"}
-)
+DEPENDENCY_PAYLOAD_FIELDS = {
+    "requires_success": frozenset(),
+    "requires_terminal": frozenset({"allowed"}),
+    "requires_artifact": frozenset({"artifact_kind"}),
+    "requires_acceptance": frozenset({"criterion"}),
+    "requires_decision": frozenset({"decision", "allowed"}),
+    "requires_plan_outcome": frozenset({"child_plan", "allowed"}),
+    "not_before": frozenset({"not_before"}),
+}
 
 # Every declared edge kind gates dependency readiness except the purely temporal
 # ``not_before``; only gating edges participate in whole-graph acyclicity (§2.1 step 5).
@@ -100,6 +104,9 @@ class Anchor:
             "end_line": self.end_line,
             "block_sha256": self.block_sha256,
         }
+
+    def ref(self) -> str:
+        return f"{self.path}:{self.start_line}-{self.end_line}#sha256:{self.block_sha256}"
 
 
 @dataclass(frozen=True)
@@ -497,10 +504,11 @@ class SliceRecord:
                 for crit in sorted(self.acceptance, key=lambda c: c.criterion_id)
             ],
             "dependencies": [
-                {"parent": dep.parent, "kind": dep.kind, "payload": dict(dep.payload),
+                {"parent": dep.parent, "kind": dep.kind,
+                 "payload": _canonical_payload(dict(dep.payload)),
                  "source_anchors": list(dep.all_source_anchors())}
                 for dep in sorted(self.dependencies, key=lambda d: (
-                    d.parent, d.kind, _canonical_json(dict(d.payload))))
+                    d.parent, d.kind, _canonical_json(_canonical_payload(dict(d.payload)))))
             ],
             "source_anchors": [anchor.as_dict() for anchor in sorted(self.source_anchors)],
         }
@@ -603,69 +611,86 @@ def idempotency_key(normalized_id: str, digest: str) -> str:
     return f"v2-slice-owner/v1:{urllib.parse.quote(normalized_id, safe='')}:{digest}"
 
 
+def _canonical_rfc3339(value: str) -> str:
+    """Parse RFC 3339, reject leap seconds, and render canonical UTC."""
+    match = re.fullmatch(
+        r"(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(\.\d+)?(Z|[+-]\d{2}:\d{2})", value)
+    if match is None or match.group(6) == "60":
+        raise ValueError("invalid RFC 3339 timestamp or unsupported leap second")
+    offset = match.group(8)
+    if offset != "Z" and (int(offset[1:3]) > 23 or int(offset[4:6]) > 59):
+        raise ValueError("RFC 3339 offset is out of range")
+    parsed = datetime.fromisoformat(value[:-1] + "+00:00" if offset == "Z" else value)
+    utc = parsed.astimezone(timezone.utc)
+    fraction = f".{utc.microsecond:06d}".rstrip("0") if utc.microsecond else ""
+    return utc.strftime("%Y-%m-%dT%H:%M:%S") + fraction + "Z"
+
+
+def _canonical_payload(payload: dict[str, object]) -> dict[str, object]:
+    result = dict(payload)
+    if "allowed" in result and isinstance(result["allowed"], (list, tuple)):
+        result["allowed"] = sorted(result["allowed"], key=_canonical_json)
+    if "not_before" in result and isinstance(result["not_before"], str):
+        result["not_before"] = _canonical_rfc3339(result["not_before"])
+    return result
+
+
+def _nonempty_id(value: object) -> bool:
+    return isinstance(value, str) and bool(value) and value == value.strip()
+
+
+def _typed_object(value: object, fields: frozenset[str]) -> bool:
+    return isinstance(value, dict) and set(value) == fields and all(_nonempty_id(v) for v in value.values())
+
+
+def _typed_set(value: object, fields: frozenset[str] | None = None) -> bool:
+    if not isinstance(value, (list, tuple)) or not value:
+        return False
+    valid = all(_typed_object(v, fields) for v in value) if fields else all(_nonempty_id(v) for v in value)
+    return valid and len({_canonical_json(v) for v in value}) == len(value)
+
+
 def _validate_payload(dep: Dependency) -> str | None:
-    """Validate the closed, typed plan-24 payload union without throwing."""
+    """Validate the exact serialized plan-24 §4.4 payload union."""
     if not isinstance(dep.payload, tuple):
         return "payload must be an ordered tuple of field/value pairs"
-    fields: list[str] = []
-    for pair in dep.payload:
-        if (not isinstance(pair, tuple) or len(pair) != 2
-                or not isinstance(pair[0], str)):
-            return "payload must contain string-named field/value pairs"
-        fields.append(pair[0])
+    if any(not isinstance(pair, tuple) or len(pair) != 2 or not isinstance(pair[0], str)
+           for pair in dep.payload):
+        return "payload must contain string-named field/value pairs"
+    fields = [pair[0] for pair in dep.payload]
     if len(fields) != len(set(fields)):
         return "payload contains duplicate field names"
     payload = dict(dep.payload)
-    try:
-        _canonical_json(payload)
-    except (TypeError, ValueError, OverflowError):
-        return "payload must be finite RFC 8785 canonical JSON"
-
-    expected = {
-        "requires_success": set(),
-        "requires_artifact": {"artifact"},
-        "requires_acceptance": {"acceptance"},
-        "requires_decision": {"decision", "allowed"},
-        "requires_plan_outcome": {"plan_outcome", "allowed"},
-        "requires_terminal": {"terminal_set"},
-        "not_before": {"timestamp"},
-    }.get(dep.kind)
+    expected = DEPENDENCY_PAYLOAD_FIELDS.get(dep.kind)
     if expected is None:
         return None
     if set(payload) != expected:
         return f"{dep.kind} payload fields must be exactly {sorted(expected)!r}"
-
-    def nonempty_string(name: str) -> bool:
-        value = payload[name]
-        return isinstance(value, str) and bool(value.strip())
-
-    if dep.kind in {"requires_artifact", "requires_acceptance"}:
-        field = next(iter(expected))
-        if not nonempty_string(field):
-            return f"{field} must be a non-empty typed reference"
-    elif dep.kind in {"requires_decision", "requires_plan_outcome"}:
-        reference = "decision" if dep.kind == "requires_decision" else "plan_outcome"
-        allowed = payload["allowed"]
-        if not nonempty_string(reference):
-            return f"{reference} must be a non-empty typed reference"
-        if (not isinstance(allowed, (list, tuple)) or not allowed
-                or not all(isinstance(value, str) and value.strip() for value in allowed)
-                or len(allowed) != len(set(allowed))):
-            return "allowed must be a non-empty set of unique string values"
-        if dep.kind == "requires_plan_outcome" and not set(allowed) <= OUTCOME_VALUES:
-            return "plan outcome allowed values are not recognized"
-    elif dep.kind == "requires_terminal":
-        values = payload["terminal_set"]
-        if (not isinstance(values, (list, tuple)) or not values
-                or not all(isinstance(value, str) for value in values)
-                or len(values) != len(set(values)) or not set(values) <= TERMINAL_VALUES):
-            return "terminal_set must be a non-empty set of recognized terminal values"
-    elif dep.kind == "not_before":
-        timestamp = payload["timestamp"]
-        if (not isinstance(timestamp, str) or not timestamp.strip()
-                or re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})",
-                                timestamp) is None):
-            return "timestamp must be an RFC 3339 timestamp"
+    try:
+        _canonical_json(payload)
+    except (TypeError, ValueError, OverflowError):
+        return "payload must be finite RFC 8785 canonical JSON"
+    if dep.kind == "requires_artifact" and not _typed_object(payload["artifact_kind"], frozenset({"kind", "schema"})):
+        return "artifact_kind must be an ArtifactKindRef"
+    if dep.kind == "requires_acceptance" and not _nonempty_id(payload["criterion"]):
+        return "criterion must be an AcceptanceCriterionId"
+    if dep.kind == "requires_decision":
+        if not _nonempty_id(payload["decision"]):
+            return "decision must be a TaskDecisionId"
+        if not _typed_set(payload["allowed"], frozenset({"registry_code", "schema_version"})):
+            return "allowed must be a BTreeSet<DecisionValueV1>"
+    if dep.kind == "requires_plan_outcome":
+        if not _nonempty_id(payload["child_plan"]):
+            return "child_plan must be a PlanId"
+        if not _typed_set(payload["allowed"]):
+            return "allowed must be a BTreeSet<OutcomeClassV1>"
+    if dep.kind == "requires_terminal" and not _typed_set(payload["allowed"]):
+        return "allowed must be an explicit terminal set"
+    if dep.kind == "not_before":
+        try:
+            _canonical_rfc3339(payload["not_before"])
+        except (TypeError, ValueError):
+            return "not_before must be valid RFC 3339; leap seconds unsupported"
     return None
 
 
@@ -907,9 +932,10 @@ def _validate_edges(records: dict[str, SliceRecord], authority_keys: frozenset[s
                 errors.append(_error("invalid_edge_type_or_payload", record.owner, dep.kind,
                                      payload_rule, normalized_id))
                 continue
-            if not dep.all_source_anchors():
+            canonical_anchors = {anchor.ref() for anchor in record.source_anchors}
+            if not dep.all_source_anchors() or not set(dep.all_source_anchors()) <= canonical_anchors:
                 errors.append(_error("source_anchor_mismatch", record.owner, dep.parent,
-                                     "dependency requires at least one canonical source anchor",
+                                     "dependency provenance must resolve to a pinned owner or companion anchor",
                                      normalized_id))
                 continue
             if dep.parent == normalized_id:
@@ -921,7 +947,8 @@ def _validate_edges(records: dict[str, SliceRecord], authority_keys: frozenset[s
                                      "edge endpoint is not a known scalar ID", normalized_id))
                 continue
             try:
-                payload_json = _canonical_json(dict(dep.payload))
+                canonical_payload = _canonical_payload(dict(dep.payload))
+                payload_json = _canonical_json(canonical_payload)
             except (TypeError, ValueError, OverflowError):
                 errors.append(_error("invalid_edge_type_or_payload", record.owner, dep.kind,
                                      "payload must be finite RFC 8785 canonical JSON",
@@ -931,7 +958,8 @@ def _validate_edges(records: dict[str, SliceRecord], authority_keys: frozenset[s
             prior = deduped.get(key)
             anchors = dep.all_source_anchors()
             if prior is None:
-                deduped[key] = Dependency(dep.parent, dep.kind, dep.payload,
+                deduped[key] = Dependency(dep.parent, dep.kind,
+                                          tuple(canonical_payload.items()),
                                           source_anchors=anchors)
             else:
                 deduped[key] = Dependency(
@@ -1059,8 +1087,15 @@ def _validate_manifest(path: Path, repo_root: Path, contained: bool) -> tuple[Pa
 def _validate_manifest_schema(path: Path, raw: bytes) -> BootstrapFailure | None:
     """Reject a manifest that is not JSON or does not satisfy the §2.1 authority schema."""
     try:
-        document = json.loads(raw)
-    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        def unique_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
+            result: dict[str, object] = {}
+            for key, value in pairs:
+                if key in result:
+                    raise ValueError(f"duplicate JSON object key {key!r}")
+                result[key] = value
+            return result
+        document = json.loads(raw, object_pairs_hook=unique_object)
+    except (json.JSONDecodeError, UnicodeDecodeError, ValueError) as exc:
         return BootstrapFailure("invalid_json", f"{path} is not valid JSON: {exc}")
     if not isinstance(document, dict):
         return BootstrapFailure("schema_mismatch", f"{path} root must be a JSON object")
@@ -1085,7 +1120,9 @@ def _validate_manifest_schema(path: Path, raw: bytes) -> BootstrapFailure | None
 
 
 def reconcile_against_authority(records: dict[str, SliceRecord], authority: dict[str, object],
-                                phase: str) -> list[Diagnostic]:
+                                phase: str,
+                                canonical_series: dict[str, tuple[str, ...]] | None = None
+                                ) -> list[Diagnostic]:
     """Parse and compare one exact authority document, recomputing all integrity fields."""
     diagnostics: list[Diagnostic] = []
     authority_anchor = Anchor(f"({phase}-authority)", 0, 0, "")
@@ -1104,6 +1141,23 @@ def reconcile_against_authority(records: dict[str, SliceRecord], authority: dict
     authority_slices = authority["slices"]
     candidate_ids = set(records)
     authority_ids = set(authority_slices)
+
+    canonical_series = canonical_series or {}
+    malformed_series = any(
+        classify_token(key).kind != "series" or not isinstance(members, tuple)
+        or list(members) != sorted(set(members))
+        or not set(members) <= set(records)
+        or any(classify_token(member).ids != (member,) for member in members)
+        for key, members in canonical_series.items()
+    )
+    expected_series = {key: list(members) for key, members in sorted(canonical_series.items())}
+    if malformed_series:
+        diagnostics.append(_error("invalid_series", authority_anchor, repr(canonical_series),
+                                  "canonical series requires exact IDs and sorted unique scalar members"))
+    elif authority["series"] != expected_series:
+        diagnostics.append(_error("reconciliation_mismatch", authority_anchor,
+                                  repr(authority["series"]),
+                                  f"series membership differs from canonical {phase} series"))
 
     expected_source_digest = source_set_digest(records)
     if authority.get("source_set_digest") != expected_source_digest:
@@ -1128,16 +1182,19 @@ def reconcile_against_authority(records: dict[str, SliceRecord], authority: dict
                                       normalized_id))
             continue
         authority_body = {key: expected[key] for key in body_keys}
-        edges, edges_valid = _edge_set(authority_body["dependencies"], normalize_payload_free=True)
-        if not edges_valid:
+        if not _authority_edges_valid(
+                authority_body["dependencies"],
+                {anchor.ref() for anchor in record.source_anchors}):
             diagnostics.append(_error("reconciliation_mismatch", record.owner, normalized_id,
                                       f"{phase} authority contains a malformed dependency",
                                       normalized_id))
             continue
-        authority_body["dependencies"] = [
-            {**edge, "payload": edge.get("payload", {})}
+        authority_body["dependencies"] = sorted([
+            {**edge, "payload": _canonical_payload(edge.get("payload", {})),
+             "source_anchors": sorted(set(edge["source_anchors"]))}
             for edge in authority_body["dependencies"]
-        ]
+        ], key=lambda edge: (edge["parent"], edge["kind"],
+                             _canonical_json(edge["payload"])))
         try:
             recomputed_digest = content_digest(authority_body)
         except (TypeError, ValueError, OverflowError):
@@ -1163,29 +1220,13 @@ def reconcile_against_authority(records: dict[str, SliceRecord], authority: dict
     return sort_diagnostics(diagnostics)
 
 
-def _authority_owner_matches(record: SliceRecord, owner: object) -> bool:
-    """Compare only the normative nested owner identity."""
-    if not isinstance(owner, dict) or not isinstance(owner.get("path"), str):
-        return False
-    anchor = owner.get("anchor")
-    if not isinstance(anchor, dict) or set(owner) != {"path", "heading", "anchor"}:
-        return False
-    if set(anchor) != {"start_line", "end_line", "block_sha256"}:
-        return False
-    expected = {"path": owner["path"], "start_line": anchor["start_line"],
-                "end_line": anchor["end_line"], "block_sha256": anchor["block_sha256"]}
-    return expected == record.owner.as_dict() and owner.get("heading") == record.owner_heading
-
-
-def _edge_set(edges: object, *, normalize_payload_free: bool = False
-              ) -> tuple[frozenset[tuple[str, str, str, str]], bool]:
-    result = set()
+def _authority_edges_valid(edges: object, canonical_anchors: set[str]) -> bool:
+    """Validate the typed authority edge projection without unused set machinery."""
     if not isinstance(edges, list):
-        return frozenset(), False
-    valid = True
+        return False
     for edge in edges:
-        if (normalize_payload_free and isinstance(edge, dict)
-                and edge.get("kind") in PAYLOAD_FREE_KINDS and "payload" not in edge):
+        if (isinstance(edge, dict) and edge.get("kind") in PAYLOAD_FREE_KINDS
+                and "payload" not in edge):
             edge = {**edge, "payload": {}}
         if (not isinstance(edge, dict)
                 or set(edge) != {"parent", "kind", "payload", "source_anchors"}
@@ -1194,24 +1235,16 @@ def _edge_set(edges: object, *, normalize_payload_free: bool = False
                 or not isinstance(edge["payload"], dict)
                 or not isinstance(edge["source_anchors"], list)
                 or not edge["source_anchors"]
-                or not all(isinstance(value, str) and value for value in edge["source_anchors"])):
-            valid = False
-            continue
-        try:
-            payload_json = _canonical_json(edge["payload"])
-            anchors_json = _canonical_json(sorted(set(edge["source_anchors"])))
-        except (TypeError, ValueError, OverflowError):
-            valid = False
-            continue
+                or not all(isinstance(value, str) and value for value in edge["source_anchors"])
+                or not set(edge["source_anchors"]) <= canonical_anchors):
+            return False
         dependency = Dependency(
             edge["parent"], edge["kind"], tuple(edge["payload"].items()),
             source_anchors=tuple(edge["source_anchors"]),
         )
         if edge["kind"] not in EDGE_KINDS or _validate_payload(dependency) is not None:
-            valid = False
-            continue
-        result.add((edge["parent"], edge["kind"], payload_json, anchors_json))
-    return frozenset(result), valid
+            return False
+    return True
 
 
 if __name__ == "__main__":  # pragma: no cover - module is a library, not a CLI
