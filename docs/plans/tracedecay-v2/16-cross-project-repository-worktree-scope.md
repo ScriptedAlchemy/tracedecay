@@ -84,7 +84,9 @@ Do not expose storage topology as product scope. Use these identities:
 | `CodeSnapshotId` | Immutable code/Git state used for a graph query. | Normally commit/tree plus index/config/parser generation; distinct from `GraphGenerationId`. |
 | `ProjectSetId` | Saved or ephemeral set of repositories/projects. | Supports related systems and benchmarks. |
 | `CollectionId` | User-saved heterogeneous entity/query collection. | May cross projects. |
-| `SessionId`, `AgentId`, `WorkflowId` | Activity identities in the profile activity domain. | Attribution to repositories/worktrees is zero, one, many, or unknown over time. |
+| `SessionId`, `AgentId` | Activity identities in the profile activity domain. | Attribution to repositories/worktrees is zero, one, many, or unknown over time. |
+| `OrchestrationObservationId` | Read-only identity for a captured provider-native orchestration/workflow observation. | It may correlate with sessions/agents/projects but never grants execution authority or aliases a native workflow run. |
+| `WorkflowDefinitionVersionId`, `WorkflowRunId` | Plan-32 native dynamic-workflow definition/run identities. | A run pins one exact definition version; scope attribution may span repositories, but neither ID is a provider observation or static operation-workflow ID. |
 | `InitiativeId`, `PlanId`, `WorkItemId`, `ExecutionAttemptId`, `ExecutorRegistrationId` | Canonical plan-24 work/execution identities in the profile activity domain. | Scope may span zero/one/many repositories; an attempt pins one exact writable binding plus authorized reads. Boards and executor queues do not mint scope identity. |
 
 `project_key`, transcript CWD, path hash, graph database filename, store directory, branch database, and provider-local project fields are aliases/provenance. They never become the primary public selector.

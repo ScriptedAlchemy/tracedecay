@@ -59,8 +59,8 @@ pub struct ActivityResearchFacetV1 {
     pub agent_instance_id: Option<AgentInstanceId>,
     pub parent_session_id: Option<SessionId>,
     pub parent_tool_use_id: Option<ToolInvocationId>,
-    pub workflow_run_id: Option<WorkflowRunId>,
-    pub workflow_agent_label: Option<WorkflowAgentLabel>,
+    pub orchestration_observation_id: Option<OrchestrationObservationId>,
+    pub orchestration_agent_label: Option<OrchestrationAgentLabel>,
     pub goal_id: Option<GoalId>,
 }
 
@@ -114,7 +114,7 @@ Plan 02 remains the physical-schema owner. Its research family lowers this tagge
 
 - `research_manifest_entries(entry_id PK, manifest_id, ordinal, subject_kind, purpose_ref, evidence_class, confidence, expected_subject_ref, retrieval_recipe_id, snapshot_ref, coverage_ref, occurred_start, occurred_end)` owns common fields and uniqueness `(manifest_id, ordinal)`.
 - Exactly one subject row exists per entry in `research_anchor_activity_subjects`, `research_anchor_git_subjects`, `research_anchor_delivery_subjects`, `research_anchor_source_subjects`, `research_anchor_web_subjects`, or `research_anchor_document_subjects`, each keyed by `entry_id` with a cascading foreign key. Only the activity table requires `provider_id` and `session_id`; the other subtype tables require their own canonical subject IDs.
-- `research_anchor_activity_facets(entry_id PK/FK, provider_id, host_id, source_store_id, session_id, thread_id, turn_id, message_id, agent_instance_id, parent_session_id, parent_tool_use_id, workflow_run_id, workflow_agent_label, goal_id)` is optional and legal only when the primary subject is not `Activity`.
+- `research_anchor_activity_facets(entry_id PK/FK, provider_id, host_id, source_store_id, session_id, thread_id, turn_id, message_id, agent_instance_id, parent_session_id, parent_tool_use_id, orchestration_observation_id, orchestration_agent_label, goal_id)` is optional and legal only when the primary subject is not `Activity`. These provider-capture fields reference `OrchestrationObservationV1`; native Plan-32 workflow runs are separate primary/relation targets keyed by `WorkflowRunId` and cannot be coerced into this facet.
 - `research_entry_retrieval_anchors(entry_id, ordinal, anchor_id, PRIMARY KEY(entry_id, ordinal), UNIQUE(entry_id, anchor_id))` enforces the nonempty canonical resolver set in the same transaction; observation references use the analogous ordinal child table.
 - `research_anchor_tombstones(entry_id PK, reason, occurred_at, subject_kind, subject_skeleton_blob_id, evidence_class, snapshot_blob_id, coverage_blob_id, audit_receipt_blob_id)` retains the safe tagged subject skeleton. It has no unconditional provider/session columns; an activity tombstone's skeleton carries them, while Git/delivery/source/web/document tombstones retain only their own canonical IDs.
 - Append validation rejects zero/multiple subtype rows, a `subject_kind`/subtype mismatch, an activity facet on an activity-primary row, or provider/session columns smuggled into a non-activity subject. Projection diagnostics surface malformed legacy imports; they never invent activity identity to repair them.

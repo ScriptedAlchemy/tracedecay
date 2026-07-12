@@ -11,7 +11,7 @@
 ## 0. Contract lock
 
 1. `tracedecay-workflow` is a pure deterministic domain kernel. JavaScript engines, TypeScript compilers, stores, schedulers, executors, providers, transports, and UI remain outside it behind ports.
-2. JavaScript and TypeScript are authoring languages, not durable state. Both compile to one immutable `WorkflowSourceArtifactV1` containing canonical executable JavaScript, normalized source/callsite manifest, source map, schema bundle, compiler/runtime ABI pins, and digests. The engine executes only that artifact; TypeScript is never interpreted directly.
+2. JavaScript and TypeScript are the only user-authored workflow languages, not durable state. The root-owned canonical compiler is the only implementation that produces `WorkflowSourceArtifactV1`; daemon/API compilation is authoritative, and any locally distributed validator/compiler component is the exact same release artifact behind a generated ABI adapter, never an SDK reimplementation. The engine executes only the immutable artifact; TypeScript is never interpreted directly.
 3. The canonical command tape plus addressed result/effect history is run truth. Operation rows, projections, checkpoints, logs, transcripts, engine bytecode, and browser graph state are evidence or acceleration, never an alternate history.
 4. Workflow work reuses the one scheduler, operation/step kernel, executor registry, execution-unit envelope, event/outbox, idempotency, effect reconciliation, retention, query, and subscription mechanisms. A workflow-local clone of any of them fails architecture review.
 5. Ordinary workflow nodes are not task work items. Taskgraph compilation emits a candidate only, and the existing plan-24 review/activation commands remain the sole task authority.
@@ -108,7 +108,7 @@ Allowed dependencies are `tracedecay-domain` plus repository-standard serializat
 | Public Rust/TS/Python SDKs and authoring package docs | plan 17 | Generates direct API clients and `@tracedecay/workflow`. |
 | Configuration | plan 20 | Owns engine/runtime/budget/cache/concurrency/UI settings and four-axis state. |
 | CLI/MCP/presentation | plan 21 | Generated commands, compact MCP profile/resources, Markdown/JSON parity, progress/cancellation. |
-| Taskgraph/executor attempt semantics | plan 24 | Shares executor registration/adapters and owns explicit candidate compilation/links into `PlanVersionV1`; no implicit conversion. |
+| Taskgraph target schema/review/activation and executor attempts | plan 24 | Owns `PlanVersionV1`/`WorkItemVersionV1`, review/edit/activation, executor registration/adapters, and workflow↔task links. Plan 32 exclusively owns workflow eligibility, loss semantics, and candidate compilation implementation; no implicit conversion. |
 | Accounting/SLOs | plan 26 | Owns workflow usage, token, cost, cache, queue, replay, latency, and failure measurements. |
 | Host bundles | plan 27 | Projects workflow commands/skills/hooks consistently to Codex, Claude Code, Cursor, and Hermes. |
 | Remote machines | plan 28 | Routes shared-Brain workflow authority and remote executor work under existing shard/lease rules. |
@@ -164,7 +164,9 @@ pub struct WorkflowSourceArtifactV1 {
 }
 ```
 
-JavaScript still passes the pinned parser/normalizer and produces an artifact; TypeScript is transpiled ahead of time with types erased and source spans mapped back to the original. The compiler permits one virtual SDK binding, rewrites Claude-compatible globals to that binding when requested, bundles no arbitrary dependency, and emits one self-contained module. `import`, dynamic import, package resolution, declaration-file execution, decorators/plugins/macros, compiler callbacks, and generated host code are rejected unless a later compiler ABI explicitly adds a fully bundled deterministic form. Engine bytecode, heap snapshots, native pointers, and third-party AST serialization are ephemeral cache material and cannot enter a definition/history/backup/export.
+JavaScript still passes the pinned parser/normalizer and produces an artifact; TypeScript is transpiled ahead of time with types erased and source spans mapped back to the original. The root composition owns one canonical compiler implementation and release component. Daemon/API import, validation, and version creation call it in process or through its root-supervised framed ABI. `@tracedecay/workflow`, generated SDKs, CLI, plugins, and Studio contain no parser, transpiler, normalizer, callsite allocator, schema emitter, or artifact signer. They call the daemon, or local tools may invoke only the exact compiler component shipped by the same TraceDecay release after verifying component digest and compiler/SDK/schema ABI. Local output is advisory and cannot publish a definition version; the daemon recompiles the original bytes and its receipt/artifact digest is authoritative. Version/component mismatch returns `workflow_compiler_abi_mismatch` rather than falling back or rebuilding differently.
+
+The compiler permits one virtual SDK binding, rewrites Claude-compatible globals to that binding when requested, bundles no arbitrary dependency, and emits one self-contained module. `import`, dynamic import, package resolution, declaration-file execution, decorators/plugins/macros, compiler callbacks, and generated host code are rejected unless a later compiler ABI explicitly adds a fully bundled deterministic form. Engine bytecode, heap snapshots, native pointers, and third-party AST serialization are ephemeral cache material and cannot enter a definition/history/backup/export.
 
 ### 5.1A JSON value and schema contract
 
@@ -252,6 +254,20 @@ return agent("Deduplicate and rank the verified set", {
   schema: FinalReportSchema,
 })
 ```
+
+The example is TraceDecay's restricted workflow-body authoring form, not a directly executable ECMAScript module: one top-level `export const meta = <static literal>` precedes a body where top-level `await` and `return` are allowed. Compiler ABI `tdwf-js-wrapper-v1` performs one frozen lowering before ordinary ECMAScript parsing:
+
+```javascript
+export const meta = /* canonicalized admitted meta literal */;
+export async function __tracedecay_workflow_v1(__runtime, __args) {
+  const { phase, agent, parallel, pipeline, childWorkflow, checkpoint,
+          waitForSignal, continueAsNew, sleep, log, workflow } = __runtime;
+  const args = __args;
+  /* exact author body; terminal `return expr` is lowered to `return await expr` */
+}
+```
+
+The lexical splitter accepts exactly one static `meta` export and rejects every other top-level import/export/declaration outside the body grammar. The generated entrypoint name, parameter order, helper destructuring, strictness, terminal-return rewrite, newline normalization, and synthetic prefix/suffix bytes are compiler-ABI inputs. Source maps mark wrapper bytes synthetic and map every body/meta token and diagnostic back to original UTF-8 byte/line/column spans; normalized callsite IDs derive from original spans plus compiler ABI, never generated line numbers. The wrapper-generated async function and its host-observed completion promise are the sole async-function/Promise exception. User-authored async functions and Promise APIs remain rejected. Changing this lowering requires a new compiler/SDK ABI and immutable definition version; replay never recompiles old history with a newer wrapper.
 
 ### 6.2 Canonical helpers
 
@@ -460,7 +476,7 @@ An ordinary workflow is optimized for ephemeral or reusable orchestration whose 
 
 ### 12.2 Explicit taskgraph candidate compilation
 
-`workflows.task_graph.eligibility.get` is a sealed read over an exact definition version or executed-run manifest. `workflows.task_graph.compile_candidate` performs `analyze -> validate -> candidate` and stops. Review/edit/activation use plan 24's existing candidate PlanVersion commands; this feature has no `preview/apply/rollback`, direct activation, or generic materialize command.
+Plan 32 and `tracedecay-workflow` exclusively own the workflow-to-taskgraph compiler implementation and its eligibility, mapping, omission, loss, identity, determinism, provenance, and idempotency semantics. `workflows.task_graph.eligibility.get` is a sealed read over an exact definition version or executed-run manifest. `workflows.task_graph.compile_candidate` performs `analyze -> validate -> candidate` and stops. Plan 24 supplies only the target `PlanVersionV1`/`WorkItemVersionV1` schemas and the existing review/edit/activation commands; it cannot reinterpret workflow nodes or implement another compiler. This feature has no `preview/apply/rollback`, direct activation, or generic materialize command.
 
 Eligibility requires:
 
@@ -502,13 +518,16 @@ workflows.definitions.list|get
 workflows.definition_versions.list|get|diff|validate_source|create|activate|retire
 workflows.source_candidates.list|get|discover|import_version
 workflows.runs.list|get|compare|start|fork|pause|resume|cancel|signal
+workflows.runs.history_page.get
 workflows.nodes.list|get|retry|cancel
 workflows.task_graph.eligibility.get|compile_candidate
 ```
 
 This is the semantic family; generic operation/status/cancel, subscriptions, exports, retrieval anchors, experiments, and taskgraph review/activation stay in their existing families. There is no `workflows.events.subscribe` stream implementation: clients create a generic subscription over the workflow run view and receive deltas carrying canonical activity event/outbox ranges. Replay/engine-policy/cache/fault experiments use the one generic experiment lifecycle with `LabKindV1::Workflow`; they cannot mutate a live run.
 
-`start` accepts exactly one sealed definition-version ref or bounded inline source artifact input plus structured `args`. Inline source is validated and atomically persisted as a retained `Ephemeral` immutable definition/version before its run; “ephemeral” controls discoverability/retention, not replay authority. A successful run can explicitly save/activate a successor definition. HTTP/API/MCP never accept an arbitrary server filesystem path. CLI `--file` reads local bytes client-side and uploads source/media type; the daemon never opens the path. Every mutation uses canonical idempotency, actor/scope, expected version/authority, and typed receipt envelopes.
+`workflows.runs.history_page.get` is the sole sealed command-tape/history read. Its first request authorizes the run and freezes `WorkflowHistorySealV1 { run_id, authority_epoch, definition_version_id, maximum_history_sequence, maximum_command_tape_sequence, head_event_digest, history_schema_version, build_version, snapshot_watermark }`. Every opaque cursor binds that seal, page size, access/redaction digest, and prior page end; pages return ordered canonical event headers plus command identities/dispositions and protected payload/anchor refs, never writable/raw store records. A live run's later events require an explicit new seal and cannot drift into the current traversal. Cursor/authorization/retention mismatch fails closed; terminal history seals are indefinitely replay-stable within retention/tombstone rules.
+
+`start` accepts exactly one sealed definition-version ref or bounded inline source input plus structured `args`. Inline source is author bytes, not a client-produced artifact: the authoritative daemon compiler validates it and atomically persists its retained `Ephemeral` immutable definition/version before the run. “Ephemeral” controls discoverability/retention, not replay authority. A successful run can explicitly save/activate a successor definition. HTTP/API/MCP never accept an arbitrary server filesystem path. CLI `--file` reads local bytes client-side and uploads source/media type; the daemon never opens the path. Every mutation uses canonical idempotency, actor/scope, expected version/authority, and typed receipt envelopes.
 
 ### 14.2 Workflow invocation shape
 
@@ -575,6 +594,7 @@ POST /api/v2/workflow-source-candidates:discover
 POST /api/v2/workflow-source-candidates/{id}:import-version
 GET  /api/v2/workflow-runs
 GET  /api/v2/workflow-runs/{id}
+GET  /api/v2/workflow-runs/{id}/history
 POST /api/v2/workflow-runs:compare
 POST /api/v2/workflow-runs:start|fork
 POST /api/v2/workflow-runs/{id}:pause|resume|cancel|signal
@@ -587,7 +607,7 @@ POST /api/v2/subscriptions
 GET  /api/v2/subscriptions/{id}/events
 ```
 
-List/detail/compare/eligibility are bounded sealed application views with cursors, scope, snapshot/watermark, coverage, version/build pins, and anchors. Protected source/result/transcript bodies resolve separately under the existing payload/anchor contract. Mutations return command receipts and the shared `OperationRef` where asynchronous. There is no `PATCH`, generic workflow action route, server path, per-run event stream, engine endpoint, raw history append, or client-side readiness/cache claim.
+List/detail/compare/eligibility and history-page are bounded sealed application views with cursors, scope, snapshot/watermark, coverage, version/build pins, and anchors. `GET .../{id}/history` accepts only `seal|cursor`, bounded `limit`, and presentation-safe include flags and returns `WorkflowHistoryPageV1`; generated Rust/TS/Python pagers preserve the seal and expose an explicit `refresh_seal` operation. Protected source/result/transcript bodies resolve separately under the existing payload/anchor contract. Mutations return command receipts and the shared `OperationRef` where asynchronous. There is no `PATCH`, generic workflow action route, server path, per-run event stream, engine endpoint, raw history append, or client-side readiness/cache claim.
 
 The workflow subscription snapshot includes run/phase/node/group state, history and command-tape cursors, operation/projection watermarks, unresolved required steering/signals/effects, coverage, and limits. Deltas name their canonical source-event range and are idempotent by event ID. Completion, effect unknown, required-steering, signal, nondeterminism, gap, and terminal events never coalesce away. Slow consumers receive resync/close; reconnect with `Last-Event-ID` either resumes exactly or reloads one authoritative snapshot. SDK pagers/streams expose this state machine rather than hiding gaps behind callbacks.
 
@@ -596,31 +616,33 @@ The workflow subscription snapshot includes run/phase/node/group state, history 
 ```text
 tracedecay workflow list|show|versions|validate|save|activate|retire|diff
 tracedecay workflow source list|show|discover|import|export
-tracedecay workflow run <name|id> --args <json>
+tracedecay workflow run --definition-version <WorkflowDefinitionVersionId> --args <json>
+tracedecay workflow run --scope <selector> --name <name> --version-policy <active|exact:WorkflowDefinitionVersionId> --args <json>
 tracedecay workflow run --file ./review.js --args <json>
 tracedecay workflow status|watch|pause|resume|cancel|fork <run>
+tracedecay workflow history <run> [--seal <seal>|--cursor <cursor>] [--limit <n>]
 tracedecay workflow signal <run> --name <signal> (--json <value>|--stdin)
 tracedecay workflow node retry|cancel <run> <node>
 tracedecay workflow task-graph eligibility|compile-candidate <definition-version|run>
 ```
 
-Markdown is default; `--json` emits the same typed view. `watch` consumes the canonical subscription cursor and visibly resyncs on a gap. `--file` uploads source and never makes the daemon open the client path. `--language` may override extension only with an explicit media type; stdin is bounded. `source discover` requires explicit source root/project scope; `source import` consumes a pinned candidate ID/generation/digest; `source export` writes response bytes client-side to explicit `--output` and never changes canonical state. Resume and fork are distinct commands. Node retry refuses completed/effect-unknown/downstream-consumed nodes with exact fork guidance. Candidate compilation prints the plan-24 candidate ID, loss report, and review continuation; no CLI command activates it.
+Markdown is default; `--json` emits the same typed view. A run never accepts a bare name, mutable definition ID, CWD inference, or implicit active-version lookup. It either receives exact `WorkflowDefinitionVersionId`, or explicit scope plus name and a declared version policy; name resolution returns typed ambiguity and the accepted receipt records the resolved exact version. `watch` consumes the canonical subscription cursor and visibly resyncs on a gap. `history` traverses the sealed paged history use case and never aliases watch/SSE. `--file` uploads source and never makes the daemon open the client path. `--language` may override extension only with an explicit media type; stdin is bounded. `source discover` requires explicit source root/project scope; `source import` consumes a pinned candidate ID/generation/digest; `source export` writes response bytes client-side to explicit `--output` and never changes canonical state. Resume and fork are distinct commands. Node retry refuses completed/effect-unknown/downstream-consumed nodes with exact fork guidance. Candidate compilation prints the Plan-32 compiler receipt plus plan-24 candidate ID, loss report, and review continuation; no CLI command activates it.
 
 ### 14.5 MCP progressive disclosure
 
 The optional MCP profile exposes at most three workflow tools:
 
-- `workflow_run`: validate/start/resume/fork one workflow through a closed tagged request;
-- `workflow_get`: retrieve a definition/run/node/phase view or paged events;
-- `workflow_control`: pause/resume/cancel/signal or safe node retry/cancel through a closed action enum.
+- `workflow_run`: validate/start/fork one workflow through a closed tagged request; it never resumes or controls an existing run;
+- `workflow_get`: retrieve a definition/run/node/phase summary view; it does not page canonical history;
+- `workflow_control`: the sole MCP owner of pause/resume/cancel/signal and safe node retry/cancel through a closed action enum.
 
-Definitions, source candidates, schemas, scripts, run graphs, transcripts, artifacts, and taskgraph eligibility/candidate reports are discoverable as authenticated resources/templates with handles. Source discovery/import/export and candidate compilation remain CLI/API/SDK/orchestrator-only unless a separately budgeted orchestrator profile revision proves need; they are not hidden inside `workflow_control`. Skills teach CLI/API fallback. Do not add one MCP tool per catalog operation, place every definition in initial tool schema, return a giant history/transcript, accept a server path, or let MCP sampling become the workflow executor. Tools-only hosts remain complete through compact tools plus resource links and CLI recipes.
+Definitions, source candidates, schemas, scripts, run graphs, transcripts, artifacts, and taskgraph eligibility/candidate reports are discoverable as authenticated resources/templates with handles. Canonical history uses the authenticated paged resource template `tracedecay://workflows/runs/{run_id}/history{?seal,cursor,limit}` backed only by `workflows.runs.history_page.get`; no MCP tool returns or mutates history. Source discovery/import/export and candidate compilation remain CLI/API/SDK/orchestrator-only unless a separately budgeted orchestrator profile revision proves need; they are not hidden inside `workflow_control`. Skills teach CLI/API fallback. Do not add one MCP tool per catalog operation, place every definition in initial tool schema, return a giant history/transcript, accept a server path, or let MCP sampling become the workflow executor. Tools-only hosts remain complete through compact tools plus resource links and CLI recipes.
 
 ### 14.6 SDKs and authoring package
 
-- generated Rust, TypeScript, and Python public clients expose the same application operations;
-- `@tracedecay/workflow` provides authoring helpers/types, the pinned JS/TS source compiler, local static/schema validation, source-map/callsite artifact generation, and the generated HTTP client; it contains no alternate scheduler/runner/provider client;
-- a Rust builder can construct canonical IR for system workflows without JavaScript;
+- generated Rust, TypeScript, and Python public clients expose the same application operations, including the sealed history pager;
+- `@tracedecay/workflow` provides authoring helpers/types, compiler-ABI declarations, diagnostics/source-map types, and the generated HTTP client. It calls authoritative daemon validation/compile; an optional local-validation command can invoke only the digest-verified canonical compiler component distributed by TraceDecay and labels results advisory. The package contains no compiler implementation, artifact signer, scheduler, runner, engine, or provider client;
+- no Rust IR builder, public IR-construction API, or alternate user-authored workflow path exists. Rust/TypeScript/Python clients submit JavaScript/TypeScript source or exact definition-version IDs. Static system recipes remain Plan-09 `OperationWorkflowDefinitionV1` values and never enter Plan-32 IR;
 - Python may call the public API but V2 does not add a second Python orchestration language/runtime;
 - all clients expose separate start/resume/fork/control/stream types and surface event gaps, command receipts, operation refs, coverage, version pins, and typed problems unchanged;
 - plugin bundles project saved workflows as commands/skills referencing stable definition/version/catalog bindings without copying source or host-specific orchestration logic. A plugin command cannot elevate its route/grants or shadow a nearer host-native workflow silently.
@@ -660,6 +682,7 @@ Every color/edge/animation has text, table, keyboard, and screen-reader equivale
 - node inspector linking prompt-safe input, schema, output, transcript/session/Turn, tools, artifacts, anchors, steering, errors, and operation receipts;
 - planned versus dynamically discovered graph and current replay cursor/history watermark;
 - synchronized command-tape inspector showing expected/actual command, source span, input/schema/dependency digests, addressed result, engine/compiler/build pins, and first nondeterminism mismatch;
+- the inspector pages only through `workflows.runs.history_page.get`, pins and displays its `WorkflowHistorySealV1`, never mixes later live events into the traversal, and offers an explicit “refresh to new seal” action while the subscription continues separately;
 - pause/resume/cancel/fork and node retry/cancel actions only when the application view exposes them;
 - run/node steering rail and composer with exact target/authority/sequence/revision, actual safe delivery boundary, acknowledgement/disposition, required completion fence, advisory non-blocking, and plain-comment separation;
 - signal inbox showing declared waits, schema, deadline/timer race, accepted value receipt, and unrelated comments/hints excluded;
@@ -807,11 +830,11 @@ Benchmarks compare engine candidates, cold/warm compile/evaluate, replay, fan-ou
 
 Required fixture families:
 
-1. **Source/compiler goldens:** JavaScript and TypeScript artifacts, source maps/callsites, Claude-compatible globals, virtual SDK binding, exact compiler/SDK/schema manifest, no arbitrary bundle/import, bytecode exclusion, and cross-platform byte-identical artifact digests.
+1. **Source/compiler goldens:** JavaScript and TypeScript artifacts, `tdwf-js-wrapper-v1` meta/body split and exported async entrypoint, terminal top-level-return lowering, synthetic-wrapper/original-byte source maps and callsites, Claude-compatible globals, virtual SDK binding, exact compiler/SDK/schema manifest, daemon recompilation authority, local-component digest/ABI mismatch, proof SDK packages contain no compiler implementation, no arbitrary bundle/import, bytecode exclusion, and cross-platform byte-identical artifact digests.
 2. **DSL goldens:** meta/args, nested phase, agent, parallel success/failure modes, keyed pipeline, child workflow, timer, signal/timer race, checkpoint, continue-as-new, log, return, schemas, diagnostics, source maps.
 3. **Forbidden runtime:** filesystem, network, shell, env, process, module/package loader, dynamic import, WebAssembly/native module, wall clock, locale/timezone, random, `Promise`/custom thenable/microtask/timer globals, detached async, unbounded loop/promise/job/memory/stack, host reflection, `eval`/`Function`.
 4. **Engine/placement:** exact Boa/rquickjs/upstream/features/allocator candidates, Test262 subset, limits, interrupts, job quiescence, leak slope, panic/abort/OOM/stack faults, daemon containment, helper crash/restart, three OS release artifacts, and 1,000 cross-engine replays.
-5. **Replay:** identical command tape, out-of-order addressed results, deterministic parallel batches/output order, daemon restart at every command boundary, pending activity/timer/signal, log dedupe, snapshot discard/overlap, mismatch kind/order/key/input/schema/dependency, changed definition/compiler/engine ABI, version fork, history cap/continue-as-new.
+5. **Replay/history:** identical command tape, out-of-order addressed results, deterministic parallel batches/output order, daemon restart at every command boundary, pending activity/timer/signal, log dedupe, snapshot discard/overlap, mismatch kind/order/key/input/schema/dependency, changed definition/compiler/engine ABI, version fork, history cap/continue-as-new, sealed page traversal under concurrent appends, cursor tamper/access drift/retention tombstone, terminal-seal stability, and byte-identical CLI/HTTP/SDK/MCP-resource/Studio pages.
 6. **Effects:** kill before/after command admission/outbox/send/ack/result/terminal commit, idempotent/at-least-once/non-repeatable adapters, unknown provider/tool effect, safe retry attempt, cancellation, stale executor, duplicate/reordered delivery.
 7. **Schemas/values:** dialect/vocabulary/meta-schema, internal refs, remote/dynamic refs rejected, invalid args/output, repair exhaustion, recursive/oversized/unsupported schema, regex/format drift, nonfinite/negative-zero/sparse/cyclic/custom values, duplicate object keys, canonical JSON parity.
 8. **Capacity:** 0/1/16/max concurrency, 1,000 live and 10,000 retained nodes, depth/cardinality/child/signal/history caps, fairness with interactive/tasks/automation, rate limit, backpressure, budget exhaustion.
@@ -871,7 +894,7 @@ PR 38B  domain/store  PR 38C  source compiler + selected engine adapter
 ### PR 38C — authoring and root runtime
 
 - Implement the root-private source-root observer/import compiler, JavaScript normalization, TypeScript transpilation, source-map/callsite pipeline, selected engine/placement adapter, forbidden-global realm, bounded job handling, bundled virtual SDK, and engine diagnostics.
-- Add exact source/compiler/SDK/schema/engine/placement manifest, source-name ambiguity handling, no-CWD discovery tests, cross-platform artifacts, and ephemeral-cache invalidation. Never persist engine bytecode or opaque continuations.
+- Add exact source/compiler/SDK/schema/engine/placement manifest, frozen wrapper lowering, one root-owned compiler release component/framed ABI, source-name ambiguity handling, no-CWD discovery tests, cross-platform artifacts, and ephemeral-cache invalidation. Generated packages contain declarations/adapters only; never persist engine bytecode or opaque continuations.
 
 ### PR 38D — application orchestration
 
@@ -880,7 +903,7 @@ PR 38B  domain/store  PR 38C  source compiler + selected engine adapter
 
 ### PR 38E — API and public SDKs
 
-- Generate catalog/OpenAPI, generic-subscription SSE, Rust/TS/Python clients, immutable source import/export, and operation/retrieval anchors; add upload containment, snapshot/delta/gap/reconnect, split start/resume/fork, and parity tests.
+- Generate catalog/OpenAPI, generic-subscription SSE, sealed history-page HTTP/SDK binding, Rust/TS/Python clients, immutable source import/export, and operation/retrieval anchors; add upload containment, snapshot/delta/gap/reconnect, frozen-page cursor, split start/resume/fork, and parity tests.
 
 ### PR 38F — CLI, MCP, and host bundles
 
@@ -922,13 +945,15 @@ Before PR 38A becomes executable, the canonical V2 plan branch must update:
 | master plan | Add dynamic workflows to product outcome, architecture diagram, entity graph, dashboard, implementation phases, and PR 38 dependency order. |
 | plan 00 | Register plan 32 as implementation authority, reading paths, dependency rules, slice inventory/source-set digest. |
 | plan 01 | Reserve `WorkflowDefinitionId`/`WorkflowDefinitionVersionId`/`WorkflowRunId`/`WorkflowPhaseId`/`WorkflowNodeId`/`WorkflowCommandId`/reuse IDs exclusively for Plan-32 native dynamic workflows; provider-native records use `OrchestrationObservationV1` identities and static operation workflows use `OperationId`/`OperationStepId`. Replace or migrate ambiguous generic `WorkflowId`/`WorkflowStepId` aliases, then add refs, events, states, relations, and the `ExecutionUnitV1` distinction. |
-| plan 02 | Add exact physical extension/projection schemas through existing activity/operation/event/outbox families and migration/fault/backup gates. |
+| plan 02 | Rename provider-capture `workflow_runs` to `orchestration_observations`, reserve native `workflow_runs` for Plan 32, and add exact physical extension/projection schemas through existing activity/operation/event/outbox families plus migration/fault/backup gates. Provider observation IDs cannot migrate into native run IDs. |
 | plan 07 | Add workflow lifecycle/steering safe-boundary hooks without script execution. |
 | plan 08 | Register workflow use cases, schemas, engine/executor capabilities, MCP profile metadata, and generated docs. |
 | plan 09 | Rename static cross-shard recipes to operation workflows; add dynamic replay/run/control/taskgraph-candidate use cases over the existing scheduler and generic operations without a second `WorkflowDefinition`. |
 | plan 10 | Bind HTTP/SSE/upload/generated TS operations; forbid server paths and parallel event streams. |
 | plan 11 | Add Workflow Studio/Run Graph/Compare/Replay/taskgraph-candidate routes and comprehension/performance gates. |
 | plan 12 | Own engine dependency/adapter, daemon supervision, diagnostics, local cache/source containment, migration/cutover. |
+| plan 13 | Replace provider-capture `WorkflowRunId` research facets with `OrchestrationObservationId`; native workflow runs remain separate typed anchor/relation targets. |
+| plan 16 | Split provider `OrchestrationObservationId`, native `WorkflowDefinitionVersionId`/`WorkflowRunId`, and static `OperationId` scope identities. |
 | plan 17 | Add public SDKs, `@tracedecay/workflow`, docs/examples/sandbox/conformance. |
 | plan 19 | Add crate/dependency/entropy rules and duplicate orchestrator/scheduler deletion checks. |
 | plan 20 | Register every workflow setting and four-axis state. |
@@ -948,8 +973,10 @@ The reconciliation gate must prove no duplicate owner heading or PR ID, regenera
 - [ ] Scripts have no ambient I/O/nondeterminism; all effects route through cataloged application activities.
 - [ ] Immutable definition versions and canonical history resume after daemon/host crashes without duplicate effects.
 - [ ] Canonical source discovery/import/export has no CWD precedence, implicit activation, mutable-name execution, or durable engine bytecode.
+- [ ] One root-owned compiler component produces authoritative artifacts; SDKs contain no compiler implementation, local validation is advisory, and wrapper lowering/source maps are ABI-golden tested.
 - [ ] JavaScript/TypeScript authoring supports meta/args/phase/agent/parallel/pipeline/log/return with JSON-Schema outputs.
 - [ ] CLI, HTTP/SSE, MCP, Rust/TS/Python SDKs, and host bundles share generated semantics and views.
+- [ ] Sealed command-tape/history paging is one application read with byte-identical HTTP/SDK/CLI/MCP-resource/Studio traversal and no live-page drift.
 - [ ] Workflow Studio renders and controls definitions/runs/nodes at required accessibility and scale gates without browser execution.
 - [ ] History, fork, and cross-run reuse are distinct, pinned, explained, and adversarially tested.
 - [ ] Structured steering works at safe boundaries; plain comments and Plan-22 suggestions never impersonate required steering.
