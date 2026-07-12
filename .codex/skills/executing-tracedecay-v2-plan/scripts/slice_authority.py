@@ -28,8 +28,9 @@ from pathlib import Path
 
 EN_DASH = "–"
 
-# A canonical block hash is the lowercase hex SHA-256 of the anchored source block.
+# Canonical hashes are lowercase full object/block digests.
 SHA256_HEX = re.compile(r"^[0-9a-f]{64}$")
+COMMIT_OID = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
 
 # ---------------------------------------------------------------------------
 # Diagnostics
@@ -165,23 +166,26 @@ def validate_source_anchor(anchor: Anchor,
     return sort_diagnostics(diagnostics)
 
 
-def _validate_pinned_anchor(anchor: Anchor, repo_root: Path, source_commit: str) -> list[Diagnostic]:
-    """Verify an anchor against the exact bytes in one pinned Git tree."""
-    try:
-        source = subprocess.run(
-            ["git", "show", f"{source_commit}:{anchor.path}"], cwd=repo_root,
-            check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-        ).stdout
-    except (OSError, subprocess.CalledProcessError):
+def block_sha256(lines: list[str]) -> str:
+    """Hash logical inventory lines as UTF-8 joined by LF, without a terminal LF."""
+    return hashlib.sha256("\n".join(lines).encode("utf-8")).hexdigest()
+
+
+def _validate_pinned_anchor(anchor: Anchor, source: bytes | None) -> list[Diagnostic]:
+    """Verify an anchor against one already-fetched pinned Git blob."""
+    if source is None:
         return [_error("source_anchor_mismatch", anchor, anchor.path,
                        "anchor path is absent or unreadable in the pinned Git source commit")]
-    lines = source.splitlines(keepends=True)
+    try:
+        lines = source.decode("utf-8").splitlines()
+    except UnicodeDecodeError:
+        return [_error("source_anchor_mismatch", anchor, anchor.path,
+                       "pinned Git source block is not valid UTF-8")]
     if anchor.end_line > len(lines):
         return [_error("source_anchor_mismatch", anchor,
                        f"{anchor.start_line}-{anchor.end_line}",
                        "anchor line range is outside the pinned Git source block")]
-    block = b"".join(lines[anchor.start_line - 1:anchor.end_line])
-    actual = hashlib.sha256(block).hexdigest()
+    actual = block_sha256(lines[anchor.start_line - 1:anchor.end_line])
     if actual != anchor.block_sha256:
         return [_error("source_anchor_mismatch", anchor, anchor.block_sha256,
                        "block hash does not match the pinned Git source block")]
@@ -416,6 +420,13 @@ class Dependency:
     kind: str
     payload: tuple[tuple[str, object], ...] = ()
     source_anchor: str | None = None
+    source_anchors: tuple[str, ...] = ()
+
+    def all_source_anchors(self) -> tuple[str, ...]:
+        values = set(self.source_anchors)
+        if self.source_anchor is not None:
+            values.add(self.source_anchor)
+        return tuple(sorted(values))
 
 
 @dataclass(frozen=True)
@@ -460,7 +471,13 @@ class SliceRecord:
                     "block_sha256": self.owner.block_sha256,
                 },
             },
-            "companions": [anchor.as_dict() for anchor in sorted(self.companions)],
+            "companions": [
+                {"path": anchor.path,
+                 "anchor": {"start_line": anchor.start_line, "end_line": anchor.end_line,
+                            "block_sha256": anchor.block_sha256},
+                 "role": "companion"}
+                for anchor in sorted(self.companions)
+            ],
             "phase": self.phase,
             "commit_subject": self.commit_subject,
             "acceptance": [
@@ -473,10 +490,9 @@ class SliceRecord:
             ],
             "dependencies": [
                 {"parent": dep.parent, "kind": dep.kind, "payload": dict(dep.payload),
-                 "source_anchors": ([dep.source_anchor] if dep.source_anchor else [])}
-                for dep in sorted(self.dependencies,
-                                  key=lambda d: (d.parent, d.kind, d.payload,
-                                                 d.source_anchor or ""))
+                 "source_anchors": list(dep.all_source_anchors())}
+                for dep in sorted(self.dependencies, key=lambda d: (
+                    d.parent, d.kind, _canonical_json(dict(d.payload))))
             ],
             "source_anchors": [anchor.as_dict() for anchor in sorted(self.source_anchors)],
         }
@@ -639,11 +655,49 @@ def reconcile(sections: list[Section], authority_keys: frozenset[str] | None = N
     warnings: list[Diagnostic] = []
     grouped: dict[str, list[tuple[Section, bool]]] = {}
     series_refs: list[tuple[str, Anchor, str]] = []
+    pin_values = (repo_root, source_commit, indexed_plan_paths)
+    pin_supplied = tuple(value is not None for value in pin_values)
+    pinned_blobs: dict[str, bytes | None] = {}
+    pin_anchor = sections[0].anchor if sections else Anchor("(pin-context)", 0, 0, "")
+    if any(pin_supplied) and not all(pin_supplied):
+        errors.append(_error(
+            "source_anchor_mismatch", pin_anchor, repr(pin_supplied),
+            "repo_root, source_commit, and indexed_plan_paths are an all-or-none pin context",
+        ))
+    elif all(pin_supplied):
+        assert repo_root is not None and source_commit is not None
+        if not COMMIT_OID.fullmatch(source_commit):
+            errors.append(_error("source_anchor_mismatch", pin_anchor, source_commit,
+                                 "source_commit must be a full lowercase immutable commit OID"))
+        else:
+            try:
+                resolved = subprocess.run(
+                    ["git", "rev-parse", "--verify", f"{source_commit}^{{commit}}"],
+                    cwd=repo_root, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                    text=True,
+                ).stdout.strip()
+            except (OSError, subprocess.CalledProcessError):
+                resolved = ""
+            if resolved != source_commit:
+                errors.append(_error(
+                    "source_anchor_mismatch", pin_anchor, source_commit,
+                    "source_commit does not identify an immutable commit object",
+                ))
+            else:
+                for path in sorted({section.anchor.path for section in sections}):
+                    try:
+                        pinned_blobs[path] = subprocess.run(
+                            ["git", "show", f"{source_commit}:{path}"], cwd=repo_root,
+                            check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                        ).stdout
+                    except (OSError, subprocess.CalledProcessError):
+                        pinned_blobs[path] = None
 
     for section in sections:
         errors.extend(validate_source_anchor(section.anchor))
-        if repo_root is not None and source_commit is not None:
-            errors.extend(_validate_pinned_anchor(section.anchor, repo_root, source_commit))
+        if pinned_blobs:
+            errors.extend(_validate_pinned_anchor(section.anchor,
+                                                  pinned_blobs.get(section.anchor.path)))
         classification = classify_token(section.raw_id)
         if section.incidental:
             warnings.append(_warning("incidental_reference", section.anchor, section.raw_id,
@@ -783,7 +837,7 @@ def _validate_edges(records: dict[str, SliceRecord], authority_keys: frozenset[s
                     errors: list[Diagnostic]) -> None:
     known = set(records) if authority_keys is None else set(records) | set(authority_keys)
     for normalized_id, record in sorted(records.items()):
-        deduped: list[Dependency] = []
+        deduped: dict[tuple[str, str, str], Dependency] = {}
         for dep in record.dependencies:
             if dep.kind not in EDGE_KINDS:
                 errors.append(_error("invalid_edge_type_or_payload", record.owner, dep.kind,
@@ -802,9 +856,18 @@ def _validate_edges(records: dict[str, SliceRecord], authority_keys: frozenset[s
                 errors.append(_error("unresolved_dependency", record.owner, dep.parent,
                                      "edge endpoint is not a known scalar ID", normalized_id))
                 continue
-            if dep not in deduped:
-                deduped.append(dep)
-        record.dependencies = deduped
+            key = (dep.parent, dep.kind, _canonical_json(dict(dep.payload)))
+            prior = deduped.get(key)
+            anchors = dep.all_source_anchors()
+            if prior is None:
+                deduped[key] = Dependency(dep.parent, dep.kind, dep.payload,
+                                          source_anchors=anchors)
+            else:
+                deduped[key] = Dependency(
+                    prior.parent, prior.kind, prior.payload,
+                    source_anchors=tuple(sorted(set(prior.all_source_anchors()) | set(anchors))),
+                )
+        record.dependencies = [deduped[key] for key in sorted(deduped)]
 
 
 def _detect_cycles(records: dict[str, SliceRecord], errors: list[Diagnostic]) -> None:
@@ -988,12 +1051,17 @@ def reconcile_against_authority(records: dict[str, SliceRecord], authority: dict
             diagnostics.append(_error("reconciliation_mismatch", record.owner, normalized_id,
                                       f"owner differs from {phase} authority",
                                       normalized_id))
-        expected_edges = _edge_set(expected.get("dependencies", []) if isinstance(expected, dict) else [])
-        candidate_edges = _edge_set(
+        expected_edges, edges_valid = _edge_set(
+            expected.get("dependencies", []) if isinstance(expected, dict) else [])
+        candidate_edges, _ = _edge_set(
             [{"parent": dep.parent, "kind": dep.kind, "payload": dict(dep.payload),
-              "source_anchors": ([dep.source_anchor] if dep.source_anchor else [])}
+              "source_anchors": list(dep.all_source_anchors())}
              for dep in record.dependencies])
-        if expected_edges != candidate_edges:
+        if not edges_valid:
+            diagnostics.append(_error("reconciliation_mismatch", record.owner, normalized_id,
+                                      f"{phase} authority contains a malformed dependency",
+                                      normalized_id))
+        elif expected_edges != candidate_edges:
             diagnostics.append(_error("reconciliation_mismatch", record.owner, normalized_id,
                                       f"dependency edges differ from {phase} authority",
                                       normalized_id))
@@ -1001,32 +1069,42 @@ def reconcile_against_authority(records: dict[str, SliceRecord], authority: dict
 
 
 def _authority_owner_matches(record: SliceRecord, owner: object) -> bool:
-    """Compare both compact anchors and the normative nested owner identity."""
+    """Compare only the normative nested owner identity."""
     if not isinstance(owner, dict) or not isinstance(owner.get("path"), str):
         return False
     anchor = owner.get("anchor")
-    if isinstance(anchor, dict):
-        expected = {"path": owner["path"], "start_line": anchor.get("start_line"),
-                    "end_line": anchor.get("end_line"),
-                    "block_sha256": anchor.get("block_sha256")}
-        return expected == record.owner.as_dict() and owner.get("heading") == record.owner_heading
-    expected = {field: owner.get(field) for field in
-                ("path", "start_line", "end_line", "block_sha256")}
-    return expected == record.owner.as_dict()
+    if not isinstance(anchor, dict) or set(owner) != {"path", "heading", "anchor"}:
+        return False
+    if set(anchor) != {"start_line", "end_line", "block_sha256"}:
+        return False
+    expected = {"path": owner["path"], "start_line": anchor["start_line"],
+                "end_line": anchor["end_line"], "block_sha256": anchor["block_sha256"]}
+    return expected == record.owner.as_dict() and owner.get("heading") == record.owner_heading
 
 
-def _edge_set(edges: object) -> frozenset[tuple[str, str, str, str]]:
+def _edge_set(edges: object) -> tuple[frozenset[tuple[str, str, str, str]], bool]:
     result = set()
-    for edge in edges or []:
-        if isinstance(edge, dict) and "parent" in edge and "kind" in edge:
-            payload = edge.get("payload", {})
-            anchors = edge.get("source_anchors")
-            if anchors is None:
-                singular = edge.get("source_anchor")
-                anchors = [singular] if singular is not None else []
-            result.add((str(edge["parent"]), str(edge["kind"]),
-                        _canonical_json(payload), _canonical_json(anchors)))
-    return frozenset(result)
+    if not isinstance(edges, list):
+        return frozenset(), False
+    valid = True
+    for edge in edges:
+        if (not isinstance(edge, dict)
+                or set(edge) != {"parent", "kind", "payload", "source_anchors"}
+                or not isinstance(edge["parent"], str)
+                or not isinstance(edge["kind"], str)
+                or not isinstance(edge["payload"], dict)
+                or not isinstance(edge["source_anchors"], list)
+                or not all(isinstance(value, str) for value in edge["source_anchors"])):
+            valid = False
+            continue
+        try:
+            payload_json = _canonical_json(edge["payload"])
+            anchors_json = _canonical_json(sorted(set(edge["source_anchors"])))
+        except (TypeError, ValueError):
+            valid = False
+            continue
+        result.add((edge["parent"], edge["kind"], payload_json, anchors_json))
+    return frozenset(result), valid
 
 
 if __name__ == "__main__":  # pragma: no cover - module is a library, not a CLI

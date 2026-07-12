@@ -4,10 +4,11 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import re
 from pathlib import Path
+
+from slice_authority import block_sha256
 
 
 PR_VALUE = r"[0-9]+(?:\.[0-9]+)?(?:[A-Z][A-Z0-9-]*)?"
@@ -144,7 +145,7 @@ def scan(path: Path, root: Path) -> list[dict[str, object]]:
                 "ordering_evidence": ordering,
                 "checkboxes": {"done": boxes.count("x"), "total": len(boxes)},
                 "commit_subjects": commits,
-                "block_sha256": hashlib.sha256("\n".join(block).encode()).hexdigest(),
+                "block_sha256": block_sha256(block),
             }
         )
     return records
