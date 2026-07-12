@@ -41,8 +41,28 @@ def _owner(raw: str, *, phase: int = 0, subject: str = "feat: x", **kw) -> sa.Se
     """
     digest = _sha(raw)
     line = int(digest[:8], 16) % 9000 + 1
+    dependencies = tuple(
+        dep if dep.all_source_anchors() else sa.Dependency(
+            dep.parent, dep.kind, dep.payload, source_anchors=("owner#dependency",))
+        for dep in kw.pop("dependencies", ())
+    )
     return sa.Section(raw, "owner", A(f"docs/plans/{raw}.md", line, line + 5, digest),
-                      phase=phase, commit_subject=subject, **kw)
+                      heading=f"{raw} exact owner", phase=phase, commit_subject=subject,
+                      dependencies=dependencies, **kw)
+
+
+def _authority(records, *, revision: int = 1):
+    return {
+        "schema": "tracedecay.v2.slice-dag/v1",
+        "graph_revision": revision,
+        "source_set_digest": sa.source_set_digest(records),
+        "slices": {
+            nid: {**record.reconciled_body(), "content_digest": record.content_digest,
+                  "idempotency_key": record.idempotency_key}
+            for nid, record in records.items()
+        },
+        "series": {},
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -339,6 +359,12 @@ class ReconciliationTests(unittest.TestCase):
         self.assertIn(("invalid_phase", "PR 3"), codes)
         self.assertIn(("conflicting_field", "PR 6"), codes)
 
+    def test_owner_requires_a_nonempty_exact_heading(self) -> None:
+        owner = sa.Section("PR 1", "owner", A("p", 1, 2, "x"), heading="   ",
+                           phase=0, commit_subject="feat: x")
+        result = sa.reconcile([owner])
+        self.assertEqual([error.code for error in result.errors], ["missing_owner"])
+
     def test_companion_may_not_override_owner_phase_or_subject(self) -> None:
         owner = _owner("PR 4E", phase=1, subject="feat: owner")
         companion = sa.Section("PR 4E", "companion", A("p", 9, 10, "m"),
@@ -441,19 +467,51 @@ class EdgeTests(unittest.TestCase):
                          ["invalid_edge_type_or_payload"])
 
     def test_payload_bearing_kinds_require_their_field(self) -> None:
-        for kind, field in [
-            ("requires_artifact", "artifact"),
-            ("requires_acceptance", "acceptance"),
-            ("requires_decision", "decision"),
-            ("requires_plan_outcome", "plan_outcome"),
-            ("requires_terminal", "terminal_set"),
-            ("not_before", "timestamp"),
+        for kind, payload in [
+            ("requires_artifact", (("artifact", "artifact-kind:v1"),)),
+            ("requires_acceptance", (("acceptance", "PR-2-AC-001"),)),
+            ("requires_decision", (("decision", "decision:1"), ("allowed", ["approved"]))),
+            ("requires_plan_outcome", (("plan_outcome", "plan:1"),
+                                       ("allowed", ["accepted"]))),
+            ("requires_terminal", (("terminal_set", ["succeeded", "failed"]),)),
+            ("not_before", (("timestamp", "2026-01-01T00:00:00Z"),)),
         ]:
             missing = self._graph([sa.Dependency("PR 2", kind)])
             self.assertEqual([e.code for e in missing.errors],
                              ["invalid_edge_type_or_payload"], kind)
-            present = self._graph([sa.Dependency("PR 2", kind, ((field, "v"),))])
+            present = self._graph([sa.Dependency("PR 2", kind, payload)])
             self.assertEqual(present.errors, [], kind)
+
+    def test_payloads_reject_duplicates_nonfinite_and_wrong_types_without_raising(self) -> None:
+        bad = [
+            (("artifact", "one"), ("artifact", "two")),
+            (("artifact", float("nan")),),
+            (("artifact", 3),),
+            (("artifact", {"bad": object()}),),
+        ]
+        for payload in bad:
+            result = self._graph([sa.Dependency("PR 2", "requires_artifact", payload)])
+            self.assertEqual([error.code for error in result.errors],
+                             ["invalid_edge_type_or_payload"])
+
+    def test_exact_payload_shapes_and_allowed_values_are_enforced(self) -> None:
+        bad = [
+            sa.Dependency("PR 2", "requires_terminal", (("terminal_set", ["ready"]),)),
+            sa.Dependency("PR 2", "requires_plan_outcome",
+                          (("plan_outcome", "plan:1"), ("allowed", ["maybe"]))),
+            sa.Dependency("PR 2", "requires_decision", (("decision", "decision:1"),)),
+            sa.Dependency("PR 2", "not_before", (("timestamp", "2026-01-01"),)),
+        ]
+        for dependency in bad:
+            self.assertEqual([error.code for error in self._graph([dependency]).errors],
+                             ["invalid_edge_type_or_payload"])
+
+    def test_dependency_requires_a_canonical_source_anchor(self) -> None:
+        owner = sa.Section("PR 1", "owner", A("p", 1, 2, "x"), heading="PR 1 owner",
+                           phase=0, commit_subject="feat: x",
+                           dependencies=(sa.Dependency("PR 2", "requires_success"),))
+        result = sa.reconcile([owner, _owner("PR 2")])
+        self.assertEqual([error.code for error in result.errors], ["source_anchor_mismatch"])
 
     def test_unknown_edge_kind_is_rejected(self) -> None:
         result = self._graph([sa.Dependency("PR 2", "requires_magic")])
@@ -526,7 +584,7 @@ class CycleTests(unittest.TestCase):
     def test_not_before_edge_does_not_form_a_cycle(self) -> None:
         # not_before is temporal, not gating: it never participates in acyclicity.
         a = _owner("PR 1", dependencies=(
-            sa.Dependency("PR 2", "not_before", (("timestamp", "2026-01-01"),)),))
+            sa.Dependency("PR 2", "not_before", (("timestamp", "2026-01-01T00:00:00Z"),)),))
         b = _owner("PR 2", dependencies=(sa.Dependency("PR 1", "requires_success"),))
         self.assertEqual(sa.reconcile([a, b]).errors, [])
 
@@ -618,24 +676,25 @@ class SourceAnchorTests(unittest.TestCase):
                                              text=True).strip()
             good = sa.Section("PR 1", "owner", sa.Anchor(
                 "docs/plans/indexed.md", 2, 3, _sha("two\nthree")),
-                phase=0, commit_subject="feat: x")
+                heading="PR 1 owner", phase=0, commit_subject="feat: x")
             result = sa.reconcile([good], repo_root=root, source_commit=commit,
                                   indexed_plan_paths=frozenset({"docs/plans/indexed.md"}))
             self.assertEqual(result.errors, [])
 
             stale = sa.Section("PR 1", "owner", sa.Anchor(
-                "docs/plans/indexed.md", 2, 3, "0" * 64), phase=0, commit_subject="feat: x")
-            outside_owner = sa.Section("PR 2", "owner", sa.Anchor(
-                "docs/plans/outside.md", 1, 1, _sha("outside\n")),
+                "docs/plans/indexed.md", 2, 3, "0" * 64), heading="PR 1 owner",
                 phase=0, commit_subject="feat: x")
+            outside_companion = sa.Section("PR 1", "companion", sa.Anchor(
+                "docs/plans/outside.md", 1, 1, _sha("outside\n")))
             errors = sa.reconcile(
-                [stale, outside_owner], repo_root=root, source_commit=commit,
+                [stale, outside_companion], repo_root=root, source_commit=commit,
                 indexed_plan_paths=frozenset({"docs/plans/indexed.md"}),
             ).errors
             self.assertEqual({error.code for error in errors}, {"source_anchor_mismatch"})
             self.assertTrue(any("pinned Git source block" in error.violated_rule
                                 for error in errors))
-            self.assertTrue(any("indexed plan set" in error.violated_rule for error in errors))
+            self.assertTrue(any("non-incidental declaration path" in error.violated_rule
+                                for error in errors))
 
     def test_real_inventory_record_hash_matches_pinned_commit(self) -> None:
         import plan_inventory
@@ -693,9 +752,9 @@ class SourceAnchorTests(unittest.TestCase):
                                              text=True).strip()
             sections = [
                 sa.Section("PR 1", "owner", sa.Anchor("plan.md", 1, 1, _sha("one")),
-                           phase=0, commit_subject="feat: one"),
+                           heading="PR 1 owner", phase=0, commit_subject="feat: one"),
                 sa.Section("PR 2", "owner", sa.Anchor("plan.md", 2, 2, _sha("two")),
-                           phase=0, commit_subject="feat: two"),
+                           heading="PR 2 owner", phase=0, commit_subject="feat: two"),
             ]
             real_run = subprocess.run
             calls: list[list[str]] = []
@@ -838,88 +897,53 @@ class ReconcileAgainstAuthorityTests(unittest.TestCase):
 
     def test_matching_candidate_produces_no_diagnostics(self) -> None:
         records = self._records()
-        authority = {"slices": {
-            nid: {"owner": {
-                      "path": rec.owner.path,
-                      "heading": rec.owner_heading,
-                      "anchor": {"start_line": rec.owner.start_line,
-                                 "end_line": rec.owner.end_line,
-                                 "block_sha256": rec.owner.block_sha256},
-                  },
-                  "content_digest": rec.content_digest,
-                  "dependencies": [{"parent": dep.parent, "kind": dep.kind,
-                                    "payload": dict(dep.payload),
-                                    "source_anchors": list(dep.all_source_anchors())}
-                                   for dep in rec.dependencies]}
-            for nid, rec in records.items()}}
-        self.assertEqual(sa.reconcile_against_authority(records, authority, "pre"), [])
+        self.assertEqual(sa.reconcile_against_authority(records, _authority(records), "pre"), [])
 
     def test_extra_and_missing_ids_are_reconciliation_mismatches(self) -> None:
         records = self._records()
-        authority = {"slices": {"PR 2": {}, "PR 9": {}}}  # PR 1 extra, PR 9 missing
+        authority = _authority(records)
+        authority["slices"] = {"PR 2": authority["slices"]["PR 2"], "PR 9": {}}
         diagnostics = sa.reconcile_against_authority(records, authority, "pre")
         pairs = {(d.code, d.normalized_id) for d in diagnostics}
         self.assertIn(("reconciliation_mismatch", "PR 1"), pairs)
         self.assertIn(("reconciliation_mismatch", "PR 9"), pairs)
 
-    def test_digest_drift_is_a_mismatch(self) -> None:
+    def test_tampered_body_with_copied_digest_and_key_is_rejected(self) -> None:
         records = self._records()
-        authority = {"slices": {
-            "PR 1": {"content_digest": "sha256:" + "0" * 64,
-                     "dependencies": [{"parent": "PR 2", "kind": "requires_success"}]},
-            "PR 2": {"content_digest": records["PR 2"].content_digest,
-                     "dependencies": []}}}
-        diagnostics = sa.reconcile_against_authority(records, authority, "post")
-        self.assertTrue(any(d.normalized_id == "PR 1"
-                            and "content digest" in d.violated_rule
-                            for d in diagnostics))
+        for field, value in [("phase", 5), ("commit_subject", "fix: tampered")]:
+            authority = _authority(records)
+            authority["slices"]["PR 1"][field] = value
+            codes = {d.code for d in sa.reconcile_against_authority(records, authority, "post")}
+            self.assertTrue({"digest_mismatch", "reconciliation_mismatch"} <= codes)
 
-    def test_edge_drift_is_a_mismatch(self) -> None:
+    def test_tampered_digest_key_and_source_set_are_rejected(self) -> None:
         records = self._records()
-        authority = {"slices": {
-            "PR 1": {"content_digest": records["PR 1"].content_digest,
-                     "dependencies": []},  # candidate has one edge, authority has none
-            "PR 2": {"content_digest": records["PR 2"].content_digest,
-                     "dependencies": []}}}
-        diagnostics = sa.reconcile_against_authority(records, authority, "pre")
-        self.assertTrue(any("dependency edges differ" in d.violated_rule
-                            for d in diagnostics))
+        authority = _authority(records)
+        authority["source_set_digest"] = "sha256:" + "0" * 64
+        authority["slices"]["PR 1"]["content_digest"] = "sha256:" + "1" * 64
+        authority["slices"]["PR 1"]["idempotency_key"] = "copied"
+        self.assertEqual({d.code for d in sa.reconcile_against_authority(records, authority, "pre")},
+                         {"digest_mismatch", "idempotency_mismatch"})
 
-    def test_missing_digest_and_owner_drift_are_mismatches(self) -> None:
+    def test_malformed_top_level_and_slice_schema_are_rejected(self) -> None:
         records = self._records()
-        authority = {"slices": {
-            nid: {"owner": ({**rec.owner.as_dict(), "path": "wrong.md"}
-                            if nid == "PR 1" else rec.owner.as_dict()),
-                  "dependencies": [{"parent": dep.parent, "kind": dep.kind,
-                                    "payload": dict(dep.payload),
-                                    "source_anchors": list(dep.all_source_anchors())}
-                                   for dep in rec.dependencies]}
-            for nid, rec in records.items()}}
-        diagnostics = sa.reconcile_against_authority(records, authority, "pre")
-        rules = {diagnostic.violated_rule for diagnostic in diagnostics}
-        self.assertTrue(any("requires content_digest" in rule for rule in rules))
-        self.assertTrue(any("owner differs" in rule for rule in rules))
+        authority = _authority(records)
+        authority["extra"] = True
+        self.assertEqual([d.code for d in sa.reconcile_against_authority(records, authority, "pre")],
+                         ["reconciliation_mismatch"])
+        authority = _authority(records)
+        del authority["slices"]["PR 1"]["phase"]
+        self.assertTrue(any("malformed exact schema" in d.violated_rule
+                            for d in sa.reconcile_against_authority(records, authority, "pre")))
 
-    def test_typed_payload_and_edge_source_anchor_drift_are_mismatches(self) -> None:
-        owner = _owner("PR 1", dependencies=(sa.Dependency(
-            "PR 2", "requires_artifact", (("artifact", "report"),), "owner#edge-1"),))
-        records = sa.reconcile([owner, _owner("PR 2")]).records
-        authority = {"slices": {
-            nid: {"owner": rec.owner.as_dict(), "content_digest": rec.content_digest,
-                  "dependencies": [
-                      {"parent": dep.parent, "kind": dep.kind,
-                       "payload": {"artifact": "different"},
-                       "source_anchors": ["owner#edge-2"]}
-                      for dep in rec.dependencies]}
-            for nid, rec in records.items()}}
-        diagnostics = sa.reconcile_against_authority(records, authority, "post")
-        self.assertTrue(any("dependency edges differ" in d.violated_rule
-                            for d in diagnostics))
-
-    def test_compact_owner_and_every_malformed_dependency_are_rejected(self) -> None:
+    def test_requires_success_authority_payload_may_be_omitted_and_normalizes(self) -> None:
         records = self._records()
-        first = records["PR 1"]
-        second = records["PR 2"]
+        authority = _authority(records)
+        del authority["slices"]["PR 1"]["dependencies"][0]["payload"]
+        self.assertEqual(sa.reconcile_against_authority(records, authority, "pre"), [])
+
+    def test_malformed_dependencies_and_payload_omission_elsewhere_are_rejected(self) -> None:
+        records = self._records()
         malformed_edges = [
             None, {}, {"parent": "PR 2"},
             {"parent": 2, "kind": "requires_success", "payload": {},
@@ -930,20 +954,14 @@ class ReconcileAgainstAuthorityTests(unittest.TestCase):
              "source_anchors": [3]},
             {"parent": "PR 2", "kind": "requires_success", "payload": {},
              "source_anchor": "legacy"},
+            {"parent": "PR 2", "kind": "requires_artifact",
+             "source_anchors": ["owner#dependency"]},
         ]
         for malformed in malformed_edges:
-            authority = {"slices": {
-                "PR 1": {"owner": first.owner.as_dict(),
-                         "content_digest": first.content_digest,
-                         "dependencies": [malformed]},
-                "PR 2": {"owner": second.reconciled_body()["owner"],
-                         "content_digest": second.content_digest,
-                         "dependencies": []},
-            }}
+            authority = _authority(records)
+            authority["slices"]["PR 1"]["dependencies"] = [malformed]
             diagnostics = sa.reconcile_against_authority(records, authority, "pre")
             self.assertTrue(any("malformed dependency" in d.violated_rule
-                                for d in diagnostics), malformed)
-            self.assertTrue(any("owner differs" in d.violated_rule
                                 for d in diagnostics), malformed)
 
     def test_reconciled_body_and_manifest_projection_are_golden(self) -> None:
@@ -954,7 +972,7 @@ class ReconcileAgainstAuthorityTests(unittest.TestCase):
         records = sa.reconcile(sections).records
         body = records["PR 1"].reconciled_body()
         self.assertEqual(body["owner"], {
-            "path": owner.anchor.path, "heading": "",
+            "path": owner.anchor.path, "heading": owner.heading,
             "anchor": {"start_line": owner.anchor.start_line,
                        "end_line": owner.anchor.end_line,
                        "block_sha256": owner.anchor.block_sha256},
@@ -965,11 +983,7 @@ class ReconcileAgainstAuthorityTests(unittest.TestCase):
                        "end_line": companion.anchor.end_line,
                        "block_sha256": companion.anchor.block_sha256},
         }])
-        authority = {"slices": {
-            nid: {**record.reconciled_body(), "content_digest": record.content_digest}
-            for nid, record in records.items()
-        }}
-        self.assertEqual(sa.reconcile_against_authority(records, authority, "pre"), [])
+        self.assertEqual(sa.reconcile_against_authority(records, _authority(records), "pre"), [])
 
 
 # ---------------------------------------------------------------------------

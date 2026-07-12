@@ -71,6 +71,14 @@ EDGE_KINDS = frozenset(
         "not_before",
     }
 )
+PAYLOAD_FREE_KINDS = frozenset({"requires_success"})
+TERMINAL_VALUES = frozenset(
+    {"succeeded", "failed", "cancelled", "timed_out", "lost", "superseded", "deferred"}
+)
+OUTCOME_VALUES = frozenset(
+    {"accepted", "accepted_with_exception", "rejected", "inconclusive", "no_op"}
+)
+
 # Every declared edge kind gates dependency readiness except the purely temporal
 # ``not_before``; only gating edges participate in whole-graph acyclicity (§2.1 step 5).
 GATING_KINDS = EDGE_KINDS - {"not_before"}
@@ -596,19 +604,68 @@ def idempotency_key(normalized_id: str, digest: str) -> str:
 
 
 def _validate_payload(dep: Dependency) -> str | None:
+    """Validate the closed, typed plan-24 payload union without throwing."""
+    if not isinstance(dep.payload, tuple):
+        return "payload must be an ordered tuple of field/value pairs"
+    fields: list[str] = []
+    for pair in dep.payload:
+        if (not isinstance(pair, tuple) or len(pair) != 2
+                or not isinstance(pair[0], str)):
+            return "payload must contain string-named field/value pairs"
+        fields.append(pair[0])
+    if len(fields) != len(set(fields)):
+        return "payload contains duplicate field names"
     payload = dict(dep.payload)
-    required = {
-        "requires_artifact": "artifact",
-        "requires_acceptance": "acceptance",
-        "requires_decision": "decision",
-        "requires_plan_outcome": "plan_outcome",
-        "requires_terminal": "terminal_set",
-        "not_before": "timestamp",
+    try:
+        _canonical_json(payload)
+    except (TypeError, ValueError, OverflowError):
+        return "payload must be finite RFC 8785 canonical JSON"
+
+    expected = {
+        "requires_success": set(),
+        "requires_artifact": {"artifact"},
+        "requires_acceptance": {"acceptance"},
+        "requires_decision": {"decision", "allowed"},
+        "requires_plan_outcome": {"plan_outcome", "allowed"},
+        "requires_terminal": {"terminal_set"},
+        "not_before": {"timestamp"},
     }.get(dep.kind)
-    if required and not payload.get(required):
-        return f"{dep.kind} edge requires a {required} payload"
-    if dep.kind == "requires_success" and payload:
-        return "requires_success carries no payload"
+    if expected is None:
+        return None
+    if set(payload) != expected:
+        return f"{dep.kind} payload fields must be exactly {sorted(expected)!r}"
+
+    def nonempty_string(name: str) -> bool:
+        value = payload[name]
+        return isinstance(value, str) and bool(value.strip())
+
+    if dep.kind in {"requires_artifact", "requires_acceptance"}:
+        field = next(iter(expected))
+        if not nonempty_string(field):
+            return f"{field} must be a non-empty typed reference"
+    elif dep.kind in {"requires_decision", "requires_plan_outcome"}:
+        reference = "decision" if dep.kind == "requires_decision" else "plan_outcome"
+        allowed = payload["allowed"]
+        if not nonempty_string(reference):
+            return f"{reference} must be a non-empty typed reference"
+        if (not isinstance(allowed, (list, tuple)) or not allowed
+                or not all(isinstance(value, str) and value.strip() for value in allowed)
+                or len(allowed) != len(set(allowed))):
+            return "allowed must be a non-empty set of unique string values"
+        if dep.kind == "requires_plan_outcome" and not set(allowed) <= OUTCOME_VALUES:
+            return "plan outcome allowed values are not recognized"
+    elif dep.kind == "requires_terminal":
+        values = payload["terminal_set"]
+        if (not isinstance(values, (list, tuple)) or not values
+                or not all(isinstance(value, str) for value in values)
+                or len(values) != len(set(values)) or not set(values) <= TERMINAL_VALUES):
+            return "terminal_set must be a non-empty set of recognized terminal values"
+    elif dep.kind == "not_before":
+        timestamp = payload["timestamp"]
+        if (not isinstance(timestamp, str) or not timestamp.strip()
+                or re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})",
+                                timestamp) is None):
+            return "timestamp must be an RFC 3339 timestamp"
     return None
 
 
@@ -703,6 +760,11 @@ def reconcile(sections: list[Section], authority_keys: frozenset[str] | None = N
             warnings.append(_warning("incidental_reference", section.anchor, section.raw_id,
                                      "mention is non-dispatchable evidence"))
             continue
+        if indexed_plan_paths is not None and section.anchor.path not in indexed_plan_paths:
+            errors.append(_error(
+                "source_anchor_mismatch", section.anchor, section.anchor.path,
+                "non-incidental declaration path is outside the indexed plan set",
+            ))
         if classification.kind == "malformed":
             errors.append(_error(classification.code, section.anchor, section.raw_id,
                                  classification.rule, suggestion=classification.suggestion))
@@ -718,13 +780,6 @@ def reconcile(sections: list[Section], authority_keys: frozenset[str] | None = N
     for normalized_id in sorted(grouped):
         entries = grouped[normalized_id]
         owners = [section for section, is_owner in entries if is_owner]
-        if indexed_plan_paths is not None:
-            for owner in owners:
-                if owner.anchor.path not in indexed_plan_paths:
-                    errors.append(_error(
-                        "source_anchor_mismatch", owner.anchor, owner.anchor.path,
-                        "owner path is outside the indexed plan set", normalized_id,
-                    ))
         if authority_keys is not None and normalized_id not in authority_keys:
             first = entries[0][0]
             errors.append(_error("missing_id", first.anchor, first.raw_id,
@@ -761,6 +816,10 @@ def _build_record(normalized_id: str, entries: list[tuple[Section, bool]], owner
                   warnings: list[Diagnostic], errors: list[Diagnostic]) -> SliceRecord:
     record = SliceRecord(normalized_id=normalized_id, owner=owner.anchor,
                          owner_heading=owner.heading)
+    if not isinstance(owner.heading, str) or not owner.heading.strip():
+        errors.append(_error("missing_owner", owner.anchor, str(owner.heading),
+                             "owner requires a non-empty exact declaring heading",
+                             normalized_id))
     if not isinstance(owner.phase, int) or not 0 <= owner.phase <= 5:
         errors.append(_error("invalid_phase", owner.anchor, str(owner.phase),
                              "phase must be an integer 0..5", normalized_id))
@@ -848,6 +907,11 @@ def _validate_edges(records: dict[str, SliceRecord], authority_keys: frozenset[s
                 errors.append(_error("invalid_edge_type_or_payload", record.owner, dep.kind,
                                      payload_rule, normalized_id))
                 continue
+            if not dep.all_source_anchors():
+                errors.append(_error("source_anchor_mismatch", record.owner, dep.parent,
+                                     "dependency requires at least one canonical source anchor",
+                                     normalized_id))
+                continue
             if dep.parent == normalized_id:
                 errors.append(_error("invalid_edge_type_or_payload", record.owner, dep.parent,
                                      "a slice may not depend on itself", normalized_id))
@@ -856,7 +920,14 @@ def _validate_edges(records: dict[str, SliceRecord], authority_keys: frozenset[s
                 errors.append(_error("unresolved_dependency", record.owner, dep.parent,
                                      "edge endpoint is not a known scalar ID", normalized_id))
                 continue
-            key = (dep.parent, dep.kind, _canonical_json(dict(dep.payload)))
+            try:
+                payload_json = _canonical_json(dict(dep.payload))
+            except (TypeError, ValueError, OverflowError):
+                errors.append(_error("invalid_edge_type_or_payload", record.owner, dep.kind,
+                                     "payload must be finite RFC 8785 canonical JSON",
+                                     normalized_id))
+                continue
+            key = (dep.parent, dep.kind, payload_json)
             prior = deduped.get(key)
             anchors = dep.all_source_anchors()
             if prior is None:
@@ -1015,55 +1086,79 @@ def _validate_manifest_schema(path: Path, raw: bytes) -> BootstrapFailure | None
 
 def reconcile_against_authority(records: dict[str, SliceRecord], authority: dict[str, object],
                                 phase: str) -> list[Diagnostic]:
-    """Compare reconciled candidate records to bootstrap (pre) or graph (post) authority.
-
-    Emits ``reconciliation_mismatch`` diagnostics for extra/missing IDs, edge differences,
-    and per-owner digest drift. Empty result means the candidate matches the authority and
-    an atomic activation receipt may be recorded by the (out-of-scope) executor.
-    """
+    """Parse and compare one exact authority document, recomputing all integrity fields."""
     diagnostics: list[Diagnostic] = []
-    authority_slices = authority.get("slices", {})
+    authority_anchor = Anchor(f"({phase}-authority)", 0, 0, "")
+    top_keys = {"schema", "graph_revision", "source_set_digest", "slices", "series"}
+    graph_revision = authority.get("graph_revision") if isinstance(authority, dict) else None
+    if (not isinstance(authority, dict) or set(authority) != top_keys
+            or authority.get("schema") != "tracedecay.v2.slice-dag/v1"
+            or isinstance(graph_revision, bool)
+            or not isinstance(graph_revision, int)
+            or graph_revision < 0
+            or not isinstance(authority.get("slices"), dict)
+            or not isinstance(authority.get("series"), dict)):
+        return [_error("reconciliation_mismatch", authority_anchor, repr(authority),
+                       f"{phase} authority does not match the exact top-level schema")]
+
+    authority_slices = authority["slices"]
     candidate_ids = set(records)
     authority_ids = set(authority_slices)
+
+    expected_source_digest = source_set_digest(records)
+    if authority.get("source_set_digest") != expected_source_digest:
+        diagnostics.append(_error("digest_mismatch", authority_anchor,
+                                  str(authority.get("source_set_digest")),
+                                  f"source_set_digest differs from canonical {phase} body"))
 
     for extra in sorted(candidate_ids - authority_ids):
         diagnostics.append(_error("reconciliation_mismatch", records[extra].owner, extra,
                                   f"candidate slice absent from {phase} authority", extra))
     for missing in sorted(authority_ids - candidate_ids):
-        anchor = Anchor(f"({phase}-authority)", 0, 0, "")
-        diagnostics.append(_error("reconciliation_mismatch", anchor, missing,
+        diagnostics.append(_error("reconciliation_mismatch", authority_anchor, missing,
                                   f"{phase} authority slice absent from candidate", missing))
     for normalized_id in sorted(candidate_ids & authority_ids):
         record = records[normalized_id]
         expected = authority_slices[normalized_id]
-        expected_digest = expected.get("content_digest") if isinstance(expected, dict) else None
-        if expected_digest is None:
+        body_keys = set(record.reconciled_body())
+        if not isinstance(expected, dict) or set(expected) != body_keys | {
+                "content_digest", "idempotency_key"}:
             diagnostics.append(_error("reconciliation_mismatch", record.owner, normalized_id,
-                                      f"{phase} authority requires content_digest",
+                                      f"{phase} authority slice has a malformed exact schema",
                                       normalized_id))
-        elif expected_digest != record.content_digest:
-            diagnostics.append(_error("reconciliation_mismatch", record.owner,
-                                      record.content_digest,
-                                      f"content digest differs from {phase} authority",
-                                      normalized_id))
-        expected_owner = expected.get("owner") if isinstance(expected, dict) else None
-        if not _authority_owner_matches(record, expected_owner):
-            diagnostics.append(_error("reconciliation_mismatch", record.owner, normalized_id,
-                                      f"owner differs from {phase} authority",
-                                      normalized_id))
-        expected_edges, edges_valid = _edge_set(
-            expected.get("dependencies", []) if isinstance(expected, dict) else [])
-        candidate_edges, _ = _edge_set(
-            [{"parent": dep.parent, "kind": dep.kind, "payload": dict(dep.payload),
-              "source_anchors": list(dep.all_source_anchors())}
-             for dep in record.dependencies])
+            continue
+        authority_body = {key: expected[key] for key in body_keys}
+        edges, edges_valid = _edge_set(authority_body["dependencies"], normalize_payload_free=True)
         if not edges_valid:
             diagnostics.append(_error("reconciliation_mismatch", record.owner, normalized_id,
                                       f"{phase} authority contains a malformed dependency",
                                       normalized_id))
-        elif expected_edges != candidate_edges:
+            continue
+        authority_body["dependencies"] = [
+            {**edge, "payload": edge.get("payload", {})}
+            for edge in authority_body["dependencies"]
+        ]
+        try:
+            recomputed_digest = content_digest(authority_body)
+        except (TypeError, ValueError, OverflowError):
+            diagnostics.append(_error("digest_mismatch", record.owner, normalized_id,
+                                      f"{phase} authority body is not canonical I-JSON",
+                                      normalized_id))
+            continue
+        if expected["content_digest"] != recomputed_digest:
+            diagnostics.append(_error("digest_mismatch", record.owner,
+                                      str(expected["content_digest"]),
+                                      f"content_digest does not match canonical {phase} body",
+                                      normalized_id))
+        recomputed_key = idempotency_key(normalized_id, recomputed_digest)
+        if expected["idempotency_key"] != recomputed_key:
+            diagnostics.append(_error("idempotency_mismatch", record.owner,
+                                      str(expected["idempotency_key"]),
+                                      f"idempotency_key does not match canonical {phase} body",
+                                      normalized_id))
+        if authority_body != record.reconciled_body():
             diagnostics.append(_error("reconciliation_mismatch", record.owner, normalized_id,
-                                      f"dependency edges differ from {phase} authority",
+                                      f"canonical body differs from {phase} authority",
                                       normalized_id))
     return sort_diagnostics(diagnostics)
 
@@ -1082,25 +1177,37 @@ def _authority_owner_matches(record: SliceRecord, owner: object) -> bool:
     return expected == record.owner.as_dict() and owner.get("heading") == record.owner_heading
 
 
-def _edge_set(edges: object) -> tuple[frozenset[tuple[str, str, str, str]], bool]:
+def _edge_set(edges: object, *, normalize_payload_free: bool = False
+              ) -> tuple[frozenset[tuple[str, str, str, str]], bool]:
     result = set()
     if not isinstance(edges, list):
         return frozenset(), False
     valid = True
     for edge in edges:
+        if (normalize_payload_free and isinstance(edge, dict)
+                and edge.get("kind") in PAYLOAD_FREE_KINDS and "payload" not in edge):
+            edge = {**edge, "payload": {}}
         if (not isinstance(edge, dict)
                 or set(edge) != {"parent", "kind", "payload", "source_anchors"}
                 or not isinstance(edge["parent"], str)
                 or not isinstance(edge["kind"], str)
                 or not isinstance(edge["payload"], dict)
                 or not isinstance(edge["source_anchors"], list)
-                or not all(isinstance(value, str) for value in edge["source_anchors"])):
+                or not edge["source_anchors"]
+                or not all(isinstance(value, str) and value for value in edge["source_anchors"])):
             valid = False
             continue
         try:
             payload_json = _canonical_json(edge["payload"])
             anchors_json = _canonical_json(sorted(set(edge["source_anchors"])))
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
+            valid = False
+            continue
+        dependency = Dependency(
+            edge["parent"], edge["kind"], tuple(edge["payload"].items()),
+            source_anchors=tuple(edge["source_anchors"]),
+        )
+        if edge["kind"] not in EDGE_KINDS or _validate_payload(dependency) is not None:
             valid = False
             continue
         result.add((edge["parent"], edge["kind"], payload_json, anchors_json))
