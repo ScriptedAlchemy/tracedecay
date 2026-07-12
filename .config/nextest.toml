@@ -1,7 +1,11 @@
+[profile.default]
+test-threads = 8
+
 [profile.ci]
 fail-fast = false
 retries = 1
 flaky-result = "fail"
+test-threads = 8
 slow-timeout = { period = "10s", terminate-after = 36 }
 final-status-level = "slow"
 
@@ -22,6 +26,7 @@ filter = '(binary(=daemon_suite) & test(/^git_watch_test::(fifty_commit_rebase_n
 slow-timeout = { period = "60s", terminate-after = 10 }
 
 [test-groups]
+cli-subprocess = { max-threads = 1 }
 windows-tracedecay-init = { max-threads = 32 }
 windows-init-heavy = { max-threads = 32 }
 windows-profile-storage = { max-threads = 32 }
@@ -45,6 +50,16 @@ threads-required = "num-cpus"
 
 [[profile.default.overrides]]
 filter = 'binary(=core_cli_suite) & test(/^tool_daemon_test::(daemon_socket_is_owner_only|daemon_sigterm_exits_while_project_client_is_connected)$/)'
+threads-required = "num-cpus"
+
+[[profile.ci.overrides]]
+filter = '(binary(=core_cli_suite) & test(/^cli_non_interactive_test::/)) | (binary(=mcp_suite) & test(/^(mcp_cli_serve_test|serve_degraded_mode_test|serve_template_path_test)::/))'
+test-group = 'cli-subprocess'
+threads-required = "num-cpus"
+
+[[profile.default.overrides]]
+filter = '(binary(=core_cli_suite) & test(/^cli_non_interactive_test::/)) | (binary(=mcp_suite) & test(/^(mcp_cli_serve_test|serve_degraded_mode_test|serve_template_path_test)::/))'
+test-group = 'cli-subprocess'
 threads-required = "num-cpus"
 
 [[profile.ci.overrides]]

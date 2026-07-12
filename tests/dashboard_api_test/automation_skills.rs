@@ -274,8 +274,8 @@ fn managed_skills_are_dashboard_controllable_with_explicit_approval() {
             .unwrap_or_else(|err| panic!("failed to canonicalize temp root: {err}"));
         let project_root = tmp_root.join("project");
         let global_db_path = tmp_root.join("global").join("global.db");
-        let profile_root = tmp_root.join("profile").join(".tracedecay");
         let home = tmp_root.join("home");
+        let profile_root = home.join(".tracedecay");
         std::fs::create_dir_all(&home).unwrap();
         let _env_guard = EnvVarGuard::set(GLOBAL_DB_ENV, &global_db_path);
         let _data_dir_guard = EnvVarGuard::set(USER_DATA_DIR_ENV, &profile_root);

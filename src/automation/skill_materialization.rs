@@ -1723,6 +1723,9 @@ pub fn reconcile_detected_scopes(
     home: &Path,
     project_root: &Path,
 ) -> (Vec<ScopeReconcileResult>, Vec<String>) {
+    if !crate::agents::uses_default_user_profile(home, profile_root) {
+        return (Vec::new(), Vec::new());
+    }
     let mut results = Vec::new();
     let mut errors = Vec::new();
     let skills = match load_active_managed_skills(profile_root) {

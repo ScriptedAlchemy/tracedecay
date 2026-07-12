@@ -49,10 +49,8 @@ fn consolidation_guard<'a>(
             "managed skill '{id}' is pinned and exempt from consolidation"
         ));
     }
-    if skill.metadata.provenance.source == ManagedSkillSource::UserDraft {
-        return Err(format!(
-            "managed skill '{id}' is user-authored and exempt from consolidation"
-        ));
+    if skill.metadata.provenance.source != ManagedSkillSource::AutomationRun {
+        return Err(format!("managed skill '{id}' is not automation-owned"));
     }
     if skill.metadata.state == ManagedSkillState::Archived {
         return Err(format!("managed skill '{id}' is already archived"));
@@ -302,6 +300,7 @@ mod tests {
             fixture_skill("workflow-b", ManagedSkillSource::AutomationRun, false),
             fixture_skill("pinned-skill", ManagedSkillSource::AutomationRun, true),
             fixture_skill("user-skill", ManagedSkillSource::UserDraft, false),
+            fixture_skill("imported-skill", ManagedSkillSource::Import, false),
             archived,
         ]
         .into_iter()
@@ -392,7 +391,19 @@ mod tests {
                 }),
                 &skills,
             ),
-            "managed skill 'user-skill' is user-authored and exempt from consolidation",
+            "managed skill 'user-skill' is not automation-owned",
+        );
+        assert_err_eq(
+            skill_archive_from_proposal(
+                &json!({
+                    "action": "archive",
+                    "id": "imported-skill",
+                    "base_checksum": checksum(&skills, "imported-skill"),
+                    "reason": "x"
+                }),
+                &skills,
+            ),
+            "managed skill 'imported-skill' is not automation-owned",
         );
         assert_err_eq(
             skill_archive_from_proposal(

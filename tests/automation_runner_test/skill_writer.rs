@@ -565,9 +565,9 @@ async fn skill_writer_runner_auto_enables_when_config_explicitly_allows() {
             body_markdown: "Check the run ledger before approving changes.".to_string(),
             support_files: Vec::new(),
             provenance: ManagedSkillProvenance {
-                source: ManagedSkillSource::UserDraft,
-                actor: "test".to_string(),
-                run_id: None,
+                source: ManagedSkillSource::AutomationRun,
+                actor: "tracedecay".to_string(),
+                run_id: Some("seed-run".to_string()),
             },
         },
     )
@@ -685,9 +685,9 @@ async fn skill_writer_runner_updates_existing_skills_with_checksum_precondition(
                 ManagedSupportFile::new("references/old.md", b"old checklist".to_vec()).unwrap(),
             ],
             provenance: ManagedSkillProvenance {
-                source: ManagedSkillSource::UserDraft,
-                actor: "test".to_string(),
-                run_id: None,
+                source: ManagedSkillSource::AutomationRun,
+                actor: "tracedecay".to_string(),
+                run_id: Some("seed-run".to_string()),
             },
         },
     )
@@ -697,6 +697,28 @@ async fn skill_writer_runner_updates_existing_skills_with_checksum_precondition(
         .await
         .unwrap();
     let base_checksum = active.metadata.checksum.clone();
+    create_managed_skill_draft(
+        &profile_root,
+        ManagedSkillDraft {
+            id: "user-owned-review".to_string(),
+            title: "User-owned review".to_string(),
+            summary: "User-authored workflow.".to_string(),
+            category: "workflow".to_string(),
+            targets: tracedecay::automation::managed_skills::default_managed_skill_targets(),
+            body_markdown: "Keep this user-authored content unchanged.".to_string(),
+            support_files: Vec::new(),
+            provenance: ManagedSkillProvenance {
+                source: ManagedSkillSource::UserDraft,
+                actor: "test-user".to_string(),
+                run_id: None,
+            },
+        },
+    )
+    .await
+    .unwrap();
+    let user_owned = approve_managed_skill(&profile_root, "user-owned-review")
+        .await
+        .unwrap();
     let backend = SkillJsonBackend::new(json!({
         "skills": [
             {
@@ -732,6 +754,12 @@ async fn skill_writer_runner_updates_existing_skills_with_checksum_precondition(
                 "id": "missing-skill",
                 "base_checksum": "sha256:missing",
                 "summary": "Unknown update should be rejected."
+            },
+            {
+                "action": "update",
+                "id": "user-owned-review",
+                "base_checksum": user_owned.metadata.checksum,
+                "summary": "Automation must not edit this user-owned skill."
             }
         ]
     }));
@@ -749,7 +777,7 @@ async fn skill_writer_runner_updates_existing_skills_with_checksum_precondition(
     assert_eq!(backend.calls(), 1);
     assert_eq!(run.ledger_record.status, AutomationRunStatus::Succeeded);
     assert_eq!(run.ledger_record.accepted_count, 1);
-    assert_eq!(run.ledger_record.rejected_count, 3);
+    assert_eq!(run.ledger_record.rejected_count, 4);
     assert_eq!(run.report["created_skills"], json!([]));
     assert_eq!(
         run.report["updated_skills"][0]["metadata"]["id"],
@@ -829,12 +857,18 @@ async fn skill_writer_runner_updates_existing_skills_with_checksum_precondition(
     assert!(!skill_dir.join("references/old.md").exists());
     assert!(skill_dir.join("references/checklist.md").is_file());
 
+    let user_owned = load_managed_skill(&profile_root, "user-owned-review")
+        .await
+        .unwrap();
+    assert_eq!(user_owned.metadata.summary, "User-authored workflow.");
+    assert!(user_owned.pending_update.is_none());
+
     let records = load_run_records(&cg.store_layout().dashboard_root, 10)
         .await
         .unwrap();
     assert_eq!(records.len(), 1);
     assert_eq!(records[0].accepted_count, 1);
-    assert_eq!(records[0].rejected_count, 3);
+    assert_eq!(records[0].rejected_count, 4);
     assert_eq!(
         records[0].proposed_ops.as_ref().unwrap()["updated_skills"][0]["metadata"]["id"],
         json!("automation-run-review")

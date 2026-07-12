@@ -61,11 +61,7 @@ fn tracedecay_command_with_stdin(home: &std::path::Path, project: &std::path::Pa
 }
 
 fn cli_timeout() -> Duration {
-    if cfg!(windows) {
-        Duration::from_secs(90)
-    } else {
-        Duration::from_secs(30)
-    }
+    Duration::from_secs(90)
 }
 
 fn add_tracedecay_path_shim(command: &mut Command, home: &Path) -> PathBuf {

@@ -553,7 +553,7 @@ fn refresh_managed_skill_exports_after_auto_enable(profile_root: &Path) -> Value
     let Some(home) = crate::agents::home_dir() else {
         return json!({"status": "skipped", "reason": "home_unavailable"});
     };
-    if !should_refresh_managed_skill_exports(profile_root, &home) {
+    if !crate::agents::uses_default_user_profile(&home, profile_root) {
         return json!({"status": "skipped", "reason": "non_default_profile_root"});
     }
     let start = std::env::current_dir().unwrap_or_else(|_| home.clone());
@@ -580,10 +580,6 @@ fn refresh_managed_skill_exports_after_auto_enable(profile_root: &Path) -> Value
         "reports": reports,
         "materialization_reconciled": true,
     })
-}
-
-fn should_refresh_managed_skill_exports(profile_root: &Path, home: &Path) -> bool {
-    profile_root == home.join(".tracedecay")
 }
 
 fn accepted_skill_approval_status(
@@ -688,6 +684,9 @@ fn skill_update_from_proposal(
     let existing = existing_skills
         .get(&id)
         .ok_or_else(|| format!("managed skill id '{id}' does not exist"))?;
+    if existing.metadata.provenance.source != ManagedSkillSource::AutomationRun {
+        return Err(format!("managed skill '{id}' is not automation-owned"));
+    }
     let base_checksum = required_proposal_string(object.get("base_checksum"), "base_checksum")?;
     if base_checksum != existing.metadata.checksum {
         return Err(format!(
@@ -870,13 +869,13 @@ mod tests {
     #[test]
     fn managed_skill_exports_only_refresh_for_the_user_profile() {
         let home = Path::new("/home/test-user");
-        assert!(should_refresh_managed_skill_exports(
+        assert!(crate::agents::uses_default_user_profile(
+            home,
             Path::new("/home/test-user/.tracedecay"),
-            home,
         ));
-        assert!(!should_refresh_managed_skill_exports(
-            Path::new("/tmp/tracedecay-test-profile"),
+        assert!(!crate::agents::uses_default_user_profile(
             home,
+            Path::new("/tmp/tracedecay-test-profile"),
         ));
     }
 
