@@ -10,14 +10,14 @@ import re
 from pathlib import Path
 
 
-PR_VALUE = r"[0-9]+(?:[A-Z][A-Z0-9-]*)?"
-HEADING = re.compile(
-    rf"^(?P<marks>#{{3,4}})\s+"
-    rf"(?P<heading>(?:(?:Task\s+\d+[A-Z]?:\s+)|(?:Companion requirements for\s+))?"
-    rf"PR\s+(?P<ids>{PR_VALUE}(?:\s*/\s*{PR_VALUE})*)"
-    rf"(?:\s*[—:-].*)?)$"
+PR_VALUE = r"[0-9]+(?:\.[0-9]+)?(?:[A-Z][A-Z0-9-]*)?"
+HEADING = re.compile(r"^(?P<marks>#{3,4})\s+(?P<heading>.*)$")
+PR_EXPRESSION = re.compile(
+    rf"\bPR\s+(?P<start>{PR_VALUE})"
+    rf"(?:(?:\s*[–-]\s*)(?P<end>{PR_VALUE})|"
+    rf"(?P<slashes>(?:\s*/\s*{PR_VALUE})+))?"
 )
-PR_ID = re.compile(r"\bPR\s+([0-9]+[A-Z][A-Z0-9-]*|[0-9]+)\b")
+PR_ID = re.compile(rf"\bPR\s+({PR_VALUE})\b")
 CHECKBOX = re.compile(r"^\s*- \[([ xX])\]")
 ORDERING = re.compile(r"(?:\*\*Ordering:\*\*|\b(?:after|depends on|blocked by|requires)\b)", re.IGNORECASE)
 COMMIT = re.compile(r"(?:Commit:|Commit separately:).*?`([^`]+)`")
@@ -29,19 +29,55 @@ def plan_files(root: Path) -> list[Path]:
     return [path for path in files if path.is_file()]
 
 
+def _expand_range(start: str, end: str) -> list[str]:
+    """Expand the numeric or final-component ranges used by the V2 plans."""
+    if start.isdigit() and end.isdigit():
+        first, last = int(start), int(end)
+        return [str(value) for value in range(first, last + 1)] if first <= last else []
+
+    left = re.fullmatch(r"(.+?)([A-Z])", start)
+    right = re.fullmatch(r"(.+?)([A-Z])", end)
+    if left and right and left.group(1) == right.group(1):
+        first, last = ord(left.group(2)), ord(right.group(2))
+        if first <= last:
+            return [f"{left.group(1)}{chr(value)}" for value in range(first, last + 1)]
+
+    left = re.fullmatch(r"(\d+[A-Z])(\d+)", start)
+    right = re.fullmatch(r"(\d+[A-Z])(\d+)", end)
+    if left and right and left.group(1) == right.group(1):
+        first, last = int(left.group(2)), int(right.group(2))
+        if first <= last:
+            return [f"{left.group(1)}{value}" for value in range(first, last + 1)]
+    return [start, end]
+
+
+def heading_ids(heading: str) -> list[str]:
+    """Return canonical IDs declared by a PR-bearing H3/H4 heading."""
+    ids: list[str] = []
+    for match in PR_EXPRESSION.finditer(heading):
+        start = match.group("start")
+        if match.group("end"):
+            values = _expand_range(start, match.group("end"))
+        elif match.group("slashes"):
+            values = [start, *re.findall(PR_VALUE, match.group("slashes"))]
+        else:
+            values = [start]
+        ids.extend(f"PR {value}" for value in values)
+    return list(dict.fromkeys(ids))
+
+
 def scan(path: Path, root: Path) -> list[dict[str, object]]:
     text = path.read_text(encoding="utf-8")
     lines = text.splitlines()
-    starts: list[tuple[int, str, str]] = []
+    starts: list[tuple[int, str, list[str]]] = []
     for index, line in enumerate(lines):
         match = HEADING.match(line)
-        if match:
-            starts.append((index, match.group("heading"), match.group("ids")))
+        if match and (ids := heading_ids(match.group("heading"))):
+            starts.append((index, match.group("heading"), ids))
     records: list[dict[str, object]] = []
-    for ordinal, (start, heading, heading_ids) in enumerate(starts):
+    for ordinal, (start, heading, ids) in enumerate(starts):
         end = starts[ordinal + 1][0] if ordinal + 1 < len(starts) else len(lines)
         block = lines[start:end]
-        ids = [f"PR {value.strip()}" for value in heading_ids.split("/")]
         references = sorted({f"PR {value}" for line in block for value in PR_ID.findall(line)} - set(ids))
         ordering = [line.strip() for line in block if ORDERING.search(line)][:20]
         commits = [match.group(1) for line in block if (match := COMMIT.search(line))]
