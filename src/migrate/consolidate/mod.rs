@@ -166,8 +166,8 @@ struct ResolvedPlan {
     target_layout: StoreLayout,
     source_meta: BranchMeta,
     target_meta: BranchMeta,
-    scratch_root: MigrationScratchRoot,
     evidence: Arc<InputReadEvidence>,
+    scratch_root: MigrationScratchRoot,
 }
 
 static NEXT_MIGRATION_SCRATCH: AtomicU64 = AtomicU64::new(0);
