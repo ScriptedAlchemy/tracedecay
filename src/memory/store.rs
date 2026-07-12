@@ -562,13 +562,8 @@ impl<'a> MemoryStore<'a> {
     }
 
     pub async fn remove_fact(&self, fact_id: i64) -> Result<bool> {
-        let changed = self
-            .with_immediate_tx("remove_fact", self.remove_fact_inner(fact_id))
-            .await?;
-        if changed {
-            self.incremental_vacuum().await?;
-        }
-        Ok(changed)
+        self.with_immediate_tx("remove_fact", self.remove_fact_inner(fact_id))
+            .await
     }
 
     async fn remove_fact_inner(&self, fact_id: i64) -> Result<bool> {
@@ -2304,34 +2299,6 @@ impl<'a> MemoryStore<'a> {
     async fn mark_fact_banks_dirty(&self, category: MemoryCategory) -> Result<()> {
         self.mark_bank_dirty("all").await?;
         self.mark_bank_dirty(category.as_str()).await
-    }
-
-    async fn incremental_vacuum(&self) -> Result<()> {
-        let freelist_pages = {
-            let mut rows = self
-                .conn
-                .query("PRAGMA freelist_count", ())
-                .await
-                .map_err(|e| db_error("incremental_vacuum", e))?;
-            let row = rows
-                .next()
-                .await
-                .map_err(|e| db_error("incremental_vacuum", e))?
-                .ok_or_else(|| {
-                    db_message("incremental_vacuum", "freelist_count returned no rows")
-                })?;
-            row.get::<i64>(0)
-                .map_err(|e| db_error("incremental_vacuum", e))?
-        };
-        if freelist_pages <= 0 {
-            return Ok(());
-        }
-
-        self.conn
-            .execute_batch(&format!("PRAGMA incremental_vacuum({freelist_pages});"))
-            .await
-            .map_err(|e| db_error("incremental_vacuum", e))?;
-        Ok(())
     }
 
     async fn mark_bank_dirty(&self, bank_name: &str) -> Result<()> {
