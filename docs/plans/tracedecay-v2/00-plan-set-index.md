@@ -76,6 +76,67 @@ When documents overlap:
 3. Plans 13–28 own cross-cutting evidence, regression, retrieval, scope, public-contract, privacy, convergence, configuration, tool/output, incremental-context, temporal-session, task/executor, code-indexing, observability/accounting, cross-host bundle, and remote shared-Brain requirements; bounded crates must satisfy them rather than reimplement them.
 4. An implementation decision that changes a locked domain contract requires an ADR and coordinated plan update before code diverges.
 
+### 2.1 Canonical V2 slice authority and bootstrap contract
+
+The checked plan documents describe intent, but they are not themselves a dispatch queue. Before V2 implementation work is dispatched, an orchestrator MUST compile every declaring heading into one versioned `tracedecay.v2.slice-dag/v1` manifest. The manifest is keyed by a normalized slice ID and contains exactly one dispatchable `owner` record for each key. The master declaration, the numbered plan selected by this index, and any other declaring sections are merged into that owner; they never become sibling tasks merely because their prose differs.
+
+Normalization is ASCII, case-insensitive, and deterministic:
+
+1. Trim surrounding whitespace, remove one leading `PR` token plus following whitespace, uppercase ASCII letters, and remove whitespace around separators. The canonical scalar form is `PR <number><suffix>`, where `suffix` is empty or a sequence of ASCII letters/digits beginning with a letter, except that a dotted numeric sub-ID retains one dot (`12.1` -> `PR 12.1`). Leading zeroes are forbidden.
+2. A slash between two complete IDs is a multi-ID list separator (`28A/28B` -> `PR 28A`, `PR 28B`). A slash between a numeric stem and one suffix is an alternate scalar spelling (`28/A` -> `PR 28A`). More than one interpretation, an empty member, or a suffix that is not `[A-Z][A-Z0-9]*` is malformed.
+3. A dotted letter suffix is an alternate scalar spelling (`4.E` -> `PR 4E`); a dotted numeric suffix is identity-bearing (`12.1` remains `PR 12.1`). Multiple dots and mixed dotted letter/numeric suffixes are malformed.
+4. An inclusive range expands only when both endpoints have the same shape: numeric (`35-37`), single-letter suffix under one numeric stem (`31A-31Q`), or numeric tail under the same letter stem (`24E0-24E8`). Descending, mixed-stem, mixed-shape, missing-endpoint, and more-than-1,000-member ranges are rejected rather than guessed.
+5. A heading ending in `series` is not a dispatchable aggregate. `PR 13 series` is a companion declaration for already declared scalar members such as `PR 13A`, `PR 13B`, and `PR 13C`; its explicit member list MUST be present in the manifest. Unknown, empty, overlapping-with-conflicting-membership, or recursively defined series block publication.
+
+Text that merely mentions a normalized ID is an `incidental_reference`, not an owner or companion. A heading that declares one scalar/range member is a `declaration`. For each normalized ID, the numbered plan named by this index is the authoritative owner when it declares that ID; otherwise the master plan is owner only when the index explicitly assigns it. Zero owners, two candidate owners, or an owner path outside the plan set is a hard error. Other declarations become ordered `companions`; their acceptance criteria, source anchors, and constraints reconcile into the owner. Equivalent criteria deduplicate by canonical criterion digest. Non-equivalent criteria are both required. Contradictory criteria, phases, commit subjects, dependency kinds, or bounded-file rules are unresolved conflicts and block activation—source order never picks a winner. `phase` is the integer `0..5` of the master plan phase containing the scalar declaration; companions may repeat but not override it, and a scalar declared outside a master phase must carry one explicit phase assignment in the index or fail publication.
+
+The machine-readable shape is normative at the field level (JSON is equivalent to this YAML example). Placeholder lines and text below are illustrative values, not assertions about the current source locations or dependency set:
+
+```yaml
+schema: tracedecay.v2.slice-dag/v1
+graph_revision: 7
+source_set_digest: sha256:<64-lowercase-hex>
+slices:
+  PR 4E:
+    normalized_id: PR 4E
+    owner:
+      path: docs/plans/tracedecay-v2/24-canonical-task-plan-graph-and-multi-agent-executor.md
+      heading: "<exact declaring heading>"
+      anchor: {start_line: 2840, end_line: 2876, block_sha256: <64-lowercase-hex>}
+    companions:
+      - path: docs/plans/2026-07-09-tracedecay-brain-rewrite.md
+        anchor: {start_line: 1810, end_line: 1818, block_sha256: <64-lowercase-hex>}
+        role: companion
+    incidental_references:
+      - {path: docs/plans/tracedecay-v2/14-historical-failure-regression-matrix.md, line: 900}
+    phase: 0
+    commit_subject: "<exact reconciled conventional-commit subject>"
+    acceptance:
+      - criterion_id: PR-4E-AC-001
+        text: "The normalized task graph rejects duplicate owners."
+        source_anchors: ["owner", "companions[0]"]
+    dependencies:
+      - parent: PR 4C
+        kind: requires_success
+        source_anchors: ["<anchor that explicitly declares this edge>"]
+    source_anchors:
+      - {path: docs/plans/tracedecay-v2/00-plan-set-index.md, start_line: 36, end_line: 79}
+    content_digest: sha256:<64-lowercase-hex>
+    idempotency_key: v2-slice-owner/v1:PR%204E:sha256:<64-lowercase-hex>
+series:
+  PR 13 series: {members: [PR 13A, PR 13B, PR 13C]}
+```
+
+`dependencies[].kind` is one of `requires_success`, `requires_terminal`, `requires_artifact`, `requires_acceptance`, `requires_decision`, `requires_plan_outcome`, or `not_before`. Payload requirements follow plan 24 exactly: artifact, acceptance, decision, and plan-outcome edges carry their typed references/allowed values; terminal and not-before semantics carry the explicitly required terminal-set or timestamp fields in the edge schema even though the domain enum's discriminants are unit-like; success has no additional payload. Prose ordering and incidental references never create an edge. Each edge names known scalar IDs, rejects self-edges, and participates in whole-graph acyclicity when gating.
+
+`content_digest` is lowercase SHA-256 over RFC 8785 canonical JSON of the fully reconciled owner record after normalization, excluding `content_digest`, `idempotency_key`, lifecycle status, attempts, and receipts. Source-anchor hashes are included, so changed source cannot reuse an old generation. `source_set_digest` uses the same encoding over sorted `(path, block_sha256)` pairs. `idempotency_key` is exactly `v2-slice-owner/v1:<percent-encoded-normalized-id>:<content_digest>` and is reused for every create/import/retry of that owner generation. A changed digest is a new generation; the previous generation is explicitly superseded, never mutated or duplicated.
+
+Before the V2 canonical graph exists, a controller may locate exactly one bootstrap export in this precedence order: (1) an explicit command argument, (2) `TRACEDECAY_V2_EXECUTION_MANIFEST`, then (3) `<repo-root>/.tracedecay/v2-execution-manifest.json`. The repository root is the result of `git rev-parse --show-toplevel`; symlinks are resolved and the selected regular file must remain beneath that root unless it was supplied explicitly. The locator does not scan directories, boards, profiles, databases, CWD siblings, “current” links, recent tasks, or UI state. Multiple explicit values, an unreadable/non-regular file, schema mismatch, unknown repo identity, or no candidate returns a typed bootstrap failure and performs no dispatch or mutation.
+
+Bootstrap completes only through one explicit reconciliation/cutover gate: validate schema and normalization; prove complete plan-inventory coverage and one owner per ID; verify every source anchor and both digests against the pinned Git commit; reconcile duplicates/series/companions; validate typed known edges and acyclicity; import with the stable keys; compare manifest IDs/edges/digests to the candidate canonical graph; record zero unresolved conflicts and zero extra dispatchable records; then atomically activate one graph revision and persist a receipt naming repository, source commit, manifest digest, candidate/activated graph revisions, counts, and validator version. Until that receipt exists and matches the active revision, all slices are non-dispatchable. After cutover, the canonical graph is the only dispatch authority; the bootstrap locator is reconciliation input only and can never silently recreate or override graph state.
+
+Malformed or ambiguous input is fail-closed and diagnostic: report the source path/line, raw token, violated rule, and deterministic suggested spelling when one exists; do not drop a declaration, coerce an edge, choose an owner, truncate a range, or publish a partial graph.
+
 Execution follows checked PR/TDD slices, current repository instructions, and whatever orchestration tools are available at implementation time. No optional named agent skill is a dependency of this plan set. The repo-local `executing-tracedecay-v2-plan` skill is an optional parser/checklist aid: its inventory output is never completion or dependency authority without Git/review/test/task evidence.
 
 ## 3. Reading paths

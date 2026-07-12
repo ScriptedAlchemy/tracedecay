@@ -26,6 +26,20 @@ Read these authorities in order:
 
 Do not make every worker reread the full plan set. The orchestrator parses once and gives each worker exact source sections, complete acceptance, constraints, and retrieval anchors.
 
+## Normalize and reconcile slice authority
+
+Follow plan 00 §2.1 exactly. Normalize scalar, slash, dotted, range, and series forms before grouping declarations. Produce one `tracedecay.v2.slice-dag/v1` owner record per normalized scalar ID; attach other declaring sections as companions, merge all non-conflicting acceptance criteria, and retain incidental references as non-dispatchable evidence. Never turn a range, series heading, duplicate description, companion, or prose mention into another executable record.
+
+Reject the whole candidate manifest on an unknown/duplicate owner, malformed or oversized range, ambiguous slash/dot form, empty/recursive series, contradictory merged field, stale/missing source anchor, unknown or cyclic typed edge, digest mismatch, or duplicate idempotency key. Do not “repair” these by source order or partial import. Compute canonical digests and `v2-slice-owner/v1:<percent-encoded-normalized-id>:<content-digest>` keys only after reconciliation.
+
+The current `plan_inventory.py` is only a legacy heading/block-hash inventory aid. It does not implement plan 00 §2.1 normalization or fail-closed classification: in particular, do not use its treatment of slash IDs, dotted IDs, ranges, or `series` headings as canonical IDs. Reconcile those forms independently against §2.1, and block on any difference. Its output cannot satisfy the bootstrap gate.
+
+## Bootstrap without ambient state
+
+Before V2 cutover, resolve the manifest only from one explicit argument, `TRACEDECAY_V2_EXECUTION_MANIFEST`, or the repo-root `.tracedecay/v2-execution-manifest.json`, in that order and with plan 00's containment/failure rules. Never search ambient/current boards, sibling databases, profiles, task history, or UI state. Missing or ambiguous location is a dispatch-blocking result, not an empty graph.
+
+Validate complete inventory coverage, normalized ownership, anchors/digests, typed edges, acyclicity, and stable-key import; compare the imported candidate to canonical IDs/edges/digests; require zero extras/conflicts; and record one atomic activation receipt. Until that receipt matches the active graph revision, return no `next_ready`. After cutover, treat the locator only as explicit reconciliation input: the activated canonical graph remains dispatch authority.
+
 ## Validate the activated graph and ledger
 
 Export the activated canonical task graph plus completion ledger to JSON, then run:
@@ -35,7 +49,7 @@ python3 .codex/skills/executing-tracedecay-v2-plan/scripts/plan_execution.py \
   --graph /path/to/v2-execution-graph.json --next-ready
 ```
 
-Each `slices[]` entry must contain `id`, one declaring-plan `authority` path, exact `source_hashes` for every master/owner/companion declaration, explicit `prerequisites`, one lifecycle `status`, and `receipts`. `integrated` requires exact implementation commit, independent approved review, named test receipts, and integration commit. The validator requires complete inventory coverage, known statuses/edges, one authority, fresh hashes, terminal receipts, and an acyclic graph before returning `next_ready`; exit `2` blocks dispatch. Never manufacture missing edges from prose references or treat an unchecked/stale export as authority.
+The authoritative manifest must contain the plan-00 fields: one `owner`, all `companions`, merged `acceptance`, typed `dependencies`, `phase`, `commit_subject`, source anchors, canonical `content_digest`, and stable `idempotency_key`. The current read-only `plan_execution.py` remains a legacy ledger validator and expects its older projection fields (`id`, `authority`, `source_hashes`, `prerequisites`, `status`, and `receipts`); it does not validate the new authority schema, normalization, typed edges, canonical digests, stable keys, or bootstrap/cutover receipt. Therefore its successful exit is necessary only for that legacy projection and is never sufficient for dispatch. Run the plan-00 reconciliation/cutover validation separately, require its matching receipt, and return no `next_ready` unless both gates pass. `integrated` additionally requires exact implementation commit, independent approved review, named test receipts, and integration commit. Never manufacture missing edges from prose references or treat an unchecked/stale export as authority.
 
 The graph export is operational state and stays outside Git. Do not commit live task statuses, private task text, worktree paths, provider output, or receipts into the skill. The plan set defines intent; the activated graph defines dispatch; immutable receipts define completion.
 
