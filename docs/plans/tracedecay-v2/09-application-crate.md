@@ -1,9 +1,9 @@
 # TraceDecay V2 Application Crate Implementation Plan
 
-> **Accepted-base refresh delta (audit 29 / packet 30):** make retries and
-> shutdown deadlines explicit bounded state-machine transitions, not best-effort
-> prose. **Add** a compression-path oversize-retry ceiling with a terminal
-> disposition (FM-168) and an end-to-end bounded-shutdown contract for a
+> **Accepted-base refresh delta (audit 29 / packet 30):** the automation
+> memory-curator already has bounded retry/timeout behavior; retired FM-168 adds
+> no application or policy obligation. At the `run(cli)` composition surface,
+> support plan 12/root lifecycle's end-to-end daemon shutdown deadline for a
 > never-resolving outer `shutdown_background_tasks().await` (FM-163). See
 > [`30-baseline-refresh-candidate-packet.md`](30-baseline-refresh-candidate-packet.md)
 > §5, §7.2, §7.4.

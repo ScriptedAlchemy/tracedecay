@@ -18,9 +18,11 @@ through the exact post-PR-#452 design endpoint:
   post-baseline delta.
 - **[FACT] Accepted implementation endpoint (`M`):**
   `e560005610ac296018c3a16b9e6bded90de0eff5` (`master`, merge PR #462).
-- **[FACT] Design endpoint (`D`):**
-  `f18f0f14b3e7e2da30eefd9f1ed88862c0d73e57`, exact checkout HEAD and
-  `fix(architecture): enforce daemon-owned physical writers`.
+- **[FACT] Audited source/design endpoint (`D`):**
+  `f18f0f14b3e7e2da30eefd9f1ed88862c0d73e57`,
+  `fix(architecture): enforce daemon-owned physical writers`. Later packet and
+  remediation commits are post-`D` review artifacts, not members of this range;
+  they must identify themselves separately rather than redefining `D` as HEAD.
 - **[FACT]** `M` is an ancestor of `D`. The full audit range is `{B} ∪ (B..D)`:
   88 commits strictly after `B`, plus `B` itself, therefore 89 commits.
 - **[FACT]** `git diff B D` contains 125 changed paths, 41,778 insertions, 286
@@ -97,17 +99,21 @@ git diff "$B" "$D" -- src/agents/hermes/templates/plugin_init.py
 git diff "$B" "$D" -- src/memory/store.rs src/sessions/lcm/compression.rs
 ```
 
-## 4. Merge history and normative disposition
+## 4. Merge history and proposed disposition
 
-- **[FACT] Common implementation history (`B..M`)** contains runtime routing,
+- **[FACT] Common implementation history (`B..M`)** is 38 commits: 28
+  non-merges and ten PR merges (#453–#462). It contains runtime routing,
   CI/release hardening, deferred live-store vacuum, compression replay identity,
   managed-skill ownership, bounded runtime teardown, and safe-upgrade messaging.
   Merge PRs #453 through #462 carry these changes; release-only commits and
   merges change `CHANGELOG.md`, `Cargo.toml`, and `Cargo.lock` without an
   independent runtime contract.
-- **[FACT] Design history (`M..D`)** adds and repeatedly reconciles the complete
-  V2 plan set, architecture authority, generated ownership/dependency/release
-  views, corpus fixtures, and machine-enforced writer boundaries.
+- **[FACT] Design history (`M..D`)** is 50 commits: 42 non-merges and eight
+  merges. All six `origin/master` reconciliation merges (`2208969d`, `9561cc30`,
+  `0dc1ee14`, `363de8c7`, `859e5ed3`, `f1e2ec32`) are in this range, alongside
+  foundation merges `2f029bbb` and `e3199ed3`. It adds and repeatedly reconciles
+  the canonical master plan, complete numbered V2 plan set, architecture
+  authority and generator, generated views, corpus fixtures, and writer bounds.
 - **[INFERENCE — proposed disposition]** Preserve surviving runtime behavior and
   tests at `D`; exclude release-only version churn as independently normative;
   supersede intermediate plan drafts with the surviving files at `D`; retain
@@ -290,9 +296,10 @@ independent product contracts, with the stated exceptions:
   corresponding source and tests, not the version bump itself.
 - `scripts/dogfood.sh` and `scripts/hermes_stock_integration.sh`: developer and
   integration harnesses; operationally important but not product semantics.
-- `docs/plans/2026-07-09-tracedecay-brain-rewrite.md`: historical master-plan
-  provenance; the surviving numbered V2 plans and architecture hierarchy govern
-  when text conflicts.
+- `docs/plans/2026-07-09-tracedecay-brain-rewrite.md`: canonical product,
+  global-gate, PR-slice, and dependency-order authority. Numbered owner plans own
+  bounded implementation detail; this audit is evidence-only and overrides
+  neither.
 
 Counts: 20 + 19 + 29 + 13 + 19 + 18 + 7 = **125**.
 
@@ -325,10 +332,14 @@ Counts: 20 + 19 + 29 + 13 + 19 + 18 + 7 = **125**.
   fallback (`src/sessions/lcm/compression.rs`, `2d06a4d1`).
 - **[CONTRACT]** `idless_compression_replay_does_not_reingest_existing_raw_messages`
   pins no-duplication behavior.
-- **[FACT]** memory-curator messages move out of duplicated prompt text into
-  backend context; oversized input becomes Retryable (`d50588d7`).
-- **[INFERENCE / disposition]** Preserve replay identity and request bounding;
-  add an explicit retry ceiling or terminal disposition for irreducible input.
+- **[FACT]** `d50588d7` moves memory-curator messages out of duplicated prompt
+  text into backend context. `classify_agent_task_error_message` classifies an
+  immediate oversized request as `Permanent`; `AGENT_TASK_MAX_ATTEMPTS = 3`
+  plus the job time budget bounds in-run retry. `agent_task_failure_disposition`
+  treats only a stale recorded oversize ledger as `Retryable`, allowing a later
+  rebuilt request after request-bounding changes.
+- **[INFERENCE / disposition]** Preserve replay identity and the existing
+  bounded automation behavior. There is no new oversize-retry owner obligation.
 
 ### 6.3 Live memory and storage maintenance
 
@@ -410,10 +421,9 @@ Counts: 20 + 19 + 29 + 13 + 19 + 18 + 7 = **125**.
    rows orphaned unless explicitly cleaned.
 6. **[INFERENCE — low] Provider discontinuity.** Historical Hermes records labeled
    `cursor` are not remapped to `hermes`; provider-filtered analytics split.
-7. **[INFERENCE — low-to-medium] Notification multiplication.** A turn now emits
-   one notification per user/project destination; downstream cardinality changes.
-8. **[INFERENCE — medium] Retry loop.** Structurally irreducible oversized input
-   may be retried without a demonstrated cap.
+7. **[INFERENCE — low-to-medium] Notification multiplication.** A turn emits two
+   event types, each once per user/project destination: up to
+   `2 × (1 + unique_project_roots)` total.
 9. **[INFERENCE — low] Codex ownership guidance loss.** Compact steering preserves
    agent discovery but drops the only Codex-specific parent-owns-writes sentence.
 10. **[INFERENCE — low] Dogfood packaging.** `CARGO_MANIFEST_DIR`-relative scripts
@@ -439,8 +449,8 @@ Counts: 20 + 19 + 29 + 13 + 19 + 18 + 7 = **125**.
 7. **Provider migration omitted:** no `cursor` to `hermes` continuity/backfill.
 8. **Cursor migration omitted:** no explicit resweep budget, resumability proof,
    or v1 cursor cleanup.
-9. **Notification cardinality unspecified:** N+1 delivery is unbounded by contract.
-10. **Oversize retry termination unspecified:** Retryable lacks a demonstrated cap.
+9. **Notification cardinality unspecified:** two event types each deliver
+   `1 + unique_project_roots`; dedupe and partial-failure behavior are unbounded.
 11. **Test-execution limitation:** source-inspected integration contracts are not a
     passing suite. Aggregate verification is required before acceptance.
 12. **Endpoint drift:** any later design/master commit is outside this report until
@@ -456,10 +466,13 @@ Counts: 20 + 19 + 29 + 13 + 19 + 18 + 7 = **125**.
   orphan-cursor policy, interruption/resumption, and storage budget.
 - **Hooks / plans 07, 27:** preserve verified current asymmetries until deliberately
   migrated; decide trust-state owner and compact Codex write ownership language.
-- **Application / plans 09, 24:** make retries and shutdown deadlines explicit,
-  bounded state-machine transitions rather than best-effort prose.
+- **Root lifecycle / plan 12 (application plan 09 at the `run(cli)` surface):**
+  bind global daemon/process shutdown to an end-to-end deadline. Plan 24 owns
+  executor attempt deadlines, not global daemon shutdown. No new oversize retry
+  obligation is introduced.
 - **Observability / plan 26:** distinguish skipped export, partial projection,
-  retry exhaustion, runtime-drop timeout, and async shutdown timeout.
+  runtime-drop timeout, async shutdown timeout, and both notification event
+  types. Retired FM-168 adds no retry-exhaustion obligation.
 - **Architecture / storage-and-consistency:** do not mark deterministic shutdown
   satisfied until a never-resolving-task process test passes.
 
@@ -477,9 +490,10 @@ Counts: 20 + 19 + 29 + 13 + 19 + 18 + 7 = **125**.
    intentionally queryable as two eras.
 6. Repeated fact deletion leaves peers usable; scheduled exclusive maintenance
    later reclaims pages within a declared bound.
-7. Irreducible oversized input terminates after a bounded retry policy.
-8. Hermes notification count is exactly `1 + unique_project_roots`, with dedupe
-   and partial-failure behavior pinned.
+7. Existing automation tests pin immediate oversize as `Permanent`, stale-ledger
+   healing as later-run `Retryable`, and the three-attempt/total-time budget.
+8. Both Hermes notification event types each emit exactly
+   `1 + unique_project_roots`, with dedupe and partial-failure behavior pinned.
 9. Codex steering retains all eight agents and a compact parent-owns-writes token.
 10. Contract test pins Claude-only `PostToolUseFailure`, absent Codex PreToolUse,
     Codex config registration/uninstall, and the chosen trust-state owner.

@@ -3182,8 +3182,9 @@ Privacy, operations, and convergence:
 
 ## 17. Accepted-base refresh delta (audit 29 / packet 30)
 
-Executor retry and shutdown behavior must be explicit bounded state-machine
-transitions, not best-effort prose: a never-resolving background task must not
-prevent process exit beyond the declared shutdown deadline. See
+Executor-attempt retry, lease, and deadline behavior remains explicit bounded
+state-machine work. Global daemon/process shutdown is owned by plan 12/root
+lifecycle (with plan 09's `run(cli)` composition surface), not this executor
+plan; FM-163 therefore creates no plan-24 delta. See
 [`30-baseline-refresh-candidate-packet.md`](30-baseline-refresh-candidate-packet.md)
 §5, §7.4 and FM-163.

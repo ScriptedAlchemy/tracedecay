@@ -2,11 +2,11 @@
 
 > **Accepted-base refresh delta (audit 29 / packet 30):** distinguish, as
 > separate observable outcomes, skipped managed-skill export, partial multi-shard
-> projection, compression retry exhaustion, runtime-drop timeout, and async
-> shutdown timeout; pin Hermes notification cardinality (`1 + unique_project_roots`)
-> with dedupe and partial-failure behavior. See
+> projection, runtime-drop timeout, and async shutdown timeout. Pin both Hermes
+> notification event types, each at `1 + unique_project_roots`, with dedupe and
+> partial-failure behavior. Retired FM-168 adds no retry-exhaustion obligation. See
 > [`30-baseline-refresh-candidate-packet.md`](30-baseline-refresh-candidate-packet.md)
-> §5, §6, §7.6 and FM-161/FM-162/FM-163/FM-167/FM-168.
+> §5, §6, §7.6 and FM-161/FM-162/FM-163/FM-167.
 
 **Goal:** Own the Observability and Accounting bounded context (master §5.2 #12) end to end: usage/cost/savings accounting events, ingest/projection lag, data-quality metrics, denominator and unknown-population semantics, cap/truncation telemetry with retrieval anchors, per-capability adoption analytics, hint outcome rollups, autonomous-automation admission/useful-work metrics, SLO monitors, and the Observatory/Costs data contracts — so that every number TraceDecay shows about itself declares its population, horizon, cap, watermark, and unknown state, and no misleading zero survives.
 

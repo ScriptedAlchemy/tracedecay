@@ -1,5 +1,11 @@
 # TraceDecay V2 Cross-Host Agent and Plugin Bundle Plan
 
+> **Accepted-base refresh delta (audit 29 / packet 30):** preserve current host
+> asymmetries as fixtures until deliberate migration; bind the compact Codex
+> parent-owns-writes token and the hook trust-state ownership decision to PR 24Q
+> and PR 36R, with FM-169/FM-170 as gates. This owner plan, not packet 30, is the
+> standing authority for the accepted obligation.
+
 > **Status:** implementation-grade architecture and delivery plan; no production code is changed by this document.
 >
 > **Product rule:** TraceDecay ships one host-neutral capability and workflow definition, then deterministically projects it into host-native Claude Code, Codex, Cursor, and Hermes integrations. A host package or Hermes plugin overlay is a projection over the same catalog, hooks, skills, agents, CLI, API, task/executor, memory, and authorization system; it is never a second product definition.

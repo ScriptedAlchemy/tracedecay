@@ -25,12 +25,52 @@ PR_ID = re.compile(rf"\bPR\s+({PR_VALUE})\b")
 CHECKBOX = re.compile(r"^\s*- \[([ xX])\]")
 ORDERING = re.compile(r"(?:\*\*Ordering:\*\*|\b(?:after|depends on|blocked by|requires)\b)", re.IGNORECASE)
 COMMIT = re.compile(r"(?:Commit:|Commit separately:).*?`([^`]+)`")
+FM_ID = re.compile(r"\bFM-(\d{3})\b")
+BASELINE_FM_BINDINGS = {
+    "FM-161": ("PR 33R",),
+    "FM-162": ("PR 21", "PR 19A", "PR 6B"),
+    "FM-163": ("PR 24E0", "PR 33R", "PR 24E", "PR 37"),
+    "FM-164": ("PR 6D", "PR 33S"),
+    "FM-165": ("PR 33R", "PR 37"),
+    "FM-166": ("PR 33R",),
+    "FM-167": ("PR 24FR", "PR 22H", "PR 37"),
+    "FM-169": ("PR 24Q", "PR 36R"),
+    "FM-170": ("PR 24Q", "PR 36R"),
+    "FM-171": ("PR 36R", "PR 37"),
+}
 
 
 def plan_files(root: Path) -> list[Path]:
     files = [root / "docs/plans/2026-07-09-tracedecay-brain-rewrite.md"]
     files.extend(sorted((root / "docs/plans/tracedecay-v2").glob("*.md")))
     return [path for path in files if path.is_file()]
+
+
+def validate_failure_matrix(root: Path) -> list[str]:
+    """Reject invalid FM IDs or missing canonical PR-slice/dependency bindings."""
+    path = root / "docs/plans/tracedecay-v2/14-historical-failure-regression-matrix.md"
+    row_pairs = [
+        (f"FM-{match.group(1)}", line)
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if line.startswith("| FM-") and (match := FM_ID.search(line))
+    ]
+    row_ids = [fm_id for fm_id, _ in row_pairs]
+    duplicates = sorted({value for value in row_ids if row_ids.count(value) > 1})
+    if duplicates:
+        raise ValueError(f"duplicate failure-matrix IDs: {', '.join(duplicates)}")
+    rows = dict(row_pairs)
+    expected = [f"FM-{value:03d}" for value in range(1, len(row_ids) + 1)]
+    if set(row_ids) != set(expected):
+        missing = sorted(set(expected) - set(row_ids))
+        detail = ", ".join(missing)
+        raise ValueError(f"non-contiguous failure-matrix IDs; missing: {detail}")
+    for fm_id, bindings in BASELINE_FM_BINDINGS.items():
+        missing = [binding for binding in bindings if binding not in rows[fm_id]]
+        if missing:
+            raise ValueError(
+                f"{fm_id} missing canonical PR binding(s): {', '.join(missing)}"
+            )
+    return expected
 
 
 def _expand_range(start: str, end: str) -> list[str]:
@@ -126,6 +166,7 @@ def main() -> int:
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args()
     root = args.root.resolve()
+    validate_failure_matrix(root)
     records = [record for path in plan_files(root) for record in scan(path, root)]
     if args.id:
         records = [record for record in records if args.id in record["ids"]]

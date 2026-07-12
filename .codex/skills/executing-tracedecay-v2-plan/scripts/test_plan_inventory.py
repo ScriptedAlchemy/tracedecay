@@ -13,6 +13,30 @@ import plan_inventory
 
 
 class PlanInventoryHeadingTests(unittest.TestCase):
+    def test_failure_matrix_ids_are_unique_and_contiguous(self) -> None:
+        root = Path(__file__).resolve().parents[4]
+        ids = plan_inventory.validate_failure_matrix(root)
+        self.assertEqual(len(ids), 171)
+        self.assertEqual(ids[0], "FM-001")
+        self.assertEqual(ids[-1], "FM-171")
+
+    def test_failure_matrix_validator_rejects_duplicate(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / "docs/plans/tracedecay-v2/14-historical-failure-regression-matrix.md"
+            path.parent.mkdir(parents=True)
+            path.write_text("| FM-001 | a |\n| FM-001 | duplicate |\n| FM-003 | gap |\n")
+            with self.assertRaisesRegex(ValueError, "duplicate"):
+                plan_inventory.validate_failure_matrix(root)
+
+    def test_baseline_failure_matrix_bindings_are_canonical(self) -> None:
+        root = Path(__file__).resolve().parents[4]
+        matrix = (root / "docs/plans/tracedecay-v2/14-historical-failure-regression-matrix.md").read_text()
+        for fm_id, bindings in plan_inventory.BASELINE_FM_BINDINGS.items():
+            row = next(line for line in matrix.splitlines() if line.startswith(f"| {fm_id} |"))
+            for binding in bindings:
+                self.assertIn(binding, row)
+
     def test_supported_heading_forms_and_ids(self) -> None:
         lines = [
             "### PR 4E — Bare heading",
