@@ -713,6 +713,11 @@ fn forbidden_real_cargo_edge_is_rejected_by_focused_fixture() {
 
 #[test]
 fn seven_v2_adrs_lock_the_phase_zero_decisions() {
+    let master_plan = fs::read_to_string("docs/plans/2026-07-09-tracedecay-brain-rewrite.md")
+        .expect("master V2 plan is required");
+    assert!(master_plan.contains("existing Rsbuild/Rspack dashboard pipeline"));
+    assert!(!master_plan.contains("bundler selected by an explicit Rsbuild-versus-Vite ADR"));
+
     let required = [
         "logical-brain.md",
         "identity-and-evidence.md",
