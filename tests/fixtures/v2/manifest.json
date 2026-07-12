@@ -1,10 +1,10 @@
 {
   "benchmark": {
+    "generated_sha256": "82a6f55b2b1f502fa55249f19c388324ef9f7f4c7639b51504e46c07e3339182",
     "generated_records": 340,
     "generator": "tests/v2_corpus_suite/generate_10x.py",
     "output": "synthetic-10x.jsonl",
-    "scale_factor": 10,
-    "seed": 20260712
+    "scale_factor": 10
   },
   "content_policy": "synthetic-or-minimally-redacted",
   "files": [

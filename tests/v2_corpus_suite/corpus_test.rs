@@ -14,6 +14,13 @@ fn manifest() -> Value {
     serde_json::from_str(&fs::read_to_string(corpus_root().join("manifest.json")).unwrap()).unwrap()
 }
 
+fn files_under(root: &Path) -> impl Iterator<Item = walkdir::DirEntry> + '_ {
+    WalkDir::new(root)
+        .into_iter()
+        .map(Result::unwrap)
+        .filter(|entry| entry.file_type().is_file())
+}
+
 #[test]
 fn manifest_is_complete_and_hashes_are_deterministic() {
     let manifest = manifest();
@@ -67,6 +74,7 @@ fn manifest_is_complete_and_hashes_are_deterministic() {
 #[test]
 fn every_provider_fixture_is_manifested_and_synthetic() {
     let manifest = manifest();
+    let root = corpus_root();
     let expected_providers: BTreeSet<_> = [
         "antigravity",
         "claude",
@@ -99,14 +107,12 @@ fn every_provider_fixture_is_manifested_and_synthetic() {
         .iter()
         .map(|entry| entry["path"].as_str().unwrap().to_owned())
         .collect();
-    let actual: BTreeSet<_> = WalkDir::new(corpus_root().join("providers"))
-        .into_iter()
-        .map(Result::unwrap)
-        .filter(|entry| entry.file_type().is_file())
+    let providers_root = root.join("providers");
+    let actual: BTreeSet<_> = files_under(&providers_root)
         .map(|entry| {
             entry
                 .path()
-                .strip_prefix(corpus_root())
+                .strip_prefix(&root)
                 .unwrap()
                 .to_string_lossy()
                 .replace('\\', "/")
@@ -115,7 +121,7 @@ fn every_provider_fixture_is_manifested_and_synthetic() {
     assert_eq!(declared, actual);
 
     for relative in actual {
-        let original = fs::read_to_string(corpus_root().join(&relative)).unwrap();
+        let original = fs::read_to_string(root.join(&relative)).unwrap();
         let value: Value = serde_json::from_str(&original).unwrap();
         assert_eq!(value["provenance"], "synthetic");
         assert!(
@@ -147,11 +153,8 @@ fn fixtures_pass_secret_scan() {
         regex::Regex::new(r"eyJ[A-Za-z0-9_-]{12,}\.[A-Za-z0-9_-]{12,}\.[A-Za-z0-9_-]{12,}")
             .unwrap(),
     ];
-    for entry in WalkDir::new(corpus_root())
-        .into_iter()
-        .map(Result::unwrap)
-        .filter(|e| e.file_type().is_file())
-    {
+    let root = corpus_root();
+    for entry in files_under(&root) {
         let text = fs::read_to_string(entry.path()).unwrap();
         for pattern in &forbidden {
             assert!(
@@ -197,6 +200,15 @@ fn reference_machine_and_generator_are_reproducible() {
     let first_bytes = fs::read(first.path().join("synthetic-10x.jsonl")).unwrap();
     let second_bytes = fs::read(second.path().join("synthetic-10x.jsonl")).unwrap();
     assert_eq!(first_bytes, second_bytes);
+    let generated_sha256 = hex::encode(Sha256::digest(&first_bytes));
+    assert_eq!(
+        generated_sha256,
+        manifest["benchmark"]["generated_sha256"].as_str().unwrap()
+    );
+    let receipt: Value =
+        serde_json::from_str(&fs::read_to_string(first.path().join("receipt.json")).unwrap())
+            .unwrap();
+    assert_eq!(receipt["sha256"], generated_sha256);
     assert_eq!(
         first_bytes.iter().filter(|byte| **byte == b'\n').count(),
         manifest["benchmark"]["generated_records"].as_u64().unwrap() as usize
