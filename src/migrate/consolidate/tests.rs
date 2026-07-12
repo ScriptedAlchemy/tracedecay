@@ -228,6 +228,167 @@ async fn dry_run_reports_live_split_shape_without_mutation() {
 }
 
 #[tokio::test]
+async fn legacy_single_db_plan_is_read_only_and_apply_preserves_source_graph() {
+    let fixture = fixture().await;
+    let source = layout_for_id(&fixture.project, &fixture.profile, &fixture.source_id).unwrap();
+    fs::remove_file(&source.branch_meta_path).unwrap();
+    storage::write_store_manifest(&source).unwrap();
+    let source_graph_before = file_digest(&source.graph_db_path).unwrap();
+    let profile_before = full_tree_snapshot(&fixture.profile);
+
+    let options = fixture.options();
+    let planned = plan(&options).await.unwrap();
+
+    assert_eq!(planned.source.graph_databases, 1);
+    assert_eq!(planned.source.branches, 1);
+    assert!(!source.branch_meta_path.exists());
+    assert_eq!(
+        full_tree_snapshot(&fixture.profile),
+        profile_before,
+        "legacy single-DB planning mutated an input"
+    );
+
+    let applied = apply(&options, &planned.confirmation_token).await.unwrap();
+
+    assert!(!source.branch_meta_path.exists());
+    assert_eq!(
+        file_digest(&source.graph_db_path).unwrap(),
+        source_graph_before
+    );
+    let default_branch = crate::branch::detect_default_branch(&fixture.project)
+        .unwrap_or_else(|| "main".to_string());
+    let preserved_name = format!("consolidated/{}/{}", fixture.source_id, default_branch);
+    let destination_meta = branch_meta::load_branch_meta(&applied.destination_data_root).unwrap();
+    let preserved = destination_meta.branches.get(&preserved_name).unwrap();
+    assert_eq!(preserved.created_at, "0");
+    assert_eq!(preserved.last_synced_at, "0");
+    let preserved_path = applied.destination_data_root.join(&preserved.db_file);
+    let (db, _) = Database::open_read_only(&preserved_path).await.unwrap();
+    let facts = MemoryStore::new(db.conn())
+        .list_facts(None, Some(0.0), 100)
+        .await
+        .unwrap();
+    assert!(
+        facts
+            .iter()
+            .any(|fact| fact.content == "legacy durable fact"),
+        "the preserved source graph lost its legacy fact"
+    );
+    db.close();
+}
+
+#[tokio::test]
+async fn legacy_single_db_retry_after_destination_publish_is_deterministic() {
+    let fixture = fixture().await;
+    let source = layout_for_id(&fixture.project, &fixture.profile, &fixture.source_id).unwrap();
+    fs::remove_file(&source.branch_meta_path).unwrap();
+    storage::write_store_manifest(&source).unwrap();
+    let options = fixture.options();
+    let planned = plan(&options).await.unwrap();
+
+    let interrupted = apply_with_prepare_stop(
+        &options,
+        &planned.confirmation_token,
+        prepare::PrepareStop::Publish,
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        interrupted.to_string().contains("synthetic interruption"),
+        "{interrupted}"
+    );
+
+    std::thread::sleep(std::time::Duration::from_secs(1));
+    let applied = apply(&options, &planned.confirmation_token).await.unwrap();
+
+    assert_eq!(applied.state, ConsolidationState::Applied);
+    let destination_meta = branch_meta::load_branch_meta(&applied.destination_data_root).unwrap();
+    let default_branch = crate::branch::detect_default_branch(&fixture.project).unwrap();
+    let preserved = &destination_meta.branches
+        [&format!("consolidated/{}/{}", fixture.source_id, default_branch)];
+    assert_eq!(preserved.created_at, "0");
+    assert_eq!(preserved.last_synced_at, "0");
+}
+
+#[tokio::test]
+async fn target_legacy_single_db_metadata_is_synthesized_without_input_mutation() {
+    let fixture = fixture().await;
+    let target = layout_for_id(&fixture.project, &fixture.profile, &fixture.target_id).unwrap();
+    fs::remove_file(&target.branch_meta_path).unwrap();
+    storage::write_store_manifest(&target).unwrap();
+    let profile_before = full_tree_snapshot(&fixture.profile);
+    let options = fixture.options();
+
+    let planned = plan(&options).await.unwrap();
+
+    assert_eq!(planned.target.branches, 1);
+    assert_eq!(full_tree_snapshot(&fixture.profile), profile_before);
+    let applied = apply(&options, &planned.confirmation_token).await.unwrap();
+    assert!(!target.branch_meta_path.exists());
+    let destination_meta = branch_meta::load_branch_meta(&applied.destination_data_root).unwrap();
+    let default_branch = crate::branch::detect_default_branch(&fixture.project).unwrap();
+    assert_eq!(destination_meta.default_branch, default_branch);
+    assert_eq!(destination_meta.branches[&default_branch].created_at, "0");
+    assert_eq!(
+        destination_meta.branches[&default_branch].last_synced_at,
+        "0"
+    );
+}
+
+#[tokio::test]
+async fn synthesized_branch_metadata_change_invalidates_confirmation_token() {
+    let fixture = fixture().await;
+    let source = layout_for_id(&fixture.project, &fixture.profile, &fixture.source_id).unwrap();
+    fs::remove_file(&source.branch_meta_path).unwrap();
+    storage::write_store_manifest(&source).unwrap();
+    run_git(&fixture.project, &["branch", "-m", "trunk"]);
+    let options = fixture.options();
+
+    let planned = plan(&options).await.unwrap();
+
+    run_git(&fixture.project, &["branch", "-m", "release"]);
+    let error = apply(&options, &planned.confirmation_token)
+        .await
+        .unwrap_err();
+
+    assert!(
+        error.to_string().contains("confirmation token mismatch"),
+        "{error}"
+    );
+    assert!(!source.branch_meta_path.exists());
+    assert!(!planned.destination_data_root.exists());
+    assert!(!planned.backup_root.exists());
+    assert!(!planned.ledger_path.exists());
+}
+
+#[tokio::test]
+async fn corrupt_branch_metadata_fails_closed_without_mutation() {
+    for content in [
+        b"{\"default_branch\":".as_slice(),
+        br#"{"default_branch":"main","branches":{}}"#.as_slice(),
+        br#"{"default_branch":"main","branches":{"main":{"db_file":"branches/not-main.db","created_at":"0","last_synced_at":"0"}}}"#.as_slice(),
+    ] {
+        let fixture = fixture().await;
+        let source = layout_for_id(&fixture.project, &fixture.profile, &fixture.source_id).unwrap();
+        fs::write(&source.branch_meta_path, content).unwrap();
+        storage::write_store_manifest(&source).unwrap();
+        let profile_before = full_tree_snapshot(&fixture.profile);
+
+        let error = plan(&fixture.options()).await.unwrap_err();
+
+        assert!(
+            error.to_string().contains("corrupt branch metadata"),
+            "{error}"
+        );
+        assert_eq!(
+            full_tree_snapshot(&fixture.profile),
+            profile_before,
+            "corrupt metadata planning mutated an input"
+        );
+    }
+}
+
+#[tokio::test]
 async fn many_branch_plan_retains_constant_database_handles_and_bounded_scratch() {
     const BRANCHES_PER_SHARD: usize = 48;
     let fixture = fixture().await;
@@ -2022,13 +2183,14 @@ async fn branch_metadata_paths_cannot_escape_the_profile_shard() {
     let source = layout_for_id(&fixture.project, &fixture.profile, &fixture.source_id).unwrap();
     let outside = fixture.profile.join("outside.db");
     fs::copy(&source.graph_db_path, &outside).unwrap();
-    let mut meta = branch_meta::load_branch_meta(&source.data_root).unwrap();
+    let meta = branch_meta::load_branch_meta(&source.data_root).unwrap();
 
     for db_file in [
         "../outside.db".to_string(),
         outside.to_string_lossy().to_string(),
     ] {
-        meta.branches.insert(
+        let mut invalid = meta.clone();
+        invalid.branches.insert(
             "unsafe".to_string(),
             BranchEntry {
                 db_file,
@@ -2038,7 +2200,11 @@ async fn branch_metadata_paths_cannot_escape_the_profile_shard() {
                 gc_protected: false,
             },
         );
-        branch_meta::save_branch_meta(&source.data_root, &meta).unwrap();
+        fs::write(
+            &source.branch_meta_path,
+            serde_json::to_vec_pretty(&invalid).unwrap(),
+        )
+        .unwrap();
         let error = plan(&fixture.options()).await.unwrap_err();
         assert!(error.to_string().contains("store-relative path"), "{error}");
     }

@@ -145,7 +145,7 @@ fn post_update_quarantines_corrupt_branch_meta() {
     let valid = write_branch_meta(
         &profile_root,
         "proj_valid",
-        r#"{"default_branch":"main","branches":{}}"#,
+        r#"{"default_branch":"main","branches":{"main":{"db_file":"tracedecay.db","created_at":"0","last_synced_at":"0"}}}"#,
     );
 
     let mut command = post_update_command(&home_root);
@@ -170,7 +170,7 @@ fn post_update_quarantines_corrupt_branch_meta() {
     );
     assert_eq!(
         std::fs::read_to_string(&valid).unwrap(),
-        r#"{"default_branch":"main","branches":{}}"#,
+        r#"{"default_branch":"main","branches":{"main":{"db_file":"tracedecay.db","created_at":"0","last_synced_at":"0"}}}"#,
         "valid branch-meta.json must be left untouched"
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -181,14 +181,17 @@ fn post_update_quarantines_corrupt_branch_meta() {
 }
 
 #[test]
-fn post_update_quarantines_schema_corrupt_branch_meta() {
+fn post_update_quarantines_semantically_corrupt_branch_meta() {
     let home = TempDir::new().unwrap();
     let home_root = canonical_temp_path(home.path());
     let profile_root = home_root.join(".tracedecay");
-    // Valid JSON, but not a valid BranchMeta — the runtime treats any schema
-    // mismatch as corrupt, so the health pass must quarantine it too.
-    let schema_corrupt =
-        write_branch_meta(&profile_root, "proj_schema", r#"{"default_branch": 5}"#);
+    // The schema is valid, but an empty branch map cannot represent the
+    // declared default branch and must be quarantined as semantic corruption.
+    let semantic_corrupt = write_branch_meta(
+        &profile_root,
+        "proj_semantic",
+        r#"{"default_branch":"main","branches":{}}"#,
+    );
 
     let mut command = post_update_command(&home_root);
     command.args(["post-update", "--no-reinstall"]);
@@ -196,10 +199,10 @@ fn post_update_quarantines_schema_corrupt_branch_meta() {
 
     assert_success(&output, "post-update");
     assert!(
-        !schema_corrupt.exists(),
-        "schema-corrupt branch-meta.json should be quarantined away"
+        !semantic_corrupt.exists(),
+        "semantically corrupt branch-meta.json should be quarantined away"
     );
-    let quarantined = quarantined_branch_meta_files(schema_corrupt.parent().unwrap());
+    let quarantined = quarantined_branch_meta_files(semantic_corrupt.parent().unwrap());
     assert_eq!(
         quarantined.len(),
         1,
@@ -207,7 +210,7 @@ fn post_update_quarantines_schema_corrupt_branch_meta() {
     );
     assert_eq!(
         std::fs::read_to_string(&quarantined[0]).unwrap(),
-        r#"{"default_branch": 5}"#,
+        r#"{"default_branch":"main","branches":{}}"#,
         "quarantine must preserve the corrupt content as evidence"
     );
     let stderr = String::from_utf8_lossy(&output.stderr);

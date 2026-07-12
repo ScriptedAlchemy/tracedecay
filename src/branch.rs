@@ -134,11 +134,15 @@ fn gix_rev_distance(
     Some(count)
 }
 
-/// Auto-detects the default branch (main or master).
+/// Auto-detects the repository's default branch.
 ///
 /// Strategy:
 /// 1. Try `git symbolic-ref refs/remotes/origin/HEAD`
 /// 2. Fall back to checking if `main` or `master` exists locally
+/// 3. Fall back to the currently checked-out local branch
+///
+/// The final fallback deliberately returns `None` for detached HEAD rather
+/// than inventing a default branch.
 pub fn detect_default_branch(project_root: &Path) -> Option<String> {
     let repo = gix::open(project_root).ok()?;
 
@@ -164,7 +168,73 @@ pub fn detect_default_branch(project_root: &Path) -> Option<String> {
         }
     }
 
-    None
+    current_branch(project_root)
+}
+
+#[cfg(test)]
+mod default_branch_tests {
+    use super::*;
+
+    fn run_git(project_root: &Path, args: &[&str]) {
+        let output = std::process::Command::new(crate::git::git_program())
+            .args(args)
+            .current_dir(project_root)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn custom_default_repo() -> (tempfile::TempDir, PathBuf) {
+        let temp = tempfile::tempdir().unwrap();
+        let project_root = temp.path().to_path_buf();
+        run_git(&project_root, &["init", "-b", "trunk"]);
+        run_git(&project_root, &["config", "user.email", "test@example.com"]);
+        run_git(&project_root, &["config", "user.name", "TraceDecay Test"]);
+        std::fs::write(project_root.join("fixture"), b"fixture").unwrap();
+        run_git(&project_root, &["add", "fixture"]);
+        run_git(&project_root, &["commit", "-m", "fixture"]);
+        (temp, project_root)
+    }
+
+    #[test]
+    fn detects_checked_out_custom_default_without_origin_head() {
+        let (_temp, project_root) = custom_default_repo();
+
+        assert_eq!(
+            detect_default_branch(&project_root).as_deref(),
+            Some("trunk")
+        );
+    }
+
+    #[test]
+    fn detached_custom_default_does_not_guess() {
+        let (_temp, project_root) = custom_default_repo();
+        run_git(&project_root, &["checkout", "--detach", "HEAD"]);
+
+        assert_eq!(detect_default_branch(&project_root), None);
+    }
+
+    #[tokio::test]
+    async fn detached_legacy_store_refuses_to_invent_default_metadata() {
+        let (temp, project_root) = custom_default_repo();
+        run_git(&project_root, &["checkout", "--detach", "HEAD"]);
+        let data_dir = temp.path().join("profile-shard");
+        std::fs::create_dir(&data_dir).unwrap();
+        std::fs::write(data_dir.join(crate::config::DB_FILENAME), b"graph").unwrap();
+
+        let error = match prepare_branch_tracking_in_layout(&project_root, "trunk", &data_dir).await
+        {
+            Ok(_) => panic!("detached legacy store must not invent a default branch"),
+            Err(error) => error,
+        };
+
+        assert!(error.to_string().contains("default branch is unknown"));
+        assert!(!data_dir.join(crate::storage::BRANCH_META_FILENAME).exists());
+    }
 }
 
 /// Sanitizes a branch name for use as a filename.
@@ -355,7 +425,8 @@ pub fn find_nearest_tracked_ancestor(
 pub enum BranchAddOutcome {
     /// The project has no `.tracedecay/` index; nothing was done.
     NotIndexed,
-    /// The branch was already tracked; no copy/sync was performed.
+    /// The branch was already tracked; no copy/sync was performed. Legacy
+    /// single-DB metadata may have been persisted for the default branch.
     AlreadyTracked,
     /// A new branch DB was created from the nearest ancestor and synced.
     Added,
@@ -408,8 +479,8 @@ pub async fn prepare_branch_tracking_in_layout(
     };
 
     let meta_path = tracedecay_dir.join("branch-meta.json");
-    let mut meta = match branch_meta::load_branch_meta(tracedecay_dir) {
-        Some(meta) => meta,
+    let (mut meta, metadata_was_missing) = match branch_meta::load_branch_meta(tracedecay_dir) {
+        Some(meta) => (meta, false),
         None if meta_path.exists() => {
             return Err(crate::errors::TraceDecayError::Config {
                 message: format!(
@@ -419,13 +490,26 @@ pub async fn prepare_branch_tracking_in_layout(
             });
         }
         None => {
-            let default = detect_default_branch(project_root).unwrap_or_else(|| "main".to_string());
-            branch_meta::BranchMeta::new_for_dir(tracedecay_dir, &default)
+            let default = detect_default_branch(project_root).ok_or_else(|| {
+                crate::errors::TraceDecayError::Config {
+                    message: format!(
+                        "cannot initialize missing branch metadata at '{}': repository default branch is unknown (detached HEAD or no default ref)",
+                        meta_path.display()
+                    ),
+                }
+            })?;
+            (
+                branch_meta::BranchMeta::for_legacy_single_db(tracedecay_dir, &default),
+                true,
+            )
         }
     };
     prune_missing_branch_dbs(tracedecay_dir, &mut meta);
 
     if meta.is_tracked(branch_name) {
+        if metadata_was_missing {
+            branch_meta::save_branch_meta(tracedecay_dir, &meta)?;
+        }
         return Ok(BranchTrackingPreparation::AlreadyTracked);
     }
 
@@ -483,6 +567,60 @@ pub async fn prepare_branch_tracking_in_layout(
         new_db_path,
         _branch_lock: branch_lock,
     }))
+}
+
+#[cfg(test)]
+#[tokio::test]
+async fn default_branch_bootstrap_persists_canonical_metadata() {
+    let temp = tempfile::tempdir().unwrap();
+    let project_root = temp.path().join("repo");
+    std::fs::create_dir_all(&project_root).unwrap();
+    let run_git = |args: &[&str]| {
+        let output = std::process::Command::new(crate::git::git_program())
+            .args(args)
+            .current_dir(&project_root)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    };
+    run_git(&["init", "-b", "main"]);
+    std::fs::write(project_root.join("fixture"), b"fixture").unwrap();
+    run_git(&["add", "fixture"]);
+    run_git(&[
+        "-c",
+        "user.email=test@example.com",
+        "-c",
+        "user.name=TraceDecay Test",
+        "commit",
+        "-m",
+        "fixture",
+    ]);
+
+    let data_dir = temp.path().join("profile-shard");
+    std::fs::create_dir_all(&data_dir).unwrap();
+    std::fs::write(data_dir.join(crate::config::DB_FILENAME), b"graph").unwrap();
+    let meta_path = data_dir.join(crate::storage::BRANCH_META_FILENAME);
+    assert!(!meta_path.exists());
+
+    let outcome = prepare_branch_tracking_in_layout(&project_root, "main", &data_dir)
+        .await
+        .unwrap();
+
+    assert!(matches!(outcome, BranchTrackingPreparation::AlreadyTracked));
+    let meta = crate::branch_meta::load_branch_meta(&data_dir).unwrap();
+    assert_eq!(meta.default_branch, "main");
+    assert_eq!(meta.branches.len(), 1);
+    let default = meta.branches.get("main").unwrap();
+    assert_eq!(default.db_file, crate::config::db_filename(&data_dir));
+    assert!(default.parent.is_none());
+    assert_eq!(default.created_at, "0");
+    assert_eq!(default.last_synced_at, "0");
+    assert!(!meta_path.with_extension("json.tmp").exists());
+    assert!(!data_dir.join("branches").exists());
 }
 
 pub fn finalize_prepared_branch_tracking(tracedecay_dir: &Path, prepared: &PreparedBranchTracking) {

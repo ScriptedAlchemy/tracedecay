@@ -3,7 +3,8 @@
 //! Stores tracking information in `branch-meta.json` inside the project data
 //! dir.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -35,6 +36,7 @@ pub struct BranchMeta {
     /// The auto-detected or configured default branch name.
     pub default_branch: String,
     /// Map of branch name → entry.
+    #[serde(serialize_with = "serialize_branches")]
     pub branches: HashMap<String, BranchEntry>,
 }
 
@@ -51,16 +53,27 @@ impl BranchMeta {
         Self::with_db_file(default_branch, crate::config::db_filename(data_dir))
     }
 
+    /// Synthesizes metadata for a legacy store that only has the canonical
+    /// main database. The timestamps are deliberately unknown (`0`) so the
+    /// same input produces byte-identical metadata across interrupted retries.
+    pub fn for_legacy_single_db(data_dir: &Path, default_branch: &str) -> Self {
+        Self::with_db_file_and_timestamp(default_branch, crate::config::db_filename(data_dir), "0")
+    }
+
     fn with_db_file(default_branch: &str, db_file: &str) -> Self {
         let now = now_unix_str();
+        Self::with_db_file_and_timestamp(default_branch, db_file, &now)
+    }
+
+    fn with_db_file_and_timestamp(default_branch: &str, db_file: &str, timestamp: &str) -> Self {
         let mut branches = HashMap::new();
         branches.insert(
             default_branch.to_string(),
             BranchEntry {
                 db_file: db_file.to_string(),
                 parent: None,
-                created_at: now.clone(),
-                last_synced_at: now,
+                created_at: timestamp.to_string(),
+                last_synced_at: timestamp.to_string(),
                 gc_protected: false,
             },
         );
@@ -119,6 +132,86 @@ impl BranchMeta {
     pub fn is_tracked(&self, name: &str) -> bool {
         self.branches.contains_key(name)
     }
+
+    fn validate(&self) -> Result<(), String> {
+        if self.default_branch.is_empty() {
+            return Err("default_branch must not be empty".to_string());
+        }
+        let default = self.branches.get(&self.default_branch).ok_or_else(|| {
+            format!(
+                "default_branch '{}' has no matching branch entry",
+                self.default_branch
+            )
+        })?;
+        let canonical_main = crate::config::DB_FILENAME;
+        if default.db_file != canonical_main {
+            return Err(format!(
+                "default branch '{}' must reference canonical main database '{canonical_main}', found '{}'",
+                self.default_branch, default.db_file
+            ));
+        }
+        if default.parent.is_some() {
+            return Err(format!(
+                "default branch '{}' must not have a parent",
+                self.default_branch
+            ));
+        }
+
+        let mut db_files = BTreeMap::new();
+        for (name, entry) in &self.branches {
+            if name.is_empty() {
+                return Err("branch names must not be empty".to_string());
+            }
+            validate_db_file(name, entry, name == &self.default_branch)?;
+            if entry.parent.as_deref() == Some(name.as_str()) {
+                return Err(format!("branch '{name}' must not be its own parent"));
+            }
+            if let Some(previous) = db_files.insert(entry.db_file.as_str(), name.as_str()) {
+                return Err(format!(
+                    "branches '{previous}' and '{name}' reference the same database '{}'",
+                    entry.db_file
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+fn serialize_branches<S>(
+    branches: &HashMap<String, BranchEntry>,
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    branches
+        .iter()
+        .collect::<BTreeMap<_, _>>()
+        .serialize(serializer)
+}
+
+fn validate_db_file(name: &str, entry: &BranchEntry, is_default: bool) -> Result<(), String> {
+    let relative = Path::new(&entry.db_file);
+    if relative.as_os_str().is_empty()
+        || relative.is_absolute()
+        || relative
+            .components()
+            .any(|component| !matches!(component, std::path::Component::Normal(_)))
+    {
+        return Err(format!(
+            "branch '{name}' database path '{}' is not a normalized store-relative path",
+            entry.db_file
+        ));
+    }
+    if !is_default
+        && (!relative.starts_with("branches") || relative.extension() != Some(OsStr::new("db")))
+    {
+        return Err(format!(
+            "non-default branch '{name}' database path '{}' must be under 'branches/' with a .db extension",
+            entry.db_file
+        ));
+    }
+    Ok(())
 }
 
 /// Parses `branch-meta.json` content into [`BranchMeta`].
@@ -129,7 +222,10 @@ impl BranchMeta {
 /// runtime, quarantining in the post-update health pass) must go through this
 /// one predicate so they agree on what corrupt means.
 pub fn parse(content: &str) -> serde_json::Result<BranchMeta> {
-    serde_json::from_str(content)
+    let meta: BranchMeta = serde_json::from_str(content)?;
+    meta.validate()
+        .map_err(<serde_json::Error as serde::de::Error>::custom)?;
+    Ok(meta)
 }
 
 /// Loads branch metadata from `branch-meta.json` in the project data dir.
@@ -138,7 +234,34 @@ pub fn parse(content: &str) -> serde_json::Result<BranchMeta> {
 /// Prints a warning to stderr if the file exists but is malformed.
 pub fn load_branch_meta(data_dir: &Path) -> Option<BranchMeta> {
     let path = data_dir.join(BRANCH_META_FILENAME);
-    let content = std::fs::read_to_string(&path).ok()?;
+    let metadata = match std::fs::symlink_metadata(&path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(error) => {
+            eprintln!(
+                "warning: could not inspect branch metadata at '{}': {error} — falling back to single-DB mode",
+                path.display()
+            );
+            return None;
+        }
+    };
+    if !metadata.file_type().is_file() {
+        eprintln!(
+            "warning: corrupt branch metadata at '{}': path is not a regular file — falling back to single-DB mode",
+            path.display()
+        );
+        return None;
+    }
+    let content = match std::fs::read_to_string(&path) {
+        Ok(content) => content,
+        Err(error) => {
+            eprintln!(
+                "warning: could not read branch metadata at '{}': {error} — falling back to single-DB mode",
+                path.display()
+            );
+            return None;
+        }
+    };
     match parse(&content) {
         Ok(meta) => Some(meta),
         Err(e) => {
@@ -157,6 +280,8 @@ pub fn load_branch_meta(data_dir: &Path) -> Option<BranchMeta> {
 /// atomic-write helper used for `store-manifest.json`), so a concurrent
 /// reader never observes a torn or truncated file.
 pub fn save_branch_meta(data_dir: &Path, meta: &BranchMeta) -> std::io::Result<()> {
+    meta.validate()
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
     let path = data_dir.join(BRANCH_META_FILENAME);
     let json = serde_json::to_string_pretty(meta).map_err(std::io::Error::other)?;
     let temp_path = path.with_extension("json.tmp");
@@ -259,10 +384,55 @@ mod tests {
 
     #[test]
     fn parse_rejects_schema_mismatch_as_corrupt() {
-        assert!(parse(r#"{"default_branch":"main","branches":{}}"#).is_ok());
+        assert!(parse(r#"{"default_branch":"main","branches":{}}"#).is_err());
         assert!(parse("{not valid json").is_err());
         assert!(parse(r#"{"default_branch": 5}"#).is_err());
         assert!(parse("[]").is_err());
+    }
+
+    #[test]
+    fn parse_rejects_semantically_invalid_branch_metadata() {
+        for content in [
+            r#"{"default_branch":"main","branches":{"main":{"db_file":"branches/main.db","created_at":"0","last_synced_at":"0"}}}"#,
+            r#"{"default_branch":"main","branches":{"main":{"db_file":"tracedecay.db","parent":"main","created_at":"0","last_synced_at":"0"}}}"#,
+            r#"{"default_branch":"main","branches":{"main":{"db_file":"tracedecay.db","created_at":"0","last_synced_at":"0"},"escape":{"db_file":"../escape.db","created_at":"0","last_synced_at":"0"}}}"#,
+            r#"{"default_branch":"main","branches":{"main":{"db_file":"tracedecay.db","created_at":"0","last_synced_at":"0"},"duplicate":{"db_file":"tracedecay.db","created_at":"0","last_synced_at":"0"}}}"#,
+        ] {
+            assert!(
+                parse(content).is_err(),
+                "accepted invalid metadata: {content}"
+            );
+        }
+    }
+
+    #[test]
+    fn legacy_single_db_metadata_is_byte_stable() {
+        let first = BranchMeta::for_legacy_single_db(Path::new("/profile/project"), "trunk");
+        let second = BranchMeta::for_legacy_single_db(Path::new("/profile/project"), "trunk");
+
+        assert_eq!(first.branches["trunk"].created_at, "0");
+        assert_eq!(first.branches["trunk"].last_synced_at, "0");
+        assert_eq!(
+            serde_json::to_vec_pretty(&first).unwrap(),
+            serde_json::to_vec_pretty(&second).unwrap()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn load_rejects_symlinked_branch_metadata() {
+        let dir = tempfile::tempdir().unwrap();
+        let outside = dir.path().join("outside.json");
+        let data_dir = dir.path().join("data");
+        std::fs::create_dir(&data_dir).unwrap();
+        std::fs::write(
+            &outside,
+            serde_json::to_vec_pretty(&BranchMeta::new("main")).unwrap(),
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(&outside, data_dir.join(BRANCH_META_FILENAME)).unwrap();
+
+        assert!(load_branch_meta(&data_dir).is_none());
     }
 
     #[test]

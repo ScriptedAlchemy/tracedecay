@@ -407,34 +407,48 @@ mod tests {
     fn quarantine_renames_only_corrupt_branch_meta() {
         let dir = tempfile::TempDir::new().unwrap();
         let projects_root = dir.path().join("projects");
-        let corrupt = write_branch_meta(&projects_root, "proj_corrupt", "{not valid json");
-        let valid = write_branch_meta(
+        let syntax_corrupt =
+            write_branch_meta(&projects_root, "proj_syntax_corrupt", "{not valid json");
+        let semantic_corrupt = write_branch_meta(
             &projects_root,
-            "proj_valid",
+            "proj_semantic_corrupt",
             r#"{"default_branch":"main","branches":{}}"#,
         );
+        let valid_content =
+            serde_json::to_string(&crate::branch_meta::BranchMeta::new("main")).unwrap();
+        let valid = write_branch_meta(&projects_root, "proj_valid", &valid_content);
 
         let (quarantines, warnings) = quarantine_corrupt_branch_meta(dir.path());
 
-        assert_eq!(quarantines.len(), 1);
+        assert_eq!(quarantines.len(), 2);
         assert!(warnings.is_empty());
-        let quarantine = &quarantines[0];
-        assert_eq!(quarantine.original, corrupt);
-        assert!(!corrupt.exists(), "corrupt file should be renamed away");
-        assert_eq!(
-            std::fs::read_to_string(&quarantine.quarantined).unwrap(),
-            "{not valid json",
-            "quarantined file must preserve the corrupt content as evidence"
-        );
-        assert!(
-            quarantine
-                .quarantined
-                .file_name()
-                .unwrap()
-                .to_string_lossy()
-                .starts_with(BRANCH_META_QUARANTINE_PREFIX),
-            "quarantine name should be branch-meta.json.corrupt-<timestamp>: {quarantine:?}"
-        );
+        for (original, content) in [
+            (&syntax_corrupt, "{not valid json"),
+            (
+                &semantic_corrupt,
+                r#"{"default_branch":"main","branches":{}}"#,
+            ),
+        ] {
+            let quarantine = quarantines
+                .iter()
+                .find(|quarantine| &quarantine.original == original)
+                .unwrap();
+            assert!(!original.exists(), "corrupt file should be renamed away");
+            assert_eq!(
+                std::fs::read_to_string(&quarantine.quarantined).unwrap(),
+                content,
+                "quarantined file must preserve the corrupt content as evidence"
+            );
+            assert!(
+                quarantine
+                    .quarantined
+                    .file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .starts_with(BRANCH_META_QUARANTINE_PREFIX),
+                "quarantine name should be branch-meta.json.corrupt-<timestamp>: {quarantine:?}"
+            );
+        }
         assert!(valid.exists(), "valid branch-meta must be left untouched");
     }
 
