@@ -429,6 +429,7 @@ Companion ownership:
 
 ### Companion requirements for PR 14A: Optional native FastEmbed semantic code channel
 
+- Require the reviewed plan-13 PR 2A native-semantic evidence-ledger digest before artifact load/download, acceptance measurement, or promotion; fail on missing/stale rows, mutable locators, registry mapping drift, digest mismatch, or unresolved license/notice disposition.
 - Consume plan 31's frozen code corpus and compare exact/lexical/nonsemantic baselines against FastEmbed `JinaEmbeddingsV2BaseCode`; run `GTELargeENV15Q` as the required comparator under the same pool, resource, and snapshot budgets.
 - Pin exact FastEmbed/runtime/model/tokenizer/chunker/dimension/metric/normalization/index/session/batch manifests; report exact-hit retention, wrong-scope/no-answer behavior, per-language/intent/worst-stratum quality, full/incremental build, cold/warm latency, session reuse, RSS, and bytes.
 - Keep every semantic profile disabled by default until the predeclared promotion gates pass. Generic learned-sparse evidence may remain research-only but creates no second production code-embedding runtime.
