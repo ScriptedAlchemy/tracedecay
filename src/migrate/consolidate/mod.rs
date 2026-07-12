@@ -28,8 +28,8 @@ use evidence::{GraphStoreEvidence, InputReadEvidence, capture_input_evidence};
 use files::sqlite_sidecar;
 use files::{
     copy_file_atomic, copy_file_exact, copy_sqlite_family_exact, excluded_source_artifact,
-    file_digest, is_reference_artifact, is_runtime_lock, is_sqlite_database, is_sqlite_sidecar,
-    relative_file_map, tree_stats,
+    file_digest, is_coordination_lock, is_reference_artifact, is_runtime_lock, is_sqlite_database,
+    is_sqlite_sidecar, relative_file_map, tree_stats,
 };
 use finalize::{cut_over_markers, register_destination, verify_destination};
 use preflight::{acquire_store_locks, ensure_profile_offline, preflight_disk_space};
@@ -1440,7 +1440,7 @@ fn backup_store(layout: &StoreLayout, backup_root: &Path) -> Result<()> {
     let project_id = layout.identity.project_id.as_deref().unwrap_or("unknown");
     let destination = backup_root.join(project_id);
     for (relative, path) in relative_file_map(&layout.data_root)? {
-        if is_runtime_lock(&relative) {
+        if is_coordination_lock(&relative) {
             continue;
         }
         copy_file_exact(&path, &destination.join(relative))?;

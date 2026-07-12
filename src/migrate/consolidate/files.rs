@@ -196,9 +196,14 @@ pub(super) fn excluded_source_artifact(relative: &Path) -> bool {
 }
 
 pub(super) fn is_runtime_lock(relative: &Path) -> bool {
+    is_coordination_lock(relative)
+        || relative.file_name().and_then(|value| value.to_str()) == Some(".dirty")
+}
+
+pub(super) fn is_coordination_lock(relative: &Path) -> bool {
     matches!(
         relative.file_name().and_then(|value| value.to_str()),
-        Some("sync.lock" | ".branch-add.lock" | ".dirty")
+        Some("sync.lock" | ".branch-add.lock")
     )
 }
 
