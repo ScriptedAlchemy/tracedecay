@@ -80,7 +80,7 @@ async fn materialize_on_activate_writes_global_scope_only_by_default() {
     let (_temp, root) = canonical_tempdir();
     let home = root.join("home");
     let project = root.join("project");
-    let profile_root = root.join("profile");
+    let profile_root = home.join(".tracedecay");
     install_fake_hosts(&home);
     install_fake_hosts(&project);
 
@@ -135,10 +135,30 @@ async fn materialize_on_activate_writes_global_scope_only_by_default() {
 }
 
 #[tokio::test]
+async fn isolated_profile_cannot_remove_user_profile_materializations() {
+    let (_temp, root) = canonical_tempdir();
+    let home = root.join("home");
+    let project = root.join("project");
+    let user_profile = home.join(".tracedecay");
+    let isolated_profile = root.join("test-profile/.tracedecay");
+    install_fake_hosts(&home);
+
+    activate_skill(&user_profile, "code-slop-cleanup").await;
+    reconcile_detected_scopes(&user_profile, &home, &project);
+    let materialized = home.join(".codex/skills/code-slop-cleanup/SKILL.md");
+    assert!(materialized.is_file());
+
+    let (results, errors) = reconcile_detected_scopes(&isolated_profile, &home, &project);
+    assert!(results.is_empty());
+    assert!(errors.is_empty());
+    assert!(materialized.is_file());
+}
+
+#[tokio::test]
 async fn materialized_file_carries_provenance_frontmatter() {
     let (_temp, root) = canonical_tempdir();
     let home = root.join("home");
-    let profile_root = root.join("profile");
+    let profile_root = home.join(".tracedecay");
     install_fake_hosts(&home);
 
     activate_skill(&profile_root, "code-slop-cleanup").await;
@@ -163,7 +183,7 @@ async fn materialized_file_carries_provenance_frontmatter() {
 async fn remove_on_deactivate_deletes_materialized_file() {
     let (_temp, root) = canonical_tempdir();
     let home = root.join("home");
-    let profile_root = root.join("profile");
+    let profile_root = home.join(".tracedecay");
     install_fake_hosts(&home);
 
     activate_skill(&profile_root, "code-slop-cleanup").await;
@@ -195,7 +215,7 @@ async fn remove_on_deactivate_deletes_materialized_file() {
 async fn idempotent_reconcile_is_unchanged_on_rerun() {
     let (_temp, root) = canonical_tempdir();
     let home = root.join("home");
-    let profile_root = root.join("profile");
+    let profile_root = home.join(".tracedecay");
     install_fake_hosts(&home);
 
     activate_skill(&profile_root, "code-slop-cleanup").await;
@@ -218,7 +238,7 @@ async fn idempotent_reconcile_is_unchanged_on_rerun() {
 async fn body_update_re_materializes_the_file() {
     let (_temp, root) = canonical_tempdir();
     let home = root.join("home");
-    let profile_root = root.join("profile");
+    let profile_root = home.join(".tracedecay");
     install_fake_hosts(&home);
 
     activate_skill(&profile_root, "code-slop-cleanup").await;
@@ -248,7 +268,7 @@ async fn body_update_re_materializes_the_file() {
 async fn metadata_update_re_materializes_the_file() {
     let (_temp, root) = canonical_tempdir();
     let home = root.join("home");
-    let profile_root = root.join("profile");
+    let profile_root = home.join(".tracedecay");
     install_fake_hosts(&home);
 
     activate_skill(&profile_root, "code-slop-cleanup").await;
@@ -277,7 +297,7 @@ async fn metadata_update_re_materializes_the_file() {
 async fn support_update_removes_only_stale_owned_files() {
     let (_temp, root) = canonical_tempdir();
     let home = root.join("home");
-    let profile_root = root.join("profile");
+    let profile_root = home.join(".tracedecay");
     install_fake_hosts(&home);
 
     activate_skill(&profile_root, "code-slop-cleanup").await;
@@ -314,7 +334,7 @@ async fn support_update_removes_only_stale_owned_files() {
 async fn user_edited_support_file_is_fork_protected() {
     let (_temp, root) = canonical_tempdir();
     let home = root.join("home");
-    let profile_root = root.join("profile");
+    let profile_root = home.join(".tracedecay");
     install_fake_hosts(&home);
 
     activate_skill(&profile_root, "code-slop-cleanup").await;
@@ -342,7 +362,7 @@ async fn user_edited_support_file_is_fork_protected() {
 async fn deactivation_removes_only_owned_artifacts() {
     let (_temp, root) = canonical_tempdir();
     let home = root.join("home");
-    let profile_root = root.join("profile");
+    let profile_root = home.join(".tracedecay");
     install_fake_hosts(&home);
 
     activate_skill(&profile_root, "code-slop-cleanup").await;
@@ -374,7 +394,7 @@ async fn package_symlink_is_rejected_before_materialization() {
 
     let (_temp, root) = canonical_tempdir();
     let home = root.join("home");
-    let profile_root = root.join("profile");
+    let profile_root = home.join(".tracedecay");
     let external = root.join("external");
     install_fake_hosts(&home);
     std::fs::create_dir_all(&external).unwrap();
@@ -403,7 +423,7 @@ async fn nested_support_symlink_is_rejected_before_write() {
 
     let (_temp, root) = canonical_tempdir();
     let home = root.join("home");
-    let profile_root = root.join("profile");
+    let profile_root = home.join(".tracedecay");
     let external = root.join("external");
     install_fake_hosts(&home);
     std::fs::create_dir_all(&external).unwrap();
@@ -433,7 +453,7 @@ async fn nested_support_symlink_is_rejected_before_remove() {
 
     let (_temp, root) = canonical_tempdir();
     let home = root.join("home");
-    let profile_root = root.join("profile");
+    let profile_root = home.join(".tracedecay");
     let external = root.join("external");
     install_fake_hosts(&home);
 
@@ -468,7 +488,7 @@ async fn nested_support_symlink_is_rejected_before_remove() {
 async fn interrupted_manifest_commit_recovers_on_retry() {
     let (_temp, root) = canonical_tempdir();
     let home = root.join("home");
-    let profile_root = root.join("profile");
+    let profile_root = home.join(".tracedecay");
     install_fake_hosts(&home);
 
     activate_skill(&profile_root, "code-slop-cleanup").await;
@@ -508,7 +528,7 @@ async fn interrupted_manifest_commit_recovers_on_retry() {
 async fn fork_protection_leaves_user_edited_file_and_doctor_flags_it() {
     let (_temp, root) = canonical_tempdir();
     let home = root.join("home");
-    let profile_root = root.join("profile");
+    let profile_root = home.join(".tracedecay");
     install_fake_hosts(&home);
 
     activate_skill(&profile_root, "code-slop-cleanup").await;
@@ -553,7 +573,7 @@ async fn fork_protection_leaves_user_edited_file_and_doctor_flags_it() {
 async fn foreign_file_is_never_touched_and_doctor_reports_conflict() {
     let (_temp, root) = canonical_tempdir();
     let home = root.join("home");
-    let profile_root = root.join("profile");
+    let profile_root = home.join(".tracedecay");
     install_fake_hosts(&home);
 
     // A user (or repo-local dev skill) already owns this slug — no provenance.
@@ -597,7 +617,7 @@ async fn foreign_file_is_never_touched_and_doctor_reports_conflict() {
 async fn doctor_reports_missing_and_orphan_drift() {
     let (_temp, root) = canonical_tempdir();
     let home = root.join("home");
-    let profile_root = root.join("profile");
+    let profile_root = home.join(".tracedecay");
     install_fake_hosts(&home);
 
     // Active skill, nothing materialized yet -> Missing.
@@ -666,7 +686,7 @@ async fn detect_scopes_only_covers_installed_hosts() {
 async fn reconcile_scope_removes_only_managed_orphans() {
     let (_temp, root) = canonical_tempdir();
     let home = root.join("home");
-    let profile_root = root.join("profile");
+    let profile_root = home.join(".tracedecay");
     install_fake_hosts(&home);
     let _ = &profile_root;
 
@@ -708,7 +728,7 @@ async fn load_skill(profile_root: &Path, id: &str) -> ManagedSkill {
 async fn lost_manifest_pristine_file_is_rederived_not_forked() {
     let (_temp, root) = canonical_tempdir();
     let home = root.join("home");
-    let profile_root = root.join("profile");
+    let profile_root = home.join(".tracedecay");
     install_fake_hosts(&home);
 
     activate_skill(&profile_root, "code-slop-cleanup").await;
@@ -769,7 +789,7 @@ async fn project_scope_filters_out_global_skills() {
     let (_temp, root) = canonical_tempdir();
     let home = root.join("home");
     let project = root.join("project");
-    let profile_root = root.join("profile");
+    let profile_root = home.join(".tracedecay");
     install_fake_hosts(&home);
     install_fake_hosts(&project);
 
@@ -800,7 +820,7 @@ async fn project_scope_protects_another_installations_committed_package() {
     let (_temp, root) = canonical_tempdir();
     let home = root.join("home");
     let project = root.join("project");
-    let profile_root = root.join("profile");
+    let profile_root = home.join(".tracedecay");
     install_fake_hosts(&home);
     install_fake_hosts(&project);
 
@@ -966,7 +986,7 @@ async fn doctor_reports_own_inactive_skill_as_plain_orphan() {
 async fn concurrent_materialize_does_not_wedge_forked() {
     let (_temp, root) = canonical_tempdir();
     let home = root.join("home");
-    let profile_root = root.join("profile");
+    let profile_root = home.join(".tracedecay");
     install_fake_hosts(&home);
 
     activate_skill(&profile_root, "code-slop-cleanup").await;
@@ -1007,7 +1027,7 @@ async fn symlinked_scope_root_materializes_through_link() {
     let (_temp, root) = canonical_tempdir();
     let home = root.join("home");
     let real_claude = root.join("dotfiles/claude");
-    let profile_root = root.join("profile");
+    let profile_root = home.join(".tracedecay");
     std::fs::create_dir_all(&home).unwrap();
     std::fs::create_dir_all(&real_claude).unwrap();
     // ~/.claude is a symlink into a dotfiles repo — a normal setup.
@@ -1037,7 +1057,7 @@ async fn doctor_reports_other_drift_when_one_package_errors() {
     let (_temp, root) = canonical_tempdir();
     let home = root.join("home");
     let external = root.join("external");
-    let profile_root = root.join("profile");
+    let profile_root = home.join(".tracedecay");
     install_fake_hosts(&home);
     std::fs::create_dir_all(&external).unwrap();
 
@@ -1081,7 +1101,7 @@ async fn reconcile_continues_past_one_poisoned_package() {
     let (_temp, root) = canonical_tempdir();
     let home = root.join("home");
     let external = root.join("external");
-    let profile_root = root.join("profile");
+    let profile_root = home.join(".tracedecay");
     install_fake_hosts(&home);
     std::fs::create_dir_all(&external).unwrap();
 
@@ -1114,7 +1134,7 @@ async fn reconcile_continues_past_one_poisoned_package() {
 async fn colliding_host_slugs_are_disambiguated_and_warned() {
     let (_temp, root) = canonical_tempdir();
     let home = root.join("home");
-    let profile_root = root.join("profile");
+    let profile_root = home.join(".tracedecay");
     install_fake_hosts(&home);
 
     // "team-sync" and "team_sync" both normalize to slug "team-sync".

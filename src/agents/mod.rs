@@ -93,6 +93,10 @@ pub struct ManagedSkillExportReport {
     pub error: Option<String>,
 }
 
+pub(crate) fn uses_default_user_profile(home: &Path, profile_root: &Path) -> bool {
+    profile_root == home.join(".tracedecay")
+}
+
 /// Re-runs the managed-skill overlay/prompt-index export for every agent
 /// integration that already has tracedecay installed under `home`, so a
 /// lifecycle change (approve/disable/archive/restore) deploys without
@@ -106,6 +110,9 @@ pub fn export_managed_skills_to_agents(
     home: &Path,
     profile_root: &Path,
 ) -> Vec<ManagedSkillExportReport> {
+    if !uses_default_user_profile(home, profile_root) {
+        return Vec::new();
+    }
     let mut reports = Vec::new();
     for ag in all_integrations() {
         match ag.export_managed_skills(home, profile_root) {
@@ -136,6 +143,9 @@ pub fn export_managed_skills_to_agent_hosts(
     project_root: &Path,
     profile_root: &Path,
 ) -> Vec<ManagedSkillExportReport> {
+    if !uses_default_user_profile(home, profile_root) {
+        return Vec::new();
+    }
     let mut reports = Vec::new();
     for ag in all_integrations() {
         let mut exports = Vec::new();

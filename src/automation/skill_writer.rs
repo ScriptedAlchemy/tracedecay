@@ -553,6 +553,9 @@ fn refresh_managed_skill_exports_after_auto_enable(profile_root: &Path) -> Value
     let Some(home) = crate::agents::home_dir() else {
         return json!({"status": "skipped", "reason": "home_unavailable"});
     };
+    if !crate::agents::uses_default_user_profile(&home, profile_root) {
+        return json!({"status": "skipped", "reason": "non_default_profile_root"});
+    }
     let start = std::env::current_dir().unwrap_or_else(|_| home.clone());
     let project_root = crate::automation::skill_materialization::resolve_project_root(&start);
     let reports =
@@ -681,6 +684,9 @@ fn skill_update_from_proposal(
     let existing = existing_skills
         .get(&id)
         .ok_or_else(|| format!("managed skill id '{id}' does not exist"))?;
+    if existing.metadata.provenance.source != ManagedSkillSource::AutomationRun {
+        return Err(format!("managed skill '{id}' is not automation-owned"));
+    }
     let base_checksum = required_proposal_string(object.get("base_checksum"), "base_checksum")?;
     if base_checksum != existing.metadata.checksum {
         return Err(format!(
@@ -859,6 +865,19 @@ fn normalized_non_empty(value: &str) -> Option<String> {
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    #[test]
+    fn managed_skill_exports_only_refresh_for_the_user_profile() {
+        let home = Path::new("/home/test-user");
+        assert!(crate::agents::uses_default_user_profile(
+            home,
+            Path::new("/home/test-user/.tracedecay"),
+        ));
+        assert!(!crate::agents::uses_default_user_profile(
+            home,
+            Path::new("/tmp/tracedecay-test-profile"),
+        ));
+    }
 
     fn assert_err_eq<T>(result: std::result::Result<T, String>, expected: &str) {
         match result {
