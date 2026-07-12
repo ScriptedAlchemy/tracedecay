@@ -19,12 +19,10 @@ use super::{
     LcmLifecycleState, LcmLifecycleUpdate, LcmMaintenanceDebt, LcmPreflightRequest,
     LcmPreflightResponse, LcmRawMessage, LcmSessionBoundaryRequest, LcmSessionBoundaryResponse,
     LcmSourceRef, LcmStorageKind, LcmSummaryNode, LcmSummaryNodeDraft, LcmSummaryRequest, dag,
-    payload, raw, security, util,
+    payload, raw, replay_transactions, security, util,
 };
 const MAX_FORCED_CATCHUP_PASSES: usize = 4;
 const MIN_SUMMARY_RESCUE_SOURCE_TOKENS: i64 = 8;
-const ACTIVE_REPLAY_METADATA_KEY: &str = "lcm_active_replay";
-const ACTIVE_REPLAY_MESSAGE_KEY: &str = "active_replay";
 const PRESERVED_TODO_CONTEXT_PREFIX: &str =
     "[Your active task list was preserved across context compression]";
 const PRESERVED_OBJECTIVE_CONTEXT_PREFIX: &str =
@@ -1116,6 +1114,7 @@ fn compression_window(
     let backlog_len = unsummarized
         .len()
         .saturating_sub(effective_fresh_tail_count);
+    let backlog_len = replay_transactions::atomic_tail_start(&unsummarized, backlog_len);
     let (older_unsummarized, fresh_tail) = unsummarized.split_at(backlog_len);
     let fresh_tail_start_store_id = fresh_tail
         .first()
@@ -1163,9 +1162,17 @@ fn replay_without_summary(
     fresh_tail: &[LcmRawMessage],
 ) -> Vec<Value> {
     let mut replay_messages = Vec::with_capacity(pinned_anchors.len() + fresh_tail.len());
-    replay_messages.extend(pinned_anchors.iter().map(raw_replay_message));
-    replay_messages.extend(fresh_tail.iter().map(raw_replay_message));
-    replay_messages
+    replay_messages.extend(
+        pinned_anchors
+            .iter()
+            .map(replay_transactions::raw_replay_message),
+    );
+    replay_messages.extend(
+        fresh_tail
+            .iter()
+            .map(replay_transactions::raw_replay_message),
+    );
+    replay_transactions::normalize_replay_tool_pairs(&replay_messages)
 }
 
 const SUMMARY_REPLAY_PRIORITY: u8 = 0;
@@ -1221,13 +1228,18 @@ async fn assemble_overflow_recovery_replay(
         max_assembly_tokens,
     );
     if candidate.len() == anchors.len() {
-        if let Some(last) = raws.last() {
+        if let Some(last_unit) = replay_transactions::replay_units(&raws).last() {
             let mut replay = anchors
                 .iter()
-                .map(|message| raw_replay_message(message))
+                .map(|message| replay_transactions::raw_replay_message(message))
                 .collect::<Vec<_>>();
-            replay.push(raw_replay_message(last));
-            return Ok(replay);
+            replay.extend(
+                last_unit
+                    .messages
+                    .iter()
+                    .map(|message| replay_transactions::raw_replay_message(message)),
+            );
+            return Ok(replay_transactions::normalize_replay_tool_pairs(&replay));
         }
     }
     Ok(candidate)
@@ -1263,7 +1275,10 @@ fn assemble_replay_messages(
     let (selected_raws, selected_summaries, preserved_objective_anchor) = match max_assembly_tokens
     {
         None => (
-            raws.to_vec(),
+            replay_transactions::replay_units(raws)
+                .into_iter()
+                .flat_map(|unit| unit.messages)
+                .collect(),
             summaries.iter().collect::<Vec<_>>(),
             latest_user_context_anchor(anchor_source, raws),
         ),
@@ -1307,7 +1322,7 @@ fn assemble_replay_messages(
         (
             message.store_id,
             RAW_REPLAY_PRIORITY,
-            raw_replay_message(message),
+            replay_transactions::raw_replay_message(message),
         )
     }));
     replay_items.extend(selected_summaries.iter().map(|summary| {
@@ -1333,14 +1348,15 @@ fn assemble_replay_messages(
         (
             message.store_id,
             RAW_REPLAY_PRIORITY,
-            raw_replay_message(message),
+            replay_transactions::raw_replay_message(message),
         )
     }));
     replay_items.sort_by_key(|(store_id, priority, _)| (*store_id, *priority));
-    replay_items
+    let replay = replay_items
         .into_iter()
         .map(|(_, _, message)| message)
-        .collect()
+        .collect::<Vec<_>>();
+    replay_transactions::normalize_replay_tool_pairs(&replay)
 }
 
 /// Mirrors hermes-lcm `_assemble_context` tail selection: keep the newest
@@ -1355,10 +1371,14 @@ fn select_budget_tail<'a>(
     let mut kept_reversed = Vec::new();
     let mut tail_tokens = 0i64;
     let mut skipped_gap = false;
-    for message in raws.iter().rev() {
-        let message_tokens = estimate_tokens(&message.content);
-        if used + tail_tokens + message_tokens > cap {
-            if is_budget_droppable_tail_message(message) {
+    for unit in replay_transactions::replay_units(raws).iter().rev() {
+        let unit_tokens = unit.token_count();
+        if used + tail_tokens + unit_tokens > cap {
+            if unit
+                .messages
+                .iter()
+                .all(|message| is_budget_droppable_tail_message(message))
+            {
                 skipped_gap = true;
                 continue;
             }
@@ -1367,8 +1387,8 @@ fn select_budget_tail<'a>(
         if skipped_gap {
             break;
         }
-        kept_reversed.push(*message);
-        tail_tokens += message_tokens;
+        kept_reversed.extend(unit.messages.iter().rev().copied());
+        tail_tokens += unit_tokens;
     }
     kept_reversed.reverse();
     (kept_reversed, tail_tokens)
@@ -2027,9 +2047,12 @@ fn default_message_kind(role: &str) -> String {
 
 fn active_message_metadata(message: &Value, replay: &Value) -> String {
     let mut metadata = Map::new();
-    metadata.insert(ACTIVE_REPLAY_METADATA_KEY.to_string(), Value::Bool(true));
     metadata.insert(
-        ACTIVE_REPLAY_MESSAGE_KEY.to_string(),
+        replay_transactions::ACTIVE_REPLAY_METADATA_KEY.to_string(),
+        Value::Bool(true),
+    );
+    metadata.insert(
+        replay_transactions::ACTIVE_REPLAY_MESSAGE_KEY.to_string(),
         active_replay_for_metadata(replay),
     );
     if let Some(lcm_ingest) = message.get("lcm_ingest") {
@@ -2057,9 +2080,12 @@ fn active_replay_metadata_json(existing_metadata_json: Option<&str>, replay: &Va
         .and_then(|text| serde_json::from_str::<Value>(text).ok())
         .and_then(|value| value.as_object().cloned())
         .unwrap_or_default();
-    metadata.insert(ACTIVE_REPLAY_METADATA_KEY.to_string(), Value::Bool(true));
     metadata.insert(
-        ACTIVE_REPLAY_MESSAGE_KEY.to_string(),
+        replay_transactions::ACTIVE_REPLAY_METADATA_KEY.to_string(),
+        Value::Bool(true),
+    );
+    metadata.insert(
+        replay_transactions::ACTIVE_REPLAY_MESSAGE_KEY.to_string(),
         active_replay_for_metadata(replay),
     );
     Value::Object(metadata).to_string()
@@ -2068,7 +2094,7 @@ fn active_replay_metadata_json(existing_metadata_json: Option<&str>, replay: &Va
 fn active_replay_for_metadata(replay: &Value) -> Value {
     let mut replay = replay.clone();
     if let Some(object) = replay.as_object_mut() {
-        strip_disposable_assistant_replay_sidecars(object, "");
+        replay_transactions::strip_disposable_assistant_replay_sidecars(object, "");
     }
     replay
 }
@@ -2217,82 +2243,6 @@ fn deterministic_message_id(
             "{provider}\0{session_id}\0{idx}\0{role}\0{content}"
         ))
     )
-}
-
-fn raw_replay_message(message: &LcmRawMessage) -> Value {
-    if let Some(mut replay) = active_replay_message_from_metadata(message) {
-        replay["role"] = Value::String(message.role.clone());
-        replay["store_id"] = Value::from(message.store_id);
-        return replay;
-    }
-    json!({
-        "role": message.role,
-        "content": message.content,
-        "store_id": message.store_id,
-    })
-}
-
-fn active_replay_message_from_metadata(message: &LcmRawMessage) -> Option<Value> {
-    let metadata: Value = serde_json::from_str(message.metadata_json.as_deref()?).ok()?;
-    if metadata
-        .get(ACTIVE_REPLAY_METADATA_KEY)
-        .and_then(Value::as_bool)
-        != Some(true)
-    {
-        return None;
-    }
-    let mut replay = metadata
-        .get(ACTIVE_REPLAY_MESSAGE_KEY)
-        .and_then(Value::as_object)
-        .cloned()
-        .or_else(|| legacy_active_replay_message_from_metadata(&metadata))?;
-    if !replay.contains_key("content") {
-        replay.insert(
-            "content".to_string(),
-            Value::String(message.content.clone()),
-        );
-    }
-    strip_disposable_assistant_replay_sidecars(&mut replay, &message.role);
-    Some(Value::Object(replay))
-}
-
-fn strip_disposable_assistant_replay_sidecars(
-    replay: &mut Map<String, Value>,
-    fallback_role: &str,
-) {
-    if !replay
-        .get("role")
-        .and_then(Value::as_str)
-        .unwrap_or(fallback_role)
-        .eq_ignore_ascii_case("assistant")
-    {
-        return;
-    }
-
-    // Provider replay sidecars are useful before the next API call, but once
-    // LCM is rebuilding compressed history they become large derived state.
-    for key in [
-        "codex_message_items",
-        "codex_reasoning_items",
-        "reasoning",
-        "reasoning_content",
-        "reasoning_details",
-    ] {
-        replay.remove(key);
-    }
-}
-
-fn legacy_active_replay_message_from_metadata(metadata: &Value) -> Option<Map<String, Value>> {
-    let mut replay = metadata.as_object()?.clone();
-    replay.remove(ACTIVE_REPLAY_METADATA_KEY);
-    replay.remove(ACTIVE_REPLAY_MESSAGE_KEY);
-    replay.remove("ingest_protection");
-    replay.remove("external_payload");
-    replay.remove("payload_ref");
-    replay.remove("byte_count");
-    replay.remove("char_count");
-    replay.remove("sha256");
-    Some(replay)
 }
 
 fn summary_replay_message(summary: &LcmSummaryNode) -> Value {

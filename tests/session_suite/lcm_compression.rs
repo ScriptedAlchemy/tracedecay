@@ -238,6 +238,54 @@ fn lcm_raw_message(store_id: i64, role: &str, content: &str) -> LcmRawMessage {
     }
 }
 
+fn active_multi_tool_transaction() -> Vec<Value> {
+    vec![
+        json!({
+            "id": "assistant-tools",
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "call-a",
+                    "type": "function",
+                    "function": {"name": "lookup_a", "arguments": "{\"query\":\"alpha\"}"},
+                },
+                {
+                    "id": "call-b",
+                    "type": "function",
+                    "function": {"name": "lookup_b", "arguments": "{\"query\":\"beta\"}"},
+                },
+            ],
+        }),
+        json!({
+            "id": "tool-a",
+            "role": "tool",
+            "tool_call_id": "call-a",
+            "content": "alpha result",
+        }),
+        json!({
+            "id": "tool-b",
+            "role": "tool",
+            "tool_call_id": "call-b",
+            "content": "beta result",
+        }),
+    ]
+}
+
+fn active_raw_message(store_id: i64, replay: Value) -> LcmRawMessage {
+    let role = replay["role"].as_str().unwrap();
+    let content = replay["content"].as_str().unwrap_or("");
+    let mut message = lcm_raw_message(store_id, role, content);
+    message.metadata_json = Some(
+        json!({
+            "lcm_active_replay": true,
+            "active_replay": replay,
+        })
+        .to_string(),
+    );
+    message
+}
+
 fn lifecycle_state_with_debt(maintenance_debt: Vec<LcmMaintenanceDebt>) -> LcmLifecycleState {
     LcmLifecycleState {
         provider: "cursor".into(),
@@ -1515,6 +1563,238 @@ async fn raw_replay_preserves_assistant_tool_calls_and_tool_result_linking() {
         "call_lookup"
     );
     assert_eq!(replay_from_raw.replay_messages[1]["name"], "lookup");
+}
+
+#[tokio::test]
+async fn fresh_tail_boundary_keeps_multi_tool_transaction_atomic_and_shrinking() {
+    let tmp = TempDir::new().unwrap();
+    let db = open_lcm_db(&tmp).await;
+    insert_session(&db, "cursor", "session-atomic-tail").await;
+
+    let mut messages = vec![json!({
+        "id": "old-user",
+        "role": "user",
+        "content": "old backlog words ".repeat(60),
+    })];
+    messages.extend(active_multi_tool_transaction());
+    messages.push(json!({"id": "fresh-user", "role": "user", "content": "fresh prompt"}));
+    let mut request = limited_compress_request(
+        "cursor",
+        "session-atomic-tail",
+        LcmSummarizerMode::Fake {
+            summary_text: "compact summary".into(),
+        },
+        None,
+        None,
+        Some(400),
+    );
+    request.messages = messages;
+    request.current_tokens = Some(107);
+    request.threshold_tokens = Some(80);
+    request.fresh_tail_count = Some(3);
+
+    let response = db.lcm_compress(request).await.unwrap();
+    let assistant = response
+        .replay_messages
+        .iter()
+        .find(|message| message["role"] == "assistant")
+        .unwrap_or_else(|| {
+            panic!(
+                "assistant tool call missing: {:?}",
+                response.replay_messages
+            )
+        });
+    assert_eq!(assistant["tool_calls"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        response
+            .replay_messages
+            .iter()
+            .filter(|message| message["role"] == "tool")
+            .map(|message| message["tool_call_id"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        vec!["call-a", "call-b"]
+    );
+    assert!(response.replay_token_estimate < 107);
+}
+
+#[tokio::test]
+async fn bounded_leaf_chunk_backs_off_before_multi_tool_transaction() {
+    let tmp = TempDir::new().unwrap();
+    let db = open_lcm_db(&tmp).await;
+    insert_session(&db, "cursor", "session-atomic-leaf").await;
+
+    let mut messages = vec![json!({
+        "id": "old-user",
+        "role": "user",
+        "content": "old backlog words ".repeat(30),
+    })];
+    messages.extend(active_multi_tool_transaction());
+    messages.push(json!({"id": "fresh-user", "role": "user", "content": "fresh prompt"}));
+    let mut request = limited_compress_request(
+        "cursor",
+        "session-atomic-leaf",
+        LcmSummarizerMode::Fake {
+            summary_text: "transaction summary".into(),
+        },
+        None,
+        Some(2),
+        None,
+    );
+    request.messages = messages;
+    request.fresh_tail_count = Some(1);
+
+    let response = db.lcm_compress(request).await.unwrap();
+    assert_eq!(response.summary_nodes_created, 1);
+    assert_eq!(response.summary_nodes[0].source_refs.len(), 1);
+    assert_eq!(
+        response
+            .replay_messages
+            .iter()
+            .filter(|message| message["role"] == "tool")
+            .count(),
+        2
+    );
+}
+
+#[test]
+fn bounded_leaf_caps_back_off_but_progress_takes_one_atomic_unit() {
+    let transaction = active_multi_tool_transaction()
+        .into_iter()
+        .enumerate()
+        .map(|(index, replay)| active_raw_message((index + 1) as i64, replay))
+        .collect::<Vec<_>>();
+
+    assert_eq!(bounded_leaf_chunk_len(&transaction, Some(1), None), 0);
+    assert_eq!(bounded_leaf_chunk_len(&transaction, None, Some(1)), 0);
+
+    let request = limited_compress_request(
+        "cursor",
+        "session-1",
+        LcmSummarizerMode::Fake {
+            summary_text: "summary".into(),
+        },
+        Some(1),
+        Some(1),
+        None,
+    );
+    let plan = compression_plan(CompressionPlanInput {
+        request: &request,
+        backlog: &transaction,
+    });
+    assert_eq!(plan.selected_backlog.len(), transaction.len());
+}
+
+#[tokio::test]
+async fn budget_and_overflow_replay_never_split_tool_transaction() {
+    let tmp = TempDir::new().unwrap();
+    let db = open_lcm_db(&tmp).await;
+    insert_session(&db, "cursor", "session-atomic-budget").await;
+
+    let mut messages = vec![json!({
+        "id": "old-user",
+        "role": "user",
+        "content": "old backlog words ".repeat(30),
+    })];
+    messages.extend(active_multi_tool_transaction());
+    let mut request = limited_compress_request(
+        "cursor",
+        "session-atomic-budget",
+        LcmSummarizerMode::Fake {
+            summary_text: "summary".into(),
+        },
+        None,
+        None,
+        Some(8),
+    );
+    request.messages = messages;
+    request.current_tokens = Some(107);
+    request.fresh_tail_count = Some(3);
+
+    let response = db.lcm_compress(request).await.unwrap();
+    let assistant_count = response
+        .replay_messages
+        .iter()
+        .filter(|message| message["role"] == "assistant")
+        .count();
+    let tool_count = response
+        .replay_messages
+        .iter()
+        .filter(|message| message["role"] == "tool")
+        .count();
+    assert!(
+        (assistant_count == 0 && tool_count == 0) || (assistant_count == 1 && tool_count == 2),
+        "budget assembly must keep or drop the transaction as a unit: {:?}",
+        response.replay_messages
+    );
+}
+
+#[tokio::test]
+async fn legacy_partial_tool_transaction_keeps_matched_pair_and_repairs_orphans() {
+    let tmp = TempDir::new().unwrap();
+    let db = open_lcm_db(&tmp).await;
+    insert_session(&db, "cursor", "session-legacy-tools").await;
+
+    let mut transaction = active_multi_tool_transaction();
+    transaction.remove(2);
+    transaction.push(json!({
+        "id": "separator",
+        "role": "user",
+        "content": "new prompt",
+    }));
+    transaction.push(json!({
+        "id": "orphan-b",
+        "role": "tool",
+        "tool_call_id": "call-b",
+        "content": "late orphan",
+    }));
+    transaction.push(json!({
+        "id": "unmatched-assistant",
+        "role": "assistant",
+        "content": "visible assistant text",
+        "tool_calls": [{
+            "id": "never-returned",
+            "type": "function",
+            "function": {"name": "missing", "arguments": "{}"},
+        }],
+    }));
+    transaction.push(json!({
+        "id": "after-unmatched-call",
+        "role": "user",
+        "content": "the unmatched call is now a closed legacy group",
+    }));
+    let mut request = compress_request(
+        "cursor",
+        "session-legacy-tools",
+        LcmSummarizerMode::Fake {
+            summary_text: "unused".into(),
+        },
+    );
+    request.messages = transaction;
+    request.fresh_tail_count = Some(10);
+
+    let response = db.lcm_compress(request).await.unwrap();
+    let paired_assistant = response
+        .replay_messages
+        .iter()
+        .find(|message| message["id"] == "assistant-tools")
+        .unwrap_or_else(|| panic!("partial assistant missing: {:?}", response.replay_messages));
+    assert_eq!(paired_assistant["tool_calls"].as_array().unwrap().len(), 1);
+    assert_eq!(paired_assistant["tool_calls"][0]["id"], "call-a");
+    assert_eq!(
+        response
+            .replay_messages
+            .iter()
+            .filter(|message| message["role"] == "tool")
+            .map(|message| message["tool_call_id"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        vec!["call-a"]
+    );
+    let repaired_assistant = response
+        .replay_messages
+        .iter()
+        .find(|message| message["id"] == "unmatched-assistant")
+        .expect("visible unmatched assistant text should remain");
+    assert!(repaired_assistant.get("tool_calls").is_none());
 }
 
 #[tokio::test]
