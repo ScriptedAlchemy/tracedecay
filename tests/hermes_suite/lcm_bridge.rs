@@ -2511,9 +2511,15 @@ def fake_call_tracedecay_tool(name, args, **kwargs):
     return '{"content":[{"type":"text","text":"{\\"status\\":\\"ok\\"}"}]}'
 
 plugin.tools.call_tracedecay_tool = fake_call_tracedecay_tool
-plugin._project_scope_resolution = lambda path, *_args: (
-    ("registered", str(path)) if str(path).startswith("/repos/") else ("unregistered", None)
-)
+def fake_project_scope_resolution(path, *_args):
+    normalized = str(path).replace("\\", "/")
+    marker = "/repos/"
+    marker_index = normalized.find(marker)
+    if marker_index < 0:
+        return ("unregistered", None)
+    return ("registered", normalized[marker_index:])
+
+plugin._project_scope_resolution = fake_project_scope_resolution
 plugin._notify_turn_completed = lambda sid, root, watermark: completed.append((sid, root, watermark))
 plugin._notify_turn_ingested = lambda sid, root, watermark: ingested.append((sid, root, watermark))
 
