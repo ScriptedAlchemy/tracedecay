@@ -14,7 +14,9 @@
 
 ## 0. Contract lock
 
-This is the plan for a **native TraceDecay port-and-redesign of Hermes Kanban**, not a Hermes adapter. TraceDecay owns and ships the canonical task/plan graph, scheduler, attempts, leases, worker protocol, CLI/MCP/API/SDK surfaces, and Brain/Work UI. For each Hermes component, implementation must choose and document one of three paths: port the proven behavior or code under its MIT provenance, rebuild it against V2 contracts while preserving its regression corpus, or replace it with a demonstrably better TraceDecay design. A separately configured Hermes agent may still be an execution host or capture source, exactly as Codex or Claude may be, but the TraceDecay Kanban/task product never delegates to or depends on a Hermes runtime, board database, plugin, or scheduler.
+This is the plan for a **TraceDecay-native task graph and multi-agent executor**, informed by Hermes Kanban and other prior art but not derived from any external product's authority or topology. TraceDecay owns and ships the canonical task/plan graph, scheduler, attempts, leases, worker protocol, CLI/MCP/API/SDK surfaces, and Brain/Work UI. A bounded behavior, test scenario, interaction, algorithm, or source span may be copied, ported, or improved only after its explicit approval in the comparison/source/license ledger; everything else is implemented from TraceDecay contracts. A separately configured Hermes agent may still be an execution host or capture source, exactly as Codex or Claude may be, but the TraceDecay task product never delegates to or depends on a Hermes runtime, board database, plugin, scheduler, or canonical provider/DAG arrangement.
+
+Throughout this plan, **Evidence**, **Fixture**, and **PriorArt** label inputs used for comparison, replay, or design investigation. They do not create architecture, scope, merge gates, or product authority. Only an explicit **Decision**, numbered contract invariant, owned cross-plan contract, or named acceptance regression is normative. Reusing any external component requires a reviewed ledger row that pins source and version, the bounded approved span/behavior, disposition, license/copyright handling, destination, and TraceDecay regression; unrelated TraceDecay-native work does not wait for whole-repository, whole-file, or whole-test-suite coverage of that source.
 
 1. There is one canonical profile-owned initiative/plan/work-item graph. No repository, project, board, worktree, provider, plugin, dashboard, or executor creates a second source of task truth.
 2. An initiative may span zero, one, or many projects, repositories, checkouts, worktrees, refs, and providers. Ownership remains the profile activity shard; scope is explicit relation evidence, not database placement.
@@ -62,6 +64,9 @@ This is the plan for a **native TraceDecay port-and-redesign of Hermes Kanban**,
 44. A review with `ChangesRequested`, `Rejected`, or `Inconclusive` is terminal review evidence, not a blocked/retryable reviewer. Remediation and re-review use successor work-item versions and exact decision/dependency refs; the same review event can derive at most one remediation path. No separate review-cycle, review-set, or review-gate identity duplicates existing work-item versions, decisions, acceptance criteria, and dependency expressions.
 45. One attempt may record a lifecycle owner plus acting native-CLI worker, reviewer, or host subagent participants under the same lease. Participants never mint another scheduler/task authority. A Hermes/Sol lifecycle owner invoking native Claude Code is not an Anthropic-provider fallback and is recorded as two distinct runtime participants.
 46. Provider/API/auth/rate/capability failures, native-CLI process failures, adapter transport failures, and lifecycle protocol violations are distinct typed causes. A provider HTTP error cannot be collapsed into “worker exited cleanly without completion,” and retry/circuit policy consumes the classified cause chain rather than a shell exit code alone.
+47. A task/ticket view derives one complete association history across all of its attempts: exact project/repository/checkout/worktree generation, base/ref/branch/commit/snapshot, PR/check/review/merge state, ownership/provenance, lease/reservation, currentness, and retention/cleanup state. A work item may have many historical or current worktrees and a worktree may have evidenced relations to several work items; neither case creates another task or workspace authority.
+48. Archiving a work item, terminalizing an attempt, merging a related PR, or reaching a retention deadline only requests cleanup evaluation. None deletes a worktree. Removal is a separately authorized, journaled application workflow over the existing `WorkspaceBindingV1`, Git/delivery relations, shared operation/outbox kernel, and daemon authority.
+49. TraceDecay never creates or provisions a Git worktree. Autonomous cleanup requires explicit cleanup delegation from the authorized user/agent/executor or external creator/owner plus a fresh proof showing no dirty or untracked data, active agent/claim/attempt/lease/reservation, unpushed commit, unmerged branch, open/unknown PR, sibling work-item reference, retention hold, uncertain external effect, identity drift, or unknown ownership. Inferred task association is never cleanup authority; anything unproven is preserved with typed blockers and TraceDecay never performs destructive implicit cleanup.
 
 ## 1. Product objective and non-goals
 
@@ -109,7 +114,7 @@ Research follows [13-research-provenance-and-context-anchors.md](./13-research-p
 
 ### 2.1 Local Hermes implementation audit
 
-| Evidence | Safe observation | Required design response |
+| Evidence | Safe observation | TraceDecay comparison outcome |
 |---|---|---|
 | Registered project `proj_99472b542e35cdb6`, `/fast/projects/hermes-agent` | Audited at clean local commit `732a9ffc572ad2703fbd25cc8a21c9f3f9c10d69`, package `0.16.0`; fork remote is `ScriptedAlchemy/hermes-agent`. | Pin source/commit in implementation research; do not describe the local fork as official current Hermes. |
 | `hermes_cli/kanban_db.py` | Central SQLite kernel owns tasks, links, comments, events, runs, attachments, notifications, claims, dispatch, recovery, workspaces, logs, and dependency promotion. | Preserve a central semantic kernel, but split domain/store/policy/application/adapter ownership and keep one activity-shard truth. |
@@ -159,42 +164,42 @@ These are safe legacy discovery locators. Resolve content only through authorize
 
 The two Hermes IDs did not resolve through the registered Hermes project shard during this audit. Keep them as legacy anchors with a coverage note until profile-wide stable-ID routing can create `RetrievalAnchorId`s. Plan 13 owns the durable research manifest; Plan 23 owns temporally correct replay and representative selection.
 
-### 2.4 Preserve and reject
+### 2.4 TraceDecay invariants and rejected prior-art failures
 
-| Preserve from Hermes | Reject or redesign |
+| TraceDecay invariant, exercised by named regressions | Rejected prior-art failure |
 |---|---|
-| Atomic claim and explicit worker lifecycle | SQLite/PID claim as distributed authority |
-| Task versus run/attempt history | Task row carrying lease, retry, worker, and result concerns |
-| Dependency DAG and fan-out/fan-in patterns | One string `assignee` as profile, lane, provider, model, and authority |
+| One fenced active lease and explicit worker lifecycle (`TD-TASK-004`, `TD-TASK-006`) | SQLite/PID claim as distributed authority |
+| Canonical task identity distinct from immutable run/attempt history (`TD-TASK-001`, `TD-TASK-002`) | Task row carrying lease, retry, worker, and result concerns |
+| Typed dependency DAGs supporting multiple fan-out/fan-in shapes (`TD-TASK-003`, `TD-TASK-006`) | One string `assignee` as profile, lane, provider, model, and authority |
 | Structured handoffs and downstream parent context | Free-form metadata as the machine protocol |
 | Heartbeats, stale recovery, runtime limits, circuit breakers | One undifferentiated failure counter and host-local crash truth |
 | Per-task model, skill, workspace, branch, retry, schedule controls | Unversioned config inheritance and no requested/actual execution receipt |
 | Thin worker toolset | Direct shared DB access or broad board visibility |
 | CLI/slash parity and useful dashboard controls | Dashboard SQL/domain logic, private REST semantics, and duplicated renderers |
 | Board, DAG, swarm, worker/run visualizations | Board as source of truth, ambient current board, and all-board notification loops |
-| Triage, verifier, synthesizer patterns | Unanchored model decomposition or silent fallback assignee |
-| Read-only inspection and dependency-aware fan-in | Auto-decomposition that ignores an external parent, publishes entry children early, or turns reclaim into readiness |
-| Explicit worker completion/block tools | Negative review represented as a permanently blocked/retried worker, or provider failure mislabeled as protocol violation |
-| Provider/model routing controls | Direct provider configuration confused with a vendor-native coding CLI or a supervising lifecycle owner |
+| Provider-neutral typed work-item roles, including optional triage/verifier/synthesizer fixtures (`TD-TASK-003`) | Unanchored model decomposition or silent fallback assignee |
+| Read-only inspection and dependency-aware fan-in (`TD-TASK-006`) | Auto-decomposition that ignores an external parent, publishes entry children early, or turns reclaim into readiness |
+| Explicit terminal review and typed failure evidence (`TD-TASK-007`, `TD-TASK-009`) | Negative review represented as a permanently blocked/retried worker, or provider failure mislabeled as protocol violation |
+| Provider-neutral routing with requested/actual receipts (`TD-TASK-003`, `TD-TASK-009`) | Direct provider configuration confused with a vendor-native coding CLI or a supervising lifecycle owner |
 
-### 2.5 Hermes Kanban heritage disposition
+### 2.5 Hermes Kanban prior-art disposition
 
-This branch remains plans-only. The implementation phase performs a file-and-feature-level port assessment, preserves the recorded MIT provenance, and is allowed to port algorithms, tests, schemas, interaction flows, and suitable source directly when that produces the strongest TraceDecay implementation. Language or architecture mismatches may require a behavior-preserving Rust/React/TypeScript port; known weaknesses are deliberately redesigned. This is product implementation inside TraceDecay, never a runtime adapter around Hermes Kanban.
+This branch remains plans-only. Hermes is comparative prior art, not the product specification. The implementation phase may approve and reuse a bounded algorithm, test scenario, schema behavior, interaction, or source span when its reviewed ledger row shows that reuse is preferable to a TraceDecay-native implementation and records the MIT provenance. Language or architecture mismatches require a new TraceDecay implementation unless the exact behavioral or source port is separately approved. This is product implementation inside TraceDecay, never a runtime adapter around Hermes Kanban.
 
 | Hermes anchor at `732a9ffc572ad2703fbd25cc8a21c9f3f9c10d69` | Disposition | V2 decision |
 |---|---|---|
-| `hermes_cli/kanban_db.py` task/run/event/link kernel | **Port and improve** | Port the transactional invariants, ordered event/history behavior, and proven tests into the V2 store/application split; replace board-local IDs, overloaded task rows, host-PID authority, free JSON, and ambient board selection with canonical IDs, immutable versions, typed relations, explicit revisions, and fence epochs. |
-| `hermes_cli/kanban_db.py::{claim_task,release_stale_claims,detect_crashed_workers,enforce_max_runtime}` | **Port as policy, reimplement as transactions** | Preserve CAS claim, layered stale detection, alive-extend-not-reclaim, maximum runtime, protocol-violation detection, rate-limit sentinel, respawn guard, and breaker semantics; implement them over V2 leases/attempts/evidence in §§5, 8.7, and 9. |
-| `hermes_cli/kanban_swarm.py` and decomposition helpers | **Port and improve** | Port fan-out → verifier → synthesizer topology, decomposition tests, and Kahn cycle rejection as ordinary typed work items/edges; replace the comment blackboard with versioned context packets, handoffs, decisions, and artifacts. |
-| `tools/kanban_tools.py` | **Port and improve** | Port the compact worker lifecycle surface and created-child verification; bind every call out of band to the active registration/attempt/epoch/grant and route it through generated application capabilities. |
-| `gateway/kanban_watchers.py` dispatcher/notifier loops | **Reimplement** | Preserve event cursors, single delivery claim, rewind-after-send-failure, and ordered safety-before-start work; replace 60 s/5 s polling and ambient board enumeration with journal wakeups plus bounded repair polling. |
-| `plugins/kanban/dashboard/plugin_api.py`, dashboard SPA, and `kanban_diagnostics.py` | **Port interactions; rebuild data boundary** | Port useful inspector anatomy, task/run/event diagnostics, attention/staleness/progress patterns, interaction tests, and structured suggested actions; use the generated V2 client, shared `DiagnosticEnvelopeV1`, saved projections, SSE deltas, and plan-11 UI state. No SQL or plugin-local business rules. |
+| `hermes_cli/kanban_db.py` task/run/event/link kernel | **Candidate bounded behavioral port** | Subject to an approved ledger row, port the transactional invariants, ordered event/history behavior, and selected proven tests into the V2 store/application split; replace board-local IDs, overloaded task rows, host-PID authority, free JSON, and ambient board selection with canonical IDs, immutable versions, typed relations, explicit revisions, and fence epochs. |
+| `hermes_cli/kanban_db.py::{claim_task,release_stale_claims,detect_crashed_workers,enforce_max_runtime}` | **Candidate policy comparison/port** | Subject to approved bounded rows, compare or preserve CAS claim, layered stale detection, alive-extend-not-reclaim, maximum runtime, protocol-violation detection, rate-limit sentinel, respawn guard, and breaker semantics; implement TraceDecay decisions over V2 leases/attempts/evidence in §§5, 8.7, and 9. |
+| `hermes_cli/kanban_swarm.py` and decomposition helpers | **Compare; selectively port approved spans** | Keep the recorded fan-out → verifier → synthesizer flow as one historical fixture and consider Kahn cycle-rejection behavior for a bounded port. TraceDecay work items/edges support multiple valid DAG topologies and provider-neutral roles; replace the comment blackboard with versioned context packets, handoffs, decisions, and artifacts. |
+| `tools/kanban_tools.py` | **Candidate bounded behavioral port** | Subject to an approved ledger row, port the compact worker lifecycle interaction and created-child verification; bind every call out of band to the active registration/attempt/epoch/grant and route it through generated application capabilities. |
+| `gateway/kanban_watchers.py` dispatcher/notifier loops | **Comparative evidence; reimplement** | Evaluate event cursors, single delivery claim, rewind-after-send-failure, and ordered safety-before-start behavior as regressions; implement TraceDecay journal wakeups plus bounded repair polling without 60 s/5 s polling or ambient board enumeration. |
+| `plugins/kanban/dashboard/plugin_api.py`, dashboard SPA, and `kanban_diagnostics.py` | **Comparative evidence; bounded port by approval** | Build the Work UI from generated TraceDecay contracts, view models, commands, and plan-11 state. Use Hermes inspector anatomy, task/run/event diagnostics, attention/staleness/progress patterns, interaction tests, and suggested actions as comparative usability/regression evidence; port an exact interaction or test only through an approved ledger row. No SQL or plugin-local business rules. |
 | `plugins/kanban/dispatcher.py` and gateway-embedded single-host supervision | **Drop/reimplement** | Drop single-host process ownership and multiple-poller caveats; root composition supervises one scoped canonical scheduler while registered adapters may run on many hosts. |
-| `skills/devops/kanban-worker` and `skills/devops/kanban-orchestrator` | **Port and generalize** | Port explicit show/work/heartbeat/complete/block and orchestration responsibilities; generate host instructions from the active packet/catalog/grants and keep lifecycle termination visible to every active worker. |
+| `skills/devops/kanban-worker` and `skills/devops/kanban-orchestrator` | **Comparative evidence; bounded port by approval** | Generate TraceDecay host instructions from the active packet/catalog/grants and keep lifecycle termination visible to every active worker. Reuse explicit show/work/heartbeat/complete/block interaction wording or orchestration behavior only through an approved bounded row. |
 | Board slug/directory databases, global `current`, `t_<hex>` board-local identity, absolute-path attachments, and status-column authority | **Drop** | Boards are `TraceQueryV1` views, attachments are scanned content-addressed artifacts, status is decomposed into typed dimensions, and no current UI/CWD/board value controls ownership or dispatch. |
-| Integrity-check/quarantine-not-recreate, FD ownership, and post-commit invariants | **Port as store regressions** | Plan 02 owns equivalent store/open/recovery tests for the canonical shards; no per-board DB survives. |
+| Integrity-check/quarantine-not-recreate, FD ownership, and post-commit invariants | **Comparative store regressions** | Plan 02 owns equivalent TraceDecay store/open/recovery tests for the canonical shards; direct test or behavior ports require approved bounded rows and no per-board DB survives. |
 
-Plan 13 PR 2A owns the implementation heritage ledger. Before code moves it must pin the exact official and local Hermes commit/file/test/UI spans and record `direct_port`, `behavioral_port`, `redesign`, or `drop` for every audited subsystem, including backend algorithms/schema tests, worker lifecycle tools, dashboard components/interactions, and diagnostics. Each row records license/copyright disposition, destination owner/PR, source-to-test traceability, divergence rationale, and the regression that proves the replacement is at least as strong. Directly copied or translated code carries required notices; behavior-preserving ports carry source-to-test traceability. If upstream behavior differs, tests and source at the pinned revision outrank unversioned prose. PRs 4E, 6G, 24M, 24N, and 25G may prototype against fixtures but cannot merge implementation until their applicable PR 2A ledger rows are reviewed.
+Plan 13 PR 2A owns the comparison/source/license ledger. Before external code, translated code, behavior, tests, or UI interactions are reused, the applicable row must pin the exact official source commit and bounded file/test/UI spans and record `direct_port`, `behavioral_port`, `comparative_fixture`, `redesign`, or `drop`. Each reuse row records approval, license/copyright disposition, destination owner/PR, source-to-test traceability, divergence rationale, and the TraceDecay regression that proves the result. Directly copied or translated code carries required notices; behavioral ports carry source-to-test traceability. If upstream behavior differs, tests and source at the pinned revision outrank unversioned prose for that row only. PRs 4E, 6G, 24M, 24N, and 25G are gated only by rows for external components they actually reuse; independent domain, store, application, or UI work has no whole-Hermes file, feature, or test inventory merge gate.
 
 ## 3. Ownership and cross-plan contract
 
@@ -203,7 +208,7 @@ Do not create a monolithic `tracedecay-tasks` crate. The graph is a cross-cuttin
 | Plan | Contract consumed or extended here |
 |---|---|
 | [01-domain-crate.md](./01-domain-crate.md) | Owns all IDs, entities, versions, events, relations, evidence, scopes, privacy wrappers, leases, cursors, errors, and typed task/plan/execution contracts proposed here, including the sole public edit-workspace/manifest/local-ref/diagnostic/diff/conflict/receipt shapes imported in section 4.12. |
-| [02-store-crate.md](./02-store-crate.md) | Owns activity-shard schema, immutable event/history storage, transactions, fenced leases, outbox, blobs, retention, backup/restore, repositories, and reuse of generic operation/export/import staging and receipt retention for edit bundles; it adds no task-edit source table. |
+| [02-store-crate.md](./02-store-crate.md) | Owns activity-shard schema, immutable event/history storage, transactions, fenced leases, outbox, blobs, retention, backup/restore, repositories, and reuse of generic operation/export/import staging and receipt retention for edit bundles and workspace cleanup; cleanup state/events/receipts remain canonical task-workflow records, not another workspace registry or scheduler. |
 | [03-capture-crate.md](./03-capture-crate.md) | Captures provider-native goals/plans/workflows/tool events, locations, external tasks, Git/delivery facts, and executor observations without granting task authority. |
 | [04-projectors-crate.md](./04-projectors-crate.md) | Builds current task/plan/attempt/dependency/critical-path/workload/context-materiality projections and links them to every graph. |
 | [05-query-crate.md](./05-query-crate.md) | Registers task entity kinds, attributes, predicates, traversal relations, facets, projections, and saved profiles consumed through the unchanged `TraceQueryV1`; it supplies deterministic traversal, aggregation, explanation, pagination, and context assembly. No task-specific source/operator vocabulary or second query engine. |
@@ -211,22 +216,22 @@ Do not create a monolithic `tracedecay-tasks` crate. The graph is a cross-cuttin
 | [07-hooks-crate.md](./07-hooks-crate.md) | Receives only validated plan-22 suggestion envelopes and bounded task lifecycle signals at supported host boundaries; it never schedules or claims work. |
 | [08-tool-catalog-crate.md](./08-tool-catalog-crate.md) | Declares task capabilities, effect/scope/privacy/cost metadata, executor adapter manifests, grant eligibility, generated schemas/bindings, and the one `task_graph.edit_bundles.*` family/audience profile. |
 | [09-application-crate.md](./09-application-crate.md) | Owns task/plan commands and queries, authorization, graph transactions, scheduler, lease lifecycle, packet assembly, executor workflows, cancellation, receipts, edit-bundle validation/diff/rebase orchestration, and final atomic submit. |
-| [10-api-crate.md](./10-api-crate.md) | Exposes versioned HTTP/SSE, auth, problems, cursors, idempotency, generated schemas, executor control-plane protocol, and exact contained edit-bundle operation routes without accepting server paths. |
-| [11-dashboard-frontend.md](./11-dashboard-frontend.md) | Owns all human projections, inspectors, saved views, interaction state, accessibility, visual/performance tests, Orchestration Lab UI, and the Edit-as-Markdown workspace/diagnostic/diff/conflict/cleanup experience. |
+| [10-api-crate.md](./10-api-crate.md) | Exposes versioned HTTP/SSE, auth, problems, cursors, idempotency, generated schemas, executor control-plane protocol, exact contained edit-bundle operation routes, and workspace-association/cleanup workflow bindings without accepting server paths or transport-authored eligibility. |
+| [11-dashboard-frontend.md](./11-dashboard-frontend.md) | Owns all human projections, inspectors, saved views, interaction state, accessibility, visual/performance tests, Orchestration Lab UI, Edit-as-Markdown workspace/diagnostic/diff/conflict/cleanup, and the task-visible associated-workspace inventory and cleanup controls; the UI renders application legal actions and never decides deletion eligibility. |
 | [12-root-compatibility-migration.md](./12-root-compatibility-migration.md) | Owns root composition, V1/external adapters, daemon wiring, shadow/cutover, one-scheduler selection, deletion receipts, and rollback window. |
 | [13-research-provenance-and-context-anchors.md](./13-research-provenance-and-context-anchors.md) | Owns research manifests and stable implementation/session/source anchors, including the Hermes evidence registry. |
 | [14-historical-failure-regression-matrix.md](./14-historical-failure-regression-matrix.md) | Registers duplicate work, wrong scope/worktree, stale lease, retry storm, board ambiguity, output, privacy, and provider failures as cutover cases. |
 | [15-search-quality-evaluation-and-retrieval-research.md](./15-search-quality-evaluation-and-retrieval-research.md) | Supplies qrels, relevance metrics, hard negatives, optional semantic channels, and retrieval-quality promotion gates for context packets and task queries. |
-| [16-cross-project-repository-worktree-scope.md](./16-cross-project-repository-worktree-scope.md) | Resolves immutable multi-project/repository/worktree/ref/snapshot sets, authorization, federation, and Rspack/Rsbuild/React Router fixtures before any task effect. |
+| [16-cross-project-repository-worktree-scope.md](./16-cross-project-repository-worktree-scope.md) | Resolves immutable multi-project/repository/worktree/ref/snapshot sets, canonical repository/worktree identity across checkouts, authorization, federation, and Rspack/Rsbuild/React Router fixtures before binding, restoring, or removing any task workspace. |
 | [28-remote-multi-machine-shared-brain.md](./28-remote-multi-machine-shared-brain.md) | Owns Brain/node/authority/placement identity, semantic sync, offline/cache truth, remote executor connectivity, backup/failover, and one-authority release gates. |
 | [17-official-public-api-and-sdks.md](./17-official-public-api-and-sdks.md) | Owns stable public API/SDK compatibility, generated clients, edit-bundle stream/file helpers, auth scopes, event subscriptions, examples, deprecation, and conformance. |
 | [18-secret-detection-redaction-and-private-data-safety.md](./18-secret-detection-redaction-and-private-data-safety.md) | Owns sanitizer/taint types, protected payloads, logs/artifacts/packets, secret scanning, quarantine, egress, retention, and deletion. |
 | [19-system-defragmentation-convergence-and-extensibility.md](./19-system-defragmentation-convergence-and-extensibility.md) | Enforces the allowed dependency DAG, one canonical activity graph, SPI rules, entropy budget, and deletion of parallel systems. |
 | [20-configuration-control-plane.md](./20-configuration-control-plane.md) | Exclusively owns typed task/executor/scheduler/model/budget/grant/privacy settings plus edit-workspace TTL/root/caps/sharding/cleanup/offline-lock descriptors, precedence, history, activation, status, and all configuration UIs/bindings. |
-| [21-cli-mcp-tool-surface-and-output-unification.md](./21-cli-mcp-tool-surface-and-output-unification.md) | Owns generated semantic bindings, local edit-workspace CLI ergonomics, an optional zero-to-three logical MCP registration/profile component set backed by one implementation/binary/daemon/catalog, resource links/skills+CLI fallback, the pure root `v2::presentation` renderer/document module, Markdown-default/explicit-JSON rules, stable pagination/handles/errors, and parity; plan 09 owns semantic typed view models. |
+| [21-cli-mcp-tool-surface-and-output-unification.md](./21-cli-mcp-tool-surface-and-output-unification.md) | Owns generated semantic bindings, local edit-workspace and task-workspace cleanup CLI ergonomics, an optional zero-to-three logical MCP registration/profile component set backed by one implementation/binary/daemon/catalog, resource links/skills+CLI fallback, the pure root `v2::presentation` renderer/document module, Markdown-default/explicit-JSON rules, stable pagination/handles/errors, and parity; plan 09 owns semantic typed view models and cleanup legality. |
 | [22-incremental-context-scout-and-suggestion-envelopes.md](./22-incremental-context-scout-and-suggestion-envelopes.md) | Consumes task events/context-packet refs as evidence and delivers at most one material, deduped, privacy-safe advisory to an exact Thread/Turn/Agent. |
 | [23-session-lcm-temporal-retrieval-and-evaluation.md](./23-session-lcm-temporal-retrieval-and-evaluation.md) | Owns temporal retrieval, logical-message copies, current/as-of semantics, source horizons, representative selection, and packet context assembly quality. |
-| [26-observability-accounting-and-usage.md](./26-observability-accounting-and-usage.md) | Owns generated task/executor accounting descriptors, liveness/scheduler rollups, attempt/work-item/executor/route/model/effort attribution, SLOs, unknown/cap semantics, and Observatory/Costs view contracts consumed here. |
+| [26-observability-accounting-and-usage.md](./26-observability-accounting-and-usage.md) | Owns generated task/executor accounting descriptors, liveness/scheduler rollups, attempt/work-item/executor/route/model/effort attribution, workspace retention/cleanup backlog and outcome metrics, SLOs, unknown/cap semantics, and Observatory/Costs view contracts consumed here; it does not own cleanup policy or effects. |
 
 ### 3.1 Allowed architecture
 
@@ -901,9 +906,51 @@ pub struct WorkspaceBindingV1 {
     pub branch: Option<RefId>,
     pub code_snapshot: CodeSnapshotId,
     pub ownership: WorkspaceOwnershipV1,
+    pub provenance: WorkspaceProvenanceV1,
     pub cleanliness: WorkspaceCleanlinessV1,
+    pub cleanup_policy: PolicyManifestRef,
     pub generation: u64,
     pub manifest_digest: ManifestDigest,
+}
+
+pub enum WorkspaceCleanupTriggerV1 {
+    ExplicitRequest,
+    AttemptTerminal,
+    WorkItemArchived,
+    ProducedPullRequestMerged,
+    RetentionExpired,
+    StartupReconciliation,
+}
+
+pub enum WorkspaceCleanupBlockerV1 {
+    DirtyTrackedChanges,
+    UntrackedFiles,
+    ActiveAttempt,
+    ActiveLeaseOrReservation,
+    ActiveAgentOrWorkClaim,
+    UnpushedCommits,
+    UnmergedBranch,
+    OpenOrUnknownPullRequest,
+    SiblingWorkItemReference,
+    UnknownOwnership,
+    OwnershipEvidenceInsufficient,
+    CleanupDelegationMissing,
+    WorkspaceIdentityDrift,
+    ExternalEffectUnknown,
+    RetentionHold,
+}
+
+pub enum WorkspaceCleanupStateV1 {
+    NotRequested,
+    Evaluating,
+    Blocked,
+    Eligible,
+    Authorized,
+    Removing,
+    Removed,
+    RemovedExternally,
+    Preserved,
+    Failed,
 }
 ```
 
@@ -911,7 +958,19 @@ A multi-repository attempt has exactly one writable target; other repositories a
 
 Workspace authority is never inherited through decomposition, parentage, retry, or provider subagents. `InspectOnly` may share an authorized snapshot but cannot write; `ExclusiveWrite` requires one current reservation and a clean/adopted ownership decision; `IntegrationAuthority` is a separate explicit work item that may integrate only declared child outputs. A generated child receives no parent worktree path until application issues its own binding. Shared or dirty worktrees require a typed adoption/conflict decision and cannot be scheduled by optimistic prompt convention.
 
-Worktree lifecycle is an application workflow with `Requested → Reserved → Created/Adopted → Bound → InUse → Releasing → Preserved/Removed/Failed`. User-created or dirty worktrees default to `Preserved`. TraceDecay-created disposable worktrees may be removed only after no active lease/agent, artifact retention, Git safety checks, and a durable cleanup receipt. Branch/rebase/merge/PR/release effects remain separately cataloged delivery commands with their own grants and receipts.
+`WorkspaceProvenanceV1` pins the canonical repository/git-common-dir, checkout/worktree identity and generation, observed path digest, external creator class, first/last observation, host, source tool/hook/watcher event refs, branch/HEAD/commit observations, ownership evidence, cleanup-delegation evidence, confidence, and contradictions. Creator class distinguishes user Git CLI, agent Git CLI, host/IDE worktree tool, external executor/automation, pre-existing, and unknown; there is no TraceDecay-created class. Association confidence is not ownership or cleanup delegation: even a strongly correlated agent-created worktree is ineligible for removal until the authorized user/agent/executor or externally evidenced creator/owner explicitly delegates cleanup for that exact repository/worktree generation.
+
+A work item does not own a mutable `worktree_id` list. The existing typed relation/evidence protocol records bitemporal `WorkItem/ExecutionAttempt ↔ WorkspaceBinding/Repository/Worktree/Ref/Commit/PullRequest` edges. `TaskWorkspaceAssociationViewV1` folds all relation versions and attempt bindings into one ordered view containing relation class (`Produced`, `Observed`, `Encountered`, or explicit human association), status (`Proposed`, `Confirmed`, `Rejected`, `Contradicted`, `Historical`), confidence/explanation, source events, active attempts/leases/reservations, ownership, Git/delivery freshness, and cleanup state. Strong multi-signal evidence may append a confirmed association event automatically; a lone ticket/PR mention, path similarity, branch-name guess, or temporal adjacency may only create a proposed candidate. Ambiguous candidates produce at most one compact plan-22 hint/confirmation action. Conflicting repository/common-dir/HEAD evidence appends a contradiction and blocks rebinding or cleanup; it never silently changes an attempt's sealed `WorkspaceBindingV1`.
+
+Discovery is host-independent and includes worktrees created outside TraceDecay. Capture correlates the active work item/attempt/Thread/Turn, registered participant, CWD transitions, `git worktree list --porcelain` plus canonical git-common-dir identity, branch/HEAD/commit, tool invocation/result IDs, explicit ticket/PR references, host worktree-create/remove hooks, IDE integrations, and the daemon's bounded Git watcher. Reconciliation scans registered repositories at startup, after watcher gaps, and on demand, then backfills relation events with observation time/source/confidence without inventing creator ownership or rewriting historical bindings. The watcher and hooks only observe and wake the canonical application workflow; they never create a lease, associate on weak evidence, or remove a worktree.
+
+Worktree lifecycle is the existing observation/binding workflow: `Discovered → ProposedAssociation | ConfirmedAssociation → Reserved → Bound → InUse → Releasing → Preserved`, followed only when triggered by `Evaluating → Blocked | Eligible → Authorized → Removing → Removed | Failed`. TraceDecay creates none of these Git worktrees; an agent, user, Git/IDE tool, or external executor provisions them before observation/binding. `Archived`, a terminal attempt, a produced-PR merge observation, retention expiry, startup reconciliation, or an explicit request enters `Evaluating`; none skips it. Evaluation uses a fresh canonical Git observation and journal watermark. Every `WorkspaceCleanupBlockerV1` is fail-closed and visible. Missing delegation, unknown ownership, dirty/contradicted/investigation-held state, or any sibling task association, active claim/agent, attempt, lease, write reservation, or integration reference settles at `Preserved`/`Blocked`. Shared read-only use is legal; one worktree may serve several tickets sequentially, but it has at most one exclusive-write/integration reservation at a time and cleanup is evaluated over the union of all current relation references.
+
+`Eligible` is a short-lived proof, not authority. It binds workspace generation/identity, repository/common-dir, creator/ownership and cleanup-delegation evidence, cleanliness, reachability/push/merge/PR observations, sibling-reference closure, active authority set, retention holds, policy/config versions, event watermark, and expiry into one digest. `Authorized` requires either an explicit generated cleanup command and confirmation from an authorized principal covered by that delegation or a plan-20 autonomous policy grant that was explicitly delegated for the exact externally created worktree generation; application rechecks delegation and the full proof immediately before the outbox effect. The daemon-owned `WorkspacePort` may perform only that delegated idempotent remove and Git prune step. It never provisions worktrees or uses `git clean`, reset, stash, forced removal, or branch deletion. Success/failure/already-absent results append canonical events and a content-safe `WorkspaceCleanupReceiptV1` with binding/generation, trigger, actor/delegator/policy, proof digest, blockers resolved, before/after Git observation refs, operation/outbox refs, and audit time.
+
+Retention is policy-versioned: active/investigation holds dominate terminal/archive/merged-PR/age triggers; blocked evaluations retain their evidence and next recheck; removed bindings, association lineage, commit/ref/PR locators, and cleanup receipts remain tombstoned under plan 02 while paths and transient Git output follow plan 18 retention. Reopening an archived work item never resurrects a terminal attempt or deleted directory. It preserves historical associations and either safely rebinds an existing proved worktree generation or returns exact retained ref/commit constraints for a user/agent/executor to create a new worktree, which TraceDecay may then observe and bind as a new generation. If the commit is no longer reachable, restore is blocked with evidence; unpushed work can never be “restored” after cleanup because its presence would have blocked removal.
+
+Branch/rebase/merge/PR/release effects remain separately cataloged delivery commands with their own grants and receipts. A PR merge makes cleanup evaluable only when the PR has a `Produced` or explicitly confirmed relation to the exact branch/worktree and live remote evidence proves the merge; a mentioned/observed PR or stale webhook is never sufficient.
 
 ### 4.9 Versioned context packet
 
@@ -1030,10 +1089,11 @@ An updated packet never rewrites the packet an attempt started with. It creates 
 - execution failure observed/classified/reclassified with typed cause-chain receipt;
 - context packet built/accepted/superseded/expired;
 - handoff/artifact/outcome/cost published/reconciled;
-- workspace reserved/bound/drifted/conflicted/released;
+- workspace discovered/observed, association proposed/confirmed/rejected/contradicted/backfilled, reserved/bound/drifted/conflicted/released/removed-externally;
+- workspace cleanup requested/evaluated/blocked/eligible/authorized/removing/removed/preserved/failed with proof and receipt refs;
 - scheduler/policy decision and no-action reason;
 
-Canonical invariants additionally require: candidate-plan items never receive offers; worker references resolve by canonical ID plus plan-local label; derived work keys are unique; only the current lifecycle owner may issue attempt lifecycle commands; workspace authority never inherits; and every failure classification retains its observation, classifier/version, cause chain, and corrective action instead of overwriting the original evidence.
+Canonical invariants additionally require: candidate-plan items never receive offers; worker references resolve by canonical ID plus plan-local label; derived work keys are unique; only the current lifecycle owner may issue attempt lifecycle commands; workspace authority never inherits; TraceDecay never provisions a Git worktree; inferred workspace association never supplies ownership or cleanup delegation; cleanup authorization names one unexpired eligibility proof and explicit delegator/grant; and every failure classification retains its observation, classifier/version, cause chain, and corrective action instead of overwriting the original evidence.
 - external effect requested/acknowledged/reconciled/compensated/unknown.
 
 Invariant checks run in domain validation and owner-shard transactions:
@@ -1199,6 +1259,7 @@ Owner-shard transactions must support:
 - terminal attempt + acceptance/outcome/handoff/artifact refs + cost reservation release + lease release + dependent invalidation/readiness event atomically;
 - cancellation request + lease state + workflow step idempotency atomically;
 - executor registration heartbeat/expiry and capacity reservation without scanning all attempts;
+- append workspace discovery/association observations and idempotent backfill results without changing a sealed attempt binding; request cleanup evaluation from archive/terminal/produced-PR-merge/retention events, then CAS cleanup state and persist proof/blockers/authorization/outbox/receipt refs against one exact workspace generation;
 - save/update/delete an authorized view without copying result rows.
 - publish every validated edit-bundle plan/work-item/dependency/gate/acceptance/assignment change, canonical event, head pointer, audit/outbox row, ID allocation, and idempotency result together after CAS-checking the complete pinned base vector; validation failure, conflict, cancellation, or kill before commit publishes none.
 
@@ -1230,7 +1291,7 @@ SQLite remains valid for one fenced activity-shard authority because all hosts r
 
 ### 5.4 Indexes, retention, and recovery
 
-Indexes cover initiative/plan/version, disposition/resolution/readiness, gating parents/children, assignment target, executor class/adapter/provider/model/effort, active lease expiry, attempt state/time/outcome, exact project/repository/worktree/ref/snapshot relation, actor/agent/session/Turn/goal, artifact/PR/check, schedule/deadline, priority, budget, and retrieval-anchor digest.
+Indexes cover initiative/plan/version, disposition/resolution/readiness, gating parents/children, assignment target, executor class/adapter/provider/model/effort, active lease expiry, attempt state/time/outcome, exact project/repository/git-common-dir/worktree-generation/ref/snapshot relation, association status/confidence/source, cleanup state/trigger/expiry/blocker, actor/agent/session/Turn/goal, artifact/PR/check, schedule/deadline, priority, budget, and retrieval-anchor digest.
 
 Maintain incremental topological order and dependency counters per active plan projection. They are rebuildable from plan versions and events. Critical-path/workload summaries are projections with manifests, never mutable truth columns.
 
@@ -1241,6 +1302,8 @@ Retention rules:
 - logs and large artifacts use separate protected retention classes and holds;
 - packet payload expiry may leave a manifest/tombstone with anchors, entry kinds, digests, omissions, and access disposition;
 - executor heartbeats expire current visibility but retain registration history;
+- workspace association observations retain bitemporal provenance/confidence/contradictions; proposed candidates expire from active hints but remain bounded audit evidence, while confirmed/historical relations and cleanup receipts retain content-safe identity/digest/event refs under the policy floor;
+- cleanup eligibility proofs expire quickly and are recomputed; blocked states retain typed blockers/next-check time, removed worktrees retain binding/ref/commit/PR tombstones, and no retention job treats archive/merge/age as delete authority;
 - saved view definitions remain encrypted and are reauthorized on every open;
 - raw edit workspaces expire under their operation TTL, successful submit schedules immediate purge, crash recovery distinguishes pre-commit staging from committed-receipt cleanup, and durable receipts contain no Markdown/frontmatter/path bytes;
 - deletion follows plan 18 descendant invalidation and anchor tombstone rules.
@@ -1278,6 +1341,7 @@ Projectors build:
 - assignment, queue, lease, attempt, retry, cancellation, and outcome timelines;
 - executor/provider/model/effort capacity and health;
 - per-initiative/project/repository/worktree/agent/goal workload and cost rollups;
+- per-work-item associated repository/worktree/branch/commit/PR history across every attempt, including proposed/confirmed/contradicted provenance, ownership/delegation, active authorities, cleanup blockers/eligibility/receipts, and retention/restore state;
 - packet source/omission/expiry/currentness status;
 - material sibling-change candidates for Plan 22;
 - safe catalog/All summaries that do not copy private task content.
@@ -1291,7 +1355,7 @@ Project the following typed predicates with evidence/provenance and validity:
 | Work graph node | Related canonical entities |
 |---|---|
 | Initiative/plan | project set, repositories, projects, goals, workflows, decisions, saved views, budgets, outcomes |
-| Work item | Thread, Session, Turn, Agent, Goal, WorkClaim, tool definition/invocation/result, file, symbol, diagnostic, test, build, memory, fact, skill, hint, retrieval anchor |
+| Work item | Thread, Session, Turn, Agent, Goal, WorkClaim, repository, checkout, worktree generation, ref/branch/commit, PR/check/review/merge, tool definition/invocation/result, file, symbol, diagnostic, test, build, memory, fact, skill, hint, retrieval anchor |
 | Attempt | executor/host/provider/model, Thread/Session/Turns, workspace/worktree/ref/commit/snapshot, tool calls, reasoning artifacts, logs, costs |
 | Artifact/handoff/outcome | files/blobs, commits, branches, PRs, checks, reviews, releases, diagnostics, tests, messages, decisions, follow-up work |
 | Dependency/gate | source/target items, decisions, acceptance evaluations, artifacts, external delivery evidence |
@@ -1299,6 +1363,8 @@ Project the following typed predicates with evidence/provenance and validity:
 Use `Produced`, `Observed`, `Encountered`, `Affected`, and `Inferred` evidence classes exactly. A task mentioning a PR does not mean it produced the PR. Temporal proximity does not mean causation. Same file/path/title does not mean duplicate work. Cross-repository edges require explicit plan scope, dependency, provider, code, Git, or session/workflow evidence.
 
 Task↔Thread/Session/Turn/Agent relations are explicitly many-to-many and bitemporal. One long thread may contribute to several tasks/branches/PRs; one task may span many agents and sessions. Relation versions carry observed/valid intervals, role (originated, instructed, executed, reviewed, mentioned, handed off), evidence, and packet/attempt provenance. Projectors never collapse this into `task.session_id` or infer ownership from the latest/current session.
+
+Task↔workspace/Git/delivery relations use the same many-to-many relation ledger. Correlation policy fuses active attempt/participant/Thread/Turn, CWD transition, canonical git-common-dir/worktree identity, branch/HEAD/commit, tool invocation/result, explicit task/PR reference, watcher/hook observation, and temporal bounds. Direct attempt registration plus matching Git identity, or a matching creator tool call/CWD transition/HEAD chain, can cross the auto-confirm threshold; ticket text, branch naming, path similarity, or PR mention alone cannot. Projector output retains every contributing and contradicting signal, policy version, score band, and source freshness. Reconciliation/backfill is idempotent by source observation and relation endpoints and never raises cleanup ownership confidence.
 
 ### 6.3 Material sibling changes
 
@@ -1644,6 +1710,7 @@ crates/tracedecay-application/src/features/task_graph/
 │   ├── work_items.rs
 │   ├── dependencies.rs
 │   ├── attempts.rs
+│   ├── workspaces.rs
 │   ├── offers.rs
 │   ├── executors.rs
 │   ├── packets.rs
@@ -1662,6 +1729,7 @@ crates/tracedecay-application/src/features/task_graph/
 │   ├── handoffs.rs
 │   ├── scheduler.rs
 │   ├── executor.rs
+│   ├── workspaces.rs
 │   └── workflows/
 │       ├── decomposition.rs
 │       ├── cancellation.rs
@@ -1672,6 +1740,7 @@ crates/tracedecay-application/src/features/task_graph/
 │   ├── plans.rs
 │   ├── work_items.rs
 │   ├── attempts.rs
+│   ├── workspaces.rs
 │   ├── offers.rs
 │   ├── packets.rs
 │   ├── notifications.rs
@@ -1693,7 +1762,9 @@ The matching `queries/{offers,packets,notifications}.rs` and `commands/{offers,p
 | `work_items.list/get/query` | Registered task variants of canonical `TraceQueryV1`; compact default plus explicit hydration of spec, dependencies, criteria, assignments, attempts, packets, artifacts, Git/delivery, and evidence. The convenience endpoint accepts/returns the same AST/digest and defines no task-only selector. |
 | `work_items.context` | Current or exact-attempt packet view with source/omission/access/expiry status; never assembles with ambient CWD or current board. |
 | `work_items.dependencies` | Parents/children/blockers/unblockable/closure/path/cycle witness/critical-path and gate explanations. |
+| `work_items.workspaces` | Every associated project/repository/checkout/worktree generation/branch/commit/PR and attempt, including proposed/confirmed/contradicted/historical provenance, confidence, freshness, ownership/delegation, active authorities, retention, cleanup eligibility/blockers/receipts, and legal actions. No ambient-CWD association or inferred ownership. |
 | `attempts.list/get/timeline` | Requested/actual route, lease, packet, workspace, tools, Turns, costs, events, outcome, cancellation/reconciliation, and evidence. |
+| `workspaces.get` | Exact binding/generation, canonical Git identity, all related work items/attempts/participants and evidence signals, current Git/delivery observation, cleanup/retention state, proof expiry, blockers, receipts, and safe restore/rebind status. Paths hydrate only for an authorized local principal. |
 | `task_offers.list/get` | Registration-scoped open/terminal offers with immutable revision, work/assignment/route/rationale and policy/config/catalog pins, readiness digest, expiry, and legal CAS actions; no lease proof or unrelated queue contents. |
 | `context_packets.list/get` | Attempt-scoped sealed packet ordinals, start/accepted/superseded/expired state, effective Turn boundary, omissions, coverage, and anchors. |
 | `task_notifications.list/get` | Owner-scoped saved filter/channel/event-class/quiet-hours/dedupe/rate-budget subscriptions with current version and delivery health; never implicit subscriptions or unrelated recipients. |
@@ -1722,8 +1793,11 @@ Queries use read ports only. They cannot create anchors by mutating during a nom
 | `work_items.record_decision` | Append a versioned `TaskDecisionV1` with alternatives, selected value, validity, affected work items, actor/policy, and evidence. Supersession names the prior decision and revalidates affected gates/packets/attempts in the same command transaction. |
 | `work_items.record_exception` | Separately authorized exception to exact required criteria, with bounded reason, evidence, actor/grant, affected versions, expiry/review requirement, and permanent outcome-quality visibility; never a generic completion bypass. |
 | `work_items.handoff` | Publish one structured `HandoffV1` from the current fenced attempt or an explicitly authorized human transition, pinning completed acceptance, unresolved risks, decisions, artifacts, anchors, suggested next work, and source version/epoch. |
-| `work_items.reopen` | Create a new work-item version and readiness path from a terminal/retired item under exact expected versions and reason; never reopen or mutate a terminal attempt. |
+| `work_items.reopen` | Create a new work-item version and readiness path from a terminal/retired item under exact expected versions and reason; never reopen or mutate a terminal attempt. Historical workspace relations remain visible, while task context returns repository/base/ref/commit constraints for an external agent/user/executor-created worktree that later enters through ordinary discovery/association. |
 | `work_items.reverse_transition` | Reference one reversible prior command receipt/event and append the registered legal inverse as a new version/event under current-version CAS. Never erase history, call rollback, compensate an external effect implicitly, or cross an irreversible/consequential-effect boundary. |
+| `worktrees.discover` and `task_worktree_associations.associate/confirm/reject/reassign` | Idempotently ingest bounded host/tool/hook/watcher/Git evidence or resolve one proposed relation under exact endpoints/source versions. Strong evidence may auto-confirm under versioned policy; ambiguity remains proposed with one deduped hint, contradiction blocks rebind, and none grants execution or cleanup authority. |
+| `worktree_cleanup.inspect` | Reconcile live Git/delivery/task authority state and append one short-lived eligibility proof or complete typed blocker set for an exact worktree generation. Archive, terminal, merged PR, TTL, and hook events invoke this workflow only; the command performs no removal. |
+| `worktree_cleanup.request` | Require expected worktree generation, unexpired inspect digest, explicit user/agent/executor cleanup delegation, confirmation/grant, and idempotency; revalidate, then run one daemon outbox effect and return a durable receipt. A configured hold is a blocker. The command never resets/stashes/cleans/forces/deletes a branch. |
 | `attempts.heartbeat/progress/complete/block` | Lifecycle-owner-only subset requiring registration, current lease epoch, attempt/work-item versions, exact accepted packet ref, capability-grant-set ID/digest pair, idempotency, and typed evidence. These commands operate only after `task_offers.accept` has atomically issued the attempt/lease/start manifest; none can mint execution authority or update advisory `WorkClaimV1`. |
 | `attempts.participant_handoff` | Current bound non-owner participant may publish one bounded progress/blocker/handoff proposal to the lifecycle owner with source Turn/evidence and idempotency. It cannot heartbeat/complete/block the canonical attempt, mutate graph state, or grant authority. |
 | `attempts.lifecycle_checkpoint` | Hook bridge for plan 07's one-shot terminal-candidate evaluation. It may atomically reserve/inspect the exact attempt/lease/Turn/participant checkpoint and return a role-correct compact same-agent continuation reason, but cannot terminalize, mutate graph state, or retry delivery. |
@@ -1738,7 +1812,7 @@ Queries use read ports only. They cannot create anchors by mutating during a nom
 
 The seven manual-work commands have distinct generated input schemas but share exact work-item/plan expected versions, actor/grant, `IdempotencyKeyV1`, sanitizer/evidence refs, policy/config/catalog pins, and a canonical event/receipt. Their stable catalog IDs are exactly `work_items.record_attestation`, `work_items.record_review`, `work_items.record_decision`, `work_items.record_exception`, `work_items.handoff`, `work_items.reopen`, and `work_items.reverse_transition`; transports may map naming style but may not merge them into a generic mutation.
 
-Ordinary task/plan mutations commit directly after validation. Destructive external consequences—worktree deletion, force-affecting Git operation, PR merge, deployment, release, protected-data deletion—remain separate plan-09 commands with explicit confirmation/authorization and receipts. They are never hidden inside `attempts.complete` or inferred from work-item readiness.
+Ordinary task/plan mutations commit directly after validation. Destructive external consequences—delegated worktree removal, force-affecting Git operation, PR merge, deployment, release, protected-data deletion—remain separate plan-09 commands with explicit confirmation/authorization and receipts. They are never hidden inside `attempts.complete`, `work_items.archive`, a merged-PR observer, a terminal hook, retention expiry, or work-item readiness.
 
 ### 9.2A Managed edit-bundle workflow
 
@@ -1853,7 +1927,7 @@ pub struct TaskOfferV1 {
 
 `task_offers.accept`, `task_offers.decline`, and `task_offers.revoke` all require `offer`, `expected_offer_revision`, and `IdempotencyKeyV1`. Accept additionally requires registration identity, exact work-item/plan versions, and echoed readiness digest; decline records one registered safe reason; revoke is scheduler/admin-only. A losing CAS returns the current safe offer view and writes no lifecycle event. Expiry is a deterministic internal CAS. Push delivery acknowledgement is not acceptance or authority. The pull query exposes only offers addressed to the authenticated registration, and push/pull conformance proves the same offer cannot yield two attempts.
 
-Acceptance is an application workflow, never scheduler-side dispatch. Before its final transaction it resolves/creates the exact safe workspace binding, assembles the sealed packet, calculates the immutable grant set, and preallocates all IDs against the offer's frozen pins without publishing any authority. The final transaction described in §5.3 changes `Open → Accepted` and atomically creates the assignment activation, packet, attempt, lease, grant set, reservations, `TaskStartManifestV1`, canonical events, and adapter-start intent. If preparation, expiry, authorization, or any CAS fails, the offer remains open or reaches its independently justified terminal state and no packet/attempt/lease/start exists.
+Acceptance is an application workflow, never scheduler-side dispatch. Before its final transaction it resolves and creates only the canonical binding record for an exact externally provisioned worktree—never the worktree itself—assembles the sealed packet, calculates the immutable grant set, and preallocates all IDs against the offer's frozen pins without publishing any authority. The final transaction described in §5.3 changes `Open → Accepted` and atomically creates the assignment activation, packet, attempt, lease, grant set, reservations, `TaskStartManifestV1`, canonical events, and adapter-start intent. If preparation, expiry, authorization, or any CAS fails, the offer remains open or reaches its independently justified terminal state and no packet/attempt/lease/start exists.
 
 Lease acquisition is a CAS over the expected work-item revision, plan version, readiness digest (the transactionally maintained `work_items.readiness_digest` column of §5.3, never a projection read), active lease, executor capacity, budget, workspace generation, and writable-resource reservation set. Application derives the attempt's writable artifacts/resources from scope, workspace, grants, and acceptance, then checks active task leases and evidence-backed work claims for overlapping worktree/branch/file/symbol/test/artifact targets **plus** `WorkClaimScopeV1.query_scope` identity/digest, resolved scope, shared retrieval anchors, and explicit goal evidence. Query/goal similarity is advisory and thresholded; a direct authoritative resource reservation blocks, while a query-only overlap triggers materiality review and cannot steal authority. `DeliberateEnsemble`, diverse review, planned parallel, and read-only relations suppress accidental-duplication warnings and are recorded in the start manifest.
 
@@ -1910,13 +1984,14 @@ Recovery executes §8.7's decision transactionally: `ExtendAlive` preserves the 
 
 Workspace preparation:
 
-- resolve the exact `ScopeResolutionV2`, repository, checkout, worktree, ref, base commit, and indexed snapshot;
-- verify ownership/dirty state and active agents/leases;
-- choose configured existing-read-only, owned-existing-write, new isolated worktree, remote workspace, or sandbox mode;
-- reserve unique worktree/branch identity through the application service;
-- create/adopt through a consumer-owned `WorkspacePort` after durable intent;
-- capture resulting Git/worktree observation and verify it matches the binding;
+- resolve the exact `ScopeResolutionV2`, repository, acceptable checkout/worktree/ref/base constraints, and indexed snapshot without selecting an ambient path;
+- require the user, agent, Git/IDE tool, host adapter, or external executor to create or nominate the worktree; TraceDecay never provisions one;
+- observe the candidate through canonical git-common-dir/worktree identity, branch/HEAD/commit, source tool/hook event, active attempt/Thread/Turn, and explicit registration evidence;
+- verify dirty/untracked state, external creator/ownership and optional cleanup delegation, active agents/leases/reservations, branch collision, and contradictory associations;
+- reserve the exact already-observed worktree generation and normalized conflict keys through the application service; never reserve or guess a path and then create it;
 - seal the binding before packet/lease issuance.
+
+If no eligible externally provisioned worktree exists, offer acceptance remains unprepared and returns a typed `workspace_required` action with the exact repository/base constraints and a registration token; it creates no attempt or lease. The executor or user provisions the worktree by its own authorized mechanism and registers/observes it, then retries the same idempotent acceptance. TraceDecay cannot silently fall back to the base checkout.
 
 During execution, capture file/tool/Git events and correlate them to attempt/lease/workspace. A branch, commit, or PR is not required unless acceptance says so. When produced:
 
@@ -1926,7 +2001,9 @@ During execution, capture file/tool/Git events and correlate them to attempt/lea
 - require a delivery-task grant for push/open/update/review/merge/release;
 - use separate verifier/reviewer work items for aggregate or high-risk changes;
 - preserve failed/dirty worktrees for investigation under retention policy;
-- clean only TraceDecay-owned disposable workspaces after terminal/reconciled state and no references.
+- on attempt terminal/reconciliation or archive/merged-PR evidence, release the reservation and request cleanup evaluation; remove only under the delegated proof/state machine in §4.8.
+
+Host `CwdChanged`, `WorktreeCreate`, `WorktreeRemove`, `Stop`, `SubagentStop`, `SessionEnd`, and equivalent IDE/executor terminal events are observation sources only. Hooks submit bounded event/tool/CWD/Git identity evidence to `workspaces.observe` or wake reconciliation; they never run Git removal, change a sealed binding, or decide cleanup. The lifecycle-owner terminal command remains authoritative for attempt completion. An externally removed worktree is reconciled to `RemovedExternally`/historical association with provenance; a missing directory is not recorded as a successful TraceDecay cleanup receipt.
 
 ### 9.9 Human and autonomous boundaries
 
@@ -1941,6 +2018,7 @@ Autonomous components may, only within activated plan-20 authority:
 - retry/back off/circuit break;
 - create validated follow-up/remediation work;
 - stop unsafe attempts;
+- evaluate and, only under an explicit still-valid user/agent/executor cleanup delegation plus the fresh §4.8 proof, execute configured worktree cleanup;
 - apply autonomous curation effects owned by the curation system.
 
 Models and executor workers propose; application authorizes. The scheduler cannot widen grants, scope, egress, budgets, model set, or destructive effects. Plan 22 is advisory only. Autonomous curation does not wait for per-item review, and task review gates never become a backdoor curation approval queue.
@@ -2097,12 +2175,15 @@ Plan 08 owns generated definitions. Add semantic families:
 ```text
 initiatives.list|get|graph|create|update|pause|resume|retire
 plans.list|get|diff|create_version|activate|decompose
-work_items.list|get|query|context|dependencies
+work_items.list|get|query|context|dependencies|workspaces
 work_items.create|update|replace|retire|link|unlink|assign|reassign|assign_set
 work_items.pause|resume|cancel|archive|retry
 work_items.record_attestation|record_review|record_decision|record_exception
 work_items.handoff|reopen|reverse_transition
 attempts.list|get|timeline|heartbeat|progress|complete|block|participant_handoff|lifecycle_checkpoint
+worktrees.list|get|discover
+task_worktree_associations.list|diagnose|associate|confirm|reject|reassign
+worktree_cleanup.inspect|status|request
 task_offers.list|get|accept|decline|revoke
 context_packets.list|get|accept
 executors.list|get|match|register|heartbeat|drain|unregister
@@ -2125,6 +2206,7 @@ Application returns transport-neutral sealed views:
 - `DependencyStateViewV1` and `CriticalPathViewV1`;
 - `AttemptSummaryViewV1`, `AttemptDetailViewV1`, and `AttemptTimelineLaneSetV1`;
 - `TaskAdmissionViewV1`, `DependencyClosureExplanationV1`, `AttemptParticipantTopologyViewV1`, `ExecutionFailureCausalityViewV1`, `WorkspaceAuthorityViewV1`, and `LifecycleCheckpointViewV1`;
+- `TaskWorkspaceAssociationViewV1`, `WorkspaceCleanupViewV1`, and `WorkspaceCleanupReceiptViewV1`, including all attempts/relations, provenance/confidence/contradictions, ownership/delegation, blockers, expiring proof status, retention/restore state, and generated legal actions;
 - `TaskOfferSummaryViewV1` and `TaskOfferDetailViewV1`, including immutable revision/pins and legal CAS actions;
 - `ContextPacketSummaryViewV1` and `ContextPacketDetailViewV1`, including ordinal/start/accepted state, omissions, coverage, and anchors;
 - `TaskNotificationSummaryViewV1` and `TaskNotificationDetailViewV1`, including subscription revision, safe channel, health, dedupe, and rate state;
@@ -2147,12 +2229,15 @@ Generated CLI groups:
 ```text
 tracedecay initiative list|show|graph|create|update|pause|resume|retire
 tracedecay plan list|show|diff|version|activate|decompose
-tracedecay task list|show|query|context|deps
+tracedecay task list|show|query|context|deps|workspaces
 tracedecay task create|update|replace|retire|link|unlink|assign|reassign|assign-set
 tracedecay task pause|resume|cancel|archive|retry
 tracedecay task record-attestation|record-review|record-decision|record-exception
 tracedecay task handoff|reopen|reverse-transition
 tracedecay attempt list|show|timeline
+tracedecay project worktree discover|list|show
+tracedecay project worktree association list|diagnose|associate|confirm|reject|reassign
+tracedecay project worktree cleanup inspect|status|request
 tracedecay task-offer list|show|accept|decline|revoke
 tracedecay context-packet list|show|accept
 tracedecay executor list|show|match|drain
@@ -2164,7 +2249,7 @@ tracedecay task-graph status|doctor|events
 tracedecay task-graph edit start|get|validate|diff|rebase|submit|clean
 ```
 
-All commands accept explicit generated scope selectors; CWD is a locator hint only and ambiguity stops. Plan creation/decomposition uses `--activation candidate|active`; legacy `--triage` lowers to `candidate` and prints `schedulable=false`, never to a board status. The edit group additionally requires an exact workspace ID after `start`; `start` requires the editable plan/initiative plus frozen query or saved-view selection and returns the managed path only to the authorized local process. No later command searches the current directory for a manifest. `--format markdown|json`, cursor/page controls, time/as-of, plan version, and saved view use common plan-21 flags. Human commands never expose raw lease tokens/epochs as copy-paste secrets. Executor lifecycle uses authenticated protocol bindings, with `attempts.lifecycle_checkpoint` hidden behind the signed host-hook binding and only a diagnostic read under an executor-admin grant.
+All commands accept explicit generated scope selectors; CWD is a locator hint only and ambiguity stops. Plan creation/decomposition uses `--activation candidate|active`; legacy `--triage` lowers to `candidate` and prints `schedulable=false`, never to a board status. `task workspaces` defaults to complete association history; `project worktree cleanup inspect|request` prints every proof input/blocker, requires exact worktree generation/proof/delegation plus confirmation, and never treats `archive`, merged PR, `--force`, or path possession as authority. Reopening a task preserves historical associations and emits external creation constraints in task context; after a user/agent/executor creates another worktree, ordinary `discover` plus association commands bind its new generation. There is no public restore/provision alias. The edit group additionally requires an exact workspace ID after `start`; `start` requires the editable plan/initiative plus frozen query or saved-view selection and returns the managed path only to the authorized local process. No later command searches the current directory for a manifest. `--format markdown|json`, cursor/page controls, time/as-of, plan version, and saved view use common plan-21 flags. Human commands never expose raw lease tokens/epochs as copy-paste secrets. Executor lifecycle uses authenticated protocol bindings, with `attempts.lifecycle_checkpoint` hidden behind the signed host-hook binding and only a diagnostic read under an executor-admin grant.
 
 ### 11.4 MCP
 
@@ -2180,13 +2265,15 @@ MCP exposes the same catalog definitions with generated schemas and audience fil
 
 The model never receives raw CLI syntax, store paths, bearer tokens, fence tokens, or arbitrary application tool invocation. Lifecycle calls bind the current host registration/attempt/participant out of band. Every active worker uses a fixed eager-safe work profile containing its role-correct lifecycle bindings: owner commands for the lifecycle owner, `participant_handoff` for non-owner participants, and never owner terminal authority for an internal subagent. Host-native deferred tool search may omit additional noncore query/control schemas as an optimization, but correctness never depends on it and the applicable lifecycle terminator/handoff is always present.
 
+Ordinary executor MCP exposes bounded worktree discovery evidence for its own active attempt and association confirmation only when addressed by a proposed-correlation hint. Cleanup inspect/request are operator capabilities, absent from the ordinary attempt surface unless the executor registration carries an explicit cleanup delegation for that exact worktree generation. MCP returns the same blockers/proof/legal actions as CLI/API/UI and cannot accept a raw path, synthesize ownership from a ticket mention, invoke forced removal, or create/restore a worktree.
+
 Task-graph bulk editing is an orchestrator capability, absent from an ordinary executor's active-attempt surface. An authorized local orchestrator may start the operation and receive the managed workspace ref; remote MCP returns an operation/resource link, never a server filesystem path or inline huge archive. Validation, diff, rebase, submit, and cleanup consume that exact workspace/bundle ref. A plugin may ship the agent skill and CLI workflow without registering MCP at all. Plan 21's separate `context`, `work`, and `operator` logical registration connections/packages are real least-privilege boundaries, but all invoke one generated MCP protocol/application adapter, binary/daemon, catalog, auth/audit model, and data root; they are not independent domain servers. Fixed explicit binding profiles are authoritative, while host-native progressive disclosure is optional acceleration only.
 
 An authorized human/orchestrator MCP surface exposes the exact catalog IDs `work_items.record_attestation`, `work_items.record_review`, `work_items.record_decision`, `work_items.record_exception`, `work_items.handoff`, `work_items.reopen`, and `work_items.reverse_transition`; it exposes no generic status setter, preview/apply pair, or rollback alias. Rust/TypeScript/Python SDK methods and the CLI/HTTP spellings above are generated from those same entries and command/view schemas.
 
 ### 11.5 HTTP/SSE and public SDKs
 
-Plan 10 §8 is the sole exact HTTP route inventory. It generates bindings from these plan-24 operation families: `initiatives.*`, `plans.*`, `work_items.*`, `attempts.*`, `task_offers.*`, `context_packets.*`, `executors.*`, `scheduler.*`, `task_notifications.*`, `task_graph.*`, and `task_graph.edit_bundles.*`, plus canonical `subscriptions.create/revoke` and event reads. Task variants use plan-09/11 `saved_views.*` routes and methods with plan-24 validation. Plan 17 generates Rust/TypeScript/Python methods from the same entries, including contained stream/file helpers for edit bundles. This plan owns task semantics, not a second router, saved-view operation list, upload protocol, or filesystem-path API.
+Plan 10 §8 is the sole exact HTTP route inventory. It generates bindings from these plan-24 operation families: `initiatives.*`, `plans.*`, `work_items.*`, `workspaces.*`, `attempts.*`, `task_offers.*`, `context_packets.*`, `executors.*`, `scheduler.*`, `task_notifications.*`, `task_graph.*`, and `task_graph.edit_bundles.*`, plus canonical `subscriptions.create/revoke` and event reads. Task variants use plan-09/11 `saved_views.*` routes and methods with plan-24 validation. Plan 17 generates Rust/TypeScript/Python methods from the same entries, including contained stream/file helpers for edit bundles. This plan owns task semantics, not a second router, saved-view operation list, upload protocol, workspace registry, cleanup scheduler, or filesystem-path API.
 
 Plan 11 owns the product route composition. Its Work route set includes `/work/edit-bundles/:editBundleId` alongside `/work`, initiative/plan/task/attempt/offer/packet/executor/scheduler/view/notification routes; the edit-bundle route is only a consumer of the generated operation/resource/diagnostic/diff/conflict/cleanup views and creates no dashboard-local task-edit contract.
 
@@ -2194,7 +2281,7 @@ Exact HTTP design follows Plan 10 conventions (plan 10 §§8.6–8.7): reads are
 
 The kebab-case manual-work route suffixes map bijectively to the seven underscore catalog IDs above. In particular, `:reverse-transition` is a new-version inverse command; there is no `rollback`, `undo`, `preview`, or `apply` task route.
 
-`scheduler.explain` and `task_graph.doctor` are read-shaped POSTs because their protected scope/evidence bodies do not belong in URLs. `task_graph.events` binds only to a canonical task read-model subscription; no `/task-events` route exists. Edit-bundle transports exchange contained artifact bytes or an opaque bundle/workspace ref, never an arbitrary server path; operations above the synchronous budget return the common `OperationRef` with progress/cancel/status. Plan 08 generates a bijection test over every capability above and its CLI, MCP, HTTP operation, Rust/TypeScript/Python SDK method, application use case, auth/effect metadata, and view/problem type. A missing or extra binding, including scheduler explain/status/doctor/events, edit-bundle lifecycle, or any work-item mutation, blocks release.
+`scheduler.explain` and `task_graph.doctor` are read-shaped POSTs because their protected scope/evidence bodies do not belong in URLs. `task_graph.events` binds only to a canonical task read-model subscription; no `/task-events` route exists. Worktree discover/association/cleanup inspect/request commands use exact identity/generation endpoints and command envelopes; remote callers never submit a path, and cleanup above the synchronous budget returns the common `OperationRef` with proof/receipt links. Edit-bundle transports exchange contained artifact bytes or an opaque bundle/workspace ref, never an arbitrary server path; operations above the synchronous budget return the common `OperationRef` with progress/cancel/status. Plan 08 generates a bijection test over every capability above and its CLI, MCP, HTTP operation, Rust/TypeScript/Python SDK method, application use case, auth/effect metadata, and view/problem type. A missing or extra binding, including scheduler explain/status/doctor/events, worktree discovery/association/cleanup, edit-bundle lifecycle, or any work-item mutation, blocks release.
 
 Plan 17 generates Rust/TypeScript/Python clients and examples for human orchestration, read-only monitoring, and custom executor adapters. Executor registration/start/event protocol is documented separately from ordinary task CRUD and has a stricter compatibility/security matrix.
 
@@ -2228,6 +2315,9 @@ capability_grant_set_mismatch
 provider_model_denied
 execution_failure_misclassified
 workspace_authority_conflict
+workspace_required
+workspace_association_ambiguous
+workspace_association_contradicted
 review_successor_required
 reasoning_effort_unsupported
 task_lease_conflict
@@ -2240,6 +2330,11 @@ transition_not_reversible
 workspace_dirty
 workspace_drifted
 workspace_conflict
+workspace_cleanup_not_delegated
+workspace_cleanup_blocked
+workspace_cleanup_proof_expired
+workspace_cleanup_effect_unknown
+workspace_restore_ref_unreachable
 context_packet_stale
 context_packet_denied
 task_budget_exhausted
@@ -2271,6 +2366,7 @@ Routes:
 /work/plans/:planId/versions/:version
 /work/tasks/:workItemId
 /work/attempts/:attemptId
+/work/workspaces/:workspaceBindingId
 /work/offers/:offerId
 /work/packets/:packetId
 /work/executors
@@ -2292,7 +2388,7 @@ Initiative overview contains:
 
 - objective, exact scope, current plan/version, budgets, deadline, health, progress, outcome, cost, and coverage;
 - milestone/fan-in strip and critical-path interval;
-- repository/project/worktree participation matrix;
+- repository/project/worktree participation matrix with every attempt/worktree generation/branch/commit/PR, provenance/confidence/contradiction, active authority, retention, and cleanup state;
 - active agents/executors/attempts and blocked decisions;
 - recent consequential events and material handoffs;
 - links to related Goals, workflows, PRs/checks/releases, memories/skills, and research anchors;
@@ -2334,7 +2430,7 @@ Saved views may overlap deliberately. A user can keep `Initiative: runtime chang
 
 - **Workload:** queue/running/blocked/review/terminal counts, age, deadlines, criticality, cost, fairness, and capacity by initiative/project/agent/executor/provider/model/effort.
 - **Executor Fleet:** registrations, hosts, capabilities, residency, concurrency, queue, success/retry/cancel/lost rates, p50/p95 runtime/cost, circuit breakers, drain/update state, and current attempts.
-- **Repository Work:** work items/attempts/artifacts by exact repository/worktree/ref/commit/PR/check; produced/observed/encountered and local/live freshness remain separate.
+- **Repository Work:** work items/attempts/artifacts by exact repository/worktree generation/ref/commit/PR/check; produced/observed/encountered/proposed/contradicted, external creator/tool provenance, active reservations, retention, cleanup blockers/receipts, and local/live freshness remain separate.
 - **All:** content-free/lazy rollups first, authorized task hydration on expansion, explicit partial/unavailable shards, and no N-project eager fan-out.
 
 Every graph has list/table/matrix parity, keyboard navigation, focus/selection synchronization, and deterministic export. Dense views use server-side bounded neighborhood/aggregation and worker rendering; no hairball or browser-side full graph load.
@@ -2354,7 +2450,8 @@ Task inspector tabs:
 - Attempts/retries/cancellation;
 - Execution Topology: lifecycle owner, acting native CLI/provider/adapter participants, exact runtime and authority;
 - Failure Causality: raw observation → typed classification/reclassification → retry/reconciliation action;
-- Workspace Authority: inspect/write/integration mode, reservations, dirty/shared/adoption/conflict evidence;
+- Workspace Associations: every repository/worktree generation/branch/commit/PR across attempts, external creator/tool/hook/watcher provenance, confidence/signals/contradictions, proposed-confirm-reject actions, and historical/current state;
+- Workspace Authority and Cleanup: inspect/write/integration mode, leases/reservations/claims, dirty/shared/conflict and cleanup-delegation evidence, retention holds, eligibility proof/blockers/expiry/receipts, restore/rebind state, and generated evaluate/retain/cleanup controls;
 - Context packets and omissions;
 - Decisions/handoffs/artifacts/outcomes;
 - Thread/session/Turn/agent/goal/tool evidence;
@@ -2367,6 +2464,8 @@ These panels are catalog-owned Work `InspectorPanelRefV1` descriptors generated 
 Attempt inspector shows requested versus actual adapter/provider/model/effort/tools/skills, lifecycle owner and acting runtime participants, typed failure cause chain, lease epoch/status without exposing secret material, exact workspace authority, packet version, Turn/tool/artifact timeline, progress/log access, cost, acceptance, cancellation/reconciliation, one-shot lifecycle checkpoint state, and residual risk.
 
 Consequential controls come from generated `legal_capabilities`; the frontend never guesses based on status. Destructive or external effects state exact scope/impact and use Plan 09 confirmation where required. Ordinary task edits commit directly with optimistic conflicts and receipts.
+
+The ticket/work-item inspector always exposes associated workspaces even after archive, PR merge, cleanup, reopen, or attempt compaction. Archive and merged-PR badges may offer **Evaluate cleanup**, never **auto-delete**. **Clean worktree** is enabled only from `legal_capabilities` when the exact generation has explicit cleanup delegation and a current eligible proof; the confirmation lists repository/worktree identity, branch/commit/PR evidence, sibling references considered, retention impact, and the operations TraceDecay will not perform. Blocked cleanup shows each actionable blocker. Proposed associations allow confirm/reject once and emit at most one deduped compact hint; contradictory evidence prevents a one-click rebind. Restore presents external creation instructions/registration state and cannot create the worktree from the browser.
 
 ### 12.7 Agent-relevant slice and notification discipline
 
@@ -2410,7 +2509,7 @@ Configuration families:
 | Executors | allowed adapter classes/versions/hosts, registration auth/TTL, workspace modes, capacity, drain/update policy |
 | Providers/models | allowed providers/models/revisions, reasoning effort, residency, fallback policy, context/tool limits, pricing source |
 | Tools/capabilities | allow/deny grant templates, effect classes, MCP/remote egress, credential refs, destructive confirmation floors |
-| Workspaces/Git | allowed roots/remotes, owned versus user worktrees, branch templates, clean-state policy, retention/cleanup, delivery grants |
+| Workspaces/Git | allowed roots/remotes, external creator/ownership and cleanup-delegation evidence, association confidence thresholds, branch templates, clean-state policy, retention/cleanup, delivery grants; no TraceDecay provisioning setting |
 | Budgets/schedules | token/cost/runtime/tool/storage/network/human limits, deadlines, time windows, retry/backoff/circuit breakers |
 | Context packets | token/entry limits, required classes, sibling materiality, temporal mode, expiry/refresh, model egress |
 | Notifications/scout | exact event classes, quiet hours, dedupe/cooldown, per-Turn/session budgets, enabled host modes |
@@ -2481,7 +2580,7 @@ Rules:
 - executor registrations by adapter/host/provider/model/effort/capability/residency and available capacity;
 - packet build latency/size/omissions/staleness/privacy denials;
 - retries, failure classes, circuit breakers, starvation/fairness, budget exhaustion;
-- workspace preparation/drift/conflict/cleanup backlog;
+- workspace discovery/proposed/contradicted association, watcher/reconciliation lag, binding/drift/conflict, retention, cleanup blocker/proof/authorization/backlog, and removal outcome;
 - artifact/handoff/acceptance/external-effect reconciliation;
 - event/outbox/projector/query/SSE lag and dead letters;
 - config/catalog/policy/schema/sanitizer generations and drift;
@@ -2502,7 +2601,7 @@ Doctor detects:
 - task ready with no eligible executor/grant/model/workspace;
 - scheduler starvation/fairness drift, retry storm, breaker oscillation, queue/backpressure overflow;
 - stale/expired/denied packet, missing mandatory entries, bad anchor route, sanitizer floor mismatch;
-- workspace identity/path mismatch, dirty ownership conflict, base/ref/snapshot drift, orphaned TraceDecay worktree;
+- workspace identity/path/common-dir mismatch, dirty ownership/delegation conflict, base/ref/snapshot drift, active attempt with no confirmed external worktree association, contradictory or stale high-confidence association, watcher/backfill gap, expired cleanup proof, cleanup authorization without delegation, or externally removed bound worktree;
 - cancellation stuck, external effect unknown, abandoned reservations/budgets;
 - artifact missing/hash/retention mismatch, handoff without outcome, acceptance terminal invariant violation;
 - cross-project scope ambiguity or task/project relation without authorized provenance;
@@ -2516,9 +2615,9 @@ Doctor is read-only by default and returns safe evidence plus cataloged repair c
 
 Alert only actionable conditions: scheduler authority lost, duplicate lease invariant, terminal transaction failure, cancellation/effect unknown beyond threshold, no eligible executor for critical work, critical-path deadline breach, privacy/sanitizer failure, outbox/projector stalled, adapter protocol incompatibility, or unrecoverable workspace conflict. Normal blocked dependencies, empty queues, expected rate-limit backoff, and advisory work claims are status, not alerts.
 
-## 15. Required cross-repository reference workflow
+## 15. Historical cross-repository fixture and topology neutrality
 
-The primary implementation/evaluation fixture is one initiative spanning Rspack, Rsbuild, and `rsbuild-plugin-react-router` with exact registered project/repository/worktree/ref identities from Plan 16.
+One required named historical fixture is an initiative spanning Rspack, Rsbuild, and `rsbuild-plugin-react-router` with exact registered project/repository/worktree/ref identities from Plan 16. Its topology and route assignments preserve replay coverage for the recorded workflow; they are not canonical architecture. The product must accept and evaluate multiple valid typed DAGs—including pipelines, fan-out/fan-in, review loops expressed through successor versions, and nested subplans—and route each role through provider-neutral capability policy. No named repository, provider, model, role sequence, or Codex/Claude split is privileged in production policy.
 
 ### 15.1 Graph shape
 
@@ -2543,9 +2642,9 @@ flowchart LR
     X --> D["Delivery/PR/check/release tasks"]
 ```
 
-Triage tasks are independently leasable and intentionally diverse. Example routing must cover separate Codex, Claude, Cursor, and Hermes/custom registrations with explicit provider/model/effort/tool grants. Verifier consumes all required handoffs, flags scope/source disagreements, and cannot pass on simple majority. Synthesizer creates decisions, acceptance criteria, and implementation dependencies. Implementation tasks bind distinct worktrees/branches and cannot mutate sibling repos without grants. Integration verifier runs exact affected/ecosystem tests at pinned commits. Delivery work is separately authorized.
+In this named fixture, triage tasks are independently leasable and intentionally diverse. Its recorded route matrix covers separate Codex, Claude, Cursor, and Hermes/custom registrations with explicit provider/model/effort/tool grants. The verifier consumes all required handoffs, flags scope/source disagreements, and cannot pass on simple majority; the synthesizer creates decisions, acceptance criteria, and implementation dependencies. Implementation tasks bind distinct worktrees/branches and cannot mutate sibling repos without grants. Integration verifier runs exact affected/ecosystem tests at pinned commits. Delivery work is separately authorized. Route-equivalent permutations and structurally different valid DAG fixtures must prove that none of these historical names or roles is required by the scheduler.
 
-The fixture must also exercise a realistic manual partition: one bounded transactional `work_items.assign_set` pins a handful of Rspack/plugin work items to eligible Codex routes and a different handful of Rsbuild/integration items to eligible Claude routes, leaves two discovery tasks policy-routable, and later rebalances one unstarted item. Assignment is a versioned route constraint, not board membership; provider queue views are projections over requested/actual route receipts. The set command is all-or-none under the owner plan/version and returns deterministic per-item receipts. Rebalancing cannot steal a live lease, change an attempt's start manifest, expose sibling prompts, or erase the original decision. An agent active in two initiatives receives two distinct attempt packets and task-aware slices, never the union of both boards.
+The historical fixture also replays its recorded manual partition: one bounded transactional `work_items.assign_set` pins a handful of Rspack/plugin work items to eligible Codex routes and a different handful of Rsbuild/integration items to eligible Claude routes, leaves two discovery tasks policy-routable, and later rebalances one unstarted item. This exact split is fixture data, not a default or architectural recommendation. A provider-permuted replay must satisfy the same assertions. Assignment is a versioned route constraint, not board membership; provider queue views are projections over requested/actual route receipts. The set command is all-or-none under the owner plan/version and returns deterministic per-item receipts. Rebalancing cannot steal a live lease, change an attempt's start manifest, expose sibling prompts, or erase the original decision. An agent active in two initiatives receives two distinct attempt packets and task-aware slices, never the union of both boards.
 
 ### 15.2 Context and notification expectations
 
@@ -2566,6 +2665,7 @@ Context packets and hints distinguish shared initiative context from provider pa
 - matching `query_scope`/query digest plus scope/goal/anchor evidence detects duplicate research once, while declared ensemble/shared-work children suppress it;
 - shared execution materializes independently leased child work under one aggregate parent; two authoritative executors never lease the same work item;
 - verifier does not unlock before all required gates or authorized exception;
+- the named triage → verifier → synthesizer replay and exact Codex/Claude partition remain covered as historical fixture data, while provider-permuted and structurally different valid DAGs produce equivalent authority, gating, packet, and receipt semantics;
 - packet versions reflect parent/sibling decisions without leaking unrelated content;
 - executor routes record requested/actual model/provider/effort/grants;
 - every attempt cites an accepted manual or offer-pinned policy assignment; policy-routable unassigned work first receives a proposed assignment in its offer and activates that exact assignment atomically with lease issuance on accept;
@@ -2587,12 +2687,14 @@ Before migration, inventory:
 - current TraceDecay goals, tasks, workflows, work claims, agent presence, automation jobs/runs/artifacts, scheduler decisions, and coordination events;
 - provider-native Codex goals/plans, Claude workflows, Cursor/Hermes agent runs, subagent/delegation relations, and provider task-like metadata;
 - Git branches/worktrees/commits/PRs/checks/releases associated with work;
-- external issue/task systems and optional Hermes Kanban stores configured as capture sources (after merged PR #407, these arrive through the ordinary user-profile capture source; refresh the recorded source/merge manifest before import);
+- external issue/task systems as observed entities; any Hermes Kanban data used by this plan is a sanitized, frozen replay/migration fixture, not a configured production capture/import source;
 - dashboard/private plugin task state, CLI/MCP commands, config keys, logs, and notification subscriptions.
 
 Classify each source as canonical candidate, external observed entity, alias, projection, artifact, or obsolete duplicate. Observation does not automatically materialize schedulable work.
 
-### 16.2 Import rules
+### 16.2 Production migration and frozen external-board fixture rules
+
+This plan authorizes production migration of TraceDecay-owned V1 evidence only. Hermes board databases and other external board stores may be transformed offline into sanitized, immutable fixtures for replay, migration-shape validation, and shadow comparison; fixture loading has no production capture, synchronization, materialization, or dispatch effect. A live external-board capture/import/synchronization capability requires a separate explicitly approved feature plan, authority model, and rollout and is not implied by PR 33F or this schema mapping.
 
 - profile activity is the only destination owner for canonical task graph mutations;
 - preserve external/native IDs as aliases with source/commit/schema provenance;
@@ -2601,19 +2703,19 @@ Classify each source as canonical candidate, external observed entity, alias, pr
 - cyclic/ambiguous graphs remain legacy-quarantined with repair diagnostics;
 - provider-native goals/workflows remain native entities linked to tasks; materialization requires an authorized idempotent command;
 - automation jobs remain automation entities; they may create/link work through application commands but are not duplicated task schedulers;
-- Hermes Kanban import, if enabled, treats each board DB as a versioned external source, ignores ambient `current`, maps task/run/link/event/attachment evidence, and never runs Hermes dispatch against canonical tasks;
+- frozen Hermes fixture conversion treats each board DB snapshot as a versioned offline source, ignores ambient `current`, maps only sanitized task/run/link/event/attachment evidence into an immutable replay bundle, and never runs Hermes dispatch or writes canonical production tasks;
 - do not import raw secrets/logs/attachments before Plan 18 scanning/classification;
 - duplicate rows/boards/store backups are clustered as observations, not separate canonical work items, until identity evidence resolves them.
 
-The importer reads each source in one frozen manifest order: `tasks`, `task_links`, `task_runs`, `task_events`, `task_comments`, `task_attachments`, notification subscriptions, then dispatcher metadata. Every source record receives exactly one plan-12 disposition—`retained`, `skipped`, `quarantined`, `redacted`, or `deleted`—with reason, source key, sanitizer receipt, target refs, and import watermark; no row disappears behind a count. `deleted` is legal only when the source itself contains a witnessed deletion/tombstone, never as an import cleanup choice.
+The offline fixture converter reads each external-board snapshot in one frozen manifest order: `tasks`, `task_links`, `task_runs`, `task_events`, `task_comments`, `task_attachments`, notification subscriptions, then dispatcher metadata. Every source record receives exactly one plan-12 disposition—`retained`, `skipped`, `quarantined`, `redacted`, or `deleted`—with reason, source key, sanitizer receipt, fixture refs, and conversion watermark; no row disappears behind a count. `deleted` is legal only when the source itself contains a witnessed deletion/tombstone, never as conversion cleanup. The resulting fixture is immutable, scanned, and production-effect-free.
 
-Hermes `blocked` is polysemous. Import replays each task's ordered `task_events` and associated run IDs to classify the last effective transition as `StickyWorkerOrOperatorBlock`, `CircuitBreakerGaveUp`, `DependencyBlock`, or `AmbiguousLegacyBlock`. A status column without a consistent event path produces `AmbiguousLegacyBlock` and quarantine/diagnostic evidence; it never fabricates readiness or a retry counter. Historical run rows become immutable `ImportedExecutionObservationV1` records under the existing provider-native workflow/run evidence family: source manifest/native run ID, linked imported work item, observed ordinal/status/times, requested-route evidence, workspace locators, artifacts, sanitizer receipt, and missing-field reasons. They are not `ExecutionAttemptV1`, have no assignment/executor/workspace/packet/grant/fence authority, and cannot enter attempt queries except through an explicitly labeled imported-observation lane. In-flight claim/PID/current-run fields are skipped and can never become a live lease. Attachments are content-read through plan 18 scanning into protected/artifact blobs; missing absolute paths remain unavailable locators. Comments become sanitized comment artifacts, except structured swarm blackboards, which are schema-validated into versioned imported packet/decision evidence or quarantined when invalid.
+Hermes `blocked` is polysemous. Frozen fixture replay evaluates each task's ordered `task_events` and associated run IDs to classify the last effective transition as `StickyWorkerOrOperatorBlock`, `CircuitBreakerGaveUp`, `DependencyBlock`, or `AmbiguousLegacyBlock`. A status column without a consistent event path produces `AmbiguousLegacyBlock` and quarantine/diagnostic evidence; it never fabricates readiness or a retry counter. Historical run rows become immutable fixture `ImportedExecutionObservationV1` records under the existing provider-native workflow/run evidence family: source manifest/native run ID, linked fixture work item, observed ordinal/status/times, requested-route evidence, workspace locators, artifacts, sanitizer receipt, and missing-field reasons. They are not `ExecutionAttemptV1`, have no assignment/executor/workspace/packet/grant/fence authority, and cannot enter production attempt queries. In-flight claim/PID/current-run fields are skipped and can never become a live lease. Attachments are content-read through plan 18 scanning into protected fixture blobs; missing absolute paths remain unavailable locators. Comments become sanitized fixture artifacts, except structured swarm blackboards, which are schema-validated into versioned fixture packet/decision evidence or quarantined when invalid.
 
-The audited Hermes `kanban_db` schema (§2.1) maps field-by-field; no field is imported without a listed rule:
+The audited Hermes `kanban_db` schema (§2.1) maps field-by-field inside the frozen fixture only; no field is converted without a listed rule, and none of these targets grants production materialization authority:
 
-| Hermes `kanban_db` evidence | V2 target | Import rule |
+| Hermes `kanban_db` evidence | Frozen fixture target | Conversion rule |
 |---|---|---|
-| task/board IDs | aliases on imported `WorkItemId` | canonical UUIDs are freshly allocated; uniqueness is `(source_manifest_id, board_slug, native_task_id)` and the safe `hermes:<board>:t_<hex>` form is an alias/display locator only; source DB path/commit/schema version recorded as provenance |
+| task/board IDs | aliases on fixture `WorkItemId` values | fixture UUIDs are freshly allocated; uniqueness is `(source_manifest_id, board_slug, native_task_id)` and the safe `hermes:<board>:t_<hex>` form is an alias/display locator only; source DB path/commit/schema version recorded as provenance |
 | title/description/comments | `WorkItemVersionV1.title`/`specification` plus comment artifacts | plan 18 sanitizer first; imported as one initial version |
 | status strings (including `scheduled` without `scheduled_at`) | `WorkItemDispositionV1` + `WorkResolutionV1` | replay ordered `task_events` before mapping `blocked`; no fabricated timestamps or readiness; inconsistent/missing event history becomes `AmbiguousLegacyBlock` quarantine with a `DiagnosticEnvelopeV1` |
 | dependency links and promotion records | `TaskDependencyV1` gating edges when acyclic; non-gating relations otherwise | cyclic/ambiguous graphs stay legacy-quarantined |
@@ -2630,7 +2732,7 @@ V1 TraceDecay goals, work claims, and provider task-like entities materialize in
 
 1. Land schemas/domain/repositories with no live scheduler.
 2. Capture current provider/workflow/task-like events and build read-only projections.
-3. Import bounded historical evidence with manifests, coverage, and identity conflicts.
+3. Migrate bounded TraceDecay-owned historical evidence with manifests, coverage, and identity conflicts; load frozen external-board fixtures only into replay/shadow evaluation.
 4. Run task query/view parity and validate cross-graph links.
 5. Run decomposition/routing/readiness/retry/packet policies in shadow; compare decisions without effects.
 6. Register fake and then real executor adapters in no-mutation canary mode.
@@ -2666,13 +2768,15 @@ Rollback during the bounded window stops new V2 leases, drains/cancels/reconcile
 Build sanitized/synthetic fixtures plus authorized local replay manifests for:
 
 - single task happy path;
-- parent/child chain and fan-out/fan-in verifier/synthesizer;
+- multiple valid DAG topologies, including parent/child chains, pipelines, nested subplans, and fan-out/fan-in with optional verifier/synthesizer roles;
 - nested plan graph-of-graphs;
 - Rspack/Rsbuild/React Router cross-repository initiative;
 - Codex/Claude/Cursor/Hermes/custom executor routing;
 - planned ensemble versus accidental duplicate research;
 - same worktree and parallel-worktree agents;
+- worktrees created by agent Git CLI, host worktree tools, IDEs, users, and external automation; strong/ambiguous/contradictory task correlation; watcher gaps and startup backfill;
 - dirty/conflicted/drifted worktree and base branch;
+- archived/reopened tickets and produced/observed/mentioned merged PRs with shared references, cleanup delegation, retention holds, proof expiry, blocked/authorized cleanup, crash recovery, and external removal;
 - stale/fenced worker, lost host, reconnect, heartbeat gap;
 - provider rate limit/auth/capability/model/effort failure;
 - cancellation before start/during tool/during Git effect/unknown remote state;
@@ -2694,7 +2798,7 @@ Required named regressions:
 |---|---|---|
 | `TD-TASK-001 ambient-board-cross-project-copy` | `session:20260617_020912_188f3e` plus sanitized task/event manifests | Work intended for `rsbuild-plugin-react-router` must never route to `tracedecay/default`; five roots remain the same canonical IDs when a saved view/scope changes; 32 tasks are not copied/archived as repair; dependency structure survives; three completed tasks do not relaunch; manual completion revokes/fences the one stale live worker; late events/terminal writes are rejected. |
 | `TD-TASK-002 thread-task-many-to-many` | `session:20260617_210811_5cd728` plus sanitized 424-message relation manifest | One Thread may link temporally to many work items/branches/PRs and each work item to many Turns/agents; no session-as-task collapse; task packets select only relevant Turns; current/as-of relation queries remain correct. |
-| `TD-TASK-003 cross-repo-plan-bundle` | Plan-16 Rspack/Rsbuild/React Router project set and Plan-13 anchors | One profile initiative spans all repositories; decomposition creates independent diverse triage and gated verifier/synthesizer/implementation work; packets preserve exact scope/snapshot/visibility/query/config/token digests; Codex/Claude/Cursor/Hermes routes pin models/effort/tools/budgets; material sibling changes reach only exact recipients. |
+| `TD-TASK-003 cross-repo-plan-bundle` | Plan-16 Rspack/Rsbuild/React Router project set and Plan-13 anchors | One profile initiative spans all repositories; the recorded triage → verifier → synthesizer → implementation topology and Codex/Claude/Cursor/Hermes route partition remain covered as historical fixture data; provider-permuted and structurally different valid DAG variants preserve the same authority/gating/packet/receipt semantics; packets preserve exact scope/snapshot/visibility/query/config/token digests; routes pin models/effort/tools/budgets; material sibling changes reach only exact recipients. |
 | `TD-TASK-004 claim-overlap-and-fence` | Synthetic many-host/worktree/file/symbol/artifact conflict fixture | CAS revision, active lease, TTL/heartbeat, writable artifact/resource overlap, and unforgeable lease proof prevent duplicate authority; planned read-only/ensemble overlap remains legal; completion/cancel revokes proof/reservations and stale workers cannot commit. |
 | `TD-TASK-005 declarative-plan-bulk-edit` | This redesign's sanitized graph shape plus synthetic 100,000-item/sharded variants | Byte-stable export/re-export; strict frontmatter/schema/source spans; no omission-delete; exact local-key allocation; semantic diff/reference parity; disjoint rebase and explicit conflicts; zero partial canonical rows across validation/CAS/disk/crash failures; exact retry returns one receipt; successful purge leaves no raw content. |
 | `TD-TASK-006 candidate-dependency-claim-race` | Live board tasks `t_1b022e6f`, `t_e30d4ad9`, replacement review `t_5305c74d`, stale run `267`, plus synthetic interleavings | Decomposition publishes one complete inactive candidate; external parent survives through expansion-boundary closure; multi-edge dependency grooming publishes atomically; no child/integration offer exists in an intermediate unlink/link state; late dependency activation revokes any open offer/fences unsafe effects; reclaim recomputes closure and cannot set ready. |
@@ -2702,6 +2806,7 @@ Required named regressions:
 | `TD-TASK-008 canonical-reference-and-derivation` | Decomposer prompt containing `task 0` and duplicate-review synthetic fixture | Every worker prompt uses canonical ID + plan-local label + version; ordinal/title-only refs fail validation; concurrent identical derivations insert-or-read one work item. |
 | `TD-TASK-009 lifecycle-owner-native-cli-failure` | Tasks `t_3f578aaf`, `t_756aaf41`; recorded native Claude CLI success and Anthropic HTTP 400 | Sol/Hermes remains lifecycle owner while native Claude Code is an acting participant; provider HTTP, native CLI, adapter, and lifecycle failures classify independently; outer rc=0 cannot relabel provider failure as protocol violation. |
 | `TD-TASK-010 workspace-and-stop-checkpoint` | Shared-worktree decomposition fixture plus duplicate Codex/Claude stop hooks | Workspace authority never inherits; dirty/shared writers are blocked; exactly one concurrent hook CAS winner prompts the same root/subagent, second stop passes, owner command or non-owner participant handoff confirms without privilege widening, and absent/untrusted/failed hooks reconcile without a loop or provider call. |
+| `TD-TASK-011 workspace-correlation-and-cleanup` | Synthetic agent/user/IDE/external worktree creation plus daemon watcher/hook/tool/CWD/Git/PR evidence, archive/reopen, shared sibling tasks, merged PRs, and cleanup crash interleavings | TraceDecay creates zero worktrees; strong multi-signal evidence confirms the exact task/attempt/worktree generation, weak evidence remains one deduped proposal, contradictions never rebind, backfill is idempotent, and inferred association never supplies cleanup delegation. Archive/terminal/produced-PR merge/TTL only evaluate; dirty/untracked, active authority, unpushed/unmerged/open-unknown-PR, sibling reference, hold, effect unknown, drift, missing delegation, and unknown ownership each block. Only an unexpired delegated proof removes; receipt/restart/external-removal/reopen/restore history converges without data loss or implicit branch deletion. |
 
 ### 17.2 Core correctness metrics and gates
 
@@ -2717,6 +2822,7 @@ Required named regressions:
 | Privacy | Zero canary occurrence in forbidden DB/index/log/event/metric/prompt/output/export sinks; complete sanitizer receipts and deletion propagation. |
 | Surface parity | Generated CLI/MCP/API/SDK/dashboard semantic fixtures and legal-action/error/status snapshots match. |
 | Declarative editing | Zero implicit deletion, partial commit, stale-base overwrite, secret/path escape, duplicate allocation, raw-receipt content, or unrecovered expired workspace; 100,000-item validation/diff remains within catalog budgets. |
+| Workspace lifecycle | Zero TraceDecay-provisioned worktrees, implicit/forced removals, cleanup from inferred association, removal with any blocker, or lost association/cleanup history; strong/ambiguous correlation and delegated cleanup state converge across hooks, watcher gaps, restart, archive/merge, external removal, reopen, and restore. |
 | UX | Fixed tasks complete within target time/error budget; graph/table equality; keyboard/screen-reader/mobile/large-data gates pass. |
 
 Do not use aggregate success rate alone. Report per project, executor adapter, provider/model/effort, workspace mode, task kind, dependency shape, effect class, privacy class, and failure class. Unknown/missing host telemetry is its own denominator.
@@ -2740,12 +2846,12 @@ Model-assisted decomposition/routing/summary is promoted only if it beats determ
 Run deterministic and soak tests with many hosts/processes competing for the same and different work items:
 
 - lease-acquisition CAS races at 2/8/64/256 contenders;
-- candidate-plan publish/activate versus scheduler observation, late dependency insertion versus offer acceptance, reclaim versus boundary invalidation, and concurrent identical derivation-key insertion;
+- candidate-plan publish/activate versus scheduler observation, late dependency insertion versus offer acceptance, reclaim versus boundary invalidation, concurrent identical derivation-key insertion, and worktree discovery/association confirmation versus attempt admission;
 - heartbeat versus expiry/revoke/cancel/complete races;
 - scheduler crash before/after offer commit/delivery/checkpoint, plus acceptance crash before/after workspace preparation, packet assembly, atomic offer/attempt/lease/grant-set commit, adapter-start outbox delivery, and terminal commit;
 - adapter start acknowledgement lost, duplicate event page, sequence gap, reconnect, host restart;
 - DB busy/locked, disk full, WAL recovery, corrupted row/blob/index, clock skew;
-- workspace create crash, branch collision, dirty takeover attempt, cleanup crash;
+- external worktree creation/registration observation lost or duplicated, watcher/hook gap, branch collision, dirty takeover attempt, association contradiction, cleanup proof race, and cleanup crash before/after Git removal/receipt;
 - edit export/upload/parse/validate/diff/rebase/submit crashes, submit-versus-head-change races, disk-full during staging/atomic commit/receipt/purge, and daemon restart with `Submitting` or `PurgePending` workspace;
 - provider timeout/rate limit/auth revoke/model disappearance;
 - Git/PR effect succeeds but receipt is lost;
@@ -2754,7 +2860,7 @@ Run deterministic and soak tests with many hosts/processes competing for the sam
 - config/catalog/policy/sanitizer generation change mid-attempt.
 - duplicate/additive Codex and Claude `Stop`/`SubagentStop` handlers racing for one lifecycle checkpoint; delivery unknown, second-stop loop guard, stale lease, daemon loss, user interrupt, and provider API failure while native CLI remains healthy.
 
-Property assert at most one active lease, epoch monotonicity, event/outbox/idempotency consistency, terminal/lease bijection, no unauthorized effect, no orphaned reservation, and replay convergence after restart. Projector/query lag is resolved, not tolerated-by-luck: because `readiness_digest` is maintained transactionally on the work-item row (§5.3), lease admission is projector-independent — with the readiness projector arbitrarily stalled, the `expected_readiness_digest` CAS still accepts only current lease requests and rejects stale ones; lag may only delay candidate discovery.
+Property assert at most one active lease, epoch monotonicity, event/outbox/idempotency consistency, terminal/lease bijection, no unauthorized effect, no orphaned reservation, no cleanup without external delegation plus a current blocker-free proof, and replay convergence after restart. Projector/query lag is resolved, not tolerated-by-luck: because `readiness_digest` is maintained transactionally on the work-item row (§5.3), lease admission is projector-independent — with the readiness projector arbitrarily stalled, the `expected_readiness_digest` CAS still accepts only current lease requests and rejects stale ones; lag may only delay candidate discovery.
 
 ### 17.5 Domain/store/projector/query tests
 
@@ -2766,6 +2872,7 @@ Property assert at most one active lease, epoch monotonicity, event/outbox/idemp
 - offer immutable-pin/revision CAS, push/pull single-acceptance, and expiry/revoke races;
 - direct attestation/review/decision/exception/handoff/reopen/reverse-transition expected-version, authorization, event, and receipt semantics;
 - candidate/current plan activation, plan-local label resolution, expansion-boundary closure, derived-work idempotency, terminal-negative-review successor, workspace non-inheritance, and reclaim-never-readies properties;
+- many-to-many task/attempt/worktree-generation/branch/commit/PR relation state, evidence-fusion thresholds, proposed/confirmed/rejected/contradicted transitions, no association-to-ownership promotion, backfill/reconciliation idempotency, cleanup proof expiry/blocker completeness/delegation CAS, retention tombstones, external removal, reopen, and restore/rebind properties;
 - strict CommonMark/YAML-subset golden/parser/property/fuzz corpus: duplicate/unknown keys, tags/aliases/merge, coercion traps, invalid UTF-8, nesting/count/byte bombs, missing files, edited stubs, implicit removal, dangling/local refs, and precise UTF-8 source spans;
 - deterministic sharded export/re-export/canonical digest at 10, 10,000, and 100,000 items; semantic `NoChange`; local-key allocation/idempotency; cycle/gate/acceptance/route/active-attempt diff parity; disjoint/conflicting three-way rebase;
 - edit-bundle all-or-none owner-shard transaction and kill-point recovery; no task-edit source table, journal, scheduler, or retained raw workspace bytes;
@@ -2794,6 +2901,7 @@ Every adapter passes the same fake-server corpus:
 - logs/artifacts/cost/usage missing or malformed;
 - host/provider cancellation acknowledged/unknown;
 - process/session cleanup and no secret/environment leakage.
+- Git CLI/host/IDE/external worktree observation correlation, terminal/CWD/worktree hook evidence, watcher-gap reconciliation, no TraceDecay worktree provisioning, and no hook-triggered cleanup or silent binding rewrite;
 - synchronous command-only one-shot stop checkpoint on Codex and Claude stock CLIs, concurrent-handler CAS, `stop_hook_active` suppression, at-most-once unknown delivery, and proof no prompt/agent/HTTP/MCP/provider route is invoked.
 
 Host-native diagnostics run after adapter repair, separately from TraceDecay doctor. A partial provider remains supported only with explicit coverage and policies that do not depend on missing signals.
@@ -2805,6 +2913,7 @@ Host-native diagnostics run after adapter repair, separately from TraceDecay doc
 - optimistic version/idempotency/cursor/SSE reconnect/gap/backpressure;
 - Markdown/JSON/API/SDK/dashboard view equivalence;
 - compact output includes blockers/partial/stale/privacy/next actions;
+- task workspace association and workspace detail parity across every attempt/generation/provenance/confidence/contradiction/ownership/delegation/retention/cleanup/receipt field, with identical generated legal actions and no raw remote path;
 - no silent truncation and stable anchor hydration;
 - board/DAG/plan/timeline/critical/workload/executor/repository/All count and selection parity;
 - drag/action maps to generated command semantics;
@@ -2813,19 +2922,20 @@ Host-native diagnostics run after adapter repair, separately from TraceDecay doc
 - keyboard, focus, screen reader, contrast, reduced motion, table fallback, 200% zoom, mobile portrait/landscape;
 - deterministic Markdown/JSON/SVG/PNG export with privacy manifest;
 - edit-bundle local-workspace/resource-link/upload parity across CLI/MCP/HTTP/Rust/TypeScript/Python/UI, offline-versus-authoritative diagnostics, exact file/span navigation, graph diff/conflict/impact, expiry and cleanup receipts;
+- worktree observe/confirm/reject/evaluate-cleanup/cleanup/retain/restore parity across CLI/MCP/HTTP/SDK/UI; archive and merged PR expose evaluation only; every blocker disables cleanup; expired proof/revoked delegation fails; receipt and reopened-task history survive refresh/restart;
 - Orchestration Lab side-effect guard and replay digest stability.
 
 ## 18. Reviewable PR slices
 
-These suffixes were checked against plans 01–28. Plan 13 owns prerequisite heritage/research PR `2A`; Plan 20 owns `4C/6E/22C/24I/25E/31N/33C/37G`; Plan 22 owns `4F/6F/10D/10F/22D/23H/24O/24P/25F/31O/33D/37H`; Plan 23 owns `13D/13E/14D/15C/24L/31P/33E/35I/37I`; plan 02 owns store companion `22F-LS`, while Plan 26 owns `22F/22F-LE/22G/22H/30J/33H`; Plan 27 owns `4G/22A/22I/24Q/25H/36R/37K`; Plan 28 owns `4H/6H/12D/24S/25I/33I/36S/37L`, while its remote-spool work is a component of capture PR 7B after 4H rather than a second PR or a self-dependency. Plan 11 owns privacy/scout integration `30L`. `17B` already belongs to Plan 04, so this plan uses `17C`. Dashboard `30A–30H` and accounting contract `30J` are assigned, so this plan uses dependency-ordered `30K`; plan 11 references to Settings under 25D/30H are shell/route consumers only, while plan 20 PR 25E exclusively owns the complete generated Settings workspace and cutover. Declarative bulk editing uses new suffix `24R`; it does not collide with or reuse existing `24D` client/API work, `24Q` host integration, `24S` remote Brain, or `25A` dashboard application-foundation work.
+These suffixes were checked against plans 01–28. Plan 13 owns bounded comparison/source/license ledger PR `2A`; Plan 20 owns `4C/6E/22C/24I/25E/31N/33C/37G`; Plan 22 owns `4F/6F/10D/10F/22D/23H/24O/24P/25F/31O/33D/37H`; Plan 23 owns `13D/13E/14D/15C/24L/31P/33E/35I/37I`; plan 02 owns store companion `22F-LS`, while Plan 26 owns `22F/22F-LE/22G/22H/30J/33H`; Plan 27 owns `4G/22A/22I/24Q/25H/36R/37K`; Plan 28 owns `4H/6H/12D/24S/25I/33I/36S/37L`, while its remote-spool work is a component of capture PR 7B after 4H rather than a second PR or a self-dependency. Plan 11 owns privacy/scout integration `30L`. `17B` already belongs to Plan 04, so this plan uses `17C`. Dashboard `30A–30H` and accounting contract `30J` are assigned, so this plan uses dependency-ordered `30K`; plan 11 references to Settings under 25D/30H are shell/route consumers only, while plan 20 PR 25E exclusively owns the complete generated Settings workspace and cutover. Declarative bulk editing uses new suffix `24R`; it does not collide with or reuse existing `24D` client/API work, `24Q` host integration, `24S` remote Brain, or `25A` dashboard application-foundation work.
 
 ### PR 4E — Canonical initiative, plan, task, executor, lease, and packet domain contracts
 
 **Files:** `crates/tracedecay-domain/src/task_graph/**/*`; schema registry fixtures; architecture tests.
 
-- Add IDs, versions, initiative/plan/work-item/dependency/gate/acceptance/decision/assignment/lease/executor/attempt/workspace/packet/handoff/artifact/outcome/budget/cost/event/query/view/status/error types, including the plan-01-owned declarative edit workspace/manifest/local-ref/diagnostic/diff/conflict/receipt contracts imported in section 4.12.
-- Consume reviewed PR 2A Hermes heritage rows for every domain type/algorithm/test being directly or behaviorally ported; carry license/source-to-test metadata into the implementation manifest.
-- Property-test state machines, plan versioning, cycle/gate validation, epoch monotonicity, typed extension rejection, privacy wrappers, and schema round trips.
+- Add IDs, versions, initiative/plan/work-item/dependency/gate/acceptance/decision/assignment/lease/executor/attempt/workspace/packet/handoff/artifact/outcome/budget/cost/event/query/view/status/error types, including external worktree provenance/association and cleanup trigger/blocker/state/proof/receipt views plus the plan-01-owned declarative edit workspace/manifest/local-ref/diagnostic/diff/conflict/receipt contracts imported in section 4.12.
+- For each external type/algorithm/test actually reused, consume its reviewed PR 2A ledger row and carry license/source-to-test metadata into the implementation manifest; TraceDecay-native domain work has no unrelated Hermes coverage dependency.
+- Property-test state machines, plan versioning, cycle/gate validation, epoch monotonicity, many-to-many workspace association, no association-to-ownership/delegation promotion, cleanup blocker/proof transitions, typed extension rejection, privacy wrappers, and schema round trips.
 - Add compile-time dependency/import boundaries and generated schema fixtures.
 - Commit: `feat(domain): define canonical task and execution graph`.
 
@@ -2833,16 +2943,16 @@ These suffixes were checked against plans 01–28. Plan 13 owns prerequisite her
 
 **Files:** activity migrations; `crates/tracedecay-store/src/repositories/task_graph/**/*`; store tests.
 
-- Add canonical/history/current-index tables, complete sealed packet/entry fields, blobs/anchors, one authoritative `task_graph_events` journal, referenced outbox/idempotency/reservations, repositories, and backup/restore manifests.
+- Add canonical/history/current-index tables, complete sealed packet/entry fields, blobs/anchors, one authoritative `task_graph_events` journal, workspace relation/provenance/cleanup events and tombstones, referenced outbox/idempotency/reservations, repositories, and backup/restore manifests; add no worktree registry or cleanup scheduler.
 - Implement plan activation, atomic packet+attempt+lease issuance, heartbeat, terminal commit, cancellation intent, complete saved-view/share/revoke, and journal/index/outbox transactions.
-- Fault-inject writer/kill/disk/busy/restart paths; prove one owner, monotonic fencing, referential integrity, retention, and corruption quarantine.
+- Fault-inject writer/kill/disk/busy/restart and cleanup before/after-effect/receipt paths; prove one owner, monotonic fencing, relation-backfill idempotency, no cleanup without delegation/current proof, referential integrity, retention, and corruption quarantine.
 - Commit: `feat(store): persist the fenced profile task graph`.
 
 ### PR 10E — Task graph current-state, dependency, and critical-path projectors
 
 **Files:** `crates/tracedecay-projectors/src/task_graph/**/*`; projector manifests/tests.
 
-- Build plan/work-item/readiness/dependency/topological/critical-path/attempt/executor/workspace/packet/cost/status projections.
+- Build plan/work-item/readiness/dependency/topological/critical-path/attempt/executor/workspace/packet/cost/status projections, including complete per-ticket association history, confidence/contradiction, active references, retention, and cleanup state.
 - Add event-range/version/watermark manifests, rebuild/dead-letter recovery, safe All rollups, and reference algorithm parity.
 - Emit bounded context-materiality candidates without rendering or delivery.
 - Commit: `feat(projectors): derive task graph and critical path views`.
@@ -2852,7 +2962,8 @@ These suffixes were checked against plans 01–28. Plan 13 owns prerequisite her
 **Files:** capture schemas/adapters where missing; relation projectors; cross-graph fixtures.
 
 - Capture provider-native goals/plans/workflows/executor events without granting task authority.
-- Project typed Produced/Observed/Encountered/Affected relations across every required entity family and exact repository/worktree/snapshot identity.
+- Capture Git CLI/host/IDE/external worktree create/remove observations, CWD transitions, tool-call refs, watcher snapshots, branch/HEAD/commit and ticket/PR evidence; project typed Produced/Observed/Encountered/Affected relations across every required entity family and exact repository/git-common-dir/worktree-generation/snapshot identity.
+- Add versioned evidence-fusion/backfill fixtures proving strong signals auto-confirm, ambiguous candidates remain proposed with one hint, contradictions never rebind, and association confidence never becomes ownership or cleanup delegation.
 - Add Rspack/Rsbuild/React Router and copied-agent/session fixtures; prove no same-name/copy/temporal false relation.
 - Commit: `feat(activity): connect work to the TraceDecay brain`.
 
@@ -2873,6 +2984,7 @@ These suffixes were checked against plans 01–28. Plan 13 owns prerequisite her
 - Generate tool schemas, executor manifests, API/CLI/MCP/SDK bindings, config refs, and drift inventories.
 - Test wildcard exclusion, deny precedence, attempt-bound lifecycle surface, protocol compatibility, exact bundle/component/probe pins, and every host tool-inheritance mode; prove a child that inherits all parent MCP bindings cannot be routed as a narrower researcher when the parent has work/operator authority.
 - Register the one `task_graph.edit_bundles.export|get|validate|diff|rebase|submit|delete` family with exact audience/effect/operation/resource/privacy/idempotency metadata; do not generate it for an ordinary executor grant.
+- Register `work_items.workspaces`, `worktrees.list|get|discover`, `task_worktree_associations.list|diagnose|associate|confirm|reject|reassign`, and `worktree_cleanup.inspect|status|request`; mark cleanup request destructive/confirmed/delegation-bound and keep it out of ordinary executor grants.
 - Commit: `feat(catalog): generate task and executor capabilities`.
 
 ### PR 23I — Pure decomposition, readiness, routing, fairness, retry, and materiality policy
@@ -2888,9 +3000,9 @@ These suffixes were checked against plans 01–28. Plan 13 owns prerequisite her
 
 **Files:** application task ports/use cases/workers/workflows; daemon composition; tests.
 
-- Implement canonical `TraceQueryV1` task registry values/builders, commands including transactional `assign_set`, graph transactions, scheduler tick, readiness revalidation, capacity/budget reservation, offer/lease-acquisition/heartbeat/terminal workflows, status, and doctor.
+- Implement canonical `TraceQueryV1` task registry values/builders, commands including transactional `assign_set`, graph transactions, scheduler tick, readiness revalidation, capacity/budget reservation, offer/lease-acquisition/heartbeat/terminal workflows, external-worktree association/evidence fusion and cleanup evaluation/retention/restore orchestration, status, and doctor.
 - Add hierarchical fairness/backpressure/checkpoints/lifecycle lease and one-owner enforcement.
-- Use fake workspace/executor/delivery ports first; pass concurrency/fault corpus.
+- Use an observation/removal-only fake workspace port—no provisioning API—and fake executor/delivery ports first; pass concurrency/fault corpus including TD-TASK-011.
 - Commit: `feat(application): orchestrate the canonical task graph`.
 
 ### PR 24N — Executor adapters, workspace lifecycle, cancellation, and public transports
@@ -2899,7 +3011,7 @@ These suffixes were checked against plans 01–28. Plan 13 owns prerequisite her
 
 - Implement Codex, Claude, Cursor, Hermes, and custom protocol adapters behind the SPI with registration/start/status/cancel/collect.
 - Generate each adapter from the plan-27 capability ledger; bind registration/start/actual-route receipts to runtime/component/probe digests, reject stale admission, and require an isolated narrow registration wherever the host cannot restrict inherited child tools.
-- Implement exact workspace/worktree/branch binding, brokered consequential effects, revocable credentials/grants, non-preemptible-effect quarantine, safe cleanup, effect reconciliation, and requested/actual route receipts.
+- Observe and bind exact externally created workspace/worktree/branch identity from Git CLI/host/IDE/executor/watcher evidence; implement brokered consequential effects, revocable credentials/grants, non-preemptible-effect quarantine, delegated proof-gated cleanup, external-removal/backfill reconciliation, and requested/actual route receipts. The adapter API has no worktree-create/provision operation.
 - Expose versioned HTTP/SSE and generated CLI/MCP/SDK surfaces with auth/idempotency/cursors/errors/output parity.
 - Commit: `feat(executors): run fenced work across agent hosts`.
 
@@ -2917,8 +3029,8 @@ These suffixes were checked against plans 01–28. Plan 13 owns prerequisite her
 
 **Files:** `dashboard/app/src/features/work/**/*`; generated client integration; E2E/visual/accessibility tests.
 
-- Consume the PR 2A UI ledger, directly/behaviorally port compatible Hermes interactions/tests under provenance, and add routes, complete saved scope/view shell, initiative/plan/task/attempt inspectors, plan outline, board projection, DAG, legal commands, table parity, and the PR 24R Edit-as-Markdown operation/diagnostic/diff/conflict/cleanup consumer.
-- Prove drag operations map to domain commands, no ambient current board, no dashboard business logic, and exact selection/version/coverage state.
+- Build routes and components from generated TraceDecay contracts and view models: complete saved scope/view shell, initiative/plan/task/attempt/workspace inspectors, complete per-ticket workspace/branch/PR association history, proposed-confirm-reject and blocker-first cleanup/retain/restore controls, plan outline, board projection, DAG, legal commands, table parity, and the PR 24R Edit-as-Markdown operation/diagnostic/diff/conflict/cleanup consumer. Use the PR 2A Hermes UI ledger as comparative usability/regression evidence; directly or behaviorally port only an explicitly approved bounded interaction/test row under provenance.
+- Prove drag operations map to domain commands, no ambient current board, no dashboard business logic, archive/merged PR never deletes, blocked cleanup cannot be invoked, restore never provisions, and exact selection/version/coverage state.
 - Commit: `feat(dashboard): add canonical work and plan views`.
 
 ### PR 30K — Timeline, causal, critical-path, workload, executor, repository, and All lenses
@@ -2938,11 +3050,11 @@ These suffixes were checked against plans 01–28. Plan 13 owns prerequisite her
 - Prove the hermetic resource-access receipt reports zero production effects, deterministic stages reproduce when inputs permit, fixture secret scan passes, and promotion remains separately authorized.
 - Commit: `feat(labs): replay task orchestration decisions`.
 
-### PR 33F — Legacy/external task evidence import and shadow parity
+### PR 33F — V1 migration, frozen external-board fixtures, and shadow parity
 
 **Files:** migration adapters/manifests; shadow decision runner; historical fixtures.
 
-- Inventory/import V1 TraceDecay and optional external Hermes/provider task-like evidence with aliases, identity conflicts, sanitizer receipts, and no ambient-current adoption.
+- Inventory/import TraceDecay-owned V1 evidence with aliases, identity conflicts, and sanitizer receipts. Convert approved Hermes/external-board snapshots only into sanitized frozen replay fixtures with no production capture, synchronization, materialization, or dispatch path; a live external-board importer requires a separate approved feature.
 - Run projections/policies/packets in shadow; generate coverage/parity/disagreement and no-effect receipts.
 - Do not dual-dispatch or materialize observed provider work without authority.
 - Commit: `feat(migration): import task evidence and run shadow orchestration`.
@@ -2967,7 +3079,8 @@ These suffixes were checked against plans 01–28. Plan 13 owns prerequisite her
 ## 19. Implementation dependency order
 
 ```text
-2A Hermes/research heritage ledger → 4E domain → 6G store → 10E projectors
+4E domain → 6G store → 10E projectors
+2A bounded comparison/source/license ledger → only slices that reuse an approved external component
 10E → 17C cross-graph relations → 21A packet lineage → 22E catalog/SPI → 23I policy → 24M application/scheduler → 24N adapters/transports
 24M + 22E → 24R managed declarative bulk editing
 4E → 22F accounting descriptors
@@ -2978,7 +3091,7 @@ These suffixes were checked against plans 01–28. Plan 13 owns prerequisite her
 24N + 24R + 22H → 25G core Work UI
 22H → 30J Observatory/Costs contracts
 25G + 30J → 30K advanced graph lenses → 31Q lab/evaluation
-24N + 22H → 33F task import/shadow
+24N + 22H → 33F V1 migration/frozen-fixture shadow
 22G + 33F → 33H analytics/accounting migration parity
 31Q + 33F + 33H → 35J scoped cutover → 37J deletion
 ```
@@ -2986,11 +3099,11 @@ These suffixes were checked against plans 01–28. Plan 13 owns prerequisite her
 Parallelism is allowed only after owning contracts land:
 
 - 10E and initial 22E schema work may proceed after 4E/6G fixtures stabilize;
-- no task implementation slice merges before its applicable PR 2A source/license/test disposition is reviewed;
+- a slice that reuses external code, behavior, tests, or interactions cannot merge before its applicable PR 2A row is reviewed; unrelated TraceDecay-native domain/store/application/UI slices do not wait for whole-Hermes coverage;
 - executor adapter stubs may be developed against generated 22E protocol while 23I/24M use fakes;
 - 25G concepts/tests may use read-only V1/synthetic fixtures but cannot invent API/view schemas;
 - 31Q corpus/judgment work can begin early, but live replay waits for 23I/24M manifests;
-- migration inventory can begin read-only before 33F; no live import writes before privacy/store gates;
+- TraceDecay V1 migration inventory can begin read-only before 33F; no live migration writes before privacy/store gates, and frozen external-board fixtures never gain a production write path;
 - 22F may begin after 4E; store-owned 22F-LS follows 22F and root/application 22F-LE follows 22F-LS; 22G requires 6G/10E journal/cost fixtures plus 22F-LE; 22H requires 24M liveness/scheduler events; 30K consumes 30J rather than inventing accounting views;
 - no scheduler cutover before 22H/30J/33H observability and migration conformance plus aggregate multi-host, cancellation, workspace, privacy, transport, and dashboard verification are stable.
 
@@ -3007,7 +3120,7 @@ Architecture:
 
 Domain and persistence:
 
-- [ ] Initiative/Plan/PlanVersion/WorkItem/dependency/gate/acceptance/decision/assignment/lease/attempt/executor/workspace/packet/handoff/artifact/outcome/cost contracts and versions are complete.
+- [ ] Initiative/Plan/PlanVersion/WorkItem/dependency/gate/acceptance/decision/assignment/lease/attempt/executor/workspace/packet/handoff/artifact/outcome/cost contracts and versions are complete, including external worktree provenance, many-to-many task/attempt/Git/delivery associations, cleanup delegation, blocker/proof/state, retention, restore, and receipt views.
 - [ ] `DependencyId`, `WorkClaimRefV1`, and manifest-ID/ordinal/digest `ContextPacketManifestRefV1` are the only generated refs; all task reads compile to canonical `TraceQueryV1`.
 - [ ] Gating DAG cycle checks, graph-of-graphs expansion, plan diffs/replacements, readiness, and critical-path reference parity pass.
 - [ ] Plan-01-owned `TaskGraphEditWorkspaceId`, `TaskGraphEditCandidateRefV1`, `TaskGraphEditManifestV1`, `EditLocalKeyV1`, `EditableEntityRefV1`, `TaskGraphEditDiagnosticV1`, `TaskGraphSemanticDiffV1`, `TaskGraphEditConflictV1`, and `TaskGraphEditReceiptV1` round-trip without duplicate/narrowed definitions.
@@ -3027,6 +3140,9 @@ Execution:
 - [ ] Every attempt exposes one lifecycle owner plus typed acting participants and separates provider, native CLI, adapter, workspace, acceptance, external-effect, and lifecycle-protocol failure cause chains.
 - [ ] Supported Codex/Claude `Stop`/`SubagentStop` bindings issue at most one same-agent lifecycle checkpoint, expose owner commands only to the lifecycle owner and participant handoff to non-owners, never invoke a provider/prompt/agent/HTTP/MCP route, and fail open with observable reconciliation when missing/disabled/untrusted/ambiguous/stale/unknown.
 - [ ] Workspace/worktree/branch/commit/PR safety preserves user work and never auto-stashes/resets/force-pushes/merges/cleans without authority.
+- [ ] TraceDecay creates/provisions zero Git worktrees. Agent/user/Git/IDE/executor/automation-created worktrees are discovered through tool/hook/CWD/git-common-dir/branch/HEAD/commit/PR/watcher evidence; strong correlation auto-confirms, ambiguity proposes once, contradiction never rebinds, and reconciliation/backfill is idempotent.
+- [ ] Archive, terminal attempt, produced-PR merge, retention expiry, and terminal hooks only evaluate cleanup. Every dirty/untracked/active-authority/unpushed/unmerged/open-or-unknown-PR/sibling-reference/unknown-ownership/missing-delegation/drift/effect/hold blocker fails closed; only explicit external delegation plus a fresh proof authorizes removal and produces a durable receipt.
+- [ ] Shared worktrees allow concurrent inspect-only bindings but at most one exclusive-write/integration reservation; cleanup considers all sibling task/attempt references. Reopen preserves history and restore/rebind requires an externally created new generation from a reachable ref/commit.
 - [ ] Cancellation and unknown external effects reconcile to explicit terminal or blocked states; retry never blindly repeats them.
 
 Context and coordination:
@@ -3039,11 +3155,12 @@ Context and coordination:
 
 Surfaces and product:
 
-- [ ] One catalog/application/view model generates API/CLI/MCP/SDK/dashboard semantics, errors, legal actions, pagination, anchors, and Markdown/JSON output.
+- [ ] One catalog/application/view model generates API/CLI/MCP/SDK/dashboard semantics, errors, legal actions, pagination, anchors, and Markdown/JSON output, including `work_items.workspaces`, `worktrees.*`, `task_worktree_associations.*`, and `worktree_cleanup.*`; no extra restore/provision alias exists.
 - [ ] Offer, packet, and notification list/detail views and owned deep links round-trip exact IDs/revisions; all seven manual-work commands have generated API/CLI/MCP/SDK/UI parity with no generic status, preview/apply, undo, or rollback alias.
 - [ ] `task_graph.edit_bundles.export|get|validate|diff|rebase|submit|delete` has generated operation/view parity across authorized CLI/MCP/API/SDK/UI bindings; skills plus CLI remain sufficient when MCP is not installed, and no domain-specific MCP server forks task semantics.
 - [ ] Kanban, DAG, plan, timeline, causal, critical-path, workload, executor, repository, initiative, agent slice, and All lenses are saved authorized projections over the same selected entities/versions.
 - [ ] Agent default views are relevance-filtered; humans with grants can query All; no board/event notification spam exists.
+- [ ] Every ticket inspector shows all repository/worktree generations/branches/commits/PRs and attempts with provenance/confidence/contradictions, active lease/reservation/agent state, retention, blockers, receipts, and legal cleanup/restore actions after archive/reopen/removal.
 - [ ] Brain/Explorer/Loom/Sessions/Agents/Code/Delivery/Knowledge/Skills/Automations/Costs/Settings/Labs pivot through canonical links without losing selection, scope, time, provenance, or coverage.
 - [ ] Graph/table/matrix parity, accessibility, responsive behavior, 50k/200k performance, and deterministic privacy-aware exports pass.
 - [ ] Orchestration Lab reproduces decomposition/routing/readiness/fairness/retry/packet/materiality/lease/cancel decisions without side effects.
@@ -3053,10 +3170,10 @@ Privacy, operations, and convergence:
 - [ ] Secret canaries have zero forbidden sink occurrences across stores/indexes/events/logs/metrics/prompts/tools/packets/APIs/exports; sanitizer and descendant invalidation receipts are complete.
 - [ ] Managed edit workspaces stay outside repositories/indexes/backups, enforce owner-only path/archive containment and TTL, purge after submit/expiry with crash recovery, and retain only digest/count/version/audit/cleanup receipts rather than raw Markdown/frontmatter/path content.
 - [ ] Config is fully navigable/editable through Plan 20 UI/CLI/MCP/API/SDK with declared owner/effective source/history/impact and safe floors.
-- [ ] Status/doctor expose scheduler, graph, leases, attempts, executors, packets, workspaces, costs, privacy, lag, coverage, and exact recovery evidence.
+- [ ] Status/doctor expose scheduler, graph, leases, attempts, executors, packets, workspace discovery/watcher/backfill/association contradictions, cleanup proof/blocker/backlog/outcomes, costs, privacy, lag, coverage, and exact recovery evidence.
 - [ ] Transactional `work_items.assign_set`, shared `saved_views.share.plan/start/revoke` over the Task variant, canonical subscription task deltas, complete saved-view state, and plan-26 workload/fleet accounting pass generated CLI/MCP/API/SDK/UI parity; no `task_views.*` binding exists.
-- [ ] Rspack/Rsbuild/React Router cross-repository initiative passes decomposition → diverse parallel triage → verifier → synthesizer → isolated implementation → integration → delivery fixtures.
-- [ ] Hermes strengths are preserved and every rejected weakness in section 2.4 is absent from live architecture.
-- [ ] Migration/import/shadow/cutover/rollback receipts prove one live scheduler/lease owner and no unauthorized materialization of provider/external work.
+- [ ] `TD-TASK-003` preserves the named Rspack/Rsbuild/React Router historical topology and Codex/Claude/Cursor/Hermes route coverage, while provider-permuted and structurally different valid DAGs pass the same authority, gating, packet, receipt, isolated implementation, integration, and delivery assertions.
+- [ ] Explicit TraceDecay invariants pass `TD-TASK-001`, `TD-TASK-003`, `TD-TASK-004`, `TD-TASK-006`, `TD-TASK-007`, `TD-TASK-008`, and `TD-TASK-009`: canonical identity, topology-neutral typed DAGs, fenced leases, atomic activation/dependency mutation, terminal review successors, canonical worker refs, provider-neutral routing, and typed participant/failure separation; every rejected failure in section 2.4 is absent.
+- [ ] Migration/shadow/cutover/rollback receipts prove one live scheduler/lease owner and no unauthorized materialization of provider/external work; Hermes/external-board inputs used here remain sanitized frozen fixtures, and no production external-board import path exists without a separately approved feature.
 - [ ] Legacy board/current-file/direct-DB/assignee-string/free-JSON/PID-lease/duplicate-render/config/scheduler paths are deleted after the bounded window.
 - [ ] Final architecture/import/catalog/config/route/source scans find one canonical task system and no compatibility write path.

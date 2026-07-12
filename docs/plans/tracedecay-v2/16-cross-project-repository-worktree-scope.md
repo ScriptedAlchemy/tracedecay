@@ -22,6 +22,7 @@ An agent or person must be able to ask one question about one named repository, 
 8. Plan 23's temporal search and context assembly use the same resolved scope before ranking and return stable cross-shard anchors; current/as-of logic cannot repair a wrong project/worktree/ref after retrieval.
 9. Plan 24's initiative/plan/work-item graph pins one authorized project-set version and exactly one writable workspace binding per attempt. Other repositories are read-only; a required multi-repository write decomposes into one fenced child work item per writable target plus explicit integration gates. A board, executor, agent, CWD, current checkout, or task title cannot add a repository, change the primary writable worktree/ref/snapshot, or copy a task to repair scope after dispatch.
 10. Plan 28 may place the same logical Brain/repository on several enrolled machines. Repository identity is global within the Brain; checkout/worktree/path identity is node-scoped; every routed result names authority/replica/cache coverage without exposing storage topology as the user's scope.
+11. Plan 24 task/attempt records may associate with externally created worktrees and plan 11 may display and act from that ticket context, but TraceDecay never creates or provisions a worktree. Discovery, confirmation, ownership provenance, and cleanup authorization are separate facts. Plan 26 observes their lifecycle without becoming mutation authority.
 
 “Current project” remains a convenient default. It is never an invisible constraint and never overrides an explicit repository, worktree, path, PR, branch, session, or agent reference in the request.
 
@@ -48,7 +49,7 @@ The following sessions are regression fixtures, not anecdotes:
 
 Current supported-surface reproduction also exposed a composability break: `tracedecay_message_search(project_scope="all_registered")` can return a session from another registered project, but `tracedecay_lcm_load_session` is active-project-only and rejects project selectors. Search-to-exact-retrieval must therefore be a required end-to-end conformance test, not two independently green tools.
 
-The Rspack/Rsbuild/React Router family is the primary cross-repository benchmark because real work regularly needs all of these evidence sources:
+The frozen Rspack/Rsbuild/React Router family is one named cross-repository regression slice in the heterogeneous scope corpus because it exercises all of these evidence sources together; it is not a required live checkout, product dependency, or sole conformance authority:
 
 - `rsbuild-plugin-react-router`: product code, tests, branch, PR, benchmark, and agent worktree.
 - `rsbuild`: plugin API, dev-server, environment, `loadBundle`, middleware, and memory-filesystem contracts.
@@ -69,6 +70,8 @@ Do not expose storage topology as product scope. Use these identities:
 | `ProjectId` | Registered TraceDecay product unit and policy/config boundary. | Usually maps to one repository, but may represent a non-Git workspace or explicit subproject. |
 | `CheckoutId` | One node-scoped filesystem checkout of a repository. | Main checkout and worktrees are peers; clean snapshots may dedupe by verified immutable manifest. |
 | `WorktreeId` | Node-scoped Git worktree identity, including git common dir and admin record. | Path is a versioned local alias, not repository identity; dirty overlays never merge by branch name. |
+| `TaskWorktreeAssociationId` | Versioned relation between a plan-24 work item/attempt and one externally created worktree. | May be inferred, confirmed, rejected, reassigned, or released; association is not ownership or cleanup authority. |
+| `WorktreeCleanupIntentId` | One CAS-pinned daemon cleanup request over a worktree identity and eligibility snapshot. | Never a path or client-side delete instruction; terminal receipt/failure remains auditable. |
 | `RefId` | Branch/tag/remote-ref lineage. | Ref name is mutable; observations are time-qualified. |
 | `CodeSnapshotId` | Immutable code/Git state used for a graph query. | Normally commit/tree plus index/config/parser generation; distinct from `GraphGenerationId`. |
 | `ProjectSetId` | Saved or ephemeral set of repositories/projects. | Supports related systems and benchmarks. |
@@ -179,6 +182,38 @@ Required behavior:
 - A non-Git project remains addressable without fabricated repository identity.
 - Domain availability is per store/capability. A missing graph can coexist with healthy sessions, facts, Git observations, or automation data.
 - Registry garbage collection has preview, evidence, retention, apply receipt, and rollback; it does not delete stores merely because a path is absent.
+- External host/project stores are source-owned read-only evidence unless a separate TraceDecay import decision approves a bounded sanitized copy. Registry retirement can remove only TraceDecay-owned routes/projections with receipts; it never mutates or deletes Hermes-owned transcripts, board databases, caches, or backups.
+
+### 6.1 Task-associated worktree discovery and lifecycle
+
+Plan [`24-canonical-task-plan-graph-and-multi-agent-executor.md`](24-canonical-task-plan-graph-and-multi-agent-executor.md) remains the task/attempt/event authority. Plan [`11-dashboard-frontend.md`](11-dashboard-frontend.md) renders related worktrees and cleanup state inside ticket/PR views. Plan [`26-observability-accounting-and-usage.md`](26-observability-accounting-and-usage.md) consumes lifecycle/cleanup events and latency/failure counters. This plan owns identity correlation and cleanup eligibility. Plan 02 persists all of it in the existing profile activity/task graph, relation, operation, outbox, audit, and retention families; there is no worktree-cleanup database or service.
+
+TraceDecay discovers worktrees created externally by an agent, user, executor, Git client, or IDE. It does not expose a create/provision operation. Discovery ingests bounded, idempotent observations from:
+
+- `git worktree list --porcelain`-equivalent Git-library inventory, git-common-dir/admin records, repository identity, path alias, branch/ref, HEAD/tree, locked/prunable state, and last-seen generation;
+- hook/tool `workdir`, provider CWD intervals, thread/subagent lineage, plan-24 workspace bindings and attempts, produced commit/artifact evidence, branch/commit ancestry, and delivery PR head/base/merge observations;
+- explicit user/agent association commands and imports/backfills, each retaining creator/source provenance rather than claiming TraceDecay created the checkout.
+
+Correlation is deterministic and versioned. Exact `WorktreeId`/Git admin identity and an attempt's sealed workspace binding dominate; verified common-dir/repository, branch/commit/PR, temporal CWD/tool use, and thread/task evidence contribute registered score features. Every candidate returns the feature contributions, provenance anchors, algorithm version, confidence, contradictions, and `Candidate | Ambiguous | Inferred | Confirmed | Rejected | Superseded` state. Equal or conflicting candidates stay ambiguous. Repeated observations and the same association command insert-or-read the same result. `confirm`, `reject`, and `reassign` use expected association revision and idempotency; reassign releases the prior relation and appends a successor rather than moving history. Reconciliation/backfill reruns the frozen algorithm over retained observations and reports changed candidates without overwriting prior decisions.
+
+One canonical relation connects work item, optional attempt, repository, checkout, worktree, branch/ref/commit, and optional PR. `workspace_binding` remains execution authority; association is descriptive navigation/provenance. Cleanup authorization is a separate explicit grant backed by external creator/source ownership proof or an independently verified safe-policy proof. Inferred or confirmed association, matching branch names, task assignment, process CWD, or PR linkage cannot grant cleanup authority.
+
+The daemon maintains evidence-bearing live references, not a blind scalar refcount: active task, attempt, lease, resource reservation, holder, branch, PR, checkout, explicit hold, and other association subjects. A rebuildable count projection accelerates lists, but every cleanup decision rechecks reference rows at one frozen activity/catalog/Git/delivery watermark. Archive and verified merged-PR events enter through the ordinary task/delivery journal and outbox, then recompute eligibility. They do not create a triage task, auto-archive a different ticket, or imply that cleanup is safe.
+
+`WorktreeCleanupEligibilityV1` is `Eligible | Blocked | Unknown | AlreadyAbsent` with exact triggers, evidence watermark, identity/lifecycle generation, cleanup-grant proof, policy version, expiry, and typed blockers. Any of these blocks cleanup:
+
+- dirty index, working copy, untracked files, or incomplete dirty-state observation;
+- active attempt, lease, reservation, executor/holder, or nonterminal external effect;
+- commits not proven reachable from the configured push remote, or not proven merged into the intended destination;
+- open/unmerged PR or delivery state that is absent, stale, conflicting, or not authoritative;
+- another live task/attempt/branch/PR/checkout/hold/shared association reference;
+- ambiguous repository/worktree identity, missing cleanup grant, stale watcher/delivery evidence, unreachable remote, or any unknown required proof.
+
+`inspect` is a read-shaped preview-as-evidence operation. It returns the exact blockers, reference subjects, Git/PR proofs, proposed effect, branch disposition, eligibility digest, expiry, and one safe next request. It never performs cleanup. `diagnose` explains ambiguous/stale/orphan/candidate state and reconciliation/backfill options. `request-cleanup` is a confirmed daemon workflow requiring `WorktreeId`, `WorktreeCleanupIntentId` or current inspect digest, expected lifecycle/association versions, cleanup grant, and idempotency. Immediately before mutation the daemon re-resolves Git common-dir/admin identity and rechecks every blocker; clients never execute `git worktree remove`, recursively delete a supplied path, or receive a deletion recipe.
+
+Cleanup removes only the proven worktree root/admin registration represented by the intent. Branch deletion is not part of this effect and requires a separately named future command if ever supported. Success, already absent, blocked-at-recheck, failed, and unknown-after-effect each append a task graph event, operation/audit/outbox receipt, and identity disposition. Crash or uncertain external outcome enters reconciliation and cannot be reported successful from missing-path evidence alone.
+
+Stale/orphan discovery is conservative. Missing path observations preserve identity/history. A candidate becomes stale only after the configured evidence horizon, and orphan discovery requires agreement among Git admin/common-dir, registry, holder, task/attempt/reference, branch/PR, and checkout evidence. Retention may compact superseded scoring/current projections after the cursor/reconciliation horizon, but association/grant/cleanup decisions and safe receipts follow task/audit retention. Absence alone never creates cleanup authority or an intent.
 
 ## 7. Cross-project session and activity model
 
@@ -303,6 +338,11 @@ tracedecay sessions search "dev runtime not ready" \
 tracedecay session show session:019f42c9-623a-7cc0-95c1-f073eaa05a4d
 
 tracedecay scope resolve "rspack rsbuild react router" --json
+
+tracedecay task-graph worktrees list --work-item <id>
+tracedecay project worktree associations diagnose --worktree <id>
+tracedecay project worktree cleanup inspect --worktree <id>
+tracedecay project worktree cleanup request --worktree <id> --preview-digest <digest> --expected-lifecycle-generation <n>
 ```
 
 Rules:
@@ -313,6 +353,7 @@ Rules:
 - `--all` is explicit, bounded, cancellable, and reports omitted scopes.
 - Commands that cannot support a selector say so through capability discovery before execution.
 - A target stable session/message/agent ID is globally routable; no project flag is required.
+- Worktree discovery/list/association/confirm/reject/reassign/diagnose and cleanup inspect/status/request commands resolve to typed IDs through the daemon. No command creates a worktree or accepts a path as deletion authority; cleanup request consumes the pinned inspect/intent evidence and expected versions.
 
 ## 11. MCP contract for agents
 
@@ -349,6 +390,7 @@ Agent-facing requirements:
 - Every partial/truncated response returns a cursor or stable retrieval/export handle.
 - A globally returned `session`, `message`, `turn`, `agent`, `entity`, or `retrieval` ref is accepted by the exact-load tool regardless of the MCP server’s startup CWD.
 - Mutation tools require exact resolved scope, optimistic version/precondition, preview when destructive, and a receipt.
+- Worktree tools expose cursor-paged discovered candidates, task/attempt associations, confirm/reject/reassign, stale/orphan diagnosis, cleanup inspect, request, and operation status. The MCP client receives eligibility evidence and an `OperationRef`; it never receives or runs a filesystem deletion command. An inferred/confirmed candidate without a separate cleanup grant is read-only.
 
 ## 12. Official API and SDK relationship
 
@@ -365,6 +407,7 @@ Minimum generated bindings from the plan 17 contract IR; no plan or adapter main
 - `POST /api/v2/graph/neighborhood|path|impact`.
 - `GET /api/v2/coverage` and projection/index watermarks.
 - `POST /api/v2/subscriptions` followed by `GET /api/v2/subscriptions/{id}/events`; query/selector stays in the authenticated body and `Last-Event-ID` binds its digest.
+- Cursor-paged worktree discovery/association/reference/cleanup-intent reads; read-shaped association diagnosis and cleanup inspect; expected-version association confirm/reject/reassign; and confirmed cleanup request/status. The generated route set contains no create/provision-worktree operation and no client path deletion body.
 
 ## 13. Dashboard and Brain behavior
 
@@ -445,6 +488,7 @@ All-scope is not implemented by opening every database and concatenating rows:
 - Query explain reports planned/visited/pruned/skipped shards and estimated/actual cost.
 - Hot hook paths never perform federated fan-out; they read a bounded precomputed nearby/capability snapshot.
 - Remote plans route to one current authority or verified replica/cache per shard under the requested consistency. They never mount or inspect remote database files; network loss, stale cache, and pending local observations are explicit coverage dimensions.
+- Worktree discovery is incremental over changed Git admin/common-dir generations and activity/delivery outbox ranges. Candidate scoring, reference projection, stale/orphan discovery, and eligibility are bounded/indexed by repository/worktree/task/attempt/branch/PR; no request scans every checkout or task.
 
 Targets at the current local corpus scale:
 
@@ -470,7 +514,7 @@ Targets are benchmark gates, not architectural promises; adjust only from measur
 
 ## 18. Evaluation corpus and experiments
 
-### 18.1 Rspack/Rsbuild/React Router scenario pack
+### 18.1 Named frozen Rspack/Rsbuild/React Router regression slice
 
 Create redacted fixtures for:
 
@@ -486,6 +530,8 @@ Create redacted fixtures for:
 10. “Query a dirty feature worktree, not the main checkout graph.”
 
 Fixture promotion runs plan 18 secret scanning and plan 15's sanitization-receipted promotion command; raw private transcript or corpus content is never committed.
+
+This pack is one named frozen regression slice, not the sole scope/product conformance authority. The full corpus must also include unrelated ecosystems and repository shapes: independent repositories, monorepo-plus-package scopes, upstream/fork/downstream relations, non-Git projects, missing provider activity, dirty and detached worktrees, unavailable stores, and authorized/unauthorized neighbors. Live Rspack/Rsbuild/React Router checkouts, stores, or provider partitions are optional and never gate conformance; the redacted fixture remains mandatory.
 
 ### 18.2 Scope resolution labels
 
@@ -527,6 +573,11 @@ Metrics:
 - 10,000+ registry rows with capped output.
 - path case/symlink/mount differences on supported platforms.
 - unauthorized private repository adjacent to authorized public projects.
+- externally created agent/user/executor/Git/IDE worktrees with missing or conflicting creator provenance.
+- one worktree inferred for two tasks, rejected then reassigned, or tied across branch/PR evidence.
+- archived work item and merged PR triggers arriving duplicated, reordered, before association confirmation, or while a shared reference remains.
+- dirty/untracked worktree, active lease/holder, unpushed commit, unmerged commit, open/stale PR, unreachable remote, and unknown Git admin state.
+- stale path with live Git admin record, orphan admin record with missing path, changed inode/common-dir between inspect and request, crash during cleanup, and inferred association without cleanup grant.
 
 ## 19. Implementation slices
 
@@ -565,6 +616,13 @@ Integrate these into the parent PR sequence; do not create a second parallel roa
 
 - Relate worktrees, branches, commits, PRs, forks, support repos, benchmarks, published artifacts, and upstream/downstream project sets.
 
+### Companion requirements for plan 24/11/26 — Task/worktree lifecycle
+
+- Ingest external worktree inventory plus hook/tool/CWD/thread/attempt/branch/commit/PR evidence into deterministic candidate correlation with provenance, confidence, ambiguity, idempotent infer/confirm/reject/reassign, and reconciliation/backfill.
+- Add canonical association/reference/eligibility projections and archive/merged-PR trigger consumers over the existing task graph/outbox. Blocked cleanup remains visible in ticket/PR diagnostics and observability; it does not become task triage.
+- Expose paged ticket-related worktrees, association decisions, cleanup inspect/diagnose/request/status, and lifecycle SSE deltas through generated API/CLI/MCP/dashboard bindings. TraceDecay creates no worktree; separate cleanup authorization and current safe-policy evidence are mandatory.
+- Test dirty/active/unpushed/unmerged/shared/unknown blockers, CAS/idempotency, daemon re-probe, crash reconciliation, stale/orphan retention, branch preservation, stable output, and transport parity.
+
 ### PR 24G — Transport parity and agent ergonomics
 
 - Generate common scope flags/objects/errors for official API, CLI, MCP, and SDKs.
@@ -585,11 +643,15 @@ Integrate these into the parent PR sequence; do not create a second parallel roa
 - [ ] One versioned `ScopeSelectorV2` and one resolver implementation feed every transport.
 - [ ] Every public operation declares supported scope kinds through capability discovery.
 - [ ] Explicit targets never fall back to current project/worktree/ref.
-- [ ] `rsbuild rspack` resolves token-wise and produces useful disambiguated repository candidates.
-- [ ] The Rspack/Rsbuild/React Router project set can be saved and queried in one request.
+- [ ] Multi-term repository queries resolve token-wise and produce useful disambiguated candidates across unrelated repository naming schemes; the frozen `rsbuild rspack` fixture covers one named case.
+- [ ] A heterogeneous project set spanning at least three repositories can be saved and queried in one request without requiring any named live checkout or provider partition; the frozen Rspack/Rsbuild/React Router set remains regression coverage.
 - [ ] All-project session search results load exactly by stable ID without changing CWD or supplying a store-local key.
 - [ ] Sessions/Turns moving across repositories and worktrees retain temporal attribution.
 - [ ] Code queries name exact repository/worktree/ref/snapshot and expose stale/dirty/partial state.
+- [ ] Externally created worktrees are discovered from Git and activity/delivery evidence with creator/source provenance, deterministic candidate scores, ambiguity, confirmation/rejection/reassignment, and reconciliation/backfill; no TraceDecay create/provision operation exists.
+- [ ] Ticket/task and PR views show typed related worktrees, ownership/cleanup-grant state, reference counts with underlying subjects, and cleanup eligibility/diagnostics without creating triage work.
+- [ ] Archive and merged-PR triggers are idempotent eligibility inputs. Dirty, active, unpushed, unmerged/open-PR, shared-reference, ambiguous, stale, unknown, and missing-grant states block request-cleanup.
+- [ ] Cleanup is daemon-only, expected-version/idempotent, re-probes identity and blockers, preserves branches, and emits intents/receipts/failures/reconciliation evidence. Clients never delete a supplied path.
 - [ ] Cross-repository edges are typed, versioned, evidence-backed, bounded, and explainable.
 - [ ] Same-name, moved, deleted, duplicate-store, no-index, corrupt-shard, and unauthorized cases pass.
 - [ ] #425/V2 split-store consolidation preserves both backups and remapped edges, publishes one verified marker/registry route, then resolves every former selected/legacy ID and exact session/branch recipe without CWD/path guessing.

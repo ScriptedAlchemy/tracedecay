@@ -113,6 +113,7 @@ crates/tracedecay-domain/
 │   │   └── outcome.rs
 │   ├── hooks/
 │   │   ├── mod.rs
+│   │   ├── binding.rs
 │   │   ├── request.rs
 │   │   └── receipt.rs
 │   ├── ordering.rs
@@ -171,7 +172,7 @@ File ownership is strict:
 - `automation.rs` defines the one trigger, relevant-input, scope-frontier, quiescence, admission, skip-episode, and terminal-disposition vocabulary for autonomous jobs; it never schedules, scans, leases, calls a model, or mutates a cursor.
 - `task_graph_edit.rs` defines the one contained Markdown-edit manifest, local reference, source diagnostic, semantic diff/conflict, and receipt vocabulary; it never parses YAML/Markdown, touches a filesystem, allocates IDs, or mutates task truth.
 - `policy/` defines policy bundle/evaluation/outcome references and proposed-effect value contracts, never evaluator execution.
-- `hooks/` defines host-neutral hook request/receipt IDs, origin/effect/durability vocabulary, never wire decoding, host rendering, or orchestration.
+- `hooks/` is the sole hook-contract module family. `binding.rs` owns definition/source/provenance/run/group/trust/eligibility/support/freshness/visibility vocabulary; `request.rs` and `receipt.rs` own host-neutral request/origin/effect/durability/result contracts. These files do not overlap, and no `hooks_v1.rs` alias or second hook facade exists.
 - `ordering.rs` defines per-source continuity states; `watermark.rs` defines per-shard progress.
 - `query/` defines the bounded AST and unsigned cursor claims. Signing and execution belong to query/application adapters.
 
@@ -3331,74 +3332,108 @@ git add crates/tracedecay-domain/src/id.rs crates/tracedecay-domain/src/source.r
 git commit -m "feat(domain): define stable v2 identity"
 ```
 
-### Task 3: Lock ownership, privacy, time, and retention
+Tasks 3A through 4B are one dependency-ordered contract wave: `3A -> 3B -> 4A -> 4B`. Each slice extends the same crate and canonical modules; none introduces a crate, compatibility facade, duplicate ID, or substitute hook/privacy/provenance abstraction.
+
+### Task 3A: Lock ownership, privacy, time, and retention foundations
 
 **Files:**
 - Create: `crates/tracedecay-domain/src/ownership.rs`
 - Create: `crates/tracedecay-domain/src/time.rs`
 - Create: `crates/tracedecay-domain/src/privacy.rs`
 - Create: `crates/tracedecay-domain/src/retention.rs`
-- Create: `crates/tracedecay-domain/src/replay.rs`
-- Create: `crates/tracedecay-domain/src/protocol.rs`
-- Create: `crates/tracedecay-domain/src/payload.rs`
-- Create: `crates/tracedecay-domain/src/hooks_v1.rs`
 - Create: `crates/tracedecay-domain/tests/ownership_contract.rs`
 - Create: `crates/tracedecay-domain/tests/retention_contract.rs`
-- Create: `crates/tracedecay-domain/tests/replay_contract.rs`
-- Create: `crates/tracedecay-domain/tests/protocol_contract.rs`
 
 - [ ] **Step 1: Write failing boundary tests**
 
-Assert activity ownership for canonical messages and experiments; project ownership for Git/code; activity ownership for profile-scoped facts/skills/policy/automation; project ownership for project-scoped equivalents; rejection of missing/ambiguous declared scope; catalog rejection of literal strings; blob-domain inequality across privacy/key/retention domains; the exact Plan 18 `SanitizationReceiptV1` field set, findings-total invariant, expiry/revocation/supersession validation, canonical-schema round trip, and rejection of receipt cycles or cross-observation supersession; half-open time behavior; exact-cutoff retention; hold precedence; the seven content-horizon defaults; requested/actual replay invariants; one baseline/at-most-six variants; sole acyclic experiment branch ancestry; explicit sweep values, checked full-coordinate expansion, hard total-cell rejection, and unique run-cell coordinates; anchors for experiment/run/cell/stage/comparison/comparison-cell/reduction; running trace without and terminal trace with sealed receipt; complete resource budgets; a side-effect receipt whose production effect count is zero; automation invariants for all trigger frontiers, typed field selectors, sorted per-shard current/considered/consumed/included frontiers, fresh writer snapshot/quiescence, unknown/partial deferral, semantic-versus-evaluation digests, admitted-only identical-input fencing, pre-admission considered transitions, terminal consumed-cursor advancement, coalesced input-bound skip episodes, and exactly-once effect reconciliation; host-integration invariants for one source-manifest digest, at most four unique components, exact install receipt/generation, typed capability dispositions, probe freshness/digest, no secret/path fields, and handshake failure on stale or mismatched component/catalog/probe identity; and hook-contract round trips for resolved/ambiguous/generated-only provenance, orthogonal trust/eligibility/support/freshness/visibility, exact host-trust-hash/content-digest separation, and no fabricated source/run identity.
+Assert activity ownership for canonical messages and experiments; project ownership for Git/code; activity ownership for profile-scoped facts/skills/policy/automation; project ownership for project-scoped equivalents; rejection of missing/ambiguous declared scope; catalog rejection of literal strings; blob-domain inequality across privacy/key/retention domains; the exact Plan 18 `SanitizationReceiptV1` field set, findings-total invariant, expiry/revocation/supersession validation, canonical-schema round trip, and rejection of receipt cycles or cross-observation supersession; half-open time behavior; exact-cutoff retention; hold precedence; and the seven content-horizon defaults.
 
 - [ ] **Step 2: Verify failure**
 
-Run: `cargo test -p tracedecay-domain --test ownership_contract --test retention_contract --test replay_contract --test protocol_contract`
+Run: `cargo test -p tracedecay-domain --test ownership_contract --test retention_contract`
 
 Expected: FAIL with unresolved ownership and retention types.
 
 - [ ] **Step 3: Implement the ownership and retention matrices**
 
-Implement `ShardKind`, `ShardRef`, `DeclaredScope`, `BlobDomainId`, `CatalogValue`, `UtcMicros`, `TimeInterval`, the Plan 18 `DataSensitivity`/receipt/taint/sink-eligibility types, `RetentionClass`, `RetentionPolicyV1`, `EvidenceRetentionWatermark`, the complete replay manifest/fidelity/branch/experiment/variant/run/cell/stage/comparison/comparison-cell/reduction/resource-budget/receipt family, the automation input-contract/manifest/frontier/quiescence/admission/skip-episode family, `SurfaceKind`, opaque `HostSurfaceKindV1`/`McpLogicalRegistrationId`/`McpSurfaceProfileId`, `HostInstallScopeV1`, `HostCapabilityDispositionV1`, `HostBundleComponentRefV1`, `HostIntegrationRuntimeRefV1`, `HostCapabilitySubjectV1`, `HostCapabilitySnapshotV1`, the complete hook binding/source/provenance/definition/run/group/trust/eligibility/support/freshness/visibility/permission/continuation/result family above in `crates/tracedecay-domain/src/hooks_v1.rs`, `RuntimeHandshakeV1`, `PayloadRef`, and reasoning format/visibility. Hook provenance must round-trip resolved, ambiguous candidate-set, and generated-binding-only cases without fabricating a source; Codex trust hash never compares as a TraceDecay content digest. Put kind-plus-declared-scope ownership in one exhaustive match so a new kind or scope class causes a compile error.
+Implement `ShardKind`, `ShardRef`, `DeclaredScope`, `BlobDomainId`, `CatalogValue`, `UtcMicros`, `TimeInterval`, the Plan 18 `DataSensitivity`/receipt/taint/sink-eligibility types, `RetentionClass`, `RetentionPolicyV1`, and `EvidenceRetentionWatermark`. Put kind-plus-declared-scope ownership in one exhaustive match so a new kind or scope class causes a compile error.
 
 - [ ] **Step 4: Verify pass and schema serialization**
 
-Run: `cargo test -p tracedecay-domain --test ownership_contract --test retention_contract --test replay_contract --test protocol_contract`
+Run: `cargo test -p tracedecay-domain --test ownership_contract --test retention_contract`
 
 Expected: PASS.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add crates/tracedecay-domain/src/ownership.rs crates/tracedecay-domain/src/time.rs crates/tracedecay-domain/src/privacy.rs crates/tracedecay-domain/src/retention.rs crates/tracedecay-domain/src/replay.rs crates/tracedecay-domain/src/protocol.rs crates/tracedecay-domain/src/payload.rs crates/tracedecay-domain/src/hooks_v1.rs crates/tracedecay-domain/tests/ownership_contract.rs crates/tracedecay-domain/tests/retention_contract.rs crates/tracedecay-domain/tests/replay_contract.rs crates/tracedecay-domain/tests/protocol_contract.rs
+git add crates/tracedecay-domain/src/ownership.rs crates/tracedecay-domain/src/time.rs crates/tracedecay-domain/src/privacy.rs crates/tracedecay-domain/src/retention.rs crates/tracedecay-domain/tests/ownership_contract.rs crates/tracedecay-domain/tests/retention_contract.rs
 git commit -m "feat(domain): lock ownership and retention semantics"
 ```
 
-### Task 4: Define immutable observations, events, and provenance
+### Task 3B: Add replay, automation, protocol, payload, and hook-binding contracts
+
+**Ordering:** after Task 3A; consumes its ownership, privacy, time, and retention vocabulary unchanged.
+
+**Files:**
+- Create: `crates/tracedecay-domain/src/replay.rs`
+- Create: `crates/tracedecay-domain/src/automation.rs`
+- Create: `crates/tracedecay-domain/src/protocol.rs`
+- Create: `crates/tracedecay-domain/src/payload.rs`
+- Create: `crates/tracedecay-domain/src/hooks/{mod,binding}.rs`
+- Create: `crates/tracedecay-domain/tests/replay_contract.rs`
+- Create: `crates/tracedecay-domain/tests/automation_contract.rs`
+- Create: `crates/tracedecay-domain/tests/protocol_contract.rs`
+
+- [ ] **Step 1: Write failing replay, automation, protocol, and binding tests**
+
+Cover requested/actual replay invariants; one baseline/at-most-six variants; sole acyclic experiment branch ancestry; checked sweep expansion and total-cell bounds; run/cell/stage/comparison/reduction anchors and receipts; automation trigger/frontier/quiescence/admission/skip/effect-reconciliation invariants; host integration component/catalog/probe identity; and hook binding/source/provenance/run/group/trust/eligibility/support/freshness/visibility round trips. Resolved, ambiguous candidate-set, and generated-binding-only provenance never fabricate a source, and a host trust hash never compares as a TraceDecay content digest.
+
+- [ ] **Step 2: Verify failure**
+
+Run: `cargo test -p tracedecay-domain --test replay_contract --test automation_contract --test protocol_contract`
+
+Expected: FAIL with unresolved replay, automation, protocol, payload, and hook-binding contracts.
+
+- [ ] **Step 3: Implement the exact contracts and validators**
+
+Implement only the contract families named above in their canonical files. `hooks/binding.rs` owns catalog/definition/source/provenance vocabulary and cannot define request framing, durability, or receipt outcomes.
+
+- [ ] **Step 4: Verify pass**
+
+Run: `cargo test -p tracedecay-domain --test replay_contract --test automation_contract --test protocol_contract`
+
+Expected: PASS with stable schema/canonical-byte fixtures.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add crates/tracedecay-domain/src/replay.rs crates/tracedecay-domain/src/automation.rs crates/tracedecay-domain/src/protocol.rs crates/tracedecay-domain/src/payload.rs crates/tracedecay-domain/src/hooks crates/tracedecay-domain/tests/replay_contract.rs crates/tracedecay-domain/tests/automation_contract.rs crates/tracedecay-domain/tests/protocol_contract.rs
+git commit -m "feat(domain): add replay and runtime contracts"
+```
+
+### Task 4A: Define immutable observations, events, messages, and provenance
+
+**Ordering:** after Task 3B so evidence envelopes reuse its exact payload, time, ownership, and privacy contracts.
 
 **Files:**
 - Create: `crates/tracedecay-domain/src/provenance.rs`
 - Create: `crates/tracedecay-domain/src/observation.rs`
 - Create: `crates/tracedecay-domain/src/event.rs`
 - Create: `crates/tracedecay-domain/src/message.rs`
-- Create: `crates/tracedecay-domain/src/coordination.rs`
-- Create: `crates/tracedecay-domain/src/policy/{mod,bundle,evaluation,outcome}.rs`
-- Create: `crates/tracedecay-domain/src/hooks/{mod,request,receipt}.rs`
 - Create: `crates/tracedecay-domain/tests/observation_contract.rs`
 - Create: `crates/tracedecay-domain/tests/message_origin_contract.rs`
-- Create: `crates/tracedecay-domain/tests/coordination_contract.rs`
-- Create: `crates/tracedecay-domain/tests/policy_hook_contract.rs`
 - Create: `crates/tracedecay-domain/tests/fixtures/observation-envelope-v1.json`
 
 - [ ] **Step 1: Write failing validation and round-trip tests**
 
-Cover deterministic ID recomputation, required missing-time reason, nonempty sorted evidence, activity owner for messages, project attribution exclusion from canonical activity rows, opaque unknown provider payload, correction by supersession, forward-version rejection, fixture round-trip digest, PR #410 origin categories, unknown/human-best-effort evidence rules, representative membership without deletion, native/representative count invariants, policy/evaluation/outcome references, hook request/durability/receipt round trips, #411 installation-owner/remediation agreement, #412 lease/drain/checkpoint/service-state distinctions, safe coordination summaries at 160 and 161 Unicode scalar values, rejection rather than truncation of unsafe text, optional-summary round trip, literal-free retrieval anchors, TTL expiry without deletion, every redundancy mode, and multi-worktree/file/symbol/query claim scopes.
+Cover deterministic ID recomputation, required missing-time reason, nonempty sorted evidence, activity owner for messages, project attribution exclusion from canonical activity rows, opaque unknown provider payload, correction by supersession, forward-version rejection, fixture round-trip digest, PR #410 origin categories, unknown/human-best-effort evidence rules, representative membership without deletion, and native/representative count invariants.
 
 - [ ] **Step 2: Verify failure**
 
-Run: `cargo test -p tracedecay-domain --test observation_contract --test message_origin_contract --test coordination_contract --test policy_hook_contract`
+Run: `cargo test -p tracedecay-domain --test observation_contract --test message_origin_contract`
 
-Expected: FAIL with unresolved observation/event/provenance/policy/hook contracts.
+Expected: FAIL with unresolved observation/event/message/provenance contracts.
 
 - [ ] **Step 3: Implement immutable contracts and validators**
 
@@ -3406,15 +3441,53 @@ Implement every field and invariant in the public contracts above. Validation re
 
 - [ ] **Step 4: Verify pass**
 
-Run: `cargo test -p tracedecay-domain --test observation_contract --test message_origin_contract --test coordination_contract --test policy_hook_contract`
+Run: `cargo test -p tracedecay-domain --test observation_contract --test message_origin_contract`
 
 Expected: PASS and the fixture digest matches `schema-digests.json` once Task 8 writes the consolidated manifest.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add crates/tracedecay-domain/src/provenance.rs crates/tracedecay-domain/src/observation.rs crates/tracedecay-domain/src/event.rs crates/tracedecay-domain/src/message.rs crates/tracedecay-domain/src/coordination.rs crates/tracedecay-domain/src/policy crates/tracedecay-domain/src/hooks crates/tracedecay-domain/tests/observation_contract.rs crates/tracedecay-domain/tests/message_origin_contract.rs crates/tracedecay-domain/tests/coordination_contract.rs crates/tracedecay-domain/tests/policy_hook_contract.rs crates/tracedecay-domain/tests/fixtures/observation-envelope-v1.json
+git add crates/tracedecay-domain/src/provenance.rs crates/tracedecay-domain/src/observation.rs crates/tracedecay-domain/src/event.rs crates/tracedecay-domain/src/message.rs crates/tracedecay-domain/tests/observation_contract.rs crates/tracedecay-domain/tests/message_origin_contract.rs crates/tracedecay-domain/tests/fixtures/observation-envelope-v1.json
 git commit -m "feat(domain): define immutable evidence envelopes"
+```
+
+### Task 4B: Add coordination, policy, and hook request/receipt contracts
+
+**Ordering:** after Task 4A; these contracts reference immutable evidence envelopes and Task 3B hook bindings, never redefine either.
+
+**Files:**
+- Create: `crates/tracedecay-domain/src/coordination.rs`
+- Create: `crates/tracedecay-domain/src/policy/{mod,bundle,evaluation,outcome}.rs`
+- Create: `crates/tracedecay-domain/src/hooks/{request,receipt}.rs`
+- Create: `crates/tracedecay-domain/tests/coordination_contract.rs`
+- Create: `crates/tracedecay-domain/tests/policy_hook_contract.rs`
+
+- [ ] **Step 1: Write failing coordination, policy, and hook tests**
+
+Cover policy/evaluation/outcome references; hook request/origin/durability/receipt round trips; #411 installation-owner/remediation agreement; #412 lease/drain/checkpoint/service-state distinctions; safe coordination summaries at 160 and 161 Unicode scalar values; rejection rather than truncation of unsafe text; optional summaries; literal-free retrieval anchors; TTL expiry without deletion; every redundancy mode; and multi-worktree/file/symbol/query claim scopes.
+
+- [ ] **Step 2: Verify failure**
+
+Run: `cargo test -p tracedecay-domain --test coordination_contract --test policy_hook_contract`
+
+Expected: FAIL with unresolved coordination, policy, hook-request, and hook-receipt contracts.
+
+- [ ] **Step 3: Implement the exact contracts and validators**
+
+Keep `hooks/request.rs` and `hooks/receipt.rs` limited to host-neutral runtime contracts; they import binding/provenance IDs from `hooks/binding.rs` and do not repeat its enums or validators.
+
+- [ ] **Step 4: Verify pass**
+
+Run: `cargo test -p tracedecay-domain --test coordination_contract --test policy_hook_contract`
+
+Expected: PASS.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add crates/tracedecay-domain/src/coordination.rs crates/tracedecay-domain/src/policy crates/tracedecay-domain/src/hooks/request.rs crates/tracedecay-domain/src/hooks/receipt.rs crates/tracedecay-domain/tests/coordination_contract.rs crates/tracedecay-domain/tests/policy_hook_contract.rs
+git commit -m "feat(domain): add policy and hook receipt contracts"
 ```
 
 ### Task 5: Implement schema and predicate registries
@@ -3598,6 +3671,8 @@ git commit -m "test(domain): freeze v2 schema contracts"
 - `ScopeSelectorV2` preserves every explicit repository/project/checkout/worktree/ref/snapshot/generation and returns typed ambiguity/stale/quarantine coverage; no current-project/CWD/first-match fallback exists.
 - The exact Plan 18 `Unclassified -> Classified -> Sanitized -> sink-eligible` contract is generated once from this crate; no consumer owns a second redactor, receipt, taint enum, or public secret marker.
 - Presence/work-claim contracts are privacy-safe, TTL-history preserving, redundancy-aware, and advisory-only; unsafe summaries and literal-bearing retrieval anchors cannot be constructed.
+- Tasks 3A/3B/4A/4B land in dependency order as reviewable slices over one crate and one set of value contracts; no slice creates a compatibility facade or duplicate abstraction.
+- `crates/tracedecay-domain::hooks` is the sole hook-contract family: binding/provenance vocabulary and request/receipt vocabulary remain explicitly non-overlapping, with no `hooks_v1.rs`.
 - `cargo test -p tracedecay-domain`, clippy, and docs pass.
 - Dependency lint proves the crate has no I/O/runtime/transport dependency.
 - V1 plus #405/#407/#410/#411/#412 import/semantic mappings have no silent omission; #413 contributes only the actual release/protocol version unless its merged diff changes more.

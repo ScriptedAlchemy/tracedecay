@@ -163,7 +163,7 @@ benches/{hooks_v2_notification,hooks_v2_prompt,hooks_v2_concurrent_agents,hooks_
 Companion files owned elsewhere:
 
 ~~~text
-crates/tracedecay-domain/src/hooks/{mod,request,receipt}.rs
+crates/tracedecay-domain/src/hooks/{mod,binding,request,receipt}.rs
 crates/tracedecay-capture/src/spool/{client,frame,recovery}.rs
 crates/tracedecay-policy/src/evaluators/{hint.rs,routing.rs}
 crates/tracedecay-tool-catalog/src/{runtime.rs,bindings/hook.rs}
@@ -319,7 +319,7 @@ pub struct HookRequestV1 {
 
 Raw paths, tokens, credentials, environment maps, query literals, prompts, arguments, and results are absent from structured fields. Authorized content resides behind PayloadRef. `requested_scope` uses the shared domain selector unchanged. Workspace facts carry privacy-domain digests plus zero-to-many candidate aliases and freshness; identity resolution occurs in application/projectors and never selects the first/current candidate silently.
 
-Plan 01 PR 4 owns the complete definition/source/provenance/run/representation/trust vocabulary in `crates/tracedecay-domain/src/hooks_v1.rs`. Plan 20 consumes it in configuration views, plan 03 captures it, plan 08 binds immutable `HostHookBindingId` specs, and this crate adds only host-wire adapters and runtime behavior. `HookDefinitionProvenanceV1` is resolved, ambiguous candidate-set plus coverage, or generated-binding-only; the runtime never fabricates one source when Codex does not identify the launching definition.
+Plan 01 PR 4 owns one canonical `crates/tracedecay-domain::hooks` family: `binding.rs` contains definition/source/provenance/run/representation/trust vocabulary, while `request.rs` and `receipt.rs` contain non-overlapping host-neutral request/durability/result contracts. No `hooks_v1.rs` facade or duplicate enum family exists. Plan 20 consumes the binding vocabulary in configuration views, plan 03 captures request/receipt evidence, plan 08 binds immutable `HostHookBindingId` specs, and this crate adds only host-wire adapters and runtime behavior. `HookDefinitionProvenanceV1` is resolved, ambiguous candidate-set plus coverage, or generated-binding-only; the runtime never fabricates one source when Codex does not identify the launching definition.
 
 `HookInvocationScopeV1` is the plan-01 lifecycle vocabulary covering session/setup/Turn/tool-call/tool-batch/subagent/task/team/worktree/component/elicitation/async/display scopes. Codex `SessionStart` maps to `SessionLifecycle`, `SubagentStart` to `SubagentLifecycle`, and its remaining events to `Turn`; Claude events retain native scope instead of being forced into a Turn. `HookDefinitionRefV1` binds resolved/ambiguous/generated-only source provenance, representation, content digest, host trust hash where applicable, matcher-group ordinal, handler ordinal, managed bit, and installed bundle digest. Configured definitions, host-deduped handlers, actual runs, and invocation groups remain distinct evidence.
 
@@ -923,5 +923,6 @@ Do not delete sanitized native copied-subagent prompt rows under #410; only reti
 - Missed Git/tool capability and human correction are observable first-class outcomes.
 - #405/#407 identity/profile migration, #410 prompt origin, #411 remediation ownership, and #412 drain/shutdown semantics are preserved; #413 contributes actual protocol version only.
 - Hooks contain no database, query, policy implementation, Git, network, process, or product UI logic.
+- All hook contracts import the single plan-01 `tracedecay_domain::hooks::{binding,request,receipt}` family; no root adapter or companion crate defines a `hooks_v1` facade or duplicate provenance/request/receipt vocabulary.
 - Every persisted/evaluated hook request and rendered hint uses the Plan 18 receipt/sink-eligible contract; raw provider wire exists only during bounded decode and cannot serialize through a hook-owned port.
 - Shadow cutover and rollback have been proven separately for every host/hook point.

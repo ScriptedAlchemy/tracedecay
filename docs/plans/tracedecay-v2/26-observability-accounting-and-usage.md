@@ -697,9 +697,11 @@ Migration is coordinated with plan 12's controller (its §14 phases) and gated b
 
 ## PR and task sequence
 
+Catalog ordering is a hard dependency graph, not letter-name implication. Plan 08 PR 22A must land before this plan's PR 22F and before every catalog-extension PR 22C, 22D, 22E, or 22I. Any of 22C/22D/22E already landed when 22F starts is a required input to the descriptor inventory; any such extension landing after 22F, including 22I, must consume the frozen metric contracts and regenerate/diff the metric registry/catalog cross-references in the same PR. No extension may fork descriptor IDs, dimension enums, canonicalization, or surface metadata around PR 22A/22F.
+
 ### PR 22F: Accounting/metric/log domain contracts and descriptor registry
 
-**Ordering:** after plan 24 PR 4E publishes the canonical executor/work-item dimension enums and before plan 04's PR 22 so `accounting_v1` projects against these contracts.
+**Ordering:** after plan 08 PR 22A and plan 24 PR 4E publishes the canonical executor/work-item dimension enums; reconcile every already-landed 22C/22D/22E catalog extension before freezing the descriptor artifact, and require every later 22C/22D/22E/22I extension to regenerate/diff it. PR 22F precedes plan 04's PR 22 so `accounting_v1` projects against these contracts.
 
 **Files:** create `crates/tracedecay-domain/src/accounting/{mod,events,metrics,slo}.rs`, registry generator under the plan 08 artifact pipeline, `generated/metric-registry.json`; extend domain schema tests.
 
@@ -789,6 +791,7 @@ Migration is coordinated with plan 12's controller (its §14 phases) and gated b
 - Two rollup rebuilds at the same watermark produce identical rows, states, and digests; replaying any source event twice changes nothing.
 - Every hydrated `MetricPointV1.cap_events` vector round-trips exact join membership/order; its displayed count equals the normalized join `COUNT(*)`, and no referenced cap-event skeleton expires before its longest-lived parent rollup.
 - 100% of rendered metrics resolve to a registered descriptor; the drift gate proves no surface renders an unregistered number.
+- PR 22A precedes PR 22F and every 22C/22D/22E/22I catalog extension; each extension proves metric-registry/catalog cross-reference regeneration or a byte-identical no-change result.
 - The misreporting matrix passes on every surface: no unknown-as-zero, no capped-as-whole, no empty-section-with-skipped-shards, no fresh-looking stale data, no rate without denominator and horizon.
 - Historical fixtures reproduce the V1 evidence correctly: the migrated corpus renders the 388k-row population where V1 printed zero, and the hint/adoption series carry explicit unknown buckets.
 - Host adoption fixtures conserve the five-stage funnel per exact host/surface/component/install/registration/profile tuple: only supported + installed + enabled + healthy + authorized units enter the final denominator; stale/missing evidence remains partial/unknown; no version, digest, instance, locator, or path appears as a metric dimension.

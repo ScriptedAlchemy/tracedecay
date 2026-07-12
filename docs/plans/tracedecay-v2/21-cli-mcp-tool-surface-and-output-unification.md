@@ -6,7 +6,7 @@
 
 **Architecture:** [`08-tool-catalog-crate.md`](08-tool-catalog-crate.md) owns stable capabilities, use cases, binding IDs, effect metadata, generated surface definitions, host component sets/install scopes, and immutable MCP exposure profiles. [`09-application-crate.md`](09-application-crate.md) owns execution and canonical `ApplicationResponse<T>` views. A small pure root `v2::presentation` module converts only sealed typed views into a transport-neutral document model and renders Markdown or terminal text; canonical JSON serializes the same view without passing through the document model. It remains private because CLI and MCP are both root adapters and snapshots/conformance are test consumers, not independent production packages. Generated CLI and MCP adapters resolve the same [`ScopeSelectorV2`](16-cross-project-repository-worktree-scope.md), call the same application port, map the same errors, and apply catalog-declared output, pagination, privacy, and budget policy. One root MCP adapter/binary uses the official Rust MCP SDK behind a pinned protocol/conformance boundary, owns lifecycle/session/framing only, and projects tools, resources, prompts, completion, notifications, and task support from the connection-pinned profile. The three logical registration names are trust-boundary façades over that adapter, not separate services. HTTP/SDK JSON, NDJSON, and SSE remain owned by plans [`10`](10-api-crate.md) and [`17`](17-official-public-api-and-sdks.md); MCP Streamable HTTP is a distinct protocol endpoint, not a REST wrapper.
 
-**Normative dependencies:** [`01-domain-crate.md`](01-domain-crate.md), [`05-query-crate.md`](05-query-crate.md), [`08-tool-catalog-crate.md`](08-tool-catalog-crate.md), [`09-application-crate.md`](09-application-crate.md), [`10-api-crate.md`](10-api-crate.md), [`12-root-compatibility-migration.md`](12-root-compatibility-migration.md), [`16-cross-project-repository-worktree-scope.md`](16-cross-project-repository-worktree-scope.md), [`17-official-public-api-and-sdks.md`](17-official-public-api-and-sdks.md), [`18-secret-detection-redaction-and-private-data-safety.md`](18-secret-detection-redaction-and-private-data-safety.md), [`19-system-defragmentation-convergence-and-extensibility.md`](19-system-defragmentation-convergence-and-extensibility.md), [`20-configuration-control-plane.md`](20-configuration-control-plane.md), [`22-incremental-context-scout-and-suggestion-envelopes.md`](22-incremental-context-scout-and-suggestion-envelopes.md), [`23-session-lcm-temporal-retrieval-and-evaluation.md`](23-session-lcm-temporal-retrieval-and-evaluation.md), and [`24-canonical-task-plan-graph-and-multi-agent-executor.md`](24-canonical-task-plan-graph-and-multi-agent-executor.md).
+**Normative dependencies:** [`01-domain-crate.md`](01-domain-crate.md), [`05-query-crate.md`](05-query-crate.md), [`08-tool-catalog-crate.md`](08-tool-catalog-crate.md), [`09-application-crate.md`](09-application-crate.md), [`10-api-crate.md`](10-api-crate.md), [`11-dashboard-frontend.md`](11-dashboard-frontend.md), [`12-root-compatibility-migration.md`](12-root-compatibility-migration.md), [`16-cross-project-repository-worktree-scope.md`](16-cross-project-repository-worktree-scope.md), [`17-official-public-api-and-sdks.md`](17-official-public-api-and-sdks.md), [`18-secret-detection-redaction-and-private-data-safety.md`](18-secret-detection-redaction-and-private-data-safety.md), [`19-system-defragmentation-convergence-and-extensibility.md`](19-system-defragmentation-convergence-and-extensibility.md), [`20-configuration-control-plane.md`](20-configuration-control-plane.md), [`22-incremental-context-scout-and-suggestion-envelopes.md`](22-incremental-context-scout-and-suggestion-envelopes.md), [`23-session-lcm-temporal-retrieval-and-evaluation.md`](23-session-lcm-temporal-retrieval-and-evaluation.md), [`24-canonical-task-plan-graph-and-multi-agent-executor.md`](24-canonical-task-plan-graph-and-multi-agent-executor.md), and [`26-observability-accounting-and-usage.md`](26-observability-accounting-and-usage.md).
 
 **Normative MCP baseline (refreshed 2026-07-10):** the current stable revision is [`2025-11-25`](https://modelcontextprotocol.io/docs/learn/versioning). Implementation follows the official [lifecycle](https://modelcontextprotocol.io/specification/2025-11-25/basic/lifecycle), [tools](https://modelcontextprotocol.io/specification/2025-11-25/server/tools), [resources](https://modelcontextprotocol.io/specification/2025-11-25/server/resources), [prompts](https://modelcontextprotocol.io/specification/2025-11-25/server/prompts), [completion](https://modelcontextprotocol.io/specification/2025-11-25/server/utilities/completion), [progress](https://modelcontextprotocol.io/specification/2025-11-25/basic/utilities/progress), [cancellation](https://modelcontextprotocol.io/specification/2025-11-25/basic/utilities/cancellation), [transports](https://modelcontextprotocol.io/specification/2025-11-25/basic/transports), and [authorization](https://modelcontextprotocol.io/specification/2025-11-25/basic/authorization) contracts. The adapter uses the [official Rust SDK](https://rust.sdk.modelcontextprotocol.io/) at an exactly pinned, conformance-tested release. The implementation PR refreshes the current stable revision; a draft revision never changes a release contract silently.
 
@@ -44,6 +44,7 @@
 28. No MCP or CLI god tool accepts an arbitrary hidden `BindingId` plus untyped arguments. Discovery returns the exact supported binding/command/API recipe; it never bypasses per-use-case schema, annotations, grants, profile ceilings, or audit.
 29. Complex plan/task edits use exactly `task_graph.edit_bundles.export|get|validate|diff|rebase|submit|delete`. The frontmatter-Markdown bundle is protected temporary staging compiled back into canonical task commands, never a second task store or writable resource.
 30. Only the `tracedecay-work` `orchestrator` profile exposes edit-bundle mutations. Large MCP bundle results use authorized resource links; diagnostics default to compact Markdown with the same explicit JSON view available on demand.
+31. Worktree lifecycle bindings discover and relate externally created worktrees; TraceDecay exposes no create/provision-worktree binding. Association, ownership provenance, and cleanup grant are distinct. Cleanup inspect is read-shaped evidence; cleanup request is a daemon-only confirmed workflow over an exact worktree identity, CAS versions, blockers, grant, and preview digest. No CLI/MCP client deletes a path or branch.
 
 ## 2. Source audit and concrete fragmentation evidence
 
@@ -149,6 +150,8 @@ The generated recursive clap inventory is authoritative. The following human mat
 | Hidden Kiro hooks | `hook-kiro-pre-tool-use`, `hook-kiro-prompt-submit`, `hook-kiro-post-tool-use` | Same internal hook contract. |
 | Hidden Cursor hooks | `hook-cursor-subagent-start`, `hook-cursor-post-tool-use`, `hook-cursor-before-submit-prompt`, `hook-cursor-pre-compact`, `hook-cursor-after-file-edit`, `hook-cursor-session-start`, `hook-cursor-session-end`, `hook-cursor-after-shell`, `hook-cursor-workspace-open`, `hook-cursor-stop` | Same internal hook contract. |
 | Hidden Codex hooks | `hook-codex-session-start`, `hook-codex-subagent-start`, `hook-codex-pre-tool-use`, `hook-codex-permission-request`, `hook-codex-post-tool-use`, `hook-codex-pre-compact`, `hook-codex-post-compact`, `hook-codex-user-prompt-submit`, `hook-codex-subagent-stop`, `hook-codex-stop` | Generated from the independent ten-event Codex manifest; exact event output schema, matcher/input/timeout/platform/trust metadata, and no invented failure binding. |
+
+The Claude event name `hook-claude-worktree-create` is an inbound observation that an external host already created a worktree. It is not a TraceDecay worktree-create command, tool, use case, cleanup grant, or proof of TraceDecay ownership.
 
 All provider hook executables lower to one catalog-generated hidden binding:
 
@@ -517,9 +520,20 @@ pub struct CommandReceiptViewV2 {
     pub effects: Vec<EffectReceiptV2>,
     pub recovery: RecoveryDispositionV2,
 }
+
+pub struct WorktreeLifecycleViewV2 {
+    pub worktree: WorktreeSummaryV2,
+    pub external_creator: ExternalWorktreeCreatorProvenanceV1,
+    pub associations: CursorPage<TaskWorktreeAssociationViewV2>,
+    pub references: WorktreeReferenceSummaryV1,
+    pub eligibility: WorktreeCleanupEligibilityV1,
+    pub current_intent: Option<WorktreeCleanupIntentViewV2>,
+}
 ```
 
 Every content-bearing field is a plan-18 eligible wrapper or an explicit redacted/denied/unknown variant. `ApplicationResponse<T>` carries scope, snapshot, coverage, freshness, redactions, retention, limits, and warnings once.
+
+Worktree association and cleanup presentations never collapse candidate confidence, ambiguity, creator/source provenance, cleanup-grant authority, blockers, underlying references, preview digest/expiry, operation state, or receipt/failure/reconciliation into prose-only status. Ticket, CLI, MCP, HTTP, and SDK consume the same view; plan 11 may choose a compact card but cannot infer eligibility from an archived label or merged badge.
 
 ### 7.2 Human document IR
 
@@ -727,6 +741,28 @@ tracedecay task-graph edit clean <workspace-id>
 
 MCP exposes generated tools for export/get/validate/diff/rebase/submit/delete and the read-only template `tracedecay://v2/task-graph/edit-bundles/{workspace_id}`. Small authorized documents may be embedded; a bundle above the binding's plan-08 `SurfaceBudgetV1.max_inline_bytes` returns a compact Markdown summary plus `resource_link`, current `TaskGraphEditCandidateRefV1`, size/expiry, and the exact CLI/API continuation. Resources are never writable. Only `validate` accepts candidate bytes; diff/rebase/submit require the pinned candidate reference. Only the `tracedecay-work` `orchestrator` profile contains the mutating export/rebase/submit/delete bindings; tools-only hosts get cataloged same-use-case read fallbacks, not a generic dispatcher.
 
+Task-associated worktree lifecycle uses this exact generated CLI tree:
+
+```text
+tracedecay task-graph worktrees list --work-item <id>
+tracedecay project worktree list|show [<worktree-ref>]
+tracedecay project worktree discover [--repo <repository-ref>]
+tracedecay project worktree association list [--work-item <id>|--worktree <id>]
+tracedecay project worktree association diagnose --work-item <id>|--worktree <id>
+tracedecay project worktree association associate --work-item <id> --worktree <id>
+tracedecay project worktree association confirm|reject --association <id> --expected-version <n>
+tracedecay project worktree association reassign --association <id> --work-item <id> --expected-version <n>
+tracedecay project worktree cleanup inspect --worktree <id>
+tracedecay project worktree cleanup status [--intent <id>|--worktree <id>]
+tracedecay project worktree cleanup request (--intent <id>|--worktree <id> --preview-digest <digest>) --expected-lifecycle-generation <n> --confirm <token>
+```
+
+`discover` asks the daemon to ingest a bounded Git worktree-list/common-dir snapshot and reconcile hook/tool/CWD/thread/attempt/branch/commit/PR evidence. It records external creator/source provenance for agent/user/executor/Git/IDE/unknown origins; it never creates, provisions, moves, locks, or prunes a worktree. Candidate lists return deterministic score features, confidence, contradictions, and provenance. Associate/confirm/reject/reassign are idempotent expected-version commands; confirmation does not grant cleanup authority. Reconciliation/backfill is the same daemon discovery operation over an explicit evidence range, not a client database or filesystem scan.
+
+`cleanup inspect` is the sole preview-as-evidence binding. Human/Markdown output leads with `Eligible | Blocked | Unknown | AlreadyAbsent`, triggers, external creator/owner evidence, cleanup-grant state, dirty/active/unpushed/unmerged/open-PR/shared-reference blockers, lifecycle/reference/policy versions, preview digest/expiry, branch-preserved disposition, and exact safe continuation. JSON carries the identical typed view. `cleanup request` consumes an application-minted `WorktreeCleanupIntentId`/inspect digest, separate cleanup grant, expected versions, confirmation, and idempotency. It returns the shared `OperationRef`; only the daemon re-probes and performs the external effect. No flag accepts a deletion path, `--force`, branch deletion, or a shell/Git cleanup command. Archive and verified merged-PR events can update eligibility or admit a policy-authorized request only when the separate grant and all proofs are current; blocked triggers remain diagnostics and are not put into task triage.
+
+MCP generates the same `worktrees.discover|list|get`, `task_worktree_associations.list|diagnose|associate|confirm|reject|reassign`, and `worktree_cleanup.inspect|status|request` bindings plus read-only `tracedecay://v2/worktrees/{worktree_id}` and `tracedecay://v2/worktree-cleanups/{intent_id}` resources. The `tracedecay-context` profile may expose only bounded read/list/diagnose/inspect views. The `tracedecay-work` `orchestrator` profile may expose association decisions and cleanup request when its explicit grant ceiling permits; operator may expose discovery/reconciliation and cleanup request. Tool results use compact Markdown plus canonical `structuredContent`, pages retain cursors/coverage/watermarks, long blocker/reference evidence uses retrieval anchors, and long-running cleanup uses MCP progress/cancellation/protocol-task augmentation around the same `OperationRef`. No profile exposes a worktree-create tool or filesystem deletion instruction.
+
 This taxonomy is a target navigation model, not authorization to rename everything at once. Each current path receives an alias/cutoff migration, generated replacement, and differential fixture. Frequently used native paths may stay short when their meaning is already canonical.
 
 ### 9.2 Help and discovery
@@ -756,6 +792,8 @@ tracedecay help schema <binding> [--format json]
 ```
 
 Search covers names, stable IDs, old aliases, intents, task-fit phrases, inputs, outputs, product views, and skills. Unavailable capabilities remain visible with one reason and one remediation. “No result” is never used for unavailable/denied discovery.
+
+Worktree lifecycle discovery explicitly distinguishes external-worktree observation, association decisions, cleanup-grant authority, read-only inspect/diagnose, and confirmed cleanup request. Help for every association/cleanup binding states “does not create a worktree”; request help additionally states that the daemon—not the CLI/MCP client—re-probes and performs the effect, preserves the branch, and refuses missing/current blockers.
 
 ### 9.3 Hints and skills
 
@@ -866,6 +904,8 @@ The generated observation subtree is exactly `dirty-scopes list`, `admissions li
 Wipe, source cleanup, protected-data retirement, unsafe migration cutover, or external side effects can require an explicit confirmation token and current-version revalidation. Their names and receipts must describe the real effect. “Apply” and “rollback” are not generic framework verbs; use a domain command such as `migration cutover`, `migration recover`, or `project retire` where that is the actual operation. Move-symbol follows the same rule: `code.move_symbol.inspect` is a read-shaped preflight and `code.move_symbol.commit` is the confirmed mutation; both call plan 09's registered boundary and never select a transport-generic preview/apply mode.
 
 Split-store consolidation follows the stricter plan-01/02/#425 workflow. The confirmation challenge binds both frozen source manifests, canonical platform locators, reservations, dual backup receipts, disposition plan, and destination. Start/resume never accepts an ambient current store; cutover is unavailable until the exhaustive verification view reports all required proofs, including remapped LCM source-edge integrity. Cancellation after an uncertain external/cutover effect enters typed reconciliation instead of claiming rollback.
+
+Worktree cleanup follows plan 16's narrower lifecycle. Discovery/list/show/diagnose/inspect/status are read or observation/reconciliation bindings as cataloged; association decisions are direct expected-version commits; cleanup request is `ConfirmedDestructive` plus a resumable `OperationRef`. The confirmation challenge binds exact `WorktreeId`, Git admin/common-dir identity, lifecycle/association/reference/policy versions, separate cleanup grant, eligibility/preview digest, trigger set, blockers-empty proof, and branch-preserved effect. The daemon repeats the proof immediately before mutation. Missing, stale, dirty, active, unpushed, unmerged, shared, ambiguous, or changed evidence returns a typed blocker/conflict; it never downgrades to force or tells the client to delete a path.
 
 ## 12. Errors, status, stdout, stderr, and exit codes
 
@@ -1151,6 +1191,7 @@ The parity matrix has one row per use case and one column per applicable binding
 - deterministic generation across map order, locale, timezone, width, platform path separators, and host capability sets.
 - snapshot `mcp-surface-profiles.json` and prove every profile is an explicit sorted `BindingId` set with the correct logical registration, effect/grant/host ceiling, eager tools-only fallback projection, count/token budget, and digest; inject a glob, cross-registration binding, implicit operator install, generic invoke binding, and over-budget definition and require named failures;
 - assert exactly seven task edit-bundle use cases and one generated binding disposition per supported surface, with export/rebase/submit/delete absent from context/task-worker profiles and present only in `tracedecay-work`/`orchestrator`.
+- assert one generated disposition for every worktree discovery/list/get, association list/diagnose/associate/confirm/reject/reassign, and cleanup inspect/status/request binding; inject create/provision/path-delete/force/branch-delete aliases and require catalog-generation failure.
 
 ### 19.2 Every-tool format conformance
 
@@ -1184,6 +1225,7 @@ For every mutation/internal tool, assert effect class, auth, idempotency/version
 - Run core-only, every allowed zero/one/many facade-component combination, explicit headless facade-only deployment, each logical registration/profile pair, eager tools-only fallback, and native deferred discovery against the same labelled role corpus. Assert role-required binding coverage, zero cross-profile/operator leakage, definition budgets, exact CLI/API fallback when absent, one thin integration-binary/private-daemon/application path, and no semantic difference by discovery mode.
 - Change prompt intent during an open connection and assert the tool set/profile digest does not change. Exercise genuine catalog/availability/grant changes and assert coalesced `listChanged` never widens beyond the pinned profile; a requested profile change returns reconnect guidance.
 - Exercise `task_graph.edit_bundles.export|get|validate|diff|rebase|submit|delete`: small inline and large resource-link reads, tools-only read fallback, Markdown-default and explicit-JSON diagnostics equality, resource immutability, stale base/rebase conflict, submit idempotency/atomicity, and orchestrator-only mutation authorization.
+- Exercise worktree lifecycle tools/resources through context/work/orchestrator/operator profiles: external creator provenance, deterministic candidates, ambiguity, association revisions, cleanup-grant separation, blocker/reference pagination, inspect digest, request operation progress/cancel/resume/reconciliation, canonical structuredContent/Markdown equality, resource immutability, and zero create/provision/client-delete binding.
 - Run the exact canonical search-evaluation family through generated CLI, MCP tools, MCP resources/templates, HTTP/SDK, and Search Quality UI metadata. Assert every read/command appears once, resources are read-only, list/get share typed views, fixture promotion has no invented fixture read, and no alias is emitted.
 - Run `automation.dirty_scopes.list` and `automation.admissions.list|get` through generated CLI, MCP tools/resource template, HTTP/SDK, and dashboard metadata. Assert one catalog mapping per declared primitive and exactly the primitive set above, exact receipt/episode and frontier parity, generic retry/circuit/quarantine types, no fake run, no fourth operation/alias, and no `run-now` identical-input bypass.
 - Run the generic experiment family through CLI, MCP tools/resources/progress/cancellation/protocol tasks, HTTP/SDK, and every Playground route. Assert one draft/create/run/status/cancel/resume/retry/minimize lifecycle, identical experiment/run/cell/stage/comparison/comparison-cell/reduction coordinates/anchors/receipts, `replay_stages.list(cell)` returning exact `ReplayTraceV1`, one top-level filtered list operation per resource, no per-lab run tool, no protocol-task/work-item ID confusion, and no MCP sampling without the explicit experiment model/egress grant.
@@ -1205,6 +1247,7 @@ For every current and V2 command path:
 - shell-safe examples and stdin/file payload behavior;
 - current `cost --export` invalid-format nonzero regression.
 - every `task-graph edit start|get|validate|diff|rebase|submit|clean` path, managed-directory versus caller-owned archive output, validate-only upload, pinned-candidate continuation, exact nonzero validation/conflict exits, and no public generic `invoke` command.
+- every task-graph/project worktree discovery/list/association/diagnose/cleanup path, expected-version/idempotency/confirmation exits, `--cursor` pages, `--json` equality, operation status/reconciliation, absence of create/provision/path/force/branch-delete flags, and proof the CLI performs no Git/filesystem mutation itself.
 
 ### 19.4 Cross-transport semantic parity
 
@@ -1216,6 +1259,7 @@ Run one canonical fixture per use case through the hermetic in-process applicati
 - cursor/restart/retrieval anchors;
 - error code/retry/candidates/current version/operation;
 - command effect/idempotency/audit/recovery;
+- worktree creator/source provenance, association candidate/decision state, cleanup-grant authority, reference subjects/counts, eligibility/blockers, intent/receipt/failure/reconciliation, and branch-preserved effect;
 - autonomous curation policy/run/outcome views;
 - configuration effective values/provenance/impact;
 - Git local/live/joined truth.
@@ -1247,6 +1291,7 @@ Session commands/tools use generated `SessionLocatorV1` unchanged. Canonical IDs
 - identity-cutover conflict returns the same candidates/remediation through CLI/MCP/HTTP.
 - 64 concurrent CLI/MCP/API/dashboard freshness requests join one operation; leader death, cancellation, partial source failure, and terminal error are byte-equivalent semantic outcomes, and no waiting adapter reports completion from a process-local notification alone.
 - edit bundles at maximum item/edge/body size, concurrent plan-version change, active lease, cycle/dangling reference, validation cancellation, rebase conflict fanout, submit kill points, staged-payload GC, and indexed expiry cleanup without a full-bundle scan.
+- worktree inventory/reconciliation across thousands of Git admin records and tasks; duplicate/reordered hook/CWD/attempt/PR/archive/merge observations; ambiguous correlation; stale/orphan horizons; dirty/active/unpushed/unmerged/shared/unknown blockers; association/eligibility CAS races; identity change after inspect; daemon crash before/after external effect; and deterministic intent/receipt recovery without branch deletion or task-triage creation.
 
 ## 20. Implementation slices inside the existing master program
 
@@ -1269,6 +1314,7 @@ These are sub-slices of existing PRs, not a separate architecture track.
 - Extend the capability catalog with formats, presentation IDs, effect modes, exit classes, stream/export support, cursor/anchor, budgets, component-set/install-scope/profile selection, `McpSurfaceProfileV1`, and the complete MCP primitive/capability/task/subscription/completion contract.
 - Generate `mcp-protocol.json`, `mcp-surface-profiles.json`, tools with input/output schemas, resources/templates, prompts, completion eligibility, list generations, CLI schemas/help/docs, and parity matrix; reject every duplicate allowlist, profile glob, cross-trust binding, generic invoke tool, or budget overflow.
 - Catalog the exact task edit-bundle family and profile visibility, including the large-bundle resource-link contract and typed diagnostics/diff/receipt presentations.
+- Catalog the exact external-worktree discovery/association/diagnose and cleanup inspect/status/request family, effect/grant/profile ceilings, cursors/SSE links, blockers/receipts, and forbidden create/provision/client-delete aliases.
 - Catalog `integrations.list|get|diff|status|install|update|repair|uninstall|verify`, their admin/effect/operation/output contracts, operator-only optional MCP exposure, and the internal `host-event ingest` binding; generate no legacy alias tool.
 
 ### PR 24A companion — sealed typed application views
@@ -1278,6 +1324,7 @@ These are sub-slices of existing PRs, not a separate architecture track.
 - Carve autonomous curation and direct configuration out of any generic preview/apply command abstraction.
 - Add sealed integration inventory/detail/difference/status views and the one application-owned operation lifecycle; root composition remains only the deployment/probe/config effect port.
 - Reuse the generic operation and structured-staging kernel for protected task edit bundles; compile submit into canonical plan/work-item/edge commands and add no document-specific scheduler, retry engine, or task store.
+- Reuse canonical task relations/events, generic operations, outbox, audit, and retention for worktree association and cleanup lifecycle views; add no cleanup database/service, triage work item, or client mutation port.
 
 ### PR 24E0–24E8 companion — daemon-only execution, pure presentation, and generated adapters
 
@@ -1289,6 +1336,7 @@ These are sub-slices of existing PRs, not a separate architecture track.
 - Cut MCP tools, structured results/errors, resources/templates, prompts/completion, roots/logging/list changes, progress/cancellation, then protocol tasks and explicitly authorized sampling/elicitation; each capability lands only with its conformance/host matrix.
 - Cut CLI and MCP semantic domains over one at a time with application/presentation differential tests; wire behavior remains transport-native.
 - Normalize stdout/stderr/exits, format switches, scope builders, help, cursors, and retrieval anchors.
+- Generate worktree lifecycle CLI/MCP bindings and ticket/API/SSE parity together; daemon-only cleanup request remains one operation across progress, polling, cancellation, and recovery.
 
 ### PR 24D/API companion — official clients and documentation
 
@@ -1369,6 +1417,8 @@ The fence test is supplemented by a parser that requires an even fence count and
 - [ ] Profile sets contain no globs or generic invoke/god tool, stay inside eager-host count/token budgets, never switch per turn, and use `listChanged` only for real changes inside the pinned profile; deferred tool search is optional.
 - [ ] `task_graph.edit_bundles.export|get|validate|diff|rebase|submit|delete` is the sole complex bulk-edit family; CLI exposes `task-graph edit start|get|validate|diff|rebase|submit|clean`, only validate uploads a sharded directory/archive, later stages consume one pinned `TaskGraphEditCandidateRefV1`, large MCP bundles return authorized resource links, and only `tracedecay-work`/`orchestrator` exposes edit mutations.
 - [ ] Frontmatter Markdown has closed schemas and source-spanned typed diagnostics; validate/diff are nonauthoritative, rebase reports conflicts, submit is one expected-version/idempotent owner-shard transaction, and safe cleanup never deletes caller-owned or replaced files.
+- [ ] Externally created worktrees have generated discover/list/get and task-association list/diagnose/associate/confirm/reject/reassign bindings with provenance/confidence/ambiguity/reconciliation; no create/provision-worktree capability exists.
+- [ ] Cleanup inspect/status/request has exact CLI/MCP/HTTP/SDK/dashboard parity, stable cursor/output/SSE semantics, separate cleanup-grant authority, dirty/active/unpushed/unmerged/shared/unknown blockers, CAS/idempotency, daemon re-probe, operation receipts/failures/reconciliation, and branch preservation. Blocked triggers are diagnostics, not task triage.
 - [ ] The canonical search-evaluation reads/commands have exact generated CLI/MCP/resource/HTTP/SDK/Search Quality UI parity, with read-only resources and zero invented aliases/use cases.
 - [ ] Automation dirty-scope/admission list/get reads have exact generated CLI/MCP/resource/HTTP/SDK/dashboard parity; coalesced skip episodes preserve evaluation-time/frontier tuples and stable anchors, current/considered/consumed/included frontiers remain explicit, shared health/reconciliation state is not forked, and run-now cannot bypass identical-input fencing.
 - [ ] The generic experiment draft/create/run/status/cancel/resume/retry/minimize and experiment/run/cell/stage/comparison/comparison-cell/reduction list/get reads have exact CLI/MCP/HTTP/SDK/dashboard parity; every lab is a catalog evaluator, not a second tool or lifecycle family.

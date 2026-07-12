@@ -692,13 +692,15 @@ Build a private, sanitized, versioned corpus from authorized local history:
 6. direct user prompt versus copied subagent/delegation/tool/schema rows;
 7. parent/child/workflow duplication and agent-overlap coordination;
 8. raw versus summary-DAG versus compaction replay;
-9. cross-project Rspack/Rsbuild/React Router and sibling-plugin investigations;
+9. heterogeneous cross-project investigations, including one frozen Rspack/Rsbuild/React Router and sibling-plugin regression slice;
 10. exact error/path/API/config/tool/session/commit/PR identifiers;
 11. conceptual paraphrases, misspellings, aliases, and renamed projects;
 12. expected no-answer, wrong-scope, partial-shard, locked/redacted, and stale-index cases;
-13. provider conformance across Codex, Claude, Cursor, Hermes, and every supported provider with sufficient data;
+13. provider-neutral conformance across at least four provider/source families, retaining Codex, Claude, Cursor, and Hermes fixtures where authorized data exists;
 14. hint-engine retrieval envelopes and background-intelligence proposals from Plan 22;
-15. task/ticket context packets, initiatives, dependencies, work claims, and relevant-versus-irrelevant sibling summaries, including cross-repository Rspack/Rsbuild/React Router work.
+15. task/ticket context packets, initiatives, dependencies, work claims, and relevant-versus-irrelevant sibling summaries across unrelated multi-repository systems, including the named frozen slice.
+
+The corpus must be heterogeneous across repository ecosystems, project topology, provider/source family, activity volume, checkout availability, and failure state. It includes independent repositories, monorepo/package scopes, upstream/fork/downstream relations, missing live checkouts, provider-absent projects, partial/conflicted stores, and no-answer cases. Named live repositories and provider stores are optional evidence inputs and never a product-default gate; frozen redacted fixtures carry their regression coverage.
 
 Queries are frozen at an `available_at` cutoff. Candidates, summaries, branches, facts, corrections, and labels created later cannot enter a historical replay. Replay also rebuilds index statistics (for example BM25 document frequencies) from the frozen `available_at < t` corpus, so ranking features cannot leak future corpus statistics.
 
@@ -709,7 +711,7 @@ The frozen research corpus this program draws on is pinned by its owner, plan [`
 Before any V2 default ranking claim:
 
 - at least 500 real query episodes;
-- at least 12 registered projects, including TraceDecay, Rspack, Rsbuild, React Router, and `rsbuild-plugin-react-router` when stores are available;
+- at least 12 authorized projects spanning at least four unrelated repository ecosystems and at least four topology/failure classes; no named repository or live checkout is required;
 - at least 4 provider families and an explicit coverage report for every supported provider;
 - at least 100 current-versus-historical/supersession cases;
 - at least 100 cross-project/worktree/ref cases;
@@ -978,6 +980,8 @@ Import read-only, idempotently:
 - duplicate/identity-conflict stores as separate observed sources until explicit consolidation.
 - shipped `user-sessions.db`/`user-memory.db` and legacy rows whose `project_key="user"` as compatibility sources; lower the sentinel only to typed Profile activity or ZeroProject when source evidence proves that ownership, preserve the original alias/provenance, and quarantine ambiguous/mixed/project evidence rather than retaining `user` as canonical identity.
 
+External provider/host stores are read-only evidence inputs. A separately approved bounded import writes only sanitized observations into TraceDecay-owned storage with owner, reason, evidence, and rollback; it never mutates, relocates, or deletes the source. Hermes-owned transcripts, LCM data, board databases, caches, and backups remain Hermes-owned regardless of TraceDecay route or retention state.
+
 Each imported row gets source/store identity, sanitization status, occurrence ID, owner route, temporal fields, and parity receipt. Missing provenance becomes `unknown`, not guessed. Two explicit escape hatches keep the import honest:
 
 - V1 summary nodes whose source ranges cannot be proven import as `SummaryStatus::imported_unverified` (§6.1) rather than failing DAG validation or fabricating coverage; they stay stale for current mode until re-summarization over verified sources.
@@ -1121,7 +1125,7 @@ Application/API/UI use the shared Plan 09/10/11/21 locations. Root V1 adapters l
 
 ### Provider/transport/UI tests
 
-- Codex, Claude, Cursor, Hermes, and remaining provider fixtures normalize origin, role, Turn, parent/child, and tool results consistently;
+- at least four heterogeneous provider/source-family fixtures normalize origin, role, Turn, parent/child, and tool results consistently; retained Codex, Claude, Cursor, and Hermes fixtures are named coverage, not required live providers;
 - CLI/MCP/API/SDK produce equivalent typed JSON and Markdown default behavior;
 - merged #445/#448 fixtures run user-scoped message search and LCM from `/`, Hermes home, unrelated CWD, and project CWD with no project route/handshake/init; missing registry/source reports typed unavailable coverage; every legacy scalar-user-plus-compatibility-project spelling, including `project_key`, fails identically; appended zero-project and registered-project source rows prove routing; 64 joiners receive the leader's exact terminal coverage/error; no-op/failure never reports refresh performed; and canonical Profile+Project reads remain valid;
 - Markdown and JSON disclose limit/truncation/cursor/coverage/conflict/stale state;
@@ -1132,7 +1136,7 @@ Application/API/UI use the shared Plan 09/10/11/21 locations. Root V1 adapters l
 
 - lexical-only and optional-model cold/warm benchmarks at current and 10x manifest scale;
 - fan-out, cancellation, slow/missing/conflicted shard, and loaded-daemon concurrency;
-- current 30-project cold Hermes history refresh completes in ≤60 seconds with one provider-source sweep, bounded source-open/read-byte/RSS counts, explicit progress, and second-refresh zero additions; query latency is measured separately and includes no ingestion work;
+- a frozen 30-project cold provider-history workload completes in ≤60 seconds with one source sweep, bounded source-open/read-byte/RSS counts, explicit progress, and second-refresh zero additions; the captured Hermes workload remains one fixture, while live Hermes availability is optional and non-gating; query latency is measured separately and includes no ingestion work;
 - token/byte/result/context ceilings, durable retrieval-anchor recovery, and legacy response-handle regression behavior;
 - secret/query-log leakage, keyed fingerprint isolation, prompt-injection labeling, deletion/cache invalidation, and unauthorized hydration.
 

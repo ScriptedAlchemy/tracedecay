@@ -286,6 +286,12 @@ pub struct JudgmentRecordV1 {
 - Owning store: the active profile's activity shard, inside plan [`02-store-crate.md`](02-store-crate.md)'s protected evaluation table family. This is a privacy/authorization family, not another physical shard; committed fixtures remain redacted/synthetic only.
 - Plan 23 §8.3 consumes the typed `SecondaryLabelsV1` dimensions above for session-temporal cases and defines no second label or judgment record.
 
+### 5.5 Semantic goldens versus cardinality-faithful load/eval data
+
+Two fixture lanes are intentionally separate. Small hand-reviewed semantic/provider goldens prove exact identity, cutoff, origin, provider-wire, ranking, explanation, privacy, and no-answer behavior; their compact manifest cannot support a scale, distribution, or promotion-evidence claim. A deterministic cardinality-faithful generator separately builds the current/10× load/eval corpus from a fixed seed and schema version. It emits unique, referentially linked project, message, event, symbol, branch/ref/snapshot, retrieval-anchor, relation, and payload identities, including declared cross-project and temporal links; reusing one placeholder ID or payload across nominal rows is a fixture failure.
+
+The generator records expected count and histogram assertions for projects, providers, messages, events, symbols, branches, refs/snapshots, anchors/relations, payload sizes, origin/time/retention classes, fan-out, selectivity, and missing/partial/no-answer cases. Verification recomputes those distributions by decoding and joining the emitted records, then compares them to the checked expectations. Coverage is derived from record content and resolvable links, never accepted from manifest tags, filenames, generator branch labels, or requested-count metadata. Synthetic generated rows exercise load/evaluation mechanics but never count toward §7.1's real-query or human-grounded promotion minimums.
+
 ## 6. Metrics
 
 ### Retrieval quality
@@ -392,6 +398,7 @@ This plan owns no module tree. Ranking, fusion, and evaluation-metrics code live
 | Bounded rerank stage (§4.4) | `rank/rerank.rs` |
 | Explanations (§8) | `rank/explain.rs` + `explain.rs` |
 | Corpus/cutoff/pool/qrels/metrics/strata/agreement/ablation/report (§§5–7, §11) | `eval/{corpus,cutoff,pool,qrels,metrics,strata,agreement,ablation,report}.rs` — `eval/metrics.rs` is the single metrics implementation, shared with plan 23 §8.5 |
+| Cardinality-faithful deterministic load/eval generation (§5.5) | `eval/load_fixture.rs` plus record-derived distribution assertions in `tests/retrieval_eval_load.rs`; semantic/provider goldens remain in focused channel/provider fixtures |
 
 Companion ownership:
 
@@ -408,6 +415,7 @@ Companion ownership:
 
 - Implement the private corpus/qrel stores per the §5.4 `JudgmentRecordV1` contract, stable anchors, time cutoff, strata, pooling, labels, metrics, agreement, aggregate/redacted reports.
 - Capture the six-query probe plus exact identifier, typo, no-answer, cross-project, provider, Git, memory, and nearby-agent fixtures.
+- Keep those small semantic/provider goldens separate from the fixed-seed cardinality-faithful generator. Generate unique linked project/message/event/symbol/branch/ref/snapshot/anchor/relation/payload identities at current and 10× envelopes; recompute and assert every §5.5 distribution from decoded record content, and fail if a manifest tag is the only coverage evidence.
 - Benchmark current production and fielded BM25 without changing default search.
 
 ### Companion requirements for PR 13B: Exact/phrase/BM25, origin/kind fields, self-echo, clustering
@@ -442,6 +450,7 @@ Companion ownership:
 - `cargo test -p tracedecay-query --test retrieval_exact --test retrieval_fuzzy --test retrieval_hybrid`.
 - `cargo test -p tracedecay-query --test retrieval_cutoff --test retrieval_privacy --test retrieval_ids`.
 - `cargo test -p tracedecay-query --test retrieval_eval --test retrieval_agreement --test retrieval_ablation`.
+- `cargo test -p tracedecay-query --test retrieval_eval_load` — fixed-seed current/10× generation is byte-identical, all linked identities resolve uniquely, and record-derived count/distribution assertions match.
 - `cargo bench -p tracedecay-query --bench retrieval_pipeline` on current and 10x manifest-derived corpora.
 - Search/API/frontend E2E for native expansion, explanation, no-answer, partial/locked shard, label command, lab no-write, and deterministic aggregate export.
 
@@ -451,6 +460,7 @@ Every report records commit, corpus/qrel/cutoff, query/retrieval profile, tokeni
 
 - Current exact search remains available, explainable, and non-regressed.
 - Real local cross-project queries are frozen, time-safe, privately judged, stratified, and reproducible by stable anchors.
+- Small semantic/provider goldens prove behavior without masquerading as load coverage; the deterministic load/eval generator has unique linked identities and record-derived cardinality/distribution assertions, and contributes no synthetic rows to promotion minimums.
 - The default profile beats lexical baselines on predeclared precision/usefulness metrics without hiding worst-stratum, no-answer, privacy, latency, or resource regressions.
 - Duplicate child prompts, protocol/tool/query echoes, wrong-project/time results, and stale summaries have explicit metrics and inspected regressions.
 - Embeddings, learned sparse, graph expansion, late interaction, expansion, recency, and reranking remain separately ablatable/removable.
