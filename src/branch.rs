@@ -226,10 +226,9 @@ mod default_branch_tests {
         std::fs::create_dir(&data_dir).unwrap();
         std::fs::write(data_dir.join(crate::config::DB_FILENAME), b"graph").unwrap();
 
-        let error = match prepare_branch_tracking_in_layout(&project_root, "trunk", &data_dir).await
-        {
-            Ok(_) => panic!("detached legacy store must not invent a default branch"),
-            Err(error) => error,
+        let Err(error) = prepare_branch_tracking_in_layout(&project_root, "trunk", &data_dir).await
+        else {
+            panic!("detached legacy store must not invent a default branch")
         };
 
         assert!(error.to_string().contains("default branch is unknown"));
