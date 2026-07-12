@@ -74,6 +74,9 @@ jobs:
       - name: Test release workflow contract
         run: bash tests/release_workflow_contract_test.sh
 
+      - name: Test local dogfood command contract
+        run: bash tests/dogfood_command_test.sh
+
       - name: Check release version drift
         run: scripts/check-release-drift.sh
 
