@@ -1,5 +1,7 @@
 # TraceDecay V2 Incremental Context Scout and Suggestion Envelope Plan
 
+**Plan 32 integration:** native workflow/run/node/history evidence may inform one bounded advisory suggestion under the existing authorization, relevance, dedupe, silence, and anchor gates. A suggestion never becomes workflow input, signal, required steering, scheduling/readiness authority, taskgraph compilation, or completion evidence; only an explicit authorized Plan-32 steering command can cross that boundary.
+
 > Status: implementation-grade design; no production code is changed by this plan.
 >
 > Product rule: the scout is optional, asynchronous, advisory, evidence-bound, and silent by default. It may prepare context while an agent works, but it never makes a hook wait for a model or invents generic TraceDecay availability text.

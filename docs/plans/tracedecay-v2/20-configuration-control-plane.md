@@ -1,5 +1,7 @@
 # TraceDecay V2 Configuration Control Plane Implementation Plan
 
+**Plan 32 integration:** register every Plan-32 compiler/engine profile and placement, runtime/history/schema/job limits, concurrency/budget/fork/cache/source-root/watcher/retention/taskgraph-candidate/remote setting with the same owner, scope, source, validation, restart/reindex impact, and four-axis state used elsewhere. UI/CLI/API expose typed policy choices, never raw engine flags or hidden SDK/plugin defaults.
+
 > **For agentic workers:** implement this plan in the program order below. Every slice must preserve the contract, privacy, scope, transport-parity, and migration gates before the next slice becomes the default.
 
 **Goal:** Replace TraceDecay's scattered files, flags, environment variables, dashboard toggles, provider metadata, hook defaults, daemon settings, and hidden constants with one typed, versioned configuration control plane. Every user-controllable non-secret setting is discoverable, searchable, explainable, and editable in the Brain Settings workspace and through generated CLI, MCP, HTTP, and SDK bindings.

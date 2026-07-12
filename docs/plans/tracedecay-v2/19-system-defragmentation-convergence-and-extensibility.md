@@ -1,5 +1,7 @@
 # TraceDecay V2 System Defragmentation, Convergence, and Extensibility Plan
 
+**Plan 32 integration:** `tracedecay-workflow` is the one newly admitted pure package because it creates a deterministic replay/validation and taskgraph-compiler firewall consumed independently by application and root engine/compiler adapters. It may depend only on domain and repository-standard pure support crates; JavaScript/TypeScript engines, compiler implementations, stores, schedulers, executors, transports, and UI remain outside. The architecture manifest raises the ceiling from 11 to 12 for this named package only and retains every other merger/deletion gate.
+
 **Status:** program-level implementation blueprint; this document changes no product code, data, store, or protocol.
 
 **Parent plan:** [`../2026-07-09-tracedecay-brain-rewrite.md`](../2026-07-09-tracedecay-brain-rewrite.md)
@@ -229,7 +231,7 @@ Required convergence:
 
 Catalog generation produces CLI metadata, MCP schemas, OpenAPI/JSON Schema references, SDK method manifests, dashboard action metadata, skill/hint discovery, docs, and drift tests. It does not generate business behavior; every binding resolves to one application use case.
 
-The plan-27 host-bundle compiler is a pure module family inside `tracedecay-tool-catalog::host_bundles`, not a new crate, package, registry, or semantic manifest. It lowers the same `HostIntegrationManifestV1` and catalog snapshot into deterministic per-host/package trees, signed-manifest inputs, component/source maps, capability/difference/conformance reports, and stock-host fixtures. It performs no host discovery, filesystem/config mutation, marketplace publication, credential access, process launch, or install state transition. The root-private `v2::host_deploy` adapter alone probes hosts and applies the compiler's resolved artifacts through application operations, protected backups, atomic replacement, verification, compensation, and receipt-owned removal. This split preserves the eleven-package ceiling and makes package generation reusable without moving privileged host mechanics into the catalog crate.
+The plan-27 host-bundle compiler is a pure module family inside `tracedecay-tool-catalog::host_bundles`, not a new crate, package, registry, or semantic manifest. It lowers the same `HostIntegrationManifestV1` and catalog snapshot into deterministic per-host/package trees, signed-manifest inputs, component/source maps, capability/difference/conformance reports, and stock-host fixtures. It performs no host discovery, filesystem/config mutation, marketplace publication, credential access, process launch, or install state transition. The root-private `v2::host_deploy` adapter alone probes hosts and applies the compiler's resolved artifacts through application operations, protected backups, atomic replacement, verification, compensation, and receipt-owned removal. This split preserves the twelve-package ceiling and makes package generation reusable without moving privileged host mechanics into the catalog crate.
 
 ### 4.7 Application command/query layer
 
@@ -326,6 +328,7 @@ crates/
 ├── tracedecay-policy/          # pure versioned evaluators and replay
 ├── tracedecay-tool-catalog/    # capability IR, validation, generators, runtime snapshot
 │   └── src/host_bundles/       # pure canonical-manifest -> host package compiler/conformance artifacts (plan 27)
+├── tracedecay-workflow/        # pure Plan-32 IR, replay, validation, call identity, taskgraph candidate compiler
 ├── tracedecay-application/     # commands, queries, workflows, ports, typed status/errors
 └── tracedecay-client/          # official Rust transport client over generated public contracts only
 src/                            # root binary/composition, CLI/MCP/daemon/install/update, V1 adapters
@@ -340,7 +343,7 @@ packages/tracedecay-client/     # official TypeScript client independent of dash
 python/tracedecay-client/       # official typed sync/async Python client
 ```
 
-The target contains at most 11 Rust packages including root and `tracedecay-client`. Plans 07, 10, 21, 27, and 28 retain separate design documents because hook, API, presentation, cross-host bundle, and protected remote-transport contracts need independent ownership/tests, but host-bundle compilation remains a `tracedecay-tool-catalog` module and deployment/remote transport remain root-private modules; none becomes a separately published Rust package. Do not create a generic `core`, `common`, `utils`, `services`, `plugin`, `host-bundles`, or `remote-store` crate. Shared code moves to the package/module that owns its invariant. A new package requires:
+The target contains at most 12 Rust packages including root and `tracedecay-client`; `tracedecay-workflow` is the sole new admission above the prior ceiling and its compiler/engine implementations remain root-private. Plans 07, 10, 21, 27, and 28 retain separate design documents because hook, API, presentation, cross-host bundle, and protected remote-transport contracts need independent ownership/tests, but host-bundle compilation remains a `tracedecay-tool-catalog` module and deployment/remote transport remain root-private modules; none becomes a separately published Rust package. Do not create a generic `core`, `common`, `utils`, `services`, `plugin`, `host-bundles`, or `remote-store` crate. Shared code moves to the package/module that owns its invariant. A new package requires:
 
 - at least two independent production consumers **or** a demonstrated optional-heavy, deployment, publication, or public-client dependency firewall;
 - a coherent domain or deployment boundary;
@@ -696,7 +699,7 @@ CI/reporting records file/function/complexity deltas, new public items, new depe
 
 - PR 1 freezes `footprint-baseline.json`; every implementation PR emits a comparable delta and classifies work as `parity_replacement`, `net_new_product`, `generated`, `migration_only`, or `test_fixture`.
 - A parity-replacement lane cannot cut over until handwritten live V2 lines are lower than the V1 plus adapter lines it retires. Generated output is reported separately with generator handwritten size and generation time; generated bulk cannot manufacture a favorable ratio.
-- Every new package, public item, dependency/feature, table/index/trigger, background worker, cache, and durable file family names the existing mechanism it replaces or a net-new requirement. Package count is capped at 11 including root/client; a new package requires a reviewed merger alternative and another package removal or ceiling ADR.
+- Every new package, public item, dependency/feature, table/index/trigger, background worker, cache, and durable file family names the existing mechanism it replaces or a net-new requirement. Package count is capped at 12 including root/client and the explicitly admitted `tracedecay-workflow`; any further package requires a reviewed merger alternative and another package removal or ceiling ADR.
 - Rust-scoped duplicate-body scanning gates live V2 production code. Definite duplicates longer than ten lines must be extracted/declarativized/deleted or receive a narrow generated/performance-isolation waiver; unreliable cross-language/TSX similarity signals remain advisory until labeled.
 - `cargo tree -d`, feature unification, artifact-size, idle-RSS/startup, and clean/hot-build reports prevent equivalent dependency stacks or adapter packages from hiding footprint. Default binary and idle RSS target <=1.25x V1, hot rebuild <=1.25x, clean build <=1.5x on the frozen reference machine.
 - Root loses V1 composition and adapter lines monotonically after each cutover. A wrapper around unchanged V1 code counts as adapter debt, not deleted code.
@@ -784,7 +787,7 @@ For split identity/store/session/graph cases:
 | Error/status/config parity | Registered variants with mappings on all supported surfaces | 100% |
 | Dependency cycles/forbidden imports | Violations in workspace/module graph | 0 |
 | Complexity debt | Non-waived hard file/function/complexity violations introduced by V2 | 0 |
-| Rust package count | Published/workspace Rust packages including root and official client | <=11; no package for root-only adapters |
+| Rust package count | Published/workspace Rust packages including root and official client | <=12; only `tracedecay-workflow` is newly admitted and root-only adapters remain modules |
 | Negative-code parity | Cut-over parity lanes whose handwritten V2 is not smaller than retired V1+adapter code | 0 non-waived |
 | Definite duplicate bodies | Live V2 production pairs >10 lines classified definite by the Rust-scoped labeled scanner | 0 non-waived |
 | Infrastructure engine count | Unregistered registry/encoder/projector/operation/host-install/extractor-driver/render/page/problem engines | 0 |
@@ -847,7 +850,7 @@ These slices are program gates mapped into the master plan’s PRs, not a compet
 ### C0 — Phase 0 architecture inventory and ownership lock (`PR 1`, `PR 3`)
 
 - Generate the inventories in Section 2.3 from the accepted master base.
-- Author and lock checked `architecture-boundaries.toml`, then generate its DAG/owner/release/deletion reports; record package-admission/merger decisions, the <=11-package ceiling, and the root-private hook/presentation/API/remote-Brain-transport module boundaries.
+- Author and lock checked `architecture-boundaries.toml`, then generate its DAG/owner/release/deletion reports; record the explicit `tracedecay-workflow` admission, the <=12-package ceiling, and the root-private hook/presentation/API/remote-Brain-transport module boundaries.
 - Add ADRs for canonical planes, ownership, DAG, config/error/status governance, shared mechanism map, extension tiers, complexity/negative-code/footprint budgets, and adapter expiry.
 - Baseline convergence scorecard and historical failure links (plan 14 `FM-###` row IDs).
 - Freeze representative semantic parity fixtures without private content.
@@ -967,7 +970,7 @@ Convergence requires one manifest vocabulary carrying model/revision/artifact, t
 - [ ] Redaction is one mandatory typed boundary; no optional/provider/memory/output-specific path can bypass it.
 - [ ] Extension SPIs are bounded, versioned, budgeted, provenance-rich, sandboxed by trust tier, and incapable of bypassing scope/privacy/effect rules.
 - [ ] Crate dependency DAG has zero cycles and zero non-waived forbidden edges.
-- [ ] Workspace contains at most 11 Rust packages including the root package and official client crate; root emits thin `tracedecay` plus private `tracedecayd` binaries without another package. Hook, presentation, API, service-identity/local-transport, host-deployment, and remote-Brain-transport adapters are private root modules with independent lint/test boundaries and no separately published artifacts.
+- [ ] Workspace contains at most 12 Rust packages including root, the official client, and the sole added `tracedecay-workflow` crate; root emits thin `tracedecay` plus private `tracedecayd` binaries without another package. Hook, presentation, API, service-identity/local-transport, host-deployment, and remote-Brain-transport adapters are private root modules with independent lint/test boundaries and no separately published artifacts.
 - [ ] File/function/complexity/public-API budgets have no non-waived V2-default violations.
 - [ ] Every parity-replacement lane is net-negative handwritten code; generated output is separately accounted; default binary/RSS/hot/clean-build gates pass.
 - [ ] The reuse-disposition ledger closes the current host-installer, extractor, registry, query/ranking, operation, projection, rendering/envelope, dashboard-client, and conformance-test clusters with no unregistered infrastructure engine or definite live duplicate body >10 lines.

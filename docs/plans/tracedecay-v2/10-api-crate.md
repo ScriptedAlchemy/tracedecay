@@ -1,5 +1,7 @@
 # TraceDecay V2 Root API Boundary Implementation Plan
 
+**Plan 32 integration:** generate its exact definition/version/source/run/node/control/taskgraph-candidate HTTP bindings, sealed `WorkflowHistoryPageV1` pager, generic-subscription SSE, upload-only source containment, OpenAPI, and TypeScript operations from the catalog/application contracts. This module accepts no server path, raw history append, engine call, alternate workflow event stream, or transport-authored resume/fork semantics.
+
 **Goal:** Build the private root `v2::api` module as the secure loopback-first Axum HTTP V2 and SSE boundary for the one official contract, with generated OpenAPI/dashboard-client artifacts and semantic parity across HTTP, CLI, MCP, SDKs, dashboard, exports, and live subscriptions. External consumers depend on the protocol and generated clients, not a server crate, so plan 19 keeps this boundary inside the root package.
 
 **Architecture:** HTTP handlers authenticate, validate bounded transport inputs, map them to `tracedecay-application` use cases, and map typed results/errors back without changing scope, ordering, coverage, freshness, evidence, command, or replay semantics. Live reads use an authorized subscription resource followed by resumable snapshot/delta SSE; OpenAPI and transport bindings are generated from plan 17's contract IR — itself built from application/domain schemas plus the generated tool catalog — while CLI/MCP remain separate thin adapters tested against the same semantic fixtures.

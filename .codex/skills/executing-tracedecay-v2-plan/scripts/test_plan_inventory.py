@@ -132,27 +132,27 @@ class PlanInventoryHeadingTests(unittest.TestCase):
             [
                 "docs/plans/tracedecay-v2/13-research-provenance-and-context-anchors.md:466: "
                 "Rebuild semantic/live PR context",
-                "docs/plans/tracedecay-v2/19-system-defragmentation-convergence-and-extensibility.md:847: "
+                "docs/plans/tracedecay-v2/19-system-defragmentation-convergence-and-extensibility.md:850: "
                 "C0 — Phase 0 architecture inventory and ownership lock (`PR 1`, `PR 3`)",
-                "docs/plans/tracedecay-v2/19-system-defragmentation-convergence-and-extensibility.md:857: "
+                "docs/plans/tracedecay-v2/19-system-defragmentation-convergence-and-extensibility.md:860: "
                 "C1 — Pure canonical contracts (`PR 4`, `PR 4A`)",
-                "docs/plans/tracedecay-v2/19-system-defragmentation-convergence-and-extensibility.md:864: "
+                "docs/plans/tracedecay-v2/19-system-defragmentation-convergence-and-extensibility.md:867: "
                 "C2 — One evidence and storage path (`PR 5–10`)",
-                "docs/plans/tracedecay-v2/19-system-defragmentation-convergence-and-extensibility.md:871: "
+                "docs/plans/tracedecay-v2/19-system-defragmentation-convergence-and-extensibility.md:874: "
                 "C3 — One scope/query/search/graph path (`PR 8A`, `PR 11–16`)",
-                "docs/plans/tracedecay-v2/19-system-defragmentation-convergence-and-extensibility.md:878: "
+                "docs/plans/tracedecay-v2/19-system-defragmentation-convergence-and-extensibility.md:881: "
                 "C4 — Reconciled domain projections (`PR 17–22`)",
-                "docs/plans/tracedecay-v2/19-system-defragmentation-convergence-and-extensibility.md:884: "
+                "docs/plans/tracedecay-v2/19-system-defragmentation-convergence-and-extensibility.md:887: "
                 "C5 — One capability and policy runtime (`PR 22A`, `PR 23 series`)",
-                "docs/plans/tracedecay-v2/19-system-defragmentation-convergence-and-extensibility.md:892: "
+                "docs/plans/tracedecay-v2/19-system-defragmentation-convergence-and-extensibility.md:895: "
                 "C6 — One application layer and official interface (`PR 24 series`)",
-                "docs/plans/tracedecay-v2/19-system-defragmentation-convergence-and-extensibility.md:900: "
+                "docs/plans/tracedecay-v2/19-system-defragmentation-convergence-and-extensibility.md:903: "
                 "C7 — One product (`PR 25–32`)",
-                "docs/plans/tracedecay-v2/19-system-defragmentation-convergence-and-extensibility.md:907: "
+                "docs/plans/tracedecay-v2/19-system-defragmentation-convergence-and-extensibility.md:910: "
                 "C8 — Backfill, reconcile, cut over (`PR 33–36`)",
-                "docs/plans/tracedecay-v2/19-system-defragmentation-convergence-and-extensibility.md:915: "
+                "docs/plans/tracedecay-v2/19-system-defragmentation-convergence-and-extensibility.md:918: "
                 "C9 — Delete V1 and close entropy budget (`PR 37`)",
-                "docs/plans/tracedecay-v2/24-canonical-task-plan-graph-and-multi-agent-executor.md:2038: "
+                "docs/plans/tracedecay-v2/24-canonical-task-plan-graph-and-multi-agent-executor.md:2040: "
                 "9.8 Workspace, branch, commit, and PR workflows",
             ],
         )
@@ -168,10 +168,10 @@ class PlanInventoryHeadingTests(unittest.TestCase):
             for record in plan_inventory.scan(path, root)
             for pr_id in cast(list[str], record["ids"])
         }
-        self.assertEqual(len(headings), 311)
-        self.assertEqual(sum(bool(plan_inventory.heading_ids(heading)) for _, _, heading in headings), 299)
+        self.assertEqual(len(headings), 324)
+        self.assertEqual(sum(bool(plan_inventory.heading_ids(heading)) for _, _, heading in headings), 312)
         self.assertEqual(declared - inventoried, set())
-        for pr_id in ("PR 12.1", "PR 28E", "PR 31Q", "PR 35J"):
+        for pr_id in ("PR 12.1", "PR 28E", "PR 31Q", "PR 35J", "PR 38K"):
             self.assertIn(pr_id, inventoried)
         self.assertNotIn("PR 999Z", inventoried)
 

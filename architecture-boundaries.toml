@@ -1,5 +1,5 @@
 version = 1
-package_ceiling = 11
+package_ceiling = 12
 generated_views = [
   "docs/architecture/v2/generated/owners.md",
   "docs/architecture/v2/generated/dependency-dag.md",
@@ -78,12 +78,20 @@ release_tier = 2
 allowed_dependencies = ["domain"]
 forbidden_dependencies = ["business-behavior", "host-io", "store-implementation"]
 
+[owners.workflow]
+kind = "rust-package"
+path = "crates/tracedecay-workflow"
+plan = "docs/plans/tracedecay-v2/32-dynamic-workflow-runtime-and-sdk.md"
+release_tier = 2
+allowed_dependencies = ["domain"]
+forbidden_dependencies = ["javascript-engine", "typescript-compiler", "store-implementation", "scheduler", "executor", "transport", "ui"]
+
 [owners.application]
 kind = "rust-package"
 path = "crates/tracedecay-application"
 plan = "docs/plans/tracedecay-v2/09-application-crate.md"
 release_tier = 4
-allowed_dependencies = ["domain", "store", "capture", "projectors", "query", "policy", "tool-catalog"]
+allowed_dependencies = ["domain", "store", "capture", "projectors", "query", "policy", "tool-catalog", "workflow"]
 forbidden_dependencies = ["transport", "root-private", "store-implementation"]
 
 [owners.client-rust]
@@ -99,7 +107,7 @@ kind = "rust-package"
 path = "."
 plan = "docs/plans/tracedecay-v2/12-root-compatibility-migration.md"
 release_tier = 5
-allowed_dependencies = ["domain", "store", "capture", "projectors", "code-index", "query", "policy", "tool-catalog", "application", "api", "hooks", "presentation", "host-deploy", "native-semantic-runtime", "remote-brain-transport"]
+allowed_dependencies = ["domain", "store", "capture", "projectors", "code-index", "query", "policy", "tool-catalog", "workflow", "application", "api", "hooks", "presentation", "host-deploy", "native-semantic-runtime", "remote-brain-transport"]
 forbidden_dependencies = ["new-business-semantics"]
 
 [owners.public-contracts]
@@ -233,6 +241,9 @@ to = "domain"
 from = "tool-catalog"
 to = "domain"
 [[edges]]
+from = "workflow"
+to = "domain"
+[[edges]]
 from = "application"
 to = "domain"
 [[edges]]
@@ -253,6 +264,9 @@ to = "policy"
 [[edges]]
 from = "application"
 to = "tool-catalog"
+[[edges]]
+from = "application"
+to = "workflow"
 [[edges]]
 from = "api"
 to = "application"
@@ -367,6 +381,9 @@ to = "policy"
 [[edges]]
 from = "root"
 to = "tool-catalog"
+[[edges]]
+from = "root"
+to = "workflow"
 
 [governance]
 inventory_generator = "plan-12-pr-3r"
@@ -377,7 +394,7 @@ package_admission_rule = "two-consumers-or-demonstrated-firewall-plus-merger-rev
 waiver_rule = "named-owner-evidence-and-expiry-before-PR-37"
 
 [budgets]
-rust_package_ceiling = 11
+rust_package_ceiling = 12
 definite_duplicate_body_lines = 10
 default_binary_ratio_max = 1.25
 idle_rss_ratio_max = 1.25
@@ -390,11 +407,15 @@ generated_accounting = "generated-lines-separate-with-generator-size-and-generat
 [[public_facades]]
 id = "domain-contracts"
 owner = "domain"
-consumers = ["store", "capture", "projectors", "code-index", "query", "policy", "tool-catalog", "application", "root"]
+consumers = ["store", "capture", "projectors", "code-index", "query", "policy", "tool-catalog", "workflow", "application", "root"]
 [[public_facades]]
 id = "application-use-cases"
 owner = "application"
 consumers = ["api", "hooks", "presentation", "host-deploy", "remote-brain-transport", "root"]
+[[public_facades]]
+id = "workflow-kernel"
+owner = "workflow"
+consumers = ["application", "root"]
 [[public_facades]]
 id = "public-api-contracts"
 owner = "public-contracts"
@@ -420,6 +441,10 @@ facade = "application-use-cases"
 id = "catalog-and-bindings"
 owner = "tool-catalog"
 facade = "public-api-contracts"
+[[capabilities]]
+id = "dynamic-workflow-replay-and-candidate-compilation"
+owner = "workflow"
+facade = "workflow-kernel"
 [[capabilities]]
 id = "remote-node-framing"
 owner = "remote-brain-transport"
@@ -577,7 +602,7 @@ target = "0 non-waived"
 [[scorecard]]
 metric = "rust-package-count"
 detector = "cargo-metadata-package-count"
-target = "<=11"
+target = "<=12"
 [[scorecard]]
 metric = "negative-code-parity"
 detector = "handwritten-line-disposition-delta"

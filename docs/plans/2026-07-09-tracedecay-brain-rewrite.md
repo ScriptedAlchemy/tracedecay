@@ -10,7 +10,7 @@
 
 **Detailed execution plans:** [`tracedecay-v2/00-plan-set-index.md`](tracedecay-v2/00-plan-set-index.md) owns the per-crate, root-migration, frontend, dependency, PR-order, and cross-plan verification map.
 
-Direct bounded-context authorities: [`01-domain-crate.md`](tracedecay-v2/01-domain-crate.md), [`03-capture-crate.md`](tracedecay-v2/03-capture-crate.md), [`04-projectors-crate.md`](tracedecay-v2/04-projectors-crate.md), [`05-query-crate.md`](tracedecay-v2/05-query-crate.md), [`06-policy-crate.md`](tracedecay-v2/06-policy-crate.md), [`07-hooks-crate.md`](tracedecay-v2/07-hooks-crate.md), [`08-tool-catalog-crate.md`](tracedecay-v2/08-tool-catalog-crate.md), [`09-application-crate.md`](tracedecay-v2/09-application-crate.md), [`11-dashboard-frontend.md`](tracedecay-v2/11-dashboard-frontend.md), [`12-root-compatibility-migration.md`](tracedecay-v2/12-root-compatibility-migration.md), and [`13-research-provenance-and-context-anchors.md`](tracedecay-v2/13-research-provenance-and-context-anchors.md). Plans 02 and 10 and cross-cutting plans 14–28 are linked at their owning sections and exhaustively indexed above; [`28-remote-multi-machine-shared-brain.md`](tracedecay-v2/28-remote-multi-machine-shared-brain.md) is normative for distribution.
+Direct bounded-context authorities: [`01-domain-crate.md`](tracedecay-v2/01-domain-crate.md), [`03-capture-crate.md`](tracedecay-v2/03-capture-crate.md), [`04-projectors-crate.md`](tracedecay-v2/04-projectors-crate.md), [`05-query-crate.md`](tracedecay-v2/05-query-crate.md), [`06-policy-crate.md`](tracedecay-v2/06-policy-crate.md), [`07-hooks-crate.md`](tracedecay-v2/07-hooks-crate.md), [`08-tool-catalog-crate.md`](tracedecay-v2/08-tool-catalog-crate.md), [`09-application-crate.md`](tracedecay-v2/09-application-crate.md), [`11-dashboard-frontend.md`](tracedecay-v2/11-dashboard-frontend.md), [`12-root-compatibility-migration.md`](tracedecay-v2/12-root-compatibility-migration.md), [`13-research-provenance-and-context-anchors.md`](tracedecay-v2/13-research-provenance-and-context-anchors.md), and [`32-dynamic-workflow-runtime-and-sdk.md`](tracedecay-v2/32-dynamic-workflow-runtime-and-sdk.md). Plans 02 and 10 and cross-cutting plans 14–28/31 are linked at their owning sections and exhaustively indexed above; Plan 32 is authoritative for native dynamic workflows and [`28-remote-multi-machine-shared-brain.md`](tracedecay-v2/28-remote-multi-machine-shared-brain.md) remains normative for distribution.
 
 ## Global Constraints
 
@@ -35,6 +35,7 @@ Direct bounded-context authorities: [`01-domain-crate.md`](tracedecay-v2/01-doma
 - Data migration and shadow parity are mandatory; stale live CLI/MCP/daemon/plugin protocols and obsolete tool names are not emulated after their domain cutover. Version mismatch fails with restart/update and the current replacement.
 - V1 stores remain read-only from their domain's verified cutover until one full release of V2-default operation completes (the rollback/evidence window). Deletion is an explicit later operation, never part of migration.
 - The plan PR contains only this master plan and its linked per-crate/frontend plan documents. Research exports remain untracked outside the repository.
+- Native dynamic workflows are immutable version-pinned JavaScript/TypeScript definitions over one pure replay/validation/taskgraph-candidate compiler. They share application scheduling/execution/event/outbox/operation infrastructure, remain distinct from provider observations/static operation workflows/tasks, and render through generated surfaces plus Workflow Studio; Plan 32 owns the complete contract.
 
 ---
 
@@ -381,6 +382,7 @@ flowchart LR
     G --> J["Knowledge and policy projection"]
     G --> K["Automation and observability projection"]
     G --> X["Canonical task, plan, and execution projection"]
+    C --> Y["Native workflow definitions and command history"]
     C --> L["Content-addressed payload store"]
     F --> M["Catalog and cross-shard index"]
     C --> T["Profile activity and session shard"]
@@ -390,6 +392,7 @@ flowchart LR
     J --> N
     K --> N
     X --> N
+    Y --> N
     M --> N
     L --> N
     W["Generated capability and tool catalog"] --> V["Versioned policy runtime"]
@@ -398,10 +401,12 @@ flowchart LR
     V --> U
     N --> O["Application services"]
     W --> O
+    Y --> Z["Pure workflow replay and taskgraph-candidate compiler"]
+    Z --> O
     O --> P["CLI adapter"]
     O --> Q["MCP adapter"]
     O --> R["HTTP and SSE adapter"]
-    R --> S["Unified TraceDecay workbench"]
+    R --> S["Unified Brain, Workflow Studio, and workbench"]
 ```
 
 ### 5.1 Deployment boundary
@@ -1619,7 +1624,7 @@ Do not log sensitive query literals or payloads. Use safe query fingerprints and
 
 ## 22. Target Repository Structure
 
-Create only the bounded crates that provide a real dependency, capability, optional-heavy-runtime, or public-package firewall; keep adapter-only code private to the root package. Move behavior only after parity. The current one-package baseline and proposed target are measured in PR 1; the V2 target is at most **11 Rust packages including root and the official Rust client**, not a quota to fill:
+Create only the bounded crates that provide a real dependency, capability, optional-heavy-runtime, or public-package firewall; keep adapter-only code private to the root package. Move behavior only after parity. The current one-package baseline and proposed target are measured in PR 1; the V2 target is at most **12 Rust packages including root, the official Rust client, and the explicitly admitted pure workflow kernel**, not a quota to fill:
 
 - `crates/tracedecay-domain/` — IDs, entities, observations, events, relations, scope, time, sensitivity, `TraceQueryV1`; no I/O.
 - `crates/tracedecay-store/` — catalog/project/graph/blob repositories, migrations, transactions, outbox, backup/repair.
@@ -1629,6 +1634,7 @@ Create only the bounded crates that provide a real dependency, capability, optio
 - `crates/tracedecay-query/` — planner, shard coordinator, FTS/vector/rank, graph/time operators, cursors, explain, exports.
 - `crates/tracedecay-policy/` — versioned deterministic hint/retrieval/correlation/scheduler/memory evaluation.
 - `crates/tracedecay-tool-catalog/` — generated capability definitions and MCP/CLI/HTTP/dashboard/skill/hint mappings plus the pure `host_bundles` compiler; no use-case implementation or host I/O.
+- `crates/tracedecay-workflow/` — pure Plan-32 workflow IR, validation, deterministic replay/call identity, and taskgraph-candidate compiler; no engine/compiler/store/scheduler/executor/transport dependencies.
 - `crates/tracedecay-application/` — use cases and composition ports; no transport-specific rendering.
 - `crates/tracedecay-client/` — official Rust client, pager/stream/operation helpers, generated public types.
 - `packages/tracedecay-client/` — official TypeScript client for Node/browser-authorized use, independent of dashboard state.
@@ -1638,7 +1644,7 @@ Create only the bounded crates that provide a real dependency, capability, optio
 
 Dependency direction:
 
-`domain ← store/capture/code-index/projectors/query/policy/tool-catalog ← application ← root adapter modules`
+`domain ← store/capture/code-index/projectors/query/policy/tool-catalog/workflow ← application ← root adapter modules`
 
 `domain + application view contracts ← root presentation/API/hook/remote-transport modules`; official Rust/TypeScript/Python clients consume generated API/catalog contracts, and the dashboard consumes the TypeScript client rather than importing server internals.
 
@@ -1731,7 +1737,7 @@ Lettered PR suffixes are stable identifiers ordered by dependency, not lexical o
 - [ ] Lock the evidence vocabulary and no-hidden-reasoning rule.
 - [ ] Lock compatibility, rollback, and V1 removal gates.
 - [ ] Lock activity-vs-project shard ownership, deterministic identity allocation, privacy/key-domain blobs, graph generation packing, exact retention/encryption defaults, and cursor/SSE semantics.
-- [ ] Lock canonical planes/owner matrix, package-admission decisions (including root-private hook/presentation/API/host-deployment/remote-Brain-transport adapters), the <=11-package ceiling, crate/module dependency DAG, extension tiers/SPIs, config/status/error governance, complexity and negative-code budgets, anti-corruption adapter contract, convergence scorecard, and deletion waves from plan 19.
+- [ ] Lock canonical planes/owner matrix, package-admission decisions (including the pure workflow kernel and root-private hook/presentation/API/host-deployment/compiler-engine/remote-Brain-transport adapters), the <=12-package ceiling, crate/module dependency DAG, extension tiers/SPIs, config/status/error governance, complexity and negative-code budgets, anti-corruption adapter contract, convergence scorecard, and deletion waves from plan 19.
 - [ ] Record the existing Rsbuild/Rspack dashboard build and hermetic embedding boundary. Treat historical Rsbuild/Vite material as cross-project retrieval scenarios, not product authority; require a separate approved proposal before any bundler migration.
 - [ ] Add architecture lint tests for dependency direction and transport isolation.
 - [ ] Lock the hermetic-test-infrastructure contract from the §2.7 flaky-test row: no process-global mutable test state, hermetic clocks/env/ports/stores, declared nextest/libtest contract, deterministic shutdown, and platform matrix.
@@ -2098,6 +2104,13 @@ Cross-cutting official-product companions:
 | 30K | Task timeline/causal/critical-path/workload/executor/repository/agent/All lenses and claim-overlap visualization, consuming PR 30J accounting contracts (plan 24). |
 | 30L | Privacy workspace and Context Scout Observatory integration over the PR 25F read models (plan 11). |
 | 31N–31Q | Configuration/autonomy extensions to existing Policy Diff/Scope evaluators (not another lab), scout/hints extension, temporal session/LCM extension to Search Quality (not a separate Search Lab), and the full Orchestration Lab with read-only side-effect guards (plans 20, 22, 23, 24). |
+| 38A–38J | Plan-32 native dynamic-workflow contracts, store/compiler/engine/application integration, generated API/SDK/CLI/MCP/plugin surfaces, Workflow Studio, taskgraph-candidate compilation, steering/remote/accounting, and replay/fault/scale qualification. |
+
+#### PR 38A–38J: Native dynamic workflow runtime and product
+
+- **Ordering:** the Plan-32 reconciliation gate precedes PR 38A; PR 38B and PR 38C require 38A; PR 38D requires both 38B and 38C; PR 38E/38F/38H/38I require 38D; PR 38G requires 38E; PR 38J requires 38E–38I.
+- Plan 32 is the sole owner of workflow IR/replay/compiler/taskgraph-candidate semantics. Shared domain/store/catalog/application/API/UI/config/presentation/task/accounting/host/remote plans contribute only their registered contracts; no workflow-local scheduler, executor, event journal, outbox, operation, cache authority, or task identity is added.
+- PR 38J publishes exact engine/placement/compiler/schema manifests and deterministic replay, effect/fault, cross-surface, Workflow Studio 10,000-node, steering/signal, remote, and taskgraph-candidate qualification receipts before any cutover.
 
 #### PR 24 series: Application services, HTTP V2, SSE, generated client, adapters
 
@@ -2263,6 +2276,11 @@ Cross-cutting migration companions:
 - PR 36R publishes one signed host release set whose canonical integration manifest, unsigned bundle payloads, signed release manifests/attestations, runtime-resolved bundles, package/component digests, capability/difference/conformance reports, supported-host matrix, signatures, SBOM/licenses, secret-scan receipts, and marketplace locators bind one source/catalog digest. Multi-component publication is atomic or remains non-current.
 - PR 36S enables protected multi-machine mode only after PR 33I enrollment/correlation migration and the partition, revocation, privacy, split-brain, backup/restore, RPO/RTO, cache, and cross-machine Git identity matrix passes.
 
+#### PR 38K: Dynamic-workflow import, cutover, and duplicate-path deletion
+
+- **Ordering:** requires PR 38J plus relevant PR 33–36 migration/shadow receipts and must complete before PR 37 can prove zero live compatibility adapters.
+- Explicitly import eligible provider/source workflows without adopting provider observations as native runs; cut generated surfaces independently; retain immutable histories; delete duplicate compiler/engine/status/event/scheduler/retry/cache/executor/host-source aliases only after zero-reference, retention, and rollback-window proof.
+
 #### PR 37: V1 archive and removal
 
 - [ ] Require one full release of V2-default operation with parity/health gates satisfied.
@@ -2379,7 +2397,7 @@ Record the reference machine and corpus in benchmark output. Test current scale 
 - Lease, cancellation, retry, and fault corpora produce zero double-active leases, stale terminal commits, epoch regressions, unauthorized effects, or duplicate non-idempotent effects.
 - Task-aware scout delivery meets plan-22 useful-silence, privacy, expiry, dedupe, token, interruption, and exact-Thread/Turn gates; hook wait remains ≤ 2 ms p95 for pending-envelope claim/revalidation.
 - Architecture scorecard reports zero unowned duplicate semantic authorities, zero transport/direct-store bypasses, zero new compatibility-adapter call sites, and zero expired adapters at each cutover.
-- Rust package count is <=11 including root and the official Rust client; hook/presentation/API/remote-Brain-transport remain private root modules unless a later ADR proves independent production consumers. Registered dependency duplicates and unregistered infrastructure engines are zero.
+- Rust package count is <=12 including root, the official Rust client, and the sole added workflow kernel; hook/presentation/API/compiler-engine/remote-Brain-transport remain private root modules unless a later ADR proves independent production consumers. Registered dependency duplicates and unregistered infrastructure engines are zero.
 - For every parity-only bounded-context cutover, handwritten V2 production lines are lower than the retired V1 plus adapter lines; generated lines are reported separately and cannot hide generator complexity. Every exception has a measured, expiring ADR.
 - Definite duplicate-body clusters longer than ten lines are zero across live V2 production paths unless a reviewed declarative/generated or performance-isolation exception names the owner. Shared host/install, extractor, registry, operation, projection, graph/timeline, and rendering machinery each have one implementation.
 - Default binary size and idle RSS are <=1.25x the frozen V1 baseline, hot rebuild time <=1.25x, and clean build time <=1.5x on the recorded reference machine; optional heavy language/model/UI features remain feature- or route-gated and report their incremental cost.
@@ -2431,7 +2449,7 @@ Repeatable user-task gates on a fixed corpus, with zero correctness failures:
 | Identity resolver silently merges history | Ambiguity defaults to separate entities plus reviewable candidate relations. |
 | False causal narratives | Evidence vocabulary, confidence, copy lint, visual encodings, supporting-event inspector. |
 | Sensitive messages/reasoning leak | Pre-index classification/redaction, protected blobs, short reasoning retention, export exclusion. |
-| Fragmentation reappears behind new crates | <=11-package ceiling, root-private adapter modules, one generated architecture manifest, one canonical owner/contract per semantic, reuse/negative-code ledger, duplicate-body lint, generated bindings, bypass inventory, convergence scorecard, and mandatory adapter deletion PRs. |
+| Fragmentation reappears behind new crates | <=12-package ceiling with only the justified workflow kernel added, root-private adapter modules, one generated architecture manifest, one canonical owner/contract per semantic, reuse/negative-code ledger, duplicate-body lint, generated bindings, bypass inventory, convergence scorecard, and mandatory adapter deletion PRs. |
 | Reuse becomes a generic god layer | Reuse only stable mechanics (registry/encoding, projection, operation fencing, host descriptors, extractor traversal, slices/rendering); domain decisions stay in owner modules, consumer-owned ports remain narrow, and fan-in/public-item budgets block a `common` dumping ground. |
 | Scanner false positive destroys evidence or exposes the candidate | Structured field scanning, synthetic negative corpus, privacy-safe fingerprint-only adjudication, read-only rule inspection/versioning, and operation-specific descendant-rebuild plan/start. |
 | Secret deletion leaves WAL/vector/cache/backup copies or skips rotation | Immediate containment, rotation-first workflow, new sanitized generations, lifecycle-leased retirement, cryptographic quarantine deletion, restore rescan gate. |
@@ -2476,13 +2494,14 @@ The redesign program is complete only when:
 - One mandatory sanitizer and sink-eligibility model is authoritative before all new writes, indexes, prompts, outputs, caches, fixtures, exports, and backups.
 - V1 data is backfilled with complete manifests, hashes, counts, quarantine records, and explained parity.
 - CLI, MCP, HTTP, dashboard, saved views, exports, and experiments/labs use the same application/query/operation contracts.
+- Native dynamic workflows use one immutable JavaScript/TypeScript artifact/replay model, one root compiler/engine implementation, the shared scheduler/executor/event/outbox/operation spine, generated API/SDK/CLI/MCP/plugin bindings, and Workflow Studio; provider observations/static operation workflows/tasks remain distinct, and Plan-32 replay/fault/steering/remote/taskgraph-candidate/migration/deletion gates pass.
 - One canonical initiative/plan/work-item graph, scheduler, lease authority, executor SPI, context-packet assembler, task query algebra, and generated public surface serve all projects and agent hosts; no board/current-project/direct-DB dispatch path remains.
 - Large plan/initiative selections round-trip through the one managed declarative edit family with deterministic sharding, strict schema/source spans, explicit scope/base/pins, stable existing/local refs, no omission-delete, semantic graph diff/rebase, atomic all-or-none submit, cross-surface operation parity, private TTL/cleanup/crash recovery, and zero retained raw workspace content; no draft/task-edit store or second kernel exists.
 - Codex, Claude, Cursor, Hermes, and custom executors pass the same fenced lifecycle/capability/workspace/cancellation conformance suite with truthful coverage and requested/actual route receipts.
 - Kanban, plan outline, DAG, critical path, timeline, causal, workload, executor, repository, agent, and All task lenses are projections over identical canonical IDs/versions and meet table/accessibility/export/performance gates.
 - Cross-repository task packets and material sibling suggestions preserve exact scope/anchors, prevent the named duplicate-work regressions, remain silent for irrelevant/intentional overlap, and never leak global-board context.
 - The convergence inventory proves there is one canonical owner for every domain semantic, generated binding parity, no serving bypass, and every temporary V1/anti-corruption adapter is retired by its deletion gate.
-- The architecture manifest proves <=11 Rust packages, zero unregistered infrastructure engines, no separately published root-only hook/presentation/API/remote-Brain-transport package, and one generated owner/DAG/release/deletion truth.
+- The architecture manifest proves <=12 Rust packages including the sole added workflow kernel, zero unregistered infrastructure engines, no separately published root-only hook/presentation/API/compiler-engine/remote-Brain-transport package, and one generated owner/DAG/release/deletion truth.
 - The negative-code ledger proves every parity lane retired more handwritten code than it added, definite live duplicate-body clusters are eliminated or narrowly waived, shared host/extractor/registry/projection/operation/graph/rendering mechanisms have one implementation, and binary/RSS/build/dependency/table/worker budgets pass.
 - Brain, Explorer, Causal Loom, domain workspaces, Observatory, Costs, and all replay evaluators meet functionality, accessibility, privacy, performance, approved-concept fidelity, visual comprehension, atlas-orientation, and hermetic experiment gates.
 - Store selection, coverage, freshness, inference, redaction, caps, ranking, and query plans are visible and correct.

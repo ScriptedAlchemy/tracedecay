@@ -11,6 +11,7 @@
 | query | Rust Package | `crates/tracedecay-query` | 3 | `private` | `docs/plans/tracedecay-v2/05-query-crate.md` |
 | policy | Rust Package | `crates/tracedecay-policy` | 3 | `private` | `docs/plans/tracedecay-v2/06-policy-crate.md` |
 | tool-catalog | Rust Package | `crates/tracedecay-tool-catalog` | 2 | `private` | `docs/plans/tracedecay-v2/08-tool-catalog-crate.md` |
+| workflow | Rust Package | `crates/tracedecay-workflow` | 2 | `private` | `docs/plans/tracedecay-v2/32-dynamic-workflow-runtime-and-sdk.md` |
 | application | Rust Package | `crates/tracedecay-application` | 4 | `private` | `docs/plans/tracedecay-v2/09-application-crate.md` |
 | client-rust | Rust Package | `crates/tracedecay-client` | 5 | `private` | `docs/plans/tracedecay-v2/17-official-public-api-and-sdks.md` |
 | root | Rust Package | `.` | 5 | `private` | `docs/plans/tracedecay-v2/12-root-compatibility-migration.md` |
@@ -26,4 +27,4 @@
 | client-python | Public Package | `python/tracedecay-client` | 5 | `private` | `docs/plans/tracedecay-v2/17-official-public-api-and-sdks.md` |
 | dashboard | Frontend | `dashboard` | 6 | `private` | `docs/plans/tracedecay-v2/11-dashboard-frontend.md` |
 
-Rust packages are capped at 11. Root-private adapters remain module-lint boundaries, not package-admission precedents.
+Rust packages are capped at 12. Root-private adapters remain module-lint boundaries, not package-admission precedents.

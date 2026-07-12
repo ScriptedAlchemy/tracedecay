@@ -1,5 +1,7 @@
 # TraceDecay V2 Brain Dashboard Implementation Plan
 
+**Plan 32 integration:** add Workflow Studio and Run Graph as generated-client views over immutable definitions, source candidates, live runs, sealed command-tape/history pages, generic subscriptions, signals, structured steering, cache provenance, and workflow experiments. Graph/timeline/list stay synchronized at 10,000 retained nodes; the browser never evaluates JavaScript, reconstructs readiness/cache/taskgraph eligibility, or activates compiled task candidates.
+
 **Goal:** Replace the project-tab dashboard with one profile-wide investigative workbench whose default Brain, Explorer, Causal Loom, domain workspaces, graph lenses, and replay labs make every captured agent, turn, tool, code, Git, delivery, memory, skill, automation, policy, and outcome relationship inspectable while preserving complete sanitized-native evidence and approved V1 semantics.
 
 **Architecture:** A route-lazy React/TypeScript application consumes generated HTTP V2 read-model and command contracts; one URL-addressable `InvestigationStateV1` coordinates scope, time, query, selection, linked composition, comparison, renderer, and inspector across every route. Server-side aggregation and frozen vector watermarks bound data, a single selected snapshot-cache implementation owns typed snapshots, an explicit SSE state machine applies typed deltas, and measured graph/layout/chart/editor implementations expose synchronized outline/table fallbacks instead of attempting a universal graph hairball.

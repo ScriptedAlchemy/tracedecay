@@ -1,10 +1,12 @@
 # TraceDecay V2 Root Compatibility and Migration Implementation Plan
 
+**Plan 32 integration:** root owns the one canonical JavaScript/TypeScript compiler component, engine adapter and selected in-process/supervised placement, bounded realm, diagnostics, source observation/import containment, ephemeral compile cache, and provider/legacy cutover. `@tracedecay/workflow` and clients contain no second compiler; root wires Plan-32 ports into the shared application scheduler/executor/event/outbox/operation authority and never owns workflow semantics or history.
+
 **Goal:** Turn the existing `tracedecay` package into the stable binary, daemon, composition root, host installer, and bounded migration shell for the V2 crates; preserve inventoried current behavior until its explicit cutover, then expose only current V2 bindings while each context backfills, validates, rolls back data safely, and retires V1 without a flag day.
 
 **Architecture:** The published root package wires immutable V2 crate contracts into process-specific service graphs. A generated migration inventory owns every legacy surface. Typed route modes select one effect owner per bounded context, V1 adapters exist only while that context is pre-cutover or during an explicit operator rollback, shadow comparators use frozen vector watermarks, and signed cutover receipts make data migration reversible. There is no live fallback for stale clients, protocols, plugins, or tool names. The root never becomes a second application layer.
 
-**Tech Stack:** Rust 2024 workspace; existing `tracedecay` binary/package; V2 workspace crates/surfaces from plans 01–28; Clap; Tokio; Axum; JSON-RPC/MCP; generated OpenAPI/SDK, capability, and host-bundle catalogs; SQLite V1 readers plus `tracedecay-store`; current provider manifests/installers; Cargo nextest; release-plz; crates.io and native host-marketplace coordinated publication.
+**Tech Stack:** Rust 2024 workspace; existing `tracedecay` binary/package; V2 workspace crates/surfaces from plans 01–28 and 31–32; Clap; Tokio; Axum; JSON-RPC/MCP; generated OpenAPI/SDK, capability, workflow, and host-bundle catalogs; SQLite V1 readers plus `tracedecay-store`; current provider manifests/installers; Cargo nextest; release-plz; crates.io and native host-marketplace coordinated publication.
 
 ---
 

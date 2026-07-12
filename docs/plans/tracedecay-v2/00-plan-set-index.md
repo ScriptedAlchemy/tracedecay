@@ -32,6 +32,7 @@ Core product surfaces:
 - An optional zero-to-three logical MCP registration component set (`context`, `work`, `operator`) backed by one implementation/binary/daemon/catalog, with negotiated lifecycle/capabilities, generated eager-safe tools/resources/templates/prompts/completions, structured content and resource links, progress/cancellation/task support, subscriptions/list-changed notifications, explicit roots/sampling/elicitation trust boundaries, stdio and Streamable HTTP transports, authentication, and host conformance; generated skills plus CLI remain the portable MCP-free baseline.
 - Change-gated autonomous evolution: a registered relevant change dirties only affected scopes; quiescence/materiality and effective-input digest admission precede one generic operation; unchanged ticks perform no scan/model/run work and coalesce one skip episode instead of creating fake history.
 - A transport-agnostic multi-machine Brain: local-only remains valid, while enrolled clients may share a fenced remote authority, verified read replicas/caches, and Git-correlated repositories over authenticated HTTPS/mTLS or an optional private network such as Tailscale. Network-mounted SQLite and implicit multi-primary writes are forbidden.
+- Native durable dynamic workflows: immutable JavaScript/TypeScript definitions compile through one root-owned compiler into a pure replay kernel, share the canonical scheduler/executor/event/outbox/operation spine, render in Workflow Studio, and remain distinct from taskgraph candidates and provider-captured orchestration observations.
 
 ## 2. Plan documents and authority
 
@@ -69,12 +70,13 @@ Core product surfaces:
 | [`29-baseline-delta-audit.md`](29-baseline-delta-audit.md) | Evidence-only review artifact for exact audited endpoint `D`: verified `{B} ∪ (B..D)` baseline-delta evidence. It changes no plan and never overrides the master/owner plans. |
 | [`30-baseline-refresh-candidate-packet.md`](30-baseline-refresh-candidate-packet.md) | Temporary generated candidate packet used only to review and route audit-29 evidence. It has no standing authority and is archived/deleted after accepted deltas are bound to canonical PR slices and FM rows. |
 | [`31-native-fastembed-semantic-code-search.md`](31-native-fastembed-semantic-code-search.md) | Optional disabled-by-default native FastEmbed semantic code search: deterministic code representations, exact model/runtime pins, incremental vector generations, Jina/GTE/BGE evaluation, signed offline artifact lifecycle, bounded optional model-assisted reranking, lexical-preserving failure, generated surfaces, and rebuild-only migration. |
+| [`32-dynamic-workflow-runtime-and-sdk.md`](32-dynamic-workflow-runtime-and-sdk.md) | Implementation authority for the pure `tracedecay-workflow` replay/validation/taskgraph-candidate compiler, immutable JavaScript/TypeScript source artifacts, root compiler/engine boundary, workflow application/API/SDK/CLI/MCP/plugin surfaces, Workflow Studio, steering, remote/fault/evaluation gates, and PR 38A–38K. |
 
 When documents overlap:
 
 1. The master plan owns outcome, global constraints, dependency order, and cutover gates.
 2. A numbered crate/surface plan owns implementation details in its boundary.
-3. Plans 13–28 and 31 own cross-cutting evidence, regression, retrieval, scope, public-contract, privacy, convergence, configuration, tool/output, incremental-context, temporal-session, task/executor, code-indexing, observability/accounting, cross-host bundle, remote shared-Brain, and native semantic-code-search requirements; bounded crates must satisfy them rather than reimplement them. Plans 29–30 are evidence/review artifacts, not implementation authorities.
+3. Plans 13–28 and 31–32 own cross-cutting evidence, regression, retrieval, scope, public-contract, privacy, convergence, configuration, tool/output, incremental-context, temporal-session, task/executor, code-indexing, observability/accounting, cross-host bundle, remote shared-Brain, native semantic-code-search, and dynamic-workflow requirements; bounded crates must satisfy them rather than reimplement them. Plans 29–30 are evidence/review artifacts, not implementation authorities.
 4. An implementation decision that changes a locked domain contract requires an ADR and coordinated plan update before code diverges.
 
 ### 2.1 Canonical V2 slice authority and bootstrap contract
@@ -205,7 +207,7 @@ Execution follows checked PR/TDD slices, current repository instructions, and wh
 
 1. Master sections 1–9, 18–24.
 2. Plans 01, 02, 05, 06, 09, and 12.
-3. Plans 13–28 and 31 as non-negotiable evidence/scope/API/privacy/convergence/task-execution/code-indexing/observability/host-integration/remote-authority/native-semantic-search gates.
+3. Plans 13–28 and 31–32 as non-negotiable evidence/scope/API/privacy/convergence/task-execution/code-indexing/observability/host-integration/remote-authority/native-semantic-search/dynamic-workflow gates.
 
 ### Storage and migration implementer
 
@@ -235,7 +237,7 @@ Execution follows checked PR/TDD slices, current repository instructions, and wh
 
 ### API/SDK implementer
 
-1. Plans 01, 05, 08, 09, 10, 17, and 31.
+1. Plans 01, 05, 08, 09, 10, 17, 31, and 32.
 2. Plan 16 for selector/routing semantics.
 3. Plans 12 and 27 for cutover/current-client and generated host-bundle rules.
 
@@ -243,13 +245,13 @@ Execution follows checked PR/TDD slices, current repository instructions, and wh
 
 1. Master sections 11–18.
 2. Plan 11 in full.
-3. Plans 15–17, 27, and 31 for labs, All/system scope, explanations, official client contracts, host integration visibility, and semantic-code-search controls/diagnostics.
+3. Plans 15–17, 27, and 31–32 for labs, All/system scope, explanations, official client contracts, host integration visibility, semantic-code-search controls/diagnostics, and Workflow Studio/Run Graph.
 4. Plan 14 dashboard/API/observability regressions.
 5. Plan 26 for usage/cost/savings accounting and Observatory data contracts.
 
 ### Test/evaluation lead
 
-1. Plans 13–16, 22–28, and 31.
+1. Plans 13–16, 22–28, and 31–32.
 2. Every plan’s Definition of Done and verification sections.
 3. Master phase/PR gates and SLO section.
 
@@ -274,7 +276,7 @@ Execution follows checked PR/TDD slices, current repository instructions, and wh
 
 ### Task graph and multi-agent execution lead
 
-1. Plan 24 in full plus plans 01, 02, 04–06, 08–10, 16–17, 20–23, and 26.
+1. Plan 24 in full plus plans 01, 02, 04–06, 08–10, 16–17, 20–23, 26, and 32; Plan 32 owns workflow-to-taskgraph compilation while Plan 24 owns only the target/review/activation contract.
 2. Plan 13 PR 2A owns the pinned Hermes source/test/UI provenance ledger; plan 24 owns and consumes its file-level `direct_port`/`behavioral_port`/`redesign`/`drop` dispositions and source-to-test/license requirements. Plans 13–14 retain the wrong-board, copied-task, lost-dependency, already-complete-dispatch, and stale-worker evidence/regressions.
 3. Canonical identity, multi-project declared scope, typed dependency edges, versioned context packets, executor capability routes, advisory work claims versus authoritative fenced leases/attempts, budget/effect grants, task-aware hints, board projections, and replay gates.
 
@@ -296,13 +298,19 @@ Execution follows checked PR/TDD slices, current repository instructions, and wh
 
 ### Remote shared-Brain implementer
 
-1. Plan 28 in full plus plans 01–05, 09–12, 16–18, 20–21, 26, and 31.
+1. Plan 28 in full plus plans 01–05, 09–12, 16–18, 20–21, 26, and 31–32.
 2. Preserve one fenced authority per mutable shard, semantic replication through the application/API boundary, local-only SQLite/WAL families, explicit consistency/coverage, and transport-independent node authorization.
 3. Validate cross-machine Git identity, offline idempotency, revocation, privacy classes, replica/cache lag, backup/restore, standby promotion, and old-authority fencing before remote mode releases.
 
+### Dynamic-workflow implementer
+
+1. Plan 32 in full, then plans 01–02/08–12/17/19–22/24/26–28 only for their explicitly owned shared contracts.
+2. Preserve the pure replay/taskgraph-candidate compiler boundary, one root compiler/engine implementation, and the shared scheduler/executor/event/outbox/operation spine; no workflow-local infrastructure or task identity.
+3. Execute PR 38A–38K only through the canonical inventory/DAG and Plan-32 dependency graph, with engine/placement evidence, cross-surface parity, Studio scale, fault/replay, migration, and deletion receipts.
+
 ## 4. Locked architectural decisions
 
-- Start as one Rust binary with bounded internal crates/ports; allow later daemon/query split without changing contracts. The workspace is capped at 11 Rust packages including root and the official Rust client. Root-only hook, presentation, API, host-deployment, and remote-Brain transport adapters remain private `src/v2` modules with import lints rather than published crates. Production files target at most 400 lines; 800 lines is the hard default ceiling and requires a temporary plan-19 waiver.
+- Start as one Rust binary with bounded internal crates/ports; allow later daemon/query split without changing contracts. The workspace is capped at 12 Rust packages including root, the official Rust client, and the explicitly admitted pure `tracedecay-workflow` kernel. Root-only hook, presentation, API, host-deployment, compiler/engine, and remote-Brain transport adapters remain private `src/v2` modules with import lints rather than published crates. Production files target at most 400 lines; 800 lines is the hard default ceiling and requires a temporary plan-19 waiver.
 - Checked `architecture-boundaries.toml` is the source authority for owners, allowed imports, package admission, release/deletion order, and plan/document links; its DAG/policy/document reports are generated. A new package needs two real production consumers or a demonstrated dependency/capability/publication firewall, an ADR, and a concrete merger/deletion alternative.
 - Reuse one narrow domain registry/canonical-encoding substrate, one projection runtime, one fenced application operation substrate, one scheduler kernel, one `HostIntegrationManifestV1`, one graph/timeline slice pipeline, one page/problem/presentation pipeline, and one saved-view lifecycle. Share mechanics without erasing typed domain meaning.
 - Replacement work is accepted only with a `reuse-dispositions.json` decision and negative-code/footprint receipt. At parity, handwritten replacement code must be smaller than the live V1 plus adapters it deletes; generated output, packages, dependencies/features, tables/indexes, workers, files, binary/RSS/startup/build time, and stored bytes are reported separately and cannot hide growth.
@@ -342,6 +350,7 @@ Execution follows checked PR/TDD slices, current repository instructions, and wh
 - Versioned context packets bind task revision, scope, dependency outcomes, exact Thread/Turn anchors, code/Git/PR state, relevant advisory work claims and the authoritative attempt/lease, retrieval/config versions, source watermarks, visibility policy, budget, and digest. Agents receive only materially relevant, recipient-authorized sibling summaries; neither boards nor long threads become implicit context.
 - `tracedecay-code-index` is the sole production owner of code extraction, grammar registration, incremental reuse, generation construction, lineage, and diagnostic/test attribution. Root/capture owns watcher intake and emits canonical observations; projectors issue canonical build requests. The indexer has no second watcher queue, scope resolver, scheduler, or source-body store. Packed generations reference plan-02 privacy-domain blobs.
 - Metric definitions, surface codes, denominators, caps, horizons, pricing/savings methods, and SLOs are registered/versioned contracts. `unknown`, `partial`, and `capped` never render as known zero, and observability cannot create a second event/accounting path.
+- Plan 32 is the sole native dynamic-workflow authority: one pure replay/validation/taskgraph-candidate compiler package, one root compiler/engine implementation, immutable versioned source/history, shared application infrastructure, generated surfaces, and Workflow Studio. Provider observations, static operation workflows, native workflow runs, and task work remain distinct identities.
 
 ## 5. Dependency and implementation order
 
@@ -487,3 +496,4 @@ Before implementing any slice:
 - [ ] No non-disposable evidence is silently lost, duplicated as authority, mis-scoped, or destroyed during migration.
 - [ ] Stale clients and obsolete tool names fail explicitly after cutover; data rollback does not become indefinite protocol compatibility.
 - [ ] Final V2 default and V1 retirement occur only after aggregate verification is stable, not after one flaky pass.
+- [ ] PR 38A–38K are present in the canonical inventory/DAG and native workflows pass deterministic replay, effect reconciliation, generated-surface parity, Workflow Studio, steering, many-host, taskgraph-candidate, migration, and duplicate-path deletion gates without becoming tasks implicitly.

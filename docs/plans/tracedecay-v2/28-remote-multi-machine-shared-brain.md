@@ -1,5 +1,7 @@
 # TraceDecay V2 Remote Multi-Machine Shared Brain Plan
 
+**Plan 32 integration:** one fenced owner-shard authority admits, replays, signals, steers, and closes each native workflow run. Remote nodes execute only shared `ExecutionUnitV1` activities and return effect receipts; they never run the workflow engine, own command history/cache, or compile source. Promotion verifies exact source/compiler/schema/engine/history/outbox/effect/signal/steering cursors before fencing the old owner.
+
 **Status:** normative cross-cutting plan. This pull request contains plans only.
 
 **Decision:** TraceDecay supports one logical Brain across multiple machines without making Tailscale, a hosted vendor, a network filesystem, or a particular database service mandatory. Tailscale is one optional private-connectivity profile. The first supported distributed topology uses one fenced TraceDecay authority per mutable shard, reached through the official authenticated application/API protocol. SQLite files and WAL families remain local to their owning process and host.

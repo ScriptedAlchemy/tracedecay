@@ -336,7 +336,7 @@ fn architecture_manifest_has_bounded_acyclic_owners() {
         .filter(|owner| owner.kind == "rust-package")
         .count();
     assert!(packages <= architecture.package_ceiling);
-    assert!(architecture.package_ceiling <= 11);
+    assert!(architecture.package_ceiling <= 12);
 
     for (name, owner) in &architecture.owners {
         assert!(

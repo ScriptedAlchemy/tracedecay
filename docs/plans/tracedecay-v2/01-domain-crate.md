@@ -8,6 +8,8 @@
 
 [`24-canonical-task-plan-graph-and-multi-agent-executor.md`](24-canonical-task-plan-graph-and-multi-agent-executor.md) consumes this crate for canonical initiative/plan/work-item versions, gates, acceptance, assignments, executor routes, fenced leases/attempts, workspace bindings, context packets, handoffs, artifacts, outcomes, task events, and task-query types. Those remain domain contracts here; plan 24 does not create a monolithic task crate or parallel identity/scope/evidence vocabulary.
 
+[`32-dynamic-workflow-runtime-and-sdk.md`](32-dynamic-workflow-runtime-and-sdk.md) owns native dynamic-workflow semantics and compiler/replay behavior. This crate owns only its canonical IDs, refs, states, events, relations, schema/value contracts, and shared `ExecutionUnitV1`; provider-captured `OrchestrationObservationId`, native workflow IDs, and plan-09 `OperationId`/`OperationStepId` are disjoint and cannot alias or convert implicitly.
+
 ---
 
 ## Goals
@@ -301,9 +303,14 @@ pub struct TurnId(pub EntityId);
 pub struct MessageId(pub EntityId);
 pub struct NativeMessageId(pub PrivacyDomainBoundLocatorDigest); // provider-native alias, never literal public text
 pub struct LocationAssertionId(pub uuid::Uuid);
-pub struct WorkflowId(pub EntityId);
+pub struct OrchestrationObservationId(pub EntityId); // provider-captured evidence only
+pub struct WorkflowDefinitionId(pub EntityId);
+pub struct WorkflowDefinitionVersionId(pub uuid::Uuid);
 pub struct WorkflowRunId(pub EntityId);
-pub struct WorkflowStepId(pub uuid::Uuid);
+pub struct WorkflowPhaseId(pub uuid::Uuid);
+pub struct WorkflowNodeId(pub uuid::Uuid);
+pub struct WorkflowCommandId(pub uuid::Uuid);
+pub struct WorkflowReuseReceiptId(pub uuid::Uuid);
 pub struct GoalId(pub EntityId);
 pub struct ToolInvocationId(pub EntityId);
 pub struct ArtifactId(pub EntityId);
@@ -347,6 +354,7 @@ pub struct CapabilityGrantTemplateId(pub EntityId);
 pub struct ApiTokenId(pub uuid::Uuid);
 pub struct SubscriptionId(pub uuid::Uuid);
 pub struct OperationId(pub uuid::Uuid);
+pub struct OperationStepId(pub uuid::Uuid); // static application operation workflow step
 pub struct OperationPreflightId(pub uuid::Uuid);
 pub struct SubprocessTreeId(pub uuid::Uuid);
 pub struct SpawnAdmissionId(pub uuid::Uuid);
@@ -2039,6 +2047,8 @@ pub enum ProtocolMismatchRemediation {
 Handshake acceptance requires the current exact protocol epoch and compatible current digests. Mismatch returns a typed remediation and current catalog digest; it cannot carry or execute an old tool-name alias/fallback.
 
 `EntityKind` includes every master-plan kind: profile/project/project-set/repository/remote/checkout/worktree/ref/commit/tree/pull-request/check/review/release; provider/host/model/installation/actor/agent/agent-presence/work-claim/session/thread/workflow/run/turn/message/content-part; tool definition/invocation/result/approval/goal/provider-native-task/provider-native-plan; initiative/plan/plan-version/work-item/work-item-version/task-dependency/acceptance-criterion/task-decision/task-assignment/task-offer/task-lease/execution-attempt/executor-registration/workspace-binding/context-packet/handoff/task-artifact/task-outcome/task-graph-edit-workspace; experiment/experiment-variant/experiment-run/experiment-cell/replay-stage/replay-comparison/replay-comparison-cell/replay-reduction; research-manifest/research-entry/research-contribution; code snapshot/file and symbol identity/occurrence/diagnostic/test/build; fact/fact-version/knowledge-entity/knowledge-version/decision/contradiction/retrieval/feedback; policy-bundle/policy-evaluation/hint; automation-job/automation-admission/automation-skip-episode/automation-run/automation-effect-reconciliation/automation-artifact/curation-candidate/autonomy-decision/autonomous-effect/automatic-recovery; skill/skill-package/skill-version/skill-materialization/recorded-use/outcome; proposal/doctor-finding/remediation; lifecycle lease/drain/checkpoint/service-state receipt; query/saved view/annotation/export/payload blob. Host bundle packages/components do not add parallel entity kinds: each materialized component is a versioned `installation` entity with registered package/component/scope/state attributes, relations to host/profile and signed manifest artifacts, and operation/audit receipts. Provider-native task/plan records remain observed entities or aliases until an authorized materialization command creates canonical work.
+
+The compact `workflow/run` labels in the broad `EntityKind` inventory are not generic runtime identities: generation expands them to `orchestration-observation`, `workflow-definition`, `workflow-definition-version`, `workflow-run`, `workflow-phase`, `workflow-node`, `workflow-command`, and `workflow-reuse-receipt`. Schema generation and CI reject bare `workflow`/`run`/`workflow-step` kinds after the Plan-32 migration; static application recipes use `operation`/`operation-step`.
 
 The shared diagnostic/action family is defined once in this domain crate; plan 24 §4.11 owns its cross-product use, not a second type definition:
 

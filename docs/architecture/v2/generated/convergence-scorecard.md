@@ -13,7 +13,7 @@
 | adapter-burn-down | `adapter-ledger-expiry-and-call-sites` | 0 expired |
 | dependency-cycles-forbidden-imports | `cargo-metadata-and-source-policy` | 0 |
 | complexity-debt | `complexity-delta-report` | 0 non-waived |
-| rust-package-count | `cargo-metadata-package-count` | <=11 |
+| rust-package-count | `cargo-metadata-package-count` | <=12 |
 | negative-code-parity | `handwritten-line-disposition-delta` | 0 non-waived |
 | definite-duplicate-bodies | `rust-labeled-duplicate-scan` | 0 non-waived >10 lines |
 | dependency-artifact-footprint | `cargo-tree-feature-artifact-report` | 0 unjustified |

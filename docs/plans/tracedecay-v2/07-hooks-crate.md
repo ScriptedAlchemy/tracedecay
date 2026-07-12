@@ -1,5 +1,7 @@
 # TraceDecay V2 Root Hooks Boundary Implementation Plan
 
+**Plan 32 integration:** hooks may capture native workflow lifecycle and deliver already-authorized `SteeringTargetV1::{WorkflowRun,WorkflowNode}` envelopes only at capability-proven safe boundaries, including at most one bounded Stop/SubagentStop continuation. They never execute workflow source, decide replay/readiness/cache, convert comments/signals/hints into steering, or own run/task completion; Plan 32 owns those semantics and receipts.
+
 > **Accepted-base refresh delta (audit 29 / packet 30):** host-hook registration,
 > dispatch, event mapping, error handling, and uninstall are byte-identical
 > `B`→`D` (only `src/hooks/steering.rs` changed). Preserve current asymmetries

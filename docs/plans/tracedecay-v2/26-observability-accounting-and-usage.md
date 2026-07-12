@@ -1,5 +1,7 @@
 # TraceDecay V2 Observability, Accounting, and Usage Plan
 
+**Plan 32 integration:** register versioned workflow compile/replay/queue/effect/cache/fork/history/steering/signal/taskgraph-candidate/engine/placement metrics, costs, caps, failure classes, and SLO denominators on the canonical event/accounting path. Every log carries the TraceDecay build plus workflow compiler/IR/schema/engine ABI pins; unknown/partial/capped populations never render as zero, and observability creates no workflow-local telemetry stream.
+
 > **Accepted-base refresh delta (audit 29 / packet 30):** distinguish, as
 > separate observable outcomes, skipped managed-skill export, partial multi-shard
 > projection, runtime-drop timeout, and async shutdown timeout. Pin both Hermes

@@ -1,5 +1,7 @@
 # TraceDecay V2 Official Public API and SDK Plan
 
+**Plan 32 integration:** generate Rust/TypeScript/Python definition/run/control/history clients plus `@tracedecay/workflow` authoring helpers, ABI declarations, diagnostics/source-map types, examples, sandbox, and conformance fixtures. SDKs submit JavaScript/TypeScript source or exact definition-version IDs and call the authoritative daemon compiler; no SDK ships a compiler implementation, runner, engine, Rust IR builder, or alternate orchestration language.
+
 > **For agentic workers:** implement this plan only after the V2 domain, query, policy, tool-catalog, application, and API contracts in plans 01, 05, 06, 08, 09, and 10 are stable enough to generate against. Use test-first, reviewable PR slices; this document adds no separate business-logic layer.
 
 **Goal:** Make TraceDecay's full supported capability surface directly queryable by agents and integrations through one stable, documented, contract-first API with first-party Rust, TypeScript, and Python SDKs, while preserving semantic parity with CLI, MCP, HTTP, dashboard, exports, and live streams.

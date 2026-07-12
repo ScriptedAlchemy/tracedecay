@@ -1,5 +1,7 @@
 # TraceDecay V2 Cross-Host Agent and Plugin Bundle Plan
 
+**Plan 32 integration:** project stable native workflow definition/version bindings, skills/commands, lifecycle hooks, and compact CLI/MCP/API fallbacks into Codex, Claude Code, Cursor, and Hermes from the canonical catalog/host manifest. Host bundles never copy workflow source, compiler/runtime semantics, grants, or state; unsupported steering boundaries remain explicit capability differences, and provider-native workflows remain observations unless explicitly imported.
+
 > **Accepted-base refresh delta (audit 29 / packet 30):** preserve current host
 > asymmetries as fixtures until deliberate migration; bind the compact Codex
 > parent-owns-writes token and the hook trust-state ownership decision to PR 24Q
@@ -12,7 +14,7 @@
 
 **Goal:** Make TraceDecay the durable intelligence and coordination fabric behind Claude Code, Codex, Cursor, and Hermes: preserve exact host-native activity, recover intent and context, provide relevant memory and tools, coordinate and execute bounded work across hosts, carry evidence-backed handoffs between them, and improve from measured outcomes without copying workflows four times, flattening host strengths, flooding model context, exposing operator authority, or requiring MCP.
 
-**Architecture:** Plan 08's existing `tracedecay-tool-catalog` and canonical `HostIntegrationManifestV1` remain the semantic source of truth. Its pure `host_bundles` module validates and deterministically compiles Claude Code, Codex, Cursor, and Hermes release projections; Hermes lowering targets its plugin-native overlay rather than pretending it has another host's marketplace schema. Plan 09 owns `HostDeploymentPort`; root-private `v2::host_deploy` implements it using plan 12's host-effect mechanics for probing, config merge, install, update, repair, owned-state compensation, and removal. This preserves plan 19's at-most-11-package ceiling: no `tracedecay-host-bundles` crate or package is added. Plans 07, 17, 18, 20, 21, and 24 continue to own hook runtime, public API, privacy, configuration, surface rendering, and task execution. Every generated host artifact calls the same separately installed TraceDecay binary/daemon and pins the same integration-manifest and catalog digests.
+**Architecture:** Plan 08's existing `tracedecay-tool-catalog` and canonical `HostIntegrationManifestV1` remain the semantic source of truth. Its pure `host_bundles` module validates and deterministically compiles Claude Code, Codex, Cursor, and Hermes release projections; Hermes lowering targets its plugin-native overlay rather than pretending it has another host's marketplace schema. Plan 09 owns `HostDeploymentPort`; root-private `v2::host_deploy` implements it using plan 12's host-effect mechanics for probing, config merge, install, update, repair, owned-state compensation, and removal. This preserves plan 19's at-most-12-package ceiling: no `tracedecay-host-bundles` crate or package is added. Plans 07, 17, 18, 20, 21, and 24 continue to own hook runtime, public API, privacy, configuration, surface rendering, and task execution. Every generated host artifact calls the same separately installed TraceDecay binary/daemon and pins the same integration-manifest and catalog digests.
 
 **Decision:** `HostIntegrationManifestV1` is extended, never renamed or duplicated. `HostBundleManifestV1` means only a signed generated per-host/per-package release artifact manifest: it references the canonical integration-manifest/catalog digests and carries files, omissions, compatibility, provenance, and conformance receipts, but no second workflow, permission, hook, task, or tool semantics. There is one semantic manifest, one compiler path, one thin `tracedecay` integration binary launched by hosts, one private `tracedecayd` authority binary managed by the OS service manager, one catalog, one authorization path, and one install state machine.
 
@@ -62,7 +64,7 @@ The base package may carry both executables, but its generated launch manifest i
 38. Every omitted component has a typed reason: unsupported host, unsupported version, policy disabled, incompatible scope, missing binary, trust pending, MCP profile omitted, or evidence unknown.
 39. The dashboard and Settings show the same resolved manifest, install state, trust state, facade selection, version/digest, compatibility, and doctor findings returned by CLI/HTTP/SDK. They do not inspect host files independently.
 40. Completion requires stock-host conformance on the supported Claude Code, Codex, Cursor, and Hermes matrices plus a documented downgrade for every unsupported surface.
-41. The Rust workspace remains at or below plan 19's 11-package ceiling. Pure host bundle generation lives in `tracedecay-tool-catalog::host_bundles`; root-private `v2::host_deploy` owns host effects only. A future crate requires the plan-19 package-admission ADR, a merger alternative, and another package retirement.
+41. The Rust workspace remains at or below plan 19's 12-package ceiling. Pure host bundle generation lives in `tracedecay-tool-catalog::host_bundles`; root-private `v2::host_deploy` owns host effects only. A future crate requires the plan-19 package-admission ADR, a merger alternative, and another package retirement.
 42. Install topology is a component set, not one mutually exclusive MCP choice: optional MCP-free core plus zero to three independently selected `McpFacade { registration, profile }` companions. A connection still pins exactly one registration/profile. Headless MCP-only deployment omits core; it does not create another implementation.
 43. `HostProfileId` is only a host installation/configuration target. It never selects or creates a TraceDecay user profile, Brain, database root, memory partition, or authorization domain.
 44. Every Hermes named profile, regardless of `HERMES_HOME` or profile count, binds the same user-global TraceDecay `ProfileId`, daemon, catalog, and stores used by Codex, Claude, and Cursor. Per-profile deployment/trust receipts remain distinct; data ownership does not.
@@ -644,7 +646,7 @@ Projection timestamps use plan 01's `UtcMicros`. Privacy and sanitization fields
 
 ### 5.1 Package-admission decision
 
-Do not create a Rust crate or published package for plugin bundles. Plan 19 already budgets exactly the maximum 11 packages. Pure source resolution, validation, overlay lowering, deterministic rendering, artifact manifests, differences, and golden conformance belong in `tracedecay-tool-catalog::host_bundles` beside the canonical `HostIntegrationManifestV1` and catalog it projects. Root-private `v2::host_deploy` implements only plan 09's narrow `HostDeploymentPort` using plan 12's descriptor-driven host effect engine.
+Do not create a Rust crate or published package for plugin bundles. Plan 19 already budgets exactly the maximum 12 packages, including the separately justified Plan-32 workflow kernel. Pure source resolution, validation, overlay lowering, deterministic rendering, artifact manifests, differences, and golden conformance belong in `tracedecay-tool-catalog::host_bundles` beside the canonical `HostIntegrationManifestV1` and catalog it projects. Root-private `v2::host_deploy` implements only plan 09's narrow `HostDeploymentPort` using plan 12's descriptor-driven host effect engine.
 
 This split:
 
@@ -2230,7 +2232,7 @@ Every PR starts with a failing focused test/fixture, lands the smallest implemen
 | [16 Scope](16-cross-project-repository-worktree-scope.md) | Explicit multi-root/repo/worktree resolution | Host `workspace_roots` set, coverage/omission parity |
 | [17 Public API/SDK](17-official-public-api-and-sdks.md) | Contract IR, Rust/TS/Python SDK, operation streams | Exact nine operations and component-set install requests |
 | [18 Privacy](18-secret-detection-redaction-and-private-data-safety.md) | Existing privacy refs, sanitization, secret scan/quarantine | Source/artifact/config/hook/evidence/runtime corpus; no raw paths |
-| [19 Defragmentation](19-system-defragmentation-convergence-and-extensibility.md) | ≤11 packages, root-private adapter rule, negative-code gates | No new crate; retire duplicated installers/generators/registries |
+| [19 Defragmentation](19-system-defragmentation-convergence-and-extensibility.md) | ≤12 packages, root-private adapter rule, negative-code gates | No new host-bundle crate; retire duplicated installers/generators/registries |
 | [20 Configuration](20-configuration-control-plane.md) | Registry/provenance/policy locks/secret refs | Desired component set, profiles, host instance/scope/trust/update settings; update any-subset wording consistently |
 | [21 Surface/output](21-cli-mcp-tool-surface-and-output-unification.md) | One use-case/binding, generated CLI/MCP, output contracts, edit bundles | Skills+CLI baseline, optional component-set MCP, exact integration CLI and task-edit workflow |
 | [22 Context scout](22-incremental-context-scout-and-suggestion-envelopes.md) | Near-real-time candidates and one arbiter | Bundle health/underuse/nearby-work facts; compact nonrepetitive routing hints |
@@ -2242,7 +2244,7 @@ Every PR starts with a failing focused test/fixture, lands the smallest implemen
 Normative conflict resolutions:
 
 1. Preserve and extend `HostIntegrationManifestV1`; `HostBundleManifestV1` is generated non-semantic release metadata only.
-2. Keep the 11-package ceiling; compile in `tracedecay-tool-catalog::host_bundles` and keep effects in root-private `v2::host_deploy`.
+2. Keep the 12-package ceiling; compile in `tracedecay-tool-catalog::host_bundles` and keep effects in root-private `v2::host_deploy`.
 3. Application owns workflow/auth/idempotency; root implements effects only.
 4. Replace the mutually exclusive legacy install mode with core + zero-or-more exact facade components across plans 08/17/20/21.
 5. Keep one registration/profile per MCP connection even when one host installation has several companions.
@@ -2256,7 +2258,7 @@ Normative conflict resolutions:
 ### Architecture and contracts
 
 - [ ] One extended `HostIntegrationManifestV1` owns semantics; generated bundles contain only artifact/provenance metadata.
-- [ ] No new crate/package; architecture manifest reports at most 11 Rust packages.
+- [ ] No new host-bundle crate/package; architecture manifest reports at most 12 Rust packages including the Plan-32 workflow kernel.
 - [ ] One catalog, one thin integration-binary/private-daemon/application path, one root deployment adapter, one hook runtime, one authorization path; every host registration launches `tracedecay`, never `tracedecayd`.
 - [ ] `HostInstallSetV1` represents `CoreSkillsCli` plus any exact `McpFacade` subset and headless facade-only deployment without semantic duplication.
 - [ ] Exactly nine integration use cases exist and generate every surface.

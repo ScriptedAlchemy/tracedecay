@@ -1,5 +1,7 @@
 # TraceDecay V2 Canonical Task/Plan Graph and Multi-Agent Executor Plan
 
+**Plan 32 boundary:** Plan 32 exclusively owns native dynamic-workflow definitions/runs and the workflow-to-taskgraph eligibility, loss, mapping, identity, provenance, and candidate-compiler implementation. This plan owns only the target `PlanVersionV1`/`WorkItemVersionV1` schema, review/edit/activation, executor/lease/attempt behavior, workflow↔task provenance, cycle checks, and exact-version task-invokes-workflow contract. A workflow node is never a task/lease, and candidate compilation never activates work.
+
 > **Status:** implementation-grade architecture and delivery plan; no production code is changed by this document.
 >
 > **Product rule:** TraceDecay owns one profile-level initiative, plan, task, and execution graph. Kanban boards, plan outlines, DAGs, timelines, workload maps, executor views, repository views, and All are authorized projections over that graph, never independent databases or ambient routing state.

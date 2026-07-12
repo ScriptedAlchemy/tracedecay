@@ -1,5 +1,7 @@
 # TraceDecay V2 CLI, MCP, Tool Surface, and Output Unification Plan
 
+**Plan 32 integration:** project its generated CLI, compact `workflow_run|workflow_get|workflow_control` MCP tools, authenticated paged-history resource, Markdown/JSON views, progress/problems/cursors, and plugin recipes from one catalog. MCP resume belongs only to `workflow_control`; CLI name execution requires explicit scope plus version policy, while exact version IDs remain canonical. No surface invents workflow semantics or returns giant raw history.
+
 > **For agentic workers:** implement this plan only inside the existing V2 program. Do not create a parallel command system, renderer stack, scope resolver, error model, or configuration registry.
 
 **Goal:** Replace TraceDecay's independently evolved CLI commands and hand-written MCP protocol/tool stack, routing allowlists, output switches, raw-JSON renderers, pagination conventions, response truncation, help text, and compatibility aliases with one generated semantic surface and one first-class MCP adapter. Skills plus CLI remain the universal baseline; optional MCP exposes only a generated immutable role profile. Every current command, tool, resource, protocol method, and host behavior receives an explicit keep/replace/remove disposition; every surviving binding invokes one application use case and renders one typed result consistently.

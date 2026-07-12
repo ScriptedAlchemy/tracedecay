@@ -15,6 +15,7 @@ flowchart TD
   query["query"] --> domain["domain"]
   policy["policy"] --> domain["domain"]
   tool_catalog["tool-catalog"] --> domain["domain"]
+  workflow["workflow"] --> domain["domain"]
   application["application"] --> domain["domain"]
   application["application"] --> store["store"]
   application["application"] --> capture["capture"]
@@ -22,6 +23,7 @@ flowchart TD
   application["application"] --> query["query"]
   application["application"] --> policy["policy"]
   application["application"] --> tool_catalog["tool-catalog"]
+  application["application"] --> workflow["workflow"]
   api["api"] --> application["application"]
   api["api"] --> public_contracts["public-contracts"]
   hooks["hooks"] --> application["application"]
@@ -59,6 +61,7 @@ flowchart TD
   root["root"] --> query["query"]
   root["root"] --> policy["policy"]
   root["root"] --> tool_catalog["tool-catalog"]
+  root["root"] --> workflow["workflow"]
 ```
 
 An arrow means a compile-time import or generation dependency. This list is byte-generated from the complete allowed dependency sets in the authority manifest.
