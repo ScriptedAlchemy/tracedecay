@@ -35,6 +35,8 @@ class PlanInventoryHeadingTests(unittest.TestCase):
             "range body",
             "### PR 24E series: Aggregate series heading",
             "series body",
+            "### 14.1 PR 33R controller phases",
+            "numbered section body",
         ]
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -56,9 +58,10 @@ class PlanInventoryHeadingTests(unittest.TestCase):
                 [f"PR 24E{value}" for value in range(9)],
                 ["PR 35", "PR 36", "PR 37"],
                 ["PR 24E"],
+                ["PR 33R"],
             ],
         )
-        self.assertEqual([record["line"] for record in records], [1, 3, 5, 7, 9, 11, 13, 15, 17, 19])
+        self.assertEqual([record["line"] for record in records], [1, 3, 5, 7, 9, 11, 13, 15, 17, 19, 21])
         self.assertEqual(records[1]["checkboxes"], {"done": 1, "total": 1})
         expected_block = "\n".join(lines[2:4]).encode()
         self.assertEqual(records[1]["block_sha256"], hashlib.sha256(expected_block).hexdigest())
@@ -69,6 +72,12 @@ class PlanInventoryHeadingTests(unittest.TestCase):
             "not a declared PR slice",
             "### Workspace, branch, commit, and PR workflows",
             "also not a declared PR slice",
+            "### Discussion of PR 999Z",
+            "reference-only heading",
+            "### C0 — Phase 0 architecture inventory and ownership lock (`PR 1`, `PR 3`)",
+            "convergence phase, not declaration authority",
+            "### C3 — One scope/query/search/graph path (`PR 8A`, `PR 11–16`)",
+            "convergence phase, not declaration authority",
         ]
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -98,6 +107,26 @@ class PlanInventoryHeadingTests(unittest.TestCase):
             [
                 "docs/plans/tracedecay-v2/13-research-provenance-and-context-anchors.md:466: "
                 "Rebuild semantic/live PR context",
+                "docs/plans/tracedecay-v2/19-system-defragmentation-convergence-and-extensibility.md:846: "
+                "C0 — Phase 0 architecture inventory and ownership lock (`PR 1`, `PR 3`)",
+                "docs/plans/tracedecay-v2/19-system-defragmentation-convergence-and-extensibility.md:856: "
+                "C1 — Pure canonical contracts (`PR 4`, `PR 4A`)",
+                "docs/plans/tracedecay-v2/19-system-defragmentation-convergence-and-extensibility.md:863: "
+                "C2 — One evidence and storage path (`PR 5–10`)",
+                "docs/plans/tracedecay-v2/19-system-defragmentation-convergence-and-extensibility.md:870: "
+                "C3 — One scope/query/search/graph path (`PR 8A`, `PR 11–16`)",
+                "docs/plans/tracedecay-v2/19-system-defragmentation-convergence-and-extensibility.md:877: "
+                "C4 — Reconciled domain projections (`PR 17–22`)",
+                "docs/plans/tracedecay-v2/19-system-defragmentation-convergence-and-extensibility.md:883: "
+                "C5 — One capability and policy runtime (`PR 22A`, `PR 23 series`)",
+                "docs/plans/tracedecay-v2/19-system-defragmentation-convergence-and-extensibility.md:891: "
+                "C6 — One application layer and official interface (`PR 24 series`)",
+                "docs/plans/tracedecay-v2/19-system-defragmentation-convergence-and-extensibility.md:899: "
+                "C7 — One product (`PR 25–32`)",
+                "docs/plans/tracedecay-v2/19-system-defragmentation-convergence-and-extensibility.md:906: "
+                "C8 — Backfill, reconcile, cut over (`PR 33–36`)",
+                "docs/plans/tracedecay-v2/19-system-defragmentation-convergence-and-extensibility.md:914: "
+                "C9 — Delete V1 and close entropy budget (`PR 37`)",
                 "docs/plans/tracedecay-v2/24-canonical-task-plan-graph-and-multi-agent-executor.md:1909: "
                 "9.8 Workspace, branch, commit, and PR workflows",
             ],
@@ -115,7 +144,7 @@ class PlanInventoryHeadingTests(unittest.TestCase):
             for pr_id in cast(list[str], record["ids"])
         }
         self.assertEqual(len(headings), 311)
-        self.assertEqual(sum(bool(plan_inventory.heading_ids(heading)) for _, _, heading in headings), 309)
+        self.assertEqual(sum(bool(plan_inventory.heading_ids(heading)) for _, _, heading in headings), 299)
         self.assertEqual(declared - inventoried, set())
         for pr_id in ("PR 12.1", "PR 28E", "PR 31Q", "PR 35J"):
             self.assertIn(pr_id, inventoried)

@@ -12,6 +12,10 @@ from pathlib import Path
 
 PR_VALUE = r"[0-9]+(?:\.[0-9]+)?(?:[A-Z][A-Z0-9-]*)?"
 HEADING = re.compile(r"^(?P<marks>#{3,4})\s+(?P<heading>.*)$")
+PR_DECLARATION = re.compile(
+    r"^(?:(?:\d+(?:\.\d+)*\s+)|(?:Task\s+\d+[A-Z]?:\s+)|"
+    r"(?:Companion requirements for\s+))?PR\s+"
+)
 PR_EXPRESSION = re.compile(
     rf"\bPR\s+(?P<start>{PR_VALUE})"
     rf"(?:(?:\s*[–-]\s*)(?P<end>{PR_VALUE})|"
@@ -53,6 +57,9 @@ def _expand_range(start: str, end: str) -> list[str]:
 
 def heading_ids(heading: str) -> list[str]:
     """Return canonical IDs declared by a PR-bearing H3/H4 heading."""
+    if not PR_DECLARATION.match(heading):
+        return []
+
     ids: list[str] = []
     for match in PR_EXPRESSION.finditer(heading):
         start = match.group("start")
