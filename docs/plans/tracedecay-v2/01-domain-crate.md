@@ -765,6 +765,12 @@ pub struct ContextPacketManifestId(pub EntityId);
 pub struct HandoffId(pub EntityId);
 pub struct TaskArtifactId(pub EntityId);
 pub struct TaskOutcomeId(pub EntityId);
+pub struct AnnotationId(pub EntityId);
+pub struct SteeringDirectiveId(pub EntityId);
+pub struct SteeringDeliveryClaimId(pub EntityId);
+pub struct SteeringDeliveryReceiptId(pub EntityId);
+pub struct SteeringAcknowledgementId(pub EntityId);
+pub struct SteeringDispositionId(pub EntityId);
 pub struct TaskGraphEditWorkspaceId(pub uuid::Uuid); // ephemeral operation artifact, never a canonical EntityId
 pub struct TaskGraphEditCandidateRefV1 {
     pub workspace_id: TaskGraphEditWorkspaceId,
@@ -1081,7 +1087,191 @@ pub struct ContextPacketManifestRefV1 {
     pub ordinal: u64,
     pub manifest_digest: ManifestDigest,
 }
+```
 
+### Canonical steering contracts
+
+This crate is the sole type authority for steering across task attempts and
+Plan-32 dynamic workflows. Plan 24 owns task-attempt lifecycle transitions,
+Plan 32 owns workflow-run/node lifecycle transitions, and Plan 07 consumes the
+same values only to declare a host boundary and render an already-claimed
+batch. No task, workflow, hook, API, CLI, MCP, or dashboard module may define a
+parallel directive, target, revision, delivery, acknowledgement, or
+disposition shape.
+
+```rust
+pub struct AnnotationRevisionRefV1 {
+    pub annotation_id: AnnotationId,
+    pub revision: u64,
+    pub body_digest: SanitizedOutputDigest,
+}
+
+pub struct TaskCommentRevisionRefV1(pub AnnotationRevisionRefV1);
+
+pub enum SteeringTargetV1 {
+    TaskAttempt {
+        work_item: WorkItemVersionRefV1,
+        attempt_id: ExecutionAttemptId,
+        lease_id: TaskLeaseId,
+        authority_epoch: AuthorityEpoch,
+        fence_epoch: u64,
+        expected_packet: ContextPacketManifestRefV1,
+        expected_graph_revision: u64,
+    },
+    WorkflowRun {
+        definition_version_id: WorkflowDefinitionVersionId,
+        run_id: WorkflowRunId,
+        authority_epoch: AuthorityEpoch,
+        fence_epoch: u64,
+        expected_history_sequence: u64,
+        expected_run_revision: u64,
+    },
+    WorkflowNode {
+        definition_version_id: WorkflowDefinitionVersionId,
+        run_id: WorkflowRunId,
+        node_id: WorkflowNodeId,
+        command_id: Option<WorkflowCommandId>,
+        authority_epoch: AuthorityEpoch,
+        fence_epoch: u64,
+        expected_history_sequence: u64,
+        expected_node_revision: u64,
+    },
+}
+
+pub enum SteeringRequirementV1 { Advisory, Required }
+pub enum SteeringKindV1 {
+    ClarifyConstraint,
+    CorrectAssumption,
+    AddEvidence,
+    ChangePriority,
+    RequestCheckpoint,
+    PauseBeforeNextEffect,
+    ResumeAfterCheckpoint,
+}
+pub enum SteeringPriorityV1 { Normal, High, Urgent }
+pub enum SteeringDeliveryBoundaryV1 {
+    NativeInterrupt,
+    AfterToolBeforeModel,
+    StopContinuation,
+    NextTurnOnly,
+}
+pub enum SteeringDeliveryDispositionV1 {
+    DeliveredAcknowledged,
+    DeliveredNoAcknowledgementObservable,
+    DeferredNextBoundary,
+    NextTurnOnly,
+    DeliveryUnknown,
+    RejectedStale,
+    Unsupported,
+}
+pub enum SteeringAcknowledgementDispositionV1 {
+    Acknowledged,
+    Duplicate,
+    RejectedStale,
+    Unsupported,
+    Deferred,
+}
+pub enum SteeringTerminalDispositionV1 { Applied, Rejected, Superseded, Cancelled }
+
+pub struct SteeringRevisionV1 {
+    pub target: SteeringTargetV1,
+    pub target_sequence: u64,
+    pub target_state_revision: u64,
+    pub authority_epoch: AuthorityEpoch,
+    pub fence_epoch: u64,
+}
+
+pub struct SteeringAuthorityRefV1 {
+    pub actor_id: ActorId,
+    pub capability_grant_id: CapabilityGrantId,
+    pub authority_digest: ManifestDigest,
+}
+
+pub struct SanitizedBoundedSteeringPayloadV1 {
+    pub payload: PayloadRef,
+    pub payload_digest: SanitizedOutputDigest,
+    pub bytes: u32,
+    pub tokens: u32,
+    pub tokenization_digest: ManifestDigest,
+    pub anchors: BoundedVec<RetrievalAnchorId, 16>,
+    pub requested_capabilities: BoundedVec<CapabilityId, 8>,
+}
+
+pub struct SteeringDirectiveV1 {
+    pub directive_id: SteeringDirectiveId,
+    pub revision: SteeringRevisionV1,
+    pub authority: SteeringAuthorityRefV1,
+    pub requirement: SteeringRequirementV1,
+    pub kind: SteeringKindV1,
+    pub payload: SanitizedBoundedSteeringPayloadV1,
+    pub priority: SteeringPriorityV1,
+    pub expires_at: UtcMicros,
+    pub idempotency_key: IdempotencyKeyV1,
+    pub promoted_comment: Option<TaskCommentRevisionRefV1>,
+    pub admitted_limits_digest: ManifestDigest,
+}
+
+pub struct SteeringReceiptBasisDigestV1(pub ManifestDigest);
+pub struct SteeringDeliveryClaimMemberV1 {
+    pub directive_id: SteeringDirectiveId,
+    pub target_sequence: u64,
+    pub directive_basis: SteeringReceiptBasisDigestV1,
+}
+pub struct SteeringDeliveryClaimV1 {
+    pub claim_id: SteeringDeliveryClaimId,
+    pub target: SteeringTargetV1,
+    pub claim_epoch: u64,
+    pub boundary: SteeringDeliveryBoundaryV1,
+    pub adapter_capability_digest: ManifestDigest,
+    pub members: BoundedVec<SteeringDeliveryClaimMemberV1, 8>,
+    pub basis: SteeringReceiptBasisDigestV1,
+    pub expires_at: UtcMicros,
+}
+pub struct SteeringDeliveryReceiptV1 {
+    pub receipt_id: SteeringDeliveryReceiptId,
+    pub claim_id: SteeringDeliveryClaimId,
+    pub basis: SteeringReceiptBasisDigestV1,
+    pub boundary: SteeringDeliveryBoundaryV1,
+    pub disposition: SteeringDeliveryDispositionV1,
+    pub rendered_payload_digest: Option<SanitizedOutputDigest>,
+    pub host_ack_digest: Option<ManifestDigest>,
+    pub recorded_at: UtcMicros,
+}
+pub struct SteeringAcknowledgementV1 {
+    pub acknowledgement_id: SteeringAcknowledgementId,
+    pub directive_id: SteeringDirectiveId,
+    pub delivery_receipt_id: SteeringDeliveryReceiptId,
+    pub basis: SteeringReceiptBasisDigestV1,
+    pub disposition: SteeringAcknowledgementDispositionV1,
+    pub evidence: PayloadRef,
+    pub recorded_at: UtcMicros,
+}
+pub struct SteeringDispositionV1 {
+    pub disposition_id: SteeringDispositionId,
+    pub directive_id: SteeringDirectiveId,
+    pub basis: SteeringReceiptBasisDigestV1,
+    pub disposition: SteeringTerminalDispositionV1,
+    pub superseding_directive_id: Option<SteeringDirectiveId>,
+    pub evidence: PayloadRef,
+    pub resolved_at: UtcMicros,
+}
+```
+
+The implementation catalog ships immutable absolute ceilings: one directive is
+at most 16 KiB and 2,048 tokens; one delivery batch is at most 8 members,
+32 KiB, and 4,096 tokens; one target receives at most 4 directives and 4,096
+steering tokens in one Turn and 16 admitted directives in a rolling 60-second
+window; advisory promotion has a minimum 250 ms target cooldown. Plan 20 owns
+configurable effective values and may only lower those ceilings. Every admitted
+directive and claim pins the catalog/config/tokenizer digest used to measure
+it. Oversized or over-rate required input is rejected before admission with a
+typed limit problem; advisory input may instead receive an explicit deflection
+or coalescing receipt. Delivery never truncates: a bounded prefix is claimed,
+the remainder stays pending, and required state keeps its lifecycle fence.
+Unknown tokenizer/config/catalog state fails closed and no retry can grow a
+Turn prompt past the pinned member/byte/token/Turn budgets.
+
+```rust
 pub struct EditLocalKeyV1(pub SafeLabel); // bundle-local grammar; never canonical identity
 
 pub enum EditableEntityRefV1 {

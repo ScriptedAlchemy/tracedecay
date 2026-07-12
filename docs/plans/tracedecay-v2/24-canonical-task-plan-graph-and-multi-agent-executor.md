@@ -210,13 +210,14 @@ Do not create a monolithic `tracedecay-tasks` crate. The graph is a cross-cuttin
 
 | Plan | Contract consumed or extended here |
 |---|---|
-| [01-domain-crate.md](./01-domain-crate.md) | Owns all IDs, entities, versions, events, relations, evidence, scopes, privacy wrappers, leases, cursors, errors, and typed task/plan/execution contracts proposed here, including the sole public edit-workspace/manifest/local-ref/diagnostic/diff/conflict/receipt shapes imported in section 4.12. |
-| [02-store-crate.md](./02-store-crate.md) | Owns activity-shard schema, immutable event/history storage, transactions, fenced leases, outbox, blobs, retention, backup/restore, repositories, and reuse of generic operation/export/import staging and receipt retention for edit bundles and workspace cleanup; cleanup state/events/receipts remain canonical task-workflow records, not another workspace registry or scheduler. |
+| [01-domain-crate.md](./01-domain-crate.md) | Owns all IDs, entities, versions, events, relations, evidence, scopes, privacy wrappers, leases, cursors, errors, and typed task/plan/execution contracts proposed here, including the sole `SteeringDirectiveV1` target/revision/delivery/acknowledgement/disposition family and the sole public edit-workspace/manifest/local-ref/diagnostic/diff/conflict/receipt shapes imported in section 4.12. |
+| [02-store-crate.md](./02-store-crate.md) | Owns activity-shard schema, immutable event/history storage, transactions, fenced leases, outbox, blobs, retention, backup/restore, repositories, and reuse of generic operation/export/import staging and receipt retention for edit bundles and workspace cleanup; its steering claim transaction enforces one globally active member claim per target sequence before render. Cleanup state/events/receipts remain canonical task-workflow records, not another workspace registry or scheduler. |
 | [03-capture-crate.md](./03-capture-crate.md) | Captures provider-native goals/plans/workflows/tool events, locations, external tasks, Git/delivery facts, and executor observations without granting task authority. |
 | [04-projectors-crate.md](./04-projectors-crate.md) | Builds current task/plan/attempt/dependency/critical-path/workload/context-materiality projections and links them to every graph. |
 | [05-query-crate.md](./05-query-crate.md) | Registers task entity kinds, attributes, predicates, traversal relations, facets, projections, and saved profiles consumed through the unchanged `TraceQueryV1`; it supplies deterministic traversal, aggregation, explanation, pagination, and context assembly. No task-specific source/operator vocabulary or second query engine. |
 | [06-policy-crate.md](./06-policy-crate.md) | Owns pure decomposition validation, routing, readiness, priority/fairness, retry/circuit-breaker, packet relevance, and sibling-materiality decisions. |
-| [07-hooks-crate.md](./07-hooks-crate.md) | Receives only validated plan-22 suggestion envelopes and bounded task lifecycle signals at supported host boundaries; it never schedules or claims work. |
+| [07-hooks-crate.md](./07-hooks-crate.md) | Receives validated plan-22 suggestion envelopes and already-admitted Plan-01 steering values at supported host boundaries; it declares capabilities, claims through application/store, renders only after claim commit, and records observed delivery. It defines no steering types or lifecycle transitions and never schedules work. |
+| [32-dynamic-workflow-runtime-and-sdk.md](./32-dynamic-workflow-runtime-and-sdk.md) | Owns workflow definition/run/node/history lifecycle and applies Plan 01 steering targets to `WorkflowRun`/`WorkflowNode`; it reuses the common envelope/receipt machinery but never delegates workflow lifecycle to this task plan. |
 | [08-tool-catalog-crate.md](./08-tool-catalog-crate.md) | Declares task capabilities, effect/scope/privacy/cost metadata, executor adapter manifests, grant eligibility, generated schemas/bindings, and the one `task_graph.edit_bundles.*` family/audience profile. |
 | [09-application-crate.md](./09-application-crate.md) | Owns task/plan commands and queries, authorization, graph transactions, scheduler, lease lifecycle, packet assembly, executor workflows, cancellation, receipts, edit-bundle validation/diff/rebase orchestration, and final atomic submit. |
 | [10-api-crate.md](./10-api-crate.md) | Exposes versioned HTTP/SSE, auth, problems, cursors, idempotency, generated schemas, executor control-plane protocol, exact contained edit-bundle operation routes, and workspace-association/cleanup workflow bindings without accepting server paths or transport-authored eligibility. |
@@ -291,6 +292,7 @@ crates/tracedecay-domain/src/task_graph/
 ├── lease.rs
 ├── executor.rs
 ├── attempt.rs
+├── steering.rs
 ├── workspace.rs
 ├── context_packet.rs
 ├── handoff.rs
@@ -795,6 +797,55 @@ pub struct ExecutionAttemptV1 {
 Attempt rows are immutable except for monotonic lifecycle fields applied by fenced commands; requested route, assignment, executor, workspace, start packet, grants, budget, ordinal, and fence epoch are fixed at creation. `accepted_context_packet` may advance only to a higher sealed ordinal through the fenced `context_packets.accept` command and never changes start authority. State history remains append-only in the canonical `task_graph_events` journal; the current attempt row carries only the latest state/version and terminal refs for efficient reads. The `work_items.current_attempt_id` pointer is denormalized and transactionally checked, never reconstructed by `MAX(started_at)`.
 
 Attempt states are closed and monotonic except explicit recovery transitions: `Prepared`, `Leased`, `Starting`, `Running`, `CancellationRequested`, `Stopping`, `Reconciling`, `Blocked`, `Succeeded`, `Failed`, `Cancelled`, `TimedOut`, `Lost`, `Superseded`, `Deferred`. `Deferred` is terminal for that attempt and pairs with outcome execution disposition `deferred`, product result `no-op`, and a registered terminal reason such as `RateLimited`; it does not increment task-quality/consecutive-failure counters. Terminal attempts never reopen; retry/requeue creates a new attempt.
+
+### 4.6A Task-attempt steering lifecycle and terminal fence
+
+Plan 01 supplies the canonical `SteeringDirectiveV1` family; this section is
+the sole owner of task-target command legality. Plan 32 separately owns the
+same envelope's `WorkflowRun` and `WorkflowNode` lifecycle. The task command
+set is closed:
+
+- `task_steering.submit` admits a direct sanitized payload;
+- `task_steering.promote` admits the same command while pinning one exact
+  shared `TaskCommentRevisionRefV1` from the Plan-01 annotation family;
+- `task_steering.supersede` admits a higher target sequence and terminalizes
+  the named older directive as `Superseded`;
+- `task_steering.acknowledge` records only addressed executor/host evidence
+  against one exact delivery receipt;
+- `task_steering.resolve` records `Applied` or `Rejected` with evidence; and
+- `task_steering.cancel` is an authorized pre-delivery terminal disposition,
+  never deletion or mutation of historical directive bytes.
+
+Submission/promotion CAS-checks the active work-item version, attempt, lease,
+authority/fence epoch, accepted packet triple, graph revision, steering-head
+version, actor grant, expiry, sanitizer and Plan-01 catalog/config limits. It
+allocates the next contiguous target sequence and appends directive, task
+journal/outbox, idempotency result, and updated head atomically. A comment is
+historical annotation only until this transaction succeeds; editing,
+tombstoning, notifying, or subscribing to it never prompts an executor.
+
+The lifecycle is append-only:
+`Admitted -> PendingDelivery -> Claimed -> Delivered|Deferred|NextTurnOnly|DeliveryUnknown|Unsupported|RejectedStale -> Acknowledged -> Applied|Rejected|Superseded`.
+Delivery observations may skip `Acknowledged` only when the host declares it
+unobservable; they never skip the required terminal disposition. Duplicate or
+stale claim/ack/disposition requests insert-or-read or reject without advancing
+the target cursor. Plan 02's partial-unique active-member rule must commit
+before any adapter receives renderable bytes. A stale pre-handoff reservation
+may be taken over under a higher claim epoch; any stale post-handoff claim is
+`DeliveryUnknown` and cannot be automatically reinjected.
+
+An unresolved `Required` directive—including `DeliveryUnknown`, unsupported
+current-Turn delivery, expiry, or queued overflow—participates in the same
+owner-shard CAS as `attempts.complete`, block/review verdict publication,
+lease release, review/integration admission, and task outcome publication.
+That transaction returns `required_steering_unresolved` with the exact legal
+acknowledge/resolve/supersede actions and performs zero terminal mutation.
+`Advisory` never blocks terminal state. A submit racing a terminal command has
+exactly one winner: admitted steering establishes the fence, or the late
+command returns `attempt_already_terminal` and cannot target a successor.
+Expiry and rate limits stop or defer delivery but never erase an admitted
+required fence. Limits are measured from the pinned Plan-01 catalog/config and
+tokenizer snapshot; batches and Turns never exceed member/byte/token ceilings.
 
 One work item has at most one active lease and one primary executor. When a user or decomposition policy requests `RedundancyMode::SharedExecution`, application atomically creates independently leasable child work items with explicit `ExpandsTo`/dependency/handoff relations and makes the parent an aggregate gate; it never issues participant leases against one work item. A provider may spawn internal subagents inside the primary attempt, but they are related Agent/Thread/Turn evidence, inherit only the primary attempt's brokered capabilities, and cannot obtain an independent lease, budget, writable reservation, or terminal authority. Sequential handoff between agents creates a new attempt/epoch unless it stays inside one adapter-owned attempt under the same primary authority. UI/API/SDK describe this as a shared-work group, not “multiple owners of one task.”
 
@@ -2238,6 +2289,8 @@ work_items.pause|resume|cancel|archive|retry
 work_items.record_attestation|record_review|record_decision|record_exception
 work_items.handoff|reopen|reverse_transition
 attempts.list|get|timeline|heartbeat|progress|complete|block|participant_handoff|lifecycle_checkpoint
+task_comments.list|create|revise|tombstone
+task_steering.list|get|submit|promote|acknowledge|resolve|supersede|cancel
 worktrees.list|get|discover
 task_worktree_associations.list|diagnose|associate|confirm|reject|reassign
 worktree_cleanup.inspect|status|request
@@ -2262,6 +2315,7 @@ Application returns transport-neutral sealed views:
 - `WorkItemSummaryViewV1`, `WorkItemDetailViewV1`, and `AgentWorkSliceViewV1`;
 - `DependencyStateViewV1` and `CriticalPathViewV1`;
 - `AttemptSummaryViewV1`, `AttemptDetailViewV1`, and `AttemptTimelineLaneSetV1`;
+- `TaskSteeringViewV1` and `TaskSteeringPageV1`, importing Plan 01 directive/target/revision/delivery/acknowledgement/disposition values unchanged and adding only server-authored legal actions, required-fence state, effective/absolute limit view, coverage, and cursor;
 - `TaskAdmissionViewV1`, `DependencyClosureExplanationV1`, `AttemptParticipantTopologyViewV1`, `ExecutionFailureCausalityViewV1`, `WorkspaceAuthorityViewV1`, and `LifecycleCheckpointViewV1`;
 - `TaskWorkspaceAssociationViewV1`, `WorkspaceCleanupViewV1`, and `WorkspaceCleanupReceiptViewV1`, including all attempts/relations, provenance/confidence/contradictions, ownership/delegation, blockers, expiring proof status, retention/restore state, and generated legal actions;
 - `TaskOfferSummaryViewV1` and `TaskOfferDetailViewV1`, including immutable revision/pins and legal CAS actions;

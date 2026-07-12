@@ -487,47 +487,20 @@ Task lifecycle continuation owns a separate decision/effect slot from hints and 
 
 ### 7.5 Live attempt steering at host-safe boundaries
 
-An active plan-24 execution attempt is steerable while its Turn is in progress, but a task comment is not implicitly a prompt. A task comment is the shared canonical annotation entity with the registered `TaskComment` presentation role and `CommentsOn` work-item target; `TaskCommentRevisionRefV1` is a validated typed ref over one immutable annotation revision, not a second comment entity/store. An authorized actor must explicitly promote that revision, or submit the same typed payload directly, as `TaskSteeringDirectiveV1`. Promotion preserves the annotation/revision/body digest as provenance; editing or tombstoning the annotation cannot mutate, repeat, or revoke the directive. Cancellation/supersession is another fenced steering command.
+An active plan-24 execution attempt is steerable while its Turn is in progress, but a task comment is not implicitly a prompt. A task comment is the shared canonical annotation entity with the registered `TaskComment` presentation role and `CommentsOn` work-item target; `TaskCommentRevisionRefV1` is a validated typed ref over one immutable annotation revision, not a second comment entity/store. An authorized actor must explicitly promote that revision, or submit the same typed payload directly, as Plan 01's `SteeringDirectiveV1` with `SteeringTargetV1::TaskAttempt`. Promotion preserves the annotation/revision/body digest as provenance; editing or tombstoning the annotation cannot mutate, repeat, or revoke the directive. Cancellation/supersession is another fenced steering command.
 
-The domain/task feature owns the closed directive and receipt semantics; hooks own only capability declaration and host-boundary delivery:
-
-~~~rust
-pub enum SteeringRequirementV1 { Advisory, Required }
-pub enum SteeringKindV1 {
-    ClarifyConstraint,
-    CorrectAssumption,
-    AddEvidence,
-    ChangePriority,
-    RequestCheckpoint,
-    PauseBeforeNextEffect,
-    ResumeAfterCheckpoint,
-}
-pub struct TaskSteeringDirectiveV1 {
-    pub directive_id: SteeringDirectiveId,
-    pub work_item_id: WorkItemId,
-    pub work_item_version_id: WorkItemVersionId,
-    pub attempt_id: ExecutionAttemptId,
-    pub lease_id: TaskLeaseId,
-    pub authority_epoch: u64,
-    pub fence_epoch: u64,
-    pub steering_sequence: u64,
-    pub actor_id: ActorId,
-    pub authority: SteeringAuthorityRefV1,
-    pub requirement: SteeringRequirementV1,
-    pub kind: SteeringKindV1,
-    pub expected_packet: ContextPacketManifestRefV1,
-    pub expected_graph_revision: u64,
-    pub payload: SanitizedBoundedSteeringPayloadV1,
-    pub priority: SteeringPriorityV1,
-    pub expires_at: UtcMicros,
-    pub idempotency_key: IdempotencyKey,
-    pub promoted_comment: Option<TaskCommentRevisionRefV1>,
-}
-~~~
+Plan 01 is the sole owner of `SteeringDirectiveV1`, `SteeringTargetV1`,
+`SteeringRevisionV1`, requirements, delivery claims/receipts,
+acknowledgements, and terminal dispositions. Plan 24 owns the task-attempt
+lifecycle commands and fences; Plan 32 owns workflow-run/node lifecycle after
+its integration. This crate imports those exact contracts and owns only host
+capability declaration, safe-boundary selection, rendering, and observation.
+It defines no hook-local steering enum, wire-domain directive, receipt, or
+state machine.
 
 Every delivery claim/receipt, acknowledgement, and terminal disposition carries a canonical `SteeringReceiptBasisDigestV1`. Its hashed basis losslessly includes directive/work-item/work-item-version, attempt, lease, authority/fence epochs, steering sequence, originating actor/authority, requirement/kind, expected packet/graph revision, sanitized payload digest, priority/expiry, idempotency-key digest, and optional promoted-comment revision. A batch receipt additionally binds ordered member basis digests plus first/last sequence and actual host boundary/capability digest. Receipt verification rehydrates those immutable rows and rejects any mismatch; a receipt cannot be replayed across attempts, epochs, controllers, payloads, or graph/packet revisions.
 
-The daemon admits it by expected attempt state, active lease plus authority/fence epoch, graph revision, current accepted packet, actor authority, expiry, payload digest, and per-attempt monotonic `steering_sequence`. Concurrent controllers reserve the next sequence with one compare-and-swap; retry with the same idempotency key and payload returns the original directive, while a changed payload conflicts. Payloads pass the existing sanitizer/authorization contracts, have a cataloged byte/token cap, contain typed anchors/actions rather than executable shell text, and never widen the attempt's scope or grants.
+The daemon admits task-targeted directives through Plan 24 and workflow-targeted directives through Plan 32. Hooks cannot admit one. The resulting Plan 01 value has already passed expected target state, authority/fence, accepted-context/history/graph revision, actor authority, expiry, sanitizer, idempotency, monotonic target sequence, and catalog/config limit checks. The hook revalidates the pinned snapshot before claiming but cannot widen scope, grants, payload, priority, expiry, or target.
 
 Delivery uses a daemon-owned per-attempt inbox projected from the canonical task event/outbox stream. Every adapter declares exact safe boundaries and acknowledgement evidence:
 
@@ -536,11 +509,29 @@ Delivery uses a daemon-owned per-attempt inbox projected from the canonical task
 3. one `Stop`/`SubagentStop` inward continuation, sharing the persisted one-shot guard in §7.4;
 4. otherwise `NextTurnOnly`.
 
-No adapter interrupts an in-flight side-effecting tool, rewrites a tool result, or reports a mid-sampling injection when the host cannot prove one. Notification callbacks may wake the daemon but are not delivery evidence. At a boundary, the adapter claims a bounded ordered batch under `(attempt, lease, authority_epoch, fence_epoch, first_sequence, last_sequence, host_boundary_id)`, deduplicates superseded advisory items, and renders one compact payload within the shared Turn attention budget. Required directives retain order and are never coalesced across a semantic dependency; advisory directives may be batched by compatible kind and expiry. The host receipt records the actual boundary and one of `DeliveredAcknowledged | DeliveredNoAcknowledgementObservable | DeferredNextBoundary | NextTurnOnly | DeliveryUnknown | RejectedStale`.
+The generated host ledger must publish and test the following conservative
+baseline. A versioned capability probe may narrow or add a boundary, but a
+similarly named callback never upgrades itself:
+
+| Host surface | Native addressed boundary | After-tool boundary | Terminal/next-Turn fallback |
+|---|---|---|---|
+| Codex | `Unsupported` until an addressed current-Turn interrupt is present in the exact stock contract | `PostToolUse` only when the pinned host version proves it runs before the next model call | one shared `Stop`/`SubagentStop` continuation; otherwise `NextTurnOnly` |
+| Claude Code | `Unsupported` unless the exact installed hook capability proves addressed in-loop context | `PostToolUse`/`PostToolUseFailure` only at the proven pre-model boundary | one shared `Stop`/`SubagentStop` block; async/rewake/notification becomes `NextTurnOnly`, never native delivery |
+| Cursor | `Unsupported` by default; UI notification and composer state are not model context | registered post-tool callback only when its conformance row proves after-result/before-model ordering | registered stop/before-submit boundary when addressed; otherwise `NextTurnOnly` |
+| Hermes | only an in-process agent-loop callback explicitly registered as addressed and pre-sampling; gateway/chat/Kanban notification is unsupported | in-process post-tool/pre-model callback when proven for the active CLI/delegated/task-worker lane | next agent-loop/Turn callback; gateway delivery, cron, webhook, background process, and board comments are `NextTurnOnly` evidence only |
+
+Each row records `Unsupported` versus `DeferredNextBoundary` versus
+`NextTurnOnly` rather than silently choosing the next similarly named hook.
+Duplicate delivery callbacks insert-or-read the same receipt. A duplicate or
+stale acknowledgement returns the canonical Plan 01 acknowledgement
+disposition and cannot advance a target cursor, clear required state, or cause
+another model-visible render.
+
+No adapter interrupts an in-flight side-effecting tool, rewrites a tool result, or reports a mid-sampling injection when the host cannot prove one. Notification callbacks may wake the daemon but are not delivery evidence. Before any payload bytes leave the daemon, the adapter must win Plan 02's globally unique active member claim for every `(target, target_sequence)` in one owner-shard transaction. A uniqueness conflict returns an empty successful host response; it cannot render optimistically. The claimed batch is ordered and bounded by Plan 01's pinned limits. Required directives retain order and are never coalesced across a semantic dependency; advisory directives may be batched only when compatible. Batch overflow leaves a bounded remainder pending rather than truncating or growing the prompt. The host receipt records the actual `SteeringDeliveryBoundaryV1` and `SteeringDeliveryDispositionV1`, including explicit `Unsupported`, `DeferredNextBoundary`, `NextTurnOnly`, `DeliveryUnknown`, duplicate, and stale outcomes.
 
 Required directives are logically exactly-once: one durable claim at a deliverable boundary, zero or one model-visible delivery, explicit acknowledgement, then `Applied | Rejected | Superseded` disposition with evidence. Duplicate hook runs and reconnects insert-or-read the same claim/receipt; `DeliveryUnknown` never re-injects automatically. Every admitted required directive without a terminal disposition fences `attempts.complete`, review/integration admission, and lease-terminal publication even after delivery expiry; expiry stops new delivery attempts but cannot silently waive controller intent. Advisory directives record the same receipts when observable but never fence progress or completion. A late directive racing a terminal transaction either wins the attempt-state CAS and fences that transaction or is atomically rejected `AttemptAlreadyTerminal`; it never attaches to a successor attempt.
 
-Codex/Claude `Stop` and `SubagentStop` can carry steering only through the same single bounded continuation reserved for that root/subagent Turn. Steering has precedence over an ordinary lifecycle reminder when required steering is pending; the combined continuation still occurs at most once and contains only the steering plus the exact lifecycle command needed to acknowledge/disposition it. `stop_hook_active=true`, an existing `PromptIssued`, uncertain delivery, or a stale lease returns empty success. Provider-native interrupt support, if added later, must first pass generated adapter conformance; similarly named notification, async, prompt, or agent handlers are not substitutes.
+Codex/Claude `Stop` and `SubagentStop` can carry steering only through the same single bounded continuation reserved for that root/subagent Turn. Cursor/Hermes use only the exact registered terminal or next-loop boundary in the table above; neither inherits Codex/Claude continuation semantics by analogy. Steering has precedence over an ordinary lifecycle reminder when required steering is pending; the combined continuation still occurs at most once and contains only the bounded claimed steering plus the exact lifecycle command needed to acknowledge/disposition it. `stop_hook_active=true`, an existing `PromptIssued`, uncertain delivery, a stale lease, or any pinned per-Turn/rate/cooldown ceiling returns empty success plus the canonical deferral/limit receipt. Provider-native interrupt support, if added later, must first pass generated adapter conformance; similarly named notification, async, prompt, agent, gateway, or board handlers are not substitutes.
 
 The remaining boundary values are explicit:
 
@@ -821,8 +812,8 @@ The checked-in human-readable table below is a historical fixture inventory, not
 |---|---|---|
 | Codex | all ten current hidden bindings and stock-wire goldens | Exact `SessionStart`, `SubagentStart`, `PreToolUse`, `PermissionRequest`, `PostToolUse`, `PreCompact`, `PostCompact`, `UserPromptSubmit`, `SubagentStop`, and `Stop`; common/event inputs, matchers/aliases, command-only execution, trust/source/definition lineage, concurrent-handler grouping, stdout/JSON/exit-2 outputs, unsupported-field failures, interception gaps, Windows lowering, and continuation guards. |
 | Claude Code | six V1 aliases plus independent 30-event stock-wire oracle | Exact current 30 events from §7.3; common/event fields, versioned matcher/`if` semantics, five handler types, exec/shell/PowerShell, sync/async/rewake, source/frontmatter lifecycle, host dedupe/concurrency, universal/event outputs, exit/HTTP/MCP/prompt-agent behavior, spill/lag/terminal coverage, and explicit generated-versus-foreign dispositions. |
-| Cursor | hook_cursor_before_submit_prompt, subagent/post-tool, session start/end/stop, precompact, after file/shell, workspace open | Prompt/subagent/tool/session/compact/edit/shell/workspace, Composer/agent origin, file paths as classified locators, JSON reply. |
-| Hermes | plugin memory/session/tool callbacks, gateway delivery, delegation, process/cron/webhook/Kanban transitions, compression/session switch, provider failover | Exact callback/source capability rows per CLI/gateway/background/delegated/task-worker surface; canonical session/source/chat/thread provenance without transport-based scope; model-visible context and delivery receipts; non-durable child versus leased durable-attempt distinction; source-broker catch-up with explicit lag where a callback is absent. |
+| Cursor | hook_cursor_before_submit_prompt, subagent/post-tool, session start/end/stop, precompact, after file/shell, workspace open | Prompt/subagent/tool/session/compact/edit/shell/workspace, Composer/agent origin, file paths as classified locators, JSON reply; steering goldens prove native interrupt unsupported by default, version-proven post-tool delivery, before-submit/next-Turn fallback, explicit unsupported/deferred truth, and duplicate/stale acknowledgement refusal. |
+| Hermes | plugin memory/session/tool callbacks, gateway delivery, delegation, process/cron/webhook/Kanban transitions, compression/session switch, provider failover | Exact callback/source capability rows per CLI/gateway/background/delegated/task-worker surface; canonical session/source/chat/thread provenance without transport-based scope; model-visible context and delivery receipts; non-durable child versus leased durable-attempt distinction; source-broker catch-up with explicit lag where a callback is absent. Steering goldens distinguish an addressed in-process pre-sampling boundary from post-tool/pre-model and next-loop fallback; gateway/chat/Kanban/cron/webhook/background notifications remain unsupported as model delivery and duplicate/stale acknowledgement cannot clear state. |
 | Kiro | pre-tool, prompt-submit, post-tool | Delegation/tool/prompt facts, bounded catch-up request, explicit gaps for unsupported lifecycle. |
 | MCP/daemon notification | FileEdit, Shell, WorkspaceOpen, SessionStart, IncrementalSync | Canonical hook observation plus async project-sync proposal; branch/worktree hints are candidates until identity/Git evidence resolves them. |
 
@@ -836,7 +827,7 @@ For every generated supported/version-gated row, fixtures cover:
 - Codex all-source concurrency with reordered completion, no sibling-start suppression, advisory-only invocation-group CAS winner/losers, separately aggregated deny/rewrite/permission/continuation precedence, delivery-unknown no-redelivery, and observable handler-run audit conservation;
 - Claude configured/matched/host-deduped/started/completed/context-delivered conservation across parallel synchronous handlers and repeated async firings; event-specific exit/output precedence, eight-stop-block cap, lagging transcript, stale resume context, output spill, and no foreign-handler execution in replay;
 - one-shot task lifecycle continuation for root and subagent: lifecycle-owner command versus non-owner `participant_handoff`, rejection of subagent terminal authority, duplicate plugin/user definitions, parallel handlers, first stop with `stop_hook_active=false`, second with `true`, persisted CAS winner, explicit confirmation, no task binding, stale lease, daemon timeout/contention, trust/feature absence, user interrupt, Claude `StopFailure`, delivery unknown, and proof that no Anthropic/provider/prompt/agent/MCP route ran;
-- active-attempt steering for root and subagent: native current-Turn interrupt only when independently capability-proven, after-tool/before-model delivery, unsupported next-Turn fallback, duplicate and reconnect, two-controller monotonic CAS, stale lease/fence/packet/graph, in-flight side-effecting tool deferral, late-terminal single-winner race, required completion/integration fence, advisory non-blocking, and exactly one bounded Stop/SubagentStop continuation shared with lifecycle reconciliation;
+- active-attempt steering for root and subagent on Codex, Claude, Cursor, and Hermes: native current-Turn interrupt only when independently capability-proven, after-tool/before-model delivery, unsupported/deferred/next-Turn truth, duplicate and reconnect, duplicate/stale acknowledgement, two-controller monotonic CAS, stale lease/fence/packet/graph, in-flight side-effecting tool deferral, late-terminal single-winner race, required completion/integration fence, advisory non-blocking, hard member/byte/token/Turn/rate/cooldown ceilings, and exactly one bounded continuation where the host contract supports it;
 - exact V1 normalized fields and host response where compatibility is required;
 - no panic and safe empty response for unknown forward event.
 
@@ -920,7 +911,7 @@ Commands run from repository root with the checkout-local target directory. Do n
 
 **Files:** `src/v2/hooks/adapters/{cursor,hermes,kiro}.rs`; `src/v2/hooks/render/{cursor,hermes,kiro}.rs`; `src/v2/hooks/conformance/*`; root internal-shadow adapters; `tests/fixtures/hooks_v2/{cursor,hermes,kiro}/`; `tests/hooks_v2/{host_conformance,v1_differential}.rs`.
 
-- [ ] Add all Section 12 fixtures, linked-worktree/detached/moved/adopted-store cases, #410 prompt-origin cases, and Hermes CLI/gateway/background/delegation/task-worker/profile/scope lanes.
+- [ ] Add all Section 12 fixtures, linked-worktree/detached/moved/adopted-store cases, #410 prompt-origin cases, and Hermes CLI/gateway/background/delegation/task-worker/profile/scope lanes. Cursor and Hermes each receive steering goldens for native-boundary capability present/absent, post-tool/pre-model, next-Turn fallback, unsupported versus deferred truth, two-host duplicate claim, duplicate/stale acknowledgement, in-flight side-effect deferral, and bounded batch/Turn/rate/cooldown exhaustion. Gateway/notification/board delivery must never pass as model-visible Hermes steering.
 - [ ] Run conformance/differential tests. Expected: fail before mappings exist.
 - [ ] Implement adapters and async proposed effects; remove inline ingest/sync from new path.
 - [ ] Re-run. Expected: every descriptor event has a fixture and no direct store/index/process call exists.
