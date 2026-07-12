@@ -28,19 +28,33 @@ use super::support::{
 const DEFAULT_FACT_LIMIT: usize = 20;
 const MAX_FACT_LIMIT: usize = 200;
 
-pub(super) struct TargetMemoryDb {
-    pub(super) db: Database,
+enum TargetMemoryDbHandle<'a> {
+    Active(&'a Database),
+    Owned(Box<Database>),
+}
+
+pub(super) struct TargetMemoryDb<'a> {
+    db: TargetMemoryDbHandle<'a>,
     pub(super) project_root: PathBuf,
     pub(super) user_scope: bool,
+}
+
+impl TargetMemoryDb<'_> {
+    pub(super) fn conn(&self) -> &libsql::Connection {
+        match &self.db {
+            TargetMemoryDbHandle::Active(db) => db.conn(),
+            TargetMemoryDbHandle::Owned(db) => db.conn(),
+        }
+    }
 }
 
 fn requests_user_memory(args: &Value) -> bool {
     args.get("memory_scope").and_then(Value::as_str) == Some("user")
 }
 
-async fn open_user_memory_target(profile_root: &Path) -> Result<TargetMemoryDb> {
+async fn open_user_memory_target(profile_root: &Path) -> Result<TargetMemoryDb<'static>> {
     Ok(TargetMemoryDb {
-        db: open_user_memory_db(profile_root).await?,
+        db: TargetMemoryDbHandle::Owned(Box::new(open_user_memory_db(profile_root).await?)),
         project_root: profile_root.to_path_buf(),
         user_scope: true,
     })
@@ -65,12 +79,12 @@ fn rendered_fact_store(project_root: Option<&Path>, args: &Value, value: &Value)
     text_tool_result(&text)
 }
 
-pub(super) async fn open_target_memory_db(
-    cg: &TraceDecay,
+pub(super) async fn open_target_memory_db<'a>(
+    cg: &'a TraceDecay,
     args: &Value,
     global_db: Option<&GlobalDb>,
     allow_default_registry_fallback: bool,
-) -> Result<TargetMemoryDb> {
+) -> Result<TargetMemoryDb<'a>> {
     if requests_user_memory(args) {
         if project_selector_present(args, &["project_path"]) {
             return Err(config_error(
@@ -89,7 +103,7 @@ pub(super) async fn open_target_memory_db(
     .await?
     else {
         return Ok(TargetMemoryDb {
-            db: cg.open_project_store_db().await?,
+            db: TargetMemoryDbHandle::Active(cg.db()),
             project_root: cg.project_root().to_path_buf(),
             user_scope: false,
         });
@@ -116,7 +130,7 @@ pub(super) async fn open_target_memory_db(
     }
     let (db, _) = Database::open(&db_path).await?;
     Ok(TargetMemoryDb {
-        db,
+        db: TargetMemoryDbHandle::Owned(Box::new(db)),
         project_root: PathBuf::from(context.project.display_root),
         user_scope: false,
     })
@@ -317,10 +331,10 @@ pub(super) async fn handle_fact_store(
 async fn handle_fact_store_for_target(
     args: Value,
     cross_project_selector: bool,
-    target_memory: TargetMemoryDb,
+    target_memory: TargetMemoryDb<'_>,
 ) -> Result<ToolResult> {
     let action = required_str(&args, "action")?;
-    let conn = target_memory.db.conn();
+    let conn = target_memory.conn();
     let store = MemoryStore::new(conn);
     let mut refresh_digest = false;
     let out = match action {
@@ -548,7 +562,7 @@ pub(super) async fn handle_fact_feedback(
         .map(ToOwned::to_owned);
     let target_memory =
         open_target_memory_db(cg, &args, global_db, allow_default_registry_fallback).await?;
-    let result = MemoryStore::new(target_memory.db.conn())
+    let result = MemoryStore::new(target_memory.conn())
         .record_feedback_event(FeedbackRequest {
             fact_id: fact_id(&args)?,
             action: feedback_action(&args)?,
@@ -561,7 +575,7 @@ pub(super) async fn handle_fact_feedback(
         .await?;
     if !target_memory.user_scope {
         refresh_memory_digest_after_memory_change(
-            target_memory.db.conn(),
+            target_memory.conn(),
             &target_memory.project_root,
         )
         .await;
@@ -582,7 +596,7 @@ pub(super) async fn handle_memory_status(
 ) -> Result<ToolResult> {
     let target_memory =
         open_target_memory_db(cg, &args, global_db, allow_default_registry_fallback).await?;
-    let status = TraceDecay::memory_status_for_conn(target_memory.db.conn()).await?;
+    let status = TraceDecay::memory_status_for_conn(target_memory.conn()).await?;
     let value = json!({ "status": "ok", "memory": status });
     Ok(rendered_tool_json(
         (!target_memory.user_scope).then_some(target_memory.project_root.as_path()),
@@ -618,7 +632,7 @@ pub async fn handle_user_memory_tool(
                 .or_else(|| args.get("reason"))
                 .and_then(Value::as_str)
                 .map(ToOwned::to_owned);
-            let result = MemoryStore::new(target_memory.db.conn())
+            let result = MemoryStore::new(target_memory.conn())
                 .record_feedback_event(FeedbackRequest {
                     fact_id: fact_id(&args)?,
                     action: feedback_action(&args)?,
@@ -636,7 +650,7 @@ pub async fn handle_user_memory_tool(
             ))
         }
         "tracedecay_memory_status" => {
-            let status = TraceDecay::memory_status_for_conn(target_memory.db.conn()).await?;
+            let status = TraceDecay::memory_status_for_conn(target_memory.conn()).await?;
             Ok(rendered_tool_json(
                 None,
                 &args,
@@ -644,5 +658,34 @@ pub async fn handle_user_memory_tool(
             ))
         }
         other => Err(config_error(format!("{other} is not a user-memory tool"))),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn active_project_memory_uses_the_served_database_handle() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project_root = tmp.path().join("project");
+        let profile_root = tmp.path().join("profile");
+        std::fs::create_dir_all(&project_root).unwrap();
+        let cg = TraceDecay::init_with_options(
+            &project_root,
+            crate::tracedecay::TraceDecayOpenOptions {
+                global_db_path: Some(profile_root.join("global.db")),
+                profile_root: Some(profile_root),
+            },
+        )
+        .await
+        .unwrap();
+
+        let target = open_target_memory_db(&cg, &json!({}), None, true)
+            .await
+            .unwrap();
+
+        assert!(matches!(target.db, TargetMemoryDbHandle::Active(_)));
+        assert!(std::ptr::eq(target.conn(), cg.db().conn()));
     }
 }
