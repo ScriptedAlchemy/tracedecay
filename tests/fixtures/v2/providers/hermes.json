@@ -1,0 +1,35 @@
+{
+  "provenance": "synthetic",
+  "provider_family": "hermes",
+  "records": [
+    {
+      "content": "Synthetic request for hermes: summarize module alpha.",
+      "id": "hermes-turn-001",
+      "record_type": "message",
+      "role": "user",
+      "timestamp": "2026-01-02T03:04:05Z"
+    },
+    {
+      "content": "Synthetic response with stable semantics.",
+      "goal": "Inspect synthetic module alpha safely.",
+      "id": "hermes-turn-002",
+      "record_type": "assistant_event",
+      "role": "assistant",
+      "timestamp": "2026-01-02T03:04:06Z"
+    },
+    {
+      "content": "Synthetic Unicode: café, 東京, مرحبا, 🧪",
+      "id": "hermes-unicode-001",
+      "record_type": "message",
+      "role": "user",
+      "timestamp": null
+    },
+    {
+      "content": "Credential value: <REDACTED_SYNTHETIC_SECRET>",
+      "id": "hermes-secret-placeholder-001",
+      "record_type": "tool_result",
+      "timestamp": "2026-01-02T03:04:07Z"
+    }
+  ],
+  "schema_version": 1
+}

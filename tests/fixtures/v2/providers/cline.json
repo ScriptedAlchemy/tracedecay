@@ -1,0 +1,22 @@
+{
+  "provenance": "synthetic",
+  "provider_family": "cline",
+  "records": [
+    {
+      "content": "Synthetic request for cline: summarize module alpha.",
+      "id": "cline-turn-001",
+      "record_type": "message",
+      "role": "user",
+      "timestamp": "2026-01-02T03:04:05Z"
+    },
+    {
+      "content": "Synthetic response with stable semantics.",
+      "goal": "Inspect synthetic module alpha safely.",
+      "id": "cline-turn-002",
+      "record_type": "assistant_event",
+      "role": "assistant",
+      "timestamp": "2026-01-02T03:04:06Z"
+    }
+  ],
+  "schema_version": 1
+}

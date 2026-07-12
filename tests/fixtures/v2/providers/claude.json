@@ -1,0 +1,34 @@
+{
+  "provenance": "synthetic",
+  "provider_family": "claude",
+  "records": [
+    {
+      "content": "Synthetic request for claude: summarize module alpha.",
+      "id": "claude-turn-001",
+      "record_type": "message",
+      "role": "user",
+      "timestamp": "2026-01-02T03:04:05Z"
+    },
+    {
+      "content": "Synthetic response with stable semantics.",
+      "goal": "Inspect synthetic module alpha safely.",
+      "id": "claude-turn-002",
+      "reasoning_summary": "Compared two synthetic options.",
+      "record_type": "assistant_event",
+      "role": "assistant",
+      "subagent": {
+        "id": "synthetic-child-01",
+        "parent_id": "claude-turn-002"
+      },
+      "timestamp": "2026-01-02T03:04:06Z",
+      "tool": {
+        "arguments": {
+          "path": "src/synthetic.rs"
+        },
+        "name": "read_file",
+        "result": "synthetic file contents"
+      }
+    }
+  ],
+  "schema_version": 1
+}
