@@ -98,13 +98,33 @@ pub(super) fn copy_file_atomic(source: &Path, target: &Path) -> Result<()> {
         Err(error) if error.kind() == io::ErrorKind::NotFound => {}
         Err(error) => return Err(io_error(error)),
     }
-    let mut input = File::open(source).map_err(io_error)?;
+    let mut input = File::open(source).map_err(|error| {
+        config_error(format!(
+            "failed to open migration source '{}' for copy to '{}': {error}",
+            source.display(),
+            target.display()
+        ))
+    })?;
     let mut output = OpenOptions::new()
         .write(true)
         .create_new(true)
         .open(&temp)
-        .map_err(io_error)?;
-    io::copy(&mut input, &mut output).map_err(io_error)?;
+        .map_err(|error| {
+            config_error(format!(
+                "failed to create migration temp '{}' while copying '{}' to '{}': {error}",
+                temp.display(),
+                source.display(),
+                target.display()
+            ))
+        })?;
+    io::copy(&mut input, &mut output).map_err(|error| {
+        config_error(format!(
+            "failed to copy migration source '{}' to temp '{}' for '{}': {error}",
+            source.display(),
+            temp.display(),
+            target.display()
+        ))
+    })?;
     fs::set_permissions(&temp, fs::metadata(source).map_err(io_error)?.permissions())
         .map_err(io_error)?;
     output.sync_all().map_err(io_error)?;
