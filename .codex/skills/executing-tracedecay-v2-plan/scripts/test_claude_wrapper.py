@@ -24,11 +24,31 @@ class ClaudeSkillWrapperTests(unittest.TestCase):
         self.assertIn("completely", body.lower())
         self.assertIn(canonical_scripts, body)
         self.assertIn("sole procedural authority", body)
-        self.assertLess(len(body.encode("utf-8")), 3_000)
+        self.assertLess(len(body.encode("utf-8")), 4_500)
 
         script_paths = re.findall(r"(?:python3\s+)(\.[^\s\\]+/scripts/[^\s\\]+)", body)
         self.assertTrue(script_paths)
         self.assertTrue(all(path.startswith(canonical_scripts) for path in script_paths))
+
+    def test_claude_and_codex_entrypoints_share_state_contract(self) -> None:
+        wrapper = (self.wrapper / "SKILL.md").read_text(encoding="utf-8")
+        canonical = (self.canonical / "SKILL.md").read_text(encoding="utf-8")
+        required = (
+            "--graph",
+            "tracedecay.v2.execution-state/v1",
+            "tracedecay.v2.completion-ledger/v1",
+            "TRACEDECAY_V2_EXECUTION_MANIFEST",
+            ".tracedecay/v2-execution-manifest.json",
+        )
+        for token in required:
+            self.assertIn(token, wrapper)
+            self.assertIn(token, canonical)
+
+        self.assertIn("same explicit `--graph`", wrapper)
+        self.assertIn(
+            "Never infer or maintain a\nhost-specific manifest, ledger, state, receipt, cache, output",
+            wrapper,
+        )
 
     def test_wrapper_has_no_implementation_tree(self) -> None:
         self.assertFalse((self.wrapper / "scripts").exists())
