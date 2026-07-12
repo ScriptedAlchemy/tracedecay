@@ -64,7 +64,7 @@ Include:
 - prohibition on self-approval, merge, push, or unrelated edits as applicable;
 - required handoff: candidate SHA, diff scope, tests, risks, retrieval anchors.
 
-Use native Claude Code/Codex CLI acting lanes as separate attempt participants when requested; do not disguise them as Hermes provider profiles.
+Use native Claude Code/Codex CLI acting lanes as separate attempt participants when requested; do not disguise them as Hermes provider profiles. For the active V2 program, load-balance substantive work across GPT-5.6-Sol and native Claude Code with a modest Claude bias while both routes are healthy: each ticket must explicitly choose Claude-first with independent Sol/lead verification or Sol-first with independent Claude review. A mere optional mention does not count. Record the exact native executable/model, bounded prompt, output, candidate SHA or patch, and both participant roles; no lane self-approves and native-CLI exit success is not acceptance.
 
 ## Review and advance
 
