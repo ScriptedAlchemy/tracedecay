@@ -4,6 +4,8 @@ generated_views = [
   "docs/architecture/v2/generated/owners.md",
   "docs/architecture/v2/generated/dependency-dag.md",
   "docs/architecture/v2/generated/release-policy.md",
+  "docs/architecture/v2/generated/convergence-scorecard.md",
+  "architecture-dependency-policy.toml",
 ]
 
 [release]
@@ -108,21 +110,31 @@ release_tier = 4
 allowed_dependencies = []
 forbidden_dependencies = ["runtime", "store-implementation"]
 
+[owners.internal-node-contracts]
+kind = "generated-contract"
+path = "contracts/node"
+plan = "docs/plans/tracedecay-v2/10-api-crate.md"
+release_tier = 4
+allowed_dependencies = []
+forbidden_dependencies = ["public-client", "store-implementation"]
+
 [owners.api]
 kind = "root-private-module"
 path = "src/v2/api"
 plan = "docs/plans/tracedecay-v2/10-api-crate.md"
 release_tier = 5
-allowed_dependencies = ["domain", "application", "tool-catalog", "public-contracts"]
+allowed_dependencies = ["domain", "application", "tool-catalog", "public-contracts", "internal-node-contracts"]
 forbidden_dependencies = ["store-implementation", "query-implementation", "policy-implementation"]
+forbidden_source_patterns = ["StoreFactory", "libsql::", "rusqlite::"]
 
 [owners.hooks]
 kind = "root-private-module"
 path = "src/v2/hooks"
 plan = "docs/plans/tracedecay-v2/07-hooks-crate.md"
 release_tier = 5
-allowed_dependencies = ["domain", "application", "tool-catalog"]
+allowed_dependencies = ["domain", "application", "capture", "tool-catalog"]
 forbidden_dependencies = ["store-implementation", "federated-query", "long-running-effects"]
+forbidden_source_patterns = ["StoreFactory", "libsql::", "rusqlite::"]
 
 [owners.presentation]
 kind = "root-private-module"
@@ -131,6 +143,7 @@ plan = "docs/plans/tracedecay-v2/21-cli-mcp-tool-surface-and-output-unification.
 release_tier = 5
 allowed_dependencies = ["domain", "application", "tool-catalog"]
 forbidden_dependencies = ["store-implementation", "raw-json-semantics"]
+forbidden_source_patterns = ["StoreFactory", "libsql::", "rusqlite::"]
 
 [owners.host-deploy]
 kind = "root-private-module"
@@ -139,14 +152,16 @@ plan = "docs/plans/tracedecay-v2/27-cross-host-agent-plugin-bundles.md"
 release_tier = 5
 allowed_dependencies = ["domain", "application", "tool-catalog"]
 forbidden_dependencies = ["store-implementation", "catalog-reinterpretation"]
+forbidden_source_patterns = ["StoreFactory", "libsql::", "rusqlite::"]
 
 [owners.remote-brain-transport]
 kind = "root-private-module"
 path = "src/v2/remote_brain_transport"
 plan = "docs/plans/tracedecay-v2/28-remote-multi-machine-shared-brain.md"
 release_tier = 5
-allowed_dependencies = ["domain", "application"]
+allowed_dependencies = ["domain", "application", "internal-node-contracts"]
 forbidden_dependencies = ["store-implementation", "authority-semantics", "sqlite-wire"]
+forbidden_source_patterns = ["StoreFactory", "libsql::", "rusqlite::"]
 
 [owners.client-typescript]
 kind = "public-package"
@@ -262,3 +277,340 @@ to = "host-deploy"
 [[edges]]
 from = "root"
 to = "remote-brain-transport"
+
+# Every allowed dependency above has exactly one edge below/above. CI compares
+# the two sets, so this normative DAG cannot silently become a partial view.
+[[edges]]
+from = "api"
+to = "domain"
+[[edges]]
+from = "api"
+to = "tool-catalog"
+[[edges]]
+from = "api"
+to = "internal-node-contracts"
+[[edges]]
+from = "hooks"
+to = "domain"
+[[edges]]
+from = "hooks"
+to = "capture"
+[[edges]]
+from = "hooks"
+to = "tool-catalog"
+[[edges]]
+from = "presentation"
+to = "domain"
+[[edges]]
+from = "presentation"
+to = "tool-catalog"
+[[edges]]
+from = "host-deploy"
+to = "domain"
+[[edges]]
+from = "host-deploy"
+to = "application"
+[[edges]]
+from = "remote-brain-transport"
+to = "domain"
+[[edges]]
+from = "remote-brain-transport"
+to = "internal-node-contracts"
+[[edges]]
+from = "root"
+to = "domain"
+[[edges]]
+from = "root"
+to = "store"
+[[edges]]
+from = "root"
+to = "capture"
+[[edges]]
+from = "root"
+to = "projectors"
+[[edges]]
+from = "root"
+to = "code-index"
+[[edges]]
+from = "root"
+to = "query"
+[[edges]]
+from = "root"
+to = "policy"
+[[edges]]
+from = "root"
+to = "tool-catalog"
+
+[governance]
+inventory_generator = "plan-12-pr-3r"
+inventory_output = "target/tracedecay-v2-inventory"
+adapter_final_pr = "PR 37"
+adapter_final_state = "zero-live-compatibility-adapters"
+package_admission_rule = "two-consumers-or-demonstrated-firewall-plus-merger-review"
+waiver_rule = "named-owner-evidence-and-expiry-before-PR-37"
+
+[budgets]
+rust_package_ceiling = 11
+definite_duplicate_body_lines = 10
+default_binary_ratio_max = 1.25
+idle_rss_ratio_max = 1.25
+hot_build_ratio_max = 1.25
+clean_build_ratio_max = 1.5
+parity_replacement = "handwritten-v2-lines-less-than-retired-v1-plus-adapter-lines"
+complexity = "zero-new-non-waived-hard-file-function-or-complexity-violations"
+generated_accounting = "generated-lines-separate-with-generator-size-and-generation-time"
+
+[[public_facades]]
+id = "domain-contracts"
+owner = "domain"
+consumers = ["store", "capture", "projectors", "code-index", "query", "policy", "tool-catalog", "application", "root"]
+[[public_facades]]
+id = "application-use-cases"
+owner = "application"
+consumers = ["api", "hooks", "presentation", "host-deploy", "remote-brain-transport", "root"]
+[[public_facades]]
+id = "public-api-contracts"
+owner = "public-contracts"
+consumers = ["api", "client-rust", "client-typescript", "client-python"]
+[[public_facades]]
+id = "internal-node-protocol"
+owner = "internal-node-contracts"
+consumers = ["api", "remote-brain-transport"]
+
+[[capabilities]]
+id = "capture-and-sanitize"
+owner = "capture"
+facade = "domain-contracts"
+[[capabilities]]
+id = "query-and-retrieval"
+owner = "query"
+facade = "application-use-cases"
+[[capabilities]]
+id = "policy-evaluation"
+owner = "policy"
+facade = "application-use-cases"
+[[capabilities]]
+id = "catalog-and-bindings"
+owner = "tool-catalog"
+facade = "public-api-contracts"
+[[capabilities]]
+id = "remote-node-framing"
+owner = "remote-brain-transport"
+facade = "internal-node-protocol"
+
+[[stores]]
+id = "profile-catalog-db"
+owner = "store"
+writer = "store"
+readers = ["application", "query"]
+classification = "canonical"
+[[stores]]
+id = "profile-activity-db"
+owner = "store"
+writer = "capture"
+readers = ["query", "application"]
+classification = "canonical"
+[[stores]]
+id = "repository-project-db"
+owner = "store"
+writer = "capture"
+readers = ["query", "application"]
+classification = "canonical"
+[[stores]]
+id = "immutable-graph-generations"
+owner = "store"
+writer = "projectors"
+readers = ["query", "application"]
+classification = "rebuildable-derived"
+[[stores]]
+id = "privacy-domain-content-addressed-blobs"
+owner = "store"
+writer = "capture"
+readers = ["projectors", "query", "application"]
+classification = "canonical"
+
+[[replaced_v1_clusters]]
+id = "semantic-duplicates"
+owner = "domain"
+disposition = "replace"
+delete_by_pr = "PR 22A"
+[[replaced_v1_clusters]]
+id = "store-and-capture-writes"
+owner = "capture"
+disposition = "replace"
+delete_by_pr = "PR 10"
+[[replaced_v1_clusters]]
+id = "query-forks"
+owner = "query"
+disposition = "replace"
+delete_by_pr = "PR 16"
+[[replaced_v1_clusters]]
+id = "policy-forks"
+owner = "policy"
+disposition = "replace"
+delete_by_pr = "PR 23"
+[[replaced_v1_clusters]]
+id = "application-transport-forks"
+owner = "application"
+disposition = "replace"
+delete_by_pr = "PR 24"
+[[replaced_v1_clusters]]
+id = "legacy-dashboard"
+owner = "dashboard"
+disposition = "delete"
+delete_by_pr = "PR 32"
+[[replaced_v1_clusters]]
+id = "v1-live-system"
+owner = "root"
+disposition = "delete"
+delete_by_pr = "PR 37"
+
+[[adapter_contracts]]
+id = "required-ledger-schema"
+owner = "root"
+required_fields = ["adapter_id", "bounded_context", "v1_source", "v2_target", "owner", "created_in_pr", "shadow_start_gate", "cutover_gate", "rollback_dependency", "traffic_counter", "mismatch_counter", "delete_in_pr", "status", "waiver_expiry"]
+delete_by_pr = "PR 37"
+new_callers_forbidden = true
+policy_forbidden = true
+
+[[deletion_waves]]
+id = "D0"
+replaced_cluster = "semantic-duplicates"
+delete_by_pr = "PR 22A"
+[[deletion_waves]]
+id = "D1"
+replaced_cluster = "store-and-capture-writes"
+delete_by_pr = "PR 10"
+[[deletion_waves]]
+id = "D2"
+replaced_cluster = "query-forks"
+delete_by_pr = "PR 16"
+[[deletion_waves]]
+id = "D3"
+replaced_cluster = "policy-forks"
+delete_by_pr = "PR 23"
+[[deletion_waves]]
+id = "D4"
+replaced_cluster = "application-transport-forks"
+delete_by_pr = "PR 24"
+[[deletion_waves]]
+id = "D5"
+replaced_cluster = "legacy-dashboard"
+delete_by_pr = "PR 32"
+[[deletion_waves]]
+id = "D6"
+replaced_cluster = "v1-live-system"
+delete_by_pr = "PR 37"
+
+[[scorecard]]
+metric = "canonical-ownership-coverage"
+detector = "inventory-owner-bijection"
+target = "100%"
+[[scorecard]]
+metric = "duplicate-authority-count"
+detector = "stores-tables-owner-analysis"
+target = "0"
+[[scorecard]]
+metric = "unowned-store-table-count"
+detector = "inventory-owner-completeness"
+target = "0"
+[[scorecard]]
+metric = "direct-canonical-writers"
+detector = "source-writer-scan"
+target = "0"
+[[scorecard]]
+metric = "capability-coverage"
+detector = "catalog-handler-bijection"
+target = "100%"
+[[scorecard]]
+metric = "transport-conformance"
+detector = "transport-fixture-matrix"
+target = "100%"
+[[scorecard]]
+metric = "generated-contract-drift"
+detector = "generated-view-byte-compare"
+target = "0"
+[[scorecard]]
+metric = "adapter-burn-down"
+detector = "adapter-ledger-expiry-and-call-sites"
+target = "0 expired"
+[[scorecard]]
+metric = "dependency-cycles-forbidden-imports"
+detector = "cargo-metadata-and-source-policy"
+target = "0"
+[[scorecard]]
+metric = "complexity-debt"
+detector = "complexity-delta-report"
+target = "0 non-waived"
+[[scorecard]]
+metric = "rust-package-count"
+detector = "cargo-metadata-package-count"
+target = "<=11"
+[[scorecard]]
+metric = "negative-code-parity"
+detector = "handwritten-line-disposition-delta"
+target = "0 non-waived"
+[[scorecard]]
+metric = "definite-duplicate-bodies"
+detector = "rust-labeled-duplicate-scan"
+target = "0 non-waived >10 lines"
+[[scorecard]]
+metric = "dependency-artifact-footprint"
+detector = "cargo-tree-feature-artifact-report"
+target = "0 unjustified"
+[[scorecard]]
+metric = "runtime-build-footprint"
+detector = "frozen-reference-benchmark"
+target = "binary/RSS/hot <=1.25x; clean <=1.5x"
+[[scorecard]]
+metric = "coverage-truth"
+detector = "transport-partial-stale-unknown-fixtures"
+target = "0 known omissions"
+[[scorecard]]
+metric = "scope-resolver-implementations"
+detector = "scope-resolver-entry-scan"
+target = "1"
+[[scorecard]]
+metric = "query-semantic-implementations"
+detector = "query-facade-source-scan"
+target = "0 bypasses"
+[[scorecard]]
+metric = "policy-decision-implementations"
+detector = "policy-evaluator-source-scan"
+target = "0 outside bundles"
+[[scorecard]]
+metric = "redaction-entry-implementations"
+detector = "privacy-sink-canary-matrix"
+target = "0 bypasses"
+[[scorecard]]
+metric = "v1-traffic-after-cutover"
+detector = "adapter-traffic-ledger"
+target = "0 outside rollback drills"
+[[scorecard]]
+metric = "typed-id-boundary-coverage"
+detector = "protected-boundary-compile-fail"
+target = "100%"
+[[scorecard]]
+metric = "error-status-config-parity"
+detector = "surface-mapping-exhaustiveness"
+target = "100%"
+[[scorecard]]
+metric = "infrastructure-engine-count"
+detector = "registered-engine-source-scan"
+target = "0 unregistered"
+[[scorecard]]
+metric = "generated-binding-coverage"
+detector = "manifest-binding-bijection"
+target = "100%"
+[[scorecard]]
+metric = "replayability"
+detector = "pinned-artifact-replay-suite"
+target = "100% supported exact paths"
+[[scorecard]]
+metric = "hook-budget-conformance"
+detector = "hook-latency-reference-benchmark"
+target = "100%"
+[[scorecard]]
+metric = "projector-rebuild-determinism"
+detector = "pinned-observation-rebuild-suite"
+target = "100%"
