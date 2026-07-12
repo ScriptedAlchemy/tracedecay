@@ -899,6 +899,8 @@ Every numerator has an eligible denominator, terminal horizon, coverage threshol
 
 ## 13. Dashboard product surfaces
 
+Plan 11 exclusively owns routes, workspace composition, layout, panels, and interaction. This section specifies only Context Scout read models, legal actions, states, and acceptance data consumed by that owner; its screen descriptions are non-normative inputs and cannot create a second frontend contract.
+
 The dashboard extends [11-dashboard-frontend.md](./11-dashboard-frontend.md) through generated API/client contracts only.
 
 ### 13.1 Observatory: Context Scout

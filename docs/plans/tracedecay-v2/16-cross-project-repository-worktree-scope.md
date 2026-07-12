@@ -340,7 +340,7 @@ tracedecay session show session:019f42c9-623a-7cc0-95c1-f073eaa05a4d
 tracedecay scope resolve "rspack rsbuild react router" --json
 
 tracedecay task-graph worktrees list --work-item <id>
-tracedecay project worktree associations diagnose --worktree <id>
+tracedecay project worktree association diagnose --worktree <id>
 tracedecay project worktree cleanup inspect --worktree <id>
 tracedecay project worktree cleanup request --worktree <id> --preview-digest <digest> --expected-lifecycle-generation <n>
 ```

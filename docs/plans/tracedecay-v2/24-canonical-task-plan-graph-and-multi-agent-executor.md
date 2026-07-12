@@ -1762,9 +1762,10 @@ The matching `queries/{offers,packets,notifications}.rs` and `commands/{offers,p
 | `work_items.list/get/query` | Registered task variants of canonical `TraceQueryV1`; compact default plus explicit hydration of spec, dependencies, criteria, assignments, attempts, packets, artifacts, Git/delivery, and evidence. The convenience endpoint accepts/returns the same AST/digest and defines no task-only selector. |
 | `work_items.context` | Current or exact-attempt packet view with source/omission/access/expiry status; never assembles with ambient CWD or current board. |
 | `work_items.dependencies` | Parents/children/blockers/unblockable/closure/path/cycle witness/critical-path and gate explanations. |
-| `work_items.workspaces` | Every associated project/repository/checkout/worktree generation/branch/commit/PR and attempt, including proposed/confirmed/contradicted/historical provenance, confidence, freshness, ownership/delegation, active authorities, retention, cleanup eligibility/blockers/receipts, and legal actions. No ambient-CWD association or inferred ownership. |
+| `task_worktree_associations.list/diagnose` | Every associated project/repository/checkout/worktree generation/branch/commit/PR and attempt, including proposed/confirmed/contradicted/historical provenance, confidence, freshness, ownership/delegation, active authorities, and legal actions. No ambient-CWD association or inferred ownership. These are the exact plan-21 binding IDs; `work_items.workspaces` is not a second alias. |
 | `attempts.list/get/timeline` | Requested/actual route, lease, packet, workspace, tools, Turns, costs, events, outcome, cancellation/reconciliation, and evidence. |
 | `worktrees.get` | Exact binding/generation, canonical Git identity, all related work items/attempts/participants and evidence signals, current Git/delivery observation, cleanup/retention state, proof expiry, blockers, receipts, and safe reopen/rebind guidance. Paths hydrate only for an authorized local principal. |
+| `worktree_cleanup.status` | Exact cleanup intent/worktree lifecycle, current proof/expiry, eligibility or blockers, operation/receipt state, retention, and safe continuation using the canonical plan-21 binding ID. |
 | `task_offers.list/get` | Registration-scoped open/terminal offers with immutable revision, work/assignment/route/rationale and policy/config/catalog pins, readiness digest, expiry, and legal CAS actions; no lease proof or unrelated queue contents. |
 | `context_packets.list/get` | Attempt-scoped sealed packet ordinals, start/accepted/superseded/expired state, effective Turn boundary, omissions, coverage, and anchors. |
 | `task_notifications.list/get` | Owner-scoped saved filter/channel/event-class/quiet-hours/dedupe/rate-budget subscriptions with current version and delivery health; never implicit subscriptions or unrelated recipients. |
@@ -2366,7 +2367,6 @@ Routes:
 /work/plans/:planId/versions/:version
 /work/tasks/:workItemId
 /work/attempts/:attemptId
-/work/workspaces/:workspaceBindingId
 /work/offers/:offerId
 /work/packets/:packetId
 /work/executors
@@ -2378,7 +2378,7 @@ Routes:
 /playgrounds/orchestration
 ```
 
-Plan 11 exclusively owns these dashboard route registrations and deep-link composition. Offer, packet, and notification deep links resolve the exact canonical ID through their application output module, preserve scope/watermark/selection in a typed link descriptor, reauthorize on open, and render terminal tombstone or denied/unavailable state explicitly. They never emulate detail by filtering a list, use an ambient current board/project, or place lease proofs, private packet payload, channel credentials, or raw routing rationale in the URL. Plan 08/10/17/21 generate operation links to these same owned routes; transports and feature components do not register aliases.
+Plan 11 exclusively owns dashboard route registrations, layout, panels, and deep-link composition. This plan owns only Work read models, legal actions, and acceptance data; all screen anatomy below is a non-normative requirement input to plan 11 and cannot register a second route or component contract. Offer, packet, notification, and workspace-binding selections resolve the exact canonical ID through their application output module and shared `VisualSelectionV1`; workspace bindings open in the task/attempt inspector rather than a dedicated route. Links preserve scope/watermark/selection in a typed descriptor, reauthorize on open, and render terminal tombstone or denied/unavailable state explicitly. They never emulate detail by filtering a list, use an ambient current board/project, or place lease proofs, private packet payload, channel credentials, raw routing rationale, or server paths in the URL. Plan 08/10/17/21 generate operation links to these same owned routes; transports and feature components do not register aliases.
 
 Global scope tree shows All → profile → initiative/project-set → project → repository → worktree/ref without making navigation state authoritative. Selection is a canonical entity set plus frozen/live watermark shared across lenses.
 
@@ -2398,7 +2398,7 @@ Plan outline is a hierarchical graph-of-graphs: work item may expand into a chil
 
 ### 12.2A Edit as Markdown
 
-The initiative/plan command surface includes **Edit as Markdown** for callers with the generated bulk-edit grant. It shows the exact scope/selection/base versions, closure, pins, sensitivity, item/file estimate, expiry, and affected active attempts before starting the ordinary operation; it never exposes or accepts a user-entered server path. Local UI may reveal the managed path after creation, while remote UI downloads/uploads the contained artifact.
+The initiative/plan command surface includes **Edit as Markdown** for callers with the generated bulk-edit grant. It shows the exact scope/selection/base versions, closure, pins, sensitivity, item/file estimate, expiry, and affected active attempts before starting the ordinary operation; it never exposes or accepts a server path. Browser clients receive only an opaque workspace ID and contained editor/download/upload operations. A caller-local CLI/SDK may reveal only its own locally materialized path after authorization; no API/dashboard/server response exposes a daemon/server path.
 
 The workspace panel exposes operation progress, file/shard inventory, last validation, source-span diagnostics, semantic entity/edge/gate/assignment/route diff, cycle witness, critical-path/readiness/active-attempt impact, base/current versions, conflicts, expiry, and cleanup state. Diagnostics open the exact file/span. Rebase produces a new workspace and side-by-side graph/file conflicts; submit remains disabled until every error/conflict is resolved and the candidate digest matches validation. A successful receipt deep-links to the committed plan versions and proves raw-workspace purge. The browser's optional multi-file editor consumes the same bundle grammar and validator as CLI/SDK rather than implementing a dashboard plan model.
 
@@ -2986,7 +2986,7 @@ These suffixes were checked against plans 01–28. Plan 13 owns bounded comparis
 - Generate tool schemas, executor manifests, API/CLI/MCP/SDK bindings, config refs, and drift inventories.
 - Test wildcard exclusion, deny precedence, attempt-bound lifecycle surface, protocol compatibility, exact bundle/component/probe pins, and every host tool-inheritance mode; prove a child that inherits all parent MCP bindings cannot be routed as a narrower researcher when the parent has work/operator authority.
 - Register the one `task_graph.edit_bundles.export|get|validate|diff|rebase|submit|delete` family with exact audience/effect/operation/resource/privacy/idempotency metadata; do not generate it for an ordinary executor grant.
-- Register `work_items.workspaces`, `worktrees.list|get|discover`, `task_worktree_associations.list|diagnose|associate|confirm|reject|reassign`, and `worktree_cleanup.inspect|status|request`; mark cleanup request destructive/confirmed/delegation-bound and keep it out of ordinary executor grants.
+- Register `worktrees.list|get|discover`, `task_worktree_associations.list|diagnose|associate|confirm|reject|reassign`, and `worktree_cleanup.inspect|status|request`; mark cleanup request destructive/confirmed/delegation-bound and keep it out of ordinary executor grants. No `work_items.workspaces` compatibility alias exists.
 - Commit: `feat(catalog): generate task and executor capabilities`.
 
 ### PR 23I — Pure decomposition, readiness, routing, fairness, retry, and materiality policy
@@ -3106,7 +3106,7 @@ Parallelism is allowed only after owning contracts land:
 - 25G concepts/tests may use read-only V1/synthetic fixtures but cannot invent API/view schemas;
 - 31Q corpus/judgment work can begin early, but live replay waits for 23I/24M manifests;
 - TraceDecay V1 migration inventory can begin read-only before 33F; no live migration writes before privacy/store gates, and frozen external-board fixtures never gain a production write path;
-- 22F may begin after 4E; store-owned 22F-LS follows 22F and root/application 22F-LE follows 22F-LS; 22G requires 6G/10E journal/cost fixtures plus 22F-LE; 22H requires 24M liveness/scheduler events; 30K consumes 30J rather than inventing accounting views;
+- 22F may begin only after plan 08 PR 22A and plan 24 PR 4E; store-owned 22F-LS follows 22F and root/application 22F-LE follows 22F-LS; 22G requires 6G/10E journal/cost fixtures plus 22F-LE; 22H requires 24M liveness/scheduler events; 30K consumes 30J rather than inventing accounting views;
 - no scheduler cutover before 22H/30J/33H observability and migration conformance plus aggregate multi-host, cancellation, workspace, privacy, transport, and dashboard verification are stable.
 
 Each PR must stay within its listed owner/files, update generated inventories, add focused tests first, run affected/architecture/schema checks, and record research anchors/manifest versions. Subagents receive exact files and acceptance commands; the lead reviews diffs before force-adding ignored plan artifacts or publishing implementation branches.
@@ -3157,7 +3157,7 @@ Context and coordination:
 
 Surfaces and product:
 
-- [ ] One catalog/application/view model generates API/CLI/MCP/SDK/dashboard semantics, errors, legal actions, pagination, anchors, and Markdown/JSON output, including `work_items.workspaces`, `worktrees.*`, `task_worktree_associations.*`, and `worktree_cleanup.*`; no extra restore/provision alias exists.
+- [ ] One catalog/application/view model generates API/CLI/MCP/SDK/dashboard semantics, errors, legal actions, pagination, anchors, and Markdown/JSON output for `worktrees.*`, `task_worktree_associations.*`, and `worktree_cleanup.*`; no `work_items.workspaces`, restore, or provision alias exists.
 - [ ] Offer, packet, and notification list/detail views and owned deep links round-trip exact IDs/revisions; all seven manual-work commands have generated API/CLI/MCP/SDK/UI parity with no generic status, preview/apply, undo, or rollback alias.
 - [ ] `task_graph.edit_bundles.export|get|validate|diff|rebase|submit|delete` has generated operation/view parity across authorized CLI/MCP/API/SDK/UI bindings; skills plus CLI remain sufficient when MCP is not installed, and no domain-specific MCP server forks task semantics.
 - [ ] Kanban, DAG, plan, timeline, causal, critical-path, workload, executor, repository, initiative, agent slice, and All lenses are saved authorized projections over the same selected entities/versions.

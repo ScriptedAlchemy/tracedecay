@@ -734,6 +734,8 @@ Agent rules:
 
 ## 12. Brain Settings workspace
 
+The generated descriptor registry assigns each setting one task-oriented group (`capture`, `retrieval-and-hints`, `privacy-and-redaction`, `storage-and-retention`, `automation`, `integrations`, `remote-brain`, or `interface`) and one visibility tier (`basic`, `advanced`, or `operator`). Default navigation progressively discloses basic settings by user task; advanced/operator tiers require an explicit filter and authorization, while exhaustive search always returns every authorized descriptor with its tier, source chain, safety floor, impact, and restart/rescan/reindex consequences. These are presentation metadata on the one descriptor, not alternate defaults or a second config hierarchy.
+
 Expand plan 11's `/settings` into the complete configuration workbench. It uses the same command/status bar, scope tree, time-independent target resolution, inspector, and status semantics as the Brain.
 
 Desktop anatomy:

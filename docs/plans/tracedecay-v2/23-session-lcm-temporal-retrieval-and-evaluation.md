@@ -843,6 +843,8 @@ Latency/token/model thresholds are hardware/profile-specific and live in Plan 20
 
 ## 9. Search Quality Lab: session-temporal workspaces
 
+Plan 11 exclusively owns routes, workspace composition, layout, panels, and interaction. This section specifies only temporal retrieval/evaluation read models, legal actions, explanations, and acceptance data consumed by that owner; its screen descriptions are non-normative inputs and cannot create a second frontend contract.
+
 This plan's replay/lineage/copy/summary/evaluation surfaces are workspaces inside the one Search Quality Lab (plan 15 §8) — not a separate Search Lab and not separate message, LCM, memory, and hint debug pages.
 
 ### 9.1 Query workspace
