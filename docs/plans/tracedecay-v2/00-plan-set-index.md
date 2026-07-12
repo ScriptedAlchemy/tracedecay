@@ -258,6 +258,10 @@ Arrows in this diagram are data-flow/build-order edges, not the package dependen
 
 No broad V2 rewrite lands as one PR. Use the master plan’s Phase 0–5 sequence and sub-PRs. The first end-to-end vertical slice proves one provider/project session/tool/subagent investigation through capture -> identity -> projection -> query -> API -> timeline/table/inspector before broad domain expansion.
 
+Before any implementation dispatch, import every declared PR/slice heading into one activated canonical task graph. Consolidate master, numbered-owner, and companion declarations under one slice ID without discarding their source hashes; assign exactly one numbered-plan authority; encode every prerequisite explicitly; attach complete acceptance, bounded files, lane, independent-review, remediation/successor-review, integration, and receipt requirements; then validate complete inventory coverage, source-hash freshness, owner/companion consistency, known endpoints, and acyclicity. Prose references and document order are never inferred as edges. The repo-local execution skill validates an exported graph/ledger and computes next-ready only after these gates; the export and live statuses remain operational state outside Git.
+
+Architecture manifests distinguish **semantic producers** from the sole **physical writer**. Capture and projectors may produce sanitized frames, projection commands, or outbox work, but only the daemon/store authority opens mutable SQLite and commits physical writes; generated owner/DAG views must never label a producer as a database writer.
+
 ## 6. Phase gates
 
 ### Phase 0 — truth and contracts
