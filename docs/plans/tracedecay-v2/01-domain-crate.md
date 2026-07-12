@@ -1163,6 +1163,7 @@ pub enum SteeringDeliveryDispositionV1 {
     DeliveryUnknown,
     RejectedStale,
     Unsupported,
+    BlockedByLimitChange,
 }
 pub enum SteeringAcknowledgementDispositionV1 {
     Acknowledged,
@@ -1270,6 +1271,12 @@ or coalescing receipt. Delivery never truncates: a bounded prefix is claimed,
 the remainder stays pending, and required state keeps its lifecycle fence.
 Unknown tokenizer/config/catalog state fails closed and no retry can grow a
 Turn prompt past the pinned member/byte/token/Turn budgets.
+If a newly activated lowering makes an admitted but unhanded directive
+undeliverable, its immutable admitted snapshot is retained and delivery records
+`BlockedByLimitChange`; a required directive keeps its lifecycle fence until a
+controller submits a bounded superseding directive or explicitly cancels the
+pre-delivery directive. Lowering never silently waives intent, and later
+loosening never enlarges the already-pinned directive or batch.
 
 ```rust
 pub struct EditLocalKeyV1(pub SafeLabel); // bundle-local grammar; never canonical identity

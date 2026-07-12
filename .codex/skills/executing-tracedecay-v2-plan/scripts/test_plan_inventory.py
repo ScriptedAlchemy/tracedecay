@@ -152,7 +152,7 @@ class PlanInventoryHeadingTests(unittest.TestCase):
                 "C8 — Backfill, reconcile, cut over (`PR 33–36`)",
                 "docs/plans/tracedecay-v2/19-system-defragmentation-convergence-and-extensibility.md:918: "
                 "C9 — Delete V1 and close entropy budget (`PR 37`)",
-                "docs/plans/tracedecay-v2/24-canonical-task-plan-graph-and-multi-agent-executor.md:2040: "
+                "docs/plans/tracedecay-v2/24-canonical-task-plan-graph-and-multi-agent-executor.md:2091: "
                 "9.8 Workspace, branch, commit, and PR workflows",
             ],
         )

@@ -36,6 +36,8 @@ work_items.record_attestation|record_review|record_decision|record_exception
 work_items.handoff|reopen|reverse_transition
 attempts.list|get|timeline
 attempts.heartbeat|progress|complete|block
+task_comments.list|create|revise|tombstone
+task_steering.list|get|submit|promote|acknowledge|resolve|supersede|cancel
 task_offers.list|get|accept|decline|revoke
 context_packets.list|get|accept
 task_notifications.list|get|create|update|delete
@@ -45,6 +47,49 @@ saved_views.list|get|create|update|delete|share.plan|share.start|share.revoke
 task_graph.status|doctor|events
 task_graph.edit_bundles.export|get|validate|diff|rebase|submit|delete
 ```
+
+The steering family preserves separate semantic commands. `resolve` accepts
+only `Applied | Rejected`, `supersede` requires the higher-sequence directive,
+and `cancel` is controller-authorized and legal only before delivery/handoff.
+HTTP, CLI, SDK, and dashboard generation expose those three operations
+separately. The compact MCP profile still has three tools total:
+`task_steering.submit`, `task_steering.acknowledge`, and the generated facade
+binding `task_steering.disposition`. The facade is not a `UseCaseId`; its closed
+tagged input has `Resolve`, `Supersede`, and `Cancel` cases, and catalog
+validation maps each case bijectively to the corresponding semantic use case,
+schema, grant, effect, idempotency, and error set before dispatch. Generation
+fails for a missing case, extra fourth semantic action, shared untagged fields,
+or any attempt to route one case through another command.
+
+Plan 01 owns the absolute steering constants. This catalog registers their one
+immutable metadata projection and attaches it to steering command, delivery,
+OpenAPI/SDK, CLI, MCP, dashboard, and hook binding schemas:
+
+```rust
+pub struct SteeringLimitsV1 {
+    pub max_payload_bytes: u32,        // absolute 16 KiB
+    pub max_payload_tokens: u32,       // absolute 2_048
+    pub max_batch_members: u16,        // absolute 8
+    pub max_batch_bytes: u32,          // absolute 32 KiB
+    pub max_batch_tokens: u32,         // absolute 4_096
+    pub max_turn_directives: u16,      // absolute 4
+    pub max_turn_tokens: u32,          // absolute 4_096
+    pub max_rolling_60s_directives: u16, // absolute 16 per target
+    pub min_cooldown_millis: u32,      // absolute floor 250 for advisory promotion
+    pub tokenization_digest: RegistryManifestDigest,
+    pub config_registry_digest: RegistryManifestDigest,
+    pub catalog_snapshot: CatalogSnapshotRefV1,
+    pub limits_digest: RegistryManifestDigest,
+}
+```
+
+Plan 20 supplies only a validated narrowing projection: maxima may decrease and
+the minimum cooldown may increase. Catalog generation rejects a default/range
+outside Plan 01, a transport-local override, absent limit/error fields, or an
+unbounded string/batch. Each admitted directive and delivery claim pins both
+the absolute catalog record and effective-config digest. `steering_limit_exceeded`
+and `steering_blocked_by_limit_change` are generated typed problems, never
+generic validation text or prompt truncation.
 
 Plan [`28-remote-multi-machine-shared-brain.md`](28-remote-multi-machine-shared-brain.md) contributes topology/node/enrollment/placement/sync/replica/backup/failover/repository-correlation use cases. The catalog marks safe status reads separately from operator effects, generates the plan-21 CLI and plan-10/17 API/SDK bindings, includes compact `brain_status` only in reviewed context profiles, and keeps enrollment/revocation/placement/repair/promotion mutations in explicit operator profiles. No generated schema exposes database paths/URLs, sync chunks, credentials, node keys, or Tailscale-specific semantics.
 
@@ -1272,6 +1317,7 @@ Commands run from repository root with checkout-local target directories.
 - [ ] Add definitions for all project/code/graph/Git/session/LCM/memory/policy/automation/representation-artifact/observability/operation/lab surfaces and all 104 source MCP definitions with dispositions, including `ast_grep_search` and `move_symbol`; 103 are installed at 0.0.47.
 - [ ] Add current V2 coordination definitions/bindings for presence, claim, heartbeat, nearby work, overlap acknowledgement/handoff, analytics, and Coordination Lab. Fixture-lock parent prefix `019f4906`, four PR #359 child agents, and Cursor session `ebc96a27-b046-4c88-865f-b38d76da9d2d`; these are evidence anchors, never catalog text.
 - [ ] Add the exact task-graph edit-bundle operation family, frontmatter-Markdown schemas, protected resource-link/read bindings, structured diagnostics/diff/receipt views, and the rule that only `tracedecay-work`/`orchestrator` exposes its mutations.
+- [ ] Add the exact steering read/comment/submit/promote/acknowledge/resolve/supersede/cancel family, catalog-owned absolute `SteeringLimitsV1`, Plan-20 narrowing reference, separate HTTP/CLI/SDK/UI semantic commands, and the three-tool MCP facade whose disposition tags map bijectively to resolve/supersede/cancel. Reject widening, truncation, missing limit errors, semantic conflation, and a fourth tool.
 - [ ] Add all nine host-integration definitions with read-versus-probe/effect metadata, `HostInstallSetV1`, admin/operator exposure, operation/idempotency/ownership/trust/restart views, and recursive rejection of paths, config/backup bodies, command/environment/credential values, and arbitrary manifests.
 - [ ] Add the exact Section 1 search-evaluation reads and commands with CLI/MCP/resource/HTTP/SDK/Search Quality UI parity dispositions. Reject all shorthand aliases and do not synthesize fixture reads or writable resources.
 - [ ] Add direct_user/subagent/tool_result/parent-representative schema fixtures for message search, LCM, CLI, MCP, future HTTP/dashboard/export/saved view.
@@ -1365,6 +1411,7 @@ Never delete raw #410 prompt rows or collapse evidence in the catalog. Retire on
 - [ ] Run plan 21's MCP protocol-generation and official-SDK conformance fixtures. Expected: every generated primitive/schema/capability re-parses, no undeclared method or notification exists, and no hand-maintained live definition survives.
 - [ ] Run MCP profile/installer/eager-host/deferred-host conformance. Expected: one adapter, exact profile digests and intersections, no per-turn `listChanged` widening, no generic invoke tool, and zero operator binding in an implicit install.
 - [ ] Run task edit-bundle catalog parity. Expected: exactly seven operations, safe resource links for large bundles, typed Markdown/JSON diagnostics, orchestrator-only mutations, and no transport-local bulk-edit semantic.
+- [ ] Run steering catalog/config/surface parity. Expected: one absolute `SteeringLimitsV1`, nine lowering-only Plan-20 descriptors, separate resolve/supersede/cancel semantic rows, exact three-tool MCP union mapping, and identical limit/block/fence/remediation schemas across hooks, API, CLI, SDK, dashboard, and subscriptions.
 - [ ] Run Git routing/truth/output regression corpus including #410. Expected: correct tool, separated truth, direct/impact/test/context membership, evidence/caps.
 - [ ] Run #410 filter parity across CLI/MCP/generated HTTP/dashboard/export schemas. Expected: identical semantics and raw-row coverage.
 - [ ] Run the closed search-evaluation family parity fixture. Expected: exact canonical operations, read-only MCP resources, complete CLI/MCP/HTTP/SDK/UI mappings, and zero invented aliases.
@@ -1381,6 +1428,7 @@ Never delete raw #410 prompt rows or collapse evidence in the catalog. Retire on
 - The exact task edit-bundle family exports, reads, validates, diffs, rebases, submits, and deletes protected frontmatter-Markdown staging through shared application machinery; large MCP bundles use resource links and only the orchestrator profile exposes mutations.
 - The canonical search-evaluation family has exact generated CLI/MCP/resource/HTTP/SDK/Search Quality UI parity; no transport invents an alias, fixture read, writable resource, or second semantic operation.
 - Native task bindings include attempt list/get/timeline, registration-scoped offer list/get/accept/decline plus authorized revoke, packet list/get/fenced accept with start-versus-current pointer visibility, and direct notification list/get/create/update/delete across every supported surface; no family is hidden inside generic work-item detail or preview/apply aliases.
+- Native steering bindings preserve one Plan-01 contract and Plan-08 absolute limit record, separate resolve/supersede/cancel semantics, Plan-20 lowering-only effective descriptors, and exactly three compact MCP tools through an exhaustive disposition union; required limit-blocked state cannot be waived or rendered above bounds.
 - The right TraceDecay Git capability is discoverable at the right intent, with live/local truth and output membership impossible to confuse.
 - #405/#407 ownership, #410 filtering/dedupe, #411 remediation ownership, and #412 lifecycle prerequisites are cataloged; #413 contributes actual release/protocol version; #409 remains historical only.
 - Missed capability and human correction are replayable evidence, while useful silence remains measurable.

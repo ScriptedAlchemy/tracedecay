@@ -218,7 +218,7 @@ Do not create a monolithic `tracedecay-tasks` crate. The graph is a cross-cuttin
 | [06-policy-crate.md](./06-policy-crate.md) | Owns pure decomposition validation, routing, readiness, priority/fairness, retry/circuit-breaker, packet relevance, and sibling-materiality decisions. |
 | [07-hooks-crate.md](./07-hooks-crate.md) | Receives validated plan-22 suggestion envelopes and already-admitted Plan-01 steering values at supported host boundaries; it declares capabilities, claims through application/store, renders only after claim commit, and records observed delivery. It defines no steering types or lifecycle transitions and never schedules work. |
 | [32-dynamic-workflow-runtime-and-sdk.md](./32-dynamic-workflow-runtime-and-sdk.md) | Owns workflow definition/run/node/history lifecycle and applies Plan 01 steering targets to `WorkflowRun`/`WorkflowNode`; it reuses the common envelope/receipt machinery but never delegates workflow lifecycle to this task plan. |
-| [08-tool-catalog-crate.md](./08-tool-catalog-crate.md) | Declares task capabilities, effect/scope/privacy/cost metadata, executor adapter manifests, grant eligibility, generated schemas/bindings, and the one `task_graph.edit_bundles.*` family/audience profile. |
+| [08-tool-catalog-crate.md](./08-tool-catalog-crate.md) | Declares task capabilities, effect/scope/privacy/cost metadata, executor adapter manifests, grant eligibility, generated schemas/bindings, the absolute `SteeringLimitsV1` metadata/command schemas and MCP disposition-union mapping, and the one `task_graph.edit_bundles.*` family/audience profile. |
 | [09-application-crate.md](./09-application-crate.md) | Owns task/plan commands and queries, authorization, graph transactions, scheduler, lease lifecycle, packet assembly, executor workflows, cancellation, receipts, edit-bundle validation/diff/rebase orchestration, and final atomic submit. |
 | [10-api-crate.md](./10-api-crate.md) | Exposes versioned HTTP/SSE, auth, problems, cursors, idempotency, generated schemas, executor control-plane protocol, exact contained edit-bundle operation routes, and workspace-association/cleanup workflow bindings without accepting server paths or transport-authored eligibility. |
 | [11-dashboard-frontend.md](./11-dashboard-frontend.md) | Owns all human projections, inspectors, saved views, interaction state, accessibility, visual/performance tests, Orchestration Lab UI, Edit-as-Markdown workspace/diagnostic/diff/conflict/cleanup, and the task-visible associated-workspace inventory and cleanup controls; the UI renders application legal actions and never decides deletion eligibility. |
@@ -231,7 +231,7 @@ Do not create a monolithic `tracedecay-tasks` crate. The graph is a cross-cuttin
 | [17-official-public-api-and-sdks.md](./17-official-public-api-and-sdks.md) | Owns stable public API/SDK compatibility, generated clients, edit-bundle stream/file helpers, auth scopes, event subscriptions, examples, deprecation, and conformance. |
 | [18-secret-detection-redaction-and-private-data-safety.md](./18-secret-detection-redaction-and-private-data-safety.md) | Owns sanitizer/taint types, protected payloads, logs/artifacts/packets, secret scanning, quarantine, egress, retention, and deletion. |
 | [19-system-defragmentation-convergence-and-extensibility.md](./19-system-defragmentation-convergence-and-extensibility.md) | Enforces the allowed dependency DAG, one canonical activity graph, SPI rules, entropy budget, and deletion of parallel systems. |
-| [20-configuration-control-plane.md](./20-configuration-control-plane.md) | Exclusively owns typed task/executor/scheduler/model/budget/grant/privacy settings plus edit-workspace TTL/root/caps/sharding/cleanup/offline-lock descriptors, precedence, history, activation, status, and all configuration UIs/bindings. |
+| [20-configuration-control-plane.md](./20-configuration-control-plane.md) | Exclusively owns typed task/executor/scheduler/model/budget/grant/privacy settings, the exact lowering-only steering payload/batch/Turn/rate/cooldown descriptors, plus edit-workspace TTL/root/caps/sharding/cleanup/offline-lock descriptors, precedence, history, activation, status, and all configuration UIs/bindings. |
 | [21-cli-mcp-tool-surface-and-output-unification.md](./21-cli-mcp-tool-surface-and-output-unification.md) | Owns generated semantic bindings, local edit-workspace and task-workspace cleanup CLI ergonomics, an optional zero-to-three logical MCP registration/profile component set backed by one implementation/binary/daemon/catalog, resource links/skills+CLI fallback, the pure root `v2::presentation` renderer/document module, Markdown-default/explicit-JSON rules, stable pagination/handles/errors, and parity; plan 09 owns semantic typed view models and cleanup legality. |
 | [22-incremental-context-scout-and-suggestion-envelopes.md](./22-incremental-context-scout-and-suggestion-envelopes.md) | Consumes task events/context-packet refs as evidence and delivers at most one material, deduped, privacy-safe advisory to an exact Thread/Turn/Agent. |
 | [23-session-lcm-temporal-retrieval-and-evaluation.md](./23-session-lcm-temporal-retrieval-and-evaluation.md) | Owns temporal retrieval, logical-message copies, current/as-of semantics, source horizons, representative selection, and packet context assembly quality. |
@@ -825,7 +825,7 @@ historical annotation only until this transaction succeeds; editing,
 tombstoning, notifying, or subscribing to it never prompts an executor.
 
 The lifecycle is append-only:
-`Admitted -> PendingDelivery -> Claimed -> Delivered|Deferred|NextTurnOnly|DeliveryUnknown|Unsupported|RejectedStale -> Acknowledged -> Applied|Rejected|Superseded`.
+`Admitted -> PendingDelivery -> Claimed -> Delivered|Deferred|NextTurnOnly|DeliveryUnknown|Unsupported|BlockedByLimitChange|RejectedStale -> Acknowledged -> Applied|Rejected|Superseded|Cancelled`.
 Delivery observations may skip `Acknowledged` only when the host declares it
 unobservable; they never skip the required terminal disposition. Duplicate or
 stale claim/ack/disposition requests insert-or-read or reject without advancing
@@ -2346,6 +2346,7 @@ tracedecay task pause|resume|cancel|archive|retry
 tracedecay task record-attestation|record-review|record-decision|record-exception
 tracedecay task handoff|reopen|reverse-transition
 tracedecay attempt list|show|timeline
+tracedecay task-graph steering list|show|submit|promote|acknowledge|resolve|supersede|cancel
 tracedecay project worktree discover|list|show
 tracedecay project worktree association list|diagnose|associate|confirm|reject|reassign
 tracedecay project worktree cleanup inspect|status|request
@@ -2375,6 +2376,15 @@ MCP exposes the same catalog definitions with generated schemas and audience fil
 - query broader initiatives/tasks only within explicit scope and role grants.
 
 The model never receives raw CLI syntax, store paths, bearer tokens, fence tokens, or arbitrary application tool invocation. Lifecycle calls bind the current host registration/attempt/participant out of band. Every active worker uses a fixed eager-safe work profile containing its role-correct lifecycle bindings: owner commands for the lifecycle owner, `participant_handoff` for non-owner participants, and never owner terminal authority for an internal subagent. Host-native deferred tool search may omit additional noncore query/control schemas as an optimization, but correctness never depends on it and the applicable lifecycle terminator/handoff is always present.
+
+Steering preserves separate application commands `resolve` (`Applied|Rejected`
+only), `supersede` (higher target sequence), and controller pre-delivery
+`cancel` (`Cancelled`). Plan 21's compact MCP projection exposes those through
+one generated `task_steering.disposition` tagged-union facade, alongside
+`submit` and `acknowledge`; each tag maps to its own command before application
+dispatch and cannot share authorization or validation accidentally. HTTP,
+CLI, SDK, dashboard, journal events, receipts, and audit continue to identify
+the underlying semantic command, never the facade name.
 
 Ordinary executor MCP exposes bounded worktree discovery evidence for its own active attempt and association confirmation only when addressed by a proposed-correlation hint. Cleanup inspect/request are operator capabilities, absent from the ordinary attempt surface unless the executor registration carries an explicit cleanup delegation for that exact worktree generation. MCP returns the same blockers/proof/legal actions as CLI/API/UI and cannot accept a raw path, synthesize ownership from a ticket mention, invoke forced removal, or create/restore a worktree.
 
@@ -3262,6 +3272,7 @@ Domain and persistence:
 - [ ] Plan-01-owned `TaskGraphEditWorkspaceId`, `TaskGraphEditCandidateRefV1`, `TaskGraphEditManifestV1`, `EditLocalKeyV1`, `EditableEntityRefV1`, `TaskGraphEditDiagnosticV1`, `TaskGraphSemanticDiffV1`, `TaskGraphEditConflictV1`, and `TaskGraphEditReceiptV1` round-trip without duplicate/narrowed definitions.
 - [ ] Declarative export is deterministic/sharded/contained, omission cannot delete, validation returns exact source spans, semantic diff/rebase preserves graph meaning, and submit CAS-commits every normalized change or none.
 - [ ] Owner-shard transactions prove one active lease, monotonic fencing, atomic terminal/release, idempotency, outbox, recovery, retention, backup/restore, and corruption quarantine.
+- [ ] Plan-01 steering contracts round-trip one target/revision/delivery/acknowledgement/disposition vocabulary; Plan 02 proves one globally active member claim before render; separate resolve/supersede/cancel commands preserve `Applied|Rejected|Superseded|Cancelled`; Plan-08 absolute and Plan-20 effective limits fail closed without truncation or prompt growth.
 - [ ] Scheduler commits/delivers only a revisioned immutable offer; accepting its exact revision uses one transaction to activate the pinned assignment and insert the complete sealed packet/entries, attempt, lease, grant set, reservations, canonical journal events, referenced adapter-start outbox, and idempotency result; decline/revoke/expiry create none of that authority.
 - [ ] Advisory `WorkClaimV1` and authoritative `TaskLeaseV1` remain distinct in schema, policy, UI, API, and tests.
 
@@ -3275,6 +3286,7 @@ Execution:
 - [ ] Negative reviews are terminal evidence with exactly one remediation/successor path; no blocked-review retry, duplicate remediation, or acceptance carry-forward across changed inputs.
 - [ ] Every attempt exposes one lifecycle owner plus typed acting participants and separates provider, native CLI, adapter, workspace, acceptance, external-effect, and lifecycle-protocol failure cause chains.
 - [ ] Supported Codex/Claude `Stop`/`SubagentStop` bindings issue at most one same-agent lifecycle checkpoint, expose owner commands only to the lifecycle owner and participant handoff to non-owners, never invoke a provider/prompt/agent/HTTP/MCP route, and fail open with observable reconciliation when missing/disabled/untrusted/ambiguous/stale/unknown.
+- [ ] Codex/Claude/Cursor/Hermes steering fixtures prove truthful native/after-tool/terminal/next-Turn boundaries, duplicate/stale acknowledgement refusal, hard batch/Turn/rate/cooldown enforcement, and `BlockedByLimitChange` remediation; an already-admitted required directive is never silently waived or delivered above a newly lowered limit.
 - [ ] Workspace/worktree/branch/commit/PR safety preserves user work and never auto-stashes/resets/force-pushes/merges/cleans without authority.
 - [ ] TraceDecay creates/provisions zero Git worktrees. Agent/user/Git/IDE/executor/automation-created worktrees are discovered through tool/hook/CWD/git-common-dir/branch/HEAD/commit/PR/watcher evidence; strong correlation auto-confirms, ambiguity proposes once, contradiction never rebinds, and reconciliation/backfill is idempotent.
 - [ ] Archive, terminal attempt, produced-PR merge, retention expiry, and terminal hooks only evaluate cleanup. Every dirty/untracked/active-authority/unpushed/unmerged/open-or-unknown-PR/sibling-reference/unknown-ownership/missing-delegation/drift/effect/hold blocker fails closed; only explicit external delegation plus a fresh proof authorizes removal and produces a durable receipt.
@@ -3294,6 +3306,7 @@ Surfaces and product:
 - [ ] One catalog/application/view model generates API/CLI/MCP/SDK/dashboard semantics, errors, legal actions, pagination, anchors, and Markdown/JSON output for `worktrees.*`, `task_worktree_associations.*`, and `worktree_cleanup.*`; no `work_items.workspaces`, restore, or provision alias exists.
 - [ ] Offer, packet, and notification list/detail views and owned deep links round-trip exact IDs/revisions; all seven manual-work commands have generated API/CLI/MCP/SDK/UI parity with no generic status, preview/apply, undo, or rollback alias.
 - [ ] `task_graph.edit_bundles.export|get|validate|diff|rebase|submit|delete` has generated operation/view parity across authorized CLI/MCP/API/SDK/UI bindings; skills plus CLI remain sufficient when MCP is not installed, and no domain-specific MCP server forks task semantics.
+- [ ] Steering HTTP/CLI/SDK/UI expose separate resolve/supersede/cancel operations; compact MCP exposes exactly `submit|acknowledge|disposition`, whose closed tags map bijectively to those semantic commands. Absolute/effective limit values, blocked state, required fence, and remediation actions are byte-semantic across every surface.
 - [ ] Kanban, DAG, plan, timeline, causal, critical-path, workload, executor, repository, initiative, agent slice, and All lenses are saved authorized projections over the same selected entities/versions.
 - [ ] Agent default views are relevance-filtered; humans with grants can query All; no board/event notification spam exists.
 - [ ] Every ticket inspector shows all repository/worktree generations/branches/commits/PRs and attempts with provenance/confidence/contradictions, active lease/reservation/agent state, retention, blockers, receipts, and legal cleanup/restore actions after archive/reopen/removal.

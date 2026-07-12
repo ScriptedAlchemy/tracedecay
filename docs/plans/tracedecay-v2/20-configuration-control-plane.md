@@ -781,7 +781,7 @@ Phase 0 generates an inventory from source and blocks cutover until every public
 | Code/Git/delivery | index modes, graph generation triggers, refs/worktrees, ignore policy, delivery refresh, diagnostics capture |
 | Query/search | lexical/fuzzy/vector/rerank profiles, exact-match floor, candidate budgets, graph expansion, diversity, temporal current/as-of/evolution/forensic policy, authority/supersession/conflict rules, copy/summary-horizon policy, fusion/calibration, time/coverage/no-answer defaults, corpus/promotion gates; signed representation artifact IDs/sources, explicit automatic-download authorization, offline-only mode, allowed residency/device/runtime, 4 GiB default disk and 2 GiB default resident-memory budgets, cold-load concurrency, idle unload, pin/eviction/revocation/rebuild/fallback policy per plan 05 §11.2A |
 | Hints/coordination/scout | classifier bundles, routing, scout off/shadow/deterministic/model-assisted mode, discovered model capability/credential reference, read/egress grants, coalescing/concurrency/tool/model/cost budgets, evidence/silence/dedupe/cooldown/expiry/delivery thresholds, proximity/task-materiality, terminal horizons |
-| Tasks/plans/executors | task graph/decomposition limits, legal work/gate/acceptance kinds, scheduler pause/concurrency/fairness/aging/batches, lease/heartbeat/start/cancel timeouts, executor adapters/hosts/capacity/workspace modes, provider/model/reasoning effort/routes/fallback, tool/effect grants, privacy/egress, worktree/branch policy, budgets/schedules/retries/circuit breakers, context-packet limits/expiry/materiality, saved task views/notifications |
+| Tasks/plans/executors | task graph/decomposition limits, legal work/gate/acceptance kinds, scheduler pause/concurrency/fairness/aging/batches, lease/heartbeat/start/cancel timeouts, executor adapters/hosts/capacity/workspace modes, provider/model/reasoning effort/routes/fallback, tool/effect grants, privacy/egress, worktree/branch policy, budgets/schedules/retries/circuit breakers, context-packet limits/expiry/materiality, the complete lowering-only steering payload/batch/Turn/rate/cooldown descriptor set, saved task views/notifications |
 | Memory/knowledge | retrieval/trust/conflict/retention policies, autonomous curation cadence and quality constraints |
 | Automations/skills | scheduler, run budgets, autonomous curator/reflector/skill-writer policies, installation authority, health pauses |
 | Storage/projectors | desired `StoreIsolationModeV1` (`DedicatedServiceIdentity`/`RemoteAuthorityOnly`/`SameUserDegraded`), read-only observed `StoreIsolationStatusV1` proof with validity/receipts, data locations by allowed location class, WAL/lease budgets, blob/backup/log retention, projection/index generations, compaction |
@@ -868,6 +868,60 @@ Plan 24 §8.7 owns the liveness/sentinel policy semantics; this registry is the 
 | `query.cursor.interactive_ttl` | duration / `15m` | `1m..24h`; catalog-bound interactive cursors only. Export/bulk continuations use their declared job lifetime; key retirement covers the maximum outstanding declared lifetime. |
 
 The ten liveness descriptors plus the cursor-lifetime descriptor are profile defaults with optional initiative/executor/provider narrowing only where the descriptor declares that scope. Deny/safety floors win. Settings shows desired/activated/effective/observed values, source, generation, affected active-attempt count, and whether activation is hot, next-heartbeat, or workflow-mediated. Tests compare generated liveness values to plan-24 fixtures and cursor expiry/rotation values to plans 01/05/10/17 so a renamed key, unit drift, or conflicting default blocks both PRs.
+
+### 13.1A Live steering lowering descriptors
+
+Plan 01 owns the non-configurable absolute ceilings and Plan 08 publishes the
+single `SteeringLimitsV1` catalog record. This registry owns only the effective
+narrowing descriptors below. Every key is a profile default; an initiative may
+narrow any key, while a `HostIntegration` target may narrow only batch/Turn
+render limits and cooldown. Maxima merge by minimum and cooldown merges by
+maximum. No project, CWD, task comment, adapter payload, API request, plugin, or
+environment value can widen them.
+
+| Key | Type/default | Range, scope, and activation |
+|---|---|---|
+| `task_graph.steering.payload_max_bytes` | bytes / `16KiB` | `256B..16KiB`; Profile/Initiative; hot for new admission and the next unhanded claim. |
+| `task_graph.steering.payload_max_tokens` | integer / `2048` | `32..2048`; Profile/Initiative; measured by the pinned tokenizer before admission and again before claim. |
+| `task_graph.steering.batch_max_members` | integer / `8` | `1..8`; Profile/Initiative/HostIntegration; next unhanded claim, never truncation. |
+| `task_graph.steering.batch_max_bytes` | bytes / `32KiB` | `256B..32KiB`; Profile/Initiative/HostIntegration; effective value may be below payload maximum, in which case the directive is explicitly blocked before handoff. |
+| `task_graph.steering.batch_max_tokens` | integer / `4096` | `32..4096`; Profile/Initiative/HostIntegration; same blocked-not-truncated rule. |
+| `task_graph.steering.turn_max_directives` | integer / `4` | `1..4`; Profile/Initiative/HostIntegration; next safe boundary/Turn accounting snapshot. |
+| `task_graph.steering.turn_max_tokens` | integer / `4096` | `32..4096`; Profile/Initiative/HostIntegration; shared across all steering batches in that Turn and cannot borrow hint/scout budget. |
+| `task_graph.steering.rolling_60s_max_directives` | integer / `16` | `1..16`; Profile/Initiative; per target over an authority-clock 60-second window. |
+| `task_graph.steering.advisory_cooldown_ms` | duration / `250ms` | `250ms..60s`; Profile/Initiative/HostIntegration; narrowing means increasing the minimum interval. Required directives are rate-limited at admission but never silently suppressed by advisory cooldown. |
+
+Each effective snapshot contains all nine values, source chain, target scope,
+Plan-08 catalog/config/tokenizer digests, activation generation, and measured
+counts. Cross-field validation requires positive values and a batch/Turn token
+and byte budget that can represent at least one legal payload; a stricter batch
+below an already-admitted payload is allowed only because the blocked workflow
+below is explicit. Unknown or partial resolution fails closed.
+
+Activation is hot at the admission and delivery-claim boundaries. A directive
+retains its admitted snapshot for identity/audit; a claim that has already
+issued its handoff token completes under its claim-pinned limits because bytes
+may already be model-visible. Before handoff, the daemon re-resolves the current
+effective snapshot. If lowering now conflicts with an admitted directive, it
+records Plan 01 `BlockedByLimitChange` plus typed
+`steering_blocked_by_limit_change`, renders zero bytes, and leaves a required
+directive fenced. Legal remediation is a bounded higher-sequence superseding
+directive or controller-authorized pre-delivery cancel. It never waives,
+truncates, splits hidden text, retries into a larger prompt, or grandfather-
+delivers above the new limit. Later loosening affects new admission/claims only
+and cannot enlarge a pinned directive or batch.
+
+Brain Settings exposes one **Steering limits** panel with absolute/effective
+values, source chain, current Turn/rate counters, affected pending directives,
+activation generation, blocked reason, and the exact supersede/cancel actions;
+it never displays protected payload. Generated CLI `tracedecay config
+get|set|history|diff task_graph.steering.*`, HTTP/SDK config bindings, optional
+operator MCP bindings, dashboard forms, status, doctor, and SSE consume the
+same descriptors/view. Fixtures cover every default/range/scope merge,
+max-decrease/cooldown-increase rule, forbidden widening, cross-field failure,
+hot activation before/after handoff, already-admitted required/advisory state,
+blocked remediation, restart/replay, slow-client resync, and byte-semantic
+CLI/MCP/HTTP/Rust/TypeScript/Python/dashboard parity.
 
 ### 13.2 Autonomous automation admission descriptors
 
@@ -1388,6 +1442,7 @@ These slices extend the master program without forming a separate architecture:
 
 - Collect owning-crate manifests.
 - Generate catalog, schemas, docs, CLI/MCP/HTTP/SDK/dashboard metadata.
+- Register all nine `task_graph.steering.*` lowering descriptors against Plan 08 `SteeringLimitsV1`; reject a widened maximum, shortened cooldown, incomplete snapshot, or conflicting unit/default.
 - Add full legacy/public-setting inventory and drift gates.
 
 ### PR 24I — Application resolver, commands, API, CLI, MCP, and SDKs
@@ -1395,12 +1450,14 @@ These slices extend the master program without forming a separate architecture:
 - Implement resolve/explain/validate/impact/patch/batch/history/import/export/status/drift use cases.
 - Ship navigable CLI tree and deterministic JSON/JSONL.
 - Add transport parity and configuration SSE.
+- Implement steering hot activation/re-resolution at admission and pre-handoff claim boundaries, including `BlockedByLimitChange`, required-fence preservation, and supersede/cancel remediation receipts.
 - Add task-graph edit-bundle bound descriptors plus the target-scoped host-integration desired package/component/install-scope/trust/update/credential descriptors and three generated one-binary MCP registration profiles; profile widening remains pending until reconnect, host effects run only through plan 09 operations, and every host/profile receipt is content/path-free.
 
 ### PR 25E — Complete Brain Settings workspace
 
 - Replace partial settings/plugins with the generated profile-wide workspace.
 - Add target tree, search/forms, provenance, impact, conflicts, history, status, drift, credential references, and links into plan 11's `/settings/integrations` topology/difference/operation workspace.
+- Add the generated Steering limits panel with absolute/effective/source/counter/blocked state and protected-payload-free remediation actions.
 - Keep all old write behavior until module parity passes, then remove old bindings atomically.
 
 ### PR 31N — Configuration and autonomy replay extensions
@@ -1436,6 +1493,7 @@ Each PR updates the master plan/index, architecture ownership table, schema inve
 - [ ] Credentials remain opaque protected references; no secret or secret-derived identifier leaks through any config sink.
 - [ ] Curation and self-improvement are fully autonomous with policy/schedule/budget configuration and audit, and no per-item approval/apply/reject/rollback surface exists.
 - [ ] Every consuming runtime acknowledges the exact activation/effective digest; pending restart/session/rescan/reproject/reindex/migration is visible and actionable.
+- [ ] All nine steering descriptors are lowering-only against Plan 08, hot activation is deterministic before/after handoff, and an already-admitted required directive that conflicts with lowering becomes explicitly limit-blocked until superseded/cancelled—never waived, truncated, or delivered above the effective bound.
 - [ ] Configuration SSE, status, doctor, and Settings agree under slow clients, restarts, stale clients, split identity, locked stores, and partial shards.
 - [ ] Import/export is typed, scoped, versioned, sanitized, non-secret, and atomic at activation; V1 inputs have complete migration/differential receipts.
 - [ ] Policy Diff and Scope/Federation evaluator modes replay historical/current configuration resolution and policy effects without mutation or unsafe fixture access; no Configuration lab kind, route, runner, or lifecycle exists.
