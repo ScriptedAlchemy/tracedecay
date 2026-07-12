@@ -299,6 +299,54 @@ class SeriesTests(unittest.TestCase):
 
 
 class ReconciliationTests(unittest.TestCase):
+    def test_acceptance_rejects_empty_or_whitespace_id_and_text(self) -> None:
+        cases = [
+            sa.Criterion("", "Valid text.", ("owner",)),
+            sa.Criterion("   ", "Valid text.", ("owner",)),
+            sa.Criterion("AC-1", "", ("owner",)),
+            sa.Criterion("AC-1", " \t\r\n ", ("owner",)),
+        ]
+        for criterion in cases:
+            result = sa.reconcile([_owner("PR 4E", acceptance=(criterion,))])
+            self.assertFalse(result.dispatchable, criterion)
+            self.assertIn("conflicting_field", {error.code for error in result.errors})
+
+    def test_acceptance_rejects_empty_and_malformed_source_anchors(self) -> None:
+        anchors = [(), ("",), ("   ",), ("ownre",), ("companion",),
+                   ("companions",), ("companions[]",), ("companions[-1]",),
+                   ("companions[01]",), ("companions[1]extra",)]
+        for source_anchors in anchors:
+            criterion = sa.Criterion("AC-1", "Valid text.", source_anchors)
+            result = sa.reconcile([_owner("PR 4E", acceptance=(criterion,))])
+            self.assertFalse(result.dispatchable, source_anchors)
+            self.assertIn("source_anchor_mismatch", {error.code for error in result.errors})
+
+    def test_acceptance_companion_anchor_must_exist_and_be_in_range(self) -> None:
+        owner = _owner("PR 4E", acceptance=(
+            sa.Criterion("AC-1", "Valid text.", ("companions[0]",)),))
+        result = sa.reconcile([owner])
+        self.assertFalse(result.dispatchable)
+        self.assertEqual({error.code for error in result.errors}, {"source_anchor_mismatch"})
+
+        companion = sa.Section("PR 4E", "companion", A("companion.md", 1, 2, "c"))
+        valid = sa.reconcile([owner, companion])
+        self.assertTrue(valid.dispatchable)
+
+        out_of_range = _owner("PR 5", acceptance=(
+            sa.Criterion("AC-1", "Valid text.", ("companions[1]",)),))
+        invalid = sa.reconcile([out_of_range, companion])
+        self.assertFalse(invalid.dispatchable)
+        self.assertIn("source_anchor_mismatch", {error.code for error in invalid.errors})
+
+    def test_acceptance_rejects_duplicate_and_whitespace_spelled_anchors(self) -> None:
+        for anchors in [("owner", "owner"), (" owner",), ("owner ",),
+                        ("companions[0]", "companions[0]"),
+                        ("companions[ 0]",), ("companions[0 ]",)]:
+            criterion = sa.Criterion("AC-1", "Valid text.", anchors)
+            result = sa.reconcile([_owner("PR 4E", acceptance=(criterion,))])
+            self.assertFalse(result.dispatchable, anchors)
+            self.assertIn("source_anchor_mismatch", {error.code for error in result.errors})
+
     def test_owner_and_companion_merge_with_equivalent_criteria(self) -> None:
         owner = _owner("PR 4E", acceptance=(
             sa.Criterion("PR-4E-AC-001", "No duplicate owners.", ("owner",)),))
@@ -1034,6 +1082,27 @@ class ReconcileAgainstAuthorityTests(unittest.TestCase):
         diagnostics = sa.reconcile_against_authority(records, authority, "post")
         self.assertTrue(any("malformed dependency" in item.violated_rule
                             for item in diagnostics))
+
+    def test_authority_acceptance_schema_fails_closed_with_typed_diagnostics(self) -> None:
+        records = self._records()
+        malformed = [
+            {"criterion_id": "", "text": "Valid.", "source_anchors": ["owner"]},
+            {"criterion_id": "AC-1", "text": "   ", "source_anchors": ["owner"]},
+            {"criterion_id": "AC-1", "text": "Valid.", "source_anchors": []},
+            {"criterion_id": "AC-1", "text": "Valid.", "source_anchors": ["ownre"]},
+            {"criterion_id": "AC-1", "text": "Valid.",
+             "source_anchors": ["companions[0]"]},
+            {"criterion_id": "AC-1", "text": "Valid.",
+             "source_anchors": ["owner", "owner"]},
+        ]
+        for criterion in malformed:
+            authority = _authority(records)
+            authority["slices"]["PR 1"]["acceptance"] = [criterion]
+            diagnostics = sa.reconcile_against_authority(records, authority, "post")
+            self.assertTrue(diagnostics, criterion)
+            self.assertTrue(
+                {item.code for item in diagnostics}
+                & {"conflicting_field", "source_anchor_mismatch"}, criterion)
 
     def test_reconciled_body_and_manifest_projection_are_golden(self) -> None:
         companion = sa.Section("PR 1", "companion", A("companion.md", 4, 5, "c"))

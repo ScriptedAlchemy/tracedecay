@@ -639,6 +639,29 @@ def _nonempty_id(value: object) -> bool:
     return isinstance(value, str) and bool(value) and value == value.strip()
 
 
+def _criterion_error(criterion: Criterion, companion_count: int) -> tuple[str, str] | None:
+    """Return a typed diagnostic code/rule for malformed acceptance provenance."""
+    if not _nonempty_id(criterion.criterion_id):
+        return "conflicting_field", "acceptance criterion ID must be a non-empty canonical string"
+    if not isinstance(criterion.text, str) or not canonicalize_text(criterion.text):
+        return "conflicting_field", "acceptance criterion text must be non-empty after normalization"
+    anchors = criterion.source_anchors
+    if not isinstance(anchors, tuple) or not anchors:
+        return "source_anchor_mismatch", "acceptance criterion requires a canonical source anchor"
+    if any(not isinstance(anchor, str) for anchor in anchors) or len(set(anchors)) != len(anchors):
+        return "source_anchor_mismatch", "acceptance source anchors must be unique canonical strings"
+    for anchor in anchors:
+        if anchor == "owner":
+            continue
+        match = re.fullmatch(r"companions\[(0|[1-9][0-9]*)\]", anchor)
+        if match is None or int(match.group(1)) >= companion_count:
+            return (
+                "source_anchor_mismatch",
+                "acceptance provenance must resolve to owner or an indexed companion",
+            )
+    return None
+
+
 def _typed_object(value: object, fields: frozenset[str]) -> bool:
     return isinstance(value, dict) and set(value) == fields and all(_nonempty_id(v) for v in value.values())
 
@@ -697,6 +720,11 @@ def _validate_payload(dep: Dependency) -> str | None:
 def _merge_acceptance(record: SliceRecord, section: Section, is_owner: bool,
                       warnings: list[Diagnostic], errors: list[Diagnostic]) -> None:
     for crit in section.acceptance:
+        malformed = _criterion_error(crit, len(record.companions))
+        if malformed is not None:
+            code, rule = malformed
+            errors.append(_error(code, section.anchor, repr(crit), rule, record.normalized_id))
+            continue
         digest = criterion_digest(crit.text)
         same_id = next((c for c in record.acceptance if c.criterion_id == crit.criterion_id), None)
         if same_id is not None and criterion_digest(same_id.text) != digest:
@@ -868,6 +896,7 @@ def _build_record(normalized_id: str, entries: list[tuple[Section, bool]], owner
                 errors.append(_error("conflicting_field", section.anchor, section.commit_subject,
                                      "companion may not override owner commit subject",
                                      normalized_id))
+    for section, is_owner in entries:
         _merge_acceptance(record, section, is_owner, warnings, errors)
         record.dependencies.extend(section.dependencies)
     return record
@@ -1182,6 +1211,37 @@ def reconcile_against_authority(records: dict[str, SliceRecord], authority: dict
                                       normalized_id))
             continue
         authority_body = {key: expected[key] for key in body_keys}
+        acceptance = authority_body["acceptance"]
+        companions = authority_body["companions"]
+        if not isinstance(acceptance, list) or not isinstance(companions, list):
+            diagnostics.append(_error("reconciliation_mismatch", record.owner, normalized_id,
+                                      f"{phase} authority contains malformed acceptance criteria",
+                                      normalized_id))
+            continue
+        malformed_acceptance = False
+        for raw_criterion in acceptance:
+            if (not isinstance(raw_criterion, dict)
+                    or set(raw_criterion) != {"criterion_id", "text", "source_anchors"}
+                    or not isinstance(raw_criterion.get("source_anchors"), list)):
+                diagnostics.append(_error(
+                    "conflicting_field", record.owner, repr(raw_criterion),
+                    "authority acceptance criterion must match the exact typed schema",
+                    normalized_id,
+                ))
+                malformed_acceptance = True
+                continue
+            criterion = Criterion(
+                raw_criterion["criterion_id"], raw_criterion["text"],
+                tuple(raw_criterion["source_anchors"]),
+            )
+            malformed = _criterion_error(criterion, len(record.companions))
+            if malformed is not None:
+                code, rule = malformed
+                diagnostics.append(_error(code, record.owner, repr(raw_criterion), rule,
+                                          normalized_id))
+                malformed_acceptance = True
+        if malformed_acceptance:
+            continue
         if not _authority_edges_valid(
                 authority_body["dependencies"],
                 {anchor.ref() for anchor in record.source_anchors}):
