@@ -221,7 +221,7 @@ Shadow comparison pins the V1 lexical/code answers and V2 lexical baseline separ
 
 ## 12. Existing executable slice integration
 
-This plan creates no slice and is supporting research/design evidence, not execution authority. The canonical PR blocks in plans 02/05/15/20/25 and the master plan own the obligations summarized below; their machine-readable block digests are the stale-work boundary. Implementers execute those canonical blocks and use this plan only for the linked rationale, benchmark protocol, and upstream evidence.
+This plan creates no slice and is supporting research/design evidence, not execution authority. The canonical PR blocks in plans 02/05/12/15/20/25 and the master plan own the obligations summarized below; their machine-readable block digests are the stale-work boundary. Implementers execute those canonical blocks and use this plan only for the linked rationale, benchmark protocol, and upstream evidence.
 
 **PR 2A evidence — freeze FastEmbed and model evidence.**
 

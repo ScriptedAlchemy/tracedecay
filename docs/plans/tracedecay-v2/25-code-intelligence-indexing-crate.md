@@ -557,17 +557,19 @@ Import receipts are durable rows (G4), written through plan 02 PR 33S storage ow
 - [ ] Run `cargo test -p tracedecay-code-index --test migration_parity fixtures`; expected: every V1 fixture row has a disposition and zero `unexplained`.
 - [ ] Commit `feat(code-index): prove v1 extraction parity`.
 
-### PR 33G: V1 branch graph store migration, dispositions, and disk math
+### PR 33G: V1 branch graph/vector migration, dispositions, and disk math
 
 **Ordering:** runs inside plan 12's PR 33R controller phases; consumes plan 12 PR 3R inventory; precedes plan 12 §15 PR 37C retirement.
 
-**Files:** create logical importer `src/migrate_v1.rs`, root orchestration `src/v2_adapters/v1_graph_import.rs`, and store/root copied-DB fixture coverage in plan 02 PR 33S; extend `tests/migration_parity.rs`; migration receipts lower through plan 02's schema and land in the execution PR's generated manifests.
+**Files:** create logical importer `src/migrate_v1.rs`, root orchestration `src/v2_adapters/v1_graph_import.rs`, and store/root copied-DB fixture coverage in plan 02 PR 33S; extend `tests/{migration_parity,semantic_vector_migration}.rs`; migration receipts lower through plan 02's schema and land in the execution PR's generated manifests.
 
 - [ ] Write failing tests named `resolvable_commit_prefers_reindex_over_import`, `unresolvable_branch_imports_with_v1_provenance`, `metadata_less_graph_is_discovered_and_imported`, `metadata_less_unique_graph_row_survives`, `metadata_less_embedded_fact_reaches_knowledge_carveout`, `metadata_less_graph_stays_gc_protected_until_disposition`, `source_fingerprint_binds_domain_and_epoch`, `v1_reader_enforces_mmap_zero`, `durable_fact_rows_block_store_archive`, `every_store_gets_exactly_one_disposition`, `identity_split_quarantines_not_duplicates`, `corrupt_store_is_quarantined_disposition`, and `disk_amplification_within_gate`.
 - [ ] Implement the re-index-first policy over logical import batches keyed by V1 schema-version lineage and emit per-store dispositions in plan 12's manifest vocabulary (`retained | skipped | quarantined | redacted | deleted`). Plan 02/root alone discovers and reads SQLite, enforces `mode=ro`/`query_only`/effective `mmap_size=0`, checks integrity, and produces the batches.
+- [ ] Inventory every legacy semantic-code vector table, generation, index, model/runtime manifest, cache, and sidecar discovered by plan 12 PR 3R. Give each artifact exactly one generated disposition: `rebuild_from_retained_eligible_code | drop_with_receipt | quarantine_unreadable`. Rebuild only from plan-25 `SemanticCodeDocumentV1`/`SemanticCodeChunkV1` rows through the accepted runtime profile; never deserialize, normalize, copy, compare, or republish historical float bytes into a V2 generation.
+- [ ] Add failing tests named `every_legacy_vector_artifact_has_one_disposition`, `old_float_bytes_never_enter_v2_generation`, `rebuild_uses_current_eligible_documents_and_complete_pins`, `unreadable_vector_artifact_quarantines`, `missing_source_prevents_rebuild`, and `rerun_is_idempotent`. The generated migration manifest records source artifact identity, disposition, replacement generation or quarantine/drop receipt, complete runtime/profile digests, document/chunk membership closure, and zero imported-vector count.
 - [ ] Bind receipts to plan 14 `FM-006` (#269/#371), `FM-001` and `FM-005` (#406), `FM-104` (merged #426), and `FM-110` (merged #436); record stable source manifest IDs, logical inventory digests, domain+epoch keyed file fingerprints, metadata state, and PR #405 adoption identities. Record no raw DB/file hash.
 - [ ] Produce the disk-math receipt: total V1 branch-store bytes vs packed generation + overlay bytes, proving ≤ 2.25× migration amplification and the ≤ 1.2× steady-state target at current scale.
-- [ ] Run `cargo test -p tracedecay-code-index --test migration_parity`; expected: exit 0 with a machine-readable disposition manifest covering 100% of inventoried stores.
+- [ ] Run `cargo test -p tracedecay-code-index --test migration_parity --test semantic_vector_migration`; expected: exit 0 with a machine-readable disposition manifest covering 100% of inventoried graph stores and vector artifacts, and proof that zero historical float bytes entered a V2 generation.
 - [ ] Commit `feat(code-index): migrate v1 branch graph stores`.
 
 ## Compatibility, cutover, and rollback rules
