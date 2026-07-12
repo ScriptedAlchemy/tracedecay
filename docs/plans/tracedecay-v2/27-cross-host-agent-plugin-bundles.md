@@ -2,6 +2,8 @@
 
 **Plan 32 integration:** project stable native workflow definition/version bindings, skills/commands, lifecycle hooks, and compact CLI/MCP/API fallbacks into Codex, Claude Code, Cursor, and Hermes from the canonical catalog/host manifest. Host bundles never copy workflow source, compiler/runtime semantics, grants, or state; unsupported steering boundaries remain explicit capability differences, and provider-native workflows remain observations unless explicitly imported.
 
+**Repo-local execution-skill rule:** `.codex/skills/executing-tracedecay-v2-plan` is the sole implementation/source tree. Claude Code may discover it through a small `.claude/.../SKILL.md` wrapper that reads the canonical skill completely and invokes only canonical scripts; the wrapper contains no copied procedure, scripts, fixtures, tests, generated mirror, or fallback. Cross-host generation must preserve this single-owner/delegation pattern and drift-test it.
+
 > **Accepted-base refresh delta (audit 29 / packet 30):** preserve current host
 > asymmetries as fixtures until deliberate migration; bind the compact Codex
 > parent-owns-writes token and the hook trust-state ownership decision to PR 24Q
