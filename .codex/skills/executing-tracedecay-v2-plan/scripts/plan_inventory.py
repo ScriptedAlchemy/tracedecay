@@ -28,11 +28,11 @@ COMMIT = re.compile(r"(?:Commit:|Commit separately:).*?`([^`]+)`")
 FM_ID = re.compile(r"\bFM-(\d{3})\b")
 BASELINE_FM_BINDINGS = {
     "FM-161": ("PR 33R",),
-    "FM-162": ("PR 21", "PR 19A", "PR 6B"),
+    "FM-162": ("PR 21", "PR 19A", "PR 6A"),
     "FM-163": ("PR 24E0", "PR 33R", "PR 24E", "PR 37"),
     "FM-164": ("PR 6D", "PR 33S"),
     "FM-165": ("PR 33R", "PR 37"),
-    "FM-166": ("PR 33R",),
+    "FM-166": ("PR 33R", "PR 33E", "PR 35I"),
     "FM-167": ("PR 24FR", "PR 22H", "PR 37"),
     "FM-169": ("PR 24Q", "PR 36R"),
     "FM-170": ("PR 24Q", "PR 36R"),
@@ -47,7 +47,11 @@ def plan_files(root: Path) -> list[Path]:
 
 
 def validate_failure_matrix(root: Path) -> list[str]:
-    """Reject invalid FM IDs or missing canonical PR-slice/dependency bindings."""
+    """Reject invalid FM IDs or missing PR references in active FM rows.
+
+    This validates matrix row text only. The activated execution-graph export is
+    the authority for slice ownership, dependency edges, and next-ready state.
+    """
     path = root / "docs/plans/tracedecay-v2/14-historical-failure-regression-matrix.md"
     row_pairs = [
         (f"FM-{match.group(1)}", line)
@@ -68,7 +72,7 @@ def validate_failure_matrix(root: Path) -> list[str]:
         missing = [binding for binding in bindings if binding not in rows[fm_id]]
         if missing:
             raise ValueError(
-                f"{fm_id} missing canonical PR binding(s): {', '.join(missing)}"
+                f"{fm_id} missing required PR reference(s): {', '.join(missing)}"
             )
     return expected
 

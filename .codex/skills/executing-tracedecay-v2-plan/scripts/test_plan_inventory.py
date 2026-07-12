@@ -29,9 +29,10 @@ class PlanInventoryHeadingTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "duplicate"):
                 plan_inventory.validate_failure_matrix(root)
 
-    def test_baseline_failure_matrix_bindings_are_canonical(self) -> None:
+    def test_active_baseline_failure_matrix_rows_contain_required_pr_references(self) -> None:
         root = Path(__file__).resolve().parents[4]
         matrix = (root / "docs/plans/tracedecay-v2/14-historical-failure-regression-matrix.md").read_text()
+        self.assertNotIn("FM-168", plan_inventory.BASELINE_FM_BINDINGS)
         for fm_id, bindings in plan_inventory.BASELINE_FM_BINDINGS.items():
             row = next(line for line in matrix.splitlines() if line.startswith(f"| {fm_id} |"))
             for binding in bindings:

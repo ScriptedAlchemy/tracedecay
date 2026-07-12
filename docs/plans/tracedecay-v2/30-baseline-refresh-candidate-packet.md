@@ -209,18 +209,22 @@ FM gates and prerequisites before `next-ready`:
 | Obligation | Canonical owner slice(s) | Dependency gate |
 |---|---|---|
 | FM-161 managed-skill path/skip receipt | PR 33R (plan 12) | after store/root lifecycle ownership is active |
-| FM-162 shard receipts/catch-up | PR 21 (plan 04), PR 19A (plan 16) | after PR 6B store outbox/checkpoint contracts |
+| FM-162 shard receipts/catch-up | PR 21 (plan 04), PR 19A (plan 16) | after PR 6A store journal/outbox/checkpoint contracts |
 | FM-163 global daemon shutdown deadline | PR 24E0 and PR 33R (plan 12), PR 24E (plan 09) | root lifecycle/composition before PR 37 |
 | FM-164 periodic exclusive maintenance | PR 6D and PR 33S (plan 02) | after writer lease/maintenance ownership |
 | FM-165 cursor resweep | PR 33R (plan 12) | before PR 37 |
-| FM-166 provider continuity | PR 33R (plan 12), plan 23 session owner | before analytics/cutover acceptance |
+| FM-166 provider continuity | PR 33R (plan 12), PR 33E (plan 23) | both before PR 35I session/LCM retrieval cutover |
 | FM-167 two-event notification cardinality | PR 24FR (plan 12), PR 22H (plan 26) | after projection receipts; before PR 37 |
 | FM-169/FM-170 host guidance/trust ownership | PR 24Q and PR 36R (plan 27) | decision/conformance before host-bundle release |
 | FM-171 packaged-script failure | PR 36R (plan 12) | release packaging before PR 37 |
 
-FM-168 is a retired corrected tombstone and binds no slice. Inventory and
-`next-ready` consumers must reject an export that omits any active binding above
-or drops its dependency edge; packet 30 itself is never imported as a slice.
+FM-168 is a retired corrected tombstone and binds no slice. The checked
+`BASELINE_FM_BINDINGS` table verifies only that every active FM row contains the
+required PR references above; it does not prove that a PR exists, that its
+declaring plan owns it, or that an activated export contains the dependency.
+Those ownership and edge checks remain an explicit future gate on the activated
+execution-graph export before `next-ready`; packet 30 itself is never imported
+as a slice.
 
 ## 6. Compatibility and migration planning updates
 
@@ -440,7 +444,8 @@ Documentation-focused validation performed for this packet (this session):
 - **`git diff --check`** run over the working tree before hand-off (no whitespace
   errors introduced).
 - **Plan tooling:** `test_plan_inventory.py` and `test_plan_execution.py` pass
-  (5 + 3 tests), including real FM uniqueness/contiguity validation; moving refresh notes after line-number-sensitive headings keeps
+  (6 + 3 tests), including real FM uniqueness/contiguity validation and FM-row
+  PR-reference presence checks (not activated-graph ownership/dependency proof); moving refresh notes after line-number-sensitive headings keeps
   the checked inventory stable.
 - **Architecture:** `scripts/generate_architecture_views.py --check` passes and
   `cargo test --test architecture_boundaries` passes all 10 tests.
