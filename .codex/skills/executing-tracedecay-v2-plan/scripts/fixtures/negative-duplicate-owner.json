@@ -1,0 +1,245 @@
+{
+  "canonical_dag": {
+    "activation_receipt": {
+      "activated": true,
+      "graph_digest": "sha256:a074b8ddc52c72f77e6299103e3ca3e2db6bc201363435928a0d84ed41895338",
+      "graph_revision": 7,
+      "receipt_id": "activation:7",
+      "repository": "git:https://example.invalid/tracedecay.git",
+      "source_commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "source_set_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+    },
+    "graph_digest": "sha256:a074b8ddc52c72f77e6299103e3ca3e2db6bc201363435928a0d84ed41895338",
+    "graph_revision": 7,
+    "nodes": [
+      {
+        "content_digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+        "dependencies": [],
+        "id": "PR 1",
+        "owner": "owner:plan-01"
+      },
+      {
+        "content_digest": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+        "dependencies": [
+          "PR 1"
+        ],
+        "id": "PR 2",
+        "owner": "owner:plan-02"
+      },
+      {
+        "content_digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+        "dependencies": [],
+        "id": "PR 1",
+        "owner": "owner:other"
+      }
+    ],
+    "repository": "git:https://example.invalid/tracedecay.git",
+    "schema": "tracedecay.v2.canonical-dag/v1",
+    "source_commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "source_set_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+  },
+  "completion_ledger": {
+    "entries": [
+      {
+        "attempt": {
+          "attempt_id": "attempt:pr-1:1",
+          "current_event_sequence": 5,
+          "lease_fence_epoch": "fence:7",
+          "observed_steering_sequence": 4,
+          "terminal_cas_committed": true,
+          "terminal_cas_sequence": 5
+        },
+        "candidate": {
+          "branch": "v2/pr-1",
+          "commit": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "digest": "sha256:7e3074109443e1cd93b00cc8396788a22d4214c7075cff668e25c382116e9f5a",
+          "worktree": "/worktrees/pr-1"
+        },
+        "graph_digest": "sha256:a074b8ddc52c72f77e6299103e3ca3e2db6bc201363435928a0d84ed41895338",
+        "graph_revision": 7,
+        "integration": {
+          "ancestry_observation": {
+            "candidate_commit": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "canonical_commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "canonical_ref": "refs/heads/main",
+            "command_exit_code": 0,
+            "method": "git merge-base --is-ancestor",
+            "observation_digest": "sha256:6d6c7bb16a9fa984e8b6a57a409f229e0c817d498823c9cd13b4a1e454644b48",
+            "repository": "git:https://example.invalid/tracedecay.git",
+            "status": "ancestor"
+          },
+          "attempt_id": "attempt:pr-1:1",
+          "candidate_commit": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "canonical_branch": "master",
+          "canonical_commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "graph_digest": "sha256:a074b8ddc52c72f77e6299103e3ca3e2db6bc201363435928a0d84ed41895338",
+          "graph_revision": 7,
+          "integration_task": "task:pr-1:integration",
+          "lease_fence_epoch": "fence:7",
+          "receipt_digest": "sha256:78aa4b3217f6f403185e3a29020498ad9affc6519b78d2882a8d26d854dbb669",
+          "source_set_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+          "state": "integrated",
+          "steering_watermark": 4,
+          "terminal_cas_sequence": 5
+        },
+        "required_tests": [
+          "unit"
+        ],
+        "review": {
+          "anchors": [
+            "anchor:review-pr-1"
+          ],
+          "candidate_commit": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "candidate_digest": "sha256:7e3074109443e1cd93b00cc8396788a22d4214c7075cff668e25c382116e9f5a",
+          "implementation_authority": "authority:implementation",
+          "independent": true,
+          "receipt_digest": "sha256:6a6040bba6e027c602217607b579db3cc657c2a81994644a8f0886242c8a0108",
+          "review_task": "task:pr-1:review",
+          "reviewer": "reviewer:independent",
+          "reviewer_authority": "authority:review",
+          "reviewer_principal": "principal:reviewer",
+          "verdict": "approved"
+        },
+        "slice_id": "PR 1",
+        "source_commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "source_set_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "steering_directives": [
+          {
+            "classification": "required",
+            "delivery_boundary": "event-log:4",
+            "directive_id": "steer:required-1",
+            "event_sequence": 4
+          },
+          {
+            "classification": "advisory",
+            "delivery_boundary": "event-log:5",
+            "directive_id": "steer:advisory-1",
+            "event_sequence": 5
+          }
+        ],
+        "steering_receipts": [
+          {
+            "acknowledged": true,
+            "actor": "worker:gpt-sol",
+            "attempt_id": "attempt:pr-1:1",
+            "authority": "lease:fence:7",
+            "delivered": true,
+            "delivery_boundary": "event-log:4",
+            "directive_id": "steer:required-1",
+            "disposition": "applied",
+            "event_sequence": 4,
+            "lease_fence_epoch": "fence:7",
+            "receipt_digest": "sha256:66ef92e47b69bec06a6d6e03aa25d5aaf37b05e066009ab7947592a15ab48b15"
+          }
+        ],
+        "task_lineage": {
+          "implementation_actor": "worker:gpt-sol",
+          "implementation_task": "task:pr-1:implementation",
+          "integration_task": "task:pr-1:integration",
+          "parent_tasks": [],
+          "remediation_tasks": [],
+          "review_tasks": [
+            "task:pr-1:review"
+          ],
+          "successor_review_tasks": []
+        },
+        "test_receipts": [
+          {
+            "candidate_commit": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "candidate_digest": "sha256:7e3074109443e1cd93b00cc8396788a22d4214c7075cff668e25c382116e9f5a",
+            "command": "python3 -m unittest test_fixture",
+            "exit_code": 0,
+            "name": "unit",
+            "receipt_digest": "sha256:66cef2b0067f6521c612fd2e75c848ff2d5acb957b3250977e3b97bb4e84bc8d"
+          }
+        ]
+      }
+    ],
+    "graph_digest": "sha256:a074b8ddc52c72f77e6299103e3ca3e2db6bc201363435928a0d84ed41895338",
+    "graph_revision": 7,
+    "repository": "git:https://example.invalid/tracedecay.git",
+    "schema": "tracedecay.v2.completion-ledger/v1",
+    "source_commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "source_set_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+  },
+  "dispatch_specs": [
+    {
+      "acceptance_commands": [
+        "python3 -m unittest test_fixture"
+      ],
+      "exact_files": [
+        "docs/pr-1.md"
+      ],
+      "gates": {
+        "independent_review": "exact-candidate independent approval required",
+        "integration": "approved candidate must be in canonical history",
+        "remediation": "negative verdict derives one remediation lineage",
+        "successor_review": "remediation requires a fresh successor review"
+      },
+      "lane": {
+        "acting_runtime": "gpt-5.6-sol",
+        "lifecycle_owner": "gpt-5.6-sol",
+        "reasoning_owner": "gpt-5.6-sol"
+      },
+      "optional_claude_review": {
+        "acceptance_criteria": [
+          "Report one concrete contract violation or PASS."
+        ],
+        "enabled": true,
+        "max_steps": 1,
+        "mode": "read_only",
+        "untrusted_until_gpt_verified": true
+      },
+      "owner": "owner:plan-01",
+      "retrieval_anchors": [
+        "anchor:pr-1"
+      ],
+      "slice_id": "PR 1",
+      "workspace": {
+        "branch": "v2/pr-1",
+        "worktree": "/worktrees/pr-1"
+      }
+    },
+    {
+      "acceptance_commands": [
+        "python3 -m unittest test_fixture"
+      ],
+      "exact_files": [
+        "docs/pr-2.md"
+      ],
+      "gates": {
+        "independent_review": "exact-candidate independent approval required",
+        "integration": "approved candidate must be in canonical history",
+        "remediation": "negative verdict derives one remediation lineage",
+        "successor_review": "remediation requires a fresh successor review"
+      },
+      "lane": {
+        "acting_runtime": "gpt-5.6-sol",
+        "lifecycle_owner": "gpt-5.6-sol",
+        "reasoning_owner": "gpt-5.6-sol"
+      },
+      "optional_claude_review": {
+        "acceptance_criteria": [
+          "Report one concrete contract violation or PASS."
+        ],
+        "enabled": true,
+        "max_steps": 1,
+        "mode": "read_only",
+        "untrusted_until_gpt_verified": true
+      },
+      "owner": "owner:plan-02",
+      "retrieval_anchors": [
+        "anchor:pr-2"
+      ],
+      "slice_id": "PR 2",
+      "workspace": {
+        "branch": "v2/pr-2",
+        "worktree": "/worktrees/pr-2"
+      }
+    }
+  ],
+  "retired_obligations": [
+    "FM-168"
+  ],
+  "schema": "tracedecay.v2.execution-state/v1"
+}

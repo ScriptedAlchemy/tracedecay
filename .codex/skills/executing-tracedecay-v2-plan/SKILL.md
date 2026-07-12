@@ -53,14 +53,31 @@ Validate complete inventory coverage, normalized ownership, anchors/digests, typ
 
 ## Validate the activated graph and ledger
 
-Export the activated canonical task graph plus completion ledger to JSON, then run:
+Export one `tracedecay.v2.execution-state/v1` JSON document containing the activated canonical DAG, its activation receipt, the pinned `tracedecay.v2.completion-ledger/v1`, one bounded dispatch specification per node, and retired-obligation tombstones. Then run:
 
 ```bash
 python3 .codex/skills/executing-tracedecay-v2-plan/scripts/plan_execution.py \
-  --graph /path/to/v2-execution-graph.json --next-ready
+  --graph /path/to/v2-execution-graph.json \
+  --root /path/to/authoritative/checkout \
+  --canonical-ref refs/heads/master --next-ready
 ```
 
-The authoritative manifest must contain the plan-00 fields: one `owner`, all `companions`, merged `acceptance`, typed `dependencies`, `phase`, `commit_subject`, source anchors, canonical `content_digest`, and stable `idempotency_key`. The current read-only `plan_execution.py` remains a legacy ledger validator and expects its older projection fields (`id`, `authority`, `source_hashes`, `prerequisites`, `status`, and `receipts`); it does not validate the new authority schema, normalization, typed edges, canonical digests, stable keys, or bootstrap/cutover receipt. Therefore its successful exit is necessary only for that legacy projection and is never sufficient for dispatch. Run the plan-00 reconciliation/cutover validation separately, require its matching receipt, and return no `next_ready` unless both gates pass. `integrated` additionally requires exact implementation commit, independent approved review, named test receipts, and integration commit. Never manufacture missing edges from prose references or treat an unchecked/stale export as authority.
+`--root` is mandatory: validation recomputes the authoritative plan-inventory/source-block digest in that checkout and resolves `--canonical-ref` (`HEAD` only when explicitly intended). Markdown is the bounded human/MCP-default view. Use `--format json` for the sealed `tracedecay.v2.next-ready-view/v1`. Both formats contain the same validity/source/digest/revision pins, diagnostics, packets, and blocker reasons. Invalid input or any Git/source observation failure exits 2 and always returns an empty ready set (`Unknown`, never guessed false/true).
+
+The canonical DAG must pin repository identity, exact current canonical source/integration SHA, source-set digest, positive graph revision, graph digest, nodes, and a byte-matching activation receipt. Nodes have unique IDs and unique owners plus explicit prerequisites. The helper rejects duplicate IDs/owners, unknown/self/retired prerequisites, cycles, stale graph or activation pins, missing packets, and any reference to retired corrected tombstone `FM-168`.
+
+Every ledger entry repeats the current source commit, source-set digest, graph revision, and graph digest and contains:
+
+- candidate commit/digest and exact declared branch/worktree;
+- implementation task/actor plus parent/review/remediation/successor-review/integration task lineage;
+- exact-candidate independent review verdict and anchored receipt, with reviewer principal and authority distinct from implementation;
+- complete named required tests bound to exact declared acceptance commands, with exit code and candidate pins;
+- canonical integration receipt embedding the live sealed `git merge-base --is-ancestor` observation for the exact candidate/current canonical commit and repository identity;
+- the attempt/lease fence, observed steering watermark, terminal-CAS sequence, every required steering directive through that cutoff, and canonical disposition receipts binding directive/attempt/fence/event/delivery/ack/disposition/actor/authority.
+
+Candidate, review, test, integration, ancestry-observation, and steering receipt digests are recomputed from canonical payload bytes. Shape-valid digest strings and asserted ancestry/independence booleans are never trusted. Required steering delivered after the recorded observation but before terminal CAS invalidates the attempted completion; required steering arriving after terminal CAS opens an explicit remediation/successor path without rewriting history. Advisory steering does not fence completion.
+
+The validator rejects duplicate/ambiguous entries and stale or mismatched receipt pins. Candidate-only or otherwise incomplete entries remain valid evidence but are explicitly blocked; they are never completion. The helper never reads a card/task status field and its exact schemas reject such extra fields.
 
 The graph export is operational state and stays outside Git. Do not commit live task statuses, private task text, worktree paths, provider output, or receipts into the skill. The plan set defines intent; the activated graph defines dispatch; immutable receipts define completion.
 
@@ -74,19 +91,20 @@ For each candidate slice, collect all of:
 - named tests/checks and their receipts;
 - remediation and successor-review state for every negative verdict;
 - integration commit when downstream work requires integrated output;
-- current master/open-PR changes that supersede plan assumptions.
+- current canonical integration SHA/source digest and open changes that supersede plan assumptions.
 
-Classify `not_started | active | changes_requested | implemented_unreviewed | approved_unintegrated | integrated | superseded | blocked_unknown`. A task marked `done` with `CHANGES_REQUESTED` is terminal review evidence, not approved implementation.
+The view derives only `verified_integrated`, `untouched`, or explicit blocker reason codes from those receipts. Operational labels such as `not_started | active | changes_requested | implemented_unreviewed | approved_unintegrated | integrated | superseded | blocked_unknown` may be displayed elsewhere but are never completion inputs. A task marked `done` with `CHANGES_REQUESTED` is terminal review evidence, not approved implementation.
 
 ## Select the next work
 
-1. Exclude `integrated` and `superseded` slices.
-2. Exclude any slice with a prerequisite outside `integrated` or an explicitly accepted same-stack parent state.
-3. Exclude ambiguous scope, dirty/shared writer worktrees, stale candidate SHAs, and missing review evidence.
-4. Prefer the smallest reviewable slice on the critical path.
-5. Create implementation, independent review, remediation, successor review, and integration gates as distinct work items.
-6. Attach parents at creation time. Publish multi-edge graph grooming atomically when V2 supports it; on Hermes, block dispatch first, add replacement parents before removing old parents, and recheck for stale claims after every mutation.
-7. Use stable idempotency keys derived from plan ID + slice + role + candidate generation.
+1. Validate the complete export; any authority error suppresses every packet.
+2. Exclude slices with verified integrated completion.
+3. Block a slice with any candidate/incomplete ledger entry; remediation and successor review must advance that exact lineage before reconsideration.
+4. Block a slice unless every canonical prerequisite has verified integrated completion. Candidate-only, approved-unintegrated, or same-stack assumptions do not satisfy a prerequisite.
+5. Return untouched eligible slices in canonical ID order with their checked bounded packets. Critical-path preference requires a separate canonical policy field; never infer it from prose or source order.
+6. Create implementation, independent review, remediation, successor review, and integration gates as distinct work items.
+7. Attach parents at creation time. Publish multi-edge graph grooming atomically when V2 supports it; on Hermes, block dispatch first, add replacement parents before removing old parents, and recheck for stale claims after every mutation.
+8. Use stable idempotency keys derived from plan ID + slice + role + candidate generation.
 
 Never call a slice eligible because its parent title/status looks complete. Resolve canonical IDs and inspect results.
 
@@ -102,7 +120,9 @@ Include:
 - prohibition on self-approval, merge, push, or unrelated edits as applicable;
 - required handoff: candidate SHA, diff scope, tests, risks, retrieval anchors.
 
-Use native Claude Code/Codex CLI acting lanes as separate attempt participants when requested; do not disguise them as Hermes provider profiles. For the active V2 program, load-balance substantive work across GPT-5.6-Sol and native Claude Code with a modest Claude bias while both routes are healthy: each ticket must explicitly choose Claude-first with independent Sol/lead verification or Sol-first with independent Claude review. A mere optional mention does not count. Record the exact native executable/model, bounded prompt, output, candidate SHA or patch, and both participant roles; no lane self-approves and native-CLI exit success is not acceptance.
+Enforced packet bounds are 32 exact files, 32 exact commands, 64 retrieval anchors, and 2,048 characters per string. Every packet names GPT-5.6-Sol as multi-step reasoning and lifecycle owner. Claude, when enabled, receives exactly one bounded read-only adversarial step with explicit acceptance criteria; its output remains untrusted until GPT verifies the cited evidence. Oversized, missing, duplicate, or non-GPT-owned packet fields fail the whole export closed.
+
+Use native Claude Code/Codex CLI acting lanes as separate attempt participants when a later canonical V2 route requests them; do not disguise them as Hermes provider profiles. The pre-V2 `execution-state/v1` packets covered here are deliberately GPT-5.6-Sol-owned and permit Claude only for the single read-only untrusted subcheck above. A future mixed substantive lane therefore requires an explicit schema/version and canonical dispatch-policy revision rather than overloading this field. Record every actual participant and route receipt; no lane self-approves and native-CLI exit success is not acceptance.
 
 ## Review and advance
 
