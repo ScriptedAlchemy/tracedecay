@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.63](https://github.com/ScriptedAlchemy/tracedecay/compare/v0.0.62...v0.0.63) - 2026-07-12
+
+### Fixed
+
+- *(upgrade)* show safe shutdown progress
+
 ## [0.0.62](https://github.com/ScriptedAlchemy/tracedecay/compare/v0.0.61...v0.0.62) - 2026-07-12
 
 ### Fixed
