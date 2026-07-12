@@ -175,6 +175,69 @@ class PlanInventoryHeadingTests(unittest.TestCase):
             self.assertIn(pr_id, inventoried)
         self.assertNotIn("PR 999Z", inventoried)
 
+    def test_cross_plan_critical_execution_order_is_explicit_and_acyclic(self) -> None:
+        root = Path(__file__).resolve().parents[4]
+        query = (root / "docs/plans/tracedecay-v2/05-query-crate.md").read_text()
+        semantic = (
+            root / "docs/plans/tracedecay-v2/31-native-fastembed-semantic-code-search.md"
+        ).read_text()
+        workflow = (
+            root / "docs/plans/tracedecay-v2/32-dynamic-workflow-runtime-and-sdk.md"
+        ).read_text()
+        master = (root / "docs/plans/2026-07-09-tracedecay-brain-rewrite.md").read_text()
+
+        self.assertIn(
+            "PR 6C + PR 18D + accepted PR 14A -> PR 14E -> PR 14B -> PR 14C",
+            semantic,
+        )
+        self.assertIn("merge-eligible only after PR 14E", query)
+        self.assertIn("after accepted PR 14B integration", query)
+        self.assertIn(
+            "PR 24F + PR 24P + PR 24S + PR 22F-LE + PR 30J",
+            workflow,
+        )
+        self.assertIn("PR 38J requires merged PR 38E–38I", master)
+
+        edges = {
+            "PR 2A": {"PR 14A"},
+            "PR 6C": {"PR 14E"},
+            "PR 18D": {"PR 14E"},
+            "PR 14A": {"PR 14E"},
+            "PR 14E": {"PR 14B"},
+            "PR 14B": {"PR 14C"},
+            "PR 38D": {"PR 38I"},
+            "PR 24F": {"PR 38I"},
+            "PR 24P": {"PR 38I"},
+            "PR 24S": {"PR 38I"},
+            "PR 22F-LE": {"PR 38I"},
+            "PR 30J": {"PR 38I"},
+            "PR 38I": {"PR 38J"},
+        }
+        inventoried = {
+            pr_id
+            for path in plan_inventory.plan_files(root)
+            for record in plan_inventory.scan(path, root)
+            for pr_id in cast(list[str], record["ids"])
+        }
+        endpoints = set(edges) | {child for children in edges.values() for child in children}
+        self.assertEqual(endpoints - inventoried, set())
+
+        visiting: set[str] = set()
+        visited: set[str] = set()
+
+        def visit(node: str) -> None:
+            self.assertNotIn(node, visiting, f"critical execution-order cycle at {node}")
+            if node in visited:
+                return
+            visiting.add(node)
+            for child in sorted(edges.get(node, set())):
+                visit(child)
+            visiting.remove(node)
+            visited.add(node)
+
+        for node in sorted(endpoints):
+            visit(node)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -866,7 +866,7 @@ PR 38B  domain/store  PR 38C  source compiler + selected engine adapter
              |
       +------+------+------+------+
       v      v      v      v      v
-    38E    38F    38G*   38H    38I
+    38E    38F    38G*   38H    38I†
     API    CLI    Studio task-   steering/remote/
     SDK    MCP           graph   accounting
       \      \      \      /      /
@@ -878,6 +878,8 @@ PR 38B  domain/store  PR 38C  source compiler + selected engine adapter
            PR 38K  import, cutover, deletion
 
 * 38G depends on 38E's generated view/SSE contracts; it may develop against frozen fixtures after 38E's schema commit but cannot merge first.
+
+† 38I may develop fixture-only adapters after 38D, but merge eligibility additionally requires the canonical host-safe-boundary contracts from PR 24F and PR 24P, remote placement/routing contracts from PR 24S, and accounting emitter/view contracts from PR 22F-LE and PR 30J. It consumes those owners; it does not recreate them.
 ```
 
 ### PR 38A — frozen contract and engine evidence
@@ -918,6 +920,8 @@ PR 38B  domain/store  PR 38C  source compiler + selected engine adapter
 - Add pure eligibility/loss analysis, candidate compiler, PlanVersion review/activation handoff, provenance/divergence/cycle tests, and task-invokes-workflow path. The slice cannot activate tasks or expose `materialize`, `preview`, `apply`, or `rollback` aliases.
 
 ### PR 38I — cross-cutting intelligence
+
+**Ordering:** fixture-only development may begin after PR 38D. Merge eligibility requires `PR 24F + PR 24P + PR 24S + PR 22F-LE + PR 30J`; PR 38I then joins PR 38E–38H as a prerequisite of PR 38J.
 
 - Integrate structured steering/dispositions at host safe boundaries, distinct signals/comments/Plan-22 advisory suggestions, one-shot Stop/SubagentStop continuation policy, remote executor routing, observability/accounting, and graph/timeline/search projections.
 

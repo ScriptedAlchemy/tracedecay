@@ -271,7 +271,7 @@ Activate only an accepted profile with compatible rebuilt generations and rollba
 
 Delete superseded direct-runtime, model wiring, vector scan/query/storage, cache, and scheduler paths after archived parity/rollback evidence proves the canonical route independent.
 
-The executable order is: plan 25 PR 18D and plan 02 PR 6C contracts -> PR 14A benchmark/accept-or-disable -> accepted-only PR 14E artifact/runtime lifecycle plus plan-04 production incremental vector scheduling -> PR 14B fusion -> PR 14C native/model-assisted rerank evaluation and optional activation -> plan 20 PR 25E plus generated API/CLI/MCP/SDK/dashboard surfaces -> PR 31J product evaluation -> plan 25 PR 33G rebuild/drop migration -> PR 35C cutover -> PR 37C retirement. A disabled PR 14A disposition short-circuits all production-runtime/vector/fusion/rerank activation work while preserving benchmark/contracts and lexical search.
+The executable order separates fixture-only evaluation from production publication: plan-13 PR 2A -> release-excluded PR 14A benchmark/accept-or-disable over frozen synthetic code documents; then production order `PR 6C + PR 18D + accepted PR 14A -> PR 14E -> PR 14B -> PR 14C`. PR 14E owns artifact/runtime lifecycle plus plan-04 production incremental vector scheduling; PR 14B owns fusion; PR 14C owns native/model-assisted rerank evaluation and optional activation. Then plan 20 PR 25E plus generated API/CLI/MCP/SDK/dashboard surfaces -> PR 31J product evaluation -> plan 25 PR 33G rebuild/drop migration -> PR 35C cutover -> PR 37C retirement. A disabled PR 14A disposition terminalizes PR 14E/14B/14C as skipped while preserving benchmark/contracts and lexical search.
 
 ## 13. Primary research manifest
 

@@ -19,13 +19,15 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import os
 import re
-import subprocess
 import unicodedata
 import urllib.parse
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
+
+from git_observation import run_git
 
 EN_DASH = "–"
 
@@ -780,13 +782,12 @@ def reconcile(sections: list[Section], authority_keys: frozenset[str] | None = N
             errors.append(_error("source_anchor_mismatch", pin_anchor, source_commit,
                                  "source_commit must be a full lowercase immutable commit OID"))
         else:
+            observed = run_git(repo_root, "rev-parse", "--verify", f"{source_commit}^{{commit}}")
             try:
-                resolved = subprocess.run(
-                    ["git", "rev-parse", "--verify", f"{source_commit}^{{commit}}"],
-                    cwd=repo_root, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                    text=True,
-                ).stdout.strip()
-            except (OSError, subprocess.CalledProcessError):
+                resolved = observed.stdout.decode("utf-8").strip()
+            except UnicodeDecodeError:
+                resolved = ""
+            if observed.error is not None or observed.returncode != 0:
                 resolved = ""
             if resolved != source_commit:
                 errors.append(_error(
@@ -795,13 +796,13 @@ def reconcile(sections: list[Section], authority_keys: frozenset[str] | None = N
                 ))
             else:
                 for path in sorted({section.anchor.path for section in sections}):
-                    try:
-                        pinned_blobs[path] = subprocess.run(
-                            ["git", "show", f"{source_commit}:{path}"], cwd=repo_root,
-                            check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                        ).stdout
-                    except (OSError, subprocess.CalledProcessError):
-                        pinned_blobs[path] = None
+                    shown = run_git(
+                        repo_root, "show", f"{source_commit}:{path}",
+                        max_output_bytes=4 * 1024 * 1024,
+                    )
+                    pinned_blobs[path] = (
+                        shown.stdout if shown.error is None and shown.returncode == 0 else None
+                    )
 
     for section in sections:
         errors.extend(validate_source_anchor(section.anchor))
@@ -1043,12 +1044,19 @@ def _finalize_digests(records: dict[str, SliceRecord], errors: list[Diagnostic])
             seen_keys[record.idempotency_key] = normalized_id
 
 
-def source_set_digest(records: dict[str, SliceRecord]) -> str:
-    pairs = sorted(
+def source_anchor_observations(records: dict[str, SliceRecord]) -> list[list[str]]:
+    """Return reconciled anchor observations; not the canonical plan-tree source set."""
+    return [list(pair) for pair in sorted(
         {(anchor.path, anchor.block_sha256)
          for record in records.values() for anchor in record.source_anchors}
-    )
-    return "sha256:" + hashlib.sha256(_canonical_json(pairs).encode("utf-8")).hexdigest()
+    )]
+
+
+def source_set_digest(observations: list[list[str]]) -> str:
+    """Digest one versioned canonical source-set projection supplied by Git observation."""
+    return "sha256:" + hashlib.sha256(
+        _canonical_json(sorted(observations)).encode("utf-8")
+    ).hexdigest()
 
 
 # ---------------------------------------------------------------------------
@@ -1083,13 +1091,63 @@ def locate_bootstrap_manifest(repo_root: Path, explicit: object = None, env: str
 
     if explicit_values:
         return _validate_manifest(Path(explicit_values[0]), repo_root, contained=False)
+    if env is None:
+        env = os.environ.get("TRACEDECAY_V2_EXECUTION_MANIFEST")
     if env:
         return _validate_manifest(Path(env), repo_root, contained=False)
 
     default = repo_root / ".tracedecay" / "v2-execution-manifest.json"
-    if not default.exists():
-        return None, BootstrapFailure("missing", "no bootstrap manifest candidate found")
-    return _validate_manifest(default, repo_root, contained=True)
+    if default.exists():
+        return _validate_manifest(default, repo_root, contained=True)
+    active = repo_root / ".tracedecay" / "v2-execution-active.json"
+    if active.exists():
+        selected, pointer_failure = resolve_active_generation(active, repo_root, "manifest")
+        if pointer_failure is not None or selected is None:
+            return None, pointer_failure
+        return _validate_manifest(selected, repo_root, contained=True)
+    return None, BootstrapFailure("missing", "no bootstrap manifest candidate found")
+
+
+def resolve_active_generation(pointer: Path, repo_root: Path,
+                              member: str) -> tuple[Path | None, BootstrapFailure | None]:
+    if member not in {"manifest", "state"}:
+        return None, BootstrapFailure("schema_mismatch", f"unknown active member {member!r}")
+    try:
+        raw = pointer.read_bytes()
+        def unique_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
+            result: dict[str, object] = {}
+            for key, value in pairs:
+                if key in result:
+                    raise ValueError(f"duplicate JSON object key {key!r}")
+                result[key] = value
+            return result
+        document = json.loads(raw, object_pairs_hook=unique_object)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as error:
+        return None, BootstrapFailure("invalid_json", f"{pointer} is invalid: {error}")
+    expected = {
+        "schema", "generation", "manifest", "state", "manifest_sha256", "state_sha256",
+    }
+    if (
+        not isinstance(document, dict)
+        or set(document) != expected
+        or document.get("schema") != "tracedecay.v2.execution-generation-pointer/v1"
+        or not all(isinstance(document.get(key), str) and document[key] for key in expected)
+    ):
+        return None, BootstrapFailure("schema_mismatch", f"{pointer} has invalid pointer schema")
+    candidate = (pointer.parent / document[member]).resolve()
+    try:
+        candidate.relative_to(repo_root.resolve())
+    except ValueError:
+        return None, BootstrapFailure("outside_root", f"{pointer} {member} escapes repository root")
+    if not candidate.is_file():
+        return None, BootstrapFailure("missing", f"active {member} {candidate} does not exist")
+    try:
+        digest = hashlib.sha256(candidate.read_bytes()).hexdigest()
+    except OSError as error:
+        return None, BootstrapFailure("unreadable", f"cannot read active {member}: {error}")
+    if digest != document[f"{member}_sha256"]:
+        return None, BootstrapFailure("schema_mismatch", f"active {member} digest mismatch")
+    return candidate, None
 
 
 def _validate_manifest(path: Path, repo_root: Path, contained: bool) -> tuple[Path | None, BootstrapFailure | None]:
@@ -1150,6 +1208,7 @@ def _validate_manifest_schema(path: Path, raw: bytes) -> BootstrapFailure | None
 
 def reconcile_against_authority(records: dict[str, SliceRecord], authority: dict[str, object],
                                 phase: str,
+                                source_observations: list[list[str]],
                                 canonical_series: dict[str, tuple[str, ...]] | None = None
                                 ) -> list[Diagnostic]:
     """Parse and compare one exact authority document, recomputing all integrity fields."""
@@ -1188,7 +1247,7 @@ def reconcile_against_authority(records: dict[str, SliceRecord], authority: dict
                                   repr(authority["series"]),
                                   f"series membership differs from canonical {phase} series"))
 
-    expected_source_digest = source_set_digest(records)
+    expected_source_digest = source_set_digest(source_observations)
     if authority.get("source_set_digest") != expected_source_digest:
         diagnostics.append(_error("digest_mismatch", authority_anchor,
                                   str(authority.get("source_set_digest")),

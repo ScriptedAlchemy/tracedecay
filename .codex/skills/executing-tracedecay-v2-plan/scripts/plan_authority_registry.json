@@ -1,0 +1,4866 @@
+{
+  "schema": "tracedecay.v2.plan-authority-registry/v1",
+  "series": {
+    "PR 13 series": [
+      "PR 13A",
+      "PR 13B",
+      "PR 13C",
+      "PR 13D",
+      "PR 13E"
+    ],
+    "PR 14 series": [
+      "PR 14A",
+      "PR 14B",
+      "PR 14C",
+      "PR 14D",
+      "PR 14E"
+    ],
+    "PR 23 series": [
+      "PR 23A",
+      "PR 23B",
+      "PR 23C",
+      "PR 23D",
+      "PR 23E",
+      "PR 23F",
+      "PR 23G",
+      "PR 23H",
+      "PR 23I"
+    ],
+    "PR 24 series": [
+      "PR 24A",
+      "PR 24A1",
+      "PR 24A2",
+      "PR 24A3",
+      "PR 24A4",
+      "PR 24A5",
+      "PR 24A6",
+      "PR 24A7",
+      "PR 24A8",
+      "PR 24B1",
+      "PR 24B2",
+      "PR 24B3",
+      "PR 24B4",
+      "PR 24C",
+      "PR 24C1",
+      "PR 24C2",
+      "PR 24D",
+      "PR 24D-API1",
+      "PR 24D-API2",
+      "PR 24D-API3",
+      "PR 24D-API4",
+      "PR 24D-SDK1",
+      "PR 24D-SDK2",
+      "PR 24D-SDK3",
+      "PR 24F",
+      "PR 24FR",
+      "PR 24G",
+      "PR 24H",
+      "PR 24I",
+      "PR 24L",
+      "PR 24M",
+      "PR 24N",
+      "PR 24O",
+      "PR 24P",
+      "PR 24Q",
+      "PR 24R",
+      "PR 24S"
+    ],
+    "PR 24E series": [
+      "PR 24E-API5",
+      "PR 24E0",
+      "PR 24E1",
+      "PR 24E2",
+      "PR 24E3",
+      "PR 24E4",
+      "PR 24E5",
+      "PR 24E6",
+      "PR 24E7",
+      "PR 24E8"
+    ],
+    "PR 28 series": [
+      "PR 28A",
+      "PR 28B",
+      "PR 28C",
+      "PR 28D",
+      "PR 28E"
+    ],
+    "PR 30 series": [
+      "PR 30A",
+      "PR 30B",
+      "PR 30B2",
+      "PR 30C",
+      "PR 30D",
+      "PR 30E",
+      "PR 30F",
+      "PR 30G",
+      "PR 30H",
+      "PR 30J",
+      "PR 30K",
+      "PR 30L"
+    ],
+    "PR 31 series": [
+      "PR 31A",
+      "PR 31B",
+      "PR 31C",
+      "PR 31D",
+      "PR 31E",
+      "PR 31F",
+      "PR 31G",
+      "PR 31H",
+      "PR 31I",
+      "PR 31J",
+      "PR 31K",
+      "PR 31L",
+      "PR 31M",
+      "PR 31N",
+      "PR 31O",
+      "PR 31P",
+      "PR 31Q"
+    ]
+  },
+  "slices": {
+    "PR 1": {
+      "commit_subject": "feat(v2): architecture decision records",
+      "dependencies": [],
+      "owner": {
+        "heading": "PR 1: Architecture decision records",
+        "line": 1723,
+        "path": "docs/plans/2026-07-09-tracedecay-brain-rewrite.md"
+      },
+      "phase": 0
+    },
+    "PR 10": {
+      "commit_subject": "feat(v2): projector contract registry checkpoints and outbox consumption",
+      "dependencies": [
+        "PR 9"
+      ],
+      "owner": {
+        "heading": "PR 10: Projector contract, registry, checkpoints, and outbox consumption",
+        "line": 455,
+        "path": "docs/plans/tracedecay-v2/04-projectors-crate.md"
+      },
+      "phase": 1
+    },
+    "PR 10A": {
+      "commit_subject": "feat(v2): privacy sink firewalls and descendant lineage",
+      "dependencies": [
+        "PR 10",
+        "PR 4B",
+        "PR 6B",
+        "PR 7A",
+        "PR 9"
+      ],
+      "owner": {
+        "heading": "PR 10A: Privacy sink firewalls and descendant lineage",
+        "line": 467,
+        "path": "docs/plans/tracedecay-v2/04-projectors-crate.md"
+      },
+      "phase": 1
+    },
+    "PR 10B": {
+      "commit_subject": "feat(v2): dead letters rebuild generations atomic swap and recovery",
+      "dependencies": [
+        "PR 9"
+      ],
+      "owner": {
+        "heading": "PR 10B: Dead letters, rebuild generations, atomic swap, and recovery",
+        "line": 478,
+        "path": "docs/plans/tracedecay-v2/04-projectors-crate.md"
+      },
+      "phase": 1
+    },
+    "PR 10C": {
+      "commit_subject": "feat(v2): canonical events identity and schema predicate enforcement",
+      "dependencies": [
+        "PR 9"
+      ],
+      "owner": {
+        "heading": "PR 10C: Canonical events, identity, and schema/predicate enforcement",
+        "line": 489,
+        "path": "docs/plans/tracedecay-v2/04-projectors-crate.md"
+      },
+      "phase": 1
+    },
+    "PR 10D": {
+      "commit_subject": "feat(v2): scout projections and safe rollups",
+      "dependencies": [
+        "PR 9"
+      ],
+      "owner": {
+        "heading": "PR 10D \u2014 Scout projections and safe rollups",
+        "line": 1261,
+        "path": "docs/plans/tracedecay-v2/22-incremental-context-scout-and-suggestion-envelopes.md"
+      },
+      "phase": 1
+    },
+    "PR 10E": {
+      "commit_subject": "feat(projectors): derive task graph and critical path views",
+      "dependencies": [
+        "PR 9"
+      ],
+      "owner": {
+        "heading": "PR 10E \u2014 Task graph current-state, dependency, and critical-path projectors",
+        "line": 3125,
+        "path": "docs/plans/tracedecay-v2/24-canonical-task-plan-graph-and-multi-agent-executor.md"
+      },
+      "phase": 1
+    },
+    "PR 10F": {
+      "commit_subject": "feat(v2): canonical task materiality projection integration",
+      "dependencies": [
+        "PR 10E",
+        "PR 9"
+      ],
+      "owner": {
+        "heading": "PR 10F \u2014 Canonical task-materiality projection integration",
+        "line": 1266,
+        "path": "docs/plans/tracedecay-v2/22-incremental-context-scout-and-suggestion-envelopes.md"
+      },
+      "phase": 1
+    },
+    "PR 11": {
+      "commit_subject": "feat(v2): tracequeryv1 parser validation cost model explain",
+      "dependencies": [
+        "PR 10",
+        "PR 10A",
+        "PR 10B",
+        "PR 10C",
+        "PR 10D",
+        "PR 10E",
+        "PR 10F"
+      ],
+      "owner": {
+        "heading": "PR 11: `TraceQueryV1` parser, validation, cost model, explain",
+        "line": 1918,
+        "path": "docs/plans/2026-07-09-tracedecay-brain-rewrite.md"
+      },
+      "phase": 2
+    },
+    "PR 11A": {
+      "commit_subject": "feat(v2): domain ast parser canonicalization and validation",
+      "dependencies": [
+        "PR 10",
+        "PR 10A",
+        "PR 10B",
+        "PR 10C",
+        "PR 10D",
+        "PR 10E",
+        "PR 10F"
+      ],
+      "owner": {
+        "heading": "PR 11A: Domain AST, parser, canonicalization, and validation",
+        "line": 961,
+        "path": "docs/plans/tracedecay-v2/05-query-crate.md"
+      },
+      "phase": 2
+    },
+    "PR 11B": {
+      "commit_subject": "feat(v2): cost model and safe explain plan",
+      "dependencies": [
+        "PR 10",
+        "PR 10A",
+        "PR 10B",
+        "PR 10C",
+        "PR 10D",
+        "PR 10E",
+        "PR 10F"
+      ],
+      "owner": {
+        "heading": "PR 11B: Cost model and safe explain plan",
+        "line": 972,
+        "path": "docs/plans/tracedecay-v2/05-query-crate.md"
+      },
+      "phase": 2
+    },
+    "PR 12": {
+      "commit_subject": "feat(v2): shard planner and stable distributed cursors",
+      "dependencies": [
+        "PR 11",
+        "PR 11A",
+        "PR 11B"
+      ],
+      "owner": {
+        "heading": "PR 12: Shard planner and stable distributed cursors",
+        "line": 1923,
+        "path": "docs/plans/2026-07-09-tracedecay-brain-rewrite.md"
+      },
+      "phase": 2
+    },
+    "PR 12.1": {
+      "commit_subject": "feat(v2): resolved scope validation shard pruning pushdown and captured",
+      "dependencies": [
+        "PR 11",
+        "PR 11A",
+        "PR 11B"
+      ],
+      "owner": {
+        "heading": "PR 12.1: Resolved-scope validation, shard pruning, pushdown, and captured watermarks",
+        "line": 982,
+        "path": "docs/plans/tracedecay-v2/05-query-crate.md"
+      },
+      "phase": 2
+    },
+    "PR 12.2": {
+      "commit_subject": "feat(v2): coordinator cancellation partial coverage and deterministic me",
+      "dependencies": [
+        "PR 11",
+        "PR 11A",
+        "PR 11B"
+      ],
+      "owner": {
+        "heading": "PR 12.2: Coordinator, cancellation, partial coverage, and deterministic merge",
+        "line": 992,
+        "path": "docs/plans/tracedecay-v2/05-query-crate.md"
+      },
+      "phase": 2
+    },
+    "PR 12.3": {
+      "commit_subject": "feat(v2): authenticated stable cursors and frozen resume",
+      "dependencies": [
+        "PR 11",
+        "PR 11A",
+        "PR 11B"
+      ],
+      "owner": {
+        "heading": "PR 12.3: Authenticated stable cursors and frozen resume",
+        "line": 1002,
+        "path": "docs/plans/tracedecay-v2/05-query-crate.md"
+      },
+      "phase": 2
+    },
+    "PR 12A": {
+      "commit_subject": "feat(v2): first end to end v2 vertical slice",
+      "dependencies": [
+        "PR 11",
+        "PR 11A",
+        "PR 11B"
+      ],
+      "owner": {
+        "heading": "PR 12A: First end-to-end V2 vertical slice",
+        "line": 1012,
+        "path": "docs/plans/tracedecay-v2/05-query-crate.md"
+      },
+      "phase": 2
+    },
+    "PR 12AR": {
+      "commit_subject": "feat(v2): first end to end v2 composition slice",
+      "dependencies": [
+        "PR 11",
+        "PR 11A",
+        "PR 11B"
+      ],
+      "owner": {
+        "heading": "PR 12AR: First end-to-end V2 composition slice",
+        "line": 843,
+        "path": "docs/plans/tracedecay-v2/12-root-compatibility-migration.md"
+      },
+      "phase": 2
+    },
+    "PR 12B": {
+      "commit_subject": "feat(v2): federated scope planning and globally routed retrieval",
+      "dependencies": [
+        "PR 11",
+        "PR 11A",
+        "PR 11B"
+      ],
+      "owner": {
+        "heading": "PR 12B: Federated scope planning and globally routed retrieval",
+        "line": 1022,
+        "path": "docs/plans/tracedecay-v2/05-query-crate.md"
+      },
+      "phase": 2
+    },
+    "PR 12C": {
+      "commit_subject": "feat(v2): privacy aware query and global containment",
+      "dependencies": [
+        "PR 10A",
+        "PR 11",
+        "PR 11A",
+        "PR 11B",
+        "PR 12B",
+        "PR 4B",
+        "PR 6B",
+        "PR 7A"
+      ],
+      "owner": {
+        "heading": "PR 12C: Privacy-aware query and global containment",
+        "line": 1034,
+        "path": "docs/plans/tracedecay-v2/05-query-crate.md"
+      },
+      "phase": 2
+    },
+    "PR 12D": {
+      "commit_subject": "feat(v2): remote authority replica cache and consistency routing",
+      "dependencies": [
+        "PR 11",
+        "PR 11A",
+        "PR 11B"
+      ],
+      "owner": {
+        "heading": "PR 12D: Remote authority, replica, cache, and consistency routing",
+        "line": 1046,
+        "path": "docs/plans/tracedecay-v2/05-query-crate.md"
+      },
+      "phase": 2
+    },
+    "PR 13A": {
+      "commit_subject": "feat(v2): time safe search evaluation corpus and baseline",
+      "dependencies": [
+        "PR 12",
+        "PR 12.1",
+        "PR 12.2",
+        "PR 12.3",
+        "PR 12A",
+        "PR 12AR",
+        "PR 12B",
+        "PR 12C",
+        "PR 12D"
+      ],
+      "owner": {
+        "heading": "PR 13A: Time-safe search evaluation corpus and baseline",
+        "line": 1053,
+        "path": "docs/plans/tracedecay-v2/05-query-crate.md"
+      },
+      "phase": 2
+    },
+    "PR 13B": {
+      "commit_subject": "feat(v2): precision first lexical search facets and v1 parity",
+      "dependencies": [
+        "PR 12",
+        "PR 12.1",
+        "PR 12.2",
+        "PR 12.3",
+        "PR 12A",
+        "PR 12AR",
+        "PR 12B",
+        "PR 12C",
+        "PR 12D"
+      ],
+      "owner": {
+        "heading": "PR 13B: Precision-first lexical search, facets, and V1 parity",
+        "line": 1064,
+        "path": "docs/plans/tracedecay-v2/05-query-crate.md"
+      },
+      "phase": 2
+    },
+    "PR 13C": {
+      "commit_subject": "feat(v2): bounded fuzzy recall and result diversity",
+      "dependencies": [
+        "PR 12",
+        "PR 12.1",
+        "PR 12.2",
+        "PR 12.3",
+        "PR 12A",
+        "PR 12AR",
+        "PR 12B",
+        "PR 12C",
+        "PR 12D"
+      ],
+      "owner": {
+        "heading": "PR 13C: Bounded fuzzy recall and result diversity",
+        "line": 1076,
+        "path": "docs/plans/tracedecay-v2/05-query-crate.md"
+      },
+      "phase": 2
+    },
+    "PR 13D": {
+      "commit_subject": "feat(v2): frozen session temporal corpus and current baselines",
+      "dependencies": [
+        "PR 12",
+        "PR 12.1",
+        "PR 12.2",
+        "PR 12.3",
+        "PR 12A",
+        "PR 12AR",
+        "PR 12B",
+        "PR 12C",
+        "PR 12D"
+      ],
+      "owner": {
+        "heading": "PR 13D \u2014 Frozen session-temporal corpus and current baselines",
+        "line": 1158,
+        "path": "docs/plans/tracedecay-v2/23-session-lcm-temporal-retrieval-and-evaluation.md"
+      },
+      "phase": 2
+    },
+    "PR 13E": {
+      "commit_subject": "feat(v2): occurrence logical copy turn thread and summary horizon projec",
+      "dependencies": [
+        "PR 12",
+        "PR 12.1",
+        "PR 12.2",
+        "PR 12.3",
+        "PR 12A",
+        "PR 12AR",
+        "PR 12B",
+        "PR 12C",
+        "PR 12D"
+      ],
+      "owner": {
+        "heading": "PR 13E \u2014 Occurrence, logical-copy, Turn/thread, and summary-horizon projections",
+        "line": 1164,
+        "path": "docs/plans/tracedecay-v2/23-session-lcm-temporal-retrieval-and-evaluation.md"
+      },
+      "phase": 2
+    },
+    "PR 14A": {
+      "commit_subject": "feat(v2): representation candidates and privacy resource benchmark",
+      "dependencies": [
+        "PR 13A",
+        "PR 13B",
+        "PR 13C",
+        "PR 13D",
+        "PR 13E",
+        "PR 2A"
+      ],
+      "owner": {
+        "heading": "PR 14A: Representation candidates and privacy/resource benchmark",
+        "line": 1087,
+        "path": "docs/plans/tracedecay-v2/05-query-crate.md"
+      },
+      "phase": 2
+    },
+    "PR 14B": {
+      "commit_subject": "feat(v2): hybrid fusion bounded graph expansion and hard negatives",
+      "dependencies": [
+        "PR 14E"
+      ],
+      "owner": {
+        "heading": "PR 14B: Hybrid fusion, bounded graph expansion, and hard negatives",
+        "line": 1101,
+        "path": "docs/plans/tracedecay-v2/05-query-crate.md"
+      },
+      "phase": 3
+    },
+    "PR 14C": {
+      "commit_subject": "feat(v2): optional bounded reranking",
+      "dependencies": [
+        "PR 14B"
+      ],
+      "owner": {
+        "heading": "PR 14C: Optional bounded reranking",
+        "line": 1115,
+        "path": "docs/plans/tracedecay-v2/05-query-crate.md"
+      },
+      "phase": 3
+    },
+    "PR 14D": {
+      "commit_subject": "feat(v2): temporal assertion resolver and intent aware hybrid ranking",
+      "dependencies": [
+        "PR 13A",
+        "PR 13B",
+        "PR 13C",
+        "PR 13D",
+        "PR 13E"
+      ],
+      "owner": {
+        "heading": "PR 14D \u2014 Temporal assertion resolver and intent-aware hybrid ranking",
+        "line": 1170,
+        "path": "docs/plans/tracedecay-v2/23-session-lcm-temporal-retrieval-and-evaluation.md"
+      },
+      "phase": 2
+    },
+    "PR 14E": {
+      "commit_subject": "feat(v2): signed representation artifact catalog and local lifecycle",
+      "dependencies": [
+        "PR 14A",
+        "PR 18D",
+        "PR 6C"
+      ],
+      "owner": {
+        "heading": "PR 14E: Signed representation artifact catalog and local lifecycle",
+        "line": 1129,
+        "path": "docs/plans/tracedecay-v2/05-query-crate.md"
+      },
+      "phase": 3
+    },
+    "PR 15": {
+      "commit_subject": "feat(v2): graph time as of operators",
+      "dependencies": [
+        "PR 14A",
+        "PR 14D"
+      ],
+      "owner": {
+        "heading": "PR 15: Graph/time/as-of operators",
+        "line": 1970,
+        "path": "docs/plans/2026-07-09-tracedecay-brain-rewrite.md"
+      },
+      "phase": 2
+    },
+    "PR 15A": {
+      "commit_subject": "feat(v2): graph composition atlas impact timeline coordination and bitem",
+      "dependencies": [
+        "PR 14A",
+        "PR 14D"
+      ],
+      "owner": {
+        "heading": "PR 15A: Graph composition, atlas, impact, timeline, coordination, and bitemporal/as-of operators",
+        "line": 1143,
+        "path": "docs/plans/tracedecay-v2/05-query-crate.md"
+      },
+      "phase": 2
+    },
+    "PR 15B": {
+      "commit_subject": "feat(v2): deterministic export and live read models",
+      "dependencies": [
+        "PR 14A",
+        "PR 14D"
+      ],
+      "owner": {
+        "heading": "PR 15B: Deterministic export and live read models",
+        "line": 1155,
+        "path": "docs/plans/tracedecay-v2/05-query-crate.md"
+      },
+      "phase": 2
+    },
+    "PR 15C": {
+      "commit_subject": "feat(v2): unified session retrieval and context assembler",
+      "dependencies": [
+        "PR 14A",
+        "PR 14D"
+      ],
+      "owner": {
+        "heading": "PR 15C \u2014 Unified session retrieval and context assembler",
+        "line": 1175,
+        "path": "docs/plans/tracedecay-v2/23-session-lcm-temporal-retrieval-and-evaluation.md"
+      },
+      "phase": 2
+    },
+    "PR 16": {
+      "commit_subject": "feat(v2): aggregate projections and query experiment evaluator",
+      "dependencies": [
+        "PR 15",
+        "PR 15A",
+        "PR 15B",
+        "PR 15C"
+      ],
+      "owner": {
+        "heading": "PR 16: Aggregate projections and Query experiment evaluator",
+        "line": 1165,
+        "path": "docs/plans/tracedecay-v2/05-query-crate.md"
+      },
+      "phase": 2
+    },
+    "PR 17": {
+      "commit_subject": "feat(v2): sessions tools reasoning goals and concurrent agents",
+      "dependencies": [
+        "PR 16"
+      ],
+      "owner": {
+        "heading": "PR 17: Sessions, tools, reasoning, goals, and concurrent agents",
+        "line": 500,
+        "path": "docs/plans/tracedecay-v2/04-projectors-crate.md"
+      },
+      "phase": 3
+    },
+    "PR 17A": {
+      "commit_subject": "feat(v2): profile activity temporal project attribution and work claims",
+      "dependencies": [
+        "PR 16"
+      ],
+      "owner": {
+        "heading": "PR 17A: Profile activity, temporal project attribution, and work claims",
+        "line": 513,
+        "path": "docs/plans/tracedecay-v2/04-projectors-crate.md"
+      },
+      "phase": 3
+    },
+    "PR 17B": {
+      "commit_subject": "feat(v2): lcm context lineage and replay state",
+      "dependencies": [
+        "PR 16"
+      ],
+      "owner": {
+        "heading": "PR 17B: LCM/context lineage and replay state",
+        "line": 526,
+        "path": "docs/plans/tracedecay-v2/04-projectors-crate.md"
+      },
+      "phase": 3
+    },
+    "PR 17C": {
+      "commit_subject": "feat(activity): connect work to the TraceDecay brain",
+      "dependencies": [
+        "PR 16"
+      ],
+      "owner": {
+        "heading": "PR 17C \u2014 Link tasks and attempts to agents, Turns, code, Git, delivery, knowledge, and automation",
+        "line": 3134,
+        "path": "docs/plans/tracedecay-v2/24-canonical-task-plan-graph-and-multi-agent-executor.md"
+      },
+      "phase": 3
+    },
+    "PR 18": {
+      "commit_subject": "feat(v2): code snapshots diagnostics tests and impact",
+      "dependencies": [
+        "PR 17",
+        "PR 17A",
+        "PR 17B",
+        "PR 17C"
+      ],
+      "owner": {
+        "heading": "PR 18: Code snapshots, diagnostics, tests, and impact",
+        "line": 539,
+        "path": "docs/plans/tracedecay-v2/04-projectors-crate.md"
+      },
+      "phase": 3
+    },
+    "PR 18A": {
+      "commit_subject": "feat(v2): cross repository graph federation",
+      "dependencies": [
+        "PR 17",
+        "PR 17A",
+        "PR 17B",
+        "PR 17C"
+      ],
+      "owner": {
+        "heading": "PR 18A: Cross-repository graph federation",
+        "line": 551,
+        "path": "docs/plans/tracedecay-v2/04-projectors-crate.md"
+      },
+      "phase": 3
+    },
+    "PR 18B": {
+      "commit_subject": "feat(v2): crate contracts grammar extractor registry and deterministic e",
+      "dependencies": [
+        "PR 17",
+        "PR 17A",
+        "PR 17B",
+        "PR 17C"
+      ],
+      "owner": {
+        "heading": "PR 18B: Crate contracts, grammar/extractor registry, and deterministic extraction",
+        "line": 501,
+        "path": "docs/plans/tracedecay-v2/25-code-intelligence-indexing-crate.md"
+      },
+      "phase": 3
+    },
+    "PR 18C": {
+      "commit_subject": "feat(v2): incremental reuse and bounded overlays",
+      "dependencies": [
+        "PR 17",
+        "PR 17A",
+        "PR 17B",
+        "PR 17C"
+      ],
+      "owner": {
+        "heading": "PR 18C: Incremental reuse and bounded overlays",
+        "line": 514,
+        "path": "docs/plans/tracedecay-v2/25-code-intelligence-indexing-crate.md"
+      },
+      "phase": 3
+    },
+    "PR 18D": {
+      "commit_subject": "feat(v2): generation build plans canonical row ir and digests",
+      "dependencies": [
+        "PR 17",
+        "PR 17A",
+        "PR 17B",
+        "PR 17C"
+      ],
+      "owner": {
+        "heading": "PR 18D: Generation build plans, canonical row IR, and digests",
+        "line": 526,
+        "path": "docs/plans/tracedecay-v2/25-code-intelligence-indexing-crate.md"
+      },
+      "phase": 3
+    },
+    "PR 18E": {
+      "commit_subject": "feat(v2): symbol lineage diagnostics mapping and test attribution",
+      "dependencies": [
+        "PR 17",
+        "PR 17A",
+        "PR 17B",
+        "PR 17C"
+      ],
+      "owner": {
+        "heading": "PR 18E: Symbol lineage, diagnostics mapping, and test attribution",
+        "line": 540,
+        "path": "docs/plans/tracedecay-v2/25-code-intelligence-indexing-crate.md"
+      },
+      "phase": 3
+    },
+    "PR 18F": {
+      "commit_subject": "feat(v2): v1 differential parity scale benchmarks and convergence eviden",
+      "dependencies": [
+        "PR 17",
+        "PR 17A",
+        "PR 17B",
+        "PR 17C"
+      ],
+      "owner": {
+        "heading": "PR 18F: V1 differential parity, scale benchmarks, and convergence evidence",
+        "line": 550,
+        "path": "docs/plans/tracedecay-v2/25-code-intelligence-indexing-crate.md"
+      },
+      "phase": 3
+    },
+    "PR 18G": {
+      "commit_subject": "feat(v2): wire the production code index builder into code evidence v1",
+      "dependencies": [
+        "PR 17",
+        "PR 17A",
+        "PR 17B",
+        "PR 17C",
+        "PR 18B",
+        "PR 18C",
+        "PR 18D",
+        "PR 18E",
+        "PR 18F",
+        "PR 6C"
+      ],
+      "owner": {
+        "heading": "PR 18G: Wire the production code-index builder into `code_evidence_v1`",
+        "line": 563,
+        "path": "docs/plans/tracedecay-v2/04-projectors-crate.md"
+      },
+      "phase": 3
+    },
+    "PR 19": {
+      "commit_subject": "feat(v2): git and delivery evidence",
+      "dependencies": [
+        "PR 18",
+        "PR 18A",
+        "PR 18B",
+        "PR 18C",
+        "PR 18D",
+        "PR 18E",
+        "PR 18F",
+        "PR 18G"
+      ],
+      "owner": {
+        "heading": "PR 19: Git and delivery evidence",
+        "line": 585,
+        "path": "docs/plans/tracedecay-v2/04-projectors-crate.md"
+      },
+      "phase": 3
+    },
+    "PR 19A": {
+      "commit_subject": "feat(v2): related system and delivery graph",
+      "dependencies": [
+        "PR 18",
+        "PR 18A",
+        "PR 18B",
+        "PR 18C",
+        "PR 18D",
+        "PR 18E",
+        "PR 18F",
+        "PR 18G"
+      ],
+      "owner": {
+        "heading": "PR 19A: Related-system and delivery graph",
+        "line": 596,
+        "path": "docs/plans/tracedecay-v2/04-projectors-crate.md"
+      },
+      "phase": 3
+    },
+    "PR 2": {
+      "commit_subject": "feat(v2): redacted golden corpus and manifest",
+      "dependencies": [
+        "PR 1"
+      ],
+      "owner": {
+        "heading": "PR 2: Redacted golden corpus and manifest",
+        "line": 1745,
+        "path": "docs/plans/2026-07-09-tracedecay-brain-rewrite.md"
+      },
+      "phase": 0
+    },
+    "PR 20": {
+      "commit_subject": "feat(v2): knowledge facts trust retrieval and policy evidence",
+      "dependencies": [
+        "PR 19",
+        "PR 19A"
+      ],
+      "owner": {
+        "heading": "PR 20: Knowledge, facts, trust, retrieval, and policy evidence",
+        "line": 607,
+        "path": "docs/plans/tracedecay-v2/04-projectors-crate.md"
+      },
+      "phase": 3
+    },
+    "PR 21": {
+      "commit_subject": "feat(v2): automation skills artifacts and outcomes",
+      "dependencies": [
+        "PR 20"
+      ],
+      "owner": {
+        "heading": "PR 21: Automation, skills, artifacts, and outcomes",
+        "line": 619,
+        "path": "docs/plans/tracedecay-v2/04-projectors-crate.md"
+      },
+      "phase": 3
+    },
+    "PR 21A": {
+      "commit_subject": "feat(tasks): add evidence-bound handoffs and context packets",
+      "dependencies": [
+        "PR 20"
+      ],
+      "owner": {
+        "heading": "PR 21A \u2014 Handoffs, artifacts, acceptance, outcomes, costs, and context-packet lineage",
+        "line": 3144,
+        "path": "docs/plans/tracedecay-v2/24-canonical-task-plan-graph-and-multi-agent-executor.md"
+      },
+      "phase": 3
+    },
+    "PR 22": {
+      "commit_subject": "feat(v2): accounting privacy gated search query read models and all scop",
+      "dependencies": [
+        "PR 21",
+        "PR 21A"
+      ],
+      "owner": {
+        "heading": "PR 22: Accounting, privacy-gated search, query read models, and All-scope rollups",
+        "line": 631,
+        "path": "docs/plans/tracedecay-v2/04-projectors-crate.md"
+      },
+      "phase": 3
+    },
+    "PR 22A": {
+      "commit_subject": "feat(v2): canonical integration source ir and use case catalog",
+      "dependencies": [
+        "PR 21",
+        "PR 21A"
+      ],
+      "owner": {
+        "heading": "PR 22A \u2014 canonical integration source IR and use-case catalog",
+        "line": 2083,
+        "path": "docs/plans/tracedecay-v2/27-cross-host-agent-plugin-bundles.md"
+      },
+      "phase": 3
+    },
+    "PR 22B": {
+      "commit_subject": "feat(v2): privacy observability and safe metrics",
+      "dependencies": [
+        "PR 21",
+        "PR 21A"
+      ],
+      "owner": {
+        "heading": "PR 22B \u2014 Privacy observability and safe metrics",
+        "line": 759,
+        "path": "docs/plans/tracedecay-v2/18-secret-detection-redaction-and-private-data-safety.md"
+      },
+      "phase": 3
+    },
+    "PR 22C": {
+      "commit_subject": "feat(v2): generated configuration registry and capability inventory",
+      "dependencies": [
+        "PR 21",
+        "PR 21A"
+      ],
+      "owner": {
+        "heading": "PR 22C \u2014 Generated configuration registry and capability inventory",
+        "line": 1441,
+        "path": "docs/plans/tracedecay-v2/20-configuration-control-plane.md"
+      },
+      "phase": 3
+    },
+    "PR 22D": {
+      "commit_subject": "feat(v2): scout capability eligibility and generated bindings",
+      "dependencies": [
+        "PR 21",
+        "PR 21A"
+      ],
+      "owner": {
+        "heading": "PR 22D \u2014 Scout capability eligibility and generated bindings",
+        "line": 1272,
+        "path": "docs/plans/tracedecay-v2/22-incremental-context-scout-and-suggestion-envelopes.md"
+      },
+      "phase": 3
+    },
+    "PR 22E": {
+      "commit_subject": "feat(catalog): generate task and executor capabilities",
+      "dependencies": [
+        "PR 21",
+        "PR 21A"
+      ],
+      "owner": {
+        "heading": "PR 22E \u2014 Generated task capability catalog and executor SPI manifests",
+        "line": 3153,
+        "path": "docs/plans/tracedecay-v2/24-canonical-task-plan-graph-and-multi-agent-executor.md"
+      },
+      "phase": 3
+    },
+    "PR 22F": {
+      "commit_subject": "feat(v2): accounting metric log domain contracts and descriptor registry",
+      "dependencies": [
+        "PR 21",
+        "PR 21A",
+        "PR 22A",
+        "PR 4E"
+      ],
+      "owner": {
+        "heading": "PR 22F: Accounting/metric/log domain contracts and descriptor registry",
+        "line": 712,
+        "path": "docs/plans/tracedecay-v2/26-observability-accounting-and-usage.md"
+      },
+      "phase": 3
+    },
+    "PR 22F-LE": {
+      "commit_subject": "feat(v2): le universal versioned diagnostic emission and query spine",
+      "dependencies": [
+        "PR 21",
+        "PR 21A",
+        "PR 22F",
+        "PR 22F-LS"
+      ],
+      "owner": {
+        "heading": "PR 22F-LE: Universal versioned diagnostic emission and query spine",
+        "line": 724,
+        "path": "docs/plans/tracedecay-v2/26-observability-accounting-and-usage.md"
+      },
+      "phase": 3
+    },
+    "PR 22F-LS": {
+      "commit_subject": "feat(v2): ls diagnostic version build registry and log persistence",
+      "dependencies": [
+        "PR 21",
+        "PR 21A",
+        "PR 22F"
+      ],
+      "owner": {
+        "heading": "PR 22F-LS: Diagnostic version/build registry and log persistence",
+        "line": 1259,
+        "path": "docs/plans/tracedecay-v2/02-store-crate.md"
+      },
+      "phase": 3
+    },
+    "PR 22G": {
+      "commit_subject": "feat(v2): denominator safe rollups lag and data quality projections",
+      "dependencies": [
+        "PR 21",
+        "PR 21A",
+        "PR 22F",
+        "PR 22F-LE"
+      ],
+      "owner": {
+        "heading": "PR 22G: Denominator-safe rollups, lag, and data-quality projections",
+        "line": 740,
+        "path": "docs/plans/tracedecay-v2/26-observability-accounting-and-usage.md"
+      },
+      "phase": 3
+    },
+    "PR 22H": {
+      "commit_subject": "feat(v2): slo adoption hint outcome and automation admission rollups",
+      "dependencies": [
+        "PR 21",
+        "PR 21A"
+      ],
+      "owner": {
+        "heading": "PR 22H: SLO, adoption, hint-outcome, and automation-admission rollups",
+        "line": 752,
+        "path": "docs/plans/tracedecay-v2/26-observability-accounting-and-usage.md"
+      },
+      "phase": 3
+    },
+    "PR 22I": {
+      "commit_subject": "feat(v2): tool catalog compiler and host artifacts",
+      "dependencies": [
+        "PR 21",
+        "PR 21A"
+      ],
+      "owner": {
+        "heading": "PR 22I \u2014 tool-catalog compiler and host artifacts",
+        "line": 2101,
+        "path": "docs/plans/tracedecay-v2/27-cross-host-agent-plugin-bundles.md"
+      },
+      "phase": 3
+    },
+    "PR 23A": {
+      "commit_subject": "feat(v2): bundle manifest bytecode vm immutable registry and determinist",
+      "dependencies": [
+        "PR 22",
+        "PR 22A",
+        "PR 22B",
+        "PR 22C",
+        "PR 22D",
+        "PR 22E",
+        "PR 22F",
+        "PR 22F-LE",
+        "PR 22F-LS",
+        "PR 22G",
+        "PR 22H",
+        "PR 22I"
+      ],
+      "owner": {
+        "heading": "PR 23A: Bundle manifest, bytecode VM, immutable registry, and deterministic runtime",
+        "line": 1145,
+        "path": "docs/plans/tracedecay-v2/06-policy-crate.md"
+      },
+      "phase": 3
+    },
+    "PR 23B": {
+      "commit_subject": "feat(v2): replay modes records substitution reports and diff core",
+      "dependencies": [
+        "PR 22",
+        "PR 22A",
+        "PR 22B",
+        "PR 22C",
+        "PR 22D",
+        "PR 22E",
+        "PR 22F",
+        "PR 22F-LE",
+        "PR 22F-LS",
+        "PR 22G",
+        "PR 22H",
+        "PR 22I"
+      ],
+      "owner": {
+        "heading": "PR 23B: Replay modes, records, substitution reports, and diff core",
+        "line": 1155,
+        "path": "docs/plans/tracedecay-v2/06-policy-crate.md"
+      },
+      "phase": 3
+    },
+    "PR 23C": {
+      "commit_subject": "feat(v2): hint evaluation git tool discovery agent coordination and outc",
+      "dependencies": [
+        "PR 22",
+        "PR 22A",
+        "PR 22B",
+        "PR 22C",
+        "PR 22D",
+        "PR 22E",
+        "PR 22F",
+        "PR 22F-LE",
+        "PR 22F-LS",
+        "PR 22G",
+        "PR 22H",
+        "PR 22I"
+      ],
+      "owner": {
+        "heading": "PR 23C: Hint evaluation, Git/tool discovery, agent coordination, and outcome attribution",
+        "line": 1165,
+        "path": "docs/plans/tracedecay-v2/06-policy-crate.md"
+      },
+      "phase": 3
+    },
+    "PR 23D": {
+      "commit_subject": "feat(v2): retrieval policy",
+      "dependencies": [
+        "PR 22",
+        "PR 22A",
+        "PR 22B",
+        "PR 22C",
+        "PR 22D",
+        "PR 22E",
+        "PR 22F",
+        "PR 22F-LE",
+        "PR 22F-LS",
+        "PR 22G",
+        "PR 22H",
+        "PR 22I"
+      ],
+      "owner": {
+        "heading": "PR 23D: Retrieval policy",
+        "line": 1180,
+        "path": "docs/plans/tracedecay-v2/06-policy-crate.md"
+      },
+      "phase": 3
+    },
+    "PR 23E": {
+      "commit_subject": "feat(v2): correlation and live local git reconciliation",
+      "dependencies": [
+        "PR 22",
+        "PR 22A",
+        "PR 22B",
+        "PR 22C",
+        "PR 22D",
+        "PR 22E",
+        "PR 22F",
+        "PR 22F-LE",
+        "PR 22F-LS",
+        "PR 22G",
+        "PR 22H",
+        "PR 22I"
+      ],
+      "owner": {
+        "heading": "PR 23E: Correlation and live/local Git reconciliation",
+        "line": 1191,
+        "path": "docs/plans/tracedecay-v2/06-policy-crate.md"
+      },
+      "phase": 3
+    },
+    "PR 23F": {
+      "commit_subject": "feat(v2): scheduler diagnostics curation and memory evaluators",
+      "dependencies": [
+        "PR 22",
+        "PR 22A",
+        "PR 22B",
+        "PR 22C",
+        "PR 22D",
+        "PR 22E",
+        "PR 22F",
+        "PR 22F-LE",
+        "PR 22F-LS",
+        "PR 22G",
+        "PR 22H",
+        "PR 22I"
+      ],
+      "owner": {
+        "heading": "PR 23F: Scheduler, diagnostics, curation, and memory evaluators",
+        "line": 1202,
+        "path": "docs/plans/tracedecay-v2/06-policy-crate.md"
+      },
+      "phase": 3
+    },
+    "PR 23G": {
+      "commit_subject": "feat(v2): pure replay evaluators and external ingest query adapters",
+      "dependencies": [
+        "PR 22",
+        "PR 22A",
+        "PR 22B",
+        "PR 22C",
+        "PR 22D",
+        "PR 22E",
+        "PR 22F",
+        "PR 22F-LE",
+        "PR 22F-LS",
+        "PR 22G",
+        "PR 22H",
+        "PR 22I"
+      ],
+      "owner": {
+        "heading": "PR 23G: Pure replay evaluators and external Ingest/Query adapters",
+        "line": 1215,
+        "path": "docs/plans/tracedecay-v2/06-policy-crate.md"
+      },
+      "phase": 3
+    },
+    "PR 23H": {
+      "commit_subject": "feat(v2): pure scout ranking silence dedupe and replay policy",
+      "dependencies": [
+        "PR 22",
+        "PR 22A",
+        "PR 22B",
+        "PR 22C",
+        "PR 22D",
+        "PR 22E",
+        "PR 22F",
+        "PR 22F-LE",
+        "PR 22F-LS",
+        "PR 22G",
+        "PR 22H",
+        "PR 22I"
+      ],
+      "owner": {
+        "heading": "PR 23H \u2014 Pure scout ranking, silence, dedupe, and replay policy",
+        "line": 1277,
+        "path": "docs/plans/tracedecay-v2/22-incremental-context-scout-and-suggestion-envelopes.md"
+      },
+      "phase": 3
+    },
+    "PR 23I": {
+      "commit_subject": "feat(policy): decide task decomposition and scheduling safely",
+      "dependencies": [
+        "PR 22",
+        "PR 22A",
+        "PR 22B",
+        "PR 22C",
+        "PR 22D",
+        "PR 22E",
+        "PR 22F",
+        "PR 22F-LE",
+        "PR 22F-LS",
+        "PR 22G",
+        "PR 22H",
+        "PR 22I"
+      ],
+      "owner": {
+        "heading": "PR 23I \u2014 Pure decomposition, readiness, routing, fairness, retry, and materiality policy",
+        "line": 3164,
+        "path": "docs/plans/tracedecay-v2/24-canonical-task-plan-graph-and-multi-agent-executor.md"
+      },
+      "phase": 3
+    },
+    "PR 24A": {
+      "commit_subject": "feat(v2): sealed typed application views",
+      "dependencies": [
+        "PR 23A",
+        "PR 23B",
+        "PR 23C",
+        "PR 23D",
+        "PR 23E",
+        "PR 23F",
+        "PR 23G",
+        "PR 23H",
+        "PR 23I"
+      ],
+      "owner": {
+        "heading": "PR 24A companion \u2014 sealed typed application views",
+        "line": 1354,
+        "path": "docs/plans/tracedecay-v2/21-cli-mcp-tool-surface-and-output-unification.md"
+      },
+      "phase": 4
+    },
+    "PR 24A1": {
+      "commit_subject": "feat(v2): crate boundary request context registry and architecture rules",
+      "dependencies": [
+        "PR 23A",
+        "PR 23B",
+        "PR 23C",
+        "PR 23D",
+        "PR 23E",
+        "PR 23F",
+        "PR 23G",
+        "PR 23H",
+        "PR 23I"
+      ],
+      "owner": {
+        "heading": "PR 24A1: Crate boundary, request context, registry, and architecture rules",
+        "line": 1107,
+        "path": "docs/plans/tracedecay-v2/09-application-crate.md"
+      },
+      "phase": 4
+    },
+    "PR 24A2": {
+      "commit_subject": "feat(v2): authorization query composition and explicit coverage",
+      "dependencies": [
+        "PR 23A",
+        "PR 23B",
+        "PR 23C",
+        "PR 23D",
+        "PR 23E",
+        "PR 23F",
+        "PR 23G",
+        "PR 23H",
+        "PR 23I"
+      ],
+      "owner": {
+        "heading": "PR 24A2: Authorization, query composition, and explicit coverage",
+        "line": 1117,
+        "path": "docs/plans/tracedecay-v2/09-application-crate.md"
+      },
+      "phase": 4
+    },
+    "PR 24A3": {
+      "commit_subject": "feat(v2): native and representative message session contracts",
+      "dependencies": [
+        "PR 23A",
+        "PR 23B",
+        "PR 23C",
+        "PR 23D",
+        "PR 23E",
+        "PR 23F",
+        "PR 23G",
+        "PR 23H",
+        "PR 23I"
+      ],
+      "owner": {
+        "heading": "PR 24A3: Native and representative message/session contracts",
+        "line": 1128,
+        "path": "docs/plans/tracedecay-v2/09-application-crate.md"
+      },
+      "phase": 4
+    },
+    "PR 24A4": {
+      "commit_subject": "feat(v2): brain graph of graphs timeline and domain reads",
+      "dependencies": [
+        "PR 23A",
+        "PR 23B",
+        "PR 23C",
+        "PR 23D",
+        "PR 23E",
+        "PR 23F",
+        "PR 23G",
+        "PR 23H",
+        "PR 23I"
+      ],
+      "owner": {
+        "heading": "PR 24A4: Brain, graph-of-graphs, timeline, and domain reads",
+        "line": 1138,
+        "path": "docs/plans/tracedecay-v2/09-application-crate.md"
+      },
+      "phase": 4
+    },
+    "PR 24A5": {
+      "commit_subject": "feat(v2): command unit of work idempotency optimistic versions and audit",
+      "dependencies": [
+        "PR 23A",
+        "PR 23B",
+        "PR 23C",
+        "PR 23D",
+        "PR 23E",
+        "PR 23F",
+        "PR 23G",
+        "PR 23H",
+        "PR 23I"
+      ],
+      "owner": {
+        "heading": "PR 24A5: Command unit of work, idempotency, optimistic versions, and audit",
+        "line": 1149,
+        "path": "docs/plans/tracedecay-v2/09-application-crate.md"
+      },
+      "phase": 4
+    },
+    "PR 24A6": {
+      "commit_subject": "feat(v2): resumable workflows and operational commands",
+      "dependencies": [
+        "PR 23A",
+        "PR 23B",
+        "PR 23C",
+        "PR 23D",
+        "PR 23E",
+        "PR 23F",
+        "PR 23G",
+        "PR 23H",
+        "PR 23I"
+      ],
+      "owner": {
+        "heading": "PR 24A6: Resumable workflows and operational commands",
+        "line": 1160,
+        "path": "docs/plans/tracedecay-v2/09-application-crate.md"
+      },
+      "phase": 4
+    },
+    "PR 24A7": {
+      "commit_subject": "feat(v2): replay labs and evolution studio",
+      "dependencies": [
+        "PR 23A",
+        "PR 23B",
+        "PR 23C",
+        "PR 23D",
+        "PR 23E",
+        "PR 23F",
+        "PR 23G",
+        "PR 23H",
+        "PR 23I"
+      ],
+      "owner": {
+        "heading": "PR 24A7: Replay labs and Evolution Studio",
+        "line": 1170,
+        "path": "docs/plans/tracedecay-v2/09-application-crate.md"
+      },
+      "phase": 4
+    },
+    "PR 24A8": {
+      "commit_subject": "feat(v2): future master migration and v1 parity harness",
+      "dependencies": [
+        "PR 23A",
+        "PR 23B",
+        "PR 23C",
+        "PR 23D",
+        "PR 23E",
+        "PR 23F",
+        "PR 23G",
+        "PR 23H",
+        "PR 23I"
+      ],
+      "owner": {
+        "heading": "PR 24A8: Future-master migration and V1 parity harness",
+        "line": 1184,
+        "path": "docs/plans/tracedecay-v2/09-application-crate.md"
+      },
+      "phase": 4
+    },
+    "PR 24B1": {
+      "commit_subject": "feat(v2): root module boundary envelopes generated router and core reads",
+      "dependencies": [
+        "PR 23A",
+        "PR 23B",
+        "PR 23C",
+        "PR 23D",
+        "PR 23E",
+        "PR 23F",
+        "PR 23G",
+        "PR 23H",
+        "PR 23I"
+      ],
+      "owner": {
+        "heading": "PR 24B1: Root module boundary, envelopes, generated router, and core reads",
+        "line": 890,
+        "path": "docs/plans/tracedecay-v2/10-api-crate.md"
+      },
+      "phase": 4
+    },
+    "PR 24B2": {
+      "commit_subject": "feat(v2): loopback auth host origin csrf csp and abuse limits",
+      "dependencies": [
+        "PR 23A",
+        "PR 23B",
+        "PR 23C",
+        "PR 23D",
+        "PR 23E",
+        "PR 23F",
+        "PR 23G",
+        "PR 23H",
+        "PR 23I"
+      ],
+      "owner": {
+        "heading": "PR 24B2: Loopback auth, Host/Origin/CSRF, CSP, and abuse limits",
+        "line": 900,
+        "path": "docs/plans/tracedecay-v2/10-api-crate.md"
+      },
+      "phase": 4
+    },
+    "PR 24B3": {
+      "commit_subject": "feat(v2): product domain reads and 410 session message surface",
+      "dependencies": [
+        "PR 23A",
+        "PR 23B",
+        "PR 23C",
+        "PR 23D",
+        "PR 23E",
+        "PR 23F",
+        "PR 23G",
+        "PR 23H",
+        "PR 23I"
+      ],
+      "owner": {
+        "heading": "PR 24B3: Product/domain reads and #410 session/message surface",
+        "line": 912,
+        "path": "docs/plans/tracedecay-v2/10-api-crate.md"
+      },
+      "phase": 4
+    },
+    "PR 24B4": {
+      "commit_subject": "feat(v2): commands jobs experiments saved state and contained exports",
+      "dependencies": [
+        "PR 23A",
+        "PR 23B",
+        "PR 23C",
+        "PR 23D",
+        "PR 23E",
+        "PR 23F",
+        "PR 23G",
+        "PR 23H",
+        "PR 23I"
+      ],
+      "owner": {
+        "heading": "PR 24B4: Commands, jobs, experiments, saved state, and contained exports",
+        "line": 925,
+        "path": "docs/plans/tracedecay-v2/10-api-crate.md"
+      },
+      "phase": 4
+    },
+    "PR 24C": {
+      "commit_subject": "feat(v2): application api sse cli mcp and dashboard adapters",
+      "dependencies": [
+        "PR 23A",
+        "PR 23B",
+        "PR 23C",
+        "PR 23D",
+        "PR 23E",
+        "PR 23F",
+        "PR 23G",
+        "PR 23H",
+        "PR 23I"
+      ],
+      "owner": {
+        "heading": "PR 24C/24E: Application, API/SSE, CLI, MCP, and dashboard adapters",
+        "line": 1176,
+        "path": "docs/plans/tracedecay-v2/05-query-crate.md"
+      },
+      "phase": 4
+    },
+    "PR 24C1": {
+      "commit_subject": "feat(v2): subscription resource snapshot and sse event framing",
+      "dependencies": [
+        "PR 23A",
+        "PR 23B",
+        "PR 23C",
+        "PR 23D",
+        "PR 23E",
+        "PR 23F",
+        "PR 23G",
+        "PR 23H",
+        "PR 23I"
+      ],
+      "owner": {
+        "heading": "PR 24C1: Subscription resource, snapshot, and SSE event framing",
+        "line": 939,
+        "path": "docs/plans/tracedecay-v2/10-api-crate.md"
+      },
+      "phase": 4
+    },
+    "PR 24C2": {
+      "commit_subject": "feat(v2): coalescing backpressure gaps and reconnect fault matrix",
+      "dependencies": [
+        "PR 23A",
+        "PR 23B",
+        "PR 23C",
+        "PR 23D",
+        "PR 23E",
+        "PR 23F",
+        "PR 23G",
+        "PR 23H",
+        "PR 23I"
+      ],
+      "owner": {
+        "heading": "PR 24C2: Coalescing, backpressure, gaps, and reconnect fault matrix",
+        "line": 951,
+        "path": "docs/plans/tracedecay-v2/10-api-crate.md"
+      },
+      "phase": 4
+    },
+    "PR 24D": {
+      "commit_subject": "feat(v2): deterministic openapi and generated typescript client",
+      "dependencies": [
+        "PR 23A",
+        "PR 23B",
+        "PR 23C",
+        "PR 23D",
+        "PR 23E",
+        "PR 23F",
+        "PR 23G",
+        "PR 23H",
+        "PR 23I"
+      ],
+      "owner": {
+        "heading": "PR 24D: Deterministic OpenAPI and generated TypeScript client",
+        "line": 963,
+        "path": "docs/plans/tracedecay-v2/10-api-crate.md"
+      },
+      "phase": 4
+    },
+    "PR 24D-API1": {
+      "commit_subject": "feat(v2): api1 freeze public contract ir and official support declaratio",
+      "dependencies": [
+        "PR 23A",
+        "PR 23B",
+        "PR 23C",
+        "PR 23D",
+        "PR 23E",
+        "PR 23F",
+        "PR 23G",
+        "PR 23H",
+        "PR 23I"
+      ],
+      "owner": {
+        "heading": "PR 24D-API1: Freeze public contract IR and official support declaration",
+        "line": 1054,
+        "path": "docs/plans/tracedecay-v2/17-official-public-api-and-sdks.md"
+      },
+      "phase": 4
+    },
+    "PR 24D-API2": {
+      "commit_subject": "feat(v2): api2 scope resolution anchors problems and direct agent discov",
+      "dependencies": [
+        "PR 23A",
+        "PR 23B",
+        "PR 23C",
+        "PR 23D",
+        "PR 23E",
+        "PR 23F",
+        "PR 23G",
+        "PR 23H",
+        "PR 23I"
+      ],
+      "owner": {
+        "heading": "PR 24D-API2: Scope resolution, anchors, problems, and direct-agent discovery",
+        "line": 1064,
+        "path": "docs/plans/tracedecay-v2/17-official-public-api-and-sdks.md"
+      },
+      "phase": 4
+    },
+    "PR 24D-API3": {
+      "commit_subject": "feat(v2): api3 complete graph of graphs and safe experiment replay contr",
+      "dependencies": [
+        "PR 23A",
+        "PR 23B",
+        "PR 23C",
+        "PR 23D",
+        "PR 23E",
+        "PR 23F",
+        "PR 23G",
+        "PR 23H",
+        "PR 23I"
+      ],
+      "owner": {
+        "heading": "PR 24D-API3: Complete Graph-of-Graphs and safe experiment/replay contract",
+        "line": 1074,
+        "path": "docs/plans/tracedecay-v2/17-official-public-api-and-sdks.md"
+      },
+      "phase": 4
+    },
+    "PR 24D-API4": {
+      "commit_subject": "feat(v2): api4 docs explorer sdk reference generation and full parity ga",
+      "dependencies": [
+        "PR 23A",
+        "PR 23B",
+        "PR 23C",
+        "PR 23D",
+        "PR 23E",
+        "PR 23F",
+        "PR 23G",
+        "PR 23H",
+        "PR 23I"
+      ],
+      "owner": {
+        "heading": "PR 24D-API4: Docs explorer, SDK/reference generation, and full parity gate",
+        "line": 1115,
+        "path": "docs/plans/tracedecay-v2/17-official-public-api-and-sdks.md"
+      },
+      "phase": 4
+    },
+    "PR 24D-SDK1": {
+      "commit_subject": "feat(v2): sdk1 rust client and hermetic sandbox",
+      "dependencies": [
+        "PR 23A",
+        "PR 23B",
+        "PR 23C",
+        "PR 23D",
+        "PR 23E",
+        "PR 23F",
+        "PR 23G",
+        "PR 23H",
+        "PR 23I"
+      ],
+      "owner": {
+        "heading": "PR 24D-SDK1: Rust client and hermetic sandbox",
+        "line": 1084,
+        "path": "docs/plans/tracedecay-v2/17-official-public-api-and-sdks.md"
+      },
+      "phase": 4
+    },
+    "PR 24D-SDK2": {
+      "commit_subject": "feat(v2): sdk2 complete and publish the one official typescript client",
+      "dependencies": [
+        "PR 23A",
+        "PR 23B",
+        "PR 23C",
+        "PR 23D",
+        "PR 23E",
+        "PR 23F",
+        "PR 23G",
+        "PR 23H",
+        "PR 23I"
+      ],
+      "owner": {
+        "heading": "PR 24D-SDK2: Complete and publish the one official TypeScript client",
+        "line": 1095,
+        "path": "docs/plans/tracedecay-v2/17-official-public-api-and-sdks.md"
+      },
+      "phase": 4
+    },
+    "PR 24D-SDK3": {
+      "commit_subject": "feat(v2): sdk3 python sync async package",
+      "dependencies": [
+        "PR 23A",
+        "PR 23B",
+        "PR 23C",
+        "PR 23D",
+        "PR 23E",
+        "PR 23F",
+        "PR 23G",
+        "PR 23H",
+        "PR 23I"
+      ],
+      "owner": {
+        "heading": "PR 24D-SDK3: Python sync/async package",
+        "line": 1105,
+        "path": "docs/plans/tracedecay-v2/17-official-public-api-and-sdks.md"
+      },
+      "phase": 4
+    },
+    "PR 24E-API5": {
+      "commit_subject": "feat(v2): api5 domain by domain cutover and stale client rejection",
+      "dependencies": [
+        "PR 23A",
+        "PR 23B",
+        "PR 23C",
+        "PR 23D",
+        "PR 23E",
+        "PR 23F",
+        "PR 23G",
+        "PR 23H",
+        "PR 23I"
+      ],
+      "owner": {
+        "heading": "PR 24E-API5: Domain-by-domain cutover and stale-client rejection",
+        "line": 1126,
+        "path": "docs/plans/tracedecay-v2/17-official-public-api-and-sdks.md"
+      },
+      "phase": 4
+    },
+    "PR 24E0": {
+      "commit_subject": "feat(v2): strong service identity split binaries and local transport",
+      "dependencies": [
+        "PR 23A",
+        "PR 23B",
+        "PR 23C",
+        "PR 23D",
+        "PR 23E",
+        "PR 23F",
+        "PR 23G",
+        "PR 23H",
+        "PR 23I"
+      ],
+      "owner": {
+        "heading": "PR 24E0: Strong service identity, split binaries, and local transport",
+        "line": 852,
+        "path": "docs/plans/tracedecay-v2/12-root-compatibility-migration.md"
+      },
+      "phase": 4
+    },
+    "PR 24E1": {
+      "commit_subject": "feat(v2): thin root adapters",
+      "dependencies": [
+        "PR 23A",
+        "PR 23B",
+        "PR 23C",
+        "PR 23D",
+        "PR 23E",
+        "PR 23F",
+        "PR 23G",
+        "PR 23H",
+        "PR 23I"
+      ],
+      "owner": {
+        "heading": "PR 24E1\u201324E8: Thin root adapters",
+        "line": 868,
+        "path": "docs/plans/tracedecay-v2/12-root-compatibility-migration.md"
+      },
+      "phase": 4
+    },
+    "PR 24E2": {
+      "commit_subject": "feat(v2): thin root adapters",
+      "dependencies": [
+        "PR 23A",
+        "PR 23B",
+        "PR 23C",
+        "PR 23D",
+        "PR 23E",
+        "PR 23F",
+        "PR 23G",
+        "PR 23H",
+        "PR 23I"
+      ],
+      "owner": {
+        "heading": "PR 24E1\u201324E8: Thin root adapters",
+        "line": 868,
+        "path": "docs/plans/tracedecay-v2/12-root-compatibility-migration.md"
+      },
+      "phase": 4
+    },
+    "PR 24E3": {
+      "commit_subject": "feat(v2): thin root adapters",
+      "dependencies": [
+        "PR 23A",
+        "PR 23B",
+        "PR 23C",
+        "PR 23D",
+        "PR 23E",
+        "PR 23F",
+        "PR 23G",
+        "PR 23H",
+        "PR 23I"
+      ],
+      "owner": {
+        "heading": "PR 24E1\u201324E8: Thin root adapters",
+        "line": 868,
+        "path": "docs/plans/tracedecay-v2/12-root-compatibility-migration.md"
+      },
+      "phase": 4
+    },
+    "PR 24E4": {
+      "commit_subject": "feat(v2): thin root adapters",
+      "dependencies": [
+        "PR 23A",
+        "PR 23B",
+        "PR 23C",
+        "PR 23D",
+        "PR 23E",
+        "PR 23F",
+        "PR 23G",
+        "PR 23H",
+        "PR 23I"
+      ],
+      "owner": {
+        "heading": "PR 24E1\u201324E8: Thin root adapters",
+        "line": 868,
+        "path": "docs/plans/tracedecay-v2/12-root-compatibility-migration.md"
+      },
+      "phase": 4
+    },
+    "PR 24E5": {
+      "commit_subject": "feat(v2): thin root adapters",
+      "dependencies": [
+        "PR 23A",
+        "PR 23B",
+        "PR 23C",
+        "PR 23D",
+        "PR 23E",
+        "PR 23F",
+        "PR 23G",
+        "PR 23H",
+        "PR 23I"
+      ],
+      "owner": {
+        "heading": "PR 24E1\u201324E8: Thin root adapters",
+        "line": 868,
+        "path": "docs/plans/tracedecay-v2/12-root-compatibility-migration.md"
+      },
+      "phase": 4
+    },
+    "PR 24E6": {
+      "commit_subject": "feat(v2): thin root adapters",
+      "dependencies": [
+        "PR 23A",
+        "PR 23B",
+        "PR 23C",
+        "PR 23D",
+        "PR 23E",
+        "PR 23F",
+        "PR 23G",
+        "PR 23H",
+        "PR 23I"
+      ],
+      "owner": {
+        "heading": "PR 24E1\u201324E8: Thin root adapters",
+        "line": 868,
+        "path": "docs/plans/tracedecay-v2/12-root-compatibility-migration.md"
+      },
+      "phase": 4
+    },
+    "PR 24E7": {
+      "commit_subject": "feat(v2): thin root adapters",
+      "dependencies": [
+        "PR 23A",
+        "PR 23B",
+        "PR 23C",
+        "PR 23D",
+        "PR 23E",
+        "PR 23F",
+        "PR 23G",
+        "PR 23H",
+        "PR 23I"
+      ],
+      "owner": {
+        "heading": "PR 24E1\u201324E8: Thin root adapters",
+        "line": 868,
+        "path": "docs/plans/tracedecay-v2/12-root-compatibility-migration.md"
+      },
+      "phase": 4
+    },
+    "PR 24E8": {
+      "commit_subject": "feat(v2): thin root adapters",
+      "dependencies": [
+        "PR 23A",
+        "PR 23B",
+        "PR 23C",
+        "PR 23D",
+        "PR 23E",
+        "PR 23F",
+        "PR 23G",
+        "PR 23H",
+        "PR 23I"
+      ],
+      "owner": {
+        "heading": "PR 24E1\u201324E8: Thin root adapters",
+        "line": 868,
+        "path": "docs/plans/tracedecay-v2/12-root-compatibility-migration.md"
+      },
+      "phase": 4
+    },
+    "PR 24F": {
+      "commit_subject": "feat(v2): hook runtime and concurrent capture boundary",
+      "dependencies": [
+        "PR 23A",
+        "PR 23B",
+        "PR 23C",
+        "PR 23D",
+        "PR 23E",
+        "PR 23F",
+        "PR 23G",
+        "PR 23H",
+        "PR 23I"
+      ],
+      "owner": {
+        "heading": "PR 24F: Hook runtime and concurrent capture boundary",
+        "line": 2128,
+        "path": "docs/plans/2026-07-09-tracedecay-brain-rewrite.md"
+      },
+      "phase": 4
+    },
+    "PR 24FR": {
+      "commit_subject": "feat(v2): hook and daemon notification compatibility",
+      "dependencies": [
+        "PR 23A",
+        "PR 23B",
+        "PR 23C",
+        "PR 23D",
+        "PR 23E",
+        "PR 23F",
+        "PR 23G",
+        "PR 23H",
+        "PR 23I",
+        "PR 24A",
+        "PR 24F"
+      ],
+      "owner": {
+        "heading": "PR 24FR: Hook and daemon notification compatibility",
+        "line": 892,
+        "path": "docs/plans/tracedecay-v2/12-root-compatibility-migration.md"
+      },
+      "phase": 4
+    },
+    "PR 24G": {
+      "commit_subject": "feat(v2): transport parity and agent ergonomics",
+      "dependencies": [
+        "PR 23A",
+        "PR 23B",
+        "PR 23C",
+        "PR 23D",
+        "PR 23E",
+        "PR 23F",
+        "PR 23G",
+        "PR 23H",
+        "PR 23I"
+      ],
+      "owner": {
+        "heading": "PR 24G \u2014 Transport parity and agent ergonomics",
+        "line": 637,
+        "path": "docs/plans/tracedecay-v2/16-cross-project-repository-worktree-scope.md"
+      },
+      "phase": 4
+    },
+    "PR 24H": {
+      "commit_subject": "feat(v2): privacy application api cli mcp sdk workflows",
+      "dependencies": [
+        "PR 23A",
+        "PR 23B",
+        "PR 23C",
+        "PR 23D",
+        "PR 23E",
+        "PR 23F",
+        "PR 23G",
+        "PR 23H",
+        "PR 23I"
+      ],
+      "owner": {
+        "heading": "PR 24H \u2014 Privacy application/API/CLI/MCP/SDK workflows",
+        "line": 764,
+        "path": "docs/plans/tracedecay-v2/18-secret-detection-redaction-and-private-data-safety.md"
+      },
+      "phase": 4
+    },
+    "PR 24I": {
+      "commit_subject": "feat(v2): application resolver commands api cli mcp and sdks",
+      "dependencies": [
+        "PR 23A",
+        "PR 23B",
+        "PR 23C",
+        "PR 23D",
+        "PR 23E",
+        "PR 23F",
+        "PR 23G",
+        "PR 23H",
+        "PR 23I"
+      ],
+      "owner": {
+        "heading": "PR 24I \u2014 Application resolver, commands, API, CLI, MCP, and SDKs",
+        "line": 1448,
+        "path": "docs/plans/tracedecay-v2/20-configuration-control-plane.md"
+      },
+      "phase": 4
+    },
+    "PR 24L": {
+      "commit_subject": "feat(v2): application api cli mcp and sdk bindings",
+      "dependencies": [
+        "PR 23A",
+        "PR 23B",
+        "PR 23C",
+        "PR 23D",
+        "PR 23E",
+        "PR 23F",
+        "PR 23G",
+        "PR 23H",
+        "PR 23I"
+      ],
+      "owner": {
+        "heading": "PR 24L \u2014 Application, API, CLI, MCP, and SDK bindings",
+        "line": 1180,
+        "path": "docs/plans/tracedecay-v2/23-session-lcm-temporal-retrieval-and-evaluation.md"
+      },
+      "phase": 4
+    },
+    "PR 24M": {
+      "commit_subject": "feat(application): orchestrate the canonical task graph",
+      "dependencies": [
+        "PR 23A",
+        "PR 23B",
+        "PR 23C",
+        "PR 23D",
+        "PR 23E",
+        "PR 23F",
+        "PR 23G",
+        "PR 23H",
+        "PR 23I"
+      ],
+      "owner": {
+        "heading": "PR 24M \u2014 Task graph application use cases and authoritative scheduler",
+        "line": 3173,
+        "path": "docs/plans/tracedecay-v2/24-canonical-task-plan-graph-and-multi-agent-executor.md"
+      },
+      "phase": 4
+    },
+    "PR 24N": {
+      "commit_subject": "feat(executors): run fenced work across agent hosts",
+      "dependencies": [
+        "PR 23A",
+        "PR 23B",
+        "PR 23C",
+        "PR 23D",
+        "PR 23E",
+        "PR 23F",
+        "PR 23G",
+        "PR 23H",
+        "PR 23I"
+      ],
+      "owner": {
+        "heading": "PR 24N \u2014 Executor adapters, workspace lifecycle, cancellation, and public transports",
+        "line": 3182,
+        "path": "docs/plans/tracedecay-v2/24-canonical-task-plan-graph-and-multi-agent-executor.md"
+      },
+      "phase": 4
+    },
+    "PR 24O": {
+      "commit_subject": "feat(v2): application worker incremental context and model gateway",
+      "dependencies": [
+        "PR 23A",
+        "PR 23B",
+        "PR 23C",
+        "PR 23D",
+        "PR 23E",
+        "PR 23F",
+        "PR 23G",
+        "PR 23H",
+        "PR 23I",
+        "PR 24L",
+        "PR 24M",
+        "PR 24N"
+      ],
+      "owner": {
+        "heading": "PR 24O \u2014 Application worker, incremental context, and model gateway",
+        "line": 1282,
+        "path": "docs/plans/tracedecay-v2/22-incremental-context-scout-and-suggestion-envelopes.md"
+      },
+      "phase": 4
+    },
+    "PR 24P": {
+      "commit_subject": "feat(v2): host suggestion handshake and single delivery selector",
+      "dependencies": [
+        "PR 23A",
+        "PR 23B",
+        "PR 23C",
+        "PR 23D",
+        "PR 23E",
+        "PR 23F",
+        "PR 23G",
+        "PR 23H",
+        "PR 23I",
+        "PR 24O"
+      ],
+      "owner": {
+        "heading": "PR 24P \u2014 Host suggestion handshake and single delivery selector",
+        "line": 1288,
+        "path": "docs/plans/tracedecay-v2/22-incremental-context-scout-and-suggestion-envelopes.md"
+      },
+      "phase": 4
+    },
+    "PR 24Q": {
+      "commit_subject": "feat(v2): application workflow root deployment port cli api sdk",
+      "dependencies": [
+        "PR 23A",
+        "PR 23B",
+        "PR 23C",
+        "PR 23D",
+        "PR 23E",
+        "PR 23F",
+        "PR 23G",
+        "PR 23H",
+        "PR 23I"
+      ],
+      "owner": {
+        "heading": "PR 24Q \u2014 application workflow, root deployment port, CLI/API/SDK",
+        "line": 2122,
+        "path": "docs/plans/tracedecay-v2/27-cross-host-agent-plugin-bundles.md"
+      },
+      "phase": 4
+    },
+    "PR 24R": {
+      "commit_subject": "feat(tasks): add atomic declarative plan editing",
+      "dependencies": [
+        "PR 23A",
+        "PR 23B",
+        "PR 23C",
+        "PR 23D",
+        "PR 23E",
+        "PR 23F",
+        "PR 23G",
+        "PR 23H",
+        "PR 23I"
+      ],
+      "owner": {
+        "heading": "PR 24R \u2014 Managed declarative task-graph bulk editing",
+        "line": 3192,
+        "path": "docs/plans/tracedecay-v2/24-canonical-task-plan-graph-and-multi-agent-executor.md"
+      },
+      "phase": 4
+    },
+    "PR 24S": {
+      "commit_subject": "feat(v2): remote shared brain application and product contract",
+      "dependencies": [
+        "PR 23A",
+        "PR 23B",
+        "PR 23C",
+        "PR 23D",
+        "PR 23E",
+        "PR 23F",
+        "PR 23G",
+        "PR 23H",
+        "PR 23I"
+      ],
+      "owner": {
+        "heading": "PR 24S: Remote shared-Brain application and product contract",
+        "line": 2159,
+        "path": "docs/plans/2026-07-09-tracedecay-brain-rewrite.md"
+      },
+      "phase": 4
+    },
+    "PR 25": {
+      "commit_subject": "feat(v2): unified shell and design system",
+      "dependencies": [
+        "PR 24A",
+        "PR 24A1",
+        "PR 24A2",
+        "PR 24A3",
+        "PR 24A4",
+        "PR 24A5",
+        "PR 24A6",
+        "PR 24A7",
+        "PR 24A8",
+        "PR 24B1",
+        "PR 24B2",
+        "PR 24B3",
+        "PR 24B4",
+        "PR 24C",
+        "PR 24C1",
+        "PR 24C2",
+        "PR 24D",
+        "PR 24D-API1",
+        "PR 24D-API2",
+        "PR 24D-API3",
+        "PR 24D-API4",
+        "PR 24D-SDK1",
+        "PR 24D-SDK2",
+        "PR 24D-SDK3",
+        "PR 24E-API5",
+        "PR 24E0",
+        "PR 24E1",
+        "PR 24E2",
+        "PR 24E3",
+        "PR 24E4",
+        "PR 24E5",
+        "PR 24E6",
+        "PR 24E7",
+        "PR 24E8",
+        "PR 24F",
+        "PR 24FR",
+        "PR 24G",
+        "PR 24H",
+        "PR 24I",
+        "PR 24L",
+        "PR 24M",
+        "PR 24N",
+        "PR 24O",
+        "PR 24P",
+        "PR 24Q",
+        "PR 24R",
+        "PR 24S"
+      ],
+      "owner": {
+        "heading": "PR 25: Unified shell and design system",
+        "line": 2164,
+        "path": "docs/plans/2026-07-09-tracedecay-brain-rewrite.md"
+      },
+      "phase": 4
+    },
+    "PR 25A": {
+      "commit_subject": "feat(v2): generated client consumption build boundary adr and applicatio",
+      "dependencies": [
+        "PR 24A",
+        "PR 24A1",
+        "PR 24A2",
+        "PR 24A3",
+        "PR 24A4",
+        "PR 24A5",
+        "PR 24A6",
+        "PR 24A7",
+        "PR 24A8",
+        "PR 24B1",
+        "PR 24B2",
+        "PR 24B3",
+        "PR 24B4",
+        "PR 24C",
+        "PR 24C1",
+        "PR 24C2",
+        "PR 24D",
+        "PR 24D-API1",
+        "PR 24D-API2",
+        "PR 24D-API3",
+        "PR 24D-API4",
+        "PR 24D-SDK1",
+        "PR 24D-SDK2",
+        "PR 24D-SDK3",
+        "PR 24E-API5",
+        "PR 24E0",
+        "PR 24E1",
+        "PR 24E2",
+        "PR 24E3",
+        "PR 24E4",
+        "PR 24E5",
+        "PR 24E6",
+        "PR 24E7",
+        "PR 24E8",
+        "PR 24F",
+        "PR 24FR",
+        "PR 24G",
+        "PR 24H",
+        "PR 24I",
+        "PR 24L",
+        "PR 24M",
+        "PR 24N",
+        "PR 24O",
+        "PR 24P",
+        "PR 24Q",
+        "PR 24R",
+        "PR 24S"
+      ],
+      "owner": {
+        "heading": "Task 2: PR 25A \u2014 Generated client consumption, build-boundary ADR, and application foundation",
+        "line": 1419,
+        "path": "docs/plans/tracedecay-v2/11-dashboard-frontend.md"
+      },
+      "phase": 4
+    },
+    "PR 25B": {
+      "commit_subject": "feat(dashboard): add shared investigation workbench",
+      "dependencies": [
+        "PR 24A",
+        "PR 24A1",
+        "PR 24A2",
+        "PR 24A3",
+        "PR 24A4",
+        "PR 24A5",
+        "PR 24A6",
+        "PR 24A7",
+        "PR 24A8",
+        "PR 24B1",
+        "PR 24B2",
+        "PR 24B3",
+        "PR 24B4",
+        "PR 24C",
+        "PR 24C1",
+        "PR 24C2",
+        "PR 24D",
+        "PR 24D-API1",
+        "PR 24D-API2",
+        "PR 24D-API3",
+        "PR 24D-API4",
+        "PR 24D-SDK1",
+        "PR 24D-SDK2",
+        "PR 24D-SDK3",
+        "PR 24E-API5",
+        "PR 24E0",
+        "PR 24E1",
+        "PR 24E2",
+        "PR 24E3",
+        "PR 24E4",
+        "PR 24E5",
+        "PR 24E6",
+        "PR 24E7",
+        "PR 24E8",
+        "PR 24F",
+        "PR 24FR",
+        "PR 24G",
+        "PR 24H",
+        "PR 24I",
+        "PR 24L",
+        "PR 24M",
+        "PR 24N",
+        "PR 24O",
+        "PR 24P",
+        "PR 24Q",
+        "PR 24R",
+        "PR 24S"
+      ],
+      "owner": {
+        "heading": "Task 3: PR 25B \u2014 Investigation state, shell, persistence, and design system",
+        "line": 1438,
+        "path": "docs/plans/tracedecay-v2/11-dashboard-frontend.md"
+      },
+      "phase": 4
+    },
+    "PR 25C": {
+      "commit_subject": "feat(dashboard): connect evidence inspector and live snapshots",
+      "dependencies": [
+        "PR 24A",
+        "PR 24A1",
+        "PR 24A2",
+        "PR 24A3",
+        "PR 24A4",
+        "PR 24A5",
+        "PR 24A6",
+        "PR 24A7",
+        "PR 24A8",
+        "PR 24B1",
+        "PR 24B2",
+        "PR 24B3",
+        "PR 24B4",
+        "PR 24C",
+        "PR 24C1",
+        "PR 24C2",
+        "PR 24D",
+        "PR 24D-API1",
+        "PR 24D-API2",
+        "PR 24D-API3",
+        "PR 24D-API4",
+        "PR 24D-SDK1",
+        "PR 24D-SDK2",
+        "PR 24D-SDK3",
+        "PR 24E-API5",
+        "PR 24E0",
+        "PR 24E1",
+        "PR 24E2",
+        "PR 24E3",
+        "PR 24E4",
+        "PR 24E5",
+        "PR 24E6",
+        "PR 24E7",
+        "PR 24E8",
+        "PR 24F",
+        "PR 24FR",
+        "PR 24G",
+        "PR 24H",
+        "PR 24I",
+        "PR 24L",
+        "PR 24M",
+        "PR 24N",
+        "PR 24O",
+        "PR 24P",
+        "PR 24Q",
+        "PR 24R",
+        "PR 24S"
+      ],
+      "owner": {
+        "heading": "Task 4: PR 25C \u2014 Universal inspector, cache, SSE, and capability commands",
+        "line": 1455,
+        "path": "docs/plans/tracedecay-v2/11-dashboard-frontend.md"
+      },
+      "phase": 4
+    },
+    "PR 25D": {
+      "commit_subject": "feat(v2): activity preset and saved views",
+      "dependencies": [
+        "PR 24A",
+        "PR 24A1",
+        "PR 24A2",
+        "PR 24A3",
+        "PR 24A4",
+        "PR 24A5",
+        "PR 24A6",
+        "PR 24A7",
+        "PR 24A8",
+        "PR 24B1",
+        "PR 24B2",
+        "PR 24B3",
+        "PR 24B4",
+        "PR 24C",
+        "PR 24C1",
+        "PR 24C2",
+        "PR 24D",
+        "PR 24D-API1",
+        "PR 24D-API2",
+        "PR 24D-API3",
+        "PR 24D-API4",
+        "PR 24D-SDK1",
+        "PR 24D-SDK2",
+        "PR 24D-SDK3",
+        "PR 24E-API5",
+        "PR 24E0",
+        "PR 24E1",
+        "PR 24E2",
+        "PR 24E3",
+        "PR 24E4",
+        "PR 24E5",
+        "PR 24E6",
+        "PR 24E7",
+        "PR 24E8",
+        "PR 24F",
+        "PR 24FR",
+        "PR 24G",
+        "PR 24H",
+        "PR 24I",
+        "PR 24L",
+        "PR 24M",
+        "PR 24N",
+        "PR 24O",
+        "PR 24P",
+        "PR 24Q",
+        "PR 24R",
+        "PR 24S"
+      ],
+      "owner": {
+        "heading": "Task 14: PR 25D/30H \u2014 Activity preset and saved views",
+        "line": 1640,
+        "path": "docs/plans/tracedecay-v2/11-dashboard-frontend.md"
+      },
+      "phase": 4
+    },
+    "PR 25E": {
+      "commit_subject": "feat(v2): complete brain settings workspace",
+      "dependencies": [
+        "PR 24A",
+        "PR 24A1",
+        "PR 24A2",
+        "PR 24A3",
+        "PR 24A4",
+        "PR 24A5",
+        "PR 24A6",
+        "PR 24A7",
+        "PR 24A8",
+        "PR 24B1",
+        "PR 24B2",
+        "PR 24B3",
+        "PR 24B4",
+        "PR 24C",
+        "PR 24C1",
+        "PR 24C2",
+        "PR 24D",
+        "PR 24D-API1",
+        "PR 24D-API2",
+        "PR 24D-API3",
+        "PR 24D-API4",
+        "PR 24D-SDK1",
+        "PR 24D-SDK2",
+        "PR 24D-SDK3",
+        "PR 24E-API5",
+        "PR 24E0",
+        "PR 24E1",
+        "PR 24E2",
+        "PR 24E3",
+        "PR 24E4",
+        "PR 24E5",
+        "PR 24E6",
+        "PR 24E7",
+        "PR 24E8",
+        "PR 24F",
+        "PR 24FR",
+        "PR 24G",
+        "PR 24H",
+        "PR 24I",
+        "PR 24L",
+        "PR 24M",
+        "PR 24N",
+        "PR 24O",
+        "PR 24P",
+        "PR 24Q",
+        "PR 24R",
+        "PR 24S"
+      ],
+      "owner": {
+        "heading": "PR 25E \u2014 Complete Brain Settings workspace",
+        "line": 1456,
+        "path": "docs/plans/tracedecay-v2/20-configuration-control-plane.md"
+      },
+      "phase": 4
+    },
+    "PR 25F": {
+      "commit_subject": "feat(v2): context scout observatory and turn timeline",
+      "dependencies": [
+        "PR 24A",
+        "PR 24A1",
+        "PR 24A2",
+        "PR 24A3",
+        "PR 24A4",
+        "PR 24A5",
+        "PR 24A6",
+        "PR 24A7",
+        "PR 24A8",
+        "PR 24B1",
+        "PR 24B2",
+        "PR 24B3",
+        "PR 24B4",
+        "PR 24C",
+        "PR 24C1",
+        "PR 24C2",
+        "PR 24D",
+        "PR 24D-API1",
+        "PR 24D-API2",
+        "PR 24D-API3",
+        "PR 24D-API4",
+        "PR 24D-SDK1",
+        "PR 24D-SDK2",
+        "PR 24D-SDK3",
+        "PR 24E-API5",
+        "PR 24E0",
+        "PR 24E1",
+        "PR 24E2",
+        "PR 24E3",
+        "PR 24E4",
+        "PR 24E5",
+        "PR 24E6",
+        "PR 24E7",
+        "PR 24E8",
+        "PR 24F",
+        "PR 24FR",
+        "PR 24G",
+        "PR 24H",
+        "PR 24I",
+        "PR 24L",
+        "PR 24M",
+        "PR 24N",
+        "PR 24O",
+        "PR 24P",
+        "PR 24Q",
+        "PR 24R",
+        "PR 24S"
+      ],
+      "owner": {
+        "heading": "PR 25F \u2014 Context Scout Observatory and Turn timeline",
+        "line": 1295,
+        "path": "docs/plans/tracedecay-v2/22-incremental-context-scout-and-suggestion-envelopes.md"
+      },
+      "phase": 4
+    },
+    "PR 25G": {
+      "commit_subject": "feat(dashboard): add canonical work and plan views",
+      "dependencies": [
+        "PR 24A",
+        "PR 24A1",
+        "PR 24A2",
+        "PR 24A3",
+        "PR 24A4",
+        "PR 24A5",
+        "PR 24A6",
+        "PR 24A7",
+        "PR 24A8",
+        "PR 24B1",
+        "PR 24B2",
+        "PR 24B3",
+        "PR 24B4",
+        "PR 24C",
+        "PR 24C1",
+        "PR 24C2",
+        "PR 24D",
+        "PR 24D-API1",
+        "PR 24D-API2",
+        "PR 24D-API3",
+        "PR 24D-API4",
+        "PR 24D-SDK1",
+        "PR 24D-SDK2",
+        "PR 24D-SDK3",
+        "PR 24E-API5",
+        "PR 24E0",
+        "PR 24E1",
+        "PR 24E2",
+        "PR 24E3",
+        "PR 24E4",
+        "PR 24E5",
+        "PR 24E6",
+        "PR 24E7",
+        "PR 24E8",
+        "PR 24F",
+        "PR 24FR",
+        "PR 24G",
+        "PR 24H",
+        "PR 24I",
+        "PR 24L",
+        "PR 24M",
+        "PR 24N",
+        "PR 24O",
+        "PR 24P",
+        "PR 24Q",
+        "PR 24R",
+        "PR 24S"
+      ],
+      "owner": {
+        "heading": "PR 25G \u2014 Work workspace, plan outline, Kanban projection, DAG, and inspectors",
+        "line": 3202,
+        "path": "docs/plans/tracedecay-v2/24-canonical-task-plan-graph-and-multi-agent-executor.md"
+      },
+      "phase": 4
+    },
+    "PR 25H": {
+      "commit_subject": "feat(v2): settings integrations workspace",
+      "dependencies": [
+        "PR 24A",
+        "PR 24A1",
+        "PR 24A2",
+        "PR 24A3",
+        "PR 24A4",
+        "PR 24A5",
+        "PR 24A6",
+        "PR 24A7",
+        "PR 24A8",
+        "PR 24B1",
+        "PR 24B2",
+        "PR 24B3",
+        "PR 24B4",
+        "PR 24C",
+        "PR 24C1",
+        "PR 24C2",
+        "PR 24D",
+        "PR 24D-API1",
+        "PR 24D-API2",
+        "PR 24D-API3",
+        "PR 24D-API4",
+        "PR 24D-SDK1",
+        "PR 24D-SDK2",
+        "PR 24D-SDK3",
+        "PR 24E-API5",
+        "PR 24E0",
+        "PR 24E1",
+        "PR 24E2",
+        "PR 24E3",
+        "PR 24E4",
+        "PR 24E5",
+        "PR 24E6",
+        "PR 24E7",
+        "PR 24E8",
+        "PR 24F",
+        "PR 24FR",
+        "PR 24G",
+        "PR 24H",
+        "PR 24I",
+        "PR 24L",
+        "PR 24M",
+        "PR 24N",
+        "PR 24O",
+        "PR 24P",
+        "PR 24Q",
+        "PR 24R",
+        "PR 24S"
+      ],
+      "owner": {
+        "heading": "PR 25H \u2014 `/settings/integrations` workspace",
+        "line": 2148,
+        "path": "docs/plans/tracedecay-v2/27-cross-host-agent-plugin-bundles.md"
+      },
+      "phase": 4
+    },
+    "PR 25I": {
+      "commit_subject": "feat(v2): shared brain settings and sync observatory",
+      "dependencies": [
+        "PR 24A",
+        "PR 24A1",
+        "PR 24A2",
+        "PR 24A3",
+        "PR 24A4",
+        "PR 24A5",
+        "PR 24A6",
+        "PR 24A7",
+        "PR 24A8",
+        "PR 24B1",
+        "PR 24B2",
+        "PR 24B3",
+        "PR 24B4",
+        "PR 24C",
+        "PR 24C1",
+        "PR 24C2",
+        "PR 24D",
+        "PR 24D-API1",
+        "PR 24D-API2",
+        "PR 24D-API3",
+        "PR 24D-API4",
+        "PR 24D-SDK1",
+        "PR 24D-SDK2",
+        "PR 24D-SDK3",
+        "PR 24E-API5",
+        "PR 24E0",
+        "PR 24E1",
+        "PR 24E2",
+        "PR 24E3",
+        "PR 24E4",
+        "PR 24E5",
+        "PR 24E6",
+        "PR 24E7",
+        "PR 24E8",
+        "PR 24F",
+        "PR 24FR",
+        "PR 24G",
+        "PR 24H",
+        "PR 24I",
+        "PR 24L",
+        "PR 24M",
+        "PR 24N",
+        "PR 24O",
+        "PR 24P",
+        "PR 24Q",
+        "PR 24R",
+        "PR 24S"
+      ],
+      "owner": {
+        "heading": "Task 14B: PR 25I \u2014 Shared Brain Settings and Sync Observatory",
+        "line": 1673,
+        "path": "docs/plans/tracedecay-v2/11-dashboard-frontend.md"
+      },
+      "phase": 4
+    },
+    "PR 25R": {
+      "commit_subject": "feat(v2): api router static shell coexistence",
+      "dependencies": [
+        "PR 24A",
+        "PR 24A1",
+        "PR 24A2",
+        "PR 24A3",
+        "PR 24A4",
+        "PR 24A5",
+        "PR 24A6",
+        "PR 24A7",
+        "PR 24A8",
+        "PR 24B1",
+        "PR 24B2",
+        "PR 24B3",
+        "PR 24B4",
+        "PR 24C",
+        "PR 24C1",
+        "PR 24C2",
+        "PR 24D",
+        "PR 24D-API1",
+        "PR 24D-API2",
+        "PR 24D-API3",
+        "PR 24D-API4",
+        "PR 24D-SDK1",
+        "PR 24D-SDK2",
+        "PR 24D-SDK3",
+        "PR 24E-API5",
+        "PR 24E0",
+        "PR 24E1",
+        "PR 24E2",
+        "PR 24E3",
+        "PR 24E4",
+        "PR 24E5",
+        "PR 24E6",
+        "PR 24E7",
+        "PR 24E8",
+        "PR 24F",
+        "PR 24FR",
+        "PR 24G",
+        "PR 24H",
+        "PR 24I",
+        "PR 24L",
+        "PR 24M",
+        "PR 24N",
+        "PR 24O",
+        "PR 24P",
+        "PR 24Q",
+        "PR 24R",
+        "PR 24S"
+      ],
+      "owner": {
+        "heading": "PR 25R: API/router/static-shell coexistence",
+        "line": 902,
+        "path": "docs/plans/tracedecay-v2/12-root-compatibility-migration.md"
+      },
+      "phase": 4
+    },
+    "PR 26": {
+      "commit_subject": "feat(v2): shared renderer lod export foundation and observatory slice",
+      "dependencies": [
+        "PR 25",
+        "PR 25A",
+        "PR 25B",
+        "PR 25C",
+        "PR 25D",
+        "PR 25E",
+        "PR 25F",
+        "PR 25G",
+        "PR 25H",
+        "PR 25I",
+        "PR 25R"
+      ],
+      "owner": {
+        "heading": "PR 26: Shared renderer/LOD/export foundation and Observatory slice",
+        "line": 2187,
+        "path": "docs/plans/2026-07-09-tracedecay-brain-rewrite.md"
+      },
+      "phase": 4
+    },
+    "PR 26A": {
+      "commit_subject": "feat(dashboard): add bounded visualization foundation",
+      "dependencies": [
+        "PR 25",
+        "PR 25A",
+        "PR 25B",
+        "PR 25C",
+        "PR 25D",
+        "PR 25E",
+        "PR 25F",
+        "PR 25G",
+        "PR 25H",
+        "PR 25I",
+        "PR 25R"
+      ],
+      "owner": {
+        "heading": "Task 5: PR 26A \u2014 Shared slot, renderer capabilities, LOD, export, and worker foundation",
+        "line": 1470,
+        "path": "docs/plans/tracedecay-v2/11-dashboard-frontend.md"
+      },
+      "phase": 4
+    },
+    "PR 26B": {
+      "commit_subject": "feat(dashboard): ship profile-wide Observatory and Brain summary",
+      "dependencies": [
+        "PR 25",
+        "PR 25A",
+        "PR 25B",
+        "PR 25C",
+        "PR 25D",
+        "PR 25E",
+        "PR 25F",
+        "PR 25G",
+        "PR 25H",
+        "PR 25I",
+        "PR 25R"
+      ],
+      "owner": {
+        "heading": "Task 6: PR 26B \u2014 Observatory and non-topology Brain slice",
+        "line": 1487,
+        "path": "docs/plans/tracedecay-v2/11-dashboard-frontend.md"
+      },
+      "phase": 4
+    },
+    "PR 27": {
+      "commit_subject": "feat(dashboard): add universal evidence explorer",
+      "dependencies": [
+        "PR 26",
+        "PR 26A",
+        "PR 26B"
+      ],
+      "owner": {
+        "heading": "Task 7: PR 27 \u2014 Universal Explorer",
+        "line": 1501,
+        "path": "docs/plans/tracedecay-v2/11-dashboard-frontend.md"
+      },
+      "phase": 4
+    },
+    "PR 28A": {
+      "commit_subject": "feat(dashboard): render bounded causal event lanes",
+      "dependencies": [
+        "PR 27"
+      ],
+      "owner": {
+        "heading": "Task 8: PR 28A/28B \u2014 Causal Loom density, lanes, transcript, and inspector",
+        "line": 1515,
+        "path": "docs/plans/tracedecay-v2/11-dashboard-frontend.md"
+      },
+      "phase": 4
+    },
+    "PR 28B": {
+      "commit_subject": "feat(dashboard): render bounded causal event lanes",
+      "dependencies": [
+        "PR 27"
+      ],
+      "owner": {
+        "heading": "Task 8: PR 28A/28B \u2014 Causal Loom density, lanes, transcript, and inspector",
+        "line": 1515,
+        "path": "docs/plans/tracedecay-v2/11-dashboard-frontend.md"
+      },
+      "phase": 4
+    },
+    "PR 28C": {
+      "commit_subject": "feat(v2): agent follow causal evidence impact as of compare annotation e",
+      "dependencies": [
+        "PR 27"
+      ],
+      "owner": {
+        "heading": "Task 9: PR 28C/28D/28E \u2014 Agent follow, causal evidence, impact, as-of, compare, annotation, export",
+        "line": 1530,
+        "path": "docs/plans/tracedecay-v2/11-dashboard-frontend.md"
+      },
+      "phase": 4
+    },
+    "PR 28D": {
+      "commit_subject": "feat(v2): agent follow causal evidence impact as of compare annotation e",
+      "dependencies": [
+        "PR 27"
+      ],
+      "owner": {
+        "heading": "Task 9: PR 28C/28D/28E \u2014 Agent follow, causal evidence, impact, as-of, compare, annotation, export",
+        "line": 1530,
+        "path": "docs/plans/tracedecay-v2/11-dashboard-frontend.md"
+      },
+      "phase": 4
+    },
+    "PR 28E": {
+      "commit_subject": "feat(v2): agent follow causal evidence impact as of compare annotation e",
+      "dependencies": [
+        "PR 27"
+      ],
+      "owner": {
+        "heading": "Task 9: PR 28C/28D/28E \u2014 Agent follow, causal evidence, impact, as-of, compare, annotation, export",
+        "line": 1530,
+        "path": "docs/plans/tracedecay-v2/11-dashboard-frontend.md"
+      },
+      "phase": 4
+    },
+    "PR 29": {
+      "commit_subject": "feat(dashboard): connect the graph-of-graphs Brain",
+      "dependencies": [
+        "PR 28A",
+        "PR 28B",
+        "PR 28C",
+        "PR 28D",
+        "PR 28E"
+      ],
+      "owner": {
+        "heading": "Task 10: PR 29 \u2014 Brain topology and seven shared graph route presets",
+        "line": 1542,
+        "path": "docs/plans/tracedecay-v2/11-dashboard-frontend.md"
+      },
+      "phase": 4
+    },
+    "PR 2A": {
+      "commit_subject": "feat(v2): research manifest and anchor fixtures",
+      "dependencies": [
+        "PR 1"
+      ],
+      "owner": {
+        "heading": "PR 2A: Research manifest and anchor fixtures",
+        "line": 504,
+        "path": "docs/plans/tracedecay-v2/13-research-provenance-and-context-anchors.md"
+      },
+      "phase": 0
+    },
+    "PR 2B": {
+      "commit_subject": "feat(v2): secret corpus sink inventory and scanner receipts",
+      "dependencies": [
+        "PR 1"
+      ],
+      "owner": {
+        "heading": "PR 2B \u2014 Secret corpus, sink inventory, and scanner receipts",
+        "line": 718,
+        "path": "docs/plans/tracedecay-v2/18-secret-detection-redaction-and-private-data-safety.md"
+      },
+      "phase": 0
+    },
+    "PR 3": {
+      "commit_subject": "feat(v2): v1 compatibility inventory generator",
+      "dependencies": [
+        "PR 2",
+        "PR 2A",
+        "PR 2B"
+      ],
+      "owner": {
+        "heading": "PR 3: V1 compatibility inventory generator",
+        "line": 1778,
+        "path": "docs/plans/2026-07-09-tracedecay-brain-rewrite.md"
+      },
+      "phase": 0
+    },
+    "PR 30A": {
+      "commit_subject": "feat(v2): sessions agents and coordination workspaces",
+      "dependencies": [
+        "PR 29"
+      ],
+      "owner": {
+        "heading": "Task 11: PR 30A/30B/30B2 \u2014 Sessions, Agents, and Coordination workspaces",
+        "line": 1579,
+        "path": "docs/plans/tracedecay-v2/11-dashboard-frontend.md"
+      },
+      "phase": 4
+    },
+    "PR 30B": {
+      "commit_subject": "feat(v2): sessions agents and coordination workspaces",
+      "dependencies": [
+        "PR 29"
+      ],
+      "owner": {
+        "heading": "Task 11: PR 30A/30B/30B2 \u2014 Sessions, Agents, and Coordination workspaces",
+        "line": 1579,
+        "path": "docs/plans/tracedecay-v2/11-dashboard-frontend.md"
+      },
+      "phase": 4
+    },
+    "PR 30B2": {
+      "commit_subject": "feat(v2): sessions agents and coordination workspaces",
+      "dependencies": [
+        "PR 29"
+      ],
+      "owner": {
+        "heading": "Task 11: PR 30A/30B/30B2 \u2014 Sessions, Agents, and Coordination workspaces",
+        "line": 1579,
+        "path": "docs/plans/tracedecay-v2/11-dashboard-frontend.md"
+      },
+      "phase": 4
+    },
+    "PR 30C": {
+      "commit_subject": "feat(v2): code and delivery workspaces",
+      "dependencies": [
+        "PR 29"
+      ],
+      "owner": {
+        "heading": "Task 12: PR 30C/30D \u2014 Code and Delivery workspaces",
+        "line": 1595,
+        "path": "docs/plans/tracedecay-v2/11-dashboard-frontend.md"
+      },
+      "phase": 4
+    },
+    "PR 30D": {
+      "commit_subject": "feat(v2): code and delivery workspaces",
+      "dependencies": [
+        "PR 29"
+      ],
+      "owner": {
+        "heading": "Task 12: PR 30C/30D \u2014 Code and Delivery workspaces",
+        "line": 1595,
+        "path": "docs/plans/tracedecay-v2/11-dashboard-frontend.md"
+      },
+      "phase": 4
+    },
+    "PR 30E": {
+      "commit_subject": "feat(v2): knowledge automations evolution and costs",
+      "dependencies": [
+        "PR 29"
+      ],
+      "owner": {
+        "heading": "Task 13: PR 30E/30F/30G \u2014 Knowledge, Automations/Evolution, and Costs",
+        "line": 1609,
+        "path": "docs/plans/tracedecay-v2/11-dashboard-frontend.md"
+      },
+      "phase": 4
+    },
+    "PR 30F": {
+      "commit_subject": "feat(v2): knowledge automations evolution and costs",
+      "dependencies": [
+        "PR 29"
+      ],
+      "owner": {
+        "heading": "Task 13: PR 30E/30F/30G \u2014 Knowledge, Automations/Evolution, and Costs",
+        "line": 1609,
+        "path": "docs/plans/tracedecay-v2/11-dashboard-frontend.md"
+      },
+      "phase": 4
+    },
+    "PR 30G": {
+      "commit_subject": "feat(v2): knowledge automations evolution and costs",
+      "dependencies": [
+        "PR 29"
+      ],
+      "owner": {
+        "heading": "Task 13: PR 30E/30F/30G \u2014 Knowledge, Automations/Evolution, and Costs",
+        "line": 1609,
+        "path": "docs/plans/tracedecay-v2/11-dashboard-frontend.md"
+      },
+      "phase": 4
+    },
+    "PR 30H": {
+      "commit_subject": "feat(v2): activity preset and saved views",
+      "dependencies": [
+        "PR 29"
+      ],
+      "owner": {
+        "heading": "Task 14: PR 25D/30H \u2014 Activity preset and saved views",
+        "line": 1640,
+        "path": "docs/plans/tracedecay-v2/11-dashboard-frontend.md"
+      },
+      "phase": 4
+    },
+    "PR 30J": {
+      "commit_subject": "feat(v2): observatory and costs data contracts",
+      "dependencies": [
+        "PR 29"
+      ],
+      "owner": {
+        "heading": "PR 30J: Observatory and Costs data contracts",
+        "line": 767,
+        "path": "docs/plans/tracedecay-v2/26-observability-accounting-and-usage.md"
+      },
+      "phase": 4
+    },
+    "PR 30K": {
+      "commit_subject": "feat(dashboard): visualize work across the TraceDecay brain",
+      "dependencies": [
+        "PR 29"
+      ],
+      "owner": {
+        "heading": "PR 30K \u2014 Timeline, causal, critical-path, workload, executor, repository, and All lenses",
+        "line": 3210,
+        "path": "docs/plans/tracedecay-v2/24-canonical-task-plan-graph-and-multi-agent-executor.md"
+      },
+      "phase": 4
+    },
+    "PR 30L": {
+      "commit_subject": "feat(v2): privacy workspace and context scout observatory",
+      "dependencies": [
+        "PR 29"
+      ],
+      "owner": {
+        "heading": "Task 13A: PR 25F/30L \u2014 Privacy workspace and Context Scout Observatory",
+        "line": 1624,
+        "path": "docs/plans/tracedecay-v2/11-dashboard-frontend.md"
+      },
+      "phase": 4
+    },
+    "PR 31A": {
+      "commit_subject": "feat(v2): shared cockpit evaluator labs and owned extensions",
+      "dependencies": [
+        "PR 30A",
+        "PR 30B",
+        "PR 30B2",
+        "PR 30C",
+        "PR 30D",
+        "PR 30E",
+        "PR 30F",
+        "PR 30G",
+        "PR 30H",
+        "PR 30J",
+        "PR 30K",
+        "PR 30L"
+      ],
+      "owner": {
+        "heading": "Task 15: PR 31A\u201331Q \u2014 Shared cockpit, evaluator labs, and owned extensions",
+        "line": 1681,
+        "path": "docs/plans/tracedecay-v2/11-dashboard-frontend.md"
+      },
+      "phase": 4
+    },
+    "PR 31B": {
+      "commit_subject": "feat(v2): shared cockpit evaluator labs and owned extensions",
+      "dependencies": [
+        "PR 30A",
+        "PR 30B",
+        "PR 30B2",
+        "PR 30C",
+        "PR 30D",
+        "PR 30E",
+        "PR 30F",
+        "PR 30G",
+        "PR 30H",
+        "PR 30J",
+        "PR 30K",
+        "PR 30L"
+      ],
+      "owner": {
+        "heading": "Task 15: PR 31A\u201331Q \u2014 Shared cockpit, evaluator labs, and owned extensions",
+        "line": 1681,
+        "path": "docs/plans/tracedecay-v2/11-dashboard-frontend.md"
+      },
+      "phase": 4
+    },
+    "PR 31C": {
+      "commit_subject": "feat(v2): shared cockpit evaluator labs and owned extensions",
+      "dependencies": [
+        "PR 30A",
+        "PR 30B",
+        "PR 30B2",
+        "PR 30C",
+        "PR 30D",
+        "PR 30E",
+        "PR 30F",
+        "PR 30G",
+        "PR 30H",
+        "PR 30J",
+        "PR 30K",
+        "PR 30L"
+      ],
+      "owner": {
+        "heading": "Task 15: PR 31A\u201331Q \u2014 Shared cockpit, evaluator labs, and owned extensions",
+        "line": 1681,
+        "path": "docs/plans/tracedecay-v2/11-dashboard-frontend.md"
+      },
+      "phase": 4
+    },
+    "PR 31D": {
+      "commit_subject": "feat(v2): shared cockpit evaluator labs and owned extensions",
+      "dependencies": [
+        "PR 30A",
+        "PR 30B",
+        "PR 30B2",
+        "PR 30C",
+        "PR 30D",
+        "PR 30E",
+        "PR 30F",
+        "PR 30G",
+        "PR 30H",
+        "PR 30J",
+        "PR 30K",
+        "PR 30L"
+      ],
+      "owner": {
+        "heading": "Task 15: PR 31A\u201331Q \u2014 Shared cockpit, evaluator labs, and owned extensions",
+        "line": 1681,
+        "path": "docs/plans/tracedecay-v2/11-dashboard-frontend.md"
+      },
+      "phase": 4
+    },
+    "PR 31E": {
+      "commit_subject": "feat(v2): shared cockpit evaluator labs and owned extensions",
+      "dependencies": [
+        "PR 30A",
+        "PR 30B",
+        "PR 30B2",
+        "PR 30C",
+        "PR 30D",
+        "PR 30E",
+        "PR 30F",
+        "PR 30G",
+        "PR 30H",
+        "PR 30J",
+        "PR 30K",
+        "PR 30L"
+      ],
+      "owner": {
+        "heading": "Task 15: PR 31A\u201331Q \u2014 Shared cockpit, evaluator labs, and owned extensions",
+        "line": 1681,
+        "path": "docs/plans/tracedecay-v2/11-dashboard-frontend.md"
+      },
+      "phase": 4
+    },
+    "PR 31F": {
+      "commit_subject": "feat(v2): shared cockpit evaluator labs and owned extensions",
+      "dependencies": [
+        "PR 30A",
+        "PR 30B",
+        "PR 30B2",
+        "PR 30C",
+        "PR 30D",
+        "PR 30E",
+        "PR 30F",
+        "PR 30G",
+        "PR 30H",
+        "PR 30J",
+        "PR 30K",
+        "PR 30L"
+      ],
+      "owner": {
+        "heading": "Task 15: PR 31A\u201331Q \u2014 Shared cockpit, evaluator labs, and owned extensions",
+        "line": 1681,
+        "path": "docs/plans/tracedecay-v2/11-dashboard-frontend.md"
+      },
+      "phase": 4
+    },
+    "PR 31G": {
+      "commit_subject": "feat(v2): shared cockpit evaluator labs and owned extensions",
+      "dependencies": [
+        "PR 30A",
+        "PR 30B",
+        "PR 30B2",
+        "PR 30C",
+        "PR 30D",
+        "PR 30E",
+        "PR 30F",
+        "PR 30G",
+        "PR 30H",
+        "PR 30J",
+        "PR 30K",
+        "PR 30L"
+      ],
+      "owner": {
+        "heading": "Task 15: PR 31A\u201331Q \u2014 Shared cockpit, evaluator labs, and owned extensions",
+        "line": 1681,
+        "path": "docs/plans/tracedecay-v2/11-dashboard-frontend.md"
+      },
+      "phase": 4
+    },
+    "PR 31H": {
+      "commit_subject": "feat(v2): shared cockpit evaluator labs and owned extensions",
+      "dependencies": [
+        "PR 30A",
+        "PR 30B",
+        "PR 30B2",
+        "PR 30C",
+        "PR 30D",
+        "PR 30E",
+        "PR 30F",
+        "PR 30G",
+        "PR 30H",
+        "PR 30J",
+        "PR 30K",
+        "PR 30L"
+      ],
+      "owner": {
+        "heading": "Task 15: PR 31A\u201331Q \u2014 Shared cockpit, evaluator labs, and owned extensions",
+        "line": 1681,
+        "path": "docs/plans/tracedecay-v2/11-dashboard-frontend.md"
+      },
+      "phase": 4
+    },
+    "PR 31I": {
+      "commit_subject": "feat(v2): shared cockpit evaluator labs and owned extensions",
+      "dependencies": [
+        "PR 30A",
+        "PR 30B",
+        "PR 30B2",
+        "PR 30C",
+        "PR 30D",
+        "PR 30E",
+        "PR 30F",
+        "PR 30G",
+        "PR 30H",
+        "PR 30J",
+        "PR 30K",
+        "PR 30L"
+      ],
+      "owner": {
+        "heading": "Task 15: PR 31A\u201331Q \u2014 Shared cockpit, evaluator labs, and owned extensions",
+        "line": 1681,
+        "path": "docs/plans/tracedecay-v2/11-dashboard-frontend.md"
+      },
+      "phase": 4
+    },
+    "PR 31J": {
+      "commit_subject": "feat(v2): search quality lab and qrel review",
+      "dependencies": [
+        "PR 30A",
+        "PR 30B",
+        "PR 30B2",
+        "PR 30C",
+        "PR 30D",
+        "PR 30E",
+        "PR 30F",
+        "PR 30G",
+        "PR 30H",
+        "PR 30J",
+        "PR 30K",
+        "PR 30L"
+      ],
+      "owner": {
+        "heading": "PR 31J: Search Quality Lab and qrel review",
+        "line": 447,
+        "path": "docs/plans/tracedecay-v2/15-search-quality-evaluation-and-retrieval-research.md"
+      },
+      "phase": 4
+    },
+    "PR 31K": {
+      "commit_subject": "feat(v2): shared cockpit evaluator labs and owned extensions",
+      "dependencies": [
+        "PR 30A",
+        "PR 30B",
+        "PR 30B2",
+        "PR 30C",
+        "PR 30D",
+        "PR 30E",
+        "PR 30F",
+        "PR 30G",
+        "PR 30H",
+        "PR 30J",
+        "PR 30K",
+        "PR 30L"
+      ],
+      "owner": {
+        "heading": "Task 15: PR 31A\u201331Q \u2014 Shared cockpit, evaluator labs, and owned extensions",
+        "line": 1681,
+        "path": "docs/plans/tracedecay-v2/11-dashboard-frontend.md"
+      },
+      "phase": 4
+    },
+    "PR 31L": {
+      "commit_subject": "feat(v2): scope and federation lab",
+      "dependencies": [
+        "PR 30A",
+        "PR 30B",
+        "PR 30B2",
+        "PR 30C",
+        "PR 30D",
+        "PR 30E",
+        "PR 30F",
+        "PR 30G",
+        "PR 30H",
+        "PR 30J",
+        "PR 30K",
+        "PR 30L"
+      ],
+      "owner": {
+        "heading": "PR 31L \u2014 Scope and federation lab",
+        "line": 647,
+        "path": "docs/plans/tracedecay-v2/16-cross-project-repository-worktree-scope.md"
+      },
+      "phase": 4
+    },
+    "PR 31M": {
+      "commit_subject": "feat(v2): privacy observatory and secret safety lab",
+      "dependencies": [
+        "PR 30A",
+        "PR 30B",
+        "PR 30B2",
+        "PR 30C",
+        "PR 30D",
+        "PR 30E",
+        "PR 30F",
+        "PR 30G",
+        "PR 30H",
+        "PR 30J",
+        "PR 30K",
+        "PR 30L"
+      ],
+      "owner": {
+        "heading": "PR 31M \u2014 Privacy Observatory and Secret Safety Lab",
+        "line": 772,
+        "path": "docs/plans/tracedecay-v2/18-secret-detection-redaction-and-private-data-safety.md"
+      },
+      "phase": 4
+    },
+    "PR 31N": {
+      "commit_subject": "feat(v2): configuration and autonomy replay extensions",
+      "dependencies": [
+        "PR 30A",
+        "PR 30B",
+        "PR 30B2",
+        "PR 30C",
+        "PR 30D",
+        "PR 30E",
+        "PR 30F",
+        "PR 30G",
+        "PR 30H",
+        "PR 30J",
+        "PR 30K",
+        "PR 30L"
+      ],
+      "owner": {
+        "heading": "PR 31N \u2014 Configuration and autonomy replay extensions",
+        "line": 1463,
+        "path": "docs/plans/tracedecay-v2/20-configuration-control-plane.md"
+      },
+      "phase": 4
+    },
+    "PR 31O": {
+      "commit_subject": "feat(v2): incremental scout hint lab and evaluation harness",
+      "dependencies": [
+        "PR 30A",
+        "PR 30B",
+        "PR 30B2",
+        "PR 30C",
+        "PR 30D",
+        "PR 30E",
+        "PR 30F",
+        "PR 30G",
+        "PR 30H",
+        "PR 30J",
+        "PR 30K",
+        "PR 30L"
+      ],
+      "owner": {
+        "heading": "PR 31O \u2014 Incremental Scout Hint Lab and evaluation harness",
+        "line": 1300,
+        "path": "docs/plans/tracedecay-v2/22-incremental-context-scout-and-suggestion-envelopes.md"
+      },
+      "phase": 4
+    },
+    "PR 31P": {
+      "commit_subject": "feat(v2): search quality lab temporal and lcm replay workspaces",
+      "dependencies": [
+        "PR 30A",
+        "PR 30B",
+        "PR 30B2",
+        "PR 30C",
+        "PR 30D",
+        "PR 30E",
+        "PR 30F",
+        "PR 30G",
+        "PR 30H",
+        "PR 30J",
+        "PR 30K",
+        "PR 30L"
+      ],
+      "owner": {
+        "heading": "PR 31P \u2014 Search Quality Lab temporal and LCM replay workspaces",
+        "line": 1186,
+        "path": "docs/plans/tracedecay-v2/23-session-lcm-temporal-retrieval-and-evaluation.md"
+      },
+      "phase": 4
+    },
+    "PR 31Q": {
+      "commit_subject": "feat(labs): replay task orchestration decisions",
+      "dependencies": [
+        "PR 30A",
+        "PR 30B",
+        "PR 30B2",
+        "PR 30C",
+        "PR 30D",
+        "PR 30E",
+        "PR 30F",
+        "PR 30G",
+        "PR 30H",
+        "PR 30J",
+        "PR 30K",
+        "PR 30L"
+      ],
+      "owner": {
+        "heading": "PR 31Q \u2014 Orchestration Lab and real-world evaluation harness",
+        "line": 3218,
+        "path": "docs/plans/tracedecay-v2/24-canonical-task-plan-graph-and-multi-agent-executor.md"
+      },
+      "phase": 4
+    },
+    "PR 32": {
+      "commit_subject": "test(dashboard): complete product quality gates",
+      "dependencies": [
+        "PR 31A",
+        "PR 31B",
+        "PR 31C",
+        "PR 31D",
+        "PR 31E",
+        "PR 31F",
+        "PR 31G",
+        "PR 31H",
+        "PR 31I",
+        "PR 31J",
+        "PR 31K",
+        "PR 31L",
+        "PR 31M",
+        "PR 31N",
+        "PR 31O",
+        "PR 31P",
+        "PR 31Q"
+      ],
+      "owner": {
+        "heading": "Task 16: PR 32 \u2014 Cross-product accessibility, responsive, export, and visual signoff",
+        "line": 1719,
+        "path": "docs/plans/tracedecay-v2/11-dashboard-frontend.md"
+      },
+      "phase": 4
+    },
+    "PR 33": {
+      "commit_subject": "feat(v2): resumable v1 backfill",
+      "dependencies": [
+        "PR 32",
+        "PR 38J"
+      ],
+      "owner": {
+        "heading": "PR 33: Resumable V1 backfill",
+        "line": 2247,
+        "path": "docs/plans/2026-07-09-tracedecay-brain-rewrite.md"
+      },
+      "phase": 5
+    },
+    "PR 33A": {
+      "commit_subject": "feat(v2): retroactive v1 v2 audit containment rebuild and restore gate",
+      "dependencies": [
+        "PR 32",
+        "PR 38J"
+      ],
+      "owner": {
+        "heading": "PR 33A \u2014 Retroactive V1/V2 audit, containment, rebuild, and restore gate",
+        "line": 776,
+        "path": "docs/plans/tracedecay-v2/18-secret-detection-redaction-and-private-data-safety.md"
+      },
+      "phase": 5
+    },
+    "PR 33C": {
+      "commit_subject": "feat(v2): legacy configuration import and cutoff",
+      "dependencies": [
+        "PR 32",
+        "PR 38J"
+      ],
+      "owner": {
+        "heading": "PR 33C \u2014 Legacy configuration import and cutoff",
+        "line": 1469,
+        "path": "docs/plans/tracedecay-v2/20-configuration-control-plane.md"
+      },
+      "phase": 5
+    },
+    "PR 33D": {
+      "commit_subject": "feat(v2): historical evidence migration and shadow parity",
+      "dependencies": [
+        "PR 32",
+        "PR 38J"
+      ],
+      "owner": {
+        "heading": "PR 33D \u2014 Historical evidence migration and shadow parity",
+        "line": 1305,
+        "path": "docs/plans/tracedecay-v2/22-incremental-context-scout-and-suggestion-envelopes.md"
+      },
+      "phase": 5
+    },
+    "PR 33E": {
+      "commit_subject": "feat(v2): v1 import backfill and shadow comparison",
+      "dependencies": [
+        "PR 32",
+        "PR 38J"
+      ],
+      "owner": {
+        "heading": "PR 33E \u2014 V1 import, backfill, and shadow comparison",
+        "line": 1191,
+        "path": "docs/plans/tracedecay-v2/23-session-lcm-temporal-retrieval-and-evaluation.md"
+      },
+      "phase": 5
+    },
+    "PR 33F": {
+      "commit_subject": "feat(migration): import task evidence and run shadow orchestration",
+      "dependencies": [
+        "PR 32",
+        "PR 38J"
+      ],
+      "owner": {
+        "heading": "PR 33F \u2014 V1 migration, frozen external-board fixtures, and shadow parity",
+        "line": 3227,
+        "path": "docs/plans/tracedecay-v2/24-canonical-task-plan-graph-and-multi-agent-executor.md"
+      },
+      "phase": 5
+    },
+    "PR 33G": {
+      "commit_subject": "feat(v2): v1 branch graph vector migration dispositions and disk math",
+      "dependencies": [
+        "PR 32",
+        "PR 38J"
+      ],
+      "owner": {
+        "heading": "PR 33G: V1 branch graph/vector migration, dispositions, and disk math",
+        "line": 560,
+        "path": "docs/plans/tracedecay-v2/25-code-intelligence-indexing-crate.md"
+      },
+      "phase": 5
+    },
+    "PR 33H": {
+      "commit_subject": "feat(v2): v1 analytics migration parity and receipts",
+      "dependencies": [
+        "PR 32",
+        "PR 38J"
+      ],
+      "owner": {
+        "heading": "PR 33H: V1 analytics migration parity and receipts",
+        "line": 778,
+        "path": "docs/plans/tracedecay-v2/26-observability-accounting-and-usage.md"
+      },
+      "phase": 5
+    },
+    "PR 33I": {
+      "commit_subject": "feat(v2): existing profile remote brain enrollment and correlation",
+      "dependencies": [
+        "PR 32",
+        "PR 38J"
+      ],
+      "owner": {
+        "heading": "PR 33I: Existing-profile remote Brain enrollment and correlation",
+        "line": 924,
+        "path": "docs/plans/tracedecay-v2/12-root-compatibility-migration.md"
+      },
+      "phase": 5
+    },
+    "PR 33R": {
+      "commit_subject": "feat(v2): whole profile migration controller",
+      "dependencies": [
+        "PR 32",
+        "PR 38J"
+      ],
+      "owner": {
+        "heading": "PR 33R: Whole-profile migration controller",
+        "line": 913,
+        "path": "docs/plans/tracedecay-v2/12-root-compatibility-migration.md"
+      },
+      "phase": 5
+    },
+    "PR 33S": {
+      "commit_subject": "feat(v2): store owned read only v1 import executor incoming master parit",
+      "dependencies": [
+        "PR 32",
+        "PR 38J"
+      ],
+      "owner": {
+        "heading": "PR 33S: Store-owned read-only V1 import executor, incoming-master parity, and resumable receipts",
+        "line": 1270,
+        "path": "docs/plans/tracedecay-v2/02-store-crate.md"
+      },
+      "phase": 5
+    },
+    "PR 33S-2": {
+      "commit_subject": "feat(v2): 2 store cutover support rollback window and deletion proof",
+      "dependencies": [
+        "PR 32",
+        "PR 38J"
+      ],
+      "owner": {
+        "heading": "PR 33S-2: Store cutover support, rollback window, and deletion proof",
+        "line": 1282,
+        "path": "docs/plans/tracedecay-v2/02-store-crate.md"
+      },
+      "phase": 5
+    },
+    "PR 34": {
+      "commit_subject": "feat(v2): shadow query parity dashboard",
+      "dependencies": [
+        "PR 33",
+        "PR 33A",
+        "PR 33C",
+        "PR 33D",
+        "PR 33E",
+        "PR 33F",
+        "PR 33G",
+        "PR 33H",
+        "PR 33I",
+        "PR 33R",
+        "PR 33S",
+        "PR 33S-2"
+      ],
+      "owner": {
+        "heading": "PR 34: Shadow-query parity dashboard",
+        "line": 2262,
+        "path": "docs/plans/2026-07-09-tracedecay-brain-rewrite.md"
+      },
+      "phase": 5
+    },
+    "PR 34R": {
+      "commit_subject": "feat(v2): shadow parity runner and operator surface",
+      "dependencies": [
+        "PR 33",
+        "PR 33A",
+        "PR 33C",
+        "PR 33D",
+        "PR 33E",
+        "PR 33F",
+        "PR 33G",
+        "PR 33H",
+        "PR 33I",
+        "PR 33R",
+        "PR 33S",
+        "PR 33S-2"
+      ],
+      "owner": {
+        "heading": "PR 34R: Shadow parity runner and operator surface",
+        "line": 931,
+        "path": "docs/plans/tracedecay-v2/12-root-compatibility-migration.md"
+      },
+      "phase": 5
+    },
+    "PR 35": {
+      "commit_subject": "feat(v2): bounded context cutovers",
+      "dependencies": [
+        "PR 34",
+        "PR 34R",
+        "PR 35H"
+      ],
+      "owner": {
+        "heading": "PR 35: Bounded-context cutovers",
+        "line": 2267,
+        "path": "docs/plans/2026-07-09-tracedecay-brain-rewrite.md"
+      },
+      "phase": 5
+    },
+    "PR 35A": {
+      "commit_subject": "feat(v2): bounded context cutovers",
+      "dependencies": [
+        "PR 34",
+        "PR 34R"
+      ],
+      "owner": {
+        "heading": "PR 35A\u201335J: Bounded-context cutovers",
+        "line": 940,
+        "path": "docs/plans/tracedecay-v2/12-root-compatibility-migration.md"
+      },
+      "phase": 5
+    },
+    "PR 35B": {
+      "commit_subject": "feat(v2): bounded context cutovers",
+      "dependencies": [
+        "PR 34",
+        "PR 34R",
+        "PR 35A"
+      ],
+      "owner": {
+        "heading": "PR 35A\u201335J: Bounded-context cutovers",
+        "line": 940,
+        "path": "docs/plans/tracedecay-v2/12-root-compatibility-migration.md"
+      },
+      "phase": 5
+    },
+    "PR 35C": {
+      "commit_subject": "feat(v2): bounded context cutovers",
+      "dependencies": [
+        "PR 34",
+        "PR 34R",
+        "PR 35B"
+      ],
+      "owner": {
+        "heading": "PR 35A\u201335J: Bounded-context cutovers",
+        "line": 940,
+        "path": "docs/plans/tracedecay-v2/12-root-compatibility-migration.md"
+      },
+      "phase": 5
+    },
+    "PR 35D": {
+      "commit_subject": "feat(v2): bounded context cutovers",
+      "dependencies": [
+        "PR 34",
+        "PR 34R",
+        "PR 35C"
+      ],
+      "owner": {
+        "heading": "PR 35A\u201335J: Bounded-context cutovers",
+        "line": 940,
+        "path": "docs/plans/tracedecay-v2/12-root-compatibility-migration.md"
+      },
+      "phase": 5
+    },
+    "PR 35E": {
+      "commit_subject": "feat(v2): bounded context cutovers",
+      "dependencies": [
+        "PR 34",
+        "PR 34R",
+        "PR 35D"
+      ],
+      "owner": {
+        "heading": "PR 35A\u201335J: Bounded-context cutovers",
+        "line": 940,
+        "path": "docs/plans/tracedecay-v2/12-root-compatibility-migration.md"
+      },
+      "phase": 5
+    },
+    "PR 35F": {
+      "commit_subject": "feat(v2): bounded context cutovers",
+      "dependencies": [
+        "PR 34",
+        "PR 34R",
+        "PR 35E"
+      ],
+      "owner": {
+        "heading": "PR 35A\u201335J: Bounded-context cutovers",
+        "line": 940,
+        "path": "docs/plans/tracedecay-v2/12-root-compatibility-migration.md"
+      },
+      "phase": 5
+    },
+    "PR 35G": {
+      "commit_subject": "feat(v2): bounded context cutovers",
+      "dependencies": [
+        "PR 34",
+        "PR 34R",
+        "PR 35F"
+      ],
+      "owner": {
+        "heading": "PR 35A\u201335J: Bounded-context cutovers",
+        "line": 940,
+        "path": "docs/plans/tracedecay-v2/12-root-compatibility-migration.md"
+      },
+      "phase": 5
+    },
+    "PR 35H": {
+      "commit_subject": "feat(v2): bounded context cutovers",
+      "dependencies": [
+        "PR 34",
+        "PR 34R",
+        "PR 35G",
+        "PR 35I",
+        "PR 35J"
+      ],
+      "owner": {
+        "heading": "PR 35A\u201335J: Bounded-context cutovers",
+        "line": 940,
+        "path": "docs/plans/tracedecay-v2/12-root-compatibility-migration.md"
+      },
+      "phase": 5
+    },
+    "PR 35I": {
+      "commit_subject": "feat(v2): session lcm retrieval cutover",
+      "dependencies": [
+        "PR 34",
+        "PR 34R",
+        "PR 35B",
+        "PR 35F"
+      ],
+      "owner": {
+        "heading": "PR 35I \u2014 Session/LCM retrieval cutover",
+        "line": 1196,
+        "path": "docs/plans/tracedecay-v2/23-session-lcm-temporal-retrieval-and-evaluation.md"
+      },
+      "phase": 5
+    },
+    "PR 35J": {
+      "commit_subject": "feat(tasks): cut over to canonical orchestration",
+      "dependencies": [
+        "PR 34",
+        "PR 34R",
+        "PR 35F",
+        "PR 35G"
+      ],
+      "owner": {
+        "heading": "PR 35J \u2014 Scoped canonical scheduler and executor cutover",
+        "line": 3236,
+        "path": "docs/plans/tracedecay-v2/24-canonical-task-plan-graph-and-multi-agent-executor.md"
+      },
+      "phase": 5
+    },
+    "PR 36": {
+      "commit_subject": "feat(v2): v2 default and live client cutoff",
+      "dependencies": [
+        "PR 35",
+        "PR 35A",
+        "PR 35B",
+        "PR 35C",
+        "PR 35D",
+        "PR 35E",
+        "PR 35F",
+        "PR 35G",
+        "PR 35H",
+        "PR 35I",
+        "PR 35J",
+        "PR 36R",
+        "PR 36S"
+      ],
+      "owner": {
+        "heading": "PR 36: V2 default and live-client cutoff",
+        "line": 2273,
+        "path": "docs/plans/2026-07-09-tracedecay-brain-rewrite.md"
+      },
+      "phase": 5
+    },
+    "PR 36R": {
+      "commit_subject": "feat(v2): stock host conformance and atomic release",
+      "dependencies": [
+        "PR 35",
+        "PR 35A",
+        "PR 35B",
+        "PR 35C",
+        "PR 35D",
+        "PR 35E",
+        "PR 35F",
+        "PR 35G",
+        "PR 35H",
+        "PR 35I",
+        "PR 35J"
+      ],
+      "owner": {
+        "heading": "PR 36R \u2014 stock-host conformance and atomic release",
+        "line": 2170,
+        "path": "docs/plans/tracedecay-v2/27-cross-host-agent-plugin-bundles.md"
+      },
+      "phase": 5
+    },
+    "PR 36S": {
+      "commit_subject": "feat(v2): protected multi machine release gate",
+      "dependencies": [
+        "PR 33I",
+        "PR 35",
+        "PR 35A",
+        "PR 35B",
+        "PR 35C",
+        "PR 35D",
+        "PR 35E",
+        "PR 35F",
+        "PR 35G",
+        "PR 35H",
+        "PR 35I",
+        "PR 35J"
+      ],
+      "owner": {
+        "heading": "PR 36S: Protected multi-machine release gate",
+        "line": 963,
+        "path": "docs/plans/tracedecay-v2/12-root-compatibility-migration.md"
+      },
+      "phase": 5
+    },
+    "PR 37": {
+      "commit_subject": "feat(v2): v1 archive and removal",
+      "dependencies": [
+        "PR 36",
+        "PR 36R",
+        "PR 36S",
+        "PR 37L",
+        "PR 38K"
+      ],
+      "owner": {
+        "heading": "PR 37: V1 archive and removal",
+        "line": 2286,
+        "path": "docs/plans/2026-07-09-tracedecay-brain-rewrite.md"
+      },
+      "phase": 5
+    },
+    "PR 37A": {
+      "commit_subject": "feat(v2): retirement",
+      "dependencies": [
+        "PR 36",
+        "PR 36R",
+        "PR 36S"
+      ],
+      "owner": {
+        "heading": "PR 37A\u201337L: Retirement",
+        "line": 971,
+        "path": "docs/plans/tracedecay-v2/12-root-compatibility-migration.md"
+      },
+      "phase": 5
+    },
+    "PR 37B": {
+      "commit_subject": "feat(v2): retirement",
+      "dependencies": [
+        "PR 36",
+        "PR 36R",
+        "PR 36S",
+        "PR 37A"
+      ],
+      "owner": {
+        "heading": "PR 37A\u201337L: Retirement",
+        "line": 971,
+        "path": "docs/plans/tracedecay-v2/12-root-compatibility-migration.md"
+      },
+      "phase": 5
+    },
+    "PR 37C": {
+      "commit_subject": "feat(v2): retirement",
+      "dependencies": [
+        "PR 36",
+        "PR 36R",
+        "PR 36S",
+        "PR 37B"
+      ],
+      "owner": {
+        "heading": "PR 37A\u201337L: Retirement",
+        "line": 971,
+        "path": "docs/plans/tracedecay-v2/12-root-compatibility-migration.md"
+      },
+      "phase": 5
+    },
+    "PR 37D": {
+      "commit_subject": "feat(v2): retirement",
+      "dependencies": [
+        "PR 36",
+        "PR 36R",
+        "PR 36S",
+        "PR 37C"
+      ],
+      "owner": {
+        "heading": "PR 37A\u201337L: Retirement",
+        "line": 971,
+        "path": "docs/plans/tracedecay-v2/12-root-compatibility-migration.md"
+      },
+      "phase": 5
+    },
+    "PR 37E": {
+      "commit_subject": "feat(v2): retirement",
+      "dependencies": [
+        "PR 36",
+        "PR 36R",
+        "PR 36S",
+        "PR 37D"
+      ],
+      "owner": {
+        "heading": "PR 37A\u201337L: Retirement",
+        "line": 971,
+        "path": "docs/plans/tracedecay-v2/12-root-compatibility-migration.md"
+      },
+      "phase": 5
+    },
+    "PR 37F": {
+      "commit_subject": "feat(v2): retirement",
+      "dependencies": [
+        "PR 36",
+        "PR 36R",
+        "PR 36S",
+        "PR 37E"
+      ],
+      "owner": {
+        "heading": "PR 37A\u201337L: Retirement",
+        "line": 971,
+        "path": "docs/plans/tracedecay-v2/12-root-compatibility-migration.md"
+      },
+      "phase": 5
+    },
+    "PR 37G": {
+      "commit_subject": "feat(v2): configuration convergence gate",
+      "dependencies": [
+        "PR 36",
+        "PR 36R",
+        "PR 36S",
+        "PR 37F"
+      ],
+      "owner": {
+        "heading": "PR 37G \u2014 Configuration convergence gate",
+        "line": 1475,
+        "path": "docs/plans/tracedecay-v2/20-configuration-control-plane.md"
+      },
+      "phase": 5
+    },
+    "PR 37H": {
+      "commit_subject": "feat(v2): scout convergence and v1 deletion gate",
+      "dependencies": [
+        "PR 36",
+        "PR 36R",
+        "PR 36S",
+        "PR 37G"
+      ],
+      "owner": {
+        "heading": "PR 37H \u2014 Scout convergence and V1 deletion gate",
+        "line": 1310,
+        "path": "docs/plans/tracedecay-v2/22-incremental-context-scout-and-suggestion-envelopes.md"
+      },
+      "phase": 5
+    },
+    "PR 37I": {
+      "commit_subject": "feat(v2): retire duplicate v1 session lcm search paths",
+      "dependencies": [
+        "PR 36",
+        "PR 36R",
+        "PR 36S",
+        "PR 37H"
+      ],
+      "owner": {
+        "heading": "PR 37I \u2014 Retire duplicate V1 session/LCM/search paths",
+        "line": 1201,
+        "path": "docs/plans/tracedecay-v2/23-session-lcm-temporal-retrieval-and-evaluation.md"
+      },
+      "phase": 5
+    },
+    "PR 37J": {
+      "commit_subject": "refactor(tasks): retire fragmented task and board paths",
+      "dependencies": [
+        "PR 36",
+        "PR 36R",
+        "PR 36S",
+        "PR 37I"
+      ],
+      "owner": {
+        "heading": "PR 37J \u2014 Task-system convergence and legacy deletion gate",
+        "line": 3244,
+        "path": "docs/plans/tracedecay-v2/24-canonical-task-plan-graph-and-multi-agent-executor.md"
+      },
+      "phase": 5
+    },
+    "PR 37K": {
+      "commit_subject": "feat(v2): migration and legacy retirement",
+      "dependencies": [
+        "PR 36",
+        "PR 36R",
+        "PR 36S",
+        "PR 37J"
+      ],
+      "owner": {
+        "heading": "PR 37K \u2014 migration and legacy retirement",
+        "line": 2193,
+        "path": "docs/plans/tracedecay-v2/27-cross-host-agent-plugin-bundles.md"
+      },
+      "phase": 5
+    },
+    "PR 37L": {
+      "commit_subject": "feat(v2): retirement",
+      "dependencies": [
+        "PR 36",
+        "PR 36R",
+        "PR 36S",
+        "PR 37K"
+      ],
+      "owner": {
+        "heading": "PR 37A\u201337L: Retirement",
+        "line": 971,
+        "path": "docs/plans/tracedecay-v2/12-root-compatibility-migration.md"
+      },
+      "phase": 5
+    },
+    "PR 38A": {
+      "commit_subject": "feat(v2): frozen contract and engine evidence",
+      "dependencies": [
+        "PR 23A",
+        "PR 23B",
+        "PR 23C",
+        "PR 23D",
+        "PR 23E",
+        "PR 23F",
+        "PR 23G",
+        "PR 23H",
+        "PR 23I"
+      ],
+      "owner": {
+        "heading": "PR 38A \u2014 frozen contract and engine evidence",
+        "line": 885,
+        "path": "docs/plans/tracedecay-v2/32-dynamic-workflow-runtime-and-sdk.md"
+      },
+      "phase": 4
+    },
+    "PR 38B": {
+      "commit_subject": "feat(v2): durable history and storage",
+      "dependencies": [
+        "PR 38A"
+      ],
+      "owner": {
+        "heading": "PR 38B \u2014 durable history and storage",
+        "line": 891,
+        "path": "docs/plans/tracedecay-v2/32-dynamic-workflow-runtime-and-sdk.md"
+      },
+      "phase": 4
+    },
+    "PR 38C": {
+      "commit_subject": "feat(v2): authoring and root runtime",
+      "dependencies": [
+        "PR 38A"
+      ],
+      "owner": {
+        "heading": "PR 38C \u2014 authoring and root runtime",
+        "line": 896,
+        "path": "docs/plans/tracedecay-v2/32-dynamic-workflow-runtime-and-sdk.md"
+      },
+      "phase": 4
+    },
+    "PR 38D": {
+      "commit_subject": "feat(v2): application orchestration",
+      "dependencies": [
+        "PR 38B",
+        "PR 38C"
+      ],
+      "owner": {
+        "heading": "PR 38D \u2014 application orchestration",
+        "line": 901,
+        "path": "docs/plans/tracedecay-v2/32-dynamic-workflow-runtime-and-sdk.md"
+      },
+      "phase": 4
+    },
+    "PR 38E": {
+      "commit_subject": "feat(v2): api and public sdks",
+      "dependencies": [
+        "PR 38D"
+      ],
+      "owner": {
+        "heading": "PR 38E \u2014 API and public SDKs",
+        "line": 906,
+        "path": "docs/plans/tracedecay-v2/32-dynamic-workflow-runtime-and-sdk.md"
+      },
+      "phase": 4
+    },
+    "PR 38F": {
+      "commit_subject": "feat(v2): cli mcp and host bundles",
+      "dependencies": [
+        "PR 38D"
+      ],
+      "owner": {
+        "heading": "PR 38F \u2014 CLI, MCP, and host bundles",
+        "line": 910,
+        "path": "docs/plans/tracedecay-v2/32-dynamic-workflow-runtime-and-sdk.md"
+      },
+      "phase": 4
+    },
+    "PR 38G": {
+      "commit_subject": "feat(v2): workflow studio",
+      "dependencies": [
+        "PR 38E"
+      ],
+      "owner": {
+        "heading": "PR 38G \u2014 Workflow Studio",
+        "line": 914,
+        "path": "docs/plans/tracedecay-v2/32-dynamic-workflow-runtime-and-sdk.md"
+      },
+      "phase": 4
+    },
+    "PR 38H": {
+      "commit_subject": "feat(v2): taskgraph candidate compilation",
+      "dependencies": [
+        "PR 38D"
+      ],
+      "owner": {
+        "heading": "PR 38H \u2014 taskgraph candidate compilation",
+        "line": 918,
+        "path": "docs/plans/tracedecay-v2/32-dynamic-workflow-runtime-and-sdk.md"
+      },
+      "phase": 4
+    },
+    "PR 38I": {
+      "commit_subject": "feat(v2): cross cutting intelligence",
+      "dependencies": [
+        "PR 22F-LE",
+        "PR 24F",
+        "PR 24P",
+        "PR 24S",
+        "PR 30J",
+        "PR 38D"
+      ],
+      "owner": {
+        "heading": "PR 38I \u2014 cross-cutting intelligence",
+        "line": 922,
+        "path": "docs/plans/tracedecay-v2/32-dynamic-workflow-runtime-and-sdk.md"
+      },
+      "phase": 4
+    },
+    "PR 38J": {
+      "commit_subject": "feat(v2): system qualification",
+      "dependencies": [
+        "PR 38E",
+        "PR 38F",
+        "PR 38G",
+        "PR 38H",
+        "PR 38I"
+      ],
+      "owner": {
+        "heading": "PR 38J \u2014 system qualification",
+        "line": 928,
+        "path": "docs/plans/tracedecay-v2/32-dynamic-workflow-runtime-and-sdk.md"
+      },
+      "phase": 4
+    },
+    "PR 38K": {
+      "commit_subject": "feat(v2): import cutover and deletion",
+      "dependencies": [
+        "PR 33",
+        "PR 34",
+        "PR 35",
+        "PR 36",
+        "PR 38J"
+      ],
+      "owner": {
+        "heading": "PR 38K \u2014 import, cutover, and deletion",
+        "line": 933,
+        "path": "docs/plans/tracedecay-v2/32-dynamic-workflow-runtime-and-sdk.md"
+      },
+      "phase": 5
+    },
+    "PR 3R": {
+      "commit_subject": "feat(v2): compatibility inventory and baseline ledger",
+      "dependencies": [
+        "PR 2",
+        "PR 2A",
+        "PR 2B"
+      ],
+      "owner": {
+        "heading": "PR 3R: Compatibility inventory and baseline ledger",
+        "line": 810,
+        "path": "docs/plans/tracedecay-v2/12-root-compatibility-migration.md"
+      },
+      "phase": 0
+    },
+    "PR 4": {
+      "commit_subject": "feat(v2): domain contracts only",
+      "dependencies": [
+        "PR 3",
+        "PR 3R"
+      ],
+      "owner": {
+        "heading": "PR 4: Domain contracts only",
+        "line": 1792,
+        "path": "docs/plans/2026-07-09-tracedecay-brain-rewrite.md"
+      },
+      "phase": 0
+    },
+    "PR 4A": {
+      "commit_subject": "docs(ui): lock Brain workbench product contract",
+      "dependencies": [
+        "PR 3",
+        "PR 3R",
+        "PR 4B"
+      ],
+      "owner": {
+        "heading": "Task 1: PR 4A \u2014 V1-backed read-only concept workbench",
+        "line": 1400,
+        "path": "docs/plans/tracedecay-v2/11-dashboard-frontend.md"
+      },
+      "phase": 0
+    },
+    "PR 4AR": {
+      "commit_subject": "feat(v2): v1 backed read only workbench composition",
+      "dependencies": [
+        "PR 3",
+        "PR 3R"
+      ],
+      "owner": {
+        "heading": "PR 4AR: V1-backed read-only workbench composition",
+        "line": 825,
+        "path": "docs/plans/tracedecay-v2/12-root-compatibility-migration.md"
+      },
+      "phase": 0
+    },
+    "PR 4B": {
+      "commit_subject": "feat(v2): privacy domain and taint state contracts",
+      "dependencies": [
+        "PR 3",
+        "PR 3R"
+      ],
+      "owner": {
+        "heading": "PR 4B \u2014 Privacy domain and taint-state contracts",
+        "line": 727,
+        "path": "docs/plans/tracedecay-v2/18-secret-detection-redaction-and-private-data-safety.md"
+      },
+      "phase": 0
+    },
+    "PR 4C": {
+      "commit_subject": "feat(v2): domain configuration contracts and registry schema",
+      "dependencies": [
+        "PR 3",
+        "PR 3R"
+      ],
+      "owner": {
+        "heading": "PR 4C \u2014 Domain configuration contracts and registry schema",
+        "line": 1430,
+        "path": "docs/plans/tracedecay-v2/20-configuration-control-plane.md"
+      },
+      "phase": 0
+    },
+    "PR 4E": {
+      "commit_subject": "feat(domain): define canonical task and execution graph",
+      "dependencies": [
+        "PR 3",
+        "PR 3R",
+        "PR 4C"
+      ],
+      "owner": {
+        "heading": "PR 4E \u2014 Canonical initiative, plan, task, executor, lease, and packet domain contracts",
+        "line": 3106,
+        "path": "docs/plans/tracedecay-v2/24-canonical-task-plan-graph-and-multi-agent-executor.md"
+      },
+      "phase": 0
+    },
+    "PR 4F": {
+      "commit_subject": "feat(v2): scout and suggestion domain contracts",
+      "dependencies": [
+        "PR 3",
+        "PR 3R",
+        "PR 4E"
+      ],
+      "owner": {
+        "heading": "PR 4F \u2014 Scout and suggestion domain contracts",
+        "line": 1250,
+        "path": "docs/plans/tracedecay-v2/22-incremental-context-scout-and-suggestion-envelopes.md"
+      },
+      "phase": 0
+    },
+    "PR 4G": {
+      "commit_subject": "feat(v2): domain host identity and capability observation contracts",
+      "dependencies": [
+        "PR 3",
+        "PR 3R"
+      ],
+      "owner": {
+        "heading": "PR 4G \u2014 domain host identity and capability-observation contracts",
+        "line": 2063,
+        "path": "docs/plans/tracedecay-v2/27-cross-host-agent-plugin-bundles.md"
+      },
+      "phase": 0
+    },
+    "PR 5": {
+      "commit_subject": "feat(v2): catalog project blob store skeleton",
+      "dependencies": [
+        "PR 4",
+        "PR 4A",
+        "PR 4AR",
+        "PR 4B",
+        "PR 4C",
+        "PR 4E",
+        "PR 4F",
+        "PR 4G"
+      ],
+      "owner": {
+        "heading": "PR 5: Catalog/project/blob store skeleton",
+        "line": 1838,
+        "path": "docs/plans/2026-07-09-tracedecay-brain-rewrite.md"
+      },
+      "phase": 1
+    },
+    "PR 5A": {
+      "commit_subject": "feat(v2): crate boundary private layout sqlite runtime and migration run",
+      "dependencies": [
+        "PR 4",
+        "PR 4A",
+        "PR 4AR",
+        "PR 4B",
+        "PR 4C",
+        "PR 4E",
+        "PR 4F",
+        "PR 4G"
+      ],
+      "owner": {
+        "heading": "PR 5A: Crate boundary, private layout, SQLite runtime, and migration runner",
+        "line": 1115,
+        "path": "docs/plans/tracedecay-v2/02-store-crate.md"
+      },
+      "phase": 1
+    },
+    "PR 5B": {
+      "commit_subject": "feat(v2): catalog activity project schemas and durable identity allocati",
+      "dependencies": [
+        "PR 4",
+        "PR 4A",
+        "PR 4AR",
+        "PR 4B",
+        "PR 4C",
+        "PR 4E",
+        "PR 4F",
+        "PR 4G"
+      ],
+      "owner": {
+        "heading": "PR 5B: Catalog/activity/project schemas and durable identity allocation",
+        "line": 1126,
+        "path": "docs/plans/tracedecay-v2/02-store-crate.md"
+      },
+      "phase": 1
+    },
+    "PR 6A": {
+      "commit_subject": "feat(v2): observation journal writer queue capture drain ingress outbox",
+      "dependencies": [
+        "PR 5",
+        "PR 5A",
+        "PR 5B"
+      ],
+      "owner": {
+        "heading": "PR 6A: Observation journal, writer queue, capture-drain ingress, outbox, and commands",
+        "line": 1137,
+        "path": "docs/plans/tracedecay-v2/02-store-crate.md"
+      },
+      "phase": 1
+    },
+    "PR 6B": {
+      "commit_subject": "feat(v2): sanitized blob staging protected quarantine key service public",
+      "dependencies": [
+        "PR 5",
+        "PR 5A",
+        "PR 5B"
+      ],
+      "owner": {
+        "heading": "PR 6B: Sanitized blob staging, protected quarantine/key service, publication, and GC",
+        "line": 1149,
+        "path": "docs/plans/tracedecay-v2/02-store-crate.md"
+      },
+      "phase": 1
+    },
+    "PR 6C": {
+      "commit_subject": "feat(v2): packed immutable graph generations and snapshot publication",
+      "dependencies": [
+        "PR 5",
+        "PR 5A",
+        "PR 5B"
+      ],
+      "owner": {
+        "heading": "PR 6C: Packed immutable graph generations and snapshot publication",
+        "line": 1159,
+        "path": "docs/plans/tracedecay-v2/02-store-crate.md"
+      },
+      "phase": 1
+    },
+    "PR 6D": {
+      "commit_subject": "feat(v2): retention integrity consistent snapshots backup restore startu",
+      "dependencies": [
+        "PR 5",
+        "PR 5A",
+        "PR 5B"
+      ],
+      "owner": {
+        "heading": "PR 6D: Retention, integrity, consistent snapshots, backup/restore, startup recovery, and repair",
+        "line": 1172,
+        "path": "docs/plans/tracedecay-v2/02-store-crate.md"
+      },
+      "phase": 1
+    },
+    "PR 6E": {
+      "commit_subject": "feat(v2): immutable configuration revisions and activation manifests",
+      "dependencies": [
+        "PR 5",
+        "PR 5A",
+        "PR 5B"
+      ],
+      "owner": {
+        "heading": "PR 6E \u2014 Immutable configuration revisions and activation manifests",
+        "line": 1436,
+        "path": "docs/plans/tracedecay-v2/20-configuration-control-plane.md"
+      },
+      "phase": 1
+    },
+    "PR 6F": {
+      "commit_subject": "feat(v2): scout repositories transactions checkpoints and retention",
+      "dependencies": [
+        "PR 5",
+        "PR 5A",
+        "PR 5B"
+      ],
+      "owner": {
+        "heading": "PR 6F \u2014 Scout repositories, transactions, checkpoints, and retention",
+        "line": 1256,
+        "path": "docs/plans/tracedecay-v2/22-incremental-context-scout-and-suggestion-envelopes.md"
+      },
+      "phase": 1
+    },
+    "PR 6G": {
+      "commit_subject": "feat(store): persist the fenced profile task graph",
+      "dependencies": [
+        "PR 5",
+        "PR 5A",
+        "PR 5B"
+      ],
+      "owner": {
+        "heading": "PR 6G \u2014 Activity-shard task graph repositories and fenced transactions",
+        "line": 3116,
+        "path": "docs/plans/tracedecay-v2/24-canonical-task-plan-graph-and-multi-agent-executor.md"
+      },
+      "phase": 1
+    },
+    "PR 6H": {
+      "commit_subject": "feat(v2): multi machine authority sync cache and recovery persistence",
+      "dependencies": [
+        "PR 5",
+        "PR 5A",
+        "PR 5B"
+      ],
+      "owner": {
+        "heading": "PR 6H: Multi-machine authority, sync, cache, and recovery persistence",
+        "line": 1181,
+        "path": "docs/plans/tracedecay-v2/02-store-crate.md"
+      },
+      "phase": 1
+    },
+    "PR 7A": {
+      "commit_subject": "feat(v2): crate contracts mandatory sanitizer deterministic identity and",
+      "dependencies": [
+        "PR 6A",
+        "PR 6B",
+        "PR 6C",
+        "PR 6D",
+        "PR 6E",
+        "PR 6F",
+        "PR 6G",
+        "PR 6H"
+      ],
+      "owner": {
+        "heading": "PR 7A: Crate contracts, mandatory sanitizer, deterministic identity, and journal runner",
+        "line": 560,
+        "path": "docs/plans/tracedecay-v2/03-capture-crate.md"
+      },
+      "phase": 1
+    },
+    "PR 7B": {
+      "commit_subject": "feat(v2): durable hook spool and concurrent agent capture",
+      "dependencies": [
+        "PR 6A",
+        "PR 6B",
+        "PR 6C",
+        "PR 6D",
+        "PR 6E",
+        "PR 6F",
+        "PR 6G",
+        "PR 6H"
+      ],
+      "owner": {
+        "heading": "PR 7B: Durable hook spool and concurrent-agent capture",
+        "line": 572,
+        "path": "docs/plans/tracedecay-v2/03-capture-crate.md"
+      },
+      "phase": 1
+    },
+    "PR 7C": {
+      "commit_subject": "feat(v2): codex and claude adapters",
+      "dependencies": [
+        "PR 6A",
+        "PR 6B",
+        "PR 6C",
+        "PR 6D",
+        "PR 6E",
+        "PR 6F",
+        "PR 6G",
+        "PR 6H"
+      ],
+      "owner": {
+        "heading": "PR 7C: Codex and Claude adapters",
+        "line": 584,
+        "path": "docs/plans/tracedecay-v2/03-capture-crate.md"
+      },
+      "phase": 1
+    },
+    "PR 7D": {
+      "commit_subject": "feat(v2): cursor family and remaining provider adapters",
+      "dependencies": [
+        "PR 6A",
+        "PR 6B",
+        "PR 6C",
+        "PR 6D",
+        "PR 6E",
+        "PR 6F",
+        "PR 6G",
+        "PR 6H"
+      ],
+      "owner": {
+        "heading": "PR 7D: Cursor family and remaining provider adapters",
+        "line": 595,
+        "path": "docs/plans/tracedecay-v2/03-capture-crate.md"
+      },
+      "phase": 1
+    },
+    "PR 7E": {
+      "commit_subject": "feat(v2): v1 lcm git sessions hooks and automation backfill adapters",
+      "dependencies": [
+        "PR 6A",
+        "PR 6B",
+        "PR 6C",
+        "PR 6D",
+        "PR 6E",
+        "PR 6F",
+        "PR 6G",
+        "PR 6H"
+      ],
+      "owner": {
+        "heading": "PR 7E: V1 LCM, Git, sessions, hooks, and automation backfill adapters",
+        "line": 609,
+        "path": "docs/plans/tracedecay-v2/03-capture-crate.md"
+      },
+      "phase": 1
+    },
+    "PR 7F": {
+      "commit_subject": "feat(v2): shadow capture parity cutover and rollback",
+      "dependencies": [
+        "PR 6A",
+        "PR 6B",
+        "PR 6C",
+        "PR 6D",
+        "PR 6E",
+        "PR 6F",
+        "PR 6G",
+        "PR 6H"
+      ],
+      "owner": {
+        "heading": "PR 7F: Shadow capture, parity, cutover, and rollback",
+        "line": 623,
+        "path": "docs/plans/tracedecay-v2/03-capture-crate.md"
+      },
+      "phase": 1
+    },
+    "PR 7FR": {
+      "commit_subject": "feat(v2): source family shadow capture composition",
+      "dependencies": [
+        "PR 6A",
+        "PR 6B",
+        "PR 6C",
+        "PR 6D",
+        "PR 6E",
+        "PR 6F",
+        "PR 6G",
+        "PR 6H"
+      ],
+      "owner": {
+        "heading": "PR 7FR: Source-family shadow capture composition",
+        "line": 834,
+        "path": "docs/plans/tracedecay-v2/12-root-compatibility-migration.md"
+      },
+      "phase": 1
+    },
+    "PR 8": {
+      "commit_subject": "feat(v2): identity and alias resolver persistence",
+      "dependencies": [
+        "PR 7A",
+        "PR 7B",
+        "PR 7C",
+        "PR 7D",
+        "PR 7E",
+        "PR 7F",
+        "PR 7FR"
+      ],
+      "owner": {
+        "heading": "PR 8: Identity and alias resolver persistence",
+        "line": 1191,
+        "path": "docs/plans/tracedecay-v2/02-store-crate.md"
+      },
+      "phase": 1
+    },
+    "PR 8A": {
+      "commit_subject": "feat(v2): canonical cross project scope candidate substrate",
+      "dependencies": [
+        "PR 7A",
+        "PR 7B",
+        "PR 7C",
+        "PR 7D",
+        "PR 7E",
+        "PR 7F",
+        "PR 7FR"
+      ],
+      "owner": {
+        "heading": "PR 8A: Canonical cross-project scope-candidate substrate",
+        "line": 1205,
+        "path": "docs/plans/tracedecay-v2/02-store-crate.md"
+      },
+      "phase": 1
+    },
+    "PR 9": {
+      "commit_subject": "feat(v2): evidence relation store",
+      "dependencies": [
+        "PR 8",
+        "PR 8A"
+      ],
+      "owner": {
+        "heading": "PR 9: Evidence relation store",
+        "line": 1219,
+        "path": "docs/plans/tracedecay-v2/02-store-crate.md"
+      },
+      "phase": 1
+    }
+  }
+}

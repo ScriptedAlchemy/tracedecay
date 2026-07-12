@@ -47,9 +47,26 @@ The current `plan_inventory.py` is only a legacy heading/block-hash inventory ai
 
 ## Bootstrap without ambient state
 
-Before V2 cutover, resolve the manifest only from one explicit argument, `TRACEDECAY_V2_EXECUTION_MANIFEST`, or the repo-root `.tracedecay/v2-execution-manifest.json`, in that order and with plan 00's containment/failure rules. Never search ambient/current boards, sibling databases, profiles, task history, or UI state. Missing or ambiguous location is a dispatch-blocking result, not an empty graph.
+Until the frozen manifest/state export is explicitly activated, plan authoring, finalization, order auditing, and review use the inventory and cited plan sections; do not report the expected missing operational state as a plan-review failure. Manifest/state is mandatory for selecting or dispatching implementation work.
 
-Validate complete inventory coverage, normalized ownership, anchors/digests, typed edges, acyclicity, and stable-key import; compare the imported candidate to canonical IDs/edges/digests; require zero extras/conflicts; and record one atomic activation receipt. Until that receipt matches the active graph revision, return no `next_ready`. After cutover, treat the locator only as explicit reconciliation input: the activated canonical graph remains dispatch authority.
+Before V2 cutover, resolve the manifest only from one explicit argument, `TRACEDECAY_V2_EXECUTION_MANIFEST`, or the repo-root `.tracedecay/v2-execution-manifest.json`, in that order and with plan 00's containment/failure rules. Never search ambient/current boards, sibling databases, profiles, task history, or UI state. Missing or ambiguous location blocks dispatch but not read-only inventory, audit, or plan review.
+
+Validate complete inventory coverage, normalized ownership, anchors/digests, typed edges, acyclicity, and stable-key import; compare the imported candidate to canonical IDs/edges/digests; require zero extras/conflicts; and record one atomic activation receipt. Install the frozen controller export through the sole canonical command:
+
+```bash
+python3 .codex/skills/executing-tracedecay-v2-plan/scripts/compile_plan_authority.py \
+  --root "$(git rev-parse --show-toplevel)" \
+  --canonical-ref refs/heads/codex/tracedecay-total-redesign-plan \
+  --manifest-output docs/plans/tracedecay-v2/execution-authority.json \
+  --state-output .tracedecay/v2-execution-state.candidate.json
+python3 .codex/skills/executing-tracedecay-v2-plan/scripts/bootstrap_execution.py \
+  --manifest docs/plans/tracedecay-v2/execution-authority.json \
+  --state-export .tracedecay/v2-execution-state.candidate.json \
+  --root "$(git rev-parse --show-toplevel)" \
+  --canonical-ref refs/heads/codex/tracedecay-total-redesign-plan
+```
+
+The compiler consumes the explicit reviewed `plan_authority_registry.json`: 257 executable slices plus eight non-executable series, with checked owner anchors, phases, commit subjects, and prerequisites. It materializes every input from the exact immutable Git tree and emits `activation_mode=verify_only`: a complete topological verification graph with no completion entries, worker packets, tests, branches, or worktrees. Bootstrap cross-checks IDs, content digests, dependencies, graph revision, the exact canonical Git-tree source-set digest, and the complete execution-state validator, stages manifest/state in one immutable generation, then atomically switches `.tracedecay/v2-execution-active.json`. It never installs partial or dispatch-mode state. Verification-only activation returns the full order and zero dispatchable `next_ready` packets; a later reviewed daemon authority revision must supply exact bounded packets and a fenced transition before dispatch mode exists. After cutover, treat the locator only as explicit reconciliation input: the activated canonical graph remains dispatch authority.
 
 ## Validate the activated graph and ledger
 
@@ -57,12 +74,11 @@ Export one `tracedecay.v2.execution-state/v1` JSON document containing the activ
 
 ```bash
 python3 .codex/skills/executing-tracedecay-v2-plan/scripts/plan_execution.py \
-  --graph /path/to/v2-execution-graph.json \
   --root /path/to/authoritative/checkout \
-  --canonical-ref refs/heads/master --next-ready
+  --canonical-ref refs/heads/codex/tracedecay-total-redesign-plan --next-ready
 ```
 
-`--root` is mandatory: validation recomputes the authoritative plan-inventory/source-block digest in that checkout and resolves `--canonical-ref` (`HEAD` only when explicitly intended). Markdown is the bounded human/MCP-default view. Use `--format json` for the sealed `tracedecay.v2.next-ready-view/v1`. Both formats contain the same validity/source/digest/revision pins, diagnostics, packets, and blocker reasons. Invalid input or any Git/source observation failure exits 2 and always returns an empty ready set (`Unknown`, never guessed false/true).
+`--root` is mandatory. `--graph` is optional only because the helper resolves the shared state through `TRACEDECAY_V2_EXECUTION_STATE` and then `<repo-root>/.tracedecay/v2-execution-state.json`; an explicit `--graph` wins. Validation hashes exact plan blobs from the Git tree resolved by `--canonical-ref`, never files from a different checked-out commit. Before this redesign branch is integrated, pass its full ref rather than `master`. Markdown is the bounded human/MCP-default view. Use `--format json` for the sealed `tracedecay.v2.next-ready-view/v1`. Both formats contain the same validity/source/digest/revision pins, diagnostics, packets, and blocker reasons. Invalid input or any Git/source observation failure exits 2 and always returns an empty ready set (`Unknown`, never guessed false/true).
 
 The canonical DAG must pin repository identity, exact current canonical source/integration SHA, source-set digest, positive graph revision, graph digest, nodes, and a byte-matching activation receipt. Nodes have unique IDs and unique owners, explicit prerequisites, and a canonical digest over the complete dispatch/test/workspace packet. The helper rejects duplicate IDs/owners, unknown/self/retired prerequisites, cycles, stale graph or activation pins, packet rewrites that no longer match that canonical digest, missing packets, and any reference to retired corrected tombstone `FM-168`.
 
@@ -75,7 +91,7 @@ Every ledger entry repeats the current source commit, source-set digest, graph r
 - canonical integration receipt embedding the live sealed `git merge-base --is-ancestor` observation for the exact candidate/current canonical commit, resolved full canonical ref, and repository identity;
 - the attempt/lease fence, observed steering watermark, terminal-CAS sequence, every required steering directive through that cutoff, and canonical disposition receipts binding directive/attempt/fence/event/delivery/ack/disposition/actor/authority.
 
-Candidate, workspace, review, test, integration, ancestry-observation, and steering receipt digests are recomputed from canonical payload bytes. Shape-valid digest strings and asserted ancestry/independence booleans are never trusted. Every Git subprocess has a finite timeout and bounded output; failures are `Unknown`. Required steering delivered after the recorded observation but before terminal CAS invalidates the attempted completion; required steering arriving after terminal CAS must bind exact remediation and successor-review task IDs in lineage before opening that path without rewriting history. Advisory steering does not fence completion.
+Candidate, workspace, review, test, integration, ancestry-observation, and steering receipt digests are recomputed from canonical payload bytes. Integrated history does not require its old worktree to remain present; immutable candidate evidence plus fresh ancestry remains mandatory. Review and test receipts must also appear in trusted daemon/task-event observations; self-authored JSON plus a recomputed hash never proves occurrence. Until that application boundary exists, the standalone helper fails closed on such completion claims. Shape-valid digest strings and asserted ancestry/independence booleans are never trusted. Every Git subprocess has a finite timeout and bounded output; failures are `Unknown`. Required steering delivered after the recorded observation but before terminal CAS invalidates the attempted completion; required steering arriving after terminal CAS must bind exact remediation and successor-review task IDs in lineage before opening that path without rewriting history. Advisory steering does not fence completion.
 
 The validator rejects duplicate/ambiguous entries and stale or mismatched receipt pins. Candidate-only or otherwise incomplete entries remain valid evidence but are explicitly blocked; they are never completion. The helper never reads a card/task status field and its exact schemas reject such extra fields.
 

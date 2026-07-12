@@ -39,12 +39,15 @@ class ClaudeSkillWrapperTests(unittest.TestCase):
             "tracedecay.v2.completion-ledger/v1",
             "TRACEDECAY_V2_EXECUTION_MANIFEST",
             ".tracedecay/v2-execution-manifest.json",
+            "TRACEDECAY_V2_EXECUTION_STATE",
+            ".tracedecay/v2-execution-state.json",
         )
         for token in required:
             self.assertIn(token, wrapper)
             self.assertIn(token, canonical)
 
-        self.assertIn("same explicit `--graph`", wrapper)
+        self.assertIn("same shared state path", wrapper)
+        self.assertIn("Until activation", wrapper)
         self.assertIn(
             "Never infer or maintain a\nhost-specific manifest, ledger, state, receipt, cache, output",
             wrapper,

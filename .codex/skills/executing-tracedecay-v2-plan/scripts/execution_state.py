@@ -39,6 +39,7 @@ class ValidationResult:
     entries: dict[str, dict[str, Any]]
     dispatch: dict[str, dict[str, Any]]
     graph: dict[str, Any]
+    activation_mode: str
 
     @property
     def valid(self) -> bool:
@@ -147,14 +148,25 @@ def validate(document: dict[str, Any], live: le.LiveEvidence | None = None) -> V
     entries: dict[str, dict[str, Any]] = {}
     dispatch: dict[str, dict[str, Any]] = {}
     graph: dict[str, Any] = {}
+    activation_mode = document.get("activation_mode", "dispatch")
 
-    if not _keys(document, {
+    expected_export_fields = {
         "schema", "canonical_dag", "completion_ledger", "dispatch_specs",
         "retired_obligations",
-    }, "export", errors):
-        return ValidationResult(_finalize_errors(errors), nodes, entries, dispatch, graph)
+    }
+    if frozenset(document) not in {frozenset(expected_export_fields),
+                                   frozenset(expected_export_fields | {"activation_mode"})}:
+        errors.append(
+            f"export: fields must be {sorted(expected_export_fields)!r} with optional "
+            f"'activation_mode'; got {sorted(document)!r}"
+        )
+        return ValidationResult(
+            _finalize_errors(errors), nodes, entries, dispatch, graph, "invalid"
+        )
     if document.get("schema") != EXPORT_SCHEMA:
         errors.append(f"export.schema: expected {EXPORT_SCHEMA!r}")
+    if activation_mode not in {"dispatch", "verify_only"}:
+        errors.append("export.activation_mode: expected 'dispatch' or 'verify_only'")
     if live is None:
         errors.append("live: authoritative checkout evidence is required")
     else:
@@ -207,11 +219,19 @@ def validate(document: dict[str, Any], live: le.LiveEvidence | None = None) -> V
         _validate_activation(graph, errors)
         nodes = _validate_nodes(graph.get("nodes"), retired_set, errors)
 
-    dispatch = _validate_dispatch(document.get("dispatch_specs"), nodes, errors)
+    if activation_mode == "verify_only":
+        if document.get("dispatch_specs") != []:
+            errors.append("dispatch_specs: verify_only activation requires an empty array")
+    else:
+        dispatch = _validate_dispatch(document.get("dispatch_specs"), nodes, errors)
     ledger = document.get("completion_ledger")
     entries = _validate_ledger(ledger, graph, nodes, dispatch, retired_set, live, errors)
+    if activation_mode == "verify_only" and entries:
+        errors.append("completion_ledger.entries: verify_only activation requires no entries")
 
-    return ValidationResult(_finalize_errors(errors), nodes, entries, dispatch, graph)
+    return ValidationResult(
+        _finalize_errors(errors), nodes, entries, dispatch, graph, activation_mode
+    )
 
 
 def _validate_activation(graph: dict[str, Any], errors: list[str]) -> None:
@@ -474,8 +494,12 @@ def _validate_ledger(raw: object, graph: dict[str, Any], nodes: dict[str, dict[s
             errors.append(f"completion_ledger.entries: retired obligation {slice_id} cannot complete")
         for field in ["source_commit", "source_set_digest", "graph_revision", "graph_digest"]:
             _pin_equal(f"{slice_id}.{field}", entry[field], graph.get(field), errors)
+        integrated = (
+            isinstance(entry["integration"], dict)
+            and entry["integration"].get("state") == "integrated"
+        )
         candidate = _validate_candidate(
-            entry["candidate"], slice_id, dispatch.get(slice_id), live, errors
+            entry["candidate"], slice_id, dispatch.get(slice_id), live, integrated, errors
         )
         _validate_lineage(entry["task_lineage"], slice_id, errors)
         _strings(entry["required_tests"], f"{slice_id}.required_tests", errors)
@@ -485,10 +509,12 @@ def _validate_ledger(raw: object, graph: dict[str, Any], nodes: dict[str, dict[s
         )
         tests = _validate_tests(
             entry["test_receipts"], entry["required_tests"], slice_id, candidate,
-            dispatch.get(slice_id), errors
+            dispatch.get(slice_id), live, errors
         )
 
-        review = _validate_review(entry["review"], slice_id, candidate, entry["task_lineage"], errors)
+        review = _validate_review(
+            entry["review"], slice_id, candidate, entry["task_lineage"], live, errors
+        )
         integration = _validate_integration(
             entry["integration"], slice_id, candidate, entry["task_lineage"], graph,
             entry["attempt"], live, errors
@@ -512,7 +538,8 @@ def _validate_ledger(raw: object, graph: dict[str, Any], nodes: dict[str, dict[s
 
 
 def _validate_candidate(value: object, slice_id: str, spec: dict[str, Any] | None,
-                        live: le.LiveEvidence | None, errors: list[str]) -> dict[str, Any]:
+                        live: le.LiveEvidence | None, integrated: bool,
+                        errors: list[str]) -> dict[str, Any]:
     fields = {"commit", "digest", "branch", "worktree", "workspace_observation"}
     if not _keys(value, fields, f"{slice_id}.candidate", errors):
         return {}
@@ -526,15 +553,34 @@ def _validate_candidate(value: object, slice_id: str, spec: dict[str, Any] | Non
     workspace = spec.get("workspace", {}) if isinstance(spec, dict) else {}
     _pin_equal(f"{slice_id}.candidate.branch", value["branch"], workspace.get("branch"), errors)
     _pin_equal(f"{slice_id}.candidate.worktree", value["worktree"], workspace.get("worktree"), errors)
-    branch_ref = value["branch"] if str(value["branch"]).startswith("refs/") else f"refs/heads/{value['branch']}"
+    stored = value["workspace_observation"]
+    workspace_fields = {
+        "repository", "candidate_commit", "branch_ref", "worktree", "method",
+        "status_method", "clean", "observation_digest",
+    }
+    if not _keys(stored, workspace_fields, f"{slice_id}.candidate.workspace_observation", errors):
+        stored = {}
+    elif stored["observation_digest"] != receipt_digest(stored, "observation_digest"):
+        errors.append(
+            f"{slice_id}.candidate.workspace_observation: digest does not match observation bytes"
+        )
+    branch_ref = (
+        value["branch"] if str(value["branch"]).startswith("refs/")
+        else f"refs/heads/{value['branch']}"
+    )
     expected_observation = None
     if live is not None:
         expected_observation = live.workspaces.get(
             le.workspace_key(str(value["commit"]), branch_ref, str(value["worktree"]))
         )
-    if expected_observation is None:
+    if integrated:
+        if stored.get("candidate_commit") != value["commit"]:
+            errors.append(
+                f"{slice_id}.candidate.workspace_observation: candidate commit mismatch"
+            )
+    elif expected_observation is None:
         errors.append(f"{slice_id}.candidate.workspace_observation: no fresh live Git association")
-    elif value["workspace_observation"] != expected_observation:
+    elif stored != expected_observation:
         errors.append(
             f"{slice_id}.candidate.workspace_observation: does not match fresh live Git association"
         )
@@ -559,6 +605,7 @@ def _validate_lineage(value: object, slice_id: str, errors: list[str]) -> None:
 
 
 def _validate_review(value: object, slice_id: str, candidate: dict[str, Any], lineage: object,
+                     live: le.LiveEvidence | None,
                      errors: list[str]) -> dict[str, Any] | None:
     if value is None:
         return None
@@ -586,6 +633,8 @@ def _validate_review(value: object, slice_id: str, candidate: dict[str, Any], li
         errors.append(
             f"{slice_id}.review.receipt_digest: digest does not match canonical receipt payload bytes"
         )
+    if live is None or value["receipt_digest"] not in live.review_receipts:
+        errors.append(f"{slice_id}.review.receipt_digest: absent from trusted review observations")
     _strings(value["anchors"], f"{slice_id}.review.anchors", errors, maximum=MAX_ANCHORS)
     if isinstance(value["anchors"], list) and not value["anchors"]:
         errors.append(f"{slice_id}.review.anchors: independent verdict requires evidence")
@@ -613,6 +662,7 @@ def _validate_review(value: object, slice_id: str, candidate: dict[str, Any], li
 def _validate_tests(value: object, required_names: object, slice_id: str,
                     candidate: dict[str, Any],
                     spec: dict[str, Any] | None,
+                    live: le.LiveEvidence | None,
                     errors: list[str]) -> list[dict[str, Any]]:
     if not isinstance(value, list):
         errors.append(f"{slice_id}.test_receipts: must be an array")
@@ -655,6 +705,8 @@ def _validate_tests(value: object, required_names: object, slice_id: str,
             errors.append(
                 f"{label}.receipt_digest: digest does not match canonical receipt payload bytes"
             )
+        if live is None or receipt["receipt_digest"] not in live.test_receipts:
+            errors.append(f"{label}.receipt_digest: absent from trusted test observations")
         result.append(receipt)
     return result
 
@@ -901,12 +953,29 @@ def completion_reasons(entry: dict[str, Any] | None) -> list[str]:
     return sorted(set(reasons))
 
 
+def execution_order(nodes: dict[str, dict[str, Any]]) -> list[str]:
+    """Return deterministic parent-before-child order for an already validated DAG."""
+    remaining = {node_id: set(node["dependencies"]) for node_id, node in nodes.items()}
+    ordered: list[str] = []
+    while remaining:
+        ready = sorted(node_id for node_id, parents in remaining.items() if not parents)
+        if not ready:
+            return []
+        ordered.extend(ready)
+        for node_id in ready:
+            del remaining[node_id]
+        for parents in remaining.values():
+            parents.difference_update(ready)
+    return ordered
+
+
 def next_ready(result: ValidationResult) -> dict[str, Any]:
     """Produce one deterministic view. Invalid authority always suppresses all packets."""
     graph = result.graph
     base = {
         "schema": VIEW_SCHEMA,
         "valid": result.valid,
+        "activation_mode": result.activation_mode,
         "repository": graph.get("repository"),
         "source_commit": graph.get("source_commit"),
         "source_set_digest": graph.get("source_set_digest"),
@@ -915,8 +984,15 @@ def next_ready(result: ValidationResult) -> dict[str, Any]:
         "errors": list(result.errors),
         "next_ready": [],
         "blocked": [],
+        "execution_order": execution_order(result.nodes) if result.valid else [],
     }
     if not result.valid:
+        return base
+    if result.activation_mode == "verify_only":
+        base["blocked"] = [
+            {"slice_id": node_id, "reasons": ["verification_only_not_dispatchable"]}
+            for node_id in base["execution_order"]
+        ]
         return base
 
     complete = {
@@ -971,12 +1047,14 @@ def markdown(view: dict[str, Any]) -> str:
         "# TraceDecay V2 next-ready",
         "",
         f"- Valid: {'yes' if view['valid'] else 'no'}",
+        f"- Activation mode: {scalar(view.get('activation_mode'))}",
         f"- Schema: {scalar(view['schema'])}",
         f"- Repository: {scalar(view.get('repository'))}",
         f"- Source commit: {scalar(view.get('source_commit'))}",
         f"- Source-set digest: {scalar(view.get('source_set_digest'))}",
         f"- Graph revision: {scalar(view.get('graph_revision'))}",
         f"- Graph digest: {scalar(view.get('graph_digest'))}",
+        f"- Execution-order nodes: {scalar(len(view.get('execution_order', [])))}",
     ]
     if view["errors"]:
         lines.extend(["", "## Errors"])

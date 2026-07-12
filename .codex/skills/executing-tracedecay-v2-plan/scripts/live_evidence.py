@@ -5,19 +5,16 @@ from __future__ import annotations
 
 import hashlib
 import re
-import subprocess
-import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
 
-import plan_inventory
+from git_observation import MAX_GIT_OUTPUT_BYTES, run_git
 import slice_authority as sa
 
 
-GIT_TIMEOUT_SECONDS = 10
-MAX_GIT_OUTPUT_BYTES = 64 * 1024
 MAX_WORKTREES = 256
+MAX_PLAN_FILE_BYTES = 4 * 1024 * 1024
 COMMIT = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
 FULL_REF = re.compile(r"^refs/(?:heads|remotes)/[^\x00-\x20~^:?*\\]+(?:/[^\x00-\x20~^:?*\\]+)*$")
 
@@ -26,24 +23,37 @@ def digest(value: object) -> str:
     return "sha256:" + hashlib.sha256(sa._canonical_json(value).encode("utf-8")).hexdigest()
 
 
-def source_set(root: Path) -> list[dict[str, Any]]:
-    """Return canonical current plan-inventory observations used for freshness."""
-    observations: list[dict[str, Any]] = []
-    for path in plan_inventory.plan_files(root):
-        observations.extend(plan_inventory.scan(path, root))
-    return sorted(
-        observations,
-        key=lambda item: (
-            str(item.get("path", "")),
-            int(item.get("line", 0)),
-            tuple(item.get("ids", [])),
-            str(item.get("block_sha256", "")),
-        ),
+def source_set(root: Path, commit: str) -> list[list[str]]:
+    """Hash the exact indexed plan blobs from one immutable Git tree."""
+    listed = _git(
+        root, "ls-tree", "-r", "-z", "--name-only", commit, "--",
+        "docs/plans/2026-07-09-tracedecay-brain-rewrite.md", "docs/plans/tracedecay-v2",
     )
+    if listed.error is not None or listed.returncode != 0:
+        raise ValueError(f"cannot list canonical plan tree: {listed.error or listed.stderr}")
+    paths = sorted(path for path in listed.stdout.split("\0") if path.endswith(".md"))
+    if "docs/plans/2026-07-09-tracedecay-brain-rewrite.md" not in paths:
+        raise ValueError("canonical plan tree is missing the master V2 plan")
+    observations: list[list[str]] = []
+    for path in paths:
+        sized = _git(root, "cat-file", "-s", f"{commit}:{path}")
+        if sized.error is not None or sized.returncode != 0:
+            raise ValueError(f"cannot size canonical plan blob {path}: {sized.error or sized.stderr}")
+        try:
+            size = int(sized.stdout.strip())
+        except ValueError as error:
+            raise ValueError(f"invalid canonical plan blob size for {path}") from error
+        if size > MAX_PLAN_FILE_BYTES:
+            raise ValueError(f"canonical plan blob {path} exceeds {MAX_PLAN_FILE_BYTES} bytes")
+        shown = _git(root, "show", f"{commit}:{path}", max_output_bytes=MAX_PLAN_FILE_BYTES)
+        if shown.error is not None or shown.returncode != 0:
+            raise ValueError(f"cannot read canonical plan blob {path}: {shown.error or shown.stderr}")
+        observations.append([path, "sha256:" + hashlib.sha256(shown.stdout_bytes).hexdigest()])
+    return observations
 
 
-def source_set_digest(root: Path) -> str:
-    return digest(source_set(root))
+def source_set_digest(root: Path, commit: str) -> str:
+    return digest(source_set(root, commit))
 
 
 @dataclass(frozen=True)
@@ -55,6 +65,8 @@ class LiveEvidence:
     source_set_digest: str | None
     ancestry: dict[str, dict[str, Any]]
     workspaces: dict[str, dict[str, Any]]
+    review_receipts: frozenset[str]
+    test_receipts: frozenset[str]
     errors: tuple[str, ...]
 
 
@@ -63,36 +75,19 @@ class GitResult:
     returncode: int
     stdout: str
     stderr: str
+    stdout_bytes: bytes
     error: str | None = None
 
 
-def _bounded_text(stream: Any, label: str) -> tuple[str, str | None]:
-    size = stream.tell()
-    stream.seek(0)
-    payload = stream.read(MAX_GIT_OUTPUT_BYTES + 1)
-    if size > MAX_GIT_OUTPUT_BYTES or len(payload) > MAX_GIT_OUTPUT_BYTES:
-        return "", f"{label} exceeded {MAX_GIT_OUTPUT_BYTES} bytes"
+def _git(root: Path, *args: str, max_output_bytes: int = MAX_GIT_OUTPUT_BYTES) -> GitResult:
+    """Text adapter over the shared bounded Git runner."""
+    result = run_git(root, *args, max_output_bytes=max_output_bytes)
     try:
-        return payload.decode("utf-8"), None
+        out = result.stdout.decode("utf-8")
+        err = result.stderr.decode("utf-8")
     except UnicodeDecodeError as error:
-        return "", f"{label} is not UTF-8: {error}"
-
-
-def _git(root: Path, *args: str) -> GitResult:
-    """Run one bounded Git observation; timeout/output failures are explicit Unknown."""
-    with tempfile.TemporaryFile() as stdout, tempfile.TemporaryFile() as stderr:
-        try:
-            completed = subprocess.run(
-                ["git", *args], cwd=root, stdout=stdout, stderr=stderr, check=False,
-                timeout=GIT_TIMEOUT_SECONDS,
-            )
-        except subprocess.TimeoutExpired:
-            return GitResult(-1, "", "", f"timed out after {GIT_TIMEOUT_SECONDS} seconds")
-        except OSError as error:
-            return GitResult(-1, "", "", f"{type(error).__name__}: {error}")
-        out, out_error = _bounded_text(stdout, "stdout")
-        err, err_error = _bounded_text(stderr, "stderr")
-    return GitResult(completed.returncode, out, err, out_error or err_error)
+        return GitResult(result.returncode, "", "", b"", f"Git output is not UTF-8: {error}")
+    return GitResult(result.returncode, out, err, result.stdout, result.error)
 
 
 def workspace_key(commit: str, branch_ref: str, worktree: str) -> str:
@@ -141,7 +136,9 @@ def _worktree_observations(root: Path, repository: str) -> tuple[dict[str, dict[
     return observations, None
 
 
-def inspect(root: Path, canonical_ref: str, candidates: Iterable[str]) -> LiveEvidence:
+def inspect(root: Path, canonical_ref: str, candidates: Iterable[str], *,
+            review_receipts: Iterable[str] = (),
+            test_receipts: Iterable[str] = ()) -> LiveEvidence:
     """Observe authoritative ref, current source blocks, and candidate ancestry.
 
     Every Git/process failure remains an explicit error. Callers must suppress packets
@@ -200,10 +197,11 @@ def inspect(root: Path, canonical_ref: str, candidates: Iterable[str]) -> LiveEv
     else:
         canonical_commit = resolved.stdout.strip()
 
-    try:
-        current_digest = source_set_digest(root)
-    except (OSError, UnicodeError, ValueError, TypeError, OverflowError) as error:
-        errors.append(f"live.source_set: {type(error).__name__}: {error}")
+    if canonical_commit is not None:
+        try:
+            current_digest = source_set_digest(root, canonical_commit)
+        except (OSError, UnicodeError, ValueError, TypeError, OverflowError) as error:
+            errors.append(f"live.source_set: {type(error).__name__}: {error}")
 
     if repository is not None:
         workspaces, worktree_error = _worktree_observations(root, repository)
@@ -240,5 +238,7 @@ def inspect(root: Path, canonical_ref: str, candidates: Iterable[str]) -> LiveEv
         source_set_digest=current_digest,
         ancestry=ancestry,
         workspaces=workspaces,
+        review_receipts=frozenset(review_receipts),
+        test_receipts=frozenset(test_receipts),
         errors=tuple(sorted(set(errors))),
     )

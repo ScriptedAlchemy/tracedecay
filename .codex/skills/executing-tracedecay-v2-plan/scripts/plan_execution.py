@@ -5,12 +5,18 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 from typing import Any
 
 import execution_state
 import live_evidence
+import slice_authority
+
+
+STATE_ENV = "TRACEDECAY_V2_EXECUTION_STATE"
+DEFAULT_STATE = Path(".tracedecay/v2-execution-state.json")
 
 
 def strict_json(path: Path) -> dict[str, Any]:
@@ -52,13 +58,32 @@ def analyze(document: dict[str, Any], live: live_evidence.LiveEvidence | None = 
     return execution_state.next_ready(execution_state.validate(document, live))
 
 
+def resolve_state(root: Path, explicit: Path | None) -> Path:
+    if explicit is not None:
+        return explicit
+    configured = os.environ.get(STATE_ENV)
+    if configured:
+        return Path(configured)
+    default = root / DEFAULT_STATE
+    if default.exists():
+        return default
+    active = root / ".tracedecay/v2-execution-active.json"
+    if active.exists():
+        selected, failure = slice_authority.resolve_active_generation(active, root, "state")
+        if failure is not None or selected is None:
+            raise ValueError(f"active execution state: {failure.reason}: {failure.detail}")
+        return selected
+    return default
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="Validate canonical V2 DAG/ledger evidence and select next-ready work."
     )
     parser.add_argument(
-        "--graph", "--state", dest="state", type=Path, required=True,
-        help="tracedecay.v2.execution-state/v1 JSON export",
+        "--graph", "--state", dest="state", type=Path,
+        help=("tracedecay.v2.execution-state/v1 JSON export; defaults to "
+              f"${STATE_ENV} then <repo-root>/{DEFAULT_STATE}"),
     )
     parser.add_argument(
         "--next-ready", action="store_true",
@@ -76,13 +101,16 @@ def main() -> int:
     args = parser.parse_args()
 
     try:
-        document = strict_json(args.state)
-        live = live_evidence.inspect(args.root, args.canonical_ref, candidate_commits(document))
+        root = args.root.resolve()
+        state = resolve_state(root, args.state)
+        document = strict_json(state)
+        live = live_evidence.inspect(root, args.canonical_ref, candidate_commits(document))
         view = analyze(document, live)
     except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as error:
         view = {
             "schema": execution_state.VIEW_SCHEMA,
             "valid": False,
+            "activation_mode": "invalid",
             "repository": None,
             "source_commit": None,
             "source_set_digest": None,
@@ -91,6 +119,7 @@ def main() -> int:
             "errors": [f"input: {error}"],
             "next_ready": [],
             "blocked": [],
+            "execution_order": [],
         }
 
     if args.format == "json":

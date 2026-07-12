@@ -20,6 +20,7 @@ from unittest import mock
 from pathlib import Path
 
 import slice_authority as sa
+import git_observation as go
 
 
 def _sha(raw: str) -> str:
@@ -53,10 +54,11 @@ def _owner(raw: str, *, phase: int = 0, subject: str = "feat: x", **kw) -> sa.Se
 
 
 def _authority(records, *, revision: int = 1):
+    observations = sa.source_anchor_observations(records)
     return {
         "schema": "tracedecay.v2.slice-dag/v1",
         "graph_revision": revision,
-        "source_set_digest": sa.source_set_digest(records),
+        "source_set_digest": sa.source_set_digest(observations),
         "slices": {
             nid: {**record.reconciled_body(), "content_digest": record.content_digest,
                   "idempotency_key": record.idempotency_key}
@@ -64,6 +66,16 @@ def _authority(records, *, revision: int = 1):
         },
         "series": {},
     }
+
+
+def _reconcile_authority(records, authority, phase, **kwargs):
+    return sa.reconcile_against_authority(
+        records,
+        authority,
+        phase,
+        source_observations=sa.source_anchor_observations(records),
+        **kwargs,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -469,9 +481,10 @@ class DigestTests(unittest.TestCase):
 
     def test_source_set_digest_is_stable_and_hex(self) -> None:
         records = sa.reconcile([_owner("PR 4E"), _owner("PR 4C")]).records
-        digest = sa.source_set_digest(records)
+        observations = sa.source_anchor_observations(records)
+        digest = sa.source_set_digest(observations)
         self.assertRegex(digest, r"^sha256:[0-9a-f]{64}$")
-        self.assertEqual(digest, sa.source_set_digest(records))
+        self.assertEqual(digest, sa.source_set_digest(observations))
 
     def test_rfc8785_numbers_strings_and_utf16_key_order(self) -> None:
         value = {"\ue000": 1.0, "😀": 1e-7, "text": "\b\n\u0000/é"}
@@ -849,7 +862,7 @@ class SourceAnchorTests(unittest.TestCase):
                 calls.append(command)
                 return real_run(command, *args, **kwargs)
 
-            with mock.patch.object(sa.subprocess, "run", side_effect=counted_run):
+            with mock.patch.object(go.subprocess, "run", side_effect=counted_run):
                 result = sa.reconcile(
                     sections, repo_root=root, source_commit=commit,
                     indexed_plan_paths=frozenset({"plan.md"}),
@@ -908,6 +921,15 @@ class BootstrapLocatorTests(unittest.TestCase):
         env = Path(self._stack[-1].name) / "env.json"
         env.write_text('{"schema":"tracedecay.v2.slice-dag/v1","slices":{}}')
         found, _ = sa.locate_bootstrap_manifest(root, env=str(env))
+        self.assertEqual(found, env.resolve())
+
+    def test_process_environment_is_used_when_argument_is_omitted(self) -> None:
+        root = self._repo(self._stack)
+        env = Path(self._stack[-1].name) / "env.json"
+        env.write_text('{"schema":"tracedecay.v2.slice-dag/v1","slices":{}}')
+        with mock.patch.dict(os.environ, {"TRACEDECAY_V2_EXECUTION_MANIFEST": str(env)}):
+            found, failure = sa.locate_bootstrap_manifest(root)
+        self.assertIsNone(failure)
         self.assertEqual(found, env.resolve())
 
     def test_missing_candidate_is_typed_failure(self) -> None:
@@ -995,13 +1017,13 @@ class ReconcileAgainstAuthorityTests(unittest.TestCase):
 
     def test_matching_candidate_produces_no_diagnostics(self) -> None:
         records = self._records()
-        self.assertEqual(sa.reconcile_against_authority(records, _authority(records), "pre"), [])
+        self.assertEqual(_reconcile_authority(records, _authority(records), "pre"), [])
 
     def test_extra_and_missing_ids_are_reconciliation_mismatches(self) -> None:
         records = self._records()
         authority = _authority(records)
         authority["slices"] = {"PR 2": authority["slices"]["PR 2"], "PR 9": {}}
-        diagnostics = sa.reconcile_against_authority(records, authority, "pre")
+        diagnostics = _reconcile_authority(records, authority, "pre")
         pairs = {(d.code, d.normalized_id) for d in diagnostics}
         self.assertIn(("reconciliation_mismatch", "PR 1"), pairs)
         self.assertIn(("reconciliation_mismatch", "PR 9"), pairs)
@@ -1011,7 +1033,7 @@ class ReconcileAgainstAuthorityTests(unittest.TestCase):
         for field, value in [("phase", 5), ("commit_subject", "fix: tampered")]:
             authority = _authority(records)
             authority["slices"]["PR 1"][field] = value
-            codes = {d.code for d in sa.reconcile_against_authority(records, authority, "post")}
+            codes = {d.code for d in _reconcile_authority(records, authority, "post")}
             self.assertTrue({"digest_mismatch", "reconciliation_mismatch"} <= codes)
 
     def test_tampered_digest_key_and_source_set_are_rejected(self) -> None:
@@ -1020,25 +1042,25 @@ class ReconcileAgainstAuthorityTests(unittest.TestCase):
         authority["source_set_digest"] = "sha256:" + "0" * 64
         authority["slices"]["PR 1"]["content_digest"] = "sha256:" + "1" * 64
         authority["slices"]["PR 1"]["idempotency_key"] = "copied"
-        self.assertEqual({d.code for d in sa.reconcile_against_authority(records, authority, "pre")},
+        self.assertEqual({d.code for d in _reconcile_authority(records, authority, "pre")},
                          {"digest_mismatch", "idempotency_mismatch"})
 
     def test_malformed_top_level_and_slice_schema_are_rejected(self) -> None:
         records = self._records()
         authority = _authority(records)
         authority["extra"] = True
-        self.assertEqual([d.code for d in sa.reconcile_against_authority(records, authority, "pre")],
+        self.assertEqual([d.code for d in _reconcile_authority(records, authority, "pre")],
                          ["reconciliation_mismatch"])
         authority = _authority(records)
         del authority["slices"]["PR 1"]["phase"]
         self.assertTrue(any("malformed exact schema" in d.violated_rule
-                            for d in sa.reconcile_against_authority(records, authority, "pre")))
+                            for d in _reconcile_authority(records, authority, "pre")))
 
     def test_requires_success_authority_payload_may_be_omitted_and_normalizes(self) -> None:
         records = self._records()
         authority = _authority(records)
         del authority["slices"]["PR 1"]["dependencies"][0]["payload"]
-        self.assertEqual(sa.reconcile_against_authority(records, authority, "pre"), [])
+        self.assertEqual(_reconcile_authority(records, authority, "pre"), [])
 
     def test_malformed_dependencies_and_payload_omission_elsewhere_are_rejected(self) -> None:
         records = self._records()
@@ -1058,7 +1080,7 @@ class ReconcileAgainstAuthorityTests(unittest.TestCase):
         for malformed in malformed_edges:
             authority = _authority(records)
             authority["slices"]["PR 1"]["dependencies"] = [malformed]
-            diagnostics = sa.reconcile_against_authority(records, authority, "pre")
+            diagnostics = _reconcile_authority(records, authority, "pre")
             self.assertTrue(any("malformed dependency" in d.violated_rule
                                 for d in diagnostics), malformed)
 
@@ -1067,11 +1089,11 @@ class ReconcileAgainstAuthorityTests(unittest.TestCase):
         series = {"PR 1 series": ("PR 1", "PR 2")}
         authority = _authority(records)
         authority["series"] = {"PR 1 series": ["PR 1", "PR 9"]}
-        diagnostics = sa.reconcile_against_authority(
+        diagnostics = _reconcile_authority(
             records, authority, "post", canonical_series=series)
         self.assertIn("reconciliation_mismatch", {item.code for item in diagnostics})
         malformed = {"PR 1 series": ("PR 2", "PR 1")}
-        diagnostics = sa.reconcile_against_authority(
+        diagnostics = _reconcile_authority(
             records, authority, "post", canonical_series=malformed)
         self.assertIn("invalid_series", {item.code for item in diagnostics})
 
@@ -1079,7 +1101,7 @@ class ReconcileAgainstAuthorityTests(unittest.TestCase):
         records = self._records()
         authority = _authority(records)
         authority["slices"]["PR 1"]["dependencies"][0]["source_anchors"] = ["bogus"]
-        diagnostics = sa.reconcile_against_authority(records, authority, "post")
+        diagnostics = _reconcile_authority(records, authority, "post")
         self.assertTrue(any("malformed dependency" in item.violated_rule
                             for item in diagnostics))
 
@@ -1098,7 +1120,7 @@ class ReconcileAgainstAuthorityTests(unittest.TestCase):
         for criterion in malformed:
             authority = _authority(records)
             authority["slices"]["PR 1"]["acceptance"] = [criterion]
-            diagnostics = sa.reconcile_against_authority(records, authority, "post")
+            diagnostics = _reconcile_authority(records, authority, "post")
             self.assertTrue(diagnostics, criterion)
             self.assertTrue(
                 {item.code for item in diagnostics}
@@ -1123,7 +1145,7 @@ class ReconcileAgainstAuthorityTests(unittest.TestCase):
                        "end_line": companion.anchor.end_line,
                        "block_sha256": companion.anchor.block_sha256},
         }])
-        self.assertEqual(sa.reconcile_against_authority(records, _authority(records), "pre"), [])
+        self.assertEqual(_reconcile_authority(records, _authority(records), "pre"), [])
 
 
 # ---------------------------------------------------------------------------

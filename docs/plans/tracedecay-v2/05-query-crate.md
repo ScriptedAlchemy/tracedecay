@@ -1086,7 +1086,7 @@ Program numbering is authoritative: PR 12 is implemented in dependency order as 
 
 ### PR 14A: Representation candidates and privacy/resource benchmark
 
-**Ordering:** plan 13 PR 2A must first publish and review the exact native-semantic evidence-ledger digest covering every selected FastEmbed/runtime/model/tokenizer/config/license artifact. Scaffolding may precede that gate; artifact load/download, benchmark acceptance, and promotion may not.
+**Ordering:** plan 13 PR 2A must first publish and review the exact native-semantic evidence-ledger digest covering every selected FastEmbed/runtime/model/tokenizer/config/license artifact. PR 14A is release-excluded fixture/benchmark work only: it uses the frozen plan-31 synthetic semantic-code document corpus and ephemeral plan-02-compatible storage, so it does not require Phase-3 PR 18D or production generation PR 6C. Scaffolding may precede PR 2A; artifact load/download and benchmark acceptance may not. Production publication/promotion remains gated at PR 14E by both PR 6C and PR 18D.
 
 **Files:** a release-excluded benchmark/test adapter under root-private `src/v2/native_semantic_runtime`, `src/operators/vector.rs`, representation manifest/port contracts, `tests/{hybrid_ranking,security_privacy,search_quality_eval}.rs`, `benches/federated_topk.rs`.
 
@@ -1100,6 +1100,8 @@ Program numbering is authoritative: PR 12 is implemented in dependency order as 
 
 ### PR 14B: Hybrid fusion, bounded graph expansion, and hard negatives
 
+**Ordering:** merge-eligible only after PR 14E records an accepted representation profile and publishes its signed lifecycle/catalog contract. It may develop against the frozen PR 14A fixture pool, but cannot merge, open a production route, or publish a generation before 14E. A disabled/rejected PR 14A disposition terminalizes PR 14B as skipped without weakening lexical retrieval.
+
 **Files:** `src/operators/vector.rs`, `src/rank/{mod,vector,rrf,features,explain}.rs`, `tests/{hybrid_ranking,security_privacy}.rs`, `benches/federated_topk.rs`.
 
 - [ ] Add tests `rrf_is_deterministic_across_shard_arrival`, `rejects_mixed_representation_dimensions`, `exact_fallback_matches_reference_topk`, `missing_features_are_absent_not_zero`, `explain_reconstructs_final_score`, and `secret_fixture_never_reaches_vector_port`.
@@ -1111,6 +1113,8 @@ Program numbering is authoritative: PR 12 is implemented in dependency order as 
 - [ ] Commit `feat(query): add explainable hybrid fusion`.
 
 ### PR 14C: Optional bounded reranking
+
+**Ordering:** after accepted PR 14B integration. It consumes the exact bounded fused pool and explanation contract produced by 14B; it cannot develop a second candidate source or bypass PR 14E lifecycle authority. A disabled/rejected representation profile terminalizes PR 14C as skipped.
 
 **Files:** create `src/rank/rerank.rs`; extend `tests/{hybrid_ranking,search_quality_eval,security_privacy}.rs` and `benches/federated_topk.rs`.
 
@@ -1124,7 +1128,7 @@ Program numbering is authoritative: PR 12 is implemented in dependency order as 
 
 ### PR 14E: Signed representation artifact catalog and local lifecycle
 
-**Ordering:** after PR 14A records accepted/disabled candidate profiles and before any accepted PR 14B/14C route is enabled by default. Plan 25 PR 18D supplies deterministic code representation documents before a code vector generation can publish. A rejected representation profile gets no production artifact entry.
+**Ordering:** after PR 14A records accepted/disabled candidate profiles and after plan-02 PR 6C plus plan-25 PR 18D supply production generation/blob persistence and deterministic code representation documents. Accepted PR 14E precedes merge eligibility—not merely default enablement—for PR 14B and PR 14C. A rejected representation profile gets no production artifact entry and terminalizes those production-only descendants as skipped.
 
 **Files:** domain representation artifact contracts; `crates/tracedecay-application/src/{ports,use_cases}/representation_artifacts.rs`; root-private `src/v2/native_semantic_runtime/{mod,fastembed,cache,session,status}.rs`; plan-02 catalog/state/lease migration and repository; plan-20 descriptors/forms; plan-08 capability entries/generated bindings; release workflow/script for the signed catalog; `tests/{representation_artifact_lifecycle,security_privacy,release_artifacts}.rs`. No new crate is created.
 

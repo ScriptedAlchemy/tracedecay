@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import copy
+import dataclasses
 import json
 import subprocess
 import tempfile
@@ -13,8 +14,11 @@ from typing import Any
 from unittest import mock
 
 import execution_state as es
+import bootstrap_execution
+import git_observation as go
 import live_evidence as le
 import plan_execution
+import slice_authority as sa
 
 
 FIXTURES = Path(__file__).with_name("fixtures")
@@ -80,8 +84,14 @@ class GitHarness:
         self._git("config", "user.email", "test@example.invalid")
         self._git("config", "user.name", "TraceDecay Test")
         self._git("remote", "add", "origin", "https://example.invalid/tracedecay.git")
+        plans = self.root / "docs/plans/tracedecay-v2"
+        plans.mkdir(parents=True)
+        (self.root / "docs/plans/2026-07-09-tracedecay-brain-rewrite.md").write_text(
+            "# Synthetic V2 plan\n", encoding="utf-8"
+        )
+        (plans / "00-plan-set-index.md").write_text("# Synthetic index\n", encoding="utf-8")
         (self.root / "evidence.txt").write_text("candidate\n", encoding="utf-8")
-        self._git("add", "evidence.txt")
+        self._git("add", ".")
         self._git("commit", "-m", "candidate")
         self.candidate_commit = self._git("rev-parse", "HEAD").stdout.strip()
         self.worktrees: dict[str, Path] = {}
@@ -164,13 +174,33 @@ def tearDownModule() -> None:
     HARNESS.close()
 
 
-def analyze(document: dict, live: le.LiveEvidence | None = None) -> dict:
-    return plan_execution.analyze(document, live or HARNESS.live)
+def analyze(document: dict, live: le.LiveEvidence | None = None, *, trust_receipts: bool = False) -> dict:
+    authority = live or HARNESS.live
+    if trust_receipts:
+        authority = dataclasses.replace(
+            authority,
+            review_receipts=frozenset(
+                entry["review"]["receipt_digest"]
+                for entry in document["completion_ledger"]["entries"]
+                if isinstance(entry.get("review"), dict)
+            ),
+            test_receipts=frozenset(
+                receipt["receipt_digest"]
+                for entry in document["completion_ledger"]["entries"]
+                for receipt in entry["test_receipts"]
+            ),
+        )
+    return plan_execution.analyze(document, authority)
+
+
+def analyze_trusted(document: dict, live: le.LiveEvidence | None = None) -> dict:
+    """Simulate receipts independently observed by the test harness event recorder."""
+    return analyze(document, live, trust_receipts=True)
 
 
 class NextReadyTests(unittest.TestCase):
     def test_positive_fixture_selects_exact_bounded_packet(self) -> None:
-        view = analyze(load())
+        view = analyze_trusted(load())
         self.assertTrue(view["valid"], view["errors"])
         self.assertEqual([item["slice_id"] for item in view["next_ready"]], ["PR 2"])
         packet = view["next_ready"][0]
@@ -180,7 +210,7 @@ class NextReadyTests(unittest.TestCase):
 
     def test_candidate_only_is_valid_but_blocks_itself(self) -> None:
         document = load("negative-candidate-only.json")
-        view = analyze(document)
+        view = analyze_trusted(document)
         self.assertTrue(view["valid"], view["errors"])
         blocked = {item["slice_id"]: item["reasons"] for item in view["blocked"]}
         self.assertIn("candidate_only_unintegrated", blocked["PR 2"])
@@ -196,7 +226,7 @@ class NextReadyTests(unittest.TestCase):
         retired = load(); retired["canonical_dag"]["nodes"][1]["dependencies"] = ["FM-168"]
         reseal(retired); cases.append((retired, "retired obligation FM-168"))
         for document, expected in cases:
-            view = analyze(document)
+            view = analyze_trusted(document)
             self.assertFalse(view["valid"])
             self.assertEqual(view["next_ready"], [])
             self.assertTrue(any(expected in error for error in view["errors"]), view["errors"])
@@ -206,7 +236,7 @@ class NextReadyTests(unittest.TestCase):
         document["canonical_dag"]["nodes"][1]["owner"] = "owner:plan-01"
         document["dispatch_specs"][1]["owner"] = "owner:plan-01"
         reseal(document)
-        view = analyze(document)
+        view = analyze_trusted(document)
         self.assertFalse(view["valid"])
         self.assertEqual(view["next_ready"], [])
         self.assertTrue(any("duplicate owner" in error for error in view["errors"]))
@@ -215,9 +245,84 @@ class NextReadyTests(unittest.TestCase):
         document = load()
         document["dispatch_specs"][1]["workspace"]["worktree"] = "x" * (es.MAX_TEXT + 1)
         reseal(document, replace_dispatch_authority=True)
-        view = analyze(document)
+        view = analyze_trusted(document)
         self.assertFalse(view["valid"])
         self.assertTrue(any("scalar exceeds 2048" in error for error in view["errors"]))
+
+    def test_bootstrap_installs_shared_default_state_for_fresh_host_entrypoints(self) -> None:
+        document = load()
+        document["activation_mode"] = "verify_only"
+        document["completion_ledger"]["entries"] = []
+        document["dispatch_specs"] = []
+        graph = document["canonical_dag"]
+        manifest = {
+            "schema": "tracedecay.v2.slice-dag/v1",
+            "graph_revision": graph["graph_revision"],
+            "source_set_digest": graph["source_set_digest"],
+            "slices": {
+                node["id"]: {
+                    "content_digest": node["content_digest"],
+                    "dependencies": [
+                        {"parent": parent} for parent in node["dependencies"]
+                    ],
+                }
+                for node in graph["nodes"]
+            },
+            "series": {},
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            temp = Path(directory)
+            manifest_path = temp / "manifest.json"
+            state_path = temp / "state.json"
+            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+            state_path.write_text(json.dumps(document), encoding="utf-8")
+            process = subprocess.run(
+                [
+                    "python3", str(Path(bootstrap_execution.__file__)),
+                    "--manifest", str(manifest_path),
+                    "--state-export", str(state_path),
+                    "--root", str(HARNESS.root),
+                    "--canonical-ref", HARNESS.live.canonical_ref,
+                ],
+                check=False, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            )
+            self.assertEqual(process.returncode, 0, process.stdout + process.stderr)
+            output = plan_execution.resolve_state(HARNESS.root, None)
+            installed_manifest, failure = sa.locate_bootstrap_manifest(HARNESS.root)
+            self.assertIsNone(failure)
+            self.assertIsNotNone(installed_manifest)
+            self.assertEqual(plan_execution.strict_json(output), document)
+            self.assertEqual(plan_execution.strict_json(installed_manifest), manifest)
+
+            view = plan_execution.analyze(document, HARNESS.live)
+            self.assertTrue(view["valid"], view["errors"])
+            self.assertEqual(view["activation_mode"], "verify_only")
+            self.assertEqual(view["execution_order"], ["PR 1", "PR 2"])
+            self.assertEqual(view["next_ready"], [])
+            self.assertTrue(all(
+                item["reasons"] == ["verification_only_not_dispatchable"]
+                for item in view["blocked"]
+            ))
+
+            dispatch_state = load()
+            dispatch_state["completion_ledger"]["entries"] = []
+            state_path.write_text(json.dumps(dispatch_state), encoding="utf-8")
+            rejected = subprocess.run(
+                [
+                    "python3", str(Path(bootstrap_execution.__file__)),
+                    "--manifest", str(manifest_path),
+                    "--state-export", str(state_path),
+                    "--root", str(HARNESS.root),
+                    "--canonical-ref", HARNESS.live.canonical_ref,
+                ],
+                check=False, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            )
+            self.assertEqual(rejected.returncode, 2)
+            self.assertIn("activation_mode=verify_only", rejected.stdout)
+            self.assertEqual(
+                plan_execution.strict_json(plan_execution.resolve_state(HARNESS.root, None)),
+                document,
+            )
 
 
 class LiveEvidenceAndReceiptTests(unittest.TestCase):
@@ -235,7 +340,7 @@ class LiveEvidenceAndReceiptTests(unittest.TestCase):
             if entry["integration"] is not None:
                 entry["integration"]["source_set_digest"] = stale
         reseal(document)
-        view = analyze(document, authoritative)
+        view = analyze_trusted(document, authoritative)
         self.assertFalse(view["valid"])
         self.assertTrue(any("canonical_dag.source_set_digest" in e for e in view["errors"]))
 
@@ -246,7 +351,7 @@ class LiveEvidenceAndReceiptTests(unittest.TestCase):
         integration["ancestry_observation"]["status"] = "not_ancestor"
         integration["ancestry_observation"]["command_exit_code"] = 1
         integration["receipt_digest"] = es.receipt_digest(integration)
-        view = analyze(document, live)
+        view = analyze_trusted(document, live)
         self.assertFalse(view["valid"])
         self.assertTrue(any("sealed live Git observation" in e for e in view["errors"]))
 
@@ -260,14 +365,14 @@ class LiveEvidenceAndReceiptTests(unittest.TestCase):
                 entry[key][0]["exit_code"] = 9
             else:
                 entry[key]["state"] = "pending"
-            view = analyze(document)
+            view = analyze_trusted(document)
             self.assertFalse(view["valid"])
             self.assertTrue(any("canonical receipt payload bytes" in e for e in view["errors"]))
 
     def test_candidate_digest_and_unbound_test_command_are_rejected(self) -> None:
         document = load()
         document["completion_ledger"]["entries"][0]["candidate"]["branch"] = "forged"
-        view = analyze(document)
+        view = analyze_trusted(document)
         self.assertFalse(view["valid"])
         self.assertTrue(any("candidate payload bytes" in e for e in view["errors"]))
 
@@ -275,7 +380,7 @@ class LiveEvidenceAndReceiptTests(unittest.TestCase):
         receipt = document["completion_ledger"]["entries"][0]["test_receipts"][0]
         receipt["command"] = "true"
         receipt["receipt_digest"] = es.receipt_digest(receipt)
-        view = analyze(document)
+        view = analyze_trusted(document)
         self.assertFalse(view["valid"])
         self.assertTrue(any("exact declared acceptance command" in e for e in view["errors"]))
 
@@ -285,7 +390,7 @@ class LiveEvidenceAndReceiptTests(unittest.TestCase):
         extra["name"] = "undeclared"
         extra["receipt_digest"] = es.receipt_digest(extra)
         entry["test_receipts"].append(extra)
-        view = analyze(document)
+        view = analyze_trusted(document)
         self.assertFalse(view["valid"])
         self.assertTrue(any("not declared in required_tests" in e for e in view["errors"]))
 
@@ -294,15 +399,29 @@ class LiveEvidenceAndReceiptTests(unittest.TestCase):
         review = document["completion_ledger"]["entries"][0]["review"]
         review["reviewer_authority"] = review["implementation_authority"]
         review["receipt_digest"] = es.receipt_digest(review)
-        view = analyze(document)
+        view = analyze_trusted(document)
         self.assertFalse(view["valid"])
         self.assertTrue(any("distinct principal/authority" in e for e in view["errors"]))
+
+    def test_self_authored_review_and_test_receipts_do_not_unlock_work(self) -> None:
+        document = load()
+        view = analyze(document)
+        self.assertFalse(view["valid"])
+        self.assertTrue(any("trusted review observations" in e for e in view["errors"]))
+        self.assertTrue(any("trusted test observations" in e for e in view["errors"]))
+
+    def test_integrated_candidate_does_not_require_retained_worktree(self) -> None:
+        document = load()
+        live = dataclasses.replace(HARNESS.live, workspaces={})
+        view = analyze_trusted(document, live)
+        self.assertTrue(view["valid"], view["errors"])
+        self.assertEqual([item["slice_id"] for item in view["next_ready"]], ["PR 2"])
 
     def test_external_live_failure_is_unknown_and_emits_no_packet(self) -> None:
         document = load()
         live = HARNESS.live
         failed = le.LiveEvidence(**{**live.__dict__, "errors": ("live.git.canonical_ref: failed",)})
-        view = analyze(document, failed)
+        view = analyze_trusted(document, failed)
         self.assertFalse(view["valid"])
         self.assertEqual(view["next_ready"], [])
 
@@ -316,7 +435,7 @@ class LiveEvidenceAndReceiptTests(unittest.TestCase):
         entry["test_receipts"][0]["name"] = "fabricated"
         entry["test_receipts"][0]["command"] = "true"
         reseal(document)
-        view = analyze(document)
+        view = analyze_trusted(document)
         self.assertFalse(view["valid"])
         self.assertTrue(any("canonical DAG dispatch_digest" in error for error in view["errors"]))
 
@@ -327,8 +446,9 @@ class LiveEvidenceAndReceiptTests(unittest.TestCase):
         candidate = document["completion_ledger"]["entries"][0]["candidate"]
         candidate["branch"] = "forged"
         candidate["worktree"] = "/forged"
+        document["completion_ledger"]["entries"][0]["integration"] = None
         reseal(document)
-        view = analyze(document)
+        view = analyze_trusted(document)
         self.assertFalse(view["valid"])
         self.assertTrue(any("canonical DAG dispatch_digest" in error for error in view["errors"]))
         self.assertTrue(any("no fresh live Git association" in error for error in view["errors"]))
@@ -338,12 +458,13 @@ class LiveEvidenceAndReceiptTests(unittest.TestCase):
         integration = document["completion_ledger"]["entries"][0]["integration"]
         integration["canonical_branch"] = "refs/heads/attacker"
         integration["receipt_digest"] = es.receipt_digest(integration)
-        view = analyze(document)
+        view = analyze_trusted(document)
         self.assertFalse(view["valid"])
         self.assertTrue(any("integration.canonical_branch" in error for error in view["errors"]))
 
     def test_dirty_worktree_observation_fails_closed(self) -> None:
         document = load()
+        document["completion_ledger"]["entries"][0]["integration"] = None
         live = copy.deepcopy(HARNESS.live)
         candidate = document["completion_ledger"]["entries"][0]["candidate"]
         key = le.workspace_key(candidate["commit"], f"refs/heads/{candidate['branch']}",
@@ -356,21 +477,21 @@ class LiveEvidenceAndReceiptTests(unittest.TestCase):
         live.workspaces[key] = dirty
         candidate["workspace_observation"] = copy.deepcopy(dirty)
         reseal(document)
-        view = analyze(document, live)
+        view = analyze_trusted(document, live)
         self.assertFalse(view["valid"])
         self.assertTrue(any("worktree is not clean" in error for error in view["errors"]))
 
     def test_git_timeout_and_output_overflow_are_explicit_errors(self) -> None:
-        timeout = subprocess.TimeoutExpired(["git"], le.GIT_TIMEOUT_SECONDS)
-        with mock.patch.object(le.subprocess, "run", side_effect=timeout):
+        timeout = subprocess.TimeoutExpired(["git"], go.GIT_TIMEOUT_SECONDS)
+        with mock.patch.object(go.subprocess, "run", side_effect=timeout):
             result = le._git(HARNESS.root, "status")
         self.assertIn("timed out", result.error or "")
 
         def overflow(*args: Any, **kwargs: Any) -> subprocess.CompletedProcess[Any]:
-            kwargs["stdout"].write(b"x" * (le.MAX_GIT_OUTPUT_BYTES + 1))
+            kwargs["stdout"].write(b"x" * (go.MAX_GIT_OUTPUT_BYTES + 1))
             return subprocess.CompletedProcess(["git", "status"], 0)
 
-        with mock.patch.object(le.subprocess, "run", side_effect=overflow):
+        with mock.patch.object(go.subprocess, "run", side_effect=overflow):
             result = le._git(HARNESS.root, "status")
         self.assertIn("exceeded", result.error or "")
 
@@ -390,7 +511,7 @@ class SteeringFenceTests(unittest.TestCase):
             "event_sequence": 5, "delivery_boundary": "event-log:5",
             "remediation_task": None, "successor_review_task": None,
         })
-        view = analyze(document)
+        view = analyze_trusted(document)
         self.assertFalse(view["valid"])
         self.assertTrue(any("late required directive before terminal CAS" in e for e in view["errors"]))
 
@@ -398,7 +519,7 @@ class SteeringFenceTests(unittest.TestCase):
         document = load(); receipt = self.entry(document)["steering_receipts"][0]
         receipt["attempt_id"] = "attempt:stale"
         receipt["receipt_digest"] = es.receipt_digest(receipt)
-        view = analyze(document)
+        view = analyze_trusted(document)
         self.assertFalse(view["valid"])
         self.assertTrue(any("steering_receipts[0].attempt_id" in e for e in view["errors"]))
 
@@ -406,14 +527,14 @@ class SteeringFenceTests(unittest.TestCase):
         document = load(); integration = self.entry(document)["integration"]
         integration["steering_watermark"] = 3
         integration["receipt_digest"] = es.receipt_digest(integration)
-        view = analyze(document)
+        view = analyze_trusted(document)
         self.assertFalse(view["valid"])
         self.assertTrue(any("integration.steering_watermark" in e for e in view["errors"]))
 
     def test_duplicate_delivery_fails_closed(self) -> None:
         document = load(); entry = self.entry(document)
         entry["steering_receipts"].append(copy.deepcopy(entry["steering_receipts"][0]))
-        view = analyze(document)
+        view = analyze_trusted(document)
         self.assertFalse(view["valid"])
         self.assertTrue(any("duplicate delivery" in e for e in view["errors"]))
 
@@ -428,7 +549,7 @@ class SteeringFenceTests(unittest.TestCase):
         })
         entry["task_lineage"]["remediation_tasks"] = ["task:pr-1:remediation"]
         entry["task_lineage"]["successor_review_tasks"] = ["task:pr-1:successor-review"]
-        view = analyze(document)
+        view = analyze_trusted(document)
         self.assertTrue(view["valid"], view["errors"])
         reasons = next(item["reasons"] for item in view["blocked"] if item["slice_id"] == "PR 1")
         self.assertIn("late_required_steering_remediation:steer:post-cas", reasons)
@@ -441,7 +562,7 @@ class SteeringFenceTests(unittest.TestCase):
             "event_sequence": 6, "delivery_boundary": "event-log:6",
             "remediation_task": None, "successor_review_task": None,
         })
-        view = analyze(document)
+        view = analyze_trusted(document)
         self.assertFalse(view["valid"])
         self.assertTrue(any("explicitly bound remediation" in error for error in view["errors"]))
         self.assertTrue(any("explicitly bound successor-review" in error for error in view["errors"]))
@@ -454,7 +575,7 @@ class SteeringFenceTests(unittest.TestCase):
             "event_sequence": 9, "delivery_boundary": "event-log:9",
             "remediation_task": None, "successor_review_task": None,
         })
-        view = analyze(document)
+        view = analyze_trusted(document)
         self.assertTrue(view["valid"], view["errors"])
         self.assertEqual([item["slice_id"] for item in view["next_ready"]], ["PR 2"])
 
@@ -462,7 +583,7 @@ class SteeringFenceTests(unittest.TestCase):
 class SurfaceTests(unittest.TestCase):
     def test_markdown_and_json_are_views_of_same_live_result(self) -> None:
         document = load()
-        view = analyze(document)
+        view = analyze_trusted(document)
         markdown = es.markdown(view)
         self.assertIn("# TraceDecay V2 next-ready", markdown)
         self.assertIn("### PR 2", markdown)
@@ -507,6 +628,7 @@ class SurfaceTests(unittest.TestCase):
 
     def test_cli_markdown_and_json_share_one_actual_checkout_boundary(self) -> None:
         document = load()
+        document["completion_ledger"]["entries"] = []
         script = Path(__file__).with_name("plan_execution.py")
         with tempfile.TemporaryDirectory() as directory:
             state = Path(directory) / "state.json"
@@ -524,7 +646,7 @@ class SurfaceTests(unittest.TestCase):
             ).stdout
         view = json.loads(raw_json)
         self.assertTrue(view["valid"], view["errors"])
-        self.assertIn("### PR 2", markdown)
+        self.assertIn("### PR 1", markdown)
         self.assertEqual(view["source_commit"], HARNESS.live.canonical_commit)
 
     def test_duplicate_json_key_is_rejected(self) -> None:
