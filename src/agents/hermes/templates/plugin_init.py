@@ -316,7 +316,7 @@ MESSAGE_DEPENDENT_TOOLS = frozenset((
     "tracedecay_lcm_preflight",
 ))
 
-STANDARD_HERMES_LCM_PROVIDER = "cursor"
+STANDARD_HERMES_LCM_PROVIDER = "hermes"
 
 LCM_PROVIDER_LOCAL_TOOL_NAMES = frozenset((
     "tracedecay_lcm_compress",

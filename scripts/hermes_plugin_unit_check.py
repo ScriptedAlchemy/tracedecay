@@ -161,6 +161,7 @@ def run_checks(work: Path):
     sys.path.insert(0, str(plugin_dir.parent))
     plugin = __import__("tracedecay")
     assert Path(plugin.__file__).resolve() == (plugin_dir / "__init__.py").resolve()
+    assert plugin.STANDARD_HERMES_LCM_PROVIDER == "hermes"
     ok("plugin package imports standalone (no hermes on sys.path)")
 
     header = (plugin_dir / "__init__.py").read_text(encoding="utf-8").splitlines()[0]
