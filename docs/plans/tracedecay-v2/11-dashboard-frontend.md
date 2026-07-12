@@ -157,7 +157,7 @@ Plan 13 PR 2A must assess Hermes dashboard files, tests, and interaction flows i
 
 | Hermes pattern | Disposition | V2 result |
 |---|---|---|
-| Task drawer sections: metadata, status/actions, diagnostics, dependencies, attachments, comments, events, worker log, run history | **Assess for direct/behavioral port** | Reuse compatible components/tests or map behavior into plan-11 `InspectorTabV1` and the task/attempt subpanels in §13.0; preserve one canonical selection and URL, not drawer-local truth. |
+| Task drawer sections: metadata, status/actions, diagnostics, dependencies, attachments, comments, events, worker log, run history | **Assess for direct/behavioral port** | Reuse compatible components/tests or map behavior into generated Work inspector-panel descriptors and the task/attempt subpanels in §13.0; preserve one canonical selection and URL, not drawer-local truth. |
 | Structured diagnostic actions with unknown-kind fallback | **Port contract** | Render plan 24 `DiagnosticEnvelopeV1`; unknown actions stay visible/disabled, and generated `legal_capabilities` controls invocation. |
 | Attention strip, server-age rings, progress pill, multi-select | **Assess then improve** | Reuse compatible interaction/tests; use server/projector attention signals, explicit staleness labels, exact completed/total/unknown progress, and named transactional batch commands such as `work_items.assign_set`. No client clock/status inference. |
 | Theme variables, `color-mix` tints, density multiplier | **Adopt** | Implement §2.4 light/dark semantic tokens and density/accessibility invariants. |
@@ -169,20 +169,22 @@ Plan 13 PR 2A must assess Hermes dashboard files, tests, and interaction flows i
 
 `dashboard/app/src/routes.tsx` defines route metadata once: path, label, feature owner, required capabilities, lazy import, default renderer, keyboard help, and migration-only legacy paths. Current route metadata/help never advertises a stale name.
 
+The persistent responsive workspace switcher is the primary product map; command search complements it but never replaces navigation. Its six groups are **Brain**, **Investigate** (Explorer, Loom, Sessions, Agents, Coordination, Code, Knowledge, Delivery), **Work** (initiatives, plans, tasks, attempts, executors, scheduler, saved views), **Operate** (Automations, Evolution, Observatory, Privacy, Costs), **Labs**, and **Settings**. It preserves pinned and recent workspaces. Observatory routes are read/diagnose surfaces and Settings routes are configure/control surfaces; cross-links preserve the exact entity, scope, time, and operation rather than duplicating controls.
+
 | Route | Primary question | Feature owner | Default artifact |
 |---|---|---|---|
 | `/` | What is TraceDecay doing, learning, changing, and failing? | `features/brain` | clustered profile topology + aligned activity |
-| `/activity` | What is active or unhealthy now? | `features/activity` | generated activity event/facet model + health matrix |
+| `/activity` | What is active or unhealthy now? | registered `triage` preset over `features/explorer` + `features/causal-loom` | generated activity event/facet model + health matrix |
 | `/explore` | Where is this evidence and how is it connected? | `features/explorer` | result table + selected pivot |
 | `/timeline` | What happened, in what order, and what did it affect? | `features/causal-loom` | density + virtualized causal lanes |
 | `/sessions`, `/sessions/:id`, `/turns/:id` | What context and work occurred in this thread/Turn? | `features/sessions` | session list / Turn evidence outline |
 | `/agents`, `/agents/:id` | Which agents collaborated and with what outcomes? | `features/agents` | delegation tree + Turn sequence |
-| `/work`, `/work/initiatives/:initiativeId`, `/work/plans/:planId/versions/:version`, `/work/tasks/:workItemId`, `/work/attempts/:attemptId`, `/work/offers/:offerId`, `/work/packets/:packetId`, `/work/executors`, `/work/scheduler`, `/work/views/:savedViewId`, `/work/edit-bundles/:editBundleId`, `/work/notifications`, `/work/notifications/:notificationId` | What work exists, how is it gated/routed/executed, and what context/outcomes connect it to the Brain? | `features/work` | initiative/plan outline + saved Kanban/DAG/task/attempt projection + managed declarative edit workspace; offer, packet, notification, and edit-workspace IDs deep-link to exact typed details |
+| `/work`, `/work/initiatives/:initiativeId`, `/work/plans/:planId/versions/:version`, `/work/tasks/:workItemId`, `/work/attempts/:attemptId`, `/work/offers/:offerId`, `/work/packets/:packetId`, `/work/executors`, `/work/scheduler`, `/work/edit-bundles/:editBundleId`, `/work/notifications`, `/work/notifications/:notificationId` | What work exists, how is it gated/routed/executed, and what context/outcomes connect it to the Brain? | `features/work` | initiative/plan outline + saved Kanban/DAG/task/attempt projection + managed declarative edit workspace; saved Work projections open the canonical `/saved/:viewId` resource; offer, packet, notification, and edit-workspace IDs deep-link to exact typed details |
 | `/coordination` | Which nearby agents may overlap, and what safe action is warranted? | `features/coordination` | evidence-ranked presence/overlap ledger + worktree map |
 | `/goals/:id` | How did this Codex goal or provider-native objective evolve and finish? | `features/agents` | versioned goal/plan/Turn evidence ledger |
-| `/workflows/:id`, `/automation/runs/:id` | How did the captured workflow/run execute? | `features/automations` | run waterfall + artifact lineage |
+| `/workflows/:id` | How did the captured provider workflow execute? | `features/automations` | run waterfall + artifact lineage |
 | `/code`, `/code/entities/:id`, `/code/compare` | What code changed, depends on it, and is affected? | `features/code` | symbol/snapshot graph + code viewer |
-| `/graphs/:lens` | Show one graph vocabulary over shared state | `features/graphs` | lens-specific renderer |
+| `/graphs/:lens` | Open one graph vocabulary over shared state | thin generated route preset into the shared Brain/Explorer graph slot; no `features/graphs` package | lens-specific renderer |
 | `/knowledge`, `/knowledge/facts/:id`, `/knowledge/entities/:id` | What does TraceDecay know and why? | `features/knowledge` | fact/version/provenance views |
 | `/delivery`, `/projects/:id`, `/projects/:id/branches/:branch`, `/pulls/:id` | What was produced, observed, or encountered in Git/delivery? | `features/delivery` | Git/PR graph + evidence ledger |
 | `/automations`, `/automation/runs/:id`, `/skills`, `/skills/:id`, `/evolution` | How is the system autonomously curating and improving itself? | `features/automations` | complete run/skill inventory + autonomy decision/effect/outcome ledger |
@@ -192,11 +194,10 @@ Plan 13 PR 2A must assess Hermes dashboard files, tests, and interaction flows i
 | `/privacy` | Is the mandatory sanitizer effective across every source/sink, and what is blocked or needs remediation? | `features/privacy` | coverage/unknown matrix + safe remediation lineage |
 | `/costs` | Where do tokens, latency, and cost go? | `features/costs` | precise ledger + trends |
 | `/playgrounds/:lab` | What would this versioned engine decide, and why? | `features/playgrounds` | shared replay workbench |
-| `/playgrounds/evolution` | How do skills, memories, policies, and automations evolve? | `features/evolution` | version/use/outcome lineage |
 | `/saved/:viewId` | Reopen a classified saved investigation | `features/saved-views` | saved route + state |
 | `/settings`, `/settings/context-scout`, `/settings/integrations`, `/settings/brain` | Which effective settings, capabilities, host integrations, enrolled Brain nodes, and placements govern behavior? | `features/settings` | scoped settings form + source labels; context-scout renders plan 22's controls, integrations renders plan 27 host bundles, and Brain renders plan 28 node/enrollment/grant/placement/replica/backup/failover controls |
 
-Legal `:lens` values are `git`, `code`, `threads`, `agents`, `turns`, `tasks`, `plans`, `timeline`, `memory`, and `automation`. Legal `:lab` values are `hints`, `retrieval`, `ingest`, `query`, `search-quality`, `scope-federation`, `correlation`, `coordination`, `orchestration`, `scheduler`, `memory`, `policy-diff`, and `privacy`; together with the named `/playgrounds/evolution` route these thirteen slugs form the canonical fourteen-lab inventory: Hint, Retrieval, Search Quality, Coordination, Orchestration, Ingest, Query, Correlation, Scheduler, Memory, Policy Diff, Evolution, Scope/Federation, and Privacy. The `privacy` slug displays as "Privacy & Secret Safety Lab" and supersedes the retired `secret-safety` route name; plan 23's temporal "Search Lab" content is folded into the Search Quality Lab, not a separate lab. Hint Lab includes deterministic and incremental-scout replay, Search Quality includes temporal session/LCM retrieval, and Orchestration replays plan/task/executor/context/lease decisions at `/playgrounds/orchestration` (the only route spelling). Every route is a configured view over plan 10 §8.5's generic experiment/run API and a catalog-owned typed evaluator; no lab gets a bespoke HTTP lifecycle. Evolution has a named route because it is both a lab and a product workspace.
+Legal `:lens` values are `git`, `code`, `threads`, `agents`, `turns`, `tasks`, `plans`, `memory`, and `automation`. A timeline is a Loom overlay/composition, not a tenth graph destination. Legal `:lab` values are `hints`, `retrieval`, `ingest`, `query`, `search-quality`, `scope-federation`, `correlation`, `coordination`, `orchestration`, `scheduler`, `memory`, `policy-diff`, and `privacy`; the canonical `/evolution` workspace supplies the fourteenth lab through its shared `lab` composition: Hint, Retrieval, Search Quality, Coordination, Orchestration, Ingest, Query, Correlation, Scheduler, Memory, Policy Diff, Evolution, Scope/Federation, and Privacy. The `privacy` slug displays as "Privacy & Secret Safety Lab" and supersedes the retired `secret-safety` route name; plan 23's temporal "Search Lab" content is folded into the Search Quality Lab, not a separate lab. Hint Lab includes deterministic and incremental-scout replay, Search Quality includes temporal session/LCM retrieval, and Orchestration replays plan/task/executor/context/lease decisions at `/playgrounds/orchestration` (the only route spelling). Every route is a configured view over plan 10 §8.5's generic experiment/run API and a catalog-owned typed evaluator; no lab gets a bespoke HTTP lifecycle. `/work/views/:id`, `/playgrounds/evolution`, and `/graphs/timeline` are migration-only redirects to `/saved/:id`, `/evolution`, and `/timeline`; they never appear in current route metadata.
 
 Route changes do not clear scope/time/query/selection unless the destination cannot represent the selected entity. In that case, the selection stays pinned in the inspector and the main view explains the unsupported relation. Browser back/forward restores complete committed investigation states, not only route names.
 
@@ -204,88 +205,90 @@ Superseded route names are recorded here so no ledger dangles: the master plan's
 
 ## 4. Shared investigation state
 
-Create the only cross-feature state model in `dashboard/packages/query-state/src/investigation.ts`:
+Generate the only persisted cross-feature state model from plan 01 into `dashboard/packages/query-state/src/investigation.ts`; the frontend adds no wire fields or enums. The TypeScript below is the generated shape shown for implementation review:
 
 ```ts
-export type TranscriptMode =
-  | "native_rows"
-  | "normalized_representative"
-  | "human_best_effort"
-  | "direct_user"
-  | "delegated_agents"
-  | "tool_results"
-  | "provider_protocol";
-
 // VisualSelectionV1, VisualSelectionAtomV1, VisualSelectionOriginV1, and
 // SelectionActionV1 are generated from plan 01; query-state imports them and
 // defines no browser-local selection union.
 
-export type InspectorTabV1 =
-  // universal tabs (every workspace)
-  | "summary" | "evidence" | "relations" | "native" | "history" | "actions"
-  // Work-workspace extension tabs (plan 24 §12.6 task/attempt inspectors)
-  | "specification" | "dependencies" | "acceptance" | "assignments" | "attempts"
-  | "packets" | "decisions" | "impact" | "costs" | "audit";
+export type UniversalPanelIdV1 =
+  | "summary" | "evidence" | "relations" | "native" | "history" | "actions";
+
+// Additional panels are catalog-generated capability descriptors, not a
+// route-specific union or conditional tab switch.
+export interface InspectorPanelRefV1 {
+  panelOwner: RegistryEntryId;
+  panelId: RegistryEntryId;
+}
+
+export interface VisualizationStateV1 {
+  rendererSpecId: RegistryEntryId;
+  graph: GraphCompositionSpecV1 | null;
+  viewport: SchemaBoundValueRef;
+  scaleState: SchemaBoundValueRef;
+  lanes: readonly RegistryEntryId[];
+  lod: VisualizationLodV1;
+  playhead: UtcMicros | null;
+  synchronizationGroup: RegistryEntryId | null;
+}
 
 export interface WorkspaceCompositionV1 {
   kind: "atlas" | "trace" | "compare" | "lab" | "triage";
-  layoutId: string; // registered layout@version
+  layoutId: RegistryEntryId; // registered layout@version
   slots: readonly {
-    id: string;
+    id: RegistryEntryId;
     artifact: "graph" | "timeline" | "table" | "matrix" | "distribution" | "small_multiples" | "transcript" | "code_diff" | "manifest";
     dock: "primary" | "left" | "right" | "bottom" | "overlay";
-    size: number;
+    sizeBasisPoints: number;
+    visualization: VisualizationStateV1;
   }[]; // 1..=4, unique IDs; validated against the composition registry
-  activeSlotId: string;
+  activeSlotId: RegistryEntryId;
 }
 
 export interface InvestigationStateV1 {
   version: 1;
-  profileId: string;
+  profileId: ProfileId;
   scope: {
     selector: ScopeSelectorV2;
     resolution: ScopeResolutionV2 | null;
   };
   time: {
-    occurred: { from: string; to: string };
-    knowledgeAsOf: string | null;
+    occurred: InvestigationTimeRangeV1;
+    knowledgeAsOf: UtcMicros | null;
     live: boolean;
-    compare: null | { a: { from: string; to: string }; b: { from: string; to: string } };
+    compare: null | readonly [InvestigationTimeRangeV1, InvestigationTimeRangeV1];
   };
   query: {
-    queryFingerprint: string | null;
-    protectedDraftId: string | null;
-    facets: Readonly<Record<string, readonly string[]>>;
-    transcriptMode: TranscriptMode;
+    queryFingerprint: PrivacyDomainBoundLocatorDigest | null;
+    protectedDraftId: ProtectedDraftId | null;
+    facets: readonly FacetSelectionV1[];
+    messageView: MessageView;
   };
   focus: {
     selected: VisualSelectionV1 | null;
-    retrievalAnchors: readonly string[];
-    retrievalRecipeId: string | null;
-    pinned: readonly string[];
-    path: readonly string[];
-    collectionId: string | null;
+    retrievalAnchors: readonly RetrievalAnchorId[];
+    retrievalRecipeId: RetrievalRecipeId | null;
+    pinned: readonly EntityRef[];
+    path: readonly EntityRef[];
+    collectionId: EntityId | null;
   };
   view: {
     composition: WorkspaceCompositionV1;
-    graph: GraphCompositionSpecV1; // one primary lens, <=2 overlays, explicit bridge kinds
-    layout: string; // registered "<algorithm>@<layoutVersion>" from the renderer registry
-    visibleLanes: readonly string[]; // generated per-lens lane-vocabulary IDs only
-    levelOfDetail: "auto" | "aggregate" | "neighborhood" | "evidence";
   };
-  inspector: { tab: InspectorTabV1 };
+  inspector: { panel: InspectorPanelRefV1 };
 }
 ```
 
-Route lens slugs map explicitly to generated application enums: `git→Git`, `code→Code`, `threads→Thread`, `agents→Agent`, `turns→Turn`, `tasks→Task`, `plans→Plan`, `timeline→Timeline`, `memory→Memory`, and `automation→AutomationSkill`. This mapping is generated/fixture-tested; the fixture asserts that the route `:lens` slug list and generated `GraphLensV1` enum stay identical (ten entries) so a lens can never be routable but URL-unrepresentable. `view.graph.primary_lens` follows the route; its bounded overlay lenses and bridge kinds remain explicit URL/saved state. Feature code never title-cases or guesses an enum.
+Route lens slugs map explicitly to generated application enums: `git→Git`, `code→Code`, `threads→Thread`, `agents→Agent`, `turns→Turn`, `tasks→Task`, `plans→Plan`, `memory→Memory`, and `automation→AutomationSkill`. This mapping is generated/fixture-tested; the fixture asserts that the route `:lens` slug list and generated `GraphLensV1` enum stay identical (nine entries) so a lens can never be routable but URL-unrepresentable. The active graph slot's `visualization.graph.primary_lens` follows the route; its bounded overlay lenses and bridge kinds remain explicit URL/saved state. Feature code never title-cases or guesses an enum.
 
 Selection, comparison, and inspector semantics:
 
 - Every selection kind the inspector supports (section 9.2) is a generated domain `VisualSelectionV1` variant, including entity set/lasso, event, relation, path, aggregate membership digest, time range, facet, and bounded comparison. URL encoding is a generated safe opaque-ID/digest codec; protected facet values remain behind `protectedDraftId` and never enter the URL.
 - Period comparison lives in `time.compare` as explicit A/B ranges; entity/aggregate/path/relation/time-range pair comparison is a `comparison` selection. The section 9.1 compare toggle populates exactly one of these two homes; there is no third comparison shape.
-- `InspectorTabV1` is owned here; plan 24 cites it. Plan 24 §12.6's eleven task-inspector tabs map onto the union by a checked table: Overview/specification/constraints→`specification` (`summary` remains the universal landing tab), Dependencies/gates/critical path→`dependencies`, Acceptance/evaluations/exceptions→`acceptance`, Assignments/eligible executors/routing→`assignments`, Attempts/retries/cancellation→`attempts`, Context packets/omissions→`packets`, Decisions/handoffs/artifacts/outcomes→`decisions`, Thread/session/Turn/agent/goal/tool evidence→`evidence`, Code/Git/delivery impact→`impact`, Costs/budgets→`costs`, Audit/provenance/anchors→`audit`. The attempt inspector reuses the same union. Workspaces cannot invent tab values outside this union; non-Work routes ignore Work extension tabs with an explicit "tab unavailable here" state, never a silent reset.
+- The six `UniversalPanelIdV1` panels are always registered. Plan 24 §12.6's Work-only content is generated as entity/capability panel descriptors owned by the task catalog, not added to a frontend union: specification, dependencies, acceptance, assignments, attempts, packets, decisions, impact, costs, and audit descriptors declare supported entity kinds, required capabilities, ordering, and nearest legal fallback. Persist `{panelOwner,panelId}`. When selection changes, migrate explicitly to the nearest legal panel with an announced focus-preserving notice; never accumulate route conditionals or retain an unusable tab.
 - The `audit`/`evidence` tabs for plans, documents, initiatives, work items, attempts, agents, and subagents expose versioned research manifests from plan 13: immutable manifest-entry `ResearchAnchorId`, nonempty canonical `RetrievalAnchorId` links, contributor/session/role/output attribution, unresolved attribution gaps, source/catalog/Git watermarks, drift, coverage, redaction state, and retrieval recipe. Selecting an entry resolves evidence only through its canonical retrieval anchors; the UI never treats a research entry ID, response handle, URL, or search rank as payload authority. "Copy evidence" copies the canonical anchor plus optional manifest-entry context.
-- `view.composition.layoutId` and `view.layout` values are registered `<algorithm>@<layoutVersion>` identifiers from the composition/renderer registries; `view.visibleLanes` values come from the generated per-lens lane vocabulary. Restoring a URL whose composition, slot artifact, layout, overlay lens, bridge kind, or lane ID is no longer registered shows an explicit reset notice and falls back to the closest legal preset — a restored URL never silently no-ops.
+- `view.composition.layoutId` and every slot's renderer/layout/viewport/scale/lanes/LOD/playhead/synchronization state are committed independently in URL/saved-view state. Values come from composition/renderer/lane registries. Restoring an unregistered composition, slot artifact, renderer, layout, overlay lens, bridge kind, or lane ID shows an explicit reset notice and falls back to the closest legal preset — a restored URL never silently no-ops.
 
 ### 4.1 State ownership
 
@@ -309,11 +312,11 @@ Scope defaults and ambiguity behavior are fixed:
 
 ### 4.2 Transcript modes and #410 seam
 
-Every transcript/session/Turn/search surface shows a persistent mode control with the seven `TranscriptMode` values. Each response includes the generated `TranscriptVisibility` block — a plan 10/17 schema type re-exported through `app/src/contracts`, reproduced here for reference and never redefined as a local interface:
+Every transcript/session/Turn/search surface shows a persistent mode control with the seven generated plan-01 `MessageView` values. Each response includes the generated `TranscriptVisibility` block — a plan 10/17 schema type re-exported through `app/src/contracts`, reproduced here for reference and never redefined as a local interface:
 
 ```ts
 export interface TranscriptVisibility {
-  mode: TranscriptMode;
+  mode: MessageView;
   rawRowCount: number;
   normalizedRepresentativeCount: number;
   visibleCount: number;
@@ -506,7 +509,7 @@ Rules:
 - `app/src/shared/renderers`, `app/src/shared/charts`, and the Brain/Causal-Loom feature visualization modules own drawing; other feature modules supply typed models and callbacks. These are ESLint ownership boundaries, not packages.
 - Every feature has a route/container boundary and pure presenters. Containers call generated-client query/command hooks, translate the one `InvestigationStateV1`, and select a generated read model; presenters accept sealed models plus typed callbacks and never fetch, join endpoints, read URL/storage, inspect raw problems, or infer legal actions.
 - Generated-client hooks are the sole network entry (`useSnapshotQuery`, `useCursorPage`, `useSubscription`, `useCapabilityCommand`, and `useOperation`). A lint forbids feature imports from `fetch`, Axum routes, raw OpenAPI internals, and V1 client modules.
-- Global state is limited to the committed investigation, auth/capability/theme, and query cache. Each open saved-view/render instance owns an isolated `ViewInstanceStateV1` keyed by `(saved_view_id, instance_id)` for draft facets, grouping, column geometry, expansion, local selection gesture, scroll/window cursor, and renderer camera. Closing an instance destroys it; changing one board cannot mutate another instance or a canonical task.
+- Global state is limited to the committed investigation, auth/capability/theme, and query cache. Each open saved-view/render instance owns an isolated `ViewInstanceStateV1` keyed by `(saved_view_id, instance_id)` for draft facets, grouping, column geometry, expansion, local selection gesture, scroll/window cursor, and per-slot transient viewport gesture layered over committed `VisualizationStateV1`. Closing an instance destroys it; changing one board cannot mutate another instance or a canonical task.
 - Optimistic UI follows one closed state machine: `idle → optimistic_pending → accepted_projection | conflict_reverted | rejected_reverted | operation_pending → accepted_projection | failed_reverted`. The pre-command model/version is retained until an accepted projection arrives. Conflicts render server/current versions and legal retry/rebase actions; partial batch results revert only failed items. This is client-state reconciliation, not a curation preview/apply/rollback workflow.
 - Each renderer creates at most one Canvas/WebGL context and one worker pool. Hidden routes suspend workers and animation frames and release large GPU buffers after a bounded idle period.
 - `features/*` may depend on packages, never another feature's internal files. Shared functionality moves to a package after two proven consumers.
@@ -563,7 +566,7 @@ Commands use generated types and this interaction contract:
 1. Capability advertises action, scope, destructive class, operation-specific inspection/plan requirement, and required version.
 2. When required, UI opens the named typed inspection/plan. It lists descendants, redactions, holds, irreversible effects, exact scope, and immutable confirmation; ordinary commands have no preview screen and autonomous curation has none.
 3. Confirm submits an opaque idempotency key and `ifVersion`/watermark; it never reuses a timed-out key for different input.
-4. `409` presents current-versus-requested state and offers refresh/review, never blind retry.
+4. `409` presents current-versus-requested state and offers refresh/review, never blind retry. Public bare native session IDs are invalid input; the migration inspector alone may render provider/profile candidate guidance without hydration. A provider-qualified native locator can still return multiple generation/variant candidates and requires explicit canonical selection.
 5. Accepted commands return operation/event IDs; UI follows their projection status through the live feed and links to audit evidence.
 
 The dashboard never exposes arbitrary SQL, file path mutation, shell, or policy bytecode execution.
@@ -579,16 +582,21 @@ type QueryKeyV1 = readonly [
   "v2",
   profileId: string,
   capabilityVersion: string,
-  routeModel: string,
+  operationOrDatasetId: string,
+  accessDecisionDigest: string,
+  schemaRegistryDigest: string,
+  catalogDigest: string,
   queryFingerprint: string,
   scopeFingerprint: string,
   timeFingerprint: string,
-  transcriptMode: TranscriptMode,
+  snapshotOrWatermarkFingerprint: string,
+  representationVersion: string,
+  messageView: MessageView,
   cursor: string | null,
 ];
 ```
 
-Sensitive text is represented only by an opaque server-issued fingerprint. Frozen snapshots are immutable and cacheable until retention/schema invalidates them. Live snapshots have bounded freshness and are changed only by typed deltas or full resync. IndexedDB stores at most the last 20 nonsensitive route snapshots and a configurable protected-cache quota; LRU eviction deletes payload chunks before metadata. Cache entries carry schema/access/retention digests and are rejected, not migrated heuristically, on mismatch.
+Sensitive text is represented only by an opaque server-issued fingerprint. Keys use canonical catalog operation/dataset identity, never route or feature names. Domain routes are generated query presets returning the same sealed page envelope; they cannot create feature-local cache adapters. Frozen snapshots are immutable and cacheable until retention/schema invalidates them. Live snapshots have bounded freshness and are changed only by typed deltas or full resync. IndexedDB stores at most the last 20 nonsensitive route snapshots and a configurable protected-cache quota; LRU eviction deletes payload chunks before metadata. Cache entries carry schema/access/retention digests and are rejected, not migrated heuristically, on mismatch.
 
 Abort previous route/brush requests on supersession. Prefetch only the selected entity inspector and adjacent timeline page; never prefetch all shards or payload bodies.
 
@@ -748,7 +756,7 @@ Brush, lasso, path, facet, time-range, table-row, cluster, and inspector-relatio
 
 Query Explain shows canonical AST/fingerprint, validation, cost/budget, selected and pruned shards, pushed/residual filters, FTS/vector/graph/time operators, ranking components including absent features, candidate universe, per-stage caps, cap-induced exclusions, stable sort key, cursor/watermark, timing, coverage, truncation, message-origin/view semantics, and retention. Noisy ranking can be diagnosed from exact score components and bounded candidates; capped/ambiguous results never look complete. Export equivalent current CLI/MCP/HTTP requests plus a stable retrieval recipe from the server-generated representation so the UI does not reinvent syntax or preserve stale names.
 
-Explorer's checked benchmark panel runs the versioned redacted corpus by slice: exact literal, phrase, misspelling, symbol/entity/alias, origin ambiguity, cross-project concept, graph-related, recency, no-result, capped, adversarial noise, and embedding regression. It reports MRR, nDCG, Recall@k, Precision@k, zero-result rate, p50/p95 latency, candidate counts, coverage, and per-slice deltas. It is an evaluation artifact, not a vanity score; any exact-match/origin-filter regression blocks profile promotion.
+Explorer shows the active qualified retrieval profile, latest evaluation-report version, promotion state, and concise regression/coverage warning. **Investigate quality** deep-links the exact protected query/profile/snapshot into Search Quality Lab, the sole owner of corpus execution, judgments, metrics, comparisons, and promotion gates. Explorer never embeds a benchmark runner or creates a second evaluation state model.
 
 One mandatory cross-repo slice spans Rspack, Rsbuild, and React Router repositories/worktrees/benchmarks with same-name files, symbols, branches, sessions, and known dependency/PR evidence. It verifies repo disambiguation, federated graph links, scope candidates, ranking relevance, provenance, and stale/partial labels across CLI/MCP/API/dashboard outputs.
 
@@ -1090,7 +1098,7 @@ Present self-improvement as autonomous but evidence-bound, not infallible. Autom
 
 Every substantial visual checks in a mini-brief at `dashboard/app/src/features/<feature>/visual-brief.md` containing analytical question, data grain, exact/sampled semantics, encoding, selection, keyboard/touch behavior, mobile continuation, URL state, synchronized fallback, export scene, benchmark fixture, and accepted desktop/mobile concept reference.
 
-One reusable `VisualizationFrame` owns snapshot/coverage chrome, visual-semantic ontology, legend, scale/brush/focus coordination, hit-test selection, visible query delta, camera, accessibility outline, renderer fallback, render-ready, context-loss recovery, and deterministic export. It consumes the shared `VisualizationEnvelopeV1<T>` and renderer registry. Domain features provide typed visual specs and inspector callbacks; they do not create chart wrappers, workers, query filters, selection stores, legends, exporters, or accessibility trees. Linked composition state follows the same scene/state principles as [Vega-Lite parameters](https://vega.github.io/vega-lite/docs/parameter.html) and [Grafana Scenes](https://grafana.com/developers/scenes/core-concepts), but the TraceDecay application remains the source of query/data truth.
+A thin reusable `WorkspaceSlotFrame` owns only slot chrome, snapshot/coverage status, lifecycle, and composition synchronization. Renderer registry entries compose narrow typed capabilities—`ViewportAdapter`, `InteractionAdapter`, `AccessibilityAdapter`, `FallbackAdapter`, and `ExportAdapter`—over the shared visual-semantic ontology and `VisualizationEnvelopeV1<T>`. No universal switch-heavy renderer component owns camera, interaction, accessibility, fallback, and export behavior for every artifact. Domain features provide typed visual specs and inspector callbacks; they do not create chart wrappers, workers, query filters, selection stores, legends, exporters, or accessibility trees. Linked composition state follows the same scene/state principles as [Vega-Lite parameters](https://vega.github.io/vega-lite/docs/parameter.html) and [Grafana Scenes](https://grafana.com/developers/scenes/core-concepts), but the TraceDecay application remains the source of query/data truth.
 
 ### 15.1 Renderer choice matrix
 
@@ -1270,7 +1278,7 @@ Manual browser QA uses the in-app Browser first. Playwright Chromium/WebKit/Fire
 
 Visual fidelity is insufficient if users misread the data. Before PR 32 signoff, the principal user, an independent visualization reviewer, and an accessibility reviewer run the fixed corpus in guided, analyst, and expert density modes over the same state model. Measure time-to-first-correct-insight, false-causality rate, sampled/partial/redacted-state comprehension, lens-overlay disorientation, atlas-location recall after zoom/reload, replay-stage comprehension, task completion/error/abandonment, and interaction count. A screen that matches its concept but fails these tasks returns to concept/design work; PR 32 cannot waive it as polish.
 
-The study protocol and thresholds are frozen before the selected concept is implemented. It includes the principal user plus at least six independent participants spanning experienced agent-tool users, engineering newcomers, one visualization specialist, and one assistive-technology user; a person may fill two specialist roles but not reduce the independent count below six. Each participant runs a randomized subset of the fixed tasks once without coaching, then one retained-orientation task 24–72 hours later; scripted fixtures use identical data/version/coverage and the incumbent UI is measured for every overlapping task. Release requires 100% completion of privacy/coverage/causality-critical tasks, at least 85% first-attempt completion overall, false-causality answers `<=5%`, sampled/partial/redacted interpretation accuracy `>=90%`, replay-stage interpretation `>=90%`, atlas target recall `>=80%`, abandonment `<=10%` overall and zero on critical tasks, median recoverable errors `<=1` per task, and no overlapping task more than 20% slower or 20% more interactions than the incumbent without a documented capability gain. The principal user's eight primary workflows must all pass their section 22.2 time limits. Report per-role results, median/p95, errors, confidence intervals where meaningful, recordings/notes under consent, and every failure/retest; changing a task, corpus, threshold, or participant exclusion after results invalidates that run.
+The study protocol and thresholds are frozen before the selected concept is implemented. It includes the principal user plus at least six independent participants spanning experienced agent-tool users, engineering newcomers, one visualization specialist, and one assistive-technology user; a person may fill two specialist roles but not reduce the independent count below six. Each participant runs a randomized subset of the fixed tasks once without coaching, then one retained-orientation task 24–72 hours later; scripted fixtures use identical data/version/coverage and the incumbent UI is measured for every overlapping task. Release requires 100% completion of privacy/coverage/causality-critical tasks, at least 85% first-attempt completion overall, false-causality answers `<=5%`, sampled/partial/redacted interpretation accuracy `>=90%`, replay-stage interpretation `>=90%`, atlas target recall `>=80%`, abandonment `<=10%` overall and zero on critical tasks, median recoverable errors `<=1` per task, and no overlapping task more than 20% slower or 20% more interactions than the incumbent without a documented capability gain. The principal user's thirteen primary workflows must all pass their section 22.2 time limits. Report per-role results, median/p95, errors, confidence intervals where meaningful, recordings/notes under consent, and every failure/retest; changing a task, corpus, threshold, or participant exclusion after results invalidates that run.
 
 ## 19. Performance budgets and degradation
 
@@ -1283,7 +1291,7 @@ Record reference machine, corpus manifest, build mode, browser/GPU, viewport, an
 | First useful evidence | `<= 2 s` to the route's `first-evidence` performance mark: the first committed data row/mark painted from a non-cache response; each route registers exactly one such mark, asserted in its e2e test |
 | Graph/timeline render-ready | `<= 3 s` on the pinned corpus manifest |
 | Local interaction response | `<= 100 ms` excluding fetch |
-| Main-thread long task | none `> 50 ms` (PerformanceObserver `longtask` entries) during the eight scripted section 22.2 tasks, which define the primary workflows |
+| Main-thread long task | none `> 50 ms` (PerformanceObserver `longtask` entries) during the thirteen scripted section 22.2 tasks, which define the primary workflows |
 | Worker progressive layout | first stable partial `<= 500 ms` |
 | Graph | `>= 55 FPS` at 50k loaded nodes/200k edges rendered at `aggregate` LOD, and `>= 55 FPS` at `neighborhood` LOD with 2k visible marks; the benchmark records the LOD level each run passed at |
 | Timeline | `>= 55 FPS` at 250k density marks; native/canonical event hydration bounded by `EventPageV1` (section 12.5: `<= 500` events and `<= 1 MiB` per page, one page prefetch each direction) |
@@ -1292,6 +1300,8 @@ Record reference machine, corpus manifest, build mode, browser/GPU, viewport, an
 | Default response payload | `<= 1 MiB`; page/stream larger authorized payloads |
 | Mobile route heap | `<= 300 MiB` JS heap measured via CDP `Performance.getMetrics` `JSHeapUsedSize` under Playwright 390×844 emulation, sampled 5 s after render-ready, median of five runs; hidden routes stop work |
 | Route lazy chunk | per-route budget recorded in a committed budget file; CI fails any chunk `> 10%` over its recorded budget unless the same PR updates the budget entry with a linked justification — an unamended budget file is the definition of "unexplained" |
+
+Remote-Brain performance gates run the thirteen workflows under pinned high-latency, packet-loss, and bandwidth-throttled profiles on desktop and mobile. Each route declares first-view and atlas-prefetch byte ceilings; superseded viewport requests abort before decode/render; `prefers-reduced-data` or an explicit reduced-data setting defaults to density/table/outline before heavy graph/tile hydration. CI proves stale responses cannot overwrite the committed viewport and that truthful coverage, selection, and navigation survive every degradation profile.
 
 Degradation order is semantic, not merely graphical:
 
@@ -1391,10 +1401,10 @@ The phase-4 PR letters in this section are the authoritative sub-split ledger fo
 - Test: `dashboard/tests/component/{investigation-state,command-bar,inspector-dock,mobile-sheets}.vitest.tsx`
 - Test: `dashboard/tests/e2e/{url-history,saved-state,migration-paths}.spec.ts`
 
-- [ ] Write failing explicit-All default, no-cwd/last-project narrowing, repository/project/worktree/ref canonical URL, same-name disambiguated candidates, one-step retry preserving request, CLI/MCP/API parity, protected literal exclusion, back/forward, panel persistence, route selection preservation, stable-anchor/recipe recovery after cursor/handle expiry, theme/density, focus restoration, mobile sheet, migration-only legacy path, and post-cutover stale-path failure tests.
+- [ ] Write failing explicit-All default, no-cwd/last-project narrowing, repository/project/worktree/ref canonical URL, same-name disambiguated candidates, one-step retry preserving request, CLI/MCP/API parity, protected literal exclusion, back/forward, per-slot visualization/panel persistence, route selection preservation, stable-anchor/recipe recovery after cursor/handle expiry, six-group switcher pinned/recent navigation, Observe→Configure context preservation, theme/density, focus restoration, mobile sheet, migration-only legacy path, and post-cutover stale-path failure tests.
 - [ ] Implement `InvestigationStateV1`, versioned codecs/store/history, protected drafts, local preferences, and IndexedDB ownership exactly as section 4.
 - [ ] Implement accepted tokens/type/icons/controls/open-layout shell and all state primitives without feature data.
-- [ ] Implement scope default All, time/live/as-of/compare, query opener, health, save/export, command palette frame, outline/inspector/time brush docks, status line, and mobile sheets.
+- [ ] Implement scope default All, time/live/as-of/compare, query opener, health, save/export, persistent six-group workspace switcher, pinned/recent destinations, command palette frame, outline/inspector/time brush docks, status line, and mobile sheets.
 - [ ] Run `cd dashboard && npm test && npx playwright test tests/e2e/url-history.spec.ts tests/e2e/saved-state.spec.ts tests/e2e/migration-paths.spec.ts`. Expected: pass with zero sensitive literals in URL/history fixtures and typed stale-path failure after cutover.
 - [ ] Commit: `feat(dashboard): add shared investigation workbench`.
 
@@ -1406,14 +1416,14 @@ The phase-4 PR letters in this section are the authoritative sub-split ledger fo
 - Test: `dashboard/tests/component/{universal-inspector,coverage-status,command-preview}.vitest.tsx`
 - Test: `dashboard/tests/e2e/{sse-reconnect,partial-offline,optimistic-command}.spec.ts`
 
-- [ ] Write failing inspector tab, aggregate membership, relation evidence, native/normalized/history, capability action, destructive preview, optimistic conflict, and SSE state-machine tests.
-- [ ] Implement query keys/cache bounds/abort, protected offline cache, subscription creation, idempotent delta reducer, coverage deltas, gap/resync, reconnect/backoff, schema/access invalidation, operation-terminal events, and `/operations/{id}` polling recovery after stream loss.
-- [ ] Implement the six inspector tabs and complete/loading/stale/partial/offline/locked/redacted/incompatible/error states.
+- [ ] Write failing universal/generated inspector panel, illegal-panel migration, aggregate membership, relation evidence, native/normalized/history, capability action, destructive preview, optimistic conflict, same-query/different-snapshot cache separation, route-preset/generic-operation cache identity, and SSE state-machine tests.
+- [ ] Implement canonical operation/dataset query keys with access/schema/catalog/query/scope/time/snapshot/representation/cursor identity, cache bounds/abort, protected offline cache, subscription creation, idempotent delta reducer, coverage deltas, gap/resync, reconnect/backoff, schema/access invalidation, operation-terminal events, and `/operations/{id}` polling recovery after stream loss. Delete route/feature-specific cache adapters.
+- [ ] Implement the six universal panels plus catalog-generated entity/capability descriptors and complete/loading/stale/partial/offline/locked/redacted/incompatible/error states.
 - [ ] Verify fake SSE duplicates/out-of-order/gaps without sleeps and profile lock clears protected state.
 - [ ] Run `cd dashboard && npm test && npx playwright test tests/e2e/sse-reconnect.spec.ts tests/e2e/partial-offline.spec.ts tests/e2e/optimistic-command.spec.ts`. Expected: pass.
 - [ ] Commit: `feat(dashboard): connect evidence inspector and live snapshots`.
 
-### Task 5: PR 26A — Shared renderer, LOD, chart, export, and worker foundation
+### Task 5: PR 26A — Shared slot, renderer capabilities, LOD, export, and worker foundation
 
 **Files:**
 - Create: `dashboard/app/src/shared/renderers/*`
@@ -1423,11 +1433,11 @@ The phase-4 PR letters in this section are the authoritative sub-split ledger fo
 - Test: `dashboard/tests/e2e/{renderer-context-loss,export-scene}.spec.ts`
 - Benchmark: `dashboard/tests/performance/{graph,timeline,main-thread}.spec.ts`
 
-- [ ] Write failing stable layout, deterministic worker, expansion position, selection/camera adapter, hidden-route suspension, reduced motion, table fallback, WebGL loss, render-ready, and export-manifest tests.
-- [ ] Implement the bakeoff winner behind the renderer registry/frame, plus ELK worker, dense Canvas, adaptive matrix, relationship table, chart theme/accessibility, and CodeMirror payload-slice primitives; delete losing graph prototypes and dependencies.
+- [ ] Write failing stable layout, deterministic worker, expansion position, independently restorable per-slot viewport/scale/lanes/LOD/playhead/synchronization, selection/camera adapter, hidden-route suspension, reduced motion/data, table fallback, WebGL loss, render-ready, and export-manifest tests.
+- [ ] Implement the bakeoff winner behind the renderer registry and thin slot frame, plus typed viewport/interaction/accessibility/fallback/export adapters, ELK worker, dense Canvas, adaptive matrix, relationship table, chart theme/accessibility, and CodeMirror payload-slice primitives; delete losing graph prototypes and dependencies.
 - [ ] Implement deterministic export scene with fixed fonts/DPR/layout and fallback.
 - [ ] Run unit/E2E/performance tests. Expected: stable hashes across two runs, nonblank exports, fallback retains selection, initial route does not load renderer chunks.
-- [ ] Run the section 15.1 renderer bakeoff on current and 10× corpora, record the decision and deletion receipt for losing prototypes/dependencies, then implement one `VisualizationFrame`, renderer registry, visual-semantic ontology, linked scale/brush/focus/legend/export machinery, atlas tile client, and accessibility adapter. No feature-local selection store, chart wrapper, worker protocol, legend, or exporter survives review.
+- [ ] Run the section 15.1 renderer bakeoff on current and 10× corpora, record the decision and deletion receipt for losing prototypes/dependencies, then implement one thin `WorkspaceSlotFrame`, renderer registry, typed capability adapters, visual-semantic ontology, linked scale/brush/focus/legend/export machinery, atlas tile client, and accessibility adapter. No switch-heavy universal renderer or feature-local selection store, chart wrapper, worker protocol, legend, or exporter survives review.
 - [ ] Commit: `feat(dashboard): add bounded visualization foundation`.
 
 ### Task 6: PR 26B — Observatory and non-topology Brain slice
@@ -1447,11 +1457,11 @@ The phase-4 PR letters in this section are the authoritative sub-split ledger fo
 ### Task 7: PR 27 — Universal Explorer
 
 **Files:**
-- Create: `dashboard/app/src/features/explorer/src/{ExplorerPage,IntentInput,QueryBuilder,TraceQueryEditor,SearchStagePanel,ResultTable,PivotSwitcher,ExplainPanel,BenchmarkPanel,CollectionPanel,ComparePanel}.tsx`
+- Create: `dashboard/app/src/features/explorer/src/{ExplorerPage,IntentInput,QueryBuilder,TraceQueryEditor,SearchStagePanel,ResultTable,PivotSwitcher,ExplainPanel,QualityStatus,CollectionPanel,ComparePanel}.tsx`
 - Create: `dashboard/app/src/features/explorer/visual-brief.md`
 - Test: `dashboard/tests/e2e/{explorer,query-explain,collections-compare}.spec.ts`
 
-- [ ] Write failing plain-language→visible-AST, builder/raw round-trip, All/repository/project/worktree/ref scope, same-name candidate retry, lexical/phrase/fuzzy/entity/semantic/graph/recency stage, origin/kind filter, complete memory/skill/automation kind presets, grouping/dedupe/native expansion, validation/cost, candidate cap, pagination/cursor, ranking explanation, Rspack/Rsbuild/React Router cross-repo benchmark, pivot, selection, stable recipe, collection, compare, export, and exact CLI/MCP/API request/result parity tests.
+- [ ] Write failing plain-language→visible-AST, builder/raw round-trip, All/repository/project/worktree/ref scope, same-name candidate retry, lexical/phrase/fuzzy/entity/semantic/graph/recency stage, origin/kind filter, complete memory/skill/automation kind presets, grouping/dedupe/native expansion, validation/cost, candidate cap, pagination/cursor, ranking explanation, active-profile/latest-qualified-report/regression warning plus exact Search Quality Lab deep link, Rspack/Rsbuild/React Router cross-repo benchmark fixture, pivot, selection, stable recipe, collection, compare, export, and exact CLI/MCP/API request/result parity tests. Explorer has no benchmark execution path.
 - [ ] Implement the three query authoring modes and pivots without client joins or SQL syntax.
 - [ ] Add transcript mode/origin facets and hidden-copy counts; prove every sanitized native row remains reachable.
 - [ ] Verify partial shards, unknown denominator, explicit candidate/ranking caps, ambiguous message-origin view, stable cursor plus cursor-independent research recipe, privacy-boundary graph frontier, mobile builder, keyboard results, and table/export parity.
@@ -1485,16 +1495,16 @@ The phase-4 PR letters in this section are the authoritative sub-split ledger fo
 - [ ] Run fixed-corpus user task “follow parent through subagents and code/test/commit/PR impact <=60 seconds.” Expected: pass.
 - [ ] Commit each sub-PR: `feat(timeline): add agent follow and evidence chains`; `feat(timeline): add impact and as-of state`; `feat(timeline): add compare and deterministic export`.
 
-### Task 10: PR 29 — Brain topology and ten graph lenses
+### Task 10: PR 29 — Brain topology and seven shared graph route presets
 
 **Files:**
 - Complete: `dashboard/app/src/features/brain/visualization/*`
 - Create: `dashboard/app/src/features/brain/src/BrainTopology.tsx`
-- Create: `dashboard/app/src/features/graphs/src/{GraphLensPage,lens-registry,git-lens,code-lens,thread-lens,agent-lens,turn-lens,timeline-lens,memory-lens,automation-lens}.ts(x)`
+- Create: generated route-preset descriptors under `dashboard/app/src/routes/presets/{git,code,threads,agents,turns,memory,automation}.ts`; extend shared Brain/Explorer renderer specs only
 - Test: `dashboard/tests/e2e/{brain-semantic-zoom,graph-lenses,git-drift}.spec.ts`
 
 - [ ] Write failing tile truth-contract, semantic zoom, stable expansion, federated multi-repo/worktree/ref scope, Work/plan/task/attempt/blocker/lease/acceptance cluster membership and cross-domain pivots, same-name node separation, per-shard stale/partial provenance, lens switch, legal edge vocabulary, cross-lens selection, fallback, dense LOD, and Git local/live drift tests.
-- [ ] Implement Brain topology only after PR 26 contracts pass; implement each of the eight base lens registry rows and its mini-brief (Task 10A's `tasks`/`plans` lenses complete the ten-slug enum), profile-atlas tile pyramid/hysteresis/object-constancy contract, bounded overlay/bridge composition, and adaptive dense-community matrix.
+- [ ] Implement Brain topology only after PR 26 contracts pass; register seven base generated graph presets and their mini-briefs (Task 10A adds `tasks`/`plans`, completing the nine-slug enum), profile-atlas tile pyramid/hysteresis/object-constancy contract, bounded overlay/bridge composition, and adaptive dense-community matrix. No `features/graphs` package or timeline graph destination exists.
 - [ ] Add generated Git tool actions and explicit semantic/live evidence requirements to Git inspector/palette.
 - [ ] Verify no hairball, aggregate versus evidence edge bundling, mobile focused neighborhood, 50k/200k benchmark, and table/matrix equality.
 - [ ] Commit: `feat(dashboard): connect the graph-of-graphs Brain`.
@@ -1503,13 +1513,13 @@ The phase-4 PR letters in this section are the authoritative sub-split ledger fo
 
 **Files:**
 - Create: `dashboard/app/src/features/work/src/**/*`
-- Create: `dashboard/app/src/features/graphs/src/{tasks-lens,plans-lens}.ts(x)`
-- Extend: `dashboard/app/src/features/{brain,graphs,causal-loom}/src/*`
+- Create: generated route-preset descriptors under `dashboard/app/src/routes/presets/{tasks,plans}.ts`
+- Extend: `dashboard/app/src/features/{brain,work,causal-loom}/src/*`
 - Test: `dashboard/tests/e2e/{work-initiative-plan,work-kanban-dag,work-attempt-packet,work-executor-critical-path,work-markdown-edit,work-notifications}.spec.ts`
 
 - [ ] Write failing one-canonical-ID/count/selection tests across initiative outline, saved Kanban, dependency DAG, critical path, timeline, causal, workload, executor-fleet, repository-work, initiative, agent-relevant, and All projections.
-- [ ] Add the `tasks` and `plans` lens-registry rows (`tasks-lens`/`plans-lens`), completing the ten-value `GraphLensV1` enum; extend the section 4 lens-slug/enum/composition fixture and prove `/graphs/tasks` and `/graphs/plans` plus legal overlays round-trip through URL state.
-- [ ] Implement initiative/plan/task/attempt routes and inspectors from generated views/legal capabilities, using the section 4 `InspectorTabV1` Work extension tabs for plan 24 §12.6's task/attempt inspector content; board/query/layout state never becomes task or dispatch authority.
+- [ ] Add generated `tasks` and `plans` route-preset rows, completing the nine-value `GraphLensV1` enum; extend the section 4 lens-slug/enum/composition fixture and prove `/graphs/tasks` and `/graphs/plans` plus legal overlays round-trip through URL state.
+- [ ] Implement initiative/plan/task/attempt routes and inspectors from generated views/legal capabilities, using section 4's catalog-owned Work panel descriptors for plan 24 §12.6 content; board/query/layout state never becomes task or dispatch authority.
 - [ ] Implement the PR 24R **Edit as Markdown** consumer at `/work/edit-bundles/:id`: explicit selection/export, small embedded and large streamed bundle modes, signed manifest tree, source-span diagnostics, semantic graph/active-attempt diff, three-way conflict/rebase, atomic-submit confirmation, canonical-ID receipt, TTL/delete/crash/success cleanup state, and CLI/SDK handoff. Browser state stores only opaque IDs and safe summaries; HTTP never transports a server path.
 - [ ] Consume reviewed plan-13 PR 2A Hermes UI ledger rows, retaining required notices and source-to-test links for direct/behavioral ports; prove a redesigned interaction passes the named upstream regression before dropping the port candidate.
 - [ ] Implement `/work/notifications` (plan 24 §12.7): saved filters/channels with event classes, quiet hours, dedupe, and rate budgets via generated direct validated `task_notifications.create/update/delete` commands; prove task creation never auto-subscribes a channel.
@@ -1580,18 +1590,19 @@ The phase-4 PR letters in this section are the authoritative sub-split ledger fo
 - [ ] Run `cd dashboard && npm test && npx playwright test tests/e2e/privacy-observatory.spec.ts tests/e2e/context-scout.spec.ts`. Expected: pass.
 - [ ] Commit separate PRs: `feat(dashboard): add privacy observatory workspace`; `feat(dashboard): add context scout observatory`.
 
-### Task 14: PR 25D/30H — Activity and saved views
+### Task 14: PR 25D/30H — Activity preset and saved views
 
 **Files:**
-- Create: `dashboard/app/src/features/activity/src/*`
+- Create: `dashboard/app/src/routes/presets/activity.ts`; reuse shared Explorer/Loom query, timeline, health, and inspector components
 - Create: `dashboard/app/src/features/saved-views/src/*`
 - Test: `dashboard/tests/e2e/{activity,saved-views}.spec.ts`
 
 - [ ] Write failing activity live/frozen/filter/coverage, generated activity-model parity, all three `SavedViewDefinitionV1::{Investigation,Task,Experiment}` variants plus `CollectionV1`/`AnnotationV1` complete round-trip and size-envelope rejection (section 4.3), proof that no task/experiment-view table/ID/share command fork exists, simultaneous overlapping views, exact experiment/run/cell/stage/comparison/comparison-cell/reduction/playhead restore, exact frozen-input unavailable state, saved protected-query classification/redaction/share-plan/start/revoke/expiry, URL restore, declared-owner conflict, and #425 identity-split operation-link fixtures.
-- [ ] Implement cross-domain activity with consequential-event priority, project/domain facets, bounded live paging, inspector, table fallback, and no duplicate hidden counts.
+- [ ] Implement Activity as a registered `triage` composition preset over shared Explorer/Loom query, timeline, health, inspector, and table components with consequential-event priority, project/domain facets, bounded live paging, and no duplicate hidden counts. It owns no feature package, data model, cache adapter, or renderer.
 - [ ] Implement saved-view create/update/open/delete plus generated `saved_views.share.plan`, `saved_views.share.start`, and `saved_views.share.revoke` commands; protected query literals/annotations remain encrypted, published views expire locally, and sharing requires classification/redaction planning plus explicit confirmation. Generated binding-ID parity tests cover every CLI/MCP/HTTP/SDK/UI spelling.
 - [ ] Consume Settings links only through plan 20 PR 25E's generated workspace routes and typed operation descriptors; PR 25D/30H owns no setting form, registry behavior, direct configuration command, or Settings cutover.
 - [ ] Verify `/activity` and `/saved/:viewId` direct reload/back/forward/mobile/offline/locked behavior.
+- [ ] Prove `/activity` and `/saved/:viewId` reuse canonical query/cache/page/inspector models, legacy `/work/views/:id` redirects only during migration, and no `features/activity` or task-specific saved-view store exists.
 - [ ] Commit independently: `feat(dashboard): add cross-domain activity`; `feat(dashboard): add protected saved investigations`.
 
 Plan 20 PR 25E exclusively creates `features/settings`, its E2E suite, complete generated forms, effective-source behavior, direct validated commands, activation/ack/drift views, and V1 Settings cutover. This frontend plan supplies the shared shell, visualization language, navigation, accessibility, and route-composition requirements that PR 25E consumes; it does not assign Settings implementation to PR 25D or 30H.
@@ -1670,7 +1681,7 @@ Evolution is the fourteenth evaluator and ships with its product workspace in Ta
 - [ ] Compare each route screenshot against its accepted concept with `view_image`; fix every reviewable mismatch and close the fidelity ledger.
 - [ ] Run section 18's preregistered study with the principal user and at least six independent participants spanning agent-tool, newcomer, visualization, and assistive-technology roles; record incumbent comparison, time/interactions, errors, false-causality, partial-state comprehension, atlas recall, replay comprehension, abandonment, exclusions, and retests. Expected: every frozen release threshold passes.
 - [ ] Run deterministic JSON/Markdown/SVG/PNG export twice and compare manifests/hashes; verify WebGL fallback and no hover-only data.
-- [ ] Run performance budgets and fixed-corpus user tasks; fix unexplained bundle/chunk/heap/FPS regressions.
+- [ ] Run performance budgets and fixed-corpus user tasks on local plus pinned remote high-latency/packet-loss/bandwidth profiles across desktop/mobile; enforce per-route/atlas byte ceilings, superseded viewport cancellation, reduced-data table/density-first fallback, and truthful selection/coverage before fixing unexplained bundle/chunk/heap/FPS regressions.
 - [ ] Run `cd dashboard && npm ci && npm test && npm run build && npx playwright test`; run `cargo test --test dashboard_api_test`; run package verification. Expected: all pass.
 - [ ] Commit: `test(dashboard): complete product quality gates`.
 
@@ -1741,7 +1752,7 @@ Expected: all pass. Before executing Rust compiler/check commands, use TraceDeca
 
 - `/` opens a truthful All/Brain view across the active profile; project selection is a filter, not another app.
 - All/repository/project/worktree/ref scopes are explicit and ambiguity-safe — the section 22.2 scope task and its typo/ambiguity script complete without dead ends — and semantically identical across dashboard/CLI/MCP/API; federated Rspack/Rsbuild/React Router fixtures retain same-name disambiguation and per-shard provenance/stale/partial state.
-- Git, code, thread, agent, Turn, task, plan, timeline, memory, and automation/skill graph lenses preserve distinct semantics, compose through bounded typed overlays/bridges, and retain a stable profile-atlas mental map across ordinary refresh.
+- Git, code, thread, agent, Turn, task, plan, memory, and automation/skill graph lenses preserve distinct semantics, compose through bounded typed overlays/bridges, and retain a stable profile-atlas mental map across ordinary refresh. Timeline remains a Loom composition/overlay and is never serialized as `GraphLensV1`.
 - Causal Loom follows agents/sessions/Turns through context, visible reasoning, tools, code, tests, Git/delivery, hints/memory, goals, and outcomes with evidence-class connectors.
 - Claude workflows, Codex goals, and Hermes-style curator/reflector/skill-writer actors are captured and visible as typed related entities.
 - Evolution Studio makes skill, memory, policy, and automation evolution inspectable from evidence through autonomous version/use/outcome/supersession/recovery.

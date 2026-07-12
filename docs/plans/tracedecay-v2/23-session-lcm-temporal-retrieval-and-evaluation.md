@@ -76,8 +76,8 @@ Observed semantics:
 10. Results contain full session/message records in JSON and a score without component explanation. They do not contain a durable V2 retrieval anchor, cluster identity, current/stale state, source coverage, or next cursor.
 11. Limits clamp to 1–50. All-registered search reports searched/skipped project counts, but not a per-shard coverage/disposition ledger in the compact human result.
 12. JSON output can exceed the global response limit and becomes an expiring response-handle envelope; Markdown is compact but still lacks paginated continuation and stable result hydration.
-13. Merged PR #445 added a separate user-session `message_search` dispatch when compatibility `storage_scope=user` is explicit. It correctly bypasses project routing, but the sentinel, CLI/MCP allowlists, and dedicated handler remain V1 compatibility mechanics; V2 queries one Profile root, retains `DeclaredScope::Profile`/`DeclaredScope::ZeroProject` provenance, and uses the one search application path.
-14. The 2026-07-11 catch-up audit quantified the hidden cost: four concurrent all-registered searches exceeded 397 seconds while the same read with `catch_up:false` took 1.85 seconds; 31 destinations repeatedly scanned a 1.15 GiB Hermes source, implying at least 35.7 GiB read per request before concurrency. This is FM-153. The unmerged V1 singleflight/multi-destination patch is regression evidence only; V2 makes reads side-effect free and delegates explicit freshness to plan 09's durable operation kernel.
+13. Merged PRs #445/#448 added a separate selected-profile user-session `message_search` dispatch and query-coupled catch-up when compatibility `storage_scope=user` is explicit. Project bypass/profile selection are parity fixtures; the sentinel, CLI/MCP allowlists, process-local singleflight, direct read-only DB open, optimistic `catch_up_performed`, and dedicated handler are V1 red fixtures. V2 queries one Profile root, retains `DeclaredScope::Profile`/`DeclaredScope::ZeroProject` provenance, uses one side-effect-free search application path, and exposes freshness only through an explicit durable refresh operation.
+14. The 2026-07-11 catch-up audit quantified the hidden cost: four concurrent all-registered searches exceeded 397 seconds while the same read with `catch_up:false` took 1.85 seconds; 31 destinations repeatedly scanned a 1.15 GiB Hermes source, implying at least 35.7 GiB read per request before concurrency. This is FM-153. PR #447's merged V1 singleflight/multi-destination patch and PR #448's user-search catch-up are differential evidence only; V2 makes reads side-effect free, reports truthful coverage, and delegates explicit freshness to plan 09's durable operation kernel.
 
 ### 1.2 `lcm_grep`
 
@@ -232,7 +232,7 @@ The result returns the chosen representative, every hidden-member count by provi
 
 A `Turn` groups one initiating event, assistant/reasoning parts, tool invocations/results, edits, goals, spawned agents, handoffs, and terminal outcome under provider-declared or evidence-backed boundaries. It is not inferred only from alternating roles.
 
-A `Thread` can span provider sessions, compaction continuations, resumed hosts, and handoffs. `thread_sessions` records relation/evidence/time rather than copying all messages into one session. Retrieval can return:
+A `Thread` can span provider sessions, compaction continuations, resumed hosts, and handoffs. Canonical `RelationAssertionV1` records thread/session relation, evidence, and time; rebuildable `thread_session_index` accelerates lookup without copying all messages into one session. Retrieval can return:
 
 - exact message;
 - smallest sufficient Turn;
@@ -1071,7 +1071,7 @@ Application/API/UI use the shared Plan 09/10/11/21 locations. Root V1 adapters l
 
 - Codex, Claude, Cursor, Hermes, and remaining provider fixtures normalize origin, role, Turn, parent/child, and tool results consistently;
 - CLI/MCP/API/SDK produce equivalent typed JSON and Markdown default behavior;
-- merged #445 fixtures run user-scoped message search and LCM from `/`, Hermes home, unrelated CWD, and project CWD with no project route/handshake/init; missing user-session storage reports typed unavailable coverage, every legacy scalar-user-plus-compatibility-project request fails identically, and canonical Profile+Project reads remain valid;
+- merged #445/#448 fixtures run user-scoped message search and LCM from `/`, Hermes home, unrelated CWD, and project CWD with no project route/handshake/init; missing registry/source reports typed unavailable coverage; every legacy scalar-user-plus-compatibility-project spelling, including `project_key`, fails identically; appended zero-project and registered-project source rows prove routing; 64 joiners receive the leader's exact terminal coverage/error; no-op/failure never reports refresh performed; and canonical Profile+Project reads remain valid;
 - Markdown and JSON disclose limit/truncation/cursor/coverage/conflict/stale state;
 - Search Quality Lab session-temporal then-versus-now replay is read-only and visually/accessibly testable;
 - Settings changes produce versioned effective-config provenance and deterministic replay.

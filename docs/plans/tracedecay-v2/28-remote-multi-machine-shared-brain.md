@@ -74,13 +74,13 @@ Replication moves semantic TraceDecay artifacts, not mutable database pages:
 - sanitized immutable observation batches;
 - canonical event-tail manifests;
 - signed read snapshots and projection manifests;
-- immutable Git/code graph packs and content-addressed blobs eligible for the destination;
+- authority-built and signed immutable Git/code graph packs and content-addressed blobs eligible for the destination;
 - tombstones, retention proofs, revocations, membership, and placement revisions;
 - acknowledgement, gap, quarantine, and conflict receipts.
 
 `EventDotV1` and bounded causal frontiers describe replication provenance. They do not replace deterministic `ObservationId`, evidence causality, per-shard sequence, or query vector watermarks.
 
-A frontier contains at most 1,024 sorted unique `(BrainNodeId, NodeEpoch, max_sequence)` components. Enrollment admission refuses growth beyond the bound until every authority/replica has acknowledged a signed compaction frontier. Retired node epochs compact into a tombstone/digest only after their accepted sequence, revocation generation, tombstone acknowledgements, and backup horizon are covered; reconnecting nodes older than that floor must re-seed from a signed snapshot and cannot upload an omitted epoch.
+A frontier contains at most 1,024 sorted unique `(BrainNodeId, NodeEpoch, max_sequence)` components. Enrollment admission refuses growth beyond the bound until every member of the compaction's frozen membership epoch has a terminal disposition: current authorities/replicas acknowledge, while a positively fenced/revoked node receives a signed tombstone disposition without acknowledgement. Retired node epochs compact only after their accepted sequence, revocation generation, disposition, and backup horizon are covered; reconnecting nodes older than that floor must re-seed from a signed snapshot and cannot upload an omitted epoch. An offline current member still blocks; a destroyed or revoked member cannot block forever.
 
 Consistency rules:
 
@@ -126,11 +126,12 @@ Only the current authority runs canonical projectors, schedulers, curation, task
 Remote nodes may:
 
 - capture and sanitize observations;
-- extract eligible immutable code/Git packs;
 - evaluate a pinned hint/policy bundle locally for hook latency;
 - request remote query/context suggestions asynchronously;
 - upload delivery/outcome receipts;
 - render read-only cache and pending overlays.
+
+The first remote release deliberately has no remote code-extraction import protocol. Remote nodes upload sanitized code/Git observations; the current authority alone builds and signs canonical graph/index packs. Every transferable pack carries plan 01 `GraphPackManifestV1`; plan 02 verifies its authority/epoch/placement, repository/generation/snapshot/watermark, schema/catalog/privacy, byte digest/length, and signature, binds the exact pack set into each replica/cache manifest, and retains it through live/backup/rollback references. Missing/corrupt/unauthorized packs yield partial/locked coverage, never fallback. Replication may copy those authority-signed immutable packs outward to eligible replicas/caches, never accept an inbound pack as canonical truth. Remote extraction is reconsidered only by a later ADR with an untrusted-build verification protocol and cannot be inferred from generic artifact upload.
 
 Every hint/suggestion records whether evidence was authoritative, bounded-stale, or local-pending. Nearby-agent coordination spans enrolled nodes only when authorized and sufficiently fresh; stale remote activity cannot trigger a definitive duplicate-work claim. Task leases and work claims are authority-fenced.
 
@@ -203,7 +204,7 @@ brain.repositories.candidates|adopt|split
 
 This is the closed catalog family owned by plan 08 and implemented by plan 09. `brain.join` is the only public enrollment/bootstrap workflow; it creates node enrollment and initial placement atomically or compensates both. `brain.leave` revokes the current node and retires its eligible cache/replica state after authority-transfer preconditions. CLI/HTTP/SDK/MCP/UI names below are generated bindings of these use cases, not additional operations.
 
-Remote mutation operations use idempotency keys, expected versions, explicit effect classification, authorization, progress resources, audit receipts, and resumable operation IDs. Promotion, restore publication, node revocation, placement changes, and destructive replica retirement are operator-only.
+Remote mutation operations use idempotency keys, expected versions, explicit effect classification, authorization, progress resources, audit receipts, and resumable operation IDs. Promotion and restore publication contend on one operation-scoped exclusive Brain/shard lifecycle lease, freeze expected placement/catalog/schema/privacy versions, and publish only through a higher-authority-epoch plus manifest CAS; kill/concurrency tests prove one winner. Promotion, restore publication, node revocation, placement changes, and destructive replica retirement are operator-only.
 
 API additions include topology/node/enrollment/placement/sync/replica/backup/failover resources and SSE changes. The remote handshake binds protocol/schema/catalog/privacy versions, `BrainId`, node identity/epoch, authority epoch, grants, placement generation, and causal frontier. Incompatible clients receive a structured upgrade problem before data transfer.
 
@@ -248,7 +249,7 @@ Authority backups are canonical; client caches and spools are not backups. A bac
 - separately recoverable wrapped data-encryption keys: either an offline recovery-key bundle stored outside the authority or an external KMS/escrow reference with tested access policy. Backups never contain the unwrap secret beside wrapped keys, and key rotation retains every epoch needed by the declared recovery horizon;
 - privacy scan and restore-eligibility receipts.
 
-Restore occurs in isolated staging, proves recovery-key/KMS access after total authority-node loss, verifies all anchors and privacy gates, then publishes under a higher authority epoch. Standby promotion requires a current verified recovery receipt plus one of §3's positive exclusive-fence proofs. An old authority reappearing after a partition is read-only/quarantined until explicitly re-seeded. Connectivity loss never promotes a cache or client automatically.
+Restore occurs in isolated staging, proves recovery-key/KMS access after total authority-node loss, verifies all anchors and privacy gates, then publishes under a higher authority epoch. Every restored task lease, execution admission, and automation admission remains historical: before serving, recovery appends restore-fence/revocation events, clears active pointers, increments every affected task fence epoch, and marks uncertain external effects for mandatory reconciliation. Only a new post-recovery admission under the new authority epoch may execute. Standby promotion requires a current verified recovery receipt plus one of §3's positive exclusive-fence proofs. An old authority reappearing after a partition is read-only/quarantined until explicitly re-seeded. Connectivity loss never promotes a cache or client automatically.
 
 Define and test declared RPO/RTO profiles for standalone, remote authority, and verified standby. Backup age and last successful restore drill are visible in Observatory.
 

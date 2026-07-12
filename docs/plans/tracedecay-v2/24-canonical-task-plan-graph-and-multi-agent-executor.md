@@ -589,7 +589,7 @@ pub struct AcceptanceCriterionV1 {
 
 Manual attestation is valid for inherently human criteria but records actor, role/grant, timestamp, task/plan versions, and evidence; it is not a generic bypass. An exception to a required criterion is a separately authorized exception event with reason/evidence and remains visible in outcome quality.
 
-`TaskDecisionV1` stores alternatives, selected value, actor/policy, evidence, validity interval, supersession, and affected work items. Decisions can invalidate packet assumptions or gates. `HandoffV1` is a structured transition containing safe summary, completed acceptance, unresolved risks, decisions, artifacts, anchors, suggested next work, and source attempt. `TaskArtifactV1` references sanitized immutable blobs or canonical external artifacts; it records produced/observed/encountered, content/provenance digests, retention, and access class.
+`TaskDecisionV1` stores alternatives, selected value, actor/policy, evidence, validity interval, supersession, and affected work items. Decisions can invalidate packet assumptions or gates. `HandoffV1` is a structured transition containing safe summary, completed acceptance, unresolved risks, decisions, artifacts, anchors, suggested next work, and source attempt. Its cross-host form additionally pins source and intended-target `HostIntegrationRuntimeRefV1`, handoff mode, target capability snapshot, exact scope, task/lease and authority epochs, budgets, policy/config/catalog/privacy versions, source watermarks, expiry, and digest. Acceptance reauthorizes the target and is idempotent; it cannot transfer host permissions or permit two targets to acquire one lease. `TaskArtifactV1` references sanitized immutable blobs or canonical external artifacts; it records produced/observed/encountered, content/provenance digests, retention, and access class.
 
 `TaskOutcomeV1` separates:
 
@@ -629,6 +629,7 @@ pub struct TaskLeaseV1 {
     pub work_item: WorkItemVersionRefV1,
     pub attempt: ExecutionAttemptId,
     pub executor: ExecutorRegistrationId,
+    pub authority_epoch: AuthorityEpoch,
     pub fence_epoch: u64,
     pub issued_at: UtcMicros,
     pub heartbeat_at: UtcMicros,
@@ -644,6 +645,7 @@ pub struct TaskLeaseProofV1 {
     pub lease: TaskLeaseId,
     pub attempt: ExecutionAttemptId,
     pub executor: ExecutorRegistrationId,
+    pub authority_epoch: AuthorityEpoch,
     pub fence_epoch: u64,
     pub expires_at: UtcMicros,
     pub nonce: Nonce,
@@ -651,7 +653,7 @@ pub struct TaskLeaseProofV1 {
 }
 ```
 
-`CapabilityGrantSetId` is the canonical plan-01 entity identity for the immutable attempt/lease grant set; its manifest digest proves contents but never substitutes for the ID. Lease, attempt, start manifest, physical `task_leases`/`execution_attempts` rows, broker calls, events, and receipts carry both values and must agree. The set pins its ordered grant IDs, attempt, lease/epoch, policy manifest, effective configuration snapshot/digest, and catalog snapshot. Revocation appends a fenced revocation event/epoch without changing the set; any different grant contents require a new set on a new attempt/lease. Mutating a set behind a stable ID is forbidden.
+`CapabilityGrantSetId` is the canonical plan-01 entity identity for the immutable attempt/lease grant set; its manifest digest proves contents but never substitutes for the ID. Lease, attempt, start manifest, physical `task_leases`/`execution_attempts` rows, broker calls, events, and receipts carry both values and must agree. The set pins its ordered grant IDs, attempt, lease authority/task fence epochs, policy manifest, effective configuration snapshot/digest, and catalog snapshot. Revocation appends a fenced revocation event/epoch without changing the set; any different grant contents require a new set on a new attempt/lease. Mutating a set behind a stable ID is forbidden.
 
 `WorkClaimV1` from Plan 01 remains an advisory statement that an agent intends or appears to work on a scope. It drives nearby-agent/duplicate-work evidence and may suggest an assignment, but it cannot authorize tools, reserve budget, block scheduling, or complete a work item. `TaskLeaseV1` is application-issued execution authority and always points to one attempt. `TaskLeaseProofV1` is a short-lived unforgeable proof bound to lease/attempt/executor/epoch; its signature/nonce is protected control-plane material and never appears in ordinary stores, logs, prompts, UI, CLI, MCP, exports, or research anchors. Proof signatures use a profile-local HMAC signing key under the plan 18 key lifecycle (key ID plus rotation recorded in the profile catalog, matching the plan 12/19 receipt mechanism; no asymmetric PKI); only the application service verifies proofs, and key rotation invalidates outstanding proofs at the next issuance or heartbeat boundary.
 
@@ -1141,7 +1143,7 @@ Retention rules:
 - raw edit workspaces expire under their operation TTL, successful submit schedules immediate purge, crash recovery distinguishes pre-commit staging from committed-receipt cleanup, and durable receipts contain no Markdown/frontmatter/path bytes;
 - deletion follows plan 18 descendant invalidation and anchor tombstone rules.
 
-Startup recovery verifies schema/integrity, active lease/attempt bijection, monotonic epochs, dangling reservations, graph cycles, topological manifests, packet refs, outbox steps, and executor registrations. Corruption never triggers silent empty database initialization; quarantine, restore, or typed repair is required.
+Startup recovery verifies schema/integrity, active lease/attempt bijection, monotonic authority/task fence epochs, dangling reservations, graph cycles, topological manifests, packet refs, outbox steps, and executor registrations. A normal same-authority restart may recover a provably current lease under its unchanged authority epoch; backup restore or authority promotion never does. It appends restore-fence/revocation events, clears active pointers, increments affected task fence epochs, and blocks new admission until every uncertain external effect is reconciled. Corruption never triggers silent empty database initialization; quarantine, restore, or typed repair is required.
 
 ## 6. Projector and relation design
 
@@ -2108,7 +2110,7 @@ Routes:
 /work/packets/:packetId
 /work/executors
 /work/scheduler
-/work/views/:savedViewId
+/saved/:viewId
 /work/edit-bundles/:editBundleId
 /work/notifications
 /work/notifications/:notificationId
@@ -2190,7 +2192,7 @@ Task inspector tabs:
 - Costs/budgets;
 - Audit/provenance/anchors.
 
-These tabs are values of the extended `inspector.tab` union in plan 11's `InvestigationStateV1`; plan 11 owns that union, and this plan defines no parallel tab-state model.
+These panels are catalog-owned Work `InspectorPanelRefV1` descriptors generated into plan 11's UI from plan 01's persisted `InvestigationStateV1`; this plan supplies descriptor content/capability metadata and defines no parallel panel-state union. Selection migration uses the declared nearest legal panel.
 
 Attempt inspector shows requested versus actual adapter/provider/model/effort/tools/skills, lease epoch/status without exposing secret material, exact workspace binding, packet version, Turn/tool/artifact timeline, progress/log access, cost, acceptance, cancellation/reconciliation, and residual risk.
 

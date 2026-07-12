@@ -1220,7 +1220,9 @@ Run one canonical fixture per use case through the hermetic in-process applicati
 - configuration effective values/provenance/impact;
 - Git local/live/joined truth.
 
-The parity matrix includes the merged #445 fixtures for user-scoped `message_search`, every LCM call, fact search/mutation/feedback, and memory status from neutral/host/unrelated/project working directories. It asserts identical route class, canonical scope-resolution ID, default source, authority, and coverage; zero project discovery/open/init or synthetic project flag; typed unavailable/incomplete coverage when profile activity is absent; and no raw CWD/path/`HERMES_HOME`/host-profile name in logs, metrics, or errors.
+The parity matrix includes merged #445/#448 fixtures for user-scoped `message_search`, every LCM call, fact search/mutation/feedback, and memory status from neutral/host/unrelated/project working directories. It asserts identical route class, canonical scope-resolution ID, default source, authority, and truthful refresh coverage; zero project discovery/open/init or synthetic project flag; typed unavailable/incomplete coverage when profile activity is absent; identical `invalid_input` for every forbidden legacy project selector including `project_key`; and no raw CWD/path/`HERMES_HOME`/host-profile name in logs, metrics, or errors.
+
+Session commands/tools use generated `SessionLocatorV1` unchanged. Canonical IDs hydrate directly; provider-native aliases require profile+provider, return the same zero/one/many canonical candidates as API/SDK/dashboard, and never let CLI/MCP first-match or encode a transport-only bare-ID shortcut.
 
 ### 19.5 Security, fuzz, and accessibility
 

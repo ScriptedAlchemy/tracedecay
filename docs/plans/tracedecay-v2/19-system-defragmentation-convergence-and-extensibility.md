@@ -119,6 +119,7 @@ The inventory records symbols and schema names, not private content. It uses sup
 | Canonical IDs, time, scope, evidence, privacy-safe values, watermarks, canonical encoding/digests | Narrow `tracedecay-domain` kernel | Owner registries and invariant-heavy validators | Per-subsystem newtypes, string codecs, hash builders, enum spellings |
 | Registry identity/version/owner/schema/deprecation/cross-reference/loading/digest/drift | Domain registry substrate; each registry retains semantic ownership | Domain, capability, use-case, configuration, metric, problem/status, SPI manifests | Registry-local loaders, canonicalizers, digest/version/replacement/codegen plumbing |
 | Observation adapter framing/offset/rewrite/sanitize/publish conformance | `tracedecay-capture` | Provider/source descriptors and parsers | Provider runner switches, direct writes, provider-specific redaction/storage |
+| Durable framed-segment append/fsync/torn-tail/rotation mechanics | `tracedecay-capture::framed_log` mechanical kernel | Capture spool frame registry/policy; root lifecycle-bootstrap receipt registry with separate service-only root/key | A second lifecycle journal engine, provider-local spool codecs, ad hoc CRC/hash-chain/recovery loops |
 | Projection lease/checkpoint/gap/dead-letter/rebuild/publication/lag runtime | `tracedecay-projectors` | `ProjectionSpecV1` plus domain reducers/builders | Accounting/code/session/knowledge/automation runner and retry forks |
 | Tree-sitter parse/traversal/result construction | `tracedecay-code-index` | Grammar descriptors and language-family query packs/hooks | Repeated `visit_children`, `build_result`, `extract_source`, C/C++ and BASIC helper bodies |
 | Query cursor/budget/page, lexical/hybrid/rank/time/graph operators | `tracedecay-query` | Registered query profiles/operators | LCM/memory/context/dashboard/tool-specific ranking, limit, pagination, traversal forks |
@@ -131,7 +132,7 @@ The inventory records symbols and schema names, not private content. It uses sup
 | Host install/update/uninstall/config mutation | One root host-integration engine outside the hook hot path | `HostIntegrationManifestV1` installation facet: paths, formats, ownership, backup and health probes | Nine installer copies, exact Cline/Roo duplicates, provider config mutation forks |
 | Protected remote Brain transport wire | Private root `v2::remote_brain_transport` | Application/API/client contracts plus plan-28 connection/stream envelopes | TLS/mTLS listener/client, connection lifecycle, SSE and semantic snapshot/tail framing only; no enrollment, grant, placement, consistency, fencing, sync-policy, query, or store semantics |
 | Sealed page/problem/graph/timeline views and human document rendering | Application view types; private root `v2::presentation` renderer | Catalog presentation descriptors and domain lens schemas | Handler envelopes/renderers, dashboard/MCP/CLI graph transforms, raw-value Markdown |
-| Visual-semantic ontology, linked composition state, graph/timeline/metric envelope, interaction/query delta, accessibility/export frame | Application/catalog view contracts plus dashboard `VisualizationFrame` | Domain lens/entity/edge/lane/metric descriptors and five registered compositions | Feature-local chart wrappers, legends, selection/filter stores, workers/exporters, graph response types, lab visualization shells |
+| Visual-semantic ontology, linked per-slot composition state, graph/timeline/metric envelope, interaction/query delta, accessibility/export capabilities | Application/catalog view contracts plus thin dashboard `WorkspaceSlotFrame` and renderer capability registry | Domain lens/entity/edge/lane/metric descriptors and five registered compositions | Switch-heavy universal renderer, feature-local chart wrappers, legends, selection/filter stores, workers/exporters, graph response types, lab visualization shells |
 
 No row authorizes a generic `common` crate. If two uses only look similar but have different invariants, their owners keep separate typed implementations and the reuse-disposition ledger records `retain` with evidence.
 
@@ -195,7 +196,7 @@ Required convergence:
 
 - Session, LCM, memory, code, diagnostics, Git, agent, automation, facts, skills, and analytics queries compile from the same typed AST or call a specialized facade that compiles to it.
 - Text search uses one versioned pipeline with exact/phrase/lexical foundations and optional measured fuzzy/entity/graph/dense/learned-sparse/rerank channels.
-- Code graph, Git graph, thread graph, agent graph, Turn graph, timeline graph, knowledge graph, and automation graph share entity/relation/time/provenance primitives while retaining domain-specific operators.
+- Code graph, Git graph, thread graph, agent graph, Turn graph, timeline graph, knowledge graph, and automation graph share entity/relation/time/provenance primitives while retaining domain-specific operators. `RelationAssertionV1` is the one canonical entity-edge authority; domain-specific edge tables are rebuildable typed indexes with mandatory source relation IDs, never parallel truth.
 - A query response always returns rows/nodes/edges plus pinned scope, coverage, freshness, watermarks, truncation, cost, planner/ranker versions, explanation, and stable retrieval anchors.
 - No UI endpoint, MCP tool, or CLI command embeds SQL, FTS syntax, graph traversal, ranking, pagination, or store routing.
 - Query caches key on normalized AST, resolved scope, access decision, snapshot/watermarks, representation/ranker versions, and privacy policy digest.
@@ -284,7 +285,7 @@ The same convergence pattern applies to identity, search, policy, config, status
 | Identity allocation and canonical alias evidence | Domain | Application/store repository | Allocation ledger plus activity/project owner shards | Query/application |
 | Keyed alias routing projection | Domain/store route contract | Projector/store | Content-free catalog routes only | Scope resolver |
 | Projections | Projector registry | Projectors | Activity/project/graph stores | Query |
-| Code extraction and immutable graph-generation builds | Domain code/evidence contracts plus plan-25 extractor registry | `tracedecay-code-index`; root only adapts its producer into the projector-owned build port | Store generation writer under the projector transaction | Projector/query/application status; never a direct transport |
+| Code extraction and immutable graph-generation builds | Domain code/evidence contracts plus plan-25 extractor registry | `tracedecay-code-index`; root only adapts its producer into the projector-owned build port | Durable source-fenced request; store generation writer outside SQLite; short manifest/pointer/checkpoint CAS transaction | Projector/query/application status; never a direct transport |
 | Query AST/value/schema | Domain | Query parses/validates/canonicalizes | None | Query/application/generated bindings |
 | Query planning/ranking/execution | Query | Query | Query cache/eval artifacts through ports | Application |
 | Retrieval-evaluation truth | Domain retrieval-evaluation contracts plus plan-15 corpus/profile registries | Query evaluator under the generic hermetic experiment runner and application authorization | Store-owned activity-shard corpus, qrel, pool, judgment, adjudication, metric/report, fixture, and profile families plus shared experiment/run rows | Application, Search Quality Lab, Observatory, and generated bindings |
@@ -494,10 +495,12 @@ Every SPI has:
 
 1. **Built-in Rust:** first-party, compiled, full conformance, least runtime overhead.
 2. **WASM component:** preferred untrusted/third-party pure transform/evaluator; capability-free by default with bounded host calls.
-3. **Isolated subprocess:** only for extractors/tools needing native runtimes; authenticated framed protocol, sandbox profile, restricted environment/filesystem/network, hard budgets.
+3. **Isolated subprocess:** only for extractors/tools needing native runtimes; authenticated framed protocol, sandbox profile, restricted environment/filesystem/network, hard budgets, and the shared daemon subprocess supervisor below.
 4. **Remote extension:** deferred; requires explicit user configuration, authenticated protocol, privacy-domain egress policy, offline/degraded semantics, and threat-model ADR.
 
 No unstable Rust dynamic-library ABI is a public plugin contract. WIT/JSON Schema/protobuf-like wire contracts are generated from the same versioned SPI IR where applicable. The first release may keep SPIs internal until two implementations and conformance suites prove the boundary; internal status must not be documented as stable public API.
+
+All child-producing components reuse one root-private subprocess-supervision kernel; provider adapters, schedulers, executors, experiments, extractors, and extension hosts cannot own independent child registries or retry loops. Admission atomically registers before spawn, binds lifecycle epoch/cancellation, rejects late/retry spawn after drain, and terminates/reaps under one aggregate deadline. Linux uses a daemon-owned cgroup/service scope and Windows a kill-on-close Job Object; a process group or descendant scan alone is never containment because `setsid`/double-fork/reparenting can escape. macOS epoch one permits native subprocess execution only when a stock-host probe proves the packaged sandbox denies fork/spawn and the registered child requires exactly one process (`MacSandboxNoFork`); child kinds needing descendants use built-in Rust/WASM/remote execution or are `Unavailable`. Without that enforceable probe the supervisor returns `ContainmentUnproven`, refuses the spawn before effects where possible, and can never publish clean shutdown from observational scans. The supervisor persists plan-01 `SubprocessShutdownReceiptV1` through plan 02 and exports plan-26 metrics without becoming a public crate. FM-157 covers each registered child kind; architecture lint rejects direct spawn outside the kernel/test harness.
 
 ### 7.4 Extension registry and dependency rule
 
@@ -817,7 +820,7 @@ Add deterministic tests/tools for:
 - cross-repo/worktree/ref scope and graph/search routing;
 - file/function/complexity/public-API/dependency budget deltas;
 - architecture-manifest drift, package ceiling/admission, generated-versus-handwritten lines, negative-code disposition, duplicate-body clusters, dependency duplication/features, table/worker/artifact counts, binary/RSS/startup/build and data-footprint deltas;
-- exactly one registry substrate, canonical encoder/digest kernel, projection runtime, operation substrate, hermetic experiment harness, host installer, extractor driver, graph/timeline/metric visualization envelope, linked `VisualizationFrame`, page/problem envelope, and presentation renderer.
+- exactly one registry substrate, canonical encoder/digest kernel, projection runtime, operation substrate, hermetic experiment harness, host installer, extractor driver, graph/timeline/metric visualization envelope, thin linked `WorkspaceSlotFrame` plus renderer capability registry, page/problem envelope, and presentation renderer.
 
 ### 13.3 Architecture observatory
 

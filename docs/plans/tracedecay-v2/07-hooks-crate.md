@@ -1,6 +1,6 @@
 # TraceDecay V2 Root Hooks Boundary Implementation Plan
 
-**Goal:** Build a bounded host-hook runtime that losslessly captures provider events, obtains replayable hint decisions, and acknowledges Codex, Claude Code, Cursor, and Kiro without coupling host latency to indexing, projection, cross-project queries, or storage internals.
+**Goal:** Build a bounded host-lifecycle runtime that losslessly captures provider events, obtains replayable hint decisions, and acknowledges Codex, Claude Code, Cursor, Hermes, and Kiro without coupling host latency to indexing, projection, cross-project queries, or storage internals. “Hook” is the canonical lifecycle boundary, not a claim that every host exposes a hook file: Hermes plugin/session/tool/gateway/delegation/scheduler callbacks and source-broker catch-up lower into the same request/receipt state machine with an exact capability disposition.
 
 **Architecture:** the private root `v2::hooks` module owns host wire normalization, hot-path orchestration, deadline and durability policy, reply rendering, and provider conformance. It delegates durable frames to `tracedecay-capture`, policy/context work to narrow `tracedecay-application` ports, and capability metadata to `tracedecay-tool-catalog`; it never opens a database, mutates policy state directly, or implements provider transcript parsing twice. It remains a module because root is its only production consumer; plan-19 import lints preserve the boundary without publishing another crate.
 
@@ -325,7 +325,7 @@ Plan 01 PR 4 owns the complete definition/source/provenance/run/representation/t
 
 ### 7.1 Exact Codex wire and matcher contract
 
-The Codex adapter has private closed `CodexHookWireInputV1` variants and losslessly lowers every current release field. All variants receive `session_id`, nullable `transcript_path`, `cwd`, `hook_event_name`, and `model`. `transcript_path` is an unstable convenience locator and `cwd` is an untrusted scope candidate; neither is a canonical session/project identity or permission. `SessionStart`, `PreToolUse`, `PermissionRequest`, `PostToolUse`, `UserPromptSubmit`, `SubagentStart`, `SubagentStop`, and `Stop` additionally carry closed `permission_mode=default|acceptEdits|plan|dontAsk|bypassPermissions`; a forward-unknown value is retained as bounded unknown evidence, never mapped to a known authorization mode. Subagents reuse the parent `session_id`, so `agent_id` is mandatory lineage rather than optional decoration.
+The Codex adapter has private closed `CodexHookWireInputV1` variants and losslessly lowers every current release field. All variants receive `session_id`, nullable `transcript_path`, `cwd`, `hook_event_name`, and `model`. `transcript_path` is an unstable convenience locator and `cwd` is an untrusted scope candidate; neither is a canonical session/project identity or permission. `SessionStart`, `PreToolUse`, `PermissionRequest`, `PostToolUse`, `UserPromptSubmit`, `SubagentStart`, `SubagentStop`, and `Stop` additionally carry closed `permission_mode=default|acceptEdits|plan|dontAsk|bypassPermissions`; a forward-unknown value is retained as bounded unknown evidence, never mapped to a known authorization mode. Subagents reuse the parent `session_id`, so `agent_id` is mandatory lineage rather than optional decoration. Merged #447's literal `[hooks.state]` parent is a V1 stock-host probe/import fixture proving semantic TOML equivalence is insufficient when observing trust state. V2's bundle emits hook definitions only and never creates or edits that host trust-state table; installation/enabling leaves every non-managed exact hash for user review in `/hooks`.
 
 | Codex event | Scope and required event fields | Matcher | Supported response semantics |
 |---|---|---|---|
@@ -393,6 +393,8 @@ pub struct HookCaptureResult {
 ~~~
 
 HookEffect is a proposal until the host adapter delivers it. A generated per-event output validator makes illegal combinations unrepresentable: `RewriteToolInput` is legal only for `PreToolUse` and must contain a complete string `command` for Bash/`apply_patch` or a complete arguments object for MCP; it accompanies allow only. `PermissionDecision` is legal only for `PermissionRequest`. Continuation effects target only their matching stop event and are always suppressed when `stop_hook_active` proves that host flow was already continued. Blocking is legal only for catalog-declared blocking hook points with a policy decision carrying a blocking rule ID. Notification and ordinary hint failures return an empty response, not denial.
+
+Canonical hook points preserve native semantics rather than pretending similarly named events are equivalent. `ToolActivityFacts` carries a closed native disposition (`Succeeded`, `Failed`, `Interrupted`, `DeniedBeforeExecution`, `Unknown`) plus provider event code, exit/error coverage, and whether the effect may already have occurred. Codex Bash nonzero remains `PostToolUse` with `Failed`; Claude retains distinct `PostToolUse` and `PostToolUseFailure`; an absent/unknown host field remains `Unknown`. Render legality is selected from the exact `(host, surface, version, native event, handler type)` capability row, never from `HookPoint` alone. A host-native event may therefore normalize to shared facts while retaining capabilities that no sibling host has.
 
 Host-specific legality further narrows this union. Claude `RewriteToolOutput`, retry, display replacement, watch-path, elicitation, validated worktree-path, session-bootstrap, ask/defer, typed permission update/destination/interrupt, and continuation effects require their exact event/version schema and policy authorization. MessageDisplay replacement is display-only. WorktreeCreate is generation-disabled unless the authorized root effect owns complete creation, validated directory, rollback, cleanup, and receipt. Elicitation accept/content crosses plan 21's form-secret and URL-auth boundary and cannot manufacture consent. CwdChanged/FileChanged watch updates never imply permission to read paths. Worktree/watch outputs carry expiring authorization-bound `ProtectedHostLocatorHandleV1`s plus privacy digests; only the root effect broker resolves them to strings at final host rendering, and raw paths never cross public/domain/UI serialization. Codex cannot receive these Claude-only effects. Unknown or version-gated output fields fail before publication rather than being emitted optimistically.
 
@@ -591,6 +593,8 @@ pub struct HookAppendReceipt {
 
 Domain `SpoolReceipt` is the one spool-receipt vocabulary: capture's spool client returns it directly, so `AppendState::Fsynced` embeds it without an adapter type (there is no separate hook spool receipt).
 
+The invocation lifecycle is monotonic and receipt-backed: `Received -> Decoded -> Sanitized -> Appended -> Evaluated? -> Rendered? -> DeliveryAttempted? -> HostAcknowledged`. A typed terminal degradation records the furthest completed stage and actual durability. No transition may claim `Appended` before the capture receipt is recoverable, `Rendered` before output-schema validation, `DeliveryAttempted` before bytes are handed to the host transport, or `HostAcknowledged` without native acknowledgement evidence. Notification transports that expose no acknowledgement terminate as `DeliveredNoAcknowledgementObservable`, not `Acknowledged`. Retry insert-or-reads the invocation/event allocation and resumes only an unperformed stage; it does not replay a delivery whose state is `AttemptedUnknown`.
+
 Defaults:
 
 | Event class | Required before host acknowledgement | Degradation |
@@ -609,6 +613,7 @@ Idempotency:
 - The host retry of one invocation returns acknowledgement-only plus the stored delivery state when its policy/catalog/environment digest still matches; it never reprints a possibly delivered effect. A digest mismatch returns typed `stale_environment` with no re-evaluation/redelivery. Delivery-unknown is never automatically retried (plan 22 §11 envelope claims follow the same rule).
 - A transcript rewrite increments generation, emits RewriteDetected, and appends superseding observations. It never overwrites old evidence.
 - Late records retain occurred/ingested times and source continuity. They do not renumber established Turns or imply causation.
+- Continuity is orthogonal, not one mutually exclusive label. A record may be both late and part of a rewrite generation, or fill a previously recorded gap. The receipt preserves duplicate identity, generation/supersession lineage, source-range relation, lateness, and remaining gaps independently; replay cannot erase an earlier uncertainty merely by receiving a later record.
 
 ## 9. Hot Path and Deadline Contract
 
@@ -663,8 +668,11 @@ Many hook processes may arrive for the same profile, session, worktree, or shard
 - Queue thresholds are measured in frames, bytes, age, and disk budget. Tier 1 coalesces rebuildable sync/status notifications; Tier 2 spills all canonical frames durably; Tier 3 disables optional enrichment; Tier 4 returns typed overload for new optional work while preserving canonical capture.
 - Prompts, tool activity, approvals, edits, visible reasoning markers, agent lifecycle, goals, hint delivery, corrections, and outcomes are never coalesced or dropped.
 - Writer batching is bounded by 1,000 frames, 4 MiB, or 5 ms transaction time. It preserves per-source order while interleaving sources fairly.
+- Activation and recovery watermarks, hysteresis, emergency-reserve size, per-source quantum, and maximum source wait are bounded plan-20 configuration generated into the integration manifest; they are not adapter constants. Each transition records the triggering frames/bytes/age/disk measurement and configuration digest. Recovery requires every relevant measurement below its lower watermark for a stable interval, preventing tier flapping. Deficit round-robin over `(privacy domain, source instance)` with a bounded consecutive-frame quantum is the normative fairness algorithm; deterministic scheduler tests prove a noisy source cannot starve a sparse source while preserving each source's known order.
 - Read snapshots and policy inputs never hold writer locks. Busy/locked state becomes partial coverage or silence, not an unbounded wait.
 - Disk-full reserves a small emergency receipt area for typed manifest/keyed-fingerprint/status fields only; it does not pretend payload durability.
+
+Fallback segments use random contained names and a separately fsynced, privacy-domain-keyed allocation index; filenames never reveal event IDs, scope, host, or idempotency-key prefixes. The index maps a keyed invocation fingerprint to segment/offset/receipt and is itself framed, checksummed, generation-stamped, and recoverable by bounded segment scan. Reconciliation claims a segment by compare-and-swap, verifies ownership/mode/checksum/sanitizer floor, imports it once, and writes a tombstone before deletion. A corrupt index or segment yields quarantined non-content diagnostics and cannot turn an unverified frame into a durable acknowledgement.
 
 Crash matrix:
 
@@ -726,6 +734,7 @@ The checked-in human-readable table below is a historical fixture inventory, not
 | Codex | all ten current hidden bindings and stock-wire goldens | Exact `SessionStart`, `SubagentStart`, `PreToolUse`, `PermissionRequest`, `PostToolUse`, `PreCompact`, `PostCompact`, `UserPromptSubmit`, `SubagentStop`, and `Stop`; common/event inputs, matchers/aliases, command-only execution, trust/source/definition lineage, concurrent-handler grouping, stdout/JSON/exit-2 outputs, unsupported-field failures, interception gaps, Windows lowering, and continuation guards. |
 | Claude Code | six V1 aliases plus independent 30-event stock-wire oracle | Exact current 30 events from §7.3; common/event fields, versioned matcher/`if` semantics, five handler types, exec/shell/PowerShell, sync/async/rewake, source/frontmatter lifecycle, host dedupe/concurrency, universal/event outputs, exit/HTTP/MCP/prompt-agent behavior, spill/lag/terminal coverage, and explicit generated-versus-foreign dispositions. |
 | Cursor | hook_cursor_before_submit_prompt, subagent/post-tool, session start/end/stop, precompact, after file/shell, workspace open | Prompt/subagent/tool/session/compact/edit/shell/workspace, Composer/agent origin, file paths as classified locators, JSON reply. |
+| Hermes | plugin memory/session/tool callbacks, gateway delivery, delegation, process/cron/webhook/Kanban transitions, compression/session switch, provider failover | Exact callback/source capability rows per CLI/gateway/background/delegated/task-worker surface; canonical session/source/chat/thread provenance without transport-based scope; model-visible context and delivery receipts; non-durable child versus leased durable-attempt distinction; source-broker catch-up with explicit lag where a callback is absent. |
 | Kiro | pre-tool, prompt-submit, post-tool | Delegation/tool/prompt facts, bounded catch-up request, explicit gaps for unsupported lifecycle. |
 | MCP/daemon notification | FileEdit, Shell, WorkspaceOpen, SessionStart, IncrementalSync | Canonical hook observation plus async project-sync proposal; branch/worktree hints are candidates until identity/Git evidence resolves them. |
 
@@ -776,6 +785,7 @@ Release gates:
 - host conformance: 100% generated documented/probe-validated event/reply rows have fixtures and every absent/unknown/version-gated row has a checked disposition with no fabricated adapter;
 - Codex conformance: an independent ten-event required matrix cannot shrink with generated output; every stock-client lane covers exact fields/nullability, matcher semantics, additive sources/concurrency, outputs/exit codes, handler type/timeout/cwd/platform, trust/managed/feature state, and explicit interception denominator;
 - Claude conformance: an independent, pinned 30-event × five-handler-type × supported-surface matrix cannot shrink with generated output; it covers all §7.3 fields/matchers/version gates/decisions, source/frontmatter/managed policy, parallel dedupe, sync/async delivery, exec/shell/PowerShell, HTTP/MCP failure, prompt/agent decisions, lag/spill/privacy, and the generated command-only subset;
+- Hermes conformance: independent CLI, gateway/chat/thread, delegated child, background process, cron/webhook, Kanban/task-worker, compression, session-switch, provider-failover, projectless, project, multi-root, and multiple named-profile lanes conserve callback/source -> normalized event -> append -> context/delivery -> terminal evidence. Missing callbacks are explicit lag/coverage gaps; gateway delivery is an effect receipt rather than task success; Hermes profile or transport identity never selects TraceDecay profile/project scope.
 - outcome: >=90% eligible evaluations terminal within horizon, false attribution <1% on labeled corpus;
 - trust/noise: zero adversarial prompt/pasted-log promotion to trusted compiler/tool failure, repeated-hint budget and useful-silence fixtures pass, and every injected hint names its trusted routing evidence or abstains;
 - new production files target <=400 lines, remain <=800 lines absent a temporary plan-19 waiver, and contain no provider duplication of policy/capture logic.
@@ -798,7 +808,7 @@ Commands run from repository root with the checkout-local target directory. Do n
 
 **Files:** `src/v2/hooks/{runtime,backpressure,telemetry}.rs`; capture spool client companion; `tests/hooks_v2/{hot_path,durability_ack,backpressure}.rs`; `benches/{hooks_v2_notification,hooks_v2_prompt}.rs`.
 
-- [ ] Add failing tests ack_never_overstates_durability, canonical_event_never_coalesces, optional_sync_coalesces_after_representative, timeout_returns_silent_degradation, duplicate_returns_same_observation, and queue_budget_is_bounded.
+- [ ] Add failing tests ack_never_overstates_durability, invocation_state_is_monotonic, unobservable_transport_ack_is_not_fabricated, canonical_event_never_coalesces, optional_sync_coalesces_after_representative, tier_hysteresis_prevents_flapping, sparse_source_is_not_starved, timeout_returns_silent_degradation, duplicate_returns_same_observation, fallback_index_recovers_fsynced_retry, corrupt_segment_never_claims_durable, and queue_budget_is_bounded.
 - [ ] Run focused tests. Expected: fail because HookRuntime/capture client are absent.
 - [ ] Implement Sections 7–10 using capture/application fakes; no production file I/O.
 - [ ] Re-run tests and Criterion baselines. Expected: correctness passes; benchmark report includes corpus/host/hook/runtime/reference-machine IDs and meets Section 14.
@@ -814,11 +824,11 @@ Commands run from repository root with the checkout-local target directory. Do n
 - [ ] Re-run. Expected: normalized/request/reply parity passes or a fixture records an intentional versioned difference.
 - [ ] Commit: feat(hooks): port Codex and Claude host adapters.
 
-### Commit 4: Cursor, Kiro, and MCP/daemon notification adapters
+### Commit 4: Cursor, Hermes, Kiro, and MCP/daemon notification adapters
 
-**Files:** `src/v2/hooks/adapters/{cursor,kiro}.rs`; `src/v2/hooks/render/{cursor,kiro}.rs`; `src/v2/hooks/conformance/*`; root internal-shadow adapters; `tests/fixtures/hooks_v2/{cursor,kiro}/`; `tests/hooks_v2/{host_conformance,v1_differential}.rs`.
+**Files:** `src/v2/hooks/adapters/{cursor,hermes,kiro}.rs`; `src/v2/hooks/render/{cursor,hermes,kiro}.rs`; `src/v2/hooks/conformance/*`; root internal-shadow adapters; `tests/fixtures/hooks_v2/{cursor,hermes,kiro}/`; `tests/hooks_v2/{host_conformance,v1_differential}.rs`.
 
-- [ ] Add all Section 12 fixtures, linked-worktree/detached/moved/adopted-store cases, and #410 prompt-origin cases.
+- [ ] Add all Section 12 fixtures, linked-worktree/detached/moved/adopted-store cases, #410 prompt-origin cases, and Hermes CLI/gateway/background/delegation/task-worker/profile/scope lanes.
 - [ ] Run conformance/differential tests. Expected: fail before mappings exist.
 - [ ] Implement adapters and async proposed effects; remove inline ingest/sync from new path.
 - [ ] Re-run. Expected: every descriptor event has a fixture and no direct store/index/process call exists.

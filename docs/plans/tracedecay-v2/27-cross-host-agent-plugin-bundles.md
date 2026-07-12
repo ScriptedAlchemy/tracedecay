@@ -2,11 +2,11 @@
 
 > **Status:** implementation-grade architecture and delivery plan; no production code is changed by this document.
 >
-> **Product rule:** TraceDecay ships one host-neutral capability and workflow definition, then deterministically compiles it into host-native Claude Code, Codex, and Cursor artifacts. A host package is a projection over the same catalog, hooks, skills, agents, CLI, API, and authorization system; it is never a second product definition.
+> **Product rule:** TraceDecay ships one host-neutral capability and workflow definition, then deterministically projects it into host-native Claude Code, Codex, Cursor, and Hermes integrations. A host package or Hermes plugin overlay is a projection over the same catalog, hooks, skills, agents, CLI, API, task/executor, memory, and authorization system; it is never a second product definition.
 
-**Goal:** Make TraceDecay feel native and dependable in Claude Code, Codex, and Cursor without copying workflows three times, assuming unsupported plugin behavior, flooding model context, exposing the operator surface to ordinary agents, or requiring MCP for the product to work.
+**Goal:** Make TraceDecay the durable intelligence and coordination fabric behind Claude Code, Codex, Cursor, and Hermes: preserve exact host-native activity, recover intent and context, provide relevant memory and tools, coordinate and execute bounded work across hosts, carry evidence-backed handoffs between them, and improve from measured outcomes without copying workflows four times, flattening host strengths, flooding model context, exposing operator authority, or requiring MCP.
 
-**Architecture:** Plan 08's existing `tracedecay-tool-catalog` and canonical `HostIntegrationManifestV1` remain the semantic source of truth. Its pure `host_bundles` module validates and deterministically compiles Claude Code, Codex, and Cursor release artifacts. Plan 09 owns `HostDeploymentPort`; root-private `v2::host_deploy` implements it using plan 12's host-effect mechanics for probing, config merge, install, update, repair, owned-state compensation, and removal. This preserves plan 19's at-most-11-package ceiling: no `tracedecay-host-bundles` crate or package is added. Plans 07, 17, 18, 20, 21, and 24 continue to own hook runtime, public API, privacy, configuration, surface rendering, and task execution. Every generated host artifact calls the same separately installed TraceDecay binary/daemon and pins the same integration-manifest and catalog digests.
+**Architecture:** Plan 08's existing `tracedecay-tool-catalog` and canonical `HostIntegrationManifestV1` remain the semantic source of truth. Its pure `host_bundles` module validates and deterministically compiles Claude Code, Codex, Cursor, and Hermes release projections; Hermes lowering targets its plugin-native overlay rather than pretending it has another host's marketplace schema. Plan 09 owns `HostDeploymentPort`; root-private `v2::host_deploy` implements it using plan 12's host-effect mechanics for probing, config merge, install, update, repair, owned-state compensation, and removal. This preserves plan 19's at-most-11-package ceiling: no `tracedecay-host-bundles` crate or package is added. Plans 07, 17, 18, 20, 21, and 24 continue to own hook runtime, public API, privacy, configuration, surface rendering, and task execution. Every generated host artifact calls the same separately installed TraceDecay binary/daemon and pins the same integration-manifest and catalog digests.
 
 **Decision:** `HostIntegrationManifestV1` is extended, never renamed or duplicated. `HostBundleManifestV1` means only a signed generated per-host/per-package release artifact manifest: it references the canonical integration-manifest/catalog digests and carries files, omissions, compatibility, provenance, and conformance receipts, but no second workflow, permission, hook, task, or tool semantics. There is one semantic manifest, one compiler path, one thin `tracedecay` integration binary launched by hosts, one private `tracedecayd` authority binary managed by the OS service manager, one catalog, one authorization path, and one install state machine.
 
@@ -16,7 +16,7 @@ The base package may carry both executables, but its generated launch manifest i
 
 ## 0. Contract lock
 
-1. Plan 08's `HostIntegrationManifestV1` is the only semantic source for shipped skills, workflow bindings, specialist roles, hook intents, MCP facade registrations, install components, host overlays, compatibility requirements, and conformance cases. Generated `HostBundleManifestV1` artifacts reference it and cannot restate those semantics.
+1. Plan 08's `HostIntegrationManifestV1` is the only semantic source for shipped skills, workflow bindings, specialist roles, hook intents, lifecycle/capture mappings, context-delivery modes, executor capabilities, MCP facade registrations, install components, host overlays, compatibility requirements, and conformance cases. Generated `HostBundleManifestV1` artifacts and Hermes plugin overlays reference it and cannot restate those semantics.
 2. Host manifests, skill directories, agent definitions, hook JSON, MCP config, marketplace entries, app metadata, screenshots, and install copy are generated projections. Hand-editing generated output fails CI.
 3. The separately installed `tracedecay` CLI and daemon are the executable product. No plugin package embeds a second TraceDecay binary, database engine, scheduler, tool registry, or copy of application logic.
 4. The universal baseline is TraceDecay skills plus the generated CLI. A host without MCP, with MCP disabled, or with MCP temporarily broken retains every semantic capability through CLI and documented HTTP/API fallback recipes.
@@ -30,7 +30,7 @@ The base package may carry both executables, but its generated launch manifest i
 12. Reusable procedure or guidance belongs in a skill. Deterministic data/action belongs in a cataloged CLI/HTTP/MCP binding. Automatic lifecycle capture belongs in a hook. A focused isolated worker belongs in an agent definition. Large addressable content belongs behind a retrieval anchor or MCP resource link.
 13. Claude `commands/` and Cursor commands are compatibility or explicit-user affordances only. New workflows use skills. Codex receives no invented plugin command directory.
 14. MCP prompts are not generated for a workflow already represented by a skill. Host-native command menus may list the skill, but they do not mint a second workflow identity.
-15. Canonical skill source uses only the portable Agent Skills core needed by all three hosts. Host-only frontmatter and invocation behavior are emitted by a reviewed host overlay.
+15. Canonical skill source uses only the portable Agent Skills core shared by Claude, Codex, Cursor, and Hermes. Host-only frontmatter and invocation behavior are emitted by a reviewed host overlay.
 16. Canonical role definitions describe purpose, required capabilities, safety class, context policy, output contract, and host fallbacks. Host agent files are projections where packaging is documented, or separately installed host configuration where packaging is not documented.
 17. The initial bundle contains two or three focused specialist roles, not a catalogue of near-duplicate personas. Adding a role requires a distinct eval-proven task boundary and context/cost justification.
 18. Hook packages contain declarative event wiring only. Every hook invokes one audited TraceDecay host-event entry point; host-specific shell scripts do not reimplement parsing, redaction, hints, ingestion, or retries.
@@ -64,6 +64,10 @@ The base package may carry both executables, but its generated launch manifest i
 46. Every generated host integration, including each Hermes named-profile deployment, stamps its exact TraceDecay component version on every TraceDecay-owned log/diagnostic event. Host application version and connected daemon/collector version are separate fields; forwarding cannot overwrite the originating TraceDecay version.
 47. A generated host adapter carries immutable installed/configured `HostProfileRef` ownership separately from per-invocation declared scope/workspace. Ambient `HOME`/`HERMES_HOME`, provider helpers, process CWD, and previous-session state can select neither that owner nor a TraceDecay profile/project. Single Profile-root activity dispatch, optionally filtered by Profile/ZeroProject declared ownership, sends no project locator and runs through the central application resolver; generated Python does not own registration or scope policy.
 48. Route behavior is catalog-generated by use-case class: registry discovery is unscoped, explicit cross-project selectors are read-only unless a named mutation authorizes them, project-required calls fail on host-home/unregistered context, and single-root profile/user fact/LCM/message calls bypass project routing. Migration scalar user/profile aliases mixed with compatibility project fields fail before execution; canonical authorized Profile+Project reads use explicit federation. No host adapter maintains a tool-name allowlist.
+49. Cross-host continuity is explicit, never inferred from shared CWD or similar prompt text. A handoff binds the originating host/session/Thread/Turn, target host capability snapshot, task or user intent, exact scope, retrieval anchors, relevant decisions, unresolved questions, artifacts, budgets, privacy grants, and source watermarks. The receiver imports a bounded context packet, not the source transcript or hidden reasoning.
+50. TraceDecay distinguishes five host roles that may coexist: **observer** (capture exact activity), **context provider** (retrieve and suggest), **knowledge steward** (curate memory/skills), **executor** (perform a leased task), and **operator surface** (configure/repair). Installing one role never grants another.
+51. Host-native strengths are additive. Claude's richer lifecycle/delegation, Codex's app-server and external-agent paths, Cursor's IDE/workspace/cloud surfaces, and Hermes's gateway, provider routing, durable jobs, delegation, and messaging delivery remain typed capabilities. The canonical contract defines shared semantics and fallbacks; it does not reduce every host to the weakest surface.
+52. TraceDecay owns durable cross-host knowledge, task/evidence lineage, and policy. Each host owns its live conversation loop, model/provider selection, UI/transport identity, native approvals, and ephemeral context. Host transport—including Hermes gateway channel—never selects memory/project scope.
 
 ## 1. Product objective and non-goals
 
@@ -71,13 +75,16 @@ The base package may carry both executables, but its generated launch manifest i
 
 After this plan is complete:
 
-- a user installs the TraceDecay base integration once and receives the same named workflows, safety language, retrieval anchors, output contracts, and help concepts in Claude Code, Codex, and Cursor;
+- a user installs the TraceDecay base integration once and receives the same named workflows, safety language, retrieval anchors, output contracts, and help concepts in Claude Code, Codex, Cursor, and Hermes;
+- Hermes participates as a first-class host without becoming a separate TraceDecay profile or data plane: CLI, gateway/chat surfaces, background jobs, delegation, and provider/model routes all resolve through the same user Brain and exact project scopes as Claude, Codex, and Cursor;
 - an agent can discover “use TraceDecay code context,” “search prior sessions,” “inspect memories,” “review hook hints,” or “work an assigned task” without knowing which transport happens to be available;
 - the skill selects the cheapest legal binding at runtime: native host integration when available, generated CLI by default, HTTP/API when configured, and MCP only when explicitly installed and healthy;
 - an ordinary install does not start or advertise operator tools;
 - a user can enable only the read-only context facade, add the task-work facade for orchestration, or explicitly add the operator/lab facade without duplicating the daemon or catalog;
 - Claude, Codex, and Cursor hook events become one canonical host-event envelope and one idempotent ingestion/hint path;
 - specialist agents are focused, permission-bounded, aware of the same retrieval IDs and task/context packet contracts, and never rely on host-specific hidden behavior;
+- work can begin in one host and continue in another through an explicit privacy-filtered handoff packet that preserves intent, evidence, task/lease state, decisions, artifacts, and unresolved questions without copying whole transcripts;
+- TraceDecay can observe what each host saw and did, explain what context or memory it supplied, measure whether the host used it, correlate work with code/Git/tasks/outcomes, and revise retrieval, hints, skills, and routing from that evidence;
 - the Settings UI explains what is installed, what is active, what is trusted, what is missing, why a component was omitted, and which restart/reload action is required;
 - a release rebuild produces byte-identical host packages from the same source and proves their semantic parity before publication;
 - a later host can be added by supplying a capability evidence record, pure compiler adapter, and conformance suite rather than copying installer/runtime code.
@@ -85,6 +92,7 @@ After this plan is complete:
 ### 1.2 Non-goals
 
 - No attempt to make Claude Code, Codex, and Cursor expose identical UI, config, agent, hook, marketplace, cache, or permission semantics.
+- No attempt to make Hermes gateway chats, scheduled jobs, background agents, or model/provider routes pretend to be IDE plugin sessions.
 - No generic lowest-common-denominator plugin format.
 - No plugin-embedded TraceDecay binary, SQLite database, model runtime, task scheduler, or dashboard server.
 - No requirement that MCP be installed for skills, hooks, CLI help, session search, task work, or host diagnostics.
@@ -145,6 +153,9 @@ All sources below were accessed for this design on **2026-07-10 UTC**. Source co
 | Cursor CLI | [Using the CLI](https://cursor.com/docs/cli/using.md), [slash commands](https://cursor.com/docs/cli/reference/slash-commands.md), and [permissions](https://cursor.com/docs/cli/reference/permissions.md) | CLI/app differences, commands, permissions, multi-surface capability constraints. |
 | Cursor marketplace security | [Marketplace security](https://cursor.com/help/security-and-privacy/marketplace-security.md) | Review, trust, publishing, and executable separation assumptions. |
 | Cursor pinned prior art | [cursor/plugins@0dda29e](https://github.com/cursor/plugins/tree/0dda29e839d15464a137af9935665a5a47ee09b8) and [cursor/plugin-template@4621607](https://github.com/cursor/plugin-template/tree/46216072ac5750f782f95bb325b4d12b7c3ae9c9) | Concrete official layouts and patterns, including `orchestrate`, `continual-learning`, `agent-compatibility`, and `cli-for-agent`. |
+| Hermes product/docs | [Hermes Agent documentation](https://hermes-agent.nousresearch.com/docs/) and [NousResearch/hermes-agent](https://github.com/NousResearch/hermes-agent) | Authoritative CLI, plugin, toolset, skill, memory-provider, session, gateway, delegation, cron/webhook, profile, provider-routing, and extension behavior. Pin exact docs/source commit before implementation. |
+| Hermes messaging/gateway | [Messaging integrations](https://hermes-agent.nousresearch.com/docs/user-guide/messaging/) | Transport/session/thread delivery capabilities and the boundary that transport identity does not select TraceDecay memory scope. |
+| Hermes task execution | [Kanban](https://hermes-agent.nousresearch.com/docs/user-guide/features/kanban) and [worker lanes](https://hermes-agent.nousresearch.com/docs/user-guide/features/kanban-worker-lanes) | Proven durable worker, routing, worktree, run, heartbeat, retry, notification, and lane behavior consumed as executor/evidence input rather than a second task authority. |
 
 ### 2.3 Decisive source findings
 
@@ -191,6 +202,16 @@ All sources below were accessed for this design on **2026-07-10 UTC**. Source co
 - `A` Cursor plugins cannot ship the TraceDecay executable. Installation and binary lifecycle are separate.
 - `U` No documented minimum host version, guaranteed namespace isolation, component-selective install, reproducible pin/rollback, or full IDE/CLI/cloud parity exists.
 - `D` Official prior art validates focused orchestration, continual-learning, compatibility, and CLI-for-agent patterns, but none establishes TraceDecay-specific authorization or cross-host parity.
+
+#### Hermes
+
+- `D` Hermes is an open plugin/tool host with CLI, API/gateway messaging surfaces, sessions, skills, native MCP client/server support, pluggable memory-provider hooks, delegation, provider/model routing, durable cron/webhooks/background work, and Kanban worker lanes. These are independent capability cells, not one “Hermes supported” boolean.
+- `D` Hermes profiles isolate Hermes configuration/session UX, but TraceDecay integration binds every named Hermes profile to the same user TraceDecay profile, daemon, catalog, and project shards. `HERMES_HOME`, gateway platform, chat ID, and profile directory are never TraceDecay storage or scope selectors.
+- `D` Hermes owns live host sessions, transport identity, model/provider choice, runtime workspace, and native approval/tool lifecycle. TraceDecay owns durable user/project memory, LCM/session ingestion, curation, managed-skill overlay, canonical tasks/evidence, and cross-host policy.
+- `D` Hermes memory-provider lifecycle can supply bounded prompt blocks/prefetch and observe turn/session/compression/memory/delegation boundaries. TraceDecay records delivery receipts and useful silence; it does not mirror facts into a second profile-local authority.
+- `D` Delegation is isolated and bounded but not durable across parent termination. Durable TraceDecay tasks use plan-24 leases/attempts and may lower to Hermes background, cron, gateway, or worker-lane execution only through a capability-probed adapter and terminal receipt.
+- `D` Gateway delivery is an explicit side effect to a resolved audience/channel/thread. Delivery success neither establishes task completion nor changes user/project memory scope.
+- `I` Generated Hermes integration uses its plugin-native overlay and toolsets instead of pretending to be a Claude/Codex/Cursor marketplace package. PR 36R must pin the exact Hermes source/docs version and pass stock CLI/gateway/background/delegation/task-worker conformance before release support is claimed.
 
 ### 2.4 Current TraceDecay failure inventory
 
@@ -272,10 +293,12 @@ flowchart LR
     B --> CL["Claude HostBundlePayloadV1 + files"]
     B --> CO["Codex HostBundlePayloadV1 + files"]
     B --> CU["Cursor HostBundlePayloadV1 + files"]
+    B --> HE["Hermes plugin overlay + capability manifest"]
     B --> G["Golden conformance manifest"]
     CL --> R["PR 36R rebuild, scan, conformance, attest, sign"]
     CO --> R
     CU --> R
+    HE --> R
     R --> SM["Signed HostBundleManifestV1 + release attestation"]
     SM --> O["Application integrations workflow"]
     HP["Current host capability probe"] --> O
@@ -315,6 +338,32 @@ No arrow from a host artifact reaches storage directly. No host artifact constru
 | Navigate large content | Retrieval anchor/resource | CLI/HTTP continuation | Giant hook hint or MCP tool text |
 | User-facing explicit legacy shortcut | Bounded compatibility command | Replacement skill | Permanent command directory |
 
+### 3.5 Host capability fabric
+
+TraceDecay integrates at capability boundaries rather than treating “plugin installed” as the feature. The closed capability registry groups every host/surface/version observation into these planes; each plane has an independent disposition, grant ceiling, freshness, fallback, and conformance suite:
+
+| Plane | TraceDecay capability | Host-native examples | Required fallback |
+|---|---|---|---|
+| Observe | Capture prompts, provider-visible responses/reasoning summaries, tool calls/results, approvals, plans, delegation, files, diagnostics, tasks, compaction, lifecycle, usage, and terminal outcomes with exact origin | Claude lifecycle/hooks; Codex hooks/app-server rollout; Cursor hooks/IDE/cloud events; Hermes conversation loop, tool dispatcher, gateway, cron, delegation, and Kanban events | Provider transcript/source ingest with explicit lag and missing-event coverage |
+| Understand | Reconstruct Thread/Turn/agent/task/tool/artifact/code/Git relations, intent evolution, decisions, corrections, blockers, and outcomes | Host session IDs, parent/child IDs, workspace roots, task IDs, gateway thread identity | Evidence-backed correlation with uncertainty; never CWD-only or text-similarity authority |
+| Contextualize | Supply compact retrieval, memory, prior decisions, code/Git context, task packet, nearby work, and one material suggestion at legal lifecycle points | Claude hook additional context; Codex hook/developer context and skills; Cursor additional context/rules/skills; Hermes memory-provider prompt blocks, prefetch, and tool discovery | Skill plus generated CLI/API retrieval; no repeated always-on prompt dump |
+| Remember and learn | Curate profile/project facts, temporal corrections, managed skills, trigger/routing evidence, and outcome feedback across hosts | Host feedback, completed turns, session boundaries, explicit memory writes, automation receipts | Autonomous TraceDecay curation from retained evidence; no host-local second fact authority |
+| Act and coordinate | Offer/claim/lease tasks, select host/provider/model/effort, issue context packets and grants, execute tools, publish progress/artifacts, hand off, review, or reconcile | Claude/Codex/Cursor subagents; Codex app-server; Cursor agents; Hermes delegation, model routing, durable cron/background runs, and messaging delivery | Parent skill/manual execution when no worker adapter; no fake success or unfenced mutation |
+| Govern | Resolve scope, privacy, authorization, budgets, approvals, trust, effects, retention, and remote authority independently of host packaging | Host approvals/trust as input evidence; TraceDecay grants and task lease as authority | Refuse/degrade with exact remediation; host permission never widens TraceDecay policy |
+| Explain and evaluate | Show supplied context, selected binding/model/host, omissions, cost, latency, adoption, outcome, handoff, and replay evidence | Per-host/surface integration and run receipts | Canonical API/CLI/UI views with truthful unknown/partial/capped states |
+
+The registry models **capability composition**, not one host score. A Hermes gateway session may provide transport delivery plus durable scheduling but no IDE edit event; a Cursor IDE session may provide rich file/workspace events but no durable background continuation; a Claude session may expose richer lifecycle hooks; a Codex app-server worker may offer structured execution. The scheduler may route a task to the best legal composition, but every decision records rejected alternatives and their capability evidence. No “preferred host” exists outside a typed route policy and measured outcome.
+
+#### Cross-host continuity contract
+
+`CrossHostHandoffV1` is a plan-24 context-packet specialization, not another message bus or transcript format. It contains source and intended-target `HostIntegrationRuntimeRefV1`, canonical Thread/Turn/agent/task refs, `DeclaredScope`, task lease and authority epochs when applicable, intent and acceptance contract, evidence-backed decisions, unresolved questions, artifact/code/Git refs, retrieval anchors, relevant sibling summaries, config/catalog/policy/privacy versions, budgets, expiry, source watermarks, and a digest. It excludes raw hidden reasoning, ambient host config, credentials, unrelated sibling content, and whole-history replay.
+
+Handoff modes are explicit: user-requested continuation, scheduler dispatch, parent-to-child delegation, worker-to-reviewer, blocked/escalated, provider/model failover, and host/surface migration. Receipt states are offered, accepted, rejected, expired, superseded, started, completed, and reconciled. Acceptance reauthorizes every scope/grant against current target policy; it never inherits source-host permissions. Duplicate acceptance is idempotent, and competing targets cannot both acquire the same task lease.
+
+#### Capability-aware context contract
+
+Before every model turn where the host permits bounded injection, TraceDecay resolves a `ModelVisibleContextReceiptV1`: exact context items offered, selected, omitted, truncated, redacted, or rejected; token budget; retrieval/policy versions; host delivery mechanism; and target Thread/Turn. After the turn it records only observable use/outcome evidence—tool selection, cited anchor, task progress, explicit feedback, or no observed use. It never claims the model read, believed, or causally acted on injected text merely because delivery succeeded.
+
 ## 4. Canonical schema and type ownership
 
 ### 4.1 Identity reuse
@@ -328,7 +377,8 @@ Type ownership is explicit; an implementation may not create plan-27-local looka
 | Types | Sole owner |
 |---|---|
 | `HostProfileRef`, `HostInstanceId`, `HostSurfaceKindV1`, `HostInstallScopeV1`, `McpLogicalRegistrationId`, `McpSurfaceProfileId`, `HostCapabilityDispositionV1`, `HostBundleComponentRefV1`, `HostIntegrationRuntimeRefV1`, `HostCapabilitySubjectV1`, `HostCapabilitySnapshotV1`, `HostHookBindingId`, `CodexHookTrustHash`, and all hook source/provenance/definition/run/group/trust/eligibility/support/freshness/visibility refs, generic IDs/digests/time/privacy refs | Plan 01 domain `hooks_v1` companion |
-| `HostComponentRefV1`, `HostAdapterId`, `BinaryCompatibilityRequirementV1`, `McpFacadePackageSpecV1`, `HostComponentOmissionV1`, `HostCapabilityCode`, `HostDifferenceDecisionV1`, and the compiled capability registry | Plan 08 `host_integration` source IR |
+| `HostComponentRefV1`, `HostAdapterId`, `BinaryCompatibilityRequirementV1`, `McpFacadePackageSpecV1`, `HostComponentOmissionV1`, `HostCapabilityCode`, `HostCapabilityPlaneV1`, `HostCapabilityPlaneSpecV1`, `HostDifferenceDecisionV1`, and the compiled capability registry | Plan 08 `host_integration` source IR |
+| `CrossHostHandoffPolicyV1`, cross-host `HandoffV1` fields/receipts, and task/lease-bound acceptance rules | Plan 24 task/context/handoff contracts; plan 27 supplies host capability requirements and lowering only |
 | `GeneratedHostArtifactV1`, `HostBundlePayloadV1`, `HostBundleCompileResultV1` | Plan 08 `host_bundles` pure compiler contracts |
 | `HostEvidenceRefV1`, `HostConformanceCaseRefV1`, sanitized stock-host evidence records | Plan 13 research/evidence contracts |
 | `ResolvedWorkspaceRootV1` | Plan 16 scope-resolution contracts |
@@ -351,6 +401,8 @@ pub struct HostBundleProjectionFacetV1 {
     pub skills: BTreeMap<RegistryEntryId, CanonicalSkillSpecV1>,
     pub roles: BTreeMap<RegistryEntryId, CanonicalRoleSpecV1>,
     pub hook_intents: BTreeMap<RegistryEntryId, CanonicalHookIntentV1>,
+    pub capability_planes: BTreeMap<HostCapabilityPlaneV1, HostCapabilityPlaneSpecV1>,
+    pub handoff_modes: BTreeMap<RegistryEntryId, CrossHostHandoffPolicyV1>,
     pub mcp_facades: BTreeMap<McpLogicalRegistrationId, McpFacadePackageSpecV1>,
     pub host_overlays: BTreeMap<HostAdapterId, HostOverlayV1>,
     pub conformance_cases: BoundedVec<HostConformanceCaseRefV1, 4096>,
@@ -518,6 +570,7 @@ pub struct HostDifferenceEntryV1 {
     pub claude: HostCapabilityDispositionV1,
     pub codex: HostCapabilityDispositionV1,
     pub cursor: HostCapabilityDispositionV1,
+    pub hermes: HostCapabilityDispositionV1,
     pub canonical_decision: HostDifferenceDecisionV1,
     pub evidence: BoundedVec<HostEvidenceRefV1, 16>,
     pub last_verified_at: UtcMicros,
@@ -621,7 +674,8 @@ crates/tracedecay-tool-catalog/src/
 │       ├── mod.rs
 │       ├── claude.rs
 │       ├── codex.rs
-│       └── cursor.rs
+│       ├── cursor.rs
+│       └── hermes.rs
 └── generated/
     ├── host-integration-manifest-v1.json
     ├── host-capability-registry-v1.json
@@ -845,6 +899,7 @@ Host-specific lowering:
 - Claude MCP companions are separate plugins because every bundled server starts with the enabled plugin. Tool Search is tested enabled and disabled.
 - Codex companions are separate packages for cross-host consistency; additionally emit `plugins."<plugin>".mcp_servers.<server>` enable/tool-approval settings and validate them with strict config.
 - Cursor companions are separate packages because component-selective install and schema deferral are undocumented. Operator package carries explicit incompatibility metadata for agent inheritance.
+- Hermes uses one plugin-native overlay with separately enabled toolsets/MCP registrations rather than marketplace companion packages. The overlay integrates through Hermes's memory-provider hooks, plugin tools, skill materialization, lifecycle/session hooks, and gateway/session identity, while every capability still authenticates to the same TraceDecay daemon and registration/profile ceiling. Hermes named profiles are deployment targets only and never become TraceDecay data profiles.
 
 ### 6.6 Configuration, install, version, and cache
 
@@ -864,18 +919,38 @@ Claude discovery preserves user `~/.claude/settings.json`, project `.claude/sett
 
 Codex discovery preserves every active source independently: system/cloud/MDM/`requirements.toml`, user `~/.codex/hooks.json` and inline `~/.codex/config.toml`, trusted-project `<repo>/.codex/hooks.json` and inline `<repo>/.codex/config.toml`, session sources, and each enabled plugin's default or manifest-declared path/path-array/inline/inline-array source. Sources compose; precedence never erases lower-layer hook definitions. A same-layer JSON-plus-inline pair remains two merged sources with a startup-warning state. Untrusted projects suppress only their project layer. The compiler emits one plugin-default `hooks/hooks.json` and no manifest override; the deployment probe can observe every foreign representation but never normalize, delete, disable, or replace it.
 
-`[features].hooks` is canonical; deprecated `codex_hooks` is import-only. Managed requirements may force feature state and `allow_managed_hooks_only`; managed hooks are policy-trusted, non-disableable, and immutable to TraceDecay. All other command definitions remain unusable until Codex records trust for the exact current definition hash; changed bytes return to review. Installation/enabling/repair never automates `/hooks`, trusts a hash, or persists `--dangerously-bypass-hook-trust`. Generated handlers are synchronous `command` only, carry explicit one-second timeout, `statusMessage` only when useful, independently escaped `commandWindows`, and execute safely from arbitrary session cwd. Parsed-but-skipped `prompt`, `agent`, or `async` handlers are reported unsupported, never healthy.
+`[features].hooks` is canonical; deprecated `codex_hooks` is import-only. Managed requirements may force feature state and `allow_managed_hooks_only`; managed hooks are policy-trusted, non-disableable, and immutable to TraceDecay. All other command definitions remain unusable until Codex records trust for the exact current definition hash; changed bytes return to review. Installation/enabling/repair never automates `/hooks`, trusts a hash, or persists `--dangerously-bypass-hook-trust`. PR #447's `c5e5779a` is a compatibility differential: the Codex loader requires the literal `[hooks.state]` parent when reading trust even when another TOML shape parses equivalently. The importer/stock-host probe recognizes and tests that lexical form while preserving every foreign byte; the V2 bundle compiler emits only hook definitions and never creates or edits host trust state. Generated handlers are synchronous `command` only, carry explicit one-second timeout, `statusMessage` only when useful, independently escaped `commandWindows`, and execute safely from arbitrary session cwd. Parsed-but-skipped `prompt`, `agent`, or `async` handlers are reported unsupported, never healthy.
 
-### 6.7 Disposition of every current integration
+### 6.7 Hermes first-class capability matrix
 
-Claude Code, Codex, and Cursor are the only epoch-one compiler candidates because this plan has dated official-source evidence for them. Supported release status remains false until PR 36R records versioned sanitized stock-host probe/conformance receipts and retrieval anchors for the exact surface/version. No existing host silently disappears, but an existing handwritten adapter or local success is not evidence that its bundle conventions are portable or safe.
+Hermes is an epoch-one compiler target with a different native shape, not a migration-only compatibility case. Its open plugin/tool/memory/session interfaces allow deeper integration than a static marketplace bundle, but that depth remains behind the same manifest, grants, scope, privacy, and conformance contracts:
+
+| Capability | Hermes-native lowering | TraceDecay authority and guardrail |
+|---|---|---|
+| Installation | Standard user-level TraceDecay plugin overlay generated from `HostIntegrationManifestV1`; reconcile every named Hermes profile as a separate deployment target | All profiles bind one user TraceDecay `ProfileId`, daemon, catalog, and stores; `HERMES_HOME` never routes data |
+| Session/transport identity | Consume canonical Hermes session ID, source/platform/chat/thread/topic, runtime workspace, profile owner, model/provider, and parent/child refs | Transport identity is provenance/delivery only; projectless chat uses profile/user scope and repository work uses exact resolved project scope |
+| Lifecycle capture | Plugin hooks around turn start/end, session end/switch, pre-compress, memory write, delegation, tool calls, background/cron/Kanban transitions, and gateway delivery where exposed | One bounded sanitized host-event envelope; missing hooks fall back to state.db/session-source ingest with explicit lag |
+| Context and memory | Memory-provider prompt blocks/prefetch, TraceDecay fact/LCM tools, managed-skill overlay, and one compact route-specific hint | TraceDecay owns durable memory and curation; Hermes built-in/profile memory is not a second TraceDecay authority and injection has a `ModelVisibleContextReceiptV1` |
+| Tool discovery | Plugin-native tools plus native MCP client, generated skills, CLI, and deferred tool loading/toolsets | Exact use-case binding and grant ceiling; toolset/profile selection cannot widen server authorization or leak operator tools |
+| Delegation | `delegate_task`, orchestrator/leaf depth, route-aware children, isolated context, and exact handoff packets | Children receive authorized task/context slices and no ambient parent transcript; non-durable delegation cannot masquerade as durable work |
+| Durable execution | Background processes, cron jobs, webhooks, gateway-triggered sessions, and native TraceDecay task-worker adapter | Durable task authority remains plan-24 attempt/lease/fence; Hermes cron/Kanban IDs are execution evidence/adapters, not a second canonical board |
+| Model routing | Hermes provider/model/reasoning route capabilities and health are executor capability evidence | Plan-24 route policy chooses from legal routes using privacy, tools, cost, quality, availability, and user policy; TraceDecay does not rewrite Hermes provider credentials |
+| Delivery | Gateway replies and notifications across supported chat/service surfaces | Delivery target is explicit effect scope with privacy/audience policy; delivery success is not task success or memory scope |
+| Feedback/evolution | Completed-turn evidence, explicit feedback, skill usage/patch telemetry, and automation outcomes | TraceDecay autonomously curates facts/skills/policies from evidence; Hermes curator lifecycle remains host evidence and cannot delete TraceDecay-managed canonical source |
+| Operator/admin | Hermes plugin/settings surface may link to canonical TraceDecay Settings/CLI/API | Ordinary sessions receive no operator grant; profile/plugin ownership never authorizes store repair or integration mutation |
+
+Hermes conformance includes CLI, API/gateway, messaging thread/topic, scheduled/background, delegated child, task-worker, projectless, single-project, multi-root, compression, session-switch, provider failover, plugin reload, and multiple named-profile cases. Passing CLI alone does not establish gateway or durable-run support.
+
+### 6.8 Disposition of every current integration
+
+Claude Code, Codex, Cursor, and Hermes are the epoch-one compiler candidates. Claude/Codex/Cursor support is grounded in the dated official-source ledger above; Hermes support is grounded in its version-pinned public repository, authoritative docs, plugin contract, and stock-host conformance ledger. Supported release status remains false until PR 36R records versioned sanitized stock-host probe/conformance receipts and retrieval anchors for the exact surface/version. No existing host silently disappears, but an existing handwritten adapter or local success is not evidence that its integration conventions are portable or safe.
 
 | Current integration ID | Epoch-one disposition | V2 behavior | Legacy implementation disposition |
 |---|---|---|---|
 | `claude` | Compile | Core plus selected context/work/operator companions; full documented skill/agent/hook lowering | Delete `ClaudeIntegration` mechanics after owned-state import and parity |
 | `codex` | Compile | Core plus selected companions; external custom-agent config remains separately selectable | Delete `CodexIntegration` mechanics after owned-state import and parity |
 | `cursor` | Compile | Core plus selected companions with inherited-MCP conflict enforcement | Delete `CursorIntegration` mechanics after owned-state import and parity |
-| `hermes` | Migration-only | Detect, verify, update/remove current owned plugin through compatibility descriptors; do not publish a V2 bundle yet | Retire handwritten Python/plugin lifecycle after import; preserve user data; Hermes task/curation concepts are product inputs, not authority for host packaging |
+| `hermes` | Compile | Generate one plugin-native overlay plus separately selected context/work/operator registrations; integrate session/gateway/memory/delegation/durable-run capabilities without profile-local TraceDecay data | Retire handwritten compatibility lifecycle after import/parity; preserve user data; Hermes task/curation/scheduler mechanisms remain execution and evidence adapters, not canonical TraceDecay authorities |
 | `gemini` | Migration-only | Preserve current MCP/config support during bounded V1 window; skills/core promotion requires official capability research | Retire handwritten config mutator after descriptor parity |
 | `opencode` | Migration-only | Preserve current MCP/config support during bounded V1 window; no inferred plugin package | Retire handwritten config mutator after descriptor parity |
 | `copilot` | Migration-only | Preserve current MCP/config support during bounded V1 window; distinguish CLI/IDE surfaces before promotion | Retire handwritten config mutator after descriptor parity |
@@ -888,7 +963,7 @@ Claude Code, Codex, and Cursor are the only epoch-one compiler candidates becaus
 | `kimi` | Migration-only | Preserve current MCP config during bounded V1 window | Retire handwritten config mutator after descriptor parity |
 | `vibe` | Migration-only | Preserve current prompt/MCP integration during bounded V1 window | Retire handwritten prompt/config lifecycle after descriptor parity |
 
-`Core-only` is a valid future disposition for a host with documented skills/shell/hook support but no safe MCP or agent packaging. None of the twelve non-primary hosts is promoted to it by assumption. Promotion requires plan-13 official-source evidence, complete plan-01 `HostCapabilityDispositionV1` coverage, a pure lowering adapter, secret scan, stock-host conformance, migration fixtures, and support ownership. Retirement of a host integration requires usage/support evidence, deprecation notice, data-preserving uninstall, and an explicit removal decision; retirement of its duplicated handwritten implementation is mandatory once the shared descriptor path reaches parity.
+`Core-only` is a valid future disposition for a host with documented skills/shell/hook support but no safe MCP or agent packaging. None of the eleven non-primary hosts is promoted to it by assumption. Promotion requires plan-13 official-source evidence, complete plan-01 `HostCapabilityDispositionV1` coverage, a pure lowering adapter, secret scan, stock-host conformance, migration fixtures, and support ownership. Retirement of a host integration requires usage/support evidence, deprecation notice, data-preserving uninstall, and an explicit removal decision; retirement of its duplicated handwritten implementation is mandatory once the shared descriptor path reaches parity.
 
 ## 7. Generated package layouts and representative artifacts
 
@@ -1445,7 +1520,7 @@ These are plan 10/17's sole generated admin routes, not plan-27 inventions. Rust
 
 Use plan 11's single admin-scoped `/settings/integrations` workspace, backed exclusively by the canonical operations. Host targets/instances are a left rail and comparison pivot inside this workspace, not a second settings page or product:
 
-1. **Overview:** Claude/Codex/Cursor cards by detected instance/surface, health, installed bundle, package badges, pending trust/reload/update, last verified time.
+1. **Overview:** Claude/Codex/Cursor/Hermes cards by detected instance/surface, health, installed bundle or plugin overlay, package badges, pending trust/reload/update, last verified time.
 2. **Packages:** base/context/work/operator selection with effect ceiling, profile, grants, token/schema cost, host limitation, and dependency explanation.
 3. **Skills and workflows:** canonical skill, host-resolved invocation, trigger coverage, primary surface, fallback, last use, omission/truncation warning.
 4. **Agents:** three canonical roles, resolved host form, permissions/effects, MCP inheritance, delegation-depth support, install scope, conflict warnings.
@@ -1635,7 +1710,7 @@ Selection is deterministic for the same catalog/config/capability/policy snapsho
 
 ### 11.3 Commands, prompts, rules, and workflows
 
-- Skills own reusable model-guided workflows on all three hosts.
+- Skills own reusable model-guided workflows on all four epoch-one hosts.
 - Claude/Cursor legacy commands survive only when telemetry proves an explicit shortcut is still needed. Their body delegates to the replacement skill and carries a removal version; it contains no workflow logic.
 - Codex receives no plugin command directory. Host-native skill selectors remain the invocation UI, and user custom prompts remain foreign.
 - MCP prompts are emitted only for a cataloged interaction not already owned by a skill; the epoch-one set emits none.
@@ -1753,6 +1828,11 @@ Labels identify eligible skill/use case, relevant scope, expected binding/fallba
 | Claude handler lifecycle conservation | Configured → matched → host-deduped → started → completed/timed-out → decision-applied/context-delivered per event/type/version | Exact conservation or explicit unobservable/partial coverage; no inferred foreign run, no async completion attributed to the trigger Turn |
 | Hook latency | Eligible invocations by host/event class | Plan-07 p50/p95/p99 budget; no regression beyond its gate |
 | Hint relevance | Human-labelled eligible deliveries | Plan-07/22 precision gate; zero repeated equivalent hint inside cooldown |
+| Context-delivery truth | Every eligible model-visible context item by host/surface/Turn | 100% offered/selected/omitted/truncated/redacted/delivered conservation; zero delivery-success-as-use claims |
+| Cross-host handoff fidelity | Labelled source→target handoffs by mode/host pair | 100% mandatory intent/scope/decision/task/evidence fields preserved or explicitly omitted; zero whole-transcript or unauthorized sibling leakage |
+| Cross-host authority isolation | Duplicate, competing-target, stale-lease, and source-permission adversarial handoffs | Zero duplicated active lease, zero inherited source grant, and 100% target reauthorization receipts |
+| Executor route explainability | Every admitted or rejected multi-host offer | 100% selected and rejected host/provider/model/effort alternatives have capability/policy/cost/privacy evidence and requested-versus-actual receipt |
+| Hermes surface parity truth | Supported Hermes CLI/gateway/background/delegation/task-worker cases | 100% per-surface disposition and exact profile/project scope; no CLI pass may mask gateway/durable-run absence |
 | Scope coverage truth | Multi-root/cross-project cases | 100% covered/omitted roots reported; zero false all-scope claim |
 | Config preservation | Foreign-comment/order/key/conflict fixtures | 100% unrelated semantics preserved; zero foreign overwrite/delete |
 | Crash recovery | Injected kill point × operation transition | 100% resume or safe compensation; zero ambiguous ownership |
@@ -1786,6 +1866,13 @@ integration.hook_effect_arbitrated
 integration.mcp_initialized
 integration.role_started
 integration.role_completed
+integration.context_offered
+integration.context_delivered
+integration.context_outcome_observed
+integration.handoff_offered
+integration.handoff_accepted
+integration.handoff_terminal
+integration.executor_route_resolved
 integration.migration_dispositioned
 ```
 
@@ -1863,7 +1950,7 @@ Inventory is non-mutating and uses the existing host integration only to discove
 
 ### 13.2 Shadow generation and differential verification
 
-For Claude Code, Codex, and Cursor:
+For Claude Code, Codex, Cursor, and Hermes:
 
 1. Resolve a PR 36R-produced signed candidate core/companion set and stage it beside the existing install without registering it; only the build/release workflow compiles packages.
 2. Parse both the verified current and candidate release payloads/artifacts into semantic inventory rows.
@@ -1873,7 +1960,7 @@ For Claude Code, Codex, and Cursor:
 6. Require zero unexplained capability loss and zero unapproved effect broadening.
 7. Store only the semantic diff/receipts, never copied private config/artifact bodies.
 
-For migration-only hosts, generate compatibility descriptors for detection, owned config merge/removal, health, and current MCP/core behavior. Do not pretend they use the three primary hosts' plugin format.
+For migration-only hosts, generate compatibility descriptors for detection, owned config merge/removal, health, and current MCP/core behavior. Do not pretend they use an epoch-one host's plugin format.
 
 ### 13.3 Cutover phases
 
@@ -2070,7 +2157,7 @@ Every PR starts with a failing focused test/fixture, lands the smallest implemen
 
 **Scope**
 
-- Implement exact supported-version/surface runners for Claude Code, Codex, and Cursor.
+- Implement exact supported-version/surface runners for Claude Code, Codex, Cursor, and Hermes, including Hermes CLI, gateway/chat, delegated, scheduled/background, and task-worker surfaces.
 - Validate skill discovery, role packaging/fallback, hooks, eager/deferred MCP, install/update/repair/uninstall, task edit, and privacy/security corpora.
 - Build/sign/attest/SBOM and atomically advance the signed TraceDecay release index after host-capability-gated marketplace publication/verification; do not claim native transactional promotion where undocumented.
 - Pin sanitized plan-13 official evidence, stock-host receipts, compatibility matrix, and release index.
@@ -2085,6 +2172,7 @@ Every PR starts with a failing focused test/fixture, lands the smallest implemen
 - supported stock-client matrix and documented downgrade assertions.
 - Codex exact ten-event wire/output/matcher/exit matrix across every supported surface, additive source/concurrent completion permutations, exact-hash review/change/disable, trusted/untrusted project, feature off/on/alias, managed-only/managed immutable state, plugin manifest forms, arbitrary cwd, and Unix/Windows lowering.
 - Claude exact 30-event wire/matcher/input/output/exit matrix across supported CLI/remote versions; five handler types; source/frontmatter/component lifecycle; parallel host dedupe; exec/shell/PowerShell; async/rewake; HTTP/MCP failure; prompt/agent decisions; disable/managed-only policy; transcript lag, output spill, stop cap, and all documented minimum-version behaviors.
+- Hermes plugin/memory/session/tool/gateway/delegation/cron/task-worker matrix across projectless, project, multi-root, compression, session-switch, provider failover, plugin reload, and multiple named-profile cases; every event, context delivery, route, handoff, and durable outcome pins the same TraceDecay profile and exact runtime scope.
 
 **Gate:** two independent reproducible builds, full stock-host matrix, a clean plan-18 scan, verified provenance/signatures, and aggregate quality gates from `12.4`.
 
@@ -2092,8 +2180,8 @@ Every PR starts with a failing focused test/fixture, lands the smallest implemen
 
 **Scope**
 
-- Inventory all fifteen current integrations and apply `6.7` dispositions.
-- Shadow/differential migrate Claude Code, Codex, and Cursor.
+- Inventory all fifteen current integrations and apply `6.8` dispositions.
+- Shadow/differential migrate Claude Code, Codex, Cursor, and Hermes.
 - Move other hosts to shared migration descriptors without expanding support.
 - Migrate desired state/ownership/config/MCP profile selection safely.
 - Delete duplicated provider installers/generators/maps/renderers and bounded aliases after gates.
@@ -2166,10 +2254,13 @@ Normative conflict resolutions:
 
 ### Host bundles and workflows
 
-- [ ] Claude Code, Codex, and Cursor core/companion artifacts parse on every supported stock surface/version.
+- [ ] Claude Code, Codex, Cursor, and Hermes core/companion or plugin-overlay artifacts parse on every supported stock surface/version.
 - [ ] Codex conformance covers exactly the current ten events and every source/trust/concurrency/output/interception state above; the fixed oracle is independent of generated artifacts and no separate `PostToolUseFailure` is claimed.
 - [ ] Claude conformance covers exactly the current pinned 30 events and every handler/source/matcher/concurrency/platform/async/output/privacy/version state above; the fixed oracle is independent of generated artifacts and every omitted generated event has an explicit catalog disposition.
 - [ ] Six skills and three roles have semantic parity, trigger/negative evals, CLI fallback, and anchor/coverage outputs.
+- [ ] Observer/context-provider/knowledge-steward/executor/operator capability planes are independently probed, granted, degraded, and evaluated; no installed flag or host score substitutes for capability truth.
+- [ ] Cross-host handoffs preserve intent/evidence/task state while excluding whole transcripts and source-host permissions; duplicate/competing acceptance cannot create two active leases.
+- [ ] Every model-visible context delivery has offered/selected/omitted/truncated/redacted/delivered receipts and only observable outcome attribution.
 - [ ] No new command/rule/prompt duplication; bounded legacy aliases name removal versions.
 - [ ] Core installs no MCP; companions are independent; operator is never default/transitive/inherited into read roles.
 - [ ] Eager MCP profiles stay within exact budgets and unauthorized calls/effects are zero.

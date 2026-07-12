@@ -389,7 +389,8 @@ All graph/timeline inputs require explicit node/edge/event/lane/bucket/page/dept
 |---|---|
 | `GET /api/v2/sessions` | No-text cursor enumeration with provider/host/time/kind/opaque scope filters. |
 | `POST /api/v2/sessions/search` | Text/semantic session search. |
-| `GET /api/v2/sessions/{id}` | Summary, participants, goals/workflows, snapshots, coverage. |
+| `GET /api/v2/sessions/{id}` | Canonical `SessionId` summary, participants, goals/workflows, snapshots, coverage; `{id}` is never overloaded with a native alias. |
+| `POST /api/v2/sessions:resolve` | Resolve generated `SessionLocatorV1`; native form requires profile+provider+native ID, returns canonical candidate(s), and rechecks ambiguity at the pinned snapshot before any canonical hydration. Multiple variants map to typed 409 candidates. |
 | `POST /api/v2/sessions/{id}/replay` | Read-only historical assembly and replay fidelity. |
 | `POST /api/v2/threads/{id}/replay` | Read-only thread assembly across its authorized session/Turn lineage. |
 | `GET /api/v2/sessions/{id}/context-lineage` | LCM source/summary DAG, compression decisions, payload coverage and source ranges. |
@@ -418,7 +419,7 @@ Representative responses always include represented entity IDs, source observati
 
 ### 8.4 Domain workspace reads
 
-These routes are typed profiles over application/query, not separate service implementations:
+These routes are generated typed presets over canonical application/query operation or dataset IDs, not separate service implementations. Every preset returns the same sealed page/snapshot/coverage envelope and shares cursor, authorization, cache, and schema identity with the generic operation. A domain spelling cannot introduce a feature-specific repository, response type, cache adapter, or alternate count; generated conformance executes the preset and equivalent canonical `TraceQueryV1` and requires byte-identical semantic results.
 
 | Family | Routes |
 |---|---|
@@ -631,7 +632,7 @@ POST /api/v2/task-graph/edit-bundles/{workspace_id}:submit
 POST /api/v2/task-graph/edit-bundles/{workspace_id}:delete
 ```
 
-`capture/refresh` is the explicit provider/session freshness command from plan 09. It returns `202` with the shared `OperationRef`; equivalent profile/provider/source/frontier/target-watermark requests join one daemon operation and receive identical terminal coverage/error receipts. Search/session/LCM read routes never invoke it implicitly. `capture/ingest` remains the authenticated source-broker submission route and is not exposed as an agentic catch-up shortcut.
+`capture/refresh` is the explicit provider/session freshness command from plan 09. Its generated request carries the unchanged application-owned `CaptureRefreshOperationKeyV1`; API code cannot restate or shrink that key. It returns `202` with the shared `OperationRef` plus `OperationAdmissionRoleV1::Leader | Joiner`; the role only describes attachment, while all callers receive the one operation's identical terminal coverage/error receipt. A receipt reports performed work only from its durable terminal outcome, never from the request flag or admission role; unavailable source/registry, failed, cancelled, and zero-addition states remain distinct. Search/session/LCM read routes never invoke it implicitly. `capture/ingest` remains the authenticated source-broker submission route and is not exposed as an agentic catch-up shortcut.
 
 The task/orchestration `:action` routes are the sole HTTP bindings for plan 24 §9.2's command use cases — no duplicate `/commands/**` aliases and no `PATCH` route exist — and they use the same `CommandHttpRequest` envelope, idempotency, expected version, operation-specific validation, and audit contract. Task-view mutations use only Section 8.6's `/saved-views` routes with a `SavedViewDefinitionV1::Task` body. `work-items:assign-set` is one bounded all-or-none owner-shard use case with plan/item expected versions and deterministic per-item receipts. `task-offers/{id}:accept` carries the expected offer/work/plan versions and readiness digest and is the sole public route that invokes the atomic sealed packet/attempt/lease transaction from plan 24 §9.4. Attempt lifecycle and packet acceptance require the active fence; packet acceptance also requires the exact prior packet and safe Turn boundary. Task-notification mutations never create implicit subscriptions. `WorkClaimV1` remains only under coordination reads/events; no task command is named “claim.”
 
@@ -838,7 +839,7 @@ Required comparisons:
 - Git local/live revisions, reconciliation/drift, fallback state;
 - error code/retry semantics before CLI exit-code, HTTP status, or MCP markdown rendering;
 - SSE initial snapshot equals ordinary HTTP query snapshot at the same watermark; export logical rows equal paged query rows at its frozen watermark.
-- merged #445 profile/user fixtures for facts, LCM, memory status, and message search from neutral, host-home, unrelated, and project working directories; all transports report the same profile-activity route/scope/authority/coverage, send no project selector for the single-root route, reject every legacy scalar-user-plus-compatibility-project spelling before resolution, and preserve canonical Profile+Project reads.
+- merged #445/#448 profile/user fixtures for facts, LCM, memory status, and message search from neutral, host-home, unrelated, and project working directories; all transports report the same selected-profile activity route/scope/authority/truthful refresh coverage, send no project selector for the single-root route, reject every legacy scalar-user-plus-compatibility-project spelling including `project_key` before resolution, and preserve canonical Profile+Project reads.
 
 MCP markdown and CLI text may differ only in checked presentation fixtures. JSON modes use the typed schema. Handler source is linted to reject store/query/policy imports and direct SQL. V1 aliases exist only in the internal migration harness; current help, hints, catalogs, and live dispatch never advertise or execute them after domain cutover.
 

@@ -256,7 +256,45 @@ pub struct AgentInstanceId(pub EntityId);
 pub struct HostInstanceId(pub EntityId);
 pub struct HookProducerId(pub EntityId);
 pub struct SessionId(pub EntityId);
+pub struct ProtectedDraftId(pub uuid::Uuid); // opaque random same-profile handle; no payload-derived bytes
 pub struct NativeSessionId(pub PrivacyDomainBoundLocatorDigest); // provider-native alias, never literal public text
+pub struct SessionVariantId(pub EntityId); // persisted UUIDv7 allocation; stable across fingerprint-key rotation
+pub struct SessionLineageKeyV1 {
+    pub profile_id: ProfileId,
+    pub provider_id: ProviderId,
+    pub source_instance_id: SourceInstanceId,
+    pub rewrite_generation: u64,
+    pub native_session_id: NativeSessionId,
+}
+pub struct SessionVariantAllocationRequestV1 {
+    pub lineage: SessionLineageKeyV1,
+    pub source_store_id: SourceStoreId,
+    pub immutable_native_variant_locator: PrivacyDomainBoundLocatorDigest,
+} // immutable source-origin allocation; mutable session content never allocates identity
+pub struct SessionVariantFingerprintSnapshotV1 {
+    pub variant_id: SessionVariantId,
+    pub source_head: SourceHeadV1,
+    pub fingerprint: PrivacyDomainKeyedFingerprintV1,
+} // frozen comparison manifest over canonical provenance + observations through one watermark
+pub struct SessionVariantFingerprintContinuityV1 {
+    pub variant_id: SessionVariantId,
+    pub source_head: SourceHeadV1,
+    pub prior: PrivacyDomainKeyedFingerprintV1,
+    pub current: PrivacyDomainKeyedFingerprintV1,
+    pub evidence: PayloadRef,
+} // same frozen snapshot rekeyed; cannot connect different watermark, privacy domain, or content
+pub struct SessionNaturalKeyV1 {
+    pub lineage: SessionLineageKeyV1,
+    pub variant_id: SessionVariantId,
+} // sole SessionId key; rotating fingerprints are lookup/equality evidence, never canonical identity
+pub enum SessionLocatorV1 {
+    Canonical(SessionId),
+    Native {
+        profile_id: ProfileId,
+        provider_id: ProviderId,
+        native_session_id: NativeSessionId,
+    },
+} // native resolution may return multiple generation/variant candidates; hydration always uses SessionId
 pub struct ThreadId(pub EntityId);
 pub struct TurnId(pub EntityId);
 pub struct MessageId(pub EntityId);
@@ -290,6 +328,7 @@ pub struct RequestId(pub uuid::Uuid);
 pub struct LeaseId(pub uuid::Uuid);
 pub struct ConsumerInstanceId(pub uuid::Uuid);
 pub struct AuthorityEpoch(pub u64);
+pub struct PlacementVersion(pub EntityId);
 pub struct NodeEpoch(pub u64);
 pub struct NodeSigningKeyId(pub uuid::Uuid);
 pub struct ReceiptNonce(pub [u8; 32]);
@@ -308,6 +347,11 @@ pub struct ApiTokenId(pub uuid::Uuid);
 pub struct SubscriptionId(pub uuid::Uuid);
 pub struct OperationId(pub uuid::Uuid);
 pub struct OperationPreflightId(pub uuid::Uuid);
+pub struct SubprocessTreeId(pub uuid::Uuid);
+pub struct SpawnAdmissionId(pub uuid::Uuid);
+pub struct SubprocessShutdownReceiptId(pub uuid::Uuid);
+pub struct CheckpointReceiptId(pub uuid::Uuid);
+pub struct DurableCloseReceiptId(pub uuid::Uuid);
 pub struct HookInvocationId(pub uuid::Uuid);
 pub struct ToolId(pub EntityId);
 pub struct DiagnosticEnvelopeId(pub uuid::Uuid);
@@ -318,6 +362,50 @@ pub struct BlobId(pub [u8; 32]);
 pub struct BlobIntegrityTag(pub [u8; 32]);
 pub struct ContentDigest(pub [u8; 32]);
 pub struct ManifestDigest(pub [u8; 32]);
+pub enum SubprocessContainmentV1 { LinuxCgroup, WindowsJob, MacSandboxNoFork, Unproven }
+pub enum SubprocessShutdownOutcomeV1 { Reaped, ForcedReaped, Stuck, ContainmentUnproven }
+pub struct SubprocessShutdownReceiptV1 {
+    pub receipt_id: SubprocessShutdownReceiptId,
+    pub tree_id: SubprocessTreeId,
+    pub admission_id: SpawnAdmissionId,
+    pub lifecycle_epoch: AuthorityEpoch,
+    pub attempt_ordinal: u32,
+    pub predecessor_receipt_id: Option<SubprocessShutdownReceiptId>,
+    pub containment: SubprocessContainmentV1,
+    pub admitted_count: u32,
+    pub reaped_count: u32,
+    pub survivor_count: u32,
+    pub outcome: SubprocessShutdownOutcomeV1,
+    pub aggregate_deadline_at: UtcMicros,
+    pub completed_at: UtcMicros,
+} // no PID/path/command payload; only proven zero survivors permits clean lifecycle publication
+pub enum CheckpointStatusV1 { Completed, Busy, Incomplete, NotApplicable, Failed }
+pub enum CheckpointModeV1 { Passive, Full, Restart, Truncate }
+pub struct CheckpointReceiptV1 {
+    pub receipt_id: CheckpointReceiptId,
+    pub shard: ShardRef,
+    pub generation: Option<GraphGenerationId>,
+    pub lifecycle_epoch: AuthorityEpoch,
+    pub status: CheckpointStatusV1,
+    pub mode: CheckpointModeV1,
+    pub sqlite_busy: Option<bool>,
+    pub wal_frames: Option<u64>,
+    pub checkpointed_frames: Option<u64>,
+    pub duration_micros: u64,
+    pub safe_error_code: Option<DiagnosticCode>,
+    pub completed_at: UtcMicros,
+}
+pub enum DurableCloseOutcomeV1 { Verified, Failed }
+pub struct DurableCloseReceiptV1 {
+    pub receipt_id: DurableCloseReceiptId,
+    pub shard: ShardRef,
+    pub generation: Option<GraphGenerationId>,
+    pub lifecycle_epoch: AuthorityEpoch,
+    pub outcome: DurableCloseOutcomeV1,
+    pub duration_micros: u64,
+    pub safe_error_code: Option<DiagnosticCode>,
+    pub completed_at: UtcMicros,
+} // required non-WAL proof; memory stores cannot construct Verified
 pub struct SchemaVersion(pub u32);
 pub struct RegistryManifestDigest(pub ManifestDigest); // canonical schema/predicate/config registry artifact identity
 pub struct NaturalKeyDigest(pub [u8; 32]);
@@ -728,12 +816,89 @@ pub struct InvestigationViewSpecV1 {
     pub scenes: BoundedVec<InvestigationSceneRefV1, 100>,
 }
 
+pub struct InvestigationStateV1 {
+    pub version: u16,
+    pub profile_id: ProfileId,
+    pub scope: InvestigationScopeStateV1,
+    pub time: InvestigationTimeStateV1,
+    pub query: InvestigationQueryStateV1,
+    pub focus: InvestigationFocusStateV1,
+    pub composition: WorkspaceCompositionV1,
+    pub inspector: InspectorPanelRefV1,
+}
+
+pub struct InvestigationScopeStateV1 {
+    pub selector: ScopeSelectorV2,
+    pub resolution: Option<ScopeResolutionV2>,
+}
+
+pub struct InvestigationTimeStateV1 {
+    pub occurred: InvestigationTimeRangeV1,
+    pub knowledge_as_of: Option<UtcMicros>,
+    pub live: bool,
+    pub compare: Option<(InvestigationTimeRangeV1, InvestigationTimeRangeV1)>,
+}
+
+pub struct InvestigationTimeRangeV1 { pub from: UtcMicros, pub to: UtcMicros }
+pub struct FacetSelectionV1 { pub field_id: RegistryEntryId, pub values: BoundedVec<SchemaBoundValueRef, 256> }
+
+pub struct InvestigationQueryStateV1 {
+    pub query_fingerprint: Option<PrivacyDomainBoundLocatorDigest>,
+    pub protected_draft_id: Option<ProtectedDraftId>,
+    pub facets: BoundedVec<FacetSelectionV1, 256>,
+    pub message_view: MessageView,
+}
+
+pub struct InvestigationFocusStateV1 {
+    pub selected: Option<VisualSelectionV1>,
+    pub retrieval_anchors: BoundedVec<RetrievalAnchorId, 256>,
+    pub retrieval_recipe_id: Option<RetrievalRecipeId>,
+    pub pinned: BoundedVec<EntityRef, 256>,
+    pub path: BoundedVec<EntityRef, 256>,
+    pub collection_id: Option<EntityId>,
+}
+
+pub enum WorkspaceCompositionKindV1 { Atlas, Trace, Compare, Lab, Triage }
+pub enum VisualizationArtifactV1 { Graph, Timeline, Table, Matrix, Distribution, SmallMultiples, Transcript, CodeDiff, Manifest }
+pub enum WorkspaceDockV1 { Primary, Left, Right, Bottom, Overlay }
+pub enum VisualizationLodV1 { Auto, Aggregate, Neighborhood, Evidence }
+
+pub struct WorkspaceCompositionV1 {
+    pub kind: WorkspaceCompositionKindV1,
+    pub layout_id: RegistryEntryId,
+    pub slots: BoundedVec<WorkspaceSlotV1, 4>,
+    pub active_slot_id: RegistryEntryId,
+}
+
+pub struct WorkspaceSlotV1 {
+    pub id: RegistryEntryId,
+    pub artifact: VisualizationArtifactV1,
+    pub dock: WorkspaceDockV1,
+    pub size_basis_points: u16,
+    pub visualization: VisualizationStateV1,
+}
+
+pub struct VisualizationStateV1 {
+    pub renderer_spec_id: RegistryEntryId,
+    pub graph: Option<GraphCompositionSpecV1>,
+    pub viewport: SchemaBoundValueRef,
+    pub scale_state: SchemaBoundValueRef,
+    pub lanes: BoundedVec<RegistryEntryId, 256>,
+    pub lod: VisualizationLodV1,
+    pub playhead: Option<UtcMicros>,
+    pub synchronization_group: Option<RegistryEntryId>,
+}
+
+pub struct InspectorPanelRefV1 {
+    pub panel_owner: RegistryEntryId,
+    pub panel_id: RegistryEntryId,
+}
+
 pub struct InvestigationSceneRefV1 {
     pub scene_id: EntityId,
     pub parent_scene_id: Option<EntityId>,
     pub state_digest: ManifestDigest,
     pub composition_id: RegistryEntryId,
-    pub camera_ref: Option<PayloadRef>,
     pub selected_anchors: BoundedVec<RetrievalAnchorId, 100>,
     pub snapshot: SnapshotManifestRefV1,
     pub annotation_ids: BoundedVec<EntityId, 100>,
@@ -1075,7 +1240,7 @@ pub struct ModelCapabilityRefV1 {
 
 `StoreIsolationStatusV1` is observed proof, not desired configuration. Each variant contains only evidence legal for that mode and is bound to the profile plus authority epoch where applicable. `database_read_denied_to_clients` and similar UI/API booleans are derived generated view fields: `true` only for an unexpired `DedicatedServiceIdentity` or `RemoteAuthorityOnly` proof, never caller-set state. Plan 20 owns desired `StoreIsolationModeV1`; root/plan 18 owns proof issuance and expiry.
 
-`SavedViewV1` and `SavedViewDefinitionV1` are the one persisted/wire saved-view envelope. Plan 11 owns the UI-neutral `InvestigationStateV1` codec, bounded scene-trail interaction semantics, and `ExperimentViewSpecV1` presentation; plan 24 owns `TaskViewSpecV1` validation/lenses. All three variants live under this domain contract and share identity, name/owner scope, classification/redaction, live/frozen snapshot, optimistic version, expiry, revoke/reauthorize, and sharing lifecycle. Experiment views reference immutable experiment/run/cell/stage/comparison/comparison-cell/reduction/playhead identities and never embed inputs or outputs. A variant cannot introduce another saved-view ID, table, query scope, grant, route family, or command namespace. `PendingSanitization` is an automated safety state, not a human approval queue.
+`SavedViewV1`, `SavedViewDefinitionV1`, and the UI-neutral persisted/wire `InvestigationStateV1` schema are owned here and generated into the frontend/client bindings. Plan 11 owns transient gestures, presentation, codec consumption, and bounded scene-trail interaction semantics; it cannot redefine the wire state. Plan 24 owns `TaskViewSpecV1` validation/lenses. All three variants share identity, name/owner scope, classification/redaction, live/frozen snapshot, optimistic version, expiry, revoke/reauthorize, and sharing lifecycle. Experiment views reference immutable experiment/run/cell/stage/comparison/comparison-cell/reduction/playhead identities and never embed inputs or outputs. A variant cannot introduce another saved-view ID, table, query scope, grant, route family, or command namespace. `PendingSanitization` is an automated safety state, not a human approval queue.
 
 Deterministic derivation uses fixed UUIDv5 namespaces published by `id.rs`. Input encoding is version byte `1`, then big-endian length-prefixed UTF-8 fields and fixed-width hash/integer fields. Enum tags use their registry snake-case names. No locale, platform path syntax, JSON object order, wall clock, or process randomness participates.
 
@@ -1257,7 +1422,6 @@ pub enum GraphLensV1 {
     Turn,
     Task,
     Plan,
-    Timeline,
     Memory,
     AutomationSkill,
 }
@@ -2475,12 +2639,42 @@ pub struct SyncReceiptV1 {
 
 pub struct CausalFrontierCompactionV1 {
     pub brain_id: BrainId,
+    pub membership_epoch: u64,
     pub prior_frontier_digest: ManifestDigest,
     pub compacted_frontier: CausalFrontierV1,
     pub retired_epochs: BoundedVec<EventDotV1, 1_024>,
+    pub member_dispositions: BoundedVec<FrontierMemberDispositionV1, 1_024>,
     pub tombstone_ack_watermark: VectorWatermark,
     pub backup_horizon: UtcMicros,
     pub manifest_digest: ManifestDigest,
+}
+
+pub struct FrontierMemberDispositionV1 {
+    pub node: BrainNodeId,
+    pub node_epoch: NodeEpoch,
+    pub disposition: FrontierDispositionKindV1, // Acknowledged | FencedRevoked
+    pub receipt_digest: ManifestDigest,
+}
+
+pub struct GraphPackManifestV1 {
+    pub brain_id: BrainId,
+    pub shard_id: ShardId,
+    pub repository_id: RepositoryId,
+    pub privacy_domain_id: PrivacyDomainId,
+    pub graph_generation_id: GraphGenerationId,
+    pub source_snapshot_digest: ManifestDigest,
+    pub source_watermark: VectorWatermark,
+    pub pack_digest: ManifestDigest,
+    pub byte_len: u64,
+    pub schema_registry_digest: RegistryManifestDigest,
+    pub capability_catalog: CatalogSnapshotRefV1,
+    pub privacy_policy_digest: PrivacyPolicyDigest,
+    pub authority_id: StoreAuthorityId,
+    pub authority_epoch: AuthorityEpoch,
+    pub placement_version: PlacementVersion,
+    pub signing_key_id: NodeSigningKeyId,
+    pub signing_key_epoch: u64,
+    pub signature: Ed25519SignatureV1,
 }
 
 pub struct CacheAccessManifestV1 {
@@ -2656,7 +2850,7 @@ pub struct SpoolReceipt {
 }
 ```
 
-Dots/frontiers describe replication provenance only. They never replace `ObservationId`, evidence causality, shard sequences, or vector watermarks. Frontier components are sorted/unique and hard-bounded; retired epochs compact only after every authority/replica acknowledges the compaction and tombstone/backup horizon. An older reconnecting node must re-seed and cannot append an omitted epoch.
+Dots/frontiers describe replication provenance only. They never replace `ObservationId`, evidence causality, shard sequences, or vector watermarks. Frontier components are sorted/unique and hard-bounded. Compaction binds one frozen membership epoch: current authorities/replicas must acknowledge, while a positively fenced/revoked member receives a signed tombstone disposition; offline current members still block. Canonical compaction bytes/signature cover the sorted complete member-disposition set and receipt digests, retired epochs, frontier, acknowledgement/tombstone watermark, backup horizon, and manifest digest. Validation rejects duplicate/missing members, an unproved `FencedRevoked`, an acknowledgement from another epoch, or any set over the bound; the contract round-trips exactly to plan 02's compaction/ack rows. The tombstone/backup horizon must pass, and any older reconnecting node must re-seed and cannot append an omitted epoch.
 
 `SyncReceiptV1` is the signed envelope; there is no unsigned public receipt twin. Canonical signing bytes are the domain canonical encoding of every field except `signature`, prefixed by the receipt schema/domain-separation tag. Those bytes include exact shard/privacy-domain identity, authority and authority-node identity, placement/schema/registry/privacy-policy versions, accepted causal frontier, committed vector watermark, batch digest, and the distinct upload manifest digest; no placement lookup or mutable stream head is needed to reconstruct the signed claim. The authority's enrolled Ed25519 public-key chain, key epoch, revocation generation, expiry, and nonce are verified before acknowledgement retirement; nonce uniqueness and accepted source range prevent replay. Key rotation preserves verification keys through the maximum receipt/cache/backup horizon. `CacheGrantSnapshotV1` signs the complete bounded `CacheAccessManifestV1` plus its independently recomputed `access_manifest_digest`, including principal, exact resolved scope, allowed fields/payload classes, policy/privacy/schema versions, and capability-catalog generation/digest; it always expires, and disconnected cache access cannot outlive `not_after` or depend on an unavailable mutable grant lookup.
 
@@ -3068,7 +3262,7 @@ git commit -m "feat(domain): establish v2 contract crate"
 
 - [ ] **Step 1: Write failing golden and property tests**
 
-Cover identical source/observation/entity keys across 10,000 randomized inputs, field-boundary collision resistance, order sensitivity, fixed golden UUIDs, `offset < next_offset`, UUIDv7 allocation-request serialization, and rejection of entity kind/owner changes.
+Cover identical source/observation/entity keys across 10,000 randomized inputs, field-boundary collision resistance, order sensitivity, fixed golden UUIDs, `offset < next_offset`, UUIDv7 allocation-request serialization, and rejection of entity kind/owner changes. Add FM-105 goldens proving immutable source origin allocates one `SessionVariantId`, exact/divergent frozen fingerprints classify without allocating, ordinary message append creates a successor fingerprint snapshot at a new watermark while `SessionNaturalKeyV1` stays stable, same-watermark `SessionVariantFingerprintContinuityV1` survives key rotation without crossing privacy domains/content, and no bare `NativeSessionId` allocation request can validate.
 
 - [ ] **Step 2: Verify failure**
 
