@@ -86,7 +86,7 @@ fn preserve_source_branch_graphs(
         merged.branches.insert(
             merged_name,
             BranchEntry {
-                db_file: relative.to_string_lossy().to_string(),
+                db_file: relative.to_string_lossy().replace('\\', "/"),
                 parent: entry
                     .parent
                     .as_deref()
@@ -171,7 +171,7 @@ fn expected_prepared_files(
         meta.branches.insert(
             merged_name,
             BranchEntry {
-                db_file: relative.to_string_lossy().to_string(),
+                db_file: relative.to_string_lossy().replace('\\', "/"),
                 parent: entry
                     .parent
                     .as_deref()

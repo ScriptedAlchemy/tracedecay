@@ -685,6 +685,7 @@ fn recover_untracked_branch_graphs(layout: &StoreLayout, meta: &mut BranchMeta) 
                 path.display()
             ))
         })?;
+        let db_file = db_file.replace('\\', "/");
         let base = relative
             .file_stem()
             .and_then(|value| value.to_str())
@@ -703,7 +704,7 @@ fn recover_untracked_branch_graphs(layout: &StoreLayout, meta: &mut BranchMeta) 
         meta.branches.insert(
             name,
             BranchEntry {
-                db_file: db_file.to_string(),
+                db_file,
                 parent: Some(meta.default_branch.clone()),
                 created_at: "0".to_string(),
                 last_synced_at: "0".to_string(),

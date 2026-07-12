@@ -164,11 +164,12 @@ enum SnapshotMode {
 
 struct ScratchDirectory {
     path: PathBuf,
-    _owner_lock: File,
+    owner_lock: Option<File>,
 }
 
 impl Drop for ScratchDirectory {
     fn drop(&mut self) {
+        drop(self.owner_lock.take());
         let _ = fs::remove_dir_all(&self.path);
     }
 }
@@ -407,7 +408,7 @@ fn create_scratch_directory(
                 FileExt::unlock(&cleanup_lock)?;
                 return Ok(ScratchDirectory {
                     path,
-                    _owner_lock: owner_lock,
+                    owner_lock: Some(owner_lock),
                 });
             }
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
