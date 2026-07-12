@@ -10,7 +10,13 @@ import re
 from pathlib import Path
 
 
-HEADING = re.compile(r"^(#{3,4})\s+((?:Task\s+\d+[A-Z]?:\s+)?PR\s+[0-9]+[A-Z0-9-]*(?:\s*[—:-].*)?)$")
+PR_VALUE = r"[0-9]+(?:[A-Z][A-Z0-9-]*)?"
+HEADING = re.compile(
+    rf"^(?P<marks>#{{3,4}})\s+"
+    rf"(?P<heading>(?:(?:Task\s+\d+[A-Z]?:\s+)|(?:Companion requirements for\s+))?"
+    rf"PR\s+(?P<ids>{PR_VALUE}(?:\s*/\s*{PR_VALUE})*)"
+    rf"(?:\s*[—:-].*)?)$"
+)
 PR_ID = re.compile(r"\bPR\s+([0-9]+[A-Z][A-Z0-9-]*|[0-9]+)\b")
 CHECKBOX = re.compile(r"^\s*- \[([ xX])\]")
 ORDERING = re.compile(r"(?:\*\*Ordering:\*\*|\b(?:after|depends on|blocked by|requires)\b)", re.IGNORECASE)
@@ -26,16 +32,16 @@ def plan_files(root: Path) -> list[Path]:
 def scan(path: Path, root: Path) -> list[dict[str, object]]:
     text = path.read_text(encoding="utf-8")
     lines = text.splitlines()
-    starts: list[tuple[int, str]] = []
+    starts: list[tuple[int, str, str]] = []
     for index, line in enumerate(lines):
         match = HEADING.match(line)
         if match:
-            starts.append((index, match.group(2)))
+            starts.append((index, match.group("heading"), match.group("ids")))
     records: list[dict[str, object]] = []
-    for ordinal, (start, heading) in enumerate(starts):
+    for ordinal, (start, heading, heading_ids) in enumerate(starts):
         end = starts[ordinal + 1][0] if ordinal + 1 < len(starts) else len(lines)
         block = lines[start:end]
-        ids = [f"PR {value}" for value in PR_ID.findall(heading)]
+        ids = [f"PR {value.strip()}" for value in heading_ids.split("/")]
         references = sorted({f"PR {value}" for line in block for value in PR_ID.findall(line)} - set(ids))
         ordering = [line.strip() for line in block if ORDERING.search(line)][:20]
         commits = [match.group(1) for line in block if (match := COMMIT.search(line))]
