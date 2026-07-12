@@ -36,12 +36,17 @@ fi
 echo "== stock hermes ref: $(git -C "$HERMES_UPSTREAM_DIR" rev-parse HEAD 2>/dev/null || echo unknown)"
 echo "== tracedecay binary: $TRACEDECAY_BIN ($("$TRACEDECAY_BIN" --version))"
 
-# Upstream venv with upstream's exact-pinned lock (idempotent).
-if [ ! -x "$HERMES_UPSTREAM_DIR/.venv/bin/python" ]; then
+# Upstream source installs use either `.venv` (uv) or `venv` (Hermes installer).
+if [ -x "$HERMES_UPSTREAM_DIR/.venv/bin/python" ]; then
+    HERMES_VENV="$HERMES_UPSTREAM_DIR/.venv"
+elif [ -x "$HERMES_UPSTREAM_DIR/venv/bin/python" ]; then
+    HERMES_VENV="$HERMES_UPSTREAM_DIR/venv"
+else
     echo "== creating stock hermes venv (uv sync --frozen --no-dev)"
     (cd "$HERMES_UPSTREAM_DIR" && uv sync --frozen --no-dev)
+    HERMES_VENV="$HERMES_UPSTREAM_DIR/.venv"
 fi
-HERMES_PYTHON="$HERMES_UPSTREAM_DIR/.venv/bin/python"
+HERMES_PYTHON="$HERMES_VENV/bin/python"
 
 STAGE="$(mktemp -d -t hermes-stock-XXXXXX)"
 trap 'rm -rf "$STAGE"' EXIT
@@ -71,7 +76,7 @@ echo "== stock plugin manager / context engine / memory provider / dispatch chec
 
 echo "== hermes plugins list"
 PLUGINS_LIST="$(cd "$HERMES_UPSTREAM_DIR" && HOME="$FAKE_HOME" COLUMNS=200 \
-    timeout 120 "$HERMES_UPSTREAM_DIR/.venv/bin/hermes" plugins list)"
+    timeout 120 "$HERMES_VENV/bin/hermes" plugins list)"
 echo "$PLUGINS_LIST" | grep tracedecay
 echo "$PLUGINS_LIST" | grep tracedecay | grep -q enabled
 echo "ok - hermes plugins list shows tracedecay enabled"
