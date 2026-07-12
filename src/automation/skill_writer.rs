@@ -553,6 +553,9 @@ fn refresh_managed_skill_exports_after_auto_enable(profile_root: &Path) -> Value
     let Some(home) = crate::agents::home_dir() else {
         return json!({"status": "skipped", "reason": "home_unavailable"});
     };
+    if !should_refresh_managed_skill_exports(profile_root, &home) {
+        return json!({"status": "skipped", "reason": "non_default_profile_root"});
+    }
     let start = std::env::current_dir().unwrap_or_else(|_| home.clone());
     let project_root = crate::automation::skill_materialization::resolve_project_root(&start);
     let reports =
@@ -577,6 +580,10 @@ fn refresh_managed_skill_exports_after_auto_enable(profile_root: &Path) -> Value
         "reports": reports,
         "materialization_reconciled": true,
     })
+}
+
+fn should_refresh_managed_skill_exports(profile_root: &Path, home: &Path) -> bool {
+    profile_root == home.join(".tracedecay")
 }
 
 fn accepted_skill_approval_status(
@@ -859,6 +866,19 @@ fn normalized_non_empty(value: &str) -> Option<String> {
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    #[test]
+    fn managed_skill_exports_only_refresh_for_the_user_profile() {
+        let home = Path::new("/home/test-user");
+        assert!(should_refresh_managed_skill_exports(
+            Path::new("/home/test-user/.tracedecay"),
+            home,
+        ));
+        assert!(!should_refresh_managed_skill_exports(
+            Path::new("/tmp/tracedecay-test-profile"),
+            home,
+        ));
+    }
 
     fn assert_err_eq<T>(result: std::result::Result<T, String>, expected: &str) {
         match result {
