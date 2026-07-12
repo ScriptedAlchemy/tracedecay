@@ -437,7 +437,10 @@ pub(crate) async fn run_post_update_tasks(
     no_reinstall: bool,
     lifecycle_lease: &tracedecay::lifecycle_lease::LifecycleLease,
 ) -> tracedecay::errors::Result<()> {
+    eprintln!("\nPreparing safe post-update maintenance.");
+    eprintln!("  Waiting for TraceDecay writers to shut down cleanly — do not interrupt.");
     let previous_daemon_state = tracedecay::daemon::quiesce_installed_service_under_lease()?;
+    eprintln!("\x1b[32m✔\x1b[0m TraceDecay writers stopped; exclusive maintenance window active.");
     let mutation_result = run_post_update_mutations(no_heal, no_reinstall, lifecycle_lease).await;
     let restart_result = refresh_daemon_service_after_update(previous_daemon_state);
     mutation_result?;
