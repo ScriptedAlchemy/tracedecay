@@ -593,6 +593,9 @@ async fn dispatch_command(command: Commands) -> tracedecay::errors::Result<()> {
         } => {
             update_cmd::run_update_command(no_heal, no_reinstall)?;
         }
+        Commands::Dogfood => {
+            update_cmd::run_dogfood_command()?;
+        }
         Commands::PostUpdate {
             no_heal,
             no_reinstall,
@@ -748,6 +751,7 @@ fn should_skip_startup_maintenance(command: &Commands) -> bool {
             | Commands::UpdatePlugin
             | Commands::Upgrade { .. }
             | Commands::Update { .. }
+            | Commands::Dogfood
             | Commands::PostUpdate { .. }
             | Commands::Uninstall { .. }
             | Commands::Lsp { .. }
@@ -803,6 +807,7 @@ fn should_skip_agent_install_maintenance(command: &Commands) -> bool {
             | Commands::UpdatePlugin
             | Commands::Upgrade { .. }
             | Commands::Update { .. }
+            | Commands::Dogfood
             | Commands::PostUpdate { .. }
             | Commands::Uninstall { .. }
             | Commands::Lsp { .. }

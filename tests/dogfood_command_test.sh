@@ -46,6 +46,6 @@ grep -Fxq 'daemon status' "$log"
 grep -Fxq 'doctor' "$log"
 grep -Fxq -- '--version' "$log"
 
-grep -Fq 'dogfood = "!scripts/dogfood.sh"' "$repo_root/.cargo/config.toml"
+grep -Fq 'dogfood = "run --quiet --release --bin tracedecay -- dogfood"' "$repo_root/.cargo/config.toml"
 
 echo "dogfood command contract passed"

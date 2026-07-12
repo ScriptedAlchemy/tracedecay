@@ -3,14 +3,16 @@ set -euo pipefail
 
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 target_dir=${CARGO_TARGET_DIR:-"$repo_root/target"}
-source_binary="$target_dir/release/tracedecay"
+source_binary=${TRACEDECAY_DOGFOOD_SOURCE_BINARY:-"$target_dir/release/tracedecay"}
 stage_dir=${TRACEDECAY_DOGFOOD_STAGE_DIR:-"$HOME/.local/lib/tracedecay/dogfood"}
 install_dir=${TRACEDECAY_DOGFOOD_INSTALL_DIR:-"$HOME/.local/bin"}
 staged_binary="$stage_dir/tracedecay"
 installed_binary="$install_dir/tracedecay"
 
 cd "$repo_root"
-cargo build --locked --release --bin tracedecay
+if [[ -z "${TRACEDECAY_DOGFOOD_SOURCE_BINARY:-}" ]]; then
+  cargo build --locked --release --bin tracedecay
+fi
 
 if [[ ! -x "$source_binary" ]]; then
   printf 'dogfood build did not produce %s\n' "$source_binary" >&2
