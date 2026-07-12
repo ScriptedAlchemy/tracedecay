@@ -485,6 +485,63 @@ Lifecycle checkpoint state is closed: `Ineligible | Reserved | PromptIssued | Co
 
 Task lifecycle continuation owns a separate decision/effect slot from hints and Plan 22 suggestion envelopes. A hint cannot consume, trigger, or disguise the one-shot reminder; a reminder cannot carry exploratory context. If foreign hooks return conflicting outcomes, native host precedence still applies and the receipt records that TraceDecay could not prove delivery.
 
+### 7.5 Live attempt steering at host-safe boundaries
+
+An active plan-24 execution attempt is steerable while its Turn is in progress, but a task comment is not implicitly a prompt. A task comment is the shared canonical annotation entity with the registered `TaskComment` presentation role and `CommentsOn` work-item target; `TaskCommentRevisionRefV1` is a validated typed ref over one immutable annotation revision, not a second comment entity/store. An authorized actor must explicitly promote that revision, or submit the same typed payload directly, as `TaskSteeringDirectiveV1`. Promotion preserves the annotation/revision/body digest as provenance; editing or tombstoning the annotation cannot mutate, repeat, or revoke the directive. Cancellation/supersession is another fenced steering command.
+
+The domain/task feature owns the closed directive and receipt semantics; hooks own only capability declaration and host-boundary delivery:
+
+~~~rust
+pub enum SteeringRequirementV1 { Advisory, Required }
+pub enum SteeringKindV1 {
+    ClarifyConstraint,
+    CorrectAssumption,
+    AddEvidence,
+    ChangePriority,
+    RequestCheckpoint,
+    PauseBeforeNextEffect,
+    ResumeAfterCheckpoint,
+}
+pub struct TaskSteeringDirectiveV1 {
+    pub directive_id: SteeringDirectiveId,
+    pub work_item_id: WorkItemId,
+    pub work_item_version_id: WorkItemVersionId,
+    pub attempt_id: ExecutionAttemptId,
+    pub lease_id: TaskLeaseId,
+    pub authority_epoch: u64,
+    pub fence_epoch: u64,
+    pub steering_sequence: u64,
+    pub actor_id: ActorId,
+    pub authority: SteeringAuthorityRefV1,
+    pub requirement: SteeringRequirementV1,
+    pub kind: SteeringKindV1,
+    pub expected_packet: ContextPacketManifestRefV1,
+    pub expected_graph_revision: u64,
+    pub payload: SanitizedBoundedSteeringPayloadV1,
+    pub priority: SteeringPriorityV1,
+    pub expires_at: UtcMicros,
+    pub idempotency_key: IdempotencyKey,
+    pub promoted_comment: Option<TaskCommentRevisionRefV1>,
+}
+~~~
+
+Every delivery claim/receipt, acknowledgement, and terminal disposition carries a canonical `SteeringReceiptBasisDigestV1`. Its hashed basis losslessly includes directive/work-item/work-item-version, attempt, lease, authority/fence epochs, steering sequence, originating actor/authority, requirement/kind, expected packet/graph revision, sanitized payload digest, priority/expiry, idempotency-key digest, and optional promoted-comment revision. A batch receipt additionally binds ordered member basis digests plus first/last sequence and actual host boundary/capability digest. Receipt verification rehydrates those immutable rows and rejects any mismatch; a receipt cannot be replayed across attempts, epochs, controllers, payloads, or graph/packet revisions.
+
+The daemon admits it by expected attempt state, active lease plus authority/fence epoch, graph revision, current accepted packet, actor authority, expiry, payload digest, and per-attempt monotonic `steering_sequence`. Concurrent controllers reserve the next sequence with one compare-and-swap; retry with the same idempotency key and payload returns the original directive, while a changed payload conflicts. Payloads pass the existing sanitizer/authorization contracts, have a cataloged byte/token cap, contain typed anchors/actions rather than executable shell text, and never widen the attempt's scope or grants.
+
+Delivery uses a daemon-owned per-attempt inbox projected from the canonical task event/outbox stream. Every adapter declares exact safe boundaries and acknowledgement evidence:
+
+1. provider-native current-Turn interrupt, only when the pinned host capability proves addressed interrupt semantics;
+2. after a tool result and before the next model call;
+3. one `Stop`/`SubagentStop` inward continuation, sharing the persisted one-shot guard in §7.4;
+4. otherwise `NextTurnOnly`.
+
+No adapter interrupts an in-flight side-effecting tool, rewrites a tool result, or reports a mid-sampling injection when the host cannot prove one. Notification callbacks may wake the daemon but are not delivery evidence. At a boundary, the adapter claims a bounded ordered batch under `(attempt, lease, authority_epoch, fence_epoch, first_sequence, last_sequence, host_boundary_id)`, deduplicates superseded advisory items, and renders one compact payload within the shared Turn attention budget. Required directives retain order and are never coalesced across a semantic dependency; advisory directives may be batched by compatible kind and expiry. The host receipt records the actual boundary and one of `DeliveredAcknowledged | DeliveredNoAcknowledgementObservable | DeferredNextBoundary | NextTurnOnly | DeliveryUnknown | RejectedStale`.
+
+Required directives are logically exactly-once: one durable claim at a deliverable boundary, zero or one model-visible delivery, explicit acknowledgement, then `Applied | Rejected | Superseded` disposition with evidence. Duplicate hook runs and reconnects insert-or-read the same claim/receipt; `DeliveryUnknown` never re-injects automatically. Every admitted required directive without a terminal disposition fences `attempts.complete`, review/integration admission, and lease-terminal publication even after delivery expiry; expiry stops new delivery attempts but cannot silently waive controller intent. Advisory directives record the same receipts when observable but never fence progress or completion. A late directive racing a terminal transaction either wins the attempt-state CAS and fences that transaction or is atomically rejected `AttemptAlreadyTerminal`; it never attaches to a successor attempt.
+
+Codex/Claude `Stop` and `SubagentStop` can carry steering only through the same single bounded continuation reserved for that root/subagent Turn. Steering has precedence over an ordinary lifecycle reminder when required steering is pending; the combined continuation still occurs at most once and contains only the steering plus the exact lifecycle command needed to acknowledge/disposition it. `stop_hook_active=true`, an existing `PromptIssued`, uncertain delivery, or a stale lease returns empty success. Provider-native interrupt support, if added later, must first pass generated adapter conformance; similarly named notification, async, prompt, or agent handlers are not substitutes.
+
 The remaining boundary values are explicit:
 
 ~~~rust
@@ -779,6 +836,7 @@ For every generated supported/version-gated row, fixtures cover:
 - Codex all-source concurrency with reordered completion, no sibling-start suppression, advisory-only invocation-group CAS winner/losers, separately aggregated deny/rewrite/permission/continuation precedence, delivery-unknown no-redelivery, and observable handler-run audit conservation;
 - Claude configured/matched/host-deduped/started/completed/context-delivered conservation across parallel synchronous handlers and repeated async firings; event-specific exit/output precedence, eight-stop-block cap, lagging transcript, stale resume context, output spill, and no foreign-handler execution in replay;
 - one-shot task lifecycle continuation for root and subagent: lifecycle-owner command versus non-owner `participant_handoff`, rejection of subagent terminal authority, duplicate plugin/user definitions, parallel handlers, first stop with `stop_hook_active=false`, second with `true`, persisted CAS winner, explicit confirmation, no task binding, stale lease, daemon timeout/contention, trust/feature absence, user interrupt, Claude `StopFailure`, delivery unknown, and proof that no Anthropic/provider/prompt/agent/MCP route ran;
+- active-attempt steering for root and subagent: native current-Turn interrupt only when independently capability-proven, after-tool/before-model delivery, unsupported next-Turn fallback, duplicate and reconnect, two-controller monotonic CAS, stale lease/fence/packet/graph, in-flight side-effecting tool deferral, late-terminal single-winner race, required completion/integration fence, advisory non-blocking, and exactly one bounded Stop/SubagentStop continuation shared with lifecycle reconciliation;
 - exact V1 normalized fields and host response where compatibility is required;
 - no panic and safe empty response for unknown forward event.
 
@@ -804,6 +862,7 @@ Metrics:
 - continuity duplicate/gap/late/rewrite/unknown counts;
 - policy candidate/suppression/delivery/terminal-outcome categories with catalog/policy version;
 - coordination eligible/emitted/suppressed/acted/handoff/duplicate-avoided/false-positive/unresolved with policy/query versions, never agent/task text as metric labels;
+- steering directive/claim/delivery/ack/disposition counts by closed state, actual boundary, requirement, and adapter capability version; never comment/payload text, actor ID, task ID, or retrieval content as labels;
 - source/profile/shard/index watermarks and partial/redacted coverage through drill-down receipts, not high-cardinality metric labels.
 
 Release gates:
@@ -851,6 +910,7 @@ Commands run from repository root with the checkout-local target directory. Do n
 **Files:** `src/v2/hooks/adapters/{codex,claude}.rs`; `src/v2/hooks/render/{mod,codex,claude}.rs`; `tests/fixtures/hooks_v2/{codex,claude}/`; `tests/hooks_v2/{host_conformance,v1_differential,outcome_evidence}.rs`.
 
 - [ ] Freeze redacted V1 fixtures and current stock Codex/Claude fixtures for every applicable generated entry point in Section 12. Codex covers all ten events and its complete §7.1/7.2 contract. Claude covers the independent 30-event oracle, exact common/event schemas and matchers, all five handler kinds, generated exec-form command subset, source/frontmatter/managed policy, parallel host dedupe, sync/async/rewake, exit/HTTP/MCP/prompt-agent result semantics, platform lowering, lag/spill/privacy, terminal/task/team/worktree/elicitation lifecycles, and every version gate; preserve unsupported historical entry points only as explicit absent/legacy evidence.
+- [ ] Add adapter-declared steering-boundary fixtures for current-Turn native interrupt, after-tool/before-model, one-shot Stop/SubagentStop continuation, and next-Turn-only. Prove similarly named async/notification/prompt/agent facilities remain unsupported until capability-proven and no adapter interrupts an in-flight side-effecting tool.
 - [ ] Run differential tests. Expected: fail before adapters exist.
 - [ ] Implement mapping/render only; use catalog binding and application policy result.
 - [ ] Re-run. Expected: normalized/request/reply parity passes or a fixture records an intentional versioned difference.
@@ -870,7 +930,7 @@ Commands run from repository root with the checkout-local target directory. Do n
 
 **Files:** `tests/hooks_v2/{concurrency_ordering,crash_recovery,hint_replay,privacy_security}.rs`; `benches/{hooks_v2_concurrent_agents,hooks_v2_host_render}.rs`.
 
-- [ ] Add deterministic scheduler/load tests for 100 parent/subagents, presence/work-claim heartbeat/TTL, same/parallel-worktree overlap, planned redundancy, five coordination gates, one-hint/dedupe/cooldown/ack, duplicate/gap/late/rewrite, daemon loss, fallback segment collision, disk full, locked reader, bundle/catalog publication, kill points, exact/recorded/best-effort replay, delivery unknown, human correction, and secret corpus. Replay parent prefix `019f4906`, four PR #359 child agents, and Cursor session `ebc96a27-b046-4c88-865f-b38d76da9d2d` from the shared coordination manifest.
+- [ ] Add deterministic scheduler/load tests for 100 parent/subagents, presence/work-claim heartbeat/TTL, same/parallel-worktree overlap, planned redundancy, five coordination gates, one-hint/dedupe/cooldown/ack, required/advisory steering contention, duplicate delivery/reconnect/stale lease/late terminal, exactly one bounded continuation, duplicate/gap/late/rewrite, daemon loss, fallback segment collision, disk full, locked reader, bundle/catalog publication, kill points, exact/recorded/best-effort replay, delivery unknown, human correction, and secret corpus. Replay parent prefix `019f4906`, four PR #359 child agents, and Cursor session `ebc96a27-b046-4c88-865f-b38d76da9d2d` from the shared coordination manifest.
 - [ ] Run tests. Expected: at least one ordering/durability/replay assertion fails before final recovery/reconciliation handling.
 - [ ] Complete idempotent retry, fair writer scheduling contracts, delivery reconciliation, and no-write replay adapters.
 - [ ] Re-run the root hook test target and four hook benches. Expected: all Section 14 gates pass.
@@ -930,6 +990,7 @@ Do not delete sanitized native copied-subagent prompt rows under #410; only reti
 - Concurrent agents cannot silently lose, duplicate, reorder within a known source, or falsely causally link canonical activity.
 - Hook latency is independent of graph/projector/network/background work and meets the recorded gates.
 - Every hint is tied to exact request facts, policy/catalog/environment digests, payload, delivery, and terminal evidence.
+- Active-attempt steering is bound to exact work item/attempt/lease/authority/fence/sequence/packet/graph revisions and actual host boundary receipts. Required unresolved/unknown delivery fences completion/integration; advisory does not; duplicate/reconnect delivery is logically exactly-once; unsupported mid-Turn delivery is truthfully next-Turn-only; Stop/SubagentStop continues at most once.
 - Agent presence/claims remain current through bounded heartbeats; coordination hints occur only at five material workflow gates, are compact/advisory/planned-redundancy-aware, and cannot spam or mutate other agents.
 - Every request and durable receipt binds the unchanged `ScopeSelectorV2` digest; multi-repo/project/checkout/worktree/ref/snapshot/generation ambiguity/staleness is explicit and hooks never infer current project/CWD/first CWD/base checkout/current graph.
 - Missed Git/tool capability and human correction are observable first-class outcomes.

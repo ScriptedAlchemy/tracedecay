@@ -727,6 +727,27 @@ The deprecated aliases `install`, `claude-install`, `reinstall`, `update-plugin`
 
 MCP remains optional. Core skills and generated CLI recipes can execute every integration workflow on a shell-capable host; the official admin HTTP/SDK is the headless fallback. If MCP exposure is explicitly installed, only the `tracedecay-operator` registration receives the reviewed admin integration bindings and their same schemas/operations—there is no installer god tool or second implementation. The three logical registrations, component-set configuration, CLI, API, SDK, dashboard, and optional MCP all call plan 09's one application feature and root `HostDeploymentPort`.
 
+Live attempt steering uses this exact generated CLI tree:
+
+```text
+tracedecay task-graph comments list --work-item <id>
+tracedecay task-graph comments add --work-item <id> (--text <bounded>|--stdin)
+tracedecay task-graph comments revise|tombstone --comment <annotation-id> --expected-revision <n> ...
+tracedecay task-graph steering list --attempt <id>
+tracedecay task-graph steering show <directive-id>
+tracedecay task-graph steering submit --attempt <id> --requirement advisory|required --kind <closed-kind> (--text <bounded>|--stdin) --expected-lease <id> --authority-epoch <n> --fence-epoch <n> --expected-packet <ref> --expected-graph-revision <n> --expected-steering-version <n> --priority <level> --expires <utc> --idempotency-key <key>
+tracedecay task-graph steering promote --comment <annotation-id>@<revision> --body-digest <digest> --attempt <id> <same fenced steering fields>
+tracedecay task-graph steering acknowledge <directive-id> --attempt <id> --steering-sequence <n> --delivery-receipt <id>
+tracedecay task-graph steering resolve <directive-id> --disposition applied|rejected --evidence <anchor>
+tracedecay task-graph steering supersede <directive-id> --by <higher-sequence-directive-id>
+```
+
+Comments are the shared annotation use cases rendered through a task-specific facade; there is no task-comment store or lifecycle. `promote` is the explicit source-comment form of the same `task_steering.submit` use case as `submit` and pins the exact `TaskCommentRevisionRefV1`. Neither comment creation nor `comments list` delivers content to an agent. Steering output always leads with work item/attempt, lease plus authority/fence epoch, monotonic sequence, expected packet/graph revision, requirement, expiry, actual boundary disposition, acknowledgement/resolution, and whether an unresolved required directive currently fences completion/integration. `accepted` is never rendered as `delivered`; advisory rows are visibly non-blocking.
+
+The MCP surface stays compact: one read-only paginated resource template `tracedecay://v2/execution-attempts/{attempt_id}/steering` plus exactly three tools, `task_steering.submit`, `task_steering.acknowledge`, and `task_steering.resolve`. `submit` accepts either a bounded direct payload or an exact comment-revision ref, never both. `resolve` is a closed union of applied, rejected, or superseded (the latter requires the higher-sequence directive). The `task-worker` profile receives its addressed resource plus acknowledge/resolve within its attempt grant; `tracedecay-work`/`orchestrator` may receive submit within explicit controller authority. Context/developer profiles receive at most the read resource. There is no stream-to-model, generic comment tool, arbitrary prompt, `send-now`, interrupt, or adapter selector. Tools return compact Markdown plus canonical structured content; long evidence is retrieval-anchor linked.
+
+All clients subscribe through the canonical `task_graph.events` subscription and resume by event ID. CLI `--watch` renders one ordered NDJSON/terminal stream of directive, delivery, acknowledgement, and resolution deltas; gap/resync reloads the authoritative attempt steering page. Required and delivery-unknown events cannot coalesce away. The client never polls an adapter, retries unknown model-visible delivery, or interrupts an in-flight tool. Host-safe delivery and one-shot Stop continuation remain daemon/hook behavior; the CLI/MCP only submit and disposition canonical commands.
+
 Complex task/plan graph editing uses this exact CLI tree:
 
 ```text
@@ -1199,6 +1220,7 @@ The parity matrix has one row per use case and one column per applicable binding
 - deterministic generation across map order, locale, timezone, width, platform path separators, and host capability sets.
 - snapshot `mcp-surface-profiles.json` and prove every profile is an explicit sorted `BindingId` set with the correct logical registration, effect/grant/host ceiling, eager tools-only fallback projection, count/token budget, and digest; inject a glob, cross-registration binding, implicit operator install, generic invoke binding, and over-budget definition and require named failures;
 - assert exactly seven task edit-bundle use cases and one generated binding disposition per supported surface, with export/rebase/submit/delete absent from context/task-worker profiles and present only in `tracedecay-work`/`orchestrator`.
+- assert the task-comment facade maps only to shared annotation use cases and `task_steering.submit|acknowledge|resolve` is the complete MCP mutation set; inject a comment-delivery, send-now, interrupt, adapter-selector, or fourth steering tool and require generation failure.
 - assert one generated disposition for every worktree discovery/list/get, association list/diagnose/associate/confirm/reject/reassign, and cleanup inspect/status/request binding; inject create/provision/path-delete/force/branch-delete aliases and require catalog-generation failure.
 
 ### 19.2 Every-tool format conformance
@@ -1234,6 +1256,7 @@ For every mutation/internal tool, assert effect class, auth, idempotency/version
 - Change prompt intent during an open connection and assert the tool set/profile digest does not change. Exercise genuine catalog/availability/grant changes and assert coalesced `listChanged` never widens beyond the pinned profile; a requested profile change returns reconnect guidance.
 - Exercise `task_graph.edit_bundles.export|get|validate|diff|rebase|submit|delete`: small inline and large resource-link reads, tools-only read fallback, Markdown-default and explicit-JSON diagnostics equality, resource immutability, stale base/rebase conflict, submit idempotency/atomicity, and orchestrator-only mutation authorization.
 - Exercise worktree lifecycle tools/resources through context/work/orchestrator/operator profiles: external creator provenance, deterministic candidates, ambiguity, association revisions, cleanup-grant separation, blocker/reference pagination, inspect digest, request operation progress/cancel/resume/reconciliation, canonical structuredContent/Markdown equality, resource immutability, and zero create/provision/client-delete binding.
+- Exercise steering resource/tools through task-worker and orchestrator profiles: direct submit, exact annotation-revision promotion, bounded payload, two-controller CAS, duplicate idempotency, stale lease/fence/packet/graph rejection, acknowledge, applied/rejected/superseded resolution, required completion fence, advisory non-blocking, unsupported-boundary next-Turn fallback, reconnect, and late-terminal race. Assert accepted is never displayed as delivered and no profile receives comment injection or host-interrupt controls.
 - Run the exact canonical search-evaluation family through generated CLI, MCP tools, MCP resources/templates, HTTP/SDK, and Search Quality UI metadata. Assert every read/command appears once, resources are read-only, list/get share typed views, fixture promotion has no invented fixture read, and no alias is emitted.
 - Run `automation.dirty_scopes.list` and `automation.admissions.list|get` through generated CLI, MCP tools/resource template, HTTP/SDK, and dashboard metadata. Assert one catalog mapping per declared primitive and exactly the primitive set above, exact receipt/episode and frontier parity, generic retry/circuit/quarantine types, no fake run, no fourth operation/alias, and no `run-now` identical-input bypass.
 - Run the generic experiment family through CLI, MCP tools/resources/progress/cancellation/protocol tasks, HTTP/SDK, and every Playground route. Assert one draft/create/run/status/cancel/resume/retry/minimize lifecycle, identical experiment/run/cell/stage/comparison/comparison-cell/reduction coordinates/anchors/receipts, `replay_stages.list(cell)` returning exact `ReplayTraceV1`, one top-level filtered list operation per resource, no per-lab run tool, no protocol-task/work-item ID confusion, and no MCP sampling without the explicit experiment model/egress grant.
@@ -1256,6 +1279,7 @@ For every current and V2 command path:
 - current `cost --export` invalid-format nonzero regression.
 - every `task-graph edit start|get|validate|diff|rebase|submit|clean` path, managed-directory versus caller-owned archive output, validate-only upload, pinned-candidate continuation, exact nonzero validation/conflict exits, and no public generic `invoke` command.
 - every task-graph/project worktree discovery/list/association/diagnose/cleanup path, expected-version/idempotency/confirmation exits, `--cursor` pages, `--json` equality, operation status/reconciliation, absence of create/provision/path/force/branch-delete flags, and proof the CLI performs no Git/filesystem mutation itself.
+- every `task-graph comments` and `task-graph steering` path, stdin/text bounds, exact comment-revision pins, sequence/lease/fence/packet/graph CAS, idempotent duplicates, required/advisory terminal behavior, `--watch` reconnect/gap handling, Markdown/JSON equality, and absence of send-now/interrupt/adapter/provider flags.
 
 ### 19.4 Cross-transport semantic parity
 
@@ -1322,6 +1346,7 @@ These are sub-slices of existing PRs, not a separate architecture track.
 - Extend the capability catalog with formats, presentation IDs, effect modes, exit classes, stream/export support, cursor/anchor, budgets, component-set/install-scope/profile selection, `McpSurfaceProfileV1`, and the complete MCP primitive/capability/task/subscription/completion contract.
 - Generate `mcp-protocol.json`, `mcp-surface-profiles.json`, tools with input/output schemas, resources/templates, prompts, completion eligibility, list generations, CLI schemas/help/docs, and parity matrix; reject every duplicate allowlist, profile glob, cross-trust binding, generic invoke tool, or budget overflow.
 - Catalog the exact task edit-bundle family and profile visibility, including the large-bundle resource-link contract and typed diagnostics/diff/receipt presentations.
+- Catalog the shared-annotation task-comment facade, full CLI steering tree, compact three-tool MCP steering surface, attempt resource, grants, safe-boundary/delivery dispositions, and required/advisory completion-fence presentation without adding another event stream or notification family.
 - Catalog the exact external-worktree discovery/association/diagnose and cleanup inspect/status/request family, effect/grant/profile ceilings, cursors/SSE links, blockers/receipts, and forbidden create/provision/client-delete aliases.
 - Catalog `integrations.list|get|diff|status|install|update|repair|uninstall|verify`, their admin/effect/operation/output contracts, operator-only optional MCP exposure, and the internal `host-event ingest` binding; generate no legacy alias tool.
 
@@ -1332,6 +1357,7 @@ These are sub-slices of existing PRs, not a separate architecture track.
 - Carve autonomous curation and direct configuration out of any generic preview/apply command abstraction.
 - Add sealed integration inventory/detail/difference/status views and the one application-owned operation lifecycle; root composition remains only the deployment/probe/config effect port.
 - Reuse the generic operation and structured-staging kernel for protected task edit bundles; compile submit into canonical plan/work-item/edge commands and add no document-specific scheduler, retry engine, or task store.
+- Reuse shared annotations for task comments and the canonical task journal/outbox plus application command/CAS path for steering. Add no comment store, steering journal, scheduler, model channel, or client delivery retry.
 - Reuse canonical task relations/events, generic operations, outbox, audit, and retention for worktree association and cleanup lifecycle views; add no cleanup database/service, triage work item, or client mutation port.
 
 ### PR 24E0–24E8 companion — daemon-only execution, pure presentation, and generated adapters
@@ -1345,6 +1371,7 @@ These are sub-slices of existing PRs, not a separate architecture track.
 - Cut CLI and MCP semantic domains over one at a time with application/presentation differential tests; wire behavior remains transport-native.
 - Normalize stdout/stderr/exits, format switches, scope builders, help, cursors, and retrieval anchors.
 - Generate worktree lifecycle CLI/MCP bindings and ticket/API/SSE parity together; daemon-only cleanup request remains one operation across progress, polling, cancellation, and recovery.
+- Generate comment/steering CLI, compact MCP, HTTP/SDK, dashboard, and canonical task-subscription parity together; safe-boundary host delivery remains plan 07's daemon adapter concern.
 
 ### PR 24D/API companion — official clients and documentation
 
@@ -1424,6 +1451,7 @@ The fence test is supplemented by a parser that requires an even fence count and
 - [ ] Skills plus CLI are semantically complete without MCP. Optional MCP uses one adapter and only `tracedecay-context`, `tracedecay-work`, or explicitly opted-in `tracedecay-operator`, with a fixed explicit profile/digest and profile∩host∩grant∩authorization visibility.
 - [ ] Profile sets contain no globs or generic invoke/god tool, stay inside eager-host count/token budgets, never switch per turn, and use `listChanged` only for real changes inside the pinned profile; deferred tool search is optional.
 - [ ] `task_graph.edit_bundles.export|get|validate|diff|rebase|submit|delete` is the sole complex bulk-edit family; CLI exposes `task-graph edit start|get|validate|diff|rebase|submit|clean`, only validate uploads a sharded directory/archive, later stages consume one pinned `TaskGraphEditCandidateRefV1`, large MCP bundles return authorized resource links, and only `tracedecay-work`/`orchestrator` exposes edit mutations.
+- [ ] Task comments are the shared annotation family and never imply delivery. The full CLI steering tree and compact MCP `submit|acknowledge|resolve` plus attempt resource preserve exact attempt/lease/fence/sequence/packet/graph/idempotency and delivery/ack/disposition receipts; required unresolved/unknown state fences terminal integration, advisory does not, and no send-now/interrupt/provider selector exists.
 - [ ] Frontmatter Markdown has closed schemas and source-spanned typed diagnostics; validate/diff are nonauthoritative, rebase reports conflicts, submit is one expected-version/idempotent owner-shard transaction, and safe cleanup never deletes caller-owned or replaced files.
 - [ ] Externally created worktrees have generated discover/list/get and task-association list/diagnose/associate/confirm/reject/reassign bindings with provenance/confidence/ambiguity/reconciliation; no create/provision-worktree capability exists.
 - [ ] Cleanup inspect/status/request has exact CLI/MCP/HTTP/SDK/dashboard parity, stable cursor/output/SSE semantics, separate cleanup-grant authority, dirty/active/unpushed/unmerged/shared/unknown blockers, CAS/idempotency, daemon re-probe, operation receipts/failures/reconciliation, and branch preservation. Blocked triggers are diagnostics, not task triage.

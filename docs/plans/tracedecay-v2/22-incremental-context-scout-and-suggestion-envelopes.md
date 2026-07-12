@@ -24,6 +24,7 @@
 14. Existing deterministic hint classifiers remain a candidate source during migration, then move behind the same policy contract. There is one delivery selector at cutover: plan 6's `DeliveryArbiterV1` ([06-policy-crate.md](./06-policy-crate.md) §9.1.3), which arbitrates deterministic and scout `DeliveryCandidateV1` submissions under one `HintStateSnapshot` version compare-and-swap.
 15. Canonical initiative/task/ticket/dependency/claim/context-packet events are eligible evidence, not a broadcast feed. A sibling-task change reaches an exact Thread/Turn only when evidence proves material overlap, a blocker, a handoff, or an invalidated assumption.
 16. Scout wakeups/coalescing/backoff/fairness use plan 09's one `SchedulerKernelV1`; each admitted run wraps `OperationKernelV1<ScoutRunKind>` for epoch, heartbeat, steps, progress, cancellation, retry/takeover, and terminal receipts. Scout owns trigger/materiality/model/exploration/envelope policy only and cannot add another scheduler or job ledger.
+17. A scout suggestion is never task steering. `TaskSteeringDirectiveV1` is an authorized plan-24 command bound to an active attempt/lease/fence/sequence; it has independent delivery, acknowledgement, disposition, and required-completion-fence semantics in plan 07 §7.5. The scout cannot create, promote, rewrite, rank, suppress, acknowledge, resolve, or masquerade as a steering directive. A human/controller comment remains an annotation until explicitly promoted through that command.
 
 This plan extends the contracts in [01-domain-crate.md](./01-domain-crate.md), [06-policy-crate.md](./06-policy-crate.md), [07-hooks-crate.md](./07-hooks-crate.md), and [09-application-crate.md](./09-application-crate.md). Configuration is exclusively owned by [20-configuration-control-plane.md](./20-configuration-control-plane.md); plan 09 owns semantic response views while capability, binding, rendering, and format parity are exclusively owned by [21-cli-mcp-tool-surface-and-output-unification.md](./21-cli-mcp-tool-surface-and-output-unification.md); every message/LCM/context read and current/as-of decision is owned by [23-session-lcm-temporal-retrieval-and-evaluation.md](./23-session-lcm-temporal-retrieval-and-evaluation.md) through the sole `TraceQueryV1` path; canonical task refs/events are owned by [24-canonical-task-plan-graph-and-multi-agent-executor.md](./24-canonical-task-plan-graph-and-multi-agent-executor.md).
 
@@ -49,6 +50,7 @@ The result is a compact typed envelope with exact addressee, expiry, evidence, r
 - No autonomous edit, commit, branch, PR, message, curation, schedule, configuration, or external-system mutation.
 - No second general-purpose agent runtime or unrestricted tool loop.
 - No attempt to inject continuously while a host has no supported steering boundary.
+- No authoritative attempt steering, comment promotion, acknowledgement, disposition, completion fence, or steering retry. Those are canonical task commands, not generated suggestions.
 - No replacement for host compaction, memory curation, search, or the deterministic policy engine.
 - No inference that temporal adjacency proves causation, adoption, or agent ownership.
 - No raw transcript mirror, secret-bearing prompt cache, or model-output search index.
@@ -877,6 +879,10 @@ When additive Codex sources launch several matching TraceDecay handlers concurre
 
 Plan 07 §7.4's task lifecycle checkpoint is a separate delivery-arbiter lane with its own persisted CAS, eligibility denominator, one-shot cap, and receipt. The scout may contribute evidence that task state materially changed, but it cannot reserve, spend, render, or trigger the continuation. The checkpoint may ask only for an explicit plan-24 lifecycle command and cannot carry retrieval ideas. Both lanes share the Turn attention budget and native host capability/trust snapshot so they cannot each inject competing text at the same boundary; task reconciliation wins only when lifecycle debt is material, otherwise the ordinary hint arbiter proceeds. The dashboard and replay harness display the two decisions side by side rather than combining their outcomes.
 
+Plan 07 §7.5's live steering inbox is a third, authoritative command lane—not a `DeliveryCandidateV1`, suggestion envelope, hint-state slot, or scout outcome. Its directive is already selected by an authorized controller and ordered by the attempt's fenced monotonic sequence. The host delivery coordinator checks steering before the ordinary hint arbiter: pending required steering wins the next safe boundary; fresh advisory steering wins over generated advice at that boundary but never gains a completion fence. A steering batch may share §7.4's single Stop continuation only under its one-shot receipt, while the scout is suppressed with `AuthoritativeSteeringPending` and spends no hint/scout quota. Steering uses its own bounded payload cap and canonical delivery/ack/disposition receipts; it does not enter hint dedupe/cooldown/learning denominators. Conversely, an ignored or rejected suggestion cannot acknowledge or resolve steering.
+
+Adapter capability names remain explicit. `SuggestionDeliveryModeV1::ProviderSteer` means an advisory scout envelope may use a provider-native model-context boundary proven by the host ledger; it does **not** mean task steering or authorize delivery of a `TaskSteeringDirectiveV1`. Task steering separately records `NativeInterrupt | AfterToolBeforeModel | StopContinuation | NextTurnOnly`, never interrupts an in-flight side-effecting tool, and falls back truthfully when unsupported. The shared conformance fixture must prove that each lane records its actual boundary and that no suggestion receipt is accepted as a steering delivery receipt.
+
 For Claude, one generated exec-form handler is eligible for advisory delivery even when foreign handlers also match. Host parallelism and identical-handler dedupe remain observed facts, not scout arbitration. `PostToolBatch` is the preferred bounded fan-out/fan-in reconsideration boundary; per-tool completion may update evidence but cannot emit several sibling suggestions for one batch. Produced-at, eligible-at, host-hook completion, model-visible Turn, transcript-resume replay, and spill/coverage states are distinct timestamps/dispositions.
 
 ## 12. Feedback and outcome attribution
@@ -1359,6 +1365,7 @@ Numbers extend the existing program without colliding with plans 1–24. Canonic
 - render raw model-visible hook input from real transcripts and verify ordinary prompts are not wrapped as noisy hook messages;
 - benchmark hook path with no pending envelope, one eligible, one stale, store contention, daemon reconnect, and many agents; assert no model/query/network calls;
 - replay copied parent/subagent prompts and assert one logical opportunity without suppressing distinct agents incorrectly.
+- run adapter fixtures with required steering, advisory steering, lifecycle checkpoint, deterministic hint, and scout envelope contending at the same boundary; prove the declared precedence, one bounded Stop continuation, no in-flight side-effecting-tool interruption, truthful next-Turn fallback, separate receipts, and zero hint-budget debit for suppressed scout work.
 
 ### 23.4 Product/API/output
 
@@ -1366,6 +1373,7 @@ Numbers extend the existing program without colliding with plans 1–24. Canonic
 - every CLI command passes human/Markdown/JSON/NDJSON applicability, stdout/stderr/exit, scope/freshness/coverage, and TTY determinism fixtures;
 - every MCP tool defaults to compact Markdown and explicit JSON decodes to the same typed view; no double encoding or giant model transcripts;
 - SSE tests snapshot/resume/gap/backpressure/resync and never drop semantic state silently;
+- cross-surface fixtures prove comments are historical annotations, steering promotion is an explicit task command, and no Scout control/tool/view can promote, deliver, acknowledge, resolve, retry, or clear a required steering fence;
 - browser tests cover Observatory, Loom, Hint Lab, Settings, keyboard/screen-reader, responsive, empty/silent/stale/partial/offline/overload/privacy states;
 - Hint Lab tests prove plan 6's immutable evaluator ports admit zero envelope claims, deliveries, counters, feedback, config, curation, or tool mutations; plan 9's side-effect receipt reports zero production effects; persistence reaches only generic experiment/run/stage rows.
 
@@ -1382,6 +1390,7 @@ Each run publishes a sanitized manifest with corpus/query labels, cutoff, inclus
 - The model can request only cataloged bounded reads; all mutation, arbitrary shell/MCP, ungranted network, scope widening, and curation effects are impossible.
 - Pure policy produces useful silence, compact selection, logical/category/anchor/coordination dedupe, cooldown, budgets, explanations, and one atomic state transition.
 - Hooks never wait for model/search/tools/network and inject only through a negotiated safe host context boundary.
+- Scout suggestions and human/controller steering remain different typed lanes: suggestions stay optional advice under hint dedupe/budgets; steering stays attempt/lease/fence/sequence bound with its own delivery/ack/disposition receipts, required completion fence, advisory non-blocking behavior, and truthful unsupported-boundary fallback.
 - Late/stale/expired/superseded/unknown-delivery behavior is deterministic, visible, and duplicate-safe.
 - Many-agent/multi-worktree/cross-project scenarios retain exact identity and surface only authorized evidence-bearing nearby-work summaries.
 - Canonical task/ticket graph changes reach an exact Turn only for evidence-backed dependencies, overlaps, blockers, handoffs, context packets, or invalidated assumptions; task/claim anchors explain relevance and high-volume global-board activity remains silent.
