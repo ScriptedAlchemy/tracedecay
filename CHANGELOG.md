@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.64](https://github.com/ScriptedAlchemy/tracedecay/compare/v0.0.63...v0.0.64) - 2026-07-12
+
+### Fixed
+
+- *(storage)* close snapshots before scratch cleanup
+- *(storage)* normalize Windows consolidation state
+- *(hermes)* trust backend replay shrink estimates
+- *(hermes)* preserve atomic LCM tool transactions
+- *(storage)* preserve dirty markers in backups
+- *(memory)* preserve project store on branch databases
+- *(memory)* reuse daemon database handle
+- *(storage)* exclude runtime locks from backups
+- *(storage)* report locked migration copy path
+- *(storage)* avoid Windows snapshot copy locks
+
 ## [0.0.63](https://github.com/ScriptedAlchemy/tracedecay/compare/v0.0.62...v0.0.63) - 2026-07-12
 
 ### Fixed
