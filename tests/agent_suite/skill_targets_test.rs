@@ -819,7 +819,7 @@ fn install_fake_cursor_plugin(home: &std::path::Path) -> std::path::PathBuf {
 async fn lifecycle_export_sweep_deploys_and_retracts_across_detected_agents() {
     let temp = tempfile::tempdir().unwrap();
     let home = temp.path().join("home");
-    let profile_root = temp.path().join("profile");
+    let profile_root = home.join(".tracedecay");
     let claude_md = install_fake_claude(&home);
     let cursor_plugin = install_fake_cursor_plugin(&home);
 
@@ -877,7 +877,7 @@ async fn lifecycle_export_sweep_deploys_and_retracts_across_detected_agents() {
 async fn lifecycle_export_sweep_isolates_per_agent_failures() {
     let temp = tempfile::tempdir().unwrap();
     let home = temp.path().join("home");
-    let profile_root = temp.path().join("profile");
+    let profile_root = home.join(".tracedecay");
     let claude_md = install_fake_claude(&home);
     let cursor_plugin = install_fake_cursor_plugin(&home);
     // A directory where the prompt file should be makes the Claude export
@@ -923,7 +923,7 @@ async fn lifecycle_export_sweep_isolates_per_agent_failures() {
 async fn lifecycle_export_sweep_skips_agents_without_installs() {
     let temp = tempfile::tempdir().unwrap();
     let home = temp.path().join("home");
-    let profile_root = temp.path().join("profile");
+    let profile_root = home.join(".tracedecay");
     std::fs::create_dir_all(&home).unwrap();
 
     create_managed_skill_draft(&profile_root, draft("repo-hygiene", "Repository hygiene"))
@@ -941,11 +941,30 @@ async fn lifecycle_export_sweep_skips_agents_without_installs() {
 }
 
 #[tokio::test]
+async fn lifecycle_export_sweep_skips_non_default_profiles() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("home");
+    let profile_root = temp.path().join("test-profile/.tracedecay");
+    let claude_md = install_fake_claude(&home);
+    let original = std::fs::read_to_string(&claude_md).unwrap();
+
+    create_managed_skill_draft(&profile_root, draft("repo-hygiene", "Repository hygiene"))
+        .await
+        .unwrap();
+    approve_managed_skill(&profile_root, "repo-hygiene")
+        .await
+        .unwrap();
+
+    assert!(export_managed_skills_to_agents(&home, &profile_root).is_empty());
+    assert_eq!(std::fs::read_to_string(claude_md).unwrap(), original);
+}
+
+#[tokio::test]
 async fn local_lifecycle_export_skips_unrelated_project_configs() {
     let temp = tempfile::tempdir().unwrap();
     let home = temp.path().join("home");
     let project_root = temp.path().join("project");
-    let profile_root = temp.path().join("profile");
+    let profile_root = home.join(".tracedecay");
     std::fs::create_dir_all(&home).unwrap();
 
     let claude_md = project_root.join(".claude/CLAUDE.md");
