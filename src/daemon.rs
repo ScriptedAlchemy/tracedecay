@@ -1568,22 +1568,12 @@ async fn run_foreground_unix(socket_path: PathBuf) -> Result<()> {
     let clients_drained = drain_client_tasks(&mut client_tasks, DAEMON_TASK_ABORT_DEADLINE).await;
     // Client setup and in-flight requests may create schedulers or project
     // servers. Sweep owned background tasks only after all client work drains.
-    let background_tasks_drained = timeout(
-        DAEMON_TASK_ABORT_DEADLINE,
-        engine.shutdown_background_tasks(),
-    )
-    .await
-    .is_ok();
-    if !in_flight_drained || !clients_drained || !background_tasks_drained {
-        let outcome = if background_tasks_drained {
-            "client_drain_timeout"
-        } else {
-            "background_task_timeout"
-        };
+    engine.shutdown_background_tasks().await;
+    if !in_flight_drained || !clients_drained {
         log_daemon_event(
             "daemon_shutdown",
             &[
-                ("outcome", outcome.to_string()),
+                ("outcome", "client_drain_timeout".to_string()),
                 (
                     "deadline_secs",
                     DAEMON_CLIENT_DRAIN_DEADLINE.as_secs().to_string(),

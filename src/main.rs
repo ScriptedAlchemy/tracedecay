@@ -178,7 +178,12 @@ fn async_main() -> tracedecay::errors::Result<()> {
         .map_err(|e| tracedecay::errors::TraceDecayError::Config {
             message: format!("failed to start async runtime: {e}"),
         })?;
-    runtime.block_on(run(cli))
+    let result = runtime.block_on(run(cli));
+    // Runtime drop waits indefinitely for blocking tasks. Daemon integrations
+    // can leave OS-backed watcher work behind after their async handles abort,
+    // so bound teardown after the command's own graceful shutdown completes.
+    runtime.shutdown_timeout(std::time::Duration::from_secs(2));
+    result
 }
 
 fn render_dynamic_command_help(args: &[String]) -> bool {
