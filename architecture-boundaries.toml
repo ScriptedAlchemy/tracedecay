@@ -1,0 +1,264 @@
+version = 1
+package_ceiling = 11
+generated_views = [
+  "docs/architecture/v2/generated/owners.md",
+  "docs/architecture/v2/generated/dependency-dag.md",
+  "docs/architecture/v2/generated/release-policy.md",
+]
+
+[release]
+compatibility_gate = "Every V1 read, write, action, error, and retained-data family has a generated disposition plus passing semantic parity and migration receipts."
+rollback_gate = "Keep non-disposable V1 stores and the old shell read-only until the release-cell rollback window closes and a restore drill succeeds."
+v1_removal_gate = "Remove a V1 route only after inventory ownership, shadow parity, cutover, rollback-window, stale-client rejection, and negative-code receipts pass."
+waves = ["contracts-and-inventory", "shadow-and-backfill", "surface-cutover", "v1-retirement"]
+
+[owners.domain]
+kind = "rust-package"
+path = "crates/tracedecay-domain"
+plan = "docs/plans/tracedecay-v2/01-domain-crate.md"
+release_tier = 1
+allowed_dependencies = []
+forbidden_dependencies = ["io", "runtime", "transport", "store-implementation"]
+
+[owners.store]
+kind = "rust-package"
+path = "crates/tracedecay-store"
+plan = "docs/plans/tracedecay-v2/02-store-crate.md"
+release_tier = 2
+allowed_dependencies = ["domain"]
+forbidden_dependencies = ["transport", "business-policy"]
+
+[owners.capture]
+kind = "rust-package"
+path = "crates/tracedecay-capture"
+plan = "docs/plans/tracedecay-v2/03-capture-crate.md"
+release_tier = 2
+allowed_dependencies = ["domain"]
+forbidden_dependencies = ["query", "transport", "store-implementation"]
+
+[owners.projectors]
+kind = "rust-package"
+path = "crates/tracedecay-projectors"
+plan = "docs/plans/tracedecay-v2/04-projectors-crate.md"
+release_tier = 2
+allowed_dependencies = ["domain"]
+forbidden_dependencies = ["transport", "store-implementation"]
+
+[owners.code-index]
+kind = "rust-package"
+path = "crates/tracedecay-code-index"
+plan = "docs/plans/tracedecay-v2/25-code-intelligence-indexing-crate.md"
+release_tier = 2
+allowed_dependencies = ["domain"]
+forbidden_dependencies = ["watcher", "scheduler", "transport", "store-implementation"]
+
+[owners.query]
+kind = "rust-package"
+path = "crates/tracedecay-query"
+plan = "docs/plans/tracedecay-v2/05-query-crate.md"
+release_tier = 3
+allowed_dependencies = ["domain"]
+forbidden_dependencies = ["transport", "mutation", "store-implementation"]
+
+[owners.policy]
+kind = "rust-package"
+path = "crates/tracedecay-policy"
+plan = "docs/plans/tracedecay-v2/06-policy-crate.md"
+release_tier = 3
+allowed_dependencies = ["domain"]
+forbidden_dependencies = ["transport", "effects", "store-implementation"]
+
+[owners.tool-catalog]
+kind = "rust-package"
+path = "crates/tracedecay-tool-catalog"
+plan = "docs/plans/tracedecay-v2/08-tool-catalog-crate.md"
+release_tier = 2
+allowed_dependencies = ["domain"]
+forbidden_dependencies = ["business-behavior", "host-io", "store-implementation"]
+
+[owners.application]
+kind = "rust-package"
+path = "crates/tracedecay-application"
+plan = "docs/plans/tracedecay-v2/09-application-crate.md"
+release_tier = 4
+allowed_dependencies = ["domain", "store", "capture", "projectors", "query", "policy", "tool-catalog"]
+forbidden_dependencies = ["transport", "root-private", "store-implementation"]
+
+[owners.client-rust]
+kind = "rust-package"
+path = "crates/tracedecay-client"
+plan = "docs/plans/tracedecay-v2/17-official-public-api-and-sdks.md"
+release_tier = 5
+allowed_dependencies = ["public-contracts"]
+forbidden_dependencies = ["domain", "application", "store-implementation"]
+
+[owners.root]
+kind = "rust-package"
+path = "."
+plan = "docs/plans/tracedecay-v2/12-root-compatibility-migration.md"
+release_tier = 5
+allowed_dependencies = ["domain", "store", "capture", "projectors", "code-index", "query", "policy", "tool-catalog", "application", "api", "hooks", "presentation", "host-deploy", "remote-brain-transport"]
+forbidden_dependencies = ["new-business-semantics"]
+
+[owners.public-contracts]
+kind = "generated-contract"
+path = "contracts/api"
+plan = "docs/plans/tracedecay-v2/17-official-public-api-and-sdks.md"
+release_tier = 4
+allowed_dependencies = []
+forbidden_dependencies = ["runtime", "store-implementation"]
+
+[owners.api]
+kind = "root-private-module"
+path = "src/v2/api"
+plan = "docs/plans/tracedecay-v2/10-api-crate.md"
+release_tier = 5
+allowed_dependencies = ["domain", "application", "tool-catalog", "public-contracts"]
+forbidden_dependencies = ["store-implementation", "query-implementation", "policy-implementation"]
+
+[owners.hooks]
+kind = "root-private-module"
+path = "src/v2/hooks"
+plan = "docs/plans/tracedecay-v2/07-hooks-crate.md"
+release_tier = 5
+allowed_dependencies = ["domain", "application", "tool-catalog"]
+forbidden_dependencies = ["store-implementation", "federated-query", "long-running-effects"]
+
+[owners.presentation]
+kind = "root-private-module"
+path = "src/v2/presentation"
+plan = "docs/plans/tracedecay-v2/21-cli-mcp-tool-surface-and-output-unification.md"
+release_tier = 5
+allowed_dependencies = ["domain", "application", "tool-catalog"]
+forbidden_dependencies = ["store-implementation", "raw-json-semantics"]
+
+[owners.host-deploy]
+kind = "root-private-module"
+path = "src/v2/host_deploy"
+plan = "docs/plans/tracedecay-v2/27-cross-host-agent-plugin-bundles.md"
+release_tier = 5
+allowed_dependencies = ["domain", "application", "tool-catalog"]
+forbidden_dependencies = ["store-implementation", "catalog-reinterpretation"]
+
+[owners.remote-brain-transport]
+kind = "root-private-module"
+path = "src/v2/remote_brain_transport"
+plan = "docs/plans/tracedecay-v2/28-remote-multi-machine-shared-brain.md"
+release_tier = 5
+allowed_dependencies = ["domain", "application"]
+forbidden_dependencies = ["store-implementation", "authority-semantics", "sqlite-wire"]
+
+[owners.client-typescript]
+kind = "public-package"
+path = "packages/tracedecay-client"
+plan = "docs/plans/tracedecay-v2/17-official-public-api-and-sdks.md"
+release_tier = 5
+allowed_dependencies = ["public-contracts"]
+forbidden_dependencies = ["store-implementation", "dashboard-state"]
+
+[owners.client-python]
+kind = "public-package"
+path = "python/tracedecay-client"
+plan = "docs/plans/tracedecay-v2/17-official-public-api-and-sdks.md"
+release_tier = 5
+allowed_dependencies = ["public-contracts"]
+forbidden_dependencies = ["store-implementation", "server-internals"]
+
+[owners.dashboard]
+kind = "frontend"
+path = "dashboard"
+plan = "docs/plans/tracedecay-v2/11-dashboard-frontend.md"
+release_tier = 6
+allowed_dependencies = ["client-typescript"]
+forbidden_dependencies = ["store-implementation", "application", "v1-plugin-api"]
+
+[[edges]]
+from = "store"
+to = "domain"
+[[edges]]
+from = "capture"
+to = "domain"
+[[edges]]
+from = "projectors"
+to = "domain"
+[[edges]]
+from = "code-index"
+to = "domain"
+[[edges]]
+from = "query"
+to = "domain"
+[[edges]]
+from = "policy"
+to = "domain"
+[[edges]]
+from = "tool-catalog"
+to = "domain"
+[[edges]]
+from = "application"
+to = "domain"
+[[edges]]
+from = "application"
+to = "store"
+[[edges]]
+from = "application"
+to = "capture"
+[[edges]]
+from = "application"
+to = "projectors"
+[[edges]]
+from = "application"
+to = "query"
+[[edges]]
+from = "application"
+to = "policy"
+[[edges]]
+from = "application"
+to = "tool-catalog"
+[[edges]]
+from = "api"
+to = "application"
+[[edges]]
+from = "api"
+to = "public-contracts"
+[[edges]]
+from = "hooks"
+to = "application"
+[[edges]]
+from = "presentation"
+to = "application"
+[[edges]]
+from = "host-deploy"
+to = "tool-catalog"
+[[edges]]
+from = "remote-brain-transport"
+to = "application"
+[[edges]]
+from = "client-rust"
+to = "public-contracts"
+[[edges]]
+from = "client-typescript"
+to = "public-contracts"
+[[edges]]
+from = "client-python"
+to = "public-contracts"
+[[edges]]
+from = "dashboard"
+to = "client-typescript"
+[[edges]]
+from = "root"
+to = "application"
+[[edges]]
+from = "root"
+to = "api"
+[[edges]]
+from = "root"
+to = "hooks"
+[[edges]]
+from = "root"
+to = "presentation"
+[[edges]]
+from = "root"
+to = "host-deploy"
+[[edges]]
+from = "root"
+to = "remote-brain-transport"
