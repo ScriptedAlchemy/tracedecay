@@ -536,7 +536,6 @@ pub struct CommandReceipt<O> {
     pub watermark: ShardWatermark,
     pub audit_event: EventId,
     pub operation: Option<OperationRef>,
-    pub workflow: Option<WorkflowRef>,
 }
 ```
 
@@ -544,28 +543,30 @@ pub struct CommandReceipt<O> {
 
 Version conflict returns the current version, changed dependency IDs, safe summary, and, only for a confirmed operation, a new-preflight requirement. It never auto-rebases a destructive command. Idempotent status/run/refresh requests may explicitly declare a merge policy; that policy is versioned in the catalog and fixture-tested.
 
-### 8.3 Cross-shard workflows
+### 8.3 Cross-shard operation workflows
 
 ```rust
-pub struct WorkflowDefinition {
-    pub kind: WorkflowKind,
+pub struct OperationWorkflowDefinitionV1 {
+    pub kind: OperationWorkflowKindV1,
     pub version: SemVer,
-    pub steps: Vec<WorkflowStepSpec>,
+    pub steps: Vec<OperationWorkflowStepSpecV1>,
 }
 
-pub struct WorkflowStepReceipt {
-    pub workflow: WorkflowId,
-    pub step: WorkflowStepId,
+pub struct OperationWorkflowStepReceiptV1 {
+    pub operation: OperationId,
+    pub step: OperationStepId,
     pub attempt: u32,
     pub expected_versions: VersionVector,
     pub input_digest: ContentDigest,
-    pub disposition: WorkflowStepDisposition,
+    pub disposition: OperationStepDispositionV1,
     pub effect_receipts: Vec<EffectReceiptRef>,
     pub compensation: Option<CompensationRef>,
 }
 ```
 
-Cross-shard workflows cover retention/delete descendants, profile/project settings propagation, export publication, projection rebuild/publish, migration/backfill/cutover, autonomous managed-skill materialization/supersession/recovery, backup/restore, and remote refresh plus local reindex. They obey:
+These types are closed, application-owned recipes over `OperationKernelV1`; they are not Plan 32 user-authored `WorkflowDefinitionV1`, workflow source, executable IR, or replay history. A dynamic workflow may invoke registered application use cases through its execution-unit envelope, but neither system translates into or executes the other's definition type. `CommandReceipt.operation` is the sole pending-work pointer for both a direct durable operation and a cross-shard operation workflow; there is no second generic `WorkflowRef` status family.
+
+Cross-shard operation workflows cover retention/delete descendants, profile/project settings propagation, export publication, projection rebuild/publish, migration/backfill/cutover, autonomous managed-skill materialization/supersession/recovery, backup/restore, and remote refresh plus local reindex. They obey:
 
 - Durable state is written before executing the next effect; retries use the same workflow/step idempotency key.
 - Each step owns at most one shard transaction or one bounded external effect, never both simultaneously.
@@ -818,7 +819,7 @@ Universal search quality is corpus-evaluated:
 
 Selecting an entity can request another lens using the same `InvestigationSelection` and frozen watermark. Application does not render or position nodes. It guarantees legal lens schema, evidence-bearing cross-links, stable selection identity, bounded expansion, and table/outline projection fields.
 
-### 9.3 Sessions, messages, turns, agents, and workflows
+### 9.3 Sessions, messages, turns, agents, and orchestration observations
 
 | Use-case ID | Input/output contract |
 |---|---|
@@ -830,7 +831,7 @@ Selecting an entity can request another lens using the same `InvestigationSelect
 | `sessions.context_lineage` | LCM sanitized-native/source/summary DAG, compression decisions, payload coverage and source ranges. |
 | `agents.list` / `agents.get` | Actor/instance identity, provider-native aliases, lifecycle, parent/child, goals, handoffs, usage and outcomes. |
 | `goals.list` / `goals.get` | First-class Codex goals and provider-native objectives with owner agent/session/workflow, versioned status/plan updates, Turns, evidence, terminal state, and coverage. |
-| `workflows.list` / `workflows.get` | Claude workflows, Codex goals, TraceDecay automations, Hermes-style curation agents with native semantics and shared relations. |
+| `orchestration_observations.list` / `orchestration_observations.get` | Read-only `OrchestrationObservationV1` views of provider-native Claude workflow runs, Codex goals, TraceDecay automations, and Hermes-style curation agents with native semantics and shared relations. These observations never acquire native dynamic-workflow identity or execution authority. Plan 32 exclusively owns `workflows.*` definition/version/run/node reads and commands. |
 
 Application does not define a second message-filter vocabulary. It consumes domain `MessageOrigin::{DirectUser,DelegatedAgentPrompt,ToolResultProtocol,ProviderProtocol,Unknown}` and `MessageView::{NativeRows,RepresentativeRows,HumanBestEffort,DirectUser,DelegatedAgents,ToolResults,ProviderProtocol}` unchanged. Its output row is named distinctly from the domain query enum:
 
