@@ -15,7 +15,7 @@ Run from the repository root:
 python3 .codex/skills/executing-tracedecay-v2-plan/scripts/plan_inventory.py
 ```
 
-Use `--json` for machine processing and `--id 'PR 4E'` for one slice. The script is read-only. It locates PR/task headings, source lines, ordering statements, referenced PR IDs, acceptance-checkbox counts, and declared commit subjects. It does not decide that prose references are gating edges.
+Use `--json` for machine processing and `--id 'PR 4E'` for every declaration of one slice. The script is read-only. It locates PR/task headings, source lines, ordering statements, referenced PR IDs, acceptance-checkbox counts, declared commit subjects, and block hashes. It does not decide that prose references are gating edges or collapse master/owner/companion declarations silently.
 
 Read these authorities in order:
 
@@ -25,6 +25,19 @@ Read these authorities in order:
 4. Any companion plan named by `Ordering`, `after`, `depends`, `blocked by`, or the index.
 
 Do not make every worker reread the full plan set. The orchestrator parses once and gives each worker exact source sections, complete acceptance, constraints, and retrieval anchors.
+
+## Validate the activated graph and ledger
+
+Export the activated canonical task graph plus completion ledger to JSON, then run:
+
+```bash
+python3 .codex/skills/executing-tracedecay-v2-plan/scripts/plan_execution.py \
+  --graph /path/to/v2-execution-graph.json --next-ready
+```
+
+Each `slices[]` entry must contain `id`, one declaring-plan `authority` path, exact `source_hashes` for every master/owner/companion declaration, explicit `prerequisites`, one lifecycle `status`, and `receipts`. `integrated` requires exact implementation commit, independent approved review, named test receipts, and integration commit. The validator requires complete inventory coverage, known statuses/edges, one authority, fresh hashes, terminal receipts, and an acyclic graph before returning `next_ready`; exit `2` blocks dispatch. Never manufacture missing edges from prose references or treat an unchecked/stale export as authority.
+
+The graph export is operational state and stays outside Git. Do not commit live task statuses, private task text, worktree paths, provider output, or receipts into the skill. The plan set defines intent; the activated graph defines dispatch; immutable receipts define completion.
 
 ## Determine completion
 

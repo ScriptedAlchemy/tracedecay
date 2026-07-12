@@ -107,27 +107,27 @@ class PlanInventoryHeadingTests(unittest.TestCase):
             [
                 "docs/plans/tracedecay-v2/13-research-provenance-and-context-anchors.md:466: "
                 "Rebuild semantic/live PR context",
-                "docs/plans/tracedecay-v2/19-system-defragmentation-convergence-and-extensibility.md:846: "
+                "docs/plans/tracedecay-v2/19-system-defragmentation-convergence-and-extensibility.md:847: "
                 "C0 — Phase 0 architecture inventory and ownership lock (`PR 1`, `PR 3`)",
-                "docs/plans/tracedecay-v2/19-system-defragmentation-convergence-and-extensibility.md:856: "
+                "docs/plans/tracedecay-v2/19-system-defragmentation-convergence-and-extensibility.md:857: "
                 "C1 — Pure canonical contracts (`PR 4`, `PR 4A`)",
-                "docs/plans/tracedecay-v2/19-system-defragmentation-convergence-and-extensibility.md:863: "
+                "docs/plans/tracedecay-v2/19-system-defragmentation-convergence-and-extensibility.md:864: "
                 "C2 — One evidence and storage path (`PR 5–10`)",
-                "docs/plans/tracedecay-v2/19-system-defragmentation-convergence-and-extensibility.md:870: "
+                "docs/plans/tracedecay-v2/19-system-defragmentation-convergence-and-extensibility.md:871: "
                 "C3 — One scope/query/search/graph path (`PR 8A`, `PR 11–16`)",
-                "docs/plans/tracedecay-v2/19-system-defragmentation-convergence-and-extensibility.md:877: "
+                "docs/plans/tracedecay-v2/19-system-defragmentation-convergence-and-extensibility.md:878: "
                 "C4 — Reconciled domain projections (`PR 17–22`)",
-                "docs/plans/tracedecay-v2/19-system-defragmentation-convergence-and-extensibility.md:883: "
+                "docs/plans/tracedecay-v2/19-system-defragmentation-convergence-and-extensibility.md:884: "
                 "C5 — One capability and policy runtime (`PR 22A`, `PR 23 series`)",
-                "docs/plans/tracedecay-v2/19-system-defragmentation-convergence-and-extensibility.md:891: "
+                "docs/plans/tracedecay-v2/19-system-defragmentation-convergence-and-extensibility.md:892: "
                 "C6 — One application layer and official interface (`PR 24 series`)",
-                "docs/plans/tracedecay-v2/19-system-defragmentation-convergence-and-extensibility.md:899: "
+                "docs/plans/tracedecay-v2/19-system-defragmentation-convergence-and-extensibility.md:900: "
                 "C7 — One product (`PR 25–32`)",
-                "docs/plans/tracedecay-v2/19-system-defragmentation-convergence-and-extensibility.md:906: "
+                "docs/plans/tracedecay-v2/19-system-defragmentation-convergence-and-extensibility.md:907: "
                 "C8 — Backfill, reconcile, cut over (`PR 33–36`)",
-                "docs/plans/tracedecay-v2/19-system-defragmentation-convergence-and-extensibility.md:914: "
+                "docs/plans/tracedecay-v2/19-system-defragmentation-convergence-and-extensibility.md:915: "
                 "C9 — Delete V1 and close entropy budget (`PR 37`)",
-                "docs/plans/tracedecay-v2/24-canonical-task-plan-graph-and-multi-agent-executor.md:1909: "
+                "docs/plans/tracedecay-v2/24-canonical-task-plan-graph-and-multi-agent-executor.md:1984: "
                 "9.8 Workspace, branch, commit, and PR workflows",
             ],
         )
