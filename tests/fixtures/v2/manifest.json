@@ -1,0 +1,253 @@
+{
+  "benchmark": {
+    "generated_records": 340,
+    "generator": "tests/v2_corpus_suite/generate_10x.py",
+    "output": "synthetic-10x.jsonl",
+    "scale_factor": 10,
+    "seed": 20260712
+  },
+  "content_policy": "synthetic-or-minimally-redacted",
+  "files": [
+    {
+      "coverage": [
+        "message"
+      ],
+      "path": "providers/antigravity.json",
+      "provider_family": "antigravity",
+      "records": 2,
+      "sha256": "f488b2b7da6234ed6aff1a423fcae48e3bb7a21f57bafe27d2d4e9978ebc6e26",
+      "source_record_families": [
+        "assistant_event",
+        "message"
+      ]
+    },
+    {
+      "coverage": [
+        "subagent",
+        "tool",
+        "reasoning-summary"
+      ],
+      "path": "providers/claude.json",
+      "provider_family": "claude",
+      "records": 2,
+      "sha256": "302241cb14d5f5f9b1635330f9875fe92b5c6d52ad054177780172e9eacc2286",
+      "source_record_families": [
+        "assistant_event",
+        "message"
+      ]
+    },
+    {
+      "coverage": [
+        "message"
+      ],
+      "path": "providers/cline.json",
+      "provider_family": "cline",
+      "records": 2,
+      "sha256": "a36ee46094574a98f94c83063ab763a6a67e2a395e0ff634e18e84bcf4ea2156",
+      "source_record_families": [
+        "assistant_event",
+        "message"
+      ]
+    },
+    {
+      "coverage": [
+        "goal",
+        "git"
+      ],
+      "path": "providers/codex.json",
+      "provider_family": "codex",
+      "records": 2,
+      "sha256": "99caa2e53b0391fcf370c7e3e38e189dd58ee218762b669c41647683a1085c5e",
+      "source_record_families": [
+        "assistant_event",
+        "message"
+      ]
+    },
+    {
+      "coverage": [
+        "message"
+      ],
+      "path": "providers/copilot.json",
+      "provider_family": "copilot",
+      "records": 2,
+      "sha256": "89d881a72410c0a1a5f6ae02e1203f70dca3fc066050413e4ab03987c1546071",
+      "source_record_families": [
+        "assistant_event",
+        "message"
+      ]
+    },
+    {
+      "coverage": [
+        "rewrite",
+        "truncation"
+      ],
+      "path": "providers/cursor.json",
+      "provider_family": "cursor",
+      "records": 2,
+      "sha256": "03b768652961d23730c2c400fc15673a997af0a3d5832ea7f82391edd9245f49",
+      "source_record_families": [
+        "assistant_event",
+        "message"
+      ]
+    },
+    {
+      "coverage": [
+        "malformed",
+        "partial"
+      ],
+      "path": "providers/gemini.json",
+      "provider_family": "gemini",
+      "records": 4,
+      "sha256": "e92ac848d9de25a44e30fa90dfe468a060e53857759d1e2b2c769c98f95d1e70",
+      "source_record_families": [
+        "assistant_event",
+        "malformed_input",
+        "message",
+        "partial_input"
+      ]
+    },
+    {
+      "coverage": [
+        "unicode",
+        "missing-timestamp",
+        "secret-placeholder"
+      ],
+      "path": "providers/hermes.json",
+      "provider_family": "hermes",
+      "records": 4,
+      "sha256": "f59a6f4a3e8bd6357aad34f95ac55fa5b73eace31e504c19f5cfa7e5a2a8f924",
+      "source_record_families": [
+        "assistant_event",
+        "message",
+        "tool_result"
+      ]
+    },
+    {
+      "coverage": [
+        "message"
+      ],
+      "path": "providers/kilo.json",
+      "provider_family": "kilo",
+      "records": 2,
+      "sha256": "75b7923b287eeaef356aa62d963e2de16edab261e4e4819d279c6786e23cc464",
+      "source_record_families": [
+        "assistant_event",
+        "message"
+      ]
+    },
+    {
+      "coverage": [
+        "message"
+      ],
+      "path": "providers/kimi.json",
+      "provider_family": "kimi",
+      "records": 2,
+      "sha256": "f337ce0e5d33666dd4bdfb9f406ea1e7b08c483c583f09f3c76dd23efd75e7d5",
+      "source_record_families": [
+        "assistant_event",
+        "message"
+      ]
+    },
+    {
+      "coverage": [
+        "message"
+      ],
+      "path": "providers/kiro.json",
+      "provider_family": "kiro",
+      "records": 2,
+      "sha256": "3061207b22d586d6860d8aea1ad0748b4260ab1ee6cb7bb1d10fa929f5d3797d",
+      "source_record_families": [
+        "assistant_event",
+        "message"
+      ]
+    },
+    {
+      "coverage": [
+        "message"
+      ],
+      "path": "providers/opencode.json",
+      "provider_family": "opencode",
+      "records": 2,
+      "sha256": "af9d868db9a6ca109c77bc3066e9606f2a261c70a3b482dfd03fdb4377854e5b",
+      "source_record_families": [
+        "assistant_event",
+        "message"
+      ]
+    },
+    {
+      "coverage": [
+        "message"
+      ],
+      "path": "providers/roo-code.json",
+      "provider_family": "roo-code",
+      "records": 2,
+      "sha256": "181d4b280af735be3d940115c5ca6d86e8abb81e93448703e6ba0b5dfa4117f8",
+      "source_record_families": [
+        "assistant_event",
+        "message"
+      ]
+    },
+    {
+      "coverage": [
+        "message"
+      ],
+      "path": "providers/vibe.json",
+      "provider_family": "vibe",
+      "records": 2,
+      "sha256": "2f49164736b9fa61f3f5cb6cffce8561373488aa8fa9d6d7013b13d219bb968e",
+      "source_record_families": [
+        "assistant_event",
+        "message"
+      ]
+    },
+    {
+      "coverage": [
+        "message"
+      ],
+      "path": "providers/zed.json",
+      "provider_family": "zed",
+      "records": 2,
+      "sha256": "d0744d318d4a278d01dc93c8be0ebecd587db4aff16c8643cfa232549dbfa73f",
+      "source_record_families": [
+        "assistant_event",
+        "message"
+      ]
+    }
+  ],
+  "normalization_contract": {
+    "json_key_order": "lexicographic",
+    "line_ending": "LF",
+    "terminal_newline": true,
+    "unicode": "preserved"
+  },
+  "provider_families": [
+    "antigravity",
+    "claude",
+    "cline",
+    "codex",
+    "copilot",
+    "cursor",
+    "gemini",
+    "hermes",
+    "kilo",
+    "kimi",
+    "kiro",
+    "opencode",
+    "roo-code",
+    "vibe",
+    "zed"
+  ],
+  "reference_machine": {
+    "architecture": "x86_64",
+    "label": "tracedecay-v2-reference-linux-x86_64",
+    "logical_cpus": 64,
+    "memory_gib": 144.8,
+    "os": "Ubuntu 24.04",
+    "rust_version": "rustc 1.95.0 (59807616e 2026-04-14)"
+  },
+  "schema_version": 1,
+  "secret_scan": {
+    "policy": "reject known credential and private-key shapes; placeholders are permitted",
+    "scope": "tests/fixtures/v2"
+  }
+}
