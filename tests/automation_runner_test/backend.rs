@@ -257,6 +257,27 @@ fn failure_disposition_heals_stale_recorded_retryability() {
 }
 
 #[test]
+fn oversized_backend_input_is_retryable_after_request_bounding_changes() {
+    let error = "codex app-server turn failed: input_too_large: Input exceeds the maximum length of 1048576 characters";
+    let disposition = agent_task_failure_disposition(
+        Some(AgentTaskFailureClass::Permanent),
+        Some(false),
+        Some(error),
+    );
+
+    assert_eq!(
+        classify_agent_task_error_message(error),
+        AgentTaskFailureClass::Permanent,
+        "the same oversized request must not be retried immediately"
+    );
+    assert_eq!(
+        disposition.classification,
+        Some(AgentTaskFailureClass::Retryable)
+    );
+    assert_eq!(disposition.retryable, Some(true));
+}
+
+#[test]
 fn fake_codex_app_server_returns_summary_and_logs_protocol() {
     let fake = FakeCodexAppServer::new();
     let config = CodexAppServerSummaryConfig {

@@ -7,6 +7,7 @@
 //! `analytics_events` so one durable table answers adoption questions, using
 //! per-file byte cursors in `parse_offsets` to stay idempotent across runs.
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
@@ -248,6 +249,48 @@ async fn open_global_db() -> crate::errors::Result<GlobalDb> {
     })
 }
 
+async fn diagnostics_message_count(
+    global: &GlobalDb,
+    project_root: Option<&Path>,
+    all_projects: bool,
+) -> i64 {
+    if all_projects {
+        let mut session_db_paths = BTreeSet::new();
+        if let Some(profile_root) = global.db_path().parent() {
+            session_db_paths.insert(crate::sessions::user_sessions_db_path(profile_root));
+        }
+        for project_root in crate::sessions::registered_project_roots_from(global)
+            .await
+            .unwrap_or_default()
+        {
+            if let Some(db_path) =
+                crate::sessions::cursor::resolved_project_session_db_path(&project_root).await
+            {
+                session_db_paths.insert(db_path);
+            }
+        }
+        let mut total = 0;
+        for db_path in session_db_paths {
+            if let Some(sessions) = GlobalDb::open_read_only_at(&db_path).await {
+                total += sessions.session_message_count().await.unwrap_or(0);
+            }
+        }
+        return total;
+    }
+    let Some(project_root) = project_root else {
+        return 0;
+    };
+    let Some(db_path) =
+        crate::sessions::cursor::resolved_project_session_db_path(project_root).await
+    else {
+        return 0;
+    };
+    let Some(sessions) = GlobalDb::open_read_only_at(&db_path).await else {
+        return 0;
+    };
+    sessions.session_message_count().await.unwrap_or(0)
+}
+
 /// `tracedecay analytics sync`: import hook JSONL rows into the durable
 /// `analytics_events` table and print what happened.
 pub async fn run_analytics_sync() -> crate::errors::Result<()> {
@@ -316,13 +359,8 @@ pub async fn run_analytics_diagnostics(
         hook_filter_root,
     );
 
-    let message_count = match project_filter.as_deref() {
-        Some(project_key) => gdb
-            .session_message_count_for_project(project_key)
-            .await
-            .unwrap_or(0),
-        None => gdb.session_message_count().await.unwrap_or(0),
-    };
+    let message_count =
+        diagnostics_message_count(&gdb, project_root.as_deref(), all_projects).await;
 
     let durable = if event_rows.is_empty() {
         None
@@ -362,7 +400,46 @@ pub async fn run_analytics_diagnostics(
 mod tests {
     use std::path::Path;
 
-    use super::hook_row_to_analytics_event;
+    use super::{diagnostics_message_count, hook_row_to_analytics_event};
+    use crate::global_db::GlobalDb;
+    use crate::sessions::{SessionMessageRecord, SessionRecord};
+
+    async fn seed_session_message(db: &GlobalDb, project: &Path, id: &str) {
+        db.upsert_session(&SessionRecord {
+            provider: "codex".to_string(),
+            session_id: id.to_string(),
+            project_key: project.display().to_string(),
+            project_path: project.display().to_string(),
+            title: None,
+            started_at: Some(1),
+            ended_at: None,
+            transcript_path: None,
+            metadata_json: None,
+            parent_session_id: None,
+            is_subagent: false,
+            agent_id: None,
+            parent_tool_use_id: None,
+        })
+        .await;
+        assert!(
+            db.upsert_session_message(&SessionMessageRecord {
+                provider: "codex".to_string(),
+                message_id: format!("{id}-message"),
+                session_id: id.to_string(),
+                role: "user".to_string(),
+                timestamp: Some(1),
+                ordinal: 1,
+                text: "diagnostics evidence".to_string(),
+                kind: None,
+                model: None,
+                tool_names: None,
+                source_path: None,
+                source_offset: None,
+                metadata_json: None,
+            })
+            .await
+        );
+    }
 
     #[test]
     fn maps_hook_invoked_row_with_attribution() {
@@ -411,5 +488,47 @@ mod tests {
     fn rows_without_event_field_are_skipped() {
         assert!(hook_row_to_analytics_event("{}", None).is_none());
         assert!(hook_row_to_analytics_event("not json", None).is_none());
+    }
+
+    #[tokio::test]
+    async fn diagnostics_counts_messages_from_the_project_session_shard() {
+        let _profile = crate::config::PinnedUserDataDir::new();
+        let project = tempfile::tempdir().expect("project tempdir");
+        let layout = crate::storage::resolve_layout_for_current_profile(project.path())
+            .expect("project layout");
+        std::fs::create_dir_all(&layout.data_root).expect("project data root");
+
+        let global = GlobalDb::open().await.expect("global db");
+        let sessions = GlobalDb::open_at(&layout.sessions_db_path)
+            .await
+            .expect("project session db");
+        seed_session_message(&sessions, project.path(), "project-session").await;
+
+        assert_eq!(global.session_message_count().await.unwrap(), 0);
+        assert_eq!(
+            diagnostics_message_count(&global, Some(project.path()), false).await,
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn all_project_diagnostics_count_registered_session_shards() {
+        let _profile = crate::config::PinnedUserDataDir::new();
+        let project = tempfile::tempdir().expect("project tempdir");
+        let layout = crate::storage::resolve_layout_for_current_profile(project.path())
+            .expect("project layout");
+        std::fs::create_dir_all(&layout.data_root).expect("project data root");
+
+        let global = GlobalDb::open().await.expect("global db");
+        global
+            .upsert_code_project("project-shard", project.path(), None, None, Some("main"))
+            .await;
+        let sessions = GlobalDb::open_at(&layout.sessions_db_path)
+            .await
+            .expect("project session db");
+        seed_session_message(&sessions, project.path(), "registered-session").await;
+
+        assert_eq!(global.session_message_count().await.unwrap(), 0);
+        assert_eq!(diagnostics_message_count(&global, None, true).await, 1);
     }
 }

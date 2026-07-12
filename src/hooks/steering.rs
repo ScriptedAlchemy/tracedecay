@@ -133,11 +133,10 @@ pub fn build_codex_session_context_for_workspace(
                  tracedecay_diagnose; both map errors to symbols and callers.\n",
             );
             s.push_str(
-                "Specialists: tracedecay-code-explorer, tracedecay-code-health-auditor, \
-                 tracedecay-session-historian, tracedecay-runtime-storage-doctor, \
-                 tracedecay-cross-host-integration-auditor, tracedecay-change-risk-reviewer, \
-                 tracedecay-usage-intelligence-analyst, tracedecay-automation-auditor. \
-                 Delegate matching read-only research; the parent owns changes and releases.\n",
+                "Agents: tracedecay-code-explorer,tracedecay-code-health-auditor,\
+                 tracedecay-session-historian,tracedecay-runtime-storage-doctor,\
+                 tracedecay-cross-host-integration-auditor,tracedecay-change-risk-reviewer,\
+                 tracedecay-usage-intelligence-analyst,tracedecay-automation-auditor\n",
             );
             s.push_str(crate::agents::CLI_FALLBACK_PROMPT_RULES);
             s.push('\n');

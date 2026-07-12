@@ -1188,6 +1188,71 @@ async fn active_structured_content_survives_preflight_and_noop_compress_replay()
 }
 
 #[tokio::test]
+async fn idless_compression_replay_does_not_reingest_existing_raw_messages() {
+    let tmp = TempDir::new().unwrap();
+    let db = open_lcm_db(&tmp).await;
+    insert_session(&db, "cursor", "session-idless-replay").await;
+
+    let initial = db
+        .lcm_preflight(preflight_request(
+            "cursor",
+            "session-idless-replay",
+            vec![
+                json!({"role": "user", "content": "old user context"}),
+                json!({"role": "assistant", "content": "old assistant context"}),
+                json!({"role": "user", "content": "fresh user context"}),
+                json!({"role": "assistant", "content": "fresh assistant context"}),
+            ],
+            Some(100),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        db.lcm_status("cursor", Some("session-idless-replay"))
+            .await
+            .unwrap()
+            .raw_message_count,
+        4
+    );
+
+    let mut request = compress_request(
+        "cursor",
+        "session-idless-replay",
+        LcmSummarizerMode::Fake {
+            summary_text: "condensed old context".into(),
+        },
+    );
+    request.messages = initial.replay_messages;
+    let compressed = db.lcm_compress(request).await.unwrap();
+    assert_eq!(compressed.summary_nodes_created, 1);
+    assert!(compressed.replay_messages[0]["lcm_summary_node_id"].is_string());
+    assert!(
+        compressed
+            .replay_messages
+            .iter()
+            .skip(1)
+            .all(|message| message["store_id"].is_number())
+    );
+
+    db.lcm_preflight(preflight_request(
+        "cursor",
+        "session-idless-replay",
+        compressed.replay_messages,
+        Some(100),
+    ))
+    .await
+    .unwrap();
+    assert_eq!(
+        db.lcm_status("cursor", Some("session-idless-replay"))
+            .await
+            .unwrap()
+            .raw_message_count,
+        4,
+        "replaying TraceDecay's own summary/tail must not duplicate raw history"
+    );
+}
+
+#[tokio::test]
 async fn active_replay_preserves_top_level_fields_that_collide_with_storage_metadata() {
     let tmp = TempDir::new().unwrap();
     let db = open_lcm_db(&tmp).await;

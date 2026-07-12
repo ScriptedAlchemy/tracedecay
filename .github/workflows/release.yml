@@ -7,7 +7,7 @@ on:
     inputs:
       release_tag:
         description: "Existing release tag to rebuild and publish, for example v0.0.17"
-        required: false
+        required: true
         type: string
 
 # Skip beta/prerelease tags — handled by release-beta.yml
@@ -21,8 +21,8 @@ env:
   CARGO_TERM_COLOR: always
 
 concurrency:
-  group: release-${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref }}
-  cancel-in-progress: true
+  group: release-${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.event.release.tag_name }}
+  cancel-in-progress: false
 
 jobs:
   build:
@@ -114,11 +114,8 @@ jobs:
         id: version
         shell: bash
         run: |
-          if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ] && [ -n "${{ inputs.release_tag }}" ]; then
+          if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ]; then
             TAG="${{ inputs.release_tag }}"
-            VERSION="${TAG#v}"
-          elif [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ]; then
-            TAG="dry-run-${GITHUB_SHA::7}"
             VERSION="${TAG#v}"
           else
             TAG="${GITHUB_REF_NAME}"

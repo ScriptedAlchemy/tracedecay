@@ -62,13 +62,24 @@ async fn try_registered_project_roots_at(profile_root: &Path) -> Option<Vec<Path
     registered_project_roots_from(&global).await
 }
 
-async fn registered_project_roots_from(global: &GlobalDb) -> Option<Vec<PathBuf>> {
+pub(crate) async fn registered_project_roots_from(global: &GlobalDb) -> Option<Vec<PathBuf>> {
     let mut roots = global
         .list_project_paths()
         .await
         .into_iter()
         .map(PathBuf::from)
         .collect::<Vec<_>>();
+    for project in global.list_code_projects(usize::MAX).await {
+        roots.push(PathBuf::from(project.canonical_root));
+        roots.push(PathBuf::from(project.display_root));
+    }
+    roots.extend(
+        global
+            .list_project_alias_paths()
+            .await
+            .into_iter()
+            .map(PathBuf::from),
+    );
     roots.sort();
     roots.dedup();
     Some(roots)
@@ -685,6 +696,31 @@ impl SessionMessageType {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod git_scan_tests {
     use super::*;
+
+    #[tokio::test]
+    async fn registered_project_roots_include_modern_registry_aliases() {
+        let temp = tempfile::tempdir().unwrap();
+        let canonical = temp.path().join("repo");
+        let worktree = temp.path().join("repo-worktree");
+        std::fs::create_dir_all(&canonical).unwrap();
+        std::fs::create_dir_all(&worktree).unwrap();
+        let canonical = std::fs::canonicalize(canonical).unwrap();
+        let worktree = std::fs::canonicalize(worktree).unwrap();
+        let db = GlobalDb::open_at(&temp.path().join("global.db"))
+            .await
+            .unwrap();
+        db.upsert_code_project("project-1", &canonical, None, None, None)
+            .await
+            .unwrap();
+        db.upsert_project_alias(&worktree, "project-1")
+            .await
+            .unwrap();
+
+        let roots = registered_project_roots_from(&db).await.unwrap();
+
+        assert!(roots.contains(&canonical));
+        assert!(roots.contains(&worktree));
+    }
 
     #[test]
     fn provider_scoped_user_catch_up_excludes_unrelated_providers() {

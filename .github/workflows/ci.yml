@@ -74,6 +74,9 @@ jobs:
       - name: Test release workflow contract
         run: bash tests/release_workflow_contract_test.sh
 
+      - name: Test local dogfood command contract
+        run: bash tests/dogfood_command_test.sh
+
       - name: Check release version drift
         run: scripts/check-release-drift.sh
 
@@ -306,7 +309,7 @@ jobs:
 
   windows-test:
     name: Test Windows
-    if: ${{ always() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON('["master","feature/holographic-memory"]'), github.event.pull_request.base.ref)) }}
+    if: ${{ !cancelled() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON('["master","feature/holographic-memory"]'), github.event.pull_request.base.ref)) }}
     needs: windows-test-shard
     runs-on: ubuntu-latest
     steps:

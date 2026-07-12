@@ -55,6 +55,7 @@ const HERMES_LOCATION_KEYS: TranscriptLocationMetadataKeys = TranscriptLocationM
 /// resumes where it stopped.
 const CHUNK_ROWS: usize = 2000;
 const CORRELATION_CURSOR_VERSION: &str = "turn-project-v2";
+const USER_CURSOR_VERSION: &str = "user-turn-v2";
 
 /// Ingests Hermes sessions proven to belong to `project_root` into `db`.
 ///
@@ -138,8 +139,9 @@ pub async fn ingest_homes(
     stats
 }
 
-/// Ingests historical Hermes turns that have no registered-project
-/// attribution into the profile-level user session store.
+/// Ingests the canonical historical Hermes conversation into the profile-level
+/// user session store. Project ingestion separately projects each turn into
+/// every registered project it touched using the same stable message IDs.
 pub async fn ingest_user_sessions(
     db: &GlobalDb,
     registered_roots: &[PathBuf],
@@ -637,7 +639,7 @@ async fn try_ingest_user_state_db(
     let state_db = &source.state_db;
     let conn = open_read_only_strict(state_db).await?;
     let path_str = state_db.to_string_lossy().to_string();
-    let cursor_path = format!("{path_str}#user-turn-v1");
+    let cursor_path = format!("{path_str}#{USER_CURSOR_VERSION}");
     let mut cursor = {
         let prev = db.get_parse_offset(&cursor_path).await.unwrap_or_default();
         StoredCursor {
@@ -855,11 +857,11 @@ async fn build_user_batches(
     rows: &[HermesRow],
     state_db_path: &str,
     source: &HermesProfileSource,
-    registered_roots: &[PathBuf],
+    _registered_roots: &[PathBuf],
 ) -> Vec<TranscriptBatch> {
     let mut order = Vec::new();
     let mut by_session: HashMap<String, TranscriptBatch> = HashMap::new();
-    let locations = user_turn_locations(rows, source, registered_roots);
+    let locations = user_turn_locations(rows, source);
     for row in rows {
         if row.role == "session_meta" || row.role.is_empty() || row.active == 0 {
             continue;
@@ -892,26 +894,13 @@ async fn build_user_batches(
 fn user_turn_locations(
     rows: &[HermesRow],
     source: &HermesProfileSource,
-    registered_roots: &[PathBuf],
 ) -> HashMap<i64, HermesSessionLocation> {
     let mut by_session: HashMap<&str, Vec<&HermesRow>> = HashMap::new();
     for row in rows {
         by_session.entry(&row.session_id).or_default().push(row);
     }
-    let belongs_to_registered = |path: &Path| {
-        registered_roots
-            .iter()
-            .any(|root| path_belongs_to_project(path, root))
-    };
     let mut locations = HashMap::new();
     for session_rows in by_session.into_values() {
-        if source
-            .legacy_project_pin
-            .as_deref()
-            .is_some_and(|pin| belongs_to_registered(pin))
-        {
-            continue;
-        }
         let recorded_cwd = session_rows.iter().find_map(|row| {
             let cwd = PathBuf::from(row.session_cwd.as_deref()?.trim());
             cwd.is_absolute().then_some(cwd)
@@ -919,29 +908,17 @@ fn user_turn_locations(
         let fallback = source
             .legacy_project_pin
             .clone()
-            .or_else(|| {
-                recorded_cwd
-                    .as_ref()
-                    .filter(|cwd| !belongs_to_registered(cwd))
-                    .cloned()
-            })
-            // Only genuinely locationless sessions fall back to the profile
-            // directory. A registered cwd must never be relabeled as user.
-            .or_else(|| {
-                recorded_cwd
-                    .is_none()
-                    .then(|| source.state_db.parent().map(Path::to_path_buf))
-                    .flatten()
-            });
+            .or(recorded_cwd)
+            .or_else(|| source.state_db.parent().map(Path::to_path_buf));
         let mut turn = Vec::new();
         for row in session_rows {
             if row.role == "user" && !turn.is_empty() {
-                assign_user_turn(&turn, fallback.as_deref(), registered_roots, &mut locations);
+                assign_user_turn(&turn, fallback.as_deref(), &mut locations);
                 turn.clear();
             }
             turn.push(row);
         }
-        assign_user_turn(&turn, fallback.as_deref(), registered_roots, &mut locations);
+        assign_user_turn(&turn, fallback.as_deref(), &mut locations);
     }
     locations
 }
@@ -949,20 +926,12 @@ fn user_turn_locations(
 fn assign_user_turn(
     rows: &[&HermesRow],
     fallback: Option<&Path>,
-    registered_roots: &[PathBuf],
     locations: &mut HashMap<i64, HermesSessionLocation>,
 ) {
     let explicit = rows
         .iter()
         .flat_map(|row| structured_tool_project_paths(row))
         .collect::<Vec<_>>();
-    if explicit.iter().any(|path| {
-        registered_roots
-            .iter()
-            .any(|root| path_belongs_to_project(path, root))
-    }) {
-        return;
-    }
     let cwd = explicit
         .last()
         .cloned()

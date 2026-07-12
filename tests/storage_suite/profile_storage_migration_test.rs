@@ -817,6 +817,7 @@ fn strict_scan_requires_matching_repository_identity_or_enrollment() {
     let profile_root = dir.path().join("profile");
     let project_root = dir.path().join("repo");
     write_profile_store_manifest(&profile_root, &project_root);
+    run_git(&project_root, &["init"]);
 
     let unowned = scan_profile_store_manifests(&profile_root, 1);
     assert_eq!(

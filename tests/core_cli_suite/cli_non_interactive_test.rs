@@ -1456,7 +1456,9 @@ fn list_all_reports_orphan_manifest_reconstructable_store() {
         .prefix("list-orphan-project-")
         .tempdir_in(Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap())
         .unwrap();
+    git(project.path(), &["init"]);
     write_profile_sharded_fixture(home.path(), project.path());
+    write_repository_identity_marker(project.path(), "proj_cli").unwrap();
     write_enrollment_marker(
         project.path(),
         &EnrollmentMarker {
@@ -1466,6 +1468,17 @@ fn list_all_reports_orphan_manifest_reconstructable_store() {
     )
     .unwrap();
     std::fs::create_dir_all(profile_root(home.path())).unwrap();
+
+    let report = tracedecay::migrate::registry::scan_profile_store_manifests(
+        &profile_root(home.path()),
+        tracedecay::tracedecay::current_timestamp(),
+    );
+    assert_eq!(report.plans.len(), 1, "{report:#?}");
+    assert_eq!(
+        report.plans[0].status,
+        tracedecay::migrate::registry::RegistryReconstructionStatus::Eligible,
+        "{report:#?}"
+    );
 
     let mut command = tracedecay_command(home.path(), project.path());
     command.args(["list", "--all"]);

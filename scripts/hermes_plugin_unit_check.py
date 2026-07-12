@@ -161,6 +161,7 @@ def run_checks(work: Path):
     sys.path.insert(0, str(plugin_dir.parent))
     plugin = __import__("tracedecay")
     assert Path(plugin.__file__).resolve() == (plugin_dir / "__init__.py").resolve()
+    assert plugin.STANDARD_HERMES_LCM_PROVIDER == "hermes"
     ok("plugin package imports standalone (no hermes on sys.path)")
 
     header = (plugin_dir / "__init__.py").read_text(encoding="utf-8").splitlines()[0]
@@ -215,10 +216,10 @@ def run_checks(work: Path):
     (hermes_descendant / "src").mkdir()
     assert plugin.tools.code_project_root(cwd=str(host_home)) is None
     assert plugin._code_project_root(cwd=str(host_home), hermes_home=str(host_home)) is None
-    assert plugin.tools.code_project_root(cwd=str(hermes_descendant)) == str(hermes_descendant)
+    assert plugin.tools.code_project_root(cwd=str(hermes_descendant)) is None
     assert plugin._code_project_root(
         cwd=str(hermes_descendant), hermes_home=str(host_home)
-    ) == str(hermes_descendant)
+    ) is None
     missing_home_child = host_home / "missing-project"
     assert plugin._project_scope_resolution(
         str(missing_home_child), str(host_home)
@@ -245,7 +246,7 @@ def run_checks(work: Path):
         plugin.tools.call_tracedecay_tool(
             "tracedecay_project_search", {"query": "scope"}, cwd=str(hermes_descendant)
         )
-        assert tool_run_kwargs[-1]["cwd"] == str(hermes_descendant)
+        assert tool_run_kwargs[-1]["cwd"] == os.path.abspath(os.sep)
         registry_raw = plugin.tools.call_tracedecay_tool(
             "tracedecay_project_list", {"limit": 3}, cwd=str(host_home)
         )
@@ -258,17 +259,14 @@ def run_checks(work: Path):
         active_context_raw = plugin.tools.call_tracedecay_tool(
             "tracedecay_project_context", {}, cwd=str(hermes_descendant)
         )
-        assert "--project" in tool_argv[-1], (tool_argv[-1], active_context_raw)
-        assert tool_argv[-1][tool_argv[-1].index("--project") + 1] == str(
-            hermes_descendant
-        )
+        assert "--project" not in tool_argv[-1], (tool_argv[-1], active_context_raw)
+        assert tool_run_kwargs[-1]["cwd"] == os.path.abspath(os.sep)
         assert "tracedecay_project_context" in tool_argv[-1], tool_argv[-1]
         plugin.tools.call_tracedecay_tool(
             "tracedecay_status", {"small": True}, cwd=str(hermes_descendant)
         )
-        assert tool_argv[-1][tool_argv[-1].index("--project") + 1] == str(
-            hermes_descendant
-        )
+        assert "--project" not in tool_argv[-1], tool_argv[-1]
+        assert tool_run_kwargs[-1]["cwd"] == os.path.abspath(os.sep)
         for name, args in (
             ("tracedecay_fact_store", {"action": "list", "memory_scope": "user"}),
             ("tracedecay_lcm_status", {"storage_scope": "user"}),
@@ -311,7 +309,7 @@ def run_checks(work: Path):
         }
         assert plugin._resolved_project_scope(
             str(hermes_descendant / "src"), str(host_home)
-        ) == str(hermes_descendant)
+        ) is None
     finally:
         plugin.call_tracedecay_json = real_json
     home_engine = plugin.TraceDecayContextEngine(hermes_home=str(host_home))
@@ -322,7 +320,7 @@ def run_checks(work: Path):
         session_id="home-scope", hermes_home=str(host_home), cwd=str(host_home)
     )
     assert home_provider.project_root is None
-    ok("Hermes home is user scope while registered descendant repos remain projects")
+    ok("Hermes home and all descendants remain user scope")
 
     # ── 3. Registration split + provider dedup ──────────────────────────
     # The installer wrote memory.provider: tracedecay into the temp profile
@@ -350,7 +348,7 @@ def run_checks(work: Path):
     custom_home.mkdir()
     custom_descendant = custom_home / "repos" / "unregistered"
     custom_descendant.mkdir(parents=True)
-    custom_registered = custom_home / "repos" / "registered"
+    custom_registered = work / "custom-registered-project"
     custom_registered.mkdir()
     custom_ctx = StubCtx()
     custom_ctx.hermes_home = str(custom_home)
@@ -487,9 +485,7 @@ def run_checks(work: Path):
         assert pending_threads == []
         assert receipt_hook(tool_name="terminal", cwd=str(hermes_descendant)) is None
         assert resolver_calls == []
-        assert len(pending_threads) == 1
-        pending_threads.pop(0)()
-        assert resolver_calls == [str(hermes_descendant)]
+        assert pending_threads == []
         assert notifications == []
         assert receipt_hook(
             tool_name="terminal",
@@ -501,10 +497,10 @@ def run_checks(work: Path):
             status="success",
             duration_ms=9,
         ) is None
-        assert resolver_calls == [str(hermes_descendant)]
+        assert resolver_calls == []
         assert len(pending_threads) == 1
         pending_threads.pop(0)()
-        assert resolver_calls == [str(hermes_descendant), str(runtime_project)]
+        assert resolver_calls == [str(runtime_project)]
         assert len(notifications) == 1
         argv, call = notifications[0]
         assert argv[-1] == "hook-hermes-terminal-receipt"
@@ -772,20 +768,39 @@ def run_checks(work: Path):
         assert kwargs["project_root"] == expected_project_root, kwargs
         ok("memory tool calls stay bound to the provider's session project")
 
+        before = len(calls)
         provider.sync_turn("u", "a", session_id="other-session", messages=messages)
-        name, args, kwargs = calls[-1]
+        turn_calls = calls[before:]
+        assert len(turn_calls) == 2, turn_calls
+        user_name, user_args, user_kwargs = turn_calls[0]
+        assert user_name == "tracedecay_lcm_preflight"
+        assert user_args["storage_scope"] == "user", user_args
+        assert "project_root" not in user_kwargs, user_kwargs
+        name, args, kwargs = turn_calls[1]
         assert name == "tracedecay_lcm_preflight", calls
         assert args["session_id"] == "other-session"
         assert [message["content"] for message in args["messages"]] == ["u", "a"]
         assert all(message.get("id") for message in args["messages"])
+        assert [message["id"] for message in user_args["messages"]] == [
+            message["id"] for message in args["messages"]
+        ]
+        assert all(
+            message["associated_project_roots"] == [expected_project_root]
+            for message in args["messages"]
+        )
         assert args["transcript_projection"] is True
         assert "project_root" not in args, args
         assert kwargs["project_root"] == expected_project_root, kwargs
 
-        ok("sync_turn projects only the completed turn into project LCM")
+        ok("sync_turn stores a canonical user turn plus its project projection")
 
+        before = len(calls)
         provider.sync_turn("only user", "and assistant", session_id="s2", messages=None)
-        name, args, kwargs = calls[-1]
+        turn_calls = calls[before:]
+        assert len(turn_calls) == 2, turn_calls
+        assert turn_calls[0][1]["storage_scope"] == "user", turn_calls
+        assert "project_root" not in turn_calls[0][2], turn_calls
+        name, args, kwargs = turn_calls[1]
         assert name == "tracedecay_lcm_preflight", calls
         assert args["messages"][0]["content"] == "only user"
         assert args["messages"][1]["content"] == "and assistant"
@@ -823,6 +838,7 @@ def run_checks(work: Path):
 
         real_resolver = plugin._resolved_project_scope
         plugin._resolved_project_scope = lambda path, *_args: expected_project_root
+        before = len(calls)
         provider.sync_turn(
             "project task",
             "done",
@@ -840,9 +856,16 @@ def run_checks(work: Path):
                 },
             ],
         )
-        name, args, kwargs = calls[-1]
+        turn_calls = calls[before:]
+        assert len(turn_calls) == 2, turn_calls
+        assert turn_calls[0][1]["storage_scope"] == "user", turn_calls
+        assert "project_root" not in turn_calls[0][2], turn_calls
+        name, args, kwargs = turn_calls[1]
         assert name == "tracedecay_lcm_preflight"
         assert kwargs["project_root"] == expected_project_root
+        assert [message["id"] for message in turn_calls[0][1]["messages"]] == [
+            message["id"] for message in args["messages"]
+        ]
         assert args["transcript_projection"] is True
         plugin._resolved_project_scope = real_resolver
         ok("structured tool activity correlates an untethered turn to its project")

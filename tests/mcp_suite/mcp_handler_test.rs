@@ -10598,6 +10598,43 @@ async fn user_scoped_lcm_preflight_ingests_without_a_project() {
 }
 
 #[tokio::test]
+async fn user_scoped_lcm_projection_preserves_associated_project_roots() {
+    let profile = TempDir::new().unwrap();
+    let roots = json!(["/work/alpha", "/work/beta"]);
+    tracedecay::mcp::tools::handle_user_lcm_tool(
+        "tracedecay_lcm_preflight",
+        json!({
+            "storage_scope": "user",
+            "provider": "hermes",
+            "session_id": "multi-project-session",
+            "messages": [{
+                "id": "multi-project-message-1",
+                "role": "user",
+                "content": "Update both repositories",
+                "associated_project_roots": roots
+            }],
+            "transcript_projection": true,
+            "format": "json"
+        }),
+        profile.path(),
+    )
+    .await
+    .unwrap();
+
+    let db =
+        GlobalDb::open_read_only_at(&tracedecay::sessions::user_sessions_db_path(profile.path()))
+            .await
+            .unwrap();
+    let message = db
+        .get_session_message("hermes", "multi-project-message-1")
+        .await
+        .unwrap();
+    let metadata: Value = serde_json::from_str(message.metadata_json.as_deref().unwrap()).unwrap();
+    assert_eq!(metadata["associated_project_roots"], roots);
+    assert_eq!(metadata["storage_scope"], "user");
+}
+
+#[tokio::test]
 async fn lcm_session_handlers_expose_bounded_read_apis_and_placeholders() {
     let dir = test_temp_dir();
     let (cg, _env) = init_test_project(dir.path()).await;

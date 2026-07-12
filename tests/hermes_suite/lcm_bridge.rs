@@ -1233,7 +1233,7 @@ args_index = argv.index("--args")
 args = json.loads(argv[args_index + 1])
 assert args == {
     "format": "json",
-    "provider": "cursor",
+    "provider": "hermes",
     "fresh_tail_count": 64,
     "leaf_chunk_tokens": 20000,
     "dynamic_leaf_chunk_enabled": False,
@@ -1318,7 +1318,7 @@ assert argv[1:6] == ["tool", "--project", "/tmp/project", "tracedecay_lcm_sessio
 args = json.loads(argv[argv.index("--args") + 1])
 assert args == {
     "format": "json",
-    "provider": "cursor",
+    "provider": "hermes",
     "session_id": "session-b",
     "old_session_id": "session-c",
     "boundary_reason": "compression",
@@ -1427,7 +1427,7 @@ else:
 assert args == {
     "format": "json",
     "response_handle_project_root": "/tmp/project",
-    "provider": "cursor",
+    "provider": "hermes",
     "fresh_tail_count": 64,
     "leaf_chunk_tokens": 20000,
     "dynamic_leaf_chunk_enabled": False,
@@ -2117,6 +2117,85 @@ assert [call[0] for call in calls] == [
 }
 
 #[test]
+fn projectless_context_engine_compression_uses_user_session_store() {
+    run_generated_plugin_script(
+        "check_projectless_compression_user_scope.py",
+        r#"
+import json
+
+calls = []
+
+def fake_call_tracedecay_tool(name, args, **kwargs):
+    calls.append((name, dict(args), dict(kwargs)))
+    return json.dumps({"content": [{"type": "text", "text": json.dumps({
+        "status": "ok",
+        "reason": "compressed_backlog",
+        "replay_messages": [{"role": "user", "content": "compressed"}],
+    })}]})
+
+plugin.tools.call_tracedecay_tool = fake_call_tracedecay_tool
+
+engine = plugin.TraceDecayContextEngine()
+engine.initialize(session_id="general-chat")
+compressed = engine.compress(
+    [{"role": "user", "content": "oversized general chat"}],
+    current_tokens=350000,
+)
+
+assert compressed == [{"role": "user", "content": "compressed"}]
+name, args, kwargs = calls.pop()
+assert name == "tracedecay_lcm_compress"
+assert args["storage_scope"] == "user"
+assert "project_root" not in kwargs
+"#,
+        "projectless Hermes compression must use the profile-level user session store",
+    );
+}
+
+#[test]
+fn project_resolution_uses_registry_and_rejects_hermes_descendants() {
+    run_generated_plugin_script(
+        "check_registry_project_resolution.py",
+        r#"
+import json
+import os
+import pathlib
+import tempfile
+
+calls = []
+temp = tempfile.TemporaryDirectory()
+base = pathlib.Path(temp.name)
+canonical = base / "repo"
+alias = base / "repo-feature"
+hermes_home = base / "hermes"
+for path in (canonical, alias, hermes_home / "hermes-agent"):
+    path.mkdir(parents=True)
+
+def fake_call_tracedecay_tool(name, args, **kwargs):
+    calls.append((name, dict(args), dict(kwargs)))
+    assert name == "tracedecay_project_context"
+    assert args == {"project_path": str(alias)}
+    return json.dumps({"content": [{"type": "text", "text": json.dumps({
+        "project": {"project_root": str(canonical)},
+        "aliases": [{"alias_path": str(alias)}],
+    })}]})
+
+plugin.tools.call_tracedecay_tool = fake_call_tracedecay_tool
+
+state, root = plugin._project_scope_resolution(str(alias), str(hermes_home))
+assert state == "registered"
+assert root == str(canonical)
+assert [call[0] for call in calls] == ["tracedecay_project_context"]
+
+for path in (hermes_home, hermes_home / "hermes-agent"):
+    assert plugin._code_project_root(explicit=str(path), hermes_home=str(hermes_home)) is None
+    assert plugin.tools.code_project_root(explicit=str(path), hermes_home=str(hermes_home)) is None
+"#,
+        "Hermes project resolution must use the registry and reject host-owned descendants",
+    );
+}
+
+#[test]
 fn context_engine_rejects_compacted_compression_replay() {
     run_generated_plugin_script(
         "check_compacted_replay_abort.py",
@@ -2180,16 +2259,21 @@ provider.sync_turn("repeat", "same", session_id="session-1", messages=[])
 provider.sync_turn("repeat", "same", session_id="session-1", messages=[])
 
 assert provider.project_root == "/tmp/project"
-assert len(calls) == 4
-for name, args, kwargs in calls:
-    assert name == "tracedecay_lcm_preflight"
-    assert "project_root" not in args
-    assert kwargs["project_root"] == "/tmp/project"
+assert len(calls) == 8
+for index in range(0, len(calls), 2):
+    user_call, project_call = calls[index:index + 2]
+    assert user_call[0] == "tracedecay_lcm_preflight"
+    assert user_call[1]["storage_scope"] == "user"
+    assert user_call[2] == {}
+    assert project_call[0] == "tracedecay_lcm_preflight"
+    assert "storage_scope" not in project_call[1]
+    assert project_call[2]["project_root"] == "/tmp/project"
+    assert user_call[1]["messages"] == project_call[1]["messages"]
 
 first_messages = calls[0][1]["messages"]
-second_messages = calls[1][1]["messages"]
-empty_list_first_messages = calls[2][1]["messages"]
-empty_list_second_messages = calls[3][1]["messages"]
+second_messages = calls[2][1]["messages"]
+empty_list_first_messages = calls[4][1]["messages"]
+empty_list_second_messages = calls[6][1]["messages"]
 assert [message["role"] for message in first_messages] == ["user", "assistant"]
 assert all(message.get("id") for message in first_messages)
 assert all(message.get("id") for message in second_messages)
@@ -2210,6 +2294,69 @@ assert calls[-1][1]["storage_scope"] == "user"
 assert "project_root" not in calls[-1][2]
 "#,
         "sync_turn fallback messages should not collapse repeated identical turns",
+    );
+}
+
+#[test]
+fn memory_provider_projects_one_turn_to_user_and_every_touched_project() {
+    run_generated_plugin_script(
+        "check_sync_turn_multi_project_projection.py",
+        r#"
+calls = []
+completed = []
+ingested = []
+
+def fake_call_tracedecay_tool(name, args, **kwargs):
+    calls.append((name, dict(args), dict(kwargs)))
+    return '{"content":[{"type":"text","text":"{\\"status\\":\\"ok\\"}"}]}'
+
+plugin.tools.call_tracedecay_tool = fake_call_tracedecay_tool
+plugin._project_scope_resolution = lambda path, *_args: (
+    ("registered", str(path)) if str(path).startswith("/repos/") else ("unregistered", None)
+)
+plugin._notify_turn_completed = lambda sid, root, watermark: completed.append((sid, root, watermark))
+plugin._notify_turn_ingested = lambda sid, root, watermark: ingested.append((sid, root, watermark))
+
+messages = [
+    {"role": "user", "content": "compare both repositories"},
+    {
+        "role": "assistant",
+        "tool_calls": [
+            {"function": {"name": "terminal", "arguments": '{"workdir":"/repos/alpha"}'}},
+            {"function": {"name": "terminal", "arguments": '{"workdir":"/repos/beta"}'}},
+        ],
+    },
+]
+
+provider = plugin.TracedecayMemoryProvider()
+provider.initialize(session_id="telegram-dm")
+provider.sync_turn(
+    "compare both repositories",
+    "done",
+    session_id="telegram-dm",
+    messages=messages,
+)
+
+assert len(calls) == 3, calls
+user_call, alpha_call, beta_call = calls
+assert user_call[1]["storage_scope"] == "user"
+assert user_call[2] == {}
+assert alpha_call[2] == {"project_root": "/repos/alpha"}
+assert beta_call[2] == {"project_root": "/repos/beta"}
+assert "storage_scope" not in alpha_call[1]
+assert "storage_scope" not in beta_call[1]
+
+message_sets = [call[1]["messages"] for call in calls]
+assert message_sets[0] == message_sets[1] == message_sets[2]
+assert message_sets[0][0]["associated_project_roots"] == [
+    "/repos/alpha",
+    "/repos/beta",
+]
+assert [root for _, root, _ in completed] == [None, "/repos/alpha", "/repos/beta"]
+assert ingested == completed
+assert provider.project_root is None
+"#,
+        "one Hermes turn must keep a user canonical copy and project into every touched repository",
     );
 }
 
@@ -4366,6 +4513,25 @@ assert ctx.skills[0][0] == "tracedecay", ctx.skills
 assert ctx.skills[0][1].name == "SKILL.md"
 "#,
         "generated registration must register the skill under the bare 'tracedecay' name",
+    );
+}
+
+/// Stock Hermes keeps plugin skills out of the flat skills index, so the
+/// first-turn code nudge must expose the qualified name that skill_view accepts.
+#[test]
+fn generated_nudge_makes_plugin_skill_discoverable() {
+    run_generated_plugin_script(
+        "check_skill_discovery_nudge.py",
+        r#"
+plugin._REGISTERED_TOOL_NAMES.add("tracedecay_search")
+text = plugin._pre_llm_call(
+    is_first_turn=True,
+    user_message="Find the callers of this Rust function",
+)
+assert "skill_view" in text, text
+assert "tracedecay:tracedecay" in text, text
+"#,
+        "generated nudge must reveal the qualified Hermes plugin skill name",
     );
 }
 
