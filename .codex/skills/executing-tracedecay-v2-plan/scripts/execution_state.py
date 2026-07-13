@@ -697,26 +697,42 @@ def _validate_tests(value: object, required_names: object, slice_id: str,
     if not isinstance(value, list):
         errors.append(f"{slice_id}.test_receipts: must be an array")
         return []
-    fields = {
+    if len(value) > MAX_COMMANDS:
+        errors.append(f"{slice_id}.test_receipts: exceeds bound {MAX_COMMANDS}")
+    legacy_fields = {
         "name", "command", "exit_code", "candidate_commit", "candidate_digest",
         "receipt_digest",
     }
+    grouped_fields = (legacy_fields - {"name"}) | {"tests"}
     result: list[dict[str, Any]] = []
     names: set[str] = set()
     commands: set[str] = set()
     for index, receipt in enumerate(value):
         label = f"{slice_id}.test_receipts[{index}]"
-        if not _keys(receipt, fields, label, errors):
+        if not isinstance(receipt, dict) or (
+            set(receipt) != legacy_fields and set(receipt) != grouped_fields
+        ):
+            errors.append(
+                f"{label}: requires exact legacy name fields or grouped tests fields"
+            )
             continue
         receipt = cast(dict[str, Any], receipt)
-        name = receipt["name"]
-        if not isinstance(name, str) or not name:
-            errors.append(f"{label}.name: must be non-empty")
-        elif name in names:
-            errors.append(f"{slice_id}.test_receipts: ambiguous duplicate receipt {name}")
-        elif isinstance(required_names, list) and name not in required_names:
-            errors.append(f"{label}.name: is not declared in required_tests")
-        names.add(name)
+        receipt_names = [receipt["name"]] if "name" in receipt else receipt["tests"]
+        if not isinstance(receipt_names, list):
+            errors.append(f"{label}.tests: must be an array")
+            receipt_names = []
+        elif len(receipt_names) > MAX_COMMANDS:
+            errors.append(f"{label}.tests: exceeds bound {MAX_COMMANDS}")
+        for name in receipt_names:
+            name_label = f"{label}.{'name' if 'name' in receipt else 'tests'}"
+            if not isinstance(name, str) or not name:
+                errors.append(f"{name_label}: entries must be non-empty strings")
+            elif name in names:
+                errors.append(f"{slice_id}.test_receipts: ambiguous duplicate receipt {name}")
+            elif isinstance(required_names, list) and name not in required_names:
+                errors.append(f"{name_label}: {name!r} is not declared in required_tests")
+            else:
+                names.add(name)
         if not isinstance(receipt["command"], str) or not receipt["command"]:
             errors.append(f"{label}.command: must be non-empty")
         elif receipt["command"] not in (spec or {}).get("acceptance_commands", []):
@@ -959,19 +975,24 @@ def completion_reasons(entry: dict[str, Any] | None) -> list[str]:
         if review.get("independent") is not True:
             reasons.append("review_not_independent")
     required = entry.get("required_tests", [])
-    receipts = {receipt.get("name"): receipt for receipt in tests}
+    receipts = {
+        name: receipt
+        for receipt in tests
+        for name in ([receipt["name"]] if "name" in receipt else receipt.get("tests", []))
+    }
     for name in sorted(required):
         receipt = receipts.get(name)
         if receipt is None:
             reasons.append(f"missing_test_receipt:{name}")
         elif receipt.get("exit_code") != 0:
             reasons.append(f"failed_test_receipt:{name}")
-    receipt_commands = {
-        receipt.get("command") for name, receipt in receipts.items() if name in required
-    }
+    receipts_by_command = {receipt.get("command"): receipt for receipt in tests}
     for command in entry.get("_acceptance_commands", []):
-        if command not in receipt_commands:
+        receipt = receipts_by_command.get(command)
+        if receipt is None:
             reasons.append(f"missing_acceptance_command_receipt:{command}")
+        elif receipt.get("exit_code") != 0:
+            reasons.append(f"failed_acceptance_command_receipt:{command}")
     if integration is None:
         reasons.append("candidate_only_unintegrated")
     else:

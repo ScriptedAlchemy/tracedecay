@@ -21,6 +21,7 @@ import execution_state
 import execution_state_v2 as v2
 import live_evidence
 import plan_execution
+import strict_json
 from git_observation import run_git
 
 PACKET_SOURCE_PATH = Path(
@@ -79,27 +80,10 @@ def _git_blob(root: Path, commit: str, path: Path) -> tuple[str, bytes]:
     return oid, result.stdout
 
 
-def _strict_bytes(payload: bytes, label: str) -> dict[str, Any]:
-    def unique(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
-        result: dict[str, Any] = {}
-        for key, value in pairs:
-            if key in result:
-                raise ValueError(f"{label}: duplicate JSON key {key!r}")
-            result[key] = value
-        return result
-
-    value = json.loads(payload, object_pairs_hook=unique, parse_constant=lambda item: (_ for _ in ()).throw(
-        ValueError(f"{label}: non-finite constant {item!r}")
-    ))
-    if not isinstance(value, dict):
-        raise ValueError(f"{label}: root must be an object")
-    return value
-
-
 def load_reviewed_source(root: Path, commit: str,
                          path: Path = PACKET_SOURCE_PATH) -> ReviewedSource:
     blob_oid, raw_bytes = _git_blob(root, commit, path)
-    source = _strict_bytes(raw_bytes, "packet source")
+    source = strict_json.loads_object(raw_bytes, "packet source")
     fields = {
         "schema", "stage_id", "authority_revision", "checked_manifest_revision",
         "checked_manifest_digest", "checked_source_set_digest", "authorized_slice_ids",
@@ -173,7 +157,7 @@ def _validate_packet_against_manifest(source: dict[str, Any], manifest: dict[str
 
 def load_predecessor(root: Path, canonical_ref: str, expected_generation: str) -> Predecessor:
     pointer_path = root / bootstrap_execution.ACTIVE_POINTER
-    active_pointer = _strict_bytes(pointer_path.read_bytes(), "active pointer")
+    active_pointer = strict_json.loads_object(pointer_path.read_bytes(), "active pointer")
     if active_pointer.get("schema") != bootstrap_execution.POINTER_SCHEMA:
         raise ValueError("active pointer schema mismatch")
     if not GENERATION.fullmatch(expected_generation):
@@ -181,8 +165,8 @@ def load_predecessor(root: Path, canonical_ref: str, expected_generation: str) -
     generation_path = root / bootstrap_execution.GENERATIONS / expected_generation
     manifest_bytes = (generation_path / "manifest.json").read_bytes()
     state_bytes = (generation_path / "state.json").read_bytes()
-    manifest = _strict_bytes(manifest_bytes, "predecessor manifest")
-    state = _strict_bytes(state_bytes, "predecessor state")
+    manifest = strict_json.loads_object(manifest_bytes, "predecessor manifest")
+    state = strict_json.loads_object(state_bytes, "predecessor state")
     manifest_hex = hashlib.sha256(manifest_bytes).hexdigest()
     state_hex = hashlib.sha256(state_bytes).hexdigest()
     actual_generation = f"r{manifest.get('graph_revision')}-{manifest_hex[:16]}-{state_hex[:16]}"
@@ -420,7 +404,7 @@ def _install(root: Path, predecessor: Predecessor, candidate: dict[str, Any]) ->
     active = root / bootstrap_execution.ACTIVE_POINTER
     with bootstrap_execution._activation_lock(root):
         if active.read_bytes() != predecessor.pointer_bytes:
-            current = _strict_bytes(active.read_bytes(), "active pointer")
+            current = strict_json.loads_object(active.read_bytes(), "active pointer")
             if current.get("generation") == generation:
                 current_state = root / ".tracedecay" / current["state"]
                 if current_state.read_bytes() == state_bytes:

@@ -92,6 +92,29 @@ An independent control-plane reviewer records a receipt for that exact candidate
 
 The initial packet keeps GPT-5.6-Sol as reasoning, lifecycle, decomposition, and complex-review owner. Its retained `claude_adversarial_review` compatibility field is explicitly disabled with zero steps and no runtime or acceptance criteria. Claude/Opus is never a planning, audit, reasoning, authority-review, or integration lane. A later GPT-decomposed single-branch micro-implementation may opt into Opus only through a separately reviewed packet revision; it is not implied by this packet. TraceDecay validates but does not create, relocate, push, merge, or otherwise own the declared worktree.
 
+### Record the initial completion without widening dispatch
+
+`complete_execution_authority.py` is the bounded bootstrap application boundary for PR 1 completion. It accepts only a PR 1 entry template, fixed owner-only review receipt `.tracedecay/pr1-independent-review.json`, and fixed owner-only collaboration event `.tracedecay/pr1-independent-review.event.json`; no review or observation path is caller-selectable, and caller-authored test receipts are rejected. The event must name reviewer task `/root/completion_receipt_schema` and bind its fixed receipt path/digest, verdict, observation time, and exact candidate under an outer event digest; the nested receipt independently binds reviewer principal/authority. The recorder verifies the packet-declared candidate worktree is a real non-symlink directory on the exact candidate commit and branch with a clean status, enumerates the exact architecture test names, then independently executes every exact checked acceptance command there with bounded output. It proves all ten names reported `ok` under their one exact Cargo command, emits empty test coverage for acceptance-only commands, rechecks candidate HEAD/branch/cleanliness after execution, computes every receipt digest itself, and atomically publishes only the resulting review/test digest observations to fixed mode-`0600` `.tracedecay/v2-completion-observations.json`. Manual digest insertion, thread prose, copied command output, a worker summary, or a caller-computed receipt is never accepted as observed evidence.
+
+Preparation and activation both reload the named immutable V2 predecessor generation, require its exact PR 1 packet plus 256-block partition and empty completion ledger, verify the canonical source/ancestry and authority-review observation, reproduce the complete candidate, and validate the event-observed review/test receipts. Activation stages the unchanged manifest and append-only ledger state as a new immutable generation, then compare-and-swaps the active pointer under the existing lock. Exact replay is idempotent; another active generation, changed source, changed packet/block/graph/policy bytes, non-independent review, failed command, missing observation, or supplied-candidate drift writes no active pointer. The original staged-dispatch candidate digest continues to seal graph/policy/packet/block authority while excluding only the append-only completion entries.
+
+```bash
+python3 .codex/skills/executing-tracedecay-v2-plan/scripts/complete_execution_authority.py \
+  --root "$(git rev-parse --show-toplevel)" \
+  --canonical-ref refs/heads/codex/tracedecay-total-redesign-plan \
+  --expected-active-generation <exact-empty-ledger-v2-generation> \
+  --completion-entry .tracedecay/pr1-completion-entry.json \
+  --prepare-candidate .tracedecay/pr1-completion-candidate.json
+python3 .codex/skills/executing-tracedecay-v2-plan/scripts/complete_execution_authority.py \
+  --root "$(git rev-parse --show-toplevel)" \
+  --canonical-ref refs/heads/codex/tracedecay-total-redesign-plan \
+  --expected-active-generation <same-empty-ledger-v2-generation> \
+  --completion-entry .tracedecay/pr1-completion-entry.json \
+  --candidate .tracedecay/pr1-completion-candidate.json
+```
+
+This completion-only generation preserves all 256 `not_in_dispatch_scope` blockers. Its correct immediate view has no PR 1 packet and no next-ready packet. PR 2, PR 2A, and PR 2B remain blocked until a separate reviewed dispatch-policy/packet transition explicitly selects scope; dependency order is not scope authority.
+
 ## Validate the activated graph and ledger
 
 Export exactly one supported execution-state document. `tracedecay.v2.execution-state/v1` remains the complete verify-only or all-node dispatch contract. V2 is the explicit staged-dispatch contract containing one reviewed packet, one explicit blocker for every other node, the predecessor transition fence, its activation receipt, the pinned `tracedecay.v2.completion-ledger/v1`, and retired-obligation tombstones. Then run:

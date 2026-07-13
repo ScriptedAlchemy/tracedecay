@@ -384,6 +384,56 @@ class LiveEvidenceAndReceiptTests(unittest.TestCase):
         self.assertFalse(view["valid"])
         self.assertTrue(any("not declared in required_tests" in e for e in view["errors"]))
 
+    def test_grouped_and_acceptance_only_test_receipts_complete_exact_contract(self) -> None:
+        document = load()
+        spec = document["dispatch_specs"][0]
+        spec["required_tests"] = ["unit", "integration"]
+        spec["acceptance_commands"] = [
+            "python3 -m unittest test_fixture",
+            "git diff --check",
+        ]
+        entry = document["completion_ledger"]["entries"][0]
+        entry["required_tests"] = list(spec["required_tests"])
+        base = {
+            key: value for key, value in entry["test_receipts"][0].items()
+            if key != "name"
+        }
+        entry["test_receipts"] = [
+            base | {"tests": ["unit", "integration"]},
+            base | {"tests": [], "command": "git diff --check"},
+        ]
+        reseal(document, replace_dispatch_authority=True)
+
+        view = analyze_trusted(document)
+        self.assertTrue(view["valid"], view["errors"])
+        self.assertEqual([packet["slice_id"] for packet in view["next_ready"]], ["PR 2"])
+
+    def test_failed_acceptance_only_receipt_does_not_complete_contract(self) -> None:
+        document = load()
+        spec = document["dispatch_specs"][0]
+        spec["acceptance_commands"].append("git diff --check")
+        entry = document["completion_ledger"]["entries"][0]
+        base = entry["test_receipts"][0]
+        entry["test_receipts"].append({
+            key: value for key, value in base.items() if key != "name"
+        } | {"tests": [], "command": "git diff --check", "exit_code": 1})
+        reseal(document, replace_dispatch_authority=True)
+
+        view = analyze_trusted(document)
+        self.assertTrue(view["valid"], view["errors"])
+        pr2 = next(item for item in view["blocked"] if item["slice_id"] == "PR 2")
+        self.assertTrue(any("failed_acceptance_command_receipt" in reason for reason in pr2["reasons"]))
+
+    def test_grouped_test_names_remain_declared_and_globally_unique(self) -> None:
+        document = load()
+        receipt = document["completion_ledger"]["entries"][0]["test_receipts"][0]
+        receipt["tests"] = ["unit", "unit"]
+        del receipt["name"]
+        receipt["receipt_digest"] = es.receipt_digest(receipt)
+        view = analyze_trusted(document)
+        self.assertFalse(view["valid"])
+        self.assertTrue(any("ambiguous duplicate receipt" in error for error in view["errors"]))
+
     def test_bare_independence_without_distinct_authority_is_rejected(self) -> None:
         document = load()
         review = document["completion_ledger"]["entries"][0]["review"]
@@ -643,8 +693,45 @@ class SurfaceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "duplicate.json"
             path.write_text('{"schema":"one","schema":"two"}', encoding="utf-8")
-            with self.assertRaisesRegex(ValueError, "duplicate JSON object key"):
+            with self.assertRaisesRegex(ValueError, "duplicate JSON key"):
                 plan_execution.strict_json(path)
+
+    def test_completion_observations_load_from_fixed_owner_only_ledger(self) -> None:
+        review = "sha256:" + "1" * 64
+        test = "sha256:" + "2" * 64
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / le.COMPLETION_OBSERVATIONS
+            path.parent.mkdir()
+            path.write_text(json.dumps({
+                "schema": le.COMPLETION_OBSERVATIONS_SCHEMA,
+                "review_receipt_digests": [review],
+                "test_receipt_digests": [test],
+            }), encoding="utf-8")
+            os.chmod(path, 0o600)
+            self.assertEqual(
+                le.load_completion_observations(root),
+                (frozenset({review}), frozenset({test})),
+            )
+
+            os.chmod(path, 0o640)
+            with self.assertRaisesRegex(ValueError, "owner-only"):
+                le.load_completion_observations(root)
+
+    def test_completion_observations_reject_ambiguous_or_unordered_digests(self) -> None:
+        digest = "sha256:" + "1" * 64
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / le.COMPLETION_OBSERVATIONS
+            path.parent.mkdir()
+            path.write_text(json.dumps({
+                "schema": le.COMPLETION_OBSERVATIONS_SCHEMA,
+                "review_receipt_digests": [digest, digest],
+                "test_receipt_digests": [],
+            }), encoding="utf-8")
+            os.chmod(path, 0o600)
+            with self.assertRaisesRegex(ValueError, "unique canonical order"):
+                le.load_completion_observations(root)
 
 
 if __name__ == "__main__":

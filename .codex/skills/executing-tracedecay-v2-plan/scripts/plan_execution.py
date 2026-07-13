@@ -14,6 +14,7 @@ import execution_state
 import execution_state_v2
 import live_evidence
 import slice_authority
+import strict_json as strict_json_codec
 
 
 STATE_ENV = "TRACEDECAY_V2_EXECUTION_STATE"
@@ -22,24 +23,7 @@ DEFAULT_STATE = Path(".tracedecay/v2-execution-state.json")
 
 def strict_json(path: Path) -> dict[str, Any]:
     """Load JSON while rejecting ambiguous duplicate object keys at every depth."""
-
-    def unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
-        result: dict[str, Any] = {}
-        for key, value in pairs:
-            if key in result:
-                raise ValueError(f"duplicate JSON object key {key!r}")
-            result[key] = value
-        return result
-
-    def invalid_constant(value: str) -> None:
-        raise ValueError(f"non-finite JSON constant {value!r}")
-
-    document = json.loads(
-        path.read_bytes(), object_pairs_hook=unique_object, parse_constant=invalid_constant
-    )
-    if not isinstance(document, dict):
-        raise ValueError("execution-state root must be a JSON object")
-    return document
+    return strict_json_codec.load_object(path, "execution-state")
 
 
 def candidate_commits(document: dict[str, Any]) -> list[str]:
@@ -128,10 +112,13 @@ def main() -> int:
         state = resolve_state(root, args.state)
         document = strict_json(state)
         authority_review_receipts = live_evidence.load_authority_review_observations(root)
+        review_receipts, test_receipts = live_evidence.load_completion_observations(root)
         live = live_evidence.inspect(
             root,
             args.canonical_ref,
             candidate_commits(document),
+            review_receipts=review_receipts,
+            test_receipts=test_receipts,
             authority_review_receipts=authority_review_receipts,
         )
         view = analyze(document, live)

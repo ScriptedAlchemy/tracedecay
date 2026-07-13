@@ -15,6 +15,7 @@ from typing import Any, cast
 import execution_state as v1
 import live_evidence as le
 import slice_authority as sa
+import strict_json
 from git_observation import run_git
 
 EXPORT_SCHEMA = "tracedecay.v2.execution-state/v2"
@@ -126,8 +127,11 @@ def graph_digest(graph: dict[str, Any]) -> str:
 
 
 def candidate_state_digest(document: dict[str, Any]) -> str:
-    """Seal candidate authority bytes without creating a receipt/digest cycle."""
+    """Seal immutable staged authority without sealing its append-only completion log."""
     payload = copy.deepcopy(document)
+    ledger = payload.get("completion_ledger")
+    if isinstance(ledger, dict):
+        ledger["entries"] = []
     transition = payload.get("authority_transition")
     if isinstance(transition, dict):
         transition["candidate_state_digest"] = ""
@@ -336,27 +340,6 @@ def _validate_policy(raw: object, graph: dict[str, Any], errors: list[str]) -> d
     return policy
 
 
-def _strict_json_bytes(payload: bytes, label: str) -> dict[str, Any]:
-    def unique(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
-        result: dict[str, Any] = {}
-        for key, value in pairs:
-            if key in result:
-                raise ValueError(f"{label}: duplicate JSON key {key!r}")
-            result[key] = value
-        return result
-
-    value = json.loads(
-        payload,
-        object_pairs_hook=unique,
-        parse_constant=lambda item: (_ for _ in ()).throw(
-            ValueError(f"{label}: non-finite constant {item!r}")
-        ),
-    )
-    if not isinstance(value, dict):
-        raise ValueError(f"{label}: root must be an object")
-    return value
-
-
 def _git_blob_observation(root: Any, commit: str, path: str,
                           *, maximum: int) -> tuple[str, bytes]:
     oid_result = run_git(root, "rev-parse", "--verify", f"{commit}:{path}", max_output_bytes=256)
@@ -388,7 +371,7 @@ def _validate_reviewed_source(policy: dict[str, Any], dispatch: dict[str, dict[s
         source_oid, source_bytes = _git_blob_observation(
             live.root, live.canonical_commit, PACKET_SOURCE_PATH, maximum=1024 * 1024
         )
-        source = _strict_json_bytes(source_bytes, "packet source")
+        source = strict_json.loads_object(source_bytes, "packet source")
     except (OSError, UnicodeError, json.JSONDecodeError, ValueError, TypeError):
         errors.append("dispatch_policy.packet_source: unavailable or invalid in canonical Git tree")
         return
@@ -408,7 +391,7 @@ def _validate_reviewed_source(policy: dict[str, Any], dispatch: dict[str, dict[s
         _, manifest_bytes = _git_blob_observation(
             live.root, live.canonical_commit, MANIFEST_PATH, maximum=4 * 1024 * 1024
         )
-        manifest = _strict_json_bytes(manifest_bytes, "checked manifest")
+        manifest = strict_json.loads_object(manifest_bytes, "checked manifest")
     except (OSError, UnicodeError, json.JSONDecodeError, ValueError, TypeError):
         errors.append("dispatch_policy.checked_manifest: unavailable or invalid in canonical Git tree")
         return

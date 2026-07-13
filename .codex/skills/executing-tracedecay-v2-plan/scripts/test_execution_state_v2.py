@@ -142,6 +142,19 @@ def tearDownModule() -> None:
 
 
 class PositiveStagedDispatchTests(unittest.TestCase):
+    def test_candidate_digest_excludes_append_only_completion_entries(self) -> None:
+        candidate = HARNESS.candidate()
+        baseline = v2.candidate_state_digest(candidate)
+        candidate["completion_ledger"]["entries"].append({"opaque": "completion evidence"})
+        self.assertEqual(v2.candidate_state_digest(candidate), baseline)
+        view = HARNESS.view(candidate)
+        self.assertFalse(view["valid"])
+        self.assertFalse(any("candidate_state_digest: digest mismatch" in error for error in view["errors"]))
+        self.assertTrue(any("completion_ledger.entries[0]" in error for error in view["errors"]))
+
+        candidate["canonical_dag"]["nodes"][0]["dependencies"] = ["PR 2"]
+        self.assertNotEqual(v2.candidate_state_digest(candidate), baseline)
+
     def test_exactly_pr1_is_ready_and_every_other_slice_is_explicitly_blocked(self) -> None:
         candidate = HARNESS.candidate()
         view = HARNESS.view(candidate)

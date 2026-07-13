@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -12,19 +13,45 @@ from typing import Any, Iterable
 
 from git_observation import MAX_GIT_OUTPUT_BYTES, run_git
 import slice_authority as sa
+import strict_json
 
 
 MAX_WORKTREES = 256
 MAX_PLAN_FILE_BYTES = 4 * 1024 * 1024
+MAX_OBSERVED_RECEIPTS = 4096
 COMMIT = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
 SHA256 = re.compile(r"^sha256:[0-9a-f]{64}$")
 FULL_REF = re.compile(r"^refs/(?:heads|remotes)/[^\x00-\x20~^:?*\\]+(?:/[^\x00-\x20~^:?*\\]+)*$")
 AUTHORITY_REVIEW_OBSERVATIONS_SCHEMA = "tracedecay.v2.authority-review-observations/v1"
 AUTHORITY_REVIEW_OBSERVATIONS = Path(".tracedecay/v2-authority-review-observations.json")
+COMPLETION_OBSERVATIONS_SCHEMA = "tracedecay.v2.completion-observations/v1"
+COMPLETION_OBSERVATIONS = Path(".tracedecay/v2-completion-observations.json")
 
 
 def digest(value: object) -> str:
     return "sha256:" + hashlib.sha256(sa._canonical_json(value).encode("utf-8")).hexdigest()
+
+
+def _receipt_digests(
+    value: object,
+    label: str,
+    *,
+    nonempty: bool = False,
+    maximum: int | None = None,
+) -> frozenset[str]:
+    if not isinstance(value, list) or (nonempty and not value):
+        requirement = "a non-empty array" if nonempty else "an array"
+        raise ValueError(f"{label}: must be {requirement}")
+    if maximum is not None and len(value) > maximum:
+        raise ValueError(f"{label}: exceeds bound {maximum}")
+    previous: str | None = None
+    for item in value:
+        if not isinstance(item, str) or not SHA256.fullmatch(item):
+            raise ValueError(f"{label}: every digest must be sha256:<64 lowercase hex>")
+        if previous is not None and item <= previous:
+            raise ValueError(f"{label}: must be unique canonical order")
+        previous = item
+    return frozenset(value)
 
 
 def load_authority_review_observations(root: Path, *, required: bool = False) -> frozenset[str]:
@@ -40,33 +67,53 @@ def load_authority_review_observations(root: Path, *, required: bool = False) ->
     if path.stat().st_mode & 0o077:
         raise ValueError("authority review observations: fixed ledger must have mode 0600")
 
-    def unique(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
-        result: dict[str, Any] = {}
-        for key, value in pairs:
-            if key in result:
-                raise ValueError(f"authority review observations: duplicate JSON key {key!r}")
-            result[key] = value
-        return result
-
-    value = json.loads(
-        path.read_bytes(),
-        object_pairs_hook=unique,
-        parse_constant=lambda item: (_ for _ in ()).throw(
-            ValueError(f"authority review observations: non-finite constant {item!r}")
-        ),
-    )
+    value = strict_json.load_object(path, "authority review observations")
     if not isinstance(value, dict) or set(value) != {"schema", "receipt_digests"}:
         raise ValueError("authority review observations: exact schema and receipt_digests fields required")
     if value["schema"] != AUTHORITY_REVIEW_OBSERVATIONS_SCHEMA:
         raise ValueError("authority review observations: unsupported schema")
-    receipts = value["receipt_digests"]
-    if not isinstance(receipts, list) or not receipts:
-        raise ValueError("authority review observations: receipt_digests must be a non-empty array")
-    if any(not isinstance(item, str) or not SHA256.fullmatch(item) for item in receipts):
-        raise ValueError("authority review observations: every receipt digest must be sha256:<64 lowercase hex>")
-    if receipts != sorted(set(receipts)):
-        raise ValueError("authority review observations: receipt digests must be unique canonical order")
-    return frozenset(receipts)
+    return _receipt_digests(
+        value["receipt_digests"],
+        "authority review observations: receipt_digests",
+        nonempty=True,
+    )
+
+
+def load_completion_observations(
+    root: Path, *, required: bool = False
+) -> tuple[frozenset[str], frozenset[str]]:
+    """Load first-party observed review/test receipt digests from the fixed ledger."""
+
+    path = root.resolve() / COMPLETION_OBSERVATIONS
+    if not path.exists():
+        if required:
+            raise ValueError(f"completion observations: required fixed ledger is missing: {path}")
+        return frozenset(), frozenset()
+    if path.is_symlink() or not path.is_file():
+        raise ValueError("completion observations: fixed ledger must be a regular non-symlink file")
+    stat = path.stat()
+    if stat.st_mode & 0o077 or stat.st_uid != os.getuid():
+        raise ValueError("completion observations: fixed ledger must be owned by this user and owner-only")
+
+    value = strict_json.load_object(path, "completion observations")
+    fields = {"schema", "review_receipt_digests", "test_receipt_digests"}
+    if not isinstance(value, dict) or set(value) != fields:
+        raise ValueError("completion observations: exact observation fields required")
+    if value["schema"] != COMPLETION_OBSERVATIONS_SCHEMA:
+        raise ValueError("completion observations: unsupported schema")
+
+    return (
+        _receipt_digests(
+            value["review_receipt_digests"],
+            "completion observations: review_receipt_digests",
+            maximum=MAX_OBSERVED_RECEIPTS,
+        ),
+        _receipt_digests(
+            value["test_receipt_digests"],
+            "completion observations: test_receipt_digests",
+            maximum=MAX_OBSERVED_RECEIPTS,
+        ),
+    )
 
 
 def source_set(root: Path, commit: str) -> list[list[str]]:
