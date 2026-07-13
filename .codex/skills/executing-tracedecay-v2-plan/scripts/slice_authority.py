@@ -1,18 +1,5 @@
 #!/usr/bin/env python3
-"""Canonical V2 slice-authority normalization and fail-closed validation.
-
-This module implements plan 00 §2.1 (``docs/plans/tracedecay-v2/00-plan-set-index.md``):
-the deterministic ID normalizer, declaration/series/incidental classifier, owner/
-companion reconciliation, typed-dependency and cycle validation, canonical digests,
-stable idempotency keys, the bootstrap-manifest locator, and the pre/post-cutover
-reconciliation comparison.
-
-It is a read-only *validation projection*. It never dispatches work, computes
-next-ready slices, mutates a graph, or manages leases/attempts/receipts — those are
-execution concerns owned by ``plan_execution.py`` and the activated canonical graph.
-The legacy ``plan_inventory.py`` heading/block-hash aid is intentionally NOT reused for
-ID meaning; §2.1 forms are classified here independently (see SKILL.md).
-"""
+"""Canonical V2 slice-authority normalization and fail-closed validation."""
 
 from __future__ import annotations
 
@@ -31,13 +18,8 @@ from git_observation import run_git
 
 EN_DASH = "–"
 
-# Canonical hashes are lowercase full object/block digests.
 SHA256_HEX = re.compile(r"^[0-9a-f]{64}$")
 COMMIT_OID = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
-
-# ---------------------------------------------------------------------------
-# Diagnostics
-# ---------------------------------------------------------------------------
 
 ERROR_CODES = frozenset(
     {
@@ -85,8 +67,6 @@ DEPENDENCY_PAYLOAD_FIELDS = {
     "not_before": frozenset({"not_before"}),
 }
 
-# Every declared edge kind gates dependency readiness except the purely temporal
-# ``not_before``; only gating edges participate in whole-graph acyclicity (§2.1 step 5).
 GATING_KINDS = EDGE_KINDS - {"not_before"}
 
 
@@ -154,15 +134,7 @@ def sort_diagnostics(diagnostics: list[Diagnostic]) -> list[Diagnostic]:
 
 def validate_source_anchor(anchor: Anchor,
                            expected: "Anchor | str | None" = None) -> list[Diagnostic]:
-    """Fail-closed structural validation of one source anchor (§2.1).
-
-    Checks anchor bounds (non-empty path, ``1 <= start_line <= end_line``) and the block
-    hash form (64-char lowercase hex SHA-256). When ``expected`` is supplied — either a
-    full :class:`Anchor` or a bare hash string carried from a prior receipt/manifest — the
-    actual block hash must equal the expected one. Every violation is a single
-    ``source_anchor_mismatch`` error; an empty list means the anchor is well-formed and
-    (if an expectation was given) verified. Validation only — never mutates the anchor.
-    """
+    """Validate anchor bounds, hash shape, and an optional expected hash."""
     diagnostics: list[Diagnostic] = []
 
     def mismatch(raw: str, rule: str) -> None:
@@ -209,10 +181,6 @@ def _validate_pinned_anchor(anchor: Anchor, source: bytes | None) -> list[Diagno
     return []
 
 
-# ---------------------------------------------------------------------------
-# Normalization (§2.1 rules 1-5)
-# ---------------------------------------------------------------------------
-
 NUM = r"(?:0|[1-9][0-9]*)"  # canonical unsigned integer, no leading zero
 _SIMPLE = re.compile(rf"^{NUM}(?:[A-Z][A-Z0-9]*)?$")
 _COMPOUND_BASE = re.compile(rf"^{NUM}[A-Z][A-Z0-9]*$")
@@ -240,11 +208,7 @@ def _compact(text: str) -> str:
 
 
 def parse_scalar(token: str) -> tuple[str | None, str | None]:
-    """Return ``(canonical, None)`` for a valid scalar, else ``(None, rule)``.
-
-    ``token`` is already ASCII-uppercased and whitespace-free. Canonical form omits the
-    leading ``PR``. Implements the scalar half of rules 1 (simple/compound), 3 (dotted).
-    """
+    """Parse an uppercased, whitespace-free scalar without the ``PR`` prefix."""
     if not token:
         return None, "empty scalar"
     if EN_DASH in token:
@@ -281,13 +245,7 @@ def parse_scalar(token: str) -> tuple[str | None, str | None]:
 
 
 def _ascii_range(token: str) -> tuple[str, object]:
-    """Test the three legacy ASCII simple-range productions in fixed order.
-
-    Returns ``("ok", [members])`` when a production matches and expands, ``("reject",
-    rule)`` when a production matches but the range is invalid (descending / oversized /
-    leading zero), or ``("none", None)`` when no legacy production matches so the caller
-    must fall through to the compound-scalar test (§2.1 rule 4 precedence).
-    """
+    """Expand a legacy range or return ``none`` for compound-scalar fallback."""
     numeric = re.fullmatch(rf"({NUM})-({NUM})", token)
     if numeric:
         return _expand_numeric(numeric.group(1), numeric.group(2))
@@ -419,11 +377,6 @@ def classify_token(raw: str) -> Classification:
     return Classification("declaration", ids=(f"PR {canonical}",))
 
 
-# ---------------------------------------------------------------------------
-# Reconciliation (§2.1 steps 4-5)
-# ---------------------------------------------------------------------------
-
-
 @dataclass(frozen=True)
 class Criterion:
     criterion_id: str
@@ -498,9 +451,6 @@ class SliceRecord:
             "phase": self.phase,
             "commit_subject": self.commit_subject,
             "acceptance": [
-                # Digest the *canonical* criterion text (§2.1 step 4): equivalent criteria
-                # collapse to one digest regardless of which raw spelling was retained, so the
-                # content digest and idempotency key are invariant to declaration source order.
                 {"criterion_id": crit.criterion_id, "text": canonicalize_text(crit.text),
                  "source_anchors": sorted(crit.source_anchors)}
                 for crit in sorted(self.acceptance, key=lambda c: c.criterion_id)
@@ -754,15 +704,7 @@ def reconcile(sections: list[Section], authority_keys: frozenset[str] | None = N
               series: dict[str, tuple[str, ...]] | None = None,
               repo_root: Path | None = None, source_commit: str | None = None,
               indexed_plan_paths: frozenset[str] | None = None) -> ReconcileResult:
-    """Reconcile declaring sections into one owner record per normalized scalar ID.
-
-    ``authority_keys`` is the explicit key set from the bootstrap manifest (pre-cutover)
-    or the activated canonical graph (post-cutover). When provided, every declaration must
-    map to a key and every key must have a declaration (``missing_id``); ``None`` skips the
-    authority join (classification-only fixtures). Authoritative validation supplies
-    ``repo_root`` plus ``source_commit`` to hash every anchored Git block, and
-    ``indexed_plan_paths`` to constrain owner selection to the ordered plan set.
-    """
+    """Reconcile declarations into one validated owner record per scalar ID."""
     errors: list[Diagnostic] = []
     warnings: list[Diagnostic] = []
     grouped: dict[str, list[tuple[Section, bool]]] = {}
@@ -906,15 +848,7 @@ def _build_record(normalized_id: str, entries: list[tuple[Section, bool]], owner
 def _validate_series(refs: list[tuple[str, Anchor, str]], series_map: dict[str, tuple[str, ...]],
                      records: dict[str, SliceRecord], authority_keys: frozenset[str] | None,
                      errors: list[Diagnostic]) -> None:
-    """Fail-closed validation of every referenced series (§2.1 rule 5).
-
-    A series is rejected (``invalid_series``) when it has no declared members, or when any
-    member is not a single canonical scalar ID (noncanonical), is itself a series
-    (recursive), has no reconciling declaration/authority key (unknown), or is already
-    claimed by a different series (conflicting overlap). A series whose members are all
-    valid canonical scalars that reconcile against actual records/authority keys, with no
-    cross-series overlap, passes.
-    """
+    """Validate canonical, known, nonrecursive, nonoverlapping series members."""
     known = set(records) if authority_keys is None else set(records) | set(authority_keys)
     claimed_by: dict[str, str] = {}
     for series_id, anchor, raw in refs:
@@ -1059,31 +993,15 @@ def source_set_digest(observations: list[list[str]]) -> str:
     ).hexdigest()
 
 
-# ---------------------------------------------------------------------------
-# Bootstrap locator (§2.1) — validation only, never dispatch
-# ---------------------------------------------------------------------------
-
-
 @dataclass(frozen=True)
 class BootstrapFailure:
-    reason: str  # multiple_explicit | ambiguous | missing | not_regular | unreadable | outside_root |
-    #              unknown_repo | invalid_json | schema_mismatch
+    reason: str
     detail: str
 
 
 def locate_bootstrap_manifest(repo_root: Path, explicit: object = None, env: str | None = None,
                               repo_identity_ok: bool = True) -> tuple[Path | None, BootstrapFailure | None]:
-    """Resolve exactly one bootstrap manifest by §2.1 precedence, or a typed failure.
-
-    Precedence: (1) explicit argument, (2) ``TRACEDECAY_V2_EXECUTION_MANIFEST`` value,
-    then exactly one repo-local source: the legacy direct manifest or the active-generation
-    pointer. Coexisting repo-local sources are ambiguous and fail closed. No
-    directory/board/profile scanning. A non-explicit selection must resolve to a regular
-    file beneath ``repo_root``.
-    The candidate must parse as JSON (``invalid_json`` otherwise) and satisfy the manifest
-    schema — a top-level object carrying a ``slices`` object whose entries are objects
-    (``schema_mismatch`` otherwise); a bare ``{}`` is rejected as a schema mismatch.
-    """
+    """Resolve one explicit, environment, legacy, or active-generation manifest."""
     if not repo_identity_ok:
         return None, BootstrapFailure("unknown_repo", "repository identity is unknown")
 
@@ -1221,11 +1139,6 @@ def _validate_manifest_schema(path: Path, raw: bytes) -> BootstrapFailure | None
             return BootstrapFailure(
                 "schema_mismatch", f"{path} slice entry {key!r} must map a non-empty ID to an object")
     return None
-
-
-# ---------------------------------------------------------------------------
-# Pre/post-cutover reconciliation (§2.1 step 6) — comparison only
-# ---------------------------------------------------------------------------
 
 
 def reconcile_against_authority(records: dict[str, SliceRecord], authority: dict[str, object],

@@ -21,12 +21,6 @@ class GitResult:
     stderr: bytes
     error: str | None = None
 
-    def text(self) -> tuple[str, str | None]:
-        try:
-            return self.stdout.decode("utf-8"), None
-        except UnicodeDecodeError as error:
-            return "", f"stdout is not UTF-8: {error}"
-
 
 def _bounded(stream: Any, label: str, maximum: int) -> tuple[bytes, str | None]:
     size = stream.tell()

@@ -212,12 +212,11 @@ fn validate_cargo_edges(
             ));
         }
         let owner = &architecture.owners[name];
-        for dependency in package
-            .dependencies
-            .iter()
-            .filter(|dependency| dependency.path.is_some())
-        {
-            let dependency_path = canonical(Path::new(dependency.path.as_deref().unwrap()))?;
+        for dependency in &package.dependencies {
+            let Some(dependency_path) = dependency.path.as_deref() else {
+                continue;
+            };
+            let dependency_path = canonical(Path::new(dependency_path))?;
             let dependency_owner = architecture
                 .owners
                 .iter()

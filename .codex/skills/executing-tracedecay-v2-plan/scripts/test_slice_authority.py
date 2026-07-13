@@ -1,45 +1,31 @@
 #!/usr/bin/env python3
-"""Deterministic contract tests for the V2 slice-authority validator.
-
-Each test pins one clause of plan 00 §2.1 (``docs/plans/tracedecay-v2/00-plan-set-index.md``)
-with both a positive and a negative case: normalization rules 1-5, owner/companion
-reconciliation, typed dependency edges and payloads, whole-graph cycles, canonical digests
-and stable idempotency keys, the explicit-authority join, series membership, the bootstrap
-locator, and the pre/post-cutover reconciliation gate. The module is a read-only validation
-projection; these tests never dispatch, mutate, or assert real source locations.
-"""
+"""Contract tests for the V2 slice-authority validator."""
 
 from __future__ import annotations
 
 import hashlib
 import os
+from pathlib import Path
 import subprocess
 import tempfile
 import unittest
 from unittest import mock
-from pathlib import Path
 
-import slice_authority as sa
 import git_observation as go
+import slice_authority as sa
 
 
 def _sha(raw: str) -> str:
-    """A deterministic 64-char lowercase SHA-256 hex digest (stable across PYTHONHASHSEED)."""
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
 def A(path: str, start_line: int, end_line: int, block_sha256: str) -> sa.Anchor:
-    """Build a valid compact fixture anchor from a terse stable label."""
     digest = block_sha256 if sa.SHA256_HEX.fullmatch(block_sha256) else _sha(block_sha256)
     return sa.Anchor(path, start_line, end_line, digest)
 
 
 def _owner(raw: str, *, phase: int = 0, subject: str = "feat: x", **kw) -> sa.Section:
-    """A minimal well-formed owner section with a deterministic anchor per raw token.
-
-    The anchor's line and block hash derive from a SHA-256 of ``raw`` — never ``hash()`` —
-    so digests and idempotency keys are reproducible regardless of PYTHONHASHSEED.
-    """
+    """Build a stable owner fixture independent of ``PYTHONHASHSEED``."""
     digest = _sha(raw)
     line = int(digest[:8], 16) % 9000 + 1
     anchor = A(f"docs/plans/{raw}.md", line, line + 5, digest)
@@ -78,11 +64,6 @@ def _reconcile_authority(records, authority, phase, **kwargs):
     )
 
 
-# ---------------------------------------------------------------------------
-# Rule 1 — simple and compound scalars
-# ---------------------------------------------------------------------------
-
-
 class ScalarClassificationTests(unittest.TestCase):
     def test_simple_scalars_and_suffixes(self) -> None:
         for raw, expected in [
@@ -110,8 +91,6 @@ class ScalarClassificationTests(unittest.TestCase):
             self.assertEqual(got.ids, (expected,), raw)
 
     def test_compound_malformations(self) -> None:
-        # empty component, zero component, doubled hyphen, non-canonical decimal tail,
-        # suffixless base, and a three-part token that is neither range nor multi-component.
         for raw in ["PR 22F-", "PR 22F-0", "PR 22F--LE", "PR 24D-API01",
                     "PR 35-API1", "PR 33S-2-4"]:
             got = sa.classify_token(raw)
@@ -148,11 +127,6 @@ class ScalarClassificationTests(unittest.TestCase):
         self.assertEqual(got.code, "malformed_id")
 
 
-# ---------------------------------------------------------------------------
-# Rule 2 — slash lists and alternate spellings
-# ---------------------------------------------------------------------------
-
-
 class SlashClassificationTests(unittest.TestCase):
     def test_slash_between_ids_is_a_multi_id_list(self) -> None:
         self.assertEqual(sa.classify_token("PR 28A/28B").ids, ("PR 28A", "PR 28B"))
@@ -170,11 +144,6 @@ class SlashClassificationTests(unittest.TestCase):
             self.assertEqual(got.code, "malformed_id", raw)
 
 
-# ---------------------------------------------------------------------------
-# Rule 3 — dotted suffixes
-# ---------------------------------------------------------------------------
-
-
 class DottedClassificationTests(unittest.TestCase):
     def test_dotted_letter_suffix_is_alternate_spelling(self) -> None:
         self.assertEqual(sa.classify_token("PR 4.E").ids, ("PR 4E",))
@@ -185,11 +154,6 @@ class DottedClassificationTests(unittest.TestCase):
     def test_multiple_dots_and_mixed_suffixes_are_malformed(self) -> None:
         for raw in ["PR 12.1.2", "PR 4.E1", "PR 4.1E"]:
             self.assertEqual(sa.classify_token(raw).kind, "malformed", raw)
-
-
-# ---------------------------------------------------------------------------
-# Rule 4 — ranges (legacy ASCII, en-dash, precedence, rejects)
-# ---------------------------------------------------------------------------
 
 
 class RangeClassificationTests(unittest.TestCase):
@@ -205,7 +169,6 @@ class RangeClassificationTests(unittest.TestCase):
                          ("PR 31A", "PR 31B", "PR 31C"))
 
     def test_numeric_tail_range_precedence_over_compound(self) -> None:
-        # 24E0-24E2 is a legacy numeric-tail range, never a decimal compound component.
         self.assertEqual(sa.classify_token("PR 24E0-24E2").ids,
                          ("PR 24E0", "PR 24E1", "PR 24E2"))
 
@@ -232,11 +195,6 @@ class RangeClassificationTests(unittest.TestCase):
         self.assertEqual(sa.classify_token("PR 35-35").ids, ("PR 35",))
 
 
-# ---------------------------------------------------------------------------
-# Rule 5 — series declarations
-# ---------------------------------------------------------------------------
-
-
 class SeriesTests(unittest.TestCase):
     def test_series_heading_classifies_as_series(self) -> None:
         got = sa.classify_token("PR 13 series")
@@ -250,7 +208,6 @@ class SeriesTests(unittest.TestCase):
         self.assertEqual(result.errors[0].normalized_id, "PR 13 series")
 
     def test_series_with_declared_members_reconciling_against_records_passes(self) -> None:
-        # Valid declared scalar members must reconcile against actual owner records.
         section = sa.Section("PR 13 series", "companion", A("p", 1, 2, "s"))
         result = sa.reconcile([section, _owner("PR 13A"), _owner("PR 13B")],
                               series={"PR 13 series": ("PR 13A", "PR 13B")})
@@ -258,7 +215,6 @@ class SeriesTests(unittest.TestCase):
         self.assertEqual(result.series["PR 13 series"], ("PR 13A", "PR 13B"))
 
     def test_series_members_may_reconcile_against_authority_keys(self) -> None:
-        # A member with no owner record but a matching authority key still reconciles.
         section = sa.Section("PR 13 series", "companion", A("p", 1, 2, "s"))
         result = sa.reconcile([section, _owner("PR 13A"), _owner("PR 13B")],
                               authority_keys=frozenset({"PR 13A", "PR 13B"}),
@@ -282,7 +238,6 @@ class SeriesTests(unittest.TestCase):
 
     def test_noncanonical_series_member_fails_closed(self) -> None:
         section = sa.Section("PR 13 series", "companion", A("p", 1, 2, "s"))
-        # Lowercase spelling and a leading-zero token are both noncanonical members.
         for member in ["pr 13a", "PR 007", "PR 13A/13B"]:
             result = sa.reconcile([section, _owner("PR 13A")],
                                   series={"PR 13 series": ("PR 13A", member)})
@@ -290,7 +245,6 @@ class SeriesTests(unittest.TestCase):
             self.assertIn("single canonical scalar ID", result.errors[0].violated_rule, member)
 
     def test_conflicting_series_overlap_fails_closed(self) -> None:
-        # A member claimed by two different series is a conflicting overlap.
         first = sa.Section("PR 13 series", "companion", A("p", 1, 2, "s"))
         second = sa.Section("PR 14 series", "companion", A("p", 3, 4, "t"))
         result = sa.reconcile([first, second, _owner("PR 13A")],
@@ -303,11 +257,6 @@ class SeriesTests(unittest.TestCase):
         got = sa.classify_token("PR 22F- series")
         self.assertEqual(got.kind, "malformed")
         self.assertEqual(got.code, "invalid_series")
-
-
-# ---------------------------------------------------------------------------
-# Reconciliation: owner selection, companions, acceptance merge, phase/subject
-# ---------------------------------------------------------------------------
 
 
 class ReconciliationTests(unittest.TestCase):
@@ -372,7 +321,6 @@ class ReconciliationTests(unittest.TestCase):
         record = result.records["PR 4E"]
         self.assertEqual(record.owner, owner.anchor)
         self.assertEqual(record.companions, [companion.anchor])
-        # Equivalent criteria collapse to one with the union of sorted source anchors.
         self.assertEqual(len(record.acceptance), 1)
         self.assertEqual(record.acceptance[0].source_anchors, ("companions[0]", "owner"))
 
@@ -443,11 +391,6 @@ class ReconciliationTests(unittest.TestCase):
         self.assertEqual(result.records, {})
 
 
-# ---------------------------------------------------------------------------
-# Digests and idempotency keys
-# ---------------------------------------------------------------------------
-
-
 class DigestTests(unittest.TestCase):
     def _record(self, sections):
         return sa.reconcile(sections)
@@ -504,11 +447,6 @@ class DigestTests(unittest.TestCase):
                       9007199254740993]:
             with self.assertRaises(ValueError, msg=repr(value)):
                 sa._canonical_json(value)
-
-
-# ---------------------------------------------------------------------------
-# Typed dependency edges and payloads
-# ---------------------------------------------------------------------------
 
 
 class EdgeTests(unittest.TestCase):
@@ -648,16 +586,10 @@ class EdgeTests(unittest.TestCase):
                          sorted((anchor.ref(), companion.ref())))
 
     def test_authority_keys_resolve_edge_endpoints(self) -> None:
-        # An endpoint absent from records but present in the authority key set is known.
         owner = _owner("PR 1", dependencies=(sa.Dependency("PR 2", "requires_success"),))
         result = sa.reconcile([owner], authority_keys=frozenset({"PR 1", "PR 2"}))
         unresolved = [e for e in result.errors if e.code == "unresolved_dependency"]
         self.assertEqual(unresolved, [])
-
-
-# ---------------------------------------------------------------------------
-# Whole-graph cycle detection over gating edges
-# ---------------------------------------------------------------------------
 
 
 class CycleTests(unittest.TestCase):
@@ -681,16 +613,10 @@ class CycleTests(unittest.TestCase):
         self.assertEqual(sa.reconcile([a, b, c]).errors, [])
 
     def test_not_before_edge_does_not_form_a_cycle(self) -> None:
-        # not_before is temporal, not gating: it never participates in acyclicity.
         a = _owner("PR 1", dependencies=(
             sa.Dependency("PR 2", "not_before", (("not_before", "2026-01-01T00:00:00Z"),)),))
         b = _owner("PR 2", dependencies=(sa.Dependency("PR 1", "requires_success"),))
         self.assertEqual(sa.reconcile([a, b]).errors, [])
-
-
-# ---------------------------------------------------------------------------
-# Explicit-authority join (§2.1 step 3)
-# ---------------------------------------------------------------------------
 
 
 class AuthorityJoinTests(unittest.TestCase):
@@ -707,11 +633,6 @@ class AuthorityJoinTests(unittest.TestCase):
     def test_none_authority_skips_the_join(self) -> None:
         result = sa.reconcile([_owner("PR 1")], authority_keys=None)
         self.assertEqual(result.errors, [])
-
-
-# ---------------------------------------------------------------------------
-# Diagnostics ordering and deduplication (§2.1 diagnostic contract)
-# ---------------------------------------------------------------------------
 
 
 class DiagnosticTests(unittest.TestCase):
@@ -871,11 +792,6 @@ class SourceAnchorTests(unittest.TestCase):
             self.assertEqual(sum(command[:2] == ["git", "show"] for command in calls), 1)
 
 
-# ---------------------------------------------------------------------------
-# Bootstrap manifest locator (§2.1 precedence and typed failures)
-# ---------------------------------------------------------------------------
-
-
 class BootstrapLocatorTests(unittest.TestCase):
     def _repo(self, stack):
         directory = tempfile.TemporaryDirectory()
@@ -1012,11 +928,6 @@ class BootstrapLocatorTests(unittest.TestCase):
             path.write_text(raw, encoding="utf-8")
             _, failure = sa.locate_bootstrap_manifest(root)
             self.assertEqual(failure.reason, "invalid_json")
-
-
-# ---------------------------------------------------------------------------
-# Pre/post-cutover reconciliation gate (§2.1 step 6)
-# ---------------------------------------------------------------------------
 
 
 class ReconcileAgainstAuthorityTests(unittest.TestCase):
@@ -1156,11 +1067,6 @@ class ReconcileAgainstAuthorityTests(unittest.TestCase):
                        "block_sha256": companion.anchor.block_sha256},
         }])
         self.assertEqual(_reconcile_authority(records, _authority(records), "pre"), [])
-
-
-# ---------------------------------------------------------------------------
-# Canonicalization helper (§2.1 step 4)
-# ---------------------------------------------------------------------------
 
 
 class CanonicalizeTests(unittest.TestCase):

@@ -122,7 +122,7 @@ The view derives only `verified_integrated`, `untouched`, or explicit blocker re
 4. Block a slice unless every canonical prerequisite has verified integrated completion. Candidate-only, approved-unintegrated, or same-stack assumptions do not satisfy a prerequisite.
 5. Return untouched eligible slices in canonical ID order with their checked bounded packets. Critical-path preference requires a separate canonical policy field; never infer it from prose or source order.
 6. Create implementation, independent review, remediation, successor review, and integration gates as distinct work items.
-7. Attach parents at creation time. Publish multi-edge graph grooming atomically when V2 supports it; on Hermes, block dispatch first, add replacement parents before removing old parents, and recheck for stale claims after every mutation.
+7. Attach parents at creation time. Publish multi-edge graph grooming atomically; block dispatch, add replacement parents before removing old parents, and recheck for stale claims after every mutation.
 8. Use stable idempotency keys derived from plan ID + slice + role + candidate generation.
 
 Never call a slice eligible because its parent title/status looks complete. Resolve canonical IDs and inspect results.

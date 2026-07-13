@@ -1,10 +1,5 @@
 #!/usr/bin/env python3
-"""Verified V2 completion-ledger and fail-closed next-ready projection.
-
-This is a read-only planning helper. It validates one exported canonical DAG, its
-activation receipt, dispatch specifications, and completion ledger. It never reads
-Kanban/card status and never mutates task, Git, review, or integration state.
-"""
+"""Validate V2 execution state and project fail-closed next-ready packets."""
 
 from __future__ import annotations
 

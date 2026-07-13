@@ -139,11 +139,7 @@ def _worktree_observations(root: Path, repository: str) -> tuple[dict[str, dict[
 def inspect(root: Path, canonical_ref: str, candidates: Iterable[str], *,
             review_receipts: Iterable[str] = (),
             test_receipts: Iterable[str] = ()) -> LiveEvidence:
-    """Observe authoritative ref, current source blocks, and candidate ancestry.
-
-    Every Git/process failure remains an explicit error. Callers must suppress packets
-    rather than converting failures into negative or positive ancestry assertions.
-    """
+    """Observe authoritative ref, source blocks, worktrees, and candidate ancestry."""
     root = root.resolve()
     errors: list[str] = []
     repository: str | None = None

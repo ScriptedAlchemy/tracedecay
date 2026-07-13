@@ -129,31 +129,36 @@ def _sorted_unique_strings(value: object, label: str) -> tuple[str, ...]:
     return tuple(value)
 
 
-def _registry_anchor(value: object, label: str) -> tuple[sa.Anchor, str]:
-    owner = _exact_keys(
-        value,
-        {"path", "heading", "start_line", "end_line", "block_sha256"},
-        label,
-    )
+def _registry_anchor(value: dict[str, Any], label: str) -> sa.Anchor:
     if (
-        not isinstance(owner["path"], str)
-        or not owner["path"].startswith((PLAN_PREFIX, "docs/plans/2026-"))
-        or isinstance(owner["start_line"], bool)
-        or not isinstance(owner["start_line"], int)
-        or isinstance(owner["end_line"], bool)
-        or not isinstance(owner["end_line"], int)
-        or not isinstance(owner["heading"], str)
-        or not owner["heading"]
-        or not isinstance(owner["block_sha256"], str)
+        not isinstance(value["path"], str)
+        or not value["path"].startswith((PLAN_PREFIX, "docs/plans/2026-"))
+        or isinstance(value["start_line"], bool)
+        or not isinstance(value["start_line"], int)
+        or isinstance(value["end_line"], bool)
+        or not isinstance(value["end_line"], int)
+        or not isinstance(value["block_sha256"], str)
     ):
         raise ValueError(f"{label} is malformed")
     anchor = sa.Anchor(
-        owner["path"], owner["start_line"], owner["end_line"], owner["block_sha256"]
+        value["path"], value["start_line"], value["end_line"], value["block_sha256"]
     )
     diagnostics = sa.validate_source_anchor(anchor)
     if diagnostics:
         raise ValueError(f"{label} is malformed: {diagnostics[0].violated_rule}")
-    return anchor, owner["heading"]
+    return anchor
+
+
+def _registry_owner(value: object, label: str) -> tuple[sa.Anchor, str]:
+    body = _exact_keys(
+        value,
+        {"path", "heading", "start_line", "end_line", "block_sha256"},
+        label,
+    )
+    heading = body["heading"]
+    if not isinstance(heading, str) or not heading:
+        raise ValueError(f"{label} is malformed")
+    return _registry_anchor(body, label), heading
 
 
 def _registry_source_anchors(value: object, label: str) -> tuple[sa.Anchor, ...]:
@@ -164,8 +169,7 @@ def _registry_source_anchors(value: object, label: str) -> tuple[sa.Anchor, ...]
         body = _exact_keys(
             raw, {"path", "start_line", "end_line", "block_sha256"}, f"{label}[{index}]"
         )
-        anchor, _ = _registry_anchor({**body, "heading": "authority source"}, f"{label}[{index}]")
-        anchors.append(anchor)
+        anchors.append(_registry_anchor(body, f"{label}[{index}]"))
     refs = [anchor.ref() for anchor in anchors]
     if refs != sorted(set(refs)):
         raise ValueError(f"{label} must be sorted and unique")
@@ -261,7 +265,7 @@ def load_registry(materialized: Path) -> Registry:
             },
             slice_id,
         )
-        owner, owner_heading = _registry_anchor(body["owner"], f"{slice_id}.owner")
+        owner, owner_heading = _registry_owner(body["owner"], f"{slice_id}.owner")
         source_anchors = _registry_source_anchors(
             body["source_anchors"], f"{slice_id}.source_anchors"
         )
