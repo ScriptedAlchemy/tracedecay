@@ -486,13 +486,33 @@ async fn dirty_open_recovers_committed_wal_before_clearing_sentinel()
 
     let ts = TraceDecay::init_with_options(&project_root, open_options.clone()).await?;
     let layout = ts.store_layout().clone();
+    ts.db()
+        .conn()
+        .execute_batch("PRAGMA wal_autocheckpoint = 0")
+        .await?;
+    let mut journal_rows = ts.db().conn().query("PRAGMA journal_mode", ()).await?;
+    let journal_mode = journal_rows
+        .next()
+        .await?
+        .expect("journal mode row")
+        .get::<String>(0)?;
+    drop(journal_rows);
     let node = sample_node("wal-recovery-node", "wal_recovery_node");
     ts.db().insert_nodes(std::slice::from_ref(&node)).await?;
-    let wal_path = layout.graph_db_path.with_extension("db-wal");
-    assert!(
-        std::fs::metadata(&wal_path)?.len() > 0,
-        "fixture must retain committed WAL frames"
-    );
+    if journal_mode.eq_ignore_ascii_case("wal") {
+        let mut wal_path = layout.graph_db_path.as_os_str().to_os_string();
+        wal_path.push("-wal");
+        assert!(
+            std::fs::metadata(std::path::PathBuf::from(wal_path))?.len() > 0,
+            "disabled autocheckpoint must retain committed WAL frames"
+        );
+    } else {
+        assert_eq!(
+            journal_mode.to_ascii_lowercase(),
+            "delete",
+            "production recovery fixture must use the platform-safe journal"
+        );
+    }
     std::fs::write(&layout.dirty_path, "pid=99999\nversion=test")?;
 
     let recovered = TraceDecay::open_with_options(&project_root, open_options).await?;
