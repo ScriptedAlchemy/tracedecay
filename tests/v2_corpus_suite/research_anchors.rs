@@ -7,11 +7,12 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::Path;
 use tracedecay_domain::research::{
-    AttributionGap, CatalogGenerationId, ContributionRoleV1, DomainError, LogSafeText,
-    ResearchAnchorSubjectV1, ResearchAnchorTombstoneV1, ResearchBundleEnvelopeV1,
-    ResearchBundleManifestV1, ResearchContextAnchorV1, RetrievalRecipeId, RetrievalRecipeV1,
-    SanitizationReceiptRefV1, SanitizationReceiptResolverV1, SanitizedTextRefV1,
-    ShardDispositionV1, ShardId,
+    AnchorTombstoneReasonV1, AttributionGap, CatalogGenerationId, ContributionRoleV1, DomainError,
+    FrozenWatermarkResolutionV1, LogSafeText, PayloadAccessState, ResearchAnchorSubjectV1,
+    ResearchAnchorTombstoneV1, ResearchBundleEnvelopeV1, ResearchBundleManifestV1,
+    ResearchContextAnchorV1, RetrievalRecipeId, RetrievalRecipeV1, SanitizationReceiptRefV1,
+    SanitizationReceiptResolverV1, SanitizedTextRefV1, ShardDispositionV1, ShardId,
+    WatermarkDriftV1,
 };
 
 const FIXTURE: &str = "tests/fixtures/v2/research-anchor-manifest.json";
@@ -751,8 +752,10 @@ fn project_rename_and_worktree_deletion_preserve_canonical_anchor_identity() {
     let ResearchAnchorSubjectV1::Git(subject) = &anchor.subject else {
         panic!("branch-session fixture must use a Git subject");
     };
-    let retrieval_anchor = anchor.retrieval_anchors.iter().next().unwrap();
+    let retrieval_anchor = anchor.retrieval_anchors.iter().next().unwrap().clone();
     let deleted_worktree = subject.worktree_id.as_ref().expect("worktree identity");
+    let original_entry_id = anchor.entry_id.clone();
+    let original_catalog_digest = fixture.envelope.retrieval_catalog.compute_digest().unwrap();
 
     assert_eq!(
         subject.project_id.as_ref().unwrap().as_str(),
@@ -765,7 +768,7 @@ fn project_rename_and_worktree_deletion_preserve_canonical_anchor_identity() {
         fixture
             .envelope
             .retrieval_catalog
-            .get(retrieval_anchor)
+            .get(&retrieval_anchor)
             .is_some()
     );
     assert_eq!(
@@ -776,6 +779,34 @@ fn project_rename_and_worktree_deletion_preserve_canonical_anchor_identity() {
         retrieval_anchor.as_str(),
         "retrieval-anchor-branch-session-001"
     );
+
+    // Location lifecycle is deliberately absent from the immutable identity. A
+    // deleted worktree/ref can be removed from a recovered context anchor while
+    // the stable entry and catalog lookup remain valid after a project rename.
+    let mut after_location_change = anchor.clone();
+    let ResearchAnchorSubjectV1::Git(subject) = &mut after_location_change.subject else {
+        unreachable!();
+    };
+    subject.worktree_id = None;
+    subject.ref_id = None;
+    after_location_change.validate().unwrap();
+
+    assert_eq!(after_location_change.entry_id, original_entry_id);
+    assert_eq!(
+        after_location_change.retrieval_anchors.iter().next(),
+        Some(&retrieval_anchor)
+    );
+    assert_eq!(
+        fixture.envelope.retrieval_catalog.compute_digest().unwrap(),
+        original_catalog_digest
+    );
+    fixture
+        .envelope
+        .retrieval_catalog
+        .get(&retrieval_anchor)
+        .unwrap()
+        .validate()
+        .unwrap();
 }
 
 #[test]
@@ -787,8 +818,13 @@ fn shard_routing_uses_watermarks_without_rekeying_canonical_anchors() {
     for anchor in &manifest.anchors {
         for retrieval_anchor in anchor.retrieval_anchors.iter() {
             let record = catalog.get(retrieval_anchor).expect("cataloged anchor");
+            record.validate().unwrap();
             assert_eq!(record.anchor_id, *retrieval_anchor);
             assert_eq!(record.snapshot, anchor.snapshot);
+            let resolution =
+                FrozenWatermarkResolutionV1::new(record.snapshot.clone(), anchor.snapshot.clone());
+            resolution.validate().unwrap();
+            assert_eq!(resolution.drift, WatermarkDriftV1::Exact);
             for shard in anchor.snapshot.components.keys() {
                 assert!(anchor.coverage.disposition(shard).is_some());
             }
@@ -797,11 +833,16 @@ fn shard_routing_uses_watermarks_without_rekeying_canonical_anchors() {
 
     for tombstone in &fixture.tombstones {
         tombstone.validate_against(catalog).unwrap();
+        assert!(matches!(
+            tombstone.reason,
+            AnchorTombstoneReasonV1::Deleted
+                | AnchorTombstoneReasonV1::Expired
+                | AnchorTombstoneReasonV1::Redacted
+        ));
         for retrieval_anchor in tombstone.retrieval_anchors.iter() {
-            assert_eq!(
-                catalog.get(retrieval_anchor).unwrap().anchor_id,
-                *retrieval_anchor
-            );
+            let retained = catalog.get(retrieval_anchor).unwrap();
+            assert_eq!(retained.anchor_id, *retrieval_anchor);
+            assert_ne!(retained.payload_access, PayloadAccessState::Eligible);
         }
     }
 }
