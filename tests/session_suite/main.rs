@@ -22,3 +22,13 @@ mod lcm_schema;
 mod message_search_eval_test;
 mod structured_backfill;
 mod transcript_backfill;
+
+#[test]
+#[ignore = "fresh-process child probe"]
+fn structured_backfill_fresh_child_probe() {
+    tracedecay::global_db::set_background_structured_backfill_enabled(true);
+    assert!(
+        !tracedecay::global_db::structured_backfill_will_spawn(),
+        "a one-shot process must not spawn the sweep"
+    );
+}

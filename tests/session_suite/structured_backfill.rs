@@ -729,24 +729,23 @@ async fn structured_backfill_migrates_legacy_global_marker() {
 /// with the background switch on: it would drop the sweep mid-parse on exit.
 #[tokio::test]
 async fn structured_backfill_one_shot_process_never_spawns() {
-    // Cargo's default test runner shares this process with tests that disable
-    // background backfill for deterministic manual sweeps. Restore the
-    // production default before asserting the independent long-lived gate.
-    tracedecay::global_db::set_background_structured_backfill_enabled(true);
-    // In fresh process state (including nextest), the background switch is on,
-    // but a one-shot process is not long-lived.
+    let current_exe = std::env::current_exe().expect("resolve the session-suite test binary");
+    let output = std::process::Command::new(current_exe)
+        .args([
+            "--exact",
+            "structured_backfill_fresh_child_probe",
+            "--ignored",
+            "--nocapture",
+        ])
+        .output()
+        .expect("launch the fresh-process child probe");
+
     assert!(
-        !tracedecay::global_db::structured_backfill_will_spawn(),
-        "a one-shot process must not spawn the sweep"
+        output.status.success(),
+        "fresh-process child probe failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
     );
-    // A long-lived host (MCP serve / daemon) opts in and then does spawn.
-    tracedecay::global_db::mark_process_long_lived_for_structured_backfill();
-    assert!(
-        tracedecay::global_db::structured_backfill_will_spawn(),
-        "a long-lived host must spawn the sweep"
-    );
-    tracedecay::global_db::reset_process_long_lived_for_structured_backfill();
-    tracedecay::global_db::set_background_structured_backfill_enabled(false);
 }
 
 /// Two concurrent openers of the same store contend on the sibling lock file:

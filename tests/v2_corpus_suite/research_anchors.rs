@@ -8,9 +8,10 @@ use std::fs;
 use std::path::Path;
 use tracedecay_domain::research::{
     AttributionGap, CatalogGenerationId, ContributionRoleV1, DomainError, LogSafeText,
-    ResearchAnchorTombstoneV1, ResearchBundleEnvelopeV1, ResearchBundleManifestV1,
-    ResearchContextAnchorV1, RetrievalRecipeId, RetrievalRecipeV1, SanitizationReceiptRefV1,
-    SanitizationReceiptResolverV1, SanitizedTextRefV1, ShardDispositionV1, ShardId,
+    ResearchAnchorSubjectV1, ResearchAnchorTombstoneV1, ResearchBundleEnvelopeV1,
+    ResearchBundleManifestV1, ResearchContextAnchorV1, RetrievalRecipeId, RetrievalRecipeV1,
+    SanitizationReceiptRefV1, SanitizationReceiptResolverV1, SanitizedTextRefV1,
+    ShardDispositionV1, ShardId,
 };
 
 const FIXTURE: &str = "tests/fixtures/v2/research-anchor-manifest.json";
@@ -735,4 +736,100 @@ fn tombstones_reject_invalid_retrieval_catalogs() {
         tombstone.validate_against(&fixture.envelope.retrieval_catalog),
         fixture.envelope.retrieval_catalog.validate()
     );
+}
+
+#[test]
+fn project_rename_and_worktree_deletion_preserve_canonical_anchor_identity() {
+    let fixture = valid_fixture();
+    let anchor = fixture
+        .envelope
+        .manifest
+        .anchors
+        .iter()
+        .find(|anchor| anchor.entry_id.as_str() == "research-anchor-branch-session-001")
+        .unwrap();
+    let ResearchAnchorSubjectV1::Git(subject) = &anchor.subject else {
+        panic!("branch-session fixture must use a Git subject");
+    };
+    let retrieval_anchor = anchor.retrieval_anchors.iter().next().unwrap();
+    let deleted_worktree = subject.worktree_id.as_ref().expect("worktree identity");
+
+    assert_eq!(
+        subject.project_id.as_ref().unwrap().as_str(),
+        "project-synthetic-001"
+    );
+    assert_eq!(deleted_worktree.as_str(), "worktree-synthetic-001");
+    assert!(!fixture_json().contains("project_display_name"));
+    assert!(!fixture_json().contains("worktree_path"));
+    assert!(
+        fixture
+            .envelope
+            .retrieval_catalog
+            .get(retrieval_anchor)
+            .is_some()
+    );
+    assert_eq!(
+        anchor.entry_id.as_str(),
+        "research-anchor-branch-session-001"
+    );
+    assert_eq!(
+        retrieval_anchor.as_str(),
+        "retrieval-anchor-branch-session-001"
+    );
+}
+
+#[test]
+fn shard_routing_uses_watermarks_without_rekeying_canonical_anchors() {
+    let fixture = valid_fixture();
+    let manifest = &fixture.envelope.manifest;
+    let catalog = &fixture.envelope.retrieval_catalog;
+
+    for anchor in &manifest.anchors {
+        for retrieval_anchor in anchor.retrieval_anchors.iter() {
+            let record = catalog.get(retrieval_anchor).expect("cataloged anchor");
+            assert_eq!(record.anchor_id, *retrieval_anchor);
+            assert_eq!(record.snapshot, anchor.snapshot);
+            for shard in anchor.snapshot.components.keys() {
+                assert!(anchor.coverage.disposition(shard).is_some());
+            }
+        }
+    }
+
+    for tombstone in &fixture.tombstones {
+        tombstone.validate_against(catalog).unwrap();
+        for retrieval_anchor in tombstone.retrieval_anchors.iter() {
+            assert_eq!(
+                catalog.get(retrieval_anchor).unwrap().anchor_id,
+                *retrieval_anchor
+            );
+        }
+    }
+}
+
+#[test]
+fn private_chronological_exports_and_judgments_require_external_owner_only_storage() {
+    fn allowed(path: &Path, repository: &Path, unix_mode: Option<u32>) -> bool {
+        // `None` is the portable fail-closed result when a platform cannot prove
+        // POSIX owner-only permissions.
+        !path.starts_with(repository) && unix_mode == Some(0o600)
+    }
+
+    let repository = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let committed_raw_export = repository.join("tests/fixtures/v2/raw-chronological.jsonl");
+    let external_raw_export = std::env::temp_dir().join("tracedecay-private-chronological.jsonl");
+    let external_judgments = std::env::temp_dir().join("tracedecay-private-judgments.jsonl");
+    assert!(!allowed(&committed_raw_export, repository, Some(0o600)));
+    assert!(!allowed(&external_raw_export, repository, Some(0o644)));
+    assert!(!allowed(&external_raw_export, repository, None));
+    assert!(allowed(&external_raw_export, repository, Some(0o600)));
+    assert!(allowed(&external_judgments, repository, Some(0o600)));
+
+    for forbidden in ["raw_chronological_export", "private_judgment_artifact"] {
+        let mutated = fixture_json().replacen(
+            "{\n  \"envelope\":",
+            &format!("{{\n  \"{forbidden}\": \"external-only\",\n  \"envelope\":"),
+            1,
+        );
+        assert_unknown_field_rejected(&mutated, forbidden);
+    }
 }

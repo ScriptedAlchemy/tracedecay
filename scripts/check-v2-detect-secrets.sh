@@ -36,10 +36,43 @@ except (OSError, json.JSONDecodeError) as error:
 
 if baseline.get("version") != required_version:
     raise SystemExit("check-v2-detect-secrets: baseline version mismatch")
-if not baseline.get("plugins_used"):
-    raise SystemExit("check-v2-detect-secrets: baseline has no enabled plugins")
-if not isinstance(baseline.get("results"), dict):
-    raise SystemExit("check-v2-detect-secrets: baseline results must be an object")
+if baseline.get("results") != {}:
+    raise SystemExit("check-v2-detect-secrets: baseline results must be empty")
+
+plugins = {entry.get("name") for entry in baseline.get("plugins_used", [])}
+for noisy in {
+    "Base64HighEntropyString",
+    "BasicAuthDetector",
+    "HexHighEntropyString",
+    "IPPublicDetector",
+    "KeywordDetector",
+}:
+    if noisy in plugins:
+        raise SystemExit(f"check-v2-detect-secrets: noisy detector enabled: {noisy}")
+required = {"AWSKeyDetector", "GitHubTokenDetector", "OpenAIDetector", "PrivateKeyDetector", "SlackDetector"}
+missing = required - plugins
+if missing:
+    raise SystemExit(f"check-v2-detect-secrets: required detectors missing: {sorted(missing)}")
+
+file_filters = [
+    entry for entry in baseline.get("filters_used", [])
+    if entry.get("path") == "detect_secrets.filters.regex.should_exclude_file"
+]
+if file_filters != [{
+    "path": "detect_secrets.filters.regex.should_exclude_file",
+    "pattern": [r"^\.secrets\.baseline$"],
+}]:
+    raise SystemExit("check-v2-detect-secrets: only the baseline file may be path-excluded")
+
+secret_filters = [
+    entry for entry in baseline.get("filters_used", [])
+    if entry.get("path") == "detect_secrets.filters.regex.should_exclude_secret"
+]
+if secret_filters != [{
+    "path": "detect_secrets.filters.regex.should_exclude_secret",
+    "pattern": [r"^(AKIAIOSFODNN7EXAMPLE|ghp_(0{36}|abcdefghijklmnopqrstuvwxyz0123456789)|-----BEGIN PRIVATE KEY-----\n(NOT-A-VALID-PRIVATE-KEY|LOSSLESSPRIVATEKEY1234567890)\n-----END PRIVATE KEY-----)$"],
+}]:
+    raise SystemExit("check-v2-detect-secrets: synthetic exclusions must stay exact and reserved")
 PY
 
 candidate="${2:-HEAD}"
@@ -55,64 +88,44 @@ tmp_dir="$(mktemp -d)" || die "unable to create temporary directory"
 trap 'rm -rf "$tmp_dir"' EXIT
 mkdir -p "$tmp_dir/tree"
 git archive "$candidate" | tar -xf - -C "$tmp_dir/tree" || die "unable to materialize candidate tree"
-cp "$BASELINE" "$tmp_dir/baseline.json"
+cp "$BASELINE" "$tmp_dir/scanned-baseline.json"
 
 (
   cd "$tmp_dir/tree"
-  detect-secrets scan --all-files \
-    --exclude-files '^\.secrets\.baseline$' \
-    --baseline "$tmp_dir/baseline.json" . >/dev/null
+  detect-secrets scan --all-files --baseline "$tmp_dir/scanned-baseline.json" . >/dev/null
 ) || die "detect-secrets scan failed"
 
-python3 - "$BASELINE" "$tmp_dir/baseline.json" <<'PY' || exit 1
-import json
-import sys
-
-def load(path):
-    try:
-        with open(path, encoding="utf-8") as handle:
-            return json.load(handle)
-    except (OSError, json.JSONDecodeError) as error:
-        raise SystemExit(f"check-v2-detect-secrets: invalid scanner output: {error}")
-
-expected, scanned = map(load, sys.argv[1:])
-results = scanned.get("results")
-if not isinstance(results, dict):
-    raise SystemExit("check-v2-detect-secrets: scanner omitted results")
-
-for field in ("version", "plugins_used"):
-    if expected.get(field) != scanned.get(field):
-        raise SystemExit(f"check-v2-detect-secrets: stale baseline {field}")
-
-def finding_keys(document):
-    return {
-        (finding.get("type"), finding.get("hashed_secret"))
-        for findings in document["results"].values()
-        for finding in findings
-    }
-
-new_findings = finding_keys(scanned) - finding_keys(expected)
-if new_findings:
-    raise SystemExit(
-        f"check-v2-detect-secrets: {len(new_findings)} new finding(s); candidate content suppressed"
-    )
-PY
-
-config_sum="$(sha256sum "$BASELINE")" || die "unable to hash baseline"
-config_hex="${config_sum%% *}"
-config_digest="sha256:$config_hex"
-scan_hex="$(python3 - "$tmp_dir/baseline.json" <<'PY'
+scan_hex="$(python3 - "$tmp_dir/scanned-baseline.json" "$REQUIRED_VERSION" <<'PY'
 import hashlib
 import json
 import sys
 
-with open(sys.argv[1], encoding="utf-8") as handle:
-    report = json.load(handle)
+path, required_version = sys.argv[1:]
+try:
+    with open(path, encoding="utf-8") as handle:
+        report = json.load(handle)
+except (OSError, json.JSONDecodeError) as error:
+    raise SystemExit(f"check-v2-detect-secrets: invalid scanner output: {error}")
+
+if report.get("version") != required_version:
+    raise SystemExit("check-v2-detect-secrets: scanner output version mismatch")
+results = report.get("results")
+if not isinstance(results, dict):
+    raise SystemExit("check-v2-detect-secrets: scanner omitted results")
+finding_count = sum(len(findings) for findings in results.values())
+if finding_count:
+    raise SystemExit(
+        f"check-v2-detect-secrets: {finding_count} candidate finding(s); candidate content suppressed"
+    )
+
 report.pop("generated_at", None)
 canonical = json.dumps(report, sort_keys=True, separators=(",", ":")).encode()
 print(hashlib.sha256(canonical).hexdigest())
 PY
-)" || die "unable to hash scanner report"
+)" || die "detect-secrets candidate tree is not zero-finding"
+
+config_sum="$(sha256sum "$BASELINE")" || die "unable to hash baseline"
+config_digest="sha256:${config_sum%% *}"
 mkdir -p "$(dirname "$RECEIPT")"
 python3 - "$RECEIPT" "$config_digest" "$reviewed_base_json" "$candidate" "$SURFACE_ID" "$scan_hex" <<'PY'
 import hashlib
@@ -124,20 +137,18 @@ import tempfile
 receipt_path, config_digest, reviewed_base_json, candidate, surface_id, scan_hex = sys.argv[1:]
 payload = {
     "schema_version": 1,
-    "tool_name": "detect-secrets",
-    "tool_version": "1.5.0",
+    "tool": {"name": "detect-secrets", "version": "1.5.0"},
     "config_digest": config_digest,
-    "reviewed_base_commit": json.loads(reviewed_base_json),
-    "candidate_commit": candidate,
+    "reviewed_base": json.loads(reviewed_base_json),
+    "candidate": candidate,
     "scanned_surface_ids": [surface_id],
     "coverage_state": "complete",
     "finding_count": 0,
 }
-reviewed_base = payload["reviewed_base_commit"] or ""
 evidence = "\n".join((
-    payload["tool_version"],
+    payload["tool"]["version"],
     config_digest.removeprefix("sha256:"),
-    reviewed_base,
+    payload["reviewed_base"] or "",
     candidate,
     scan_hex,
 )).encode()

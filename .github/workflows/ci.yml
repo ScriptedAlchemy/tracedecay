@@ -80,6 +80,122 @@ jobs:
       - name: Check release version drift
         run: scripts/check-release-drift.sh
 
+  v2-corpus-privacy:
+    name: V2 corpus privacy
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    env:
+      REVIEWED_BASE: ${{ github.event.pull_request.base.sha }}
+      CANDIDATE: ${{ github.event.pull_request.head.sha }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - name: Validate immutable PR revisions and complete history
+        run: |
+          set -euo pipefail
+          readonly sha_pattern='^[0-9a-f]{40}$'
+          [[ "$REVIEWED_BASE" =~ $sha_pattern ]]
+          [[ "$CANDIDATE" =~ $sha_pattern ]]
+          test "$(git rev-parse --is-shallow-repository)" = "false"
+          test "$(git rev-parse --verify "${REVIEWED_BASE}^{commit}")" = "$REVIEWED_BASE"
+          test "$(git rev-parse --verify "${CANDIDATE}^{commit}")" = "$CANDIDATE"
+          git merge-base --is-ancestor "$REVIEWED_BASE" "$CANDIDATE"
+          git rev-list --objects --missing=print "$REVIEWED_BASE..$CANDIDATE" > "$RUNNER_TEMP/pr2-range-objects"
+          if grep -q '^?' "$RUNNER_TEMP/pr2-range-objects"; then
+            echo "PR2 reviewed range has missing Git objects" >&2
+            exit 1
+          fi
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: ./.github/actions/setup-linux-mold
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version: stable
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install pinned privacy scanners
+        env:
+          GOBIN: ${{ runner.temp }}/scanner-bin
+        run: |
+          set -euo pipefail
+          mkdir -p "$GOBIN"
+          go install github.com/gitleaks/gitleaks/v8@v8.30.1
+          "$GOBIN/gitleaks" version | grep -Fx '8.30.1'
+          echo "$GOBIN" >> "$GITHUB_PATH"
+          python -m pip install --disable-pip-version-check 'detect-secrets==1.5.0'
+          detect-secrets --version | grep -Fx 'detect-secrets 1.5.0'
+
+      - name: Run focused V2 privacy corpus tests
+        run: cargo test --test v2_corpus_suite privacy
+
+      - name: Run pinned Gitleaks lane
+        run: scripts/check-v2-gitleaks.sh "$REVIEWED_BASE" "$CANDIDATE"
+
+      - name: Run pinned detect-secrets lane
+        run: scripts/check-v2-detect-secrets.sh "$REVIEWED_BASE" "$CANDIDATE"
+
+      - name: Generate content-free host receipts
+        run: |
+          python3 - <<'PY'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+
+          fixtures = Path("tests/fixtures/v2/privacy")
+          paths = sorted(fixtures.glob("host-*.json"))
+          if len(paths) != 7:
+              raise SystemExit(f"expected 7 host fixtures, found {len(paths)}")
+          scanner_receipts = [
+              Path("target/v2-privacy/receipts/gitleaks-8.30.1.json"),
+              Path("target/v2-privacy/receipts/detect-secrets-1.5.0.json"),
+          ]
+          scanner_digests = {}
+          for path in scanner_receipts:
+              data = path.read_bytes()
+              scanner_digests[path.as_posix()] = "sha256:" + hashlib.sha256(data).hexdigest()
+          for path in paths:
+              raw = path.read_bytes()
+              fixture = json.loads(raw)
+              surface_id = fixture.get("surface_id")
+              expected = f"target/v2-privacy/receipts/hosts/{surface_id}.json"
+              if fixture.get("metadata_only") is not True or fixture.get("receipt_ref") != expected:
+                  raise SystemExit(f"invalid host receipt contract: {path}")
+              payload = {
+                  "schema_version": 1,
+                  "surface_id": surface_id,
+                  "artifact_class": fixture.get("artifact_class"),
+                  "reviewed_base_commit": os.environ["REVIEWED_BASE"],
+                  "candidate_commit": os.environ["CANDIDATE"],
+                  "coverage_state": "complete",
+                  "finding_count": 0,
+                  "fixture_digest": "sha256:" + hashlib.sha256(raw).hexdigest(),
+                  "scanner_receipt_digests": scanner_digests,
+              }
+              canonical = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+              payload["artifact_digest"] = "sha256:" + hashlib.sha256(canonical).hexdigest()
+              destination = Path(expected)
+              destination.parent.mkdir(parents=True, exist_ok=True)
+              destination.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+          PY
+
+      - name: Publish content-free privacy receipts
+        uses: actions/upload-artifact@v4
+        with:
+          name: v2-privacy-receipts-${{ github.event.pull_request.number }}-${{ github.event.pull_request.head.sha }}
+          path: target/v2-privacy/receipts/**/*.json
+          if-no-files-found: error
+          retention-days: 7
+
   test:
     name: Test ${{ matrix.name }}
     if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON('["master","feature/holographic-memory"]'), github.event.pull_request.base.ref) }}
