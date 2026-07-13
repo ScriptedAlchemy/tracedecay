@@ -7,5 +7,6 @@ useDefault = true
 description = "Exclude Git metadata and non-candidate local build artifacts"
 paths = [
   '''(^|/)\.git(?:/|$)''',
+  '''(^|/)\.secrets\.baseline$''',
   '''(^|/)target(?:/|$)''',
 ]

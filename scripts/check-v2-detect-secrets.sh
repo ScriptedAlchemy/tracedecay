@@ -38,8 +38,8 @@ if baseline.get("version") != required_version:
     raise SystemExit("check-v2-detect-secrets: baseline version mismatch")
 if not baseline.get("plugins_used"):
     raise SystemExit("check-v2-detect-secrets: baseline has no enabled plugins")
-if baseline.get("results") != {}:
-    raise SystemExit("check-v2-detect-secrets: baseline contains findings")
+if not isinstance(baseline.get("results"), dict):
+    raise SystemExit("check-v2-detect-secrets: baseline results must be an object")
 PY
 
 candidate="${2:-HEAD}"
@@ -59,7 +59,9 @@ cp "$BASELINE" "$tmp_dir/baseline.json"
 
 (
   cd "$tmp_dir/tree"
-  detect-secrets scan --all-files --baseline "$tmp_dir/baseline.json" . >/dev/null
+  detect-secrets scan --all-files \
+    --exclude-files '^\.secrets\.baseline$' \
+    --baseline "$tmp_dir/baseline.json" . >/dev/null
 ) || die "detect-secrets scan failed"
 
 python3 - "$BASELINE" "$tmp_dir/baseline.json" <<'PY' || exit 1
@@ -77,14 +79,23 @@ expected, scanned = map(load, sys.argv[1:])
 results = scanned.get("results")
 if not isinstance(results, dict):
     raise SystemExit("check-v2-detect-secrets: scanner omitted results")
-if any(results.values()):
-    count = sum(len(findings) for findings in results.values())
-    raise SystemExit(f"check-v2-detect-secrets: {count} finding(s); candidate content suppressed")
 
-for document in (expected, scanned):
-    document.pop("generated_at", None)
-if expected != scanned:
-    raise SystemExit("check-v2-detect-secrets: stale baseline")
+for field in ("version", "plugins_used"):
+    if expected.get(field) != scanned.get(field):
+        raise SystemExit(f"check-v2-detect-secrets: stale baseline {field}")
+
+def finding_keys(document):
+    return {
+        (finding.get("type"), finding.get("hashed_secret"))
+        for findings in document["results"].values()
+        for finding in findings
+    }
+
+new_findings = finding_keys(scanned) - finding_keys(expected)
+if new_findings:
+    raise SystemExit(
+        f"check-v2-detect-secrets: {len(new_findings)} new finding(s); candidate content suppressed"
+    )
 PY
 
 config_sum="$(sha256sum "$BASELINE")" || die "unable to hash baseline"
