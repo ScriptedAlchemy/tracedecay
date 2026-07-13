@@ -92,13 +92,13 @@ class StagedAuthorityHarness:
         self.fixture.git("add", transition.PACKET_SOURCE_PATH.as_posix())
         self.fixture.git("commit", "-m", "test: add reviewed staged source")
         compiled, live = compile_plan_authority.compile_from_ref(
-            self.fixture.root, "refs/heads/main", revision=5
+            self.fixture.root, "refs/heads/main", revision=6
         )
         self.compiled = compiled
         self.live = live
         state_bytes = compile_plan_authority._canonical_json_bytes(compiled.state)
         self.predecessor = transition.Predecessor(
-            generation="r5-test-predecessor",
+            generation="r6-test-predecessor",
             pointer_bytes=b"{}\n",
             manifest=compiled.manifest,
             state=compiled.state,

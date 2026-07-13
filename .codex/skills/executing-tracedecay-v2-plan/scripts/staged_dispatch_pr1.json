@@ -1,11 +1,11 @@
 {
-  "authority_revision": 6,
+  "authority_revision": 7,
   "authorized_slice_ids": [
     "PR 1"
   ],
-  "checked_manifest_digest": "sha256:02707bf4782013bd81cd7031b49114d3bcca7b3f058f598118a32544c49577b8",
-  "checked_manifest_revision": 5,
-  "checked_source_set_digest": "sha256:e942346c591d6b02c8c74d777cc127999cac139d602e7a4817cf746f9d369c5f",
+  "checked_manifest_digest": "sha256:50c4e34f7138ce0d0f41289aec18bae0a293e07c23536eb6646df940483916ca",
+  "checked_manifest_revision": 6,
+  "checked_source_set_digest": "sha256:ee8782577549d1d77e0aba728e35e9d1146ae67500cb29852e415968755d09be",
   "packet": {
     "acceptance": [
       {

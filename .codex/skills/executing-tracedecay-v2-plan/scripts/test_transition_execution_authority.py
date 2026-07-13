@@ -59,7 +59,7 @@ class TransitionHarness:
         self.fixture.git("add", transition.PACKET_SOURCE_PATH.as_posix())
         self.fixture.git("commit", "-m", "test: add reviewed staged source")
         compiled, live = compile_plan_authority.compile_from_ref(
-            self.fixture.root, "refs/heads/main", revision=5
+            self.fixture.root, "refs/heads/main", revision=6
         )
         state_bytes = compile_plan_authority._canonical_json_bytes(compiled.state)
         self.compiled = compiled
@@ -71,7 +71,7 @@ class TransitionHarness:
             compile_plan_authority._canonical_json_bytes(compiled.manifest)
         ).hexdigest()
         state_hex = hashlib.sha256(state_bytes).hexdigest()
-        generation = f"r5-{manifest_hex[:16]}-{state_hex[:16]}"
+        generation = f"r6-{manifest_hex[:16]}-{state_hex[:16]}"
         self.predecessor = transition.Predecessor(
             generation=generation,
             pointer_bytes=b"",
@@ -143,13 +143,13 @@ class ReviewedSourceTests(unittest.TestCase):
             HARNESS.source.document, HARNESS.compiled.manifest
         )
         self.assertEqual(HARNESS.source.document["authorized_slice_ids"], ["PR 1"])
-        self.assertEqual(HARNESS.source.document["authority_revision"], 6)
-        self.assertEqual(HARNESS.source.document["checked_manifest_revision"], 5)
+        self.assertEqual(HARNESS.source.document["authority_revision"], 7)
+        self.assertEqual(HARNESS.source.document["checked_manifest_revision"], 6)
 
     def test_revision_skip_manifest_drift_and_packet_drift_are_rejected(self) -> None:
         cases = []
         skipped = copy.deepcopy(HARNESS.source.document)
-        skipped["authority_revision"] = 7
+        skipped["authority_revision"] = 8
         cases.append((dataclasses.replace(HARNESS.source, document=skipped), "exact predecessor successor"))
         stale_manifest = copy.deepcopy(HARNESS.source.document)
         stale_manifest["checked_manifest_digest"] = "sha256:" + "0" * 64
@@ -275,9 +275,9 @@ class AtomicTransitionTests(unittest.TestCase):
         candidate["authority_transition"]["authority_review"] = make_review(candidate)
         state_path, active = transition._install(root, predecessor, candidate)
         first_pointer = active.read_bytes()
-        self.assertEqual(json.loads(state_path.read_text())["canonical_dag"]["graph_revision"], 6)
+        self.assertEqual(json.loads(state_path.read_text())["canonical_dag"]["graph_revision"], 7)
         self.assertEqual(
-            json.loads((state_path.parent / "manifest.json").read_text())["graph_revision"], 5
+            json.loads((state_path.parent / "manifest.json").read_text())["graph_revision"], 6
         )
         replay_state, replay_active = transition._install(root, predecessor, candidate)
         self.assertEqual(replay_state, state_path)
@@ -292,7 +292,7 @@ class AtomicTransitionTests(unittest.TestCase):
         candidate["authority_transition"]["authority_review"] = make_review(candidate)
         active = root / bootstrap_execution.ACTIVE_POINTER
         changed = json.loads(active.read_text())
-        changed["generation"] = "r5-concurrent-winner"
+        changed["generation"] = "r6-concurrent-winner"
         active.write_bytes(compile_plan_authority._canonical_json_bytes(changed))
         before = active.read_bytes()
         with self.assertRaisesRegex(ValueError, "changed before compare-and-swap"):
