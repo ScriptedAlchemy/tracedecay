@@ -395,6 +395,118 @@ async fn open_preserves_corrupt_store_and_dirty_sentinel_for_offline_repair()
 }
 
 #[tokio::test]
+async fn dirty_open_checks_integrity_before_writable_migration()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    let dir = TempDir::new()?;
+    let project_root = dir.path().join("repo");
+    std::fs::create_dir_all(&project_root)?;
+    let open_options = TraceDecayOpenOptions {
+        profile_root: Some(dir.path().join("profile")),
+        global_db_path: Some(dir.path().join("global.db")),
+    };
+
+    let ts = TraceDecay::init_with_options(&project_root, open_options.clone()).await?;
+    let layout = ts.store_layout().clone();
+    ts.db()
+        .conn()
+        .execute_batch("PRAGMA user_version = 17")
+        .await?;
+    ts.checkpoint().await?;
+    ts.close();
+
+    let mut file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&layout.graph_db_path)?;
+    let offset = std::cmp::min(file.metadata()?.len() / 2, 8192);
+    file.seek(std::io::SeekFrom::Start(offset))?;
+    file.write_all(&[0xFF; 256])?;
+    file.sync_all()?;
+    drop(file);
+    std::fs::write(&layout.dirty_path, "pid=99999\nversion=test")?;
+
+    let before = std::fs::read(&layout.graph_db_path)?;
+    let result = TraceDecay::open_with_options(&project_root, open_options).await;
+    assert!(result.is_err(), "damaged dirty store must require recovery");
+    assert_eq!(
+        std::fs::read(&layout.graph_db_path)?,
+        before,
+        "integrity failure must be detected before writable migration"
+    );
+    assert!(layout.dirty_path.exists());
+    Ok(())
+}
+
+#[tokio::test]
+async fn dirty_open_does_not_race_an_active_sync_lock()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    let dir = TempDir::new()?;
+    let project_root = dir.path().join("repo");
+    std::fs::create_dir_all(&project_root)?;
+    let open_options = TraceDecayOpenOptions {
+        profile_root: Some(dir.path().join("profile")),
+        global_db_path: Some(dir.path().join("global.db")),
+    };
+
+    let ts = TraceDecay::init_with_options(&project_root, open_options.clone()).await?;
+    let layout = ts.store_layout().clone();
+    ts.close();
+    let active_lock = layout.graph_db_path.with_file_name(format!(
+        "{}.sync.lock",
+        layout.graph_db_path.file_name().unwrap().to_string_lossy()
+    ));
+    std::fs::write(&active_lock, std::process::id().to_string())?;
+    std::fs::write(&layout.dirty_path, "pid=99999\nversion=test")?;
+    let before = std::fs::read(&layout.graph_db_path)?;
+
+    let error = match TraceDecay::open_with_options(&project_root, open_options).await {
+        Ok(_) => panic!("active writer lock must block recovery"),
+        Err(error) => error,
+    };
+    assert!(
+        error
+            .to_string()
+            .contains("another sync is already in progress")
+    );
+    assert_eq!(std::fs::read(&layout.graph_db_path)?, before);
+    assert!(layout.dirty_path.exists());
+    Ok(())
+}
+
+#[tokio::test]
+async fn dirty_open_recovers_committed_wal_before_clearing_sentinel()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    let dir = TempDir::new()?;
+    let project_root = dir.path().join("repo");
+    std::fs::create_dir_all(&project_root)?;
+    let open_options = TraceDecayOpenOptions {
+        profile_root: Some(dir.path().join("profile")),
+        global_db_path: Some(dir.path().join("global.db")),
+    };
+
+    let ts = TraceDecay::init_with_options(&project_root, open_options.clone()).await?;
+    let layout = ts.store_layout().clone();
+    let node = sample_node("wal-recovery-node", "wal_recovery_node");
+    ts.db().insert_nodes(std::slice::from_ref(&node)).await?;
+    let wal_path = layout.graph_db_path.with_extension("db-wal");
+    assert!(
+        std::fs::metadata(&wal_path)?.len() > 0,
+        "fixture must retain committed WAL frames"
+    );
+    std::fs::write(&layout.dirty_path, "pid=99999\nversion=test")?;
+
+    let recovered = TraceDecay::open_with_options(&project_root, open_options).await?;
+    assert!(recovered.get_node(&node.id).await?.is_some());
+    assert!(
+        !layout.dirty_path.exists(),
+        "sentinel clears only after WAL-aware quick_check succeeds"
+    );
+    recovered.close();
+    ts.close();
+    Ok(())
+}
+
+#[tokio::test]
 async fn corrupt_db_detected_and_repaired_on_reopen() {
     let dir = TempDir::new().unwrap();
     let db_path = dir.path().join("test.db");

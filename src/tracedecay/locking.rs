@@ -54,17 +54,10 @@ pub(super) struct ActiveSyncLockGuard {
 
 impl super::TraceDecay {
     pub(super) fn try_acquire_active_sync_lock(&self) -> Result<ActiveSyncLockGuard> {
-        let active = try_acquire_sync_lock_at(&self.active_graph_layout.sync_lock_path)?;
-        let legacy = if self.active_graph_layout.sync_lock_path == self.store_layout.sync_lock_path
-        {
-            None
-        } else {
-            Some(try_acquire_sync_lock_at(&self.store_layout.sync_lock_path)?)
-        };
-        Ok(ActiveSyncLockGuard {
-            _active: active,
-            _legacy: legacy,
-        })
+        try_acquire_graph_sync_locks(
+            &self.active_graph_layout.sync_lock_path,
+            &self.store_layout.sync_lock_path,
+        )
     }
 
     pub(super) fn write_active_dirty_sentinels(&self) {
@@ -80,6 +73,22 @@ impl super::TraceDecay {
             clear_dirty_sentinel_at(&self.store_layout.dirty_path);
         }
     }
+}
+
+pub(super) fn try_acquire_graph_sync_locks(
+    active_path: &Path,
+    legacy_path: &Path,
+) -> Result<ActiveSyncLockGuard> {
+    let active = try_acquire_sync_lock_at(active_path)?;
+    let legacy = if active_path == legacy_path {
+        None
+    } else {
+        Some(try_acquire_sync_lock_at(legacy_path)?)
+    };
+    Ok(ActiveSyncLockGuard {
+        _active: active,
+        _legacy: legacy,
+    })
 }
 
 impl Drop for SyncLockGuard {
