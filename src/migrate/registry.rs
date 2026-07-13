@@ -1056,8 +1056,42 @@ fn reconstruct_graph_scopes(
     let Some(branch_dir) = branch_meta_path.parent() else {
         return (None, Vec::new(), Vec::new());
     };
-    let Some(meta) = branch_meta::load_branch_meta(branch_dir) else {
-        return (None, Vec::new(), Vec::new());
+    let invalid = |message| (None, Vec::new(), vec![message]);
+    let metadata = match fs::symlink_metadata(branch_meta_path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return (None, Vec::new(), Vec::new());
+        }
+        Err(error) => {
+            return invalid(format!(
+                "could not inspect branch metadata '{}': {error}",
+                branch_meta_path.display()
+            ));
+        }
+    };
+    if !metadata.file_type().is_file() {
+        return invalid(format!(
+            "branch metadata '{}' is not a regular file",
+            branch_meta_path.display()
+        ));
+    }
+    let content = match fs::read_to_string(branch_meta_path) {
+        Ok(content) => content,
+        Err(error) => {
+            return invalid(format!(
+                "could not read branch metadata '{}': {error}",
+                branch_meta_path.display()
+            ));
+        }
+    };
+    let meta = match branch_meta::parse(&content) {
+        Ok(meta) => meta,
+        Err(error) => {
+            return invalid(format!(
+                "branch metadata '{}' is invalid: {error}",
+                branch_meta_path.display()
+            ));
+        }
     };
     let mut scopes = Vec::new();
     let mut issues = Vec::new();

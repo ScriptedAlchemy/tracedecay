@@ -351,7 +351,9 @@ fn unsafe_branch_database_path_blocks_reconstruction() {
         report
             .issues
             .iter()
-            .any(|issue| issue.contains("unsafe database path"))
+            .any(|issue| issue.contains("must reference canonical main database")),
+        "unexpected reconstruction issues: {:?}",
+        report.issues
     );
 }
 

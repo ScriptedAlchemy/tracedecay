@@ -436,8 +436,8 @@ async fn resolve_plan_inner(
         )?;
     }
 
-    let mut source_meta = load_required_branch_meta(&source_layout)?;
-    let mut target_meta = load_required_branch_meta(&target_layout)?;
+    let mut source_meta = load_input_branch_meta(&source_layout)?;
+    let mut target_meta = load_input_branch_meta(&target_layout)?;
     recover_untracked_branch_graphs(&source_layout, &mut source_meta)?;
     recover_untracked_branch_graphs(&target_layout, &mut target_meta)?;
     let source_graphs = graph_db_paths(&source_layout, &source_meta)?;
@@ -486,7 +486,9 @@ async fn resolve_plan_inner(
     let input_fingerprint = fingerprint_inputs(
         &evidence,
         &source_layout,
+        &source_meta,
         &target_layout,
+        &target_meta,
         applied_ledger
             .as_ref()
             .map(|_| destination_project_id.as_str()),
@@ -578,10 +580,7 @@ fn validate_manifest_path(
             &manifest.data_root.join(&manifest.sessions_db_relpath),
             &layout.sessions_db_path,
         )
-        || !same_path(
-            &manifest.data_root.join(&manifest.branch_meta_relpath),
-            &layout.branch_meta_path,
-        )
+        || !manifest_branch_meta_path_matches_layout(&manifest, layout)
     {
         return Err(config_error(format!(
             "store manifest '{}' does not match profile shard '{}'",
@@ -590,6 +589,16 @@ fn validate_manifest_path(
         )));
     }
     Ok(manifest)
+}
+
+fn manifest_branch_meta_path_matches_layout(
+    manifest: &StoreManifest,
+    layout: &StoreLayout,
+) -> bool {
+    layout
+        .branch_meta_path
+        .strip_prefix(&layout.data_root)
+        .is_ok_and(|relative| manifest.branch_meta_relpath == relative)
 }
 
 fn manifest_matches_identity(
@@ -656,6 +665,53 @@ fn reject_ambiguous_shards(
         )));
     }
     Ok(())
+}
+
+fn load_input_branch_meta(layout: &StoreLayout) -> Result<BranchMeta> {
+    match fs::symlink_metadata(&layout.branch_meta_path) {
+        Ok(metadata) if !metadata.file_type().is_file() => Err(config_error(format!(
+            "corrupt branch metadata at '{}': path is not a regular file",
+            layout.branch_meta_path.display()
+        ))),
+        Ok(_) => {
+            let content = fs::read_to_string(&layout.branch_meta_path).map_err(|error| {
+                config_error(format!(
+                    "could not read branch metadata at '{}': {error}",
+                    layout.branch_meta_path.display()
+                ))
+            })?;
+            branch_meta::parse(&content).map_err(|error| {
+                config_error(format!(
+                    "corrupt branch metadata at '{}': {error}",
+                    layout.branch_meta_path.display()
+                ))
+            })
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            if !layout.graph_db_path.is_file() {
+                return Err(config_error(format!(
+                    "missing branch metadata at '{}' and default graph database at '{}'",
+                    layout.branch_meta_path.display(),
+                    layout.graph_db_path.display()
+                )));
+            }
+            let default_branch = crate::branch::detect_default_branch(&layout.project_root)
+                .ok_or_else(|| {
+                    config_error(format!(
+                        "cannot synthesize missing branch metadata at '{}': repository default branch is unknown (detached HEAD or no default ref)",
+                        layout.branch_meta_path.display()
+                    ))
+                })?;
+            Ok(BranchMeta::for_legacy_single_db(
+                &layout.data_root,
+                &default_branch,
+            ))
+        }
+        Err(error) => Err(config_error(format!(
+            "could not inspect branch metadata at '{}': {error}",
+            layout.branch_meta_path.display()
+        ))),
+    }
 }
 
 fn load_required_branch_meta(layout: &StoreLayout) -> Result<BranchMeta> {
@@ -828,15 +884,33 @@ fn confirmation_token(fingerprint: &str, migration_id: &str) -> String {
 fn fingerprint_inputs(
     evidence: &InputReadEvidence,
     source: &StoreLayout,
+    source_meta: &BranchMeta,
     target: &StoreLayout,
+    target_meta: &BranchMeta,
     retired_destination_project_id: Option<&str>,
 ) -> Result<String> {
     let mut hash = Sha256::new();
-    for (label, root, graph) in [
-        ("source", &source.data_root, &evidence.source_graph),
-        ("target", &target.data_root, &evidence.target_graph),
+    for (label, root, graph, meta) in [
+        (
+            "source",
+            &source.data_root,
+            &evidence.source_graph,
+            source_meta,
+        ),
+        (
+            "target",
+            &target.data_root,
+            &evidence.target_graph,
+            target_meta,
+        ),
     ] {
         hash.update(label.as_bytes());
+        hash.update(b"\0branch-meta\0");
+        hash.update(serde_json::to_vec(meta).map_err(|error| {
+            config_error(format!(
+                "could not canonicalize {label} branch metadata for input fingerprint: {error}"
+            ))
+        })?);
         let mut files = BTreeMap::new();
         for (relative, path) in relative_file_map(root)? {
             let retired_manifest_name = retired_destination_project_id
