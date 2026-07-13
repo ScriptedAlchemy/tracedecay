@@ -643,20 +643,31 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, required=True)
     parser.add_argument("--canonical-ref", required=True)
-    parser.add_argument("--graph-revision", type=int, default=1)
+    parser.add_argument("--graph-revision", type=int)
     parser.add_argument("--manifest-output", type=Path)
     parser.add_argument("--state-output", type=Path)
     parser.add_argument("--check", action="store_true")
     args = parser.parse_args()
     try:
-        if args.graph_revision < 1:
-            raise ValueError("graph revision must be positive")
-        compiled, live = compile_from_ref(args.root, args.canonical_ref, args.graph_revision)
+        committed: bytes | None = None
+        revision = args.graph_revision
         if args.check:
             commit = resolve_commit(args.root.resolve(), args.canonical_ref)
             committed = _git_bytes(
                 args.root.resolve(), "show", f"{commit}:{CANONICAL_MANIFEST_PATH}"
             )
+            if revision is None:
+                document = json.loads(committed)
+                if not isinstance(document, dict) or document.get("schema") != MANIFEST_SCHEMA:
+                    raise ValueError("canonical manifest mismatch: invalid committed schema")
+                revision = document.get("graph_revision")
+        elif revision is None:
+            revision = 1
+        if isinstance(revision, bool) or not isinstance(revision, int) or revision < 1:
+            raise ValueError("graph revision must be positive")
+        compiled, live = compile_from_ref(args.root, args.canonical_ref, revision)
+        if args.check:
+            assert committed is not None
             if committed != _canonical_json_bytes(compiled.manifest):
                 raise ValueError(
                     f"canonical manifest mismatch: regenerate {CANONICAL_MANIFEST_PATH}"
