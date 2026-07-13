@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.66](https://github.com/ScriptedAlchemy/tracedecay/compare/v0.0.65...v0.0.66) - 2026-07-13
+
+### Fixed
+
+- *(storage)* preflight dirty graph recovery read-only
+
 ## [0.0.65](https://github.com/ScriptedAlchemy/tracedecay/compare/v0.0.64...v0.0.65) - 2026-07-13
 
 ### Fixed
