@@ -13,7 +13,9 @@ use crate::extraction::LanguageRegistry;
 use crate::global_db::{GraphScopeUpsert, StoreArtifactUpsert, StoreInstanceUpsert};
 use crate::storage::{self, StoreLayout};
 
-use super::locking::{clear_dirty_sentinel_at, has_dirty_sentinel_at};
+use super::locking::{
+    clear_dirty_sentinel_at, has_dirty_sentinel_at, try_acquire_graph_sync_locks,
+};
 use super::{TraceDecay, TraceDecayOpenOptions, current_timestamp};
 
 impl TraceDecay {
@@ -286,7 +288,7 @@ impl TraceDecay {
     /// Falls back to the nearest tracked ancestor DB with a warning only when
     /// the live branch cannot be auto-tracked, such as detached HEAD.
     /// If the previous operation was interrupted (dirty sentinel exists),
-    /// the database is integrity-checked and rebuilt if corrupted.
+    /// the database is integrity-checked before any writable open.
     pub async fn open(project_root: &Path) -> Result<Self> {
         Self::open_with_options(project_root, TraceDecayOpenOptions::default()).await
     }
@@ -335,6 +337,45 @@ impl TraceDecay {
             eprintln!(
                 "[tracedecay] previous operation was interrupted — checking database integrity…"
             );
+        }
+
+        // A dirty marker can also describe a sync that is still active in a
+        // peer process. Recovery must own both graph-local and legacy locks so
+        // it cannot race that writer or clear its sentinel. Preflight through
+        // the read-only connection before Database::open applies writable
+        // pragmas or migrations to a potentially damaged recovery set.
+        let _recovery_lock = if crashed {
+            Some(try_acquire_graph_sync_locks(
+                &active_graph_layout.sync_lock_path,
+                &store_layout.sync_lock_path,
+            )?)
+        } else {
+            None
+        };
+        if crashed {
+            let verification = match Database::open_read_only(&db_path).await {
+                Ok((db, _)) => db,
+                Err(error) => {
+                    print_corruption_warning(&db_path);
+                    return Err(recovery_required_error(&db_path, error));
+                }
+            };
+            let integrity = verification.quick_check().await;
+            verification.close();
+            match integrity {
+                Ok(true) => {}
+                Ok(false) => {
+                    print_corruption_warning(&db_path);
+                    return Err(recovery_required_error(
+                        &db_path,
+                        "read-only SQLite quick_check did not return ok",
+                    ));
+                }
+                Err(error) => {
+                    print_corruption_warning(&db_path);
+                    return Err(recovery_required_error(&db_path, error));
+                }
+            }
         }
 
         // Ordinary opens never replace database files. A daemon or another MCP
