@@ -196,6 +196,43 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+  v2-compatibility-inventory:
+    name: V2 compatibility inventory
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    env:
+      CURRENT_COMMIT: ${{ github.event.pull_request.head.sha }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: ./.github/actions/setup-linux-mold
+
+      - name: Cache Rust build outputs
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci-v2-compatibility-inventory-${{ runner.os }}
+          cache-on-failure: true
+
+      - name: Run focused V2 compatibility tests
+        run: cargo test --test v2_root_composition --locked
+
+      - name: Check V1 compatibility inventory drift
+        run: |
+          set -euo pipefail
+          generated_at="$(git show -s --format=%cI "$CURRENT_COMMIT")"
+          cargo run --quiet --locked --bin compatibility-inventory -- \
+            --footprint-descriptors tests/fixtures/v2/compatibility-footprint-descriptors.json \
+            --commit "$CURRENT_COMMIT" \
+            --generated-at "$generated_at" \
+            --watermark "git:$CURRENT_COMMIT" \
+            --check tests/fixtures/v2/v1-compatibility.json \
+            > /dev/null
+
   test:
     name: Test ${{ matrix.name }}
     if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON('["master","feature/holographic-memory"]'), github.event.pull_request.base.ref) }}
