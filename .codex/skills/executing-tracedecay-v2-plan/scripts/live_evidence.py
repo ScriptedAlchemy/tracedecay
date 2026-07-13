@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -16,11 +17,56 @@ import slice_authority as sa
 MAX_WORKTREES = 256
 MAX_PLAN_FILE_BYTES = 4 * 1024 * 1024
 COMMIT = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
+SHA256 = re.compile(r"^sha256:[0-9a-f]{64}$")
 FULL_REF = re.compile(r"^refs/(?:heads|remotes)/[^\x00-\x20~^:?*\\]+(?:/[^\x00-\x20~^:?*\\]+)*$")
+AUTHORITY_REVIEW_OBSERVATIONS_SCHEMA = "tracedecay.v2.authority-review-observations/v1"
+AUTHORITY_REVIEW_OBSERVATIONS = Path(".tracedecay/v2-authority-review-observations.json")
 
 
 def digest(value: object) -> str:
     return "sha256:" + hashlib.sha256(sa._canonical_json(value).encode("utf-8")).hexdigest()
+
+
+def load_authority_review_observations(root: Path, *, required: bool = False) -> frozenset[str]:
+    """Load the fixed, operator-controlled authority-review observation ledger."""
+
+    path = root.resolve() / AUTHORITY_REVIEW_OBSERVATIONS
+    if not path.exists():
+        if required:
+            raise ValueError(f"authority review observations: required fixed ledger is missing: {path}")
+        return frozenset()
+    if path.is_symlink() or not path.is_file():
+        raise ValueError("authority review observations: fixed ledger must be a regular non-symlink file")
+    if path.stat().st_mode & 0o077:
+        raise ValueError("authority review observations: fixed ledger must have mode 0600")
+
+    def unique(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError(f"authority review observations: duplicate JSON key {key!r}")
+            result[key] = value
+        return result
+
+    value = json.loads(
+        path.read_bytes(),
+        object_pairs_hook=unique,
+        parse_constant=lambda item: (_ for _ in ()).throw(
+            ValueError(f"authority review observations: non-finite constant {item!r}")
+        ),
+    )
+    if not isinstance(value, dict) or set(value) != {"schema", "receipt_digests"}:
+        raise ValueError("authority review observations: exact schema and receipt_digests fields required")
+    if value["schema"] != AUTHORITY_REVIEW_OBSERVATIONS_SCHEMA:
+        raise ValueError("authority review observations: unsupported schema")
+    receipts = value["receipt_digests"]
+    if not isinstance(receipts, list) or not receipts:
+        raise ValueError("authority review observations: receipt_digests must be a non-empty array")
+    if any(not isinstance(item, str) or not SHA256.fullmatch(item) for item in receipts):
+        raise ValueError("authority review observations: every receipt digest must be sha256:<64 lowercase hex>")
+    if receipts != sorted(set(receipts)):
+        raise ValueError("authority review observations: receipt digests must be unique canonical order")
+    return frozenset(receipts)
 
 
 def source_set(root: Path, commit: str) -> list[list[str]]:
@@ -67,6 +113,7 @@ class LiveEvidence:
     workspaces: dict[str, dict[str, Any]]
     review_receipts: frozenset[str]
     test_receipts: frozenset[str]
+    authority_review_receipts: frozenset[str]
     errors: tuple[str, ...]
 
 
@@ -138,7 +185,8 @@ def _worktree_observations(root: Path, repository: str) -> tuple[dict[str, dict[
 
 def inspect(root: Path, canonical_ref: str, candidates: Iterable[str], *,
             review_receipts: Iterable[str] = (),
-            test_receipts: Iterable[str] = ()) -> LiveEvidence:
+            test_receipts: Iterable[str] = (),
+            authority_review_receipts: Iterable[str] = ()) -> LiveEvidence:
     """Observe authoritative ref, source blocks, worktrees, and candidate ancestry."""
     root = root.resolve()
     errors: list[str] = []
@@ -236,5 +284,6 @@ def inspect(root: Path, canonical_ref: str, candidates: Iterable[str], *,
         workspaces=workspaces,
         review_receipts=frozenset(review_receipts),
         test_receipts=frozenset(test_receipts),
+        authority_review_receipts=frozenset(authority_review_receipts),
         errors=tuple(sorted(set(errors))),
     )

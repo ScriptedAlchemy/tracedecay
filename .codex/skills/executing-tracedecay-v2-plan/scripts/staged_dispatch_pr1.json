@@ -1,0 +1,170 @@
+{
+  "authority_revision": 6,
+  "authorized_slice_ids": [
+    "PR 1"
+  ],
+  "checked_manifest_digest": "sha256:02707bf4782013bd81cd7031b49114d3bcca7b3f058f598118a32544c49577b8",
+  "checked_manifest_revision": 5,
+  "checked_source_set_digest": "sha256:e942346c591d6b02c8c74d777cc127999cac139d602e7a4817cf746f9d369c5f",
+  "packet": {
+    "acceptance": [
+      {
+        "criterion_id": "AC-0348594E1B0404AC",
+        "source_anchors": [
+          "docs/plans/2026-07-09-tracedecay-brain-rewrite.md:1723-1744#sha256:468735f36b42d7058abf03a7f95f42fdfb2c719019a6d67460265deae129d0d3"
+        ],
+        "text": "Record selected and rejected alternatives from this plan."
+      },
+      {
+        "criterion_id": "AC-2DB0D91A2ABA602C",
+        "source_anchors": [
+          "docs/plans/2026-07-09-tracedecay-brain-rewrite.md:1723-1744#sha256:468735f36b42d7058abf03a7f95f42fdfb2c719019a6d67460265deae129d0d3"
+        ],
+        "text": "Lock the evidence vocabulary and no-hidden-reasoning rule."
+      },
+      {
+        "criterion_id": "AC-6AEFBE342DC5A3E4",
+        "source_anchors": [
+          "docs/plans/2026-07-09-tracedecay-brain-rewrite.md:1723-1744#sha256:468735f36b42d7058abf03a7f95f42fdfb2c719019a6d67460265deae129d0d3"
+        ],
+        "text": "Lock compatibility, rollback, and V1 removal gates."
+      },
+      {
+        "criterion_id": "AC-877B620B08A2D8F8",
+        "source_anchors": [
+          "docs/plans/2026-07-09-tracedecay-brain-rewrite.md:1723-1744#sha256:468735f36b42d7058abf03a7f95f42fdfb2c719019a6d67460265deae129d0d3"
+        ],
+        "text": "Lock canonical planes/owner matrix, package-admission decisions (including the pure workflow kernel and root-private hook/presentation/API/host-deployment/compiler-engine/remote-Brain-transport adapters), the <=12-package ceiling, crate/module dependency DAG, extension tiers/SPIs, config/status/error governance, complexity and negative-code budgets, anti-corruption adapter contract, convergence scorecard, and deletion waves from plan 19."
+      },
+      {
+        "criterion_id": "AC-A5F116861E32A4AE",
+        "source_anchors": [
+          "docs/plans/2026-07-09-tracedecay-brain-rewrite.md:1723-1744#sha256:468735f36b42d7058abf03a7f95f42fdfb2c719019a6d67460265deae129d0d3"
+        ],
+        "text": "Lock activity-vs-project shard ownership, deterministic identity allocation, privacy/key-domain blobs, graph generation packing, exact retention/encryption defaults, and cursor/SSE semantics."
+      },
+      {
+        "criterion_id": "AC-B4C95390ECF61F45",
+        "source_anchors": [
+          "docs/plans/2026-07-09-tracedecay-brain-rewrite.md:1723-1744#sha256:468735f36b42d7058abf03a7f95f42fdfb2c719019a6d67460265deae129d0d3"
+        ],
+        "text": "Add architecture lint tests for dependency direction and transport isolation."
+      },
+      {
+        "criterion_id": "AC-CEFFDE819D3915E6",
+        "source_anchors": [
+          "docs/plans/2026-07-09-tracedecay-brain-rewrite.md:1723-1744#sha256:468735f36b42d7058abf03a7f95f42fdfb2c719019a6d67460265deae129d0d3"
+        ],
+        "text": "Lock the hermetic-test-infrastructure contract from the §2.7 flaky-test row: no process-global mutable test state, hermetic clocks/env/ports/stores, declared nextest/libtest contract, deterministic shutdown, and platform matrix."
+      },
+      {
+        "criterion_id": "AC-DD6F45B074B754EA",
+        "source_anchors": [
+          "docs/plans/2026-07-09-tracedecay-brain-rewrite.md:1723-1744#sha256:468735f36b42d7058abf03a7f95f42fdfb2c719019a6d67460265deae129d0d3"
+        ],
+        "text": "Record the existing Rsbuild/Rspack dashboard build and hermetic embedding boundary. Treat historical Rsbuild/Vite material as cross-project retrieval scenarios, not product authority; require a separate approved proposal before any bundler migration."
+      }
+    ],
+    "acceptance_commands": [
+      "python3 .codex/skills/executing-tracedecay-v2-plan/scripts/compile_plan_authority.py --root \"$(git rev-parse --show-toplevel)\" --canonical-ref refs/heads/codex/tracedecay-total-redesign-plan --check",
+      "cargo fmt --check",
+      "cargo test --test architecture_boundaries",
+      "cargo clippy --test architecture_boundaries -- -D warnings",
+      "git diff --check"
+    ],
+    "claude_adversarial_review": {
+      "acceptance_criteria": [],
+      "enabled": false,
+      "forbidden_authorities": [
+        "activation",
+        "authority_review",
+        "integration",
+        "packet_source",
+        "self_approval"
+      ],
+      "max_steps": 0,
+      "mode": "disabled",
+      "runtime": "none",
+      "untrusted_until_gpt_verified": true
+    },
+    "commit_subject": "feat(v2): architecture decision records",
+    "content_digest": "sha256:76ade28de35388e20604f8aaf61bed4fe2563e5fdfd514d80f6a2cd1b5d03333",
+    "exact_files": [
+      "architecture-boundaries.toml",
+      "architecture-dependency-policy.toml",
+      "docs/architecture/v2/dashboard-and-renderers.md",
+      "docs/architecture/v2/frontend-build-and-embedding.md",
+      "docs/architecture/v2/generated/convergence-scorecard.md",
+      "docs/architecture/v2/generated/dependency-dag.md",
+      "docs/architecture/v2/generated/owners.md",
+      "docs/architecture/v2/generated/release-policy.md",
+      "docs/architecture/v2/identity-and-evidence.md",
+      "docs/architecture/v2/logical-brain.md",
+      "docs/architecture/v2/privacy-and-retention.md",
+      "docs/architecture/v2/query-and-api.md",
+      "docs/architecture/v2/storage-and-consistency.md",
+      "scripts/generate_architecture_views.py",
+      "tests/architecture_boundaries.rs"
+    ],
+    "gates": {
+      "implementation": "GPT-5.6-Sol owns bounded implementation in the declared clean worktree.",
+      "independent_review": "A distinct reviewer reviews the exact candidate commit and full file ceiling.",
+      "integration": "A distinct integration authority verifies all prior gates and canonical ancestry before integration.",
+      "remediation": "Every negative review creates one bounded remediation task over the same candidate lineage.",
+      "successor_review": "A distinct successor reviewer evaluates the remediated exact candidate before integration."
+    },
+    "lane": {
+      "acting_runtime": "codex-cli",
+      "lifecycle_owner": "gpt-5.6-sol",
+      "reasoning_owner": "gpt-5.6-sol"
+    },
+    "owner": "PR 1@docs/plans/2026-07-09-tracedecay-brain-rewrite.md:1723-1744#sha256:468735f36b42d7058abf03a7f95f42fdfb2c719019a6d67460265deae129d0d3",
+    "prerequisites": [],
+    "prohibitions": [
+      "no self-approval",
+      "no push",
+      "no merge",
+      "no out-of-scope edits",
+      "TraceDecay validates but does not create or relocate the worktree"
+    ],
+    "required_tests": [
+      "architecture_manifest_has_bounded_acyclic_owners",
+      "cargo_and_source_policy_enforce_materialized_boundaries",
+      "dependency_policy_generator_escapes_apostrophes_as_valid_toml",
+      "forbidden_owner_import_is_rejected_by_focused_fixture",
+      "forbidden_real_cargo_edge_is_rejected_by_focused_fixture",
+      "forbidden_source_pattern_is_rejected_by_focused_fixture",
+      "generated_views_and_release_gates_are_checked_in",
+      "machine_authority_has_complete_governance_schema",
+      "seven_v2_adrs_lock_the_phase_zero_decisions",
+      "transports_are_isolated_from_storage_and_business_implementations"
+    ],
+    "retrieval_anchors": [
+      "docs/plans/2026-07-09-tracedecay-brain-rewrite.md:1723-1744#sha256:468735f36b42d7058abf03a7f95f42fdfb2c719019a6d67460265deae129d0d3",
+      "docs/plans/tracedecay-v2/21-cli-mcp-tool-surface-and-output-unification.md:1333-1339#sha256:dd7e01487b668598dae4c2871a82aff220f848cb18bc9c958708f1acf13a6023"
+    ],
+    "slice_id": "PR 1",
+    "source_blocks": [
+      {
+        "block_sha256": "468735f36b42d7058abf03a7f95f42fdfb2c719019a6d67460265deae129d0d3",
+        "end_line": 1744,
+        "path": "docs/plans/2026-07-09-tracedecay-brain-rewrite.md",
+        "start_line": 1723
+      },
+      {
+        "block_sha256": "dd7e01487b668598dae4c2871a82aff220f848cb18bc9c958708f1acf13a6023",
+        "end_line": 1339,
+        "path": "docs/plans/tracedecay-v2/21-cli-mcp-tool-surface-and-output-unification.md",
+        "start_line": 1333
+      }
+    ],
+    "workspace": {
+      "branch": "codex/v2-pr-1-architecture-decision-records",
+      "clean_required": true,
+      "created_externally": true,
+      "worktree": "/fast/projects/tracedecay/.worktrees/v2-pr-1-architecture-decision-records"
+    }
+  },
+  "schema": "tracedecay.v2.staged-dispatch-source/v1",
+  "stage_id": "v2-pr1-initial-stage"
+}

@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 import execution_state
+import execution_state_v2
 import live_evidence
 import slice_authority
 
@@ -55,7 +56,25 @@ def candidate_commits(document: dict[str, Any]) -> list[str]:
 
 
 def analyze(document: dict[str, Any], live: live_evidence.LiveEvidence | None = None) -> dict[str, Any]:
-    return execution_state.next_ready(execution_state.validate(document, live))
+    schema = document.get("schema")
+    if schema == execution_state.EXPORT_SCHEMA:
+        return execution_state.next_ready(execution_state.validate(document, live))
+    if schema == execution_state_v2.EXPORT_SCHEMA:
+        return execution_state_v2.next_ready(execution_state_v2.validate(document, live))
+    return {
+        "schema": execution_state.VIEW_SCHEMA,
+        "valid": False,
+        "activation_mode": "invalid",
+        "repository": None,
+        "source_commit": None,
+        "source_set_digest": None,
+        "graph_revision": None,
+        "graph_digest": None,
+        "errors": [f"unsupported execution-state schema/version {schema!r}"],
+        "next_ready": [],
+        "blocked": [],
+        "execution_order": [],
+    }
 
 
 def resolve_state(root: Path, explicit: Path | None) -> Path:
@@ -108,7 +127,13 @@ def main() -> int:
         root = args.root.resolve()
         state = resolve_state(root, args.state)
         document = strict_json(state)
-        live = live_evidence.inspect(root, args.canonical_ref, candidate_commits(document))
+        authority_review_receipts = live_evidence.load_authority_review_observations(root)
+        live = live_evidence.inspect(
+            root,
+            args.canonical_ref,
+            candidate_commits(document),
+            authority_review_receipts=authority_review_receipts,
+        )
         view = analyze(document, live)
     except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as error:
         view = {
@@ -129,7 +154,12 @@ def main() -> int:
     if args.format == "json":
         print(json.dumps(view, indent=2, sort_keys=True))
     else:
-        print(execution_state.markdown(view), end="")
+        renderer = (
+            execution_state_v2.markdown
+            if view.get("schema") == execution_state_v2.VIEW_SCHEMA
+            else execution_state.markdown
+        )
+        print(renderer(view), end="")
     return 0 if view["valid"] else 2
 
 
