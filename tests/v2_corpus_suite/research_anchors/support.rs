@@ -173,6 +173,11 @@ fn reject_unknown(object: Map<String, Value>) -> Result<(), String> {
 
 pub(super) fn valid_fixture() -> ResearchAnchorFixtureV1 {
     let fixture = fixture();
+    assert_eq!(
+        fixture.envelope.manifest.digest,
+        fixture.envelope.manifest.compute_digest().unwrap(),
+        "frozen research manifest digest drifted"
+    );
     fixture.envelope.validate().unwrap();
     for tombstone in &fixture.tombstones {
         tombstone

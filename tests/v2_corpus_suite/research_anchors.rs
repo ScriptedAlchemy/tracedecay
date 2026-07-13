@@ -103,8 +103,8 @@ fn research_fixture_deserializes_through_strict_envelope_and_validates() {
     assert_eq!(manifest.anchors.len(), 7);
     assert_eq!(manifest.retrieval_recipes.len(), 7);
     assert_eq!(manifest.unresolved_attribution.len(), 2);
-    assert_eq!(fixture.envelope.retrieval_catalog.records.len(), 9);
-    assert_eq!(fixture.tombstones.len(), 2);
+    assert_eq!(fixture.envelope.retrieval_catalog.records.len(), 10);
+    assert_eq!(fixture.tombstones.len(), 3);
 }
 
 #[test]
@@ -137,7 +137,7 @@ fn frozen_catalog_generation_and_record_snapshots_are_exact() {
     );
     assert_eq!(
         manifest.catalog_snapshot.digest.as_str(),
-        "sha256:4482de00dbf8fe192a5fb74802dcec3c366dbef4bd80d8c3c488d1413217dac1"
+        "sha256:74ec82e8ac9134e6108566e685b077514bf9694399937d968cb75db2d584debe"
     );
     assert_eq!(catalog.snapshot, manifest.catalog_snapshot);
 
@@ -162,7 +162,11 @@ fn canonical_coverage_represents_each_shard_once_with_its_disposition() {
         .iter()
         .find(|anchor| anchor.entry_id.as_str() == "research-anchor-message-001")
         .unwrap();
-    let tombstone = fixture.tombstones[0].clone();
+    let tombstone = fixture
+        .tombstones
+        .iter()
+        .find(|tombstone| tombstone.reason == AnchorTombstoneReasonV1::Redacted)
+        .unwrap();
 
     assert_eq!(
         message.coverage.disposition(&searched_shard),
