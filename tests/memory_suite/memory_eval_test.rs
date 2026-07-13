@@ -24,6 +24,7 @@ use std::time::{Duration, Instant};
 use serde::Deserialize;
 use serde_json::Value;
 use tempfile::TempDir;
+use tracedecay::db::Database;
 use tracedecay::memory::store::MemoryStore;
 use tracedecay::memory::trust::DEFAULT_TRUST;
 use tracedecay::memory::types::{AddFactRequest, MemoryCategory};
@@ -214,12 +215,14 @@ fn load_scenario(id: &str) -> Scenario {
 }
 
 struct Fixture {
+    // Fields drop in declaration order. Stop the daemon before TempDir removes
+    // the database and socket directories it still owns.
+    #[cfg(unix)]
+    _daemon: Option<common::DaemonProcess>,
     _home: TempDir,
     home_path: PathBuf,
     _project: TempDir,
     project_path: PathBuf,
-    #[cfg(unix)]
-    _daemon: Option<common::DaemonProcess>,
 }
 
 #[cfg(windows)]
@@ -360,12 +363,11 @@ fn runtime() -> tokio::runtime::Runtime {
 fn query_scalar(fixture: &Fixture, sql: &str) -> i64 {
     let db_path = fixture.db_path();
     runtime().block_on(async move {
-        let db = libsql::Builder::new_local(&db_path)
-            .build()
+        let (db, _) = Database::open_read_only(&db_path)
             .await
             .unwrap_or_else(|e| panic!("open {}: {e}", db_path.display()));
-        let conn = db.connect().expect("db connect");
-        let mut rows = conn
+        let mut rows = db
+            .conn()
             .query(sql, ())
             .await
             .unwrap_or_else(|e| panic!("query `{sql}`: {e}"));
@@ -382,12 +384,11 @@ fn query_scalar(fixture: &Fixture, sql: &str) -> i64 {
 fn fact_ids_by_source(fixture: &Fixture) -> HashMap<String, HashSet<i64>> {
     let db_path = fixture.db_path();
     runtime().block_on(async move {
-        let db = libsql::Builder::new_local(&db_path)
-            .build()
+        let (db, _) = Database::open_read_only(&db_path)
             .await
             .unwrap_or_else(|e| panic!("open {}: {e}", db_path.display()));
-        let conn = db.connect().expect("db connect");
-        let mut rows = conn
+        let mut rows = db
+            .conn()
             .query("SELECT source, fact_id FROM memory_facts", ())
             .await
             .expect("list fact sources");
@@ -408,50 +409,54 @@ fn seed_setup_facts(fixture: &Fixture, facts: &[SeedFact]) {
 
     let db_path = fixture.db_path();
     runtime().block_on(async move {
-        let db = libsql::Builder::new_local(&db_path)
-            .build()
+        let (db, _) = Database::open(&db_path)
             .await
             .unwrap_or_else(|e| panic!("open {}: {e}", db_path.display()));
-        let conn = db.connect().expect("db connect");
-        let store = MemoryStore::new(&conn);
-        for fact in facts {
-            let category = fact
-                .category
-                .parse::<MemoryCategory>()
-                .unwrap_or_else(|e| panic!("invalid seed fact category `{}`: {e}", fact.category));
-            let outcome = store
-                .add_fact(
-                    AddFactRequest {
-                        content: fact.content.clone(),
-                        category,
-                        source: Some(fact.source.clone()),
-                        tags: Vec::new(),
-                        entities: Vec::new(),
-                        trust: Some(fact.trust),
-                        metadata: serde_json::json!({}),
-                    },
-                    DEFAULT_TRUST,
-                )
-                .await
-                .unwrap_or_else(|e| panic!("seed setup fact `{}`: {e}", fact.content));
-            assert!(
-                outcome.fact.is_some(),
-                "seed setup fact should be stored: {}",
-                fact.content
-            );
-            conn.execute(
-                "UPDATE memory_facts SET trust_score = ?1, retrieval_count = ?2, source = ?3 \
-                 WHERE content = ?4",
-                libsql::params![
-                    fact.trust,
-                    fact.retrieval_count,
-                    fact.source.as_str(),
-                    fact.content.as_str()
-                ],
-            )
-            .await
-            .unwrap_or_else(|e| panic!("update seed setup fact `{}`: {e}", fact.content));
+        {
+            let store = MemoryStore::new(db.conn());
+            for fact in facts {
+                let category = fact.category.parse::<MemoryCategory>().unwrap_or_else(|e| {
+                    panic!("invalid seed fact category `{}`: {e}", fact.category)
+                });
+                let outcome = store
+                    .add_fact(
+                        AddFactRequest {
+                            content: fact.content.clone(),
+                            category,
+                            source: Some(fact.source.clone()),
+                            tags: Vec::new(),
+                            entities: Vec::new(),
+                            trust: Some(fact.trust),
+                            metadata: serde_json::json!({}),
+                        },
+                        DEFAULT_TRUST,
+                    )
+                    .await
+                    .unwrap_or_else(|e| panic!("seed setup fact `{}`: {e}", fact.content));
+                assert!(
+                    outcome.fact.is_some(),
+                    "seed setup fact should be stored: {}",
+                    fact.content
+                );
+                db.conn()
+                    .execute(
+                        "UPDATE memory_facts SET trust_score = ?1, retrieval_count = ?2, source = ?3 \
+                         WHERE content = ?4",
+                        libsql::params![
+                            fact.trust,
+                            fact.retrieval_count,
+                            fact.source.as_str(),
+                            fact.content.as_str()
+                        ],
+                    )
+                    .await
+                    .unwrap_or_else(|e| panic!("update seed setup fact `{}`: {e}", fact.content));
+            }
         }
+        db.checkpoint()
+            .await
+            .unwrap_or_else(|e| panic!("checkpoint seeded fixture {}: {e}", db_path.display()));
+        db.close();
     });
 }
 
@@ -520,12 +525,12 @@ fn build_fixture(setup: &Setup) -> Fixture {
     let home_path = canonical_test_dir(home.path());
     let project_path = canonical_test_dir(project.path());
     let mut fixture = Fixture {
+        #[cfg(unix)]
+        _daemon: None,
         _home: home,
         home_path,
         _project: project,
         project_path,
-        #[cfg(unix)]
-        _daemon: None,
     };
     let src = fixture.project_path.join("src");
     std::fs::create_dir_all(&src).expect("create src dir");
