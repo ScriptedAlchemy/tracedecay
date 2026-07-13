@@ -5,15 +5,18 @@ readonly REQUIRED_VERSION="1.5.0"
 readonly BASELINE=".secrets.baseline"
 readonly RECEIPT="target/v2-privacy/receipts/detect-secrets-1.5.0.json"
 readonly SURFACE_ID="PR2B-CANDIDATE-TREE"
+readonly GENERATED_SURFACE_ID="PR2B-GENERATED-DERIVATIVES"
 
 die() {
+  rm -f -- "$RECEIPT"
   printf 'check-v2-detect-secrets: %s\n' "$*" >&2
   exit 1
 }
 
+rm -f -- "$RECEIPT"
 [[ $# -eq 0 || $# -eq 2 ]] || die "usage: $0 [reviewed-base candidate]"
 
-for executable in detect-secrets git python3 sha256sum tar; do
+for executable in cmp detect-secrets git jq python3 sha256sum tar; do
   command -v "$executable" >/dev/null 2>&1 || die "missing required executable: $executable"
 done
 
@@ -23,7 +26,7 @@ actual_version="${actual_version#detect-secrets }"
   die "detect-secrets version mismatch: expected $REQUIRED_VERSION, got $actual_version"
 
 [[ -f "$BASELINE" ]] || die "missing baseline: $BASELINE"
-python3 - "$BASELINE" "$REQUIRED_VERSION" <<'PY' || exit 1
+python3 - "$BASELINE" "$REQUIRED_VERSION" <<'PY' || die "baseline validation failed"
 import hashlib
 import json
 import sys
@@ -65,13 +68,31 @@ trap 'rm -rf "$tmp_dir"' EXIT
 mkdir -p "$tmp_dir/tree"
 git archive "$candidate" | tar -xf - -C "$tmp_dir/tree" || die "unable to materialize candidate tree"
 cp "$BASELINE" "$tmp_dir/baseline.json"
+cp "$BASELINE" "$tmp_dir/generated-baseline.json"
 
 (
   cd "$tmp_dir/tree"
   detect-secrets scan --all-files --baseline "$tmp_dir/baseline.json" . >/dev/null
 ) || die "detect-secrets scan failed"
 
-python3 - "$BASELINE" "$tmp_dir/baseline.json" <<'PY' || exit 1
+generated_root="$tmp_dir/generated-derivatives/hosts"
+mkdir -p "$generated_root"
+host_receipt_count=0
+for source in "$tmp_dir"/tree/tests/fixtures/v2/privacy/host-*.json; do
+  [[ -f "$source" ]] || die "reviewed host receipt fixtures are missing"
+  destination="$generated_root/$(basename "$source")"
+  cp "$source" "$destination" || die "unable to copy reviewed host receipt"
+  cmp --silent "$source" "$destination" || die "reviewed host receipt copy drifted"
+  host_receipt_count=$((host_receipt_count + 1))
+done
+[[ "$host_receipt_count" -eq 7 ]] || die "expected seven reviewed host receipts"
+(
+  cd "$generated_root"
+  detect-secrets scan --all-files --baseline "$tmp_dir/generated-baseline.json" . >/dev/null
+) || die "detect-secrets generated-derivative scan failed"
+
+python3 - "$BASELINE" "$tmp_dir/baseline.json" "$tmp_dir/generated-baseline.json" <<'PY' || \
+  die "scanner output validation failed"
 import json
 import sys
 
@@ -82,54 +103,59 @@ def load(path):
     except (OSError, json.JSONDecodeError) as error:
         raise SystemExit(f"check-v2-detect-secrets: invalid scanner output: {error}")
 
-expected, scanned = map(load, sys.argv[1:])
-results = scanned.get("results")
-if not isinstance(results, dict):
-    raise SystemExit("check-v2-detect-secrets: scanner omitted results")
+expected = load(sys.argv[1])
 
-finding_count = sum(len(findings) for findings in results.values())
-if finding_count:
-    raise SystemExit(
-        f"check-v2-detect-secrets: {finding_count} candidate finding(s); candidate content suppressed"
-    )
+for surface, scanned_path in zip(("candidate", "generated derivative"), sys.argv[2:]):
+    scanned = load(scanned_path)
+    results = scanned.get("results")
+    if not isinstance(results, dict):
+        raise SystemExit(f"check-v2-detect-secrets: {surface} scan omitted results")
+    finding_count = sum(len(findings) for findings in results.values())
+    if finding_count:
+        raise SystemExit(
+            f"check-v2-detect-secrets: {finding_count} {surface} finding(s); content suppressed"
+        )
 
-for field in ("version", "plugins_used"):
-    if expected.get(field) != scanned.get(field):
-        raise SystemExit(f"check-v2-detect-secrets: scanner {field} drifted")
-canonical_filters = {
-    json.dumps(entry, sort_keys=True, separators=(",", ":"))
-    for entry in scanned.get("filters_used", [])
-}
-for entry in expected.get("filters_used", []):
-    canonical = json.dumps(entry, sort_keys=True, separators=(",", ":"))
-    if canonical not in canonical_filters:
-        raise SystemExit("check-v2-detect-secrets: scanner filters drifted")
+    for field in ("version", "plugins_used"):
+        if expected.get(field) != scanned.get(field):
+            raise SystemExit(f"check-v2-detect-secrets: {surface} scanner {field} drifted")
+    canonical_filters = {
+        json.dumps(entry, sort_keys=True, separators=(",", ":"))
+        for entry in scanned.get("filters_used", [])
+    }
+    for entry in expected.get("filters_used", []):
+        canonical = json.dumps(entry, sort_keys=True, separators=(",", ":"))
+        if canonical not in canonical_filters:
+            raise SystemExit(f"check-v2-detect-secrets: {surface} scanner filters drifted")
 PY
 
 config_sum="$(sha256sum "$BASELINE")" || die "unable to hash baseline"
 config_hex="${config_sum%% *}"
 config_digest="sha256:$config_hex"
-scan_hex="$(python3 - "$tmp_dir/baseline.json" <<'PY'
+scan_hex="$(python3 - "$tmp_dir/baseline.json" "$tmp_dir/generated-baseline.json" <<'PY'
 import hashlib
 import json
 import sys
 
-with open(sys.argv[1], encoding="utf-8") as handle:
-    report = json.load(handle)
-report.pop("generated_at", None)
-canonical = json.dumps(report, sort_keys=True, separators=(",", ":")).encode()
+reports = []
+for path in sys.argv[1:]:
+    with open(path, encoding="utf-8") as handle:
+        report = json.load(handle)
+    report.pop("generated_at", None)
+    reports.append(report)
+canonical = json.dumps(reports, sort_keys=True, separators=(",", ":")).encode()
 print(hashlib.sha256(canonical).hexdigest())
 PY
 )" || die "unable to hash scanner report"
 mkdir -p "$(dirname "$RECEIPT")"
-python3 - "$RECEIPT" "$config_digest" "$reviewed_base_json" "$candidate" "$SURFACE_ID" "$scan_hex" <<'PY'
+python3 - "$RECEIPT" "$config_digest" "$reviewed_base_json" "$candidate" "$SURFACE_ID" "$GENERATED_SURFACE_ID" "$scan_hex" <<'PY'
 import hashlib
 import json
 import os
 import sys
 import tempfile
 
-receipt_path, config_digest, reviewed_base_json, candidate, surface_id, scan_hex = sys.argv[1:]
+receipt_path, config_digest, reviewed_base_json, candidate, surface_id, generated_surface_id, scan_hex = sys.argv[1:]
 payload = {
     "schema_version": 1,
     "tool_name": "detect-secrets",
@@ -137,7 +163,7 @@ payload = {
     "config_digest": config_digest,
     "reviewed_base_commit": json.loads(reviewed_base_json),
     "candidate_commit": candidate,
-    "scanned_surface_ids": [surface_id],
+    "scanned_surface_ids": [surface_id, generated_surface_id],
     "coverage_state": "complete",
     "finding_count": 0,
 }
@@ -166,4 +192,5 @@ except BaseException:
     raise
 PY
 
-printf 'detect-secrets %s: 0 findings across %s\n' "$REQUIRED_VERSION" "$SURFACE_ID"
+printf 'detect-secrets %s: 0 findings across %s and %s\n' \
+  "$REQUIRED_VERSION" "$SURFACE_ID" "$GENERATED_SURFACE_ID"

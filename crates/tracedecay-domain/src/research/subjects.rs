@@ -23,6 +23,7 @@ pub enum EntityKind {
     Session,
     Message,
     Workflow,
+    ResponseHandle,
     SourceRecord,
     WebSource,
     Document,

@@ -9,7 +9,7 @@
   "child_manifests": [
     {
       "path": "privacy/privacy-manifest.json",
-      "sha256": "e496c91b78a6b3baff8b4c7ed57cabae896bcb4f4b69ea2c52768d5e7b4972b0"
+      "sha256": "6eb913f3303285666fa7631fce1b8eeb011c5d63b8abb9f66da6b40d41430d22"
     }
   ],
   "content_policy": "synthetic-or-minimally-redacted",

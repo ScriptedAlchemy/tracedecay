@@ -200,7 +200,7 @@
     {
       "fixture_id": "privacy-historical-regressions-v1",
       "relative_path": "tests/fixtures/v2/privacy/historical-regressions.json",
-      "sha256": "06cbcc54e2c253fba0aab6b51cb48a5883a42b78ac0f1558cdd80cd4fc0ca277",
+      "sha256": "774ada46b7947faaf538fd24c428926648ec7a3932fc28f89de60d4caeb2fae6",
       "source_class": "historical-metadata",
       "coverage_state": "historical-reviewed",
       "surface_ids": ["PR2B-REVIEWED-GIT-RANGE"],

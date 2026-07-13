@@ -143,50 +143,15 @@ jobs:
       - name: Run pinned detect-secrets lane
         run: scripts/check-v2-detect-secrets.sh "$REVIEWED_BASE" "$CANDIDATE"
 
-      - name: Generate content-free host receipts
+      - name: Materialize reviewed content-free host receipts
         run: |
-          python3 - <<'PY'
-          import hashlib
-          import json
-          import os
-          from pathlib import Path
-
-          fixtures = Path("tests/fixtures/v2/privacy")
-          paths = sorted(fixtures.glob("host-*.json"))
-          if len(paths) != 7:
-              raise SystemExit(f"expected 7 host fixtures, found {len(paths)}")
-          scanner_receipts = [
-              Path("target/v2-privacy/receipts/gitleaks-8.30.1.json"),
-              Path("target/v2-privacy/receipts/detect-secrets-1.5.0.json"),
-          ]
-          scanner_digests = {}
-          for path in scanner_receipts:
-              data = path.read_bytes()
-              scanner_digests[path.as_posix()] = "sha256:" + hashlib.sha256(data).hexdigest()
-          for path in paths:
-              raw = path.read_bytes()
-              fixture = json.loads(raw)
-              surface_id = fixture.get("surface_id")
-              expected = f"target/v2-privacy/receipts/hosts/{surface_id}.json"
-              if fixture.get("metadata_only") is not True or fixture.get("receipt_ref") != expected:
-                  raise SystemExit(f"invalid host receipt contract: {path}")
-              payload = {
-                  "schema_version": 1,
-                  "surface_id": surface_id,
-                  "artifact_class": fixture.get("artifact_class"),
-                  "reviewed_base_commit": os.environ["REVIEWED_BASE"],
-                  "candidate_commit": os.environ["CANDIDATE"],
-                  "coverage_state": "complete",
-                  "finding_count": 0,
-                  "fixture_digest": "sha256:" + hashlib.sha256(raw).hexdigest(),
-                  "scanner_receipt_digests": scanner_digests,
-              }
-              canonical = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
-              payload["artifact_digest"] = "sha256:" + hashlib.sha256(canonical).hexdigest()
-              destination = Path(expected)
-              destination.parent.mkdir(parents=True, exist_ok=True)
-              destination.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
-          PY
+          set -euo pipefail
+          for source in tests/fixtures/v2/privacy/host-*.json; do
+            destination="$(jq -er '.receipt_ref' "$source")"
+            mkdir -p "$(dirname "$destination")"
+            cp -- "$source" "$destination"
+            cmp --silent "$source" "$destination"
+          done
 
       - name: Publish content-free privacy receipts
         uses: actions/upload-artifact@v4

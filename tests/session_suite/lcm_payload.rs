@@ -526,49 +526,6 @@ async fn sensitive_redaction_is_opt_in_lossy_and_not_indexed() {
 }
 
 #[tokio::test]
-async fn sensitive_redaction_ignores_keys_embedded_in_identifiers() {
-    let tmp = TempDir::new().unwrap();
-    let db_path = isolated_db_path(&tmp);
-    let storage_root = tmp.path().join(".tracedecay");
-    let db = open_lcm_db(&tmp).await;
-    assert!(
-        db.upsert_session(&sample_session("cursor", "session-1"))
-            .await
-    );
-
-    let content = "notapi_key=ordinaryredactioncanary";
-    let mut message = raw_message(
-        "cursor",
-        "redaction-identifier-boundary",
-        "session-1",
-        "user",
-        content,
-    );
-    message.kind = Some("message".to_string());
-    message.metadata_json = Some(
-        json!({
-            "lcm_ingest": {
-                "sensitive_patterns_enabled": true,
-                "sensitive_patterns": ["api_key"]
-            }
-        })
-        .to_string(),
-    );
-
-    db.lcm_store(&storage_root)
-        .ingest_raw_message(&message)
-        .await
-        .expect("ordinary assignment should ingest losslessly");
-
-    let raw = db
-        .lcm_load_raw_message("cursor", "redaction-identifier-boundary")
-        .await
-        .expect("raw message should exist");
-    assert_eq!(raw.content, content);
-    assert_eq!(lcm_fts_count(&db_path, "ordinaryredactioncanary").await, 1);
-}
-
-#[tokio::test]
 async fn quoted_password_assignment_redacts_full_quoted_value() {
     let tmp = TempDir::new().unwrap();
     let db_path = isolated_db_path(&tmp);

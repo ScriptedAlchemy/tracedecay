@@ -1,0 +1,31 @@
+{
+  "schema_version": "research-evidence-consumer-binding/v1",
+  "consumer_id": "pr36r.host-release-manifest",
+  "evidence_ledger_digest": "sha256:48a73634b047e2c86d2a79069761768736eb316b6c243f8b2e079e7489eaa607",
+  "selected_entry_ids": [
+    "host-evidence-claude-agent",
+    "host-evidence-claude-command",
+    "host-evidence-claude-component",
+    "host-evidence-claude-hook",
+    "host-evidence-claude-mcp",
+    "host-evidence-claude-release",
+    "host-evidence-claude-rule",
+    "host-evidence-claude-skill",
+    "host-evidence-codex-agent",
+    "host-evidence-codex-command",
+    "host-evidence-codex-component",
+    "host-evidence-codex-hook",
+    "host-evidence-codex-mcp",
+    "host-evidence-codex-release",
+    "host-evidence-codex-rule",
+    "host-evidence-codex-skill",
+    "host-evidence-cursor-agent",
+    "host-evidence-cursor-command",
+    "host-evidence-cursor-component",
+    "host-evidence-cursor-hook",
+    "host-evidence-cursor-mcp",
+    "host-evidence-cursor-release",
+    "host-evidence-cursor-rule",
+    "host-evidence-cursor-skill"
+  ]
+}

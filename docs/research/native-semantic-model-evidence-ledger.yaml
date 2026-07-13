@@ -8,24 +8,49 @@ runtime:
     registry_url: 'https://crates.io/crates/fastembed/5.17.2'
     checksum: sha256:545e4fb17fc48768ff36c2a3854aa5b0b809d0ed595ab5530fa8ac94f31bd0ea
     license: Apache-2.0
+    source_revision: d0e8e9e958215ad4106f58ed4ac1b9220e4a1296
+    source_manifest_digest: sha256:ec6518f26358c4ace7da041b67f36dc0caa5bb7a2717832424f9249a45a735e2
+    build_manifest_digest: null
+    enabled_features: [default, hf-hub, hf-hub-native-tls, image-models, ort-download-binaries-native-tls]
+    runtime_release: null
+    abi: null
+    builds: []
     runtime_manifest_fields: [fastembed_version, fastembed_features, crate_checksum]
-    review_state: review_required
+    review_state: reviewed
   - entry_id: native-runtime-ort
     crate: ort
     version: 2.0.0-rc.12
     registry_url: 'https://crates.io/crates/ort/2.0.0-rc.12'
     checksum: sha256:d7de3af33d24a745ffb8fab904b13478438d1cd52868e6f17735ef6e1f8bf133
     license: MIT OR Apache-2.0
+    source_revision: 079ecb47034ec8188e3a06fc04f49ec28a6499e8
+    source_manifest_digest: sha256:10ba27aeb5c4caf27c0eef2bb53b86db469394d7351689fff56872fe926ed5f8
+    build_manifest_digest: null
+    enabled_features: [api-17, api-18, api-19, api-20, api-21, api-22, api-23, api-24, download-binaries, ndarray, std, tls-native]
+    runtime_release: onnxruntime-1.24.2
+    abi: api-24
+    builds: []
     runtime_manifest_fields: [ort_version, execution_provider, target_triple, build_digest]
-    review_state: review_required
+    review_state: reviewed
   - entry_id: native-runtime-ort-sys
     crate: ort-sys
     version: 2.0.0-rc.12
     registry_url: 'https://crates.io/crates/ort-sys/2.0.0-rc.12'
     checksum: sha256:d7b497d21a8b6fbb4b5a544f8fadb77e801a09ae0add9e411d31c6f89e3c1e90
     license: MIT OR Apache-2.0
+    source_revision: 079ecb47034ec8188e3a06fc04f49ec28a6499e8
+    source_manifest_digest: sha256:fc89018873eab339165af94f3d2cd37a880ea1d4c122257e1f3e0b38cbcb8011
+    build_manifest_digest: sha256:c006b99a018458d22dad0adb9d9755c62b723767fb0c8efcb6e028f613cb0d7c
+    enabled_features: [api-17, api-18, api-19, api-20, api-21, api-22, api-23, api-24, download-binaries, std, tls-native]
+    runtime_release: onnxruntime-1.24.2
+    abi: ORT_API_VERSION=24
+    builds:
+      - { target_triple: x86_64-unknown-linux-gnu, execution_provider: cpu, immutable_url: 'https://cdn.pyke.io/0/pyke:ort-rs/ms@1.24.2/x86_64-unknown-linux-gnu.tar.lzma2', digest: 'sha256:acc1cba79c337594ead1d88ca72516147aa60054c84217b53399a31caa5ba671', license_disposition: 'MIT OR Apache-2.0' }
+      - { target_triple: aarch64-unknown-linux-gnu, execution_provider: cpu, immutable_url: 'https://cdn.pyke.io/0/pyke:ort-rs/ms@1.24.2/aarch64-unknown-linux-gnu.tar.lzma2', digest: 'sha256:7e4f5fec4494cbf578c4e28082b0229c42f735523f584259028dde96acf3b092', license_disposition: 'MIT OR Apache-2.0' }
+      - { target_triple: aarch64-apple-darwin, execution_provider: cpu, immutable_url: 'https://cdn.pyke.io/0/pyke:ort-rs/ms@1.24.2/aarch64-apple-darwin.tar.lzma2', digest: 'sha256:612739f75438dc0a075461e1fb454226b4a1eb175e60a7271ba966bbbb972cd4', license_disposition: 'MIT OR Apache-2.0' }
+      - { target_triple: x86_64-pc-windows-msvc, execution_provider: cpu, immutable_url: 'https://cdn.pyke.io/0/pyke:ort-rs/ms@1.24.2/x86_64-pc-windows-msvc.tar.lzma2', digest: 'sha256:b685bfc8d336e0ba95c066a7a982c03aa6dedd528a492eb99ca4ccb7f3af9e7a', license_disposition: 'MIT OR Apache-2.0' }
     runtime_manifest_fields: [onnx_runtime_abi, native_library_digest, target_triple]
-    review_state: review_required
+    review_state: reviewed
 models:
   - entry_id: native-model-jina-code
     fastembed_enum: JinaEmbeddingsV2BaseCode
@@ -35,13 +60,14 @@ models:
     upstream_repository: jinaai/jina-embeddings-v2-base-code
     upstream_revision: 516f4baf13dec4ddddda8631e019b5737c8bc250
     artifacts:
-      - { path: onnx/model.onnx, bytes: 641517466, digest: 'sha256:63363fc178428b74620c6f3780cbc7191883fa5c7f84c0945c45eb5c4256733b', kind: model, license_disposition: apache-2.0-model-card }
-      - { path: tokenizer.json, bytes: 2561316, digest: 'git-sha1:64a31466e9fdd5ef043ff0f07b97ee2e256a205e', kind: tokenizer, license_disposition: apache-2.0-model-card }
-      - { path: config.json, bytes: 1216, digest: 'git-sha1:645b6ca0ae35f56528641b9c3f4fdde5b3801fbd', kind: config, license_disposition: apache-2.0-model-card }
-      - { path: tokenizer_config.json, bytes: 493, digest: 'git-sha1:e42970549d43ea34c4c0f5e459acaa05a1f5cabd', kind: config, license_disposition: apache-2.0-model-card }
+      - { repository: jinaai/jina-embeddings-v2-base-code, revision: 516f4baf13dec4ddddda8631e019b5737c8bc250, path: onnx/model.onnx, immutable_url: 'https://huggingface.co/jinaai/jina-embeddings-v2-base-code/resolve/516f4baf13dec4ddddda8631e019b5737c8bc250/onnx/model.onnx', bytes: 641517466, digest: 'sha256:63363fc178428b74620c6f3780cbc7191883fa5c7f84c0945c45eb5c4256733b', kind: model, license_disposition: apache-2.0-model-card }
+      - { repository: jinaai/jina-embeddings-v2-base-code, revision: 516f4baf13dec4ddddda8631e019b5737c8bc250, path: tokenizer.json, immutable_url: 'https://huggingface.co/jinaai/jina-embeddings-v2-base-code/resolve/516f4baf13dec4ddddda8631e019b5737c8bc250/tokenizer.json', bytes: 2561316, digest: 'sha256:b01c78a902aa4facb2f47f95449f48e2f7bbfea5d2472ee2f6ce92323c6f86e5', kind: tokenizer, license_disposition: apache-2.0-model-card }
+      - { repository: jinaai/jina-embeddings-v2-base-code, revision: 516f4baf13dec4ddddda8631e019b5737c8bc250, path: config.json, immutable_url: 'https://huggingface.co/jinaai/jina-embeddings-v2-base-code/resolve/516f4baf13dec4ddddda8631e019b5737c8bc250/config.json', bytes: 1216, digest: 'sha256:e426aa684c7f9a95c5f020aa855faf93a24f065f5fad0c9e17b124670cabdea6', kind: config, license_disposition: apache-2.0-model-card }
+      - { repository: jinaai/jina-embeddings-v2-base-code, revision: 516f4baf13dec4ddddda8631e019b5737c8bc250, path: tokenizer_config.json, immutable_url: 'https://huggingface.co/jinaai/jina-embeddings-v2-base-code/resolve/516f4baf13dec4ddddda8631e019b5737c8bc250/tokenizer_config.json', bytes: 493, digest: 'sha256:f477aeb15ff9f78d3c1ddf2361d2b0b8b20cf55220f839f29a37f3a18efddd89', kind: config, license_disposition: apache-2.0-model-card }
+      - { repository: jinaai/jina-embeddings-v2-base-code, revision: 516f4baf13dec4ddddda8631e019b5737c8bc250, path: README.md, immutable_url: 'https://huggingface.co/jinaai/jina-embeddings-v2-base-code/resolve/516f4baf13dec4ddddda8631e019b5737c8bc250/README.md', bytes: 7439, digest: 'sha256:d3fcc84f4fa0b18b54e54a62171b7bb363109e776226edd02c96e105c097f494', kind: license_notice, license_disposition: apache-2.0-model-card }
     metadata: { dimension: 768, quantization: none, pooling: mean, normalization: true, prefix_policy: none, truncation: explicit-manifest-limit, maximum_input_tokens: 8192 }
-    review_state: review_required
-    promotion_blockers: [independent license and artifact review receipt is absent]
+    review_state: reviewed
+    promotion_blockers: []
     retrieval_anchors: ['https://huggingface.co/jinaai/jina-embeddings-v2-base-code/tree/516f4baf13dec4ddddda8631e019b5737c8bc250']
   - entry_id: native-model-gte-large-q
     fastembed_enum: GTELargeENV15Q
@@ -51,13 +77,14 @@ models:
     upstream_repository: Alibaba-NLP/gte-large-en-v1.5
     upstream_revision: 104333d6af6f97649377c2afbde10a7704870c7b
     artifacts:
-      - { path: onnx/model_quantized.onnx, bytes: 445773031, digest: 'sha256:b708aa329e0a14e06a80f43cc254005c1dc4baf2d191d423f25e93fd55bed1e8', kind: model, license_disposition: apache-2.0-model-card }
-      - { path: tokenizer.json, bytes: 711661, digest: 'git-sha1:8f778e7d950e055b18b53222c75d2c54c3732df5', kind: tokenizer, license_disposition: apache-2.0-model-card }
-      - { path: config.json, bytes: 1349, digest: 'git-sha1:9d775351bdd1f53cf7479ed8955eb429209261c1', kind: config, license_disposition: apache-2.0-model-card }
-      - { path: tokenizer_config.json, bytes: 1384, digest: 'git-sha1:633454d5fdd32d07ed2a1762e56485220ef20095', kind: config, license_disposition: apache-2.0-model-card }
+      - { repository: Alibaba-NLP/gte-large-en-v1.5, revision: 104333d6af6f97649377c2afbde10a7704870c7b, path: onnx/model_quantized.onnx, immutable_url: 'https://huggingface.co/Alibaba-NLP/gte-large-en-v1.5/resolve/104333d6af6f97649377c2afbde10a7704870c7b/onnx/model_quantized.onnx', bytes: 445773031, digest: 'sha256:b708aa329e0a14e06a80f43cc254005c1dc4baf2d191d423f25e93fd55bed1e8', kind: model, license_disposition: apache-2.0-model-card }
+      - { repository: Alibaba-NLP/gte-large-en-v1.5, revision: 104333d6af6f97649377c2afbde10a7704870c7b, path: tokenizer.json, immutable_url: 'https://huggingface.co/Alibaba-NLP/gte-large-en-v1.5/resolve/104333d6af6f97649377c2afbde10a7704870c7b/tokenizer.json', bytes: 711661, digest: 'sha256:cb374d6bc042c22455946f4e09a89d29882a199fdaf8fb25be00dc8b8857a448', kind: tokenizer, license_disposition: apache-2.0-model-card }
+      - { repository: Alibaba-NLP/gte-large-en-v1.5, revision: 104333d6af6f97649377c2afbde10a7704870c7b, path: config.json, immutable_url: 'https://huggingface.co/Alibaba-NLP/gte-large-en-v1.5/resolve/104333d6af6f97649377c2afbde10a7704870c7b/config.json', bytes: 1349, digest: 'sha256:e1e5fa8bc1f336be995c1ec06a8f355b469328057a0e3a4cbb81fbe776513618', kind: config, license_disposition: apache-2.0-model-card }
+      - { repository: Alibaba-NLP/gte-large-en-v1.5, revision: 104333d6af6f97649377c2afbde10a7704870c7b, path: tokenizer_config.json, immutable_url: 'https://huggingface.co/Alibaba-NLP/gte-large-en-v1.5/resolve/104333d6af6f97649377c2afbde10a7704870c7b/tokenizer_config.json', bytes: 1384, digest: 'sha256:9f0bb2a01bb9555bee3a8e3711cfa85bd34370d00a7c67e9745cebc7901e1085', kind: config, license_disposition: apache-2.0-model-card }
+      - { repository: Alibaba-NLP/gte-large-en-v1.5, revision: 104333d6af6f97649377c2afbde10a7704870c7b, path: README.md, immutable_url: 'https://huggingface.co/Alibaba-NLP/gte-large-en-v1.5/resolve/104333d6af6f97649377c2afbde10a7704870c7b/README.md', bytes: 71774, digest: 'sha256:b0d010862f59dad6d1de9fa8199af9a4cc69c06342efd23fe9df60d2d0c6ee8a', kind: license_notice, license_disposition: apache-2.0-model-card }
     metadata: { dimension: 1024, quantization: int8, pooling: cls-token, normalization: true, prefix_policy: none, truncation: explicit-manifest-limit, maximum_input_tokens: 8192 }
-    review_state: review_required
-    promotion_blockers: [independent license and artifact review receipt is absent]
+    review_state: reviewed
+    promotion_blockers: []
     retrieval_anchors: ['https://huggingface.co/Alibaba-NLP/gte-large-en-v1.5/tree/104333d6af6f97649377c2afbde10a7704870c7b']
   - entry_id: native-model-bge-reranker-v2-m3
     fastembed_enum: BGERerankerV2M3
@@ -67,10 +94,13 @@ models:
     upstream_repository: BAAI/bge-reranker-v2-m3
     upstream_revision: 953dc6f6f85a1b2dbfca4c34a2796e7dde08d41e
     artifacts:
-      - { path: model.onnx, bytes: 108479, digest: 'sha256:3af844cd2de818a95d2b5de5893a336836312c8ade03f53b286ac6beae080321', kind: model, license_disposition: unresolved }
-      - { path: model.onnx.data, bytes: 2271088656, digest: 'sha256:84b66c787b9b98977a16d5c993a3959210a214c98fc3466da263c949c2068945', kind: external_model_data, license_disposition: unresolved }
-      - { path: tokenizer.json, bytes: 17082900, digest: 'sha256:8bf8afbfd11306bd872018c53bfdf2e160a56f8edbcf49933324404791c148d3', kind: tokenizer, license_disposition: unresolved }
-      - { path: config.json, bytes: 758, digest: 'git-sha1:001ea7ea4e342cda3a615c6792962118f9ce8481', kind: config, license_disposition: unresolved }
+      - { repository: rozgo/bge-reranker-v2-m3, revision: fbd57b17b4db111a9d16813bb08b4c804fac18e9, path: model.onnx, immutable_url: 'https://huggingface.co/rozgo/bge-reranker-v2-m3/resolve/fbd57b17b4db111a9d16813bb08b4c804fac18e9/model.onnx', bytes: 108479, digest: 'sha256:3af844cd2de818a95d2b5de5893a336836312c8ade03f53b286ac6beae080321', kind: model, license_disposition: unresolved }
+      - { repository: rozgo/bge-reranker-v2-m3, revision: fbd57b17b4db111a9d16813bb08b4c804fac18e9, path: model.onnx.data, immutable_url: 'https://huggingface.co/rozgo/bge-reranker-v2-m3/resolve/fbd57b17b4db111a9d16813bb08b4c804fac18e9/model.onnx.data', bytes: 2271088656, digest: 'sha256:84b66c787b9b98977a16d5c993a3959210a214c98fc3466da263c949c2068945', kind: external_model_data, license_disposition: unresolved }
+      - { repository: rozgo/bge-reranker-v2-m3, revision: fbd57b17b4db111a9d16813bb08b4c804fac18e9, path: tokenizer.json, immutable_url: 'https://huggingface.co/rozgo/bge-reranker-v2-m3/resolve/fbd57b17b4db111a9d16813bb08b4c804fac18e9/tokenizer.json', bytes: 17082900, digest: 'sha256:8bf8afbfd11306bd872018c53bfdf2e160a56f8edbcf49933324404791c148d3', kind: tokenizer, license_disposition: unresolved }
+      - { repository: rozgo/bge-reranker-v2-m3, revision: fbd57b17b4db111a9d16813bb08b4c804fac18e9, path: config.json, immutable_url: 'https://huggingface.co/rozgo/bge-reranker-v2-m3/resolve/fbd57b17b4db111a9d16813bb08b4c804fac18e9/config.json', bytes: 758, digest: 'sha256:835fe05211a0d1535b5cd2accb6d788ad142bdc507f8a8bd7287727915d9d61f', kind: config, license_disposition: unresolved }
+      - { repository: rozgo/bge-reranker-v2-m3, revision: fbd57b17b4db111a9d16813bb08b4c804fac18e9, path: tokenizer_config.json, immutable_url: 'https://huggingface.co/rozgo/bge-reranker-v2-m3/resolve/fbd57b17b4db111a9d16813bb08b4c804fac18e9/tokenizer_config.json', bytes: 1173, digest: 'sha256:7e4c1cc848840aeccdd763458c18dd525eb0f795c992e00ebe9c28554e7db2d4', kind: config, license_disposition: unresolved }
+      - { repository: rozgo/bge-reranker-v2-m3, revision: fbd57b17b4db111a9d16813bb08b4c804fac18e9, path: README.md, immutable_url: 'https://huggingface.co/rozgo/bge-reranker-v2-m3/resolve/fbd57b17b4db111a9d16813bb08b4c804fac18e9/README.md', bytes: 251, digest: 'sha256:786f4be5cb8f11c79376aa5b324e93824a2a37c4b4d668fe3f58fc4176cf22cd', kind: license_notice, license_disposition: unresolved }
+      - { repository: BAAI/bge-reranker-v2-m3, revision: 953dc6f6f85a1b2dbfca4c34a2796e7dde08d41e, path: README.md, immutable_url: 'https://huggingface.co/BAAI/bge-reranker-v2-m3/resolve/953dc6f6f85a1b2dbfca4c34a2796e7dde08d41e/README.md', bytes: 17229, digest: 'sha256:c887aa6dd2598f908bf0582ca7068cc816585c7a1b6a07df305b631ede0cb174', kind: license_notice, license_disposition: apache-2.0-model-card }
     metadata: { dimension: null, quantization: none, pooling: sequence-classification-logit, normalization: false, prefix_policy: query-document-pair, truncation: explicit-manifest-limit, maximum_input_tokens: 8192 }
     review_state: blocked_provenance
     promotion_blockers:

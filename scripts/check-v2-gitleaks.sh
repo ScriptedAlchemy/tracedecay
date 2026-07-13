@@ -5,6 +5,7 @@ readonly expected_version="8.30.1"
 readonly receipt="target/v2-privacy/receipts/gitleaks-8.30.1.json"
 readonly config=".gitleaks.toml"
 readonly tree_surface="PR2B-CANDIDATE-TREE"
+readonly generated_surface="PR2B-GENERATED-DERIVATIVES"
 readonly history_surface="PR2B-REVIEWED-GIT-RANGE"
 
 fail() {
@@ -16,6 +17,8 @@ fail() {
 [[ $# -eq 0 || $# -eq 2 ]] || fail "usage: $0 [reviewed_base candidate]"
 command -v git >/dev/null 2>&1 || fail "git is required"
 command -v gitleaks >/dev/null 2>&1 || fail "gitleaks ${expected_version} is required"
+command -v cmp >/dev/null 2>&1 || fail "cmp is required"
+command -v jq >/dev/null 2>&1 || fail "jq is required"
 command -v sha256sum >/dev/null 2>&1 || fail "sha256sum is required"
 command -v tar >/dev/null 2>&1 || fail "tar is required"
 [[ -f "$config" ]] || fail "missing ${config}"
@@ -26,8 +29,7 @@ actual_version="$(gitleaks version 2>/dev/null)" || fail "cannot read gitleaks v
 
 candidate="$(git rev-parse --verify 'HEAD^{commit}' 2>/dev/null)" || fail "HEAD is not a commit"
 reviewed_base=""
-scan_root="."
-surface_ids="\"${tree_surface}\""
+surface_ids="\"${tree_surface}\", \"${generated_surface}\""
 
 umask 077
 mkdir -p -- "$(dirname -- "$receipt")"
@@ -35,6 +37,11 @@ rm -f -- "$receipt"
 tmpdir="$(mktemp -d target/v2-privacy/.gitleaks.XXXXXX)" || fail "cannot create temporary directory"
 trap 'rm -rf -- "$tmpdir"' EXIT HUP INT TERM
 touch "$tmpdir/empty-gitleaks-ignore"
+
+mkdir "$tmpdir/candidate"
+git archive "$candidate" | tar -xf - -C "$tmpdir/candidate" || \
+  fail "cannot materialize candidate tree"
+scan_root="$tmpdir/candidate"
 
 if [[ $# -eq 2 ]]; then
   reviewed_base="$(git rev-parse --verify "$1^{commit}" 2>/dev/null)" || fail "reviewed_base is not a commit"
@@ -46,11 +53,11 @@ if [[ $# -eq 2 ]]; then
   if grep -q '^?' "$tmpdir/range-objects"; then
     fail "reviewed Git range has missing objects"
   fi
-  mkdir "$tmpdir/candidate"
-  git archive "$candidate" | tar -xf - -C "$tmpdir/candidate" || \
+  rm -rf -- "$scan_root"
+  mkdir "$scan_root"
+  git archive "$candidate" | tar -xf - -C "$scan_root" || \
     fail "cannot materialize candidate tree"
-  scan_root="$tmpdir/candidate"
-  surface_ids="\"${tree_surface}\", \"${history_surface}\""
+  surface_ids="\"${tree_surface}\", \"${generated_surface}\", \"${history_surface}\""
 fi
 
 tree_report="$tmpdir/tree.json"
@@ -61,6 +68,26 @@ if ! gitleaks dir "$scan_root" --config "$config" \
   fail "candidate-tree scan failed or found secrets"
 fi
 [[ -f "$tree_report" ]] || fail "candidate-tree report is missing"
+
+generated_root="$tmpdir/generated-derivatives/hosts"
+mkdir -p -- "$generated_root"
+host_receipt_count=0
+for source in "$scan_root"/tests/fixtures/v2/privacy/host-*.json; do
+  [[ -f "$source" ]] || fail "reviewed host receipt fixtures are missing"
+  destination="$generated_root/$(basename -- "$source")"
+  cp -- "$source" "$destination" || fail "cannot copy reviewed host receipt"
+  cmp --silent "$source" "$destination" || fail "reviewed host receipt copy drifted"
+  host_receipt_count=$((host_receipt_count + 1))
+done
+[[ "$host_receipt_count" -eq 7 ]] || fail "expected seven reviewed host receipts"
+generated_report="$tmpdir/generated.json"
+if ! gitleaks dir "$generated_root" --config "$config" \
+    --gitleaks-ignore-path "$tmpdir/empty-gitleaks-ignore" \
+    --no-banner --no-color --redact=100 --max-archive-depth 2 \
+    --report-format json --report-path "$generated_report" --log-level error; then
+  fail "generated-derivative scan failed or found secrets"
+fi
+[[ -f "$generated_report" ]] || fail "generated-derivative report is missing"
 
 history_report="$tmpdir/history.json"
 printf '[]\n' >"$history_report"
@@ -79,13 +106,13 @@ finding_count="$(awk '
   /^[[:space:]]*\[[[:space:]]*\][[:space:]]*$/ { next }
   { count = 1 }
   END { print count }
-' "$tree_report" "$history_report")"
+' "$tree_report" "$generated_report" "$history_report")"
 [[ "$finding_count" == "0" ]] || fail "scanner reports are not empty"
 
 config_digest="$(sha256sum "$config" | awk '{print $1}')"
 artifact_digest="$({
   printf '%s\n' "$expected_version" "$config_digest" "$reviewed_base" "$candidate"
-  sha256sum "$tree_report" "$history_report" | awk '{print $1}'
+  sha256sum "$tree_report" "$generated_report" "$history_report" | awk '{print $1}'
 } | sha256sum | awk '{print $1}')"
 
 base_json="null"

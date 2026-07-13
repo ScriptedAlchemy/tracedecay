@@ -1000,14 +1000,9 @@ fn find_next_private_key_block(
 fn find_next_key(lower: &str, cursor: usize, keys: &[&str]) -> Option<(usize, usize)> {
     keys.iter()
         .filter_map(|key| {
-            lower[cursor..].match_indices(key).find_map(|(idx, _)| {
-                let start = cursor + idx;
-                let embedded_in_identifier = lower[..start]
-                    .chars()
-                    .next_back()
-                    .is_some_and(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-'));
-                (!embedded_in_identifier).then_some((start, key.len()))
-            })
+            lower[cursor..]
+                .find(key)
+                .map(|idx| (cursor + idx, key.len()))
         })
         .min_by_key(|(idx, _)| *idx)
 }

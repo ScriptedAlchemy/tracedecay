@@ -568,7 +568,7 @@
       ],
       "base_commit": "commit-synthetic-base-001",
       "catalog_snapshot": {
-        "digest": "sha256:bdfdd355330876e4abfe6897df643932ffbe9022fdbffa129cf3829aa443e679",
+        "digest": "sha256:74ec82e8ac9134e6108566e685b077514bf9694399937d968cb75db2d584debe",
         "generation": "catalog-synthetic-001"
       },
       "created_at": 1767323045000000,
@@ -576,7 +576,7 @@
         "actor_id": "actor-synthetic-parent-001",
         "version": null
       },
-      "digest": "sha256:c14117fe7ba54c43dbf4c47704565bd1a06063d7388970100d265cbc8fb3de79",
+      "digest": "sha256:1a8c7a0c69f5dcef96cd553d9b87b36c00a1e3ac206e367e5e87beb76a3912be",
       "git_snapshot": {
         "captured_at": 1767323045000000,
         "dirty": false,
@@ -787,7 +787,7 @@
           "anchor_id": "retrieval-anchor-branch-session-001",
           "canonical_request_digest": "sha256:a54b849958d54b2b2fda697eb7a238adefb99de2916fff97581f102329dacdf6",
           "capability_catalog": {
-            "digest": "sha256:bdfdd355330876e4abfe6897df643932ffbe9022fdbffa129cf3829aa443e679",
+            "digest": "sha256:74ec82e8ac9134e6108566e685b077514bf9694399937d968cb75db2d584debe",
             "generation": "catalog-synthetic-001"
           },
           "created_at": 1767323045000000,
@@ -838,7 +838,7 @@
           "anchor_id": "retrieval-anchor-child-001",
           "canonical_request_digest": "sha256:9ba087e4292a86c1fe358193515da719e266239f72c5d58835651c7d100eb6f5",
           "capability_catalog": {
-            "digest": "sha256:bdfdd355330876e4abfe6897df643932ffbe9022fdbffa129cf3829aa443e679",
+            "digest": "sha256:74ec82e8ac9134e6108566e685b077514bf9694399937d968cb75db2d584debe",
             "generation": "catalog-synthetic-001"
           },
           "created_at": 1767323045000000,
@@ -889,7 +889,7 @@
           "anchor_id": "retrieval-anchor-copied-coordination-001",
           "canonical_request_digest": "sha256:6d2b30f3f00a9172a289d87034ef2403faad18e9b7833c8378a1bbc4fbae4b89",
           "capability_catalog": {
-            "digest": "sha256:bdfdd355330876e4abfe6897df643932ffbe9022fdbffa129cf3829aa443e679",
+            "digest": "sha256:74ec82e8ac9134e6108566e685b077514bf9694399937d968cb75db2d584debe",
             "generation": "catalog-synthetic-001"
           },
           "created_at": 1767323045000000,
@@ -940,7 +940,7 @@
           "anchor_id": "retrieval-anchor-message-001",
           "canonical_request_digest": "sha256:d4a5827385716df498936a331ba03b7d99332fb28295488cb9f9ba73e2f15ea3",
           "capability_catalog": {
-            "digest": "sha256:bdfdd355330876e4abfe6897df643932ffbe9022fdbffa129cf3829aa443e679",
+            "digest": "sha256:74ec82e8ac9134e6108566e685b077514bf9694399937d968cb75db2d584debe",
             "generation": "catalog-synthetic-001"
           },
           "created_at": 1767323045000000,
@@ -991,7 +991,7 @@
           "anchor_id": "retrieval-anchor-observed-commit-001",
           "canonical_request_digest": "sha256:6e2f663eafaa7deecc5a19ae6afa01b60ca0177c6ccb394b9c0ec9db20e4e29a",
           "capability_catalog": {
-            "digest": "sha256:bdfdd355330876e4abfe6897df643932ffbe9022fdbffa129cf3829aa443e679",
+            "digest": "sha256:74ec82e8ac9134e6108566e685b077514bf9694399937d968cb75db2d584debe",
             "generation": "catalog-synthetic-001"
           },
           "created_at": 1767323045000000,
@@ -1042,7 +1042,7 @@
           "anchor_id": "retrieval-anchor-produced-commit-001",
           "canonical_request_digest": "sha256:ca4a87d2064b11ce784b1abddb32afb12f0906eece1a1b7269813199b31e8f01",
           "capability_catalog": {
-            "digest": "sha256:bdfdd355330876e4abfe6897df643932ffbe9022fdbffa129cf3829aa443e679",
+            "digest": "sha256:74ec82e8ac9134e6108566e685b077514bf9694399937d968cb75db2d584debe",
             "generation": "catalog-synthetic-001"
           },
           "created_at": 1767323045000000,
@@ -1088,12 +1088,63 @@
           "view": "entity_version",
           "view_algorithm_version": "research-view-synthetic-1.0.0"
         },
+        "retrieval-anchor-deleted-001": {
+          "access_policy_digest": "sha256:a3edf5d62ee43f32142b9e99ffa37f0e9bbdf46f1a69a05f07c7f4cb1b343651",
+          "anchor_id": "retrieval-anchor-deleted-001",
+          "canonical_request_digest": "sha256:4444444444444444444444444444444444444444444444444444444444444444",
+          "capability_catalog": {
+            "digest": "sha256:74ec82e8ac9134e6108566e685b077514bf9694399937d968cb75db2d584debe",
+            "generation": "catalog-synthetic-001"
+          },
+          "created_at": 1767323045000000,
+          "data_version_digest": "sha256:5555555555555555555555555555555555555555555555555555555555555555",
+          "durability": "archived",
+          "expansion_recipe": {
+            "bounded_arguments_digest": "sha256:6666666666666666666666666666666666666666666666666666666666666666",
+            "capability_id": "capability-synthetic-research-exact-001",
+            "expansion": "exact_target"
+          },
+          "immutable_source_refs": [
+            {
+              "id": "message-synthetic-deleted-001",
+              "kind": "message"
+            }
+          ],
+          "payload_access": "unavailable",
+          "privacy_domain_id": "privacy-domain-synthetic-001",
+          "projection_version": "research-projection-synthetic-1.0.0",
+          "provenance": [
+            "provenance-synthetic-deleted-001"
+          ],
+          "resolved_scope_id": "scope-synthetic-deleted-001",
+          "retention_class": "retention-synthetic-deleted",
+          "schema_registry_digest": "sha256:f6694f27ce029884f3a6f8ae4eb282caa9fd0b5aa9f6f1d0b6c6b035c5f95cfc",
+          "snapshot": {
+            "components": {
+              "shard-synthetic-a": 51
+            }
+          },
+          "source_identity_class": "project_evidence",
+          "source_observations": [
+            "observation-deleted-001"
+          ],
+          "target": {
+            "kind": "entity",
+            "target": {
+              "id": "message-synthetic-deleted-001",
+              "kind": "message"
+            }
+          },
+          "target_kind": "message",
+          "view": "entity_version",
+          "view_algorithm_version": "research-view-synthetic-1.0.0"
+        },
         "retrieval-anchor-redacted-001": {
           "access_policy_digest": "sha256:a3edf5d62ee43f32142b9e99ffa37f0e9bbdf46f1a69a05f07c7f4cb1b343651",
           "anchor_id": "retrieval-anchor-redacted-001",
           "canonical_request_digest": "sha256:e3be3858c3750db9b482758446d2f3d0e3a4b8538c8f86096d439a1307834759",
           "capability_catalog": {
-            "digest": "sha256:bdfdd355330876e4abfe6897df643932ffbe9022fdbffa129cf3829aa443e679",
+            "digest": "sha256:74ec82e8ac9134e6108566e685b077514bf9694399937d968cb75db2d584debe",
             "generation": "catalog-synthetic-001"
           },
           "created_at": 1767323045000000,
@@ -1137,12 +1188,67 @@
           "view": "entity_version",
           "view_algorithm_version": "research-view-synthetic-1.0.0"
         },
+        "retrieval-anchor-response-handle-expired-001": {
+          "access_policy_digest": "sha256:a3edf5d62ee43f32142b9e99ffa37f0e9bbdf46f1a69a05f07c7f4cb1b343651",
+          "anchor_id": "retrieval-anchor-response-handle-expired-001",
+          "canonical_request_digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+          "capability_catalog": {
+            "digest": "sha256:74ec82e8ac9134e6108566e685b077514bf9694399937d968cb75db2d584debe",
+            "generation": "catalog-synthetic-001"
+          },
+          "created_at": 1767323045000000,
+          "data_version_digest": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+          "durability": {
+            "retention_bound": {
+              "expires_at": 1767323224000000
+            }
+          },
+          "expansion_recipe": {
+            "bounded_arguments_digest": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+            "capability_id": "capability-synthetic-research-exact-001",
+            "expansion": "exact_target"
+          },
+          "immutable_source_refs": [
+            {
+              "id": "response-handle-synthetic-expired-001",
+              "kind": "response_handle"
+            }
+          ],
+          "payload_access": "retention_expired",
+          "privacy_domain_id": "privacy-domain-synthetic-001",
+          "projection_version": "research-projection-synthetic-1.0.0",
+          "provenance": [
+            "provenance-synthetic-response-handle-expired-001"
+          ],
+          "resolved_scope_id": "scope-synthetic-response-handle-expired-001",
+          "retention_class": "retention-synthetic-response-handle",
+          "schema_registry_digest": "sha256:f6694f27ce029884f3a6f8ae4eb282caa9fd0b5aa9f6f1d0b6c6b035c5f95cfc",
+          "snapshot": {
+            "components": {
+              "shard-synthetic-a": 50
+            }
+          },
+          "source_identity_class": "external_delivery",
+          "source_observations": [
+            "observation-response-handle-expired-001"
+          ],
+          "target": {
+            "kind": "entity",
+            "target": {
+              "id": "response-handle-synthetic-expired-001",
+              "kind": "response_handle"
+            }
+          },
+          "target_kind": "response_handle",
+          "view": "entity_version",
+          "view_algorithm_version": "research-view-synthetic-1.0.0"
+        },
         "retrieval-anchor-workflow-001": {
           "access_policy_digest": "sha256:a3edf5d62ee43f32142b9e99ffa37f0e9bbdf46f1a69a05f07c7f4cb1b343651",
           "anchor_id": "retrieval-anchor-workflow-001",
           "canonical_request_digest": "sha256:d0685d0dc271bd8aad9f66e74d45155c8aacfdb56991c7e6ebf5cf18eb41c72b",
           "capability_catalog": {
-            "digest": "sha256:bdfdd355330876e4abfe6897df643932ffbe9022fdbffa129cf3829aa443e679",
+            "digest": "sha256:74ec82e8ac9134e6108566e685b077514bf9694399937d968cb75db2d584debe",
             "generation": "catalog-synthetic-001"
           },
           "created_at": 1767323045000000,
@@ -1190,12 +1296,66 @@
         }
       },
       "snapshot": {
-        "digest": "sha256:bdfdd355330876e4abfe6897df643932ffbe9022fdbffa129cf3829aa443e679",
+        "digest": "sha256:74ec82e8ac9134e6108566e685b077514bf9694399937d968cb75db2d584debe",
         "generation": "catalog-synthetic-001"
       }
     }
   },
   "tombstones": [
+    {
+      "coverage": {
+        "freshness": {
+          "shard-synthetic-a": {
+            "outbox_sequence": 51,
+            "shard_id": "shard-synthetic-a"
+          }
+        },
+        "incompatible": [],
+        "locked": [],
+        "redacted": [],
+        "searched": [],
+        "skipped": [],
+        "stale": [],
+        "truncated": [],
+        "unavailable": [
+          "shard-synthetic-a"
+        ],
+        "unknown_coverage": false
+      },
+      "entry_id": "research-anchor-deleted-001",
+      "evidence_class": "observed",
+      "occurred_at": 1767323225000000,
+      "reason": "deleted",
+      "receipt": {
+        "receipt_id": "audit-receipt-synthetic-deleted-001"
+      },
+      "retrieval_anchors": [
+        "retrieval-anchor-deleted-001"
+      ],
+      "snapshot": {
+        "components": {
+          "shard-synthetic-a": 51
+        }
+      },
+      "subject": {
+        "kind": "activity",
+        "subject": {
+          "agent_instance_id": null,
+          "goal_id": null,
+          "host": "host-synthetic-001",
+          "message_id": "message-synthetic-deleted-001",
+          "orchestration_agent_label": null,
+          "orchestration_observation_id": null,
+          "parent_session_id": null,
+          "parent_tool_use_id": null,
+          "provider": "provider-synthetic",
+          "session_id": "session-synthetic-deleted-001",
+          "source_store_id": "source-store-synthetic-001",
+          "thread_id": null,
+          "turn_id": null
+        }
+      }
+    },
     {
       "coverage": {
         "freshness": {
@@ -1247,6 +1407,52 @@
           "source_store_id": "source-store-synthetic-001",
           "thread_id": null,
           "turn_id": null
+        }
+      }
+    },
+    {
+      "coverage": {
+        "freshness": {
+          "shard-synthetic-a": {
+            "outbox_sequence": 50,
+            "shard_id": "shard-synthetic-a"
+          }
+        },
+        "incompatible": [],
+        "locked": [],
+        "redacted": [],
+        "searched": [],
+        "skipped": [],
+        "stale": [],
+        "truncated": [],
+        "unavailable": [
+          "shard-synthetic-a"
+        ],
+        "unknown_coverage": false
+      },
+      "entry_id": "research-anchor-response-handle-expired-001",
+      "evidence_class": "observed",
+      "occurred_at": 1767323225000000,
+      "reason": "expired",
+      "receipt": {
+        "receipt_id": "audit-receipt-synthetic-response-handle-expired-001"
+      },
+      "retrieval_anchors": [
+        "retrieval-anchor-response-handle-expired-001"
+      ],
+      "snapshot": {
+        "components": {
+          "shard-synthetic-a": 50
+        }
+      },
+      "subject": {
+        "kind": "delivery",
+        "subject": {
+          "delivery_entity": {
+            "id": "response-handle-synthetic-expired-001",
+            "kind": "response_handle"
+          },
+          "repository_id": "repository-synthetic-001"
         }
       }
     }

@@ -1,86 +1,363 @@
 schema_version: host-bundle-evidence-ledger/v1
-accessed_on: '2026-07-10'
+accessed_on: '2026-07-13'
 entries:
-  - entry_id: host-evidence-codex-plugin
+  - entry_id: host-evidence-codex-release
     host_profile: codex
-    surface: plugin
-    host_version_range: official documentation snapshot 2026-07-10
-    capability_code: HOST_PLUGIN_BUNDLE
+    surface: release
+    host_version_range: official documentation snapshot 2026-07-13
+    capability_code: HOST_RELEASE_PROJECTION
+    capability_disposition: V
     evidence_state: documented
-    source: { kind: official_documentation, canonical_url: 'https://developers.openai.com/codex/plugins/build', accessed_on: '2026-07-10' }
+    source: { kind: official_documentation, canonical_url: 'https://developers.openai.com/codex/plugins/build', accessed_on: '2026-07-13', locator_mutability: mutable, content_digest: 'sha256:057a665292feeb9cabce1ac4af03ba1d5452c442c37a832006322cfc49a01def' }
     license_disposition: metadata_only_no_copy
-    finding: Codex plugins package skills, hooks, MCP integrations, apps, and assets; custom agents remain separately configured.
-    conformance: { case_ref: HOST-CONFORMANCE-001, outcome: documented_only, reference: generated Codex bundle contract }
-    review: { reviewer: PR2A host-evidence reviewer, reviewed_on: '2026-07-10', expires_on: '2026-10-10' }
+    copy_disposition: metadata_only
+    finding: Codex documents plugin packaging and marketplace lifecycle, but release support remains version-gated until PR 36R stock-host conformance and signed digest verification pass.
+    conformance: { case_ref: HOST-CONFORMANCE-001, outcome: not_run, reference: Codex PR 36R release gate }
+    review: { reviewer: PR2A host-evidence reviewer, reviewed_on: '2026-07-13', expires_on: '2026-10-13' }
     sanitization_receipt: sanitization-receipt-host-evidence-001
     retrieval_anchors: ['https://developers.openai.com/codex/plugins/build']
   - entry_id: host-evidence-codex-skill
     host_profile: codex
     surface: skill
-    host_version_range: official documentation snapshot 2026-07-10
+    host_version_range: official documentation snapshot 2026-07-13
     capability_code: HOST_PROGRESSIVE_SKILL
+    capability_disposition: D
     evidence_state: documented
-    source: { kind: official_documentation, canonical_url: 'https://developers.openai.com/codex/skills', accessed_on: '2026-07-10' }
+    source: { kind: official_documentation, canonical_url: 'https://developers.openai.com/codex/skills', accessed_on: '2026-07-13', locator_mutability: mutable, content_digest: 'sha256:705475617cda00b6bbbd5c50a24c428754f4fd3df81c80245033464f3d3ef8cc' }
     license_disposition: metadata_only_no_copy
+    copy_disposition: metadata_only
     finding: Codex loads bounded skill metadata first and discloses the selected skill body when invoked.
     conformance: { case_ref: HOST-CONFORMANCE-002, outcome: documented_only, reference: generated skill discovery contract }
-    review: { reviewer: PR2A host-evidence reviewer, reviewed_on: '2026-07-10', expires_on: '2026-10-10' }
+    review: { reviewer: PR2A host-evidence reviewer, reviewed_on: '2026-07-13', expires_on: '2026-10-13' }
     sanitization_receipt: sanitization-receipt-host-evidence-002
     retrieval_anchors: ['https://developers.openai.com/codex/skills']
   - entry_id: host-evidence-codex-agent
     host_profile: codex
     surface: agent
-    host_version_range: official documentation snapshot 2026-07-10
+    host_version_range: official documentation snapshot 2026-07-13
     capability_code: HOST_BOUNDED_SUBAGENT
+    capability_disposition: A
     evidence_state: documented
-    source: { kind: official_documentation, canonical_url: 'https://learn.chatgpt.com/docs/agent-configuration/subagents', accessed_on: '2026-07-10' }
+    source: { kind: official_documentation, canonical_url: 'https://learn.chatgpt.com/docs/agent-configuration/subagents', accessed_on: '2026-07-13', locator_mutability: mutable, content_digest: 'sha256:064e37154dd69006c0f2b4678b778da0fb0d1bda16a0b199cdc5cf2771171f2a' }
     license_disposition: metadata_only_no_copy
-    finding: Codex supports requested or instruction-driven subagents with separately selected roles and configuration.
-    conformance: { case_ref: HOST-CONFORMANCE-003, outcome: documented_only, reference: generated agent fallback contract }
-    review: { reviewer: PR2A host-evidence reviewer, reviewed_on: '2026-07-10', expires_on: '2026-10-10' }
+    copy_disposition: metadata_only
+    finding: Codex documents external subagent configuration, but agents are absent from plugin packaging; use an explicitly selected separately owned TOML fallback.
+    conformance: { case_ref: HOST-CONFORMANCE-003, outcome: unsupported, reference: Codex packaged-agent omission }
+    review: { reviewer: PR2A host-evidence reviewer, reviewed_on: '2026-07-13', expires_on: '2026-10-13' }
     sanitization_receipt: sanitization-receipt-host-evidence-003
     retrieval_anchors: ['https://learn.chatgpt.com/docs/agent-configuration/subagents']
-  - entry_id: host-evidence-claude-plugin
-    host_profile: claude-code
-    surface: plugin
-    host_version_range: official documentation snapshot 2026-07-10
-    capability_code: HOST_PLUGIN_BUNDLE
+  - entry_id: host-evidence-codex-hook
+    host_profile: codex
+    surface: hook
+    host_version_range: official documentation snapshot 2026-07-13
+    capability_code: HOST_LIFECYCLE_HOOK
+    capability_disposition: D
     evidence_state: documented
-    source: { kind: official_documentation, canonical_url: 'https://code.claude.com/docs/en/plugins-reference', accessed_on: '2026-07-10' }
+    source: { kind: official_documentation, canonical_url: 'https://developers.openai.com/codex/hooks', accessed_on: '2026-07-13', locator_mutability: mutable, content_digest: 'sha256:adb9f45c1d09d60a6ffc01c328f7f3634f58f8b307f9f2803bd1e1b364cf37f1' }
     license_disposition: metadata_only_no_copy
-    finding: Claude Code plugins can bundle skills, commands, agents, hooks, and MCP configuration with host-specific namespaces and settings.
-    conformance: { case_ref: HOST-CONFORMANCE-004, outcome: documented_only, reference: generated Claude bundle contract }
-    review: { reviewer: PR2A host-evidence reviewer, reviewed_on: '2026-07-10', expires_on: '2026-10-10' }
+    copy_disposition: metadata_only
+    finding: Codex plugins expose host-specific lifecycle hooks whose events and payloads require generated adapters.
+    conformance: { case_ref: HOST-CONFORMANCE-007, outcome: documented_only, reference: generated Codex hook contract }
+    review: { reviewer: PR2A host-evidence reviewer, reviewed_on: '2026-07-13', expires_on: '2026-10-13' }
+    sanitization_receipt: sanitization-receipt-host-evidence-007
+    retrieval_anchors: ['https://developers.openai.com/codex/hooks']
+  - entry_id: host-evidence-codex-mcp
+    host_profile: codex
+    surface: mcp
+    host_version_range: official documentation snapshot 2026-07-13
+    capability_code: HOST_MCP_CONFIGURATION
+    capability_disposition: D
+    evidence_state: documented
+    source: { kind: official_documentation, canonical_url: 'https://developers.openai.com/codex/mcp', accessed_on: '2026-07-13', locator_mutability: mutable, content_digest: 'sha256:62bb9a139a27fd6b8830c773250f56af78232e81f2905e52528d6ed90594d832' }
+    license_disposition: metadata_only_no_copy
+    copy_disposition: metadata_only
+    finding: Codex supports named MCP server configuration as a generated plugin component.
+    conformance: { case_ref: HOST-CONFORMANCE-008, outcome: documented_only, reference: generated Codex MCP contract }
+    review: { reviewer: PR2A host-evidence reviewer, reviewed_on: '2026-07-13', expires_on: '2026-10-13' }
+    sanitization_receipt: sanitization-receipt-host-evidence-008
+    retrieval_anchors: ['https://developers.openai.com/codex/mcp']
+  - entry_id: host-evidence-codex-rule
+    host_profile: codex
+    surface: rule
+    host_version_range: official documentation snapshot 2026-07-13
+    capability_code: HOST_INSTRUCTION_RULE
+    capability_disposition: forbidden
+    evidence_state: documented
+    source: { kind: official_documentation, canonical_url: 'https://developers.openai.com/codex/guides/agents-md', accessed_on: '2026-07-13', locator_mutability: mutable, content_digest: 'sha256:46d272626485f2dffe821e4abd431f6f7b9213855058815670a12535ce3a0c6e' }
+    license_disposition: metadata_only_no_copy
+    copy_disposition: metadata_only
+    finding: Codex discovers scoped AGENTS.md instructions, but Plan 27 forbids generating an always-on TraceDecay catalog rule; skills remain the discovery surface.
+    conformance: { case_ref: HOST-CONFORMANCE-009, outcome: unsupported, reference: Codex generated-rule omission }
+    review: { reviewer: PR2A host-evidence reviewer, reviewed_on: '2026-07-13', expires_on: '2026-10-13' }
+    sanitization_receipt: sanitization-receipt-host-evidence-009
+    retrieval_anchors: ['https://developers.openai.com/codex/guides/agents-md']
+  - entry_id: host-evidence-codex-command
+    host_profile: codex
+    surface: command
+    host_version_range: official documentation snapshot 2026-07-13
+    capability_code: HOST_COMMAND_SURFACE
+    capability_disposition: A
+    evidence_state: documented
+    source: { kind: official_documentation, canonical_url: 'https://developers.openai.com/codex/custom-prompts', accessed_on: '2026-07-13', locator_mutability: mutable, content_digest: 'sha256:9c40d6d3acb5a6616d773dc556ab8cd0c575f5640f147a698f76baec43844434' }
+    license_disposition: metadata_only_no_copy
+    copy_disposition: metadata_only
+    finding: Codex custom prompts are external compatibility affordances, but a plugin command directory is undocumented and no new command projection is generated.
+    conformance: { case_ref: HOST-CONFORMANCE-010, outcome: unsupported, reference: Codex plugin-command omission }
+    review: { reviewer: PR2A host-evidence reviewer, reviewed_on: '2026-07-13', expires_on: '2026-10-13' }
+    sanitization_receipt: sanitization-receipt-host-evidence-010
+    retrieval_anchors: ['https://developers.openai.com/codex/custom-prompts']
+  - entry_id: host-evidence-codex-component
+    host_profile: codex
+    surface: component
+    host_version_range: official documentation snapshot 2026-07-13
+    capability_code: HOST_COMPONENT_BUNDLE
+    capability_disposition: D
+    evidence_state: documented
+    source: { kind: official_documentation, canonical_url: 'https://developers.openai.com/codex/plugins/build', accessed_on: '2026-07-13', locator_mutability: mutable, content_digest: 'sha256:057a665292feeb9cabce1ac4af03ba1d5452c442c37a832006322cfc49a01def' }
+    license_disposition: metadata_only_no_copy
+    copy_disposition: metadata_only
+    finding: Codex plugin manifests bind generated skills, hooks, MCP servers, apps, and assets as separately digestible components.
+    conformance: { case_ref: HOST-CONFORMANCE-011, outcome: documented_only, reference: generated Codex component contract }
+    review: { reviewer: PR2A host-evidence reviewer, reviewed_on: '2026-07-13', expires_on: '2026-10-13' }
+    sanitization_receipt: sanitization-receipt-host-evidence-011
+    retrieval_anchors: ['https://developers.openai.com/codex/plugins/build']
+  - entry_id: host-evidence-claude-release
+    host_profile: claude-code
+    surface: release
+    host_version_range: official documentation snapshot 2026-07-13
+    capability_code: HOST_RELEASE_PROJECTION
+    capability_disposition: V
+    evidence_state: documented
+    source: { kind: official_documentation, canonical_url: 'https://code.claude.com/docs/en/plugin-marketplaces', accessed_on: '2026-07-13', locator_mutability: mutable, content_digest: 'sha256:33fc2dabc3da437b47b4b91770f14c231eb1396d131400ec0936665ca1f14035' }
+    license_disposition: metadata_only_no_copy
+    copy_disposition: metadata_only
+    finding: Claude documents marketplace publication and version resolution, but release support remains version-gated until PR 36R stock-host conformance and signed digest verification pass.
+    conformance: { case_ref: HOST-CONFORMANCE-004, outcome: not_run, reference: Claude PR 36R release gate }
+    review: { reviewer: PR2A host-evidence reviewer, reviewed_on: '2026-07-13', expires_on: '2026-10-13' }
     sanitization_receipt: sanitization-receipt-host-evidence-004
-    retrieval_anchors: ['https://code.claude.com/docs/en/plugins-reference']
+    retrieval_anchors: ['https://code.claude.com/docs/en/plugin-marketplaces']
   - entry_id: host-evidence-claude-hook
     host_profile: claude-code
     surface: hook
-    host_version_range: official documentation snapshot 2026-07-10
+    host_version_range: official documentation snapshot 2026-07-13
     capability_code: HOST_LIFECYCLE_HOOK
+    capability_disposition: D
     evidence_state: documented
-    source: { kind: official_documentation, canonical_url: 'https://code.claude.com/docs/en/hooks', accessed_on: '2026-07-10' }
+    source: { kind: official_documentation, canonical_url: 'https://code.claude.com/docs/en/hooks', accessed_on: '2026-07-13', locator_mutability: mutable, content_digest: 'sha256:a65fb6ae9e5a1e49043454e31a29cd1cd77dd6b34cf3c6a7c706e4879538c474' }
     license_disposition: metadata_only_no_copy
+    copy_disposition: metadata_only
     finding: Claude Code hook event and response shapes are host-specific and require generated adapters rather than shared raw fields.
     conformance: { case_ref: HOST-CONFORMANCE-005, outcome: documented_only, reference: generated hook adapter contract }
-    review: { reviewer: PR2A host-evidence reviewer, reviewed_on: '2026-07-10', expires_on: '2026-10-10' }
+    review: { reviewer: PR2A host-evidence reviewer, reviewed_on: '2026-07-13', expires_on: '2026-10-13' }
     sanitization_receipt: sanitization-receipt-host-evidence-005
     retrieval_anchors: ['https://code.claude.com/docs/en/hooks']
-  - entry_id: host-evidence-cursor-plugin-schema
-    host_profile: cursor
-    surface: plugin
-    host_version_range: schema commit 0dda29e839d15464a137af9935665a5a47ee09b8
-    capability_code: HOST_PLUGIN_BUNDLE
+  - entry_id: host-evidence-claude-skill
+    host_profile: claude-code
+    surface: skill
+    host_version_range: official documentation snapshot 2026-07-13
+    capability_code: HOST_PROGRESSIVE_SKILL
+    capability_disposition: D
     evidence_state: documented
-    source:
-      kind: official_repository_schema
-      canonical_url: 'https://github.com/cursor/plugins/blob/0dda29e839d15464a137af9935665a5a47ee09b8/schemas/plugin.schema.json'
-      accessed_on: '2026-07-10'
-      repository_commit: 0dda29e839d15464a137af9935665a5a47ee09b8
-      repository_path: schemas/plugin.schema.json
-    license_disposition: mit_metadata_only
-    finding: Cursor plugins declare rules, skills, agents, commands, hooks, and MCP surfaces in an official pinned schema.
-    conformance: { case_ref: HOST-CONFORMANCE-006, outcome: documented_only, reference: generated Cursor bundle contract }
-    review: { reviewer: PR2A host-evidence reviewer, reviewed_on: '2026-07-10', expires_on: '2026-10-10' }
+    source: { kind: official_documentation, canonical_url: 'https://code.claude.com/docs/en/slash-commands', accessed_on: '2026-07-13', locator_mutability: mutable, content_digest: 'sha256:b28f79447cb6af402c39f7b5be4d59df0c61d11c5ee70236c67b5a1268da6561' }
+    license_disposition: metadata_only_no_copy
+    copy_disposition: metadata_only
+    finding: Claude Code discovers SKILL.md bundles and exposes user or model invocation controls.
+    conformance: { case_ref: HOST-CONFORMANCE-012, outcome: documented_only, reference: generated Claude skill contract }
+    review: { reviewer: PR2A host-evidence reviewer, reviewed_on: '2026-07-13', expires_on: '2026-10-13' }
+    sanitization_receipt: sanitization-receipt-host-evidence-012
+    retrieval_anchors: ['https://code.claude.com/docs/en/slash-commands']
+  - entry_id: host-evidence-claude-agent
+    host_profile: claude-code
+    surface: agent
+    host_version_range: official documentation snapshot 2026-07-13
+    capability_code: HOST_BOUNDED_SUBAGENT
+    capability_disposition: D
+    evidence_state: documented
+    source: { kind: official_documentation, canonical_url: 'https://code.claude.com/docs/en/sub-agents', accessed_on: '2026-07-13', locator_mutability: mutable, content_digest: 'sha256:533ac587ca5d03fe67131f2668562433150cbfcf2a536b1f4c3353f5d07c5c41' }
+    license_disposition: metadata_only_no_copy
+    copy_disposition: metadata_only
+    finding: Claude Code supports scoped subagent definitions with model, tools, skills, MCP, hooks, and isolation fields.
+    conformance: { case_ref: HOST-CONFORMANCE-013, outcome: documented_only, reference: generated Claude agent contract }
+    review: { reviewer: PR2A host-evidence reviewer, reviewed_on: '2026-07-13', expires_on: '2026-10-13' }
+    sanitization_receipt: sanitization-receipt-host-evidence-013
+    retrieval_anchors: ['https://code.claude.com/docs/en/sub-agents']
+  - entry_id: host-evidence-claude-mcp
+    host_profile: claude-code
+    surface: mcp
+    host_version_range: official documentation snapshot 2026-07-13
+    capability_code: HOST_MCP_CONFIGURATION
+    capability_disposition: D
+    evidence_state: documented
+    source: { kind: official_documentation, canonical_url: 'https://code.claude.com/docs/en/mcp', accessed_on: '2026-07-13', locator_mutability: mutable, content_digest: 'sha256:0226182edf48520f23a0754187de48ad7bf275ca06215eb0dd66b73e29382cb2' }
+    license_disposition: metadata_only_no_copy
+    copy_disposition: metadata_only
+    finding: Claude Code supports plugin and local MCP server declarations with host-specific configuration.
+    conformance: { case_ref: HOST-CONFORMANCE-014, outcome: documented_only, reference: generated Claude MCP contract }
+    review: { reviewer: PR2A host-evidence reviewer, reviewed_on: '2026-07-13', expires_on: '2026-10-13' }
+    sanitization_receipt: sanitization-receipt-host-evidence-014
+    retrieval_anchors: ['https://code.claude.com/docs/en/mcp']
+  - entry_id: host-evidence-claude-rule
+    host_profile: claude-code
+    surface: rule
+    host_version_range: official documentation snapshot 2026-07-13
+    capability_code: HOST_INSTRUCTION_RULE
+    capability_disposition: forbidden
+    evidence_state: documented
+    source: { kind: official_documentation, canonical_url: 'https://code.claude.com/docs/en/memory', accessed_on: '2026-07-13', locator_mutability: mutable, content_digest: 'sha256:641a7a56ac472262e84bbcb01e4485229440c65d75d007d02bbc47e02667905a' }
+    license_disposition: metadata_only_no_copy
+    copy_disposition: metadata_only
+    finding: Claude loads CLAUDE.md and scoped rules, but Plan 27 forbids generating an always-on TraceDecay catalog rule; skills remain the discovery surface.
+    conformance: { case_ref: HOST-CONFORMANCE-015, outcome: unsupported, reference: Claude generated-rule omission }
+    review: { reviewer: PR2A host-evidence reviewer, reviewed_on: '2026-07-13', expires_on: '2026-10-13' }
+    sanitization_receipt: sanitization-receipt-host-evidence-015
+    retrieval_anchors: ['https://code.claude.com/docs/en/memory']
+  - entry_id: host-evidence-claude-command
+    host_profile: claude-code
+    surface: command
+    host_version_range: official documentation snapshot 2026-07-13
+    capability_code: HOST_COMMAND_SURFACE
+    capability_disposition: forbidden
+    evidence_state: documented
+    source: { kind: official_documentation, canonical_url: 'https://code.claude.com/docs/en/commands', accessed_on: '2026-07-13', locator_mutability: mutable, content_digest: 'sha256:7a04293a3e0410f1cf59b7138e182a5dec900a1158800de2645a479814e3f983' }
+    license_disposition: metadata_only_no_copy
+    copy_disposition: metadata_only
+    finding: Claude supports command compatibility, but Plan 27 forbids new command projections and permits only bounded one-release migration shims to skills.
+    conformance: { case_ref: HOST-CONFORMANCE-016, outcome: unsupported, reference: Claude new-command omission }
+    review: { reviewer: PR2A host-evidence reviewer, reviewed_on: '2026-07-13', expires_on: '2026-10-13' }
+    sanitization_receipt: sanitization-receipt-host-evidence-016
+    retrieval_anchors: ['https://code.claude.com/docs/en/commands']
+  - entry_id: host-evidence-claude-component
+    host_profile: claude-code
+    surface: component
+    host_version_range: official documentation snapshot 2026-07-13
+    capability_code: HOST_COMPONENT_BUNDLE
+    capability_disposition: D
+    evidence_state: documented
+    source: { kind: official_documentation, canonical_url: 'https://code.claude.com/docs/en/plugins-reference', accessed_on: '2026-07-13', locator_mutability: mutable, content_digest: 'sha256:358fd4a74fbb22dabd90217b2fc3e6a134916164c8597518af9a31a5f1753721' }
+    license_disposition: metadata_only_no_copy
+    copy_disposition: metadata_only
+    finding: Claude plugin components include skills, agents, hooks, MCP servers, LSP servers, and monitors under one manifest.
+    conformance: { case_ref: HOST-CONFORMANCE-017, outcome: documented_only, reference: generated Claude component contract }
+    review: { reviewer: PR2A host-evidence reviewer, reviewed_on: '2026-07-13', expires_on: '2026-10-13' }
+    sanitization_receipt: sanitization-receipt-host-evidence-017
+    retrieval_anchors: ['https://code.claude.com/docs/en/plugins-reference']
+  - entry_id: host-evidence-cursor-release
+    host_profile: cursor
+    surface: release
+    host_version_range: official documentation snapshot 2026-07-13
+    capability_code: HOST_RELEASE_PROJECTION
+    capability_disposition: V
+    evidence_state: documented
+    source: { kind: official_documentation, canonical_url: 'https://cursor.com/help/security-and-privacy/marketplace-security.md', accessed_on: '2026-07-13', locator_mutability: mutable, content_digest: 'sha256:ae1053adc2be00c55109fe20eab46c94b0ec4712287a5a9a2d5d46cde8770048' }
+    license_disposition: metadata_only_no_copy
+    copy_disposition: metadata_only
+    finding: Cursor documents marketplace review and trust, but release support remains version-gated until PR 36R stock-host conformance and signed digest verification pass.
+    conformance: { case_ref: HOST-CONFORMANCE-006, outcome: not_run, reference: Cursor PR 36R release gate }
+    review: { reviewer: PR2A host-evidence reviewer, reviewed_on: '2026-07-13', expires_on: '2026-10-13' }
     sanitization_receipt: sanitization-receipt-host-evidence-006
+    retrieval_anchors: ['https://cursor.com/help/security-and-privacy/marketplace-security.md']
+  - entry_id: host-evidence-cursor-skill
+    host_profile: cursor
+    surface: skill
+    host_version_range: schema commit 0dda29e839d15464a137af9935665a5a47ee09b8
+    capability_code: HOST_PROGRESSIVE_SKILL
+    capability_disposition: D
+    evidence_state: documented
+    source: &cursor_plugin_schema_source { kind: official_repository_schema, canonical_url: 'https://github.com/cursor/plugins/blob/0dda29e839d15464a137af9935665a5a47ee09b8/schemas/plugin.schema.json', accessed_on: '2026-07-13', locator_mutability: immutable, repository_commit: 0dda29e839d15464a137af9935665a5a47ee09b8, repository_path: schemas/plugin.schema.json, content_digest: 'sha256:75b402640b1c2654b19199885793ef1985df8185c36694325436f5bb748b7757' }
+    license_disposition: mit_metadata_only
+    copy_disposition: schema_validation_only
+    finding: Cursor plugin schemas declare skills as an independently generated bundle category.
+    conformance: { case_ref: HOST-CONFORMANCE-018, outcome: documented_only, reference: generated Cursor skill contract }
+    review: { reviewer: PR2A host-evidence reviewer, reviewed_on: '2026-07-13', expires_on: '2026-10-13' }
+    sanitization_receipt: sanitization-receipt-host-evidence-018
+    retrieval_anchors: ['https://github.com/cursor/plugins/blob/0dda29e839d15464a137af9935665a5a47ee09b8/schemas/plugin.schema.json']
+  - entry_id: host-evidence-cursor-agent
+    host_profile: cursor
+    surface: agent
+    host_version_range: schema commit 0dda29e839d15464a137af9935665a5a47ee09b8
+    capability_code: HOST_BOUNDED_SUBAGENT
+    capability_disposition: D
+    evidence_state: documented
+    source: *cursor_plugin_schema_source
+    license_disposition: mit_metadata_only
+    copy_disposition: schema_validation_only
+    finding: Cursor plugin schemas declare agents as an independently generated bundle category.
+    conformance: { case_ref: HOST-CONFORMANCE-019, outcome: documented_only, reference: generated Cursor agent contract }
+    review: { reviewer: PR2A host-evidence reviewer, reviewed_on: '2026-07-13', expires_on: '2026-10-13' }
+    sanitization_receipt: sanitization-receipt-host-evidence-019
+    retrieval_anchors: ['https://github.com/cursor/plugins/blob/0dda29e839d15464a137af9935665a5a47ee09b8/schemas/plugin.schema.json']
+  - entry_id: host-evidence-cursor-hook
+    host_profile: cursor
+    surface: hook
+    host_version_range: schema commit 0dda29e839d15464a137af9935665a5a47ee09b8
+    capability_code: HOST_LIFECYCLE_HOOK
+    capability_disposition: D
+    evidence_state: documented
+    source: *cursor_plugin_schema_source
+    license_disposition: mit_metadata_only
+    copy_disposition: schema_validation_only
+    finding: Cursor plugin schemas declare hooks as an independently generated bundle category.
+    conformance: { case_ref: HOST-CONFORMANCE-020, outcome: documented_only, reference: generated Cursor hook contract }
+    review: { reviewer: PR2A host-evidence reviewer, reviewed_on: '2026-07-13', expires_on: '2026-10-13' }
+    sanitization_receipt: sanitization-receipt-host-evidence-020
+    retrieval_anchors: ['https://github.com/cursor/plugins/blob/0dda29e839d15464a137af9935665a5a47ee09b8/schemas/plugin.schema.json']
+  - entry_id: host-evidence-cursor-mcp
+    host_profile: cursor
+    surface: mcp
+    host_version_range: schema commit 0dda29e839d15464a137af9935665a5a47ee09b8
+    capability_code: HOST_MCP_CONFIGURATION
+    capability_disposition: D
+    evidence_state: documented
+    source: *cursor_plugin_schema_source
+    license_disposition: mit_metadata_only
+    copy_disposition: schema_validation_only
+    finding: Cursor plugin schemas declare MCP server configuration as an independently generated bundle category.
+    conformance: { case_ref: HOST-CONFORMANCE-021, outcome: documented_only, reference: generated Cursor MCP contract }
+    review: { reviewer: PR2A host-evidence reviewer, reviewed_on: '2026-07-13', expires_on: '2026-10-13' }
+    sanitization_receipt: sanitization-receipt-host-evidence-021
+    retrieval_anchors: ['https://github.com/cursor/plugins/blob/0dda29e839d15464a137af9935665a5a47ee09b8/schemas/plugin.schema.json']
+  - entry_id: host-evidence-cursor-rule
+    host_profile: cursor
+    surface: rule
+    host_version_range: schema commit 0dda29e839d15464a137af9935665a5a47ee09b8
+    capability_code: HOST_INSTRUCTION_RULE
+    capability_disposition: forbidden
+    evidence_state: documented
+    source: *cursor_plugin_schema_source
+    license_disposition: mit_metadata_only
+    copy_disposition: schema_validation_only
+    finding: Cursor schemas document rules, but Plan 27 forbids generating an always-on TraceDecay catalog rule; skills remain the discovery surface.
+    conformance: { case_ref: HOST-CONFORMANCE-022, outcome: unsupported, reference: Cursor generated-rule omission }
+    review: { reviewer: PR2A host-evidence reviewer, reviewed_on: '2026-07-13', expires_on: '2026-10-13' }
+    sanitization_receipt: sanitization-receipt-host-evidence-022
+    retrieval_anchors: ['https://github.com/cursor/plugins/blob/0dda29e839d15464a137af9935665a5a47ee09b8/schemas/plugin.schema.json']
+  - entry_id: host-evidence-cursor-command
+    host_profile: cursor
+    surface: command
+    host_version_range: schema commit 0dda29e839d15464a137af9935665a5a47ee09b8
+    capability_code: HOST_COMMAND_SURFACE
+    capability_disposition: forbidden
+    evidence_state: documented
+    source: *cursor_plugin_schema_source
+    license_disposition: mit_metadata_only
+    copy_disposition: schema_validation_only
+    finding: Cursor documents legacy commands, but Plan 27 forbids new command projections and permits only bounded one-release migration shims to skills.
+    conformance: { case_ref: HOST-CONFORMANCE-023, outcome: unsupported, reference: Cursor new-command omission }
+    review: { reviewer: PR2A host-evidence reviewer, reviewed_on: '2026-07-13', expires_on: '2026-10-13' }
+    sanitization_receipt: sanitization-receipt-host-evidence-023
+    retrieval_anchors: ['https://github.com/cursor/plugins/blob/0dda29e839d15464a137af9935665a5a47ee09b8/schemas/plugin.schema.json']
+  - entry_id: host-evidence-cursor-component
+    host_profile: cursor
+    surface: component
+    host_version_range: schema commit 0dda29e839d15464a137af9935665a5a47ee09b8
+    capability_code: HOST_COMPONENT_BUNDLE
+    capability_disposition: D
+    evidence_state: documented
+    source: *cursor_plugin_schema_source
+    license_disposition: mit_metadata_only
+    copy_disposition: schema_validation_only
+    finding: Cursor plugin schemas bind rules, skills, agents, commands, hooks, and MCP entries as separately digestible components.
+    conformance: { case_ref: HOST-CONFORMANCE-024, outcome: documented_only, reference: generated Cursor component contract }
+    review: { reviewer: PR2A host-evidence reviewer, reviewed_on: '2026-07-13', expires_on: '2026-10-13' }
+    sanitization_receipt: sanitization-receipt-host-evidence-024
     retrieval_anchors: ['https://github.com/cursor/plugins/blob/0dda29e839d15464a137af9935665a5a47ee09b8/schemas/plugin.schema.json']

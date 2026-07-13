@@ -170,20 +170,6 @@ fn privacy_manifest_is_complete_and_hashes_are_deterministic() {
 }
 
 #[test]
-fn privacy_manifest_is_registered_by_the_v2_corpus() {
-    let root = read_json("tests/fixtures/v2/manifest.json");
-    let children = objects(&root, "child_manifests");
-    let privacy = children
-        .iter()
-        .find(|entry| field(entry, "path") == "privacy/privacy-manifest.json")
-        .expect("privacy child manifest is registered");
-    let actual = hex::encode(Sha256::digest(read_bytes(
-        "tests/fixtures/v2/privacy/privacy-manifest.json",
-    )));
-    assert_eq!(field(privacy, "sha256"), actual);
-}
-
-#[test]
 fn privacy_positive_invalid_corpus_covers_required_classes() {
     let corpus = privacy_json("positive-invalid.json");
     let cases = objects(&corpus, "cases");
@@ -343,24 +329,154 @@ fn privacy_host_surfaces_have_independent_receipts() {
 
 #[test]
 fn privacy_legacy_fixture_replacements_preserve_detector_coverage() {
+    struct Expected<'a> {
+        id: &'a str,
+        path: &'a str,
+        symbol: &'a str,
+        rule: &'a str,
+        canaries: &'a [&'a str],
+        branch_assertions: &'a [&'a str],
+    }
+
+    let expected = [
+        Expected {
+            id: "PR2B-LEGACY-001",
+            path: "src/dashboard/memory_analysis.rs",
+            symbol: "propose_hygiene_candidates_flags_secret_transient_and_supersession_for_review",
+            rule: "generic-api-key",
+            canaries: &["concat!(\"api_\", \"key=\", \"0000000000000000\")"],
+            branch_assertions: &["assert_eq!(secret[0][\"recommended_op\"], \"delete\");"],
+        },
+        Expected {
+            id: "PR2B-LEGACY-002",
+            path: "src/hooks/memory_inject.rs",
+            symbol: "secret_like_facts_are_never_selected",
+            rule: "generic-api-key",
+            canaries: &["concat!(\"api_\", \"key=\", \"0000000000000000\")"],
+            branch_assertions: &["assert_eq!(selected[0].fact_id, 2);"],
+        },
+        Expected {
+            id: "PR2B-LEGACY-003",
+            path: "src/memory/hygiene.rs",
+            symbol: "detects_pem_blocks_and_bearer_tokens",
+            rule: "private-key",
+            canaries: &[
+                "\"-----BEGIN \"",
+                "\"PRIVATE KEY-----\\nNOT-A-VALID-PRIVATE-KEY\"",
+            ],
+            branch_assertions: &[".is_some()"],
+        },
+        Expected {
+            id: "PR2B-LEGACY-004",
+            path: "src/memory/hygiene.rs",
+            symbol: "detects_known_prefixes_and_credentialish_assignments",
+            rule: "generic-api-key",
+            canaries: &[concat!("ghp_", "abcdefghijklmnopqrstuvwxyz0123456789")],
+            branch_assertions: &[".is_some()"],
+        },
+        Expected {
+            id: "PR2B-LEGACY-005",
+            path: "tests/agent_suite/memory_digest_test.rs",
+            symbol: "selection_excludes_secret_like_and_injection_like_content",
+            rule: "generic-api-key",
+            canaries: &["api_key=TEST_ONLY_INVALID_CANARY"],
+            branch_assertions: &["assert_eq!(ids, vec![1]);"],
+        },
+        Expected {
+            id: "PR2B-LEGACY-006",
+            path: "tests/memory_suite/memory_test.rs",
+            symbol: "add_fact_rejects_secret_like_content_without_storing",
+            rule: "generic-api-key",
+            canaries: &["api_key=TEST_ONLY_INVALID_CANARY"],
+            branch_assertions: &["AddFactDiffKind::RejectedSecretLike"],
+        },
+        Expected {
+            id: "PR2B-LEGACY-007",
+            path: "tests/session_suite/lcm_payload.rs",
+            symbol: "api_alias_assignments_redact_apikey_and_apitoken",
+            rule: "generic-api-key",
+            canaries: &["invalidapikeycanary", "invalidapitokencanary"],
+            branch_assertions: &["[LCM sensitive redaction: name=api_key"],
+        },
+        Expected {
+            id: "PR2B-LEGACY-008",
+            path: "tests/session_suite/lcm_payload.rs",
+            symbol: "private_key_redaction_is_lossy_and_not_indexed_when_enabled",
+            rule: "private-key",
+            canaries: &["INVALIDPRIVATEKEYCANARY", "\"PRIVATE\", \"PRIVATE\""],
+            branch_assertions: &["[LCM sensitive redaction: name=private_key"],
+        },
+        Expected {
+            id: "PR2B-LEGACY-009",
+            path: "tests/session_suite/lcm_payload.rs",
+            symbol: "redaction_applies_before_whole_message_externalization",
+            rule: "generic-api-key",
+            canaries: &["invalidapikeycanary"],
+            branch_assertions: &[
+                "LcmStorageKind::External",
+                "[LCM sensitive redaction: name=api_key",
+            ],
+        },
+    ];
+
     let manifest = manifest();
     let occurrences = objects(&manifest, "occurrences");
-    assert_eq!(occurrences.len(), 9);
+    assert_eq!(occurrences.len(), expected.len());
     assert_unique(&occurrences, "occurrence_id");
-    let expected: BTreeSet<_> = (1..=9).map(|n| format!("PR2B-LEGACY-{n:03}")).collect();
-    let actual: BTreeSet<String> = occurrences
+    let occurrences: BTreeMap<_, _> = occurrences
         .iter()
-        .map(|item| field(item, "occurrence_id").to_owned())
+        .map(|item| (field(item, "occurrence_id"), *item))
         .collect();
-    assert_eq!(actual, expected);
-    for occurrence in occurrences {
+    for expected in expected {
+        let occurrence = occurrences
+            .get(expected.id)
+            .unwrap_or_else(|| panic!("missing {}", expected.id));
+        assert_eq!(field(occurrence, "relative_path"), expected.path);
+        assert_eq!(field(occurrence, "symbol_anchor"), expected.symbol);
+        assert_eq!(
+            field(
+                occurrence["detector_rule_ref"]
+                    .as_object()
+                    .expect("detector_rule_ref object"),
+                "rule_id",
+            ),
+            expected.rule,
+        );
         assert_eq!(occurrence["source_class"], "legacy-fixture-reference");
         assert_eq!(occurrence["coverage_state"], "covered");
-        assert!(!field(occurrence, "symbol_anchor").is_empty());
-        assert!(
-            occurrence["detector_rule_ref"]["rule_id"] == "generic-api-key"
-                || occurrence["detector_rule_ref"]["rule_id"] == "private-key"
+        assert_eq!(occurrence["detector_rule_ref"]["detector_id"], "gitleaks");
+        assert_eq!(
+            occurrence["detector_rule_ref"]["detector_version"],
+            "8.30.1"
         );
+        assert_eq!(occurrence["detector_rule_ref"]["rule_version"], "8.30.1");
+
+        let source = fs::read_to_string(repo_path(expected.path))
+            .unwrap_or_else(|error| panic!("failed to read {}: {error}", expected.path));
+        let start = source
+            .find(expected.symbol)
+            .unwrap_or_else(|| panic!("missing symbol {}", expected.symbol));
+        let tail = &source[start..];
+        let end = ["\n    #[test]", "\n#[test]", "\n#[tokio::test]"]
+            .iter()
+            .filter_map(|marker| tail.find(marker))
+            .min()
+            .unwrap_or(tail.len());
+        let symbol_source = &tail[..end];
+        for canary in expected.canaries {
+            assert!(
+                symbol_source.contains(canary),
+                "{} moved or changed reserved canary {canary:?}",
+                expected.id,
+            );
+        }
+        for branch in expected.branch_assertions {
+            assert!(
+                symbol_source.contains(branch),
+                "{} no longer proves detector branch {branch:?}",
+                expected.id,
+            );
+        }
     }
 }
 

@@ -24,29 +24,73 @@
         "spdx": { "const": "MIT" },
         "path": { "const": "LICENSE" },
         "digest": { "type": "string", "pattern": "^git-sha1:[0-9a-f]{40}$" },
-        "notice_required": { "type": "boolean" }
+        "notice_required": { "const": true }
       }
     },
-    "entries": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/entry" } }
+    "entries": { "type": "array", "minItems": 8, "maxItems": 8, "items": { "$ref": "#/$defs/entry" } }
   },
   "$defs": {
+    "sourceSpan": {
+      "type": "object", "additionalProperties": false,
+      "required": ["kind", "path", "symbol", "start_line", "end_line", "digest"],
+      "properties": {
+        "kind": { "enum": ["symbol", "ui", "document"] },
+        "path": { "type": "string", "pattern": "^[A-Za-z0-9_.@/+ -]+$" },
+        "symbol": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "start_line": { "type": "integer", "minimum": 1 },
+        "end_line": { "type": "integer", "minimum": 1 },
+        "digest": { "type": "string", "pattern": "^git-sha1:[0-9a-f]{40}$" }
+      }
+    },
+    "testSpan": {
+      "type": "object", "additionalProperties": false,
+      "required": ["kind", "path", "symbol", "start_line", "end_line", "digest"],
+      "properties": {
+        "kind": { "const": "test" },
+        "path": { "type": "string", "pattern": "^tests/[A-Za-z0-9_.@/+ -]+$" },
+        "symbol": { "type": "string", "pattern": "^test_[A-Za-z0-9_]+$" },
+        "start_line": { "type": "integer", "minimum": 1 },
+        "end_line": { "type": "integer", "minimum": 1 },
+        "digest": { "type": "string", "pattern": "^git-sha1:[0-9a-f]{40}$" }
+      }
+    },
     "entry": {
       "type": "object", "additionalProperties": false,
-      "required": ["entry_id", "source_path", "source_bounds", "source_digest", "disposition", "rationale", "destination_owner", "destination_pr", "required_notice", "source_tests", "v2_regressions", "review_state"],
+      "required": ["entry_id", "source_spans", "disposition", "rationale", "destination_owner", "destination_pr", "destination_contract", "required_notice", "source_license", "license_disposition", "source_tests", "v2_regressions", "review_state", "review_scope", "review_basis"],
       "properties": {
         "entry_id": { "type": "string", "pattern": "^hermes-port-[a-z0-9-]+$" },
-        "source_path": { "type": "string", "pattern": "^[A-Za-z0-9_.@/+ -]+$" },
-        "source_bounds": { "type": "string", "pattern": "^(whole-file|symbol:[A-Za-z0-9_.]+)$" },
-        "source_digest": { "type": "string", "pattern": "^git-sha1:[0-9a-f]{40}$" },
+        "source_spans": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/sourceSpan" } },
         "disposition": { "enum": ["direct_port", "behavioral_port", "comparative_fixture", "redesign", "drop"] },
         "rationale": { "type": "string", "minLength": 1, "maxLength": 280 },
         "destination_owner": { "type": "string", "minLength": 1, "maxLength": 100 },
         "destination_pr": { "type": "string", "pattern": "^PR (4E|6G|24M|24N|25G)$" },
+        "destination_contract": { "type": "string", "minLength": 1, "maxLength": 140 },
         "required_notice": { "enum": ["MIT notice if code is copied", "source-to-test provenance only"] },
-        "source_tests": { "type": "array", "items": { "type": "string", "pattern": "^[A-Za-z0-9_.@/+ -]+$" }, "uniqueItems": true },
+        "source_license": { "const": "MIT" },
+        "license_disposition": { "enum": ["pinned MIT source; copying or adaptation requires separate review", "no code copied; pinned MIT source retained as provenance"] },
+        "source_tests": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/testSpan" } },
         "v2_regressions": { "type": "array", "minItems": 1, "items": { "type": "string", "pattern": "^[A-Za-z0-9_.:-]+$" }, "uniqueItems": true },
-        "review_state": { "const": "review_required" }
-      }
+        "review_state": { "enum": ["reviewed", "review_required"] },
+        "review_scope": { "const": "evidence-only; no copied or adapted implementation approval" },
+        "review_basis": { "enum": ["pinned commit, file digests, exact tests, and no-copy disposition", "incomplete"] },
+        "review_blocker": { "type": "string", "minLength": 1, "maxLength": 180 }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "review_state": { "const": "reviewed" } }, "required": ["review_state"] },
+          "then": {
+            "properties": { "review_basis": { "const": "pinned commit, file digests, exact tests, and no-copy disposition" } },
+            "not": { "required": ["review_blocker"] }
+          }
+        },
+        {
+          "if": { "properties": { "review_state": { "const": "review_required" } }, "required": ["review_state"] },
+          "then": {
+            "required": ["review_blocker"],
+            "properties": { "review_basis": { "const": "incomplete" } }
+          }
+        }
+      ]
     }
   }
 }

@@ -1,19 +1,21 @@
 use serde::Deserialize;
-use serde::de::DeserializeOwned;
-use serde_json::{Map, Value};
+use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
-use std::fs;
 use std::path::Path;
 use tracedecay_domain::research::{
-    AnchorTombstoneReasonV1, AttributionGap, CatalogGenerationId, ContributionRoleV1, DomainError,
-    FrozenWatermarkResolutionV1, LogSafeText, PayloadAccessState, ResearchAnchorSubjectV1,
-    ResearchAnchorTombstoneV1, ResearchBundleEnvelopeV1, ResearchBundleManifestV1,
-    ResearchContextAnchorV1, RetrievalRecipeId, RetrievalRecipeV1, SanitizationReceiptRefV1,
-    SanitizationReceiptResolverV1, SanitizedTextRefV1, ShardDispositionV1, ShardId,
-    WatermarkDriftV1,
+    AnchorDurabilityClass, AnchorTombstoneReasonV1, AttributionGap, CatalogGenerationId,
+    ContributionRoleV1, DomainError, EntityKind, FrozenWatermarkResolutionV1, LogSafeText,
+    PayloadAccessState, ResearchAnchorSubjectV1, ResearchAnchorTombstoneV1,
+    ResearchBundleEnvelopeV1, ResearchBundleManifestV1, ResearchContextAnchorV1, RetrievalRecipeId,
+    RetrievalRecipeV1, SanitizationReceiptRefV1, SanitizationReceiptResolverV1, SanitizedTextRefV1,
+    ShardDispositionV1, ShardId, WatermarkDriftV1,
 };
+
+mod support;
+
+use support::*;
 
 const FIXTURE: &str = "tests/fixtures/v2/research-anchor-manifest.json";
 const SYNTHETIC_RECEIPT: &str = "sanitization-receipt-synthetic-001";
@@ -93,211 +95,6 @@ unsafe impl SanitizationReceiptResolverV1 for CaptureReceiptResolver {
     }
 }
 
-fn fixture_json() -> String {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(FIXTURE);
-    fs::read_to_string(path).unwrap()
-}
-
-fn fixture() -> ResearchAnchorFixtureV1 {
-    decode_fixture(&fixture_json()).unwrap()
-}
-
-fn decode_fixture(json: &str) -> Result<ResearchAnchorFixtureV1, String> {
-    let raw: RawResearchAnchorFixtureV1 = serde_json::from_str(json).map_err(|e| e.to_string())?;
-    let resolver = CaptureReceiptResolver::from_receipts(&raw.sanitization_receipts)?;
-    let envelope = decode_envelope(raw.envelope, &resolver)?;
-    Ok(ResearchAnchorFixtureV1 {
-        envelope,
-        tombstones: raw.tombstones,
-        sanitization_receipts: raw.sanitization_receipts,
-    })
-}
-
-fn decode_envelope(
-    value: Value,
-    resolver: &CaptureReceiptResolver,
-) -> Result<ResearchBundleEnvelopeV1, String> {
-    let mut object = into_object(value, "envelope")?;
-    let manifest = decode_manifest(take_value(&mut object, "manifest")?, resolver)?;
-    let retrieval_catalog = take(&mut object, "retrieval_catalog")?;
-    reject_unknown(object)?;
-    Ok(ResearchBundleEnvelopeV1 {
-        manifest,
-        retrieval_catalog,
-    })
-}
-
-fn decode_manifest(
-    value: Value,
-    resolver: &CaptureReceiptResolver,
-) -> Result<ResearchBundleManifestV1, String> {
-    let mut object = into_object(value, "manifest")?;
-    let anchors = take_values(&mut object, "anchors")?
-        .into_iter()
-        .map(|value| decode_anchor(value, resolver))
-        .collect::<Result<_, _>>()?;
-    let unresolved_attribution = take_values(&mut object, "unresolved_attribution")?
-        .into_iter()
-        .map(|value| decode_attribution_gap(value, resolver))
-        .collect::<Result<_, _>>()?;
-    let retrieval_recipes = take_values(&mut object, "retrieval_recipes")?
-        .into_iter()
-        .map(|value| decode_recipe(value, resolver))
-        .collect::<Result<_, _>>()?;
-    let manifest = ResearchBundleManifestV1 {
-        manifest_id: take(&mut object, "manifest_id")?,
-        schema_version: take(&mut object, "schema_version")?,
-        supersedes: take(&mut object, "supersedes")?,
-        created_at: take(&mut object, "created_at")?,
-        created_by: take(&mut object, "created_by")?,
-        parent_plan: take(&mut object, "parent_plan")?,
-        repository: take(&mut object, "repository")?,
-        base_commit: take(&mut object, "base_commit")?,
-        plan_commit: take(&mut object, "plan_commit")?,
-        catalog_snapshot: take(&mut object, "catalog_snapshot")?,
-        store_watermarks: take(&mut object, "store_watermarks")?,
-        private_corpus: take(&mut object, "private_corpus")?,
-        git_snapshot: take(&mut object, "git_snapshot")?,
-        anchors,
-        agent_contributions: take(&mut object, "agent_contributions")?,
-        unresolved_attribution,
-        retrieval_recipes,
-        redaction_report: take(&mut object, "redaction_report")?,
-        digest: take(&mut object, "digest")?,
-    };
-    reject_unknown(object)?;
-    Ok(manifest)
-}
-
-fn decode_anchor(
-    value: Value,
-    resolver: &CaptureReceiptResolver,
-) -> Result<ResearchContextAnchorV1, String> {
-    let mut object = into_object(value, "anchor")?;
-    let anchor = ResearchContextAnchorV1 {
-        entry_id: take(&mut object, "entry_id")?,
-        retrieval_anchors: take(&mut object, "retrieval_anchors")?,
-        purpose: resolve_text(take_value(&mut object, "purpose")?, resolver)?,
-        subject: take(&mut object, "subject")?,
-        related_activity: take(&mut object, "related_activity")?,
-        occurred_window: take(&mut object, "occurred_window")?,
-        source_observation_ids: take(&mut object, "source_observation_ids")?,
-        evidence_class: take(&mut object, "evidence_class")?,
-        confidence: take(&mut object, "confidence")?,
-        expected_subject: resolve_text(take_value(&mut object, "expected_subject")?, resolver)?,
-        retrieval_recipe_id: take(&mut object, "retrieval_recipe_id")?,
-        snapshot: take(&mut object, "snapshot")?,
-        coverage: take(&mut object, "coverage")?,
-    };
-    reject_unknown(object)?;
-    Ok(anchor)
-}
-
-fn decode_recipe(
-    value: Value,
-    resolver: &CaptureReceiptResolver,
-) -> Result<RetrievalRecipeV1, String> {
-    let mut object = into_object(value, "retrieval recipe")?;
-    let recipe = RetrievalRecipeV1 {
-        recipe_id: take(&mut object, "recipe_id")?,
-        use_case: take(&mut object, "use_case")?,
-        anchors: take(&mut object, "anchors")?,
-        purpose: resolve_text(take_value(&mut object, "purpose")?, resolver)?,
-        snapshot: take(&mut object, "snapshot")?,
-    };
-    reject_unknown(object)?;
-    Ok(recipe)
-}
-
-fn decode_attribution_gap(
-    value: Value,
-    resolver: &CaptureReceiptResolver,
-) -> Result<AttributionGap, String> {
-    let mut object = into_object(value, "attribution gap")?;
-    let gap = AttributionGap {
-        subject: resolve_text(take_value(&mut object, "subject")?, resolver)?,
-        candidate_sessions: take(&mut object, "candidate_sessions")?,
-        reason: take(&mut object, "reason")?,
-        repair_recipe: take(&mut object, "repair_recipe")?,
-    };
-    reject_unknown(object)?;
-    Ok(gap)
-}
-
-fn resolve_text(value: Value, resolver: &CaptureReceiptResolver) -> Result<LogSafeText, String> {
-    let candidate: SanitizedTextRefV1 = serde_json::from_value(value).map_err(|e| e.to_string())?;
-    candidate
-        .resolve(resolver)
-        .map(LogSafeText::from_sanitized)
-        .map_err(|e| e.to_string())
-}
-
-fn into_object(value: Value, field: &str) -> Result<Map<String, Value>, String> {
-    value
-        .as_object()
-        .cloned()
-        .ok_or_else(|| format!("`{field}` must be an object"))
-}
-
-fn take_value(object: &mut Map<String, Value>, field: &str) -> Result<Value, String> {
-    object
-        .remove(field)
-        .ok_or_else(|| format!("missing field `{field}`"))
-}
-
-fn take_values(object: &mut Map<String, Value>, field: &str) -> Result<Vec<Value>, String> {
-    serde_json::from_value(take_value(object, field)?).map_err(|e| e.to_string())
-}
-
-fn take<T: DeserializeOwned>(object: &mut Map<String, Value>, field: &str) -> Result<T, String> {
-    serde_json::from_value(take_value(object, field)?).map_err(|e| e.to_string())
-}
-
-fn reject_unknown(object: Map<String, Value>) -> Result<(), String> {
-    match object.into_iter().next() {
-        Some((field, _)) => Err(format!("unknown field `{field}`")),
-        None => Ok(()),
-    }
-}
-
-fn valid_fixture() -> ResearchAnchorFixtureV1 {
-    let fixture = fixture();
-    fixture.envelope.validate().unwrap();
-    for tombstone in &fixture.tombstones {
-        tombstone
-            .validate_against(&fixture.envelope.retrieval_catalog)
-            .unwrap();
-    }
-    fixture
-}
-
-fn refresh_catalog_snapshot_digest(fixture: &mut ResearchAnchorFixtureV1) {
-    let digest = fixture.envelope.retrieval_catalog.compute_digest().unwrap();
-    fixture.envelope.retrieval_catalog.snapshot.digest = digest.clone();
-    for record in fixture.envelope.retrieval_catalog.records.values_mut() {
-        record.capability_catalog.digest = digest.clone();
-    }
-    fixture.envelope.manifest.catalog_snapshot.digest = digest;
-}
-
-fn assert_unknown_field_rejected(json: &str, field: &str) {
-    let error = serde_json::from_str::<StrictResearchAnchorFixtureV1>(json).unwrap_err();
-    let message = error.to_string();
-    assert!(
-        message.contains(&format!("unknown field `{field}`")),
-        "expected `{field}` to be rejected as unknown, got: {message}"
-    );
-}
-
-fn assert_duplicate_field_rejected(json: &str, field: &str) {
-    let error = serde_json::from_str::<StrictResearchAnchorFixtureV1>(json).unwrap_err();
-    let message = error.to_string();
-    assert!(
-        message.contains(&format!("duplicate field `{field}`")),
-        "expected duplicate `{field}` to be rejected, got: {message}"
-    );
-}
-
 #[test]
 fn research_fixture_deserializes_through_strict_envelope_and_validates() {
     let fixture = valid_fixture();
@@ -306,8 +103,8 @@ fn research_fixture_deserializes_through_strict_envelope_and_validates() {
     assert_eq!(manifest.anchors.len(), 7);
     assert_eq!(manifest.retrieval_recipes.len(), 7);
     assert_eq!(manifest.unresolved_attribution.len(), 2);
-    assert_eq!(fixture.envelope.retrieval_catalog.records.len(), 8);
-    assert_eq!(fixture.tombstones.len(), 1);
+    assert_eq!(fixture.envelope.retrieval_catalog.records.len(), 9);
+    assert_eq!(fixture.tombstones.len(), 2);
 }
 
 #[test]
@@ -340,7 +137,7 @@ fn frozen_catalog_generation_and_record_snapshots_are_exact() {
     );
     assert_eq!(
         manifest.catalog_snapshot.digest.as_str(),
-        "sha256:bdfdd355330876e4abfe6897df643932ffbe9022fdbffa129cf3829aa443e679"
+        "sha256:4482de00dbf8fe192a5fb74802dcec3c366dbef4bd80d8c3c488d1413217dac1"
     );
     assert_eq!(catalog.snapshot, manifest.catalog_snapshot);
 
@@ -845,6 +642,49 @@ fn shard_routing_uses_watermarks_without_rekeying_canonical_anchors() {
             assert_ne!(retained.payload_access, PayloadAccessState::Eligible);
         }
     }
+}
+
+#[test]
+fn expired_response_handle_is_tombstoned_and_resolves_deterministically() {
+    let fixture = valid_fixture();
+    let tombstone = fixture
+        .tombstones
+        .iter()
+        .find(|value| value.entry_id.as_str() == "research-anchor-response-handle-expired-001")
+        .expect("expired response-handle tombstone");
+    assert_eq!(tombstone.reason, AnchorTombstoneReasonV1::Expired);
+    let ResearchAnchorSubjectV1::Delivery(subject) = &tombstone.subject else {
+        panic!("response handle must retain a delivery identity");
+    };
+    assert_eq!(subject.delivery_entity.kind, EntityKind::ResponseHandle);
+
+    let retrieval_anchor = tombstone.retrieval_anchors.iter().next().unwrap();
+    let record = fixture
+        .envelope
+        .retrieval_catalog
+        .get(retrieval_anchor)
+        .expect("expired response-handle catalog record");
+    assert_eq!(record.payload_access, PayloadAccessState::RetentionExpired);
+    let AnchorDurabilityClass::RetentionBound { expires_at } = &record.durability else {
+        panic!("expired response handle must be retention-bound");
+    };
+    assert!(expires_at.0 <= tombstone.occurred_at.0);
+
+    let exact =
+        FrozenWatermarkResolutionV1::new(record.snapshot.clone(), tombstone.snapshot.clone());
+    assert_eq!(exact.drift, WatermarkDriftV1::Exact);
+    assert_eq!(
+        exact,
+        FrozenWatermarkResolutionV1::new(record.snapshot.clone(), tombstone.snapshot.clone())
+    );
+
+    let mut observed = tombstone.snapshot.clone();
+    observed
+        .components
+        .insert(ShardId::new("shard-synthetic-a").unwrap(), 51);
+    let drifted = FrozenWatermarkResolutionV1::new(record.snapshot.clone(), observed);
+    assert_eq!(drifted.drift, WatermarkDriftV1::ObservedAhead);
+    drifted.validate().unwrap();
 }
 
 #[test]

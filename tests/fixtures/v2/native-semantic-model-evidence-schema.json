@@ -8,7 +8,7 @@
   "properties": {
     "schema_version": { "const": "native-semantic-model-evidence-ledger/v1" },
     "accessed_on": { "type": "string", "format": "date" },
-    "promotion_eligible": { "const": false },
+    "promotion_eligible": { "type": "boolean" },
     "runtime": { "type": "array", "minItems": 3, "items": { "$ref": "#/$defs/runtime" } },
     "models": { "type": "array", "minItems": 3, "items": { "$ref": "#/$defs/model" } }
   },
@@ -17,7 +17,7 @@
     "runtime": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["entry_id", "crate", "version", "registry_url", "checksum", "license", "runtime_manifest_fields", "review_state"],
+      "required": ["entry_id", "crate", "version", "registry_url", "checksum", "license", "source_revision", "source_manifest_digest", "build_manifest_digest", "enabled_features", "runtime_release", "abi", "builds", "runtime_manifest_fields", "review_state"],
       "properties": {
         "entry_id": { "type": "string", "pattern": "^native-runtime-[a-z0-9-]+$" },
         "crate": { "type": "string", "minLength": 1 },
@@ -25,19 +25,41 @@
         "registry_url": { "type": "string", "pattern": "^https://" },
         "checksum": { "$ref": "#/$defs/digest" },
         "license": { "type": "string", "minLength": 1 },
+        "source_revision": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+        "source_manifest_digest": { "$ref": "#/$defs/digest" },
+        "build_manifest_digest": { "anyOf": [{ "$ref": "#/$defs/digest" }, { "type": "null" }] },
+        "enabled_features": { "type": "array", "items": { "type": "string", "minLength": 1 }, "uniqueItems": true },
+        "runtime_release": { "type": ["string", "null"], "minLength": 1 },
+        "abi": { "type": ["string", "null"], "minLength": 1 },
+        "builds": { "type": "array", "items": { "$ref": "#/$defs/runtime_build" } },
         "runtime_manifest_fields": { "type": "array", "minItems": 1, "items": { "type": "string" }, "uniqueItems": true },
         "review_state": { "enum": ["review_required", "reviewed"] }
+      }
+    },
+    "runtime_build": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["target_triple", "execution_provider", "immutable_url", "digest", "license_disposition"],
+      "properties": {
+        "target_triple": { "type": "string", "minLength": 1 },
+        "execution_provider": { "type": "string", "minLength": 1 },
+        "immutable_url": { "type": "string", "pattern": "^https://" },
+        "digest": { "$ref": "#/$defs/digest" },
+        "license_disposition": { "const": "MIT OR Apache-2.0" }
       }
     },
     "artifact": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["path", "bytes", "digest", "kind", "license_disposition"],
+      "required": ["repository", "revision", "path", "immutable_url", "bytes", "digest", "kind", "license_disposition"],
       "properties": {
+        "repository": { "type": "string", "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$" },
+        "revision": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
         "path": { "type": "string", "pattern": "^[A-Za-z0-9_.@/+ -]+$" },
+        "immutable_url": { "type": "string", "pattern": "^https://" },
         "bytes": { "type": "integer", "minimum": 1 },
         "digest": { "$ref": "#/$defs/digest" },
-        "kind": { "enum": ["model", "external_model_data", "tokenizer", "config"] },
+        "kind": { "enum": ["model", "external_model_data", "tokenizer", "config", "license_notice"] },
         "license_disposition": { "enum": ["apache-2.0-model-card", "unresolved"] }
       }
     },
@@ -68,10 +90,35 @@
             "maximum_input_tokens": { "type": "integer", "minimum": 1 }
           }
         },
-        "review_state": { "enum": ["review_required", "blocked_provenance"] },
+        "review_state": { "enum": ["review_required", "reviewed", "blocked_provenance"] },
         "promotion_blockers": { "type": "array", "items": { "type": "string", "minLength": 1, "maxLength": 180 }, "uniqueItems": true },
         "retrieval_anchors": { "type": "array", "minItems": 1, "items": { "type": "string", "pattern": "^https://" }, "uniqueItems": true }
       }
     }
-  }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "promotion_eligible": { "const": true } }, "required": ["promotion_eligible"] },
+      "then": {
+        "properties": {
+          "runtime": { "items": { "properties": { "review_state": { "const": "reviewed" } } } },
+          "models": {
+            "items": {
+              "properties": {
+                "review_state": { "const": "reviewed" },
+                "promotion_blockers": { "maxItems": 0 },
+                "artifacts": {
+                  "items": {
+                    "properties": {
+                      "license_disposition": { "const": "apache-2.0-model-card" }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  ]
 }

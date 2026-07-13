@@ -98,6 +98,20 @@ fn manifest_is_complete_and_hashes_are_deterministic() {
 }
 
 #[test]
+fn privacy_child_manifest_is_registered_and_current() {
+    let manifest = manifest();
+    let privacy = manifest["child_manifests"]
+        .as_array()
+        .expect("child_manifests array")
+        .iter()
+        .find(|entry| entry["path"] == "privacy/privacy-manifest.json")
+        .expect("privacy child manifest is registered");
+    let bytes = fs::read(corpus_root().join("privacy/privacy-manifest.json")).unwrap();
+    let actual = hex::encode(Sha256::digest(&bytes));
+    assert_eq!(privacy["sha256"].as_str().unwrap(), actual);
+}
+
+#[test]
 fn every_provider_fixture_is_manifested_and_synthetic() {
     let manifest = manifest();
     let root = corpus_root();

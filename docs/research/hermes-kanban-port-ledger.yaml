@@ -11,98 +11,160 @@ license:
   notice_required: true
 entries:
   - entry_id: hermes-port-kanban-db
-    source_path: hermes_cli/kanban_db.py
-    source_bounds: whole-file
-    source_digest: git-sha1:b684450e6bb45e639edfe4cfd766a728f0cdf988
+    source_spans:
+      - { kind: symbol, path: hermes_cli/kanban_db.py, symbol: link_tasks, start_line: 2413, end_line: 2442, digest: 'git-sha1:b684450e6bb45e639edfe4cfd766a728f0cdf988' }
+      - { kind: symbol, path: hermes_cli/kanban_db.py, symbol: _would_cycle, start_line: 2443, end_line: 2465, digest: 'git-sha1:b684450e6bb45e639edfe4cfd766a728f0cdf988' }
+      - { kind: symbol, path: hermes_cli/kanban_db.py, symbol: claim_task, start_line: 2972, end_line: 3085, digest: 'git-sha1:b684450e6bb45e639edfe4cfd766a728f0cdf988' }
+      - { kind: symbol, path: hermes_cli/kanban_db.py, symbol: complete_task, start_line: 3562, end_line: 3747, digest: 'git-sha1:b684450e6bb45e639edfe4cfd766a728f0cdf988' }
     disposition: behavioral_port
-    rationale: Compare transactional task, run, event, link, claim, and recovery invariants; reimplement them over canonical V2 identities and leases.
+    rationale: Compare dependency, claim, attempt, and completion invariants; reimplement them over canonical V2 identities and fenced leases.
     destination_owner: tracedecay-store and tracedecay-application
     destination_pr: PR 24M
-    required_notice: source-to-test provenance only
-    source_tests: [tests/hermes_cli/test_kanban_db.py]
+    destination_contract: Plan 24 task graph, attempt lease, and completion commands
+    required_notice: MIT notice if code is copied
+    source_license: MIT
+    license_disposition: pinned MIT source; copying or adaptation requires separate review
+    source_tests:
+      - { kind: test, path: tests/hermes_cli/test_kanban_db.py, symbol: test_link_detects_cycle, start_line: 285, end_line: 295, digest: 'git-sha1:8bb5c1a7b85c19f7cec93c3c3959d17d6a4d3888' }
+      - { kind: test, path: tests/hermes_cli/test_kanban_db.py, symbol: test_concurrent_claims_only_one_wins, start_line: 959, end_line: 979, digest: 'git-sha1:8bb5c1a7b85c19f7cec93c3c3959d17d6a4d3888' }
+      - { kind: test, path: tests/hermes_cli/test_kanban_db.py, symbol: test_complete_records_result, start_line: 980, end_line: 989, digest: 'git-sha1:8bb5c1a7b85c19f7cec93c3c3959d17d6a4d3888' }
     v2_regressions: [TD-TASK-001, TD-TASK-006, TD-TASK-009]
     review_state: review_required
+    review_scope: evidence-only; no copied or adapted implementation approval
+    review_basis: incomplete
+    review_blocker: No independent review of a copied/adapted destination diff or its notice placement exists.
   - entry_id: hermes-port-kanban-swarm
-    source_path: hermes_cli/kanban_swarm.py
-    source_bounds: whole-file
-    source_digest: git-sha1:fe47a4c771334214097c3ba561dc76e10bc79b9d
+    source_spans:
+      - { kind: symbol, path: hermes_cli/kanban_swarm.py, symbol: create_swarm, start_line: 77, end_line: 225, digest: 'git-sha1:fe47a4c771334214097c3ba561dc76e10bc79b9d' }
     disposition: comparative_fixture
-    rationale: Preserve fan-out, verifier, synthesizer, and cycle-rejection scenarios without adopting the comment blackboard or fixed topology.
+    rationale: Preserve fan-out, verifier, synthesizer, and dependency-gating scenarios without adopting the comment blackboard or fixed topology.
     destination_owner: tracedecay-domain task graph
     destination_pr: PR 24M
+    destination_contract: Plan 24 provider-neutral fan-out/fan-in fixture
     required_notice: source-to-test provenance only
-    source_tests: [tests/hermes_cli/test_kanban_swarm.py]
+    source_license: MIT
+    license_disposition: no code copied; pinned MIT source retained as provenance
+    source_tests:
+      - { kind: test, path: tests/hermes_cli/test_kanban_swarm.py, symbol: test_create_swarm_builds_parallel_workers_verifier_and_synthesizer, start_line: 11, end_line: 44, digest: 'git-sha1:eeb6f917a3cbe449d7cdc5619742cd9d29d827e7' }
+      - { kind: test, path: tests/hermes_cli/test_kanban_swarm.py, symbol: test_swarm_verifier_and_synthesis_are_dependency_gated, start_line: 79, end_line: 117, digest: 'git-sha1:eeb6f917a3cbe449d7cdc5619742cd9d29d827e7' }
     v2_regressions: [TD-TASK-003, TD-TASK-006]
-    review_state: review_required
+    review_state: reviewed
+    review_scope: evidence-only; no copied or adapted implementation approval
+    review_basis: pinned commit, file digests, exact tests, and no-copy disposition
   - entry_id: hermes-port-kanban-tools
-    source_path: tools/kanban_tools.py
-    source_bounds: whole-file
-    source_digest: git-sha1:67157dfc1c622dcaa2c0af65088332c6837ff7b2
+    source_spans:
+      - { kind: symbol, path: tools/kanban_tools.py, symbol: _handle_complete, start_line: 476, end_line: 597, digest: 'git-sha1:67157dfc1c622dcaa2c0af65088332c6837ff7b2' }
+      - { kind: symbol, path: tools/kanban_tools.py, symbol: _handle_block, start_line: 598, end_line: 635, digest: 'git-sha1:67157dfc1c622dcaa2c0af65088332c6837ff7b2' }
+      - { kind: symbol, path: tools/kanban_tools.py, symbol: _handle_heartbeat, start_line: 636, end_line: 686, digest: 'git-sha1:67157dfc1c622dcaa2c0af65088332c6837ff7b2' }
     disposition: behavioral_port
-    rationale: Retain compact worker lifecycle interactions and child-creation verification while binding calls to attempt, epoch, and grants.
+    rationale: Retain bounded worker lifecycle behavior while binding every action to the current attempt, epoch, and grants.
     destination_owner: tracedecay-application task capabilities
     destination_pr: PR 24N
-    required_notice: source-to-test provenance only
-    source_tests: [tests/tools/test_kanban_tools.py]
+    destination_contract: Plan 24 worker completion, block, and heartbeat capabilities
+    required_notice: MIT notice if code is copied
+    source_license: MIT
+    license_disposition: pinned MIT source; copying or adaptation requires separate review
+    source_tests:
+      - { kind: test, path: tests/tools/test_kanban_tools.py, symbol: test_complete_happy_path, start_line: 293, end_line: 313, digest: 'git-sha1:2bf89449905a6b07e1729393a5722fbc9bc2873d' }
+      - { kind: test, path: tests/tools/test_kanban_tools.py, symbol: test_heartbeat_happy_path, start_line: 619, end_line: 625, digest: 'git-sha1:2bf89449905a6b07e1729393a5722fbc9bc2873d' }
+      - { kind: test, path: tests/tools/test_kanban_tools.py, symbol: test_worker_complete_rejects_stale_run_id, start_line: 1401, end_line: 1447, digest: 'git-sha1:2bf89449905a6b07e1729393a5722fbc9bc2873d' }
     v2_regressions: [TD-TASK-003, TD-TASK-007]
     review_state: review_required
+    review_scope: evidence-only; no copied or adapted implementation approval
+    review_basis: incomplete
+    review_blocker: No independent review of a copied/adapted destination diff or its notice placement exists.
   - entry_id: hermes-port-kanban-watchers
-    source_path: gateway/kanban_watchers.py
-    source_bounds: whole-file
-    source_digest: git-sha1:328cbd7fb5b54eb4dccf72daf78ee9da726a8e04
+    source_spans:
+      - { kind: symbol, path: gateway/kanban_watchers.py, symbol: GatewayKanbanWatchersMixin._kanban_dispatcher_watcher._tick_once_for_board, start_line: 765, end_line: 852, digest: 'git-sha1:328cbd7fb5b54eb4dccf72daf78ee9da726a8e04' }
+      - { kind: symbol, path: gateway/kanban_watchers.py, symbol: GatewayKanbanWatchersMixin._kanban_dispatcher_watcher._ready_nonempty, start_line: 870, end_line: 920, digest: 'git-sha1:328cbd7fb5b54eb4dccf72daf78ee9da726a8e04' }
     disposition: redesign
-    rationale: Reimplement ordered safety-before-start delivery with journal wakeups and repair polling; reject ambient board scans and fixed polling.
+    rationale: Preserve dispatch gating and corrupt-board isolation as fixtures; reject ambient board scans, fixed polling, and watcher-owned scheduling.
     destination_owner: tracedecay-projectors scheduler
     destination_pr: PR 24N
+    destination_contract: Plan 24 journal-driven readiness and application-owned admission
     required_notice: source-to-test provenance only
-    source_tests: []
+    source_license: MIT
+    license_disposition: no code copied; pinned MIT source retained as provenance
+    source_tests:
+      - { kind: test, path: tests/hermes_cli/test_kanban_core_functionality.py, symbol: test_gateway_dispatcher_watcher_respects_config_flag_off, start_line: 3553, end_line: 3573, digest: 'git-sha1:2762e220e79a559ece72b7655f2aa982fb328f9d' }
+      - { kind: test, path: tests/hermes_cli/test_kanban_core_functionality.py, symbol: test_gateway_dispatcher_disables_corrupt_board_without_traceback, start_line: 3617, end_line: 3709, digest: 'git-sha1:2762e220e79a559ece72b7655f2aa982fb328f9d' }
     v2_regressions: [TD-TASK-007, TD-TASK-009]
-    review_state: review_required
+    review_state: reviewed
+    review_scope: evidence-only; no copied or adapted implementation approval
+    review_basis: pinned commit, file digests, exact tests, and no-copy disposition
   - entry_id: hermes-port-dashboard-api
-    source_path: plugins/kanban/dashboard/plugin_api.py
-    source_bounds: whole-file
-    source_digest: git-sha1:e340aba97bff8a93bdbc2d8191741af421a0f09e
+    source_spans:
+      - { kind: symbol, path: plugins/kanban/dashboard/plugin_api.py, symbol: get_board, start_line: 379, end_line: 517, digest: 'git-sha1:e340aba97bff8a93bdbc2d8191741af421a0f09e' }
+      - { kind: ui, path: plugins/kanban/dashboard/dist/index.js, symbol: TaskDrawer, start_line: 2783, end_line: 3071, digest: 'git-sha1:871972ce44bff1f7923a329fdb2be07dfca77758' }
     disposition: redesign
-    rationale: Use inspector anatomy only as comparative UX evidence; generate the TraceDecay UI from canonical contracts with no plugin-local SQL or domain logic.
+    rationale: Use board and task-inspector anatomy as comparative UX evidence; generate TraceDecay UI from canonical contracts without plugin-local SQL or domain logic.
     destination_owner: tracedecay-dashboard Work UI
     destination_pr: PR 25G
+    destination_contract: Plan 11 Work board and task inspector over the generated client
     required_notice: source-to-test provenance only
-    source_tests: []
+    source_license: MIT
+    license_disposition: no code copied; pinned MIT source retained as provenance
+    source_tests:
+      - { kind: test, path: tests/plugins/test_kanban_dashboard_plugin.py, symbol: test_task_detail_includes_links_and_events, start_line: 255, end_line: 279, digest: 'git-sha1:e570c7627dfb0fab44daceb0451a7a2cd7a2e738' }
+      - { kind: test, path: tests/plugins/test_kanban_dashboard_plugin.py, symbol: test_board_exposes_diagnostics_list_and_summary, start_line: 2034, end_line: 2083, digest: 'git-sha1:e570c7627dfb0fab44daceb0451a7a2cd7a2e738' }
     v2_regressions: [TD-TASK-001, TD-TASK-007]
-    review_state: review_required
+    review_state: reviewed
+    review_scope: evidence-only; no copied or adapted implementation approval
+    review_basis: pinned commit, file digests, exact tests, and no-copy disposition
   - entry_id: hermes-port-diagnostics
-    source_path: hermes_cli/kanban_diagnostics.py
-    source_bounds: whole-file
-    source_digest: git-sha1:bef9bc8a97e2c1b02d363cb35a9f2889eb4c388f
+    source_spans:
+      - { kind: symbol, path: hermes_cli/kanban_diagnostics.py, symbol: Diagnostic.to_dict, start_line: 105, end_line: 123, digest: 'git-sha1:bef9bc8a97e2c1b02d363cb35a9f2889eb4c388f' }
+      - { kind: symbol, path: hermes_cli/kanban_diagnostics.py, symbol: compute_task_diagnostics, start_line: 1065, end_line: 1107, digest: 'git-sha1:bef9bc8a97e2c1b02d363cb35a9f2889eb4c388f' }
     disposition: comparative_fixture
     rationale: Preserve attention, staleness, progress, and suggested-action scenarios while deriving diagnostics from canonical projections.
     destination_owner: tracedecay-query diagnostics
     destination_pr: PR 25G
+    destination_contract: Plan 19 canonical diagnostic read model and generated doctor consumer
     required_notice: source-to-test provenance only
-    source_tests: [tests/hermes_cli/test_kanban_diagnostics.py]
+    source_license: MIT
+    license_disposition: no code copied; pinned MIT source retained as provenance
+    source_tests:
+      - { kind: test, path: tests/hermes_cli/test_kanban_diagnostics.py, symbol: test_hallucinated_cards_fires_on_blocked_event, start_line: 70, end_line: 92, digest: 'git-sha1:2de4933dc6349217fa4ae051b6171b2063c67a0a' }
+      - { kind: test, path: tests/hermes_cli/test_kanban_diagnostics.py, symbol: test_diagnostics_sorted_critical_first, start_line: 369, end_line: 389, digest: 'git-sha1:2de4933dc6349217fa4ae051b6171b2063c67a0a' }
+      - { kind: test, path: tests/hermes_cli/test_kanban_diagnostics.py, symbol: test_broken_rule_is_isolated, start_line: 430, end_line: 453, digest: 'git-sha1:2de4933dc6349217fa4ae051b6171b2063c67a0a' }
     v2_regressions: [TD-TASK-007, TD-TASK-009]
-    review_state: review_required
+    review_state: reviewed
+    review_scope: evidence-only; no copied or adapted implementation approval
+    review_basis: pinned commit, file digests, exact tests, and no-copy disposition
   - entry_id: hermes-port-worker-skill
-    source_path: skills/devops/kanban-worker/SKILL.md
-    source_bounds: whole-file
-    source_digest: git-sha1:7dd64ad55e38053b1386f1e40deed881125e1091
+    source_spans:
+      - { kind: document, path: skills/devops/kanban-worker/SKILL.md, symbol: 'Good summary + metadata shapes through Retry scenarios', start_line: 34, end_line: 159, digest: 'git-sha1:7dd64ad55e38053b1386f1e40deed881125e1091' }
     disposition: comparative_fixture
-    rationale: Compare explicit show, work, heartbeat, complete, and block wording; generate host instructions from active TraceDecay grants.
+    rationale: Compare explicit completion, block, heartbeat, and retry wording; generate host instructions from active TraceDecay grants.
     destination_owner: generated host bundles
     destination_pr: PR 6G
+    destination_contract: Plan 27 generated worker lifecycle guidance
     required_notice: source-to-test provenance only
-    source_tests: []
+    source_license: MIT
+    license_disposition: no code copied; pinned MIT source retained as provenance
+    source_tests:
+      - { kind: test, path: tests/tools/test_kanban_tools.py, symbol: test_kanban_guidance_in_worker_prompt, start_line: 1191, end_line: 1225, digest: 'git-sha1:2bf89449905a6b07e1729393a5722fbc9bc2873d' }
+      - { kind: test, path: tests/tools/test_kanban_tools.py, symbol: test_kanban_guidance_prompt_size_bounded, start_line: 1226, end_line: 1258, digest: 'git-sha1:2bf89449905a6b07e1729393a5722fbc9bc2873d' }
     v2_regressions: [TD-TASK-003, TD-TASK-007]
     review_state: review_required
+    review_scope: evidence-only; no copied or adapted implementation approval
+    review_basis: incomplete
+    review_blocker: Pinned tests cover injected guidance, not the selected skill text; no direct source-to-test proof exists.
   - entry_id: hermes-port-orchestrator-skill
-    source_path: skills/devops/kanban-orchestrator/SKILL.md
-    source_bounds: whole-file
-    source_digest: git-sha1:fb5aa58a86514a7236b48cffcd6bb1fbe8f6b4dd
+    source_spans:
+      - { kind: document, path: skills/devops/kanban-orchestrator/SKILL.md, symbol: 'Anti-temptation rules through Create tasks and link', start_line: 46, end_line: 120, digest: 'git-sha1:fb5aa58a86514a7236b48cffcd6bb1fbe8f6b4dd' }
     disposition: comparative_fixture
-    rationale: Compare lifecycle visibility and dependency-aware fan-in while retaining provider-neutral routing and canonical task authority.
+    rationale: Compare dependency-aware fan-out/fan-in guidance while retaining provider-neutral routing and canonical task authority.
     destination_owner: generated host bundles
     destination_pr: PR 6G
+    destination_contract: Plan 27 generated orchestrator guidance over Plan 24 task capabilities
     required_notice: source-to-test provenance only
-    source_tests: []
+    source_license: MIT
+    license_disposition: no code copied; pinned MIT source retained as provenance
+    source_tests:
+      - { kind: test, path: tests/hermes_cli/test_kanban_swarm.py, symbol: test_swarm_verifier_and_synthesis_are_dependency_gated, start_line: 79, end_line: 117, digest: 'git-sha1:eeb6f917a3cbe449d7cdc5619742cd9d29d827e7' }
     v2_regressions: [TD-TASK-003, TD-TASK-006]
     review_state: review_required
+    review_scope: evidence-only; no copied or adapted implementation approval
+    review_basis: incomplete
+    review_blocker: Pinned tests cover swarm behavior, not the selected skill text; no direct source-to-test proof exists.
