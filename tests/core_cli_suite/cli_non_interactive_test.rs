@@ -234,11 +234,7 @@ fn write_profile_sharded_fixture(home: &std::path::Path, project: &std::path::Pa
     .unwrap();
     std::fs::write(shard_root.join("tracedecay.db"), b"profile graph").unwrap();
     std::fs::write(shard_root.join("sessions.db"), b"sessions").unwrap();
-    std::fs::write(
-        shard_root.join("branch-meta.json"),
-        r#"{"default_branch":"main","branches":{}}"#,
-    )
-    .unwrap();
+    write_branch_meta(&shard_root, &[], false);
     let manifest = StoreManifest {
         schema_version: STORE_MANIFEST_SCHEMA_VERSION,
         project_id: Some("proj_cli".to_string()),
@@ -1967,11 +1963,7 @@ fn migrate_cleanup_sources_removes_source_artifacts_but_preserves_enrollment_mar
     std::fs::create_dir_all(&target_root).unwrap();
     std::fs::write(&source_graph, b"graph").unwrap();
     std::fs::write(target_root.join("tracedecay.db"), b"graph").unwrap();
-    std::fs::write(
-        target_root.join("branch-meta.json"),
-        r#"{"default_branch":"main","branches":{}}"#,
-    )
-    .unwrap();
+    write_branch_meta(&target_root, &[], false);
     let store_manifest = StoreManifest {
         schema_version: STORE_MANIFEST_SCHEMA_VERSION,
         project_id: Some("proj_cli".to_string()),
