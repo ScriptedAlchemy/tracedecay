@@ -12,7 +12,7 @@ The audited FastEmbed registry reports 768 dimensions for Jina Code and 1024 for
 
 ## 1. Scope and non-goals
 
-This feature answers natural-language and mixed literal/concept questions over exact repository, checkout, worktree, ref, snapshot, and immutable code-generation scope. It retrieves files, symbols, occurrences, signatures, documentation, and bounded source slices already represented by plan 25. It may feed `code.search_symbols`, `code.context`, `search.universal`, Explorer, the Code lens, context packets, and the Search Quality Lab through the existing `TraceQueryV1` and application contracts.
+This feature answers natural-language and mixed literal/concept questions over exact repository, checkout, worktree, ref, snapshot, and immutable code-generation scope. It retrieves files, symbols, occurrences, signatures, documentation, and bounded source slices already represented by plan 25. It may feed `code.search_symbols`, `code.context`, `search.universal`, the canonical `code.redundancy` profile, Explorer, the Code lens, context packets, and the Search Quality Lab through the existing `TraceQueryV1` and application contracts. When an accepted semantic profile is effective, the same compatible code-vector generation also supplies a bounded candidate channel for duplicate-code, semantic-analogue, and consolidation-opportunity discovery; it does not create a second vector family or endpoint.
 
 It does not:
 
@@ -22,6 +22,7 @@ It does not:
 - let a query download a model, create an index, open a model file, or rebuild a generation synchronously;
 - add a public model-provider plug-in interface in V2's first release;
 - let a model-assisted reranker generate vectors, mutate indexes/qrels/profiles, widen retrieval, or become an implicit dependency of ordinary code search;
+- label embedding proximity alone as a duplicate, shared lineage, equivalent behavior, safe consolidation, impact, or causal evidence, or automatically rewrite/merge/delete code;
 - import historical embedding bytes as current vectors.
 
 The February CodeGraph plans' direct `ort`, hand-written ONNX wrapper, Nomic prefix protocol, mutable `vectors` table, and brute-force production search direction are superseded for V2. Those historical documents remain provenance; implementation must not copy their runtime, table, CLI, or MCP architecture. Holographic-memory HRR vectors are a separate memory algebra and are neither inputs nor migration candidates for semantic code search.
@@ -35,7 +36,7 @@ No new crate is admitted. Existing owners compose as follows:
 | Code document/chunk identity and eligible source material | plan 25, `tracedecay-code-index` | Pure deterministic `SemanticCodeDocumentV1`/`SemanticCodeChunkV1` rows derived from the exact snapshot/generation; no FastEmbed session, filesystem cache, model download, store open, or ranking. |
 | Eligibility scheduling and generation requests | plan 04 projectors | Durable, change-gated requests keyed by source watermark, code-document digest, profile digest, and target generation; unchanged documents are never re-embedded. |
 | Artifact/vector persistence and generation publication | plan 02 store | Immutable vector generations and profile-catalog artifact/lease state; short manifest publication transaction only. |
-| Semantic AST, vector port, candidate merge, RRF, explanations, exact fallback | plan 05 query | `RepresentationQueryPort` consumes a pinned local runtime; it neither loads models nor performs network/filesystem lifecycle work. |
+| Semantic AST, vector port, candidate merge, RRF, explanations, exact fallback, and optional similar-code/redundancy augmentation | plan 05 query | `RepresentationQueryPort` consumes a pinned local runtime; it neither loads models nor performs network/filesystem lifecycle work. Structural/fingerprint redundancy remains available without it. |
 | Model lifecycle, authorization, operations, status | plan 09 application | Existing `representations.artifacts.*` and `representations.generations.*`; one lifecycle for embeddings and rerankers. |
 | Native inference and private artifact cache | root-private `src/v2/native_semantic_runtime/fastembed.rs` | Sole production `fastembed` dependency and model/session adapter. It implements application/query/projector ports and adds no semantic ranking or store authority. |
 | Capabilities and generated surfaces | plans 08, 10, 17, 21 | Existing semantic use cases only; no FastEmbed-specific public transport family. |
@@ -107,6 +108,14 @@ Native and model-assisted reranking are separate profiles and separate ablations
 
 Batching is workload-aware but deterministic within a manifest. Offline generation batches documents; interactive query embedding coalesces only requests with the same profile/privacy/runtime pins and a bounded microbatch deadline. Reranking never exceeds 25 documents per query. Cancellation discards undelivered work without poisoning the shared session; timeouts do not publish partial rerank ordering as complete.
 
+### 6.1 Duplicate-code, similar-code, and redundancy augmentation
+
+The plan-05 `code.redundancy` profile reuses the active compatible code-vector generation; it does not add `code.semantic_duplicates`, another store family, or a second ranker. For each eligible source symbol/chunk, query retrieves a profile-bounded nearest-neighbor set from the same scope/snapshot/generation, removes self and overlapping chunks of the same parent, canonicalizes every entity pair by stable ID, collapses repeated chunk evidence into one pair, and applies deterministic pair and total-scan budgets. Cross-repository, cross-ref, cross-language, generated/vendor/fixture, test-versus-production, and historical comparisons are explicit predicates or strata, never ambient widening. The legacy graph `similar` capability retains bounded name/signature-neighborhood semantics and is not silently redefined as semantic code similarity.
+
+Plan 25's normalized fingerprints, structural/body evidence, extractor classifications, and exact clone rows remain the non-vector baseline and the sole inputs to definite clone claims. Plan 05 fuses those channels with optional semantic proximity and returns separate classes: `exact_clone`, `structural_near_duplicate`, `semantic_analogue`, and `insufficient_evidence`. Every pair exposes channel scores, matched representation fields, scope/snapshot/profile/vector-generation pins, exclusions, coverage, and why its final class was selected. A semantic-only pair is always an inferred analogue requiring inspection; it cannot become lineage, behavior equivalence, impact, a CI violation, or an automatic consolidation action without independent structural/behavioral evidence and the applicable reviewed policy.
+
+Disabled, unavailable, incompatible, failed, cancelled, or out-of-budget semantic augmentation performs no model load and opens no vector generation. It returns the byte-identical fingerprint/structural pair set, order, classes, and explanations with semantic coverage `Disabled | Unavailable | Omitted`, unless the request explicitly requires the semantic profile and therefore receives the typed unavailable error. Enabling embeddings never weakens exact-clone recall, changes the meaning of the baseline redundancy score, or hides baseline pairs; semantic candidates form a separately measurable additive channel before deterministic fusion and caps.
+
 ## 7. Artifact, cache, offline, and session lifecycle
 
 PR 14E's signed representation catalog is the only source of installable artifacts. A promoted entry pins all model/tokenizer/config bytes used by FastEmbed. TraceDecay supplies its private managed cache directory explicitly; FastEmbed's ambient default cache and first-query download behavior are forbidden.
@@ -133,9 +142,9 @@ The existing public operations remain:
 - `representations.generations.list|rebuild`;
 - existing config/status/doctor, experiment, corpus, qrel, report, and profile operations.
 
-CLI, MCP, HTTP, Rust/TypeScript/Python SDKs, and dashboard generate these same contracts. MCP remains optional. No surface accepts a model path, raw vector, arbitrary repository text, unregistered model name, or transport-local ranking toggle.
+CLI, MCP, HTTP, Rust/TypeScript/Python SDKs, and dashboard generate these same contracts. MCP remains optional. The canonical `code.redundancy`, code-health, and changed-file simplification bindings select the same optional profile and receive the same pair classes, explanations, coverage, and fallback; no FastEmbed-specific duplicate-code alias is added. No surface accepts a model path, raw vector, arbitrary repository text, unregistered model name, or transport-local ranking toggle.
 
-Settings shows all four axes, FastEmbed/runtime/model pins, bytes, readiness, device/threads, session warmth, generation coverage/freshness, rebuild progress, resource use, offline state, native and model-assisted rerank settings, requested/actual route health, budgets/cost, fallback count, last qualified report, and legal actions. Explorer and the Code lens show lexical versus semantic candidates, native/model-assisted fusion/rerank stages, exact-tier preservation, profile/generation, requested/actual model receipt, coverage, and a Search Quality Lab link. Browser code never embeds or reranks.
+Settings shows all four axes, FastEmbed/runtime/model pins, bytes, readiness, device/threads, session warmth, generation coverage/freshness, rebuild progress, resource use, offline state, native and model-assisted rerank settings, semantic-redundancy contribution and pair/neighbor budgets, requested/actual route health, budgets/cost, fallback count, last qualified report, and legal actions. Explorer and the Code lens show lexical versus semantic candidates, native/model-assisted fusion/rerank stages, exact-tier preservation, profile/generation, requested/actual model receipt, coverage, and a Search Quality Lab link. The Code workspace's redundancy view adds a pair table, side-by-side source/diff, bounded cluster/graph view, baseline-versus-semantic stage chips, pair class, matched fields, and exact query/profile/generation anchors; its table is the precise accessible/export representation. Feedback creates versioned evaluation judgments only and never changes live ranking directly. Browser code never embeds or reranks.
 
 ## 9. Failure and fallback contract
 
@@ -171,6 +180,8 @@ Required query strata:
 - cross-repository concept queries, zero-answer queries, forbidden/out-of-scope candidates, stale/partial generations, and deleted documents;
 - incremental edit cases: unchanged file, one-symbol edit, rename, delete, branch switch, dirty overlay, parser/chunker/model upgrade.
 
+The same frozen corpus includes pair and cluster judgments for duplicate/redundancy discovery: formatting/comment-only copies; renamed identifiers/literals; reordered or lightly edited helpers; split/wrapped helpers; same behavior with different vocabulary; cross-language analogues; common framework boilerplate; tests versus production; generated/vendor/fixture clones; and hard negatives sharing identifiers or vocabulary while implementing different behavior. Copy/fork/rename families stay in one split family. Labels keep exact clone, structural near-duplicate, useful semantic analogue, intentional repetition, boilerplate, and false-consolidation risk distinct.
+
 Judgments distinguish exact required, useful, context-only, redundant, stale/superseded, wrong-repository/snapshot, and no-answer. At least two human labels plus adjudication cover the promotion set; model-generated labels remain secondary evidence.
 
 Compared variants on identical candidate pools and snapshots:
@@ -184,9 +195,9 @@ Compared variants on identical candidate pools and snapshots:
 7. registered model-assisted bounded top-N rerank over the same Jina/fused pool, when the explicit route is available;
 8. every accepted candidate with semantic/native-rerank/model-assisted-rerank ablated independently.
 
-Report Precision@1/3/5, Recall@5/10/20, MRR, nDCG@10, first-useful rank, exact-hit retention, no-answer precision, wrong-repository/snapshot rate, duplicate/redundant rate, per-language/per-intent/worst-stratum confidence intervals, and paired query-level deltas. Resource results include index build/update documents/sec, incremental touched/reused counts, vector/index bytes, model/cache bytes, cold/warm load, query embed, vector top-k, fusion, native/model-assisted rerank, end-to-end p50/p95/p99, throughput, CPU, peak RSS, session reuse hit rate, batch fill/wait, cancellation, offline startup, model-assisted tokens/cost/route failures, and deadline/budget rejection rates.
+Report Precision@1/3/5, Recall@5/10/20, MRR, nDCG@10, first-useful rank, exact-hit retention, no-answer precision, wrong-repository/snapshot rate, duplicate/redundant rate, per-language/per-intent/worst-stratum confidence intervals, and paired query-level deltas. The redundancy lane additionally reports pair Precision@K/Recall@K, MAP or nDCG over pairs, exact-clone recall, semantic-only precision, cluster purity, false-consolidation rate, unique useful pairs added, chunk-to-pair collapse ratio, and baseline-pair retention. Resource results include index build/update documents/sec, incremental touched/reused counts, vector/index bytes, model/cache bytes, cold/warm load, query embed, vector top-k, neighbors examined, pair canonicalization/fusion, native/model-assisted rerank, end-to-end p50/p95/p99, throughput, CPU, peak RSS, session reuse hit rate, batch fill/wait, cancellation, offline startup, model-assisted tokens/cost/route failures, and deadline/budget rejection rates.
 
-Promotion requires a reviewed predeclared threshold manifest. At minimum: zero material exact-identifier regression, zero scope/snapshot correctness regression, statistically supported improvement in Precision@3, nDCG@10, and first-useful rank on the intended natural-language code strata, no material worst-stratum regression, and compliance with plan 05's current/10x resource gates. If no variant passes, semantic code search stays disabled and only benchmark evidence/contracts may land; dormant runtime routes do not ship.
+Promotion requires a reviewed predeclared threshold manifest. At minimum: zero material exact-identifier regression, zero scope/snapshot correctness regression, statistically supported improvement in Precision@3, nDCG@10, and first-useful rank on the intended natural-language code strata, no material worst-stratum regression, and compliance with plan 05's current/10x resource gates. Semantic redundancy contribution is promoted independently only when it materially improves useful-pair recall while preserving exact-clone recall, baseline pair bytes/order when ablated, semantic-only precision, false-consolidation, and every declared worst-stratum floor. If no variant passes, semantic code search or only its redundancy contribution stays disabled and only benchmark evidence/contracts may land; dormant runtime routes do not ship.
 
 ### Reproduction commands
 
@@ -233,11 +244,11 @@ Persist the staged immutable `(document_id, chunk_id, vector, pins)` generation 
 
 **PR 14A evidence — bounded benchmark-only FastEmbed harness and promotion decision.**
 
-Add the only pre-promotion FastEmbed executable as a root-private benchmark adapter under `src/v2/native_semantic_runtime`, compiled solely for the explicit benchmark/test target and excluded from normal and release binaries. It accepts only an exact preinstalled signed artifact/runtime manifest, runs with network disabled, uses an ephemeral plan-02-compatible logical generation writer, exposes no application/catalog/transport route, and cannot publish a production generation. Run the frozen Jina/GTE/lexical comparisons and record an accepted-or-disabled receipt. Accepted code is promoted/refactored through PR 14E; rejected code remains test-only evidence or is deleted and never becomes a dormant production dependency.
+Add the only pre-promotion FastEmbed executable as a root-private benchmark adapter under `src/v2/native_semantic_runtime`, compiled solely for the explicit benchmark/test target and excluded from normal and release binaries. It accepts only an exact preinstalled signed artifact/runtime manifest, runs with network disabled, uses an ephemeral plan-02-compatible logical generation writer, exposes no application/catalog/transport route, and cannot publish a production generation. Run the frozen Jina/GTE/lexical comparisons plus fingerprint/structural redundancy baseline versus semantic augmentation, and record separate accepted-or-disabled receipts for search and redundancy contribution. Accepted code is promoted/refactored through PR 14E; rejected code remains test-only evidence or is deleted and never becomes a dormant production dependency.
 
 **PR 14B evidence — accepted-only fusion and explanation.**
 
-Implement vector fusion/explanation only for a PR-14A-accepted profile. Preserve exact tiers, compatible-generation checks, and byte-stable lexical fallback.
+Implement vector fusion/explanation only for a PR-14A-accepted profile. When redundancy contribution is separately accepted, add bounded neighbor retrieval, canonical pair collapse, structural-plus-semantic fusion, explicit pair classes, and byte-stable structural fallback. Preserve exact tiers and compatible-generation checks.
 
 **PR 14C evidence — independent bounded rerank evaluations.**
 
@@ -257,7 +268,7 @@ Generate plan-20-owned controls plus desired/activated/effective/observed status
 
 **PR 31J evidence — Search Quality product evaluation.**
 
-Add code-search qrel, stage, profile, resource, regression, four-axis status, and report views to the shared Search Quality Lab using existing experiment/application contracts.
+Add code-search and redundancy pair/cluster qrel, stage, profile, resource, regression, four-axis status, baseline-versus-semantic ablation, and report views to the shared Search Quality Lab using existing experiment/application contracts.
 
 **PR 33G evidence — rebuild-only vector migration.**
 
@@ -271,7 +282,7 @@ Activate only an accepted profile with compatible rebuilt generations and rollba
 
 Delete superseded direct-runtime, model wiring, vector scan/query/storage, cache, and scheduler paths after archived parity/rollback evidence proves the canonical route independent.
 
-The executable order separates fixture-only evaluation from production publication: plan-13 PR 2A -> release-excluded PR 14A benchmark/accept-or-disable over frozen synthetic code documents; then production order `PR 6C + PR 18D + accepted PR 14A -> PR 14E -> PR 14B -> PR 14C`. PR 14E owns artifact/runtime lifecycle plus plan-04 production incremental vector scheduling; PR 14B owns fusion; PR 14C owns native/model-assisted rerank evaluation and optional activation. Then plan 20 PR 25E plus generated API/CLI/MCP/SDK/dashboard surfaces -> PR 31J product evaluation -> plan 25 PR 33G rebuild/drop migration -> PR 35C cutover -> PR 37C retirement. A disabled PR 14A disposition terminalizes PR 14E/14B/14C as skipped while preserving benchmark/contracts and lexical search.
+The executable order separates fixture-only evaluation from production publication: plan-13 PR 2A -> release-excluded PR 14A benchmark/accept-or-disable over frozen synthetic code documents and redundancy pairs/clusters; then production order `PR 6C + PR 18D + either accepted PR 14A contribution -> PR 14E -> PR 14B`. PR 14C additionally requires the search contribution to be accepted. PR 14E owns artifact/runtime lifecycle plus plan-04 production incremental vector scheduling; PR 14B owns search fusion and any separately accepted redundancy augmentation; PR 14C owns native/model-assisted search rerank evaluation and optional activation. Then plan 20 PR 25E plus generated API/CLI/MCP/SDK/dashboard surfaces -> PR 31J product evaluation -> plan 25 PR 33G rebuild/drop migration -> PR 35C cutover -> PR 37C retirement. A fully disabled PR 14A disposition terminalizes PR 14E/14B/14C as skipped while preserving benchmark/contracts and lexical/structural search.
 
 ## 13. Primary research manifest
 
@@ -295,6 +306,8 @@ Accessed 2026-07-12. Implementation refreshes exact upstream revisions/digests b
 - [ ] Model/runtime/tokenizer/chunker/dimension/metric/normalization pins follow every generation, query, explanation, experiment, result, and migration receipt.
 - [ ] Jina, Jina+BGE top-25, and GTE comparator runs are reproducible on frozen pools with full quality/resource/worst-stratum reports and independently reviewed verdicts.
 - [ ] Disabled/no-model/offline/revoked/OOM/cancelled/incompatible/partial-build states preserve lexical results exactly or fail with the typed strict-mode error; no model is selected or downloaded silently.
+- [ ] Enabled compatible embeddings augment the canonical `code.redundancy` profile through bounded canonical pair discovery; semantic-only results remain labeled analogues, and disabled/failed augmentation preserves baseline structural pair bytes, order, classes, and explanations exactly.
+- [ ] Frozen pair/cluster qrels and hard negatives prove material useful-pair recall gain without exact-clone, semantic-only precision, false-consolidation, scope/snapshot, worst-stratum, or current/10x resource regression.
 - [ ] Generated config/UI/API/CLI/MCP/SDK/status/doctor surfaces share existing use cases and expose truthful profile, readiness, coverage, rebuild, and fallback state.
 - [ ] PR 33G proves every historical code vector is rebuilt, dropped, or quarantined with receipt and no old float enters a FastEmbed generation.
 - [ ] No profile becomes default without the reviewed promotion report; failure to beat the baseline leaves semantic code search disabled.

@@ -976,6 +976,7 @@ This is a composed Work/Repository Work/Delivery experience, not a new inventory
 - Diff graph, dependency matrix, cycles/coupling, diagnostic/test and affected-test overlays.
 - Branch/commit/as-of slider and snapshot comparison; CodeMirror source/diff with exact locations and redaction decorations.
 - Semantic search diagnostics reuse Explorer's stage waterfall, representation state, rank/rerank comparison, artifact/generation/rebuild coverage, resource charts, provenance, and typed fallbacks; Code never creates a second settings panel, search request, model session, or client-side vector index.
+- Duplicate/similar-code exploration reuses the same query and representation state: an exact pair table plus synchronized side-by-side source/diff, bounded cluster/graph, and inspector show exact clone, structural near-duplicate, semantic analogue, or insufficient evidence; matched fields/component scores; scope/snapshot/profile/vector-generation; exclusions/coverage; and baseline-versus-semantic contribution. Semantic-only is styled and worded as advisory, never “duplicate” or “safe to merge.” Disabled/unavailable semantics preserves the exact structural result set and visibly names omitted coverage. Pair/cluster feedback links to Search Quality judgments and does not mutate live ranking.
 - `move_symbol` is a generated operation, never a browser rewrite helper. `code.move_symbol.inspect` shows the exact source/destination diff, inserted destination imports, caller/dependency/visibility/collision/module/cycle/orphan/cfg impact, snapshot/version, affected tests, and no caller auto-edit; `code.move_symbol.commit` requires confirmation, revalidation, repository/worktree grant, recovery/reindex operation, and durable receipt.
 
 ### 13.4 Knowledge
@@ -1599,8 +1600,8 @@ The phase-4 PR letters in this section are the authoritative sub-split ledger fo
 - Create: `dashboard/app/src/features/delivery/src/*`
 - Test: `dashboard/tests/e2e/{code-workspace,code-diff-impact,delivery-git-reconciliation}.spec.ts`
 
-- [ ] Generate failing Code Graph/Diagnostics parity tests plus snapshot/symbol-lineage/diff/impact/affected-test cases.
-- [ ] Implement code views using the code lens, matrix, charts, CodeMirror, exact source locations, and observed/inferred ownership.
+- [ ] Generate failing Code Graph/Diagnostics parity tests plus snapshot/symbol-lineage/diff/impact/affected-test and fingerprint-only versus semantic-augmented redundancy cases, including hard negatives and disabled/failure byte-stable fallback.
+- [ ] Implement code views using the code lens, matrix, charts, CodeMirror, exact source locations, observed/inferred ownership, and the precise pair-table/side-by-side-diff/cluster redundancy composition from section 13.3.
 - [ ] Implement worktree/ref/commit/PR/check/review/release views with produced/observed/encountered states and local/live reconciliation.
 - [ ] Verify drift blocks joined claims and command palette routes Git intent to generated TraceDecay tools.
 - [ ] Redirect graph/diagnostic views independently after parity.

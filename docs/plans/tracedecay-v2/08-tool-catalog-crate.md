@@ -296,6 +296,8 @@ The PR 22A fixture locks all 104 source definitions below; 103 are installed at 
 
 The inventory generator additionally records parameter schema, required/default/enum/range, description, renderer formats, response-handle behavior, project-selector support, availability, mutation/effect, and dispatch target. A name-only match is insufficient.
 
+PR 22A maps current health `redundancy` to the canonical `code.redundancy` query profile and its shared typed pair/cluster view. Plan 31's accepted optional semantic contribution may add bounded candidates to that profile without adding a tool or use case. Current graph `similar` remains the distinct bounded name/signature-neighborhood capability; catalog generation rejects any mapping that silently changes it into duplicate-code or embedding similarity. Changed-file `simplify_scan` may compose `code.redundancy` results through its own bounded selection, but never owns another detector, vector profile, or ranking contract.
+
 ### 5.2 CLI surface
 
 Current root commands:
