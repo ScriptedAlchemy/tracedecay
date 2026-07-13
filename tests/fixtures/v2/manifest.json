@@ -1,11 +1,17 @@
 {
   "benchmark": {
-    "generated_sha256": "82a6f55b2b1f502fa55249f19c388324ef9f7f4c7639b51504e46c07e3339182",
-    "generated_records": 340,
+    "generated_records": 350,
+    "generated_sha256": "1784129ba00bfbc9168217f123cb671a58ed85285826ef4d2e2ea05fdae12b8e",
     "generator": "tests/v2_corpus_suite/generate_10x.py",
     "output": "synthetic-10x.jsonl",
     "scale_factor": 10
   },
+  "child_manifests": [
+    {
+      "path": "privacy/privacy-manifest.json",
+      "sha256": "e496c91b78a6b3baff8b4c7ed57cabae896bcb4f4b69ea2c52768d5e7b4972b0"
+    }
+  ],
   "content_policy": "synthetic-or-minimally-redacted",
   "files": [
     {
@@ -110,14 +116,16 @@
       "coverage": [
         "unicode",
         "missing-timestamp",
-        "secret-placeholder"
+        "secret-placeholder",
+        "synthetic-credential-positive-control"
       ],
       "path": "providers/hermes.json",
       "provider_family": "hermes",
-      "records": 4,
-      "sha256": "f59a6f4a3e8bd6357aad34f95ac55fa5b73eace31e504c19f5cfa7e5a2a8f924",
+      "records": 5,
+      "sha256": "7d46ee1d73fa9d7997316c937ad339bb354569f70c5b1dd42e47751116e35b2d",
       "source_record_families": [
         "assistant_event",
+        "credential_positive_control",
         "message",
         "tool_result"
       ]

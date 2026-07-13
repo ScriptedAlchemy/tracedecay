@@ -1,0 +1,9 @@
+{
+  "schema_version": 1,
+  "fixture_id": "privacy-host-hook-stdin-v1",
+  "surface_id": "host-hook-stdin",
+  "artifact_class": "hook-stdin-inventory",
+  "coverage": ["discovery", "classification", "receipt-binding"],
+  "receipt_ref": "target/v2-privacy/receipts/hosts/host-hook-stdin.json",
+  "metadata_only": true
+}

@@ -781,7 +781,7 @@ mod tests {
     #[test]
     fn propose_hygiene_candidates_flags_secret_transient_and_supersession_for_review() {
         let facts = vec![
-            json!({"fact_id": 1, "content": "api_key=Zx9mQ4tR7wLp2NvK8sBd1FgH", "trust_score": 0.5, "created_at": 10}),
+            json!({"fact_id": 1, "content": concat!("api_", "key=", "0000000000000000"), "trust_score": 0.5, "created_at": 10}),
             json!({"fact_id": 2, "content": "dev server listening on 127.0.0.1:8081", "trust_score": 0.5, "created_at": 11}),
             json!({"fact_id": 3, "content": "We use Redis for caching sessions", "trust_score": 0.8, "created_at": 5, "access_count": 4}),
             json!({"fact_id": 4, "content": "We no longer use Redis for caching sessions", "trust_score": 0.8, "created_at": 9}),

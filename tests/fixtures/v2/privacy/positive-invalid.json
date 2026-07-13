@@ -1,0 +1,49 @@
+{
+  "schema_version": 1,
+  "fixture_set": "positive-invalid",
+  "description": "Detector-positive strings that are synthetic, reserved, or structurally invalid.",
+  "cases": [
+    {
+      "id": "positive-invalid-aws-access-key-001",
+      "detector_class": "aws_access_key_id",
+      "value": "A\u004bIAIOSFODNN7EXAMPLE",
+      "expected_detection": true,
+      "credential_validity": "reserved-documentation-example"
+    },
+    {
+      "id": "positive-invalid-github-pat-001",
+      "detector_class": "github_personal_access_token",
+      "value": "gh\u0070_000000000000000000000000000000000000",
+      "expected_detection": true,
+      "credential_validity": "synthetic-invalid"
+    },
+    {
+      "id": "positive-invalid-openai-key-001",
+      "detector_class": "openai_api_key",
+      "value": "sk-\u0074est-000000000000000000000000000000000000000000000000",
+      "expected_detection": true,
+      "credential_validity": "synthetic-invalid"
+    },
+    {
+      "id": "positive-invalid-slack-bot-token-001",
+      "detector_class": "slack_bot_token",
+      "value": "xox\u0062-000000000000-000000000000-000000000000000000000000",
+      "expected_detection": true,
+      "credential_validity": "synthetic-invalid"
+    },
+    {
+      "id": "positive-invalid-private-key-001",
+      "detector_class": "private_key_pem",
+      "value": "-----BEGIN PRIV\u0041TE KEY-----\nNOT-A-VALID-PRIVATE-KEY\n-----END PRIVATE KEY-----",
+      "expected_detection": true,
+      "credential_validity": "synthetic-invalid"
+    },
+    {
+      "id": "positive-invalid-database-url-001",
+      "detector_class": "database_url_credentials",
+      "value": "postgresql://fixture_user:fixture_password@example.invalid:5432/fixture_db",
+      "expected_detection": true,
+      "credential_validity": "reserved-domain"
+    }
+  ]
+}

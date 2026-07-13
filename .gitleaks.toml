@@ -1,0 +1,11 @@
+title = "TraceDecay V2 candidate policy"
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Exclude Git metadata and non-candidate local build artifacts"
+paths = [
+  '''(^|/)\.git(?:/|$)''',
+  '''(^|/)target(?:/|$)''',
+]

@@ -158,7 +158,13 @@ mod tests {
 
     #[test]
     fn detects_pem_blocks_and_bearer_tokens() {
-        assert!(detect_secret_like("-----BEGIN RSA PRIVATE KEY-----\nMII...").is_some());
+        assert!(
+            detect_secret_like(concat!(
+                "-----BEGIN ",
+                "PRIVATE KEY-----\nNOT-A-VALID-PRIVATE-KEY"
+            ))
+            .is_some()
+        );
         assert!(detect_secret_like("-----BEGIN OPENSSH PRIVATE KEY-----").is_some());
         assert!(
             detect_secret_like("Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9")
@@ -172,7 +178,7 @@ mod tests {
         assert!(detect_secret_like("Deploys used sk-test-742913 before rotation").is_some());
         assert!(detect_secret_like("ghp_abcdefghijklmnopqrstuvwxyz0123456789").is_some());
         assert!(detect_secret_like("AKIAIOSFODNN7EXAMPLE is the access key").is_some());
-        assert!(detect_secret_like("api_key=Zx9mQ4tR7wLp2NvK8sBd1FgH").is_some());
+        assert!(detect_secret_like(concat!("api_", "key=", "0000000000000000")).is_some());
         assert!(detect_secret_like("password: hunter2hunter2hunter2").is_some());
     }
 

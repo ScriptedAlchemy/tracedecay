@@ -1,0 +1,9 @@
+{
+  "schema_version": 1,
+  "fixture_id": "privacy-host-canonical-sources-v1",
+  "surface_id": "host-canonical-sources",
+  "artifact_class": "canonical-source-inventory",
+  "coverage": ["discovery", "classification", "receipt-binding"],
+  "receipt_ref": "target/v2-privacy/receipts/hosts/host-canonical-sources.json",
+  "metadata_only": true
+}

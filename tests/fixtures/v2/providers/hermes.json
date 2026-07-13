@@ -29,6 +29,13 @@
       "id": "hermes-secret-placeholder-001",
       "record_type": "tool_result",
       "timestamp": "2026-01-02T03:04:07Z"
+    },
+    {
+      "content": "sk-SYNTHETIC_RESERVED_INVALID_000000000000",
+      "id": "hermes-credential-positive-control-001",
+      "label": "synthetic-reserved-invalid-positive-control",
+      "record_type": "credential_positive_control",
+      "timestamp": "2026-01-02T03:04:08Z"
     }
   ],
   "schema_version": 1

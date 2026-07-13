@@ -895,7 +895,7 @@ mod tests {
                 1,
                 MemoryCategory::Tool,
                 0.99,
-                "api_key=Zx9mQ4tR7wLp2NvK8sBd1FgH",
+                concat!("api_", "key=", "0000000000000000"),
             ),
             fact(
                 2,

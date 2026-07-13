@@ -1,0 +1,287 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://tracedecay.dev/schemas/v2/privacy-manifest.schema.json",
+  "title": "TraceDecay V2 privacy fixture manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "manifest_id",
+    "content_policy",
+    "detectors",
+    "receipt_contracts",
+    "surfaces",
+    "fixtures",
+    "occurrences",
+    "dependency_edges"
+  ],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "manifest_id": { "$ref": "#/$defs/stable_id" },
+    "content_policy": { "const": "metadata-only-no-candidate-content" },
+    "detectors": {
+      "type": "array",
+      "minItems": 2,
+      "items": { "$ref": "#/$defs/detector" }
+    },
+    "receipt_contracts": {
+      "type": "array",
+      "minItems": 2,
+      "items": { "$ref": "#/$defs/receipt_contract" }
+    },
+    "surfaces": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/surface" }
+    },
+    "fixtures": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/fixture" }
+    },
+    "occurrences": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/occurrence" }
+    },
+    "dependency_edges": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/dependency_edge" }
+    }
+  },
+  "$defs": {
+    "stable_id": {
+      "type": "string",
+      "minLength": 3,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+    },
+    "relative_path": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 512,
+      "pattern": "^[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)*$",
+      "not": { "pattern": "(^|/)\\.\\.(/|$)" }
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "coverage_state": {
+      "enum": [
+        "covered",
+        "expected-clean",
+        "historical-reviewed",
+        "synthetic-canary",
+        "synthetic-positive"
+      ]
+    },
+    "source_class": {
+      "enum": [
+        "generated-derivative",
+        "historical-metadata",
+        "host-surface-metadata",
+        "legacy-fixture-reference",
+        "repository-candidate",
+        "sink-inventory",
+        "synthetic-invalid",
+        "synthetic-non-secret",
+        "synthetic-serialized-field",
+        "synthetic-sink-canary"
+      ]
+    },
+    "detector_rule_ref": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["detector_id", "detector_version", "rule_id", "rule_version"],
+      "properties": {
+        "detector_id": { "$ref": "#/$defs/stable_id" },
+        "detector_version": { "type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$" },
+        "rule_id": { "$ref": "#/$defs/stable_id" },
+        "rule_version": { "type": "string", "minLength": 1, "maxLength": 64 }
+      }
+    },
+    "detector": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["detector_id", "detector_version", "rules"],
+      "properties": {
+        "detector_id": { "$ref": "#/$defs/stable_id" },
+        "detector_version": { "type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$" },
+        "rules": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["rule_id", "rule_version"],
+            "properties": {
+              "rule_id": { "$ref": "#/$defs/stable_id" },
+              "rule_version": { "type": "string", "minLength": 1, "maxLength": 64 }
+            }
+          }
+        }
+      }
+    },
+    "receipt_contract": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "receipt_id",
+        "relative_path",
+        "detector_id",
+        "detector_version",
+        "required_fields",
+        "forbidden_fields"
+      ],
+      "properties": {
+        "receipt_id": { "$ref": "#/$defs/stable_id" },
+        "relative_path": { "$ref": "#/$defs/relative_path" },
+        "detector_id": { "$ref": "#/$defs/stable_id" },
+        "detector_version": { "type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$" },
+        "required_fields": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/stable_id" }
+        },
+        "forbidden_fields": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/stable_id" }
+        }
+      }
+    },
+    "surface": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "surface_id",
+        "relative_paths",
+        "source_class",
+        "coverage_state",
+        "detector_rule_refs",
+        "receipt_refs",
+        "depends_on"
+      ],
+      "properties": {
+        "surface_id": { "$ref": "#/$defs/stable_id" },
+        "relative_paths": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/relative_path" }
+        },
+        "source_class": { "$ref": "#/$defs/source_class" },
+        "coverage_state": { "$ref": "#/$defs/coverage_state" },
+        "detector_rule_refs": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/detector_rule_ref" }
+        },
+        "receipt_refs": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/relative_path" }
+        },
+        "depends_on": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/stable_id" }
+        }
+      }
+    },
+    "fixture": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "fixture_id",
+        "relative_path",
+        "sha256",
+        "source_class",
+        "coverage_state",
+        "surface_ids",
+        "detector_rule_refs",
+        "receipt_refs",
+        "depends_on"
+      ],
+      "properties": {
+        "fixture_id": { "$ref": "#/$defs/stable_id" },
+        "relative_path": { "$ref": "#/$defs/relative_path" },
+        "sha256": { "$ref": "#/$defs/sha256" },
+        "source_class": { "$ref": "#/$defs/source_class" },
+        "coverage_state": { "$ref": "#/$defs/coverage_state" },
+        "surface_ids": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/stable_id" }
+        },
+        "detector_rule_refs": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/detector_rule_ref" }
+        },
+        "receipt_refs": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/relative_path" }
+        },
+        "depends_on": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/stable_id" }
+        }
+      }
+    },
+    "occurrence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "occurrence_id",
+        "relative_path",
+        "symbol_anchor",
+        "source_class",
+        "coverage_state",
+        "detector_rule_ref",
+        "receipt_refs",
+        "depends_on"
+      ],
+      "properties": {
+        "occurrence_id": { "$ref": "#/$defs/stable_id" },
+        "relative_path": { "$ref": "#/$defs/relative_path" },
+        "symbol_anchor": { "$ref": "#/$defs/stable_id" },
+        "source_class": { "const": "legacy-fixture-reference" },
+        "coverage_state": { "$ref": "#/$defs/coverage_state" },
+        "detector_rule_ref": { "$ref": "#/$defs/detector_rule_ref" },
+        "receipt_refs": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/relative_path" }
+        },
+        "depends_on": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/stable_id" }
+        }
+      }
+    },
+    "dependency_edge": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["from_id", "to_id", "kind"],
+      "properties": {
+        "from_id": { "$ref": "#/$defs/stable_id" },
+        "to_id": { "$ref": "#/$defs/stable_id" },
+        "kind": {
+          "enum": ["covered-by", "depends-on", "emits-receipt", "scanned-by"]
+        }
+      }
+    }
+  }
+}

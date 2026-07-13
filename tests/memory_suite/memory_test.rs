@@ -2261,7 +2261,7 @@ async fn add_fact_rejects_secret_like_content_without_storing() {
     let rejected = store
         .add_fact(
             fact_request(
-                "Staging deploy uses api_key=Zx9mQ4tR7wLp2NvK8sBd1FgH for auth",
+                "Staging deploy uses api_key=TEST_ONLY_INVALID_CANARY for auth",
                 MemoryCategory::Tool,
                 0.8,
             ),

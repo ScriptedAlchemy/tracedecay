@@ -1,0 +1,35 @@
+{
+  "schema_version": 1,
+  "fixture_set": "serialized-field-boundary",
+  "description": "Synthetic invalid canaries placed at serialization boundaries.",
+  "cases": [
+    {
+      "id": "serialized-boundary-top-level-001",
+      "detector_class": "github_personal_access_token",
+      "serialized": "{\"token\":\"gh\\u0070_000000000000000000000000000000000000\",\"provider\":\"fixture\"}",
+      "sensitive_json_pointer": "/token",
+      "expected_redacted_json_pointer": "/token"
+    },
+    {
+      "id": "serialized-boundary-nested-001",
+      "detector_class": "aws_access_key_id",
+      "serialized": "{\"request\":{\"headers\":{\"x-api-key\":\"A\\u004bIAIOSFODNN7EXAMPLE\"}}}",
+      "sensitive_json_pointer": "/request/headers/x-api-key",
+      "expected_redacted_json_pointer": "/request/headers/x-api-key"
+    },
+    {
+      "id": "serialized-boundary-array-001",
+      "detector_class": "slack_bot_token",
+      "serialized": "{\"events\":[{\"kind\":\"fixture\",\"credential\":\"xox\\u0062-000000000000-000000000000-000000000000000000000000\"}]}",
+      "sensitive_json_pointer": "/events/0/credential",
+      "expected_redacted_json_pointer": "/events/0/credential"
+    },
+    {
+      "id": "serialized-boundary-escaped-string-001",
+      "detector_class": "openai_api_key",
+      "serialized": "{\"payload\":\"{\\\"api_key\\\":\\\"sk-\\u0074est-000000000000000000000000000000000000000000000000\\\"}\"}",
+      "sensitive_json_pointer": "/payload",
+      "expected_redacted_json_pointer": "/payload"
+    }
+  ]
+}

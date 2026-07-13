@@ -665,7 +665,7 @@ Assertions:
 - detector timeout/crash yields blocked/unknown, never stored plaintext.
 - deletion/remediation rebuild removes every descendant and old serving generation.
 - backup/restore cannot resurrect the canary.
-- the nine replaced credential-shaped legacy fixtures remain scanner-clean reserved/invalid canaries while still exercising every intended detector branch.
+- the nine replaced credential-shaped legacy occurrences across the six exact PR 2B paths remain scanner-clean reserved/invalid canaries while still exercising every intended detector branch.
 - Hermes projection-only, hook analytics duplicate-command, bounded MCP failure, post-model summary, response-handle writer, LCM backup copy, dashboard raw/host, memory metadata/V11 vector, and status-inference regressions each fail independently when its firewall is disabled.
 
 ### 17.4 Quality metrics
@@ -711,6 +711,87 @@ No real secret is used to evaluate the system.
 
 The existing `src/sessions/lcm/raw.rs` redactors and `src/memory/hygiene.rs` detectors become V1 fixture/reference adapters, not two competing V2 implementations.
 
+## 19.1 Bounded delivery clarification for PR 2B — reviewed amendment v1
+
+This amendment clarifies the bounded PR 2B delivery scope above; it neither changes PR 2B's product meaning nor records implementation completion. PR 2B is evidence-, fixture-, test-, scanner-config-, and CI-only work. It owns no V2 runtime, crate, database, detector engine, public API, workflow runtime, or Claude workflow JavaScript. The only existing `src/**` edits authorized here are the literal scanner-safe fixture replacements listed below; subsequent runtime work remains owned by PR 4B/6B/7A/10A and their companion plans.
+
+**Exact owned paths**
+
+- Four separate corpus producers own one path each: `tests/fixtures/v2/privacy/positive-invalid.json`, `tests/fixtures/v2/privacy/negative-realistic.json`, `tests/fixtures/v2/privacy/serialized-field-boundary.json`, and `tests/fixtures/v2/privacy/forbidden-sink-canaries.json`.
+- Sink-inventory producer owns only `tests/fixtures/v2/privacy/v1-v2-sink-inventory.json`.
+- Historical-regression producer owns only `tests/fixtures/v2/privacy/historical-regressions.json`.
+- Privacy-manifest producer owns only `tests/fixtures/v2/privacy/privacy-manifest.schema.json` and `tests/fixtures/v2/privacy/privacy-manifest.json`. The schema rejects unknown fields and requires stable surface/fixture/occurrence IDs, relative paths, content digests, source classes, detector/rule versions, coverage state, receipt references, and dependency edges; neither manifest may contain candidate content.
+- Seven separate host-lane producers own one path each: `tests/fixtures/v2/privacy/host-canonical-sources.json`, `tests/fixtures/v2/privacy/host-rendered-trees.json`, `tests/fixtures/v2/privacy/host-component-archives.json`, `tests/fixtures/v2/privacy/host-marketplace-artifacts.json`, `tests/fixtures/v2/privacy/host-owned-config-backups.json`, `tests/fixtures/v2/privacy/host-hook-stdin.json`, and `tests/fixtures/v2/privacy/host-probe-diagnostics.json`.
+- Gitleaks producer owns only `.gitleaks.toml` and `scripts/check-v2-gitleaks.sh`, which emits the content-free build artifact `target/v2-privacy/receipts/gitleaks-8.30.1.json`; the executable and receipt must identify exactly `gitleaks 8.30.1`.
+- Differential-scanner producer owns only `.secrets.baseline` and `scripts/check-v2-detect-secrets.sh`, which emits the content-free build artifact `target/v2-privacy/receipts/detect-secrets-1.5.0.json`; the executable and receipt must identify exactly `detect-secrets 1.5.0`.
+- Test producer owns only `tests/v2_corpus_suite/privacy.rs`.
+- The final integration producer may edit only `tests/v2_corpus_suite/main.rs`, `tests/fixtures/v2/manifest.json`, and `.github/workflows/ci.yml`. These are registration/wiring edits only; it may not absorb the privacy test module, corpus, scanner, fixture-replacement, or runtime implementation.
+
+Only the privacy-manifest producer defines the PR 2B manifest schema and child manifest, including the two exact scanner-receipt artifact contracts. Scanner producers write those build receipts but cannot change either manifest. Only the integration producer registers the already-reviewed child manifest in `tests/fixtures/v2/manifest.json` and publishes the receipts as CI artifacts; it cannot reinterpret or regenerate their semantic contents. Receipts stay outside the scanned committed fixture tree to avoid self-reference through their candidate commit and artifact digest.
+
+The nine legacy scanner findings are nine **occurrences**, not nine paths. They are split into six mutually exclusive file-owner micro-items:
+
+1. `src/dashboard/memory_analysis.rs` — one occurrence.
+2. `src/hooks/memory_inject.rs` — one occurrence.
+3. `src/memory/hygiene.rs` — two occurrences.
+4. `tests/agent_suite/memory_digest_test.rs` — one occurrence.
+5. `tests/memory_suite/memory_test.rs` — one occurrence.
+6. `tests/session_suite/lcm_payload.rs` — three occurrences.
+
+The immutable occurrence IDs below remain stable if line numbers move. The line is a reviewed candidate-tree anchor, the symbol is the semantic relocation anchor, and the scanner rule ID is part of the acceptance receipt:
+
+| Stable ID | Reviewed path:line | Symbol anchor | Detector rule ID |
+|---|---|---|---|
+| `PR2B-LEGACY-001` | `src/dashboard/memory_analysis.rs:784` | `propose_hygiene_candidates_flags_secret_transient_and_supersession_for_review` | `generic-api-key` |
+| `PR2B-LEGACY-002` | `src/hooks/memory_inject.rs:898` | `secret_like_facts_are_never_selected` | `generic-api-key` |
+| `PR2B-LEGACY-003` | `src/memory/hygiene.rs:161` | `detects_pem_blocks_and_bearer_tokens` | `private-key` |
+| `PR2B-LEGACY-004` | `src/memory/hygiene.rs:175` | `detects_known_prefixes_and_credentialish_assignments` | `generic-api-key` |
+| `PR2B-LEGACY-005` | `tests/agent_suite/memory_digest_test.rs:72` | `selection_excludes_secret_like_and_injection_like_content` | `generic-api-key` |
+| `PR2B-LEGACY-006` | `tests/memory_suite/memory_test.rs:2264` | `add_fact_rejects_secret_like_content_without_storing` | `generic-api-key` |
+| `PR2B-LEGACY-007` | `tests/session_suite/lcm_payload.rs:586` | `api_alias_assignments_redact_apikey_and_apitoken` | `generic-api-key` |
+| `PR2B-LEGACY-008` | `tests/session_suite/lcm_payload.rs:637` | `private_key_redaction_is_lossy_and_not_indexed_when_enabled` | `private-key` |
+| `PR2B-LEGACY-009` | `tests/session_suite/lcm_payload.rs:1266` | `redaction_applies_before_whole_message_externalization` | `generic-api-key` |
+
+Each file owner may replace only those credential literals with reserved/invalid scanner-safe canaries and adjust only directly adjacent expectations needed to preserve the existing detector branch. This is not ownership of those modules' behavior. Findings in `.codex/skills/**`, `.claude/**`, workflow scripts, generated output, or any other path are reported separately and are not silently folded into this nine-occurrence correction.
+
+**Exact tests and gates**
+
+`tests/v2_corpus_suite/privacy.rs` defines exactly these PR 2B tests:
+
+- `privacy_manifest_is_complete_and_hashes_are_deterministic`
+- `privacy_positive_invalid_corpus_covers_required_classes`
+- `privacy_negative_corpus_has_no_builtin_findings`
+- `privacy_serialized_fields_are_scanned_independently`
+- `privacy_sink_inventory_covers_v1_v2_and_forbidden_sinks`
+- `privacy_historical_regressions_are_anchored`
+- `privacy_host_surfaces_have_independent_receipts`
+- `privacy_legacy_fixture_replacements_preserve_detector_coverage`
+- `privacy_scanner_receipts_pin_gitleaks_8_30_1_and_detect_secrets_1_5_0`
+- `privacy_repository_and_generated_derivatives_are_zero_finding`
+
+CI runs `cargo test --test v2_corpus_suite privacy`, `scripts/check-v2-gitleaks.sh`, and `scripts/check-v2-detect-secrets.sh`. Each scanner lane emits its exact content-free receipt named above, containing tool version, config digest, reviewed base commit, candidate commit, scanned-surface stable IDs, coverage state, finding count, and artifact digest; it emits no candidate value, snippet, candidate fingerprint, or raw path containing private data. Detect-secrets independently scans the same committed/generated surface inventory. A missing executable, version mismatch, skipped/locked/unsupported surface, stale baseline, nonzero candidate finding count, or absent receipt fails the gate; neither scanner substitutes for the other.
+
+The Gitleaks PR gate accepts two explicit immutable revisions, `reviewed_base` and `candidate`, verifies both exist and `reviewed_base` is an ancestor of `candidate`, scans the complete candidate working tree/generated derivatives, and scans Git objects only for the reviewed `reviewed_base..candidate` range. It must not infer a base from the current branch name, mutable remote default, merge-base drift, shallow-clone boundary, or prior receipt. The receipt binds both full commit IDs and reports incomplete history as a failed/unknown gate.
+
+Historical coverage is a separate scheduled and release gate: it scans every reachable commit from the release roots under the same pinned policy and publishes a content-free coverage receipt. A historical finding is tracked by stable finding ID, commit, relative path, detector rule/version, and remediation state. It is fixed forward, rotated/revoked when applicable, and explicitly adjudicated without candidate bytes. History is not rewritten by PR 2B, and repository-, path-, rule-, or history-wide blanket allowlists are prohibited. A narrowly adjudicated historical occurrence never suppresses a candidate-tree finding, a new commit, another path, or another detector version.
+
+**Bounded multi-agent route and dependency DAG**
+
+All items run in `/fast/projects/tracedecay/.worktrees/codex-tracedecay-total-redesign-plan` through the canonical plan-execution route and shared PR 2B ledger. Every producer receives one exact path set, acceptance tests, and an independent durable receipt. No producer receives an entire PR, multiple corpus or host lanes, a corpus-plus-tests bundle, or open-ended discovery. The four corpus, sink-inventory, historical-regression, privacy-manifest, seven host, two scanner, and six legacy-file producers run independently and may run in parallel. The test producer starts only after all fixture-data and manifest producers publish accepted receipts. The integration producer starts only after the fixture-data, manifest, scanner, six file-owner, and test receipts are accepted. A separate reviewer then validates the aggregate diff and gates; corrections return as new bounded owner-specific micro-items rather than one aggregate fix task.
+
+```text
+corpus lanes (4) ─────┐
+sink inventory ──────┼──> privacy tests ──┐
+historical anchors ──┤                    │
+privacy manifest ─────┤                    │
+host lanes (7) ──────┘                    │
+gitleaks lane ────────────────────────────┤
+detect-secrets lane ──────────────────────┼──> integration wiring ──> independent review
+six file owners (parallel) ───────────────┘
+```
+
+The route uses explicit cancellation, progress/heartbeat visibility, resumable checkpoints, and receipt-based restart. It imposes no automatic wall-clock, per-agent, workflow, or no-progress timeout. Cancellation never converts incomplete work into success. No workflow `.js` file, Claude workflow implementation, or task-executor runtime is modified by PR 2B. Completion requires every named receipt, exact test, scanner lane, and independent review to pass on the aggregate tree; a planning amendment or individual producer success is not completion.
+
 ## 20. Reviewable PR sequence
 
 Integrate these slices into the master Phase 0–5 sequence.
@@ -723,6 +804,8 @@ Integrate these slices into the master Phase 0–5 sequence.
 - Import historical session anchors and current LCM/memory/remote/tool-preview tests.
 - Replace all nine credential-shaped repository fixtures with reserved/invalid scanner-safe canaries and freeze their detector-coverage equivalence plus zero-findings repository scan.
 - Inventory and scan plan 27's exact canonical host-bundle sources, all deterministic rendered host/package trees, component archives, marketplace candidates/indexes, owned-config diff/backup lane, hook stdin lane, and probe/doctor/conformance diagnostic lane independently; store only safe manifests and protected receipt refs.
+
+The companion bounded-delivery clarification is §19.1; it adds no product acceptance criterion.
 
 ### PR 4B — Privacy domain and taint-state contracts
 

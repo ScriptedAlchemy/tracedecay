@@ -1,0 +1,189 @@
+{
+  "schema_version": 1,
+  "inventory_id": "tracedecay-v1-v2-privacy-sinks-v1",
+  "content_policy": "metadata-only; candidate content, candidate fragments, and candidate digests are forbidden",
+  "sinks": [
+    {
+      "id": "sink.session.provider-projection",
+      "surface": "provider transcript messages and metadata",
+      "v1_sources": ["src/sessions/hermes.rs::ingest_hermes_session", "src/global_db.rs::GlobalDb"],
+      "v2_boundary": "capture.provider_projection",
+      "required_state": "sanitized-before-persist"
+    },
+    {
+      "id": "sink.session.codex-events",
+      "surface": "Codex messages, tool events, reasoning, and inter-agent traffic",
+      "v1_sources": ["src/sessions/codex/events.rs"],
+      "v2_boundary": "capture.codex_event",
+      "required_state": "sanitized-before-projection"
+    },
+    {
+      "id": "sink.session.lcm-message",
+      "surface": "LCM message content and searchable projection",
+      "v1_sources": ["src/sessions/lcm/raw.rs::prepare_message"],
+      "v2_boundary": "capture.lcm_message",
+      "required_state": "sanitized-before-persist"
+    },
+    {
+      "id": "sink.session.lcm-replay",
+      "surface": "LCM tool arguments, results, errors, and replay fields",
+      "v1_sources": ["src/sessions/lcm/raw.rs::protect_replay_field_value"],
+      "v2_boundary": "capture.lcm_replay_field",
+      "required_state": "sanitized-or-content-free-quarantine"
+    },
+    {
+      "id": "sink.session.summary-dag",
+      "surface": "summaries, compression nodes, and post-model output",
+      "v1_sources": ["src/sessions/lcm/raw.rs", "src/sessions/lcm/query.rs"],
+      "v2_boundary": "projectors.session_summary",
+      "required_state": "sanitized-descendant-only"
+    },
+    {
+      "id": "sink.session.workflow-goal",
+      "surface": "workflow journals, goals, claims, and agent status",
+      "v1_sources": ["src/sessions/workflow_ingest.rs"],
+      "v2_boundary": "capture.workflow_event",
+      "required_state": "sanitized-before-persist"
+    },
+    {
+      "id": "sink.store.activity-project",
+      "surface": "activity and project canonical content rows",
+      "v1_sources": ["src/global_db.rs::GlobalDb"],
+      "v2_boundary": "store.canonical_record",
+      "required_state": "sanitized-before-transaction"
+    },
+    {
+      "id": "sink.store.fts",
+      "surface": "FTS rows, snippets, token dictionaries, facets, and rank fields",
+      "v1_sources": ["src/global_db.rs::GlobalDb"],
+      "v2_boundary": "projectors.fts",
+      "required_state": "sanitized-descendant-only"
+    },
+    {
+      "id": "sink.store.code-graph",
+      "surface": "graph labels, source snippets, symbol docs, fingerprints, and diagnostics",
+      "v1_sources": ["src/code_graph.rs", "src/storage.rs"],
+      "v2_boundary": "projectors.code_graph",
+      "required_state": "sanitized-descendant-only"
+    },
+    {
+      "id": "sink.store.vector-memory",
+      "surface": "dense, sparse, rerank, summary, and model-cache representations",
+      "v1_sources": ["src/memory/store.rs::MemoryStore"],
+      "v2_boundary": "projectors.semantic_representation",
+      "required_state": "sanitized-descendant-only"
+    },
+    {
+      "id": "sink.store.response-handle",
+      "surface": "reversible MCP truncation payloads",
+      "v1_sources": ["src/mcp/response_handles.rs::store_response_handle"],
+      "v2_boundary": "store.response_handle",
+      "required_state": "sanitized-before-write"
+    },
+    {
+      "id": "sink.store.backup-recovery",
+      "surface": "SQLite backups, WAL/SHM, migration, restore, and recovery sets",
+      "v1_sources": ["src/storage.rs", "src/sessions/lcm/raw.rs"],
+      "v2_boundary": "store.backup_restore_gate",
+      "required_state": "rescanned-before-serving"
+    },
+    {
+      "id": "sink.memory.fact-write",
+      "surface": "facts, entities, aliases, trust, and feedback",
+      "v1_sources": ["src/memory/store.rs::add_fact_inner", "src/memory/store.rs::update_fact"],
+      "v2_boundary": "application.memory_write",
+      "required_state": "rejected-or-sanitized-before-persist"
+    },
+    {
+      "id": "sink.memory.prompt-injection",
+      "surface": "recalled fact and entity prompt context",
+      "v1_sources": ["src/hooks/memory_inject.rs::injectable"],
+      "v2_boundary": "query.prompt_context",
+      "required_state": "sanitized-before-output"
+    },
+    {
+      "id": "sink.memory.digest",
+      "surface": "memory digest selection and automation prompt material",
+      "v1_sources": ["src/automation/memory_digest.rs::select_digest_facts"],
+      "v2_boundary": "application.memory_digest",
+      "required_state": "sanitized-before-output"
+    },
+    {
+      "id": "sink.automation.artifact",
+      "surface": "automation prompts, run artifacts, proposals, and managed skills",
+      "v1_sources": ["src/automation/runner.rs", "src/automation/agent_targets.rs"],
+      "v2_boundary": "application.automation_artifact",
+      "required_state": "sanitized-before-write"
+    },
+    {
+      "id": "sink.hook.context-output",
+      "surface": "hook stdin, tool hints, steering context, and nearby-agent summaries",
+      "v1_sources": ["src/hooks/steering.rs", "src/hooks/tool_hints.rs"],
+      "v2_boundary": "capture.hook_payload",
+      "required_state": "sanitized-before-output"
+    },
+    {
+      "id": "sink.analytics.event",
+      "surface": "analytics events, metadata, metric labels, and hint outcomes",
+      "v1_sources": ["src/analytics.rs", "src/global_db.rs::GlobalDb"],
+      "v2_boundary": "store.analytics_event",
+      "required_state": "content-free-fields-only"
+    },
+    {
+      "id": "sink.diagnostics.cache-output",
+      "surface": "compiler diagnostics, cache entries, doctor output, and probe results",
+      "v1_sources": ["src/diagnostics/cache.rs::DiagnosticsCacheSlot", "src/diagnostics/lsp/broker.rs"],
+      "v2_boundary": "application.diagnostic_output",
+      "required_state": "sanitized-before-cache-or-output"
+    },
+    {
+      "id": "sink.api.cli-mcp",
+      "surface": "CLI and MCP responses, errors, cursors, and pagination tokens",
+      "v1_sources": ["src/mcp/server.rs::tool_error_response", "src/commands"],
+      "v2_boundary": "api.response",
+      "required_state": "sanitized-before-serialization"
+    },
+    {
+      "id": "sink.api.http-sse-sdk",
+      "surface": "HTTP, SSE, SDK, deep-link, and browser-visible payloads",
+      "v1_sources": ["src/dashboard"],
+      "v2_boundary": "api.transport_response",
+      "required_state": "sanitized-before-serialization"
+    },
+    {
+      "id": "sink.dashboard.browser",
+      "surface": "dashboard views, browser storage, source maps, and host diagnostics",
+      "v1_sources": ["dashboard", "src/dashboard"],
+      "v2_boundary": "dashboard.view_model",
+      "required_state": "sanitized-before-render"
+    },
+    {
+      "id": "sink.log-error-crash",
+      "surface": "logs, traces, errors, panic reports, and crash staging",
+      "v1_sources": ["src"],
+      "v2_boundary": "application.observability",
+      "required_state": "content-free-fields-only"
+    },
+    {
+      "id": "sink.export-support-release",
+      "surface": "exports, shares, support bundles, fixtures, benchmarks, and release packages",
+      "v1_sources": ["src/types.rs::Export", "tests/fixtures"],
+      "v2_boundary": "application.export_gate",
+      "required_state": "rescanned-before-emission"
+    },
+    {
+      "id": "sink.host-config-backup",
+      "surface": "host config, owned diffs, backups, rendered plugin trees, and marketplace artifacts",
+      "v1_sources": ["src/agents/mod.rs", "src/agents/claude.rs", "src/agents/kiro.rs"],
+      "v2_boundary": "application.host_bundle",
+      "required_state": "protected-operation-only"
+    },
+    {
+      "id": "sink.multi-machine-transfer",
+      "surface": "spool, upload, replication, and remote backup transfer",
+      "v1_sources": ["src"],
+      "v2_boundary": "application.transfer_gate",
+      "required_state": "classified-and-sanitized-before-transfer"
+    }
+  ]
+}

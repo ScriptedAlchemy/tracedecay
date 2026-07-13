@@ -46,13 +46,30 @@ fn manifest_is_complete_and_hashes_are_deterministic() {
     ]
     .into_iter()
     .collect();
-    let mut observed = BTreeSet::new();
+    let mut observed_coverage = BTreeSet::new();
+    let mut observed_providers = BTreeSet::new();
     let files = manifest["files"].as_array().expect("files array");
     assert!(!files.is_empty());
 
     for entry in files {
         let relative = entry["path"].as_str().expect("fixture path");
         assert!(relative.starts_with("providers/"));
+        let provider = entry["provider_family"]
+            .as_str()
+            .expect("manifest provider_family");
+        let path_provider = Path::new(relative)
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .expect("provider fixture file stem");
+        assert_eq!(
+            provider, path_provider,
+            "provider/path mismatch: {relative}"
+        );
+        assert!(
+            observed_providers.insert(provider),
+            "duplicate provider manifest entry: {provider}"
+        );
+
         let bytes = fs::read(corpus_root().join(relative)).unwrap();
         let actual = hex::encode(Sha256::digest(&bytes));
         assert_eq!(
@@ -61,13 +78,22 @@ fn manifest_is_complete_and_hashes_are_deterministic() {
             "hash mismatch: {relative}"
         );
         for tag in entry["coverage"].as_array().expect("coverage array") {
-            observed.insert(tag.as_str().unwrap());
+            observed_coverage.insert(tag.as_str().unwrap());
         }
     }
+    let provider_families = manifest["provider_families"]
+        .as_array()
+        .expect("provider_families array");
+    let declared_providers: BTreeSet<_> = provider_families
+        .iter()
+        .map(|provider| provider.as_str().expect("provider family string"))
+        .collect();
+    assert_eq!(provider_families.len(), declared_providers.len());
+    assert_eq!(observed_providers, declared_providers);
     assert!(
-        required_coverage.is_subset(&observed),
+        required_coverage.is_subset(&observed_coverage),
         "missing coverage: {:?}",
-        required_coverage.difference(&observed)
+        required_coverage.difference(&observed_coverage)
     );
 }
 
@@ -120,25 +146,248 @@ fn every_provider_fixture_is_manifested_and_synthetic() {
         .collect();
     assert_eq!(declared, actual);
 
-    for relative in actual {
-        let original = fs::read_to_string(root.join(&relative)).unwrap();
+    let canonical_record_families: BTreeSet<_> = [
+        "assistant_event",
+        "message",
+        "tool_result",
+        "malformed_input",
+        "partial_input",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect();
+    let authoritative_record_families: BTreeSet<_> = canonical_record_families
+        .iter()
+        .cloned()
+        .chain(std::iter::once("credential_positive_control".to_owned()))
+        .collect();
+    let mut observed_corpus_record_families = BTreeSet::new();
+
+    for entry in manifest["files"].as_array().unwrap() {
+        let relative = entry["path"].as_str().unwrap();
+        let original = fs::read_to_string(root.join(relative)).unwrap();
         let value: Value = serde_json::from_str(&original).unwrap();
+        let provider = entry["provider_family"].as_str().unwrap();
         assert_eq!(value["provenance"], "synthetic");
+        assert_eq!(value["schema_version"], 1, "schema mismatch: {relative}");
+        assert_eq!(
+            value["provider_family"], provider,
+            "fixture provider mismatch: {relative}"
+        );
+        let records = value["records"].as_array().expect("records array");
+        assert_eq!(
+            records.len(),
+            entry["records"].as_u64().expect("manifest record count") as usize,
+            "record count mismatch: {relative}"
+        );
+        let source_record_families = entry["source_record_families"]
+            .as_array()
+            .expect("source_record_families array");
+        let declared_record_families: BTreeSet<_> = source_record_families
+            .iter()
+            .map(|family| family.as_str().expect("record family string"))
+            .collect();
+        assert_eq!(
+            source_record_families.len(),
+            declared_record_families.len(),
+            "duplicate declared record family: {relative}"
+        );
+        let mut observed_record_families = BTreeSet::new();
+        let mut record_ids = BTreeSet::new();
+        let mut concrete_coverage = BTreeSet::new();
+        for record in records {
+            let record_id = record["id"].as_str().expect("record id string");
+            assert!(!record_id.is_empty(), "empty record id: {relative}");
+            assert!(
+                record_ids.insert(record_id),
+                "duplicate record id {record_id}: {relative}"
+            );
+            let record_type = record["record_type"].as_str().expect("record_type string");
+            observed_record_families.insert(record_type);
+            observed_corpus_record_families.insert(record_type.to_owned());
+            if record_type == "message" {
+                assert!(
+                    record["content"]
+                        .as_str()
+                        .is_some_and(|value| !value.is_empty())
+                );
+                concrete_coverage.insert("message");
+            }
+        }
+        assert_eq!(
+            observed_record_families, declared_record_families,
+            "record families mismatch: {relative}"
+        );
+
+        match provider {
+            "claude" => {
+                let event = records
+                    .iter()
+                    .find(|record| record["record_type"] == "assistant_event")
+                    .expect("Claude assistant event");
+                let subagent = event["subagent"]
+                    .as_object()
+                    .expect("Claude subagent object");
+                assert!(
+                    subagent["id"]
+                        .as_str()
+                        .is_some_and(|value| !value.is_empty())
+                );
+                assert!(
+                    subagent["parent_id"]
+                        .as_str()
+                        .is_some_and(|value| !value.is_empty())
+                );
+                concrete_coverage.insert("subagent");
+                let tool = event["tool"].as_object().expect("Claude tool object");
+                assert!(tool["name"].as_str().is_some_and(|value| !value.is_empty()));
+                assert!(tool["arguments"].is_object());
+                assert!(
+                    tool["result"]
+                        .as_str()
+                        .is_some_and(|value| !value.is_empty())
+                );
+                concrete_coverage.insert("tool");
+                assert!(
+                    event["reasoning_summary"]
+                        .as_str()
+                        .is_some_and(|value| !value.is_empty())
+                );
+                concrete_coverage.insert("reasoning-summary");
+            }
+            "codex" => {
+                let event = records
+                    .iter()
+                    .find(|record| record["record_type"] == "assistant_event")
+                    .expect("Codex assistant event");
+                assert!(
+                    event["goal"]
+                        .as_str()
+                        .is_some_and(|value| !value.is_empty())
+                );
+                concrete_coverage.insert("goal");
+                let git = event["git"].as_object().expect("Codex git object");
+                assert!(
+                    git["branch"]
+                        .as_str()
+                        .is_some_and(|value| !value.is_empty())
+                );
+                assert_eq!(git["commit"].as_str().map(str::len), Some(40));
+                concrete_coverage.insert("git");
+            }
+            "cursor" => {
+                let event = records
+                    .iter()
+                    .find(|record| record["record_type"] == "assistant_event")
+                    .expect("Cursor assistant event");
+                assert!(
+                    event["rewrite"]["supersedes"]
+                        .as_str()
+                        .is_some_and(|value| !value.is_empty())
+                );
+                concrete_coverage.insert("rewrite");
+                assert_eq!(event["truncated"], true);
+                assert!(
+                    event["content"]
+                        .as_str()
+                        .is_some_and(|value| value.contains("TRUNCATED"))
+                );
+                concrete_coverage.insert("truncation");
+            }
+            "gemini" => {
+                let malformed = records
+                    .iter()
+                    .find(|record| record["record_type"] == "malformed_input")
+                    .expect("Gemini malformed input");
+                assert_eq!(malformed["parse_status"], "rejected");
+                assert!(
+                    malformed["raw_fragment"]
+                        .as_str()
+                        .is_some_and(|value| !value.is_empty())
+                );
+                concrete_coverage.insert("malformed");
+                let partial = records
+                    .iter()
+                    .find(|record| record["record_type"] == "partial_input")
+                    .expect("Gemini partial input");
+                assert_eq!(partial["partial"], true);
+                assert!(
+                    partial["content"]
+                        .as_str()
+                        .is_some_and(|value| !value.is_empty())
+                );
+                concrete_coverage.insert("partial");
+            }
+            "hermes" => {
+                let unicode = records
+                    .iter()
+                    .find(|record| record["id"] == "hermes-unicode-001")
+                    .expect("Hermes Unicode record");
+                assert!(
+                    unicode["content"]
+                        .as_str()
+                        .is_some_and(|value| !value.is_ascii())
+                );
+                concrete_coverage.insert("unicode");
+                assert!(unicode["timestamp"].is_null());
+                concrete_coverage.insert("missing-timestamp");
+                let placeholder = records
+                    .iter()
+                    .find(|record| record["id"] == "hermes-secret-placeholder-001")
+                    .expect("Hermes secret placeholder");
+                assert_eq!(placeholder["record_type"], "tool_result");
+                assert!(
+                    placeholder["content"]
+                        .as_str()
+                        .is_some_and(|value| value.contains("<REDACTED_SYNTHETIC_SECRET>"))
+                );
+                concrete_coverage.insert("secret-placeholder");
+                let canary = records
+                    .iter()
+                    .find(|record| record["id"] == "hermes-credential-positive-control-001")
+                    .expect("Hermes credential positive control");
+                assert_eq!(canary["record_type"], "credential_positive_control");
+                assert_eq!(
+                    canary["label"],
+                    "synthetic-reserved-invalid-positive-control"
+                );
+                assert_eq!(
+                    canary["content"],
+                    "sk-SYNTHETIC_RESERVED_INVALID_000000000000"
+                );
+                concrete_coverage.insert("synthetic-credential-positive-control");
+            }
+            _ => {}
+        }
+        for coverage in entry["coverage"].as_array().expect("coverage array") {
+            let coverage = coverage.as_str().expect("coverage string");
+            assert!(
+                concrete_coverage.contains(coverage),
+                "coverage {coverage} lacks concrete evidence: {relative}"
+            );
+        }
+
+        let normalization = &manifest["normalization_contract"];
+        assert_eq!(normalization["json_key_order"], "lexicographic");
+        assert_eq!(normalization["line_ending"], "LF");
+        assert_eq!(normalization["terminal_newline"], true);
+        assert_eq!(normalization["unicode"], "preserved");
+        assert!(!original.contains('\r'), "non-LF line ending: {relative}");
         assert!(
-            value.get("records").and_then(Value::as_array).is_some(),
-            "records missing: {relative}"
+            original.ends_with('\n'),
+            "terminal newline missing: {relative}"
         );
         let normalized = serde_json::to_string_pretty(&value).unwrap() + "\n";
-        let reparsed: Value = serde_json::from_str(&normalized).unwrap();
-        assert_eq!(
-            value, reparsed,
-            "normalization changed semantics: {relative}"
-        );
         assert_eq!(
             original, normalized,
             "fixture is not canonically normalized: {relative}"
         );
     }
+    assert!(canonical_record_families.is_subset(&observed_corpus_record_families));
+    assert_eq!(
+        observed_corpus_record_families,
+        authoritative_record_families
+    );
 }
 
 #[test]
@@ -154,8 +403,41 @@ fn fixtures_pass_secret_scan() {
             .unwrap(),
     ];
     let root = corpus_root();
+    let canary_path = root.join("providers/hermes.json");
+    let canary_value = "sk-SYNTHETIC_RESERVED_INVALID_000000000000";
+    let canary_matches = forbidden
+        .iter()
+        .filter(|pattern| pattern.is_match(canary_value))
+        .count();
+    assert_eq!(
+        canary_matches, 1,
+        "secret detector must match the canary once"
+    );
+
     for entry in files_under(&root) {
-        let text = fs::read_to_string(entry.path()).unwrap();
+        let mut text = fs::read_to_string(entry.path()).unwrap();
+        if entry.path() == canary_path {
+            let mut fixture: Value = serde_json::from_str(&text).unwrap();
+            let records = fixture["records"].as_array_mut().expect("records array");
+            let matching_records: Vec<_> = records
+                .iter_mut()
+                .filter(|record| record["id"] == "hermes-credential-positive-control-001")
+                .collect();
+            assert_eq!(
+                matching_records.len(),
+                1,
+                "expected exactly one secret canary"
+            );
+            let canary = &mut *matching_records.into_iter().next().unwrap();
+            assert_eq!(canary["record_type"], "credential_positive_control");
+            assert_eq!(
+                canary["label"],
+                "synthetic-reserved-invalid-positive-control"
+            );
+            assert_eq!(canary["content"], canary_value);
+            canary["content"] = Value::String("<REMOVED_SYNTHETIC_CANARY>".to_owned());
+            text = serde_json::to_string(&fixture).unwrap();
+        }
         for pattern in &forbidden {
             assert!(
                 !pattern.is_match(&text),
@@ -170,19 +452,41 @@ fn fixtures_pass_secret_scan() {
 fn reference_machine_and_generator_are_reproducible() {
     let manifest = manifest();
     let reference = &manifest["reference_machine"];
-    for key in [
-        "label",
-        "architecture",
-        "logical_cpus",
-        "memory_gib",
-        "os",
-        "rust_version",
-    ] {
+    for key in ["label", "architecture", "os", "rust_version"] {
+        let value = reference[key]
+            .as_str()
+            .unwrap_or_else(|| panic!("reference_machine.{key} must be a string"));
         assert!(
-            reference.get(key).is_some(),
-            "reference_machine.{key} missing"
+            !value.trim().is_empty(),
+            "reference_machine.{key} must be nonempty"
         );
     }
+    assert!(
+        reference["logical_cpus"]
+            .as_u64()
+            .is_some_and(|value| value > 0),
+        "reference_machine.logical_cpus must be a nonzero integer"
+    );
+    assert!(
+        reference["memory_gib"]
+            .as_f64()
+            .is_some_and(|value| value.is_finite() && value > 0.0),
+        "reference_machine.memory_gib must be a positive finite number"
+    );
+
+    let benchmark = &manifest["benchmark"];
+    let scale_factor = benchmark["scale_factor"].as_u64().unwrap();
+    assert_eq!(scale_factor, 10);
+    let base_records: u64 = manifest["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|entry| entry["records"].as_u64().unwrap())
+        .sum();
+    assert_eq!(
+        benchmark["generated_records"].as_u64().unwrap(),
+        base_records * scale_factor
+    );
 
     let generator =
         Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/v2_corpus_suite/generate_10x.py");
@@ -209,6 +513,8 @@ fn reference_machine_and_generator_are_reproducible() {
         serde_json::from_str(&fs::read_to_string(first.path().join("receipt.json")).unwrap())
             .unwrap();
     assert_eq!(receipt["sha256"], generated_sha256);
+    assert_eq!(receipt["scale_factor"], scale_factor);
+    assert_eq!(receipt["records"], base_records * scale_factor);
     assert_eq!(
         first_bytes.iter().filter(|byte| **byte == b'\n').count(),
         manifest["benchmark"]["generated_records"].as_u64().unwrap() as usize
