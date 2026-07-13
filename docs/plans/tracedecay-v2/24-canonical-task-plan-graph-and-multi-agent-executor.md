@@ -2667,6 +2667,10 @@ Settings UI/CLI/MCP/API/SDK show declared owner, effective source/default, revis
 
 No config includes a global current board, implicit current project, first repository match, default writable worktree, or unrestricted fallback executor. Safe floors prevent disabling sanitizer, audit, fence validation, scope authorization, or secret scanning.
 
+Every attempt also has an advisory target duration, durable progress/heartbeat contract, bounded provider/tool-call request deadline, and maximum prompt/output/tool-result budget. Context assembly sends the bounded packet plus retrieval anchors and page cursors; it never inlines an entire repository, diff, board, parent transcript, workflow journal, or sibling prompt. Missing expected progress opens a deduplicated observable stall incident and refreshes availability, but no wall-clock, per-agent, workflow, or no-progress timer automatically cancels, fails, reroutes, or completes the attempt. Explicit cancellation fences new effects and reconciles ambiguous ones before decomposition resumes. A retry cannot merely raise limits or reuse the oversized packet.
+
+The scheduler exploits safe parallelism instead of globally serializing the initiative: independent read-only tasks and mutable tasks with disjoint, CAS-reserved repository/worktree/file/symbol/artifact effect sets may run concurrently up to fairness and resource budgets. Overlap, ambiguous ownership, shared integration authority, or a non-idempotent effect serializes only the conflicting cut. Speculative duplicate execution is forbidden for mutating/effect-unknown work and allowed for pure snapshot-bound reads only when policy records one winning result and cancels the rest.
+
 ### 13.2 Authorization model
 
 Roles/capabilities distinguish:
@@ -2727,6 +2731,7 @@ Rules:
 - active leases/attempts, heartbeat age, starts/cancellations/reconciliation, stale/fenced counts;
 - executor registrations by adapter/host/provider/model/effort/capability/residency and available capacity;
 - packet build latency/size/omissions/staleness/privacy denials;
+- per-attempt advisory target duration, progress/heartbeat age, queue/lock/provider/tool stage, context/token/output budget use, explicit-cancellation latency, and observed-stall/redecomposition counts;
 - retries, failure classes, circuit breakers, starvation/fairness, budget exhaustion;
 - workspace discovery/proposed/contradicted association, watcher/reconciliation lag, binding/drift/conflict, retention, cleanup blocker/proof/authorization/backlog, and removal outcome;
 - artifact/handoff/acceptance/external-effect reconciliation;
@@ -2993,6 +2998,7 @@ Legal transitions are exact approval, terminal negative plus one recovery transi
 | Search/query | Task-context Precision@K/nDCG/Recall, temporal correctness, duplicate rate, anchor resolution, partial-scope truth meet Plan 15/23 gates. |
 | Fairness | No eligible fixture starves; maximum wait/fairness deviation within configured bound under mixed initiatives/providers. |
 | Retry/cancel | No retry storm; bounded time to breaker; cancellation terminal/reconciliation states correct under every kill point. |
+| Anti-stall | Every missing-progress interval becomes visible with one anchored incident and explicit operator/scheduler disposition; no automatic agent/workflow timeout is introduced; bounded context prevents context-window overflow on the current/10x corpus. |
 | Privacy | Zero canary occurrence in forbidden DB/index/log/event/metric/prompt/output/export sinks; complete sanitizer receipts and deletion propagation. |
 | Surface parity | Generated CLI/MCP/API/SDK/dashboard semantic fixtures and legal-action/error/status snapshots match. |
 | Declarative editing | Zero implicit deletion, partial commit, stale-base overwrite, secret/path escape, duplicate allocation, raw-receipt content, or unrecovered expired workspace; 100,000-item validation/diff remains within catalog budgets. |
@@ -3028,6 +3034,7 @@ Run deterministic and soak tests with many hosts/processes competing for the sam
 - external worktree creation/registration observation lost or duplicated, watcher/hook gap, branch collision, dirty takeover attempt, association contradiction, cleanup proof race, and cleanup crash before/after Git removal/receipt;
 - edit export/upload/parse/validate/diff/rebase/submit crashes, submit-versus-head-change races, disk-full during staging/atomic commit/receipt/purge, and daemon restart with `Submitting` or `PurgePending` workspace;
 - provider timeout/rate limit/auth revoke/model disappearance;
+- provider/tool call that remains connected past its bounded request deadline, oversized context/tool output, context-window rejection, missing workflow progress visibility, and explicit-cancellation acknowledgement loss;
 - Git/PR effect succeeds but receipt is lost;
 - cancellation while a non-idempotent tool is in flight;
 - projector/query lag while scheduler owns current truth;
@@ -3326,6 +3333,7 @@ Context and coordination:
 - [ ] Every attempt receives a compact versioned sanitized packet with objective, parents, material siblings, decisions, anchors, scope/workspace/dependencies/acceptance, prior failures, omissions, and manifests.
 - [ ] Every packet entry carries at least one durable anchor plus evidence/time/access/sanitizer/token/relevance fields and round-trips through store/projector/API without digest loss.
 - [ ] Packet assembly meets temporal retrieval/relevance/privacy/token/latency gates and never includes hidden reasoning, secrets, or unrelated global-board content.
+- [ ] Equivalent-quality single-agent versus safe 4/8/16-way execution fixtures prove parallelizable task graphs reduce critical-path wall time while preserving effect uniqueness, bounded tail latency/RSS/tokens/cost, fairness, and deterministic stall/cancel/redecomposition outcomes.
 - [ ] Material sibling/blocker/handoff/invalidation events target the exact active Thread/Turn/Agent through Plan 22 with dedupe/cooldown/budgets; unchanged noise remains silent.
 - [ ] Planned ensemble/review work is not mislabeled duplicate, while real duplicate work fixtures receive one evidence-backed advisory.
 

@@ -546,6 +546,11 @@ Registered SLO descriptors at minimum (thresholds are plan 20 descriptors defaul
 | Current-registry top-k | p95 ≤ 800 ms |
 | Timeline first page | p95 ≤ 200 ms current scale |
 | Task lease / heartbeat (plan 24 surfaces) | p95 ≤ 50 ms / ≤ 20 ms |
+| Local health/status control lane | p95 ≤ 100 ms under queue/provider/corrupt-shard fault load |
+| Common warm local agent-facing read | p95 ≤ 500 ms; bounded complex read p95 ≤ 2 s |
+| Long-work admission/progress acknowledgement | p95 ≤ 250 ms to `OperationRef` or typed progress |
+| Synchronous agent-facing hard ceiling | ≤ 30 s with propagated deadline and typed timeout/partial/unavailable outcome |
+| Task/workflow progress visibility | every missing expected checkpoint opens one deduplicated incident and awaits explicit continue/cancel/reconcile/redecompose/block disposition; no automatic workflow timeout |
 | Remote observation authority acknowledgement | p95 target declared by deployment profile; no hook-path coupling |
 | Replica/cache lag and oldest pending spool | explicit per-placement bounds; breach is never hidden by availability |
 | Backup age / restore / promotion | declared plan-28 RPO/RTO profile with verified drill |
@@ -813,6 +818,7 @@ Catalog ordering is a hard dependency graph, not letter-name implication. Plan 0
 - Ledger append and rollup projection stay within plan 04's projection budgets (visibility p95 ≤ 2 s under concurrent capture); accounting adds no synchronous work to the hook path (hooks emit events; the hook budgets are monitored, not consumed, by this plan).
 - Observatory/Costs first page p95 ≤ 200 ms at current scale from rollup rows, without scanning ledgers; drill-down queries are cursor-bounded.
 - SLO monitor sampling overhead is measured and bounded; monitors run in background lanes, never in hook or query hot paths.
+- Stage spans separate admission, queue, lock, IPC, application, store/query, render, executor/provider/tool-call, explicit cancellation, and recovery time; monitors retain max and tail samples, RSS/heap slope, context/output bytes, synchronous-request timeout outcomes, and long-running-operation progress incidents so a fast average cannot hide a stuck minority.
 - Automation rollups consume durable transition/receipt evidence and coalesced tick episodes; observing 1,000 unchanged ticks adds zero automation runs/model/tool calls and bounded metric cardinality.
 
 ### Privacy

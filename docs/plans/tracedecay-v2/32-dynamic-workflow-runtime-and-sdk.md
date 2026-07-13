@@ -384,6 +384,10 @@ Shared scheduler behavior:
 - workflow, task, automation, and interactive work share fairness/admission/circuit-breaker policy; workflows cannot monopolize the executor fleet;
 - backpressure suspends new scheduling without re-evaluating effects or losing history;
 - cancellation fences new effects, reconciles unknown external effects, and only then permits terminal/retry transitions.
+- every activity declares an advisory target duration, durable progress/heartbeat schema, bounded provider/tool-call request deadline, and prompt/output/tool-result byte and token ceilings; connected-but-silent provider/tool calls can time out independently, while missing workflow progress opens an incident without automatically terminating the workflow;
+- agent inputs are recipient-specific bounded context packets plus retrieval anchors/page cursors, never concatenated parent transcripts, workflow journals, repository dumps, or unbounded prior tool output;
+- the scheduler adapts pipeline/fan-out width to measured capacity and critical-path value, starts independent work without waiting for unrelated stragglers, and fences/cancels the losing copies when policy permits speculative execution of pure snapshot-bound reads; mutating or effect-unknown activities are never duplicated speculatively;
+- missing expected progress records one durable stall incident and awaits an explicit continue/cancel/reconcile/redecompose/block decision; no wall-clock, per-agent, workflow, or no-progress timer automatically changes node state, and retry cannot only increase context, request timeout, or token limits.
 
 ## 9. Result reuse and cache provenance
 
@@ -767,6 +771,7 @@ Configuration changes never mutate historical pins. Engine/compiler/schema chang
 | Nondeterministic command sequence | Stop before new effect, preserve history, show first mismatch/source locations, offer fork only. |
 | Daemon/host crash | Replay canonical history and resume pending work; committed command admission is not repeated, while sent-without-receipt effects enter reconciliation/unknown according to adapter semantics. |
 | Executor/provider unavailable | Shared route/retry/fallback policy applies; requested/actual route and unavailable coverage remain visible. |
+| Executor/provider connected but silent | A bounded provider/tool-call request deadline yields a typed timeout; missing workflow progress opens one visible incident and requires explicit cancellation or continuation before effect reconciliation and any reroute. TCP/process liveness alone is not progress, and elapsed workflow time alone is not cancellation authority. |
 | Activity result lost/unknown | Reconcile through executor/effect receipts; never schedule a replacement effect until safe. |
 | Schema-invalid model output | Bounded repair/retry under the same node history; terminal failure when exhausted. |
 | Budget/cap exceeded | Stop new admission and terminally record the exact exhausted dimension; partial outputs are not complete. |
@@ -800,6 +805,7 @@ Plan 26 owns dimensions and rollups. Required measurements include:
 - admission/queue/engine compile/replay/activity/critical-path/terminal latency p50/p95/p99;
 - replay event throughput, history bytes, checkpoint size, nondeterminism rate, resume success, and crash recovery time;
 - concurrent/total agents, pipeline width/depth, backpressure, fairness delay, and executor utilization;
+- per-node advisory target duration/progress age, queue/lock/provider/tool-call stage latency, context/prompt/output sizes, context-window rejection, observed stalls/redecomposition, explicit-cancellation acknowledgement, and straggler critical-path waste;
 - requested/actual host/provider/model/effort/tool/skill route;
 - input/output/token/cost/artifact totals with unknown denominators;
 - history/fork/cross-run reuse rate, bytes/cost avoided, invalidation reasons, age, and quality outcomes;
@@ -822,6 +828,8 @@ Promotion gates must be measured on a named reference machine and corpus. Initia
 - run/event API and dashboard remain interactive at 1,000 live nodes and a 10,000-node retained run, 16 active agents, and bounded 10x history;
 - pause/cancel/steering safe-boundary acknowledgement within the host capability SLO or explicit unsupported/deferred state;
 - shared-scheduler load proves one max-width workflow cannot starve interactive/task/automation work beyond their configured fairness SLO;
+- equivalent-quality 1/4/8/16-agent fixtures show useful critical-path speedup for parallelizable workflows, bounded p99/RSS/tokens/cost and duplicate effort, and no regression for intentionally serial workflows; a wider workflow that only adds waiting, context, or cost fails promotion;
+- slow-but-connected provider-call, oversized tool output, and context-window rejection fixtures reach typed bounded-request outcomes; missing workflow heartbeat becomes visible without automatic termination, and explicit cancellation-loss reaches typed reconcile/block state without silently claiming completion;
 - zero unexplained taskgraph nodes/edges in candidate-compilation fixtures.
 
 Benchmarks compare engine candidates, cold/warm compile/evaluate, replay, fan-out scheduling, schema validation, history growth, API/SSE, and dashboard rendering. A public JavaScript-engine benchmark score is not TraceDecay evidence.
