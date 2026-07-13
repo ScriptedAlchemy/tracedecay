@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.65](https://github.com/ScriptedAlchemy/tracedecay/compare/v0.0.64...v0.0.65) - 2026-07-13
+
+### Fixed
+
+- *(migrate)* report invalid reconstruction metadata
+- *(ci)* satisfy clippy let-else lint
+- *(migrate)* align branch metadata validation
+
+### Other
+
+- Merge branch 'master' into fix/consolidate-legacy-single-db
+
 ## [0.0.64](https://github.com/ScriptedAlchemy/tracedecay/compare/v0.0.63...v0.0.64) - 2026-07-12
 
 ### Fixed
