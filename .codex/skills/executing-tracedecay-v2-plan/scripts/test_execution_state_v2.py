@@ -92,13 +92,13 @@ class StagedAuthorityHarness:
         self.fixture.git("add", transition.PACKET_SOURCE_PATH.as_posix())
         self.fixture.git("commit", "-m", "test: add reviewed staged source")
         compiled, live = compile_plan_authority.compile_from_ref(
-            self.fixture.root, "refs/heads/main", revision=6
+            self.fixture.root, "refs/heads/main", revision=8
         )
         self.compiled = compiled
         self.live = live
         state_bytes = compile_plan_authority._canonical_json_bytes(compiled.state)
         self.predecessor = transition.Predecessor(
-            generation="r6-test-predecessor",
+            generation="r8-test-predecessor",
             pointer_bytes=b"{}\n",
             manifest=compiled.manifest,
             state=compiled.state,
@@ -365,7 +365,7 @@ class PacketAndFenceTamperTests(unittest.TestCase):
             "source_set_digest": "sha256:" + "3" * 64,
             "manifest_digest": "sha256:" + "4" * 64,
             "checked_manifest_revision": 4,
-            "target_graph_revision": 9,
+            "target_graph_revision": 10,
             "packet_source_blob_oid": "6" * 40,
             "packet_source_digest": "sha256:" + "5" * 64,
         }

@@ -83,7 +83,7 @@ Use `transition_execution_authority.py` only. Commit the transition implementati
 python3 .codex/skills/executing-tracedecay-v2-plan/scripts/transition_execution_authority.py \
   --root "$(git rev-parse --show-toplevel)" \
   --canonical-ref refs/heads/codex/tracedecay-total-redesign-plan \
-  --expected-active-generation <exact-revision-6-generation> \
+  --expected-active-generation <exact-verify-only-predecessor-generation> \
   --activated-at <reviewed-RFC3339-time> \
   --prepare-candidate <review-candidate.json>
 ```

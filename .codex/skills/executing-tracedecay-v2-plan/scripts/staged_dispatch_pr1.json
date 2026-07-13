@@ -1,11 +1,11 @@
 {
-  "authority_revision": 7,
+  "authority_revision": 9,
   "authorized_slice_ids": [
     "PR 1"
   ],
-  "checked_manifest_digest": "sha256:50c4e34f7138ce0d0f41289aec18bae0a293e07c23536eb6646df940483916ca",
-  "checked_manifest_revision": 6,
-  "checked_source_set_digest": "sha256:ee8782577549d1d77e0aba728e35e9d1146ae67500cb29852e415968755d09be",
+  "checked_manifest_digest": "sha256:40f5c0c7a8694688a99d602e980d3f2929c60bd776ad8d738805619c29af46e3",
+  "checked_manifest_revision": 8,
+  "checked_source_set_digest": "sha256:719319f263a4c3079c12c91233e6228f0327f1a2e20e4759ca19d9d271dec4e3",
   "packet": {
     "acceptance": [
       {
