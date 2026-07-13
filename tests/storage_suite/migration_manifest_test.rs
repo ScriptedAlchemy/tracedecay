@@ -6,6 +6,7 @@ use crate::common::sample_node;
 #[cfg(unix)]
 use std::os::unix::fs::symlink;
 use tempfile::TempDir;
+use tracedecay::branch_meta::BranchMeta;
 use tracedecay::global_db::GlobalDb;
 use tracedecay::lifecycle_lease::acquire_exclusive_for_profile;
 use tracedecay::migrate::inventory::{
@@ -46,6 +47,14 @@ fn manifest_for(protocol: MigrationProtocol, migration_id: &str) -> MigrationMan
 
 fn canonical_temp_path(path: &Path) -> PathBuf {
     path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+}
+
+fn write_valid_branch_meta(path: &Path) {
+    fs::write(
+        path,
+        serde_json::to_vec_pretty(&BranchMeta::new("main")).unwrap(),
+    )
+    .unwrap();
 }
 
 #[cfg(unix)]
@@ -390,11 +399,7 @@ fn verify_manifest_validates_profile_store_manifest_registry_records() {
     fs::create_dir_all(&data_root).unwrap();
     fs::write(data_root.join("tracedecay.db"), b"graph").unwrap();
     fs::write(data_root.join("sessions.db"), b"sessions").unwrap();
-    fs::write(
-        data_root.join("branch-meta.json"),
-        r#"{"default_branch":"main","branches":{}}"#,
-    )
-    .unwrap();
+    write_valid_branch_meta(&data_root.join("branch-meta.json"));
     let store_manifest = StoreManifest {
         schema_version: STORE_MANIFEST_SCHEMA_VERSION,
         project_id: Some("proj_123".to_string()),
@@ -492,11 +497,7 @@ async fn verify_manifest_accepts_logically_equal_sqlite_artifacts_with_different
     target.close();
     assert_ne!(fs::read(&source_db).unwrap(), fs::read(&target_db).unwrap());
 
-    fs::write(
-        data_root.join("branch-meta.json"),
-        r#"{"default_branch":"main","branches":{}}"#,
-    )
-    .unwrap();
+    write_valid_branch_meta(&data_root.join("branch-meta.json"));
     fs::write(data_root.join("sessions.db"), b"sessions").unwrap();
     let store_manifest = StoreManifest {
         schema_version: STORE_MANIFEST_SCHEMA_VERSION,
@@ -578,7 +579,7 @@ fn apply_migration_manifest_stops_at_verified_before_cutover() {
     fs::create_dir_all(&data_dir).unwrap();
     fs::write(&graph_db, b"graph").unwrap();
     fs::write(&sessions_db, b"sessions").unwrap();
-    fs::write(&branch_meta, r#"{"default_branch":"main","branches":{}}"#).unwrap();
+    write_valid_branch_meta(&branch_meta);
     let mut manifest = build_plan_manifest(
         MigrationInventory {
             stores: vec![StoreInventory {
@@ -604,7 +605,7 @@ fn apply_migration_manifest_stops_at_verified_before_cutover() {
                     StoreArtifact {
                         kind: "branch_meta".to_string(),
                         path: branch_meta.clone(),
-                        size_bytes: 39,
+                        size_bytes: fs::metadata(&branch_meta).unwrap().len(),
                     },
                 ],
             }],
@@ -649,11 +650,7 @@ fn finalize_migration_apply_marks_cutover_complete() {
     let profile_root = root.join("profile");
     fs::create_dir_all(&data_dir).unwrap();
     fs::write(&graph_db, b"graph").unwrap();
-    fs::write(
-        data_dir.join("branch-meta.json"),
-        r#"{"default_branch":"main","branches":{}}"#,
-    )
-    .unwrap();
+    write_valid_branch_meta(&data_dir.join("branch-meta.json"));
     let mut manifest = build_plan_manifest(
         MigrationInventory {
             stores: vec![StoreInventory {
@@ -944,7 +941,7 @@ fn migrate_apply_copies_single_store_and_cuts_over_profile_shard() {
     fs::create_dir_all(&data_dir).unwrap();
     fs::write(&graph_db, b"graph").unwrap();
     fs::write(&sessions_db, b"sessions").unwrap();
-    fs::write(&branch_meta, r#"{"default_branch":"main","branches":{}}"#).unwrap();
+    write_valid_branch_meta(&branch_meta);
     let manifest = build_plan_manifest(
         MigrationInventory {
             stores: vec![StoreInventory {
@@ -970,7 +967,7 @@ fn migrate_apply_copies_single_store_and_cuts_over_profile_shard() {
                     StoreArtifact {
                         kind: "branch_meta".to_string(),
                         path: branch_meta.clone(),
-                        size_bytes: 39,
+                        size_bytes: fs::metadata(&branch_meta).unwrap().len(),
                     },
                 ],
             }],
@@ -1185,11 +1182,7 @@ fn migrate_reconstruct_reports_registry_plans_without_applying_them() {
     fs::create_dir_all(&project).unwrap();
     fs::create_dir_all(&data_root).unwrap();
     fs::write(data_root.join("tracedecay.db"), b"graph").unwrap();
-    fs::write(
-        data_root.join("branch-meta.json"),
-        r#"{"default_branch":"main","branches":{}}"#,
-    )
-    .unwrap();
+    write_valid_branch_meta(&data_root.join("branch-meta.json"));
     let store_manifest = StoreManifest {
         schema_version: STORE_MANIFEST_SCHEMA_VERSION,
         project_id: Some("proj_123".to_string()),
