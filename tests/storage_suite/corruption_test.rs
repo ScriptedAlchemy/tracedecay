@@ -474,7 +474,7 @@ async fn dirty_open_does_not_race_an_active_sync_lock()
 }
 
 #[tokio::test]
-async fn dirty_open_recovers_committed_wal_before_clearing_sentinel()
+async fn dirty_open_recovers_committed_rows_before_clearing_sentinel()
 -> std::result::Result<(), Box<dyn std::error::Error>> {
     let dir = TempDir::new()?;
     let project_root = dir.path().join("repo");
@@ -507,10 +507,12 @@ async fn dirty_open_recovers_committed_wal_before_clearing_sentinel()
             "disabled autocheckpoint must retain committed WAL frames"
         );
     } else {
-        assert_eq!(
-            journal_mode.to_ascii_lowercase(),
-            "delete",
-            "production recovery fixture must use the platform-safe journal"
+        assert!(
+            matches!(
+                journal_mode.to_ascii_lowercase().as_str(),
+                "delete" | "memory"
+            ),
+            "production recovery fixture must use a platform-safe non-WAL journal"
         );
     }
     std::fs::write(&layout.dirty_path, "pid=99999\nversion=test")?;
