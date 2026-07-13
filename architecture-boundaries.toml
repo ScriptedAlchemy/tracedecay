@@ -85,6 +85,16 @@ plan = "docs/plans/tracedecay-v2/32-dynamic-workflow-runtime-and-sdk.md"
 release_tier = 2
 allowed_dependencies = ["domain"]
 forbidden_dependencies = ["javascript-engine", "typescript-compiler", "store-implementation", "scheduler", "executor", "transport", "ui"]
+forbidden_source_patterns = ["boa_engine::", "rquickjs::", "deno_core::", "swc_", "oxc_"]
+
+[owners.workflow-compiler-engine]
+kind = "root-private-module"
+path = "src/v2/workflow_compiler_engine"
+plan = "docs/plans/tracedecay-v2/32-dynamic-workflow-runtime-and-sdk.md"
+release_tier = 5
+allowed_dependencies = ["domain", "workflow", "application"]
+forbidden_dependencies = ["store-implementation", "transport", "scheduler", "executor", "effect-execution", "business-policy", "provider-sdk", "network"]
+forbidden_source_patterns = ["StoreFactory", "libsql::", "rusqlite::", "axum::", "reqwest::"]
 
 [owners.application]
 kind = "rust-package"
@@ -107,7 +117,7 @@ kind = "rust-package"
 path = "."
 plan = "docs/plans/tracedecay-v2/12-root-compatibility-migration.md"
 release_tier = 5
-allowed_dependencies = ["domain", "store", "capture", "projectors", "code-index", "query", "policy", "tool-catalog", "workflow", "application", "api", "hooks", "presentation", "host-deploy", "native-semantic-runtime", "remote-brain-transport"]
+allowed_dependencies = ["domain", "store", "capture", "projectors", "code-index", "query", "policy", "tool-catalog", "workflow", "application", "api", "hooks", "presentation", "host-deploy", "workflow-compiler-engine", "native-semantic-runtime", "remote-brain-transport"]
 forbidden_dependencies = ["new-business-semantics"]
 
 [owners.public-contracts]
@@ -244,6 +254,15 @@ to = "domain"
 from = "workflow"
 to = "domain"
 [[edges]]
+from = "workflow-compiler-engine"
+to = "domain"
+[[edges]]
+from = "workflow-compiler-engine"
+to = "workflow"
+[[edges]]
+from = "workflow-compiler-engine"
+to = "application"
+[[edges]]
 from = "application"
 to = "domain"
 [[edges]]
@@ -312,6 +331,9 @@ to = "presentation"
 [[edges]]
 from = "root"
 to = "host-deploy"
+[[edges]]
+from = "root"
+to = "workflow-compiler-engine"
 [[edges]]
 from = "root"
 to = "remote-brain-transport"
@@ -407,15 +429,15 @@ generated_accounting = "generated-lines-separate-with-generator-size-and-generat
 [[public_facades]]
 id = "domain-contracts"
 owner = "domain"
-consumers = ["store", "capture", "projectors", "code-index", "query", "policy", "tool-catalog", "workflow", "application", "root"]
+consumers = ["store", "capture", "projectors", "code-index", "query", "policy", "tool-catalog", "workflow", "workflow-compiler-engine", "application", "root"]
 [[public_facades]]
 id = "application-use-cases"
 owner = "application"
-consumers = ["api", "hooks", "presentation", "host-deploy", "remote-brain-transport", "root"]
+consumers = ["api", "hooks", "presentation", "host-deploy", "workflow-compiler-engine", "remote-brain-transport", "root"]
 [[public_facades]]
 id = "workflow-kernel"
 owner = "workflow"
-consumers = ["application", "root"]
+consumers = ["workflow-compiler-engine", "application", "root"]
 [[public_facades]]
 id = "public-api-contracts"
 owner = "public-contracts"
@@ -444,6 +466,10 @@ facade = "public-api-contracts"
 [[capabilities]]
 id = "dynamic-workflow-replay-and-candidate-compilation"
 owner = "workflow"
+facade = "workflow-kernel"
+[[capabilities]]
+id = "dynamic-workflow-source-compilation-and-evaluation"
+owner = "workflow-compiler-engine"
 facade = "workflow-kernel"
 [[capabilities]]
 id = "remote-node-framing"

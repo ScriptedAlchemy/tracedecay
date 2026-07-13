@@ -454,6 +454,64 @@ fn transports_are_isolated_from_storage_and_business_implementations() {
 }
 
 #[test]
+fn workflow_compiler_engine_has_one_root_private_owner_boundary() {
+    let architecture = load();
+    let owner = &architecture.owners["workflow-compiler-engine"];
+    assert_eq!(owner.kind, "root-private-module");
+    assert_eq!(owner.path, "src/v2/workflow_compiler_engine");
+    assert_eq!(
+        owner
+            .allowed_dependencies
+            .iter()
+            .map(String::as_str)
+            .collect::<BTreeSet<_>>(),
+        ["application", "domain", "workflow"].into_iter().collect()
+    );
+    for forbidden in [
+        "store-implementation",
+        "transport",
+        "scheduler",
+        "executor",
+        "effect-execution",
+        "business-policy",
+        "provider-sdk",
+        "network",
+    ] {
+        assert!(
+            owner
+                .forbidden_dependencies
+                .iter()
+                .any(|item| item == forbidden)
+        );
+    }
+    assert!(
+        architecture.owners["root"]
+            .allowed_dependencies
+            .iter()
+            .any(|dependency| dependency == "workflow-compiler-engine")
+    );
+    assert_eq!(
+        architecture.owners["workflow"].allowed_dependencies,
+        ["domain"]
+    );
+    for pattern in ["boa_engine::", "rquickjs::", "swc_", "oxc_"] {
+        assert!(
+            architecture.owners["workflow"]
+                .forbidden_source_patterns
+                .iter()
+                .any(|item| item == pattern)
+        );
+    }
+    let capability = architecture
+        .capabilities
+        .iter()
+        .find(|capability| capability.id == "dynamic-workflow-source-compilation-and-evaluation")
+        .expect("workflow compiler/engine capability must be registered");
+    assert_eq!(capability.owner, "workflow-compiler-engine");
+    assert_eq!(capability.facade, "workflow-kernel");
+}
+
+#[test]
 fn generated_views_and_release_gates_are_checked_in() {
     let architecture = load();
     assert_eq!(architecture.generated_views.len(), 5);
@@ -603,7 +661,9 @@ fn cargo_and_source_policy_enforce_materialized_boundaries() {
     validate_cargo_edges(&architecture, &metadata).unwrap();
     for (name, owner) in &architecture.owners {
         let path = Path::new(&owner.path);
-        if owner.kind == "root-private-module" {
+        if owner.kind == "root-private-module"
+            || (owner.kind == "rust-package" && owner.path != "." && path.exists())
+        {
             for entry in rust_sources(path).unwrap() {
                 let source = fs::read_to_string(&entry).unwrap();
                 validate_owner_imports(&architecture, name, owner, &entry, &source).unwrap();
@@ -668,6 +728,40 @@ fn forbidden_owner_import_is_rejected_by_focused_fixture() {
     )
     .unwrap_err();
     assert!(error.contains("forbidden real import of store"));
+}
+
+#[test]
+fn workflow_compiler_engine_rejects_storage_transport_and_kernel_engines() {
+    let architecture = load();
+    let adapter = &architecture.owners["workflow-compiler-engine"];
+    let storage_error = validate_owner_imports(
+        &architecture,
+        "workflow-compiler-engine",
+        adapter,
+        Path::new("src/v2/workflow_compiler_engine/fixture.rs"),
+        "use tracedecay_store::Store;",
+    )
+    .unwrap_err();
+    assert!(storage_error.contains("forbidden real import of store"));
+
+    let transport_error = validate_source(
+        "workflow-compiler-engine",
+        adapter,
+        Path::new("src/v2/workflow_compiler_engine/fixture.rs"),
+        "use axum::Router;",
+    )
+    .unwrap_err();
+    assert!(transport_error.contains("imports forbidden axum::"));
+
+    let kernel = &architecture.owners["workflow"];
+    let engine_error = validate_source(
+        "workflow",
+        kernel,
+        Path::new("crates/tracedecay-workflow/src/fixture.rs"),
+        "use boa_engine::Context;",
+    )
+    .unwrap_err();
+    assert!(engine_error.contains("imports forbidden boa_engine::"));
 }
 
 #[test]
