@@ -6,6 +6,7 @@ from __future__ import annotations
 import copy
 import dataclasses
 import json
+import os
 import subprocess
 import tempfile
 import unittest
@@ -198,6 +199,29 @@ def analyze_trusted(document: dict, live: le.LiveEvidence | None = None) -> dict
     return analyze(document, live, trust_receipts=True)
 
 
+class StateResolutionTests(unittest.TestCase):
+    def test_legacy_state_and_active_pointer_are_ambiguous(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / ".tracedecay").mkdir()
+            (root / plan_execution.DEFAULT_STATE).write_text("{}", encoding="utf-8")
+            (root / ".tracedecay/v2-execution-active.json").write_text("{}", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "ambiguous execution state"):
+                plan_execution.resolve_state(root, None)
+
+    def test_explicit_and_env_state_win_over_ambiguous_repo_local_sources(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / ".tracedecay").mkdir()
+            (root / plan_execution.DEFAULT_STATE).write_text("{}", encoding="utf-8")
+            (root / ".tracedecay/v2-execution-active.json").write_text("{}", encoding="utf-8")
+            explicit = root / "explicit.json"
+            configured = root / "configured.json"
+            self.assertEqual(plan_execution.resolve_state(root, explicit), explicit)
+            with mock.patch.dict(os.environ, {plan_execution.STATE_ENV: str(configured)}):
+                self.assertEqual(plan_execution.resolve_state(root, None), configured)
+
+
 class NextReadyTests(unittest.TestCase):
     def test_positive_fixture_selects_exact_bounded_packet(self) -> None:
         view = analyze_trusted(load())
@@ -249,7 +273,7 @@ class NextReadyTests(unittest.TestCase):
         self.assertFalse(view["valid"])
         self.assertTrue(any("scalar exceeds 2048" in error for error in view["errors"]))
 
-    def test_bootstrap_installs_shared_default_state_for_fresh_host_entrypoints(self) -> None:
+    def test_bootstrap_rejects_hand_authored_self_consistent_state(self) -> None:
         document = load()
         document["activation_mode"] = "verify_only"
         document["completion_ledger"]["entries"] = []
@@ -286,43 +310,9 @@ class NextReadyTests(unittest.TestCase):
                 ],
                 check=False, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             )
-            self.assertEqual(process.returncode, 0, process.stdout + process.stderr)
-            output = plan_execution.resolve_state(HARNESS.root, None)
-            installed_manifest, failure = sa.locate_bootstrap_manifest(HARNESS.root)
-            self.assertIsNone(failure)
-            self.assertIsNotNone(installed_manifest)
-            self.assertEqual(plan_execution.strict_json(output), document)
-            self.assertEqual(plan_execution.strict_json(installed_manifest), manifest)
-
-            view = plan_execution.analyze(document, HARNESS.live)
-            self.assertTrue(view["valid"], view["errors"])
-            self.assertEqual(view["activation_mode"], "verify_only")
-            self.assertEqual(view["execution_order"], ["PR 1", "PR 2"])
-            self.assertEqual(view["next_ready"], [])
-            self.assertTrue(all(
-                item["reasons"] == ["verification_only_not_dispatchable"]
-                for item in view["blocked"]
-            ))
-
-            dispatch_state = load()
-            dispatch_state["completion_ledger"]["entries"] = []
-            state_path.write_text(json.dumps(dispatch_state), encoding="utf-8")
-            rejected = subprocess.run(
-                [
-                    "python3", str(Path(bootstrap_execution.__file__)),
-                    "--manifest", str(manifest_path),
-                    "--state-export", str(state_path),
-                    "--root", str(HARNESS.root),
-                    "--canonical-ref", HARNESS.live.canonical_ref,
-                ],
-                check=False, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            )
-            self.assertEqual(rejected.returncode, 2)
-            self.assertIn("activation_mode=verify_only", rejected.stdout)
-            self.assertEqual(
-                plan_execution.strict_json(plan_execution.resolve_state(HARNESS.root, None)),
-                document,
-            )
+            self.assertEqual(process.returncode, 2, process.stdout + process.stderr)
+            self.assertIn("canonical commit lacks", process.stdout)
+            self.assertFalse((HARNESS.root / bootstrap_execution.ACTIVE_POINTER).exists())
 
 
 class LiveEvidenceAndReceiptTests(unittest.TestCase):

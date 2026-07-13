@@ -1066,7 +1066,7 @@ def source_set_digest(observations: list[list[str]]) -> str:
 
 @dataclass(frozen=True)
 class BootstrapFailure:
-    reason: str  # multiple_explicit | missing | not_regular | unreadable | outside_root |
+    reason: str  # multiple_explicit | ambiguous | missing | not_regular | unreadable | outside_root |
     #              unknown_repo | invalid_json | schema_mismatch
     detail: str
 
@@ -1076,8 +1076,10 @@ def locate_bootstrap_manifest(repo_root: Path, explicit: object = None, env: str
     """Resolve exactly one bootstrap manifest by §2.1 precedence, or a typed failure.
 
     Precedence: (1) explicit argument, (2) ``TRACEDECAY_V2_EXECUTION_MANIFEST`` value,
-    (3) ``<repo-root>/.tracedecay/v2-execution-manifest.json``. No directory/board/profile
-    scanning. A non-explicit selection must resolve to a regular file beneath ``repo_root``.
+    then exactly one repo-local source: the legacy direct manifest or the active-generation
+    pointer. Coexisting repo-local sources are ambiguous and fail closed. No
+    directory/board/profile scanning. A non-explicit selection must resolve to a regular
+    file beneath ``repo_root``.
     The candidate must parse as JSON (``invalid_json`` otherwise) and satisfy the manifest
     schema — a top-level object carrying a ``slices`` object whose entries are objects
     (``schema_mismatch`` otherwise); a bare ``{}`` is rejected as a schema mismatch.
@@ -1097,9 +1099,13 @@ def locate_bootstrap_manifest(repo_root: Path, explicit: object = None, env: str
         return _validate_manifest(Path(env), repo_root, contained=False)
 
     default = repo_root / ".tracedecay" / "v2-execution-manifest.json"
+    active = repo_root / ".tracedecay" / "v2-execution-active.json"
+    if default.exists() and active.exists():
+        return None, BootstrapFailure(
+            "ambiguous", "legacy direct manifest and active generation pointer both exist"
+        )
     if default.exists():
         return _validate_manifest(default, repo_root, contained=True)
-    active = repo_root / ".tracedecay" / "v2-execution-active.json"
     if active.exists():
         selected, pointer_failure = resolve_active_generation(active, repo_root, "manifest")
         if pointer_failure is not None or selected is None:
@@ -1134,6 +1140,22 @@ def resolve_active_generation(pointer: Path, repo_root: Path,
         or not all(isinstance(document.get(key), str) and document[key] for key in expected)
     ):
         return None, BootstrapFailure("schema_mismatch", f"{pointer} has invalid pointer schema")
+    generation = document["generation"]
+    expected_paths = {
+        "manifest": f"v2-execution-generations/{generation}/manifest.json",
+        "state": f"v2-execution-generations/{generation}/state.json",
+    }
+    if (
+        Path(generation).name != generation
+        or generation in {".", ".."}
+        or "/" in generation
+        or "\\" in generation
+        or document["manifest"] != expected_paths["manifest"]
+        or document["state"] != expected_paths["state"]
+    ):
+        return None, BootstrapFailure(
+            "schema_mismatch", f"{pointer} members do not belong to named generation"
+        )
     candidate = (pointer.parent / document[member]).resolve()
     try:
         candidate.relative_to(repo_root.resolve())

@@ -65,9 +65,13 @@ def resolve_state(root: Path, explicit: Path | None) -> Path:
     if configured:
         return Path(configured)
     default = root / DEFAULT_STATE
+    active = root / ".tracedecay/v2-execution-active.json"
+    if default.exists() and active.exists():
+        raise ValueError(
+            "ambiguous execution state: legacy direct state and active generation pointer both exist"
+        )
     if default.exists():
         return default
-    active = root / ".tracedecay/v2-execution-active.json"
     if active.exists():
         selected, failure = slice_authority.resolve_active_generation(active, root, "state")
         if failure is not None or selected is None:

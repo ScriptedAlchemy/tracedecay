@@ -59,6 +59,9 @@ python3 .codex/skills/executing-tracedecay-v2-plan/scripts/compile_plan_authorit
   --canonical-ref refs/heads/codex/tracedecay-total-redesign-plan \
   --manifest-output docs/plans/tracedecay-v2/execution-authority.json \
   --state-output .tracedecay/v2-execution-state.candidate.json
+python3 .codex/skills/executing-tracedecay-v2-plan/scripts/compile_plan_authority.py \
+  --root "$(git rev-parse --show-toplevel)" \
+  --canonical-ref refs/heads/codex/tracedecay-total-redesign-plan --check
 python3 .codex/skills/executing-tracedecay-v2-plan/scripts/bootstrap_execution.py \
   --manifest docs/plans/tracedecay-v2/execution-authority.json \
   --state-export .tracedecay/v2-execution-state.candidate.json \
@@ -78,7 +81,7 @@ python3 .codex/skills/executing-tracedecay-v2-plan/scripts/plan_execution.py \
   --canonical-ref refs/heads/codex/tracedecay-total-redesign-plan --next-ready
 ```
 
-`--root` is mandatory. `--graph` is optional only because the helper resolves the shared state through `TRACEDECAY_V2_EXECUTION_STATE` and then `<repo-root>/.tracedecay/v2-execution-state.json`; an explicit `--graph` wins. Validation hashes exact plan blobs from the Git tree resolved by `--canonical-ref`, never files from a different checked-out commit. Before this redesign branch is integrated, pass its full ref rather than `master`. Markdown is the bounded human/MCP-default view. Use `--format json` for the sealed `tracedecay.v2.next-ready-view/v1`. Both formats contain the same validity/source/digest/revision pins, diagnostics, packets, and blocker reasons. Invalid input or any Git/source observation failure exits 2 and always returns an empty ready set (`Unknown`, never guessed false/true).
+`--root` is mandatory. An explicit `--graph` wins, followed by `TRACEDECAY_V2_EXECUTION_STATE`. Without either override, exactly one repo-local source may exist: the legacy direct `<repo-root>/.tracedecay/v2-execution-state.json` or the atomically switched `<repo-root>/.tracedecay/v2-execution-active.json` generation. Coexistence fails closed as ambiguous; neither silently shadows the other. Manifest resolution uses the identical explicit/environment/one-repo-local-source policy. Validation hashes exact plan blobs from the Git tree resolved by `--canonical-ref`, never files from a different checked-out commit. Before this redesign branch is integrated, pass its full ref rather than `master`. `compile_plan_authority.py --check` byte-compares the regenerated manifest with the canonical-ref blob at `docs/plans/tracedecay-v2/execution-authority.json`. Markdown is the bounded human/MCP-default view. Use `--format json` for the sealed `tracedecay.v2.next-ready-view/v1`. Both formats contain the same validity/source/digest/revision pins, diagnostics, packets, and blocker reasons. Invalid input or any Git/source observation failure exits 2 and always returns an empty ready set (`Unknown`, never guessed false/true).
 
 The canonical DAG must pin repository identity, exact current canonical source/integration SHA, source-set digest, positive graph revision, graph digest, nodes, and a byte-matching activation receipt. Nodes have unique IDs and unique owners, explicit prerequisites, and a canonical digest over the complete dispatch/test/workspace packet. The helper rejects duplicate IDs/owners, unknown/self/retired prerequisites, cycles, stale graph or activation pins, packet rewrites that no longer match that canonical digest, missing packets, and any reference to retired corrected tombstone `FM-168`.
 

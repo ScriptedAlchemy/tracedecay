@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import hashlib
 import json
 import os
 import re
@@ -22,21 +23,43 @@ from git_observation import run_git
 
 
 MANIFEST_SCHEMA = "tracedecay.v2.slice-dag/v1"
-REGISTRY_SCHEMA = "tracedecay.v2.plan-authority-registry/v1"
+REGISTRY_SCHEMA = "tracedecay.v2.plan-authority-registry/v2"
 REGISTRY_PATH = ".codex/skills/executing-tracedecay-v2-plan/scripts/plan_authority_registry.json"
 MASTER_PATH = "docs/plans/2026-07-09-tracedecay-brain-rewrite.md"
 PLAN_PREFIX = "docs/plans/tracedecay-v2/"
+CANONICAL_MANIFEST_PATH = f"{PLAN_PREFIX}execution-authority.json"
+COMPILER_VERSION = es.COMPILER_VERSION
+
+
+@dataclass(frozen=True)
+class RegistryCriterion:
+    criterion_id: str
+    text: str
+    source_anchors: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class RegistryDependency:
+    parent: str
+    kind: str
+    payload: tuple[tuple[str, object], ...]
+    source_anchors: tuple[str, ...]
 
 
 @dataclass(frozen=True)
 class RegistrySlice:
     slice_id: str
-    owner_path: str
-    owner_line: int
+    owner: sa.Anchor
     owner_heading: str
+    source_anchors: tuple[sa.Anchor, ...]
     phase: int
     commit_subject: str
-    dependencies: tuple[str, ...]
+    acceptance: tuple[RegistryCriterion, ...]
+    dependencies: tuple[RegistryDependency, ...]
+
+    @property
+    def parent_ids(self) -> tuple[str, ...]:
+        return tuple(dependency.parent for dependency in self.dependencies)
 
 
 @dataclass(frozen=True)
@@ -95,6 +118,124 @@ def _exact_keys(value: object, expected: set[str], label: str) -> dict[str, Any]
     return value
 
 
+def _sorted_unique_strings(value: object, label: str) -> tuple[str, ...]:
+    if (
+        not isinstance(value, list)
+        or not value
+        or value != sorted(set(value))
+        or not all(isinstance(item, str) and item and item == item.strip() for item in value)
+    ):
+        raise ValueError(f"{label} must be non-empty sorted unique strings")
+    return tuple(value)
+
+
+def _registry_anchor(value: object, label: str) -> tuple[sa.Anchor, str]:
+    owner = _exact_keys(
+        value,
+        {"path", "heading", "start_line", "end_line", "block_sha256"},
+        label,
+    )
+    if (
+        not isinstance(owner["path"], str)
+        or not owner["path"].startswith((PLAN_PREFIX, "docs/plans/2026-"))
+        or isinstance(owner["start_line"], bool)
+        or not isinstance(owner["start_line"], int)
+        or isinstance(owner["end_line"], bool)
+        or not isinstance(owner["end_line"], int)
+        or not isinstance(owner["heading"], str)
+        or not owner["heading"]
+        or not isinstance(owner["block_sha256"], str)
+    ):
+        raise ValueError(f"{label} is malformed")
+    anchor = sa.Anchor(
+        owner["path"], owner["start_line"], owner["end_line"], owner["block_sha256"]
+    )
+    diagnostics = sa.validate_source_anchor(anchor)
+    if diagnostics:
+        raise ValueError(f"{label} is malformed: {diagnostics[0].violated_rule}")
+    return anchor, owner["heading"]
+
+
+def _registry_source_anchors(value: object, label: str) -> tuple[sa.Anchor, ...]:
+    if not isinstance(value, list) or not value:
+        raise ValueError(f"{label} must be a non-empty array")
+    anchors: list[sa.Anchor] = []
+    for index, raw in enumerate(value):
+        body = _exact_keys(
+            raw, {"path", "start_line", "end_line", "block_sha256"}, f"{label}[{index}]"
+        )
+        anchor, _ = _registry_anchor({**body, "heading": "authority source"}, f"{label}[{index}]")
+        anchors.append(anchor)
+    refs = [anchor.ref() for anchor in anchors]
+    if refs != sorted(set(refs)):
+        raise ValueError(f"{label} must be sorted and unique")
+    return tuple(anchors)
+
+
+def _registry_acceptance(value: object, label: str) -> tuple[RegistryCriterion, ...]:
+    if not isinstance(value, list) or not value:
+        raise ValueError(f"{label} must be a non-empty array")
+    result: list[RegistryCriterion] = []
+    for index, raw in enumerate(value):
+        body = _exact_keys(
+            raw, {"criterion_id", "text", "source_anchors"}, f"{label}[{index}]"
+        )
+        criterion_id = body["criterion_id"]
+        text = body["text"]
+        if (
+            not isinstance(criterion_id, str)
+            or not criterion_id
+            or criterion_id != criterion_id.strip()
+            or not isinstance(text, str)
+            or not sa.canonicalize_text(text)
+        ):
+            raise ValueError(f"{label}[{index}] has an invalid ID or text")
+        anchors = _sorted_unique_strings(
+            body["source_anchors"], f"{label}[{index}].source_anchors"
+        )
+        result.append(RegistryCriterion(criterion_id, text, anchors))
+    if [item.criterion_id for item in result] != sorted({item.criterion_id for item in result}):
+        raise ValueError(f"{label} must be sorted by unique criterion_id")
+    return tuple(result)
+
+
+def _registry_dependencies(value: object, label: str) -> tuple[RegistryDependency, ...]:
+    if not isinstance(value, list):
+        raise ValueError(f"{label} must be an array")
+    result: list[RegistryDependency] = []
+    for index, raw in enumerate(value):
+        body = _exact_keys(
+            raw, {"parent", "kind", "payload", "source_anchors"}, f"{label}[{index}]"
+        )
+        parent = body["parent"]
+        kind = body["kind"]
+        payload = body["payload"]
+        if not isinstance(parent, str) or not parent or not isinstance(kind, str) or not kind:
+            raise ValueError(f"{label}[{index}] has an invalid parent or kind")
+        if not isinstance(payload, dict):
+            raise ValueError(f"{label}[{index}].payload must be an object")
+        anchors = _sorted_unique_strings(
+            body["source_anchors"], f"{label}[{index}].source_anchors"
+        )
+        dependency = sa.Dependency(
+            parent, kind, tuple(sorted(payload.items())), source_anchors=anchors
+        )
+        payload_error = sa._validate_payload(dependency)
+        if kind not in sa.EDGE_KINDS or payload_error:
+            raise ValueError(
+                f"{label}[{index}] has invalid typed payload: "
+                f"{payload_error or f'unknown edge kind {kind!r}'}"
+            )
+        result.append(RegistryDependency(parent, kind, dependency.payload, anchors))
+    keys = [
+        (item.parent, item.kind, sa._canonical_json(dict(item.payload)), item.source_anchors)
+        for item in result
+    ]
+    if keys != sorted(set(keys)):
+        raise ValueError(f"{label} must be sorted and contain unique typed edges")
+    return tuple(result)
+
+
 def load_registry(materialized: Path) -> Registry:
     document = plan_execution.strict_json(materialized / REGISTRY_PATH)
     _exact_keys(document, {"schema", "series", "slices"}, "registry")
@@ -112,34 +253,31 @@ def load_registry(materialized: Path) -> Registry:
         classification = sa.classify_token(slice_id)
         if classification.kind != "declaration" or classification.ids != (slice_id,):
             raise ValueError(f"registry slice {slice_id!r} is not one canonical scalar")
-        body = _exact_keys(raw, {"owner", "phase", "commit_subject", "dependencies"}, slice_id)
-        owner = _exact_keys(body["owner"], {"path", "line", "heading"}, f"{slice_id}.owner")
-        if (
-            not isinstance(owner["path"], str)
-            or not owner["path"].startswith((PLAN_PREFIX, "docs/plans/2026-"))
-            or isinstance(owner["line"], bool)
-            or not isinstance(owner["line"], int)
-            or owner["line"] < 1
-            or not isinstance(owner["heading"], str)
-            or not owner["heading"]
-        ):
-            raise ValueError(f"{slice_id}.owner is malformed")
+        body = _exact_keys(
+            raw,
+            {
+                "owner", "source_anchors", "phase", "commit_subject", "acceptance",
+                "dependencies",
+            },
+            slice_id,
+        )
+        owner, owner_heading = _registry_anchor(body["owner"], f"{slice_id}.owner")
+        source_anchors = _registry_source_anchors(
+            body["source_anchors"], f"{slice_id}.source_anchors"
+        )
+        if owner.ref() not in {anchor.ref() for anchor in source_anchors}:
+            raise ValueError(f"{slice_id}.source_anchors must include the exact owner anchor")
         phase = body["phase"]
         if isinstance(phase, bool) or not isinstance(phase, int) or phase not in range(6):
             raise ValueError(f"{slice_id}.phase must be 0..5")
         subject = body["commit_subject"]
         if not isinstance(subject, str) or not subject or len(subject) > 72:
             raise ValueError(f"{slice_id}.commit_subject must be 1..72 characters")
-        dependencies = body["dependencies"]
-        if (
-            not isinstance(dependencies, list)
-            or dependencies != sorted(set(dependencies))
-            or not all(isinstance(parent, str) and parent for parent in dependencies)
-        ):
-            raise ValueError(f"{slice_id}.dependencies must be sorted unique strings")
+        acceptance = _registry_acceptance(body["acceptance"], f"{slice_id}.acceptance")
+        dependencies = _registry_dependencies(body["dependencies"], f"{slice_id}.dependencies")
         slices[slice_id] = RegistrySlice(
-            slice_id, owner["path"], owner["line"], owner["heading"], phase, subject,
-            tuple(dependencies),
+            slice_id, owner, owner_heading, source_anchors, phase, subject, acceptance,
+            dependencies,
         )
 
     series: dict[str, tuple[str, ...]] = {}
@@ -165,12 +303,12 @@ def load_registry(materialized: Path) -> Registry:
     if overlap:
         raise ValueError(f"series aggregates are not executable slices: {sorted(overlap)!r}")
     for slice_id, record in slices.items():
-        unknown = set(record.dependencies) - set(slices)
+        unknown = set(record.parent_ids) - set(slices)
         if unknown:
             raise ValueError(f"{slice_id}: unknown dependencies {sorted(unknown)!r}")
-        if slice_id in record.dependencies:
+        if slice_id in record.parent_ids:
             raise ValueError(f"{slice_id}: self dependency")
-    _assert_acyclic({key: set(value.dependencies) for key, value in slices.items()})
+    _assert_acyclic({key: set(value.parent_ids) for key, value in slices.items()})
     _validate_required_edges(slices)
     return Registry(slices, series)
 
@@ -211,7 +349,7 @@ def _validate_required_edges(slices: dict[str, RegistrySlice]) -> None:
         "PR 38K": {"PR 38J", "PR 33", "PR 34", "PR 35", "PR 36"},
     }
     for child, parents in required.items():
-        if child not in slices or not parents <= set(slices[child].dependencies):
+        if child not in slices or not parents <= set(slices[child].parent_ids):
             raise ValueError(f"checked registry is missing required edge(s) for {child}")
 
 
@@ -232,17 +370,36 @@ def _anchor(record: dict[str, object]) -> sa.Anchor:
     )
 
 
-def _criteria(materialized: Path, record: dict[str, object], anchor_name: str) -> tuple[sa.Criterion, ...]:
-    lines = (materialized / str(record["path"])).read_text(encoding="utf-8").splitlines()
-    result: list[sa.Criterion] = []
-    for line in lines[int(record["line"]) - 1:int(record["end_line"])]:
-        if plan_inventory.CHECKBOX.match(line):
-            text = re.sub(r"^\s*- \[[ xX]\]\s*", "", line).strip()
-            if text:
-                result.append(sa.Criterion(
-                    "AC-" + sa.criterion_digest(text)[:16].upper(), text, (anchor_name,),
-                ))
-    return tuple(result)
+_BULLET = re.compile(r"^\s*-\s+(?:\[[ xX]\]\s*)?(?P<text>.*\S)\s*$")
+_CHECKED_BULLET = re.compile(r"^\s*-\s+\[[ xX]\]\s*(?P<text>.*\S)\s*$")
+_METADATA_REQUIREMENT = re.compile(
+    r"^(?:\*\*)?(?:Ordering|Files?|Commit(?: separately)?)(?::|\*\*:)", re.IGNORECASE
+)
+
+
+def _anchor_lines(materialized: Path, anchor: sa.Anchor) -> list[str]:
+    lines = (materialized / anchor.path).read_text(encoding="utf-8").splitlines()
+    if anchor.end_line > len(lines):
+        raise ValueError(f"authority anchor is outside {anchor.path}")
+    block = lines[anchor.start_line - 1:anchor.end_line]
+    if sa.block_sha256(block) != anchor.block_sha256:
+        raise ValueError(f"stale authority anchor {anchor.ref()}")
+    return block
+
+
+def _normative_requirements(materialized: Path, anchor: sa.Anchor) -> tuple[str, ...]:
+    """Extract exact requirements only to detect drift from checked registry authority."""
+    block = _anchor_lines(materialized, anchor)
+    checked = [match.group("text").strip() for line in block if (match := _CHECKED_BULLET.match(line))]
+    candidates = checked or [
+        match.group("text").strip() for line in block if (match := _BULLET.match(line))
+    ]
+    normalized = {
+        sa.canonicalize_text(text): text
+        for text in candidates
+        if text and not _METADATA_REQUIREMENT.match(text)
+    }
+    return tuple(normalized[key] for key in sorted(normalized))
 
 
 def _sections(materialized: Path, registry: Registry,
@@ -258,35 +415,83 @@ def _sections(materialized: Path, registry: Registry,
         declarations = by_id[slice_id]
         owners = [
             record for record in declarations
-            if record["path"] == authority.owner_path
-            and record["line"] == authority.owner_line
+            if _anchor(record) == authority.owner
             and record["heading"] == authority.owner_heading
         ]
         if len(owners) != 1:
             raise ValueError(f"{slice_id}: checked owner anchor resolves {len(owners)} declarations")
         owner = owners[0]
-        companions = sorted(
-            [record for record in declarations if record is not owner],
-            key=lambda item: (str(item["path"]), int(item["line"])),
-        )
-        for index, record in enumerate([owner, *companions]):
-            name = "owner" if index == 0 else f"companions[{index - 1}]"
-            anchor = _anchor(record)
-            dependencies = ()
-            if index == 0:
-                dependencies = tuple(
-                    sa.Dependency(parent, "requires_success", source_anchors=(anchor.ref(),))
-                    for parent in authority.dependencies
-                )
+        declaration_headings = {_anchor(record).ref(): str(record["heading"]) for record in declarations}
+        source_anchors = [authority.owner, *[
+            anchor for anchor in authority.source_anchors if anchor != authority.owner
+        ]]
+        source_refs = {anchor.ref() for anchor in source_anchors}
+        for anchor in source_anchors:
+            _anchor_lines(materialized, anchor)
+        anchor_names = {
+            anchor.ref(): "owner" if index == 0 else f"companions[{index - 1}]"
+            for index, anchor in enumerate(source_anchors)
+        }
+        normative = {
+            anchor.ref(): {
+                sa.canonicalize_text(text) for text in _normative_requirements(materialized, anchor)
+            }
+            for anchor in source_anchors
+        }
+        owner_expected = {
+            (
+                "AC-" + sa.criterion_digest(text)[:16].upper(),
+                sa.canonicalize_text(text),
+                authority.owner.ref(),
+            )
+            for text in _normative_requirements(materialized, authority.owner)
+        }
+        checked_acceptance = {
+            (criterion.criterion_id, sa.canonicalize_text(criterion.text), anchor)
+            for criterion in authority.acceptance
+            for anchor in criterion.source_anchors
+        }
+        if not owner_expected <= checked_acceptance:
+            raise ValueError(f"{slice_id}: checked acceptance omits owner requirements")
+        acceptance: list[sa.Criterion] = []
+        for criterion in authority.acceptance:
+            expected_id = "AC-" + sa.criterion_digest(criterion.text)[:16].upper()
+            if criterion.criterion_id != expected_id:
+                raise ValueError(f"{slice_id}: criterion ID does not bind its exact text")
+            unknown = set(criterion.source_anchors) - source_refs
+            if unknown:
+                raise ValueError(f"{slice_id}: acceptance has unregistered source anchors")
+            canonical_text = sa.canonicalize_text(criterion.text)
+            if not any(canonical_text in normative[anchor] for anchor in criterion.source_anchors):
+                raise ValueError(f"{slice_id}: acceptance text is stale at its source anchors")
+            acceptance.append(sa.Criterion(
+                criterion.criterion_id,
+                criterion.text,
+                tuple(sorted(anchor_names[anchor] for anchor in criterion.source_anchors)),
+            ))
+        dependencies: list[sa.Dependency] = []
+        for dependency in authority.dependencies:
+            if not set(dependency.source_anchors) <= source_refs:
+                raise ValueError(f"{slice_id}: dependency has unregistered source anchors")
+            dependencies.append(sa.Dependency(
+                dependency.parent,
+                dependency.kind,
+                dependency.payload,
+                source_anchors=dependency.source_anchors,
+            ))
+        for index, anchor in enumerate(source_anchors):
             sections.append(sa.Section(
                 raw_id=slice_id,
                 role="owner" if index == 0 else "companion",
                 anchor=anchor,
-                heading=str(record["heading"]),
+                heading=(
+                    authority.owner_heading if index == 0
+                    else declaration_headings.get(anchor.ref(), "registered ordering authority")
+                ),
                 phase=authority.phase if index == 0 else None,
                 commit_subject=authority.commit_subject if index == 0 else None,
-                acceptance=_criteria(materialized, record, name),
-                dependencies=dependencies,
+                acceptance=tuple(acceptance) if index == 0 else (),
+                dependencies=tuple(dependencies) if index == 0 else (),
             ))
 
     aggregate_records: dict[str, list[dict[str, object]]] = {}
@@ -341,6 +546,7 @@ def compile_materialized(root: Path, materialized: Path, commit: str,
         "slices": slices,
         "series": {key: list(value) for key, value in sorted(registry.series.items())},
     }
+    manifest_digest = "sha256:" + hashlib.sha256(_canonical_json_bytes(manifest)).hexdigest()
     nodes = []
     for slice_id, record in sorted(reconciled.records.items()):
         unassigned = {"activation_mode": "verify_only", "slice_id": slice_id,
@@ -350,7 +556,7 @@ def compile_materialized(root: Path, materialized: Path, commit: str,
             "owner": f"{slice_id}@{record.owner.ref()}",
             "content_digest": record.content_digest,
             "dispatch_digest": es.dispatch_digest(unassigned),
-            "dependencies": list(registry.slices[slice_id].dependencies),
+            "dependencies": list(registry.slices[slice_id].parent_ids),
         })
     graph: dict[str, Any] = {
         "schema": es.DAG_SCHEMA,
@@ -364,12 +570,20 @@ def compile_materialized(root: Path, materialized: Path, commit: str,
     }
     graph["graph_digest"] = es.graph_digest(graph)
     graph["activation_receipt"] = {
-        "receipt_id": f"activation:verify-only:{revision}",
+        "receipt_id": f"activation:verify-only:{revision}:{manifest_digest[7:23]}",
         "repository": live.repository,
         "source_commit": commit,
         "source_set_digest": live.source_set_digest,
         "graph_revision": revision,
         "graph_digest": graph["graph_digest"],
+        "manifest_digest": manifest_digest,
+        "candidate_graph_revision": revision,
+        "activated_graph_revision": revision,
+        "slice_count": len(nodes),
+        "edge_count": sum(len(node["dependencies"]) for node in nodes),
+        "series_count": len(registry.series),
+        "compiler_version": COMPILER_VERSION,
+        "validator_version": es.VALIDATOR_VERSION,
         "activated": True,
     }
     state = {
@@ -408,7 +622,7 @@ def compile_from_ref(root: Path, canonical_ref: str, revision: int = 1
 
 def _atomic_json(path: Path, document: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    payload = (json.dumps(document, indent=2, sort_keys=True) + "\n").encode("utf-8")
+    payload = _canonical_json_bytes(document)
     with tempfile.NamedTemporaryFile(dir=path.parent, prefix=f".{path.name}.", delete=False) as file:
         temporary = Path(file.name)
         file.write(payload)
@@ -419,6 +633,10 @@ def _atomic_json(path: Path, document: dict[str, Any]) -> None:
         os.replace(temporary, path)
     finally:
         temporary.unlink(missing_ok=True)
+
+
+def _canonical_json_bytes(document: dict[str, Any]) -> bytes:
+    return (json.dumps(document, indent=2, sort_keys=True) + "\n").encode("utf-8")
 
 
 def main() -> int:
@@ -434,7 +652,16 @@ def main() -> int:
         if args.graph_revision < 1:
             raise ValueError("graph revision must be positive")
         compiled, live = compile_from_ref(args.root, args.canonical_ref, args.graph_revision)
-        if not args.check:
+        if args.check:
+            commit = resolve_commit(args.root.resolve(), args.canonical_ref)
+            committed = _git_bytes(
+                args.root.resolve(), "show", f"{commit}:{CANONICAL_MANIFEST_PATH}"
+            )
+            if committed != _canonical_json_bytes(compiled.manifest):
+                raise ValueError(
+                    f"canonical manifest mismatch: regenerate {CANONICAL_MANIFEST_PATH}"
+                )
+        else:
             if args.manifest_output is None or args.state_output is None:
                 raise ValueError("--manifest-output and --state-output are required unless --check is used")
             _atomic_json(args.manifest_output.resolve(), compiled.manifest)

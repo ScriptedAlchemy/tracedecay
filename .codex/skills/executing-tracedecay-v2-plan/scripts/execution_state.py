@@ -22,6 +22,8 @@ EXPORT_SCHEMA = "tracedecay.v2.execution-state/v1"
 DAG_SCHEMA = "tracedecay.v2.canonical-dag/v1"
 LEDGER_SCHEMA = "tracedecay.v2.completion-ledger/v1"
 VIEW_SCHEMA = "tracedecay.v2.next-ready-view/v1"
+VALIDATOR_VERSION = "execution_state/v1"
+COMPILER_VERSION = "compile_plan_authority/v1"
 SHA256 = re.compile(r"^sha256:[0-9a-f]{64}$")
 COMMIT = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
 FM_ID = re.compile(r"^FM-[0-9]{3}$")
@@ -238,7 +240,10 @@ def _validate_activation(graph: dict[str, Any], errors: list[str]) -> None:
     receipt = graph.get("activation_receipt")
     fields = {
         "receipt_id", "repository", "source_commit", "source_set_digest",
-        "graph_revision", "graph_digest", "activated",
+        "graph_revision", "graph_digest", "manifest_digest",
+        "candidate_graph_revision", "activated_graph_revision", "slice_count",
+        "edge_count", "series_count", "compiler_version", "validator_version",
+        "activated",
     }
     if not _keys(receipt, fields, "canonical_dag.activation_receipt", errors):
         return
@@ -247,6 +252,36 @@ def _validate_activation(graph: dict[str, Any], errors: list[str]) -> None:
         errors.append("canonical_dag.activation_receipt.receipt_id: must be non-empty")
     for field in ["repository", "source_commit", "source_set_digest", "graph_revision", "graph_digest"]:
         _pin_equal(f"canonical_dag.activation_receipt.{field}", receipt[field], graph[field], errors)
+    if not isinstance(receipt["manifest_digest"], str) or not SHA256.fullmatch(receipt["manifest_digest"]):
+        errors.append("canonical_dag.activation_receipt.manifest_digest: must be sha256:<64 lowercase hex>")
+    for field in ("candidate_graph_revision", "activated_graph_revision"):
+        _pin_equal(f"canonical_dag.activation_receipt.{field}", receipt[field], graph["graph_revision"], errors)
+    expected_counts = {
+        "slice_count": len(graph.get("nodes", [])) if isinstance(graph.get("nodes"), list) else -1,
+        "edge_count": sum(
+            len(node.get("dependencies", []))
+            for node in graph.get("nodes", [])
+            if isinstance(node, dict) and isinstance(node.get("dependencies"), list)
+        ),
+    }
+    for field, expected in expected_counts.items():
+        _pin_equal(f"canonical_dag.activation_receipt.{field}", receipt[field], expected, errors)
+    if (
+        isinstance(receipt["series_count"], bool)
+        or not isinstance(receipt["series_count"], int)
+        or receipt["series_count"] < 0
+    ):
+        errors.append("canonical_dag.activation_receipt.series_count: must be a non-negative integer")
+    if receipt["compiler_version"] != COMPILER_VERSION:
+        errors.append(
+            "canonical_dag.activation_receipt.compiler_version: "
+            f"expected {COMPILER_VERSION!r}"
+        )
+    if receipt["validator_version"] != VALIDATOR_VERSION:
+        errors.append(
+            "canonical_dag.activation_receipt.validator_version: "
+            f"expected {VALIDATOR_VERSION!r}"
+        )
     if receipt["activated"] is not True:
         errors.append("canonical_dag.activation_receipt.activated: must be true")
 

@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
+import fcntl
 import hashlib
 import json
 import os
@@ -13,6 +15,7 @@ from pathlib import Path
 from typing import Any
 
 import execution_state
+import compile_plan_authority
 import live_evidence
 import plan_execution
 import slice_authority
@@ -20,6 +23,7 @@ import slice_authority
 
 GENERATIONS = Path(".tracedecay/v2-execution-generations")
 ACTIVE_POINTER = Path(".tracedecay/v2-execution-active.json")
+ACTIVATION_LOCK = Path(".tracedecay/v2-execution-activation.lock")
 POINTER_SCHEMA = "tracedecay.v2.execution-generation-pointer/v1"
 
 
@@ -62,11 +66,80 @@ def _cross_validate(manifest: dict[str, Any], state: dict[str, Any],
             errors.append(f"manifest/state {field} differs")
     if graph.get("source_set_digest") != live.source_set_digest:
         errors.append("manifest/state source_set_digest differs from canonical Git tree")
+    receipt = graph.get("activation_receipt", {}) if isinstance(graph, dict) else {}
+    expected = {
+        "manifest_digest": "sha256:" + hashlib.sha256(_json_bytes(manifest)).hexdigest(),
+        "candidate_graph_revision": manifest.get("graph_revision"),
+        "activated_graph_revision": manifest.get("graph_revision"),
+        "slice_count": len(slices) if isinstance(slices, dict) else -1,
+        "edge_count": sum(
+            len(body.get("dependencies", []))
+            for body in slices.values()
+            if isinstance(body, dict) and isinstance(body.get("dependencies"), list)
+        ) if isinstance(slices, dict) else -1,
+        "series_count": len(manifest.get("series", {}))
+        if isinstance(manifest.get("series"), dict) else -1,
+        "compiler_version": compile_plan_authority.COMPILER_VERSION,
+        "validator_version": execution_state.VALIDATOR_VERSION,
+    }
+    for field, value in expected.items():
+        if receipt.get(field) != value:
+            errors.append(f"activation receipt {field} differs from compiled manifest/state")
     return sorted(set(errors))
 
 
 def _json_bytes(document: dict[str, Any]) -> bytes:
-    return (json.dumps(document, indent=2, sort_keys=True) + "\n").encode("utf-8")
+    return compile_plan_authority._canonical_json_bytes(document)
+
+
+@contextlib.contextmanager
+def _activation_lock(root: Path):
+    path = root / ACTIVATION_LOCK
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor = os.open(path, os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        yield
+    finally:
+        fcntl.flock(descriptor, fcntl.LOCK_UN)
+        os.close(descriptor)
+
+
+def _active_generation(root: Path) -> tuple[dict[str, Any], dict[str, Any]] | None:
+    pointer = root / ACTIVE_POINTER
+    if not pointer.exists():
+        return None
+    manifest_path, manifest_failure = slice_authority.resolve_active_generation(
+        pointer, root, "manifest"
+    )
+    state_path, state_failure = slice_authority.resolve_active_generation(pointer, root, "state")
+    failures = [failure for failure in (manifest_failure, state_failure) if failure is not None]
+    if failures or manifest_path is None or state_path is None:
+        detail = "; ".join(f"{failure.reason}: {failure.detail}" for failure in failures)
+        raise ValueError(f"active execution generation is invalid: {detail}")
+    return _load_manifest(manifest_path), plan_execution.strict_json(state_path)
+
+
+def _check_compare_and_swap(root: Path, manifest: dict[str, Any], state: dict[str, Any]) -> bool:
+    active = _active_generation(root)
+    if active is None:
+        return False
+    active_manifest, active_state = active
+    incoming_revision = manifest["graph_revision"]
+    active_revision = active_manifest["graph_revision"]
+    if incoming_revision < active_revision:
+        raise ValueError(
+            f"execution graph revision regression: {incoming_revision} < {active_revision}"
+        )
+    identical = (
+        _json_bytes(manifest) == _json_bytes(active_manifest)
+        and _json_bytes(state) == _json_bytes(active_state)
+    )
+    if incoming_revision == active_revision and not identical:
+        raise ValueError(
+            f"execution graph revision {incoming_revision} already activated with different bytes"
+        )
+    return identical
 
 
 def _write_staged(output: Path, payload: bytes) -> None:
@@ -108,36 +181,39 @@ def _install_generation(root: Path, manifest: dict[str, Any], state: dict[str, A
     manifest_digest = hashlib.sha256(manifest_bytes).hexdigest()
     state_digest = hashlib.sha256(state_bytes).hexdigest()
     generation = f"r{manifest['graph_revision']}-{manifest_digest[:16]}-{state_digest[:16]}"
-    generations = root / GENERATIONS
-    generations.mkdir(parents=True, exist_ok=True)
-    final = generations / generation
-    if not final.exists():
-        staging = Path(tempfile.mkdtemp(prefix=f".{generation}.", dir=generations))
-        try:
-            _write_staged(staging / "manifest.json", manifest_bytes)
-            _write_staged(staging / "state.json", state_bytes)
-            _fsync_directory(staging)
-            os.replace(staging, final)
-            _fsync_directory(generations)
-        finally:
-            if staging.exists():
-                shutil.rmtree(staging)
-    elif (
-        (final / "manifest.json").read_bytes() != manifest_bytes
-        or (final / "state.json").read_bytes() != state_bytes
-    ):
-        raise ValueError(f"existing execution generation {generation} has different bytes")
+    with _activation_lock(root):
+        replay = _check_compare_and_swap(root, manifest, state)
+        generations = root / GENERATIONS
+        generations.mkdir(parents=True, exist_ok=True)
+        final = generations / generation
+        if not final.exists():
+            staging = Path(tempfile.mkdtemp(prefix=f".{generation}.", dir=generations))
+            try:
+                _write_staged(staging / "manifest.json", manifest_bytes)
+                _write_staged(staging / "state.json", state_bytes)
+                _fsync_directory(staging)
+                os.replace(staging, final)
+                _fsync_directory(generations)
+            finally:
+                if staging.exists():
+                    shutil.rmtree(staging)
+        elif (
+            (final / "manifest.json").read_bytes() != manifest_bytes
+            or (final / "state.json").read_bytes() != state_bytes
+        ):
+            raise ValueError(f"existing execution generation {generation} has different bytes")
 
-    pointer = {
-        "schema": POINTER_SCHEMA,
-        "generation": generation,
-        "manifest": f"v2-execution-generations/{generation}/manifest.json",
-        "state": f"v2-execution-generations/{generation}/state.json",
-        "manifest_sha256": manifest_digest,
-        "state_sha256": state_digest,
-    }
-    active = root / ACTIVE_POINTER
-    _atomic_install(active, pointer)
+        pointer = {
+            "schema": POINTER_SCHEMA,
+            "generation": generation,
+            "manifest": f"v2-execution-generations/{generation}/manifest.json",
+            "state": f"v2-execution-generations/{generation}/state.json",
+            "manifest_sha256": manifest_digest,
+            "state_sha256": state_digest,
+        }
+        active = root / ACTIVE_POINTER
+        if not replay:
+            _atomic_install(active, pointer)
     return final / "manifest.json", final / "state.json", active
 
 
@@ -163,7 +239,17 @@ def main() -> int:
             raise ValueError(
                 "pre-V2 bootstrap accepts compiler-produced activation_mode=verify_only only"
             )
-        live = live_evidence.inspect(root, args.canonical_ref, plan_execution.candidate_commits(state))
+        graph = state.get("canonical_dag", {})
+        revision = graph.get("graph_revision") if isinstance(graph, dict) else None
+        if isinstance(revision, bool) or not isinstance(revision, int) or revision < 1:
+            raise ValueError("state graph revision must be a positive integer")
+        compiled, live = compile_plan_authority.compile_from_ref(
+            root, args.canonical_ref, revision
+        )
+        if selected.read_bytes() != _json_bytes(compiled.manifest):
+            raise ValueError("supplied manifest bytes differ from canonical compiler output")
+        if args.state_export.read_bytes() != _json_bytes(compiled.state):
+            raise ValueError("supplied state bytes differ from canonical compiler output")
         validation = execution_state.validate(state, live)
         errors = [*live.errors, *validation.errors, *_cross_validate(manifest, state, live)]
         if errors:

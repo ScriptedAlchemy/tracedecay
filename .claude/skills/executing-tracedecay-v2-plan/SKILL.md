@@ -23,15 +23,17 @@ Claude and Codex entrypoints must resolve the same shared state path for canonic
 `tracedecay.v2.completion-ledger/v1`, tracking state, dispatch packets, and
 review/test/integration/steering receipts. For bootstrap manifest resolution,
 both hosts use the canonical precedence unchanged: explicit argument,
-`TRACEDECAY_V2_EXECUTION_MANIFEST`, then
-`<repo-root>/.tracedecay/v2-execution-manifest.json`, then the atomically switched
-`<repo-root>/.tracedecay/v2-execution-active.json` generation. Never infer or maintain a
+`TRACEDECAY_V2_EXECUTION_MANIFEST`, then exactly one repo-local source: either
+`<repo-root>/.tracedecay/v2-execution-manifest.json` or the atomically switched
+`<repo-root>/.tracedecay/v2-execution-active.json` generation. Coexistence is ambiguous
+and fails closed. Never infer or maintain a
 host-specific manifest, ledger, state, receipt, cache, output, or “current” path
 under `.claude`, `.codex`, `$CLAUDE_HOME`, `$CODEX_HOME`, or another host store.
 The canonical bootstrap command stages manifest/state together and atomically
 switches `<repo-root>/.tracedecay/v2-execution-active.json`. State resolution is
-explicit `--graph`, `TRACEDECAY_V2_EXECUTION_STATE`, the legacy direct path, then
-`<repo-root>/.tracedecay/v2-execution-state.json`, then that active generation.
+explicit `--graph`, `TRACEDECAY_V2_EXECUTION_STATE`, then exactly one repo-local source:
+the legacy direct `<repo-root>/.tracedecay/v2-execution-state.json` or that active
+generation. Coexistence is ambiguous and fails closed.
 If the two entrypoints do not resolve the same state input, stop rather than
 merge, mirror, or choose newer host-local state. Missing state blocks dispatch
 only; read-only inventory, audit, and plan review may continue without claiming
@@ -50,6 +52,9 @@ python3 .codex/skills/executing-tracedecay-v2-plan/scripts/compile_plan_authorit
   --canonical-ref refs/heads/codex/tracedecay-total-redesign-plan \
   --manifest-output docs/plans/tracedecay-v2/execution-authority.json \
   --state-output .tracedecay/v2-execution-state.candidate.json
+python3 .codex/skills/executing-tracedecay-v2-plan/scripts/compile_plan_authority.py \
+  --root "$(git rev-parse --show-toplevel)" \
+  --canonical-ref refs/heads/codex/tracedecay-total-redesign-plan --check
 python3 .codex/skills/executing-tracedecay-v2-plan/scripts/bootstrap_execution.py \
   --manifest docs/plans/tracedecay-v2/execution-authority.json \
   --state-export .tracedecay/v2-execution-state.candidate.json \

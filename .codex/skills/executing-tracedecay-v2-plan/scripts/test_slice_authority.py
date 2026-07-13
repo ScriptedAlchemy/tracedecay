@@ -903,9 +903,18 @@ class BootstrapLocatorTests(unittest.TestCase):
         self.assertIsNone(failure)
         self.assertEqual(found, expected.resolve())
 
+    def test_legacy_manifest_and_active_pointer_are_ambiguous(self) -> None:
+        root = self._repo(self._stack)
+        self._default_manifest(root)
+        (root / ".tracedecay" / "v2-execution-active.json").write_text("{}")
+        found, failure = sa.locate_bootstrap_manifest(root)
+        self.assertIsNone(found)
+        self.assertEqual(failure.reason, "ambiguous")
+
     def test_explicit_argument_wins_over_env_and_default(self) -> None:
         root = self._repo(self._stack)
         self._default_manifest(root)
+        (root / ".tracedecay" / "v2-execution-active.json").write_text("{}")
         explicit = Path(self._stack[-1].name) / "explicit.json"
         explicit.write_text('{"schema":"tracedecay.v2.slice-dag/v1","slices":{}}')
         env = Path(self._stack[-1].name) / "env.json"
@@ -918,6 +927,7 @@ class BootstrapLocatorTests(unittest.TestCase):
     def test_env_wins_over_default(self) -> None:
         root = self._repo(self._stack)
         self._default_manifest(root)
+        (root / ".tracedecay" / "v2-execution-active.json").write_text("{}")
         env = Path(self._stack[-1].name) / "env.json"
         env.write_text('{"schema":"tracedecay.v2.slice-dag/v1","slices":{}}')
         found, _ = sa.locate_bootstrap_manifest(root, env=str(env))
