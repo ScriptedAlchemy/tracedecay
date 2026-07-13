@@ -1,0 +1,52 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://tracedecay.dev/schemas/v2/hermes-port-ledger.json",
+  "title": "HermesKanbanPortLedgerV1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "source", "license", "entries"],
+  "properties": {
+    "schema_version": { "const": "hermes-kanban-port-ledger/v1" },
+    "source": {
+      "type": "object", "additionalProperties": false,
+      "required": ["repository", "commit", "tree", "package_version"],
+      "properties": {
+        "repository": { "const": "https://github.com/ScriptedAlchemy/hermes-agent" },
+        "commit": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+        "tree": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+        "package_version": { "type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$" }
+      }
+    },
+    "license": {
+      "type": "object", "additionalProperties": false,
+      "required": ["spdx", "path", "digest", "notice_required"],
+      "properties": {
+        "spdx": { "const": "MIT" },
+        "path": { "const": "LICENSE" },
+        "digest": { "type": "string", "pattern": "^git-sha1:[0-9a-f]{40}$" },
+        "notice_required": { "type": "boolean" }
+      }
+    },
+    "entries": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/entry" } }
+  },
+  "$defs": {
+    "entry": {
+      "type": "object", "additionalProperties": false,
+      "required": ["entry_id", "source_path", "source_bounds", "source_digest", "disposition", "rationale", "destination_owner", "destination_pr", "required_notice", "source_tests", "v2_regressions", "review_state"],
+      "properties": {
+        "entry_id": { "type": "string", "pattern": "^hermes-port-[a-z0-9-]+$" },
+        "source_path": { "type": "string", "pattern": "^[A-Za-z0-9_.@/+ -]+$" },
+        "source_bounds": { "type": "string", "pattern": "^(whole-file|symbol:[A-Za-z0-9_.]+)$" },
+        "source_digest": { "type": "string", "pattern": "^git-sha1:[0-9a-f]{40}$" },
+        "disposition": { "enum": ["direct_port", "behavioral_port", "comparative_fixture", "redesign", "drop"] },
+        "rationale": { "type": "string", "minLength": 1, "maxLength": 280 },
+        "destination_owner": { "type": "string", "minLength": 1, "maxLength": 100 },
+        "destination_pr": { "type": "string", "pattern": "^PR (4E|6G|24M|24N|25G)$" },
+        "required_notice": { "enum": ["MIT notice if code is copied", "source-to-test provenance only"] },
+        "source_tests": { "type": "array", "items": { "type": "string", "pattern": "^[A-Za-z0-9_.@/+ -]+$" }, "uniqueItems": true },
+        "v2_regressions": { "type": "array", "minItems": 1, "items": { "type": "string", "pattern": "^[A-Za-z0-9_.:-]+$" }, "uniqueItems": true },
+        "review_state": { "const": "review_required" }
+      }
+    }
+  }
+}

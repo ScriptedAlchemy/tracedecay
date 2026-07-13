@@ -1,0 +1,74 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://tracedecay.dev/schemas/v2/host-bundle-evidence-ledger.json",
+  "title": "HostBundleEvidenceLedgerV1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "accessed_on", "entries"],
+  "properties": {
+    "schema_version": { "const": "host-bundle-evidence-ledger/v1" },
+    "accessed_on": { "type": "string", "format": "date" },
+    "entries": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/entry" }
+    }
+  },
+  "$defs": {
+    "entry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["entry_id", "host_profile", "surface", "host_version_range", "capability_code", "evidence_state", "source", "license_disposition", "finding", "conformance", "review", "sanitization_receipt", "retrieval_anchors"],
+      "properties": {
+        "entry_id": { "type": "string", "pattern": "^host-evidence-[a-z0-9-]+$" },
+        "host_profile": { "enum": ["codex", "claude-code", "cursor"] },
+        "surface": { "enum": ["plugin", "skill", "agent", "hook", "mcp", "rule", "command"] },
+        "host_version_range": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "capability_code": { "type": "string", "pattern": "^HOST_[A-Z0-9_]+$" },
+        "evidence_state": { "enum": ["documented", "validated", "assumed"] },
+        "source": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "canonical_url", "accessed_on"],
+          "properties": {
+            "kind": { "enum": ["official_documentation", "official_repository_schema"] },
+            "canonical_url": { "type": "string", "pattern": "^https://" },
+            "accessed_on": { "type": "string", "format": "date" },
+            "repository_commit": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+            "repository_path": { "type": "string", "pattern": "^[A-Za-z0-9_.@/+ -]+$" },
+            "content_digest": { "type": "string", "pattern": "^(sha256|git-sha1):[0-9a-f]{40,64}$" }
+          }
+        },
+        "license_disposition": { "enum": ["metadata_only_no_copy", "mit_metadata_only"] },
+        "finding": { "type": "string", "minLength": 1, "maxLength": 320 },
+        "conformance": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["case_ref", "outcome", "reference"],
+          "properties": {
+            "case_ref": { "type": "string", "pattern": "^HOST-CONFORMANCE-[0-9]{3}$" },
+            "outcome": { "enum": ["documented_only", "pass", "unsupported", "not_run"] },
+            "reference": { "type": "string", "minLength": 1, "maxLength": 160 }
+          }
+        },
+        "review": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["reviewer", "reviewed_on", "expires_on"],
+          "properties": {
+            "reviewer": { "type": "string", "minLength": 1, "maxLength": 80 },
+            "reviewed_on": { "type": "string", "format": "date" },
+            "expires_on": { "type": "string", "format": "date" }
+          }
+        },
+        "sanitization_receipt": { "type": "string", "pattern": "^sanitization-receipt-[a-z0-9-]+$" },
+        "retrieval_anchors": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "string", "pattern": "^https://" },
+          "uniqueItems": true
+        }
+      }
+    }
+  }
+}

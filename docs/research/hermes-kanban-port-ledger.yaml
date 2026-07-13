@@ -1,0 +1,108 @@
+schema_version: hermes-kanban-port-ledger/v1
+source:
+  repository: 'https://github.com/ScriptedAlchemy/hermes-agent'
+  commit: 732a9ffc572ad2703fbd25cc8a21c9f3f9c10d69
+  tree: 0b83a5506e99b5eafe4e818056896430a8621f43
+  package_version: 0.16.0
+license:
+  spdx: MIT
+  path: LICENSE
+  digest: git-sha1:75410e73319c72cd3e991a501c5455eb78f38375
+  notice_required: true
+entries:
+  - entry_id: hermes-port-kanban-db
+    source_path: hermes_cli/kanban_db.py
+    source_bounds: whole-file
+    source_digest: git-sha1:b684450e6bb45e639edfe4cfd766a728f0cdf988
+    disposition: behavioral_port
+    rationale: Compare transactional task, run, event, link, claim, and recovery invariants; reimplement them over canonical V2 identities and leases.
+    destination_owner: tracedecay-store and tracedecay-application
+    destination_pr: PR 24M
+    required_notice: source-to-test provenance only
+    source_tests: [tests/hermes_cli/test_kanban_db.py]
+    v2_regressions: [TD-TASK-001, TD-TASK-006, TD-TASK-009]
+    review_state: review_required
+  - entry_id: hermes-port-kanban-swarm
+    source_path: hermes_cli/kanban_swarm.py
+    source_bounds: whole-file
+    source_digest: git-sha1:fe47a4c771334214097c3ba561dc76e10bc79b9d
+    disposition: comparative_fixture
+    rationale: Preserve fan-out, verifier, synthesizer, and cycle-rejection scenarios without adopting the comment blackboard or fixed topology.
+    destination_owner: tracedecay-domain task graph
+    destination_pr: PR 24M
+    required_notice: source-to-test provenance only
+    source_tests: [tests/hermes_cli/test_kanban_swarm.py]
+    v2_regressions: [TD-TASK-003, TD-TASK-006]
+    review_state: review_required
+  - entry_id: hermes-port-kanban-tools
+    source_path: tools/kanban_tools.py
+    source_bounds: whole-file
+    source_digest: git-sha1:67157dfc1c622dcaa2c0af65088332c6837ff7b2
+    disposition: behavioral_port
+    rationale: Retain compact worker lifecycle interactions and child-creation verification while binding calls to attempt, epoch, and grants.
+    destination_owner: tracedecay-application task capabilities
+    destination_pr: PR 24N
+    required_notice: source-to-test provenance only
+    source_tests: [tests/tools/test_kanban_tools.py]
+    v2_regressions: [TD-TASK-003, TD-TASK-007]
+    review_state: review_required
+  - entry_id: hermes-port-kanban-watchers
+    source_path: gateway/kanban_watchers.py
+    source_bounds: whole-file
+    source_digest: git-sha1:328cbd7fb5b54eb4dccf72daf78ee9da726a8e04
+    disposition: redesign
+    rationale: Reimplement ordered safety-before-start delivery with journal wakeups and repair polling; reject ambient board scans and fixed polling.
+    destination_owner: tracedecay-projectors scheduler
+    destination_pr: PR 24N
+    required_notice: source-to-test provenance only
+    source_tests: []
+    v2_regressions: [TD-TASK-007, TD-TASK-009]
+    review_state: review_required
+  - entry_id: hermes-port-dashboard-api
+    source_path: plugins/kanban/dashboard/plugin_api.py
+    source_bounds: whole-file
+    source_digest: git-sha1:e340aba97bff8a93bdbc2d8191741af421a0f09e
+    disposition: redesign
+    rationale: Use inspector anatomy only as comparative UX evidence; generate the TraceDecay UI from canonical contracts with no plugin-local SQL or domain logic.
+    destination_owner: tracedecay-dashboard Work UI
+    destination_pr: PR 25G
+    required_notice: source-to-test provenance only
+    source_tests: []
+    v2_regressions: [TD-TASK-001, TD-TASK-007]
+    review_state: review_required
+  - entry_id: hermes-port-diagnostics
+    source_path: hermes_cli/kanban_diagnostics.py
+    source_bounds: whole-file
+    source_digest: git-sha1:bef9bc8a97e2c1b02d363cb35a9f2889eb4c388f
+    disposition: comparative_fixture
+    rationale: Preserve attention, staleness, progress, and suggested-action scenarios while deriving diagnostics from canonical projections.
+    destination_owner: tracedecay-query diagnostics
+    destination_pr: PR 25G
+    required_notice: source-to-test provenance only
+    source_tests: [tests/hermes_cli/test_kanban_diagnostics.py]
+    v2_regressions: [TD-TASK-007, TD-TASK-009]
+    review_state: review_required
+  - entry_id: hermes-port-worker-skill
+    source_path: skills/devops/kanban-worker/SKILL.md
+    source_bounds: whole-file
+    source_digest: git-sha1:7dd64ad55e38053b1386f1e40deed881125e1091
+    disposition: comparative_fixture
+    rationale: Compare explicit show, work, heartbeat, complete, and block wording; generate host instructions from active TraceDecay grants.
+    destination_owner: generated host bundles
+    destination_pr: PR 6G
+    required_notice: source-to-test provenance only
+    source_tests: []
+    v2_regressions: [TD-TASK-003, TD-TASK-007]
+    review_state: review_required
+  - entry_id: hermes-port-orchestrator-skill
+    source_path: skills/devops/kanban-orchestrator/SKILL.md
+    source_bounds: whole-file
+    source_digest: git-sha1:fb5aa58a86514a7236b48cffcd6bb1fbe8f6b4dd
+    disposition: comparative_fixture
+    rationale: Compare lifecycle visibility and dependency-aware fan-in while retaining provider-neutral routing and canonical task authority.
+    destination_owner: generated host bundles
+    destination_pr: PR 6G
+    required_notice: source-to-test provenance only
+    source_tests: []
+    v2_regressions: [TD-TASK-003, TD-TASK-006]
+    review_state: review_required

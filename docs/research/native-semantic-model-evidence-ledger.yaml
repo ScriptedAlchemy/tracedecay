@@ -1,0 +1,82 @@
+schema_version: native-semantic-model-evidence-ledger/v1
+accessed_on: '2026-07-13'
+promotion_eligible: false
+runtime:
+  - entry_id: native-runtime-fastembed
+    crate: fastembed
+    version: 5.17.2
+    registry_url: 'https://crates.io/crates/fastembed/5.17.2'
+    checksum: sha256:545e4fb17fc48768ff36c2a3854aa5b0b809d0ed595ab5530fa8ac94f31bd0ea
+    license: Apache-2.0
+    runtime_manifest_fields: [fastembed_version, fastembed_features, crate_checksum]
+    review_state: review_required
+  - entry_id: native-runtime-ort
+    crate: ort
+    version: 2.0.0-rc.12
+    registry_url: 'https://crates.io/crates/ort/2.0.0-rc.12'
+    checksum: sha256:d7de3af33d24a745ffb8fab904b13478438d1cd52868e6f17735ef6e1f8bf133
+    license: MIT OR Apache-2.0
+    runtime_manifest_fields: [ort_version, execution_provider, target_triple, build_digest]
+    review_state: review_required
+  - entry_id: native-runtime-ort-sys
+    crate: ort-sys
+    version: 2.0.0-rc.12
+    registry_url: 'https://crates.io/crates/ort-sys/2.0.0-rc.12'
+    checksum: sha256:d7b497d21a8b6fbb4b5a544f8fadb77e801a09ae0add9e411d31c6f89e3c1e90
+    license: MIT OR Apache-2.0
+    runtime_manifest_fields: [onnx_runtime_abi, native_library_digest, target_triple]
+    review_state: review_required
+models:
+  - entry_id: native-model-jina-code
+    fastembed_enum: JinaEmbeddingsV2BaseCode
+    fastembed_mapping: 'https://docs.rs/crate/fastembed/5.17.2/source/src/models/text_embedding.rs'
+    resolved_repository: jinaai/jina-embeddings-v2-base-code
+    revision: 516f4baf13dec4ddddda8631e019b5737c8bc250
+    upstream_repository: jinaai/jina-embeddings-v2-base-code
+    upstream_revision: 516f4baf13dec4ddddda8631e019b5737c8bc250
+    artifacts:
+      - { path: onnx/model.onnx, bytes: 641517466, digest: 'sha256:63363fc178428b74620c6f3780cbc7191883fa5c7f84c0945c45eb5c4256733b', kind: model, license_disposition: apache-2.0-model-card }
+      - { path: tokenizer.json, bytes: 2561316, digest: 'git-sha1:64a31466e9fdd5ef043ff0f07b97ee2e256a205e', kind: tokenizer, license_disposition: apache-2.0-model-card }
+      - { path: config.json, bytes: 1216, digest: 'git-sha1:645b6ca0ae35f56528641b9c3f4fdde5b3801fbd', kind: config, license_disposition: apache-2.0-model-card }
+      - { path: tokenizer_config.json, bytes: 493, digest: 'git-sha1:e42970549d43ea34c4c0f5e459acaa05a1f5cabd', kind: config, license_disposition: apache-2.0-model-card }
+    metadata: { dimension: 768, quantization: none, pooling: mean, normalization: true, prefix_policy: none, truncation: explicit-manifest-limit, maximum_input_tokens: 8192 }
+    review_state: review_required
+    promotion_blockers: [independent license and artifact review receipt is absent]
+    retrieval_anchors: ['https://huggingface.co/jinaai/jina-embeddings-v2-base-code/tree/516f4baf13dec4ddddda8631e019b5737c8bc250']
+  - entry_id: native-model-gte-large-q
+    fastembed_enum: GTELargeENV15Q
+    fastembed_mapping: 'https://docs.rs/crate/fastembed/5.17.2/source/src/models/text_embedding.rs'
+    resolved_repository: Alibaba-NLP/gte-large-en-v1.5
+    revision: 104333d6af6f97649377c2afbde10a7704870c7b
+    upstream_repository: Alibaba-NLP/gte-large-en-v1.5
+    upstream_revision: 104333d6af6f97649377c2afbde10a7704870c7b
+    artifacts:
+      - { path: onnx/model_quantized.onnx, bytes: 445773031, digest: 'sha256:b708aa329e0a14e06a80f43cc254005c1dc4baf2d191d423f25e93fd55bed1e8', kind: model, license_disposition: apache-2.0-model-card }
+      - { path: tokenizer.json, bytes: 711661, digest: 'git-sha1:8f778e7d950e055b18b53222c75d2c54c3732df5', kind: tokenizer, license_disposition: apache-2.0-model-card }
+      - { path: config.json, bytes: 1349, digest: 'git-sha1:9d775351bdd1f53cf7479ed8955eb429209261c1', kind: config, license_disposition: apache-2.0-model-card }
+      - { path: tokenizer_config.json, bytes: 1384, digest: 'git-sha1:633454d5fdd32d07ed2a1762e56485220ef20095', kind: config, license_disposition: apache-2.0-model-card }
+    metadata: { dimension: 1024, quantization: int8, pooling: cls-token, normalization: true, prefix_policy: none, truncation: explicit-manifest-limit, maximum_input_tokens: 8192 }
+    review_state: review_required
+    promotion_blockers: [independent license and artifact review receipt is absent]
+    retrieval_anchors: ['https://huggingface.co/Alibaba-NLP/gte-large-en-v1.5/tree/104333d6af6f97649377c2afbde10a7704870c7b']
+  - entry_id: native-model-bge-reranker-v2-m3
+    fastembed_enum: BGERerankerV2M3
+    fastembed_mapping: 'https://docs.rs/crate/fastembed/5.17.2/source/src/models/reranking.rs'
+    resolved_repository: rozgo/bge-reranker-v2-m3
+    revision: fbd57b17b4db111a9d16813bb08b4c804fac18e9
+    upstream_repository: BAAI/bge-reranker-v2-m3
+    upstream_revision: 953dc6f6f85a1b2dbfca4c34a2796e7dde08d41e
+    artifacts:
+      - { path: model.onnx, bytes: 108479, digest: 'sha256:3af844cd2de818a95d2b5de5893a336836312c8ade03f53b286ac6beae080321', kind: model, license_disposition: unresolved }
+      - { path: model.onnx.data, bytes: 2271088656, digest: 'sha256:84b66c787b9b98977a16d5c993a3959210a214c98fc3466da263c949c2068945', kind: external_model_data, license_disposition: unresolved }
+      - { path: tokenizer.json, bytes: 17082900, digest: 'sha256:8bf8afbfd11306bd872018c53bfdf2e160a56f8edbcf49933324404791c148d3', kind: tokenizer, license_disposition: unresolved }
+      - { path: config.json, bytes: 758, digest: 'git-sha1:001ea7ea4e342cda3a615c6792962118f9ce8481', kind: config, license_disposition: unresolved }
+    metadata: { dimension: null, quantization: none, pooling: sequence-classification-logit, normalization: false, prefix_policy: query-document-pair, truncation: explicit-manifest-limit, maximum_input_tokens: 8192 }
+    review_state: blocked_provenance
+    promotion_blockers:
+      - FastEmbed resolves the enum to rozgo/bge-reranker-v2-m3 rather than the upstream BAAI repository
+      - resolved repository has no model-card license declaration
+      - accepted relationship between resolved bytes and upstream artifacts is unproven
+    retrieval_anchors:
+      - 'https://huggingface.co/rozgo/bge-reranker-v2-m3/tree/fbd57b17b4db111a9d16813bb08b4c804fac18e9'
+      - 'https://huggingface.co/BAAI/bge-reranker-v2-m3/tree/953dc6f6f85a1b2dbfca4c34a2796e7dde08d41e'

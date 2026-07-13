@@ -1,3 +1,7 @@
+[workspace]
+members = ["crates/tracedecay-domain"]
+resolver = "3"
+
 [package]
 name = "tracedecay"
 version = "0.0.65"
@@ -168,6 +172,7 @@ logo-art = "0.2"
 cc = "1"
 
 [dev-dependencies]
+tracedecay-domain = { path = "crates/tracedecay-domain" }
 tempfile = "3"
 sha2 = "0.11"
 hex = "0.4"

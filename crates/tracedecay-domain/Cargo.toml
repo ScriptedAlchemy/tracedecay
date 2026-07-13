@@ -1,0 +1,12 @@
+[package]
+name = "tracedecay-domain"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "Pure domain contracts for TraceDecay V2"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.11"
+thiserror = "2"

@@ -1,0 +1,86 @@
+schema_version: host-bundle-evidence-ledger/v1
+accessed_on: '2026-07-10'
+entries:
+  - entry_id: host-evidence-codex-plugin
+    host_profile: codex
+    surface: plugin
+    host_version_range: official documentation snapshot 2026-07-10
+    capability_code: HOST_PLUGIN_BUNDLE
+    evidence_state: documented
+    source: { kind: official_documentation, canonical_url: 'https://developers.openai.com/codex/plugins/build', accessed_on: '2026-07-10' }
+    license_disposition: metadata_only_no_copy
+    finding: Codex plugins package skills, hooks, MCP integrations, apps, and assets; custom agents remain separately configured.
+    conformance: { case_ref: HOST-CONFORMANCE-001, outcome: documented_only, reference: generated Codex bundle contract }
+    review: { reviewer: PR2A host-evidence reviewer, reviewed_on: '2026-07-10', expires_on: '2026-10-10' }
+    sanitization_receipt: sanitization-receipt-host-evidence-001
+    retrieval_anchors: ['https://developers.openai.com/codex/plugins/build']
+  - entry_id: host-evidence-codex-skill
+    host_profile: codex
+    surface: skill
+    host_version_range: official documentation snapshot 2026-07-10
+    capability_code: HOST_PROGRESSIVE_SKILL
+    evidence_state: documented
+    source: { kind: official_documentation, canonical_url: 'https://developers.openai.com/codex/skills', accessed_on: '2026-07-10' }
+    license_disposition: metadata_only_no_copy
+    finding: Codex loads bounded skill metadata first and discloses the selected skill body when invoked.
+    conformance: { case_ref: HOST-CONFORMANCE-002, outcome: documented_only, reference: generated skill discovery contract }
+    review: { reviewer: PR2A host-evidence reviewer, reviewed_on: '2026-07-10', expires_on: '2026-10-10' }
+    sanitization_receipt: sanitization-receipt-host-evidence-002
+    retrieval_anchors: ['https://developers.openai.com/codex/skills']
+  - entry_id: host-evidence-codex-agent
+    host_profile: codex
+    surface: agent
+    host_version_range: official documentation snapshot 2026-07-10
+    capability_code: HOST_BOUNDED_SUBAGENT
+    evidence_state: documented
+    source: { kind: official_documentation, canonical_url: 'https://learn.chatgpt.com/docs/agent-configuration/subagents', accessed_on: '2026-07-10' }
+    license_disposition: metadata_only_no_copy
+    finding: Codex supports requested or instruction-driven subagents with separately selected roles and configuration.
+    conformance: { case_ref: HOST-CONFORMANCE-003, outcome: documented_only, reference: generated agent fallback contract }
+    review: { reviewer: PR2A host-evidence reviewer, reviewed_on: '2026-07-10', expires_on: '2026-10-10' }
+    sanitization_receipt: sanitization-receipt-host-evidence-003
+    retrieval_anchors: ['https://learn.chatgpt.com/docs/agent-configuration/subagents']
+  - entry_id: host-evidence-claude-plugin
+    host_profile: claude-code
+    surface: plugin
+    host_version_range: official documentation snapshot 2026-07-10
+    capability_code: HOST_PLUGIN_BUNDLE
+    evidence_state: documented
+    source: { kind: official_documentation, canonical_url: 'https://code.claude.com/docs/en/plugins-reference', accessed_on: '2026-07-10' }
+    license_disposition: metadata_only_no_copy
+    finding: Claude Code plugins can bundle skills, commands, agents, hooks, and MCP configuration with host-specific namespaces and settings.
+    conformance: { case_ref: HOST-CONFORMANCE-004, outcome: documented_only, reference: generated Claude bundle contract }
+    review: { reviewer: PR2A host-evidence reviewer, reviewed_on: '2026-07-10', expires_on: '2026-10-10' }
+    sanitization_receipt: sanitization-receipt-host-evidence-004
+    retrieval_anchors: ['https://code.claude.com/docs/en/plugins-reference']
+  - entry_id: host-evidence-claude-hook
+    host_profile: claude-code
+    surface: hook
+    host_version_range: official documentation snapshot 2026-07-10
+    capability_code: HOST_LIFECYCLE_HOOK
+    evidence_state: documented
+    source: { kind: official_documentation, canonical_url: 'https://code.claude.com/docs/en/hooks', accessed_on: '2026-07-10' }
+    license_disposition: metadata_only_no_copy
+    finding: Claude Code hook event and response shapes are host-specific and require generated adapters rather than shared raw fields.
+    conformance: { case_ref: HOST-CONFORMANCE-005, outcome: documented_only, reference: generated hook adapter contract }
+    review: { reviewer: PR2A host-evidence reviewer, reviewed_on: '2026-07-10', expires_on: '2026-10-10' }
+    sanitization_receipt: sanitization-receipt-host-evidence-005
+    retrieval_anchors: ['https://code.claude.com/docs/en/hooks']
+  - entry_id: host-evidence-cursor-plugin-schema
+    host_profile: cursor
+    surface: plugin
+    host_version_range: schema commit 0dda29e839d15464a137af9935665a5a47ee09b8
+    capability_code: HOST_PLUGIN_BUNDLE
+    evidence_state: documented
+    source:
+      kind: official_repository_schema
+      canonical_url: 'https://github.com/cursor/plugins/blob/0dda29e839d15464a137af9935665a5a47ee09b8/schemas/plugin.schema.json'
+      accessed_on: '2026-07-10'
+      repository_commit: 0dda29e839d15464a137af9935665a5a47ee09b8
+      repository_path: schemas/plugin.schema.json
+    license_disposition: mit_metadata_only
+    finding: Cursor plugins declare rules, skills, agents, commands, hooks, and MCP surfaces in an official pinned schema.
+    conformance: { case_ref: HOST-CONFORMANCE-006, outcome: documented_only, reference: generated Cursor bundle contract }
+    review: { reviewer: PR2A host-evidence reviewer, reviewed_on: '2026-07-10', expires_on: '2026-10-10' }
+    sanitization_receipt: sanitization-receipt-host-evidence-006
+    retrieval_anchors: ['https://github.com/cursor/plugins/blob/0dda29e839d15464a137af9935665a5a47ee09b8/schemas/plugin.schema.json']
