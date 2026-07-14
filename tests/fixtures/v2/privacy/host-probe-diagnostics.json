@@ -1,9 +1,0 @@
-{
-  "schema_version": 1,
-  "fixture_id": "privacy-host-probe-diagnostics-v1",
-  "surface_id": "host-probe-diagnostics",
-  "artifact_class": "probe-diagnostic-inventory",
-  "coverage": ["discovery", "classification", "receipt-binding"],
-  "receipt_ref": "target/v2-privacy/receipts/hosts/host-probe-diagnostics.json",
-  "metadata_only": true
-}

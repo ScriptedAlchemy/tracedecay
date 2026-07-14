@@ -1,4 +1,0 @@
-interface:
-  display_name: "Deliver TraceDecay V2"
-  short_description: "Implement the next bounded V2 product outcome"
-  default_prompt: "Use $executing-tracedecay-v2-plan to implement the named TraceDecay V2 product outcome with bounded agents and focused tests."

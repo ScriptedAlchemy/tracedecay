@@ -13,6 +13,7 @@ use tracedecay_domain::research::{
     ShardDispositionV1, ShardId, WatermarkDriftV1,
 };
 
+#[path = "research_anchors/support.rs"]
 mod support;
 
 use support::*;

@@ -1,9 +1,0 @@
-{
-  "schema_version": 1,
-  "fixture_id": "privacy-host-owned-config-backups-v1",
-  "surface_id": "host-owned-config-backups",
-  "artifact_class": "owned-config-backup-inventory",
-  "coverage": ["discovery", "classification", "receipt-binding"],
-  "receipt_ref": "target/v2-privacy/receipts/hosts/host-owned-config-backups.json",
-  "metadata_only": true
-}

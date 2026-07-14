@@ -1,9 +1,0 @@
-{
-  "schema_version": 1,
-  "fixture_id": "privacy-host-marketplace-artifacts-v1",
-  "surface_id": "host-marketplace-artifacts",
-  "artifact_class": "marketplace-artifact-inventory",
-  "coverage": ["discovery", "classification", "receipt-binding"],
-  "receipt_ref": "target/v2-privacy/receipts/hosts/host-marketplace-artifacts.json",
-  "metadata_only": true
-}
