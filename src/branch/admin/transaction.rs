@@ -241,19 +241,7 @@ where
                 if expected_present {
                     require_regular_file(&source, "branch store family member")?;
                     require_missing(&quarantine, "branch deletion quarantine")?;
-                    std::fs::rename(&source, &quarantine).map_err(|error| {
-                        config_error(format!(
-                            "failed to quarantine branch store file '{}' as '{}': {error}",
-                            source.display(),
-                            quarantine.display()
-                        ))
-                    })?;
-                    sync_directory(source.parent().ok_or_else(|| {
-                        config_error(format!(
-                            "branch store path '{}' has no parent",
-                            source.display()
-                        ))
-                    })?)?;
+                    move_file_durably(&source, &quarantine, "branch store quarantine")?;
                     moved += 1;
                     hook(TransactionPhase::AfterMove(moved))?;
                 } else {
@@ -590,6 +578,24 @@ fn quarantine_family_paths(database: &Path, transaction_id: &str) -> Result<[Pat
     Ok([database, PathBuf::from(wal), PathBuf::from(shm)])
 }
 
+fn move_file_durably(source: &Path, destination: &Path, record_name: &str) -> Result<()> {
+    crate::db::DatabaseAuthority::replace_file_atomically(source, destination, record_name)
+        .map_err(|error| {
+            config_error(format!(
+                "failed to move '{}' to '{}' for {record_name}: {error}",
+                source.display(),
+                destination.display()
+            ))
+        })?;
+    let parent = destination.parent().ok_or_else(|| {
+        config_error(format!(
+            "branch store path '{}' has no parent",
+            destination.display()
+        ))
+    })?;
+    sync_directory(parent)
+}
+
 fn rollback_files(tracedecay_dir: &Path, journal: &DeletionJournal) -> Result<()> {
     let states = journal
         .entries
@@ -615,19 +621,7 @@ fn rollback_files(tracedecay_dir: &Path, journal: &DeletionJournal) -> Result<()
     for family in states.into_iter().rev() {
         for (source, quarantine, expected_present) in family.into_iter().rev() {
             if expected_present && quarantine.exists() {
-                std::fs::rename(&quarantine, &source).map_err(|error| {
-                    config_error(format!(
-                        "failed to restore quarantined branch store '{}' to '{}': {error}",
-                        quarantine.display(),
-                        source.display()
-                    ))
-                })?;
-                sync_directory(source.parent().ok_or_else(|| {
-                    config_error(format!(
-                        "branch store path '{}' has no parent",
-                        source.display()
-                    ))
-                })?)?;
+                move_file_durably(&quarantine, &source, "branch store quarantine rollback")?;
             }
         }
     }

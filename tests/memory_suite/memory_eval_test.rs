@@ -229,7 +229,8 @@ struct FixtureSnapshot {
 
 #[cfg(windows)]
 impl FixtureSnapshot {
-    fn capture(fixture: &Fixture) -> Self {
+    fn capture(fixture: &mut Fixture) -> Self {
+        fixture.stop_daemon();
         let dir = TempDir::new().expect("fixture snapshot tempdir");
         let profile_path = dir.path().join(".tracedecay");
         std::fs::create_dir_all(&profile_path).unwrap_or_else(|e| {
@@ -239,13 +240,15 @@ impl FixtureSnapshot {
             )
         });
         copy_dir_contents(&fixture.home_path.join(".tracedecay"), &profile_path);
+        fixture.start_daemon();
         Self {
             _dir: dir,
             profile_path,
         }
     }
 
-    fn restore_into(&self, fixture: &Fixture) {
+    fn restore_into(&self, fixture: &mut Fixture) {
+        fixture.stop_daemon();
         let profile_path = fixture.home_path.join(".tracedecay");
         if profile_path.exists() {
             std::fs::remove_dir_all(&profile_path).unwrap_or_else(|e| {
@@ -262,10 +265,21 @@ impl FixtureSnapshot {
             )
         });
         copy_dir_contents(&self.profile_path, &profile_path);
+        fixture.start_daemon();
     }
 }
 
 impl Fixture {
+    fn start_daemon(&mut self) {
+        assert!(self._daemon.is_none(), "fixture daemon already running");
+        self._daemon = Some(common::spawn_tracedecay_daemon(&self.home_path));
+    }
+
+    #[cfg(windows)]
+    fn stop_daemon(&mut self) {
+        drop(self._daemon.take());
+    }
+
     fn db_path(&self) -> PathBuf {
         tracedecay::storage::resolve_layout(&self.project_path, &self.home_path.join(".tracedecay"))
             .expect("resolve fixture storage layout")
@@ -534,7 +548,7 @@ fn build_fixture(setup: &Setup) -> Fixture {
     }
     initialize_fixture_project(&fixture);
     seed_setup_facts(&fixture, &setup.facts);
-    fixture._daemon = Some(common::spawn_tracedecay_daemon(&fixture.home_path));
+    fixture.start_daemon();
     fixture
 }
 
@@ -816,7 +830,7 @@ fn run_scenario(id: &str) {
     #[cfg(windows)]
     let baseline_snapshot =
         if !well_behaved_steps.is_empty() && scenario.deterministic.violation.is_some() {
-            Some(FixtureSnapshot::capture(&fixture))
+            Some(FixtureSnapshot::capture(&mut fixture))
         } else {
             None
         };
@@ -854,7 +868,7 @@ fn run_scenario(id: &str) {
     if !well_behaved_steps.is_empty() {
         #[cfg(windows)]
         if let Some(snapshot) = &baseline_snapshot {
-            snapshot.restore_into(&fixture);
+            snapshot.restore_into(&mut fixture);
         }
         #[cfg(not(windows))]
         {
