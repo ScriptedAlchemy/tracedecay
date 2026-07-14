@@ -266,7 +266,11 @@ def main():
     added = unwrap_tool_json(
         provider.handle_tool_call(
             "fact_add",
-            {"content": "stock hermes integration verified", "fact_type": "decision"},
+            {
+                "content": "stock hermes integration verified",
+                "fact_type": "decision",
+                "format": "json",
+            },
         )
     )
     fact = added.get("fact") or {}
@@ -278,6 +282,7 @@ def main():
                 "action": "search",
                 "query": "stock hermes integration",
                 "limit": 1,
+                "format": "json",
             },
         )
     )
@@ -313,19 +318,19 @@ def main():
     unwrap_tool_json(
         other_provider.handle_tool_call(
             "fact_add",
-            {"content": isolation_marker, "fact_type": "decision"},
+            {"content": isolation_marker, "fact_type": "decision", "format": "json"},
         )
     )
     first_project_result = unwrap_tool_json(
         provider.handle_tool_call(
             "fact_store",
-            {"action": "list", "limit": 200},
+            {"action": "list", "limit": 200, "format": "json"},
         )
     )
     second_project_result = unwrap_tool_json(
         other_provider.handle_tool_call(
             "fact_store",
-            {"action": "list", "limit": 200},
+            {"action": "list", "limit": 200, "format": "json"},
         )
     )
     first_contents = {
@@ -375,6 +380,7 @@ def main():
                 "action": "search",
                 "query": "on-memory-write mirror",
                 "limit": 1,
+                "format": "json",
             },
         )
     )
