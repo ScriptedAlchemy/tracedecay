@@ -675,7 +675,7 @@ fn cleanup_files(tracedecay_dir: &Path, journal: &DeletionJournal) -> Result<()>
             let source_exists = inspect_regular_file(source, "branch store family member")?;
             let quarantine_exists = inspect_regular_file(quarantine, "branch deletion quarantine")?;
             match (*expected_present, source_exists, quarantine_exists) {
-                (true, false, true) | (true, false, false) | (false, false, false) => {}
+                (true, false, true | false) | (false, false, false) => {}
                 _ => {
                     return Err(config_error(format!(
                         "cannot clean committed branch deletion transaction '{}': ambiguous source/quarantine state for '{}'",

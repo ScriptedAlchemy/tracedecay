@@ -2,80 +2,11 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
-use std::future::Future;
-use std::pin::Pin;
-use std::sync::Arc;
-
 use serde_json::{Value, json};
 
 use super::DashboardState;
 use super::memory_service::{push_curation_activity, push_curation_activity_with_level};
 use crate::sessions::lcm::{LcmGrepSort, LcmScope};
-
-pub(crate) struct DashboardAutomationWriteRequest {
-    state: DashboardState,
-    operation: DashboardAutomationOperation,
-}
-
-pub(crate) enum DashboardAutomationOperation {
-    MemoryCurator {
-        request: MemoryCuratorRunRequest,
-        run_id: Option<String>,
-    },
-    SessionReflection {
-        request: SessionReflectionRunRequest,
-        run_id: Option<String>,
-    },
-    SkillWriting {
-        request: SkillWritingRunRequest,
-        run_id: Option<String>,
-    },
-}
-
-/// Injectable lifetime boundary for complete dashboard automation writes.
-///
-/// No writable [`crate::tracedecay::TraceDecay`] handle crosses this callback.
-pub(crate) type DashboardAutomationWriter = Arc<
-    dyn Fn(
-            DashboardAutomationWriteRequest,
-        ) -> Pin<Box<dyn Future<Output = Result<Value, String>> + Send>>
-        + Send
-        + Sync
-        + 'static,
->;
-
-pub(crate) fn direct_dashboard_automation_writer() -> DashboardAutomationWriter {
-    Arc::new(|request| Box::pin(execute_dashboard_automation_run_direct(request)))
-}
-
-pub(crate) async fn execute_dashboard_automation_run_direct(
-    request: DashboardAutomationWriteRequest,
-) -> Result<Value, String> {
-    let DashboardAutomationWriteRequest { state, operation } = request;
-    match operation {
-        DashboardAutomationOperation::MemoryCurator { request, run_id } => {
-            memory_curator_run_payload_direct(&state, request, run_id).await
-        }
-        DashboardAutomationOperation::SessionReflection { request, run_id } => {
-            session_reflection_run_payload_direct(&state, request, run_id).await
-        }
-        DashboardAutomationOperation::SkillWriting { request, run_id } => {
-            skill_writing_run_payload_direct(&state, request, run_id).await
-        }
-    }
-}
-
-async fn run_dashboard_automation(
-    state: &DashboardState,
-    operation: DashboardAutomationOperation,
-) -> Result<Value, String> {
-    let writer = Arc::clone(&state.automation_writer);
-    writer(DashboardAutomationWriteRequest {
-        state: state.clone(),
-        operation,
-    })
-    .await
-}
 
 pub(crate) type DashboardAutomationWriteFuture =
     Pin<Box<dyn Future<Output = Result<Value, String>> + Send + 'static>>;
@@ -88,7 +19,7 @@ pub(crate) type DashboardAutomationWriter = Arc<
         + 'static,
 >;
 
-fn execute_dashboard_automation_run_direct(
+pub(crate) fn execute_dashboard_automation_run_direct(
     operation: DashboardAutomationWriteOperation,
 ) -> DashboardAutomationWriteFuture {
     operation()

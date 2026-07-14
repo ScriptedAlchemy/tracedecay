@@ -656,10 +656,11 @@ fn filesystem_rust_sources(
                     pending.push(entry.path());
                 } else if file_type.is_file() && entry.path().extension() == Some(OsStr::new("rs"))
                 {
-                    let relative = entry.path().strip_prefix(repository).map_err(|_| {
+                    let entry_path = entry.path();
+                    let relative = entry_path.strip_prefix(repository).map_err(|_| {
                         format!(
                             "source path is outside repository: {}",
-                            entry.path().display()
+                            entry_path.display()
                         )
                     })?;
                     sources.insert(normalize_relative(relative)?);
