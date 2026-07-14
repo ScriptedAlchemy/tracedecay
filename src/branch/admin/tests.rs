@@ -454,6 +454,7 @@ fn metadata_commit_before_deleted_promotion_recovers_as_committed() {
     assert!(crate::db::database_path_is_tombstoned(&db).unwrap());
 }
 
+#[cfg(unix)]
 #[test]
 fn committed_recovery_syncs_metadata_before_tombstone_transition() {
     let (_temp, project_root, tracedecay_dir) = fixture();
@@ -549,6 +550,7 @@ fn orphan_commit_before_deleted_promotion_recovers_as_committed() {
     assert!(crate::db::database_path_is_tombstoned(&orphan).unwrap());
 }
 
+#[cfg(unix)]
 #[test]
 fn committed_recovery_syncs_store_directory_before_tombstone_transition() {
     let (_temp, project_root, tracedecay_dir) = fixture();

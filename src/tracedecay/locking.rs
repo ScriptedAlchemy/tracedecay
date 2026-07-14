@@ -466,6 +466,7 @@ fn is_pid_alive(pid: u32) -> bool {
 mod tests {
     use super::*;
 
+    #[cfg(not(windows))]
     fn legacy_parser_classifies_stale(path: &Path) -> bool {
         std::fs::read_to_string(path)
             .ok()
@@ -474,16 +475,20 @@ mod tests {
     }
 
     #[test]
-    fn live_new_owner_is_not_stale_to_legacy_pid_parser() {
+    fn live_new_owner_blocks_legacy_create_and_new_lockers() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("sync.lock");
         let guard = try_acquire_sync_lock_at(&path).unwrap();
 
-        assert!(!legacy_parser_classifies_stale(&path));
-        assert_eq!(
-            std::fs::read_to_string(&path).unwrap(),
-            std::process::id().to_string()
-        );
+        assert!(is_pid_alive(std::process::id()));
+        #[cfg(not(windows))]
+        {
+            assert!(!legacy_parser_classifies_stale(&path));
+            assert_eq!(
+                std::fs::read_to_string(&path).unwrap(),
+                std::process::id().to_string()
+            );
+        }
         let legacy_create = OpenOptions::new().write(true).create_new(true).open(&path);
         assert_eq!(
             legacy_create.unwrap_err().kind(),

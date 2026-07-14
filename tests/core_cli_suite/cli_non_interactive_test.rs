@@ -393,7 +393,7 @@ fn init_skips_gitignore_prompt_when_stdin_not_a_terminal() {
     std::fs::create_dir_all(project.path().join("src")).unwrap();
     std::fs::write(project.path().join("src/lib.rs"), "pub fn marker() {}\n").unwrap();
 
-    let mut command = tracedecay_command_without_daemon(home.path(), project.path());
+    let mut command = tracedecay_command(home.path(), project.path());
     command.arg("init");
     let output = run_with_timeout(command, cli_timeout());
 
@@ -1782,7 +1782,6 @@ fn migrate_registry_gc_cleans_stale_storage_metadata_and_preserves_live_and_bloc
     std::fs::create_dir_all(&live_project).expect("live project dir");
     std::fs::write(live_project.join("lib.rs"), "pub fn live() {}\n").expect("live source");
 
-    #[cfg(unix)]
     let daemon = crate::common::spawn_tracedecay_daemon(home.path());
     let init = tracedecay_command_without_daemon(home.path(), &live_project)
         .args(["init", "."])
@@ -1794,7 +1793,6 @@ fn migrate_registry_gc_cleans_stale_storage_metadata_and_preserves_live_and_bloc
         String::from_utf8_lossy(&init.stdout),
         String::from_utf8_lossy(&init.stderr)
     );
-    #[cfg(unix)]
     drop(daemon);
 
     let stale_project = canonical_temp_path(home.path()).join("gone-project");

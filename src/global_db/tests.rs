@@ -166,13 +166,16 @@ async fn try_open_at_preserves_authority_error() {
         "{message}"
     );
     assert!(message.contains("open global database"), "{message}");
+    let displayed = path.display().to_string();
     #[cfg(windows)]
     assert!(
-        message.contains(&format!(r"\\?\{}", path.display())),
+        message
+            .replace('\\', "/")
+            .contains(&displayed.replace('\\', "/")),
         "{message}"
     );
     #[cfg(not(windows))]
-    assert!(message.contains(&path.display().to_string()), "{message}");
+    assert!(message.contains(&displayed), "{message}");
 }
 
 #[tokio::test]

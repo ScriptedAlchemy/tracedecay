@@ -253,6 +253,7 @@ async fn replayed_provider_hooks_record_attributed_rows_and_bridge_to_analytics_
                 .success()
         );
     }
+    let daemon = spawn_tracedecay_daemon(&home_root);
     let init = tracedecay_command_with_home(&home_root)
         .arg("init")
         .current_dir(&project_root)
@@ -315,7 +316,6 @@ async fn replayed_provider_hooks_record_attributed_rows_and_bridge_to_analytics_
     );
 
     // Bridge: `analytics sync` imports the JSONL rows into the durable table.
-    let daemon = spawn_tracedecay_daemon(&home_root);
     let sync = tracedecay_command_with_home(&home_root)
         .args(["analytics", "sync"])
         .current_dir(&project_root)
