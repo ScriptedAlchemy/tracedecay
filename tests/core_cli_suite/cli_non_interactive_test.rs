@@ -1924,6 +1924,7 @@ fn migrate_export_from_profile_copies_profile_store_to_target() {
     let project = TempDir::new().unwrap();
     let project_root = canonical_temp_path(project.path());
     write_profile_sharded_fixture(home.path(), &project_root);
+    let source_db = profile_shard_root(home.path()).join("tracedecay.db");
     let export_dir = canonical_temp_path(home.path()).join("exported-store");
 
     let mut command = tracedecay_command_without_daemon(home.path(), &project_root);
@@ -1944,7 +1945,13 @@ fn migrate_export_from_profile_copies_profile_store_to_target() {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    assert!(export_dir.join("tracedecay.db").is_file());
+    let exported_db = export_dir.join("tracedecay.db");
+    assert!(exported_db.is_file());
+    assert_eq!(
+        std::fs::read(&exported_db).unwrap(),
+        std::fs::read(&source_db).unwrap(),
+        "exported graph database must match the source snapshot"
+    );
     let exported_manifest =
         tracedecay::storage::read_store_manifest(&export_dir.join(STORE_MANIFEST_FILENAME))
             .unwrap();

@@ -99,22 +99,10 @@ pub(super) async fn handle_admin_cli(
 
 pub(crate) async fn handle_projectless_admin_cli(
     args: Value,
-    profile_root: &Path,
+    global_db: &GlobalDb,
 ) -> Result<ToolResult> {
     let action = parse_admin_cli_action(args)?;
-    let global_db_path = profile_root.join("global.db");
-    let mut global_db = None;
-    for _ in 0..40 {
-        global_db = GlobalDb::open_at(&global_db_path).await;
-        if global_db.is_some() {
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
-    }
-    let global_db = global_db.ok_or_else(|| TraceDecayError::Config {
-        message: "daemon global database is unavailable".to_string(),
-    })?;
-    dispatch_admin_cli(AdminCliContext::projectless(&global_db), action).await
+    dispatch_admin_cli(AdminCliContext::projectless(global_db), action).await
 }
 
 fn parse_admin_cli_action(args: Value) -> Result<AdminCliAction> {

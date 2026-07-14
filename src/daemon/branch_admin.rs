@@ -30,6 +30,7 @@ type ExternalHolderVerifier = fn(&[PathBuf]) -> Result<()>;
 pub(super) struct StoreAdministration {
     gate: Arc<tokio::sync::Mutex<()>>,
     project_servers: Arc<tokio::sync::Mutex<DatabaseOwnerRegistry>>,
+    global_databases: Arc<tokio::sync::Mutex<HashMap<PathBuf, Arc<crate::global_db::GlobalDb>>>>,
     automation_schedulers:
         Arc<tokio::sync::Mutex<HashMap<ProjectServerKey, AutomationSchedulerHandle>>>,
     #[cfg(test)]
@@ -41,6 +42,7 @@ impl Default for StoreAdministration {
         Self {
             gate: Arc::new(tokio::sync::Mutex::new(())),
             project_servers: Arc::new(tokio::sync::Mutex::new(DatabaseOwnerRegistry::default())),
+            global_databases: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             automation_schedulers: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             #[cfg(test)]
             external_holder_verifier: None,
@@ -71,6 +73,36 @@ impl StoreAdministration {
 
     pub(super) fn project_servers(&self) -> &Arc<tokio::sync::Mutex<DatabaseOwnerRegistry>> {
         &self.project_servers
+    }
+
+    pub(super) async fn global_database(
+        &self,
+        path: &Path,
+    ) -> Result<Arc<crate::global_db::GlobalDb>> {
+        let path = authority::canonical_identity_path(path)?;
+        let mut global_databases = self.global_databases.lock().await;
+        if let Some(database) = global_databases.get(&path) {
+            return Ok(Arc::clone(database));
+        }
+        let mut database = None;
+        for attempt in 0..40 {
+            match crate::global_db::GlobalDb::try_open_at(&path).await? {
+                Some(opened) => {
+                    database = Some(opened);
+                    break;
+                }
+                None if attempt < 39 => {
+                    tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+                }
+                None => break,
+            }
+        }
+        let database = database.ok_or_else(|| TraceDecayError::Config {
+            message: format!("daemon global database '{}' is unavailable", path.display()),
+        })?;
+        let database = Arc::new(database);
+        global_databases.insert(path, Arc::clone(&database));
+        Ok(database)
     }
 
     pub(super) fn automation_schedulers(

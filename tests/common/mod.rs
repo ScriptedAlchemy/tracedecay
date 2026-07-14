@@ -452,6 +452,12 @@ pub struct DaemonProcess {
     child: Child,
 }
 
+impl DaemonProcess {
+    fn is_running(&mut self) -> bool {
+        matches!(self.child.try_wait(), Ok(None))
+    }
+}
+
 impl Drop for DaemonProcess {
     fn drop(&mut self) {
         let _ = self.child.kill();
@@ -490,7 +496,7 @@ pub fn ensure_tracedecay_daemon(home: &Path) {
     let home = canonical_existing_path(home);
     TEST_DAEMONS.with(|daemons| {
         let mut daemons = daemons.borrow_mut();
-        daemons.retain(|existing_home, _| existing_home == &home);
+        daemons.retain(|existing_home, daemon| existing_home == &home && daemon.is_running());
         daemons
             .entry(home.clone())
             .or_insert_with(|| spawn_tracedecay_daemon(&home));

@@ -2277,8 +2277,13 @@ impl DaemonEngine {
             return Ok((key, canonical_project_path, server));
         }
 
-        let accounting_db = accounting_db_for_handshake(handshake).await?;
-        let registry_db = registry_db_for_handshake(handshake).await?;
+        let registry_db = self
+            .store_administration
+            .global_database(&handshake.client_identity.global_db_path)
+            .await?;
+        let accounting_db =
+            crate::global_db::global_accounting_enabled().then(|| Arc::clone(&registry_db));
+        let registry_db = Some(registry_db);
         let current_key = Arc::new(tokio::sync::Mutex::new(key.clone()));
         let route_registered = Arc::new(AtomicBool::new(true));
         let reconciler = self.automation_scheduler_reconciler(
@@ -2462,6 +2467,7 @@ async fn serve_authenticated_socket_client(
 async fn apply_daemon_initialize_route(
     handshake: &mut DaemonHandshake,
     first_request_line: &str,
+    store_administration: &StoreAdministration,
 ) -> Result<Option<InitializeRouteMetadata>> {
     if !handshake.allow_initialize_root_routing {
         return Ok(None);
@@ -2472,10 +2478,11 @@ async fn apply_daemon_initialize_route(
     if request.method != "initialize" {
         return Ok(None);
     }
-    let registry =
-        crate::global_db::GlobalDb::try_open_at(&handshake.client_identity.global_db_path).await?;
+    let registry = store_administration
+        .global_database(&handshake.client_identity.global_db_path)
+        .await?;
     let Some(route) =
-        resolve_daemon_initialize_route(request.params.as_ref(), registry.as_ref()).await
+        resolve_daemon_initialize_route(request.params.as_ref(), Some(&registry)).await
     else {
         return Ok(None);
     };
@@ -2566,8 +2573,12 @@ async fn serve_broker_socket_client(
     let Some(first_request_line) = first_request_line else {
         return Ok(());
     };
-    let initialize_route =
-        apply_daemon_initialize_route(&mut handshake, &first_request_line).await?;
+    let initialize_route = apply_daemon_initialize_route(
+        &mut handshake,
+        &first_request_line,
+        &engine.store_administration,
+    )
+    .await?;
     if let Some(request) = parse_branch_admin_request(&first_request_line) {
         let result = match request.action.clone() {
             Ok(action) => engine.execute_branch_admin(&handshake, action).await,
@@ -2643,6 +2654,7 @@ async fn serve_broker_socket_client(
             &mut transport,
             &handshake.client_identity,
             &engine.lifecycle,
+            &engine.store_administration,
         )
         .await?;
     }
@@ -2682,7 +2694,8 @@ async fn serve_windows_broker_client(
         return Ok(());
     };
     let initialize_route =
-        apply_daemon_initialize_route(&mut handshake, &first_request_line).await?;
+        apply_daemon_initialize_route(&mut handshake, &first_request_line, &store_administration)
+            .await?;
     if let Some(request) = parse_branch_admin_request(&first_request_line) {
         let result = match request.action.clone() {
             Ok(action) => {
@@ -2749,7 +2762,13 @@ async fn serve_windows_broker_client(
         drop(setup_activity);
         let mut transport = ReplayTransport::new(transport);
         transport.push_replay(first_request_line);
-        serve_projectless_client(&mut transport, &handshake.client_identity, lifecycle).await?;
+        serve_projectless_client(
+            &mut transport,
+            &handshake.client_identity,
+            lifecycle,
+            &store_administration,
+        )
+        .await?;
     }
     Ok(())
 }
@@ -2816,8 +2835,12 @@ async fn portable_project_server(
         Arc::clone(&route_registered),
         handshake.clone(),
     );
-    let accounting_db = accounting_db_for_handshake(handshake).await?;
-    let registry_db = registry_db_for_handshake(handshake).await?;
+    let registry_db = store_administration
+        .global_database(&handshake.client_identity.global_db_path)
+        .await?;
+    let accounting_db =
+        crate::global_db::global_accounting_enabled().then(|| Arc::clone(&registry_db));
+    let registry_db = Some(registry_db);
     let candidate = crate::mcp::McpServer::new_with_dbs_and_reconcilers_and_writers(
         cg,
         handshake.scope_prefix.clone(),
@@ -2929,27 +2952,6 @@ async fn open_existing_project_with_options(
     }
 }
 
-async fn accounting_db_for_handshake(
-    handshake: &DaemonHandshake,
-) -> Result<Option<Arc<crate::global_db::GlobalDb>>> {
-    if !crate::global_db::global_accounting_enabled() {
-        return Ok(None);
-    }
-    crate::global_db::GlobalDb::try_open_at(&handshake.client_identity.global_db_path)
-        .await
-        .map(|db| db.map(Arc::new))
-}
-
-async fn registry_db_for_handshake(
-    handshake: &DaemonHandshake,
-) -> Result<Option<Arc<crate::global_db::GlobalDb>>> {
-    Ok(
-        crate::global_db::GlobalDb::open_read_only_at(&handshake.client_identity.global_db_path)
-            .await
-            .map(Arc::new),
-    )
-}
-
 async fn write_project_open_error(
     transport: &mut impl McpTransport,
     error: &TraceDecayError,
@@ -2986,6 +2988,7 @@ async fn serve_projectless_client(
     transport: &mut impl McpTransport,
     client_identity: &DaemonClientIdentity,
     lifecycle: &DaemonLifecycle,
+    store_administration: &StoreAdministration,
 ) -> Result<()> {
     loop {
         let line = tokio::select! {
@@ -2999,7 +3002,9 @@ async fn serve_projectless_client(
             break;
         };
         let response = match serde_json::from_str::<JsonRpcRequest>(&line) {
-            Ok(request) => projectless_response(&request, client_identity).await,
+            Ok(request) => {
+                projectless_response(&request, client_identity, store_administration).await
+            }
             Err(e) => Some(JsonRpcResponse::error(
                 json!(null),
                 ErrorCode::ParseError,
@@ -3019,6 +3024,7 @@ async fn serve_projectless_client(
 async fn projectless_response(
     request: &crate::mcp::JsonRpcRequest,
     client_identity: &DaemonClientIdentity,
+    store_administration: &StoreAdministration,
 ) -> Option<crate::mcp::JsonRpcResponse> {
     let id = request.id.clone()?;
     match request.method.as_str() {
@@ -3038,7 +3044,13 @@ async fn projectless_response(
             }),
         )),
         "tools/call" => Some(
-            projectless_tools_call_response(id, request.params.as_ref(), client_identity).await,
+            projectless_tools_call_response(
+                id,
+                request.params.as_ref(),
+                client_identity,
+                store_administration,
+            )
+            .await,
         ),
         "ping" | "logging/setLevel" => Some(JsonRpcResponse::success(id, json!({}))),
         _ => Some(JsonRpcResponse::error(
@@ -3053,6 +3065,7 @@ async fn projectless_tools_call_response(
     id: serde_json::Value,
     params: Option<&serde_json::Value>,
     client_identity: &DaemonClientIdentity,
+    store_administration: &StoreAdministration,
 ) -> crate::mcp::JsonRpcResponse {
     let (tool_name, arguments) = match projectless_tool_call(params) {
         Ok(tool_call) => tool_call,
@@ -3072,12 +3085,16 @@ async fn projectless_tools_call_response(
         };
     }
     if tool_name == "tracedecay_admin_cli" {
-        return match crate::mcp::tools::handle_projectless_admin_cli(
-            arguments,
-            &client_identity.profile_root,
-        )
-        .await
+        let global_db = match store_administration
+            .global_database(&client_identity.global_db_path)
+            .await
         {
+            Ok(global_db) => global_db,
+            Err(error) => {
+                return JsonRpcResponse::error(id, ErrorCode::InternalError, error.to_string());
+            }
+        };
+        return match crate::mcp::tools::handle_projectless_admin_cli(arguments, &global_db).await {
             Ok(result) => JsonRpcResponse::success(id, result.value),
             Err(error) => JsonRpcResponse::error(id, ErrorCode::InternalError, error.to_string()),
         };
