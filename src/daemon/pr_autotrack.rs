@@ -43,9 +43,22 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use tokio::time::Instant;
 
+use crate::branch::{BranchAdminAction, BranchAdminOutcome};
 use crate::tracedecay::{TraceDecay, TraceDecayOpenOptions};
 
+use super::branch_admin::StoreAdministration;
 use super::log_daemon_event;
+
+#[derive(Clone, Copy)]
+struct PrStoreAdministration<'a> {
+    daemon: &'a StoreAdministration,
+}
+
+impl<'a> PrStoreAdministration<'a> {
+    fn new(daemon: &'a StoreAdministration) -> Self {
+        Self { daemon }
+    }
+}
 
 /// Filename of the PR-autotrack state sidecar, stored next to `branch-meta.json`
 /// in the project's store data root.
@@ -450,6 +463,19 @@ pub async fn reconcile_project(
     discovery: &PrDiscovery,
     cap: usize,
 ) -> ReconcileReport {
+    let administration = StoreAdministration::default();
+    let administration = PrStoreAdministration::new(&administration);
+    reconcile_project_with_administration(repo_root, data_root, discovery, cap, administration)
+        .await
+}
+
+async fn reconcile_project_with_administration(
+    repo_root: &Path,
+    data_root: &Path,
+    discovery: &PrDiscovery,
+    cap: usize,
+    administration: PrStoreAdministration<'_>,
+) -> ReconcileReport {
     let mut state = load_state(data_root);
     let mut report = ReconcileReport {
         skipped_forks: discovery.skipped_forks.clone(),
@@ -487,7 +513,7 @@ pub async fn reconcile_project(
         // whose PR is neither open nor managed is an orphan left by a daemon
         // crash between `worktree add` and `save_state`. Remove it so stale
         // worktrees don't accumulate on disk across restarts.
-        sweep_orphan_pr_worktrees(repo_root, data_root, &desired, &state);
+        sweep_orphan_pr_worktrees(repo_root, data_root, &desired, &state, administration).await;
 
         let stale: Vec<String> = state
             .managed
@@ -496,20 +522,28 @@ pub async fn reconcile_project(
             .cloned()
             .collect();
         for label in stale {
-            if let Some(managed) = state.managed.get(&label).cloned() {
-                untrack_pr(repo_root, data_root, &label, &managed).await;
-                state.managed.remove(&label);
-                state_dirty = true;
-                report.untracked.push(label.clone());
-                log_daemon_event(
-                    "pr_autotrack",
-                    &[
-                        ("project", repo_root.display().to_string()),
-                        ("action", "untracked".to_string()),
-                        ("branch", label),
-                        ("pr", managed.pr.to_string()),
-                    ],
-                );
+            let Some(managed) = state.managed.get(&label).cloned() else {
+                continue;
+            };
+            match untrack_pr(repo_root, data_root, &label, &managed, administration).await {
+                Ok(()) => {
+                    state.managed.remove(&label);
+                    state_dirty = true;
+                    report.untracked.push(label.clone());
+                    log_daemon_event(
+                        "pr_autotrack",
+                        &[
+                            ("project", repo_root.display().to_string()),
+                            ("action", "untracked".to_string()),
+                            ("branch", label),
+                            ("pr", managed.pr.to_string()),
+                        ],
+                    );
+                }
+                Err(reason) => {
+                    report.failures.push((label.clone(), reason.clone()));
+                    log_pr_skip(repo_root, Some(&label), Some(managed.pr), &reason);
+                }
             }
         }
     }
@@ -535,11 +569,22 @@ pub async fn reconcile_project(
         if let Some(managed) = current {
             // A changed remote head invalidates the entire branch graph. Drop
             // the owned store before rebuilding so stale data is never served.
-            untrack_pr(repo_root, data_root, label, &managed).await;
-            state.managed.remove(label);
-            state_dirty = true;
+            // If removal is busy or fails, leave the old state and owned Git
+            // artifacts intact; tracking the new head would otherwise mix the
+            // two generations under one label.
+            match untrack_pr(repo_root, data_root, label, &managed, administration).await {
+                Ok(()) => {
+                    state.managed.remove(label);
+                    state_dirty = true;
+                }
+                Err(reason) => {
+                    report.failures.push((label.clone(), reason.clone()));
+                    log_pr_skip(repo_root, Some(label), Some(managed.pr), &reason);
+                    continue;
+                }
+            }
         }
-        match track_pr(repo_root, data_root, pr).await {
+        match track_pr(repo_root, data_root, pr, administration).await {
             Ok(managed) => {
                 let dirty_before_insert = state_dirty;
                 state.managed.insert(label.clone(), managed.clone());
@@ -562,12 +607,36 @@ pub async fn reconcile_project(
                         );
                     }
                     Err(error) => {
-                        state.managed.remove(label);
-                        state_dirty = dirty_before_insert;
-                        untrack_pr(repo_root, data_root, label, &managed).await;
-                        let reason = format!("failed to persist managed state: {error}");
-                        report.failures.push((label.clone(), reason.clone()));
-                        log_pr_skip(repo_root, Some(label), Some(pr.number), &reason);
+                        let persist_reason = format!("failed to persist managed state: {error}");
+                        match untrack_pr(repo_root, data_root, label, &managed, administration)
+                            .await
+                        {
+                            Ok(()) => {
+                                state.managed.remove(label);
+                                state_dirty = dirty_before_insert;
+                                report
+                                    .failures
+                                    .push((label.clone(), persist_reason.clone()));
+                                log_pr_skip(
+                                    repo_root,
+                                    Some(label),
+                                    Some(pr.number),
+                                    &persist_reason,
+                                );
+                            }
+                            Err(cleanup_reason) => {
+                                // The successfully-added branch remains owned and
+                                // recoverable. Do not drop it from in-memory state
+                                // before the coordinator has actually removed its
+                                // store, and expose both failures to the caller.
+                                state_dirty = dirty_before_insert;
+                                let reason = format!(
+                                    "{persist_reason}; rollback cleanup failed: {cleanup_reason}"
+                                );
+                                report.failures.push((label.clone(), reason.clone()));
+                                log_pr_skip(repo_root, Some(label), Some(pr.number), &reason);
+                            }
+                        }
                     }
                 }
             }
@@ -598,6 +667,7 @@ async fn track_pr(
     repo_root: &Path,
     data_root: &Path,
     pr: &DiscoveredPr,
+    administration: PrStoreAdministration<'_>,
 ) -> std::result::Result<ManagedPr, String> {
     let label = pr_label(pr.number);
     let tracking_ref = pr_tracking_ref(pr.number);
@@ -616,7 +686,7 @@ async fn track_pr(
     let validated_orphan =
         branch_ready && tracking_ref_ready && (!worktree.exists() || worktree_ready);
     if graph_ready || validated_orphan {
-        let _ = crate::branch::remove_tracked_branch_store(data_root, &label);
+        remove_pr_store(repo_root, data_root, &label, administration).await?;
         cleanup_pr_worktree(repo_root, data_root, pr.number, &pr.head_sha, true);
     }
 
@@ -625,20 +695,58 @@ async fn track_pr(
     let tref = tracking_ref.clone();
     let label_for_prep = label.clone();
     let expected_head = pr.head_sha.clone();
-    // git operations are blocking; keep them off the reactor.
-    let prep = tokio::task::spawn_blocking(move || {
+    // git operations are blocking; keep them off the reactor. A failed fetch or
+    // worktree add can still have left owned artifacts behind, so reconcile its
+    // store through the coordinator before attempting Git cleanup.
+    match tokio::task::spawn_blocking(move || {
         prepare_pr_worktree(&repo, &wt, &tref, &label_for_prep, &expected_head)
     })
     .await
-    .map_err(|e| format!("join error: {e}"))?;
-    prep?;
+    {
+        Ok(Ok(())) => {}
+        Ok(Err(reason)) => {
+            return cleanup_failed_track(
+                repo_root,
+                data_root,
+                pr.number,
+                &pr.head_sha,
+                &label,
+                administration,
+                &reason,
+            )
+            .await;
+        }
+        Err(error) => {
+            let reason = format!("worktree preparation join error: {error}");
+            return cleanup_failed_track(
+                repo_root,
+                data_root,
+                pr.number,
+                &pr.head_sha,
+                &label,
+                administration,
+                &reason,
+            )
+            .await;
+        }
+    }
 
-    match TraceDecay::add_branch_tracking_with_options(
-        &worktree,
-        &label,
-        TraceDecayOpenOptions::default(),
-    )
-    .await
+    // The branch add prepares metadata, syncs its new SQLite family, and then
+    // finalizes metadata. Construct its future only after the writer gate is
+    // acquired so a coordinator removal cannot observe a half-prepared branch.
+    let add_worktree = worktree.clone();
+    let add_label = label.clone();
+    match administration
+        .daemon
+        .with_writer(move || async move {
+            TraceDecay::add_branch_tracking_with_options(
+                &add_worktree,
+                &add_label,
+                TraceDecayOpenOptions::default(),
+            )
+            .await
+        })
+        .await
     {
         Ok(crate::branch::BranchAddOutcome::Added) => Ok(ManagedPr {
             pr: pr.number,
@@ -650,9 +758,8 @@ async fn track_pr(
         Ok(outcome) => {
             // Deferred may leave branch metadata behind. AlreadyTracked can
             // be an orphan from an interrupted prior cycle. Neither proves a
-            // completed sync, so clear only our internal label and retry later.
-            let _ = crate::branch::remove_tracked_branch_store(data_root, &label);
-            cleanup_pr_worktree(repo_root, data_root, pr.number, &pr.head_sha, true);
+            // completed sync, so remove its store through the coordinator
+            // before releasing the owned worktree/refs for a future retry.
             let reason = match outcome {
                 crate::branch::BranchAddOutcome::NotIndexed => "project not indexed",
                 crate::branch::BranchAddOutcome::AlreadyTracked => {
@@ -661,12 +768,84 @@ async fn track_pr(
                 crate::branch::BranchAddOutcome::Deferred => "branch tracking deferred",
                 crate::branch::BranchAddOutcome::Added => unreachable!(),
             };
-            Err(reason.to_string())
+            cleanup_failed_track(
+                repo_root,
+                data_root,
+                pr.number,
+                &pr.head_sha,
+                &label,
+                administration,
+                reason,
+            )
+            .await
         }
-        Err(e) => {
-            cleanup_pr_worktree(repo_root, data_root, pr.number, &pr.head_sha, true);
-            Err(e.to_string())
+        Err(error) => {
+            let reason = error.to_string();
+            cleanup_failed_track(
+                repo_root,
+                data_root,
+                pr.number,
+                &pr.head_sha,
+                &label,
+                administration,
+                &reason,
+            )
+            .await
         }
+    }
+}
+
+/// Removes a store selected by its known project layout. `Remove` does not use
+/// the retention values, so zero keeps this path independent of config/layout
+/// re-resolution while retaining the coordinator's safety checks.
+async fn remove_pr_store(
+    repo_root: &Path,
+    data_root: &Path,
+    label: &str,
+    administration: PrStoreAdministration<'_>,
+) -> std::result::Result<(), String> {
+    let report = administration
+        .daemon
+        .execute_branch_admin_in_layout(
+            repo_root,
+            data_root,
+            BranchAdminAction::Remove {
+                branch: label.to_string(),
+            },
+            0,
+            0,
+        )
+        .await
+        .map_err(|error| format!("branch-store removal failed: {error}"))?;
+    match report.outcome {
+        BranchAdminOutcome::Removed
+        | BranchAdminOutcome::NotTracked
+        | BranchAdminOutcome::NoTracking => Ok(()),
+        outcome @ BranchAdminOutcome::NoChanges => Err(format!(
+            "branch-store removal returned unexpected outcome {outcome:?}"
+        )),
+    }
+}
+
+/// Rolls back a failed branch add without deleting owned Git artifacts until
+/// the coordinator proves the corresponding branch store is gone.
+async fn cleanup_failed_track(
+    repo_root: &Path,
+    data_root: &Path,
+    pr: u64,
+    head_sha: &str,
+    label: &str,
+    administration: PrStoreAdministration<'_>,
+    original_reason: &str,
+) -> std::result::Result<ManagedPr, String> {
+    match remove_pr_store(repo_root, data_root, label, administration).await {
+        Ok(()) => {
+            cleanup_pr_worktree(repo_root, data_root, pr, head_sha, true);
+            Err(original_reason.to_string())
+        }
+        Err(cleanup_reason) => Err(format!(
+            "{original_reason}; failed to remove incomplete branch store: {cleanup_reason}"
+        )),
     }
 }
 
@@ -738,8 +917,15 @@ fn prepare_pr_worktree(
 }
 
 /// Untracks a managed PR: removes its branch store, its worktree, its local
-/// tracking branch, and its ref.
-async fn untrack_pr(repo_root: &Path, data_root: &Path, label: &str, managed: &ManagedPr) {
+/// tracking branch, and its ref. The Git artifacts are released only after the
+/// coordinator reports that the store is gone (or was already absent).
+async fn untrack_pr(
+    repo_root: &Path,
+    data_root: &Path,
+    label: &str,
+    managed: &ManagedPr,
+    administration: PrStoreAdministration<'_>,
+) -> std::result::Result<(), String> {
     let expected_label = pr_label(managed.pr);
     let legacy_label = format!("pr/{}", managed.pr);
     let is_legacy = label == legacy_label;
@@ -751,14 +937,9 @@ async fn untrack_pr(repo_root: &Path, data_root: &Path, label: &str, managed: &M
         || managed.worktree != expected_worktree
         || managed.tracking_ref != expected_ref
     {
-        return;
+        return Err("managed PR entry does not own the requested branch artifacts".to_string());
     }
-    let data = data_root.to_path_buf();
-    let label_owned = label.to_string();
-    let _ = tokio::task::spawn_blocking(move || {
-        crate::branch::remove_tracked_branch_store(&data, &label_owned)
-    })
-    .await;
+    remove_pr_store(repo_root, data_root, label, administration).await?;
     // `pr/<N>` is the pre-namespace persisted format. Remove its owned store
     // and worktree once, but never delete that ambiguous local branch name.
     cleanup_pr_worktree(
@@ -768,6 +949,7 @@ async fn untrack_pr(repo_root: &Path, data_root: &Path, label: &str, managed: &M
         &managed.head_sha,
         !is_legacy,
     );
+    Ok(())
 }
 
 /// Removes leaked PR worktrees from interrupted prior cycles.
@@ -779,11 +961,12 @@ async fn untrack_pr(repo_root: &Path, data_root: &Path, label: &str, managed: &M
 /// Its synthetic branch and fetch ref are cleaned up alongside the checkout.
 /// Only called for a *complete* discovery (never when `partial`), so an open PR
 /// that merely fell outside a truncated listing is never swept.
-fn sweep_orphan_pr_worktrees(
+async fn sweep_orphan_pr_worktrees(
     repo_root: &Path,
     data_root: &Path,
     desired: &BTreeMap<String, &DiscoveredPr>,
     state: &PrAutotrackState,
+    administration: PrStoreAdministration<'_>,
 ) {
     let worktrees_dir = data_root.join("pr-worktrees");
     let Ok(entries) = std::fs::read_dir(&worktrees_dir) else {
@@ -803,16 +986,22 @@ fn sweep_orphan_pr_worktrees(
         if managed_prs.contains(&number) || desired.contains_key(&pr_label(number)) {
             continue;
         }
-        cleanup_pr_worktree(repo_root, data_root, number, "", true);
-        log_daemon_event(
-            "pr_autotrack",
-            &[
-                ("project", repo_root.display().to_string()),
-                ("action", "swept".to_string()),
-                ("pr", number.to_string()),
-                ("reason", "orphan worktree".to_string()),
-            ],
-        );
+        let label = pr_label(number);
+        match remove_pr_store(repo_root, data_root, &label, administration).await {
+            Ok(()) => {
+                cleanup_pr_worktree(repo_root, data_root, number, "", true);
+                log_daemon_event(
+                    "pr_autotrack",
+                    &[
+                        ("project", repo_root.display().to_string()),
+                        ("action", "swept".to_string()),
+                        ("pr", number.to_string()),
+                        ("reason", "orphan worktree".to_string()),
+                    ],
+                );
+            }
+            Err(reason) => log_pr_skip(repo_root, Some(&label), Some(number), &reason),
+        }
     }
 }
 
@@ -876,20 +1065,34 @@ fn remove_worktree(repo_root: &Path, worktree: &Path) {
 /// Spawns the PR-autotrack poll loop. Cheap and inert when no registered project
 /// has the feature enabled — each tick only reads per-project config.
 pub fn spawn(global_db_path: Option<PathBuf>) -> tokio::task::JoinHandle<()> {
+    spawn_with_administration(global_db_path, StoreAdministration::default())
+}
+
+/// Spawns the PR-autotrack poll loop with the daemon's shared store coordinator.
+/// The coordinator serializes PR additions and destructive branch administration
+/// with every other daemon connection that owns the same store family.
+pub(super) fn spawn_with_administration(
+    global_db_path: Option<PathBuf>,
+    administration: StoreAdministration,
+) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        run(global_db_path).await;
+        run(global_db_path, administration).await;
     })
 }
 
-async fn run(global_db_path: Option<PathBuf>) {
+async fn run(global_db_path: Option<PathBuf>, administration: StoreAdministration) {
     let mut last_poll: HashMap<PathBuf, Instant> = HashMap::new();
     loop {
-        tick(global_db_path.as_deref(), &mut last_poll).await;
+        tick(global_db_path.as_deref(), &mut last_poll, &administration).await;
         tokio::time::sleep(BASE_TICK).await;
     }
 }
 
-async fn tick(global_db_path: Option<&Path>, last_poll: &mut HashMap<PathBuf, Instant>) {
+async fn tick(
+    global_db_path: Option<&Path>,
+    last_poll: &mut HashMap<PathBuf, Instant>,
+    administration: &StoreAdministration,
+) {
     let window = 14 * 86_400;
     let cap = 64;
     let db = match global_db_path {
@@ -912,19 +1115,19 @@ async fn tick(global_db_path: Option<&Path>, last_poll: &mut HashMap<PathBuf, In
         }
         last_poll.insert(root.clone(), Instant::now());
         if cfg.auto_track_pr_branches {
-            poll_project(root).await;
+            poll_project(root, administration).await;
         } else {
             // Feature disabled: if it left managed PR state behind (it was on,
             // then turned off), tear that state down once instead of stranding
             // worktrees/refs/branches/stores forever. Gated on the poll cadence
             // (via last_poll above) so a disabled project isn't probed each tick.
-            teardown_disabled_project(&root).await;
+            teardown_disabled_project_with_administration(&root, administration).await;
         }
     }
 }
 
 /// Runs one discovery + reconcile pass for a project and logs a poll summary.
-async fn poll_project(repo_root: PathBuf) {
+async fn poll_project(repo_root: PathBuf, administration: &StoreAdministration) {
     let opts = TraceDecayOpenOptions::default();
     let Some(layout) = TraceDecay::initialized_store_layout_with_options(&repo_root, &opts).await
     else {
@@ -955,8 +1158,14 @@ async fn poll_project(repo_root: PathBuf) {
             Err(_) => return, // join error (task panicked/cancelled)
         };
 
-    let report =
-        reconcile_project(&repo_root, &data_root, &discovery, MAX_NEW_TRACKS_PER_CYCLE).await;
+    let report = reconcile_project_with_administration(
+        &repo_root,
+        &data_root,
+        &discovery,
+        MAX_NEW_TRACKS_PER_CYCLE,
+        PrStoreAdministration::new(administration),
+    )
+    .await;
     let managed = load_state(&data_root).managed.len();
     log_daemon_event(
         "pr_autotrack",
@@ -981,6 +1190,14 @@ async fn poll_project(repo_root: PathBuf) {
 /// (empty desired set) to clean the managed set down to empty. Cheap and inert
 /// once nothing is managed, so it is safe to call every poll cadence.
 pub async fn teardown_disabled_project(repo_root: &Path) {
+    let administration = StoreAdministration::default();
+    teardown_disabled_project_with_administration(repo_root, &administration).await;
+}
+
+async fn teardown_disabled_project_with_administration(
+    repo_root: &Path,
+    administration: &StoreAdministration,
+) {
     let opts = TraceDecayOpenOptions::default();
     let Some(layout) = TraceDecay::initialized_store_layout_with_options(repo_root, &opts).await
     else {
@@ -992,11 +1209,12 @@ pub async fn teardown_disabled_project(repo_root: &Path) {
     }
     // Empty (complete, non-partial) discovery → every managed entry is stale →
     // untracked and cleaned up.
-    let report = reconcile_project(
+    let report = reconcile_project_with_administration(
         repo_root,
         &data_root,
         &PrDiscovery::default(),
         MAX_NEW_TRACKS_PER_CYCLE,
+        PrStoreAdministration::new(administration),
     )
     .await;
     log_daemon_event(

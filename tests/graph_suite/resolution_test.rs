@@ -16,7 +16,7 @@ async fn resolution_fixture() -> &'static ResolutionFixture {
     RESOLUTION_FIXTURE
         .get_or_init(|| async {
             let dir = TempDir::new().expect("failed to create temp dir");
-            let (db, _) = Database::initialize(&dir.path().join("test.db"))
+            let (db, _) = crate::common::initialize_test_database(&dir.path().join("test.db"))
                 .await
                 .expect("failed to init db");
             let nodes = basic_nodes();
@@ -95,7 +95,7 @@ fn basic_nodes() -> Vec<Node> {
 
 async fn setup_db_with_nodes() -> (TempDir, Database) {
     let dir = TempDir::new().expect("failed to create temp dir");
-    let (db, _) = Database::initialize(&dir.path().join("test.db"))
+    let (db, _) = crate::common::initialize_test_database(&dir.path().join("test.db"))
         .await
         .expect("failed to init db");
 

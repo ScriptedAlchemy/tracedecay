@@ -53,12 +53,12 @@ filter = 'binary(=core_cli_suite) & test(/^tool_daemon_test::(daemon_socket_is_o
 threads-required = "num-cpus"
 
 [[profile.ci.overrides]]
-filter = '(binary(=core_cli_suite) & test(/^cli_non_interactive_test::/)) | (binary(=mcp_suite) & test(/^(mcp_cli_serve_test|serve_degraded_mode_test|serve_template_path_test)::/))'
+filter = '(binary(=core_cli_suite) & test(/^cli_non_interactive_test::/)) | (binary(=mcp_suite) & test(/^(mcp_cli_serve_test|serve_template_path_test)::/))'
 test-group = 'cli-subprocess'
 threads-required = "num-cpus"
 
 [[profile.default.overrides]]
-filter = '(binary(=core_cli_suite) & test(/^cli_non_interactive_test::/)) | (binary(=mcp_suite) & test(/^(mcp_cli_serve_test|serve_degraded_mode_test|serve_template_path_test)::/))'
+filter = '(binary(=core_cli_suite) & test(/^cli_non_interactive_test::/)) | (binary(=mcp_suite) & test(/^(mcp_cli_serve_test|serve_template_path_test)::/))'
 test-group = 'cli-subprocess'
 threads-required = "num-cpus"
 

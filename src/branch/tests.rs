@@ -26,9 +26,11 @@ fn sanitize_dots_prevented() {
 #[test]
 fn unique_stem_keeps_free_name() {
     let meta = crate::branch_meta::BranchMeta::new("main");
-    let dir = Path::new("/nonexistent-branches-dir-for-test");
+    let dir = tempfile::tempdir().unwrap();
     assert_eq!(
-        unique_branch_db_stem(&meta, dir, "feature/new").unwrap(),
+        unique_branch_db_stem(&meta, dir.path(), "feature/new")
+            .unwrap()
+            .unwrap(),
         "feature_new"
     );
 }
@@ -38,8 +40,10 @@ fn unique_stem_disambiguates_sanitization_collision() {
     // "feature/foo" sanitizes to the same stem as the literal "feature_foo".
     let mut meta = crate::branch_meta::BranchMeta::new("main");
     meta.add_branch("feature/foo", "branches/feature_foo.db", "main");
-    let dir = Path::new("/nonexistent-branches-dir-for-test");
-    let stem = unique_branch_db_stem(&meta, dir, "feature_foo").unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let stem = unique_branch_db_stem(&meta, dir.path(), "feature_foo")
+        .unwrap()
+        .unwrap();
     assert_ne!(
         stem, "feature_foo",
         "second branch must not reuse the first branch's DB file"
@@ -56,7 +60,9 @@ fn unique_stem_preserves_hashed_orphan_recovery_file() {
     std::fs::write(dir.path().join(format!("{hashed}.db")), b"recovery").unwrap();
 
     assert_eq!(
-        unique_branch_db_stem(&meta, dir.path(), "feature_foo").unwrap(),
+        unique_branch_db_stem(&meta, dir.path(), "feature_foo")
+            .unwrap()
+            .unwrap(),
         format!("{hashed}-1")
     );
 }
@@ -67,9 +73,11 @@ fn unique_stem_is_idempotent_for_same_branch() {
     // as a conflict.
     let mut meta = crate::branch_meta::BranchMeta::new("main");
     meta.add_branch("feature/foo", "branches/feature_foo.db", "main");
-    let dir = Path::new("/nonexistent-branches-dir-for-test");
+    let dir = tempfile::tempdir().unwrap();
     assert_eq!(
-        unique_branch_db_stem(&meta, dir, "feature/foo").unwrap(),
+        unique_branch_db_stem(&meta, dir.path(), "feature/foo")
+            .unwrap()
+            .unwrap(),
         "feature_foo"
     );
 }
@@ -78,8 +86,33 @@ fn unique_stem_is_idempotent_for_same_branch() {
 fn unique_stem_rejects_empty_sanitization() {
     let meta = crate::branch_meta::BranchMeta::new("main");
     let dir = Path::new("/nonexistent-branches-dir-for-test");
-    assert!(unique_branch_db_stem(&meta, dir, "..").is_none());
-    assert!(unique_branch_db_stem(&meta, dir, "///").is_none());
+    assert!(unique_branch_db_stem(&meta, dir, "..").unwrap().is_none());
+    assert!(unique_branch_db_stem(&meta, dir, "///").unwrap().is_none());
+}
+
+#[test]
+fn unique_stem_never_reuses_a_deleted_database_path() {
+    let temp = tempfile::tempdir().unwrap();
+    let branches_dir = temp.path().join("branches");
+    std::fs::create_dir_all(&branches_dir).unwrap();
+    let retired = branches_dir.join("feature.db");
+    let fence = crate::db::DatabaseDeletionFence::acquire(
+        std::slice::from_ref(&retired),
+        "retire branch database path",
+    )
+    .unwrap();
+    fence.publish_deleting().unwrap();
+    fence.promote_deleted().unwrap();
+    drop(fence);
+
+    let meta = crate::branch_meta::BranchMeta::new("main");
+    let stem = unique_branch_db_stem(&meta, &branches_dir, "feature")
+        .unwrap()
+        .unwrap();
+
+    assert_ne!(stem, "feature");
+    assert!(stem.starts_with("feature-"), "got: {stem}");
+    assert!(crate::db::database_path_is_tombstoned(&retired).unwrap());
 }
 
 // --- git test harness (mirrors src/mcp/hook_events.rs tests) ------------
@@ -198,7 +231,11 @@ async fn read_only_sqlite_snapshot_includes_committed_data() {
     let dir = tempfile::tempdir().unwrap();
     let src = dir.path().join("src.db");
     let dst = dir.path().join("dst.db");
-    let (writer, _) = crate::db::Database::initialize(&src).await.unwrap();
+    let authority =
+        crate::db::DatabaseAuthority::acquire_test(&src, "branch snapshot test").unwrap();
+    let (writer, _) = crate::db::Database::initialize(&src, &authority)
+        .await
+        .unwrap();
     writer
         .conn()
         .execute_batch(
@@ -207,10 +244,25 @@ async fn read_only_sqlite_snapshot_includes_committed_data() {
         )
         .await
         .unwrap();
+    writer.close();
 
-    writer.snapshot_to(&dst).await.unwrap();
+    let (source, _) = crate::db::Database::open_read_only(&src, &authority)
+        .await
+        .unwrap();
+    source.snapshot_to(&dst).await.unwrap();
+    assert!(
+        source
+            .conn()
+            .execute("CREATE TABLE forbidden_snapshot_write (id INTEGER)", ())
+            .await
+            .is_err()
+    );
 
-    let (snapshot, _) = crate::db::Database::open_read_only(&dst).await.unwrap();
+    let snapshot_authority =
+        crate::db::DatabaseAuthority::acquire_test(&dst, "branch snapshot verification").unwrap();
+    let (snapshot, _) = crate::db::Database::open_read_only(&dst, &snapshot_authority)
+        .await
+        .unwrap();
     let mut rows = snapshot
         .conn()
         .query("SELECT value FROM snapshot_probe", ())
@@ -221,105 +273,17 @@ async fn read_only_sqlite_snapshot_includes_committed_data() {
 }
 
 #[test]
-fn gc_removes_dead_stale_branch() {
+fn legacy_gc_wrapper_fails_closed() {
     let (_base, project_root, td) = setup_repo_with_meta();
-    // Ref-gone (never created) and last synced long ago (> 14d).
     let stale = now_unix_secs() - 20 * 86_400;
     let db = add_tracked_branch(&project_root, &td, "gone", stale, false);
     assert!(db.exists());
 
     let report = gc_dead_branch_stores(&project_root, &td, 14, 7);
 
-    assert_eq!(report.removed_tracked, vec!["gone".to_string()]);
-    assert!(!db.exists(), "dead branch DB should be deleted");
+    assert!(report.removed_tracked.is_empty());
+    assert!(report.removed_orphan_dbs.is_empty());
+    assert!(db.exists());
     let meta = crate::branch_meta::load_branch_meta(&td).unwrap();
-    assert!(!meta.is_tracked("gone"));
-}
-
-#[test]
-fn gc_keeps_default_branch() {
-    let (_base, project_root, td) = setup_repo_with_meta();
-    // Delete the git ref for main so only the never-remove-default guard
-    // protects it; also backdate would require touching main's entry.
-    run_git(&project_root, &["checkout", "--detach"]);
-    // Force main's ref away is unnecessary — GC skips default by name.
-    let report = gc_dead_branch_stores(&project_root, &td, 14, 7);
-    assert!(report.removed_tracked.is_empty());
-    let meta = crate::branch_meta::load_branch_meta(&td).unwrap();
-    assert!(meta.is_tracked("main"));
-    assert!(td.join("tracedecay.db").exists());
-}
-
-#[test]
-fn gc_keeps_fresh_dead_branch() {
-    let (_base, project_root, td) = setup_repo_with_meta();
-    // Ref gone but synced just now: within grace, keep it.
-    let db = add_tracked_branch(&project_root, &td, "recent", now_unix_secs(), false);
-    let report = gc_dead_branch_stores(&project_root, &td, 14, 7);
-    assert!(report.removed_tracked.is_empty());
-    assert!(db.exists());
-}
-
-#[test]
-fn gc_keeps_protected_ref_gone_stale_branch() {
-    let (_base, project_root, td) = setup_repo_with_meta();
-    let db = add_tracked_branch(&project_root, &td, "recovered/orphan", 0, false);
-    let mut meta = crate::branch_meta::load_branch_meta(&td).unwrap();
-    meta.branches
-        .get_mut("recovered/orphan")
-        .unwrap()
-        .gc_protected = true;
-    crate::branch_meta::save_branch_meta(&td, &meta).unwrap();
-
-    let report = gc_dead_branch_stores(&project_root, &td, 0, 0);
-
-    assert!(report.removed_tracked.is_empty());
-    assert!(db.exists());
-    let reloaded = crate::branch_meta::load_branch_meta(&td).unwrap();
-    assert!(reloaded.branches["recovered/orphan"].gc_protected);
-}
-
-#[test]
-fn gc_keeps_branch_with_live_ref() {
-    let (_base, project_root, td) = setup_repo_with_meta();
-    // Ref exists AND stale: still keep it, ref presence wins.
-    let stale = now_unix_secs() - 100 * 86_400;
-    let db = add_tracked_branch(&project_root, &td, "live", stale, true);
-    assert!(is_branch_ref_present(&project_root, "live"));
-    let report = gc_dead_branch_stores(&project_root, &td, 14, 7);
-    assert!(report.removed_tracked.is_empty());
-    assert!(db.exists());
-}
-
-#[test]
-fn gc_deletes_stale_orphan_db_keeps_fresh() {
-    let (_base, project_root, td) = setup_repo_with_meta();
-    let branches_dir = crate::branch_meta::ensure_branches_dir(&td).unwrap();
-
-    // Stale orphan: not in meta, mtime backdated > 7d.
-    let stale_orphan = branches_dir.join("orphan_stale.db");
-    std::fs::write(&stale_orphan, b"junk").unwrap();
-    let stale_wal = branches_dir.join("orphan_stale.db-wal");
-    std::fs::write(&stale_wal, b"wal").unwrap();
-    let old = std::time::SystemTime::now() - std::time::Duration::from_hours(720);
-    set_mtime(&stale_orphan, old);
-
-    // Fresh orphan: just created, must survive.
-    let fresh_orphan = branches_dir.join("orphan_fresh.db");
-    std::fs::write(&fresh_orphan, b"junk").unwrap();
-
-    let report = gc_dead_branch_stores(&project_root, &td, 14, 7);
-
-    assert!(!stale_orphan.exists(), "stale orphan should be deleted");
-    assert!(!stale_wal.exists(), "orphan sidecar should be deleted");
-    assert!(fresh_orphan.exists(), "fresh orphan should be kept");
-    assert!(report.removed_orphan_dbs.contains(&stale_orphan));
-    assert!(!report.removed_orphan_dbs.contains(&fresh_orphan));
-}
-
-fn set_mtime(path: &Path, when: std::time::SystemTime) {
-    // Best-effort mtime backdate via filetime-free approach: re-open and use
-    // the standard library's set_modified (stable since 1.75).
-    let f = std::fs::OpenOptions::new().write(true).open(path).unwrap();
-    f.set_modified(when).unwrap();
+    assert!(meta.is_tracked("gone"));
 }

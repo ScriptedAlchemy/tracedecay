@@ -37,8 +37,7 @@ pub(crate) struct CursorMcpLogFindings {
     /// "Connection failed: MCP error -32000" lines — each one is a failed
     /// spawn whose scope Cursor will never retry.
     pub connection_failures: usize,
-    /// Lines where a newer tracedecay serve stayed alive in degraded MCP mode
-    /// instead of exiting.
+    /// Legacy degraded-mode marker lines retained in recent Cursor logs.
     pub degraded_mode_notices: usize,
     /// Log files (newest session first) that contained at least one finding.
     pub affected_logs: Vec<PathBuf>,
@@ -166,8 +165,9 @@ pub(crate) fn report_cursor_mcp_log_findings(dc: &mut DoctorCounters, home: &Pat
     }
     if findings.degraded_mode_notices > 0 {
         dc.warn(&format!(
-            "tracedecay serve ran in degraded MCP mode {} time(s) recently (project \
-             resolution failed at startup); run `tracedecay init` in the affected project",
+            "found {} legacy tracedecay serve degraded-mode notice(s) in recent Cursor logs \
+             (an older version failed project resolution at startup); run `tracedecay init` \
+             in the affected project",
             findings.degraded_mode_notices
         ));
     }
@@ -294,8 +294,8 @@ mod tests {
         assert!(findings.has_findings());
     }
 
-    /// The scanner must match the exact marker `serve` emits — shared via
-    /// [`DEGRADED_SERVE_STDERR_MARKER`] so the two cannot drift.
+    /// The scanner must match the exact marker older `serve` versions emitted;
+    /// [`DEGRADED_SERVE_STDERR_MARKER`] retains that legacy log contract.
     #[test]
     fn scan_detects_degraded_mode_notice() {
         let logs = TempDir::new().unwrap();

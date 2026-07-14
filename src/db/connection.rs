@@ -1,124 +1,56 @@
 // Rust guideline compliant 2025-10-17
 use std::path::Path;
+use std::sync::Arc;
 
-use libsql::{Builder, Connection, Database as LibsqlDatabase, OpenFlags};
+use libsql::{Builder, Connection, OpenFlags};
 
 use crate::errors::{Result, TraceDecayError};
 
-use super::migrations;
+use super::{DatabaseAuthority, migrations};
 
-/// Computes adaptive `(cache_size_kb, mmap_size)` based on the DB file size.
-///
-/// - **`cache_size`**: 25% of DB size, clamped to \[2 MB, 64 MB\] (in KiB).
-/// - **`mmap_size`**: 2× DB size, clamped to \[0, 256 MB\].
-///
-/// This avoids the fixed 320 MB memory baseline for small/medium projects.
-pub(crate) fn adaptive_cache_sizes(db_file_size: u64) -> (u64, u64) {
-    const KB: u64 = 1024;
-    const MB: u64 = 1024 * 1024;
+mod integrity;
+mod pragmas;
+mod registry;
 
-    // cache_size: 25% of DB, clamped [2 MB .. 64 MB], expressed in KiB
-    let cache_bytes = (db_file_size / 4).clamp(2 * MB, 64 * MB);
-    let cache_kb = cache_bytes / KB;
-
-    // mmap_size: 2× DB, clamped [0 .. 256 MB]
-    let mmap = db_file_size.saturating_mul(2).min(256 * MB);
-
-    (cache_kb, mmap)
-}
-
-/// Returns the `mmap_size` that is actually safe to apply on the current
-/// platform.
-///
-/// `SQLite` memory-mapped I/O is disabled on Windows. When the final connection
-/// to a WAL-mode database closes, `SQLite` runs an implicit checkpoint; on
-/// Windows the interaction between that close-time checkpoint and tearing down
-/// the file's memory map intermittently faults with `STATUS_ACCESS_VIOLATION`
-/// (`0xc0000005`). Because libsql's local connection executes synchronously
-/// (no background runtime), the fault surfaces as a native process abort
-/// during teardown — nextest reports it as an ABORT/"test aborted" on a
-/// rotating set of tests rather than an assertion failure. Forcing
-/// `mmap_size = 0` on Windows routes the close path through ordinary file I/O
-/// and removes the crash at its source. Other platforms keep the adaptive
-/// mmap size for its read-throughput benefit.
-pub(crate) fn platform_safe_mmap_size(mmap: u64) -> u64 {
-    if cfg!(windows) { 0 } else { mmap }
-}
-
-const GRAPH_STORE_MMAP_SIZE: u64 = 0;
-
-/// Env var that, when set to `1`, switches every `TraceDecay` `SQLite`
-/// connection to `journal_mode=MEMORY` + `synchronous=OFF` on all platforms.
-///
-/// **For tests/CI only — must never be set in production.** It trades away
-/// crash durability entirely: a process or OS crash mid-transaction can
-/// corrupt the database. CI test runs don't care (every DB is a throwaway
-/// fixture), and on Windows this avoids the per-transaction rollback-journal
-/// file create/write/fsync/delete cost of the `DELETE`+`FULL` pairing. An
-/// in-memory journal also never enters WAL mode, so it sidesteps the Windows
-/// WAL close-time teardown crash the same way `DELETE` does.
-pub const SQLITE_UNSAFE_FAST_ENV: &str = "TRACEDECAY_SQLITE_UNSAFE_FAST";
-
-fn sqlite_unsafe_fast_enabled() -> bool {
-    std::env::var(SQLITE_UNSAFE_FAST_ENV).as_deref() == Ok("1")
-}
-
-/// Returns the `journal_mode` safe for the current platform.
-///
-/// Windows libsql/SQLite local databases can intermittently fault while closing
-/// WAL-mode databases under nextest's per-test process isolation. Disabling
-/// mmap removed one unsafe teardown path, but master CI still aborts in
-/// unrelated tests as different short-lived databases close. Use rollback
-/// journaling on Windows and keep WAL everywhere else.
-///
-/// When [`SQLITE_UNSAFE_FAST_ENV`] is `1` (tests/CI only — never set it in
-/// production) this returns `MEMORY` on every platform, skipping journal file
-/// I/O entirely at the cost of crash durability.
-pub(crate) fn platform_safe_journal_mode() -> &'static str {
-    if sqlite_unsafe_fast_enabled() {
-        "MEMORY"
-    } else if cfg!(windows) {
-        "DELETE"
-    } else {
-        "WAL"
-    }
-}
-
-/// Returns the `synchronous` level paired with the current platform journal.
-///
-/// `NORMAL` is consistency-safe for WAL because WAL can recover from a missing
-/// final fsync, but rollback journals need `FULL` to avoid corruption after an
-/// OS crash or power loss. Keep the faster WAL+NORMAL pairing on non-Windows
-/// and use DELETE+FULL on Windows.
-///
-/// When [`SQLITE_UNSAFE_FAST_ENV`] is `1` (tests/CI only — never set it in
-/// production) this returns `OFF` on every platform, skipping fsyncs entirely
-/// at the cost of crash durability.
-pub(crate) fn platform_safe_synchronous_mode() -> &'static str {
-    if sqlite_unsafe_fast_enabled() {
-        "OFF"
-    } else if cfg!(windows) {
-        "FULL"
-    } else {
-        "NORMAL"
-    }
-}
+pub use pragmas::SQLITE_UNSAFE_FAST_ENV;
+#[cfg(test)]
+pub(crate) use pragmas::{adaptive_cache_sizes, platform_safe_mmap_size};
+pub(crate) use pragmas::{platform_safe_journal_mode, platform_safe_synchronous_mode};
+use registry::{DatabaseInner, database_slot};
 
 /// `SQLite` database backing the code graph, powered by libsql.
+#[derive(Clone)]
 pub struct Database {
-    conn: Connection,
-    /// Kept alive so the underlying database is not dropped.
-    _db: LibsqlDatabase,
+    inner: Arc<DatabaseInner>,
 }
 
 impl Database {
     /// Creates a new database at `db_path`, creating parent directories if needed.
     ///
+    /// An explicit [`DatabaseAuthority`] is required; opening writable storage
+    /// without process authority is intentionally unsupported.
+    ///
     /// Opens a libsql connection, applies performance pragmas, and runs all
     /// schema migrations up to the latest version.
     /// Returns `(Self, migrated)` where `migrated` is `true` if schema
     /// migrations were applied during initialization.
-    pub async fn initialize(db_path: &Path) -> Result<(Self, bool)> {
+    pub async fn initialize(db_path: &Path, authority: &DatabaseAuthority) -> Result<(Self, bool)> {
+        let authority = authority.hold_for(db_path, "initialize")?;
+        let slot = database_slot(authority.canonical_database_path());
+        let mut open = slot.lock().await;
+        if let Some(inner) = open.upgrade() {
+            if !inner.writable {
+                return Err(integrity::read_only_upgrade_error(db_path, "initialize"));
+            }
+            return Ok((Self { inner }, false));
+        }
+        let is_fresh = std::fs::metadata(db_path)
+            .map(|metadata| metadata.len() == 0)
+            .unwrap_or(true);
+        if !is_fresh {
+            integrity::validate_sqlite_header(db_path, "initialize", false)?;
+            integrity::validate_read_only(db_path).await?;
+        }
         if let Some(parent) = db_path.parent() {
             std::fs::create_dir_all(parent).map_err(|e| TraceDecayError::Database {
                 message: format!("failed to create database directory: {e}"),
@@ -140,19 +72,55 @@ impl Database {
             operation: "initialize".to_string(),
         })?;
 
-        migrations::configure_fresh_auto_vacuum(&conn, "initialize").await?;
-        Self::apply_pragmas(&conn, 0).await?;
-        migrations::create_schema(&conn).await?;
+        if is_fresh {
+            pragmas::apply_fresh_storage(&conn).await?;
+            migrations::configure_fresh_auto_vacuum(&conn, "initialize").await?;
+        }
+        let file_size = std::fs::metadata(db_path).map_or(0, |metadata| metadata.len());
+        pragmas::apply(&conn, file_size).await?;
+        let migrated = if is_fresh {
+            migrations::create_schema(&conn).await?;
+            false
+        } else {
+            migrations::migrate(&conn).await?
+        };
 
-        Ok((Self { conn, _db: db }, false))
+        let inner = Arc::new(DatabaseInner {
+            conn,
+            db,
+            writable: true,
+            _authority: authority,
+            _slot: Some(slot.clone()),
+        });
+        *open = Arc::downgrade(&inner);
+        Ok((Self { inner }, migrated))
     }
 
     /// Opens an existing database at `db_path`, applies performance pragmas,
     /// and runs any pending schema migrations.
+    ///
+    /// An explicit [`DatabaseAuthority`] is required; opening writable storage
+    /// without process authority is intentionally unsupported.
+    ///
     /// Returns `(Self, migrated)` where `migrated` is `true` if schema
     /// migrations were applied during open.
-    pub async fn open(db_path: &Path) -> Result<(Self, bool)> {
-        Self::validate_sqlite_header(db_path, "open", true)?;
+    pub async fn open(db_path: &Path, authority: &DatabaseAuthority) -> Result<(Self, bool)> {
+        let authority = authority.hold_for(db_path, "open")?;
+        let slot = database_slot(authority.canonical_database_path());
+        let mut open = slot.lock().await;
+        if let Some(inner) = open.upgrade() {
+            if !inner.writable {
+                return Err(integrity::read_only_upgrade_error(db_path, "open"));
+            }
+            return Ok((Self { inner }, false));
+        }
+        let is_fresh = std::fs::metadata(db_path)
+            .map(|metadata| metadata.len() == 0)
+            .unwrap_or(true);
+        integrity::validate_sqlite_header(db_path, "open", true)?;
+        if !is_fresh {
+            integrity::validate_read_only(db_path).await?;
+        }
         let db =
             Builder::new_local(db_path)
                 .build()
@@ -168,10 +136,21 @@ impl Database {
         })?;
 
         let file_size = std::fs::metadata(db_path).map_or(0, |m| m.len());
-        Self::apply_pragmas(&conn, file_size).await?;
+        if is_fresh {
+            pragmas::apply_fresh_storage(&conn).await?;
+        }
+        pragmas::apply(&conn, file_size).await?;
         let migrated = migrations::migrate(&conn).await?;
 
-        Ok((Self { conn, _db: db }, migrated))
+        let inner = Arc::new(DatabaseInner {
+            conn,
+            db,
+            writable: true,
+            _authority: authority,
+            _slot: Some(slot.clone()),
+        });
+        *open = Arc::downgrade(&inner);
+        Ok((Self { inner }, migrated))
     }
 
     /// Opens an existing database in read-only mode.
@@ -179,8 +158,14 @@ impl Database {
     /// This intentionally skips write-oriented PRAGMAs and migrations so
     /// status/verification paths can inspect read-only `SQLite` files without
     /// creating WAL files or attempting schema updates.
-    pub async fn open_read_only(db_path: &Path) -> Result<(Self, bool)> {
-        Self::validate_sqlite_header(db_path, "open_read_only", false)?;
+    /// An explicit [`DatabaseAuthority`] is still required so every local
+    /// database handle participates in the same process-ownership contract.
+    pub async fn open_read_only(
+        db_path: &Path,
+        authority: &DatabaseAuthority,
+    ) -> Result<(Self, bool)> {
+        let authority = authority.hold_for(db_path, "open_read_only")?;
+        integrity::validate_sqlite_header(db_path, "open_read_only", false)?;
         let db = Builder::new_local(db_path)
             .flags(OpenFlags::SQLITE_OPEN_READ_ONLY)
             .build()
@@ -196,59 +181,30 @@ impl Database {
         })?;
 
         let file_size = std::fs::metadata(db_path).map_or(0, |m| m.len());
-        Self::apply_read_only_pragmas(&conn, file_size).await?;
+        pragmas::apply_read_only(&conn, file_size).await?;
+        integrity::validate(&conn, "open_read_only").await?;
 
-        Ok((Self { conn, _db: db }, false))
-    }
-
-    fn validate_sqlite_header(
-        db_path: &Path,
-        operation: &str,
-        allow_fresh_path: bool,
-    ) -> Result<()> {
-        match std::fs::metadata(db_path) {
-            Ok(metadata) if allow_fresh_path && metadata.len() == 0 => return Ok(()),
-            Ok(_) => {}
-            Err(e) if allow_fresh_path && e.kind() == std::io::ErrorKind::NotFound => {
-                return Ok(());
-            }
-            Err(e) => {
-                return Err(TraceDecayError::Database {
-                    message: format!(
-                        "failed to inspect database path at '{}': {e}",
-                        db_path.display()
-                    ),
-                    operation: operation.to_string(),
-                });
-            }
-        }
-        match crate::storage::has_sqlite_database_header(db_path) {
-            Ok(true) => Ok(()),
-            Ok(false) => Err(TraceDecayError::Database {
-                message: format!(
-                    "file is not a database: SQLite header is missing at '{}'",
-                    db_path.display()
-                ),
-                operation: operation.to_string(),
-            }),
-            Err(e) => Err(TraceDecayError::Database {
-                message: format!(
-                    "failed to read database header at '{}': {e}",
-                    db_path.display()
-                ),
-                operation: operation.to_string(),
-            }),
-        }
+        let inner = Arc::new(DatabaseInner {
+            conn,
+            db,
+            writable: false,
+            _authority: authority,
+            _slot: None,
+        });
+        Ok((Self { inner }, false))
     }
 
     /// Returns a reference to the underlying libsql connection.
     pub fn conn(&self) -> &Connection {
-        &self.conn
+        &self.inner.conn
     }
 
-    /// Consumes the `Database`, closing the underlying connection.
+    /// Releases this database handle.
+    ///
+    /// The underlying connection remains open until all cloned handles are
+    /// released.
     pub fn close(self) {
-        drop(self.conn);
+        drop(self);
     }
 
     /// Checkpoints the WAL back into the main database file.
@@ -257,6 +213,7 @@ impl Database {
     /// before the process exits, preventing a stale WAL file on next startup.
     pub async fn checkpoint(&self) -> Result<()> {
         let mut rows = self
+            .inner
             .conn
             .query("PRAGMA wal_checkpoint(TRUNCATE);", ())
             .await
@@ -313,7 +270,25 @@ impl Database {
                 ),
                 operation: "snapshot".to_string(),
             })?;
-        self.conn
+        // Read-only handles keep `query_only` enabled for their ordinary
+        // connection. `VACUUM INTO` only writes the destination, so use a
+        // one-shot connection from the same read-only database without
+        // weakening that guard on the exposed handle.
+        let snapshot_connection = if self.inner.writable {
+            None
+        } else {
+            Some(
+                self.inner
+                    .db
+                    .connect()
+                    .map_err(|e| TraceDecayError::Database {
+                        message: format!("failed to open database snapshot connection: {e}"),
+                        operation: "snapshot".to_string(),
+                    })?,
+            )
+        };
+        let connection = snapshot_connection.as_ref().unwrap_or(&self.inner.conn);
+        connection
             .execute("VACUUM INTO ?1", libsql::params![destination])
             .await
             .map_err(|e| TraceDecayError::Database {
@@ -327,6 +302,7 @@ impl Database {
     /// Returns the on-disk size of the database file in bytes.
     pub async fn size(&self) -> Result<u64> {
         let mut rows = self
+            .inner
             .conn
             .query(
                 "SELECT page_count * page_size FROM pragma_page_count(), pragma_page_size()",
@@ -363,24 +339,13 @@ impl Database {
     /// This is faster than `integrity_check` — it verifies B-tree structure
     /// without cross-checking index contents against table data.
     pub async fn quick_check(&self) -> Result<bool> {
-        let mut rows = self
-            .conn
-            .query("PRAGMA quick_check", ())
-            .await
-            .map_err(|e| TraceDecayError::Database {
-                message: format!("failed to run quick_check: {e}"),
-                operation: "quick_check".to_string(),
-            })?;
-
-        if let Some(row) = rows.next().await.map_err(|e| TraceDecayError::Database {
-            message: format!("failed to read quick_check result: {e}"),
-            operation: "quick_check".to_string(),
-        })? {
-            let result: String = row.get::<String>(0).unwrap_or_default();
-            Ok(result == "ok")
-        } else {
-            Ok(false)
-        }
+        Ok(integrity::quick_check_result(
+            &self.inner.conn,
+            "quick_check",
+            "failed to run quick_check",
+        )
+        .await?
+        .is_some_and(|result| result == "ok"))
     }
 
     /// Maintenance-only: rebuilds the FTS5 index from the content table.
@@ -389,7 +354,8 @@ impl Database {
     /// without requiring a full re-index of the codebase. Callers must hold
     /// exclusive maintenance ownership; read paths must never invoke this.
     pub async fn rebuild_fts(&self) -> Result<()> {
-        self.conn
+        self.inner
+            .conn
             .execute("INSERT INTO nodes_fts(nodes_fts) VALUES('rebuild')", ())
             .await
             .map_err(|e| TraceDecayError::Database {
@@ -399,63 +365,13 @@ impl Database {
         Ok(())
     }
 
-    /// Applies performance-oriented `SQLite` pragmas.
-    ///
-    /// `cache_size` and `mmap_size` are scaled to the on-disk DB size so
-    /// small projects don't pay the 320 MB baseline of a large project.
-    async fn apply_pragmas(conn: &Connection, db_file_size: u64) -> Result<()> {
-        let (cache_kb, _) = adaptive_cache_sizes(db_file_size);
-        // Keep graph stores on ordinary file I/O. The daemon intentionally
-        // holds one connection open while watcher and hook processes open and
-        // close peers; mmap-backed peers can otherwise retain stale page views
-        // across WAL checkpoints, especially for legacy 4 KiB databases.
-        let mmap = GRAPH_STORE_MMAP_SIZE;
-        let journal_mode = platform_safe_journal_mode();
-        let synchronous = platform_safe_synchronous_mode();
-        conn.execute_batch(&format!(
-            "PRAGMA mmap_size = {mmap};
-             PRAGMA page_size = 8192;
-             PRAGMA journal_mode = {journal_mode};
-             PRAGMA foreign_keys = ON;
-             PRAGMA busy_timeout = 120000;
-             PRAGMA synchronous = {synchronous};
-             PRAGMA cache_size = -{cache_kb};
-             PRAGMA temp_store = MEMORY;",
-        ))
-        .await
-        .map_err(|e| TraceDecayError::Database {
-            message: format!("failed to apply pragmas: {e}"),
-            operation: "apply_pragmas".to_string(),
-        })?;
-        Ok(())
-    }
-
-    async fn apply_read_only_pragmas(conn: &Connection, db_file_size: u64) -> Result<()> {
-        let (cache_kb, _) = adaptive_cache_sizes(db_file_size);
-        // Read-only graph handles may overlap a writer/checkpointer too, so
-        // they must use the same non-mmap access invariant.
-        let mmap = GRAPH_STORE_MMAP_SIZE;
-        conn.execute_batch(&format!(
-            "PRAGMA mmap_size = {mmap};
-             PRAGMA foreign_keys = ON;
-             PRAGMA busy_timeout = 120000;
-             PRAGMA cache_size = -{cache_kb};
-             PRAGMA temp_store = MEMORY;",
-        ))
-        .await
-        .map_err(|e| TraceDecayError::Database {
-            message: format!("failed to apply read-only pragmas: {e}"),
-            operation: "apply_read_only_pragmas".to_string(),
-        })?;
-        Ok(())
-    }
-
     /// Drops secondary indexes, disables fsync/FK, and clears FTS for fast
     /// bulk loading. Callers should insert data sorted by PK so the primary
     /// B-tree gets sequential appends. Call `end_bulk_load` afterwards to
     /// rebuild indexes in one optimized pass.
     pub async fn begin_bulk_load(&self) -> Result<()> {
-        self.conn
+        self.inner
+            .conn
             .execute_batch(
                 "PRAGMA foreign_keys = OFF;
              DROP INDEX IF EXISTS idx_nodes_kind;
@@ -488,7 +404,7 @@ impl Database {
     /// Recreates secondary indexes (benefiting from sorted row order),
     /// restores FTS triggers and content, and re-enables normal durability.
     pub async fn end_bulk_load(&self) -> Result<()> {
-        self.conn.execute_batch(
+        self.inner.conn.execute_batch(
             "CREATE INDEX IF NOT EXISTS idx_nodes_kind ON nodes(kind);
              CREATE INDEX IF NOT EXISTS idx_nodes_name ON nodes(name);
              CREATE INDEX IF NOT EXISTS idx_nodes_qualified_name ON nodes(qualified_name);
@@ -613,19 +529,83 @@ mod tests {
     }
 
     #[test]
-    fn mmap_disabled_on_windows_only() {
-        // Windows forces mmap_size to 0 to avoid the close-time database
-        // teardown access violation; every other platform keeps the adaptive
-        // value.
+    fn mmap_disabled_for_every_graph_database() {
         let raw = 200 * MB;
         let effective = platform_safe_mmap_size(raw);
-        if cfg!(windows) {
-            assert_eq!(effective, 0, "Windows must disable mmap");
-        } else {
-            assert_eq!(effective, raw, "non-Windows keeps adaptive mmap");
-        }
-        // A zero input stays zero on every platform.
+        assert_eq!(effective, 0);
         assert_eq!(platform_safe_mmap_size(0), 0);
+    }
+
+    #[tokio::test]
+    async fn repeated_authorized_opens_share_one_physical_connection() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("graph.db");
+        let authority = DatabaseAuthority::acquire_test(&path, "connection reuse").unwrap();
+        let (first, _) = Database::initialize(&path, &authority).await.unwrap();
+        let (second, _) = Database::open(&path, &authority).await.unwrap();
+        let mut readers = Vec::new();
+        for _ in 0..12 {
+            readers.push(Database::open_read_only(&path, &authority).await.unwrap().0);
+        }
+
+        assert!(Arc::ptr_eq(&first.inner, &second.inner));
+        assert!(
+            readers
+                .iter()
+                .all(|reader| !Arc::ptr_eq(&first.inner, &reader.inner))
+        );
+        assert!(readers.iter().all(|reader| !reader.inner.writable));
+        assert!(first.inner.writable);
+    }
+
+    #[tokio::test]
+    async fn retained_database_guard_keeps_authority_alive_for_raw_connection() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("graph.db");
+        let authority = DatabaseAuthority::acquire_test(&path, "dashboard guard").unwrap();
+        let (db, _) = Database::initialize(&path, &authority).await.unwrap();
+        let raw = db.conn().clone();
+        let guard = Arc::new(db.clone());
+        drop(db);
+        drop(authority);
+
+        assert!(matches!(
+            crate::db::probe_writer_owner(&path).unwrap(),
+            crate::db::WriterOwnership::Active(_)
+        ));
+        raw.query("SELECT 1", ()).await.unwrap();
+
+        drop(guard);
+        assert_eq!(
+            crate::db::probe_writer_owner(&path).unwrap(),
+            crate::db::WriterOwnership::Idle
+        );
+        drop(raw);
+    }
+
+    #[tokio::test]
+    async fn read_only_first_open_does_not_block_writable_owner() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("graph.db");
+        let authority = DatabaseAuthority::acquire_test(&path, "readonly upgrade").unwrap();
+        let (seed, _) = Database::initialize(&path, &authority).await.unwrap();
+        drop(seed);
+
+        let (reader, _) = Database::open_read_only(&path, &authority).await.unwrap();
+        let (writer, _) = Database::open(&path, &authority).await.unwrap();
+        assert!(!Arc::ptr_eq(&reader.inner, &writer.inner));
+        writer
+            .conn()
+            .execute("CREATE TABLE reader_did_not_poison_writer (id INTEGER)", ())
+            .await
+            .unwrap();
+        assert!(
+            reader
+                .conn()
+                .execute("CREATE TABLE forbidden_reader_write (id INTEGER)", ())
+                .await
+                .is_err()
+        );
     }
 
     #[test]

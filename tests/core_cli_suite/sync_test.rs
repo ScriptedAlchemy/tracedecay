@@ -1,6 +1,5 @@
 use std::io::Write;
 use tempfile::{NamedTempFile, TempDir};
-use tracedecay::db::Database;
 use tracedecay::sync::*;
 use tracedecay::types::FileRecord;
 
@@ -21,7 +20,7 @@ fn test_content_hash_different() {
 #[tokio::test]
 async fn test_find_stale_files() {
     let dir = TempDir::new().unwrap();
-    let (db, _) = Database::initialize(&dir.path().join("test.db"))
+    let (db, _) = crate::common::initialize_test_database(&dir.path().join("test.db"))
         .await
         .unwrap();
     db.upsert_file(&FileRecord {
@@ -43,7 +42,7 @@ async fn test_find_stale_files() {
 #[tokio::test]
 async fn test_find_new_files() {
     let dir = TempDir::new().unwrap();
-    let (db, _) = Database::initialize(&dir.path().join("test.db"))
+    let (db, _) = crate::common::initialize_test_database(&dir.path().join("test.db"))
         .await
         .unwrap();
     let current = vec!["src/new_file.rs".to_string()];
@@ -54,7 +53,7 @@ async fn test_find_new_files() {
 #[tokio::test]
 async fn test_find_removed_files() {
     let dir = TempDir::new().unwrap();
-    let (db, _) = Database::initialize(&dir.path().join("test.db"))
+    let (db, _) = crate::common::initialize_test_database(&dir.path().join("test.db"))
         .await
         .unwrap();
     db.upsert_file(&FileRecord {

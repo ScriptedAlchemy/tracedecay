@@ -43,7 +43,9 @@ use tokio::time::Instant;
 use crate::config::SyncConfig;
 use crate::tracedecay::{TraceDecay, TraceDecayOpenOptions};
 
-use super::log_daemon_event;
+use super::{branch_admin::StoreAdministration, log_daemon_event};
+
+mod store_maintenance;
 
 /// Degraded watchers fall back to polling git metadata every 5 minutes.
 const DEGRADED_POLL_INTERVAL: Duration = Duration::from_mins(5);
@@ -203,6 +205,12 @@ pub struct GitWatcher {
 
 struct GitWatcherInner {
     config: SyncConfig,
+    /// Profile selected by the owning daemon. Every open and administration
+    /// action must use this identity rather than whichever profile a watcher
+    /// task happens to resolve from its environment.
+    profile_root: PathBuf,
+    /// Serializes every store-writing lifetime with daemon branch administration.
+    administration: StoreAdministration,
     /// Whether watching is enabled at all (`auto_watch`). When false every
     /// method is a no-op so the daemon runs exactly as before this feature.
     enabled: bool,
@@ -227,11 +235,28 @@ impl Default for GitWatcher {
 
 impl GitWatcher {
     fn disabled() -> Self {
+        Self::from_parts(
+            SyncConfig::default(),
+            StoreAdministration::default(),
+            current_profile_root(),
+            false,
+        )
+    }
+
+    fn from_parts(
+        config: SyncConfig,
+        administration: StoreAdministration,
+        profile_root: PathBuf,
+        enabled: bool,
+    ) -> Self {
+        let permits = config.max_concurrent_syncs.max(1);
         Self {
             inner: Arc::new(GitWatcherInner {
-                config: SyncConfig::default(),
-                enabled: false,
-                sync_semaphore: Arc::new(Semaphore::new(1)),
+                config,
+                profile_root,
+                administration,
+                enabled,
+                sync_semaphore: Arc::new(Semaphore::new(permits)),
                 projects: Mutex::new(HashMap::new()),
                 backstop_task: Mutex::new(None),
                 shutting_down: AtomicBool::new(false),
@@ -241,21 +266,28 @@ impl GitWatcher {
 
     /// Builds a watcher from the given sync config. Watching is gated on
     /// `auto_watch`; when disabled the returned watcher is inert.
+    ///
+    /// The test constructor deliberately uses the process's current profile
+    /// and a standalone coordinator so unit tests retain their existing behavior.
+    #[cfg(test)]
     pub fn new(config: SyncConfig) -> Self {
-        if !config.auto_watch {
-            return Self::disabled();
-        }
-        let permits = config.max_concurrent_syncs.max(1);
-        Self {
-            inner: Arc::new(GitWatcherInner {
-                config,
-                enabled: true,
-                sync_semaphore: Arc::new(Semaphore::new(permits)),
-                projects: Mutex::new(HashMap::new()),
-                backstop_task: Mutex::new(None),
-                shutting_down: AtomicBool::new(false),
-            }),
-        }
+        Self::new_with_administration(
+            config,
+            StoreAdministration::default(),
+            current_profile_root(),
+        )
+    }
+
+    /// Builds a watcher bound to the daemon's profile and administration
+    /// coordinator. The daemon uses this constructor so watcher syncs and
+    /// destructive branch administration share one writer gate.
+    pub(super) fn new_with_administration(
+        config: SyncConfig,
+        administration: StoreAdministration,
+        profile_root: PathBuf,
+    ) -> Self {
+        let enabled = config.auto_watch;
+        Self::from_parts(config, administration, profile_root, enabled)
     }
 
     // Doctor watcher-health surface (follow-up wiring).
@@ -376,6 +408,30 @@ impl GitWatcher {
             .collect();
         out.sort_by(|a, b| a.0.cmp(&b.0));
         out
+    }
+}
+
+/// Falls back to an empty path only when the process cannot resolve a current
+/// profile. Daemon construction passes its canonical profile explicitly; the
+/// fallback exists solely for standalone/test construction.
+fn current_profile_root() -> PathBuf {
+    crate::storage::default_profile_root().unwrap_or_default()
+}
+
+/// Builds explicit open options for the daemon-owned profile. The global
+/// registry path follows that same profile rather than the ambient process
+/// environment used by ordinary CLI clients.
+fn daemon_open_options(inner: &GitWatcherInner) -> TraceDecayOpenOptions {
+    if inner.profile_root.as_os_str().is_empty() {
+        // Keep standalone construction's former behavior when no current
+        // profile can be resolved: the normal open path will report failure
+        // rather than treating an empty path as a writable profile directory.
+        return TraceDecayOpenOptions::default();
+    }
+    let profile_root = inner.profile_root.clone();
+    TraceDecayOpenOptions {
+        global_db_path: Some(profile_root.join("global.db")),
+        profile_root: Some(profile_root),
     }
 }
 
@@ -630,13 +686,20 @@ async fn execute_plan(
     plan: DirtyPlan,
 ) {
     let root = &state.project_root;
-    let opts = TraceDecayOpenOptions::default();
+    let opts = daemon_open_options(inner);
 
     // 1. Proactively track newly-created linked worktrees.
     for name in &plan.new_worktrees {
-        if let Some((wt_root, branch)) = resolve_worktree(common, name) {
+        if let Some((wt_root, branch)) = store_maintenance::resolve_worktree(common, name) {
             let _permit = inner.sync_semaphore.acquire().await;
-            match track_worktree_branch(wt_root.clone(), branch.clone()).await {
+            match store_maintenance::track_worktree_branch(
+                &inner.administration,
+                wt_root.clone(),
+                branch.clone(),
+                opts.clone(),
+            )
+            .await
+            {
                 Some(outcome) => {
                     log_daemon_event(
                         "git_watch_synced",
@@ -690,7 +753,14 @@ async fn execute_plan(
     // advanced without `plan.dirty` capturing the branch name.
     if current_branch.is_some() || !plan.branches.is_empty() {
         let _permit = inner.sync_semaphore.acquire().await;
-        if sync_project(root, &opts, inner.config.full_sync_escalation_files).await {
+        if store_maintenance::sync_project(
+            root,
+            &opts,
+            inner.config.full_sync_escalation_files,
+            &inner.administration,
+        )
+        .await
+        {
             state.health.mark_synced();
             let mut fields = vec![
                 ("project", root.display().to_string()),
@@ -713,105 +783,7 @@ async fn execute_plan(
 
     // 3. GC eligibility on ref/worktree deletion.
     if plan.gc_eligible {
-        run_gc(root, &opts, &inner.config).await;
-    }
-}
-
-/// Opens the project store and runs a diff-scoped incremental sync (or a full
-/// sync when the diff base is missing / oversized). Returns true on success.
-/// `SyncLock` is treated as success (a peer synced).
-///
-/// The `TraceDecay` sync/open futures are `Send` (the sync path scopes its
-/// `!Send` `gix` values so they drop before every `.await`; see
-/// `indexing::stamp_last_synced_commit`), so this awaits them directly on the
-/// caller's task under the daemon-wide sync semaphore — no nested runtime.
-async fn sync_project(root: &Path, opts: &TraceDecayOpenOptions, escalation: usize) -> bool {
-    let Ok(cg) = TraceDecay::open_with_options(root, opts.clone()).await else {
-        return false;
-    };
-    let base = cg.last_synced_commit().await;
-    let result = match base {
-        Some(base) => match cg.stale_files_since_commit(&base, escalation) {
-            Some(files) if files.is_empty() => Ok(()),
-            Some(files) => cg.sync_if_stale_silent(&files).await,
-            // Base missing/unreachable or over the escalation limit → full.
-            None => cg.sync().await.map(|_| ()),
-        },
-        None => cg.sync().await.map(|_| ()),
-    };
-    matches!(
-        result,
-        Ok(()) | Err(crate::errors::TraceDecayError::SyncLock { .. })
-    )
-}
-
-/// Proactively tracks a linked worktree's branch. Returns the
-/// [`crate::branch::BranchAddOutcome`] name for logging, or `None` on error.
-async fn track_worktree_branch(wt_root: PathBuf, branch: String) -> Option<String> {
-    match TraceDecay::add_branch_tracking_with_options(
-        &wt_root,
-        &branch,
-        TraceDecayOpenOptions::default(),
-    )
-    .await
-    {
-        Ok(outcome) => Some(format!("{outcome:?}")),
-        Err(_) => None,
-    }
-}
-
-/// Resolves a `worktrees/<name>` leaf to `(worktree_root, branch)` by reading
-/// its `gitdir` file and the linked HEAD.
-fn resolve_worktree(common: &Path, name: &str) -> Option<(PathBuf, String)> {
-    let wt_meta = common.join("worktrees").join(name);
-    let gitdir_file = wt_meta.join("gitdir");
-    let gitdir_raw = std::fs::read_to_string(&gitdir_file).ok()?;
-    // `gitdir` points at `<worktree>/.git`; the worktree root is its parent.
-    let gitdir = PathBuf::from(gitdir_raw.trim());
-    let wt_root = gitdir.parent()?.to_path_buf();
-    let branch = crate::branch::current_branch(&wt_root)?;
-    Some((wt_root, branch))
-}
-
-/// Runs branch-store GC for a project, logging what it removed.
-///
-/// The layout resolution is async; the GC sweep itself is blocking fs work, so
-/// it runs on the blocking pool to avoid stalling the reactor.
-async fn run_gc(root: &Path, opts: &TraceDecayOpenOptions, config: &SyncConfig) {
-    let data_root = TraceDecay::initialized_store_layout_with_options(root, opts)
-        .await
-        .map(|layout| layout.data_root);
-    let Some(data_root) = data_root else {
-        return;
-    };
-    let root_owned = root.to_path_buf();
-    let branch_gc_days = config.branch_gc_days;
-    let orphan_db_gc_days = config.orphan_db_gc_days;
-    let Ok(report) = tokio::task::spawn_blocking(move || {
-        crate::branch::gc_dead_branch_stores(
-            &root_owned,
-            &data_root,
-            branch_gc_days,
-            orphan_db_gc_days,
-        )
-    })
-    .await
-    else {
-        return;
-    };
-    if !report.removed_tracked.is_empty() || !report.removed_orphan_dbs.is_empty() {
-        log_daemon_event(
-            "git_watch_synced",
-            &[
-                ("project", root.display().to_string()),
-                ("action", "gc".to_string()),
-                ("removed_tracked", report.removed_tracked.len().to_string()),
-                (
-                    "removed_orphans",
-                    report.removed_orphan_dbs.len().to_string(),
-                ),
-            ],
-        );
+        store_maintenance::run_gc(inner, root, &opts).await;
     }
 }
 
@@ -823,6 +795,7 @@ async fn degraded_poll_loop(
     state: &Arc<WatchState>,
     common: Option<&Path>,
 ) {
+    let opts = daemon_open_options(inner);
     let mut last_sig: Option<(SystemTime, SystemTime)> = None;
     loop {
         state.health.beat();
@@ -830,10 +803,11 @@ async fn degraded_poll_loop(
             let sig = metadata_signature(common);
             if sig != last_sig && last_sig.is_some() {
                 let _permit = inner.sync_semaphore.acquire().await;
-                if sync_project(
+                if store_maintenance::sync_project(
                     &state.project_root,
-                    &TraceDecayOpenOptions::default(),
+                    &opts,
                     inner.config.full_sync_escalation_files,
+                    &inner.administration,
                 )
                 .await
                 {
@@ -899,7 +873,7 @@ mod backstop {
             .config
             .backstop_interval_mins
             .saturating_mul(60);
-        let opts = TraceDecayOpenOptions::default();
+        let opts = daemon_open_options(&watcher.inner);
 
         // Snapshot registered projects; cover those the watcher isn't keeping
         // fresh (stale/absent heartbeat) AND whose store is older than one
@@ -913,15 +887,17 @@ mod backstop {
         };
 
         let run_gc_now = last_gc.is_none_or(|t| t.elapsed() >= gc_period);
+        let mut gc_retry_needed = false;
 
         for (root, state) in entries {
             let snap = state.health.snapshot();
             if snap.heartbeat_stale() && store_is_stale(&root, &opts, interval_secs).await {
                 let _permit = watcher.inner.sync_semaphore.acquire().await;
-                if super::sync_project(
+                if super::store_maintenance::sync_project(
                     &root,
                     &opts,
                     watcher.inner.config.full_sync_escalation_files,
+                    &watcher.inner.administration,
                 )
                 .await
                 {
@@ -936,12 +912,12 @@ mod backstop {
                 }
             }
 
-            if run_gc_now {
-                super::run_gc(&root, &opts, &watcher.inner.config).await;
+            if run_gc_now && !super::store_maintenance::run_gc(&watcher.inner, &root, &opts).await {
+                gc_retry_needed = true;
             }
         }
 
-        if run_gc_now {
+        if run_gc_now && !gc_retry_needed {
             *last_gc = Some(Instant::now());
         }
     }

@@ -57,6 +57,8 @@ pub struct DatabaseSnapshot {
     pub project_root: PathBuf,
     /// `<root>/.tracedecay/<branch>.db` or whichever DB is being served.
     pub db_path: PathBuf,
+    /// Canonical identity of the file owned by this process, when resolvable.
+    pub canonical_db_path: PathBuf,
     pub db_size_bytes: u64,
     /// Size of the WAL (`-wal`) file alongside the DB, when present.
     pub wal_size_bytes: u64,
@@ -64,6 +66,15 @@ pub struct DatabaseSnapshot {
     pub shm_size_bytes: u64,
     /// `journal_mode` PRAGMA (`wal`, `delete`, `truncate`, …).
     pub journal_mode: Option<String>,
+    /// Numeric `synchronous` PRAGMA (`0` OFF, `1` NORMAL, `2` FULL, `3` EXTRA).
+    pub synchronous: Option<i64>,
+    pub page_size: Option<u64>,
+    /// `PRAGMA quick_check` executed on the already-owned daemon connection.
+    pub quick_check_ok: Option<bool>,
+    pub quick_check_error: Option<String>,
+    pub dirty_marker: DirtyMarkerSnapshot,
+    /// Kernel writer lease currently observed for this database.
+    pub writer_owner: WriterOwnerSnapshot,
     /// Total source size we've indexed, from the `files` table sum, in
     /// bytes — useful to compute the "DB / source" ratio.
     pub source_total_bytes: u64,
@@ -71,6 +82,33 @@ pub struct DatabaseSnapshot {
     /// graph size — a 25× ratio with a tiny graph is suspicious.
     pub node_count: u64,
     pub edge_count: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum WriterOwnerSnapshot {
+    Idle,
+    Active {
+        pid: u32,
+        started_epoch_ms: u128,
+        version: String,
+        intent: String,
+    },
+    ActiveUnknown,
+    ProbeFailed {
+        error: String,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DirtyMarkerSnapshot {
+    pub path: PathBuf,
+    pub exists: bool,
+    pub parsed: bool,
+    pub owner_pid: Option<u64>,
+    pub epoch: Option<String>,
+    pub state: Option<String>,
+    pub schema: Option<u64>,
 }
 
 /// Capture a runtime snapshot for the given project.
@@ -82,7 +120,7 @@ pub struct DatabaseSnapshot {
 /// tool is recording *what's available* during a spike.
 pub async fn collect(cg: &crate::tracedecay::TraceDecay) -> Result<RuntimeSnapshot> {
     let process = sample_process();
-    let database = sample_database(cg).await?;
+    let database = collect_database(cg).await?;
     let captured_at = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_secs());
@@ -132,6 +170,10 @@ pub fn to_text_report(snap: &RuntimeSnapshot) -> String {
            wal size         {wal}\n\
            shm size         {shm}\n\
            journal mode     {jm}\n\
+           synchronous      {sync}\n\
+           page size        {page_size}\n\
+           quick check      {quick_check}\n\
+           dirty marker     {dirty}\n\
            source indexed   {src}\n\
            db / source      {ratio:.1}×\n\
            nodes / edges    {nodes} / {edges}\n\
@@ -152,6 +194,23 @@ pub fn to_text_report(snap: &RuntimeSnapshot) -> String {
         wal = bytes_human(d.wal_size_bytes),
         shm = bytes_human(d.shm_size_bytes),
         jm = d.journal_mode.as_deref().unwrap_or("(unknown)"),
+        sync = d
+            .synchronous
+            .map_or_else(|| "(unknown)".to_string(), |v| v.to_string()),
+        page_size = d
+            .page_size
+            .map_or_else(|| "(unknown)".to_string(), |v| v.to_string()),
+        quick_check = match (d.quick_check_ok, d.quick_check_error.as_deref()) {
+            (Some(true), _) => "ok".to_string(),
+            (Some(false), _) => "failed".to_string(),
+            (None, Some(error)) => format!("unavailable: {error}"),
+            (None, None) => "unavailable".to_string(),
+        },
+        dirty = if d.dirty_marker.exists {
+            d.dirty_marker.state.as_deref().unwrap_or("unparsed")
+        } else {
+            "absent"
+        },
         src = bytes_human(d.source_total_bytes),
         ratio = bloat_ratio,
         nodes = d.node_count,
@@ -213,26 +272,99 @@ fn sample_process_with_window(cpu_sample_window: Duration) -> ProcessSnapshot {
 // Database sampling
 // ---------------------------------------------------------------------------
 
-async fn sample_database(cg: &crate::tracedecay::TraceDecay) -> Result<DatabaseSnapshot> {
+pub(crate) async fn collect_database(
+    cg: &crate::tracedecay::TraceDecay,
+) -> Result<DatabaseSnapshot> {
     let project_root = cg.project_root().to_path_buf();
     let db_path = cg.db_path().clone();
+    let canonical_db_path = db_path.canonicalize().unwrap_or_else(|_| db_path.clone());
     let db_size_bytes = file_size(&db_path);
     let wal_size_bytes = file_size(&with_suffix(&db_path, "-wal"));
     let shm_size_bytes = file_size(&with_suffix(&db_path, "-shm"));
     let journal_mode = read_journal_mode(cg).await.ok();
+    let synchronous = read_pragma_i64(cg, "PRAGMA synchronous", "read_synchronous")
+        .await
+        .ok();
+    let page_size = read_pragma_i64(cg, "PRAGMA page_size", "read_page_size")
+        .await
+        .ok()
+        .and_then(|value| u64::try_from(value).ok());
+    let (quick_check_ok, quick_check_error) = match cg.quick_check().await {
+        Ok(ok) => (Some(ok), None),
+        Err(error) => (None, Some(error.to_string())),
+    };
+    let dirty_marker = read_dirty_marker(&with_suffix(&db_path, ".dirty"));
+    let writer_owner = match crate::db::probe_writer_owner(&db_path) {
+        Ok(crate::db::WriterOwnership::Idle) => WriterOwnerSnapshot::Idle,
+        Ok(crate::db::WriterOwnership::Active(owner)) => WriterOwnerSnapshot::Active {
+            pid: owner.pid,
+            started_epoch_ms: owner.started_epoch_ms,
+            version: owner.version,
+            intent: owner.intent,
+        },
+        Ok(crate::db::WriterOwnership::ActiveUnknown) => WriterOwnerSnapshot::ActiveUnknown,
+        Err(error) => WriterOwnerSnapshot::ProbeFailed {
+            error: error.to_string(),
+        },
+    };
     let source_total_bytes = read_source_total_bytes(cg).await.unwrap_or(0);
     let (node_count, edge_count) = read_graph_counts(cg).await.unwrap_or((0, 0));
     Ok(DatabaseSnapshot {
         project_root,
         db_path,
+        canonical_db_path,
         db_size_bytes,
         wal_size_bytes,
         shm_size_bytes,
         journal_mode,
+        synchronous,
+        page_size,
+        quick_check_ok,
+        quick_check_error,
+        dirty_marker,
+        writer_owner,
         source_total_bytes,
         node_count,
         edge_count,
     })
+}
+
+fn read_dirty_marker(path: &Path) -> DirtyMarkerSnapshot {
+    let Ok(contents) = std::fs::read(path) else {
+        return DirtyMarkerSnapshot {
+            path: path.to_path_buf(),
+            exists: path.exists(),
+            parsed: false,
+            owner_pid: None,
+            epoch: None,
+            state: None,
+            schema: None,
+        };
+    };
+    let value = serde_json::from_slice::<serde_json::Value>(&contents).ok();
+    DirtyMarkerSnapshot {
+        path: path.to_path_buf(),
+        exists: true,
+        parsed: value.is_some(),
+        owner_pid: value
+            .as_ref()
+            .and_then(|marker| marker.pointer("/owner/pid"))
+            .and_then(serde_json::Value::as_u64),
+        epoch: value
+            .as_ref()
+            .and_then(|marker| marker.get("epoch"))
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string),
+        state: value
+            .as_ref()
+            .and_then(|marker| marker.get("state"))
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string),
+        schema: value
+            .as_ref()
+            .and_then(|marker| marker.get("schema"))
+            .and_then(serde_json::Value::as_u64),
+    }
 }
 
 fn file_size(path: &Path) -> u64 {
@@ -270,6 +402,37 @@ async fn read_journal_mode(cg: &crate::tracedecay::TraceDecay) -> Result<String>
         message: format!("failed to decode journal_mode: {e}"),
         operation: "read_journal_mode".to_string(),
     })
+}
+
+async fn read_pragma_i64(
+    cg: &crate::tracedecay::TraceDecay,
+    sql: &str,
+    operation: &str,
+) -> Result<i64> {
+    let mut rows =
+        cg.db()
+            .conn()
+            .query(sql, ())
+            .await
+            .map_err(|error| TraceDecayError::Database {
+                message: format!("failed to query {sql}: {error}"),
+                operation: operation.to_string(),
+            })?;
+    rows.next()
+        .await
+        .map_err(|error| TraceDecayError::Database {
+            message: format!("failed to read {sql}: {error}"),
+            operation: operation.to_string(),
+        })?
+        .ok_or_else(|| TraceDecayError::Database {
+            message: format!("{sql} returned no rows"),
+            operation: operation.to_string(),
+        })?
+        .get(0)
+        .map_err(|error| TraceDecayError::Database {
+            message: format!("failed to decode {sql}: {error}"),
+            operation: operation.to_string(),
+        })
 }
 
 async fn read_source_total_bytes(cg: &crate::tracedecay::TraceDecay) -> Result<u64> {
@@ -373,6 +536,37 @@ mod tests {
         let p = Path::new("/tmp/x.db");
         assert_eq!(with_suffix(p, "-wal"), Path::new("/tmp/x.db-wal"));
         assert_eq!(with_suffix(p, "-shm"), Path::new("/tmp/x.db-shm"));
+    }
+
+    #[test]
+    fn dirty_marker_snapshot_parses_owner_epoch_and_state() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("graph.db.dirty");
+        std::fs::write(
+            &path,
+            br#"{"schema":2,"owner":{"pid":42},"epoch":"epoch-7","state":"dirty"}"#,
+        )
+        .unwrap();
+
+        let marker = read_dirty_marker(&path);
+        assert!(marker.exists);
+        assert!(marker.parsed);
+        assert_eq!(marker.owner_pid, Some(42));
+        assert_eq!(marker.epoch.as_deref(), Some("epoch-7"));
+        assert_eq!(marker.state.as_deref(), Some("dirty"));
+        assert_eq!(marker.schema, Some(2));
+    }
+
+    #[test]
+    fn dirty_marker_snapshot_preserves_unparsed_presence() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("graph.db.dirty");
+        std::fs::write(&path, b"legacy-dirty-marker").unwrap();
+
+        let marker = read_dirty_marker(&path);
+        assert!(marker.exists);
+        assert!(!marker.parsed);
+        assert_eq!(marker.state, None);
     }
 
     /// Regression guard for the Windows `STATUS_STACK_OVERFLOW` report against

@@ -28,7 +28,6 @@ use tracedecay::automation::run_ledger::{
     AutomationRunArtifactKind, AutomationRunLedgerRecord, AutomationRunStatus, AutomationTrigger,
     append_run_record, write_run_artifact,
 };
-use tracedecay::db::Database;
 use tracedecay::mcp::handle_tool_call;
 use tracedecay::serve;
 use tracedecay::storage::{
@@ -126,21 +125,6 @@ async fn set_user_version(db_path: &Path, version: u32) {
         .unwrap();
 }
 
-#[cfg(unix)]
-async fn drop_memory_facts(db_path: &Path) {
-    let mut permissions = fs::metadata(db_path).unwrap().permissions();
-    permissions.set_mode(0o644);
-    fs::set_permissions(db_path, permissions).unwrap();
-
-    let db = Builder::new_local(db_path).build().await.unwrap();
-    let conn = db.connect().unwrap();
-    conn.execute("DROP TABLE memory_facts", ()).await.unwrap();
-
-    let mut permissions = fs::metadata(db_path).unwrap().permissions();
-    permissions.set_mode(0o444);
-    fs::set_permissions(db_path, permissions).unwrap();
-}
-
 fn extract_tool_text(value: &Value) -> &str {
     value["content"][0]["text"]
         .as_str()
@@ -167,7 +151,9 @@ async fn create_read_only_project_db(
         },
     )
     .unwrap();
-    let (db, _) = Database::initialize(&db_path).await.unwrap();
+    let (db, _) = crate::common::initialize_test_database(&db_path)
+        .await
+        .unwrap();
     db.checkpoint().await.unwrap();
     db.close();
     if let Some(version) = user_version {
@@ -218,7 +204,7 @@ fn create_unindexed_git_project_with_file(contents: &str) -> TempDir {
 }
 
 #[tokio::test]
-async fn serve_without_daemon_socket_falls_back_to_in_process_mcp() {
+async fn serve_without_daemon_socket_reports_daemon_unavailable() {
     let home = TempDir::new().unwrap();
     let project = init_project_with_file(home.path(), "pub fn client_only_marker() {}\n").await;
 
@@ -249,16 +235,11 @@ async fn serve_without_daemon_socket_falls_back_to_in_process_mcp() {
         .wait_with_output()
         .expect("tracedecay serve should exit after stdin closes");
 
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        output.status.success(),
-        "serve should fall back to an in-process MCP engine when the daemon socket is missing\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(
-        stdout.contains("\"protocolVersion\":\"2024-11-05\""),
-        "serve fallback should answer initialize over stdio\nstdout:\n{stdout}"
+        stderr.contains("TraceDecay daemon") && stderr.contains("is not available"),
+        "expected explicit daemon-unavailable error, got:\n{stderr}"
     );
 }
 
@@ -283,6 +264,7 @@ async fn serve_stdio_smokes_managed_skill_list_and_view() {
     approve_managed_skill(&profile_root, "active-stdio-skill")
         .await
         .unwrap();
+    let _daemon = common::spawn_tracedecay_daemon(home.path());
 
     let mut child = tracedecay_command_with_home(home.path())
         .arg("serve")
@@ -431,6 +413,7 @@ async fn serve_stdio_smokes_automation_run_artifact_view() {
     )
     .await
     .unwrap();
+    let _daemon = common::spawn_tracedecay_daemon(home.path());
 
     let mut child = tracedecay_command_with_home(home.path())
         .arg("serve")
@@ -496,9 +479,9 @@ async fn serve_stdio_smokes_automation_run_artifact_view() {
     );
 }
 
-/// A reachable daemon must win before serve opens either local database. The
-/// intentionally uninitialized explicit path also proves that proxy startup
-/// preserves authoritative path routing without invoking local resolution.
+/// Serve must proxy through a reachable daemon without opening either database
+/// locally. The intentionally uninitialized explicit path also proves that
+/// proxy startup preserves authoritative path routing without local resolution.
 #[cfg(unix)]
 #[tokio::test]
 async fn serve_with_reachable_daemon_proxies_before_opening_explicit_project() {
@@ -844,44 +827,30 @@ async fn serve_daemon_proxy_reports_daemon_disconnect_as_json_rpc_error() {
     );
 }
 
-#[cfg(unix)]
 #[tokio::test]
-async fn ensure_initialized_rejects_read_only_db_with_pending_migrations() {
-    let _env_guard = READ_ONLY_SERVE_ENV_LOCK.lock().await;
+async fn ensure_initialized_with_options_fails_closed_without_daemon_routing() {
     let home = TempDir::new().unwrap();
     let project = TempDir::new().unwrap();
     let open_options = TraceDecayOpenOptions {
         profile_root: Some(profile_root(home.path())),
         global_db_path: Some(profile_root(home.path()).join("global.db")),
     };
-    let (project_root, db_path) = create_read_only_project_db(
-        home.path(),
-        project.path(),
-        "proj_serve_readonly_old_schema",
-        Some(14),
-    )
-    .await;
-    drop_memory_facts(&db_path).await;
 
-    assert!(
-        TraceDecay::open(&project_root).await.is_err(),
-        "normal TraceDecay::open should fail against the read-only DB fixture"
-    );
-
-    let error = match serve::ensure_initialized_with_options(&project_root, open_options).await {
-        Ok(_) => panic!("read-only fallback must reject old schemas instead of serving them"),
+    let error = match serve::ensure_initialized_with_options(project.path(), open_options).await {
+        Ok(_) => panic!("serve compatibility API must not open project databases locally"),
         Err(error) => error,
     };
     let message = error.to_string();
     assert!(
-        message.contains("schema") && message.contains("migrat"),
-        "error should explain that the read-only DB needs migration, got: {message}"
+        message.contains("direct project database access is disabled")
+            && message.contains("managed TraceDecay daemon"),
+        "error should direct callers through the sole database owner, got: {message}"
     );
 }
 
 #[cfg(unix)]
 #[tokio::test]
-async fn ensure_initialized_read_only_fallback_reports_and_guards_read_only_store() {
+async fn explicit_read_only_open_reports_and_guards_read_only_store() {
     let _env_guard = READ_ONLY_SERVE_ENV_LOCK.lock().await;
     let home = TempDir::new().unwrap();
     let project = TempDir::new().unwrap();
@@ -905,7 +874,7 @@ async fn ensure_initialized_read_only_fallback_reports_and_guards_read_only_stor
 
     let cg = TraceDecay::open_read_only_with_options(&project_root, open_options)
         .await
-        .expect("current-schema read-only DB should open for read-only serving");
+        .expect("current-schema read-only DB should open explicitly");
 
     let status = handle_tool_call(
         &cg,

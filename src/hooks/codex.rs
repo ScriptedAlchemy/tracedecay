@@ -44,19 +44,18 @@ mapped to symbols, `tracedecay:project-memory` when project decisions/preference
 `tracedecay_lcm_expand_query`, and `tracedecay_lcm_describe` when prior conversation context \
 may be missing.";
 
-const CODEX_POST_COMPACT_BUDGET: Duration = Duration::from_secs(115);
-
 /// Codex `SessionStart` hook handler.
 pub async fn hook_codex_session_start() -> i32 {
     let event = read_hook_event!();
+    let parsed = serde_json::from_str::<Value>(&event).unwrap_or(Value::Null);
     let root = codex_project_root_from_event_with_identity(&event).await;
     let _hook_telemetry =
         record_hook_invoked(root.as_deref(), HintAgent::Codex, "SessionStart", &event);
+    if let (Some(root), Some(event)) = (root.as_ref(), codex_session_start_hook_event(&parsed)) {
+        crate::daemon::notify_hook_event(root, event).await;
+    }
     let (mut context, _) = codex_session_context_for_event(&event).await;
-    let session_id = serde_json::from_str::<Value>(&event)
-        .ok()
-        .as_ref()
-        .and_then(event_session_id);
+    let session_id = event_session_id(&parsed);
     if root.is_none() && ingest_user_codex_session(session_id.clone()).await {
         super::schedule_user_session_review("codex", session_id.as_deref());
     }
@@ -77,6 +76,12 @@ pub async fn hook_codex_session_start() -> i32 {
         codex_additional_context_json("SessionStart", &context)
     );
     0
+}
+
+fn codex_session_start_hook_event(parsed: &Value) -> Option<crate::daemon::DaemonHookEvent> {
+    event_cwd_from_parsed(parsed).map(|cwd| {
+        crate::daemon::DaemonHookEvent::session_start(crate::daemon::HookAgent::Codex, cwd)
+    })
 }
 
 /// Codex `UserPromptSubmit` hook handler.
@@ -650,84 +655,67 @@ fn codex_apply_patch_added_text(command: &str) -> Option<String> {
 }
 
 async fn codex_post_compact(event_json: &str) {
-    let work = async {
-        let project_root = codex_project_root_from_event_with_identity(event_json).await;
-        if project_root.is_none() {
-            let session_id = serde_json::from_str::<Value>(event_json)
-                .ok()
-                .as_ref()
-                .and_then(event_session_id);
-            if ingest_user_codex_session(session_id.clone()).await {
-                super::schedule_user_session_review("codex", session_id.as_deref());
-            }
-            return;
-        }
-        let Some(project_root) = project_root else {
-            return;
-        };
-        if !crate::tracedecay::TraceDecay::has_initialized_store(&project_root).await {
-            return;
-        }
-        let Some(db) = crate::sessions::cursor::open_project_session_db(&project_root).await else {
-            return;
-        };
-        if let Some(source) = crate::sessions::codex::CodexSource::new() {
-            let _ = crate::sessions::source::ingest_source(&db, &source, &project_root, None).await;
-        }
-        let session_id = serde_json::from_str::<Value>(event_json)
-            .ok()
-            .and_then(|parsed| event_session_id(&parsed));
-        let Ok(mut pending) = db
-            .pending_codex_compaction_summary_requests(session_id.as_deref(), 1)
-            .await
-        else {
-            return;
-        };
-        let Some(pending) = pending.pop() else {
-            return;
-        };
-        let config = crate::sessions::codex_app_server::CodexAppServerSummaryConfig::from_env();
-        let summary = match crate::sessions::codex_app_server::summarize_with_codex_app_server(
-            &pending.request,
-            &config,
-        ) {
-            Ok(summary) => summary,
-            Err(err) => {
-                eprintln!("tracedecay Codex PostCompact summary failed: {err}");
-                return;
-            }
-        };
-        if let Err(err) = db
-            .replace_codex_compaction_summary(
-                &pending.node_id,
-                &summary.text,
-                "codex_app_server",
-                summary.model.as_deref().or(config.model.as_deref()),
-            )
-            .await
-        {
-            eprintln!("tracedecay Codex PostCompact summary replacement failed: {err}");
-        }
+    let root = codex_project_root_from_event_with_identity(event_json).await;
+    let action = if root.is_some() {
+        "codex_compact"
+    } else {
+        "ingest_transcript"
     };
-    let _ = tokio::time::timeout(CODEX_POST_COMPACT_BUDGET, work).await;
+    let session_id = serde_json::from_str::<Value>(event_json)
+        .ok()
+        .as_ref()
+        .and_then(event_session_id);
+    let mut args = serde_json::json!({
+        "action": action,
+        "provider": "codex",
+        "user_scope": root.is_none(),
+        "event_json": event_json,
+    });
+    if let Some(session_id) = session_id {
+        args["session_id"] = serde_json::json!(session_id);
+    }
+    if let Err(error) = super::daemon_hook_action(root.as_deref(), args).await {
+        eprintln!("[tracedecay] Codex PostCompact daemon call failed: {error}");
+    }
 }
 
 async fn ingest_user_codex_session(session_id: Option<String>) -> bool {
     if session_id.is_none() {
         return false;
     }
-    crate::sessions::ingest_user_codex_sessions(session_id)
-        .await
-        .messages_upserted
-        > 0
+    match super::daemon_hook_action(
+        None,
+        serde_json::json!({
+            "action": "ingest_transcript",
+            "provider": "codex",
+            "user_scope": true,
+            "session_id": session_id,
+        }),
+    )
+    .await
+    {
+        Ok(result) => result
+            .get("messages_upserted")
+            .and_then(Value::as_u64)
+            .is_some_and(|count| count > 0),
+        Err(error) => {
+            eprintln!("[tracedecay] user Codex ingest daemon call failed: {error}");
+            false
+        }
+    }
 }
 
 async fn reset_counter_for_codex_event(event_json: &str) {
     let Some(project_root) = codex_project_root_from_event_with_identity(event_json).await else {
         return;
     };
-    if let Ok(cg) = crate::tracedecay::TraceDecay::open(&project_root).await {
-        let _ = cg.reset_local_counter().await;
+    if let Err(error) = super::daemon_hook_action(
+        Some(&project_root),
+        serde_json::json!({ "action": "reset_counter" }),
+    )
+    .await
+    {
+        eprintln!("[tracedecay] local counter reset daemon call failed: {error}");
     }
 }
 
@@ -780,6 +768,21 @@ fn codex_prompt_hint(event_json: &str) -> Option<ToolHint> {
 mod tests {
     use super::*;
     use crate::config::USER_DATA_DIR_ENV;
+
+    #[test]
+    fn codex_session_start_event_signals_daemon_with_real_cwd() {
+        let event = codex_session_start_hook_event(&serde_json::json!({
+            "cwd": "/workspace/codex-session"
+        }))
+        .unwrap();
+
+        assert_eq!(event.agent, crate::daemon::HookAgent::Codex.as_wire());
+        assert_eq!(event.event, "sessionStart");
+        assert_eq!(
+            event.cwd.as_deref(),
+            Some(Path::new("/workspace/codex-session"))
+        );
+    }
 
     const QUALIFYING_RUST_PATCH: &str = "*** Begin Patch\n\
 *** Add File: src/util.rs\n\
@@ -972,46 +975,12 @@ mod tests {
     async fn codex_stop_ingests_final_user_turn_once() {
         let _lock = crate::hooks::lock_test_env();
         let temp = tempfile::tempdir().unwrap();
-        let home = temp.path().join("home");
-        let profile = temp.path().join("profile");
         let general = temp.path().join("general-chat");
         std::fs::create_dir_all(&general).unwrap();
-        let _home_env = EnvGuard::set_path("HOME", &home);
-        let _profile_env = EnvGuard::set_path(USER_DATA_DIR_ENV, &profile);
-        let rollout_dir = home.join(".codex/sessions/2026/01/01");
-        std::fs::create_dir_all(&rollout_dir).unwrap();
-        let rollout = rollout_dir.join("rollout-2026-01-01T00-00-00-final-turn.jsonl");
-        let records = [
-            serde_json::json!({
-                "timestamp": "2026-01-01T00:00:00.000Z",
-                "type": "session_meta",
-                "payload": {
-                    "id": "final-turn",
-                    "cwd": general.to_string_lossy(),
-                    "model": "gpt-5.5"
-                }
-            }),
-            serde_json::json!({
-                "timestamp": "2026-01-01T00:00:01.000Z",
-                "type": "event_msg",
-                "payload": {"type": "user_message", "message": "one turn prompt"}
-            }),
-            serde_json::json!({
-                "timestamp": "2026-01-01T00:00:02.000Z",
-                "type": "event_msg",
-                "payload": {"type": "agent_message", "message": "final assistant evidence"}
-            }),
-        ];
-        std::fs::write(
-            rollout,
-            records
-                .iter()
-                .map(ToString::to_string)
-                .collect::<Vec<_>>()
-                .join("\n")
-                + "\n",
-        )
-        .unwrap();
+        let daemon = crate::hooks::TestDaemonHookActionGuard::install([
+            serde_json::json!({ "messages_upserted": 1 }),
+            serde_json::json!({ "messages_upserted": 0 }),
+        ]);
 
         assert!(finalize_codex_user_session(None, Some("final-turn".to_string())).await);
         assert!(
@@ -1023,14 +992,16 @@ mod tests {
             "project-scoped Stop receipts must never write the user session store"
         );
 
-        let db = crate::sessions::open_user_session_db(&profile)
-            .await
-            .expect("user session db should exist");
-        let hits = db
-            .search_session_messages("codex", Some("user"), "final assistant evidence", 10)
-            .await;
-        assert_eq!(hits.len(), 1);
-        assert_eq!(hits[0].session.session_id, "final-turn");
+        let calls = daemon.calls();
+        assert_eq!(calls.len(), 2);
+        for (project_root, arguments) in calls {
+            assert_eq!(project_root, None);
+            assert_eq!(arguments["action"], "ingest_transcript");
+            assert_eq!(arguments["provider"], "codex");
+            assert_eq!(arguments["user_scope"], true);
+            assert_eq!(arguments["session_id"], "final-turn");
+            assert_eq!(arguments["format"], "json");
+        }
     }
 
     #[test]

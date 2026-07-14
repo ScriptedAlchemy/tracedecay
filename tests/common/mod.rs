@@ -5,13 +5,11 @@ use std::fs::{self, File};
 #[cfg(not(windows))]
 use std::io::Write;
 use std::net::TcpListener;
+#[cfg(not(unix))]
+use std::net::TcpStream;
 use std::path::{Path, PathBuf};
-use std::process::Command;
-#[cfg(unix)]
-use std::process::{Child, Stdio};
-use std::time::Duration;
-#[cfg(unix)]
-use std::time::Instant;
+use std::process::{Child, Command, Stdio};
+use std::time::{Duration, Instant};
 
 use serde_json::Value;
 #[cfg(not(windows))]
@@ -19,13 +17,30 @@ use tempfile::NamedTempFile;
 use tempfile::TempDir;
 use tokio::sync::OnceCell;
 use tracedecay::config::USER_DATA_DIR_ENV;
-use tracedecay::db::Database;
+use tracedecay::db::{Database, DatabaseAuthority};
 use tracedecay::global_db::GlobalDb;
 use tracedecay::sessions::{SessionMessageRecord, SessionRecord};
 use tracedecay::types::{Node, NodeKind, Visibility};
 
 static EMPTY_LCM_DB_TEMPLATE: OnceCell<Vec<u8>> = OnceCell::const_new();
 static EMPTY_GRAPH_DB_TEMPLATE: OnceCell<Vec<u8>> = OnceCell::const_new();
+
+pub async fn initialize_test_database(path: &Path) -> tracedecay::errors::Result<(Database, bool)> {
+    let authority = DatabaseAuthority::acquire_test(path, "integration test initialize")?;
+    Database::initialize(path, &authority).await
+}
+
+pub async fn open_test_database(path: &Path) -> tracedecay::errors::Result<(Database, bool)> {
+    let authority = DatabaseAuthority::acquire_test(path, "integration test open")?;
+    Database::open(path, &authority).await
+}
+
+pub async fn open_test_database_read_only(
+    path: &Path,
+) -> tracedecay::errors::Result<(Database, bool)> {
+    let authority = DatabaseAuthority::acquire_test(path, "integration test read-only open")?;
+    Database::open_read_only(path, &authority).await
+}
 
 /// Sets (or removes) an environment variable for its lifetime, restoring the
 /// previous value on drop.
@@ -173,6 +188,7 @@ pub struct TraceDecayStorageEnvGuard {
     _userprofile_guard: EnvVarGuard,
     _data_dir_guard: EnvVarGuard,
     _global_db_guard: GlobalDbEnvGuard,
+    _holder_scan_guard: EnvVarGuard,
 }
 
 impl TraceDecayStorageEnvGuard {
@@ -189,6 +205,10 @@ impl TraceDecayStorageEnvGuard {
             _userprofile_guard: EnvVarGuard::set("USERPROFILE", &home),
             _data_dir_guard: EnvVarGuard::set(USER_DATA_DIR_ENV, &profile_root),
             _global_db_guard: GlobalDbEnvGuard::set(&global_db_path),
+            _holder_scan_guard: EnvVarGuard::set(
+                "TRACEDECAY_TEST_ALLOW_INCOMPLETE_HOLDER_SCAN",
+                "1",
+            ),
         }
     }
 
@@ -433,12 +453,16 @@ pub fn http_agent_with_timeout(timeout: Duration) -> ureq::Agent {
         .into()
 }
 
-#[cfg(unix)]
 pub struct DaemonProcess {
     child: Child,
 }
 
-#[cfg(unix)]
+impl DaemonProcess {
+    fn is_running(&mut self) -> bool {
+        matches!(self.child.try_wait(), Ok(None))
+    }
+}
+
 impl Drop for DaemonProcess {
     fn drop(&mut self) {
         let _ = self.child.kill();
@@ -460,6 +484,28 @@ pub fn tracedecay_command_with_home(home: &Path) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_tracedecay"));
     apply_tracedecay_home_env(&mut command, home);
     command
+}
+
+thread_local! {
+    static TEST_DAEMONS: std::cell::RefCell<std::collections::HashMap<PathBuf, DaemonProcess>> =
+        std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
+/// Keeps one managed daemon alive for the current test thread and profile.
+///
+/// Nextest runs each test in its own process, while the standard test harness
+/// runs each test on a dedicated thread. Thread-local ownership therefore
+/// keeps command factories concise without leaking daemon children across
+/// otherwise unrelated tests.
+pub fn ensure_tracedecay_daemon(home: &Path) {
+    let home = canonical_existing_path(home);
+    TEST_DAEMONS.with(|daemons| {
+        let mut daemons = daemons.borrow_mut();
+        daemons.retain(|existing_home, daemon| existing_home == &home && daemon.is_running());
+        daemons
+            .entry(home.clone())
+            .or_insert_with(|| spawn_tracedecay_daemon(&home));
+    });
 }
 
 /// Resolves the `git` executable to an absolute path exactly once per process.
@@ -496,32 +542,70 @@ pub fn daemon_socket_path(home: &Path) -> PathBuf {
     canonical_existing_path(home).join(".tracedecay/daemon.sock")
 }
 
-#[cfg(unix)]
 pub fn spawn_tracedecay_daemon(home: &Path) -> DaemonProcess {
+    let profile_root = canonical_existing_path(home).join(".tracedecay");
+    std::fs::create_dir_all(&profile_root).expect("daemon profile should be created");
+    #[cfg(unix)]
     let socket_path = daemon_socket_path(home);
-    let _ = std::fs::remove_file(&socket_path);
+    let authority_path = profile_root.join("daemon-authority.json");
+    #[cfg(not(unix))]
+    let portable_daemon_connectable = || {
+        std::fs::read(&authority_path)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+            .and_then(|record| {
+                (record["endpoint"]["kind"] == "loopback")
+                    .then(|| record["endpoint"]["address"].as_str().map(str::to_owned))
+                    .flatten()
+            })
+            .is_some_and(|address| TcpStream::connect(address).is_ok())
+    };
+    #[cfg(unix)]
+    assert!(
+        std::os::unix::net::UnixStream::connect(&socket_path).is_err(),
+        "refusing to replace a live test daemon at {}",
+        socket_path.display()
+    );
+    #[cfg(not(unix))]
+    assert!(
+        !portable_daemon_connectable(),
+        "refusing to replace a live test daemon recorded at {}",
+        authority_path.display()
+    );
 
-    let mut child = tracedecay_command_with_home(home)
-        .arg("daemon")
-        .arg("run")
+    let mut command = Command::new(env!("CARGO_BIN_EXE_tracedecay"));
+    apply_tracedecay_home_env(&mut command, home);
+    let child = command
+        .args(["daemon", "run"])
+        .env("TRACEDECAY_TEST_ALLOW_INCOMPLETE_HOLDER_SCAN", "1")
+        .current_dir(home)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
         .expect("tracedecay daemon should start");
+    let mut daemon = DaemonProcess { child };
 
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        if std::os::unix::net::UnixStream::connect(&socket_path).is_ok() {
-            return DaemonProcess { child };
+        #[cfg(unix)]
+        let ready = std::os::unix::net::UnixStream::connect(&socket_path).is_ok();
+        #[cfg(not(unix))]
+        let ready = portable_daemon_connectable();
+        if ready {
+            return daemon;
         }
-        if let Some(status) = child.try_wait().expect("daemon status should be readable") {
-            panic!("tracedecay daemon exited before opening socket: {status}");
+        if let Some(status) = daemon
+            .child
+            .try_wait()
+            .expect("daemon status should be readable")
+        {
+            panic!("tracedecay daemon exited before accepting connections: {status}");
         }
         assert!(
             Instant::now() < deadline,
-            "timed out waiting for daemon socket at {}",
-            socket_path.display()
+            "timed out waiting for daemon authority at {}",
+            authority_path.display()
         );
         std::thread::sleep(Duration::from_millis(25));
     }
@@ -671,7 +755,7 @@ pub async fn open_graph_db_from_template(db_path: &Path) -> Database {
         .get_or_init(|| async {
             let tmp = tempdir_or_panic();
             let template_path = tmp.path().join("template-graph.db");
-            let (db, _) = Database::initialize(&template_path)
+            let (db, _) = initialize_test_database(&template_path)
                 .await
                 .expect("template graph db initialize");
             db.checkpoint().await.expect("template graph db checkpoint");
@@ -698,7 +782,7 @@ pub async fn open_graph_db_from_template(db_path: &Path) -> Database {
             db_path.display()
         )
     });
-    let (db, _) = Database::open(db_path)
+    let (db, _) = open_test_database(db_path)
         .await
         .unwrap_or_else(|err| panic!("failed to open templated graph db: {err}"));
     db

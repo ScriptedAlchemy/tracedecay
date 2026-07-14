@@ -6,7 +6,9 @@
 //! allowing AI assistants to query the code graph interactively.
 
 use std::collections::HashMap;
+use std::future::Future;
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
@@ -25,7 +27,7 @@ use crate::mcp::tool_analytics::{
     McpToolAnalyticsEvent, hook_route_analytics_event, mcp_tool_analytics_event,
 };
 use crate::path_tree::format_compact_annotated_path_list;
-use crate::tracedecay::TraceDecay;
+use crate::tracedecay::{TraceDecay, TraceDecayOpenOptions};
 
 use super::hook_events::{self, HookAgent, HookEventPlan};
 use super::tools::{
@@ -35,9 +37,7 @@ use super::tools::{
 use super::transport::{ErrorCode, JsonRpcRequest, JsonRpcResponse};
 
 /// Every JSON-RPC method surface the MCP server understands. This is the
-/// single source of truth for protocol dispatch, shared by the full server
-/// ([`McpServer::handle_request`]) and the degraded startup server
-/// ([`super::degraded`]) so the two surfaces cannot drift.
+/// single source of truth for [`McpServer::handle_request`] dispatch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum McpMethod {
     Initialize,
@@ -93,9 +93,7 @@ pub(crate) const SERVER_INSTRUCTIONS: &str = concat!(
     report the savings to the user (e.g. 'TraceDecay\\'d ~N tokens')."
 );
 
-/// The `initialize` result payload. One definition serves both the full
-/// server and the degraded startup server (which substitutes its recovery
-/// notice for the standard instructions).
+/// The `initialize` result payload.
 pub(crate) fn initialize_result(instructions: &str) -> Value {
     json!({
         "protocolVersion": "2024-11-05",
@@ -114,8 +112,7 @@ pub(crate) fn initialize_result(instructions: &str) -> Value {
     })
 }
 
-/// The `resources/list` result payload, shared with the degraded startup
-/// server (the resource catalog is static).
+/// The `resources/list` result payload.
 pub(crate) fn resources_list_result() -> Value {
     json!({
         "resources": [
@@ -731,6 +728,145 @@ struct VersionCheckState {
     checked_at: Option<Instant>,
 }
 
+/// Updates daemon ownership routing after this server changes physical graph DB.
+/// Implementations must not call back into this `McpServer`: reconciliation is
+/// awaited while the graph write guard is held so readers see the swap and
+/// registry rekey atomically.
+pub(crate) type DatabaseOwnerReconciler = Arc<
+    dyn Fn(Arc<TraceDecay>) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync + 'static,
+>;
+
+/// Complete hook-driven branch write requested by the MCP server.
+///
+/// `incremental_sync_agent` is set only for a routed worktree operation. In
+/// that case the writer must keep any opened [`TraceDecay`] handle inside the
+/// returned future until the conditional incremental sync has completed.
+#[derive(Debug, Clone)]
+pub(crate) struct HookBranchWriteRequest {
+    pub(crate) root: PathBuf,
+    pub(crate) branch: String,
+    pub(crate) open_options: TraceDecayOpenOptions,
+    pub(crate) incremental_sync_agent: Option<HookAgent>,
+}
+
+/// Metadata returned after the complete hook branch write has settled. No
+/// writable store handle crosses the capability boundary.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct HookBranchWriteResult {
+    pub(crate) branch_outcome: crate::branch::BranchAddOutcome,
+    pub(crate) refresh_file_token_map: bool,
+}
+
+/// Injectable ownership boundary for hook-driven branch writes.
+///
+/// Daemon construction can wrap [`execute_hook_branch_write_direct`] in its
+/// store-administration coordinator so the permit covers branch creation and,
+/// for routed worktrees, the subsequent open and incremental sync.
+pub(crate) type HookBranchWriter = Arc<
+    dyn Fn(
+            HookBranchWriteRequest,
+        ) -> Pin<Box<dyn Future<Output = Result<HookBranchWriteResult>> + Send>>
+        + Send
+        + Sync
+        + 'static,
+>;
+
+fn direct_hook_branch_writer() -> HookBranchWriter {
+    Arc::new(|request| Box::pin(execute_hook_branch_write_direct(request)))
+}
+
+pub(crate) async fn execute_hook_branch_write_direct(
+    request: HookBranchWriteRequest,
+) -> Result<HookBranchWriteResult> {
+    let branch_outcome = TraceDecay::add_branch_tracking_with_options(
+        &request.root,
+        &request.branch,
+        request.open_options.clone(),
+    )
+    .await?;
+    let mut refresh_file_token_map = false;
+
+    if branch_outcome == crate::branch::BranchAddOutcome::AlreadyTracked
+        && let Some(agent) = request.incremental_sync_agent
+    {
+        let worktree_cg =
+            TraceDecay::open_with_options(&request.root, request.open_options).await?;
+        refresh_file_token_map = run_hook_incremental_sync_direct(&worktree_cg, agent).await?;
+    }
+
+    Ok(HookBranchWriteResult {
+        branch_outcome,
+        refresh_file_token_map,
+    })
+}
+
+async fn run_hook_incremental_sync_direct(cg: &TraceDecay, agent: HookAgent) -> Result<bool> {
+    let marker = hook_events::sync_marker_path(&cg.store_layout().data_root, agent);
+    let now = crate::tracedecay::current_timestamp();
+    if !hook_events::should_run_sync(&marker, now, 3) {
+        return Ok(false);
+    }
+    match cg.sync().await {
+        Ok(_) | Err(TraceDecayError::SyncLock { .. }) => {
+            hook_events::write_sync_marker(&marker, now);
+            Ok(true)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+/// Complete detached read-refresh write requested by the MCP server.
+#[derive(Debug, Clone)]
+pub(crate) struct BackgroundRefreshRequest {
+    pub(crate) project_root: PathBuf,
+    pub(crate) open_options: TraceDecayOpenOptions,
+    pub(crate) full_sync_escalation_files: usize,
+}
+
+/// Injectable ownership boundary for a detached read refresh. The returned
+/// token map is the only state allowed to cross back into the server; any
+/// temporary [`TraceDecay`] handle must remain inside the callback future.
+pub(crate) type BackgroundRefreshWriter = Arc<
+    dyn Fn(
+            BackgroundRefreshRequest,
+        ) -> Pin<Box<dyn Future<Output = Result<Option<HashMap<String, u64>>>> + Send>>
+        + Send
+        + Sync
+        + 'static,
+>;
+
+fn direct_background_refresh_writer() -> BackgroundRefreshWriter {
+    Arc::new(|request| Box::pin(execute_background_refresh_direct(request)))
+}
+
+pub(crate) async fn execute_background_refresh_direct(
+    request: BackgroundRefreshRequest,
+) -> Result<Option<HashMap<String, u64>>> {
+    let cg = TraceDecay::open_with_options(&request.project_root, request.open_options).await?;
+    let scoped = match cg.last_synced_commit().await {
+        Some(base) => cg.stale_files_since_commit(&base, request.full_sync_escalation_files),
+        None => None,
+    };
+    let result = if let Some(files) = scoped {
+        if files.is_empty() {
+            Ok(())
+        } else {
+            cg.sync_if_stale_silent(&files).await
+        }
+    } else {
+        let stale = cg.find_stale_files().await;
+        if stale.is_empty() {
+            Ok(())
+        } else {
+            cg.sync_if_stale_silent(&stale).await
+        }
+    };
+    if let Err(error) = result {
+        eprintln!("[tracedecay] background read refresh failed: {error}");
+    }
+    Ok(cg.get_file_token_map().await.ok())
+}
+
 /// The MCP server wrapping a `TraceDecay` instance.
 // Lock ordering: file_token_map -> method/resource/tool call counts (never nested)
 pub struct McpServer {
@@ -768,6 +904,10 @@ pub struct McpServer {
     registry_db: Option<Arc<GlobalDb>>,
     allow_default_registry_fallback: bool,
     automation_scheduler_reconciler: Option<crate::dashboard::AutomationSchedulerReconciler>,
+    database_owner_reconciler: Option<DatabaseOwnerReconciler>,
+    dashboard_automation_writer: crate::dashboard::DashboardAutomationWriter,
+    hook_branch_writer: HookBranchWriter,
+    background_refresh_writer: BackgroundRefreshWriter,
     initialize_root_routing_enabled: AtomicBool,
     hook_project_routes: SharedHookProjectRouteCache,
     /// Cached latest-version check result.
@@ -940,6 +1080,55 @@ impl McpServer {
         allow_default_registry_fallback: bool,
         automation_scheduler_reconciler: Option<crate::dashboard::AutomationSchedulerReconciler>,
     ) -> Arc<Self> {
+        Self::new_with_dbs_and_reconcilers(
+            cg,
+            scope_prefix,
+            global_db,
+            registry_db,
+            allow_default_registry_fallback,
+            automation_scheduler_reconciler,
+            None,
+        )
+        .await
+    }
+
+    pub(crate) async fn new_with_dbs_and_reconcilers(
+        cg: TraceDecay,
+        scope_prefix: Option<String>,
+        global_db: Option<Arc<GlobalDb>>,
+        registry_db: Option<Arc<GlobalDb>>,
+        allow_default_registry_fallback: bool,
+        automation_scheduler_reconciler: Option<crate::dashboard::AutomationSchedulerReconciler>,
+        database_owner_reconciler: Option<DatabaseOwnerReconciler>,
+    ) -> Arc<Self> {
+        Self::new_with_dbs_and_reconcilers_and_writers(
+            cg,
+            scope_prefix,
+            global_db,
+            registry_db,
+            allow_default_registry_fallback,
+            automation_scheduler_reconciler,
+            database_owner_reconciler,
+            crate::dashboard::direct_dashboard_automation_writer(),
+            direct_hook_branch_writer(),
+            direct_background_refresh_writer(),
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn new_with_dbs_and_reconcilers_and_writers(
+        cg: TraceDecay,
+        scope_prefix: Option<String>,
+        global_db: Option<Arc<GlobalDb>>,
+        registry_db: Option<Arc<GlobalDb>>,
+        allow_default_registry_fallback: bool,
+        automation_scheduler_reconciler: Option<crate::dashboard::AutomationSchedulerReconciler>,
+        database_owner_reconciler: Option<DatabaseOwnerReconciler>,
+        dashboard_automation_writer: crate::dashboard::DashboardAutomationWriter,
+        hook_branch_writer: HookBranchWriter,
+        background_refresh_writer: BackgroundRefreshWriter,
+    ) -> Arc<Self> {
         let file_token_map = cg.get_file_token_map().await.unwrap_or_default();
         let persisted = cg.get_tokens_saved().await.unwrap_or(0);
         let response_handle_project_root = cg.project_root().to_path_buf();
@@ -992,6 +1181,10 @@ impl McpServer {
             registry_db,
             allow_default_registry_fallback,
             automation_scheduler_reconciler,
+            database_owner_reconciler,
+            dashboard_automation_writer,
+            hook_branch_writer,
+            background_refresh_writer,
             initialize_root_routing_enabled: AtomicBool::new(true),
             hook_project_routes: SharedHookProjectRouteCache::default(),
             version_cache: std::sync::Mutex::new(VersionCheckState {
@@ -1189,7 +1382,11 @@ impl McpServer {
                         fresh.active_branch().unwrap_or("<detached>")
                     );
                     *guard = Arc::new(fresh);
-                    guard.clone()
+                    let fresh = guard.clone();
+                    if let Some(reconcile) = &self.database_owner_reconciler {
+                        reconcile(fresh.clone()).await;
+                    }
+                    fresh
                 }
                 Err(e) => {
                     eprintln!(
@@ -1216,7 +1413,11 @@ impl McpServer {
                         fresh.active_branch().unwrap_or("<detached>")
                     );
                     *guard = Arc::new(fresh);
-                    true
+                    let fresh = guard.clone();
+                    if let Some(reconcile) = &self.database_owner_reconciler {
+                        reconcile(fresh.clone()).await;
+                    }
+                    Some(fresh)
                 }
                 Err(e) => {
                     eprintln!(
@@ -1224,11 +1425,11 @@ impl McpServer {
                          continuing to serve branch '{}'",
                         guard.serving_branch().unwrap_or("<none>")
                     );
-                    false
+                    None
                 }
             }
         };
-        if reopened {
+        if reopened.is_some() {
             self.refresh_file_token_map().await;
         }
     }
@@ -1602,45 +1803,22 @@ impl McpServer {
         let running = Arc::clone(&self.background_refresh_running);
         let done_at = Arc::clone(&self.last_background_refresh_done_at);
         let token_map = Arc::clone(&self.file_token_map);
-        let project_root = cg.project_root().to_path_buf();
-        let open_options = cg.open_options();
+        let refresh = Arc::clone(&self.background_refresh_writer);
+        let request = BackgroundRefreshRequest {
+            project_root: cg.project_root().to_path_buf(),
+            open_options: cg.open_options(),
+            full_sync_escalation_files: escalation,
+        };
         tokio::spawn(async move {
-            let cg = match TraceDecay::open_with_options(&project_root, open_options).await {
-                Ok(cg) => cg,
+            match refresh(request).await {
+                Ok(Some(fresh)) => {
+                    if let Ok(mut guard) = token_map.lock() {
+                        *guard = fresh;
+                    }
+                }
+                Ok(None) => {}
                 Err(e) => {
                     eprintln!("[tracedecay] background read refresh could not reopen project: {e}");
-                    done_at.store(crate::tracedecay::current_timestamp(), Ordering::Release);
-                    running.store(false, Ordering::Release);
-                    return;
-                }
-            };
-            // Prefer diff-scoping off the last synced commit.
-            let scoped = match cg.last_synced_commit().await {
-                Some(base) => cg.stale_files_since_commit(&base, escalation),
-                None => None,
-            };
-            let result = if let Some(files) = scoped {
-                if files.is_empty() {
-                    Ok(())
-                } else {
-                    cg.sync_if_stale_silent(&files).await
-                }
-            } else {
-                // Fallback: full tree walk.
-                let stale = cg.find_stale_files().await;
-                if stale.is_empty() {
-                    Ok(())
-                } else {
-                    cg.sync_if_stale_silent(&stale).await
-                }
-            };
-            if let Err(e) = result {
-                eprintln!("[tracedecay] background read refresh failed: {e}");
-            }
-            // Refresh the shared file-token map from the (now-synced) DB.
-            if let Ok(fresh) = cg.get_file_token_map().await {
-                if let Ok(mut guard) = token_map.lock() {
-                    *guard = fresh;
                 }
             }
             done_at.store(crate::tracedecay::current_timestamp(), Ordering::Release);
@@ -2277,17 +2455,23 @@ impl McpServer {
                 }
             }
             HookEventPlan::AddBranch(branch) => {
-                match self.add_hook_branch_tracking(root, &branch, &cg).await {
-                    Ok(crate::branch::BranchAddOutcome::Added) => {
-                        self.reopen_after_branch_tracking_added().await;
-                    }
-                    Ok(crate::branch::BranchAddOutcome::AlreadyTracked) => {
-                        self.refresh_file_token_map().await;
-                    }
-                    Ok(
+                let request = HookBranchWriteRequest {
+                    root: root.to_path_buf(),
+                    branch,
+                    open_options: cg.open_options(),
+                    incremental_sync_agent: None,
+                };
+                match (self.hook_branch_writer)(request).await {
+                    Ok(result) => match result.branch_outcome {
+                        crate::branch::BranchAddOutcome::Added => {
+                            self.reopen_after_branch_tracking_added().await;
+                        }
+                        crate::branch::BranchAddOutcome::AlreadyTracked => {
+                            self.refresh_file_token_map().await;
+                        }
                         crate::branch::BranchAddOutcome::Deferred
-                        | crate::branch::BranchAddOutcome::NotIndexed,
-                    ) => {}
+                        | crate::branch::BranchAddOutcome::NotIndexed => {}
+                    },
                     Err(e) => eprintln!("[tracedecay] hook branch tracking failed: {e}"),
                 }
             }
@@ -2296,43 +2480,42 @@ impl McpServer {
                 branch,
                 agent,
             } => {
-                // The routed worktree root is not this server's checkout, so
-                // reopen/token-map refresh only applies after opening that root.
-                match self.add_hook_branch_tracking(&root, &branch, &cg).await {
-                    Ok(crate::branch::BranchAddOutcome::AlreadyTracked) => {
-                        match TraceDecay::open_with_options(&root, cg.open_options()).await {
-                            Ok(worktree_cg) => {
-                                self.run_hook_incremental_sync(Arc::new(worktree_cg), agent)
-                                    .await;
-                            }
-                            Err(e) => {
-                                eprintln!(
-                                    "[tracedecay] hook worktree branch sync open failed: {e}"
-                                );
-                            }
-                        }
+                let request = HookBranchWriteRequest {
+                    root,
+                    branch,
+                    open_options: cg.open_options(),
+                    incremental_sync_agent: Some(agent),
+                };
+                match (self.hook_branch_writer)(request).await {
+                    Ok(result) if result.refresh_file_token_map => {
+                        self.refresh_file_token_map().await;
                     }
-                    Ok(
-                        crate::branch::BranchAddOutcome::Added
-                        | crate::branch::BranchAddOutcome::Deferred
-                        | crate::branch::BranchAddOutcome::NotIndexed,
-                    ) => {}
-                    Err(e) => eprintln!("[tracedecay] hook worktree branch tracking failed: {e}"),
+                    Ok(_) => {}
+                    Err(e) => eprintln!("[tracedecay] hook worktree branch write failed: {e}"),
                 }
             }
             HookEventPlan::SyncCurrentBranch { branch, agent } => {
-                match self.add_hook_branch_tracking(root, &branch, &cg).await {
-                    Ok(crate::branch::BranchAddOutcome::Added) => {
-                        self.reopen_after_branch_tracking_added().await;
-                    }
-                    Ok(
-                        crate::branch::BranchAddOutcome::AlreadyTracked
-                        | crate::branch::BranchAddOutcome::Deferred,
-                    ) => self.run_hook_incremental_sync(cg, agent).await,
-                    Ok(crate::branch::BranchAddOutcome::NotIndexed) => {}
+                let request = HookBranchWriteRequest {
+                    root: root.to_path_buf(),
+                    branch,
+                    open_options: cg.open_options(),
+                    incremental_sync_agent: Some(agent),
+                };
+                match (self.hook_branch_writer)(request).await {
+                    Ok(result) => match result.branch_outcome {
+                        crate::branch::BranchAddOutcome::Added => {
+                            self.reopen_after_branch_tracking_added().await;
+                        }
+                        crate::branch::BranchAddOutcome::AlreadyTracked => {
+                            if result.refresh_file_token_map {
+                                self.refresh_file_token_map().await;
+                            }
+                        }
+                        crate::branch::BranchAddOutcome::Deferred
+                        | crate::branch::BranchAddOutcome::NotIndexed => {}
+                    },
                     Err(e) => {
                         eprintln!("[tracedecay] hook current branch tracking failed: {e}");
-                        self.run_hook_incremental_sync(cg, agent).await;
                     }
                 }
             }
@@ -2379,31 +2562,10 @@ impl McpServer {
         }
     }
 
-    async fn add_hook_branch_tracking(
-        &self,
-        root: &Path,
-        branch: &str,
-        cg: &TraceDecay,
-    ) -> Result<crate::branch::BranchAddOutcome> {
-        crate::tracedecay::TraceDecay::add_branch_tracking_with_options(
-            root,
-            branch,
-            cg.open_options(),
-        )
-        .await
-    }
-
     async fn run_hook_incremental_sync(&self, cg: Arc<TraceDecay>, agent: HookAgent) {
-        let marker = hook_events::sync_marker_path(&cg.store_layout().data_root, agent);
-        let now = crate::tracedecay::current_timestamp();
-        if !hook_events::should_run_sync(&marker, now, 3) {
-            return;
-        }
-        match cg.sync().await {
-            Ok(_) | Err(TraceDecayError::SyncLock { .. }) => {
-                hook_events::write_sync_marker(&marker, now);
-                self.refresh_file_token_map().await;
-            }
+        match run_hook_incremental_sync_direct(&cg, agent).await {
+            Ok(true) => self.refresh_file_token_map().await,
+            Ok(false) => {}
             Err(e) => eprintln!("[tracedecay] hook incremental sync failed: {e}"),
         }
     }
@@ -2760,6 +2922,7 @@ impl McpServer {
                 allow_default_registry_fallback: self.allow_default_registry_fallback,
                 implicit_project_path,
                 automation_scheduler_reconciler: self.automation_scheduler_reconciler.clone(),
+                automation_writer: self.dashboard_automation_writer.clone(),
                 diagnostics_cache: Some(&self.diagnostics_cache),
                 diagnostics_lsp: Some(&self.diagnostics_lsp),
             },
@@ -3318,7 +3481,13 @@ fn json_rpc_request_id_string(id: &Value) -> Option<String> {
 /// `indexing.rs` test idiom.
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
+mod background_refresh_writer_tests;
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod freshness_tests;
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod hook_branch_writer_tests;
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod staleness_banner_tests;

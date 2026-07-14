@@ -464,7 +464,7 @@ async fn verify_manifest_accepts_logically_equal_sqlite_artifacts_with_different
     fs::create_dir_all(&data_dir).unwrap();
     fs::create_dir_all(&data_root).unwrap();
 
-    let (source, _) = tracedecay::db::Database::initialize(&source_db)
+    let (source, _) = crate::common::initialize_test_database(&source_db)
         .await
         .unwrap();
     source
@@ -474,7 +474,7 @@ async fn verify_manifest_accepts_logically_equal_sqlite_artifacts_with_different
     source.checkpoint().await.unwrap();
     source.close();
 
-    let (target, _) = tracedecay::db::Database::initialize(&target_db)
+    let (target, _) = crate::common::initialize_test_database(&target_db)
         .await
         .unwrap();
     target

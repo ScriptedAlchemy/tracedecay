@@ -3,7 +3,9 @@ use std::io::Write;
 use std::path::Path;
 use std::process::{Command, Output, Stdio};
 
-use super::common::apply_tracedecay_home_env;
+use super::common::{
+    apply_tracedecay_home_env, git_program, spawn_tracedecay_daemon, tracedecay_command_with_home,
+};
 
 const NO_INPUT_HOOKS: &[&str] = &["hook-pre-tool-use", "hook-prompt-submit", "hook-stop"];
 const STDIN_HOOKS: &[&str] = &[
@@ -48,11 +50,15 @@ fn hold_external_exclusive_lease(home: &Path) -> File {
 }
 
 fn run_hook(home: &Path, hook: &str, input: Option<&[u8]>) -> Output {
+    run_hook_at(home, home, hook, input)
+}
+
+fn run_hook_at(home: &Path, cwd: &Path, hook: &str, input: Option<&[u8]>) -> Output {
     let mut command = Command::new(env!("CARGO_BIN_EXE_tracedecay"));
     apply_tracedecay_home_env(&mut command, home);
     command
         .arg(hook)
-        .current_dir(home)
+        .current_dir(cwd)
         .stdin(if input.is_some() {
             Stdio::piped()
         } else {
@@ -106,13 +112,43 @@ fn exclusive_lifecycle_owner_quiesces_every_hook_before_startup_or_dispatch() {
 #[test]
 fn normal_lease_path_still_executes_a_direct_claude_stdin_hook() {
     let temp = tempfile::tempdir().unwrap();
+    let project = temp.path().join("project");
+    std::fs::create_dir_all(project.join("src")).unwrap();
+    std::fs::write(project.join("src/lib.rs"), "pub fn hook_fixture() {}\n").unwrap();
+    let git = git_program();
+    for args in [
+        &["init", "-q", "-b", "main"][..],
+        &["config", "user.email", "test@tracedecay.dev"][..],
+        &["config", "user.name", "TraceDecay Test"][..],
+        &["add", "."][..],
+        &["commit", "-q", "-m", "fixture"][..],
+    ] {
+        assert!(
+            Command::new(&git)
+                .args(args)
+                .current_dir(&project)
+                .status()
+                .unwrap()
+                .success()
+        );
+    }
+    let _daemon = spawn_tracedecay_daemon(temp.path());
+    assert!(
+        tracedecay_command_with_home(temp.path())
+            .arg("init")
+            .current_dir(&project)
+            .status()
+            .unwrap()
+            .success()
+    );
     let event = format!(
         "{{\"hook_event_name\":\"SessionStart\",\"cwd\":{}}}",
-        serde_json::to_string(&temp.path().to_string_lossy()).unwrap()
+        serde_json::to_string(&project.to_string_lossy()).unwrap()
     );
 
-    let output = run_hook(
+    let output = run_hook_at(
         temp.path(),
+        &project,
         "hook-claude-session-start",
         Some(event.as_bytes()),
     );

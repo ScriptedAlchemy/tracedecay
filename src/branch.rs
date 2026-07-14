@@ -4,11 +4,19 @@ use std::path::{Path, PathBuf};
 
 use crate::branch_meta::BranchMeta;
 
+mod admin;
+
+pub use admin::{
+    BranchAdminAction, BranchAdminOutcome, BranchAdminReport, PreparedBranchAdminMutation,
+    prepare_branch_admin_mutation, remove_tracked_branch_store_checked,
+};
+pub(crate) use admin::{BranchAdminRecoveryDisposition, prepare_pending_branch_admin_recovery};
+
 /// Bounded-retry policy for a briefly-contended branch-add lock: a concurrent
 /// branch add only holds the lock for the duration of a DB clone, so a short
 /// spin lets a contender through instead of failing immediately. Shared by the
 /// async [`prepare_branch_tracking_in_layout`] and the synchronous
-/// [`acquire_branch_add_lock_blocking`]; only the sleep primitive differs.
+/// administrative path; only the sleep primitive differs.
 const BRANCH_LOCK_RETRY_ATTEMPTS: usize = 20;
 const BRANCH_LOCK_RETRY_INTERVAL: std::time::Duration = std::time::Duration::from_millis(50);
 
@@ -281,30 +289,36 @@ fn unique_branch_db_stem(
     meta: &BranchMeta,
     branches_dir: &Path,
     branch_name: &str,
-) -> Option<String> {
+) -> crate::errors::Result<Option<String>> {
     let base = sanitize_branch_name(branch_name);
     if base.is_empty() {
-        return None;
+        return Ok(None);
     }
-    let conflicts = |stem: &str| -> bool {
+    let conflicts = |stem: &str| -> crate::errors::Result<bool> {
         let db_file = format!("branches/{stem}.db");
         let meta_conflict = meta
             .branches
             .iter()
             .any(|(name, entry)| name != branch_name && entry.db_file == db_file);
-        let file_conflict = branches_dir.join(format!("{stem}.db")).exists();
-        meta_conflict || file_conflict
+        let database_path = branches_dir.join(format!("{stem}.db"));
+        let file_conflict = database_path.exists();
+        let retired_path = crate::db::database_path_is_tombstoned(&database_path)?;
+        Ok(meta_conflict || file_conflict || retired_path)
     };
-    if !conflicts(&base) {
-        return Some(base);
+    if !conflicts(&base)? {
+        return Ok(Some(base));
     }
     let hashed = format!("{base}-{}", short_branch_hash(branch_name));
-    if !conflicts(&hashed) {
-        return Some(hashed);
+    if !conflicts(&hashed)? {
+        return Ok(Some(hashed));
     }
-    (1..10_000)
-        .map(|suffix| format!("{hashed}-{suffix}"))
-        .find(|candidate| !conflicts(candidate))
+    for suffix in 1..10_000 {
+        let candidate = format!("{hashed}-{suffix}");
+        if !conflicts(&candidate)? {
+            return Ok(Some(candidate));
+        }
+    }
+    Ok(None)
 }
 
 /// Short, stable hex digest of a branch name for DB-stem disambiguation.
@@ -503,10 +517,10 @@ pub async fn prepare_branch_tracking_in_layout(
             )
         }
     };
-    prune_missing_branch_dbs(tracedecay_dir, &mut meta);
+    let pruned_missing_branches = prune_missing_branch_dbs(tracedecay_dir, &mut meta);
 
     if meta.is_tracked(branch_name) {
-        if metadata_was_missing {
+        if metadata_was_missing || pruned_missing_branches {
             branch_meta::save_branch_meta(tracedecay_dir, &meta)?;
         }
         return Ok(BranchTrackingPreparation::AlreadyTracked);
@@ -538,10 +552,10 @@ pub async fn prepare_branch_tracking_in_layout(
     let branches_dir = branch_meta::ensure_branches_dir(tracedecay_dir)?;
     // Pick a collision-free stem so a branch whose sanitized name matches an
     // already-tracked branch gets its own DB instead of overwriting it (#3).
-    let stem = unique_branch_db_stem(&meta, &branches_dir, branch_name).ok_or_else(|| {
+    let stem = unique_branch_db_stem(&meta, &branches_dir, branch_name)?.ok_or_else(|| {
         crate::errors::TraceDecayError::Config {
             message: format!(
-                "cannot track branch '{branch_name}': its name sanitizes to an empty filename"
+                "cannot track branch '{branch_name}': no unretired collision-free database filename is available"
             ),
         }
     })?;
@@ -622,6 +636,51 @@ async fn default_branch_bootstrap_persists_canonical_metadata() {
     assert!(!data_dir.join("branches").exists());
 }
 
+#[cfg(test)]
+#[tokio::test]
+async fn already_tracked_branch_persists_pruned_missing_database_entries() {
+    let temp = tempfile::tempdir().unwrap();
+    let project_root = temp.path().join("repo");
+    std::fs::create_dir_all(&project_root).unwrap();
+    let data_dir = temp.path().join("profile-shard");
+    std::fs::create_dir_all(&data_dir).unwrap();
+    std::fs::write(data_dir.join(crate::config::DB_FILENAME), b"graph").unwrap();
+
+    let mut meta = crate::branch_meta::BranchMeta::new("main");
+    meta.add_branch("stale", "branches/missing.db", "main");
+    crate::branch_meta::save_branch_meta(&data_dir, &meta).unwrap();
+
+    let outcome = prepare_branch_tracking_in_layout(&project_root, "main", &data_dir)
+        .await
+        .unwrap();
+
+    assert!(matches!(outcome, BranchTrackingPreparation::AlreadyTracked));
+    let persisted = crate::branch_meta::load_branch_meta(&data_dir).unwrap();
+    assert!(!persisted.is_tracked("stale"));
+}
+
+#[cfg(test)]
+#[test]
+fn rollback_keeps_database_when_metadata_removal_cannot_be_saved() {
+    let temp = tempfile::tempdir().unwrap();
+    let data_dir = temp.path();
+    let branches_dir = data_dir.join("branches");
+    std::fs::create_dir_all(&branches_dir).unwrap();
+    let db_path = branches_dir.join("feature.db");
+    std::fs::write(&db_path, b"graph").unwrap();
+
+    let mut meta = crate::branch_meta::BranchMeta::new("main");
+    meta.add_branch("feature", "branches/feature.db", "main");
+    crate::branch_meta::save_branch_meta(data_dir, &meta).unwrap();
+    std::fs::create_dir(data_dir.join("branch-meta.json.tmp")).unwrap();
+
+    rollback_branch_tracking(data_dir, "feature", "branches/feature.db", &db_path);
+
+    assert!(db_path.exists());
+    let persisted = crate::branch_meta::load_branch_meta(data_dir).unwrap();
+    assert!(persisted.is_tracked("feature"));
+}
+
 pub fn finalize_prepared_branch_tracking(tracedecay_dir: &Path, prepared: &PreparedBranchTracking) {
     if let Some(mut meta) = crate::branch_meta::load_branch_meta(tracedecay_dir) {
         meta.touch_synced(&prepared.branch_name);
@@ -644,25 +703,30 @@ fn rollback_branch_tracking(
     db_file: &str,
     new_db_path: &Path,
 ) {
-    if let Some(mut meta) = crate::branch_meta::load_branch_meta(tracedecay_dir) {
-        let should_remove = meta
-            .branches
-            .get(branch_name)
-            .is_some_and(|entry| entry.db_file == db_file);
-        if should_remove {
+    let metadata_removed =
+        crate::branch_meta::load_branch_meta(tracedecay_dir).is_some_and(|mut meta| {
+            let should_remove = meta
+                .branches
+                .get(branch_name)
+                .is_some_and(|entry| entry.db_file == db_file);
+            if !should_remove {
+                return false;
+            }
             meta.remove_branch(branch_name);
-            let _ = crate::branch_meta::save_branch_meta(tracedecay_dir, &meta);
-        }
-    }
-    let still_ours = crate::branch_meta::load_branch_meta(tracedecay_dir)
-        .and_then(|meta| meta.branches.get(branch_name).cloned())
-        .is_none_or(|entry| entry.db_file == db_file);
-    if still_ours {
+            crate::branch_meta::save_branch_meta(tracedecay_dir, &meta).is_ok()
+        });
+    let removal_persisted = metadata_removed
+        && crate::branch_meta::load_branch_meta(tracedecay_dir)
+            .is_some_and(|meta| !meta.branches.contains_key(branch_name));
+    if removal_persisted {
         remove_branch_db_files(new_db_path);
     }
 }
 
-fn prune_missing_branch_dbs(tracedecay_dir: &Path, meta: &mut crate::branch_meta::BranchMeta) {
+fn prune_missing_branch_dbs(
+    tracedecay_dir: &Path,
+    meta: &mut crate::branch_meta::BranchMeta,
+) -> bool {
     let missing: Vec<String> = meta
         .branches
         .iter()
@@ -674,12 +738,14 @@ fn prune_missing_branch_dbs(tracedecay_dir: &Path, meta: &mut crate::branch_meta
             (!path.exists()).then(|| name.clone())
         })
         .collect();
+    let changed = !missing.is_empty();
     for name in missing {
         meta.remove_branch(&name);
     }
+    changed
 }
 
-fn try_acquire_branch_add_lock(tracedecay_dir: &Path) -> crate::errors::Result<std::fs::File> {
+fn try_acquire_branch_add_lock_raw(tracedecay_dir: &Path) -> crate::errors::Result<std::fs::File> {
     use fs2::FileExt;
 
     std::fs::create_dir_all(tracedecay_dir)?;
@@ -696,31 +762,22 @@ fn try_acquire_branch_add_lock(tracedecay_dir: &Path) -> crate::errors::Result<s
     Ok(file)
 }
 
-/// Blocking-with-timeout variant of [`try_acquire_branch_add_lock`] for
-/// synchronous callers. Retries a briefly-contended lock (a concurrent branch
-/// add is only holding it for the duration of a DB clone) before giving up.
-/// Returns `None` on timeout or a non-contention error, so the caller can skip
-/// its mutation this round rather than proceed unsynchronized.
-fn acquire_branch_add_lock_blocking(tracedecay_dir: &Path) -> Option<std::fs::File> {
-    for _ in 0..BRANCH_LOCK_RETRY_ATTEMPTS {
-        match try_acquire_branch_add_lock(tracedecay_dir) {
-            Ok(lock) => return Some(lock),
-            Err(crate::errors::TraceDecayError::SyncLock { .. }) => {
-                std::thread::sleep(BRANCH_LOCK_RETRY_INTERVAL);
-            }
-            Err(_) => return None,
-        }
-    }
-    None
+pub(crate) fn try_acquire_branch_add_lock(
+    tracedecay_dir: &Path,
+) -> crate::errors::Result<std::fs::File> {
+    let file = try_acquire_branch_add_lock_raw(tracedecay_dir)?;
+    admin::ensure_no_pending_branch_admin_recovery(tracedecay_dir)?;
+    Ok(file)
+}
+
+pub(crate) fn acquire_branch_lock_blocking(
+    tracedecay_dir: &Path,
+) -> crate::errors::Result<std::fs::File> {
+    admin::acquire_branch_add_lock_blocking(tracedecay_dir)
 }
 
 fn remove_branch_db_files(db_path: &Path) {
-    let _ = std::fs::remove_file(db_path);
-    let mut sidecar = db_path.to_path_buf();
-    sidecar.set_extension("db-wal");
-    let _ = std::fs::remove_file(&sidecar);
-    sidecar.set_extension("db-shm");
-    let _ = std::fs::remove_file(&sidecar);
+    let _ = admin::remove_branch_db_files_checked(db_path);
 }
 
 async fn create_consistent_branch_snapshot(src: &Path, dst: &Path) -> crate::errors::Result<()> {
@@ -742,7 +799,9 @@ async fn create_consistent_branch_snapshot(src: &Path, dst: &Path) -> crate::err
         std::process::id()
     ));
     let result = async {
-        let (source, _) = crate::db::Database::open_read_only(src).await?;
+        let authority =
+            crate::db::DatabaseAuthority::for_runtime(src, "create branch snapshot")?;
+        let (source, _) = crate::db::Database::open_read_only(src, &authority).await?;
         source.snapshot_to(&temp).await?;
         std::fs::hard_link(&temp, dst).map_err(|error| {
             crate::errors::TraceDecayError::Config {
@@ -755,36 +814,19 @@ async fn create_consistent_branch_snapshot(src: &Path, dst: &Path) -> crate::err
         Ok(())
     }
     .await;
-    remove_branch_db_files(&temp);
-    result
+    let cleanup = admin::remove_branch_db_files_checked(&temp);
+    match result {
+        Err(error) => Err(error),
+        Ok(()) => cleanup,
+    }
 }
 
-/// Untracks a single non-default branch: removes its metadata entry and deletes
-/// its DB file (plus `-wal`/`-shm` sidecars). Returns `true` when an entry was
-/// removed. The default branch is never removed. This is the shared removal path
-/// used by `tracedecay branch remove` and the PR-autotrack lifecycle so both
-/// clean up identically.
+/// Compatibility wrapper for the PR-autotrack lifecycle. Administrative CLI
+/// removal uses [`prepare_branch_admin_mutation`] through the daemon so failures
+/// are surfaced instead of collapsed to `false`.
 pub fn remove_tracked_branch_store(tracedecay_dir: &Path, branch: &str) -> bool {
-    // Serialize on the same branch-add lock every other `branch-meta.json`
-    // mutator holds (prepare_branch_tracking_in_layout, gc_dead_branch_stores).
-    // Without it, this unlocked load→remove→save races a concurrent
-    // `branch add`: depending on write order it either silently drops the
-    // user's just-added branch or resurrects a removed entry pointing at a
-    // deleted DB. On sustained contention, skip removal (returning false); the
-    // caller retries next cycle — nothing is lost. Callers never hold this lock
-    // when calling in (branch add / GC acquire-then-release), so no deadlock.
-    let Some(_lock) = acquire_branch_add_lock_blocking(tracedecay_dir) else {
-        return false;
-    };
-    let Some(mut meta) = crate::branch_meta::load_branch_meta(tracedecay_dir) else {
-        return false;
-    };
-    let Some(entry) = meta.remove_branch(branch) else {
-        return false;
-    };
-    remove_branch_db_files(&tracedecay_dir.join(&entry.db_file));
-    let _ = crate::branch_meta::save_branch_meta(tracedecay_dir, &meta);
-    true
+    remove_tracked_branch_store_checked(tracedecay_dir, branch)
+        .is_ok_and(|report| report.outcome == BranchAdminOutcome::Removed)
 }
 
 /// Returns true if `branch` currently exists as a local `refs/heads/*` ref.
@@ -820,139 +862,19 @@ fn now_unix_secs() -> u64 {
         .as_secs()
 }
 
-/// Garbage-collects dead and orphaned branch stores.
-///
-/// Two independent sweeps, both age-gated so an in-flight branch that has not
-/// yet synced or a just-deleted-then-recreated ref is never collected:
-///
-/// (a) **Tracked, ref-gone branches** — for each unprotected tracked
-///     non-default branch whose git ref no longer exists AND whose
-///     `last_synced_at` is older than `branch_gc_days`, remove its DB files and
-///     metadata entry. The default branch and GC-protected entries are never
-///     removed.
-/// (b) **Orphan DBs** — `branches/*.db` files not referenced by any meta entry
-///     whose mtime is older than `orphan_db_gc_days` are deleted along with
-///     their `-wal`/`-shm` sidecars.
-///
-/// The whole pass holds the branch-add lock so it never races a concurrent
-/// branch-add (which is creating files GC would otherwise see as orphans).
-/// If the lock cannot be acquired promptly, GC is skipped this round and an
-/// empty report is returned — the daemon retries on its next tick. Logging is
-/// the caller's responsibility; this function is silent.
+/// Compatibility wrapper retained for callers that cannot reach the managed
+/// daemon. Physical branch-store GC requires daemon-owned store administration,
+/// so this API fails closed without mutating metadata or `SQLite` files.
 pub fn gc_dead_branch_stores(
-    project_root: &Path,
-    tracedecay_dir: &Path,
-    branch_gc_days: u64,
-    orphan_db_gc_days: u64,
+    _project_root: &Path,
+    _tracedecay_dir: &Path,
+    _branch_gc_days: u64,
+    _orphan_db_gc_days: u64,
 ) -> GcReport {
-    let mut report = GcReport::default();
-
-    // Serialize against branch-add so we don't delete a DB it is mid-creation.
-    let Ok(_lock) = try_acquire_branch_add_lock(tracedecay_dir) else {
-        return report;
-    };
-
-    let now = now_unix_secs();
-
-    // (a) Tracked branches whose ref is gone and whose last sync is stale.
-    if let Some(mut meta) = crate::branch_meta::load_branch_meta(tracedecay_dir) {
-        let branch_grace = branch_gc_days.saturating_mul(86_400);
-        let default_branch = meta.default_branch.clone();
-        let candidates: Vec<(String, PathBuf, u64)> = meta
-            .branches
-            .iter()
-            .filter(|(name, entry)| **name != default_branch && !entry.gc_protected)
-            .map(|(name, entry)| {
-                (
-                    name.clone(),
-                    tracedecay_dir.join(&entry.db_file),
-                    parse_unix_secs(&entry.last_synced_at),
-                )
-            })
-            .collect();
-
-        let mut removed_any = false;
-        for (name, db_path, last_synced) in candidates {
-            // Never collect a branch whose ref still resolves, and never one
-            // synced within the grace window (`<= now` age guards a clock skew
-            // where last_synced is in the future).
-            if is_branch_ref_present(project_root, &name) {
-                continue;
-            }
-            let age = now.saturating_sub(last_synced);
-            if age < branch_grace {
-                continue;
-            }
-            remove_branch_db_files(&db_path);
-            meta.remove_branch(&name);
-            report.removed_tracked.push(name);
-            removed_any = true;
-        }
-        if removed_any {
-            let _ = crate::branch_meta::save_branch_meta(tracedecay_dir, &meta);
-        }
-
-        // (b) Orphan DBs: files under branches/ not referenced by any surviving
-        // meta entry. Recompute the referenced set AFTER the removals above so
-        // a just-removed branch's DB (already deleted) is not double-counted.
-        let referenced: std::collections::HashSet<PathBuf> = meta
-            .branches
-            .values()
-            .map(|entry| tracedecay_dir.join(&entry.db_file))
-            .collect();
-        report.removed_orphan_dbs =
-            sweep_orphan_dbs(tracedecay_dir, &referenced, orphan_db_gc_days, now);
-    } else {
-        // No branch metadata: every branches/*.db is an orphan candidate.
-        report.removed_orphan_dbs = sweep_orphan_dbs(
-            tracedecay_dir,
-            &std::collections::HashSet::new(),
-            orphan_db_gc_days,
-            now,
-        );
-    }
-
-    report
-}
-
-/// Deletes stale `branches/*.db` files (+ sidecars) not in `referenced`.
-fn sweep_orphan_dbs(
-    tracedecay_dir: &Path,
-    referenced: &std::collections::HashSet<PathBuf>,
-    orphan_db_gc_days: u64,
-    now: u64,
-) -> Vec<PathBuf> {
-    let mut removed = Vec::new();
-    let branches_dir = tracedecay_dir.join("branches");
-    let Ok(entries) = std::fs::read_dir(&branches_dir) else {
-        return removed;
-    };
-    let orphan_grace = orphan_db_gc_days.saturating_mul(86_400);
-    for entry in entries.flatten() {
-        let path = entry.path();
-        // Only main `.db` files are stores; sidecars are removed alongside.
-        if path.extension().and_then(|e| e.to_str()) != Some("db") {
-            continue;
-        }
-        if referenced.contains(&path) {
-            continue;
-        }
-        // Age-gate on mtime; a freshly-created orphan (e.g. a branch-add whose
-        // meta save is momentarily lagging) is kept until it ages out.
-        let mtime_secs = entry
-            .metadata()
-            .ok()
-            .and_then(|m| m.modified().ok())
-            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-            .map_or(0, |d| d.as_secs());
-        let age = now.saturating_sub(mtime_secs);
-        if age < orphan_grace {
-            continue;
-        }
-        remove_branch_db_files(&path);
-        removed.push(path);
-    }
-    removed
+    // Physical branch-store GC requires daemon-owned writer exclusion, cached
+    // owner checks, a deletion fence, and holder proof. This compatibility API
+    // cannot establish those invariants, so it deliberately fails closed.
+    GcReport::default()
 }
 
 #[cfg(test)]

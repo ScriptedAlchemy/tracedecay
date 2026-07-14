@@ -2,6 +2,7 @@ use super::*;
 
 use notify::event::EventAttributes;
 use std::process::Command;
+use tokio::sync::oneshot;
 
 #[test]
 fn dirty_set_coalesces_and_takes_once() {
@@ -99,6 +100,74 @@ fn heartbeat_staleness() {
         degraded: false,
     };
     assert!(old.heartbeat_stale());
+}
+
+/// The shared coordinator must not start a second store-writing lifetime while
+/// the first one is held. Paused Tokio time plus Notify/oneshot handshakes make
+/// this a scheduling-state assertion rather than a wall-clock sleep.
+#[tokio::test(start_paused = true)]
+async fn writer_administration_blocks_until_the_gate_is_released() {
+    let administration = StoreAdministration::default();
+    let holder_entered = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+
+    let holder = {
+        let administration = administration.clone();
+        let holder_entered = Arc::clone(&holder_entered);
+        let release = Arc::clone(&release);
+        tokio::spawn(async move {
+            administration
+                .with_writer(move || async move {
+                    holder_entered.notify_one();
+                    release.notified().await;
+                })
+                .await;
+        })
+    };
+    tokio::time::timeout(Duration::from_secs(1), holder_entered.notified())
+        .await
+        .expect("holder must acquire the writer gate");
+
+    let (waiter_ready_tx, waiter_ready_rx) = oneshot::channel();
+    let waiter_entered = Arc::new(Notify::new());
+    let waiter = {
+        let administration = administration.clone();
+        let waiter_entered = Arc::clone(&waiter_entered);
+        tokio::spawn(async move {
+            waiter_ready_tx
+                .send(())
+                .expect("waiter readiness receiver must remain alive");
+            administration
+                .with_writer(move || async move {
+                    waiter_entered.notify_one();
+                })
+                .await;
+        })
+    };
+    waiter_ready_rx
+        .await
+        .expect("waiter task must reach the gate");
+    tokio::task::yield_now().await;
+
+    assert!(
+        tokio::time::timeout(Duration::from_secs(1), waiter_entered.notified())
+            .await
+            .is_err(),
+        "a second writer must remain blocked while the first writer holds the gate"
+    );
+
+    release.notify_one();
+    tokio::time::timeout(Duration::from_secs(1), waiter_entered.notified())
+        .await
+        .expect("releasing the gate must admit the waiting writer");
+    tokio::time::timeout(Duration::from_secs(1), holder)
+        .await
+        .expect("holder task must finish")
+        .expect("holder task must not panic");
+    tokio::time::timeout(Duration::from_secs(1), waiter)
+        .await
+        .expect("waiter task must finish")
+        .expect("waiter task must not panic");
 }
 
 // ---- Real `GitWatcher` tests (drive the public API + the real debounce

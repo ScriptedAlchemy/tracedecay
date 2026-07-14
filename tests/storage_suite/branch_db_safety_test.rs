@@ -3,6 +3,9 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command;
 
+#[cfg(unix)]
+use serde_json::Value;
+
 use crate::common::{self, IsolatedEnv};
 use tracedecay::branch::BranchAddOutcome;
 use tracedecay::branch_meta::load_branch_meta;
@@ -426,6 +429,7 @@ fn cli_branch_add_refuses_corrupt_metadata_without_overwriting() {
     fs::write(project.join("src/lib.rs"), "pub fn main_only() {}\n").unwrap();
     commit_all(project, "initial commit");
 
+    let _daemon = common::spawn_tracedecay_daemon(env.home());
     let mut init_command = Command::new(env!("CARGO_BIN_EXE_tracedecay"));
     common::apply_tracedecay_home_env(&mut init_command, env.home());
     let init = init_command
@@ -475,5 +479,126 @@ fn cli_branch_add_refuses_corrupt_metadata_without_overwriting() {
         fs::read(&meta_path).unwrap(),
         b"{not valid json",
         "failed CLI branch add must preserve corrupt metadata for repair"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn cli_branch_add_uses_managed_daemon_as_the_only_database_writer() {
+    let _env_lock = HOME_ENV_LOCK.lock().await;
+    let (env, project) = IsolatedEnv::acquire().await;
+    let project = project.as_path();
+
+    git(project, &["init", "-b", "main"]);
+    fs::create_dir_all(project.join("src")).unwrap();
+    fs::write(project.join("src/lib.rs"), "pub fn main_only() {}\n").unwrap();
+    commit_all(project, "initial commit");
+
+    let main = TraceDecay::init(project).await.unwrap();
+    main.index_all().await.unwrap();
+    drop(main);
+
+    git(project, &["checkout", "-b", "feature/daemon-owned"]);
+    fs::write(
+        project.join("src/daemon_owned.rs"),
+        "pub fn daemon_owned() {}\n",
+    )
+    .unwrap();
+    commit_all(project, "feature commit");
+
+    let daemon_socket = common::daemon_socket_path(env.home());
+    let _daemon = common::spawn_tracedecay_daemon(env.home());
+    let authority: Value = serde_json::from_slice(
+        &fs::read(env.home().join(".tracedecay/daemon-authority.json"))
+            .expect("read isolated daemon authority record"),
+    )
+    .expect("parse isolated daemon authority record");
+    let daemon_pid = authority["pid"]
+        .as_u64()
+        .expect("daemon authority record should contain its PID");
+
+    let branch_add = common::tracedecay_command_with_home(env.home())
+        .current_dir(project)
+        .env("TRACEDECAY_DAEMON_SOCKET", &daemon_socket)
+        .args(["branch", "add", "feature/daemon-owned", "--path"])
+        .arg(project)
+        .output()
+        .expect("tracedecay branch add through the isolated daemon");
+    assert!(
+        branch_add.status.success(),
+        "daemon-routed branch add should succeed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&branch_add.stdout),
+        String::from_utf8_lossy(&branch_add.stderr)
+    );
+    let branch_add_text = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&branch_add.stdout),
+        String::from_utf8_lossy(&branch_add.stderr)
+    );
+    assert!(
+        !branch_add_text.contains("database access is restricted to the elected managed daemon"),
+        "the CLI must proxy branch add to the daemon instead of attempting local database authority:\n{branch_add_text}"
+    );
+
+    let meta = load_branch_meta(&project_data_dir(project)).expect("load branch metadata");
+    let branch_entry = meta
+        .branches
+        .get("feature/daemon-owned")
+        .expect("daemon branch add should record the feature branch");
+    assert_eq!(branch_entry.parent.as_deref(), Some("main"));
+    let branch_db = project_data_dir(project).join(&branch_entry.db_file);
+    assert!(
+        branch_db.is_file(),
+        "daemon branch add should create the recorded branch store at {}",
+        branch_db.display()
+    );
+
+    let project_arg = project.to_string_lossy().to_string();
+    let runtime_output = common::tracedecay_command_with_home(env.home())
+        .current_dir(project)
+        .env("TRACEDECAY_DAEMON_SOCKET", &daemon_socket)
+        .args([
+            "tool",
+            "--project",
+            &project_arg,
+            "runtime",
+            "--json",
+            "--format",
+            "json",
+        ])
+        .output()
+        .expect("daemon-routed runtime inspection");
+    assert!(
+        runtime_output.status.success(),
+        "daemon-routed runtime inspection should succeed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&runtime_output.stdout),
+        String::from_utf8_lossy(&runtime_output.stderr)
+    );
+    let runtime_tool_result: Value =
+        serde_json::from_slice(&runtime_output.stdout).expect("runtime tool result JSON");
+    let runtime: Value = runtime_tool_result["content"]
+        .as_array()
+        .expect("runtime tool result content")
+        .iter()
+        .filter_map(|item| item["text"].as_str())
+        .find_map(|text| serde_json::from_str(text).ok())
+        .unwrap_or_else(|| {
+            panic!("runtime tool result should contain a JSON payload: {runtime_tool_result}")
+        });
+    assert_eq!(
+        runtime["database"]["db_path"].as_str(),
+        Some(branch_db.to_string_lossy().as_ref()),
+        "the daemon should be serving the branch store it created"
+    );
+    let writer_owner = &runtime["database"]["writer_owner"];
+    assert_eq!(
+        writer_owner["state"].as_str(),
+        Some("active"),
+        "the branch store must have an active writer owner: {writer_owner}"
+    );
+    assert_eq!(
+        writer_owner["pid"].as_u64(),
+        Some(daemon_pid),
+        "the active exclusive writer must be the daemon recorded in daemon-authority.json: {writer_owner}"
     );
 }

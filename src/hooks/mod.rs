@@ -43,7 +43,7 @@ pub use cursor::{
     hook_cursor_session_end, hook_cursor_session_start, hook_cursor_stop,
     hook_cursor_subagent_start, hook_cursor_workspace_open,
 };
-pub use cursor_compact::{CursorPreCompactOutcome, cursor_pre_compact_for_event_with_config};
+pub use cursor_compact::{CursorPreCompactOutcome, cursor_pre_compact_via_daemon};
 pub use cursor_shell::{
     CursorShellSyncPlan, cursor_branch_switch_target, cursor_shell_command_targets_project,
     cursor_shell_sync_plan, cursor_shell_sync_plan_with_current_branch,
@@ -82,6 +82,65 @@ macro_rules! read_hook_event {
 }
 pub(crate) use read_hook_event;
 
+pub(crate) async fn daemon_tool_json(
+    project_root: Option<&Path>,
+    tool_name: &str,
+    arguments: Value,
+) -> crate::errors::Result<Value> {
+    let handshake = crate::daemon::DaemonHandshake::for_current_client(
+        project_root.map(Path::to_path_buf),
+        None,
+        false,
+        false,
+    )?;
+    let result = crate::daemon::call_default_tool(&handshake, tool_name, arguments).await?;
+    parse_daemon_tool_json_content(&result, tool_name)
+}
+
+fn parse_daemon_tool_json_content(result: &Value, tool_name: &str) -> crate::errors::Result<Value> {
+    let payloads = result
+        .get("content")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|item| item.get("text").and_then(Value::as_str))
+        .filter_map(|text| serde_json::from_str::<Value>(text).ok())
+        .collect::<Vec<_>>();
+
+    match payloads.as_slice() {
+        [payload] => Ok(payload.clone()),
+        [] => Err(crate::errors::TraceDecayError::Config {
+            message: format!("daemon tool {tool_name} returned no JSON payload"),
+        }),
+        _ => Err(crate::errors::TraceDecayError::Config {
+            message: format!(
+                "daemon tool {tool_name} returned multiple JSON payloads ({})",
+                payloads.len()
+            ),
+        }),
+    }
+}
+
+pub(crate) async fn daemon_hook_action(
+    project_root: Option<&Path>,
+    mut arguments: Value,
+) -> crate::errors::Result<Value> {
+    arguments["format"] = serde_json::json!("json");
+    #[cfg(test)]
+    if let Some(result) = take_test_daemon_hook_action(project_root, &arguments) {
+        return result;
+    }
+    let handshake = crate::daemon::DaemonHandshake::for_current_client(
+        project_root.map(Path::to_path_buf),
+        None,
+        false,
+        project_root.is_some(),
+    )?;
+    let result =
+        crate::daemon::call_default_tool(&handshake, "tracedecay_hook_runtime", arguments).await?;
+    parse_daemon_tool_json_content(&result, "tracedecay_hook_runtime")
+}
+
 pub async fn hook_hermes_terminal_receipt() -> i32 {
     let event_json = read_hook_event!();
     let Ok(event) = serde_json::from_str::<crate::daemon::DaemonHookEvent>(&event_json) else {
@@ -106,98 +165,22 @@ pub async fn hook_hermes_terminal_receipt() -> i32 {
         None => None,
     } {
         crate::daemon::notify_hook_event(&project_root, event).await;
-    } else if let Err(error) = Box::pin(handle_user_hermes_receipt(event)).await {
-        eprintln!("[tracedecay] user Hermes receipt failed: {error}");
+    } else if let Err(error) = daemon_hook_action(
+        None,
+        serde_json::json!({ "action": "hermes_receipt", "event": event }),
+    )
+    .await
+    {
+        eprintln!("[tracedecay] user Hermes receipt daemon call failed: {error}");
     }
     0
-}
-
-async fn handle_user_hermes_receipt(
-    event: crate::daemon::DaemonHookEvent,
-) -> crate::errors::Result<()> {
-    use crate::automation::run_ledger::AutomationRunStatus;
-
-    let profile_root = crate::storage::default_profile_root()?;
-    let dashboard_root = crate::automation::runner::user_automation_root(&profile_root);
-    let route = event.route.clone();
-    let Some(receipt) = event.receipt.clone() else {
-        return Ok(());
-    };
-    match event.event.as_str() {
-        "terminalReceipt" | "turnCompleted" => {
-            crate::automation::host_receipts::record(&dashboard_root, route, receipt).await?;
-        }
-        "turnIngested" => {
-            let Some(watermark) = receipt.transcript_watermark.as_deref() else {
-                return Ok(());
-            };
-            crate::automation::host_receipts::mark_turn_ingested(&dashboard_root, route, watermark)
-                .await?;
-            let Some(ready) =
-                crate::automation::host_receipts::oldest_ready(&dashboard_root).await?
-            else {
-                return Ok(());
-            };
-            let sessions_path = crate::sessions::user_sessions_db_path(&profile_root);
-            let Some(session_db) =
-                crate::global_db::GlobalDb::open_read_only_at(&sessions_path).await
-            else {
-                return Ok(());
-            };
-            if session_db
-                .lcm_load_raw_message("hermes", &ready.transcript_watermark)
-                .await
-                .is_none()
-            {
-                return Ok(());
-            }
-            if crate::automation::scheduler::load_scheduler_control(&dashboard_root)
-                .await?
-                .paused
-            {
-                return Ok(());
-            }
-            let Some(_review_lock) = lock_user_session_review(&dashboard_root) else {
-                return Ok(());
-            };
-            let session_id = ready
-                .pending
-                .route
-                .as_ref()
-                .and_then(|route| route.session_id.clone());
-            let run = run_user_session_review(
-                &profile_root,
-                "hermes",
-                session_id,
-                Some(format!("user_host_receipt_{}", ready.pending.generation)),
-            )
-            .await?;
-            if run.session_reflector.ledger_record.status == AutomationRunStatus::Succeeded
-                && run.memory_curator.ledger_record.status != AutomationRunStatus::Failed
-                && run.skill_writer.ledger_record.status == AutomationRunStatus::Succeeded
-            {
-                crate::automation::host_receipts::mark_consumed(
-                    &dashboard_root,
-                    &ready.pending.session_key,
-                    ready.pending.generation,
-                )
-                .await?;
-            }
-        }
-        _ => {}
-    }
-    Ok(())
 }
 
 pub(crate) fn schedule_user_session_review(provider: &str, session_id: Option<&str>) {
     let Ok(exe) = std::env::current_exe() else {
         return;
     };
-    let payload = serde_json::json!({
-        "provider": provider,
-        "session_id": session_id,
-    })
-    .to_string();
+    let payload = serde_json::json!({ "provider": provider, "session_id": session_id }).to_string();
     let Ok(mut child) = std::process::Command::new(exe)
         .arg("hook-user-session-review")
         .stdin(std::process::Stdio::piped())
@@ -220,93 +203,20 @@ pub async fn hook_user_session_review() -> i32 {
     let Some(provider) = payload.get("provider").and_then(Value::as_str) else {
         return 0;
     };
-    let session_id = payload
-        .get("session_id")
-        .and_then(Value::as_str)
-        .filter(|value| !value.is_empty())
-        .map(str::to_string);
-    review_user_session(provider, session_id).await;
-    0
-}
-
-async fn review_user_session(provider: &str, session_id: Option<String>) {
-    let Ok(profile_root) = crate::storage::default_profile_root() else {
-        return;
-    };
-    let dashboard_root = crate::automation::runner::user_automation_root(&profile_root);
-    let Some(_review_lock) = lock_user_session_review(&dashboard_root) else {
-        return;
-    };
-    if crate::automation::scheduler::load_scheduler_control(&dashboard_root)
-        .await
-        .is_ok_and(|control| control.paused)
-    {
-        return;
-    }
-    if let Err(error) = run_user_session_review(&profile_root, provider, session_id, None).await {
-        eprintln!("[tracedecay] {provider} user session review failed: {error}");
-    }
-}
-
-fn lock_user_session_review(dashboard_root: &std::path::Path) -> Option<std::fs::File> {
-    std::fs::create_dir_all(dashboard_root).ok()?;
-    let lock = std::fs::OpenOptions::new()
-        .create(true)
-        .read(true)
-        .write(true)
-        .truncate(false)
-        .open(dashboard_root.join("host-review.lock"))
-        .ok()?;
-    fs2::FileExt::lock_exclusive(&lock).ok()?;
-    Some(lock)
-}
-
-async fn run_user_session_review(
-    profile_root: &std::path::Path,
-    provider: &str,
-    session_id: Option<String>,
-    run_id: Option<String>,
-) -> crate::errors::Result<crate::automation::runner::UserSessionAutomationRun> {
-    use crate::automation::backend::CodexAppServerBackend;
-    use crate::automation::run_ledger::AutomationTrigger;
-    use crate::automation::runner::{
-        MemoryCuratorAutomationOptions, SessionReflectorAutomationOptions,
-        SkillWriterAutomationOptions, UserSessionAutomationOptions,
-        run_user_session_automation_with_backend,
-    };
-
-    let global = crate::user_config::UserConfig::load().automation;
-    let config = crate::automation::config::effective_user_automation_config(
-        profile_root,
-        &global,
-        crate::user_config::automation_is_configured(),
-    )
-    .await?;
-    let backend = CodexAppServerBackend::from_automation_config(&config);
-    run_user_session_automation_with_backend(
-        profile_root,
-        &config,
-        &backend,
-        UserSessionAutomationOptions {
-            session_reflector: SessionReflectorAutomationOptions {
-                trigger: AutomationTrigger::HostReceipt,
-                run_id,
-                provider: provider.to_string(),
-                session_id,
-                ..SessionReflectorAutomationOptions::default()
-            },
-            memory_curator: MemoryCuratorAutomationOptions {
-                trigger: AutomationTrigger::HostReceipt,
-                ..MemoryCuratorAutomationOptions::default()
-            },
-            skill_writer: SkillWriterAutomationOptions {
-                trigger: AutomationTrigger::HostReceipt,
-                provider: provider.to_string(),
-                ..SkillWriterAutomationOptions::default()
-            },
-        },
+    let session_id = payload.get("session_id").and_then(Value::as_str);
+    if let Err(error) = daemon_hook_action(
+        None,
+        serde_json::json!({
+            "action": "user_review",
+            "provider": provider,
+            "session_id": session_id,
+        }),
     )
     .await
+    {
+        eprintln!("[tracedecay] {provider} user session review daemon call failed: {error}");
+    }
+    0
 }
 
 const TRACEDECAY_RESEARCH_BLOCK_REASON: &str = "STOP: Use tracedecay MCP tools \
@@ -336,6 +246,85 @@ fn now_unix_secs() -> i64 {
 #[cfg(test)]
 pub(crate) fn lock_test_env() -> std::sync::MutexGuard<'static, ()> {
     crate::config::lock_user_data_dir_test_env()
+}
+
+#[cfg(test)]
+#[derive(Default)]
+struct TestDaemonHookActionState {
+    owner: Option<std::thread::ThreadId>,
+    responses: std::collections::VecDeque<Value>,
+    calls: Vec<(Option<PathBuf>, Value)>,
+}
+
+#[cfg(test)]
+static TEST_DAEMON_HOOK_ACTION: std::sync::LazyLock<std::sync::Mutex<TestDaemonHookActionState>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(TestDaemonHookActionState::default()));
+
+#[cfg(test)]
+pub(crate) struct TestDaemonHookActionGuard {
+    owner: std::thread::ThreadId,
+}
+
+#[cfg(test)]
+impl TestDaemonHookActionGuard {
+    pub(crate) fn install(responses: impl IntoIterator<Item = Value>) -> Self {
+        let owner = std::thread::current().id();
+        let mut state = TEST_DAEMON_HOOK_ACTION
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert!(
+            state.owner.is_none(),
+            "daemon hook test responder is in use"
+        );
+        state.owner = Some(owner);
+        state.responses = responses.into_iter().collect();
+        state.calls.clear();
+        Self { owner }
+    }
+
+    pub(crate) fn calls(&self) -> Vec<(Option<PathBuf>, Value)> {
+        let state = TEST_DAEMON_HOOK_ACTION
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert_eq!(state.owner, Some(self.owner));
+        state.calls.clone()
+    }
+}
+
+#[cfg(test)]
+impl Drop for TestDaemonHookActionGuard {
+    fn drop(&mut self) {
+        let mut state = TEST_DAEMON_HOOK_ACTION
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if state.owner == Some(self.owner) {
+            *state = TestDaemonHookActionState::default();
+        }
+    }
+}
+
+#[cfg(test)]
+fn take_test_daemon_hook_action(
+    project_root: Option<&Path>,
+    arguments: &Value,
+) -> Option<crate::errors::Result<Value>> {
+    let mut state = TEST_DAEMON_HOOK_ACTION
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if state.owner != Some(std::thread::current().id()) {
+        return None;
+    }
+    state
+        .calls
+        .push((project_root.map(Path::to_path_buf), arguments.clone()));
+    Some(
+        state
+            .responses
+            .pop_front()
+            .ok_or_else(|| crate::errors::TraceDecayError::Config {
+                message: "daemon hook test responder has no response".to_string(),
+            }),
+    )
 }
 
 fn hook_route_metadata_from_event(
@@ -562,20 +551,6 @@ fn event_session_id(parsed: &Value) -> Option<String> {
         .find_map(|key| parsed.get(*key).and_then(Value::as_str))
         .filter(|id| !id.is_empty())
         .map(str::to_string)
-}
-
-fn event_i64(parsed: &Value, keys: &[&str]) -> Option<i64> {
-    keys.iter().find_map(|key| {
-        let value = parsed.get(*key)?;
-        value
-            .as_i64()
-            .or_else(|| value.as_u64().and_then(|value| i64::try_from(value).ok()))
-            .or_else(|| value.as_str()?.parse::<i64>().ok())
-    })
-}
-
-fn event_usize(parsed: &Value, keys: &[&str]) -> Option<usize> {
-    event_i64(parsed, keys).and_then(|value| usize::try_from(value).ok())
 }
 
 /// Reads the `cwd` string field from a hook event JSON payload. Shared by the
@@ -1043,7 +1018,45 @@ mod hint_analytics_tests {
 
 #[cfg(test)]
 mod tests {
-    use super::hook_route_metadata_from_event;
+    use super::{hook_route_metadata_from_event, parse_daemon_tool_json_content};
+
+    #[test]
+    fn daemon_tool_json_ignores_notices_and_returns_one_payload() {
+        let response = serde_json::json!({
+            "content": [
+                { "type": "text", "text": "write already accepted by daemon" },
+                { "type": "text", "text": r#"{"status":"ok"}"# },
+                { "type": "text", "text": "informational notice" }
+            ]
+        });
+
+        assert_eq!(
+            parse_daemon_tool_json_content(&response, "test").unwrap(),
+            serde_json::json!({ "status": "ok" })
+        );
+    }
+
+    #[test]
+    fn daemon_tool_json_rejects_zero_or_multiple_payloads() {
+        let no_payload = serde_json::json!({
+            "content": [{ "type": "text", "text": "notice only" }]
+        });
+        let error = parse_daemon_tool_json_content(&no_payload, "test").unwrap_err();
+        assert!(error.to_string().contains("returned no JSON payload"));
+
+        let multiple = serde_json::json!({
+            "content": [
+                { "type": "text", "text": "{}" },
+                { "type": "text", "text": "[]" }
+            ]
+        });
+        let error = parse_daemon_tool_json_content(&multiple, "test").unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("returned multiple JSON payloads (2)")
+        );
+    }
 
     #[test]
     fn hook_route_metadata_preserves_camel_case_session_ids() {

@@ -352,12 +352,11 @@ async fn concurrent_syncs_are_single_flight() {
     );
 }
 
-/// Ref deletion → the dead branch store becomes GC-eligible and is collected.
-/// The watcher feeds `gc_dead_branch_stores` on ref-delete events; here we
-/// verify the collection itself with a zero grace so the just-deleted branch is
-/// swept immediately (the watcher uses the configured grace instead).
+/// Ref deletion does not permit an unmanaged caller to delete branch stores.
+/// The watcher routes GC through daemon-owned store administration; the legacy
+/// compatibility API must fail closed even when given a zero grace window.
 #[tokio::test]
-async fn deleted_branch_store_is_garbage_collected() {
+async fn deleted_branch_store_gc_fails_closed_without_daemon_administration() {
     let (_env, project) = init_indexed_repo().await;
 
     git(&project, &["checkout", "-b", "feat/dead"]);
@@ -377,13 +376,13 @@ async fn deleted_branch_store_is_garbage_collected() {
     git(&project, &["branch", "-D", "feat/dead"]);
     let report = branch::gc_dead_branch_stores(&project, &data_dir, 0, 0);
     assert!(
-        report.removed_tracked.contains(&"feat/dead".to_string()),
-        "GC should remove the dead tracked branch, report: {report:?}"
+        report.removed_tracked.is_empty() && report.removed_orphan_dbs.is_empty(),
+        "unmanaged GC must fail closed, report: {report:?}"
     );
     assert!(
         load_branch_meta(&data_dir)
-            .map(|m| !m.is_tracked("feat/dead"))
-            .unwrap_or(true),
-        "branch metadata must be gone after GC"
+            .map(|m| m.is_tracked("feat/dead"))
+            .unwrap_or(false),
+        "unmanaged GC must preserve branch metadata"
     );
 }

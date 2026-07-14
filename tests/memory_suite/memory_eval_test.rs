@@ -218,7 +218,6 @@ struct Fixture {
     home_path: PathBuf,
     _project: TempDir,
     project_path: PathBuf,
-    #[cfg(unix)]
     _daemon: Option<common::DaemonProcess>,
 }
 
@@ -524,7 +523,6 @@ fn build_fixture(setup: &Setup) -> Fixture {
         home_path,
         _project: project,
         project_path,
-        #[cfg(unix)]
         _daemon: None,
     };
     let src = fixture.project_path.join("src");
@@ -536,10 +534,7 @@ fn build_fixture(setup: &Setup) -> Fixture {
     }
     initialize_fixture_project(&fixture);
     seed_setup_facts(&fixture, &setup.facts);
-    #[cfg(unix)]
-    {
-        fixture._daemon = Some(common::spawn_tracedecay_daemon(&fixture.home_path));
-    }
+    fixture._daemon = Some(common::spawn_tracedecay_daemon(&fixture.home_path));
     fixture
 }
 

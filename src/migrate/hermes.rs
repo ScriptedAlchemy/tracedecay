@@ -99,6 +99,25 @@ async fn migrate_legacy_hermes_stores_inner(
     hermes_homes: &[PathBuf],
     fail_after_table: Option<&str>,
 ) -> LegacyHermesMigrationReport {
+    let lifecycle = match crate::lifecycle_lease::acquire_exclusive_for_profile(
+        tracedecay_profile_root,
+        "legacy Hermes store migration",
+    ) {
+        Ok(lifecycle) => lifecycle,
+        Err(error) => {
+            return migration_authority_failure(tracedecay_profile_root, error.to_string());
+        }
+    };
+    let _database_scope = match crate::db::enter_maintenance_database_scope(
+        &lifecycle,
+        tracedecay_profile_root,
+        "legacy Hermes store migration",
+    ) {
+        Ok(scope) => scope,
+        Err(error) => {
+            return migration_authority_failure(tracedecay_profile_root, error.to_string());
+        }
+    };
     let profile_dirs = legacy_profile_dirs_for_homes(hermes_homes);
     let mut report = LegacyHermesMigrationReport::default();
     for candidate in legacy_store_candidates(&profile_dirs, tracedecay_profile_root) {
@@ -195,6 +214,19 @@ async fn migrate_legacy_hermes_stores_inner(
         }
     }
     report
+}
+
+fn migration_authority_failure(
+    tracedecay_profile_root: &Path,
+    reason: String,
+) -> LegacyHermesMigrationReport {
+    LegacyHermesMigrationReport {
+        failed: vec![LegacyHermesMigrationIssue {
+            source_db: tracedecay_profile_root.to_path_buf(),
+            reason,
+        }],
+        ..LegacyHermesMigrationReport::default()
+    }
 }
 
 async fn remove_legacy_registry_metadata(
@@ -547,12 +579,19 @@ async fn migrate_candidate_snapshot(
         .filter(|_| !target_project.user_scope)
     {
         Some(path) => {
-            let (db, _) = Database::open_read_only(path).await.map_err(|error| {
-                CandidateError::Failed(format!(
-                    "could not open legacy memory store '{}' read-only: {error}",
-                    path.display()
-                ))
-            })?;
+            let authority = crate::db::DatabaseAuthority::for_runtime(
+                path,
+                "read legacy memory migration source",
+            )
+            .map_err(|error| CandidateError::Failed(error.to_string()))?;
+            let (db, _) = Database::open_read_only(path, &authority)
+                .await
+                .map_err(|error| {
+                    CandidateError::Failed(format!(
+                        "could not open legacy memory store '{}' read-only: {error}",
+                        path.display()
+                    ))
+                })?;
             db.conn().execute("BEGIN", ()).await.map_err(|error| {
                 CandidateError::Failed(format!("could not snapshot legacy memory store: {error}"))
             })?;
@@ -1221,10 +1260,13 @@ async fn merge_memory_snapshot(source: &Connection, target_path: &Path) -> Resul
         return Ok(0);
     }
     verify_source(source).await?;
+    let authority =
+        crate::db::DatabaseAuthority::for_runtime(target_path, "merge memory migration target")
+            .map_err(|error| format!("could not authorize target memory store: {error}"))?;
     let (target, _) = if target_path.is_file() {
-        Database::open(target_path).await
+        Database::open(target_path, &authority).await
     } else {
-        Database::initialize(target_path).await
+        Database::initialize(target_path, &authority).await
     }
     .map_err(|error| format!("could not open target memory store: {error}"))?;
     target
@@ -2223,6 +2265,25 @@ mod tests {
     use crate::memory::types::{AddFactRequest, FeedbackAction, FeedbackRequest, MemoryCategory};
     use crate::sessions::{SessionMessageRecord, SessionRecord};
 
+    async fn test_initialize(path: &Path) -> (Database, bool) {
+        let authority =
+            crate::db::DatabaseAuthority::acquire_test(path, "Hermes migration test initialize")
+                .unwrap();
+        Database::initialize(path, &authority).await.unwrap()
+    }
+
+    async fn test_open(path: &Path) -> (Database, bool) {
+        let authority =
+            crate::db::DatabaseAuthority::acquire_test(path, "Hermes migration test open").unwrap();
+        Database::open(path, &authority).await.unwrap()
+    }
+
+    async fn test_open_read_only(path: &Path) -> (Database, bool) {
+        let authority =
+            crate::db::DatabaseAuthority::acquire_test(path, "Hermes migration test read").unwrap();
+        Database::open_read_only(path, &authority).await.unwrap()
+    }
+
     fn mark_real_project(project: &Path) {
         fs::create_dir_all(project.join(".tracedecay")).unwrap();
         fs::write(project.join(".tracedecay/tracedecay.db"), []).unwrap();
@@ -2295,7 +2356,7 @@ mod tests {
     }
 
     async fn seed_memory_fact(path: &Path, content: &str) -> i64 {
-        let (db, _) = Database::initialize(path).await.unwrap();
+        let (db, _) = test_initialize(path).await;
         MemoryStore::new(db.conn())
             .add_fact(
                 AddFactRequest {
@@ -2413,9 +2474,7 @@ mod tests {
         assert_eq!(count(target.conn(), "session_messages").await, 1);
         assert_eq!(count(target.conn(), "lcm_raw_messages").await, 1);
         assert_eq!(marker_count(&layout.sessions_db_path), 1);
-        let (target_code, _) = Database::open_read_only(&layout.graph_db_path)
-            .await
-            .unwrap();
+        let (target_code, _) = test_open_read_only(&layout.graph_db_path).await;
         let facts = MemoryStore::new(target_code.conn())
             .list_facts(None, None, 10)
             .await
@@ -2440,9 +2499,7 @@ mod tests {
             .unwrap();
         assert_eq!(count(target.conn(), "sessions").await, 1);
         assert_eq!(marker_count(&layout.sessions_db_path), 1);
-        let (target_code, _) = Database::open_read_only(&layout.graph_db_path)
-            .await
-            .unwrap();
+        let (target_code, _) = test_open_read_only(&layout.graph_db_path).await;
         assert_eq!(
             MemoryStore::new(target_code.conn())
                 .list_facts(None, None, 10)
@@ -2571,9 +2628,7 @@ mod tests {
         let report = migrate_legacy_hermes_stores_to(&user_home, &profile_root).await;
         assert_eq!(report.migrated.len(), 1, "{report:?}");
         let layout = crate::storage::resolve_layout(&project, &profile_root).unwrap();
-        let (target, _) = Database::open_read_only(&layout.graph_db_path)
-            .await
-            .unwrap();
+        let (target, _) = test_open_read_only(&layout.graph_db_path).await;
         let facts = MemoryStore::new(target.conn())
             .list_facts(None, None, 10)
             .await
@@ -2741,7 +2796,7 @@ mod tests {
         .unwrap();
         seed_source(&source_sessions, &[("session", &project)]).await;
         let source_fact_id = seed_memory_fact(&source_memory, "shared durable fact").await;
-        let (source_db, _) = Database::open(&source_memory).await.unwrap();
+        let (source_db, _) = test_open(&source_memory).await;
         MemoryStore::new(source_db.conn())
             .record_feedback_event(FeedbackRequest {
                 fact_id: source_fact_id,
@@ -2754,7 +2809,7 @@ mod tests {
         drop(source_db);
 
         let layout = crate::storage::resolve_layout(&project, &profile_root).unwrap();
-        let (target_db, _) = Database::initialize(&layout.graph_db_path).await.unwrap();
+        let (target_db, _) = test_initialize(&layout.graph_db_path).await;
         let target_store = MemoryStore::new(target_db.conn());
         let target_fact = target_store
             .add_fact(
@@ -2786,9 +2841,7 @@ mod tests {
 
         let first = migrate_legacy_hermes_stores_to(&user_home, &profile_root).await;
         assert_eq!(first.migrated.len(), 1, "{first:?}");
-        let (target_db, _) = Database::open_read_only(&layout.graph_db_path)
-            .await
-            .unwrap();
+        let (target_db, _) = test_open_read_only(&layout.graph_db_path).await;
         let facts = MemoryStore::new(target_db.conn())
             .list_facts(None, None, 10)
             .await
@@ -2803,9 +2856,7 @@ mod tests {
 
         let second = migrate_legacy_hermes_stores_to(&user_home, &profile_root).await;
         assert_eq!(second.already_migrated.len(), 1, "{second:?}");
-        let (target_db, _) = Database::open_read_only(&layout.graph_db_path)
-            .await
-            .unwrap();
+        let (target_db, _) = test_open_read_only(&layout.graph_db_path).await;
         assert_eq!(count(target_db.conn(), "memory_feedback_events").await, 2);
         let facts = MemoryStore::new(target_db.conn())
             .list_facts(None, None, 10)
@@ -3315,7 +3366,7 @@ mod tests {
         let source_after = GlobalDb::open_read_only_at(&source).await.unwrap();
         assert_eq!(count(source_after.conn(), "sessions").await, 1);
         drop(source_after);
-        let (source_memory_after, _) = Database::open_read_only(&source_memory).await.unwrap();
+        let (source_memory_after, _) = test_open_read_only(&source_memory).await;
         assert!(
             MemoryStore::new(source_memory_after.conn())
                 .get_fact(source_fact_id)

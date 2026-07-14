@@ -12,7 +12,6 @@ use tracedecay::config::{TraceDecayConfig, USER_DATA_DIR_ENV};
 use tracedecay::config::{
     discover_project_root, get_config_path, load_config, save_config_to_path,
 };
-use tracedecay::db::Database;
 use tracedecay::global_db::GlobalDb;
 use tracedecay::mcp::response_handles::{
     ResponseHandleLookup, retrieve_response_handle, store_response_handle,
@@ -176,7 +175,9 @@ async fn initialize_empty_profile_layout(layout: &tracedecay::storage::StoreLayo
         },
     )
     .unwrap();
-    let (db, _) = Database::initialize(&layout.graph_db_path).await.unwrap();
+    let (db, _) = crate::common::initialize_test_database(&layout.graph_db_path)
+        .await
+        .unwrap();
     db.checkpoint().await.unwrap();
     db.close();
     write_store_manifest(layout).unwrap();
@@ -1669,7 +1670,7 @@ async fn trace_decay_open_uses_profile_shard_paths_from_enrollment_marker() {
         serde_json::to_string_pretty(&shard_config).unwrap(),
     )
     .unwrap();
-    Database::initialize(&shard_root.join("tracedecay.db"))
+    crate::common::initialize_test_database(&shard_root.join("tracedecay.db"))
         .await
         .unwrap();
     let meta = BranchMeta::new_for_dir(&shard_root, "main");

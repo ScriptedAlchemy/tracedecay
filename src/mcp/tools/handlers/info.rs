@@ -24,6 +24,41 @@ use super::super::render::{self, Md};
 use super::dependency_hints;
 use super::support::{effective_path, filter_by_scope, require_node_id, unique_file_paths};
 
+/// Daemon-only sync entry point used by the first-party CLI. It is deliberately
+/// not advertised in the MCP catalog: external agents should rely on the
+/// daemon watcher while the CLI can request an explicit serialized refresh.
+pub(super) async fn handle_admin_sync(cg: &TraceDecay, args: Value) -> Result<ToolResult> {
+    let force = args.get("force").and_then(Value::as_bool).unwrap_or(false);
+    let output = if force {
+        let result = cg.index_all().await?;
+        json!({
+            "mode": "full",
+            "files": result.file_count,
+            "nodes": result.node_count,
+            "edges": result.edge_count,
+            "duration_ms": result.duration_ms,
+        })
+    } else {
+        let result = cg.sync().await?;
+        json!({
+            "mode": "incremental",
+            "files_added": result.files_added,
+            "files_modified": result.files_modified,
+            "files_removed": result.files_removed,
+            "duration_ms": result.duration_ms,
+        })
+    };
+    Ok(ToolResult::new(
+        json!({
+            "content": [{
+                "type": "text",
+                "text": serde_json::to_string(&output).unwrap_or_default(),
+            }]
+        }),
+        Vec::new(),
+    ))
+}
+
 /// Handles `tracedecay_status` tool calls.
 pub(super) async fn handle_status(
     cg: &TraceDecay,
@@ -33,6 +68,14 @@ pub(super) async fn handle_status(
 ) -> Result<ToolResult> {
     let stats = cg.get_stats().await?;
     let mut output: Value = serde_json::to_value(&stats).unwrap_or(json!({}));
+    let mut storage_health =
+        serde_json::to_value(crate::runtime_telemetry::collect_database(cg).await?)
+            .unwrap_or_else(|_| json!({}));
+    if server_stats.is_some() {
+        storage_health["daemon_owner_pid"] = json!(std::process::id());
+        storage_health["daemon_generation"] = json!(crate::runtime_identity::process_run_id());
+    }
+    output["storage_health"] = storage_health;
     if let Some(ss) = server_stats {
         output["server"] = ss;
     }

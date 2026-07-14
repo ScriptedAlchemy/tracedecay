@@ -86,6 +86,13 @@ pub fn acquire_shared(operation: &str) -> Result<LifecycleLease> {
     acquire_shared_at(&lifecycle_lock_path()?, operation)
 }
 
+/// Holds ordinary database activity open for one explicit profile. The
+/// managed daemon retains this for its lifetime so offline maintenance cannot
+/// overlap any daemon-owned database handle.
+pub fn acquire_shared_for_profile(profile_root: &Path, operation: &str) -> Result<LifecycleLease> {
+    acquire_shared_at(&lifecycle_lock_path_for_profile(profile_root)?, operation)
+}
+
 /// Attempts to acquire a non-inherited shared lease without blocking.
 pub fn try_acquire_shared(operation: &str) -> Result<SharedLeaseAttempt> {
     try_acquire_shared_at(&lifecycle_lock_path()?, operation)

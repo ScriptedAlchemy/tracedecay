@@ -115,7 +115,7 @@ where
 /// `Database::initialize` would produce — without paying schema creation.
 pub async fn seed_latest_graph_db(dest: &Path) {
     let template = ensure_template_db("graph-empty", &[], |path| async move {
-        let (db, _) = tracedecay::db::Database::initialize(&path)
+        let (db, _) = crate::common::initialize_test_database(&path)
             .await
             .expect("failed to initialize template database");
         db.checkpoint()

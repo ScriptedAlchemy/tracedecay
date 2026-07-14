@@ -1,8 +1,8 @@
 use super::{
-    GENERATED_DIR_SEGMENTS, TraceDecayConfig, USER_DATA_DIR_ENV, db_filename, get_project_db_path,
-    get_tracedecay_dir, is_excluded, is_excluded_dir, is_generated_dir_segment,
-    is_generated_path_segment, is_ignored_by_explicit_global_excludes, is_ignored_by_git,
-    is_included, lock_user_data_dir_test_env, user_data_dir,
+    GENERATED_DIR_SEGMENTS, TraceDecayConfig, USER_DATA_DIR_ENV, canonicalize_data_dir,
+    db_filename, get_project_db_path, get_tracedecay_dir, is_excluded, is_excluded_dir,
+    is_generated_dir_segment, is_generated_path_segment, is_ignored_by_explicit_global_excludes,
+    is_ignored_by_git, is_included, lock_user_data_dir_test_env, user_data_dir,
 };
 use std::ffi::OsString;
 use std::fs;
@@ -73,6 +73,35 @@ fn user_data_dir_canonicalizes_symlinked_existing_parent() {
         user_data_dir().unwrap(),
         real_home.canonicalize().unwrap().join(".tracedecay")
     );
+}
+
+#[test]
+fn nextest_shared_target_profile_is_isolated_by_test_name() {
+    let _lock = lock_user_data_dir_test_env();
+    let root = TempDir::new().unwrap();
+    let target = root.path().join("target");
+    fs::create_dir_all(target.join("debug")).unwrap();
+    let profile = target.join("test-profile/.tracedecay");
+    let _profile = EnvRestore::set(USER_DATA_DIR_ENV, &profile);
+    let _binary_id = EnvRestore::set("NEXTEST_BINARY_ID", "tracedecay::storage_suite");
+    let _test_name = EnvRestore::set("NEXTEST_TEST_NAME", "storage_suite::isolated_profile");
+
+    let resolved = user_data_dir().unwrap();
+
+    let canonical_profile = canonicalize_data_dir(profile);
+    assert!(resolved.starts_with(canonical_profile.join("nextest")));
+    assert_ne!(resolved, canonical_profile);
+}
+
+#[test]
+fn nextest_preserves_explicit_temp_profile_override() {
+    let _lock = lock_user_data_dir_test_env();
+    let root = TempDir::new().unwrap();
+    let profile = root.path().join("test-profile/.tracedecay");
+    let _profile = EnvRestore::set(USER_DATA_DIR_ENV, &profile);
+    let _test_name = EnvRestore::set("NEXTEST_TEST_NAME", "storage_suite::explicit_profile");
+
+    assert_eq!(user_data_dir().unwrap(), canonicalize_data_dir(profile));
 }
 
 #[test]

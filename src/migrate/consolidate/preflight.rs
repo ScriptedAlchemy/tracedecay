@@ -27,8 +27,19 @@ pub(super) fn ensure_profile_offline(options: &ConsolidationOptions) -> Result<(
     Ok(())
 }
 
+#[cfg(not(test))]
 pub(super) fn ensure_no_open_store_holders(database_paths: &[PathBuf]) -> Result<()> {
     evaluate_holder_scan(crate::open_store_holders::scan(database_paths).map_err(io_error)?)
+}
+
+#[cfg(test)]
+pub(super) fn ensure_no_open_store_holders(_database_paths: &[PathBuf]) -> Result<()> {
+    // Unit tests share the host with unrelated processes whose /proc entries
+    // may be unreadable. Keep production discovery fail-closed and exercise
+    // its result handling deterministically below.
+    evaluate_holder_scan(crate::open_store_holders::OpenStoreHolderScan::Supported(
+        Vec::new(),
+    ))
 }
 
 fn evaluate_holder_scan(scan: crate::open_store_holders::OpenStoreHolderScan) -> Result<()> {

@@ -366,34 +366,64 @@ async fn repeated_target_edits_keep_unresolved_refs_bounded() {
 }
 
 // ---------------------------------------------------------------------------
-// Finding #5 (LOW): stale sync-lock reclaim must be atomic and preserve a live
-// lock. We can't deterministically force the TOCTOU race, but we assert the
-// functional contract the atomic reclaim must keep.
+// Finding #5 (LOW): sync ownership uses a persistent kernel-locked file. Bare
+// PID contents remain supported only for interoperability with older clients.
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn stale_sync_lock_with_dead_pid_is_reclaimed() {
+async fn persistent_sync_lock_reuses_an_unlocked_legacy_file() {
     let dir = TempDir::new().unwrap();
     let project = dir.path();
     TraceDecay::init(project).await.unwrap();
     let lock_path = resolve_layout_for_current_profile(project)
         .unwrap()
         .sync_lock_path;
-    // A PID well out of range can never be alive -> the lock is stale.
+    // A dead legacy owner does not require unlinking the canonical path.
     fs::write(&lock_path, "4294967294").unwrap();
 
     let guard = tracedecay::tracedecay::try_acquire_sync_lock(project)
-        .expect("a stale lock with a dead PID must be reclaimed");
+        .expect("an unlocked legacy file must be reusable");
+    #[cfg(unix)]
     assert_eq!(
-        fs::read_to_string(&lock_path).unwrap().trim(),
-        std::process::id().to_string(),
-        "reclaimed lock must hold the current PID"
+        fs::read_to_string(&lock_path).unwrap(),
+        std::process::id().to_string()
     );
+    let owner_path = lock_path.with_extension("lock.owner");
+    let metadata: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&owner_path).unwrap()).unwrap();
+    assert_eq!(
+        metadata["owner"]["pid"].as_u64(),
+        Some(std::process::id() as u64)
+    );
+    assert_eq!(metadata["state"], "locked");
     drop(guard);
+    assert!(fs::read_to_string(&lock_path).unwrap().is_empty());
     assert!(
-        !lock_path.exists(),
-        "dropping the guard must remove the lockfile"
+        lock_path.exists(),
+        "dropping the guard must leave the persistent lockfile in place"
     );
+    assert!(
+        !owner_path.exists(),
+        "dropping the exact owner clears its sidecar"
+    );
+    drop(
+        tracedecay::tracedecay::try_acquire_sync_lock(project)
+            .expect("kernel lease must be reusable after Drop"),
+    );
+}
+
+#[tokio::test]
+async fn writable_open_does_not_claim_the_sync_lock_without_an_operation() {
+    let dir = TempDir::new().unwrap();
+    let project = dir.path();
+    let initialized = TraceDecay::init(project).await.unwrap();
+    let lock_path = initialized.store_layout().sync_lock_path.clone();
+    drop(initialized);
+    fs::write(&lock_path, "4294967294").unwrap();
+
+    let reopened = TraceDecay::open(project).await.unwrap();
+    assert_eq!(fs::read_to_string(&lock_path).unwrap(), "4294967294");
+    drop(reopened);
 }
 
 #[tokio::test]
@@ -401,14 +431,12 @@ async fn live_sync_lock_is_not_reclaimed() {
     let dir = TempDir::new().unwrap();
     let project = dir.path();
     TraceDecay::init(project).await.unwrap();
-    let lock_path = resolve_layout_for_current_profile(project)
-        .unwrap()
-        .sync_lock_path;
-    // Our own PID is alive -> the lock must be treated as in-progress.
-    fs::write(&lock_path, format!("{}", std::process::id())).unwrap();
+    let guard =
+        tracedecay::tracedecay::try_acquire_sync_lock(project).expect("hold live sync lease");
 
     assert!(
         tracedecay::tracedecay::try_acquire_sync_lock(project).is_err(),
         "a live lock must not be reclaimed"
     );
+    drop(guard);
 }

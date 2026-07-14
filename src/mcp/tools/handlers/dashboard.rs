@@ -14,7 +14,7 @@ use super::super::ToolResult;
 use super::super::render;
 
 use crate::dashboard::{
-    AutomationSchedulerReconciler, DEFAULT_PORT, bind_dashboard,
+    AutomationSchedulerReconciler, DEFAULT_PORT, DashboardAutomationWriter, bind_dashboard,
     build_state_with_automation_reconciler, router,
 };
 
@@ -63,6 +63,7 @@ pub(super) async fn handle_dashboard(
     cg: &TraceDecay,
     args: Value,
     automation_scheduler_reconciler: Option<AutomationSchedulerReconciler>,
+    automation_writer: DashboardAutomationWriter,
 ) -> Result<ToolResult> {
     let action = args
         .get("action")
@@ -113,8 +114,12 @@ pub(super) async fn handle_dashboard(
             // Shared construction with the CLI path: resolved LCM/session store
             // selection included. No catch-up ingest spawn here — the host
             // MCP server already swept hookless transcripts at startup.
-            let state =
-                build_state_with_automation_reconciler(cg, automation_scheduler_reconciler).await;
+            let state = build_state_with_automation_reconciler(
+                cg,
+                automation_scheduler_reconciler,
+                automation_writer,
+            )
+            .await;
 
             let app = router(state);
             let (listener, addr) = bind_dashboard(&host, port).await?;

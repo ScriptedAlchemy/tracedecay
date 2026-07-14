@@ -7,11 +7,14 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt::Write as _;
+use std::ops::Deref;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, LazyLock, Weak};
 
 use libsql::{Builder, Connection, Database as LibsqlDatabase, OpenFlags, Value, params};
 use serde_json::Value as JsonValue;
 
+use crate::db::DatabaseAuthority;
 use crate::sessions::{
     SessionMessageRecord, SessionMessageSearchResult, SessionRecord, SessionSearchFilters,
     lcm::{
@@ -306,10 +309,50 @@ enum TranscriptWriteMode {
 
 /// User-level database tracking all `TraceDecay` projects.
 pub struct GlobalDb {
+    inner: Arc<GlobalDbInner>,
+}
+
+#[doc(hidden)]
+pub struct GlobalDbInner {
     conn: Connection,
     storage_root: PathBuf,
     db_path: PathBuf,
     _db: LibsqlDatabase,
+    _authority: DatabaseAuthority,
+    _slot: Option<GlobalDbSlot>,
+}
+
+impl Deref for GlobalDb {
+    type Target = GlobalDbInner;
+
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
+}
+
+#[derive(Default)]
+struct GlobalDbSchemaState {
+    ensured: bool,
+}
+
+type GlobalDbSlot = Arc<tokio::sync::Mutex<GlobalDbSchemaState>>;
+
+static GLOBAL_DB_SLOTS: LazyLock<
+    std::sync::Mutex<HashMap<PathBuf, Weak<tokio::sync::Mutex<GlobalDbSchemaState>>>>,
+> = LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
+
+fn global_db_slot(authority: &DatabaseAuthority) -> GlobalDbSlot {
+    let identity = authority.canonical_database_path();
+    let mut slots = GLOBAL_DB_SLOTS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    slots.retain(|_, slot| slot.strong_count() > 0);
+    if let Some(slot) = slots.get(identity).and_then(Weak::upgrade) {
+        return slot;
+    }
+    let slot = Arc::new(tokio::sync::Mutex::new(GlobalDbSchemaState::default()));
+    slots.insert(identity.to_path_buf(), Arc::downgrade(&slot));
+    slot
 }
 
 struct TranscriptSummarySources {
@@ -339,11 +382,8 @@ fn global_db_path_override() -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
-fn global_db_mmap_size_guard() -> Option<u64> {
-    const PROBE_MMAP_SIZE: u64 = 1;
-
-    let safe_mmap = crate::db::platform_safe_mmap_size(PROBE_MMAP_SIZE);
-    (safe_mmap != PROBE_MMAP_SIZE).then_some(safe_mmap)
+fn global_db_mmap_size_guard() -> u64 {
+    0
 }
 
 /// Returns the path to the global database: `global.db` inside the user-level
@@ -924,24 +964,32 @@ impl GlobalDb {
         &self.db_path
     }
 
-    async fn open_local(db_path: &Path, read_only: bool) -> Option<Self> {
+    async fn open_local(
+        db_path: &Path,
+        read_only: bool,
+        authority: DatabaseAuthority,
+        slot: Option<GlobalDbSlot>,
+    ) -> Option<Self> {
+        let authority = authority.hold_for(db_path, "open global database").ok()?;
+        let db_path = authority.canonical_database_path().to_path_buf();
         let storage_root = db_path
             .parent()
             .unwrap_or_else(|| Path::new("."))
             .to_path_buf();
         let builder = if read_only {
-            Builder::new_local(db_path).flags(OpenFlags::SQLITE_OPEN_READ_ONLY)
+            Builder::new_local(&db_path).flags(OpenFlags::SQLITE_OPEN_READ_ONLY)
         } else {
-            Builder::new_local(db_path)
+            Builder::new_local(&db_path)
         };
         let db = builder.build().await.ok()?;
         let conn = db.connect().ok()?;
 
-        if let Some(mmap_size) = global_db_mmap_size_guard() {
-            conn.execute_batch(&format!("PRAGMA mmap_size = {mmap_size};"))
-                .await
-                .ok()?;
-        }
+        conn.execute_batch(&format!(
+            "PRAGMA mmap_size = {};",
+            global_db_mmap_size_guard()
+        ))
+        .await
+        .ok()?;
 
         let pragmas = if read_only {
             "PRAGMA busy_timeout = 5000;
@@ -960,10 +1008,14 @@ impl GlobalDb {
         conn.execute_batch(&pragmas).await.ok()?;
 
         Some(Self {
-            conn,
-            storage_root,
-            db_path: db_path.to_path_buf(),
-            _db: db,
+            inner: Arc::new(GlobalDbInner {
+                conn,
+                storage_root,
+                db_path,
+                _db: db,
+                _authority: authority,
+                _slot: slot,
+            }),
         })
     }
 
@@ -974,46 +1026,92 @@ impl GlobalDb {
     /// other's `PRAGMA journal_mode = WAL`, DDL batch, and migration
     /// transactions: all but one connection silently got `None`, which
     /// disabled global accounting (ledger recording) for the unlucky
-    /// callers' entire session. Opens are rare, so they are serialized
-    /// in-process and retried briefly to also cover a racing *external*
-    /// process (e.g. two MCP servers starting simultaneously).
+    /// callers' entire session. Schema initialization is singleflight per
+    /// canonical database identity; after it completes, every caller opens an
+    /// independent connection so caller-managed transactions cannot interleave
+    /// on one shared libSQL session. `SQLite` still serializes actual writers.
     pub async fn open_at(db_path: &std::path::Path) -> Option<Self> {
-        Self::open_at_with_backfill(db_path, true).await
+        Self::best_effort_open(Self::try_open_at(db_path).await)
+    }
+
+    /// Result-preserving counterpart to [`Self::open_at`]. Authority failures
+    /// retain their exact ownership/profile diagnostic; storage-open failures
+    /// remain `Ok(None)` under the global database's best-effort contract.
+    pub async fn try_open_at(db_path: &std::path::Path) -> crate::errors::Result<Option<Self>> {
+        Self::try_open_at_with_backfill(db_path, true).await
     }
 
     /// Opens and ensures a writable session store without starting detached
     /// structured backfill. Bulk multi-store catch-up uses this to avoid
     /// launching one competing backfill task per registered project.
     pub async fn open_at_without_structured_backfill(db_path: &std::path::Path) -> Option<Self> {
-        Self::open_at_with_backfill(db_path, false).await
+        Self::best_effort_open(Self::try_open_at_without_structured_backfill(db_path).await)
     }
 
-    async fn open_at_with_backfill(
+    /// Result-preserving counterpart to
+    /// [`Self::open_at_without_structured_backfill`].
+    pub async fn try_open_at_without_structured_backfill(
         db_path: &std::path::Path,
-        spawn_structured_backfill: bool,
-    ) -> Option<Self> {
-        static OPEN_ENSURE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-        let _guard = OPEN_ENSURE_LOCK.lock().await;
-        for attempt in 0..3_u64 {
-            if attempt > 0 {
-                tokio::time::sleep(std::time::Duration::from_millis(50 * attempt)).await;
-            }
-            if let Some(db) = Self::open_at_unsynchronized(db_path, spawn_structured_backfill).await
-            {
-                return Some(db);
+    ) -> crate::errors::Result<Option<Self>> {
+        Self::try_open_at_with_backfill(db_path, false).await
+    }
+
+    fn best_effort_open(result: crate::errors::Result<Option<Self>>) -> Option<Self> {
+        match result {
+            Ok(db) => db,
+            Err(error) => {
+                eprintln!("[tracedecay] global database open rejected: {error}");
+                None
             }
         }
-        None
+    }
+
+    async fn try_open_at_with_backfill(
+        db_path: &std::path::Path,
+        spawn_structured_backfill: bool,
+    ) -> crate::errors::Result<Option<Self>> {
+        let authority = DatabaseAuthority::for_runtime(db_path, "open global database")?;
+        let canonical_path = authority.canonical_database_path().to_path_buf();
+        let slot = global_db_slot(&authority);
+        let mut schema = slot.lock().await;
+        if schema.ensured {
+            drop(schema);
+            let Some(db) =
+                Self::open_local(&canonical_path, false, authority, Some(Arc::clone(&slot))).await
+            else {
+                return Ok(None);
+            };
+            if spawn_structured_backfill {
+                db.spawn_structured_backfill();
+            }
+            return Ok(Some(db));
+        }
+        if let Some(parent) = canonical_path.parent() {
+            if std::fs::create_dir_all(parent).is_err() {
+                return Ok(None);
+            }
+        }
+        let Some(db) = Self::open_at_unsynchronized(
+            &canonical_path,
+            spawn_structured_backfill,
+            authority,
+            Arc::clone(&slot),
+        )
+        .await
+        else {
+            return Ok(None);
+        };
+        schema.ensured = true;
+        Ok(Some(db))
     }
 
     async fn open_at_unsynchronized(
         db_path: &std::path::Path,
         spawn_structured_backfill: bool,
+        authority: DatabaseAuthority,
+        slot: GlobalDbSlot,
     ) -> Option<Self> {
-        if let Some(parent) = db_path.parent() {
-            std::fs::create_dir_all(parent).ok()?;
-        }
-        let db = Self::open_local(db_path, false).await?;
+        let db = Self::open_local(db_path, false, authority, Some(slot)).await?;
 
         db.conn
             .execute_batch(
@@ -1241,11 +1339,16 @@ impl GlobalDb {
     /// DDL batch and LCM migrations while still applying the per-connection
     /// PRAGMAs. Long-lived servers use this to avoid re-paying the schema
     /// ensure on every tool call (the caller tracks which paths are ensured).
+    /// This raw open never participates in or updates the full-open schema
+    /// slot, so it cannot make a later [`Self::open_at`] skip initialization.
     pub async fn open_at_assuming_schema(db_path: &std::path::Path) -> Option<Self> {
         if !db_path.is_file() {
             return None;
         }
-        Self::open_local(db_path, false).await
+        let authority =
+            DatabaseAuthority::for_runtime(db_path, "open global database assuming schema").ok()?;
+        let canonical_path = authority.canonical_database_path().to_path_buf();
+        Self::open_local(&canonical_path, false, authority, None).await
     }
 
     /// Opens an existing database without creating directories, creating schema,
@@ -1254,14 +1357,24 @@ impl GlobalDb {
         if !db_path.is_file() {
             return None;
         }
-        Self::open_local(db_path, true).await
+        let authority =
+            DatabaseAuthority::for_runtime(db_path, "open global database read-only").ok()?;
+        let canonical_path = authority.canonical_database_path().to_path_buf();
+        Self::open_local(&canonical_path, true, authority, None).await
     }
 
     /// Opens (or creates) the global database. Returns `None` if the home
     /// directory cannot be determined or the DB fails to open.
     pub async fn open() -> Option<Self> {
-        let db_path = global_db_path()?;
-        Self::open_at(&db_path).await
+        Self::best_effort_open(Self::try_open().await)
+    }
+
+    /// Result-preserving counterpart to [`Self::open`].
+    pub async fn try_open() -> crate::errors::Result<Option<Self>> {
+        let Some(db_path) = global_db_path() else {
+            return Ok(None);
+        };
+        Self::try_open_at(&db_path).await
     }
 
     /// Raw connection for crate-internal read layers (the dashboard HTTP
@@ -1309,9 +1422,9 @@ impl GlobalDb {
             }
         }
         tokio::spawn(async move {
-            // Re-open an independent handle to the same store (the scheduling
-            // open already ensured its schema) so the sweep never shares the
-            // connection handed back to the caller.
+            // The scheduling open already ensured the schema. Use a separate
+            // raw connection so backfill transactions never share the
+            // caller's libSQL session or publish schema state.
             if let Some(db) = GlobalDb::open_at_assuming_schema(&db_path).await {
                 let _ = crate::sessions::transcript_backfill::backfill_structured_rows(&db).await;
             }
@@ -1795,9 +1908,17 @@ impl GlobalDb {
         })
     }
 
-    pub async fn list_code_projects(&self, limit: usize) -> Vec<CodeProjectRecord> {
+    /// Lists registered code projects, preserving query and row-decoding errors.
+    ///
+    /// Destructive maintenance callers must use this instead of the best-effort
+    /// [`Self::list_code_projects`] wrapper so a registry failure cannot be
+    /// mistaken for an empty registry.
+    pub async fn try_list_code_projects(
+        &self,
+        limit: usize,
+    ) -> crate::errors::Result<Vec<CodeProjectRecord>> {
         let limit = i64::try_from(limit).unwrap_or(i64::MAX);
-        let Ok(mut rows) = self
+        let mut rows = self
             .conn
             .query(
                 "SELECT project_id, canonical_root, display_root, git_common_dir,
@@ -1807,17 +1928,23 @@ impl GlobalDb {
                  LIMIT ?1",
                 params![limit],
             )
-            .await
-        else {
-            return Vec::new();
-        };
+            .await?;
         let mut projects = Vec::new();
-        while let Ok(Some(row)) = rows.next().await {
-            if let Some(project) = row_to_code_project(&row, 0) {
-                projects.push(project);
-            }
+        while let Some(row) = rows.next().await? {
+            let project = row_to_code_project(&row, 0).ok_or_else(|| {
+                crate::errors::TraceDecayError::Database {
+                    message: "failed to decode code project registry row".to_string(),
+                    operation: "list code projects".to_string(),
+                }
+            })?;
+            projects.push(project);
         }
-        projects
+        Ok(projects)
+    }
+
+    /// Lists registered code projects on the daemon's best-effort path.
+    pub async fn list_code_projects(&self, limit: usize) -> Vec<CodeProjectRecord> {
+        self.try_list_code_projects(limit).await.unwrap_or_default()
     }
 
     /// Returns registered code projects whose `last_seen_at` is within the last
@@ -4988,7 +5115,7 @@ impl GlobalDb {
 
     /// Consumes the `GlobalDb`, closing the underlying connection.
     pub fn close(self) {
-        drop(self.conn);
+        drop(self);
     }
 }
 #[cfg(test)]

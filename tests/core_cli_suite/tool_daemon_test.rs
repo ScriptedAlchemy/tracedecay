@@ -12,7 +12,6 @@ use crate::common::{
 };
 use serde_json::{Value, json};
 use tempfile::TempDir;
-use tracedecay::db::Database;
 use tracedecay::storage::{
     EnrollmentMarker, StorageMode, default_profile_project_id, profile_sharded_data_root,
     write_enrollment_marker,
@@ -500,7 +499,7 @@ fn kiro_post_tool_use_hook_notifies_daemon() {
 }
 
 #[test]
-fn daemon_sigterm_exits_while_project_client_is_connected() {
+fn daemon_sigterm_exits_while_authenticated_project_client_is_connected() {
     let home = TempDir::new().unwrap();
     let project = TempDir::new().unwrap();
     let home_path = canonical_existing_path(home.path());
@@ -521,6 +520,23 @@ fn daemon_sigterm_exits_while_project_client_is_connected() {
 
     let mut client = UnixStream::connect(&socket_path).expect("client should connect to daemon");
     let mut reader = BufReader::new(client.try_clone().expect("clone daemon client stream"));
+    let authority: Value = serde_json::from_slice(
+        &std::fs::read(home_path.join(".tracedecay/daemon-authority.json"))
+            .expect("read daemon authority"),
+    )
+    .expect("parse daemon authority");
+    let auth_token = authority["auth_token"]
+        .as_str()
+        .expect("daemon authority auth token");
+    writeln!(
+        client,
+        "{}",
+        json!({
+            "protocol": "tracedecay-daemon-v1",
+            "auth_token": auth_token
+        })
+    )
+    .expect("write daemon auth preface");
     let handshake = json!({
         "project_path": project_path,
         "scope_prefix": null,
@@ -853,7 +869,9 @@ fn doctor_keeps_live_daemon_database_healthy_without_compaction() {
     );
     let db_path = data_root.join(tracedecay::config::db_filename(&data_root));
     common::create_runtime().block_on(async {
-        let (db, _) = Database::open(&db_path).await.expect("open graph database");
+        let (db, _) = crate::common::open_test_database(&db_path)
+            .await
+            .expect("open graph database");
         db.conn()
             .execute_batch(
                 "CREATE TABLE doctor_daemon_probe (payload BLOB);\
@@ -1156,7 +1174,7 @@ fn daemon_project_cache_is_scoped_by_client_identity() {
 }
 
 #[test]
-fn tool_cli_without_daemon_socket_falls_back_to_in_process_handler() {
+fn tool_cli_without_daemon_socket_reports_daemon_unavailable() {
     let home = TempDir::new().unwrap();
     let project = TempDir::new().unwrap();
     let socket_dir = TempDir::new().unwrap();
@@ -1173,15 +1191,10 @@ fn tool_cli_without_daemon_socket_falls_back_to_in_process_handler() {
         .output()
         .expect("tracedecay tool should run");
 
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        output.status.success(),
-        "tool CLI should fall back to in-process handlers when the daemon socket is missing\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(
-        stdout.contains("\"content\""),
-        "expected MCP tool result JSON from in-process fallback, got:\n{stdout}"
+        stderr.contains("TraceDecay daemon socket") && stderr.contains("is not available"),
+        "expected explicit daemon-unavailable error, got:\n{stderr}"
     );
 }

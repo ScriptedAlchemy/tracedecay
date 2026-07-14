@@ -856,7 +856,12 @@ impl PrivateStoreIo {
         reject_symlink_components(temp_path, "private store temp file")?;
         fs::write(temp_path, contents)?;
         set_private_file_permissions(temp_path)?;
-        fs::rename(temp_path, path)?;
+        crate::db::DatabaseAuthority::replace_file_atomically(
+            temp_path,
+            path,
+            "private store file",
+        )
+        .map_err(io::Error::other)?;
         set_private_file_permissions(path)
     }
 

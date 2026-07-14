@@ -29,6 +29,9 @@ mod automation_jobs_api;
 mod automation_outcomes_api;
 mod automation_run_api;
 mod automation_run_service;
+pub(crate) use automation_run_service::{
+    DashboardAutomationWriter, direct_dashboard_automation_writer,
+};
 mod automation_scheduler_api;
 mod automation_skills_api;
 mod code_diagnostics_api;
@@ -84,6 +87,9 @@ pub(crate) struct DashboardState {
     pub(crate) project_id: Option<String>,
     /// Active code-graph database. This can be branch-specific.
     pub(crate) graph_conn: libsql::Connection,
+    /// Keeps every project-database authority alive as long as cloned raw
+    /// connections remain reachable through this state.
+    pub(crate) _database_guards: Vec<Arc<Database>>,
     /// Display path of the active code-graph database.
     pub(crate) graph_db_path: String,
     /// Project memory database. This is shared across branches.
@@ -93,6 +99,8 @@ pub(crate) struct DashboardState {
     /// LCM session store for the resolved active project store, or the global
     /// fallback when no project store is available.
     pub(crate) lcm_conn: Option<libsql::Connection>,
+    /// Keeps session-store authorities alive alongside `lcm_conn`.
+    pub(crate) _global_database_guards: Vec<Arc<GlobalDb>>,
     /// Display path of the LCM session store actually being served.
     pub(crate) lcm_db_path: String,
     /// Which store `lcm_conn` points at, e.g. `"profile_sharded"` or `"global"`.
@@ -123,6 +131,8 @@ pub(crate) struct DashboardState {
     /// dashboard server lifetime.
     pub(crate) code_diagnostics_backfill_started: Arc<AtomicBool>,
     pub(crate) automation_scheduler_reconciler: Option<AutomationSchedulerReconciler>,
+    /// Lifetime-owning capability for complete dashboard automation writes.
+    pub(crate) automation_writer: DashboardAutomationWriter,
 }
 
 impl DashboardState {
@@ -136,6 +146,7 @@ impl DashboardState {
 /// The LCM session store the dashboard will serve.
 pub(crate) struct LcmStoreSelection {
     pub(crate) conn: Option<libsql::Connection>,
+    pub(crate) guard: Option<Arc<GlobalDb>>,
     pub(crate) path: String,
     pub(crate) scope: String,
 }
@@ -155,16 +166,20 @@ pub(crate) async fn resolve_lcm_store(cg: &TraceDecay) -> LcmStoreSelection {
         crate::sessions::cursor::resolved_project_session_db_path(project_root).await
     {
         if let Some(db) = GlobalDb::open_at(&project_db_path).await {
+            let conn = db.dashboard_connection();
             return LcmStoreSelection {
-                conn: Some(db.dashboard_connection()),
+                conn: Some(conn),
+                guard: Some(Arc::new(db)),
                 path: project_db_path.display().to_string(),
                 scope: storage_mode_label(&cg.store_layout().storage_mode).to_string(),
             };
         }
     }
     let global = GlobalDb::open().await;
+    let conn = global.as_ref().map(GlobalDb::dashboard_connection);
     LcmStoreSelection {
-        conn: global.as_ref().map(GlobalDb::dashboard_connection),
+        conn,
+        guard: global.map(Arc::new),
         path: crate::global_db::global_db_path()
             .map(|p| p.display().to_string())
             .unwrap_or_default(),
@@ -188,9 +203,11 @@ pub(crate) fn code_diagnostics_broker(
     lsp::broker::DiagnosticBroker::new(project_root, adapters, settings)
 }
 
-async fn open_dashboard_connection(path: &Path) -> Option<libsql::Connection> {
-    let (db, _) = Database::open(path).await.ok()?;
-    Some(db.conn().clone())
+async fn open_dashboard_connection(path: &Path) -> Option<(libsql::Connection, Arc<Database>)> {
+    let authority = crate::db::DatabaseAuthority::for_runtime(path, "dashboard").ok()?;
+    let (db, _) = Database::open(path, &authority).await.ok()?;
+    let conn = db.conn().clone();
+    Some((conn, Arc::new(db)))
 }
 
 async fn memory_fact_count(conn: &libsql::Connection) -> Option<i64> {
@@ -201,29 +218,33 @@ async fn memory_fact_count(conn: &libsql::Connection) -> Option<i64> {
     rows.next().await.ok()??.get::<i64>(0).ok()
 }
 
-pub(crate) async fn resolve_project_memory_store(cg: &TraceDecay) -> (libsql::Connection, String) {
+pub(crate) async fn resolve_project_memory_store(
+    cg: &TraceDecay,
+) -> (libsql::Connection, String, Option<Arc<Database>>) {
     let graph_path = cg.dashboard_db_path();
-    let mut first_open: Option<(libsql::Connection, String)> = None;
+    let mut first_open: Option<(libsql::Connection, String, Option<Arc<Database>>)> = None;
     let mut seen = std::collections::BTreeSet::new();
 
     for path in [cg.store_layout().graph_db_path.clone()] {
         if !seen.insert(path.clone()) || !path.is_file() {
             continue;
         }
-        let conn = if path == graph_path {
-            Some(cg.dashboard_connection())
+        let opened = if path == graph_path {
+            Some((cg.dashboard_connection(), None))
         } else {
-            open_dashboard_connection(&path).await
+            open_dashboard_connection(&path)
+                .await
+                .map(|(conn, guard)| (conn, Some(guard)))
         };
-        let Some(conn) = conn else {
+        let Some((conn, guard)) = opened else {
             continue;
         };
         let display_path = path.display().to_string();
         if first_open.is_none() {
-            first_open = Some((conn.clone(), display_path.clone()));
+            first_open = Some((conn.clone(), display_path.clone(), guard.clone()));
         }
         if memory_fact_count(&conn).await.unwrap_or(0) > 0 {
-            return (conn, display_path);
+            return (conn, display_path, guard);
         }
     }
 
@@ -231,6 +252,7 @@ pub(crate) async fn resolve_project_memory_store(cg: &TraceDecay) -> (libsql::Co
         (
             cg.dashboard_connection(),
             cg.dashboard_db_path().display().to_string(),
+            None,
         )
     })
 }
@@ -240,8 +262,9 @@ async fn build_state_inner(
     repair_memory_on_startup: bool,
     warm_token_counts: bool,
     automation_scheduler_reconciler: Option<AutomationSchedulerReconciler>,
+    automation_writer: DashboardAutomationWriter,
 ) -> DashboardState {
-    let (mem_conn, mem_db_path) = resolve_project_memory_store(cg).await;
+    let (mem_conn, mem_db_path, mem_guard) = resolve_project_memory_store(cg).await;
     let lcm = resolve_lcm_store(cg).await;
     let dashboard_root = cg.store_layout().dashboard_root.clone();
     let store_root = cg.store_layout().data_root.clone();
@@ -259,10 +282,14 @@ async fn build_state_inner(
     let state = DashboardState {
         project_id: cg.store_layout().identity.project_id.clone(),
         graph_conn: cg.dashboard_connection(),
+        _database_guards: std::iter::once(cg.dashboard_database_guard())
+            .chain(mem_guard)
+            .collect(),
         graph_db_path: cg.dashboard_db_path().display().to_string(),
         mem_conn,
         mem_db_path,
         lcm_conn: lcm.conn,
+        _global_database_guards: lcm.guard.into_iter().collect(),
         lcm_db_path: lcm.path,
         lcm_scope: lcm.scope,
         savings_db,
@@ -277,6 +304,7 @@ async fn build_state_inner(
         code_diagnostics: Arc::new(RwLock::new(code_diagnostics)),
         code_diagnostics_backfill_started: Arc::new(AtomicBool::new(false)),
         automation_scheduler_reconciler,
+        automation_writer,
     };
     if repair_memory_on_startup {
         if let Err(err) = memory_api::repair_derived_memory(&state).await {
@@ -295,20 +323,39 @@ async fn build_state_inner(
 /// `tracedecay_dashboard` MCP tool.
 #[allow(dead_code)]
 pub(crate) async fn build_state(cg: &TraceDecay) -> DashboardState {
-    build_state_inner(cg, true, true, None).await
+    build_state_inner(cg, true, true, None, direct_dashboard_automation_writer()).await
 }
 
 pub(crate) async fn build_state_with_automation_reconciler(
     cg: &TraceDecay,
     automation_scheduler_reconciler: Option<AutomationSchedulerReconciler>,
+    automation_writer: DashboardAutomationWriter,
 ) -> DashboardState {
-    build_state_inner(cg, true, true, automation_scheduler_reconciler).await
+    build_state_inner(
+        cg,
+        true,
+        true,
+        automation_scheduler_reconciler,
+        automation_writer,
+    )
+    .await
 }
 
 /// Builds a lightweight cached state for a non-active project selected from the
-/// dashboard project picker.
-pub(crate) async fn build_selected_project_state(cg: &TraceDecay) -> DashboardState {
-    build_state_inner(cg, false, false, None).await
+/// dashboard project picker. Automation authority is inherited from the active
+/// dashboard state so daemon-selected projects cannot fall back to direct open.
+pub(crate) async fn build_selected_project_state(
+    cg: &TraceDecay,
+    active: &DashboardState,
+) -> DashboardState {
+    build_state_inner(
+        cg,
+        false,
+        false,
+        None,
+        Arc::clone(&active.automation_writer),
+    )
+    .await
 }
 
 /// Detached catch-up ingest for transcript sources (Claude, Codex, Vibe,
@@ -426,6 +473,7 @@ where
         options.repair_memory_on_startup,
         options.warm_token_counts,
         None,
+        direct_dashboard_automation_writer(),
     )
     .await;
     if options.start_session_catch_up && state.lcm_scope != "global" {

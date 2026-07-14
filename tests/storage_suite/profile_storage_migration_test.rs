@@ -6,7 +6,6 @@ use tempfile::TempDir;
 use tracedecay::branch::BranchAddOutcome;
 use tracedecay::branch_meta::{self, BranchMeta};
 use tracedecay::config::{TraceDecayConfig, USER_DATA_DIR_ENV};
-use tracedecay::db::Database;
 use tracedecay::global_db::{GlobalDb, GraphScopeUpsert, StoreArtifactUpsert, StoreInstanceUpsert};
 use tracedecay::migrate::inventory::{
     MigrationInventory, RegistryStatus, StoreArtifact, StoreBrand, StoreInventory, StoreRole,
@@ -57,7 +56,8 @@ async fn hermes_home_env_cannot_redirect_legacy_migration() {
 
     assert_eq!(report, Default::default());
     assert_eq!(fs::read(&redirected_db).unwrap(), b"must remain untouched");
-    assert!(!profile_root.exists());
+    assert!(!profile_root.join("global.db").exists());
+    assert!(!profile_root.join("projects").exists());
 }
 
 impl HomeEnvGuard {
@@ -1181,7 +1181,7 @@ async fn trace_decay_open_matches_renamed_git_checkout_by_registered_remote() {
 }
 
 #[tokio::test]
-async fn ensure_initialized_with_options_uses_persisted_repository_identity() {
+async fn persisted_repository_identity_survives_rename_while_serve_open_fails_closed() {
     let _guard = HOME_ENV_LOCK.lock().await;
     let dir = TempDir::new().unwrap();
     let root = canonical_temp_path(dir.path());
@@ -1217,7 +1217,19 @@ async fn ensure_initialized_with_options_uses_persisted_repository_identity() {
         TraceDecay::is_initialized_with_options(&renamed, &open_options),
         "the durable git marker should resolve the moved profile store synchronously"
     );
-    let reopened = serve::ensure_initialized_with_options(&renamed, open_options)
+    let serve_error =
+        match serve::ensure_initialized_with_options(&renamed, open_options.clone()).await {
+            Ok(_) => panic!("serve compatibility API must not open the project database locally"),
+            Err(error) => error,
+        };
+    assert!(
+        serve_error
+            .to_string()
+            .contains("managed TraceDecay daemon"),
+        "serve should direct callers to the sole database owner: {serve_error}"
+    );
+
+    let reopened = TraceDecay::open_with_options(&renamed, open_options)
         .await
         .unwrap();
 
@@ -1262,10 +1274,12 @@ async fn trace_decay_open_branch_uses_profile_shard_branch_db() {
         serde_json::to_string_pretty(&config).unwrap(),
     )
     .unwrap();
-    Database::initialize(&shard_root.join("tracedecay.db"))
+    crate::common::initialize_test_database(&shard_root.join("tracedecay.db"))
         .await
         .unwrap();
-    Database::initialize(&branch_db).await.unwrap();
+    crate::common::initialize_test_database(&branch_db)
+        .await
+        .unwrap();
     let mut meta = BranchMeta::new_for_dir(&shard_root, "main");
     meta.add_branch("feature/profile", "branches/feature_profile.db", "main");
     branch_meta::save_branch_meta(&shard_root, &meta).unwrap();

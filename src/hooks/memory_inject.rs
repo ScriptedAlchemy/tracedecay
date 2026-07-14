@@ -19,10 +19,7 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 
 use crate::memory::hygiene::detect_secret_like;
-use crate::memory::retrieval::FactRetriever;
-use crate::memory::store::MemoryStore;
 use crate::memory::types::{FactRecord, FactSearchResult};
-use crate::memory::user::open_user_memory_db;
 
 /// Hard cap for the session-start "durable project memory" digest.
 pub const SESSION_DIGEST_CHAR_BUDGET: usize = 2_000;
@@ -64,6 +61,64 @@ const COMBINED_DIGEST_HEADER: &str = "Durable user and project memory \
 (tracedecay fact stores; each fact includes its scope):";
 const COMBINED_PROMPT_RECALL_HEADER: &str = "Possibly relevant user and project memory \
 (tracedecay fact stores; each fact includes its scope):";
+
+async fn daemon_fact_store(
+    root: Option<&Path>,
+    action: &str,
+    query: Option<&str>,
+    user_scope: bool,
+    limit: usize,
+) -> Option<serde_json::Value> {
+    let mut args = serde_json::json!({
+        "action": action,
+        "format": "json",
+        "limit": limit,
+        "min_trust": INJECTION_MIN_TRUST,
+    });
+    if let Some(query) = query {
+        args["query"] = serde_json::json!(query);
+    }
+    if user_scope {
+        args["memory_scope"] = serde_json::json!("user");
+    }
+    match super::daemon_tool_json(root, "tracedecay_fact_store", args).await {
+        Ok(value) => Some(value),
+        Err(error) => {
+            eprintln!("[tracedecay] memory hook daemon call failed: {error}");
+            None
+        }
+    }
+}
+
+async fn daemon_fact_list(root: Option<&Path>, user_scope: bool) -> Vec<FactRecord> {
+    daemon_fact_store(
+        root,
+        "list",
+        None,
+        user_scope,
+        SESSION_DIGEST_FACT_COUNT * 4,
+    )
+    .await
+    .and_then(|value| serde_json::from_value(value.get("facts")?.clone()).ok())
+    .unwrap_or_default()
+}
+
+async fn daemon_fact_search(
+    root: Option<&Path>,
+    prompt: &str,
+    user_scope: bool,
+) -> Vec<FactSearchResult> {
+    daemon_fact_store(
+        root,
+        "search",
+        Some(prompt),
+        user_scope,
+        PROMPT_RECALL_FACT_COUNT * 4,
+    )
+    .await
+    .and_then(|value| serde_json::from_value(value.get("facts")?.clone()).ok())
+    .unwrap_or_default()
+}
 
 // ---------------------------------------------------------------------------
 // Config gate
@@ -466,20 +521,7 @@ fn record_injected_user_facts(session_id: Option<&str>, fact_ids: &[i64]) {
 /// without bumping recall/access counters. Fail-open: any error yields an
 /// empty list.
 async fn digest_candidates(root: &Path) -> Vec<FactRecord> {
-    let Ok(cg) = crate::tracedecay::TraceDecay::open(root).await else {
-        return Vec::new();
-    };
-    let Ok(db) = cg.open_project_store_db().await else {
-        return Vec::new();
-    };
-    MemoryStore::new(db.conn())
-        .list_facts(
-            None,
-            Some(INJECTION_MIN_TRUST),
-            SESSION_DIGEST_FACT_COUNT * 4,
-        )
-        .await
-        .unwrap_or_default()
+    daemon_fact_list(Some(root), false).await
 }
 
 /// Builds a session-start digest from the profile-level user memory store.
@@ -487,16 +529,7 @@ pub async fn user_session_memory_digest(session_id: Option<&str>) -> Option<Stri
     if !memory_injection_enabled() {
         return None;
     }
-    let profile_root = crate::storage::default_profile_root().ok()?;
-    let db = open_user_memory_db(&profile_root).await.ok()?;
-    let facts = MemoryStore::new(db.conn())
-        .list_facts(
-            None,
-            Some(INJECTION_MIN_TRUST),
-            SESSION_DIGEST_FACT_COUNT * 4,
-        )
-        .await
-        .ok()?;
+    let facts = daemon_fact_list(None, true).await;
     let facts = select_digest_facts(facts, SESSION_DIGEST_FACT_COUNT);
     let (text, included) =
         render_fact_block(USER_DIGEST_HEADER, &facts, SESSION_DIGEST_CHAR_BUDGET)?;
@@ -509,17 +542,7 @@ pub async fn user_prompt_memory_recall(session_id: Option<&str>, prompt: &str) -
     if !memory_injection_enabled() || prompt.trim().chars().count() < MIN_PROMPT_CHARS {
         return None;
     }
-    let profile_root = crate::storage::default_profile_root().ok()?;
-    let db = open_user_memory_db(&profile_root).await.ok()?;
-    let results = FactRetriever::new(db.conn())
-        .search_untracked(
-            prompt,
-            None,
-            Some(INJECTION_MIN_TRUST),
-            PROMPT_RECALL_FACT_COUNT * 4,
-        )
-        .await
-        .ok()?;
+    let results = daemon_fact_search(None, prompt, true).await;
     let already_injected = match (session_id, user_seen_facts_path()) {
         (Some(session_id), Some(path)) => {
             MemoryInjectSeen::load_or_default(&path).seen_for_session(session_id)
@@ -546,21 +569,10 @@ pub async fn combined_session_memory_digest(
     } else {
         Vec::new()
     };
-    let user = match crate::storage::default_profile_root() {
-        Ok(profile_root) => match open_user_memory_db(&profile_root).await {
-            Ok(db) => MemoryStore::new(db.conn())
-                .list_facts(
-                    None,
-                    Some(INJECTION_MIN_TRUST),
-                    SESSION_DIGEST_FACT_COUNT * 4,
-                )
-                .await
-                .map(|facts| select_digest_facts(facts, SESSION_DIGEST_FACT_COUNT))
-                .unwrap_or_default(),
-            Err(_) => Vec::new(),
-        },
-        Err(_) => Vec::new(),
-    };
+    let user = select_digest_facts(
+        daemon_fact_list(Some(root), true).await,
+        SESSION_DIGEST_FACT_COUNT,
+    );
     let facts = select_scoped_facts(user, project, SESSION_DIGEST_FACT_COUNT);
     let (text, user_ids, project_ids) =
         render_scoped_fact_block(COMBINED_DIGEST_HEADER, &facts, SESSION_DIGEST_CHAR_BUDGET)?;
@@ -584,52 +596,22 @@ pub async fn combined_prompt_memory_recall(
         }
         _ => HashSet::new(),
     };
-    let project = if crate::tracedecay::TraceDecay::has_initialized_store(root).await {
-        match crate::tracedecay::TraceDecay::open(root).await {
-            Ok(cg) => match cg.open_project_store_db().await {
-                Ok(db) => FactRetriever::new(db.conn())
-                    .search_untracked(
-                        prompt,
-                        None,
-                        Some(INJECTION_MIN_TRUST),
-                        PROMPT_RECALL_FACT_COUNT * 4,
-                    )
-                    .await
-                    .map(|results| {
-                        select_prompt_recall_facts(results, &project_seen, PROMPT_RECALL_FACT_COUNT)
-                    })
-                    .unwrap_or_default(),
-                Err(_) => Vec::new(),
-            },
-            Err(_) => Vec::new(),
-        }
-    } else {
-        Vec::new()
-    };
+    let project = select_prompt_recall_facts(
+        daemon_fact_search(Some(root), prompt, false).await,
+        &project_seen,
+        PROMPT_RECALL_FACT_COUNT,
+    );
     let user_seen = match (session_id, user_seen_facts_path()) {
         (Some(session_id), Some(path)) => {
             MemoryInjectSeen::load_or_default(&path).seen_for_session(session_id)
         }
         _ => HashSet::new(),
     };
-    let user = match crate::storage::default_profile_root() {
-        Ok(profile_root) => match open_user_memory_db(&profile_root).await {
-            Ok(db) => FactRetriever::new(db.conn())
-                .search_untracked(
-                    prompt,
-                    None,
-                    Some(INJECTION_MIN_TRUST),
-                    PROMPT_RECALL_FACT_COUNT * 4,
-                )
-                .await
-                .map(|results| {
-                    select_prompt_recall_facts(results, &user_seen, PROMPT_RECALL_FACT_COUNT)
-                })
-                .unwrap_or_default(),
-            Err(_) => Vec::new(),
-        },
-        Err(_) => Vec::new(),
-    };
+    let user = select_prompt_recall_facts(
+        daemon_fact_search(Some(root), prompt, true).await,
+        &user_seen,
+        PROMPT_RECALL_FACT_COUNT,
+    );
     let facts = select_scoped_facts(user, project, PROMPT_RECALL_FACT_COUNT);
     let (text, user_ids, project_ids) = render_scoped_fact_block(
         COMBINED_PROMPT_RECALL_HEADER,
@@ -734,8 +716,7 @@ pub async fn regenerate_cursor_user_memory_rule() -> bool {
     if !memory_injection_enabled() {
         return false;
     }
-    let (Some(home), Ok(profile_root)) = (dirs::home_dir(), crate::storage::default_profile_root())
-    else {
+    let Some(home) = dirs::home_dir() else {
         return false;
     };
     let rule_path = crate::agents::cursor::cursor_memory_rule_path(&home);
@@ -745,17 +726,7 @@ pub async fn regenerate_cursor_user_memory_rule() -> bool {
     if !plugin_dir.join(".cursor-plugin/plugin.json").exists() {
         return false;
     }
-    let facts = match open_user_memory_db(&profile_root).await {
-        Ok(db) => MemoryStore::new(db.conn())
-            .list_facts(
-                None,
-                Some(INJECTION_MIN_TRUST),
-                SESSION_DIGEST_FACT_COUNT * 4,
-            )
-            .await
-            .unwrap_or_default(),
-        Err(_) => Vec::new(),
-    };
+    let facts = daemon_fact_list(None, true).await;
     let facts = select_digest_facts(facts, SESSION_DIGEST_FACT_COUNT);
     write_cursor_memory_rule_if_managed(&rule_path, &render_cursor_user_memory_rule(&facts))
 }

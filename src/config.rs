@@ -474,10 +474,55 @@ pub fn has_project_database(project_root: &Path) -> bool {
 /// `~/.tracedecay` unless `TRACEDECAY_DATA_DIR` explicitly overrides it.
 pub fn user_data_dir() -> Option<PathBuf> {
     if let Some(path) = std::env::var_os(USER_DATA_DIR_ENV).filter(|path| !path.is_empty()) {
-        return Some(canonicalize_data_dir(PathBuf::from(path)));
+        return Some(nextest_isolated_user_data_dir(canonicalize_data_dir(
+            PathBuf::from(path),
+        )));
     }
     let home = dirs::home_dir()?;
     Some(canonicalize_data_dir(home.join(TRACEDECAY_DIR)))
+}
+
+fn nextest_isolated_user_data_dir(path: PathBuf) -> PathBuf {
+    use std::hash::{Hash, Hasher};
+
+    let Some(test_name) = std::env::var_os("NEXTEST_TEST_NAME").filter(|name| !name.is_empty())
+    else {
+        return path;
+    };
+    let Some(profile_dir) = path.parent() else {
+        return path;
+    };
+    if path.file_name() != Some(std::ffi::OsStr::new(TRACEDECAY_DIR)) {
+        return path;
+    }
+
+    let profile_name = profile_dir.file_name().and_then(std::ffi::OsStr::to_str);
+    let target_profile = profile_name == Some("test-profile")
+        && profile_dir
+            .parent()
+            .is_some_and(|target| target.join("debug").is_dir());
+    let ci_profile =
+        profile_name == Some("tracedecay-test-profile") && std::env::var_os("CI").is_some();
+    if !target_profile && !ci_profile {
+        return path;
+    }
+
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    std::env::var_os("NEXTEST_RUN_ID")
+        .unwrap_or_default()
+        .to_string_lossy()
+        .hash(&mut hasher);
+    std::env::var_os("NEXTEST_ATTEMPT_ID")
+        .unwrap_or_default()
+        .to_string_lossy()
+        .hash(&mut hasher);
+    std::env::var_os("NEXTEST_BINARY_ID")
+        .unwrap_or_default()
+        .to_string_lossy()
+        .hash(&mut hasher);
+    test_name.to_string_lossy().hash(&mut hasher);
+    path.join("nextest")
+        .join(format!("{:016x}", hasher.finish()))
 }
 
 fn canonicalize_data_dir(path: PathBuf) -> PathBuf {
@@ -785,34 +830,26 @@ fn absolutize_path(path: PathBuf) -> PathBuf {
 /// initialised `TraceDecay` project, or `None` if the filesystem root is
 /// reached without finding one.
 ///
-/// # Canonical project-root resolution order
+/// # Canonical local project-root resolution order
 ///
 /// This walk-up is the heart of project-root resolution. Every entry point
 /// that needs a project root should resolve it in this order — new code must
 /// converge on this chain instead of inventing its own:
 ///
 /// 0. **Template pre-filter** (`serve` only,
-///    `serve::sanitize_serve_path_arg`): an explicit path that is a literal
+///    [`crate::serve::sanitize_serve_path_arg`]): an explicit path that is a literal
 ///    unexpanded `${...}` host template variable (e.g. `${workspaceFolder}`
 ///    from a host that failed to expand it) is discarded with a warning and
-///    resolution continues as if no path was given — except that step 4 then
-///    requires a unique registered project
-///    (`serve::ServeGlobalDbMatch::UniqueOnly`), because the host's spawn
-///    directory says nothing about the intended workspace.
+///    resolution continues as if no path was given.
 /// 1. **Explicit path** (`--path`/`-p`, tool `path` argument): used verbatim,
 ///    no discovery, and failure to open is fatal — never silently fall back.
 /// 2. **CWD walk-up** (this function via [`resolve_path_with_discovery`]):
 ///    nearest ancestor of the working directory containing an initialised
 ///    project database (see [`get_project_db_path`]).
-/// 3. **MCP `initialize` roots** (`serve` only,
-///    `serve::ServeProjectResolver`): each workspace root the editor
-///    advertises is tried verbatim against registered projects, then walked
-///    up via this function.
-/// 4. **Global DB registry** (`serve` only,
-///    `serve::resolve_serve_from_global_db`): a single registered project
-///    wins outright; among several, the deepest registered ancestor of cwd
-///    wins, then the shallowest registered descendant; ties are reported as
-///    ambiguous and require an explicit path.
+///
+/// `serve` forwards this routing metadata to the managed daemon. MCP
+/// `initialize` roots and registry aliases are resolved there; the proxy never
+/// opens a project or global database and has no in-process fallback.
 pub fn discover_project_root(start: &Path) -> Option<PathBuf> {
     let mut dir = start.to_path_buf();
     let worktree_root = crate::worktree::git_worktree_root(start);

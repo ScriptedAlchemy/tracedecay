@@ -126,15 +126,19 @@ impl Default for MemoryCurateOptions {
 /// Minimal dashboard state over the project memory store — no LCM store,
 /// savings DB, or token-count cache warmup (those belong to the server).
 async fn cli_state(cg: &TraceDecay) -> DashboardState {
-    let (mem_conn, mem_db_path) = super::resolve_project_memory_store(cg).await;
+    let (mem_conn, mem_db_path, mem_guard) = super::resolve_project_memory_store(cg).await;
     let store_layout = cg.store_layout();
     DashboardState {
         project_id: store_layout.identity.project_id.clone(),
         graph_conn: cg.dashboard_connection(),
+        _database_guards: std::iter::once(cg.dashboard_database_guard())
+            .chain(mem_guard)
+            .collect(),
         graph_db_path: cg.dashboard_db_path().display().to_string(),
         mem_conn,
         mem_db_path,
         lcm_conn: None,
+        _global_database_guards: Vec::new(),
         lcm_db_path: String::new(),
         lcm_scope: storage_mode_label(&store_layout.storage_mode).to_string(),
         savings_db: None,
@@ -152,6 +156,7 @@ async fn cli_state(cg: &TraceDecay) -> DashboardState {
         ))),
         code_diagnostics_backfill_started: Arc::new(AtomicBool::new(false)),
         automation_scheduler_reconciler: None,
+        automation_writer: super::direct_dashboard_automation_writer(),
     }
 }
 
@@ -165,10 +170,12 @@ fn user_state(
     DashboardState {
         project_id: None,
         graph_conn: conn.clone(),
+        _database_guards: vec![Arc::new(memory_db.clone())],
         graph_db_path: memory_db_path.display().to_string(),
         mem_conn: conn,
         mem_db_path: memory_db_path.display().to_string(),
         lcm_conn: None,
+        _global_database_guards: Vec::new(),
         lcm_db_path: String::new(),
         lcm_scope: "user".to_string(),
         savings_db: None,
@@ -186,6 +193,7 @@ fn user_state(
         ))),
         code_diagnostics_backfill_started: Arc::new(AtomicBool::new(false)),
         automation_scheduler_reconciler: None,
+        automation_writer: super::direct_dashboard_automation_writer(),
     }
 }
 
@@ -865,7 +873,12 @@ mod tests {
     async fn preview_is_read_only_while_apply_repairs_derived_memory() {
         let temp = tempfile::tempdir().unwrap();
         let memory_path = temp.path().join("user-memory.db");
-        let (db, _) = Database::initialize(&memory_path).await.unwrap();
+        let authority =
+            crate::db::DatabaseAuthority::acquire_test(&memory_path, "memory curation test")
+                .unwrap();
+        let (db, _) = Database::initialize(&memory_path, &authority)
+            .await
+            .unwrap();
         db.conn()
             .execute(
                 "INSERT INTO memory_facts
