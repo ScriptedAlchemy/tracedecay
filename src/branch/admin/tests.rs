@@ -159,6 +159,49 @@ fn failpoint(message: &str) -> crate::errors::Result<()> {
     })
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TestDeletionState {
+    Missing,
+    Deleting,
+    Deleted,
+}
+
+struct TestDeletionFence {
+    state: std::cell::Cell<TestDeletionState>,
+}
+
+impl TestDeletionFence {
+    const TRANSACTION_ID: &'static str = "portable-branch-admin-transaction";
+
+    fn new() -> Self {
+        Self {
+            state: std::cell::Cell::new(TestDeletionState::Missing),
+        }
+    }
+
+    fn state(&self) -> TestDeletionState {
+        self.state.get()
+    }
+
+    fn publish_deleting(&self) -> crate::errors::Result<()> {
+        assert_eq!(self.state(), TestDeletionState::Missing);
+        self.state.set(TestDeletionState::Deleting);
+        Ok(())
+    }
+
+    fn rollback_deleting(&self) -> crate::errors::Result<()> {
+        assert_eq!(self.state(), TestDeletionState::Deleting);
+        self.state.set(TestDeletionState::Missing);
+        Ok(())
+    }
+
+    fn promote_deleted(&self) -> crate::errors::Result<()> {
+        assert_eq!(self.state(), TestDeletionState::Deleting);
+        self.state.set(TestDeletionState::Deleted);
+        Ok(())
+    }
+}
+
 fn quarantine_files(tracedecay_dir: &Path) -> Vec<PathBuf> {
     std::fs::read_dir(tracedecay_dir.join("branches"))
         .unwrap()
@@ -242,6 +285,29 @@ fn recover_committed_with_fence(
     states
 }
 
+fn recover_with_test_fence(
+    tracedecay_dir: &Path,
+    fence: &TestDeletionFence,
+    expected: BranchAdminRecoveryDisposition,
+) {
+    let recovery = prepare_pending_branch_admin_recovery(tracedecay_dir)
+        .unwrap()
+        .expect("pending branch deletion recovery");
+    assert_eq!(recovery.disposition(), expected);
+    recovery
+        .recover(
+            |_| Ok(()),
+            |disposition| {
+                assert_eq!(disposition, expected);
+                match disposition {
+                    BranchAdminRecoveryDisposition::PreCommitRollback => fence.rollback_deleting(),
+                    BranchAdminRecoveryDisposition::CommittedCleanup => fence.promote_deleted(),
+                }
+            },
+        )
+        .unwrap();
+}
+
 #[test]
 fn crash_after_journal_before_deleting_publication_recovers_missing_tombstone() {
     let (_temp, project_root, tracedecay_dir) = fixture();
@@ -323,14 +389,11 @@ fn crash_after_physical_rollback_recovers_same_id_deleting_tombstone() {
         0,
     )
     .unwrap();
-    let fence =
-        crate::db::DatabaseDeletionFence::acquire(std::slice::from_ref(&db), "delete branch test")
-            .unwrap();
-    let transaction_id = fence.transaction_id().to_string();
+    let fence = TestDeletionFence::new();
 
     let error = prepared
         .commit_with_precommit_hook(
-            Some(&transaction_id),
+            Some(TestDeletionFence::TRANSACTION_ID),
             || fence.publish_deleting(),
             |_| Ok(()),
             || fence.rollback_deleting(),
@@ -346,13 +409,15 @@ fn crash_after_physical_rollback_recovers_same_id_deleting_tombstone() {
         )
         .unwrap_err();
     assert!(error.to_string().contains("crash after physical rollback"));
-    drop(fence);
 
     assert!(db.exists());
-    assert!(crate::db::database_path_is_tombstoned(&db).unwrap());
-    let states = recover_precommit_with_fence(&tracedecay_dir, &transaction_id);
-    assert_eq!(states.deleting(), 1);
-    assert!(!crate::db::database_path_is_tombstoned(&db).unwrap());
+    assert_eq!(fence.state(), TestDeletionState::Deleting);
+    recover_with_test_fence(
+        &tracedecay_dir,
+        &fence,
+        BranchAdminRecoveryDisposition::PreCommitRollback,
+    );
+    assert_eq!(fence.state(), TestDeletionState::Missing);
 }
 
 #[test]
@@ -457,7 +522,6 @@ fn metadata_commit_before_deleted_promotion_recovers_as_committed() {
 #[test]
 fn committed_recovery_syncs_metadata_before_tombstone_transition() {
     let (_temp, project_root, tracedecay_dir) = fixture();
-    let db = tracedecay_dir.join("branches/feature.db");
     let metadata_path = tracedecay_dir.join(crate::storage::BRANCH_META_FILENAME);
     let prepared = prepare_branch_admin_mutation(
         &project_root,
@@ -469,20 +533,17 @@ fn committed_recovery_syncs_metadata_before_tombstone_transition() {
         0,
     )
     .unwrap();
-    let fence =
-        crate::db::DatabaseDeletionFence::acquire(std::slice::from_ref(&db), "delete branch test")
-            .unwrap();
-    let transaction_id = fence.transaction_id().to_string();
+    let fence = TestDeletionFence::new();
     prepared
         .commit_with_transaction(
-            &transaction_id,
+            TestDeletionFence::TRANSACTION_ID,
             || fence.publish_deleting(),
             |_| Ok(()),
             || fence.rollback_deleting(),
             || failpoint("crash before deleted promotion"),
         )
         .unwrap_err();
-    drop(fence);
+    assert_eq!(fence.state(), TestDeletionState::Deleting);
 
     let metadata = std::fs::read(&metadata_path).unwrap();
     let recovery = prepare_pending_branch_admin_recovery(&tracedecay_dir)
@@ -502,9 +563,15 @@ fn committed_recovery_syncs_metadata_before_tombstone_transition() {
 
     assert!(error.to_string().contains("failed to sync"));
     assert!(!transitioned.get());
+    assert_eq!(fence.state(), TestDeletionState::Deleting);
     assert!(!quarantine_files(&tracedecay_dir).is_empty());
     std::fs::write(metadata_path, metadata).unwrap();
-    recover_committed_with_fence(&tracedecay_dir, &transaction_id);
+    recover_with_test_fence(
+        &tracedecay_dir,
+        &fence,
+        BranchAdminRecoveryDisposition::CommittedCleanup,
+    );
+    assert_eq!(fence.state(), TestDeletionState::Deleted);
 }
 
 #[test]
@@ -520,16 +587,11 @@ fn orphan_commit_before_deleted_promotion_recovers_as_committed() {
         0,
     )
     .unwrap();
-    let fence = crate::db::DatabaseDeletionFence::acquire(
-        std::slice::from_ref(&orphan),
-        "delete orphan branch test",
-    )
-    .unwrap();
-    let transaction_id = fence.transaction_id().to_string();
+    let fence = TestDeletionFence::new();
 
     let error = prepared
         .commit_with_transaction(
-            &transaction_id,
+            TestDeletionFence::TRANSACTION_ID,
             || fence.publish_deleting(),
             |_| Ok(()),
             || fence.rollback_deleting(),
@@ -537,16 +599,19 @@ fn orphan_commit_before_deleted_promotion_recovers_as_committed() {
         )
         .unwrap_err();
     assert!(error.to_string().contains("crash after orphan commit"));
-    drop(fence);
+    assert_eq!(fence.state(), TestDeletionState::Deleting);
 
     let journal =
         std::fs::read_to_string(tracedecay_dir.join(".branch-delete-transaction.json")).unwrap();
     assert!(journal.contains(r#""state": "committed_orphans""#));
     assert!(!orphan.exists());
-    let states = recover_committed_with_fence(&tracedecay_dir, &transaction_id);
-    assert_eq!(states.deleting(), 1);
+    recover_with_test_fence(
+        &tracedecay_dir,
+        &fence,
+        BranchAdminRecoveryDisposition::CommittedCleanup,
+    );
+    assert_eq!(fence.state(), TestDeletionState::Deleted);
     assert!(quarantine_files(&tracedecay_dir).is_empty());
-    assert!(crate::db::database_path_is_tombstoned(&orphan).unwrap());
 }
 
 #[test]

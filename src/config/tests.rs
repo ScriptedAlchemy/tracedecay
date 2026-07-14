@@ -76,6 +76,34 @@ fn user_data_dir_canonicalizes_symlinked_existing_parent() {
 }
 
 #[test]
+fn nextest_shared_target_profile_is_isolated_by_test_name() {
+    let _lock = lock_user_data_dir_test_env();
+    let root = TempDir::new().unwrap();
+    let target = root.path().join("target");
+    fs::create_dir_all(target.join("debug")).unwrap();
+    let profile = target.join("test-profile/.tracedecay");
+    let _profile = EnvRestore::set(USER_DATA_DIR_ENV, &profile);
+    let _binary_id = EnvRestore::set("NEXTEST_BINARY_ID", "tracedecay::storage_suite");
+    let _test_name = EnvRestore::set("NEXTEST_TEST_NAME", "storage_suite::isolated_profile");
+
+    let resolved = user_data_dir().unwrap();
+
+    assert!(resolved.starts_with(profile.join("nextest")));
+    assert_ne!(resolved, profile);
+}
+
+#[test]
+fn nextest_preserves_explicit_temp_profile_override() {
+    let _lock = lock_user_data_dir_test_env();
+    let root = TempDir::new().unwrap();
+    let profile = root.path().join("test-profile/.tracedecay");
+    let _profile = EnvRestore::set(USER_DATA_DIR_ENV, &profile);
+    let _test_name = EnvRestore::set("NEXTEST_TEST_NAME", "storage_suite::explicit_profile");
+
+    assert_eq!(user_data_dir().unwrap(), profile);
+}
+
+#[test]
 fn test_db_filename_tracks_dir_brand() {
     assert_eq!(
         db_filename(std::path::Path::new("/p/.tracedecay")),

@@ -474,10 +474,47 @@ pub fn has_project_database(project_root: &Path) -> bool {
 /// `~/.tracedecay` unless `TRACEDECAY_DATA_DIR` explicitly overrides it.
 pub fn user_data_dir() -> Option<PathBuf> {
     if let Some(path) = std::env::var_os(USER_DATA_DIR_ENV).filter(|path| !path.is_empty()) {
-        return Some(canonicalize_data_dir(PathBuf::from(path)));
+        return Some(nextest_isolated_user_data_dir(canonicalize_data_dir(
+            PathBuf::from(path),
+        )));
     }
     let home = dirs::home_dir()?;
     Some(canonicalize_data_dir(home.join(TRACEDECAY_DIR)))
+}
+
+fn nextest_isolated_user_data_dir(path: PathBuf) -> PathBuf {
+    use std::hash::{Hash, Hasher};
+
+    let Some(test_name) = std::env::var_os("NEXTEST_TEST_NAME").filter(|name| !name.is_empty())
+    else {
+        return path;
+    };
+    let Some(profile_dir) = path.parent() else {
+        return path;
+    };
+    if path.file_name() != Some(std::ffi::OsStr::new(TRACEDECAY_DIR)) {
+        return path;
+    }
+
+    let profile_name = profile_dir.file_name().and_then(std::ffi::OsStr::to_str);
+    let target_profile = profile_name == Some("test-profile")
+        && profile_dir
+            .parent()
+            .is_some_and(|target| target.join("debug").is_dir());
+    let ci_profile =
+        profile_name == Some("tracedecay-test-profile") && std::env::var_os("CI").is_some();
+    if !target_profile && !ci_profile {
+        return path;
+    }
+
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    std::env::var_os("NEXTEST_BINARY_ID")
+        .unwrap_or_default()
+        .to_string_lossy()
+        .hash(&mut hasher);
+    test_name.to_string_lossy().hash(&mut hasher);
+    path.join("nextest")
+        .join(format!("{:016x}", hasher.finish()))
 }
 
 fn canonicalize_data_dir(path: PathBuf) -> PathBuf {
