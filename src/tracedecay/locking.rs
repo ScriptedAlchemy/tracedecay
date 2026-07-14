@@ -245,7 +245,11 @@ pub(super) fn try_acquire_graph_sync_locks(
 
 impl Drop for SyncLockGuard {
     fn drop(&mut self) {
-        clear_lock_owner_if_matches(&self.owner_path, &self.epoch);
+        if clear_lock_owner_if_matches(&self.owner_path, &self.epoch) {
+            let _ = self.file.set_len(0);
+            let _ = self.file.seek(SeekFrom::Start(0));
+            let _ = self.file.sync_all();
+        }
         let _ = FileExt::unlock(&self.file);
     }
 }
@@ -296,7 +300,7 @@ pub fn try_acquire_sync_lock_at(lock_path: &Path) -> Result<SyncLockGuard> {
     let mut previous = String::new();
     let _ = file.read_to_string(&mut previous);
     if let Ok(pid) = previous.trim().parse::<u32>() {
-        if pid != std::process::id() && is_pid_alive(pid) {
+        if is_pid_alive(pid) {
             let _ = FileExt::unlock(&file);
             return Err(TraceDecayError::SyncLock {
                 message: format!("another sync is already in progress (legacy PID {pid})"),
@@ -338,24 +342,11 @@ pub fn try_acquire_sync_lock_at(lock_path: &Path) -> Result<SyncLockGuard> {
     })
 }
 
-/// Publishes the current process as the legacy sync owner without retaining an
-/// operation lock. Old binaries see the live bare PID and fail closed for this
-/// process's lifetime; new binaries still require the kernel lock per sync.
-pub(super) fn seed_legacy_sync_owner_at(lock_path: &Path) -> Result<()> {
-    if let Some(parent) = lock_path.parent() {
-        std::fs::create_dir_all(parent).map_err(|error| TraceDecayError::SyncLock {
-            message: format!("could not create sync lock directory: {error}"),
-        })?;
-    }
-    drop(try_acquire_sync_lock_at(lock_path)?);
-    Ok(())
-}
-
 fn lock_owner_path(lock_path: &Path) -> PathBuf {
     lock_path.with_extension("lock.owner")
 }
 
-fn clear_lock_owner_if_matches(path: &Path, expected_epoch: &str) {
+fn clear_lock_owner_if_matches(path: &Path, expected_epoch: &str) -> bool {
     let matches = std::fs::read(path)
         .ok()
         .and_then(|contents| serde_json::from_slice::<serde_json::Value>(&contents).ok())
@@ -368,7 +359,9 @@ fn clear_lock_owner_if_matches(path: &Path, expected_epoch: &str) {
         .is_some_and(|epoch| epoch == expected_epoch);
     if matches && std::fs::remove_file(path).is_ok() {
         sync_parent_directory(path);
+        return true;
     }
+    false
 }
 
 fn next_epoch() -> String {
@@ -532,20 +525,6 @@ mod tests {
     }
 
     #[test]
-    fn legacy_owner_seed_persists_pid_without_operation_sidecar() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("sync.lock");
-
-        seed_legacy_sync_owner_at(&path).unwrap();
-        assert_eq!(
-            std::fs::read_to_string(&path).unwrap(),
-            std::process::id().to_string()
-        );
-        assert!(!lock_owner_path(&path).exists());
-        seed_legacy_sync_owner_at(&path).unwrap();
-    }
-
-    #[test]
     fn dead_legacy_pid_is_recoverable_without_replacing_lock_inode() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("sync.lock");
@@ -580,10 +559,7 @@ mod tests {
             std::process::id().to_string()
         );
         drop(guard);
-        assert_eq!(
-            std::fs::read_to_string(&path).unwrap(),
-            std::process::id().to_string()
-        );
+        assert!(std::fs::read_to_string(&path).unwrap().is_empty());
     }
 
     #[test]

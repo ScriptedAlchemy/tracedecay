@@ -772,8 +772,21 @@ fn connection_for_socket_path(socket_path: &Path) -> DaemonConnection {
     {
         return connection;
     }
+    if let Some(profile_root) = socket_path.parent()
+        && let Ok(Some(record)) = authority::current_record(profile_root)
+        && let DaemonEndpoint::Unix(authority_path) = &record.endpoint
+        && authority::canonical_identity_path(authority_path).ok()
+            == authority::canonical_identity_path(socket_path).ok()
+    {
+        return DaemonConnection {
+            endpoint: record.endpoint.clone(),
+            auth_token: Some(record.auth_token.clone()),
+            authority_record: Some(record),
+        };
+    }
     // Explicit paths are retained for test harnesses and legacy one-shot
-    // callers. Default production routing always uses the authority record.
+    // callers without a discoverable authority record. Default production
+    // routing always uses the authority record.
     DaemonConnection {
         endpoint: DaemonEndpoint::Unix(socket_path.to_path_buf()),
         auth_token: None,
@@ -2599,9 +2612,7 @@ async fn serve_broker_socket_client(
         let server = match Box::pin(engine.project_server(&handshake)).await {
             Ok(server) => server,
             Err(e) => {
-                let mut transport = ReplayTransport::new(transport);
-                transport.push_replay(first_request_line);
-                write_project_open_error(&mut transport, &e).await?;
+                write_project_open_error(&mut transport, &first_request_line, &e).await?;
                 return Err(e);
             }
         };
@@ -2734,9 +2745,7 @@ async fn serve_windows_broker_client(
         let server = match server_result {
             Ok(server) => server,
             Err(error) => {
-                let mut transport = ReplayTransport::new(transport);
-                transport.push_replay(first_request_line);
-                write_project_open_error(&mut transport, &error).await?;
+                write_project_open_error(&mut transport, &first_request_line, &error).await?;
                 return Err(error);
             }
         };
@@ -2929,47 +2938,28 @@ async fn open_existing_project_with_options(
     project_path: &Path,
     open_options: crate::tracedecay::TraceDecayOpenOptions,
 ) -> Result<crate::tracedecay::TraceDecay> {
-    match crate::tracedecay::TraceDecay::open_with_options(project_path, open_options.clone()).await
-    {
-        Ok(cg) => Ok(cg),
-        Err(open_err) => {
-            match crate::tracedecay::TraceDecay::open_read_only_with_options(
-                project_path,
-                open_options,
-            )
-            .await
-            {
-                Ok(cg) => {
-                    cg.ensure_schema_current().await?;
-                    Ok(cg)
-                }
-                Err(_) if is_missing_index_error(&open_err) => {
-                    Err(missing_index_error(project_path))
-                }
-                Err(_) => Err(open_err),
+    crate::tracedecay::TraceDecay::open_with_options(project_path, open_options)
+        .await
+        .map_err(|error| {
+            if is_missing_index_error(&error) {
+                missing_index_error(project_path)
+            } else {
+                error
             }
-        }
-    }
+        })
 }
 
 async fn write_project_open_error(
     transport: &mut impl McpTransport,
+    request_line: &str,
     error: &TraceDecayError,
 ) -> Result<()> {
-    let id = read_json_rpc_request_id(transport).await?;
-    let response = JsonRpcResponse::error(id, ErrorCode::InternalError, error.to_string());
-    write_json_rpc_response(transport, &response).await
-}
-
-async fn read_json_rpc_request_id(transport: &mut impl McpTransport) -> Result<serde_json::Value> {
-    let Some(line) = transport.read_line().await? else {
-        return Ok(serde_json::Value::Null);
-    };
-
-    Ok(serde_json::from_str::<JsonRpcRequest>(&line)
+    let id = serde_json::from_str::<JsonRpcRequest>(request_line)
         .ok()
         .and_then(|request| request.id)
-        .unwrap_or(serde_json::Value::Null))
+        .unwrap_or(serde_json::Value::Null);
+    let response = JsonRpcResponse::error(id, ErrorCode::InternalError, error.to_string());
+    write_json_rpc_response(transport, &response).await
 }
 
 async fn write_json_rpc_response(

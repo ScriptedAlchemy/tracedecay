@@ -37,7 +37,7 @@ pub(super) fn reject_hard_linked_database(path: &Path) -> Result<()> {
 }
 
 #[cfg(windows)]
-pub(super) fn windows_hard_link_count(path: &Path) -> Result<u32> {
+pub(crate) fn windows_hard_link_count(path: &Path) -> Result<u32> {
     use std::{mem::MaybeUninit, os::windows::io::AsRawHandle};
 
     let file = std::fs::File::open(path)

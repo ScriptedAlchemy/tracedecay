@@ -14,8 +14,7 @@ use crate::global_db::{GraphScopeUpsert, StoreArtifactUpsert, StoreInstanceUpser
 use crate::storage::{self, StoreLayout};
 
 use super::locking::{
-    clear_dirty_sentinel_at, has_dirty_sentinel_at, seed_legacy_sync_owner_at,
-    try_acquire_graph_sync_locks,
+    clear_dirty_sentinel_at, has_dirty_sentinel_at, try_acquire_graph_sync_locks,
 };
 use super::{TraceDecay, TraceDecayOpenOptions, current_timestamp};
 
@@ -35,7 +34,6 @@ impl TraceDecay {
         let store_layout =
             Self::resolve_store_layout_for_project(project_root, &open_options).await?;
         let authority = DatabaseAuthority::for_runtime(&store_layout.graph_db_path, "init")?;
-        seed_legacy_sync_owner_at(&store_layout.sync_lock_path)?;
         let config = TraceDecayConfig {
             root_dir: project_root.to_string_lossy().to_string(),
             ..TraceDecayConfig::default()
@@ -303,10 +301,6 @@ impl TraceDecay {
     ) -> Result<Self> {
         let store_layout =
             Self::resolve_store_layout_for_project(project_root, &open_options).await?;
-        let seed_authority =
-            DatabaseAuthority::for_runtime(&store_layout.graph_db_path, "open project store")?;
-        seed_legacy_sync_owner_at(&store_layout.sync_lock_path)?;
-        drop(seed_authority);
         let config = load_config_from_path(project_root, &store_layout.config_path)?;
         let active_branch = branch::current_branch(project_root);
         Self::auto_track_active_branch(

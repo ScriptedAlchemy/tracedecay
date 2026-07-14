@@ -443,6 +443,8 @@ fn cli_branch_add_refuses_corrupt_metadata_without_overwriting() {
         String::from_utf8_lossy(&init.stderr)
     );
 
+    let _daemon = common::spawn_tracedecay_daemon(env.home());
+
     let tracedecay_dir = project_data_dir(project);
     let meta_path = tracedecay_dir.join("branch-meta.json");
     fs::write(&meta_path, b"{not valid json").unwrap();

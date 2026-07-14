@@ -335,8 +335,8 @@ async fn replayed_provider_hooks_record_attributed_rows_and_bridge_to_analytics_
     });
     assert_eq!(
         sync_outcome.get("imported").and_then(Value::as_u64),
-        Some(replays.len() as u64),
-        "analytics sync must import every replayed hook: {sync_outcome:#}"
+        Some(store_rows.len() as u64),
+        "analytics sync must import every emitted hook analytics row: {sync_outcome:#}"
     );
     drop(daemon);
 

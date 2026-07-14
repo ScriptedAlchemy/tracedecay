@@ -378,11 +378,6 @@ async fn persistent_sync_lock_reuses_an_unlocked_legacy_file() {
     let lock_path = resolve_layout_for_current_profile(project)
         .unwrap()
         .sync_lock_path;
-    assert_eq!(
-        fs::read_to_string(&lock_path).unwrap(),
-        std::process::id().to_string(),
-        "init must seed a legacy-compatible daemon-lifetime owner"
-    );
     // A dead legacy owner does not require unlinking the canonical path.
     fs::write(&lock_path, "4294967294").unwrap();
 
@@ -402,10 +397,7 @@ async fn persistent_sync_lock_reuses_an_unlocked_legacy_file() {
     );
     assert_eq!(metadata["state"], "locked");
     drop(guard);
-    assert_eq!(
-        fs::read_to_string(&lock_path).unwrap(),
-        std::process::id().to_string()
-    );
+    assert!(fs::read_to_string(&lock_path).unwrap().is_empty());
     assert!(
         lock_path.exists(),
         "dropping the guard must leave the persistent lockfile in place"
@@ -421,7 +413,7 @@ async fn persistent_sync_lock_reuses_an_unlocked_legacy_file() {
 }
 
 #[tokio::test]
-async fn writable_open_reseeds_legacy_sync_owner_before_database_use() {
+async fn writable_open_does_not_claim_the_sync_lock_without_an_operation() {
     let dir = TempDir::new().unwrap();
     let project = dir.path();
     let initialized = TraceDecay::init(project).await.unwrap();
@@ -430,10 +422,7 @@ async fn writable_open_reseeds_legacy_sync_owner_before_database_use() {
     fs::write(&lock_path, "4294967294").unwrap();
 
     let reopened = TraceDecay::open(project).await.unwrap();
-    assert_eq!(
-        fs::read_to_string(&lock_path).unwrap(),
-        std::process::id().to_string()
-    );
+    assert_eq!(fs::read_to_string(&lock_path).unwrap(), "4294967294");
     drop(reopened);
 }
 

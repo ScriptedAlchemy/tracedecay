@@ -9,7 +9,6 @@
 
 use std::path::Path;
 
-#[cfg(unix)]
 use crate::common;
 use crate::common::{canonical_existing_path, tracedecay_command_with_home};
 use tempfile::TempDir;
@@ -117,6 +116,7 @@ fn code_graph_tools_do_not_first_touch_project_store() {
     let target_path = canonical_temp_path(target.path());
     let cwd_path = canonical_temp_path(cwd.path());
     let home_path = canonical_temp_path(home.path());
+    let _daemon = common::spawn_tracedecay_daemon(&home_path);
     let target_arg = target_path.to_string_lossy().to_string();
     let output = run_tool(
         &cwd_path,

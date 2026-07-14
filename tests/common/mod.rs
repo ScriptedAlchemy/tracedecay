@@ -188,6 +188,7 @@ pub struct TraceDecayStorageEnvGuard {
     _userprofile_guard: EnvVarGuard,
     _data_dir_guard: EnvVarGuard,
     _global_db_guard: GlobalDbEnvGuard,
+    _holder_scan_guard: EnvVarGuard,
 }
 
 impl TraceDecayStorageEnvGuard {
@@ -204,6 +205,10 @@ impl TraceDecayStorageEnvGuard {
             _userprofile_guard: EnvVarGuard::set("USERPROFILE", &home),
             _data_dir_guard: EnvVarGuard::set(USER_DATA_DIR_ENV, &profile_root),
             _global_db_guard: GlobalDbEnvGuard::set(&global_db_path),
+            _holder_scan_guard: EnvVarGuard::set(
+                "TRACEDECAY_TEST_ALLOW_INCOMPLETE_HOLDER_SCAN",
+                "1",
+            ),
         }
     }
 
