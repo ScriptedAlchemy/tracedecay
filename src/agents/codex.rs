@@ -507,11 +507,11 @@ fn uninstall_tracedecay_mcp_if_present(config_path: &Path) {
 /// The scope contract for a rendered Codex plugin bundle, in one place.
 ///
 /// A global bundle ships lifecycle hooks (declared in the manifest and
-/// recorded as trusted in the user-level `~/.codex/config.toml`), serves with
-/// the global DB enabled, and carries the memory digest. A repo-local bundle
-/// ships no hooks, serves the project path with no env, and stays free of
-/// user-profile state. The bundle writer, manifest/MCP renderers, and doctor
-/// all consume this type instead of re-encoding the scope as ad-hoc
+/// recorded as trusted in the user-level `~/.codex/config.toml`), invokes
+/// `serve` without an explicit project path, and carries the memory digest. A
+/// repo-local bundle ships no hooks, invokes `serve --path .` with no env, and
+/// stays free of user-profile state. The bundle writer, manifest/MCP renderers,
+/// and doctor all consume this type instead of re-encoding the scope as ad-hoc
 /// conditionals.
 #[derive(Debug, Clone, Copy)]
 struct CodexBundlePolicy {

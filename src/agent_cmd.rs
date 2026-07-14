@@ -53,8 +53,7 @@ async fn install_codex_daemon_automation(
         );
     }
 
-    let cg = open_or_init_codex_daemon_automation_project(project_path).await?;
-    let dashboard_root = cg.store_layout().dashboard_root.clone();
+    let dashboard_root = open_or_init_codex_daemon_automation_project(project_path).await?;
     let patch = AutomationConfigPatch {
         enabled: Some(true),
         backend: Some(AutomationBackend::CodexAppServer),
@@ -97,22 +96,44 @@ async fn install_codex_daemon_automation(
 
 async fn open_or_init_codex_daemon_automation_project(
     project_path: &Path,
-) -> tracedecay::errors::Result<tracedecay::tracedecay::TraceDecay> {
-    if tracedecay::tracedecay::TraceDecay::has_initialized_store(project_path).await {
-        tracedecay::tracedecay::TraceDecay::open(project_path).await
-    } else {
-        eprintln!(
-            "No TraceDecay store found for {}; initializing one (equivalent to `tracedecay init`).",
-            project_path.display()
-        );
-        let cg = tracedecay::tracedecay::TraceDecay::init_with_options(
-            project_path,
-            tracedecay::tracedecay::TraceDecayOpenOptions::default(),
-        )
-        .await?;
-        cg.index_all().await?;
-        Ok(cg)
-    }
+) -> tracedecay::errors::Result<PathBuf> {
+    broker_codex_daemon_automation_project(
+        project_path,
+        |handshake| async move {
+            tracedecay::daemon::call_default_tool(
+                &handshake,
+                "tracedecay_admin_project",
+                serde_json::json!({"action": "counter_get"}),
+            )
+            .await
+            .map(|_| ())
+        },
+        |project_path| {
+            tracedecay::storage::resolve_layout_for_current_profile(project_path)
+                .map(|layout| layout.dashboard_root)
+        },
+    )
+    .await
+}
+
+async fn broker_codex_daemon_automation_project<I, IFut, R>(
+    project_path: &Path,
+    initialize: I,
+    resolve_dashboard_root: R,
+) -> tracedecay::errors::Result<PathBuf>
+where
+    I: FnOnce(tracedecay::daemon::DaemonHandshake) -> IFut,
+    IFut: std::future::Future<Output = tracedecay::errors::Result<()>>,
+    R: FnOnce(&Path) -> tracedecay::errors::Result<PathBuf>,
+{
+    let handshake = tracedecay::daemon::DaemonHandshake::for_current_client(
+        Some(project_path.to_path_buf()),
+        None,
+        false,
+        true,
+    )?;
+    initialize(handshake).await?;
+    resolve_dashboard_root(project_path)
 }
 
 fn codex_daemon_interval_task(interval_secs: u64) -> AutomationTaskPatch {
@@ -546,10 +567,63 @@ pub(crate) async fn handle_uninstall_command(
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
 
     use tracedecay::migrate::hermes::{LegacyHermesMigrationIssue, LegacyHermesMigrationReport};
 
-    use super::finish_legacy_hermes_reinstall_migration;
+    use super::{broker_codex_daemon_automation_project, finish_legacy_hermes_reinstall_migration};
+
+    #[tokio::test]
+    async fn codex_automation_project_initializes_through_daemon() {
+        let project = tempfile::tempdir().unwrap();
+        let project_path = project.path().to_path_buf();
+        let expected_project_path = project_path.clone();
+        let expected_dashboard = project_path.join("dashboard");
+        let actual = broker_codex_daemon_automation_project(
+            &project_path,
+            move |handshake| async move {
+                assert_eq!(
+                    handshake.project_path.as_deref(),
+                    Some(expected_project_path.as_path())
+                );
+                assert!(handshake.allow_init);
+                Ok(())
+            },
+            |_| Ok(expected_dashboard.clone()),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(actual, expected_dashboard);
+    }
+
+    #[tokio::test]
+    async fn unavailable_daemon_does_not_resolve_or_open_local_project() {
+        let project = tempfile::tempdir().unwrap();
+        let resolved = Arc::new(AtomicBool::new(false));
+        let resolver_called = Arc::clone(&resolved);
+        let error = broker_codex_daemon_automation_project(
+            project.path(),
+            |_| async {
+                Err(tracedecay::errors::TraceDecayError::Config {
+                    message: "daemon unavailable".to_string(),
+                })
+            },
+            move |_| {
+                resolver_called.store(true, Ordering::SeqCst);
+                Ok(PathBuf::from("unreachable"))
+            },
+        )
+        .await
+        .unwrap_err();
+
+        assert!(error.to_string().contains("daemon unavailable"));
+        assert!(!resolved.load(Ordering::SeqCst));
+        assert!(std::fs::read_dir(project.path()).unwrap().next().is_none());
+    }
 
     #[test]
     fn automated_reinstall_preserves_unresolved_legacy_store_without_gating() {

@@ -1,7 +1,6 @@
-use std::process;
-
+use serde::Deserialize;
+use serde_json::{Value, json};
 use tracedecay::accounting::CostSummary;
-use tracedecay::global_db::GlobalDb;
 
 pub(crate) async fn handle_cost(
     range: String,
@@ -9,41 +8,36 @@ pub(crate) async fn handle_cost(
     by_task: bool,
     export: Option<String>,
 ) -> tracedecay::errors::Result<()> {
-    tracedecay::accounting::pricing::refresh_if_stale();
-
-    let gdb = match GlobalDb::open().await {
-        Some(db) => db,
-        None => {
-            eprintln!("Could not open global database.");
-            process::exit(1);
-        }
-    };
-
-    let ingest_stats = tracedecay::accounting::parser::ingest(&gdb).await;
-    if ingest_stats.turns_inserted > 0 {
+    let payload = call_cost_admin(&range).await?;
+    let ingest_stats = &payload["ingest"];
+    if ingest_stats["turns_inserted"].as_u64().unwrap_or(0) > 0 {
         eprintln!(
             "Ingested {} new turns from Claude Code sessions.",
-            ingest_stats.turns_inserted
+            ingest_stats["turns_inserted"].as_u64().unwrap_or(0)
         );
     }
-
-    let since = tracedecay::accounting::metrics::parse_range(&range);
-    let tokens_saved = gdb.global_tokens_saved().await.unwrap_or(0);
-    let summary = tracedecay::accounting::metrics::cost_summary(&gdb, since, tokens_saved).await;
-
-    let Some(summary) = summary else {
+    if payload.get("summary").is_none_or(Value::is_null) {
         println!(
             "No session data found. Use Claude Code and then run `tracedecay cost` to see spending."
         );
         return Ok(());
-    };
+    }
+    let summary: CostSummaryPayload = serde_json::from_value(payload["summary"].clone())?;
+    let summary = summary.into();
 
-    print_cost_summary(&gdb, &range, by_model, by_task, export.as_deref(), &summary).await;
+    print_cost_summary(
+        &payload["today"],
+        &range,
+        by_model,
+        by_task,
+        export.as_deref(),
+        &summary,
+    );
     Ok(())
 }
 
-async fn print_cost_summary(
-    gdb: &GlobalDb,
+fn print_cost_summary(
+    today: &Value,
     range: &str,
     by_model: bool,
     by_task: bool,
@@ -57,7 +51,7 @@ async fn print_cost_summary(
     } else if by_task {
         print_task_table(summary);
     } else {
-        print_default_summary(gdb, range, summary).await;
+        print_default_summary(today, range, summary);
     }
 }
 
@@ -140,24 +134,17 @@ fn print_task_table(summary: &CostSummary) {
     }
 }
 
-async fn print_default_summary(gdb: &GlobalDb, range: &str, summary: &CostSummary) {
-    let today_since = tracedecay::accounting::metrics::parse_range("today");
-    let today_cost = gdb.total_cost_since(today_since).await.unwrap_or(0.0);
-    let today_breakdown = gdb
-        .token_breakdown_since(today_since)
-        .await
-        .unwrap_or((0, 0, 0));
-
+fn print_default_summary(today: &Value, range: &str, summary: &CostSummary) {
     println!(
         "  {:<10} {:>10} {:>10} {:>10} {:>10}",
         "Period", "Cost", "Input", "Output", "Cache-hit"
     );
     print_cost_row(
         "Today",
-        today_cost,
-        today_breakdown.0,
-        today_breakdown.1,
-        today_breakdown.2,
+        today["cost"].as_f64().unwrap_or(0.0),
+        today["input_tokens"].as_u64().unwrap_or(0),
+        today["output_tokens"].as_u64().unwrap_or(0),
+        today["cache_read_tokens"].as_u64().unwrap_or(0),
     );
     print_cost_row(
         range,
@@ -176,6 +163,47 @@ async fn print_default_summary(gdb: &GlobalDb, range: &str, summary: &CostSummar
             summary.efficiency_ratio * 100.0
         );
     }
+}
+
+#[derive(Deserialize)]
+struct CostSummaryPayload {
+    total_cost: f64,
+    total_input_tokens: u64,
+    total_output_tokens: u64,
+    total_cache_read_tokens: u64,
+    by_model: Vec<(String, f64, u64)>,
+    by_category: Vec<(String, f64, u64)>,
+    tokens_saved: u64,
+    efficiency_ratio: f64,
+}
+
+impl From<CostSummaryPayload> for CostSummary {
+    fn from(value: CostSummaryPayload) -> Self {
+        Self {
+            total_cost: value.total_cost,
+            total_input_tokens: value.total_input_tokens,
+            total_output_tokens: value.total_output_tokens,
+            total_cache_read_tokens: value.total_cache_read_tokens,
+            by_model: value.by_model,
+            by_category: value.by_category,
+            tokens_saved: value.tokens_saved,
+            efficiency_ratio: value.efficiency_ratio,
+        }
+    }
+}
+
+async fn call_cost_admin(range: &str) -> tracedecay::errors::Result<Value> {
+    let cwd = std::env::current_dir()?;
+    let project_root = tracedecay::config::discover_project_root(&cwd);
+    let handshake =
+        tracedecay::daemon::DaemonHandshake::for_current_client(project_root, None, false, false)?;
+    let result = tracedecay::daemon::call_default_tool(
+        &handshake,
+        "tracedecay_admin_cli",
+        json!({ "action": "cost_summary", "range": range }),
+    )
+    .await?;
+    tracedecay::daemon::tool_json_payload(&result, "tracedecay_admin_cli")
 }
 
 fn print_cost_row(label: &str, cost: f64, input: u64, output: u64, cache_read: u64) {

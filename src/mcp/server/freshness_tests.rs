@@ -1,7 +1,11 @@
-use super::{McpServer, StalenessBannerInputs, format_index_age_phrase, staleness_banner};
+use super::{
+    DatabaseOwnerReconciler, McpServer, StalenessBannerInputs, format_index_age_phrase,
+    staleness_banner,
+};
 use crate::config::PinnedUserDataDir;
 use crate::tracedecay::TraceDecay;
 use std::sync::atomic::Ordering;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tempfile::TempDir;
 
@@ -31,6 +35,49 @@ async fn init_indexed_repo() -> (TraceDecay, TempDir, PinnedUserDataDir) {
     let cg = TraceDecay::init(root).await.expect("init");
     cg.index_all().await.expect("index");
     (cg, dir, pin)
+}
+
+#[tokio::test]
+async fn branch_drift_reconciles_database_owner_before_returning() {
+    let (cg, dir, _pin) = init_indexed_repo().await;
+    let root = dir.path();
+    cg.checkpoint().await.unwrap();
+    let layout = cg.store_layout().clone();
+    drop(cg);
+
+    let mut meta = crate::branch_meta::BranchMeta::new("main");
+    meta.add_branch("feature", "branches/feature.db", "main");
+    crate::branch_meta::save_branch_meta(&layout.data_root, &meta).unwrap();
+    std::fs::create_dir_all(layout.data_root.join("branches")).unwrap();
+    std::fs::copy(
+        &layout.graph_db_path,
+        layout.data_root.join("branches/feature.db"),
+    )
+    .unwrap();
+
+    git(root, &["checkout", "-q", "-b", "feature"]);
+    git(root, &["checkout", "-q", "main"]);
+    let main = TraceDecay::open(root).await.unwrap();
+    let observed = Arc::new(Mutex::new(Vec::new()));
+    let callback: DatabaseOwnerReconciler = {
+        let observed = Arc::clone(&observed);
+        Arc::new(move |fresh| {
+            let observed = Arc::clone(&observed);
+            Box::pin(async move {
+                observed.lock().unwrap().push(fresh.db_path());
+            })
+        })
+    };
+    let server =
+        McpServer::new_with_dbs_and_reconcilers(main, None, None, None, true, None, Some(callback))
+            .await;
+
+    git(root, &["checkout", "-q", "feature"]);
+    let fresh = server.reopen_if_branch_drifted().await;
+
+    assert_eq!(fresh.serving_branch(), Some("feature"));
+    assert_eq!(observed.lock().unwrap().as_slice(), &[fresh.db_path()]);
+    server.shutdown().await;
 }
 
 // ---- D7 pure-logic banner tests (test c) --------------------------

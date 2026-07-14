@@ -15,13 +15,9 @@ use std::process::{Command, Stdio};
 
 use serde_json::{Value, json};
 use tracedecay::global_db::{AnalyticsEventQuery, GlobalDb};
-use tracedecay::storage::{
-    EnrollmentMarker, StorageMode, profile_sharded_data_root, write_enrollment_marker,
-};
+use tracedecay::storage::{StorageMode, default_profile_sharded_layout};
 
-use crate::common::tracedecay_command_with_home;
-
-const REPLAY_PROJECT_ID: &str = "proj_hook_replay";
+use crate::common::{git_program, spawn_tracedecay_daemon, tracedecay_command_with_home};
 
 struct Replay {
     subcommand: &'static str,
@@ -230,15 +226,49 @@ async fn replayed_provider_hooks_record_attributed_rows_and_bridge_to_analytics_
     let home_root = home.path().canonicalize().expect("canonical home");
     let project_root = home_root.join("project");
     std::fs::create_dir_all(project_root.join("src")).unwrap();
-    std::fs::write(project_root.join("Cargo.toml"), "[package]\n").unwrap();
-    write_enrollment_marker(
-        &project_root,
-        &EnrollmentMarker {
-            project_id: REPLAY_PROJECT_ID.to_string(),
-            storage_mode: StorageMode::ProfileSharded,
-        },
+    std::fs::write(
+        project_root.join("Cargo.toml"),
+        "[package]\nname = \"hook-replay-fixture\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
     )
     .unwrap();
+    std::fs::write(
+        project_root.join("src/lib.rs"),
+        "pub fn replay_fixture() {}\n",
+    )
+    .unwrap();
+    let git = git_program();
+    for args in [
+        &["init", "-q", "-b", "main"][..],
+        &["config", "user.email", "test@tracedecay.dev"][..],
+        &["config", "user.name", "TraceDecay Test"][..],
+        &["add", "."][..],
+        &["commit", "-q", "-m", "fixture"][..],
+    ] {
+        assert!(
+            Command::new(&git)
+                .args(args)
+                .current_dir(&project_root)
+                .status()
+                .unwrap()
+                .success()
+        );
+    }
+    let daemon = spawn_tracedecay_daemon(&home_root);
+    let init = tracedecay_command_with_home(&home_root)
+        .arg("init")
+        .current_dir(&project_root)
+        .output()
+        .expect("initialize replay project");
+    assert!(
+        init.status.success(),
+        "fixture init failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&init.stdout),
+        String::from_utf8_lossy(&init.stderr)
+    );
+    let profile_root = home_root.join(".tracedecay");
+    let layout = default_profile_sharded_layout(&project_root, &profile_root)
+        .expect("resolve initialized project layout");
+    assert_eq!(layout.storage_mode, StorageMode::ProfileSharded);
     let root_str = project_root.display().to_string();
 
     let replays = replays(&root_str);
@@ -249,10 +279,7 @@ async fn replayed_provider_hooks_record_attributed_rows_and_bridge_to_analytics_
     // Every replay resolved a project root, so every row must land in the
     // project store file with `project_root` attribution (the user-level
     // fallback file stays empty).
-    let profile_root = home_root.join(".tracedecay");
-    let store_rows = read_jsonl_rows(
-        &profile_sharded_data_root(&profile_root, REPLAY_PROJECT_ID).join("hook_analytics.jsonl"),
-    );
+    let store_rows = read_jsonl_rows(&layout.data_root.join("hook_analytics.jsonl"));
     let hook_invoked: Vec<&Value> = store_rows
         .iter()
         .filter(|row| str_field(row, "event") == "hook_invoked")
@@ -296,9 +323,22 @@ async fn replayed_provider_hooks_record_attributed_rows_and_bridge_to_analytics_
         .expect("analytics sync output");
     assert!(
         sync.status.success(),
-        "analytics sync failed: {}",
+        "analytics sync failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&sync.stdout),
         String::from_utf8_lossy(&sync.stderr)
     );
+    let sync_outcome: Value = serde_json::from_slice(&sync.stdout).unwrap_or_else(|error| {
+        panic!(
+            "analytics sync returned invalid JSON: {error}\nstdout:\n{}",
+            String::from_utf8_lossy(&sync.stdout)
+        )
+    });
+    assert_eq!(
+        sync_outcome.get("imported").and_then(Value::as_u64),
+        Some(store_rows.len() as u64),
+        "analytics sync must import every emitted hook analytics row: {sync_outcome:#}"
+    );
+    drop(daemon);
 
     let global_db = GlobalDb::open_at(&profile_root.join("global.db"))
         .await

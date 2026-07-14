@@ -430,7 +430,7 @@ async fn memory_bank_fact_count(db: &Database, bank_name: &str) -> Option<i64> {
 }
 
 async fn clear_fact_vector(cg: &TraceDecay, fact_id: i64) {
-    let (db, _) = Database::open(&cg.store_layout().graph_db_path)
+    let (db, _) = crate::common::open_test_database(&cg.store_layout().graph_db_path)
         .await
         .unwrap();
     db.conn()
@@ -446,7 +446,7 @@ async fn clear_fact_vector(cg: &TraceDecay, fact_id: i64) {
 }
 
 async fn set_fact_updated_at(cg: &TraceDecay, fact_id: i64, updated_at: i64) {
-    let (db, _) = Database::open(&cg.store_layout().graph_db_path)
+    let (db, _) = crate::common::open_test_database(&cg.store_layout().graph_db_path)
         .await
         .unwrap();
     db.conn()
@@ -460,7 +460,7 @@ async fn set_fact_updated_at(cg: &TraceDecay, fact_id: i64, updated_at: i64) {
 }
 
 async fn fact_updated_at(cg: &TraceDecay, fact_id: i64) -> i64 {
-    let (db, _) = Database::open(&cg.store_layout().graph_db_path)
+    let (db, _) = crate::common::open_test_database(&cg.store_layout().graph_db_path)
         .await
         .unwrap();
     let mut rows = db
@@ -1351,7 +1351,7 @@ async fn remove_fact_defers_vacuum_while_peer_connections_are_live() {
         .await
         .unwrap();
     let size_after_insert = std::fs::metadata(&db_path).unwrap().len();
-    let (peer, _) = Database::open(&db_path).await.unwrap();
+    let (peer, _) = crate::common::open_test_database(&db_path).await.unwrap();
 
     for fact_id in fact_ids {
         assert!(store.remove_fact(fact_id).await.unwrap());
@@ -1371,7 +1371,7 @@ async fn remove_fact_defers_vacuum_while_peer_connections_are_live() {
         0,
         "a peer opened before deletion must remain usable"
     );
-    let (fresh, _) = Database::open(&db_path).await.unwrap();
+    let (fresh, _) = crate::common::open_test_database(&db_path).await.unwrap();
     assert_eq!(
         scalar_i64(&fresh, "SELECT COUNT(*) FROM memory_facts").await,
         0,

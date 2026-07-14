@@ -37,15 +37,15 @@ def ok(label, detail=""):
     print(f"ok {PASS} - {label}{suffix}")
 
 
-def unwrap_tool_json(raw):
-    """Decode a generated-tools.py response: MCP envelope with JSON text."""
+def assert_tool_dispatch_success(raw):
+    """Validate the stock provider's raw MCP envelope without decoding its text."""
     outer = json.loads(raw)
+    assert isinstance(outer, dict), outer
     assert "error" not in outer, f"tool dispatch returned an error: {outer}"
+    assert outer.get("isError") is not True, f"tool dispatch failed: {outer}"
     content = outer["content"]
     assert content and content[0]["type"] == "text", outer
-    inner = json.loads(content[0]["text"])
-    assert "error" not in inner, f"tool payload carries an error: {inner}"
-    return inner
+    return outer
 
 
 def main():
@@ -80,6 +80,7 @@ def main():
     assert loaded is not None, f"tracedecay missing from {sorted(manager._plugins)}"
     assert loaded.enabled, f"tracedecay plugin not enabled: {loaded.error}"
     assert loaded.error is None, f"tracedecay plugin load error: {loaded.error}"
+    plugin = loaded.module
     ok("plugin loads via stock PluginManager")
     assert "pre_llm_call" in loaded.hooks_registered, loaded.hooks_registered
     ok("pre_llm_call hook registered")
@@ -190,7 +191,9 @@ def main():
     assert isinstance(engine, ContextEngine)
     ok("context engine activates via stock plugin fallback")
 
-    engine.initialize(session_id="stock-check-session", cwd=project_root)
+    engine.initialize(session_id="stock-check-session", project_root=project_root)
+    assert engine.project_root is not None
+    assert os.path.realpath(engine.project_root) == os.path.realpath(project_root)
     engine.update_model("stock-check-model", 128000)
     engine.update_from_response({"prompt_tokens": 120, "completion_tokens": 30})
     assert engine.last_total_tokens == 150
@@ -203,7 +206,7 @@ def main():
     cloned_engine = copy.deepcopy(engine)
     assert cloned_engine is not engine
     assert cloned_engine._state_lock is not engine._state_lock
-    assert cloned_engine.project_root == project_root
+    assert cloned_engine.project_root == engine.project_root
     assert cloned_engine.context_length == 128000
     assert cloned_engine.last_total_tokens == 150
     assert cloned_engine.agent is None
@@ -214,7 +217,8 @@ def main():
     assert engine.should_compress_preflight([], current_tokens=1000) is False
     ok("should_compress_preflight honors the bool ABC contract")
 
-    status = unwrap_tool_json(engine.handle_tool_call("lcm_status", {}))
+    status = engine.status()
+    assert isinstance(status, dict) and "error" not in status, status
     if status.get("status") == "not_ingested":
         assert status.get("store_exists") is False, status
         ok("lcm_status dispatch round-trips", "not_ingested before compress")
@@ -252,30 +256,32 @@ def main():
     assert provider.is_available() is True
     ok("memory provider discovered and available on stock")
 
-    provider.initialize("stock-check-session", cwd=project_root)
+    provider.initialize("stock-check-session", project_root=project_root)
     schema_names = [schema["name"] for schema in provider.get_tool_schemas()]
     assert schema_names == ["fact_store", "fact_feedback", "memory_status"], schema_names
     ok("memory tool schemas collapsed to fact_store/fact_feedback/memory_status")
 
     # Legacy fixed-action names still dispatch even though they no longer
     # cost schema footprint.
-    added = unwrap_tool_json(
+    assert_tool_dispatch_success(
         provider.handle_tool_call(
             "fact_add",
-            {"content": "stock hermes integration verified", "fact_type": "decision"},
-        )
-    )
-    fact = added.get("fact") or {}
-    assert fact.get("content") == "stock hermes integration verified", added
-    found = unwrap_tool_json(
-        provider.handle_tool_call(
-            "fact_store",
             {
-                "action": "search",
-                "query": "stock hermes integration",
-                "limit": 1,
+                "content": "stock hermes integration verified",
+                "fact_type": "decision",
+                "format": "json",
             },
         )
+    )
+    found = plugin.call_tracedecay_json(
+        "tracedecay_fact_store",
+        {
+            "action": "search",
+            "query": "stock hermes integration",
+            "limit": 1,
+            "format": "json",
+        },
+        project_root=project_root,
     )
     assert found.get("count", 0) >= 1, found
     ok("memory fact add/search round-trips through the binary")
@@ -300,29 +306,27 @@ def main():
     ).lower(), init_result.stderr
     other_provider = load_memory_provider("tracedecay")
     assert other_provider is not None and other_provider is not provider
-    other_provider.initialize("stock-check-session-two", cwd=other_project)
+    other_provider.initialize("stock-check-session-two", project_root=other_project)
     assert provider.project_root != other_provider.project_root, (
         provider.project_root,
         other_provider.project_root,
     )
     isolation_marker = "stock hermes project two isolated"
-    unwrap_tool_json(
+    assert_tool_dispatch_success(
         other_provider.handle_tool_call(
             "fact_add",
-            {"content": isolation_marker, "fact_type": "decision"},
+            {"content": isolation_marker, "fact_type": "decision", "format": "json"},
         )
     )
-    first_project_result = unwrap_tool_json(
-        provider.handle_tool_call(
-            "fact_store",
-            {"action": "list", "limit": 200},
-        )
+    first_project_result = plugin.call_tracedecay_json(
+        "tracedecay_fact_store",
+        {"action": "list", "limit": 200, "format": "json"},
+        project_root=project_root,
     )
-    second_project_result = unwrap_tool_json(
-        other_provider.handle_tool_call(
-            "fact_store",
-            {"action": "list", "limit": 200},
-        )
+    second_project_result = plugin.call_tracedecay_json(
+        "tracedecay_fact_store",
+        {"action": "list", "limit": 200, "format": "json"},
+        project_root=other_project,
     )
     first_contents = {
         item.get("fact", item).get("content") for item in first_project_result.get("facts", [])
@@ -349,30 +353,36 @@ def main():
     provider.sync_turn(
         "hello", "hi there", session_id="stock-check-session", messages=messages
     )
-    grep = unwrap_tool_json(
-        engine.handle_tool_call("lcm_grep", {"query": "hello", "session_scope": "all"})
+    grep = plugin.call_tracedecay_json(
+        "tracedecay_lcm_grep",
+        {
+            "provider": "hermes",
+            "session_id": "stock-check-session",
+            "query": "hello",
+            "scope": "all",
+        },
+        project_root=project_root,
     )
     assert isinstance(grep, dict) and "error" not in grep, grep
     ok("sync_turn ingests the turn into the LCM raw store")
     provider.on_memory_write(
         "add", "memory", "stock on-memory-write mirror fact", {"session_id": "s"}
     )
-    mirrored = unwrap_tool_json(
-        provider.handle_tool_call(
-            "fact_store",
-            {
-                "action": "search",
-                "query": "on-memory-write mirror",
-                "limit": 1,
-            },
-        )
+    mirrored = plugin.call_tracedecay_json(
+        "tracedecay_fact_store",
+        {
+            "action": "search",
+            "query": "on-memory-write mirror",
+            "limit": 1,
+            "format": "json",
+        },
+        project_root=project_root,
     )
     assert mirrored.get("count", 0) >= 1, mirrored
     ok("on_memory_write mirrors built-in memory writes")
 
     # 4. Graph tool dispatch through generated tools.py against the real cwd,
     #    never the Hermes plugin/config directory.
-    plugin = loaded.module
     graph_status = plugin.call_tracedecay_json("tracedecay_status", {})
     assert graph_status.get("file_count", 0) >= 1, graph_status
     assert graph_status.get("node_count", 0) >= 1, graph_status

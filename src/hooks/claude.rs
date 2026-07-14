@@ -173,8 +173,9 @@ pub async fn hook_claude_session_start() -> i32 {
     // project root and the real session cwd so the linked-worktree detection in
     // `plan_hook_event` sees the session tree rather than the daemon's cwd.
     if let Some(root) = root.as_ref() {
-        let cwd = event_cwd_from_parsed(&parsed);
-        crate::daemon::notify_hook_event(root, session_start_hook_event(cwd)).await;
+        if let Some(event) = claude_session_start_hook_event(&parsed) {
+            crate::daemon::notify_hook_event(root, event).await;
+        }
     }
     if session_start_from_compaction(&event) {
         append_context_recovery_hint(&mut context);
@@ -235,23 +236,10 @@ async fn claude_subagent_start_context(event_json: &str) -> Option<String> {
     Some(context)
 }
 
-/// Builds the `sessionStart` daemon notification for the Claude agent.
-///
-/// Mirrors the other `DaemonHookEvent` constructors used in this file, but
-/// `DaemonHookEvent::new` is private to `daemon.rs`, so the fire-and-forget
-/// session-start event is assembled from its public fields here. `cwd` carries
-/// the real session working directory so the daemon's linked-worktree detection
-/// can auto-track a harness worktree's branch store.
-fn session_start_hook_event(cwd: Option<std::path::PathBuf>) -> crate::daemon::DaemonHookEvent {
-    crate::daemon::DaemonHookEvent {
-        agent: crate::daemon::HookAgent::Claude.as_wire().to_string(),
-        event: "sessionStart".to_string(),
-        rel_paths: Vec::new(),
-        command: None,
-        cwd,
-        route: None,
-        receipt: None,
-    }
+fn claude_session_start_hook_event(parsed: &Value) -> Option<crate::daemon::DaemonHookEvent> {
+    event_cwd_from_parsed(parsed).map(|cwd| {
+        crate::daemon::DaemonHookEvent::session_start(crate::daemon::HookAgent::Claude, cwd)
+    })
 }
 
 /// Builds the Claude `SessionStart` context for code workspaces.
@@ -406,9 +394,11 @@ pub async fn hook_prompt_submit() {
         super::schedule_user_session_review("claude", session_id.as_deref());
     }
     if let Some(root) = root.as_deref()
-        && let Ok(cg) = crate::tracedecay::TraceDecay::open(root).await
+        && let Err(error) =
+            super::daemon_hook_action(Some(root), serde_json::json!({ "action": "reset_counter" }))
+                .await
     {
-        let _ = cg.reset_local_counter().await;
+        eprintln!("[tracedecay] local counter reset daemon call failed: {error}");
     }
     let recall = prompt_like_text(&parsed);
     let recall = match (root.as_deref(), recall.as_deref()) {
@@ -446,35 +436,38 @@ pub async fn hook_stop() {
         super::schedule_user_session_review("claude", session_id.as_deref());
     }
 
-    let Some(gdb) = crate::global_db::GlobalDb::open().await else {
-        return;
-    };
-
-    let stats = crate::accounting::parser::ingest(&gdb).await;
-    if stats.turns_inserted == 0 {
-        return;
-    }
-
-    let project_path = crate::config::resolve_path(None);
-    let tokens_saved = if let Ok(cg) = crate::tracedecay::TraceDecay::open(&project_path).await {
-        cg.get_tokens_saved().await.unwrap_or(0)
-    } else {
-        0
-    };
-
-    let efficiency = if tokens_saved + stats.tokens_consumed > 0 {
-        (tokens_saved as f64 / (tokens_saved + stats.tokens_consumed) as f64) * 100.0
-    } else {
-        0.0
-    };
-
-    let saved_str = crate::display::format_token_count(tokens_saved);
-
-    if stats.cost_usd >= 0.001 {
-        eprintln!(
-            "\x1b[36mSession: ${:.2} spent | {saved_str} saved | {efficiency:.0}% efficiency\x1b[0m",
-            stats.cost_usd
-        );
+    let project_path = root.unwrap_or_else(|| crate::config::resolve_path(None));
+    match super::daemon_hook_action(
+        Some(&project_path),
+        serde_json::json!({ "action": "accounting_receipt" }),
+    )
+    .await
+    {
+        Ok(receipt) => {
+            let turns = receipt
+                .get("turns_inserted")
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
+            let cost = receipt
+                .get("cost_usd")
+                .and_then(Value::as_f64)
+                .unwrap_or(0.0);
+            if turns > 0 && cost >= 0.001 {
+                let saved = receipt
+                    .get("tokens_saved")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0);
+                let efficiency = receipt
+                    .get("efficiency")
+                    .and_then(Value::as_f64)
+                    .unwrap_or(0.0);
+                let saved_str = crate::display::format_token_count(saved);
+                eprintln!(
+                    "\x1b[36mSession: ${cost:.2} spent | {saved_str} saved | {efficiency:.0}% efficiency\x1b[0m"
+                );
+            }
+        }
+        Err(error) => eprintln!("[tracedecay] session receipt daemon call failed: {error}"),
     }
 }
 
@@ -484,25 +477,47 @@ pub async fn ingest_user_claude_session(session_id: Option<String>) -> bool {
     if session_id.is_none() {
         return false;
     }
-    let Ok(profile_root) = crate::storage::default_profile_root() else {
-        return false;
-    };
-    let Some(db) = crate::sessions::open_user_session_db(&profile_root).await else {
-        return false;
-    };
-    let Some(registered_roots) = crate::sessions::try_registered_project_roots().await else {
-        return false;
-    };
-    crate::sessions::claude::ingest_user_sessions(&db, &profile_root, session_id, registered_roots)
-        .await
-        .messages_upserted
-        > 0
+    match super::daemon_hook_action(
+        None,
+        serde_json::json!({
+            "action": "ingest_transcript",
+            "provider": "claude",
+            "user_scope": true,
+            "session_id": session_id,
+        }),
+    )
+    .await
+    {
+        Ok(result) => result
+            .get("messages_upserted")
+            .and_then(Value::as_u64)
+            .is_some_and(|count| count > 0),
+        Err(error) => {
+            eprintln!("[tracedecay] user Claude ingest daemon call failed: {error}");
+            false
+        }
+    }
 }
 
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn claude_session_start_event_signals_daemon_with_real_cwd() {
+        let event = claude_session_start_hook_event(&serde_json::json!({
+            "cwd": "/workspace/claude-session"
+        }))
+        .unwrap();
+
+        assert_eq!(event.agent, crate::daemon::HookAgent::Claude.as_wire());
+        assert_eq!(event.event, "sessionStart");
+        assert_eq!(
+            event.cwd.as_deref(),
+            Some(std::path::Path::new("/workspace/claude-session"))
+        );
+    }
 
     fn post_event(tool_name: &str, tool_input: &Value) -> Value {
         serde_json::json!({

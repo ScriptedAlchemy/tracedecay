@@ -33,7 +33,7 @@ use crate::common::GLOBAL_DB_ENV;
 
 /// Bump when the template layout or fixture sources change, so stale
 /// templates from previous revisions in a cached target dir are ignored.
-const TEMPLATE_DIR_NAME: &str = "mcp-suite-store-template-v1";
+const TEMPLATE_DIR_NAME: &str = "mcp-suite-store-template-v2";
 
 const EMPTY_FLAVOR: &str = "empty";
 const INDEXED_FLAVOR: &str = "indexed";

@@ -954,6 +954,45 @@ pub(super) async fn handle_pr_context(cg: &TraceDecay, args: Value) -> Result<To
 
 // ── Cross-branch tools ─────────────────────────────────────────────────
 
+/// Daemon-only branch-add entry point used by the first-party CLI.
+///
+/// Branch preparation copies and syncs a graph database, so it must run inside
+/// the managed daemon's database-authority scope rather than in the CLI process.
+pub(super) async fn handle_admin_branch_add(cg: &TraceDecay, args: Value) -> Result<ToolResult> {
+    let branch = require_admin_branch_name(&args)?;
+    let outcome =
+        TraceDecay::add_branch_tracking_with_options(cg.project_root(), branch, cg.open_options())
+            .await?;
+    let output = json!({ "outcome": admin_branch_add_outcome_name(&outcome) });
+    Ok(ToolResult::new(
+        json!({
+            "content": [{
+                "type": "text",
+                "text": serde_json::to_string(&output).unwrap_or_default(),
+            }]
+        }),
+        vec![],
+    ))
+}
+
+fn require_admin_branch_name(args: &Value) -> Result<&str> {
+    args.get("branch")
+        .and_then(Value::as_str)
+        .filter(|branch| !branch.is_empty())
+        .ok_or_else(|| TraceDecayError::Config {
+            message: "missing required parameter: branch".to_string(),
+        })
+}
+
+fn admin_branch_add_outcome_name(outcome: &crate::branch::BranchAddOutcome) -> &'static str {
+    match outcome {
+        crate::branch::BranchAddOutcome::NotIndexed => "not_indexed",
+        crate::branch::BranchAddOutcome::AlreadyTracked => "already_tracked",
+        crate::branch::BranchAddOutcome::Added => "added",
+        crate::branch::BranchAddOutcome::Deferred => "deferred",
+    }
+}
+
 /// Handles `tracedecay_branch_list` tool calls.
 pub(super) fn handle_branch_list(cg: &TraceDecay, args: &Value) -> ToolResult {
     let diagnostics = cg.branch_diagnostics();
@@ -1230,6 +1269,35 @@ mod tests {
             output.status.success(),
             "git {args:?} failed: {}",
             String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    fn admin_branch_add_requires_a_nonempty_branch_name() {
+        for args in [serde_json::json!({}), serde_json::json!({ "branch": "" })] {
+            let error = require_admin_branch_name(&args)
+                .expect_err("branch add request without branch must fail");
+            assert!(error.to_string().contains("branch"));
+        }
+    }
+
+    #[test]
+    fn admin_branch_add_outcomes_have_stable_wire_names() {
+        assert_eq!(
+            admin_branch_add_outcome_name(&crate::branch::BranchAddOutcome::NotIndexed),
+            "not_indexed"
+        );
+        assert_eq!(
+            admin_branch_add_outcome_name(&crate::branch::BranchAddOutcome::AlreadyTracked),
+            "already_tracked"
+        );
+        assert_eq!(
+            admin_branch_add_outcome_name(&crate::branch::BranchAddOutcome::Added),
+            "added"
+        );
+        assert_eq!(
+            admin_branch_add_outcome_name(&crate::branch::BranchAddOutcome::Deferred),
+            "deferred"
         );
     }
 

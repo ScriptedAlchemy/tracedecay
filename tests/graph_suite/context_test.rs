@@ -5,14 +5,14 @@ use tracedecay::types::*;
 async fn test_reranking_demotes_fixture_nodes() {
     use tempfile::TempDir;
     use tracedecay::context::ContextBuilder;
-    use tracedecay::db::Database;
 
     let dir = TempDir::new().unwrap();
     let project = dir.path();
 
-    let (db, _) = Database::initialize(&project.join(".tracedecay/tracedecay.db"))
-        .await
-        .unwrap();
+    let (db, _) =
+        crate::common::initialize_test_database(&project.join(".tracedecay/tracedecay.db"))
+            .await
+            .unwrap();
 
     // Fixture node: enum variant in tests/fixtures/
     let fixture_node = Node {
@@ -150,7 +150,6 @@ async fn test_build_context_with_db() {
     use std::fs;
     use tempfile::TempDir;
     use tracedecay::context::ContextBuilder;
-    use tracedecay::db::Database;
 
     let dir = TempDir::new().unwrap();
     let project = dir.path();
@@ -160,9 +159,10 @@ async fn test_build_context_with_db() {
     fs::write(project.join("src/lib.rs"), "pub fn process_data() {}\n").unwrap();
 
     // Init DB and insert a node
-    let (db, _) = Database::initialize(&project.join(".tracedecay/tracedecay.db"))
-        .await
-        .unwrap();
+    let (db, _) =
+        crate::common::initialize_test_database(&project.join(".tracedecay/tracedecay.db"))
+            .await
+            .unwrap();
     let node = Node {
         id: "function:test123".to_string(),
         kind: NodeKind::Function,
@@ -204,7 +204,6 @@ async fn test_get_code_reads_source_file() {
     use std::fs;
     use tempfile::TempDir;
     use tracedecay::context::ContextBuilder;
-    use tracedecay::db::Database;
 
     let dir = TempDir::new().unwrap();
     let project = dir.path();
@@ -216,9 +215,10 @@ async fn test_get_code_reads_source_file() {
     )
     .unwrap();
 
-    let (db, _) = Database::initialize(&project.join(".tracedecay/tracedecay.db"))
-        .await
-        .unwrap();
+    let (db, _) =
+        crate::common::initialize_test_database(&project.join(".tracedecay/tracedecay.db"))
+            .await
+            .unwrap();
 
     let node = Node {
         id: "function:main123".to_string(),
@@ -258,14 +258,14 @@ async fn test_get_code_reads_source_file() {
 async fn test_get_code_returns_none_for_missing_file() {
     use tempfile::TempDir;
     use tracedecay::context::ContextBuilder;
-    use tracedecay::db::Database;
 
     let dir = TempDir::new().unwrap();
     let project = dir.path();
 
-    let (db, _) = Database::initialize(&project.join(".tracedecay/tracedecay.db"))
-        .await
-        .unwrap();
+    let (db, _) =
+        crate::common::initialize_test_database(&project.join(".tracedecay/tracedecay.db"))
+            .await
+            .unwrap();
 
     let node = Node {
         id: "function:missing".to_string(),
@@ -303,16 +303,16 @@ async fn test_get_code_returns_none_for_reversed_line_range() {
     use std::fs;
     use tempfile::TempDir;
     use tracedecay::context::ContextBuilder;
-    use tracedecay::db::Database;
 
     let dir = TempDir::new().unwrap();
     let project = dir.path();
     fs::create_dir_all(project.join("src")).unwrap();
     fs::write(project.join("src/lib.rs"), "line 1\nline 2\nline 3\n").unwrap();
 
-    let (db, _) = Database::initialize(&project.join(".tracedecay/tracedecay.db"))
-        .await
-        .unwrap();
+    let (db, _) =
+        crate::common::initialize_test_database(&project.join(".tracedecay/tracedecay.db"))
+            .await
+            .unwrap();
 
     let node = context_test_node("src/lib.rs", 3, 1);
     let builder = ContextBuilder::new(&db, project);
@@ -325,16 +325,16 @@ async fn test_get_code_rejects_absolute_path_when_root_is_not_canonical() {
     use std::fs;
     use tempfile::TempDir;
     use tracedecay::context::ContextBuilder;
-    use tracedecay::db::Database;
 
     let dir = TempDir::new().unwrap();
     let project = dir.path();
     let outside = project.join("outside.rs");
     fs::write(&outside, "fn secret() {}\n").unwrap();
 
-    let (db, _) = Database::initialize(&project.join(".tracedecay/tracedecay.db"))
-        .await
-        .unwrap();
+    let (db, _) =
+        crate::common::initialize_test_database(&project.join(".tracedecay/tracedecay.db"))
+            .await
+            .unwrap();
 
     let missing_root = project.join("missing-root");
     let node = context_test_node(outside.to_string_lossy().as_ref(), 1, 1);
@@ -347,14 +347,14 @@ async fn test_get_code_rejects_absolute_path_when_root_is_not_canonical() {
 async fn test_find_relevant_context() {
     use tempfile::TempDir;
     use tracedecay::context::ContextBuilder;
-    use tracedecay::db::Database;
 
     let dir = TempDir::new().unwrap();
     let project = dir.path();
 
-    let (db, _) = Database::initialize(&project.join(".tracedecay/tracedecay.db"))
-        .await
-        .unwrap();
+    let (db, _) =
+        crate::common::initialize_test_database(&project.join(".tracedecay/tracedecay.db"))
+            .await
+            .unwrap();
     let node = Node {
         id: "function:ctx_test".to_string(),
         kind: NodeKind::Function,
@@ -394,14 +394,14 @@ async fn test_find_relevant_context() {
 async fn test_exclude_node_ids_deduplication() {
     use tempfile::TempDir;
     use tracedecay::context::ContextBuilder;
-    use tracedecay::db::Database;
 
     let dir = TempDir::new().unwrap();
     let project = dir.path();
 
-    let (db, _) = Database::initialize(&project.join(".tracedecay/tracedecay.db"))
-        .await
-        .unwrap();
+    let (db, _) =
+        crate::common::initialize_test_database(&project.join(".tracedecay/tracedecay.db"))
+            .await
+            .unwrap();
 
     for (id, name) in [("fn:first", "compute"), ("fn:second", "compute_batch")] {
         db.insert_node(&Node {
@@ -457,7 +457,6 @@ async fn test_merge_adjacent_code_blocks() {
     use std::fs;
     use tempfile::TempDir;
     use tracedecay::context::ContextBuilder;
-    use tracedecay::db::Database;
 
     let dir = TempDir::new().unwrap();
     let project = dir.path();
@@ -468,9 +467,10 @@ async fn test_merge_adjacent_code_blocks() {
     )
     .unwrap();
 
-    let (db, _) = Database::initialize(&project.join(".tracedecay/tracedecay.db"))
-        .await
-        .unwrap();
+    let (db, _) =
+        crate::common::initialize_test_database(&project.join(".tracedecay/tracedecay.db"))
+            .await
+            .unwrap();
 
     // Two adjacent functions in same file
     db.insert_node(&Node {

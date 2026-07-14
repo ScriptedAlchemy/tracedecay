@@ -34,6 +34,10 @@ use crate::global_db::{CodeProjectRecord, GlobalDb};
 use crate::migrate::registry::{StaleRootScope, code_project_root_exists, stale_code_projects};
 use crate::storage::{BRANCH_META_FILENAME, BRANCH_META_QUARANTINE_PREFIX};
 
+mod report;
+
+use report::{render_health_pass_report, render_missing_profile_report, render_warnings};
+
 /// A corrupt `branch-meta.json` that was renamed out of the way.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BranchMetaQuarantine {
@@ -76,6 +80,23 @@ pub async fn run_post_update_health_pass_under_lease(
         render_warnings(&report.warnings);
         return report;
     }
+    let _database_scope = match crate::db::enter_maintenance_database_scope(
+        lifecycle_lease,
+        &profile_root,
+        "post-update health pass",
+    ) {
+        Ok(scope) => scope,
+        Err(error) => {
+            let report = HealthPassReport {
+                warnings: vec![format!(
+                    "could not enter maintenance database scope for the post-update health pass: {error}"
+                )],
+                ..HealthPassReport::default()
+            };
+            render_warnings(&report.warnings);
+            return report;
+        }
+    };
     run_post_update_health_pass_for_profile(&profile_root).await
 }
 
@@ -105,15 +126,6 @@ async fn run_post_update_health_pass_for_profile(profile_root: &Path) -> HealthP
     report
 }
 
-fn render_missing_profile_report() -> HealthPassReport {
-    let report = HealthPassReport {
-        warnings: vec!["could not determine the profile data directory".to_string()],
-        ..HealthPassReport::default()
-    };
-    render_warnings(&report.warnings);
-    report
-}
-
 /// Applies the safe remedies and gathers everything the pass has to say into
 /// a [`HealthPassReport`], without printing anything.
 async fn compute_health_pass_report(profile_root: &Path) -> HealthPassReport {
@@ -129,11 +141,20 @@ async fn compute_health_pass_report(profile_root: &Path) -> HealthPassReport {
 
     // Opening the global DB applies its idempotent schema migrations — the
     // same lazy upgrade every normal open path performs.
-    let Some(global_db) = GlobalDb::open().await else {
-        report
-            .warnings
-            .push("could not open the global DB for the health pass".to_string());
-        return report;
+    let global_db = match GlobalDb::try_open().await {
+        Ok(Some(global_db)) => global_db,
+        Ok(None) => {
+            report
+                .warnings
+                .push("could not open the global DB for the health pass".to_string());
+            return report;
+        }
+        Err(error) => {
+            report.warnings.push(format!(
+                "could not open the global DB for the health pass: {error}"
+            ));
+            return report;
+        }
     };
 
     // One registry snapshot for the whole pass: the GC and the remaining
@@ -173,78 +194,6 @@ async fn retire_completed_consolidation_manifests(
     report.retired_consolidation_manifests = retirement.retired;
     report.retired_consolidation_registry_projects = retirement.retired_registry_projects;
     report.warnings.extend(retirement.warnings);
-}
-
-/// Prints the doctor-style summary for a computed report.
-fn render_health_pass_report(report: &HealthPassReport) {
-    if report.retired_consolidation_manifests.is_empty() {
-        eprintln!("  \x1b[32m✔\x1b[0m No completed consolidation manifests to retire");
-    } else {
-        eprintln!(
-            "  \x1b[32m✔\x1b[0m Retired {} completed consolidation input manifest(s):",
-            report.retired_consolidation_manifests.len()
-        );
-        for path in &report.retired_consolidation_manifests {
-            eprintln!("      • {}", path.display());
-        }
-    }
-    if report.retired_consolidation_registry_projects > 0 {
-        eprintln!(
-            "  \x1b[32m✔\x1b[0m Retired {} superseded consolidation registry project(s)",
-            report.retired_consolidation_registry_projects
-        );
-    }
-
-    if report.quarantined_branch_meta.is_empty() {
-        eprintln!("  \x1b[32m✔\x1b[0m No corrupt branch metadata files");
-    } else {
-        eprintln!(
-            "  \x1b[32m✔\x1b[0m Quarantined {} corrupt branch metadata file(s):",
-            report.quarantined_branch_meta.len()
-        );
-        for quarantine in &report.quarantined_branch_meta {
-            eprintln!("      • {}", quarantine.quarantined.display());
-        }
-    }
-
-    match report.purged_temp_registry_rows {
-        Some(0) => eprintln!("  \x1b[32m✔\x1b[0m No stale temp-root registry rows"),
-        Some(purged) => {
-            eprintln!("  \x1b[32m✔\x1b[0m Purged {purged} stale temp-root registry row(s)");
-        }
-        None => {}
-    }
-
-    if report.reconciled_store_roots.is_empty() {
-        eprintln!("  \x1b[32m✔\x1b[0m No stale store manifest roots to reconcile");
-    } else {
-        eprintln!(
-            "  \x1b[32m✔\x1b[0m Reconciled {} stale store manifest root(s):",
-            report.reconciled_store_roots.len()
-        );
-        for reconciled in &report.reconciled_store_roots {
-            eprintln!("      • {}", reconciled.manifest_path.display());
-            if let Some(config_path) = &reconciled.config_path {
-                eprintln!("        (config: {})", config_path.display());
-            }
-        }
-    }
-
-    if report.remaining_findings.is_empty() {
-        eprintln!("  \x1b[32m✔\x1b[0m No remaining doctor findings");
-    } else {
-        eprintln!("  Remaining findings (not auto-fixed — run `tracedecay doctor` for details):");
-        for finding in &report.remaining_findings {
-            eprintln!("      • {finding}");
-        }
-    }
-    render_warnings(&report.warnings);
-}
-
-fn render_warnings(warnings: &[String]) {
-    for warning in warnings {
-        eprintln!("  \x1b[33mwarning:\x1b[0m health pass: {warning}");
-    }
 }
 
 /// Renames every `branch-meta.json` under `<profile_root>/projects/*` that is
@@ -405,6 +354,33 @@ fn count_remaining_registry_drift(
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    struct ClearedUserDataDir {
+        _lock: std::sync::MutexGuard<'static, ()>,
+        previous: Option<std::ffi::OsString>,
+    }
+
+    impl ClearedUserDataDir {
+        fn new() -> Self {
+            let lock = crate::config::lock_user_data_dir_test_env();
+            let previous = std::env::var_os(crate::config::USER_DATA_DIR_ENV);
+            unsafe { std::env::remove_var(crate::config::USER_DATA_DIR_ENV) };
+            Self {
+                _lock: lock,
+                previous,
+            }
+        }
+    }
+
+    impl Drop for ClearedUserDataDir {
+        fn drop(&mut self) {
+            if let Some(previous) = self.previous.take() {
+                unsafe { std::env::set_var(crate::config::USER_DATA_DIR_ENV, previous) };
+            } else {
+                unsafe { std::env::remove_var(crate::config::USER_DATA_DIR_ENV) };
+            }
+        }
+    }
 
     fn write_branch_meta(projects_root: &Path, project_id: &str, content: &str) -> PathBuf {
         let shard = projects_root.join(project_id);
@@ -585,11 +561,63 @@ mod tests {
         assert!(health_pass_lease_error(&exclusive, &guarded_profile, false).is_none());
     }
 
+    #[test]
+    fn maintenance_scope_authorizes_health_pass_global_db_open() {
+        let _data_dir = ClearedUserDataDir::new();
+        let base = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+        let dir = tempfile::Builder::new()
+            .prefix("doctor-heal-scope-")
+            .tempdir_in(base)
+            .unwrap();
+        let profile = dir.path().join("profile");
+        std::fs::create_dir_all(&profile).unwrap();
+        unsafe { std::env::set_var(crate::config::USER_DATA_DIR_ENV, &profile) };
+        let profile = crate::config::user_data_dir().unwrap();
+        let lifecycle = crate::lifecycle_lease::acquire_exclusive_for_profile(
+            &profile,
+            "maintenance scope healer test",
+        )
+        .unwrap();
+        let _database_scope = crate::db::enter_maintenance_database_scope(
+            &lifecycle,
+            &profile,
+            "post-update health pass",
+        )
+        .unwrap();
+        let db_path = profile.join("global.db");
+        let authority = crate::db::DatabaseAuthority::for_runtime(
+            &db_path,
+            "open global database for health pass",
+        )
+        .unwrap();
+
+        assert_eq!(
+            authority.role(),
+            crate::db::DatabaseAuthorityRole::Maintenance
+        );
+    }
+
     #[tokio::test]
     async fn post_update_retires_applied_consolidation_manifests_idempotently() {
-        let dir = tempfile::TempDir::new().unwrap();
+        let _data_dir = ClearedUserDataDir::new();
+        let base = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+        let dir = tempfile::Builder::new()
+            .prefix("doctor-heal-retirement-")
+            .tempdir_in(base)
+            .unwrap();
         let project = dir.path().join("repo");
         let profile = dir.path().join("profile");
+        let lifecycle = crate::lifecycle_lease::acquire_exclusive_for_profile(
+            &profile,
+            "post-update healer test",
+        )
+        .unwrap();
+        let _database_scope = crate::db::enter_maintenance_database_scope(
+            &lifecycle,
+            &profile,
+            "post-update health pass",
+        )
+        .unwrap();
         std::fs::create_dir_all(&project).unwrap();
         let status = std::process::Command::new("git")
             .args(["init", "--quiet"])
@@ -691,11 +719,6 @@ mod tests {
         global.checkpoint().await;
         global.close();
 
-        let _lease = crate::lifecycle_lease::acquire_exclusive_for_profile(
-            &profile,
-            "post-update healer test",
-        )
-        .unwrap();
         std::fs::write(
             profile
                 .join("migration-inventory")

@@ -11,13 +11,28 @@ use serde_json::json;
 use tempfile::TempDir;
 
 use super::*;
-use crate::db::Database;
+use crate::db::{Database, DatabaseAuthority};
 use crate::memory::store::MemoryStore;
 use crate::memory::types::{
     AddFactRequest, FactRelationKind, FeedbackAction, FeedbackRequest, MemoryCategory,
 };
 use crate::sessions::{SessionMessageRecord, SessionRecord};
 use crate::tracedecay::{TraceDecay, TraceDecayOpenOptions};
+
+async fn test_initialize(path: &Path) -> (Database, bool) {
+    let authority = DatabaseAuthority::acquire_test(path, "consolidation test initialize").unwrap();
+    Database::initialize(path, &authority).await.unwrap()
+}
+
+async fn test_open(path: &Path) -> (Database, bool) {
+    let authority = DatabaseAuthority::acquire_test(path, "consolidation test open").unwrap();
+    Database::open(path, &authority).await.unwrap()
+}
+
+async fn test_open_read_only(path: &Path) -> (Database, bool) {
+    let authority = DatabaseAuthority::acquire_test(path, "consolidation test read").unwrap();
+    Database::open_read_only(path, &authority).await.unwrap()
+}
 
 struct Fixture {
     _temp: TempDir,
@@ -49,16 +64,15 @@ enum SnapshotEntry {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum TreeSnapshotEntry {
+    // Directory timestamps are derived state: creating and removing ignored
+    // authority-lock artifacts changes their parent directories' mtime/ctime.
+    // Topology, identity, permissions, and every non-ignored child remain
+    // snapshotted, so persistent input mutations are still detected.
     Directory {
-        modified: SystemTime,
         #[cfg(unix)]
         device: u64,
         #[cfg(unix)]
         inode: u64,
-        #[cfg(unix)]
-        changed_seconds: i64,
-        #[cfg(unix)]
-        changed_nanoseconds: i64,
         #[cfg(unix)]
         mode: u32,
     },
@@ -118,21 +132,29 @@ fn full_tree_snapshot(root: &Path) -> BTreeMap<PathBuf, TreeSnapshotEntry> {
     while let Some(path) = pending.pop() {
         let metadata = fs::symlink_metadata(&path).unwrap();
         let relative = path.strip_prefix(root).unwrap().to_path_buf();
+        let is_database_authority_artifact = relative.components().any(|component| {
+            component.as_os_str() == std::ffi::OsStr::new(".tracedecay-database-locks")
+        }) || relative.file_name().is_some_and(|name| {
+            let name = name.to_string_lossy();
+            name == "lifecycle.lock"
+                || name == "lifecycle.lock.owner"
+                || name.ends_with(".access.lock")
+                || name.ends_with(".writer.lock")
+                || name.ends_with(".writer.owner")
+        });
+        if is_database_authority_artifact {
+            continue;
+        }
         if metadata.is_dir() {
             #[cfg(unix)]
             use std::os::unix::fs::{MetadataExt, PermissionsExt};
             snapshot.insert(
                 relative,
                 TreeSnapshotEntry::Directory {
-                    modified: metadata.modified().unwrap(),
                     #[cfg(unix)]
                     device: metadata.dev(),
                     #[cfg(unix)]
                     inode: metadata.ino(),
-                    #[cfg(unix)]
-                    changed_seconds: metadata.ctime(),
-                    #[cfg(unix)]
-                    changed_nanoseconds: metadata.ctime_nsec(),
                     #[cfg(unix)]
                     mode: metadata.permissions().mode(),
                 },
@@ -217,7 +239,7 @@ async fn dry_run_reports_live_split_shape_without_mutation() {
                 .starts_with(".tracedecay-migration-scratch-")),
         "dry-run left migration scratch state behind"
     );
-    assert!(!fixture.profile.join("lifecycle.lock").exists());
+    assert!(fixture.profile.join("lifecycle.lock").exists());
     assert_eq!(
         storage::read_repository_identity_marker(&fixture.project)
             .unwrap()
@@ -263,7 +285,7 @@ async fn legacy_single_db_plan_is_read_only_and_apply_preserves_source_graph() {
     assert_eq!(preserved.created_at, "0");
     assert_eq!(preserved.last_synced_at, "0");
     let preserved_path = applied.destination_data_root.join(&preserved.db_file);
-    let (db, _) = Database::open_read_only(&preserved_path).await.unwrap();
+    let (db, _) = test_open_read_only(&preserved_path).await;
     let facts = MemoryStore::new(db.conn())
         .list_facts(None, Some(0.0), 100)
         .await
@@ -684,7 +706,7 @@ async fn mixed_page_destination_survives_overlapping_watcher_opens() {
         drop(watcher);
 
         assert!(storage::has_sqlite_database_header(&destination).unwrap());
-        let (verification, _) = Database::open_read_only(&destination).await.unwrap();
+        let (verification, _) = test_open_read_only(&destination).await;
         let mut mmap_rows = verification
             .conn()
             .query("PRAGMA mmap_size", ())
@@ -943,7 +965,7 @@ async fn verification_rejects_a_missing_unique_row_when_target_is_larger() {
     let graph_path = report
         .destination_data_root
         .join(crate::config::DB_FILENAME);
-    let (graph, _) = Database::open(&graph_path).await.unwrap();
+    let (graph, _) = test_open(&graph_path).await;
     graph
         .conn()
         .execute_batch(
@@ -2016,7 +2038,7 @@ async fn divergent_summary_node_identity_remains_a_hard_error() {
             "target-hash",
         ),
     ] {
-        let (db, _) = Database::open(path).await.unwrap();
+        let (db, _) = test_open(path).await;
         db.conn()
             .execute(
                 "INSERT INTO lcm_summary_nodes(
@@ -2147,7 +2169,7 @@ async fn untracked_branch_databases_with_mixed_case_extensions_are_recovered() {
         } else {
             TARGET_ORPHAN_FACT
         };
-        let (db, _) = Database::open_read_only(&path).await.unwrap();
+        let (db, _) = test_open_read_only(&path).await;
         let facts = MemoryStore::new(db.conn())
             .list_facts(None, Some(0.0), 100)
             .await
@@ -2261,7 +2283,7 @@ async fn overlapping_facts_merge_tags_metadata_and_feedback_without_duplication(
     let graph_path = applied
         .destination_data_root
         .join(crate::config::DB_FILENAME);
-    let (graph, _) = Database::open_read_only(&graph_path).await.unwrap();
+    let (graph, _) = test_open_read_only(&graph_path).await;
     let store = MemoryStore::new(graph.conn());
     let facts = store.list_facts(None, Some(0.0), 100).await.unwrap();
     let shared = facts
@@ -2458,7 +2480,7 @@ async fn current_schema_tables_have_an_explicit_consolidation_disposition() {
 }
 
 async fn unknown_tables(path: &Path, classify: fn(&str) -> Option<&'static str>) -> Vec<String> {
-    let (db, _) = Database::open_read_only(path).await.unwrap();
+    let (db, _) = test_open_read_only(path).await;
     let mut rows = db
         .conn()
         .query(
@@ -2627,7 +2649,7 @@ async fn create_shard(
 ) {
     let layout = layout_for_id(project, profile, project_id).unwrap();
     fs::create_dir_all(&layout.data_root).unwrap();
-    let (graph, _) = Database::initialize(&layout.graph_db_path).await.unwrap();
+    let (graph, _) = test_initialize(&layout.graph_db_path).await;
     let memory = MemoryStore::new(graph.conn());
     let outcome = memory
         .add_fact(
@@ -2722,7 +2744,7 @@ async fn add_fact_to_shard(
     feedback: Option<FeedbackAction>,
 ) {
     let layout = layout_for_id(&fixture.project, &fixture.profile, project_id).unwrap();
-    let (graph, _) = Database::open(&layout.graph_db_path).await.unwrap();
+    let (graph, _) = test_open(&layout.graph_db_path).await;
     let memory = MemoryStore::new(graph.conn());
     let outcome = memory
         .add_fact(
@@ -2756,7 +2778,7 @@ async fn add_fact_to_shard(
 
 async fn add_fact_relation_to_shard(fixture: &Fixture, project_id: &str) {
     let layout = layout_for_id(&fixture.project, &fixture.profile, project_id).unwrap();
-    let (graph, _) = Database::open(&layout.graph_db_path).await.unwrap();
+    let (graph, _) = test_open(&layout.graph_db_path).await;
     let memory = MemoryStore::new(graph.conn());
     let source_fact_id = memory
         .list_facts(None, Some(0.0), 10)
@@ -2807,7 +2829,7 @@ fn add_branch_links(fixture: &Fixture, project_id: &str, count: usize) {
     for index in 0..count {
         let name = format!("load-{index:03}");
         let relative = format!("branches/load-{index:03}.db");
-        fs::hard_link(&layout.graph_db_path, layout.data_root.join(&relative)).unwrap();
+        fs::copy(&layout.graph_db_path, layout.data_root.join(&relative)).unwrap();
         meta.add_branch(&name, &relative, "main");
     }
     branch_meta::save_branch_meta(&layout.data_root, &meta).unwrap();
@@ -2818,7 +2840,7 @@ async fn add_untracked_branch(layout: &StoreLayout, name: &str, fact_content: &s
     fs::create_dir_all(&branches).unwrap();
     let path = branches.join(format!("{name}.db"));
     fs::copy(&layout.graph_db_path, &path).unwrap();
-    let (db, _) = Database::open(&path).await.unwrap();
+    let (db, _) = test_open(&path).await;
     MemoryStore::new(db.conn())
         .add_fact(
             AddFactRequest {
@@ -2851,14 +2873,14 @@ fn sqlite_family_bytes(path: &Path) -> u64 {
 }
 
 async fn execute_sql(path: &Path, sql: &str) {
-    let (db, _) = Database::open(path).await.unwrap();
+    let (db, _) = test_open(path).await;
     db.conn().execute_batch(sql).await.unwrap();
     db.checkpoint().await.unwrap();
     db.close();
 }
 
 async fn rewrite_page_size(path: &Path, page_size: i64) {
-    let (db, _) = Database::open(path).await.unwrap();
+    let (db, _) = test_open(path).await;
     db.checkpoint().await.unwrap();
     db.conn()
         .execute_batch(&format!(
@@ -2870,7 +2892,7 @@ async fn rewrite_page_size(path: &Path, page_size: i64) {
 }
 
 async fn database_page_size(path: &Path) -> i64 {
-    let (db, _) = Database::open_read_only(path).await.unwrap();
+    let (db, _) = test_open_read_only(path).await;
     let mut rows = db.conn().query("PRAGMA page_size", ()).await.unwrap();
     let page_size = rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap();
     db.close();

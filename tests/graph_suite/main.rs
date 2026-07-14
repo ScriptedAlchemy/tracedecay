@@ -12,6 +12,9 @@ mod types {
     pub use tracedecay::types::*;
 }
 
+#[path = "../common/mod.rs"]
+mod common;
+
 mod annotation_helpers_test;
 mod bench_test;
 mod cloud_test;

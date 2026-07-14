@@ -151,13 +151,10 @@ pub trait McpTransport {
 /// Wraps a transport with a queue of already-consumed input lines that must
 /// be re-delivered before reading from the underlying transport again.
 ///
-/// Two serve flows need this: the startup peek of the MCP `initialize`
-/// request (to read workspace roots before a server exists), and the degraded
-/// startup server's recovery handoff (the `tools/call` that triggered a
-/// successful resolution retry must be answered by the recovered full
-/// server). Keeping one `ReplayTransport` alive across those phases is what
-/// prevents pipelined requests buffered by the inner reader from being lost —
-/// dropping the transport and constructing a fresh one would discard them.
+/// The daemon consumes the first MCP request while resolving initialize roots
+/// and selecting a project server. Replaying that request into the selected
+/// server preserves it, along with any pipelined input buffered by the inner
+/// reader.
 pub struct ReplayTransport<T: McpTransport + Send> {
     replay: std::collections::VecDeque<String>,
     inner: T,

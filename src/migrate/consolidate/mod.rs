@@ -190,6 +190,15 @@ impl Drop for MigrationScratchRoot {
 
 pub async fn plan(options: &ConsolidationOptions) -> Result<ConsolidationReport> {
     ensure_profile_offline(options)?;
+    let lifecycle = crate::lifecycle_lease::acquire_exclusive_for_profile(
+        &options.profile_root,
+        "profile shard consolidation plan",
+    )?;
+    let _database_scope = crate::db::enter_maintenance_database_scope(
+        &lifecycle,
+        &options.profile_root,
+        "profile shard consolidation plan",
+    )?;
     Ok(resolve_plan(options).await?.report)
 }
 
@@ -224,7 +233,12 @@ async fn apply_with_faults(
     prepare_stop: Option<prepare::PrepareStop>,
 ) -> Result<ConsolidationReport> {
     ensure_profile_offline(options)?;
-    let _lifecycle = crate::lifecycle_lease::acquire_exclusive_for_profile(
+    let lifecycle = crate::lifecycle_lease::acquire_exclusive_for_profile(
+        &options.profile_root,
+        "profile shard consolidation",
+    )?;
+    let _database_scope = crate::db::enter_maintenance_database_scope(
+        &lifecycle,
         &options.profile_root,
         "profile shard consolidation",
     )?;

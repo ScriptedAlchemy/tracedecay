@@ -5,7 +5,6 @@ use std::process::Command;
 use tempfile::TempDir;
 use tracedecay::branch_meta::{self, BranchMeta};
 use tracedecay::config::{TraceDecayConfig, USER_DATA_DIR_ENV};
-use tracedecay::db::Database;
 use tracedecay::hooks::{
     CursorShellSyncPlan, cursor_branch_switch_target, cursor_shell_command_targets_project,
     cursor_shell_sync_plan, cursor_shell_sync_plan_with_current_branch,
@@ -200,7 +199,7 @@ async fn hook_branch_tracking_writes_profile_sharded_branch_db() {
         serde_json::to_string_pretty(&config).unwrap(),
     )
     .unwrap();
-    Database::initialize(&shard_root.join("tracedecay.db"))
+    crate::common::initialize_test_database(&shard_root.join("tracedecay.db"))
         .await
         .unwrap();
     let meta = BranchMeta::new_for_dir(&shard_root, "main");

@@ -4,6 +4,10 @@
 //! the JSON arguments, calls the appropriate `TraceDecay` method, and
 //! formats the result.
 
+mod admin_cli;
+pub(crate) use admin_cli::handle_projectless_admin_cli;
+pub(crate) use hook_runtime::handle_projectless_hook_runtime;
+mod admin_project;
 pub mod analysis;
 mod analytics;
 pub mod ast_grep_search;
@@ -14,6 +18,7 @@ pub mod git;
 pub mod graph;
 pub mod grep;
 pub mod health;
+pub mod hook_runtime;
 pub mod info;
 pub mod memory;
 pub mod redundancy;
@@ -89,6 +94,15 @@ use super::dispatch_policy::{
 };
 use super::render;
 use support::{profile_root_for_global_db, project_registry_context, project_selector_present};
+
+#[cfg(test)]
+const INTERNAL_DAEMON_TOOL_NAMES: &[&str] = &[
+    "tracedecay_admin_branch_add",
+    "tracedecay_admin_cli",
+    "tracedecay_admin_project",
+    "tracedecay_admin_sync",
+    "tracedecay_hook_runtime",
+];
 
 fn rejected_tool_project_selector_present(tool_name: &str, args: &Value) -> bool {
     let top_level_path_keys = if tool_name.starts_with("tracedecay_lcm_") {
@@ -266,6 +280,7 @@ pub async fn handle_tool_call_with_registry(
             allow_default_registry_fallback,
             implicit_project_path: None,
             automation_scheduler_reconciler: None,
+            automation_writer: crate::dashboard::direct_dashboard_automation_writer(),
             diagnostics_cache: None,
             diagnostics_lsp: None,
         },
@@ -279,6 +294,7 @@ pub struct ToolCallRegistryOptions<'a> {
     pub allow_default_registry_fallback: bool,
     pub implicit_project_path: Option<&'a Path>,
     pub automation_scheduler_reconciler: Option<crate::dashboard::AutomationSchedulerReconciler>,
+    pub automation_writer: crate::dashboard::DashboardAutomationWriter,
     pub diagnostics_cache: Option<&'a crate::diagnostics::DiagnosticsCache>,
     pub diagnostics_lsp:
         Option<&'a tokio::sync::Mutex<crate::diagnostics::lsp::broker::DiagnosticBroker>>,
@@ -380,6 +396,15 @@ pub async fn handle_tool_call_with_registry_and_implicit_project(
         "tracedecay_impact" => graph::handle_impact(cg, args).await,
         "tracedecay_node" => graph::handle_node(cg, args).await,
         "tracedecay_status" => info::handle_status(cg, args, server_stats, scope_prefix).await,
+        "tracedecay_hook_runtime" => {
+            hook_runtime::handle_hook_runtime(cg, args, options.global_db).await
+        }
+        "tracedecay_admin_branch_add" => git::handle_admin_branch_add(cg, args).await,
+        "tracedecay_admin_sync" => info::handle_admin_sync(cg, args).await,
+        "tracedecay_admin_cli" => admin_cli::handle_admin_cli(cg, args, options.global_db).await,
+        "tracedecay_admin_project" => {
+            admin_project::handle_admin_project(cg, args, options.global_db).await
+        }
         "tracedecay_active_project" => Ok(info::handle_active_project(
             cg,
             &args,
@@ -546,8 +571,13 @@ pub async fn handle_tool_call_with_registry_and_implicit_project(
         "tracedecay_skill_view" => skills::handle_skill_view(cg, args).await,
         "tracedecay_hermes_skill_bridge" => skills::handle_hermes_skill_bridge(cg, &args),
         "tracedecay_dashboard" => {
-            dashboard::handle_dashboard(cg, args, options.automation_scheduler_reconciler.clone())
-                .await
+            dashboard::handle_dashboard(
+                cg,
+                args,
+                options.automation_scheduler_reconciler.clone(),
+                options.automation_writer.clone(),
+            )
+            .await
         }
         "tracedecay_message_search" => {
             session::handle_message_search(
@@ -723,6 +753,9 @@ mod tests {
             .map(|tool| tool.name)
             .collect::<BTreeSet<_>>();
         let mut handler_names = dispatch_tool_names_from_source("handle_tool_call");
+        for internal in INTERNAL_DAEMON_TOOL_NAMES {
+            handler_names.remove(*internal);
+        }
 
         // These tools are intentionally hidden from the advertised surface when
         // the host ast-grep CLI capability they need is unavailable; mirror the

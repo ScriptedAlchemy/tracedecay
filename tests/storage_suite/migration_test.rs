@@ -3,7 +3,6 @@ use std::path::Path;
 
 use libsql::{Builder, Connection, Database as LibsqlDatabase};
 use tempfile::TempDir;
-use tracedecay::db::Database;
 use tracedecay::db::migrations::{create_schema, migrate};
 
 use crate::support;
@@ -819,7 +818,7 @@ async fn test_database_initialize_creates_latest_version() {
     let dir = TempDir::new().expect("failed to create temp dir");
     let db_path = dir.path().join("init_test.db");
 
-    let (db, _migrated) = Database::initialize(&db_path)
+    let (db, _migrated) = crate::common::initialize_test_database(&db_path)
         .await
         .expect("Database::initialize should succeed");
 
@@ -836,7 +835,7 @@ async fn test_database_open_no_migration_needed() {
     support::seed_latest_graph_db(&db_path).await;
 
     // Open the same database — should not migrate
-    let (_db2, migrated) = Database::open(&db_path)
+    let (_db2, migrated) = crate::common::open_test_database(&db_path)
         .await
         .expect("Database::open should succeed");
 
@@ -869,7 +868,7 @@ async fn test_database_open_migrates_v1_to_latest() {
     }
 
     // Open via Database::open — should detect v1 and migrate to latest
-    let (db, migrated) = Database::open(&db_path)
+    let (db, migrated) = crate::common::open_test_database(&db_path)
         .await
         .expect("Database::open should succeed");
 

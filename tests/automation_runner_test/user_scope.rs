@@ -174,7 +174,7 @@ async fn projectless_memory_curator_applies_validated_delete_to_user_memory() {
 
     assert_eq!(run.report["dry_run"], json!(false));
     assert_eq!(run.report["llm_apply"]["applied"], json!(1));
-    let db = Database::open(&user_memory_db_path(profile_root))
+    let db = crate::common::open_test_database(&user_memory_db_path(profile_root))
         .await
         .unwrap()
         .0;
@@ -221,7 +221,7 @@ async fn projectless_memory_curator_merges_and_updates_user_memory() {
     .unwrap();
 
     assert_eq!(run.report["llm_apply"]["applied"], json!(1));
-    let db = Database::open(&user_memory_db_path(profile_root))
+    let db = crate::common::open_test_database(&user_memory_db_path(profile_root))
         .await
         .unwrap()
         .0;
@@ -271,7 +271,7 @@ async fn projectless_memory_curator_grooms_user_memory() {
     .unwrap();
 
     assert_eq!(run.report["llm_apply"]["applied"], json!(1));
-    let db = Database::open(&user_memory_db_path(profile_root))
+    let db = crate::common::open_test_database(&user_memory_db_path(profile_root))
         .await
         .unwrap()
         .0;

@@ -9,9 +9,7 @@ use std::time::Duration;
 
 use serde_json::Value;
 
-use super::cursor_compact::{
-    CURSOR_PRE_COMPACT_SUMMARY_BUDGET, cursor_pre_compact_for_event_with_config,
-};
+use super::cursor_compact::cursor_pre_compact_via_daemon;
 use super::cursor_shell::paths_same;
 use super::memory_inject;
 use super::post_tool_use::{captured_tool_output, trusted_tool_failure};
@@ -249,19 +247,18 @@ pub async fn hook_cursor_stop() -> i32 {
 /// Cursor `preCompact` hook handler.
 ///
 /// Cursor's compaction event exposes pressure metadata but not Cursor's own
-/// generated summary text. At the boundary, `TraceDecay` ingests the current
-/// transcript tail, asks LCM for the compactable raw-message backlog, generates
-/// a summary through `cursor-agent -p`, and stores that summary as a normal LCM
-/// summary node. The hook is fail-open and emits Cursor's empty object shape.
+/// generated summary text. The hook delegates to the daemon, which ingests the
+/// current transcript tail, asks LCM for the compactable raw-message backlog,
+/// generates a summary through `cursor-agent -p`, and stores that summary as a
+/// normal LCM summary node. The hook is fail-open and emits Cursor's empty
+/// object shape.
 pub async fn hook_cursor_pre_compact() -> i32 {
     let event = read_hook_event!();
     let root = cursor_project_root_from_event_with_identity(&event).await;
     let _hook_telemetry =
         record_hook_invoked(root.as_deref(), HintAgent::Cursor, "preCompact", &event);
     if std::env::var(crate::sessions::cursor_agent::CURSOR_SUMMARY_CHILD_ENV).is_err() {
-        let mut config = crate::sessions::cursor_agent::CursorAgentSummaryConfig::from_env();
-        config.timeout = config.timeout.min(CURSOR_PRE_COMPACT_SUMMARY_BUDGET);
-        let outcome = cursor_pre_compact_for_event_with_config(&event, &config).await;
+        let outcome = cursor_pre_compact_via_daemon(&event).await;
         if outcome.status == "error" {
             eprintln!(
                 "tracedecay Cursor preCompact summary failed: {}",
@@ -307,9 +304,13 @@ pub async fn hook_cursor_after_file_edit() -> i32 {
 /// for the resolved workspace. Never blocks session creation.
 pub async fn hook_cursor_session_start() -> i32 {
     let event = read_hook_event!();
+    let parsed = serde_json::from_str::<Value>(&event).unwrap_or(Value::Null);
     let root = cursor_project_root_from_event_with_identity(&event).await;
     let _hook_telemetry =
         record_hook_invoked(root.as_deref(), HintAgent::Cursor, "sessionStart", &event);
+    if let (Some(root), Some(event)) = (root.as_ref(), cursor_session_start_hook_event(&parsed)) {
+        crate::daemon::notify_hook_event(root, event).await;
+    }
     ingest_cursor_transcript_for_event(
         &event,
         Some(CURSOR_CATCH_UP_INGEST_MAX_BYTES),
@@ -317,10 +318,7 @@ pub async fn hook_cursor_session_start() -> i32 {
     )
     .await;
     let mut context = cursor_session_context_for_root(root.as_deref()).await;
-    let session_id = serde_json::from_str::<Value>(&event)
-        .ok()
-        .as_ref()
-        .and_then(event_session_id);
+    let session_id = event_session_id(&parsed);
     let digest = match root.as_deref() {
         Some(root) => {
             memory_inject::combined_session_memory_digest(root, session_id.as_deref()).await
@@ -340,6 +338,12 @@ pub async fn hook_cursor_session_start() -> i32 {
     }
     println!("{}", cursor_session_start_json(root.as_deref(), &context));
     0
+}
+
+fn cursor_session_start_hook_event(parsed: &Value) -> Option<crate::daemon::DaemonHookEvent> {
+    cursor_event_cwd(parsed).map(|cwd| {
+        crate::daemon::DaemonHookEvent::session_start(crate::daemon::HookAgent::Cursor, cwd)
+    })
 }
 
 /// Builds the lean Cursor `sessionStart` context for a resolved project root.
@@ -767,8 +771,13 @@ async fn reset_counter_for_cursor_event(event_json: &str) {
     let Some(project_root) = cursor_project_root_from_event_with_identity(event_json).await else {
         return;
     };
-    if let Ok(cg) = crate::tracedecay::TraceDecay::open(&project_root).await {
-        let _ = cg.reset_local_counter().await;
+    if let Err(error) = super::daemon_hook_action(
+        Some(&project_root),
+        serde_json::json!({ "action": "reset_counter" }),
+    )
+    .await
+    {
+        eprintln!("[tracedecay] local counter reset daemon call failed: {error}");
     }
 }
 
@@ -798,64 +807,48 @@ async fn ingest_cursor_transcript_for_event_inner(
     max_new_bytes: Option<u64>,
     budget: Duration,
 ) -> CursorIngestOutcome {
-    let work = async {
-        let Ok(parsed) = serde_json::from_str::<Value>(event_json) else {
-            return CursorIngestOutcome::default();
-        };
-        let project_root = cursor_project_root_from_parsed_event_with_identity(&parsed).await;
-        if project_root.is_none() {
-            let Ok(profile_root) = crate::storage::default_profile_root() else {
-                return CursorIngestOutcome::default();
-            };
-            let Some(db) = crate::sessions::open_user_session_db(&profile_root).await else {
-                return CursorIngestOutcome::default();
-            };
-            let Some(registered_roots) = crate::sessions::try_registered_project_roots().await
-            else {
-                return CursorIngestOutcome::default();
-            };
-            let stats = crate::sessions::cursor::ingest_cursor_user_transcript_event_capped_with_registered_roots(
-                event_json,
-                &db,
-                max_new_bytes,
-                &registered_roots,
-            )
-            .await;
-            return CursorIngestOutcome {
-                completed: true,
-                user_scope: true,
-                messages_upserted: stats.messages_upserted,
-            };
-        }
-        let Some(project_root) = project_root else {
-            return CursorIngestOutcome::default();
-        };
-        if let Some(cwd_root) = cursor_event_cwd(&parsed)
-            .as_deref()
-            .and_then(crate::config::discover_project_root)
-        {
-            if !paths_same(&cwd_root, &project_root) {
-                return CursorIngestOutcome::default();
-            }
-        }
-        let Some(db) = crate::sessions::cursor::open_project_session_db(&project_root).await else {
-            return CursorIngestOutcome::default();
-        };
-        let stats = crate::sessions::cursor::ingest_cursor_transcript_event_capped(
-            event_json,
-            &db,
-            max_new_bytes,
-        )
-        .await;
-        CursorIngestOutcome {
-            completed: true,
-            user_scope: false,
-            messages_upserted: stats.messages_upserted,
-        }
+    let Ok(parsed) = serde_json::from_str::<Value>(event_json) else {
+        return CursorIngestOutcome::default();
     };
-    // Short-lived CLI hook processes exit immediately, so the ingest must run
-    // inline (not on a detached task); the timeout keeps it inside budget.
-    tokio::time::timeout(budget, work).await.unwrap_or_default()
+    let project_root = cursor_project_root_from_parsed_event_with_identity(&parsed).await;
+    let mut args = serde_json::json!({
+        "action": "ingest_transcript",
+        "provider": "cursor",
+        "user_scope": project_root.is_none(),
+        "event_json": event_json,
+    });
+    if let Some(max_new_bytes) = max_new_bytes {
+        args["max_new_bytes"] = serde_json::json!(max_new_bytes);
+    }
+    match tokio::time::timeout(
+        budget,
+        super::daemon_hook_action(project_root.as_deref(), args),
+    )
+    .await
+    {
+        Ok(Ok(result)) => CursorIngestOutcome {
+            completed: result
+                .get("completed")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+            user_scope: result
+                .get("user_scope")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+            messages_upserted: result
+                .get("messages_upserted")
+                .and_then(Value::as_u64)
+                .unwrap_or(0),
+        },
+        Ok(Err(error)) => {
+            eprintln!("[tracedecay] Cursor transcript ingest daemon call failed: {error}");
+            CursorIngestOutcome::default()
+        }
+        Err(_) => {
+            eprintln!("[tracedecay] Cursor transcript ingest daemon call timed out");
+            CursorIngestOutcome::default()
+        }
+    }
 }
 
 fn event_session_id_from_json(event_json: &str) -> Option<String> {
@@ -996,6 +989,21 @@ mod tests {
     use super::super::tool_hints::HintCategory;
     use super::*;
     use crate::config::USER_DATA_DIR_ENV;
+
+    #[test]
+    fn cursor_session_start_event_signals_daemon_with_real_cwd() {
+        let event = cursor_session_start_hook_event(&serde_json::json!({
+            "cwd": "/workspace/cursor-session"
+        }))
+        .unwrap();
+
+        assert_eq!(event.agent, crate::daemon::HookAgent::Cursor.as_wire());
+        assert_eq!(event.event, "sessionStart");
+        assert_eq!(
+            event.cwd.as_deref(),
+            Some(Path::new("/workspace/cursor-session"))
+        );
+    }
 
     #[test]
     fn cursor_before_submit_prompt_json_attaches_context_only_when_present() {

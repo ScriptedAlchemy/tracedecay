@@ -67,6 +67,17 @@ fn block_on_inventory(
         .block_on(build_inventory(options))
 }
 
+async fn build_inventory_with_env_lock(
+    options: MigrationInventoryOptions,
+) -> tracedecay::errors::Result<MigrationInventory> {
+    // Inventory resolves its maintenance profile through process-global env.
+    // Serialize it with every HOME/HERMES_HOME-mutating storage test so
+    // parallel tests neither contend on one lifecycle lease nor scan another
+    // test's transient profile.
+    let _guard = crate::support::HOME_ENV_LOCK.lock().await;
+    build_inventory(options).await
+}
+
 fn make_project_store(root: &Path) {
     let data_dir = root.join(".tracedecay");
     fs::create_dir_all(&data_dir).unwrap();
@@ -239,7 +250,7 @@ async fn inventory_does_not_open_or_recover_dirty_project_db() {
     let db_path = root.join(".tracedecay/tracedecay.db");
     let before = fs::read(&db_path).unwrap();
 
-    let report = build_inventory(MigrationInventoryOptions {
+    let report = build_inventory_with_env_lock(MigrationInventoryOptions {
         roots: vec![dir.path().to_path_buf()],
         ..MigrationInventoryOptions::default()
     })
@@ -269,7 +280,7 @@ async fn inventory_records_project_store_sidecar_artifacts() {
     fs::write(data_dir.join("config.json"), b"{}").unwrap();
     fs::write(data_dir.join("store_manifest.json"), b"{}").unwrap();
 
-    let report = build_inventory(MigrationInventoryOptions {
+    let report = build_inventory_with_env_lock(MigrationInventoryOptions {
         roots: vec![dir.path().to_path_buf()],
         ..MigrationInventoryOptions::default()
     })
@@ -311,7 +322,7 @@ async fn inventory_records_branch_graph_db_and_marks_corrupt_when_quick_check_fa
     fs::write(branches_dir.join("feature.db-wal"), b"wal").unwrap();
     fs::write(branches_dir.join("feature.db-shm"), b"shm").unwrap();
 
-    let report = build_inventory(MigrationInventoryOptions {
+    let report = build_inventory_with_env_lock(MigrationInventoryOptions {
         roots: vec![dir.path().to_path_buf()],
         ..MigrationInventoryOptions::default()
     })
@@ -357,7 +368,7 @@ async fn inventory_skips_symlinked_branches_dir_by_default() {
     fs::write(&branch_db, b"not sqlite").unwrap();
     symlink(&real_branches, root.join(".tracedecay/branches")).unwrap();
 
-    let report = build_inventory(MigrationInventoryOptions {
+    let report = build_inventory_with_env_lock(MigrationInventoryOptions {
         roots: vec![dir.path().to_path_buf()],
         follow_symlinks: false,
         ..MigrationInventoryOptions::default()
@@ -395,7 +406,7 @@ async fn inventory_reports_global_db_metadata() {
     assert!(db.ensure_token_count_cache().await);
     drop(db);
 
-    let report = build_inventory(MigrationInventoryOptions {
+    let report = build_inventory_with_env_lock(MigrationInventoryOptions {
         roots: Vec::new(),
         global_db_path: Some(db_path.clone()),
         ..MigrationInventoryOptions::default()
@@ -433,7 +444,7 @@ async fn inventory_discovers_registered_project_outside_scan_roots() {
     db.upsert(&registered, 42).await;
     drop(db);
 
-    let report = build_inventory(MigrationInventoryOptions {
+    let report = build_inventory_with_env_lock(MigrationInventoryOptions {
         roots: Vec::new(),
         global_db_path: Some(db_path),
         ..MigrationInventoryOptions::default()
@@ -555,7 +566,7 @@ async fn inventory_reports_registered_project_with_missing_local_store() {
     db.upsert(&registered, 42).await;
     drop(db);
 
-    let report = build_inventory(MigrationInventoryOptions {
+    let report = build_inventory_with_env_lock(MigrationInventoryOptions {
         roots: Vec::new(),
         global_db_path: Some(db_path),
         ..MigrationInventoryOptions::default()
@@ -578,7 +589,7 @@ async fn inventory_warns_instead_of_failing_on_unreadable_global_db() {
     let db_path = dir.path().join("global.db");
     fs::write(&db_path, b"not sqlite").unwrap();
 
-    let report = build_inventory(MigrationInventoryOptions {
+    let report = build_inventory_with_env_lock(MigrationInventoryOptions {
         roots: Vec::new(),
         global_db_path: Some(db_path),
         ..MigrationInventoryOptions::default()
@@ -600,7 +611,7 @@ async fn inventory_flags_leftover_config_tmp_for_manual_review() {
     make_project_store(&root);
     fs::write(root.join(".tracedecay/config.json.tmp"), b"partial config").unwrap();
 
-    let report = build_inventory(MigrationInventoryOptions {
+    let report = build_inventory_with_env_lock(MigrationInventoryOptions {
         roots: vec![dir.path().to_path_buf()],
         ..MigrationInventoryOptions::default()
     })
@@ -631,7 +642,7 @@ async fn inventory_reports_skipped_symlink_directories() {
     let alias = dir.path().join("alias_project");
     std::os::unix::fs::symlink(&real, &alias).unwrap();
 
-    let report = build_inventory(MigrationInventoryOptions {
+    let report = build_inventory_with_env_lock(MigrationInventoryOptions {
         roots: vec![dir.path().to_path_buf()],
         follow_symlinks: false,
         ..MigrationInventoryOptions::default()
@@ -658,7 +669,7 @@ async fn inventory_skips_symlinked_data_dir_by_default() {
     fs::write(real_data.join("tracedecay.db"), b"not sqlite").unwrap();
     std::os::unix::fs::symlink(&real_data, root.join(".tracedecay")).unwrap();
 
-    let report = build_inventory(MigrationInventoryOptions {
+    let report = build_inventory_with_env_lock(MigrationInventoryOptions {
         roots: vec![dir.path().to_path_buf()],
         follow_symlinks: false,
         ..MigrationInventoryOptions::default()

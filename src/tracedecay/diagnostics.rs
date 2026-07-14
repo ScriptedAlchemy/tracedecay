@@ -64,6 +64,10 @@ impl TraceDecay {
         self.db.conn().clone()
     }
 
+    pub(crate) fn dashboard_database_guard(&self) -> std::sync::Arc<Database> {
+        std::sync::Arc::new(self.db.clone())
+    }
+
     /// Filesystem path of the project's tracedecay directory, for display in
     /// dashboard payloads (mirrors the `path` field of the Hermes plugin API).
     pub(crate) fn dashboard_db_path(&self) -> std::path::PathBuf {
@@ -170,12 +174,21 @@ impl TraceDecay {
                     .to_string(),
             });
         }
-        let (db, _) = Database::open(&self.store_layout.graph_db_path).await?;
+        let authority = crate::db::DatabaseAuthority::for_runtime(
+            &self.store_layout.graph_db_path,
+            "open diagnostics project store",
+        )?;
+        let (db, _) = Database::open(&self.store_layout.graph_db_path, &authority).await?;
         Ok(db)
     }
 
     pub async fn open_project_store_db_read_only(&self) -> Result<Database> {
-        let (db, _) = Database::open_read_only(&self.store_layout.graph_db_path).await?;
+        let authority = crate::db::DatabaseAuthority::for_runtime(
+            &self.store_layout.graph_db_path,
+            "open diagnostics project store read-only",
+        )?;
+        let (db, _) =
+            Database::open_read_only(&self.store_layout.graph_db_path, &authority).await?;
         Ok(db)
     }
 

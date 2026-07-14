@@ -7,13 +7,15 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use crate::branch;
 use crate::branch_meta::{self, BranchMeta};
 use crate::config::{TraceDecayConfig, db_filename, load_config_from_path, save_config_to_path};
-use crate::db::Database;
+use crate::db::{Database, DatabaseAuthority};
 use crate::errors::{Result, TraceDecayError};
 use crate::extraction::LanguageRegistry;
 use crate::global_db::{GraphScopeUpsert, StoreArtifactUpsert, StoreInstanceUpsert};
 use crate::storage::{self, StoreLayout};
 
-use super::locking::{clear_dirty_sentinel_at, has_dirty_sentinel_at};
+use super::locking::{
+    clear_dirty_sentinel_at, has_dirty_sentinel_at, try_acquire_graph_sync_locks,
+};
 use super::{TraceDecay, TraceDecayOpenOptions, current_timestamp};
 
 impl TraceDecay {
@@ -31,13 +33,14 @@ impl TraceDecay {
     ) -> Result<Self> {
         let store_layout =
             Self::resolve_store_layout_for_project(project_root, &open_options).await?;
+        let authority = DatabaseAuthority::for_runtime(&store_layout.graph_db_path, "init")?;
         let config = TraceDecayConfig {
             root_dir: project_root.to_string_lossy().to_string(),
             ..TraceDecayConfig::default()
         };
         save_config_to_path(&store_layout.config_path, &config)?;
 
-        let (db, _migrated) = Database::initialize(&store_layout.graph_db_path).await?;
+        let (db, _migrated) = Database::initialize(&store_layout.graph_db_path, &authority).await?;
         let active_graph_layout = active_graph_layout(&store_layout.graph_db_path);
         if store_layout.storage_mode == storage::StorageMode::ProfileSharded {
             storage::write_store_manifest(&store_layout)?;
@@ -118,7 +121,8 @@ impl TraceDecay {
             "tracedecay-current-schema-{}-{stamp}.db",
             std::process::id()
         ));
-        let (db, _) = Database::initialize(&db_path).await?;
+        let authority = DatabaseAuthority::acquire_test(&db_path, "latest schema version")?;
+        let (db, _) = Database::initialize(&db_path, &authority).await?;
         let version = Self::schema_version(&db, "latest_schema_version").await;
         db.close();
         delete_db_files(&db_path);
@@ -286,7 +290,7 @@ impl TraceDecay {
     /// Falls back to the nearest tracked ancestor DB with a warning only when
     /// the live branch cannot be auto-tracked, such as detached HEAD.
     /// If the previous operation was interrupted (dirty sentinel exists),
-    /// the database is integrity-checked and rebuilt if corrupted.
+    /// the database is integrity-checked before any writable open.
     pub async fn open(project_root: &Path) -> Result<Self> {
         Self::open_with_options(project_root, TraceDecayOpenOptions::default()).await
     }
@@ -337,10 +341,51 @@ impl TraceDecay {
             );
         }
 
+        // A dirty marker can also describe a sync that is still active in a
+        // peer process. Recovery must own both graph-local and legacy locks so
+        // it cannot race that writer or clear its sentinel. Preflight through
+        // the read-only connection before Database::open applies writable
+        // pragmas or migrations to a potentially damaged recovery set.
+        let _recovery_lock = if crashed {
+            Some(try_acquire_graph_sync_locks(
+                &active_graph_layout.sync_lock_path,
+                &store_layout.sync_lock_path,
+            )?)
+        } else {
+            None
+        };
+        if crashed {
+            let authority = DatabaseAuthority::for_runtime(&db_path, "crash verification")?;
+            let verification = match Database::open_read_only(&db_path, &authority).await {
+                Ok((db, _)) => db,
+                Err(error) => {
+                    print_corruption_warning(&db_path);
+                    return Err(recovery_required_error(&db_path, error));
+                }
+            };
+            let integrity = verification.quick_check().await;
+            verification.close();
+            match integrity {
+                Ok(true) => {}
+                Ok(false) => {
+                    print_corruption_warning(&db_path);
+                    return Err(recovery_required_error(
+                        &db_path,
+                        "read-only SQLite quick_check did not return ok",
+                    ));
+                }
+                Err(error) => {
+                    print_corruption_warning(&db_path);
+                    return Err(recovery_required_error(&db_path, error));
+                }
+            }
+        }
+
         // Ordinary opens never replace database files. A daemon or another MCP
         // process may still hold the current DB/WAL/SHM inodes, and deleting
         // them here would split readers and writers across different stores.
-        let open_result = Database::open(&db_path).await;
+        let authority = DatabaseAuthority::for_runtime(&db_path, "open project store")?;
+        let open_result = Database::open(&db_path, &authority).await;
         let (db, migrated) = match open_result {
             Ok(pair) => pair,
             Err(e) if Database::is_corruption_error(&e) || crashed => {
@@ -434,7 +479,8 @@ impl TraceDecay {
             });
         }
 
-        let (db, _) = Database::open_read_only(&db_path).await?;
+        let authority = DatabaseAuthority::for_runtime(&db_path, "open project store read-only")?;
+        let (db, _) = Database::open_read_only(&db_path, &authority).await?;
         Ok(Self {
             db,
             config,
@@ -505,6 +551,10 @@ impl TraceDecay {
             return Ok(branch::BranchAddOutcome::NotIndexed);
         }
 
+        // Branch preparation copies a live SQLite store and rewrites metadata;
+        // reject non-daemon callers before either filesystem mutation occurs.
+        let _authority =
+            DatabaseAuthority::for_runtime(&store_layout.graph_db_path, "add branch tracking")?;
         Self::add_branch_tracking_in_layout(
             project_root,
             branch_name,
@@ -668,7 +718,8 @@ impl TraceDecay {
             });
         }
 
-        let (db, _) = Database::open(&db_path).await?;
+        let authority = DatabaseAuthority::for_runtime(&db_path, "open branch store")?;
+        let (db, _) = Database::open(&db_path, &authority).await?;
         Ok(Self {
             db,
             config,
@@ -691,7 +742,7 @@ impl TraceDecay {
         Some(meta.branches.keys().cloned().collect())
     }
 
-    async fn register_project_store_in_global_registry(&self) {
+    pub(crate) async fn register_project_store_in_global_registry(&self) {
         static REGISTRY_WRITE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
         if self.store_layout.storage_mode != storage::StorageMode::ProfileSharded {
@@ -1044,21 +1095,25 @@ impl std::fmt::Display for StoreIdentityInventory {
 }
 
 async fn store_identity_inventory(layout: &StoreLayout) -> StoreIdentityInventory {
-    let (graph_health, nodes, files, facts) =
-        match Database::open_read_only(&layout.graph_db_path).await {
-            Ok((db, _)) => {
-                if let Ok(stats) = db.get_stats().await {
-                    let facts = count_rows(db.conn(), "memory_facts").await;
-                    db.close();
-                    ("healthy", stats.node_count, stats.file_count, facts)
-                } else {
-                    db.close();
-                    ("corrupt", 0, 0, 0)
-                }
+    let authority = DatabaseAuthority::for_runtime(&layout.graph_db_path, "store inventory");
+    let open_result = match authority {
+        Ok(authority) => Database::open_read_only(&layout.graph_db_path, &authority).await,
+        Err(error) => Err(error),
+    };
+    let (graph_health, nodes, files, facts) = match open_result {
+        Ok((db, _)) => {
+            if let Ok(stats) = db.get_stats().await {
+                let facts = count_rows(db.conn(), "memory_facts").await;
+                db.close();
+                ("healthy", stats.node_count, stats.file_count, facts)
+            } else {
+                db.close();
+                ("corrupt", 0, 0, 0)
             }
-            Err(_) if layout.graph_db_path.exists() => ("corrupt", 0, 0, 0),
-            Err(_) => ("missing", 0, 0, 0),
-        };
+        }
+        Err(_) if layout.graph_db_path.exists() => ("corrupt", 0, 0, 0),
+        Err(_) => ("missing", 0, 0, 0),
+    };
 
     let (sessions, messages, lcm_rows) = if let Some(db) =
         crate::global_db::GlobalDb::open_read_only_at(&layout.sessions_db_path).await

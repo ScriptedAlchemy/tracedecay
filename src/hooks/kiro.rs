@@ -174,8 +174,13 @@ async fn reset_counter_for_kiro_event(event_json: &str) {
     let Some(project_root) = kiro_project_root(event_json) else {
         return;
     };
-    if let Ok(cg) = crate::tracedecay::TraceDecay::open(&project_root).await {
-        let _ = cg.reset_local_counter().await;
+    if let Err(error) = super::daemon_hook_action(
+        Some(&project_root),
+        serde_json::json!({ "action": "reset_counter" }),
+    )
+    .await
+    {
+        eprintln!("[tracedecay] local counter reset daemon call failed: {error}");
     }
 }
 
@@ -192,43 +197,41 @@ async fn ingest_kiro_transcript_for_event(
     max_new_bytes: Option<u64>,
     budget: std::time::Duration,
 ) -> KiroIngestOutcome {
-    let work = async {
-        if let Some(project_root) = kiro_project_root(event_json) {
-            let Some(db) = crate::sessions::cursor::open_project_session_db(&project_root).await
-            else {
-                return KiroIngestOutcome::default();
-            };
-            let stats =
-                crate::sessions::kiro::ingest_kiro_for_project(&db, &project_root, max_new_bytes)
-                    .await;
-            return KiroIngestOutcome {
-                messages_upserted: stats.messages_upserted,
-                ..KiroIngestOutcome::default()
-            };
+    let project_root = kiro_project_root(event_json);
+    let mut args = serde_json::json!({
+        "action": "ingest_transcript",
+        "provider": "kiro",
+        "user_scope": project_root.is_none(),
+        "event_json": event_json,
+    });
+    if let Some(max_new_bytes) = max_new_bytes {
+        args["max_new_bytes"] = serde_json::json!(max_new_bytes);
+    }
+    match tokio::time::timeout(
+        budget,
+        super::daemon_hook_action(project_root.as_deref(), args),
+    )
+    .await
+    {
+        Ok(Ok(result)) => KiroIngestOutcome {
+            user_scope: result
+                .get("user_scope")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+            messages_upserted: result
+                .get("messages_upserted")
+                .and_then(Value::as_u64)
+                .unwrap_or(0),
+        },
+        Ok(Err(error)) => {
+            eprintln!("[tracedecay] Kiro transcript ingest daemon call failed: {error}");
+            KiroIngestOutcome::default()
         }
-
-        let Ok(profile_root) = crate::storage::default_profile_root() else {
-            return KiroIngestOutcome::default();
-        };
-        let Some(db) = crate::sessions::open_user_session_db(&profile_root).await else {
-            return KiroIngestOutcome::default();
-        };
-        let Some(source) = crate::sessions::kiro::KiroSource::new() else {
-            return KiroIngestOutcome::default();
-        };
-        let Some(registered_roots) = crate::sessions::try_registered_project_roots().await else {
-            return KiroIngestOutcome::default();
-        };
-        let source = source.for_user_scope(registered_roots);
-        let stats =
-            crate::sessions::source::ingest_source(&db, &source, &profile_root, max_new_bytes)
-                .await;
-        KiroIngestOutcome {
-            user_scope: true,
-            messages_upserted: stats.messages_upserted,
+        Err(_) => {
+            eprintln!("[tracedecay] Kiro transcript ingest daemon call timed out");
+            KiroIngestOutcome::default()
         }
-    };
-    tokio::time::timeout(budget, work).await.unwrap_or_default()
+    }
 }
 
 async fn kiro_prompt_memory_recall(event_json: &str) -> Option<String> {

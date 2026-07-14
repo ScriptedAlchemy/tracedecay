@@ -1,19 +1,25 @@
 use std::path::PathBuf;
+#[cfg(unix)]
+use std::process::Command;
+use std::sync::Arc;
 
 #[cfg(unix)]
 use serde_json::Value;
 #[cfg(unix)]
 use serde_json::json;
-#[cfg(unix)]
 use tempfile::TempDir;
-#[cfg(unix)]
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 #[cfg(unix)]
 use tokio::task::JoinHandle;
 
 #[cfg(unix)]
-use super::{AutomationSchedulerHandle, DaemonEngine, ProjectServerKey, drain_client_tasks};
-use super::{DaemonClientIdentity, DaemonHandshake, DaemonLifecycle};
+use super::{AutomationSchedulerHandle, DaemonEngine, drain_client_tasks};
+use super::{
+    DaemonClientIdentity, DaemonHandshake, DaemonLifecycle, DatabaseOwnerRegistry, ProjectRouteKey,
+    ProjectServerKey, StoreAdministration, StoreOwnerKey,
+};
+
+mod compatibility;
 
 #[test]
 fn daemon_lifecycle_rejects_new_work_after_draining() {
@@ -23,6 +29,138 @@ fn daemon_lifecycle_rejects_new_work_after_draining() {
     lifecycle.begin_draining();
 
     assert!(!lifecycle.accepting());
+}
+
+#[tokio::test]
+async fn portable_broker_requests_reuse_one_authenticated_project_owner() {
+    const TOKEN: &str = "0123456789abcdef0123456789abcdef";
+
+    let temp = TempDir::new().expect("temp dir");
+    let project = temp.path().join("project");
+    let profile_root = temp.path().join("profile");
+    std::fs::create_dir_all(&project).expect("project dir");
+    let client_identity = test_client_identity_for(profile_root.clone());
+    let options = crate::tracedecay::TraceDecayOpenOptions {
+        profile_root: Some(profile_root.clone()),
+        global_db_path: Some(client_identity.global_db_path.clone()),
+    };
+    drop(
+        crate::tracedecay::TraceDecay::init_with_options(&project, options)
+            .await
+            .expect("initialize project"),
+    );
+    let _database_scope =
+        crate::db::enter_daemon_database_scope(&profile_root, 1, "portable-owner-cache-test")
+            .expect("daemon database scope");
+    let handshake = DaemonHandshake {
+        project_path: Some(project.clone()),
+        client_identity,
+        ..test_handshake_defaults()
+    };
+    let route = super::ProjectRouteKey::from_handshake(&project, &handshake).expect("route key");
+    let owners = std::sync::Arc::new(tokio::sync::Mutex::new(
+        super::DatabaseOwnerRegistry::default(),
+    ));
+    let store_administration = StoreAdministration::with_project_servers(Arc::clone(&owners));
+    let gates = std::sync::Arc::new(tokio::sync::Mutex::new(super::ProjectOpenGates::default()));
+    let attempts = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let lifecycle = DaemonLifecycle::default();
+    let (listener, endpoint) =
+        super::transport::BrokerListener::bind(&super::transport::default_loopback_endpoint())
+            .await
+            .expect("loopback listener");
+
+    let server = {
+        let store_administration = store_administration.clone();
+        let gates = std::sync::Arc::clone(&gates);
+        let attempts = std::sync::Arc::clone(&attempts);
+        let lifecycle = lifecycle.clone();
+        tokio::spawn(async move {
+            let mut clients = tokio::task::JoinSet::new();
+            for _ in 0..2 {
+                let stream = listener.accept().await.expect("accept client");
+                let store_administration = store_administration.clone();
+                let gates = std::sync::Arc::clone(&gates);
+                let attempts = std::sync::Arc::clone(&attempts);
+                let lifecycle = lifecycle.clone();
+                clients.spawn(async move {
+                    Box::pin(super::serve_windows_broker_client(
+                        stream,
+                        TOKEN,
+                        &lifecycle,
+                        store_administration,
+                        gates,
+                        Some(attempts),
+                    ))
+                    .await
+                });
+            }
+            while let Some(client) = clients.join_next().await {
+                client.expect("client task").expect("serve client");
+            }
+        })
+    };
+
+    let request = |id: u64| {
+        let endpoint = endpoint.clone();
+        let handshake = handshake.clone();
+        async move {
+            let stream = super::transport::BrokerStream::connect(&endpoint)
+                .await
+                .expect("connect client");
+            let (reader, mut writer) = stream.into_split();
+            let preface = super::transport::DaemonAuthPreface::new(TOKEN)
+                .to_line()
+                .expect("auth preface");
+            writer.write_all(preface.as_bytes()).await.expect("preface");
+            writer.write_all(b"\n").await.expect("preface newline");
+            writer
+                .write_all(handshake.to_line().expect("handshake").as_bytes())
+                .await
+                .expect("handshake");
+            writer.write_all(b"\n").await.expect("handshake newline");
+            let initialize = serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": "2024-11-05",
+                    "capabilities": {},
+                    "clientInfo": {"name": "portable-cache-test", "version": "1"}
+                }
+            });
+            writer
+                .write_all(initialize.to_string().as_bytes())
+                .await
+                .expect("initialize");
+            writer.write_all(b"\n").await.expect("initialize newline");
+            writer.shutdown().await.expect("shutdown request writer");
+            let mut lines = tokio::io::BufReader::new(reader).lines();
+            let response = lines
+                .next_line()
+                .await
+                .expect("read response")
+                .expect("initialize response");
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(&response).unwrap()["id"],
+                id
+            );
+        }
+    };
+    tokio::join!(request(1), request(2));
+    server.await.expect("broker server");
+
+    assert_eq!(
+        attempts.load(std::sync::atomic::Ordering::Relaxed),
+        1,
+        "same-route requests must singleflight one project open"
+    );
+    let owners = owners.lock().await;
+    assert_eq!(owners.servers.len(), 1);
+    assert_eq!(owners.aliases.len(), 1);
+    let first = owners.get_route(&route).expect("first cached owner").1;
+    let second = owners.get_route(&route).expect("second cached owner").1;
+    assert!(std::sync::Arc::ptr_eq(first, second));
 }
 
 #[cfg(unix)]
@@ -50,6 +188,184 @@ async fn client_drain_waits_for_completed_work() {
 
     assert!(drained);
     assert!(clients.is_empty());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn one_shot_tool_call_aborts_when_daemon_liveness_fails_after_write() {
+    let temp = TempDir::new().expect("temp dir");
+    let socket = temp.path().join("daemon.sock");
+    let listener = tokio::net::UnixListener::bind(&socket).expect("bind daemon socket");
+    let server = tokio::spawn(async move {
+        let (_stream, _) = listener.accept().await.expect("accept tool call");
+        drop(listener);
+        std::future::pending::<()>().await;
+    });
+
+    let error = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        super::call_tool_with_liveness_poll(
+            &socket,
+            &test_handshake_defaults(),
+            "tracedecay_status",
+            json!({}),
+            std::time::Duration::from_millis(10),
+        ),
+    )
+    .await
+    .expect("liveness failure detection timed out")
+    .expect_err("lost daemon liveness must abort the one-shot request");
+    let message = error.to_string();
+    assert!(message.contains("tracedecay_status"), "{message}");
+    assert!(message.contains("unreachable"), "{message}");
+    assert!(
+        message.contains("already sent") && message.contains("not retried"),
+        "{message}"
+    );
+    server.abort();
+    let _ = server.await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn proxied_request_uses_shared_liveness_boundary_after_write() {
+    let temp = TempDir::new().expect("temp dir");
+    let socket = temp.path().join("daemon.sock");
+    let listener = tokio::net::UnixListener::bind(&socket).expect("bind daemon socket");
+    let server = tokio::spawn(async move {
+        let (_stream, _) = listener.accept().await.expect("accept proxied request");
+        drop(listener);
+        std::future::pending::<()>().await;
+    });
+    let request = json!({
+        "jsonrpc": "2.0",
+        "id": 7,
+        "method": "tools/list",
+    })
+    .to_string();
+
+    let error = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        super::send_daemon_request_line_with_liveness_poll(
+            &socket,
+            &test_handshake_defaults(),
+            &request,
+            std::time::Duration::from_millis(10),
+        ),
+    )
+    .await
+    .expect("proxy liveness failure detection timed out")
+    .expect_err("proxied response wait must stop when daemon liveness fails");
+    let message = error.to_string();
+    assert!(message.contains("tools/list"), "{message}");
+    assert!(
+        message.contains("already sent") && message.contains("not retried"),
+        "{message}"
+    );
+    server.abort();
+    let _ = server.await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn post_write_disconnect_reports_ambiguous_outcome_without_retry() {
+    let temp = TempDir::new().expect("temp dir");
+    let socket = temp.path().join("daemon.sock");
+    let listener = tokio::net::UnixListener::bind(&socket).expect("bind daemon socket");
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.expect("accept proxied request");
+        let (reader, _writer) = stream.into_split();
+        let mut lines = tokio::io::BufReader::new(reader).lines();
+        lines
+            .next_line()
+            .await
+            .expect("read handshake")
+            .expect("handshake line");
+        lines
+            .next_line()
+            .await
+            .expect("read request")
+            .expect("request line");
+    });
+    let request = json!({
+        "jsonrpc": "2.0",
+        "id": 8,
+        "method": "tools/call",
+    })
+    .to_string();
+
+    let error = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        super::send_daemon_request_line_with_liveness_poll(
+            &socket,
+            &test_handshake_defaults(),
+            &request,
+            std::time::Duration::from_millis(10),
+        ),
+    )
+    .await
+    .expect("post-write disconnect detection timed out")
+    .expect_err("disconnect without a response must remain ambiguous");
+    let message = error.to_string();
+    assert!(message.contains("outcome is unknown"), "{message}");
+    assert!(message.contains("not retried"), "{message}");
+    assert!(!message.contains("retry the request"), "{message}");
+    server.await.expect("fake daemon task");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn one_shot_tool_call_allows_long_response_while_daemon_stays_live() {
+    let temp = TempDir::new().expect("temp dir");
+    let socket = temp.path().join("daemon.sock");
+    let listener = tokio::net::UnixListener::bind(&socket).expect("bind daemon socket");
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.expect("accept tool call");
+        let (reader, mut writer) = stream.into_split();
+        let mut lines = tokio::io::BufReader::new(reader).lines();
+        lines
+            .next_line()
+            .await
+            .expect("read handshake")
+            .expect("handshake line");
+        let request_line = lines
+            .next_line()
+            .await
+            .expect("read request")
+            .expect("request line");
+        let request: Value = serde_json::from_str(&request_line).expect("request json");
+        let (probe, _) = tokio::time::timeout(std::time::Duration::from_secs(2), listener.accept())
+            .await
+            .expect("liveness probe timed out")
+            .expect("accept liveness probe");
+        drop(probe);
+        let response = json!({
+            "jsonrpc": "2.0",
+            "id": request["id"],
+            "result": {"status": "ok"},
+        });
+        writer
+            .write_all(response.to_string().as_bytes())
+            .await
+            .expect("write response");
+        writer.write_all(b"\n").await.expect("write newline");
+    });
+
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        super::call_tool_with_liveness_poll(
+            &socket,
+            &test_handshake_defaults(),
+            "tracedecay_status",
+            json!({}),
+            std::time::Duration::from_millis(10),
+        ),
+    )
+    .await
+    .expect("healthy long-running request timed out")
+    .expect("healthy long-running request must complete");
+    assert_eq!(result["status"], json!("ok"));
+    server.await.expect("fake daemon task");
 }
 
 #[cfg(unix)]
@@ -95,18 +411,28 @@ async fn draining_waits_for_one_bounded_in_flight_request() {
 async fn daemon_scheduler_shutdown_aborts_and_joins_every_loop() {
     let engine = DaemonEngine::default();
     let key = ProjectServerKey {
-        project_path: PathBuf::from("/projects/shutdown-test"),
+        owner: StoreOwnerKey {
+            profile_root: PathBuf::from("/profiles/shutdown-test"),
+            global_db_path: PathBuf::from("/profiles/shutdown-test/global.db"),
+            project_id: Some("shutdown-test".to_string()),
+            store_root: PathBuf::from("/stores/shutdown-test"),
+            graph_db_path: PathBuf::from("/stores/shutdown-test/graph.db"),
+        },
         scope_prefix: None,
-        client_identity: test_client_identity(),
     };
     let task = tokio::spawn(std::future::pending::<()>());
-    engine.automation_schedulers.lock().await.insert(
-        key,
-        AutomationSchedulerHandle {
-            task,
-            wake: std::sync::Arc::new(tokio::sync::Notify::new()),
-        },
-    );
+    engine
+        .store_administration
+        .automation_schedulers()
+        .lock()
+        .await
+        .insert(
+            key,
+            AutomationSchedulerHandle {
+                task,
+                wake: std::sync::Arc::new(tokio::sync::Notify::new()),
+            },
+        );
 
     engine.lifecycle.begin_draining();
     tokio::time::timeout(
@@ -116,7 +442,218 @@ async fn daemon_scheduler_shutdown_aborts_and_joins_every_loop() {
     .await
     .expect("scheduler shutdown should not wait for its tick interval");
 
-    assert!(engine.automation_schedulers.lock().await.is_empty());
+    assert!(
+        engine
+            .store_administration
+            .automation_schedulers()
+            .lock()
+            .await
+            .is_empty()
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn project_server_cache_hit_skips_open_and_singleflights_first_miss() {
+    const PHASE_TIMEOUT: tokio::time::Duration = tokio::time::Duration::from_secs(20);
+    let temp = TempDir::new().expect("temp dir");
+    let project = temp.path().join("project");
+    let project_alias = temp.path().join("project-alias");
+    let profile_root = temp.path().join("profile");
+    std::fs::create_dir_all(&project).expect("project dir");
+    std::os::unix::fs::symlink(&project, &project_alias).expect("project alias");
+    let client_identity = test_client_identity_for(profile_root.clone());
+    let options = crate::tracedecay::TraceDecayOpenOptions {
+        profile_root: Some(profile_root.clone()),
+        global_db_path: Some(client_identity.global_db_path.clone()),
+    };
+    eprintln!("[cache-test] phase=init start");
+    let initialized = crate::tracedecay::TraceDecay::init_with_options(&project, options)
+        .await
+        .expect("initialize project");
+    drop(initialized);
+    let mut config = crate::config::load_config(&project).expect("load project config");
+    config.sync.session_start_sync = false;
+    crate::config::save_config(&project, &config)
+        .expect("disable unrelated startup transcript ingestion");
+    eprintln!("[cache-test] phase=init done");
+
+    let direct = DaemonHandshake {
+        project_path: Some(project.clone()),
+        client_identity: client_identity.clone(),
+        ..test_handshake_defaults()
+    };
+    let aliased = DaemonHandshake {
+        project_path: Some(project_alias),
+        client_identity,
+        ..test_handshake_defaults()
+    };
+    let _database_scope =
+        crate::db::enter_daemon_database_scope(&profile_root, 1, "project-server-cache-test")
+            .expect("daemon database scope");
+    let engine = DaemonEngine::default();
+    let direct_route = super::ProjectRouteKey::from_handshake(&project, &direct).unwrap();
+    let alias_route = super::ProjectRouteKey::from_handshake(
+        &project.canonicalize().expect("canonical project"),
+        &aliased,
+    )
+    .unwrap();
+    assert_eq!(
+        direct_route, alias_route,
+        "aliases must share one route gate"
+    );
+
+    eprintln!("[cache-test] phase=concurrent-open start");
+    let (direct_server, alias_server) = tokio::time::timeout(PHASE_TIMEOUT, async {
+        tokio::join!(
+            engine.project_server(&direct),
+            engine.project_server(&aliased)
+        )
+    })
+    .await
+    .expect("cache-test concurrent-open phase timed out");
+    eprintln!("[cache-test] phase=concurrent-open done");
+    let direct_server = direct_server.expect("direct project server");
+    let alias_server = alias_server.expect("aliased project server");
+    assert!(std::sync::Arc::ptr_eq(&direct_server, &alias_server));
+    assert_eq!(
+        engine
+            .project_open_attempts
+            .load(std::sync::atomic::Ordering::Relaxed),
+        1,
+        "canonical aliases must singleflight the first project open"
+    );
+
+    eprintln!("[cache-test] phase=cached-open start");
+    let cached = tokio::time::timeout(PHASE_TIMEOUT, engine.project_server(&direct))
+        .await
+        .expect("cache-test cached-open phase timed out")
+        .expect("cached project server");
+    eprintln!("[cache-test] phase=cached-open done");
+    assert!(std::sync::Arc::ptr_eq(&direct_server, &cached));
+    assert_eq!(
+        engine
+            .project_open_attempts
+            .load(std::sync::atomic::Ordering::Relaxed),
+        1,
+        "cache hits must return before opening project databases"
+    );
+    drop(cached);
+    drop(alias_server);
+    drop(direct_server);
+    eprintln!("[cache-test] phase=shutdown start");
+    tokio::time::timeout(PHASE_TIMEOUT, engine.shutdown_all())
+        .await
+        .expect("cache-test shutdown phase timed out");
+    eprintln!("[cache-test] phase=shutdown done");
+}
+
+#[cfg(unix)]
+#[test]
+fn store_owner_key_collapses_profile_and_store_aliases() {
+    let temp = TempDir::new().expect("temp dir");
+    let profile = temp.path().join("profile");
+    let store = temp.path().join("store");
+    std::fs::create_dir_all(&profile).expect("profile dir");
+    std::fs::create_dir_all(&store).expect("store dir");
+    let profile_alias = temp.path().join("profile-alias");
+    let store_alias = temp.path().join("store-alias");
+    std::os::unix::fs::symlink(&profile, &profile_alias).expect("profile alias");
+    std::os::unix::fs::symlink(&store, &store_alias).expect("store alias");
+
+    let direct = StoreOwnerKey::from_paths(
+        &profile,
+        &profile.join("global.db"),
+        Some("project-id".to_string()),
+        &store,
+        &store.join("graph.db"),
+    )
+    .expect("direct owner");
+    let aliased = StoreOwnerKey::from_paths(
+        &profile_alias,
+        &profile_alias.join("global.db"),
+        Some("project-id".to_string()),
+        &store_alias,
+        &store_alias.join("graph.db"),
+    )
+    .expect("aliased owner");
+
+    assert_eq!(direct, aliased);
+}
+
+#[cfg(unix)]
+#[test]
+fn database_owner_registry_rekeys_and_evicts_stale_routes() {
+    let owner = StoreOwnerKey {
+        profile_root: PathBuf::from("/profile"),
+        global_db_path: PathBuf::from("/profile/global.db"),
+        project_id: Some("project".to_string()),
+        store_root: PathBuf::from("/store"),
+        graph_db_path: PathBuf::from("/store/main.db"),
+    };
+    let old = ProjectServerKey {
+        owner: owner.clone(),
+        scope_prefix: Some("src".to_string()),
+    };
+    let mut feature_owner = owner;
+    feature_owner.graph_db_path = PathBuf::from("/store/feature.db");
+    let new = ProjectServerKey {
+        owner: feature_owner,
+        scope_prefix: Some("src".to_string()),
+    };
+    let route = ProjectRouteKey {
+        profile_root: PathBuf::from("/profile"),
+        global_db_path: PathBuf::from("/profile/global.db"),
+        project_path: PathBuf::from("/project"),
+        scope_prefix: Some("src".to_string()),
+    };
+    let mut registry = DatabaseOwnerRegistry::<u8>::default();
+    registry.insert(old.clone(), 7);
+    registry.bind_route(route.clone(), old.clone());
+
+    assert!(registry.rekey(&old, &new));
+
+    assert!(registry.get(&old).is_none());
+    assert_eq!(registry.get(&new), Some(&7));
+    assert_eq!(registry.get_route(&route), Some((&new, &7)));
+
+    let mut collision = DatabaseOwnerRegistry::<u8>::default();
+    collision.insert(old.clone(), 7);
+    collision.insert(new.clone(), 9);
+    collision.bind_route(route.clone(), old.clone());
+    assert!(!collision.rekey(&old, &new));
+    assert!(collision.get(&old).is_none());
+    assert_eq!(collision.get(&new), Some(&9));
+    assert!(collision.get_route(&route).is_none());
+}
+
+#[test]
+fn database_owner_registry_race_keeps_first_server_and_binds_route() {
+    let owner = StoreOwnerKey {
+        profile_root: PathBuf::from("/profile"),
+        global_db_path: PathBuf::from("/profile/global.db"),
+        project_id: Some("project".to_string()),
+        store_root: PathBuf::from("/store"),
+        graph_db_path: PathBuf::from("/store/main.db"),
+    };
+    let key = ProjectServerKey {
+        owner,
+        scope_prefix: None,
+    };
+    let route = ProjectRouteKey {
+        profile_root: PathBuf::from("/profile"),
+        global_db_path: PathBuf::from("/profile/global.db"),
+        project_path: PathBuf::from("/project-alias"),
+        scope_prefix: None,
+    };
+    let mut registry = DatabaseOwnerRegistry::<u8>::default();
+    registry.insert(key.clone(), 7);
+
+    let (resolved, inserted) = registry.bind_or_insert_route(route.clone(), key.clone(), 9);
+
+    assert_eq!(resolved, 7);
+    assert!(!inserted);
+    assert_eq!(registry.get_route(&route), Some((&key, &7)));
 }
 
 fn test_client_identity() -> DaemonClientIdentity {
@@ -201,7 +738,9 @@ async fn daemon_round_trip(
     let (server_stream, client_stream) =
         tokio::net::UnixStream::pair().expect("daemon socket pair");
     let server =
-        tokio::spawn(async move { super::serve_socket_client(server_stream, engine).await });
+        tokio::spawn(
+            async move { Box::pin(super::serve_socket_client(server_stream, engine)).await },
+        );
     let (reader, mut writer) = client_stream.into_split();
     writer
         .write_all(handshake.to_line().expect("handshake json").as_bytes())
@@ -311,7 +850,7 @@ async fn connect_with_restart_grace_reconnects_once_daemon_rebinds() {
     });
 
     super::connect_with_restart_grace(
-        &socket,
+        &super::connection_for_socket_path(&socket),
         std::time::Duration::from_secs(8),
         std::time::Duration::from_millis(50),
     )
@@ -327,7 +866,7 @@ async fn connect_with_restart_grace_gives_up_with_restart_hint() {
     let socket = dir.path().join("daemon.sock");
 
     let err = super::connect_with_restart_grace(
-        &socket,
+        &super::connection_for_socket_path(&socket),
         std::time::Duration::from_millis(300),
         std::time::Duration::from_millis(50),
     )
@@ -374,6 +913,7 @@ async fn initialize_root_routing_replaces_cached_project_and_scope() {
     base_handshake.client_identity = test_client_identity_for(profile.path().to_path_buf());
     base_handshake.client_identity.global_db_path = global_db_path;
     let mut routed_handshake = base_handshake.clone();
+    let store_administration = super::StoreAdministration::default();
 
     let line = json!({
         "jsonrpc": "2.0",
@@ -388,8 +928,13 @@ async fn initialize_root_routing_replaces_cached_project_and_scope() {
     })
     .to_string();
 
-    super::update_proxy_handshake_from_initialize(&base_handshake, &mut routed_handshake, &line)
-        .await;
+    super::reset_proxy_handshake_for_initialize(&base_handshake, &mut routed_handshake, &line);
+    let route =
+        super::apply_daemon_initialize_route(&mut routed_handshake, &line, &store_administration)
+            .await
+            .expect("daemon initialize routing should succeed")
+            .expect("registered initialize root should produce a route");
+    assert_eq!(route.project_path, project_b);
 
     assert_eq!(
         routed_handshake.project_path.as_deref(),
@@ -404,12 +949,21 @@ async fn initialize_root_routing_replaces_cached_project_and_scope() {
         "params": {}
     })
     .to_string();
-    super::update_proxy_handshake_from_initialize(
+    super::reset_proxy_handshake_for_initialize(
         &base_handshake,
         &mut routed_handshake,
         &rerun_without_roots,
-    )
-    .await;
+    );
+    assert!(
+        super::apply_daemon_initialize_route(
+            &mut routed_handshake,
+            &rerun_without_roots,
+            &store_administration,
+        )
+        .await
+        .expect("daemon initialize reroute should succeed")
+        .is_none()
+    );
 
     assert_eq!(
         routed_handshake.project_path.as_deref(),
@@ -417,6 +971,52 @@ async fn initialize_root_routing_replaces_cached_project_and_scope() {
         "reinitialize without a route must not keep the previous routed project"
     );
     assert_eq!(routed_handshake.scope_prefix.as_deref(), Some("src"));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn daemon_resolves_registry_only_initialize_root_alias() {
+    let profile = TempDir::new().expect("profile temp dir");
+    let canonical = TempDir::new().expect("canonical project temp dir");
+    let alias = TempDir::new().expect("project alias temp dir");
+    let canonical = canonical.path().canonicalize().expect("canonical project");
+    let alias = alias.path().canonicalize().expect("canonical alias");
+    let nested = alias.join("nested");
+    std::fs::create_dir_all(&nested).expect("nested alias path");
+    let global_db_path = profile.path().join("global.db");
+    let registry = crate::global_db::GlobalDb::open_at(&global_db_path)
+        .await
+        .expect("open registry");
+    registry
+        .upsert_code_project("project-registry-only", &canonical, None, None, None)
+        .await
+        .expect("register canonical project");
+    registry
+        .upsert_project_alias(&alias, "project-registry-only")
+        .await
+        .expect("register project alias");
+    drop(registry);
+
+    let mut handshake = test_handshake_defaults();
+    handshake.allow_initialize_root_routing = true;
+    handshake.client_identity = test_client_identity_for(profile.path().to_path_buf());
+    handshake.client_identity.global_db_path = global_db_path;
+    let store_administration = super::StoreAdministration::default();
+    let line = json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": { "roots": [{ "uri": nested, "name": "alias" }] }
+    })
+    .to_string();
+
+    let route = super::apply_daemon_initialize_route(&mut handshake, &line, &store_administration)
+        .await
+        .expect("daemon initialize routing should succeed")
+        .expect("authenticated daemon should resolve registry alias");
+    assert_eq!(route.project_path, alias);
+    assert_eq!(handshake.project_path.as_deref(), Some(alias.as_path()));
+    assert!(!route.allow_init);
 }
 
 #[cfg(unix)]
@@ -454,8 +1054,11 @@ async fn initialize_root_routing_delegates_config_gated_git_auto_init() {
     .to_string();
 
     let mut routed_handshake = base_handshake.clone();
-    super::update_proxy_handshake_from_initialize(&base_handshake, &mut routed_handshake, &line)
-        .await;
+    let store_administration = super::StoreAdministration::default();
+    super::reset_proxy_handshake_for_initialize(&base_handshake, &mut routed_handshake, &line);
+    super::apply_daemon_initialize_route(&mut routed_handshake, &line, &store_administration)
+        .await
+        .expect("daemon should delegate auto-init");
     assert_eq!(
         routed_handshake.project_path.as_deref(),
         Some(project.as_path())
@@ -468,8 +1071,10 @@ async fn initialize_root_routing_delegates_config_gated_git_auto_init() {
     };
     config.sync.auto_init = false;
     crate::config::save_config(&project, &config).expect("disable auto-init");
-    super::update_proxy_handshake_from_initialize(&base_handshake, &mut routed_handshake, &line)
-        .await;
+    super::reset_proxy_handshake_for_initialize(&base_handshake, &mut routed_handshake, &line);
+    super::apply_daemon_initialize_route(&mut routed_handshake, &line, &store_administration)
+        .await
+        .expect("daemon should resolve git root with auto-init disabled");
     assert_eq!(
         routed_handshake.project_path.as_deref(),
         Some(project.as_path())
@@ -703,7 +1308,7 @@ async fn long_lived_proxy_reconnects_after_daemon_socket_rebind() {
 
 #[cfg(unix)]
 #[tokio::test]
-async fn proxy_transport_carries_initialize_root_and_resets_on_reinitialize() {
+async fn proxy_uses_daemon_initialize_route_without_registry_access() {
     let dir = TempDir::new().expect("temp dir");
     let temp_root = dir.path().canonicalize().expect("canonical temp dir");
     let active_root = temp_root.join("active");
@@ -713,20 +1318,12 @@ async fn proxy_transport_carries_initialize_root_and_resets_on_reinitialize() {
     let active = active_root.canonicalize().expect("active root");
     let target = target_root.canonicalize().expect("target root");
     let socket = temp_root.join("daemon.sock");
-    let client_identity = test_client_identity_for(temp_root.join("profile"));
-    let registry = crate::global_db::GlobalDb::open_at(&client_identity.global_db_path)
-        .await
-        .expect("registry");
-    registry
-        .upsert_code_project("proj_active_proxy", &active, None, None, Some("main"))
-        .await
-        .expect("active project registry");
-    registry
-        .upsert_code_project("proj_target_proxy", &target, None, None, Some("main"))
-        .await
-        .expect("target project registry");
+    let mut client_identity = test_client_identity_for(temp_root.join("profile"));
+    client_identity.global_db_path = temp_root.join("proxy-cannot-open-this-directory");
+    std::fs::create_dir_all(&client_identity.global_db_path).expect("non-database authority path");
 
     let listener = tokio::net::UnixListener::bind(&socket).expect("daemon socket");
+    let daemon_target = target.clone();
     let accept_task = tokio::spawn(async move {
         let mut projects = Vec::new();
         for _ in 0..4 {
@@ -746,14 +1343,28 @@ async fn proxy_transport_carries_initialize_root_and_resets_on_reinitialize() {
                 .expect("read request")
                 .expect("request line");
             let request: Value = serde_json::from_str(&request_line).expect("request json");
-            let project = handshake
+            let mut project = handshake
                 .project_path
                 .as_ref()
                 .map(|path| path.display().to_string());
+            let mut result = json!({ "project": project });
+            if request["method"] == json!("initialize")
+                && request
+                    .pointer("/params/roots")
+                    .and_then(Value::as_array)
+                    .is_some_and(|roots| !roots.is_empty())
+            {
+                project = Some(daemon_target.display().to_string());
+                result["project"] = json!(project);
+                result["_meta"]["tracedecayInitializeRoute"] = json!({
+                    "projectPath": daemon_target,
+                    "allowInit": false,
+                });
+            }
             let response = json!({
                 "jsonrpc": "2.0",
                 "id": request["id"].clone(),
-                "result": { "project": project }
+                "result": result
             });
             writer
                 .write_all(
@@ -765,7 +1376,12 @@ async fn proxy_transport_carries_initialize_root_and_resets_on_reinitialize() {
                 .expect("write response");
             writer.write_all(b"\n").await.expect("write newline");
             writer.shutdown().await.expect("shutdown fake daemon");
-            projects.push(project);
+            projects.push(
+                handshake
+                    .project_path
+                    .as_ref()
+                    .map(|path| path.display().to_string()),
+            );
         }
         projects
     });
@@ -866,7 +1482,7 @@ async fn proxy_transport_carries_initialize_root_and_resets_on_reinitialize() {
     assert_eq!(
         served_projects,
         vec![
-            Some(target.clone()),
+            Some(active.clone()),
             Some(target),
             Some(active.clone()),
             Some(active),
@@ -987,46 +1603,52 @@ fn daemon_handshake_requires_client_identity() {
     assert!(DaemonHandshake::from_line(&encoded).is_err());
 }
 
-/// Old client → new daemon: handshakes without version/instance fields must
-/// still parse, with empty defaults.
-#[test]
-fn daemon_handshake_accepts_old_client_without_version() {
-    let encoded = serde_json::json!({
-        "project_path": "/work/repo",
-        "scope_prefix": null,
-        "timings": false,
-        "allow_init": false,
-        "client_identity": {
-            "profile_root": "/profiles/client",
-            "global_db_path": "/profiles/client/global.db"
-        }
-    })
-    .to_string();
+#[tokio::test]
+async fn portable_broker_rejects_missing_auth_before_routing() {
+    const TOKEN: &str = "0123456789abcdef0123456789abcdef";
+    let owners = std::sync::Arc::new(tokio::sync::Mutex::new(
+        super::DatabaseOwnerRegistry::default(),
+    ));
+    let store_administration = StoreAdministration::with_project_servers(Arc::clone(&owners));
+    let gates = std::sync::Arc::new(tokio::sync::Mutex::new(super::ProjectOpenGates::default()));
+    let attempts = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let (listener, endpoint) =
+        super::transport::BrokerListener::bind(&super::transport::default_loopback_endpoint())
+            .await
+            .expect("loopback listener");
+    let server_administration = store_administration.clone();
+    let server_attempts = std::sync::Arc::clone(&attempts);
+    let server = tokio::spawn(async move {
+        let stream = listener.accept().await.expect("accept client");
+        Box::pin(super::serve_windows_broker_client(
+            stream,
+            TOKEN,
+            &DaemonLifecycle::default(),
+            server_administration,
+            gates,
+            Some(server_attempts),
+        ))
+        .await
+    });
+    let mut handshake = test_handshake_defaults();
+    handshake.project_path = Some(PathBuf::from("/must-not-route"));
+    let mut client = super::transport::BrokerStream::connect(&endpoint)
+        .await
+        .expect("connect client");
+    client
+        .write_all(handshake.to_line().expect("handshake").as_bytes())
+        .await
+        .expect("write unauthenticated handshake");
+    client.write_all(b"\n").await.expect("write newline");
+    client.shutdown().await.expect("shutdown client");
 
-    let decoded = DaemonHandshake::from_line(&encoded).expect("old handshake should decode");
-
-    assert_eq!(decoded.client_version, "");
-    assert_eq!(decoded.client_instance_id, "");
-    assert!(!decoded.tool_list_changed_capable);
-    assert_eq!(decoded.catalog_version, "");
-}
-
-/// New client → old daemon: the serde derive ignores unknown fields, so a
-/// daemon predating `client_version` (same derive) parses new handshakes.
-/// Adding another unknown field to a current handshake proves the
-/// tolerance the old daemon relies on.
-#[test]
-fn daemon_handshake_ignores_unknown_fields_for_old_daemons() {
-    let handshake = test_handshake_defaults();
-    let mut value: serde_json::Value =
-        serde_json::from_str(&handshake.to_line().expect("handshake should encode"))
-            .expect("handshake json");
-    value["field_from_a_future_version"] = serde_json::json!("ignored");
-
-    let decoded = DaemonHandshake::from_line(&value.to_string())
-        .expect("handshake with unknown fields should decode");
-
-    assert_eq!(decoded, handshake);
+    let error = server
+        .await
+        .expect("server task")
+        .expect_err("missing auth must fail closed");
+    assert!(error.to_string().contains("authentication failed"));
+    assert_eq!(attempts.load(std::sync::atomic::Ordering::Relaxed), 0);
+    assert!(owners.lock().await.values().next().is_none());
 }
 
 #[test]
@@ -1577,14 +2199,21 @@ async fn daemon_ensure_scheduler_skips_before_project_has_configured_work() {
         client_identity,
         ..test_handshake_defaults()
     };
+    let cg = crate::tracedecay::TraceDecay::init_with_options(&project, handshake.open_options())
+        .await
+        .expect("project init");
     let engine = super::DaemonEngine::default();
-    let key = super::ProjectServerKey::from_handshake(project.clone(), &handshake);
+    let key = super::ProjectServerKey::from_open_project(&cg, &handshake).expect("owner key");
 
     engine
         .ensure_automation_scheduler(key.clone(), project, handshake)
         .await;
 
-    let schedulers = engine.automation_schedulers.lock().await;
+    let schedulers = engine
+        .store_administration
+        .automation_schedulers()
+        .lock()
+        .await;
     assert!(!schedulers.contains_key(&key));
 }
 
@@ -1615,12 +2244,19 @@ async fn daemon_ensure_scheduler_starts_after_project_configures_work() {
         ..test_handshake_defaults()
     };
     let engine = super::DaemonEngine::default();
-    let key = super::ProjectServerKey::from_handshake(project.clone(), &handshake);
+    let key = super::ProjectServerKey::from_open_project(&cg, &handshake).expect("owner key");
 
     engine
         .ensure_automation_scheduler(key.clone(), project.clone(), handshake.clone())
         .await;
-    assert!(!engine.automation_schedulers.lock().await.contains_key(&key));
+    assert!(
+        !engine
+            .store_administration
+            .automation_schedulers()
+            .lock()
+            .await
+            .contains_key(&key)
+    );
 
     save_project_config(
         &cg.store_layout().dashboard_root,
@@ -1642,7 +2278,11 @@ async fn daemon_ensure_scheduler_starts_after_project_configures_work() {
         .ensure_automation_scheduler(key.clone(), project, handshake)
         .await;
 
-    let schedulers = engine.automation_schedulers.lock().await;
+    let schedulers = engine
+        .store_administration
+        .automation_schedulers()
+        .lock()
+        .await;
     assert!(schedulers.contains_key(&key));
     drop(schedulers);
     engine.shutdown_all().await;
@@ -1774,4 +2414,115 @@ async fn socket_client_rejects_tool_calls_without_project() {
         .await
         .expect("server task should complete")
         .expect("projectless client shutdown should be clean");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn daemon_linked_worktree_route_repairs_primary_identity_and_keeps_alias() {
+    let dir = TempDir::new().expect("temp dir");
+    let root = dir.path().canonicalize().expect("canonical temp dir");
+    let primary = root.join("primary");
+    let linked = root.join("linked");
+    let profile_root = root.join("profile");
+    std::fs::create_dir_all(&primary).expect("primary dir");
+    let git = |cwd: &std::path::Path, args: &[&str]| {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(cwd)
+            .env("GIT_AUTHOR_NAME", "TraceDecay Test")
+            .env("GIT_AUTHOR_EMAIL", "test@tracedecay.local")
+            .env("GIT_COMMITTER_NAME", "TraceDecay Test")
+            .env("GIT_COMMITTER_EMAIL", "test@tracedecay.local")
+            .output()
+            .expect("run git");
+        assert!(
+            output.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    };
+    git(&primary, &["init", "-b", "main", "--quiet"]);
+    std::fs::write(primary.join("README.md"), "linked worktree route\n").expect("fixture");
+    git(&primary, &["add", "."]);
+    git(&primary, &["commit", "-m", "fixture", "--quiet"]);
+    git(
+        &primary,
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "feature/linked-route",
+            linked.to_str().expect("utf-8 linked path"),
+            "HEAD",
+        ],
+    );
+
+    let client_identity = test_client_identity_for(profile_root.clone());
+    let options = crate::tracedecay::TraceDecayOpenOptions {
+        profile_root: Some(profile_root.clone()),
+        global_db_path: Some(client_identity.global_db_path.clone()),
+    };
+    let primary_cg = crate::tracedecay::TraceDecay::init_with_options(&primary, options.clone())
+        .await
+        .expect("primary init");
+    primary_cg.index_all().await.expect("primary index");
+    primary_cg
+        .db()
+        .checkpoint()
+        .await
+        .expect("primary checkpoint");
+    let project_id = primary_cg
+        .store_layout()
+        .identity
+        .project_id
+        .clone()
+        .expect("profile project id");
+    drop(primary_cg);
+
+    let registry = crate::global_db::GlobalDb::open_at(&client_identity.global_db_path)
+        .await
+        .expect("registry");
+    registry
+        .upsert_code_project(
+            &project_id,
+            &linked,
+            crate::worktree::git_common_dir(&linked).as_deref(),
+            None,
+            Some("main"),
+        )
+        .await
+        .expect("seed stale linked canonical root");
+
+    let handshake = DaemonHandshake {
+        project_path: Some(linked.clone()),
+        client_identity,
+        ..test_handshake_defaults()
+    };
+    let _database_scope =
+        crate::db::enter_daemon_database_scope(&profile_root, 1, "linked-worktree-route-test")
+            .expect("daemon database scope");
+    let engine = super::DaemonEngine::default();
+    engine
+        .project_server(&handshake)
+        .await
+        .expect("daemon linked-worktree route");
+
+    let context = registry
+        .project_registry_context_by_id(&project_id)
+        .await
+        .expect("registry context");
+    assert_eq!(
+        context.project.canonical_root,
+        crate::global_db::GlobalDb::canonical_project_key(&primary)
+    );
+    assert!(context.aliases.iter().any(|alias| {
+        alias.alias_path == crate::global_db::GlobalDb::canonical_project_key(&linked)
+    }));
+}
+
+#[test]
+fn unsupported_daemon_transport_never_falls_back_to_local_sqlite() {
+    assert!(super::proxy_required_by_platform(false, false));
+    assert!(super::proxy_required_by_platform(false, true));
+    assert!(!super::proxy_required_by_platform(true, false));
 }

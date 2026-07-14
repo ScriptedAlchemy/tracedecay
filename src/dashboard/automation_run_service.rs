@@ -1,8 +1,46 @@
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::Arc;
+
 use serde_json::{Value, json};
 
 use super::DashboardState;
 use super::memory_service::{push_curation_activity, push_curation_activity_with_level};
 use crate::sessions::lcm::{LcmGrepSort, LcmScope};
+
+pub(crate) type DashboardAutomationWriteFuture =
+    Pin<Box<dyn Future<Output = Result<Value, String>> + Send + 'static>>;
+pub(crate) type DashboardAutomationWriteOperation =
+    Box<dyn FnOnce() -> DashboardAutomationWriteFuture + Send + 'static>;
+pub(crate) type DashboardAutomationWriter = Arc<
+    dyn Fn(DashboardAutomationWriteOperation) -> DashboardAutomationWriteFuture
+        + Send
+        + Sync
+        + 'static,
+>;
+
+pub(crate) fn execute_dashboard_automation_run_direct(
+    operation: DashboardAutomationWriteOperation,
+) -> DashboardAutomationWriteFuture {
+    operation()
+}
+
+pub(crate) fn direct_dashboard_automation_writer() -> DashboardAutomationWriter {
+    Arc::new(execute_dashboard_automation_run_direct)
+}
+
+async fn execute_dashboard_automation_run<Operation, OperationFuture>(
+    state: &DashboardState,
+    operation: Operation,
+) -> Result<Value, String>
+where
+    Operation: FnOnce(DashboardState) -> OperationFuture + Send + 'static,
+    OperationFuture: Future<Output = Result<Value, String>> + Send + 'static,
+{
+    let writer = Arc::clone(&state.automation_writer);
+    let state = state.clone();
+    writer(Box::new(move || Box::pin(operation(state)))).await
+}
 
 pub(crate) struct MemoryCuratorRunRequest {
     pub max_clusters: usize,
@@ -10,6 +48,17 @@ pub(crate) struct MemoryCuratorRunRequest {
 }
 
 pub(crate) async fn memory_curator_run_payload_with_run_id(
+    state: &DashboardState,
+    request: MemoryCuratorRunRequest,
+    run_id: Option<String>,
+) -> Result<Value, String> {
+    execute_dashboard_automation_run(state, move |state| async move {
+        memory_curator_run_payload_with_run_id_direct(&state, request, run_id).await
+    })
+    .await
+}
+
+async fn memory_curator_run_payload_with_run_id_direct(
     state: &DashboardState,
     request: MemoryCuratorRunRequest,
     run_id: Option<String>,
@@ -238,6 +287,17 @@ pub(crate) async fn session_reflection_run_payload_with_run_id(
     request: SessionReflectionRunRequest,
     run_id: Option<String>,
 ) -> Result<Value, String> {
+    execute_dashboard_automation_run(state, move |state| async move {
+        session_reflection_run_payload_with_run_id_direct(&state, request, run_id).await
+    })
+    .await
+}
+
+async fn session_reflection_run_payload_with_run_id_direct(
+    state: &DashboardState,
+    request: SessionReflectionRunRequest,
+    run_id: Option<String>,
+) -> Result<Value, String> {
     use crate::automation::run_ledger::AutomationTrigger;
     use crate::automation::runner::{
         SessionReflectorAutomationOptions, run_session_reflector_with_backend,
@@ -328,6 +388,17 @@ pub(crate) async fn session_reflection_run_payload_with_run_id(
 }
 
 pub(crate) async fn skill_writing_run_payload_with_run_id(
+    state: &DashboardState,
+    request: SkillWritingRunRequest,
+    run_id: Option<String>,
+) -> Result<Value, String> {
+    execute_dashboard_automation_run(state, move |state| async move {
+        skill_writing_run_payload_with_run_id_direct(&state, request, run_id).await
+    })
+    .await
+}
+
+async fn skill_writing_run_payload_with_run_id_direct(
     state: &DashboardState,
     request: SkillWritingRunRequest,
     run_id: Option<String>,
@@ -591,4 +662,30 @@ fn automation_run_payload(
         "ledger_record": ledger_record,
         "backend_response": backend_response,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use super::*;
+
+    #[tokio::test]
+    async fn direct_writer_executes_operation_once() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let observed = Arc::clone(&calls);
+        let writer = direct_dashboard_automation_writer();
+
+        let result = writer(Box::new(move || {
+            Box::pin(async move {
+                observed.fetch_add(1, Ordering::Relaxed);
+                Ok(json!({ "status": "ok" }))
+            })
+        }))
+        .await
+        .expect("direct dashboard automation write should succeed");
+
+        assert_eq!(result, json!({ "status": "ok" }));
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+    }
 }

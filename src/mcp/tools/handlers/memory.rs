@@ -133,7 +133,8 @@ pub(super) async fn open_target_memory_db<'a>(
             db_path.display()
         )));
     }
-    let (db, _) = Database::open(&db_path).await?;
+    let authority = crate::db::DatabaseAuthority::for_runtime(&db_path, "open memory target")?;
+    let (db, _) = Database::open(&db_path, &authority).await?;
     Ok(TargetMemoryDb {
         db: TargetMemoryDbHandle::Owned(Box::new(db)),
         project_root: PathBuf::from(context.project.display_root),

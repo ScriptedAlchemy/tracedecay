@@ -56,6 +56,17 @@ fn normal_commands_keep_startup_maintenance() {
 }
 
 #[test]
+fn tool_fallback_skips_network_and_agent_startup_maintenance() {
+    let command = Commands::Tool {
+        project: None,
+        name: Some("message_search".to_string()),
+        args: Vec::new(),
+    };
+    assert!(should_skip_startup_maintenance(&command));
+    assert!(should_skip_agent_install_maintenance(&command));
+}
+
+#[test]
 fn agent_install_maintenance_is_selective() {
     // Skip the implicit reinstall scan on the hot path (`serve`), on the
     // explicit install commands (they already install), and on per-call
@@ -92,12 +103,6 @@ fn agent_install_maintenance_is_selective() {
             lifecycle_lease_token: None,
         }
     ));
-    assert!(should_skip_agent_install_maintenance(&Commands::Tool {
-        project: None,
-        name: Some("message_search".to_string()),
-        args: Vec::new(),
-    }));
-
     // Also skip for uninstall (about to remove configs) and doctor (a
     // read-only diagnostic) — restoring the original #84 intent.
     assert!(should_skip_agent_install_maintenance(

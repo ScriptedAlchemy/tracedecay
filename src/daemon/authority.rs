@@ -1,0 +1,628 @@
+use std::fs::{File, OpenOptions};
+use std::io::{Read, Seek, SeekFrom, Write};
+use std::path::{Component, Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use fs2::FileExt;
+use serde::{Deserialize, Deserializer, Serialize};
+
+use crate::errors::{Result, TraceDecayError};
+
+use super::transport::DaemonEndpoint;
+
+const LOCK_FILE: &str = "daemon-authority.lock";
+const RECORD_FILE: &str = "daemon-authority.json";
+
+fn deserialize_endpoint<'de, D>(deserializer: D) -> std::result::Result<DaemonEndpoint, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum EndpointRecord {
+        Current(DaemonEndpoint),
+        Legacy(PathBuf),
+    }
+
+    match EndpointRecord::deserialize(deserializer)? {
+        EndpointRecord::Current(endpoint) => Ok(endpoint),
+        EndpointRecord::Legacy(path) => {
+            #[cfg(unix)]
+            {
+                Ok(DaemonEndpoint::Unix(path))
+            }
+            #[cfg(not(unix))]
+            {
+                Err(serde::de::Error::custom(format!(
+                    "legacy Unix daemon endpoint '{}' is unsupported on this platform",
+                    path.display()
+                )))
+            }
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+pub(super) struct DaemonAuthorityRecord {
+    pub(super) pid: u32,
+    pub(super) process_run_id: String,
+    pub(super) started_at_unix_secs: i64,
+    pub(super) epoch: u64,
+    pub(super) version: String,
+    #[serde(alias = "socket_path", deserialize_with = "deserialize_endpoint")]
+    pub(super) endpoint: DaemonEndpoint,
+    pub(super) auth_token: String,
+    pub(super) profile_root: PathBuf,
+}
+
+#[derive(Debug)]
+pub(super) struct DaemonAuthority {
+    _lock: File,
+    record_path: PathBuf,
+    record: DaemonAuthorityRecord,
+    endpoint_bound: bool,
+}
+
+impl DaemonAuthority {
+    pub(super) fn acquire(
+        profile_root: &Path,
+        endpoint: &DaemonEndpoint,
+        version: &str,
+    ) -> Result<Self> {
+        let profile_root = canonical_identity_path(profile_root)?;
+        std::fs::create_dir_all(&profile_root)
+            .map_err(|error| config_io("create", &profile_root, &error))?;
+        restrict_directory(&profile_root)?;
+
+        let lock_path = profile_root.join(LOCK_FILE);
+        let mut lock_options = OpenOptions::new();
+        lock_options.create(true).read(true).write(true);
+        configure_private_create(&mut lock_options, 0o600);
+        let mut lock = lock_options
+            .open(&lock_path)
+            .map_err(|error| config_io("open", &lock_path, &error))?;
+        restrict_file(&lock_path)?;
+        if let Err(error) = lock.try_lock_exclusive() {
+            if !is_lock_contended(&error) {
+                return Err(config_io("lock", &lock_path, &error));
+            }
+            let record = read_record_if_present(&profile_root.join(RECORD_FILE))
+                .ok()
+                .flatten()
+                .map(|record| {
+                    format!(
+                        " (pid {}, epoch {}, endpoint '{}')",
+                        record.pid, record.epoch, record.endpoint
+                    )
+                })
+                .unwrap_or_default();
+            return Err(TraceDecayError::Config {
+                message: format!(
+                    "daemon authority for profile '{}' is already held{record}: {error}",
+                    profile_root.display()
+                ),
+            });
+        }
+
+        let record_path = profile_root.join(RECORD_FILE);
+        let prior_epoch = read_record_if_present(&record_path)
+            .ok()
+            .flatten()
+            .map(|record| record.epoch)
+            .unwrap_or(0);
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default();
+        let record = DaemonAuthorityRecord {
+            pid: std::process::id(),
+            process_run_id: crate::runtime_identity::process_run_id().to_string(),
+            started_at_unix_secs: i64::try_from(now.as_secs()).unwrap_or(i64::MAX),
+            epoch: prior_epoch.saturating_add(1),
+            version: version.to_string(),
+            endpoint: canonical_endpoint(endpoint)?,
+            auth_token: new_auth_token()?,
+            profile_root,
+        };
+        write_record(&record_path, &record)?;
+        lock.set_len(0)
+            .map_err(|error| config_io("truncate", &lock_path, &error))?;
+        lock.seek(SeekFrom::Start(0))
+            .map_err(|error| config_io("seek", &lock_path, &error))?;
+        writeln!(
+            lock,
+            "pid={} run={} epoch={}",
+            record.pid, record.process_run_id, record.epoch
+        )
+        .map_err(|error| config_io("write", &lock_path, &error))?;
+        lock.sync_data()
+            .map_err(|error| config_io("sync", &lock_path, &error))?;
+
+        Ok(Self {
+            _lock: lock,
+            record_path,
+            record,
+            endpoint_bound: false,
+        })
+    }
+
+    pub(super) fn record(&self) -> &DaemonAuthorityRecord {
+        &self.record
+    }
+
+    pub(super) fn endpoint(&self) -> &DaemonEndpoint {
+        &self.record.endpoint
+    }
+
+    pub(super) fn auth_token(&self) -> &str {
+        &self.record.auth_token
+    }
+
+    pub(super) fn publish_endpoint(&mut self, endpoint: &DaemonEndpoint) -> Result<()> {
+        self.record.endpoint = canonical_endpoint(endpoint)?;
+        write_record(&self.record_path, &self.record)?;
+        self.endpoint_bound = true;
+        Ok(())
+    }
+
+    pub(super) fn ensure_current(&self) -> Result<()> {
+        let current = read_record_if_present(&self.record_path)?;
+        if current.as_ref().is_some_and(|record| {
+            record.epoch == self.record.epoch
+                && record.process_run_id == self.record.process_run_id
+                && record.profile_root == self.record.profile_root
+                && record.endpoint == self.record.endpoint
+                && record.auth_token == self.record.auth_token
+        }) {
+            return Ok(());
+        }
+        Err(TraceDecayError::Config {
+            message: format!(
+                "daemon authority epoch {} for profile '{}' is no longer current",
+                self.record.epoch,
+                self.record.profile_root.display()
+            ),
+        })
+    }
+
+    #[cfg(test)]
+    pub(super) fn mark_endpoint_bound(&mut self) {
+        self.endpoint_bound = true;
+    }
+
+    pub(super) fn cleanup_owned_endpoint(&mut self) -> Result<()> {
+        if !self.endpoint_bound || self.ensure_current().is_err() {
+            return Ok(());
+        }
+        match &self.record.endpoint {
+            #[cfg(unix)]
+            DaemonEndpoint::Unix(path) => remove_if_present(path)?,
+            DaemonEndpoint::Loopback(_) => {}
+        }
+        self.endpoint_bound = false;
+        Ok(())
+    }
+}
+
+impl Drop for DaemonAuthority {
+    fn drop(&mut self) {
+        let _ = self.cleanup_owned_endpoint();
+    }
+}
+
+pub(super) fn current_record(profile_root: &Path) -> Result<Option<DaemonAuthorityRecord>> {
+    let profile_root = canonical_identity_path(profile_root)?;
+    read_record_if_present(&profile_root.join(RECORD_FILE))
+}
+
+pub(super) fn canonical_identity_path(path: &Path) -> Result<PathBuf> {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map_err(|error| config_io("resolve", path, &error))?
+            .join(path)
+    };
+    if let Ok(canonical) = absolute.canonicalize() {
+        return Ok(canonical);
+    }
+
+    let mut suffix = Vec::new();
+    let mut existing = absolute.as_path();
+    while !existing.exists() {
+        let Some(name) = existing.file_name() else {
+            return Err(TraceDecayError::Config {
+                message: format!("failed to resolve identity path '{}'", path.display()),
+            });
+        };
+        suffix.push(name.to_os_string());
+        existing = existing.parent().ok_or_else(|| TraceDecayError::Config {
+            message: format!("failed to resolve identity path '{}'", path.display()),
+        })?;
+    }
+    let mut canonical = existing
+        .canonicalize()
+        .map_err(|error| config_io("canonicalize", existing, &error))?;
+    for component in suffix.iter().rev() {
+        canonical.push(component);
+    }
+    Ok(normalize_path(&canonical))
+}
+
+fn canonical_endpoint(endpoint: &DaemonEndpoint) -> Result<DaemonEndpoint> {
+    match endpoint {
+        #[cfg(unix)]
+        DaemonEndpoint::Unix(path) => {
+            let file_name = path.file_name().ok_or_else(|| TraceDecayError::Config {
+                message: format!("daemon socket path '{}' has no file name", path.display()),
+            })?;
+            let parent = path.parent().unwrap_or_else(|| Path::new("."));
+            Ok(DaemonEndpoint::Unix(
+                canonical_identity_path(parent)?.join(file_name),
+            ))
+        }
+        DaemonEndpoint::Loopback(address) => DaemonEndpoint::loopback(*address),
+    }
+}
+
+fn normalize_path(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                normalized.pop();
+            }
+            other => normalized.push(other.as_os_str()),
+        }
+    }
+    normalized
+}
+
+fn read_record_if_present(path: &Path) -> Result<Option<DaemonAuthorityRecord>> {
+    let mut file = match File::open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(config_io("open", path, &error)),
+    };
+    let mut contents = String::new();
+    file.read_to_string(&mut contents)
+        .map_err(|error| config_io("read", path, &error))?;
+    serde_json::from_str(&contents)
+        .map(Some)
+        .map_err(|error| TraceDecayError::Config {
+            message: format!(
+                "invalid daemon authority record '{}': {error}",
+                path.display()
+            ),
+        })
+}
+
+fn write_record(path: &Path, record: &DaemonAuthorityRecord) -> Result<()> {
+    let temporary = path.with_extension(format!("json.{}.tmp", record.process_run_id));
+    let bytes = serde_json::to_vec_pretty(record).map_err(|error| TraceDecayError::Config {
+        message: format!("failed to encode daemon authority record: {error}"),
+    })?;
+    crate::db::DatabaseAuthority::publish_record_atomically(
+        &temporary,
+        path,
+        &bytes,
+        "daemon authority record",
+    )
+}
+
+#[cfg(unix)]
+fn configure_private_create(options: &mut OpenOptions, mode: u32) {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    options.mode(mode);
+}
+
+#[cfg(not(unix))]
+fn configure_private_create(_options: &mut OpenOptions, _mode: u32) {}
+
+#[cfg(unix)]
+fn restrict_directory(path: &Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
+        .map_err(|error| config_io("restrict", path, &error))
+}
+
+#[cfg(not(unix))]
+fn restrict_directory(_path: &Path) -> Result<()> {
+    Ok(())
+}
+
+#[cfg(unix)]
+fn restrict_file(path: &Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+        .map_err(|error| config_io("restrict", path, &error))
+}
+
+#[cfg(not(unix))]
+fn restrict_file(_path: &Path) -> Result<()> {
+    Ok(())
+}
+
+fn is_lock_contended(error: &std::io::Error) -> bool {
+    if error.kind() == std::io::ErrorKind::WouldBlock {
+        return true;
+    }
+    #[cfg(windows)]
+    {
+        return error.raw_os_error() == Some(33);
+    }
+    #[cfg(not(windows))]
+    false
+}
+
+fn new_auth_token() -> Result<String> {
+    let mut bytes = [0_u8; 32];
+    getrandom::getrandom(&mut bytes).map_err(|error| TraceDecayError::Config {
+        message: format!("failed to generate daemon authentication token: {error}"),
+    })?;
+    Ok(hex::encode(bytes))
+}
+
+#[cfg(unix)]
+fn remove_if_present(path: &Path) -> Result<()> {
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(config_io("remove", path, &error)),
+    }
+}
+
+fn config_io(operation: &str, path: &Path, error: &std::io::Error) -> TraceDecayError {
+    TraceDecayError::Config {
+        message: format!("failed to {operation} '{}': {error}", path.display()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_endpoint(profile: &Path) -> DaemonEndpoint {
+        #[cfg(unix)]
+        {
+            DaemonEndpoint::Unix(profile.join("daemon.sock"))
+        }
+        #[cfg(not(unix))]
+        {
+            super::super::transport::default_loopback_endpoint()
+        }
+    }
+
+    #[test]
+    fn stale_record_does_not_block_and_epoch_advances() {
+        let temp = tempfile::tempdir().unwrap();
+        let profile = temp.path().join("profile");
+        let endpoint = test_endpoint(&profile);
+        let mut first = DaemonAuthority::acquire(&profile, &endpoint, "test").unwrap();
+        let first_epoch = first.record().epoch;
+        first.endpoint_bound = false;
+        drop(first);
+
+        let second = DaemonAuthority::acquire(&profile, &endpoint, "test").unwrap();
+        assert_eq!(second.record().epoch, first_epoch + 1);
+        assert_eq!(second.auth_token().len(), 64);
+        assert!(
+            second
+                .auth_token()
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit())
+        );
+    }
+
+    #[test]
+    fn contended_lease_does_not_replace_the_live_record() {
+        let temp = tempfile::tempdir().unwrap();
+        let profile = temp.path().join("profile");
+        let endpoint = test_endpoint(&profile);
+        let first = DaemonAuthority::acquire(&profile, &endpoint, "first").unwrap();
+        let record_path = profile.join(RECORD_FILE);
+        let live = read_record_if_present(&record_path).unwrap().unwrap();
+
+        let contender = DaemonAuthority::acquire(&profile, &endpoint, "contender");
+
+        assert!(contender.is_err());
+        assert_eq!(read_record_if_present(&record_path).unwrap(), Some(live));
+        drop(first);
+    }
+
+    #[test]
+    fn record_replacement_is_complete_and_removes_the_temporary_file() {
+        let temp = tempfile::tempdir().unwrap();
+        let profile = temp.path().join("profile");
+        let endpoint = test_endpoint(&profile);
+        let authority = DaemonAuthority::acquire(&profile, &endpoint, "first").unwrap();
+        let mut successor = authority.record().clone();
+        successor.epoch += 1;
+        successor.version = "successor".to_string();
+        let temporary = authority
+            .record_path
+            .with_extension(format!("json.{}.tmp", successor.process_run_id));
+
+        write_record(&authority.record_path, &successor).unwrap();
+
+        assert_eq!(
+            read_record_if_present(&authority.record_path).unwrap(),
+            Some(successor)
+        );
+        assert!(!temporary.exists());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            assert_eq!(
+                std::fs::metadata(&profile).unwrap().permissions().mode() & 0o777,
+                0o700
+            );
+            for path in [&authority.record_path, &profile.join(LOCK_FILE)] {
+                assert_eq!(
+                    std::fs::metadata(path).unwrap().permissions().mode() & 0o777,
+                    0o600
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn published_loopback_endpoint_preserves_the_elected_secret() {
+        let temp = tempfile::tempdir().unwrap();
+        let profile = temp.path().join("profile");
+        let requested = test_endpoint(&profile);
+        let mut authority = DaemonAuthority::acquire(&profile, &requested, "test").unwrap();
+        let auth_token = authority.auth_token().to_string();
+        let concrete = DaemonEndpoint::parse("tcp://127.0.0.1:43123").unwrap();
+
+        authority.publish_endpoint(&concrete).unwrap();
+
+        let published = current_record(&profile).unwrap().unwrap();
+        assert_eq!(published.endpoint, concrete);
+        assert_eq!(published.auth_token, auth_token);
+        assert!(authority.ensure_current().is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn legacy_socket_path_record_is_accepted_by_current_reader() {
+        #[derive(Serialize)]
+        struct LegacySocketRecord {
+            pid: u32,
+            process_run_id: String,
+            started_at_unix_secs: i64,
+            epoch: u64,
+            version: String,
+            socket_path: PathBuf,
+            auth_token: String,
+            profile_root: PathBuf,
+        }
+
+        let temp = tempfile::tempdir().unwrap();
+        let profile_root = temp.path().join("profile");
+        std::fs::create_dir_all(&profile_root).unwrap();
+        let record_path = profile_root.join(RECORD_FILE);
+        let socket_path = profile_root.join("daemon.sock");
+        let legacy = LegacySocketRecord {
+            pid: 42,
+            process_run_id: "legacy-run".to_string(),
+            started_at_unix_secs: 1,
+            epoch: 3,
+            version: "legacy".to_string(),
+            socket_path: socket_path.clone(),
+            auth_token: "a".repeat(64),
+            profile_root: profile_root.clone(),
+        };
+        std::fs::write(&record_path, serde_json::to_vec(&legacy).unwrap()).unwrap();
+
+        let decoded = read_record_if_present(&record_path).unwrap().unwrap();
+        assert_eq!(decoded.endpoint, DaemonEndpoint::Unix(socket_path));
+        assert_eq!(decoded.auth_token, "a".repeat(64));
+    }
+
+    #[test]
+    fn current_endpoint_record_fails_closed_for_legacy_reader() {
+        #[allow(dead_code)]
+        #[derive(Deserialize)]
+        struct LegacySocketRecord {
+            pid: u32,
+            process_run_id: String,
+            started_at_unix_secs: i64,
+            epoch: u64,
+            version: String,
+            socket_path: PathBuf,
+            profile_root: PathBuf,
+        }
+
+        let temp = tempfile::tempdir().unwrap();
+        let profile = temp.path().join("profile");
+        let endpoint = test_endpoint(&profile);
+        let authority = DaemonAuthority::acquire(&profile, &endpoint, "current").unwrap();
+        let encoded = serde_json::to_string(authority.record()).unwrap();
+
+        assert!(serde_json::from_str::<LegacySocketRecord>(&encoded).is_err());
+    }
+
+    #[test]
+    fn stale_endpoint_or_token_is_rejected_by_the_elected_owner() {
+        let temp = tempfile::tempdir().unwrap();
+        let profile = temp.path().join("profile");
+        let endpoint = test_endpoint(&profile);
+        let authority = DaemonAuthority::acquire(&profile, &endpoint, "test").unwrap();
+        let mut stale = authority.record().clone();
+        stale.auth_token = "0".repeat(64);
+        write_record(&authority.record_path, &stale).unwrap();
+
+        assert!(authority.ensure_current().is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn canonical_profile_alias_contends_on_one_kernel_lease() {
+        let temp = tempfile::tempdir().unwrap();
+        let profile = temp.path().join("profile");
+        std::fs::create_dir_all(&profile).unwrap();
+        let alias = temp.path().join("alias");
+        std::os::unix::fs::symlink(&profile, &alias).unwrap();
+        let first = DaemonAuthority::acquire(
+            &profile,
+            &DaemonEndpoint::Unix(profile.join("daemon.sock")),
+            "test",
+        )
+        .unwrap();
+        let second = DaemonAuthority::acquire(
+            &alias,
+            &DaemonEndpoint::Unix(alias.join("daemon.sock")),
+            "test",
+        );
+        assert!(second.is_err());
+        drop(first);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stale_epoch_cannot_remove_successor_socket() {
+        let temp = tempfile::tempdir().unwrap();
+        let profile = temp.path().join("profile");
+        let socket = profile.join("daemon.sock");
+        let mut authority =
+            DaemonAuthority::acquire(&profile, &DaemonEndpoint::Unix(socket.clone()), "test")
+                .unwrap();
+        std::fs::write(&socket, b"successor").unwrap();
+        authority.mark_endpoint_bound();
+        let mut successor = authority.record().clone();
+        successor.epoch += 1;
+        successor.process_run_id.push_str("-successor");
+        write_record(&authority.record_path, &successor).unwrap();
+
+        authority.cleanup_owned_endpoint().unwrap();
+        assert!(socket.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn socket_identity_never_follows_the_socket_leaf_symlink() {
+        let temp = tempfile::tempdir().unwrap();
+        let profile = temp.path().join("profile");
+        std::fs::create_dir_all(&profile).unwrap();
+        let target = temp.path().join("unrelated");
+        std::fs::write(&target, b"keep").unwrap();
+        let socket = profile.join("daemon.sock");
+        std::os::unix::fs::symlink(&target, &socket).unwrap();
+
+        let authority =
+            DaemonAuthority::acquire(&profile, &DaemonEndpoint::Unix(socket.clone()), "test")
+                .unwrap();
+
+        let canonical_socket = profile.canonicalize().unwrap().join("daemon.sock");
+        assert_eq!(
+            authority.endpoint(),
+            &DaemonEndpoint::Unix(canonical_socket)
+        );
+        assert_eq!(std::fs::read(&target).unwrap(), b"keep");
+    }
+}

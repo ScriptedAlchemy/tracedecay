@@ -3,7 +3,7 @@
 // Updated 2026-03-23: compact bordered table for status output
 use clap::{CommandFactory, Parser};
 use std::io::{IsTerminal, Write};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process;
 
 mod agent_cmd;
@@ -234,8 +234,7 @@ fn maybe_run_extract_worker(command: &Commands) {
 }
 
 async fn run_startup_preamble(command: &Commands) {
-    let skip_startup_maintenance = should_skip_startup_maintenance(command);
-    let skip_agent_install_maintenance = should_skip_agent_install_maintenance(command);
+    let startup_policy = CommandStartupPolicy::for_command(command);
 
     // First-run notice (check BEFORE any config save creates the file)
     let is_first_run = tracedecay::user_config::UserConfig::is_fresh();
@@ -250,7 +249,7 @@ async fn run_startup_preamble(command: &Commands) {
     // makes a synchronous HTTP call (#84) which can add seconds to
     // `tracedecay serve` startup on slow networks — long enough to blow the
     // MCP client's 30 s `initialize` timeout.
-    if !skip_startup_maintenance {
+    if startup_policy.runs_startup_maintenance() {
         global::try_flush(&mut user_config, is_force_flush);
     }
     if !is_local_install_command(command) {
@@ -259,7 +258,7 @@ async fn run_startup_preamble(command: &Commands) {
         }
     }
 
-    if is_first_run && !skip_startup_maintenance {
+    if is_first_run && startup_policy.runs_startup_maintenance() {
         eprintln!(
             "note: tracedecay can optionally upload anonymous token savings counts to a worldwide counter.\n\
              \x20     Run `tracedecay enable-upload-counter` to opt in."
@@ -271,7 +270,7 @@ async fn run_startup_preamble(command: &Commands) {
     // and beta users now stay on beta until they explicitly switch off.
 
     // Best-effort check: warn if install needs re-running.
-    if !skip_agent_install_maintenance {
+    if startup_policy.runs_agent_install_maintenance() {
         tracedecay::agents::claude::check_install_stale();
         maybe_run_silent_reinstall(&mut user_config).await;
     }
@@ -361,35 +360,26 @@ async fn resolve_registered_project_root(
     project_id: Option<String>,
     project_path: Option<String>,
 ) -> tracedecay::errors::Result<Option<PathBuf>> {
-    let db = tracedecay::global_db::GlobalDb::open()
-        .await
-        .ok_or_else(|| tracedecay::errors::TraceDecayError::Config {
-            message: "could not open tracedecay project registry; run tracedecay init first"
-                .to_string(),
-        })?;
-    let context = if let Some(project_id) = project_id.as_deref() {
-        db.project_registry_context_by_id(project_id).await
-    } else if let Some(project_path) = project_path.as_deref() {
-        let project_path_arg = Path::new(project_path);
-        if let Some(context) = db.project_registry_context_by_alias(project_path_arg).await {
-            Some(context)
-        } else if tracedecay::global_db::GlobalDb::is_explicit_project_path_selector(project_path) {
-            let git_common_dir = tracedecay::worktree::git_common_dir(project_path_arg);
-            db.project_registry_context_by_identity(project_path_arg, git_common_dir.as_deref())
-                .await
-        } else {
-            None
-        }
-    } else {
+    let Some(selector) = project_id.or(project_path) else {
         return Ok(None);
     };
-
-    context
-        .map(|context| PathBuf::from(context.project.display_root))
+    let context = commands::daemon_tool_json(
+        None,
+        "tracedecay_admin_cli",
+        serde_json::json!({
+            "action": "registry_context",
+            "project_arg": selector,
+        }),
+    )
+    .await?;
+    let display_root = context
+        .get("project")
+        .and_then(|project| project.get("display_root"))
+        .and_then(serde_json::Value::as_str)
         .ok_or_else(|| tracedecay::errors::TraceDecayError::Config {
             message: "registered project not found for selector".to_string(),
-        })
-        .map(Some)
+        })?;
+    Ok(Some(PathBuf::from(display_root)))
 }
 
 pub(crate) async fn resolve_cli_project_root(
@@ -534,8 +524,33 @@ async fn dispatch_command(command: Commands) -> tracedecay::errors::Result<()> {
             open,
         } => {
             let project_path = tracedecay::config::resolve_path_with_discovery(path);
-            let cg = serve::ensure_initialized(&project_path).await?;
-            tracedecay::dashboard::run(&cg, &host, port, open).await?;
+            let result = commands::daemon_tool_json(
+                Some(&project_path),
+                "tracedecay_dashboard",
+                serde_json::json!({
+                    "action": "start",
+                    "host": host,
+                    "port": port,
+                    "format": "json",
+                }),
+            )
+            .await?;
+            let url = result
+                .get("url")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| tracedecay::errors::TraceDecayError::Config {
+                    message: "daemon dashboard response omitted URL".to_string(),
+                })?;
+            println!("tracedecay dashboard listening on {url}");
+            eprintln!("Serving project {}", project_path.display());
+            if open {
+                match open::that(url) {
+                    Ok(()) => eprintln!("Opened dashboard in default browser: {url}"),
+                    Err(error) => {
+                        eprintln!("Warning: could not open browser for {url}: {error}")
+                    }
+                }
+            }
         }
         Commands::Serve { path, timings } => {
             if matches!(std::env::var("DISABLE_TRACEDECAY").as_deref(), Ok("true")) {
@@ -620,15 +635,40 @@ async fn dispatch_command(command: Commands) -> tracedecay::errors::Result<()> {
         },
         Commands::CurrentCounter { path } => {
             let project_path = tracedecay::config::resolve_path(path);
-            let cg = serve::ensure_initialized(&project_path).await?;
-            let value = cg.get_local_counter().await?;
+            let result = commands::daemon_tool_json(
+                Some(&project_path),
+                "tracedecay_admin_project",
+                serde_json::json!({ "action": "counter_get" }),
+            )
+            .await?;
+            let value = result
+                .get("counter")
+                .and_then(serde_json::Value::as_u64)
+                .ok_or_else(|| tracedecay::errors::TraceDecayError::Config {
+                    message: "daemon counter response omitted counter".to_string(),
+                })?;
             println!("{value}");
         }
         Commands::ResetCounter { path } => {
             let project_path = tracedecay::config::resolve_path(path);
-            let cg = serve::ensure_initialized(&project_path).await?;
-            let prev = cg.get_local_counter().await?;
-            cg.reset_local_counter().await?;
+            let result = commands::daemon_tool_json(
+                Some(&project_path),
+                "tracedecay_admin_project",
+                serde_json::json!({ "action": "counter_get" }),
+            )
+            .await?;
+            let prev = result
+                .get("counter")
+                .and_then(serde_json::Value::as_u64)
+                .ok_or_else(|| tracedecay::errors::TraceDecayError::Config {
+                    message: "daemon counter response omitted counter".to_string(),
+                })?;
+            commands::daemon_tool_json(
+                Some(&project_path),
+                "tracedecay_admin_project",
+                serde_json::json!({ "action": "counter_reset" }),
+            )
+            .await?;
             eprintln!("Local counter reset (was {prev})");
         }
         Commands::DisableUploadCounter => {
@@ -641,7 +681,7 @@ async fn dispatch_command(command: Commands) -> tracedecay::errors::Result<()> {
             commands::handle_gitignore(path, action).await?;
         }
         Commands::Doctor { agent } => {
-            tracedecay::doctor::run_doctor(agent.as_deref()).await;
+            tracedecay::doctor::run_doctor(agent.as_deref()).await?;
         }
         Commands::Cost {
             range,
@@ -698,11 +738,25 @@ async fn dispatch_command(command: Commands) -> tracedecay::errors::Result<()> {
                 project_path,
             } => {
                 let project_path = resolve_cli_project_root(path, project_id, project_path).await?;
-                let cg = crate::serve::ensure_initialized(&project_path).await?;
-                let status = cg.project_memory_status().await?;
-                let largest_bank_fact_count =
-                    status_cmd::largest_memory_bank_fact_count_at(&cg.store_layout().graph_db_path)
-                        .await?;
+                let result = commands::daemon_tool_json(
+                    Some(&project_path),
+                    "tracedecay_admin_project",
+                    serde_json::json!({ "action": "memory_status" }),
+                )
+                .await?;
+                let status: tracedecay::memory::types::MemoryStatus =
+                    serde_json::from_value(result.get("status").cloned().ok_or_else(|| {
+                        tracedecay::errors::TraceDecayError::Config {
+                            message: "daemon memory response omitted status".to_string(),
+                        }
+                    })?)?;
+                let largest_bank_fact_count = result
+                    .get("largest_bank_fact_count")
+                    .and_then(serde_json::Value::as_u64)
+                    .and_then(|value| usize::try_from(value).ok())
+                    .ok_or_else(|| tracedecay::errors::TraceDecayError::Config {
+                        message: "daemon memory response omitted largest bank count".to_string(),
+                    })?;
                 let largest_bank_utilization_pct = if status.estimated_capacity > 0 {
                     largest_bank_fact_count as f64 / status.estimated_capacity as f64 * 100.0
                 } else {
@@ -745,69 +799,27 @@ async fn dispatch_command(command: Commands) -> tracedecay::errors::Result<()> {
     Ok(())
 }
 
-fn should_skip_startup_maintenance(command: &Commands) -> bool {
-    if hook_cmd::hook_input(command).is_some() {
-        return true;
-    }
-    matches!(
-        command,
-        Commands::Install { .. }
-            | Commands::Reinstall
-            | Commands::UpdatePlugin
-            | Commands::Upgrade { .. }
-            | Commands::Update { .. }
-            | Commands::Dogfood
-            | Commands::PostUpdate { .. }
-            | Commands::Uninstall { .. }
-            | Commands::Lsp { .. }
-            | Commands::Doctor { .. }
-            | Commands::Analytics { .. }
-            | Commands::Sessions {
-                action: SessionsAction::Unfinished { .. },
-            }
-            | Commands::Migrate { .. }
-            | Commands::Projects { .. }
-            | Commands::Daemon { .. }
-            // `Serve` is the hot path used by MCP clients (Claude Code,
-            // Codex, etc.). Clients impose a 30 s `initialize` timeout, so
-            // every pre-serve startup task — `try_flush` network round-trip,
-            // `check_install_stale`, the silent-reinstall loop over every
-            // tracked agent — risks pushing us past it on slow networks or
-            // big home-dir trees (#84). Skip them; the same maintenance
-            // runs on the user's next interactive `tracedecay …` invocation.
-            | Commands::Serve { .. }
-    )
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CommandStartupPolicy {
+    Full,
+    SkipAll,
 }
 
-fn should_skip_agent_install_maintenance(command: &Commands) -> bool {
-    if hook_cmd::hook_input(command).is_some() {
-        return true;
-    }
-    // Selectively gate the implicit `check_install_stale` + silent-reinstall
-    // path so agent permissions/hooks/MCP config stay in sync after a binary
-    // upgrade, without firing on paths where it would be wrong or wasteful:
-    //   - `Serve`: the MCP hot path with a 30 s client `initialize` timeout
-    //     (#84). Reinstalling every tracked agent before the stdio loop starts
-    //     can blow that budget, so it must stay off `serve`.
-    //   - `Install` / `Reinstall`: already perform installation — don't
-    //     double-install as an implicit prelude to the explicit command.
-    //   - `UpdatePlugin` / `Upgrade` / `Update`: explicit maintenance paths
-    //     that manage plugin refresh themselves (upgrade/update re-exec the
-    //     new binary's `post-update`); an implicit silent reinstall beforehand
-    //     would rewrite configs with the OLD binary and break the
-    //     update-plugin contract.
-    //   - `Uninstall`: about to remove agent configs — don't reinstall them
-    //     first (per the original #84 intent).
-    //   - `Doctor` / `Migrate`: diagnostics and explicitly confirmed storage
-    //     maintenance manage their own lifecycle and must not mutate agent
-    //     configs as a side effect.
-    //   - `Tool`: per-invocation tool calls are a hot-ish path; skip the
-    //     reinstall scan there too.
-    // Every other command (the normal everyday invocations) runs maintenance.
-    matches!(
-        command,
-        Commands::Serve { .. }
-            | Commands::Install { .. }
+impl CommandStartupPolicy {
+    fn for_command(command: &Commands) -> Self {
+        if hook_cmd::hook_input(command).is_some() {
+            return Self::SkipAll;
+        }
+
+        match command {
+            // Tool calls are the documented MCP fallback and must remain a local,
+            // latency-bounded protocol path. Unrelated counter uploads or agent
+            // maintenance belong on interactive commands and daemon background work.
+            Commands::Tool { .. } => Self::SkipAll,
+            // Explicit lifecycle/maintenance commands manage their own work.
+            // Serve is also latency-sensitive: clients impose a 30 s MCP
+            // initialize timeout, so no implicit startup work belongs there.
+            Commands::Install { .. }
             | Commands::Reinstall
             | Commands::UpdatePlugin
             | Commands::Upgrade { .. }
@@ -818,14 +830,34 @@ fn should_skip_agent_install_maintenance(command: &Commands) -> bool {
             | Commands::Lsp { .. }
             | Commands::Doctor { .. }
             | Commands::Analytics { .. }
-            | Commands::Migrate { .. }
-            | Commands::Projects { .. }
-            | Commands::Tool { .. }
             | Commands::Sessions {
                 action: SessionsAction::Unfinished { .. },
             }
+            | Commands::Migrate { .. }
+            | Commands::Projects { .. }
             | Commands::Daemon { .. }
-    )
+            | Commands::Serve { .. } => Self::SkipAll,
+            _ => Self::Full,
+        }
+    }
+
+    fn runs_startup_maintenance(self) -> bool {
+        !matches!(self, Self::SkipAll)
+    }
+
+    fn runs_agent_install_maintenance(self) -> bool {
+        matches!(self, Self::Full)
+    }
+}
+
+#[cfg(test)]
+fn should_skip_startup_maintenance(command: &Commands) -> bool {
+    !CommandStartupPolicy::for_command(command).runs_startup_maintenance()
+}
+
+#[cfg(test)]
+fn should_skip_agent_install_maintenance(command: &Commands) -> bool {
+    !CommandStartupPolicy::for_command(command).runs_agent_install_maintenance()
 }
 
 fn is_local_install_command(command: &Commands) -> bool {
@@ -836,7 +868,7 @@ fn is_local_install_command(command: &Commands) -> bool {
 mod startup_tests;
 
 // handle_branch_action, handle_wipe, handle_list, handle_no_command,
-// init_and_index, and print_sync_doctor have been moved to src/commands.rs.
+// init_and_index has been moved to src/commands.rs.
 //
 // update_global_db, try_flush, check_for_update, gather_target_projects,
 // gather_local_projects, gather_local_projects_from, find_descendant_tracedecay,

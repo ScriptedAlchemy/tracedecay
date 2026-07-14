@@ -39,6 +39,10 @@ async fn orphan_reporting_uses_complete_registry_rows_not_token_accounting() {
         .prefix("doctor-orphans-")
         .tempdir_in(base)
         .unwrap();
+    let db_dir = tempfile::Builder::new()
+        .prefix("doctor-orphans-db-")
+        .tempdir()
+        .unwrap();
     let profile_root = dir.path().join("profile");
     let eligible_root = dir.path().join("eligible-repo");
     let conflicting_root = dir.path().join("conflicting-repo");
@@ -99,7 +103,7 @@ async fn orphan_reporting_uses_complete_registry_rows_not_token_accounting() {
         .unwrap();
     }
 
-    let db = crate::global_db::GlobalDb::open_at(&dir.path().join("global.db"))
+    let db = crate::global_db::GlobalDb::open_at(&db_dir.path().join("global.db"))
         .await
         .unwrap();
     db.upsert_code_project(
@@ -260,8 +264,19 @@ async fn database_check_preserves_corrupt_graph_and_adjacent_stores()
     std::fs::write(&layout.sessions_db_path, b"preserve-sessions")?;
 
     let mut counters = DoctorCounters::new();
-    check_database(&mut counters, &project_root, open_options).await;
+    let healthy = check_database(
+        &mut counters,
+        &serde_json::json!({
+            "storage_health": {
+                "canonical_db_path": layout.graph_db_path,
+                "db_size_bytes": corrupt_db.len(),
+                "quick_check_ok": false,
+                "dirty_marker": { "exists": true, "state": "dirty" },
+            }
+        }),
+    );
 
+    assert!(!healthy);
     assert_eq!(counters.issues, 1);
     assert_eq!(std::fs::read(&layout.graph_db_path)?, corrupt_db);
     assert_eq!(std::fs::read(&wal_path)?, b"preserve-wal");
@@ -289,7 +304,8 @@ async fn database_check_is_read_only_while_a_writer_is_live()
     let db_path = ts.db_path();
     drop(ts);
 
-    let (writer, _) = crate::db::Database::open(&db_path).await?;
+    let authority = crate::db::DatabaseAuthority::acquire_test(&db_path, "doctor test")?;
+    let (writer, _) = crate::db::Database::open(&db_path, &authority).await?;
     writer
         .conn()
         .execute_batch(
@@ -313,7 +329,20 @@ async fn database_check_is_read_only_while_a_writer_is_live()
     );
 
     let mut counters = DoctorCounters::new();
-    check_database(&mut counters, &project_root, open_options).await;
+    let healthy = check_database(
+        &mut counters,
+        &serde_json::json!({
+            "storage_health": {
+                "canonical_db_path": db_path,
+                "db_size_bytes": std::fs::metadata(&db_path)?.len(),
+                "quick_check_ok": true,
+                "dirty_marker": { "exists": false },
+                "daemon_owner_pid": std::process::id(),
+                "daemon_generation": "test-generation",
+            }
+        }),
+    );
+    assert!(healthy);
 
     let freelist_after: i64 = {
         let mut rows = writer.conn().query("PRAGMA freelist_count", ()).await?;
@@ -477,7 +506,11 @@ async fn current_project_store_surfaces_split_identity_conflict()
                 storage_mode: StorageMode::ProfileSharded,
             },
         )?;
-        let (db, _) = crate::db::Database::initialize(&layout.graph_db_path).await?;
+        let authority = crate::db::DatabaseAuthority::acquire_test(
+            &layout.graph_db_path,
+            "doctor identity test",
+        )?;
+        let (db, _) = crate::db::Database::initialize(&layout.graph_db_path, &authority).await?;
         db.insert_node(&crate::types::Node {
             id: node_id.to_string(),
             kind: crate::types::NodeKind::Function,
@@ -806,4 +839,46 @@ fn plain_orphan_still_warns_with_update_remediation() {
         msg.contains("tracedecay update"),
         "plain orphan should still prescribe update: {msg}"
     );
+}
+
+#[test]
+fn daemon_runtime_parser_extracts_storage_health_and_owner() {
+    let parsed = super::daemon_runtime_status(&serde_json::json!({
+        "content": [
+            {"type": "text", "text": "daemon notice"},
+            {
+                "type": "text",
+                "text": r#"{"tracedecay_version":"0.0.66","process":{"pid":1234},"database":{"canonical_db_path":"/tmp/project.db","quick_check_ok":true,"dirty_marker":{"exists":false}}}"#
+            }
+        ]
+    }))
+    .unwrap();
+
+    assert_eq!(
+        parsed.pointer("/storage_health/quick_check_ok"),
+        Some(&serde_json::Value::Bool(true))
+    );
+    assert_eq!(
+        parsed.pointer("/storage_health/daemon_owner_pid"),
+        Some(&serde_json::json!(1234))
+    );
+    assert_eq!(
+        parsed.pointer("/storage_health/daemon_version"),
+        Some(&serde_json::json!("0.0.66"))
+    );
+}
+
+#[test]
+fn daemon_runtime_parser_rejects_missing_json_payload() {
+    let error = super::daemon_runtime_status(&serde_json::json!({ "content": [] })).unwrap_err();
+    assert!(error.to_string().contains("returned no JSON payload"));
+}
+
+#[test]
+fn daemon_runtime_parser_rejects_missing_database_telemetry() {
+    let error = super::daemon_runtime_status(&serde_json::json!({
+        "content": [{"type": "text", "text": r#"{"process":{"pid":1234}}"#}]
+    }))
+    .unwrap_err();
+    assert!(error.to_string().contains("omitted database telemetry"));
 }

@@ -6,22 +6,22 @@
 use std::path::{Component, Path, PathBuf};
 
 use crate::agents::{self, DoctorCounters, HealthcheckContext};
-use crate::db::Database;
 use crate::display::{format_bytes, format_token_count};
-use crate::migrate::registry::code_project_root_exists;
+#[cfg(test)]
 use crate::storage::StoreLayout;
+#[cfg(test)]
 use crate::tracedecay::{TraceDecay, TraceDecayOpenOptions};
 
 pub mod heal;
 pub(crate) mod registry_drift;
 
 /// Runs a comprehensive health check of the tracedecay installation.
-pub async fn run_doctor(agent_filter: Option<&str>) {
+pub async fn run_doctor(agent_filter: Option<&str>) -> crate::errors::Result<()> {
     let _lifecycle_lease = match crate::lifecycle_lease::acquire_shared_or_inherited("doctor") {
         Ok(lease) => lease,
         Err(error) => {
             eprintln!("tracedecay doctor could not start: {error}");
-            return;
+            return Err(error);
         }
     };
     debug_assert!(
@@ -39,30 +39,21 @@ pub async fn run_doctor(agent_filter: Option<&str>) {
 
     eprintln!("\n\x1b[1mCurrent project\x1b[0m");
     let project_path = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let open_options = TraceDecayOpenOptions::default();
-    match resolve_current_project_store(&project_path, &open_options).await {
-        Ok(CurrentProjectStore::Resolved(layout)) => {
-            dc.pass(&describe_resolved_store(&layout));
-            check_database(&mut dc, &project_path, open_options.clone()).await;
+    let daemon_status = daemon_project_status(&project_path).await;
+    let storage_healthy = match daemon_status.as_ref() {
+        Ok(status) => check_database(&mut dc, status),
+        Err(error) => {
+            report_daemon_diagnostics_unavailable(
+                &mut dc,
+                fallback_database_path(&project_path).as_deref(),
+                error,
+            );
+            false
         }
-        Ok(CurrentProjectStore::LegacyRepoLocal) => {
-            dc.pass(&format!(
-                "Index found: {}/ (legacy repo-local store)",
-                crate::config::get_tracedecay_dir(&project_path).display()
-            ));
-            check_database(&mut dc, &project_path, open_options).await;
-        }
-        Ok(CurrentProjectStore::Uninitialized) => {
-            dc.warn(&format!(
-                "No index found for {} — run `tracedecay init`",
-                project_path.display()
-            ));
-        }
-        Err(error) => dc.fail(&format!("Project storage resolution failed: {error}")),
-    }
+    };
 
     check_global_db(&mut dc);
-    check_stale_stores(&mut dc).await;
+    check_stale_stores(&mut dc, daemon_status.as_ref().ok());
     check_watcher(&mut dc);
     check_user_config(&mut dc);
     check_external_tools(&mut dc);
@@ -95,6 +86,14 @@ pub async fn run_doctor(agent_filter: Option<&str>) {
 
     check_network(&mut dc);
     print_summary(&dc);
+
+    match daemon_status {
+        Err(error) => Err(error),
+        Ok(_) if !storage_healthy => Err(crate::errors::TraceDecayError::Config {
+            message: "doctor storage health check failed".to_string(),
+        }),
+        Ok(_) => Ok(()),
+    }
 }
 
 /// Reports drift between the active managed-skill set and the host-loadable
@@ -198,6 +197,7 @@ fn skill_drift_report(
 }
 
 /// How the doctor "Current project" check sees the working directory's store.
+#[cfg(test)]
 #[derive(Debug)]
 enum CurrentProjectStore {
     /// A store resolved through the same registry/alias-aware path the tools
@@ -209,6 +209,7 @@ enum CurrentProjectStore {
     Uninitialized,
 }
 
+#[cfg(test)]
 async fn resolve_current_project_store(
     project_path: &Path,
     open_options: &TraceDecayOpenOptions,
@@ -224,6 +225,7 @@ async fn resolve_current_project_store(
     Ok(CurrentProjectStore::Uninitialized)
 }
 
+#[cfg(test)]
 fn describe_resolved_store(layout: &StoreLayout) -> String {
     let mode = match layout.storage_mode {
         crate::storage::StorageMode::ProjectLocal => "repo-local",
@@ -240,66 +242,131 @@ fn describe_resolved_store(layout: &StoreLayout) -> String {
     )
 }
 
-/// Check database health without mutating a store that may be owned by the daemon.
-///
-/// The DB path is taken from the opened instance so the size measured is the
-/// same file that the active branch reader serves.
-async fn check_database(
-    dc: &mut DoctorCounters,
-    project_path: &Path,
-    open_options: TraceDecayOpenOptions,
-) {
-    let db_path = active_database_path(project_path, &open_options).await;
-    let ts = match TraceDecay::open_read_only_with_options(project_path, open_options).await {
-        Ok(ts) => ts,
-        Err(e) if Database::is_corruption_error(&e) => {
-            dc.fail(&format!("Database recovery required: {e}"));
-            if let Some(db_path) = db_path.as_deref() {
-                print_database_recovery_guidance(dc, db_path);
-            } else {
-                dc.info("TraceDecay could not resolve the damaged database path; no files were changed.");
-            }
-            return;
+async fn daemon_project_status(project_path: &Path) -> crate::errors::Result<serde_json::Value> {
+    let handshake = crate::daemon::DaemonHandshake::for_current_client(
+        Some(project_path.to_path_buf()),
+        None,
+        false,
+        false,
+    )?;
+    let result = crate::daemon::call_default_tool(
+        &handshake,
+        "tracedecay_runtime",
+        serde_json::json!({ "format": "json" }),
+    )
+    .await?;
+    daemon_runtime_status(&result)
+}
+
+fn daemon_runtime_status(result: &serde_json::Value) -> crate::errors::Result<serde_json::Value> {
+    let runtime = crate::daemon::tool_json_payload(result, "tracedecay_runtime")?;
+    let mut storage =
+        runtime
+            .get("database")
+            .cloned()
+            .ok_or_else(|| crate::errors::TraceDecayError::Config {
+                message: "daemon runtime response omitted database telemetry".to_string(),
+            })?;
+    let storage =
+        storage
+            .as_object_mut()
+            .ok_or_else(|| crate::errors::TraceDecayError::Config {
+                message: "daemon runtime database telemetry was not an object".to_string(),
+            })?;
+    if let Some(pid) = runtime.pointer("/process/pid").cloned() {
+        storage.insert("daemon_owner_pid".to_string(), pid);
+    }
+    if let Some(version) = runtime.get("tracedecay_version").cloned() {
+        storage.insert("daemon_version".to_string(), version);
+    }
+    Ok(serde_json::json!({ "storage_health": storage }))
+}
+
+fn check_database(dc: &mut DoctorCounters, status: &serde_json::Value) -> bool {
+    let Some(storage) = status.get("storage_health") else {
+        dc.fail("Daemon status omitted storage health; doctor did not open SQLite");
+        return false;
+    };
+    let db_path = storage
+        .get("canonical_db_path")
+        .or_else(|| storage.get("db_path"))
+        .and_then(serde_json::Value::as_str)
+        .map(PathBuf::from);
+    if let Some(path) = db_path.as_deref() {
+        dc.pass(&format!("Index found: {} (daemon-owned)", path.display()));
+    }
+    if let Some(size) = storage
+        .get("db_size_bytes")
+        .and_then(serde_json::Value::as_u64)
+    {
+        dc.pass(&format!("DB size: {}", format_bytes(size)));
+    }
+    let healthy = match storage
+        .get("quick_check_ok")
+        .and_then(serde_json::Value::as_bool)
+    {
+        Some(true) => {
+            dc.pass("DB integrity: ok (checked by daemon owner)");
+            true
         }
-        Err(e) => {
-            dc.fail(&format!("Could not open database read-only: {e}"));
-            return;
+        Some(false) => {
+            dc.fail("Database integrity check failed; offline recovery is required");
+            if let Some(path) = db_path.as_deref() {
+                print_database_recovery_guidance(dc, path);
+            }
+            false
+        }
+        None => {
+            let detail = storage
+                .get("quick_check_error")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("daemon did not return a quick_check result");
+            dc.fail(&format!("Database diagnostics unavailable: {detail}"));
+            if let Some(path) = db_path.as_deref() {
+                print_database_recovery_guidance(dc, path);
+            }
+            false
         }
     };
-    let db_path = ts.db_path();
-    let size_before = std::fs::metadata(&db_path).map_or(0, |m| m.len());
+    if storage
+        .pointer("/dirty_marker/exists")
+        .and_then(serde_json::Value::as_bool)
+        == Some(true)
+    {
+        let state = storage
+            .pointer("/dirty_marker/state")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("unparsed");
+        dc.warn(&format!("Graph dirty marker present (state={state})"));
+    }
+    healthy
+}
 
-    dc.pass(&format!("DB size: {}", format_bytes(size_before)));
-
-    match ts.quick_check().await {
-        Ok(true) => dc.pass("DB integrity: ok"),
-        Ok(false) => {
-            dc.fail("Database integrity check failed; offline recovery is required");
-            print_database_recovery_guidance(dc, &db_path);
-        }
-        Err(e) if Database::is_corruption_error(&e) => {
-            dc.fail(&format!("Database recovery required: {e}"));
-            print_database_recovery_guidance(dc, &db_path);
-        }
-        Err(e) => dc.warn(&format!(
-            "Could not complete read-only integrity check: {e}"
-        )),
+fn report_daemon_diagnostics_unavailable(
+    dc: &mut DoctorCounters,
+    db_path: Option<&Path>,
+    error: &crate::errors::TraceDecayError,
+) {
+    dc.fail(&format!(
+        "Database diagnostics unavailable from the sole daemon owner: {error}. Doctor did not open SQLite."
+    ));
+    if let Some(path) = db_path {
+        print_database_recovery_guidance(dc, path);
+    } else {
+        dc.info("The database path could not be resolved without opening registry SQLite; stop all TraceDecay processes and preserve the project store before repair.");
     }
 }
 
-async fn active_database_path(
-    project_path: &Path,
-    open_options: &TraceDecayOpenOptions,
-) -> Option<PathBuf> {
-    if let Some(layout) =
-        TraceDecay::initialized_store_layout_with_options(project_path, open_options).await
-    {
-        let branch = crate::branch::current_branch(project_path);
-        return Some(
-            TraceDecay::resolve_db_for_branch(project_path, &layout.data_root, branch.as_deref()).0,
-        );
+fn fallback_database_path(project_path: &Path) -> Option<PathBuf> {
+    if let Ok(Some(marker)) = crate::storage::read_enrollment_marker(project_path) {
+        if let Ok(profile_root) = crate::storage::default_profile_root() {
+            if let Ok(layout) =
+                crate::storage::profile_sharded_layout(project_path, &profile_root, &marker)
+            {
+                return Some(layout.graph_db_path);
+            }
+        }
     }
-
     let data_root = crate::config::get_tracedecay_dir(project_path);
     let db_path = data_root.join(crate::config::db_filename(&data_root));
     db_path.is_file().then_some(db_path)
@@ -367,185 +434,40 @@ fn check_global_db(dc: &mut DoctorCounters) {
     }
 }
 
-/// Lists projects registered in the global DB whose resolved data directory
-/// is gone, and offers to purge them. Stale rows are harmless but show up in
-/// `tracedecay list --all` and inflate the global tokens-saved count.
-async fn check_stale_stores(dc: &mut DoctorCounters) {
-    use std::io::{IsTerminal, Write};
-
-    let Some(gdb) = crate::global_db::GlobalDb::open().await else {
-        return;
-    };
-    let project_paths = gdb.list_project_paths().await;
-    let mut repo_local = 0usize;
-    let mut profile_sharded = 0usize;
-    let mut reconstructable = Vec::new();
-    let mut stale = Vec::new();
-
-    let profile_root = crate::config::user_data_dir();
-    for project_path in &project_paths {
-        match classify_project_storage_with_registry(
-            Path::new(project_path),
-            &gdb,
-            profile_root.as_deref(),
-        )
-        .await
-        {
-            DoctorStorageStatus::RepoLocal => repo_local += 1,
-            DoctorStorageStatus::ProfileSharded => profile_sharded += 1,
-            DoctorStorageStatus::ManifestReconstructable => {
-                reconstructable.push(project_path.clone());
-            }
-            DoctorStorageStatus::Stale => stale.push(project_path.clone()),
-        }
-    }
-
-    dc.pass(&format!(
-        "Storage registry: {repo_local} repo-local, {profile_sharded} profile-sharded"
-    ));
-    if !reconstructable.is_empty() {
-        dc.warn(&format!(
-            "{} manifest-reconstructable project(s) need registry repair",
-            reconstructable.len()
+/// Registry `SQLite` is owned by the daemon. The external doctor reports that
+/// ownership and leaves stale-row inspection/repair to daemon-backed tools.
+fn check_stale_stores(dc: &mut DoctorCounters, status: Option<&serde_json::Value>) {
+    eprintln!("\n\x1b[1mStorage registry\x1b[0m");
+    if let Some(storage) = status.and_then(|value| value.get("storage_health")) {
+        let owner = storage
+            .get("daemon_owner_pid")
+            .and_then(serde_json::Value::as_u64)
+            .map_or_else(|| "unknown".to_string(), |pid| pid.to_string());
+        let identity = storage
+            .get("daemon_generation")
+            .and_then(serde_json::Value::as_str)
+            .map_or_else(
+                || {
+                    storage
+                        .get("daemon_version")
+                        .and_then(serde_json::Value::as_str)
+                        .map_or_else(
+                            || "identity=unknown".to_string(),
+                            |version| format!("version={version}"),
+                        )
+                },
+                |generation| format!("generation={generation}"),
+            );
+        dc.pass(&format!(
+            "Registry/database inspection delegated to daemon owner pid={owner}, {identity}"
         ));
-        for p in reconstructable.iter().take(10) {
-            dc.info(&format!("  • {p}"));
-        }
+    } else {
+        dc.warn("Registry diagnostics unavailable because the daemon owner did not answer; doctor did not open the global DB");
     }
-
-    check_orphan_store_manifests(dc, &gdb).await;
-    check_stale_code_projects(dc, &gdb).await;
-    if let Some(profile_root) = profile_root.as_deref() {
-        let drift = registry_drift::registry_drift_findings(&gdb, profile_root).await;
-        if drift.is_empty() {
-            dc.pass("No registry/store manifest identity drift");
-        } else {
-            dc.warn(&format!(
-                "{} registry/store manifest identity drift finding(s):",
-                drift.len()
-            ));
-            for finding in drift.iter().take(10) {
-                dc.info(&format!(
-                    "  • {} {} {}: registry={} manifest={} ({})",
-                    finding.project_id,
-                    finding.store_id,
-                    finding.field,
-                    finding.registry_value,
-                    finding.manifest_value,
-                    finding.manifest_path.display()
-                ));
-            }
-            if drift.len() > 10 {
-                dc.info(&format!("  … and {} more", drift.len() - 10));
-            }
-        }
-    }
-    if stale.is_empty() {
-        dc.pass("No stale projects in global DB");
-        return;
-    }
-
-    eprintln!(
-        "  \x1b[33m!\x1b[0m {} stale project(s) in global DB (registered but the data dir is gone):",
-        stale.len()
-    );
-    let preview = stale.len().min(10);
-    for p in &stale[..preview] {
-        dc.info(&format!("  • {p}"));
-    }
-    if stale.len() > preview {
-        dc.info(&format!("  … and {} more", stale.len() - preview));
-    }
-
-    if !std::io::stdin().is_terminal() {
-        dc.warnings += 1;
-        dc.info(
-            "    Run `tracedecay migrate registry-gc --json` to preview, then add `--apply` to purge metadata only.",
-        );
-        return;
-    }
-
-    eprint!(
-        "  Purge {} stale row(s) from the global DB? [Y/n] ",
-        stale.len()
-    );
-    std::io::stderr().flush().ok();
-    let mut answer = String::new();
-    if std::io::stdin().read_line(&mut answer).is_err() {
-        dc.warnings += 1;
-        return;
-    }
-    let answer = answer.trim();
-    if !answer.is_empty() && !answer.eq_ignore_ascii_case("y") {
-        dc.warnings += 1;
-        dc.info("Skipped — run again later to purge.");
-        return;
-    }
-
-    let purged = gdb.delete_projects(&stale).await;
-    dc.pass(&format!("Purged {purged} stale project(s)"));
+    dc.info("Use `tracedecay projects list` for daemon-backed registry inspection and `tracedecay migrate registry-gc --json` to preview explicit offline cleanup.");
 }
 
-async fn check_stale_code_projects(dc: &mut DoctorCounters, gdb: &crate::global_db::GlobalDb) {
-    use std::io::{IsTerminal, Write};
-
-    let stale: Vec<_> = gdb
-        .list_code_projects(usize::MAX)
-        .await
-        .into_iter()
-        .filter(|project| !code_project_root_exists(project))
-        .collect();
-
-    if stale.is_empty() {
-        dc.pass("No stale code project registry rows");
-        return;
-    }
-
-    dc.warn(&format!(
-        "{} stale code project registry row(s) (registered but project root is gone):",
-        stale.len()
-    ));
-    let preview = stale.len().min(10);
-    for project in &stale[..preview] {
-        dc.info(&format!(
-            "  • {} ({})",
-            project.project_id, project.display_root
-        ));
-    }
-    if stale.len() > preview {
-        dc.info(&format!("  … and {} more", stale.len() - preview));
-    }
-
-    if !std::io::stdin().is_terminal() {
-        dc.info("    Re-run `tracedecay doctor` interactively to purge registry rows.");
-        return;
-    }
-
-    eprint!(
-        "  Purge {} stale code project registry row(s)? [Y/n] ",
-        stale.len()
-    );
-    std::io::stderr().flush().ok();
-    let mut answer = String::new();
-    if std::io::stdin().read_line(&mut answer).is_err() {
-        return;
-    }
-    let answer = answer.trim();
-    if !answer.is_empty() && !answer.eq_ignore_ascii_case("y") {
-        dc.info("Skipped code project registry purge.");
-        return;
-    }
-
-    let project_ids: Vec<String> = stale
-        .into_iter()
-        .map(|project| project.project_id)
-        .collect();
-    let purged = gdb.delete_code_projects(&project_ids).await;
-    dc.pass(&format!(
-        "Purged {purged} stale code project registry row(s)"
-    ));
-}
-
+#[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DoctorStorageStatus {
     RepoLocal,
@@ -554,6 +476,7 @@ enum DoctorStorageStatus {
     Stale,
 }
 
+#[cfg(test)]
 fn classify_project_storage(project_root: &Path) -> DoctorStorageStatus {
     let Ok(layout) = crate::storage::resolve_layout_for_current_profile(project_root) else {
         return DoctorStorageStatus::Stale;
@@ -575,6 +498,7 @@ fn classify_project_storage(project_root: &Path) -> DoctorStorageStatus {
     }
 }
 
+#[cfg(test)]
 async fn classify_project_storage_with_registry(
     project_root: &Path,
     global_db: &crate::global_db::GlobalDb,
@@ -593,6 +517,7 @@ async fn classify_project_storage_with_registry(
     classify_registry_storage(profile_root, &resolution.store).unwrap_or(status)
 }
 
+#[cfg(test)]
 fn classify_registry_storage(
     profile_root: &Path,
     store: &crate::global_db::StoreInstanceRecord,
@@ -618,12 +543,14 @@ fn classify_registry_storage(
     }
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone)]
 struct RegistryStoreArtifacts {
     graph_db_path: PathBuf,
     manifest_path: Option<PathBuf>,
 }
 
+#[cfg(test)]
 fn registry_store_artifacts(
     profile_root: &Path,
     store: &crate::global_db::StoreInstanceRecord,
@@ -656,6 +583,7 @@ fn registry_store_artifacts(
     artifacts
 }
 
+#[cfg(test)]
 fn registry_manifest_path(
     profile_root: &Path,
     data_root: &Path,
@@ -696,25 +624,6 @@ fn registry_profile_roots(profile_root: &Path) -> Vec<PathBuf> {
         }
     }
     roots
-}
-
-async fn check_orphan_store_manifests(
-    dc: &mut DoctorCounters,
-    global_db: &crate::global_db::GlobalDb,
-) {
-    let Some(profile_root) = crate::config::user_data_dir() else {
-        return;
-    };
-    let (orphan_count, issues) = orphan_store_manifest_report(global_db, &profile_root).await;
-    for issue in issues.iter().take(10) {
-        dc.warn(&format!("Store manifest issue: {issue}"));
-    }
-    if orphan_count > 0 {
-        dc.warn(&format!(
-            "{orphan_count} orphan profile store manifest(s) can reconstruct registry rows"
-        ));
-        dc.info("    Run `tracedecay migrate reconstruct --profile-root <profile> --apply` after review.");
-    }
 }
 
 /// Counts profile store manifests with no matching registry row, plus any

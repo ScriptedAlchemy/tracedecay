@@ -243,12 +243,6 @@ fn cli_project_root() -> Option<PathBuf> {
         .and_then(|cwd| crate::config::discover_project_root(&cwd))
 }
 
-async fn open_global_db() -> crate::errors::Result<GlobalDb> {
-    GlobalDb::open().await.ok_or_else(|| {
-        cli_error("user-level global DB unavailable (no writable profile root)".to_string())
-    })
-}
-
 async fn diagnostics_message_count(
     global: &GlobalDb,
     project_root: Option<&Path>,
@@ -295,12 +289,10 @@ async fn diagnostics_message_count(
 /// `analytics_events` table and print what happened.
 pub async fn run_analytics_sync() -> crate::errors::Result<()> {
     let project_root = cli_project_root();
-    let gdb = open_global_db().await?;
-    let sources = hook_import_sources(project_root.as_deref());
-    let outcome = import_hook_analytics(&gdb, &sources).await;
+    let outcome = call_admin_cli(project_root, json!({ "action": "analytics_sync" })).await?;
     println!(
         "{}",
-        serde_json::to_string_pretty(&outcome.as_json()).unwrap_or_default()
+        serde_json::to_string_pretty(&outcome).unwrap_or_default()
     );
     Ok(())
 }
@@ -311,22 +303,57 @@ pub async fn run_analytics_diagnostics(
     all_projects: bool,
     no_sync: bool,
 ) -> crate::errors::Result<()> {
-    const EVENT_SAMPLE_LIMIT: usize = 10_000;
-
     let project_root = cli_project_root();
-    let gdb = open_global_db().await?;
+    let summary = call_admin_cli(
+        project_root,
+        json!({
+            "action": "analytics_diagnostics",
+            "all": all_projects,
+            "no_sync": no_sync,
+        }),
+    )
+    .await?;
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&summary).unwrap_or_default()
+    );
+    Ok(())
+}
+
+async fn call_admin_cli(
+    project_root: Option<PathBuf>,
+    arguments: Value,
+) -> crate::errors::Result<Value> {
+    let handshake =
+        crate::daemon::DaemonHandshake::for_current_client(project_root, None, false, false)?;
+    let result =
+        crate::daemon::call_default_tool(&handshake, "tracedecay_admin_cli", arguments).await?;
+    crate::daemon::tool_json_payload(&result, "tracedecay_admin_cli")
+}
+
+pub(crate) async fn analytics_sync_with_db(gdb: &GlobalDb, project_root: Option<&Path>) -> Value {
+    let sources = hook_import_sources(project_root);
+    import_hook_analytics(gdb, &sources).await.as_json()
+}
+
+pub(crate) async fn analytics_diagnostics_with_db(
+    gdb: &GlobalDb,
+    project_root: Option<&Path>,
+    all_projects: bool,
+    no_sync: bool,
+) -> crate::errors::Result<Value> {
+    const EVENT_SAMPLE_LIMIT: usize = 10_000;
 
     let import = if no_sync {
         Value::Null
     } else {
-        let sources = hook_import_sources(project_root.as_deref());
-        import_hook_analytics(&gdb, &sources).await.as_json()
+        analytics_sync_with_db(gdb, project_root).await
     };
 
     let project_filter = if all_projects {
         None
     } else {
-        project_root.as_deref().map(GlobalDb::canonical_project_key)
+        project_root.map(GlobalDb::canonical_project_key)
     };
     let events = gdb
         .query_analytics_events(&crate::global_db::AnalyticsEventQuery {
@@ -344,23 +371,18 @@ pub async fn run_analytics_diagnostics(
         .map(crate::dashboard::analytics_api::durable_analytics_event_row)
         .collect();
 
-    let store_root = project_root.as_deref().and_then(|root| {
+    let store_root = project_root.and_then(|root| {
         crate::storage::resolve_layout_for_current_profile(root)
             .ok()
             .map(|layout| layout.data_root)
     });
-    let hook_filter_root = if all_projects {
-        None
-    } else {
-        project_root.as_deref()
-    };
+    let hook_filter_root = if all_projects { None } else { project_root };
     let hook_analytics = crate::dashboard::analytics_api::read_hook_analytics_rows_at(
         store_root.as_deref(),
         hook_filter_root,
     );
 
-    let message_count =
-        diagnostics_message_count(&gdb, project_root.as_deref(), all_projects).await;
+    let message_count = diagnostics_message_count(gdb, project_root, all_projects).await;
 
     let durable = if event_rows.is_empty() {
         None
@@ -380,8 +402,7 @@ pub async fn run_analytics_diagnostics(
         summary.insert("import".to_string(), import);
         summary.insert(
             "global_db".to_string(),
-            crate::global_db::global_db_path()
-                .map_or(Value::Null, |path| json!(path.display().to_string())),
+            json!(gdb.db_path().display().to_string()),
         );
         summary.insert("event_sample_limit".to_string(), json!(EVENT_SAMPLE_LIMIT));
         summary.insert(
@@ -389,11 +410,7 @@ pub async fn run_analytics_diagnostics(
             json!(event_rows.len() >= EVENT_SAMPLE_LIMIT),
         );
     }
-    println!(
-        "{}",
-        serde_json::to_string_pretty(&summary).unwrap_or_default()
-    );
-    Ok(())
+    Ok(summary)
 }
 
 #[cfg(test)]

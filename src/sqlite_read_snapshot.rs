@@ -22,6 +22,7 @@ pub(crate) struct SnapshotDatabase {
     source_state: Vec<FileState>,
     path: PathBuf,
     _scratch: Option<Arc<ScratchDirectory>>,
+    _authority: crate::db::DatabaseAuthority,
     #[cfg(test)]
     copied_bytes: u64,
 }
@@ -153,6 +154,7 @@ struct PreparedSnapshot {
     target: PathBuf,
     mode: SnapshotMode,
     copy_bytes: u64,
+    authority: crate::db::DatabaseAuthority,
 }
 
 #[derive(Clone, Copy)]
@@ -217,6 +219,11 @@ pub(crate) async fn open_in(path: &Path, root: &Path) -> io::Result<SnapshotData
 pub(crate) fn family_fingerprint(path: &Path) -> io::Result<String> {
     use std::io::Read;
 
+    let _authority = crate::db::DatabaseAuthority::for_runtime(
+        path,
+        "fingerprint SQLite family for offline maintenance",
+    )
+    .map_err(io::Error::other)?;
     let before = family_state(path)?;
     let mut hash = Sha256::new();
     for (label, member) in [
@@ -255,6 +262,11 @@ fn prepare_one(
     scratch: &ScratchDirectory,
     index: usize,
 ) -> io::Result<PreparedSnapshot> {
+    let authority = crate::db::DatabaseAuthority::for_runtime(
+        source,
+        "capture SQLite family for offline maintenance",
+    )
+    .map_err(io::Error::other)?;
     let directory = scratch.path.join(index.to_string());
     create_private_directory(&directory)?;
     let target = directory.join("database.db");
@@ -306,6 +318,7 @@ fn prepare_one(
         target,
         mode,
         copy_bytes,
+        authority,
     })
 }
 
@@ -376,6 +389,7 @@ async fn finish_one(
         source_state: prepared.source_state,
         path: open_path,
         _scratch: scratch,
+        _authority: prepared.authority,
         #[cfg(test)]
         copied_bytes: prepared.copy_bytes,
     };

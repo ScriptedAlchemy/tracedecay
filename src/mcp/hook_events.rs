@@ -903,6 +903,24 @@ mod tests {
     }
 
     #[test]
+    fn plans_cursor_session_start_as_current_branch_sync() {
+        let params = serde_json::to_value(crate::daemon::DaemonHookEvent::session_start(
+            HookAgent::Cursor,
+            PathBuf::from("/tmp/project"),
+        ))
+        .unwrap();
+        let event = parse_or_panic(&params);
+
+        assert_eq!(
+            plan_hook_event(&event, Path::new("/tmp/project"), Some("main")),
+            HookEventPlan::SyncCurrentBranch {
+                branch: "main".to_string(),
+                agent: HookAgent::Cursor,
+            }
+        );
+    }
+
+    #[test]
     fn plans_workspace_open_as_current_branch_sync() {
         let params = json!({
             "agent": "kiro",

@@ -301,6 +301,100 @@ async fn tracks_same_repo_pr_indexes_its_content_and_untracks_on_close() {
     assert_eq!(user_branch_after_close, user_branch_sha);
 }
 
+/// A contended coordinator removal must leave every owned artifact in place so
+/// the following poll can retry safely instead of serving an untracked state
+/// whose worktree/ref was already deleted.
+#[tokio::test]
+async fn busy_untrack_retains_managed_state_until_a_later_poll_succeeds() {
+    let (_env, project, origin) = indexed_repo_with_origin().await;
+    add_same_repo_pr(&project, &origin, 6, "pr_six_symbol");
+    let data_root = project_data_dir(&project);
+    let label = "tracedecay/autotrack/pr/6";
+    let worktree = data_root.join("pr-worktrees/pr-6");
+    let discovery = pr_autotrack::discover_open_prs(&project).expect("PR discovery succeeds");
+    let tracked = pr_autotrack::reconcile_project(&project, &data_root, &discovery, 10).await;
+    assert_eq!(tracked.tracked, vec![label.to_string()]);
+
+    // The branch-administration coordinator takes this same metadata lock. It
+    // must fail closed while another mutation owns it, not delete Git artifacts
+    // after an unsuccessful store removal.
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .open(data_root.join(".branch-add.lock"))
+        .unwrap();
+    lock.lock_exclusive().unwrap();
+
+    let busy = pr_autotrack::reconcile_project(
+        &project,
+        &data_root,
+        &pr_autotrack::PrDiscovery::default(),
+        10,
+    )
+    .await;
+    assert!(busy.untracked.is_empty());
+    assert!(
+        busy.failures.iter().any(|(branch, _)| branch == label),
+        "the failed coordinator removal must be reported"
+    );
+    assert_eq!(pr_autotrack::managed_summary(&data_root).len(), 1);
+    assert!(load_branch_meta(&data_root).unwrap().is_tracked(label));
+    assert!(worktree.exists(), "busy removal must retain its worktree");
+    assert!(
+        git_out(
+            &project,
+            &[
+                "rev-parse",
+                "--verify",
+                "refs/heads/tracedecay/autotrack/pr/6",
+            ],
+        )
+        .status
+        .success(),
+        "busy removal must retain its synthetic branch"
+    );
+    assert!(
+        git_out(&project, &["rev-parse", "--verify", "refs/tracedecay/pr/6"])
+            .status
+            .success(),
+        "busy removal must retain its owned fetch ref"
+    );
+
+    lock.unlock().unwrap();
+
+    let retried = pr_autotrack::reconcile_project(
+        &project,
+        &data_root,
+        &pr_autotrack::PrDiscovery::default(),
+        10,
+    )
+    .await;
+    assert_eq!(retried.untracked, vec![label.to_string()]);
+    assert!(pr_autotrack::managed_summary(&data_root).is_empty());
+    assert!(!load_branch_meta(&data_root).unwrap().is_tracked(label));
+    assert!(!worktree.exists(), "successful retry removes the worktree");
+    assert!(
+        !git_out(
+            &project,
+            &[
+                "rev-parse",
+                "--verify",
+                "refs/heads/tracedecay/autotrack/pr/6",
+            ],
+        )
+        .status
+        .success(),
+        "successful retry removes the synthetic branch"
+    );
+    assert!(
+        !git_out(&project, &["rev-parse", "--verify", "refs/tracedecay/pr/6"])
+            .status
+            .success(),
+        "successful retry removes the owned fetch ref"
+    );
+}
+
 #[tokio::test]
 async fn deferred_tracking_is_not_persisted_and_retries_next_cycle() {
     let (_env, project, origin) = indexed_repo_with_origin().await;
@@ -320,8 +414,8 @@ async fn deferred_tracking_is_not_persisted_and_retries_next_cycle() {
     assert!(deferred.tracked.is_empty());
     assert!(pr_autotrack::managed_summary(&data_root).is_empty());
     assert!(
-        !data_root.join("pr-worktrees/pr-7").exists(),
-        "deferred tracking must roll back its worktree"
+        data_root.join("pr-worktrees/pr-7").exists(),
+        "contended rollback must retain its worktree for the next poll"
     );
 
     lock.unlock().unwrap();
@@ -363,9 +457,14 @@ async fn validated_branch_ref_orphan_without_worktree_is_rebuilt() {
     let first = pr_autotrack::reconcile_project(&project, &data_root, &discovery, 10).await;
     assert_eq!(first.tracked, vec![label.to_string()]);
     fs::remove_file(data_root.join("pr-autotrack.json")).unwrap();
-    assert!(tracedecay::branch::remove_tracked_branch_store(
-        &data_root, label
-    ));
+    let mut meta = load_branch_meta(&data_root).unwrap();
+    let entry = meta.remove_branch(label).unwrap();
+    save_branch_meta(&data_root, &meta).unwrap();
+    fs::rename(
+        data_root.join(entry.db_file),
+        data_root.join("interrupted-branch-store.db"),
+    )
+    .unwrap();
     git(
         &project,
         &["worktree", "remove", "--force", &worktree.to_string_lossy()],
@@ -538,9 +637,14 @@ async fn interrupted_track_with_advanced_head_recovers_instead_of_wedging() {
     // Reproduce the mid-track crash aftermath: state gone, DB gone, worktree
     // gone — but the synthetic branch survives pointing at the OLD head.
     fs::remove_file(data_root.join("pr-autotrack.json")).unwrap();
-    assert!(tracedecay::branch::remove_tracked_branch_store(
-        &data_root, label
-    ));
+    let mut meta = load_branch_meta(&data_root).unwrap();
+    let entry = meta.remove_branch(label).unwrap();
+    save_branch_meta(&data_root, &meta).unwrap();
+    fs::rename(
+        data_root.join(entry.db_file),
+        data_root.join("interrupted-branch-store.db"),
+    )
+    .unwrap();
     git(
         &project,
         &["worktree", "remove", "--force", &worktree.to_string_lossy()],
@@ -616,7 +720,6 @@ async fn cap_does_not_starve_head_updates_for_managed_prs() {
         "the refreshed managed branch serves the advanced head, not the stale one"
     );
 }
-
 /// Finding 7: turning the feature off must tear down managed PR state rather
 /// than stranding worktrees, refs, synthetic branches and stores forever.
 #[tokio::test]
@@ -659,48 +762,4 @@ async fn teardown_removes_all_managed_state_on_disable() {
     // Idempotent: a second teardown with nothing managed is a no-op.
     pr_autotrack::teardown_disabled_project(&project).await;
     assert!(pr_autotrack::managed_summary(&data_root).is_empty());
-}
-
-/// Finding 3: `remove_tracked_branch_store` must serialize on the branch-add
-/// lock so it can't race a concurrent `branch add`. While the lock is held it
-/// skips (returns false) and leaves metadata intact; once released it proceeds.
-#[tokio::test]
-async fn remove_tracked_branch_store_respects_branch_add_lock() {
-    use tracedecay::branch_meta::BranchMeta;
-
-    let dir = tempfile::tempdir().unwrap();
-    let root = dir.path();
-    let mut meta = BranchMeta::new("main");
-    meta.add_branch("feature-x", "branches/feature_x.db", "main");
-    fs::create_dir_all(root.join("branches")).unwrap();
-    fs::write(root.join("branches/feature_x.db"), b"db").unwrap();
-    save_branch_meta(root, &meta).unwrap();
-
-    // Hold the branch-add lock exclusively, as a concurrent `branch add` would.
-    let lock = std::fs::OpenOptions::new()
-        .create(true)
-        .write(true)
-        .truncate(false)
-        .open(root.join(".branch-add.lock"))
-        .unwrap();
-    lock.lock_exclusive().unwrap();
-
-    assert!(
-        !tracedecay::branch::remove_tracked_branch_store(root, "feature-x"),
-        "removal must skip while the branch-add lock is held"
-    );
-    assert!(
-        load_branch_meta(root).unwrap().is_tracked("feature-x"),
-        "contended removal must not mutate branch metadata"
-    );
-    assert!(root.join("branches/feature_x.db").exists());
-
-    lock.unlock().unwrap();
-
-    assert!(
-        tracedecay::branch::remove_tracked_branch_store(root, "feature-x"),
-        "removal proceeds once the lock is released"
-    );
-    assert!(!load_branch_meta(root).unwrap().is_tracked("feature-x"));
-    assert!(!root.join("branches/feature_x.db").exists());
 }
