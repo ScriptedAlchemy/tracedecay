@@ -1156,7 +1156,11 @@ async fn project_registry_tools_prefer_injected_registry_over_process_default() 
     assert_eq!(context_payload["project"]["project_id"], "proj_alpha");
     assert_eq!(
         context_payload["registry_path"],
-        client_registry_path.display().to_string()
+        client_registry_path
+            .canonicalize()
+            .unwrap()
+            .display()
+            .to_string()
     );
 }
 
