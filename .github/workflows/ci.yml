@@ -128,7 +128,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p "$GOBIN"
-          go install github.com/gitleaks/gitleaks/v8@v8.30.1
+          go install github.com/zricethezav/gitleaks/v8@v8.30.1
           "$GOBIN/gitleaks" version | grep -Fx '8.30.1'
           echo "$GOBIN" >> "$GITHUB_PATH"
           python -m pip install --disable-pip-version-check 'detect-secrets==1.5.0'
