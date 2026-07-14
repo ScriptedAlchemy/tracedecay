@@ -43,7 +43,7 @@ pub use cursor::{
     hook_cursor_session_end, hook_cursor_session_start, hook_cursor_stop,
     hook_cursor_subagent_start, hook_cursor_workspace_open,
 };
-pub use cursor_compact::{CursorPreCompactOutcome, cursor_pre_compact_for_event_with_config};
+pub use cursor_compact::{CursorPreCompactOutcome, cursor_pre_compact_via_daemon};
 pub use cursor_shell::{
     CursorShellSyncPlan, cursor_branch_switch_target, cursor_shell_command_targets_project,
     cursor_shell_sync_plan, cursor_shell_sync_plan_with_current_branch,
@@ -142,15 +142,13 @@ pub async fn hook_hermes_terminal_receipt() -> i32 {
         None => None,
     } {
         crate::daemon::notify_hook_event(&project_root, event).await;
-    } else {
-        if let Err(error) = daemon_hook_action(
-            None,
-            serde_json::json!({ "action": "hermes_receipt", "event": event }),
-        )
-        .await
-        {
-            eprintln!("[tracedecay] user Hermes receipt daemon call failed: {error}");
-        }
+    } else if let Err(error) = daemon_hook_action(
+        None,
+        serde_json::json!({ "action": "hermes_receipt", "event": event }),
+    )
+    .await
+    {
+        eprintln!("[tracedecay] user Hermes receipt daemon call failed: {error}");
     }
     0
 }

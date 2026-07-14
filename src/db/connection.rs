@@ -87,7 +87,7 @@ impl Database {
 
         let inner = Arc::new(DatabaseInner {
             conn,
-            _db: db,
+            db,
             writable: true,
             _authority: authority,
             _slot: Some(slot.clone()),
@@ -144,7 +144,7 @@ impl Database {
 
         let inner = Arc::new(DatabaseInner {
             conn,
-            _db: db,
+            db,
             writable: true,
             _authority: authority,
             _slot: Some(slot.clone()),
@@ -186,7 +186,7 @@ impl Database {
 
         let inner = Arc::new(DatabaseInner {
             conn,
-            _db: db,
+            db,
             writable: false,
             _authority: authority,
             _slot: None,
@@ -279,7 +279,7 @@ impl Database {
         } else {
             Some(
                 self.inner
-                    ._db
+                    .db
                     .connect()
                     .map_err(|e| TraceDecayError::Database {
                         message: format!("failed to open database snapshot connection: {e}"),

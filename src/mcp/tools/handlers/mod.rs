@@ -97,6 +97,7 @@ use support::{profile_root_for_global_db, project_registry_context, project_sele
 
 #[cfg(test)]
 const INTERNAL_DAEMON_TOOL_NAMES: &[&str] = &[
+    "tracedecay_admin_branch_add",
     "tracedecay_admin_cli",
     "tracedecay_admin_project",
     "tracedecay_admin_sync",
@@ -396,6 +397,7 @@ pub async fn handle_tool_call_with_registry_and_implicit_project(
         "tracedecay_hook_runtime" => {
             hook_runtime::handle_hook_runtime(cg, args, options.global_db).await
         }
+        "tracedecay_admin_branch_add" => git::handle_admin_branch_add(cg, args).await,
         "tracedecay_admin_sync" => info::handle_admin_sync(cg, args).await,
         "tracedecay_admin_cli" => admin_cli::handle_admin_cli(cg, args, options.global_db).await,
         "tracedecay_admin_project" => {

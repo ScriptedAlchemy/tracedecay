@@ -276,18 +276,35 @@ pub fn load_branch_meta(data_dir: &Path) -> Option<BranchMeta> {
     }
 }
 
+/// Serializes validated branch metadata in the canonical persisted form.
+pub(crate) fn serialize_branch_meta(meta: &BranchMeta) -> std::io::Result<String> {
+    meta.validate()
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+    serde_json::to_string_pretty(meta).map_err(std::io::Error::other)
+}
+
+/// Publishes already-serialized branch metadata after validating that it is the
+/// same canonical schema accepted by runtime readers. This is crate-private so
+/// the deletion journal can persist and later compare the exact commit bytes.
+pub(crate) fn save_branch_meta_serialized(
+    data_dir: &Path,
+    serialized: &str,
+) -> std::io::Result<()> {
+    parse(serialized)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+    let path = data_dir.join(BRANCH_META_FILENAME);
+    let temp_path = path.with_extension("json.tmp");
+    PrivateStoreIo::write_file_atomically(&path, &temp_path, serialized.as_bytes())
+}
+
 /// Saves branch metadata to `branch-meta.json` in the project data dir.
 ///
 /// Writes via a sibling temp file and renames it into place (the same
 /// atomic-write helper used for `store-manifest.json`), so a concurrent
 /// reader never observes a torn or truncated file.
 pub fn save_branch_meta(data_dir: &Path, meta: &BranchMeta) -> std::io::Result<()> {
-    meta.validate()
-        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
-    let path = data_dir.join(BRANCH_META_FILENAME);
-    let json = serde_json::to_string_pretty(meta).map_err(std::io::Error::other)?;
-    let temp_path = path.with_extension("json.tmp");
-    PrivateStoreIo::write_file_atomically(&path, &temp_path, json.as_bytes())
+    let serialized = serialize_branch_meta(meta)?;
+    save_branch_meta_serialized(data_dir, &serialized)
 }
 
 /// Advances the `last_synced_at` timestamp for `branch` in the project's
@@ -297,9 +314,18 @@ pub fn save_branch_meta(data_dir: &Path, meta: &BranchMeta) -> std::io::Result<(
 /// reflects real sync activity (previously `last_synced_at` only moved at
 /// branch-add finalize, making the list misleading). It silently no-ops when
 /// there is no branch metadata (single-DB mode / pre-branch projects) or when
-/// `branch` is untracked — a sync of an untracked branch has no entry to touch,
-/// and forcing one here would race branch-add's own bookkeeping.
+/// `branch` is untracked — a sync of an untracked branch has no entry to touch.
+/// The shared branch lock serializes this load-modify-save sequence with branch
+/// add, removal, GC, and pending deletion recovery.
 pub fn update_synced_timestamp(tracedecay_dir: &Path, branch: &str) {
+    update_synced_timestamp_with(tracedecay_dir, branch, || {});
+}
+
+fn update_synced_timestamp_with(tracedecay_dir: &Path, branch: &str, after_lock: impl FnOnce()) {
+    let Ok(_branch_lock) = crate::branch::acquire_branch_lock_blocking(tracedecay_dir) else {
+        return;
+    };
+    after_lock();
     let Some(mut meta) = load_branch_meta(tracedecay_dir) else {
         return;
     };
@@ -473,6 +499,28 @@ mod tests {
             .parse()
             .unwrap();
         assert!(synced > 1000, "last_synced_at should advance, got {synced}");
+    }
+
+    #[test]
+    fn update_synced_timestamp_holds_shared_branch_lock_during_load_modify_save() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut meta = BranchMeta::new("main");
+        meta.add_branch("feature/foo", "branches/feature_foo.db", "main");
+        save_branch_meta(dir.path(), &meta).unwrap();
+        let mut observed_contention = false;
+
+        update_synced_timestamp_with(dir.path(), "feature/foo", || {
+            let error = crate::branch::try_acquire_branch_add_lock(dir.path())
+                .expect_err("timestamp update must already own the shared branch lock");
+            observed_contention = matches!(error, crate::errors::TraceDecayError::SyncLock { .. });
+        });
+
+        assert!(observed_contention);
+        assert!(
+            load_branch_meta(dir.path())
+                .unwrap()
+                .is_tracked("feature/foo")
+        );
     }
 
     #[test]

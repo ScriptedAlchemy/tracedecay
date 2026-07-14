@@ -164,11 +164,11 @@ async fn unauthenticated_legacy_handshake_is_rejected_before_routing() {
     .expect("bind broker");
     let server = tokio::spawn(async move {
         let stream = listener.accept().await.expect("accept legacy client");
-        super::super::serve_authenticated_socket_client(
+        Box::pin(super::super::serve_authenticated_socket_client(
             stream,
             super::super::DaemonEngine::default(),
             TOKEN.to_string(),
-        )
+        ))
         .await
     });
 

@@ -1,6 +1,7 @@
 use serde_json::{Value, json};
 use std::path::Path;
 
+use crate::automation::run_ledger::AutomationRunStatus;
 use crate::errors::{Result, TraceDecayError};
 use crate::global_db::GlobalDb;
 use crate::mcp::tools::ToolResult;
@@ -21,8 +22,8 @@ fn required_str<'a>(args: &'a Value, key: &str) -> Result<&'a str> {
         .ok_or_else(|| config_error(format!("missing required parameter `{key}`")))
 }
 
-fn rendered(project_root: Option<&std::path::Path>, args: &Value, value: Value) -> ToolResult {
-    let text = render::finalize(project_root, args, &value, || render::generic_md(&value));
+fn rendered(project_root: Option<&std::path::Path>, args: &Value, value: &Value) -> ToolResult {
+    let text = render::finalize(project_root, args, value, || render::generic_md(value));
     ToolResult::new(
         json!({ "content": [{ "type": "text", "text": text }] }),
         vec![],
@@ -62,7 +63,7 @@ pub async fn handle_hook_runtime(
             )));
         }
     };
-    Ok(rendered(Some(cg.project_root()), &args, output))
+    Ok(rendered(Some(cg.project_root()), &args, &output))
 }
 
 pub async fn handle_projectless_hook_runtime(
@@ -89,7 +90,7 @@ pub async fn handle_projectless_hook_runtime(
         "hermes_receipt" => hermes_receipt(&args, profile_root).await?,
         _ => unreachable!("projectless hook action validated above"),
     };
-    Ok(rendered(None, &args, output))
+    Ok(rendered(None, &args, &output))
 }
 
 async fn codex_compact(cg: &TraceDecay, args: &Value) -> Result<Value> {
@@ -471,7 +472,7 @@ async fn run_user_review(
     )
     .await?;
     let backend = CodexAppServerBackend::from_automation_config(&config);
-    Ok(run_user_session_automation_with_backend(
+    run_user_session_automation_with_backend(
         profile_root,
         &config,
         &backend,
@@ -494,7 +495,7 @@ async fn run_user_review(
             },
         },
     )
-    .await?)
+    .await
 }
 
 async fn hermes_receipt(args: &Value, profile_root: &Path) -> Result<Value> {
@@ -559,7 +560,6 @@ async fn hermes_receipt(args: &Value, profile_root: &Path) -> Result<Value> {
                 crate::automation::run_ledger::AutomationTrigger::HostReceipt,
             )
             .await?;
-            use crate::automation::run_ledger::AutomationRunStatus;
             if run.session_reflector.ledger_record.status == AutomationRunStatus::Succeeded
                 && run.memory_curator.ledger_record.status != AutomationRunStatus::Failed
                 && run.skill_writer.ledger_record.status == AutomationRunStatus::Succeeded

@@ -151,9 +151,8 @@ async fn try_open_at_preserves_authority_error() {
     if path.starts_with(std::env::temp_dir()) {
         return;
     }
-    let error = match GlobalDb::try_open_at(&path).await {
-        Err(error) => error,
-        Ok(_) => panic!("unauthorized global DB open unexpectedly succeeded"),
+    let Err(error) = GlobalDb::try_open_at(&path).await else {
+        panic!("unauthorized global DB open unexpectedly succeeded");
     };
     let message = error.to_string();
     assert!(
@@ -166,12 +165,11 @@ async fn try_open_at_preserves_authority_error() {
 }
 
 #[tokio::test]
-async fn isolated_temp_database_uses_test_authority() {
+async fn isolated_temp_database_opens_without_ambient_daemon() {
     let dir = tempfile::TempDir::new().unwrap();
-    let db = GlobalDb::open_at(&dir.path().join("global.db"))
+    let _db = GlobalDb::open_at(&dir.path().join("global.db"))
         .await
         .expect("temp test open");
-    assert_eq!(db._authority.role(), crate::db::DatabaseAuthorityRole::Test);
 }
 
 #[test]

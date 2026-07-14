@@ -11,15 +11,23 @@ use serde_json::json;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 #[cfg(unix)]
 use tokio::net::UnixStream;
-#[cfg(unix)]
-use tokio::task::JoinHandle;
-use tokio::task::JoinSet;
+use tokio::task::{JoinHandle, JoinSet};
 use tokio::time::{Duration, timeout};
 
 use crate::client_identity::DaemonClientIdentity;
 use crate::errors::{Result, TraceDecayError};
 use crate::mcp::ReplayTransport;
 use crate::mcp::{ErrorCode, JsonRpcRequest, JsonRpcResponse, McpTransport, StdioTransport};
+use branch_add::{branch_add_response, coordinated_hook_branch_writer, parse_branch_add_request};
+use branch_admin::{StoreAdministration, parse_branch_admin_request, write_branch_admin_response};
+#[cfg(unix)]
+use scheduler::AutomationSchedulerHandle;
+#[cfg(all(unix, test))]
+use scheduler::{
+    automation_scheduler_configured, automation_scheduler_tick_secs_for_project,
+    automation_staged_log_fields, daemon_scheduler_record_log_line, run_automation_scheduler_tick,
+    scheduler_task_log_fields, user_config_for_client,
+};
 use transport::{BrokerListener, BrokerStream, DaemonAuthPreface, DaemonEndpoint};
 
 pub const SERVICE_NAME: &str = "tracedecay.service";
@@ -32,6 +40,22 @@ const MAX_CATALOG_REFRESH_CLIENTS_PER_GENERATION: usize = 1_024;
 const HOOK_EVENT_NOTIFY_TIMEOUT: Duration = Duration::from_millis(750);
 const DAEMON_TOOL_LIVENESS_POLL_INTERVAL: Duration = Duration::from_secs(5);
 const DAEMON_TOOL_HEALTH_CONNECT_TIMEOUT: Duration = Duration::from_secs(1);
+
+fn coordinated_background_refresh_writer(
+    administration: StoreAdministration,
+) -> crate::mcp::server::BackgroundRefreshWriter {
+    Arc::new(move |request| {
+        let administration = administration.clone();
+        Box::pin(async move {
+            administration
+                .with_writer(|| async move {
+                    crate::mcp::server::execute_background_refresh_direct(request).await
+                })
+                .await
+        })
+    })
+}
+
 /// Upper bound on graceful-shutdown persistence work (per-server token
 /// persistence and WAL checkpoints). Must stay comfortably below systemd's
 /// stop timeout (90s by default) so the daemon exits cleanly instead of
@@ -119,10 +143,14 @@ impl Drop for DaemonActivity {
 }
 
 mod authority;
+mod branch_add;
+mod branch_admin;
 #[cfg(unix)]
 mod git_watch;
 #[cfg(unix)]
 pub mod pr_autotrack;
+#[cfg(unix)]
+mod scheduler;
 mod service;
 pub(crate) mod transport;
 pub use service::{
@@ -685,149 +713,6 @@ fn read_daemon_log_tail(max_lines: usize) -> String {
     }
 }
 
-#[cfg(unix)]
-fn scheduler_task_log_fields(
-    project_path: &Path,
-    task: crate::automation::backend::AgentTaskKind,
-    outcome: &str,
-) -> Vec<(&'static str, String)> {
-    vec![
-        ("project", project_path.display().to_string()),
-        (
-            "task",
-            crate::automation::backend::task_key(task).to_string(),
-        ),
-        ("outcome", outcome.to_string()),
-    ]
-}
-
-#[cfg(unix)]
-fn log_scheduler_task_start(project_path: &Path, task: crate::automation::backend::AgentTaskKind) {
-    log_daemon_event(
-        "scheduler_task",
-        &scheduler_task_log_fields(project_path, task, "start"),
-    );
-}
-
-#[cfg(unix)]
-fn scheduler_task_error_log_fields(
-    project_path: &Path,
-    task: crate::automation::backend::AgentTaskKind,
-    error: &TraceDecayError,
-) -> Vec<(&'static str, String)> {
-    vec![
-        ("project", project_path.display().to_string()),
-        (
-            "task",
-            crate::automation::backend::task_key(task).to_string(),
-        ),
-        ("error", error.to_string()),
-    ]
-}
-
-#[cfg(unix)]
-fn log_scheduler_task_error(
-    project_path: &Path,
-    task: crate::automation::backend::AgentTaskKind,
-    error: &TraceDecayError,
-) {
-    log_daemon_event(
-        "scheduler_task_error",
-        &scheduler_task_error_log_fields(project_path, task, error),
-    );
-}
-
-#[cfg(unix)]
-fn scheduler_record_log_fields(
-    project_path: &Path,
-    record: &crate::automation::run_ledger::AutomationRunLedgerRecord,
-) -> Vec<(&'static str, String)> {
-    use crate::automation::run_ledger::AutomationRunStatus;
-
-    let outcome = match record.status {
-        AutomationRunStatus::Succeeded => "complete",
-        AutomationRunStatus::Failed => "error",
-        AutomationRunStatus::Skipped => "skipped",
-        AutomationRunStatus::Queued => "queued",
-        AutomationRunStatus::Running => "running",
-    };
-    let task = record
-        .task_key
-        .as_deref()
-        .unwrap_or_else(|| crate::automation::backend::task_key(record.task))
-        .to_string();
-    let mut fields = vec![
-        ("project", project_path.display().to_string()),
-        ("task", task),
-        ("outcome", outcome.to_string()),
-        ("run_id", record.run_id.clone()),
-    ];
-    if let Some(reason) = record.fallback_status.as_ref().or(record.error.as_ref()) {
-        fields.push(("reason", reason.clone()));
-    }
-    fields
-}
-
-#[cfg(all(unix, test))]
-fn daemon_scheduler_record_log_line(
-    project_path: &Path,
-    record: &crate::automation::run_ledger::AutomationRunLedgerRecord,
-) -> String {
-    format_daemon_log_line(
-        "scheduler_task",
-        &scheduler_record_log_fields(project_path, record),
-    )
-}
-
-#[cfg(unix)]
-fn log_daemon_scheduler_record(
-    project_path: &Path,
-    record: &crate::automation::run_ledger::AutomationRunLedgerRecord,
-) {
-    log_daemon_event(
-        "scheduler_task",
-        &scheduler_record_log_fields(project_path, record),
-    );
-}
-
-#[cfg(unix)]
-fn automation_staged_log_fields(
-    project_path: &Path,
-    counts: crate::automation::staged_notice::AutomationPendingCounts,
-) -> Vec<(&'static str, String)> {
-    vec![
-        ("project", project_path.display().to_string()),
-        (
-            "pending_fact_proposals",
-            counts.pending_fact_proposals.to_string(),
-        ),
-        ("pending_skills", counts.pending_skills.to_string()),
-    ]
-}
-
-/// After a scheduler tick where at least one task completed, emit a stable
-/// `event=automation_staged` line with managed-skill review counts plus fact
-/// proposal telemetry.
-/// Silent when nothing is pending or the profile root is unavailable.
-#[cfg(unix)]
-async fn log_automation_staged_if_pending(project_path: &Path, dashboard_root: &Path) {
-    let Ok(profile_root) = crate::storage::default_profile_root() else {
-        return;
-    };
-    let counts = crate::automation::staged_notice::count_pending_automation_output(
-        dashboard_root,
-        &profile_root,
-    )
-    .await;
-    if counts.total() == 0 {
-        return;
-    }
-    log_daemon_event(
-        "automation_staged",
-        &automation_staged_log_fields(project_path, counts),
-    );
-}
-
 pub fn unavailable_error(socket_path: &Path) -> TraceDecayError {
     TraceDecayError::Config {
         message: format!(
@@ -972,9 +857,10 @@ fn default_available_socket_path() -> Result<PathBuf> {
     #[cfg(unix)]
     {
         if socket_path.exists() {
-            return Ok(socket_path);
+            Ok(socket_path)
+        } else {
+            Err(unavailable_error(&socket_path))
         }
-        return Err(unavailable_error(&socket_path));
     }
     #[cfg(not(unix))]
     {
@@ -1121,7 +1007,7 @@ pub async fn run_foreground(_socket_path: PathBuf) -> Result<()> {
     log_daemon_event("daemon_listening", &[("endpoint", endpoint.to_string())]);
 
     let lifecycle = DaemonLifecycle::default();
-    let project_servers = Arc::new(tokio::sync::Mutex::new(DatabaseOwnerRegistry::default()));
+    let store_administration = StoreAdministration::default();
     let project_open_gates = Arc::new(tokio::sync::Mutex::new(ProjectOpenGates::default()));
     let mut clients: JoinSet<Result<()>> = JoinSet::new();
     loop {
@@ -1137,14 +1023,14 @@ pub async fn run_foreground(_socket_path: PathBuf) -> Result<()> {
         };
         let auth_token = authority.auth_token().to_string();
         let client_lifecycle = lifecycle.clone();
-        let project_servers = Arc::clone(&project_servers);
+        let store_administration = store_administration.clone();
         let project_open_gates = Arc::clone(&project_open_gates);
         clients.spawn(async move {
             serve_windows_broker_client(
                 stream,
                 &auth_token,
                 &client_lifecycle,
-                project_servers,
+                store_administration,
                 project_open_gates,
                 #[cfg(test)]
                 None,
@@ -1671,23 +1557,31 @@ async fn run_foreground_unix(socket_path: PathBuf) -> Result<()> {
     prepare_socket_path(&authority).await?;
 
     let (listener, bound_endpoint) = BrokerListener::bind(authority.endpoint()).await?;
-    authority.publish_endpoint(bound_endpoint.clone())?;
+    authority.publish_endpoint(&bound_endpoint)?;
     set_owner_only_permissions(&socket_path, 0o600)?;
     log_daemon_event(
         "daemon_listening",
         &[("endpoint", bound_endpoint.to_string())],
     );
+    let engine = DaemonEngine::default();
     // Install the git-metadata watcher (design D3/D5). The daemon has no single
     // project root, so it uses the default `[sync]` config plus env overrides.
-    // When `auto_watch` is off the watcher is inert.
-    let git_watcher =
-        git_watch::GitWatcher::new(crate::config::SyncConfig::default().with_env_overrides());
+    // When `auto_watch` is off the watcher is inert. The watcher shares the
+    // engine's administration coordinator before it can spawn any writer.
+    let git_watcher = git_watch::GitWatcher::new_with_administration(
+        crate::config::SyncConfig::default().with_env_overrides(),
+        engine.store_administration.clone(),
+        profile_root.clone(),
+    );
     git_watcher.spawn(crate::global_db::global_db_path()).await;
     // PR-branch auto-tracking runs independently of the metadata watcher: it is
     // gated per-project on `sync.auto_track_pr_branches` (default off), so this
     // loop is inert unless a project opts in.
-    let pr_autotrack_task = pr_autotrack::spawn(crate::global_db::global_db_path());
-    let engine = DaemonEngine::default()
+    let pr_autotrack_task = pr_autotrack::spawn_with_administration(
+        crate::global_db::global_db_path(),
+        engine.store_administration.clone(),
+    );
+    let engine = engine
         .with_git_watcher(git_watcher)
         .with_pr_autotrack_task(pr_autotrack_task)
         .await;
@@ -1870,16 +1764,14 @@ async fn prepare_socket_path(authority: &authority::DaemonAuthority) -> Result<(
 #[derive(Clone, Default)]
 struct DaemonEngine {
     lifecycle: DaemonLifecycle,
-    /// Shared daemon state, partitioned by the client-scoped project server key.
-    project_servers: Arc<tokio::sync::Mutex<DatabaseOwnerRegistry>>,
+    /// One coordinator owns the project-server registry, scheduler registry,
+    /// and the writer gate that orders all mutations of either identity map.
+    store_administration: StoreAdministration,
     /// Per-canonical-route singleflight gates. Weak entries disappear after
     /// the last waiter, so failed opens are never cached.
     project_open_gates: Arc<tokio::sync::Mutex<ProjectOpenGates>>,
     #[cfg(test)]
     project_open_attempts: Arc<AtomicUsize>,
-    /// Background automation loops, partitioned with the same client/project identity as MCP state.
-    automation_schedulers:
-        Arc<tokio::sync::Mutex<HashMap<ProjectServerKey, AutomationSchedulerHandle>>>,
     /// Client versions whose skew was already logged. Proxy clients reconnect
     /// per request, so without this the mismatch would flood the daemon log.
     logged_client_version_skews: Arc<tokio::sync::Mutex<HashSet<String>>>,
@@ -1895,12 +1787,6 @@ struct DaemonEngine {
     git_watcher: git_watch::GitWatcher,
     /// PR reconciliation task, retained so shutdown never leaves it writing.
     pr_autotrack_task: Arc<tokio::sync::Mutex<Option<JoinHandle<()>>>>,
-}
-
-#[cfg(unix)]
-struct AutomationSchedulerHandle {
-    task: JoinHandle<()>,
-    wake: Arc<tokio::sync::Notify>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -1937,7 +1823,6 @@ type ProjectOpenGates = HashMap<ProjectRouteKey, std::sync::Weak<ProjectOpenGate
 /// keeps daemon cache aliases and branch-drift rekeys consistent with it.
 struct DatabaseOwnerRegistry<Server = Arc<crate::mcp::McpServer>> {
     servers: HashMap<ProjectServerKey, Server>,
-    routes: HashMap<StoreOwnerKey, HashSet<ProjectServerKey>>,
     aliases: HashMap<ProjectRouteKey, ProjectServerKey>,
 }
 
@@ -1945,7 +1830,6 @@ impl<Server> Default for DatabaseOwnerRegistry<Server> {
     fn default() -> Self {
         Self {
             servers: HashMap::new(),
-            routes: HashMap::new(),
             aliases: HashMap::new(),
         }
     }
@@ -1957,10 +1841,6 @@ impl<Server> DatabaseOwnerRegistry<Server> {
     }
 
     fn insert(&mut self, key: ProjectServerKey, server: Server) {
-        self.routes
-            .entry(key.owner.clone())
-            .or_default()
-            .insert(key.clone());
         self.servers.insert(key, server);
     }
 
@@ -1996,28 +1876,17 @@ impl<Server> DatabaseOwnerRegistry<Server> {
         (candidate, true)
     }
 
-    fn rekey(&mut self, old: &ProjectServerKey, new: ProjectServerKey) -> bool {
-        if old == &new {
+    fn rekey(&mut self, old: &ProjectServerKey, new: &ProjectServerKey) -> bool {
+        if old == new {
             return true;
         }
         let Some(server) = self.servers.remove(old) else {
             return false;
         };
-        let remove_owner = self.routes.get_mut(&old.owner).is_some_and(|routes| {
-            routes.remove(old);
-            routes.is_empty()
-        });
-        if remove_owner {
-            self.routes.remove(&old.owner);
-        }
-        if self.servers.contains_key(&new) {
+        if self.servers.contains_key(new) {
             self.aliases.retain(|_, key| key != old);
             return false;
         }
-        self.routes
-            .entry(new.owner.clone())
-            .or_default()
-            .insert(new.clone());
         self.servers.insert(new.clone(), server);
         for key in self.aliases.values_mut() {
             if key == old {
@@ -2080,40 +1949,47 @@ async fn project_open_gate(
 
 #[cfg(any(not(unix), test))]
 fn portable_database_owner_reconciler(
-    project_servers: Arc<tokio::sync::Mutex<DatabaseOwnerRegistry>>,
+    store_administration: StoreAdministration,
     current_key: Arc<tokio::sync::Mutex<ProjectServerKey>>,
     route_registered: Arc<AtomicBool>,
     handshake: DaemonHandshake,
 ) -> crate::mcp::DatabaseOwnerReconciler {
     Arc::new(move |fresh| {
-        let project_servers = Arc::clone(&project_servers);
+        let store_administration = store_administration.clone();
         let current_key = Arc::clone(&current_key);
         let route_registered = Arc::clone(&route_registered);
         let handshake = handshake.clone();
         Box::pin(async move {
-            if !route_registered.load(Ordering::Acquire) {
-                return;
-            }
-            let new_key = match ProjectServerKey::from_open_project(&fresh, &handshake) {
-                Ok(key) => key,
-                Err(error) => {
-                    eprintln!("[tracedecay] failed to rekey daemon database owner: {error}");
-                    return;
-                }
-            };
-            let mut current = current_key.lock().await;
-            if *current == new_key {
-                return;
-            }
-            let old_key = current.clone();
-            if !project_servers
-                .lock()
-                .await
-                .rekey(&old_key, new_key.clone())
-            {
-                route_registered.store(false, Ordering::Release);
-            }
-            *current = new_key;
+            store_administration
+                .with_writer(|| async {
+                    if !route_registered.load(Ordering::Acquire) {
+                        return;
+                    }
+                    let new_key = match ProjectServerKey::from_open_project(&fresh, &handshake) {
+                        Ok(key) => key,
+                        Err(error) => {
+                            eprintln!(
+                                "[tracedecay] failed to rekey daemon database owner: {error}"
+                            );
+                            return;
+                        }
+                    };
+                    let mut current = current_key.lock().await;
+                    if *current == new_key {
+                        return;
+                    }
+                    let old_key = current.clone();
+                    if !store_administration
+                        .project_servers()
+                        .lock()
+                        .await
+                        .rekey(&old_key, &new_key)
+                    {
+                        route_registered.store(false, Ordering::Release);
+                    }
+                    *current = new_key;
+                })
+                .await;
         })
     })
 }
@@ -2178,6 +2054,18 @@ impl DaemonEngine {
     async fn with_pr_autotrack_task(self, task: JoinHandle<()>) -> Self {
         *self.pr_autotrack_task.lock().await = Some(task);
         self
+    }
+
+    /// Runs destructive branch administration before any project server is
+    /// opened for the request, under the daemon-wide store administration gate.
+    async fn execute_branch_admin(
+        &self,
+        handshake: &DaemonHandshake,
+        action: crate::branch::BranchAdminAction,
+    ) -> Result<crate::branch::BranchAdminReport> {
+        self.store_administration
+            .execute_branch_admin_for_handshake(handshake, action)
+            .await
     }
 
     /// Returns the client version to log for this handshake, once per distinct
@@ -2272,6 +2160,22 @@ impl DaemonEngine {
         &self,
         handshake: &DaemonHandshake,
     ) -> Result<Arc<crate::mcp::McpServer>> {
+        let (key, project_path, server) = self
+            .store_administration
+            .with_writer(|| self.open_project_server(handshake))
+            .await?;
+        Ok(self
+            .activate_project_server(key, project_path, handshake, server)
+            .await)
+    }
+
+    /// Opens or resolves a project server while writer administration is held.
+    /// Watcher and scheduler activation happen only after this returns so those
+    /// components can acquire the same coordinator without recursive locking.
+    async fn open_project_server(
+        &self,
+        handshake: &DaemonHandshake,
+    ) -> Result<(ProjectServerKey, PathBuf, Arc<crate::mcp::McpServer>)> {
         let Some(project_path) = handshake.project_path.as_ref() else {
             return Err(TraceDecayError::Config {
                 message: "project server requested without project_path".to_string(),
@@ -2282,29 +2186,25 @@ impl DaemonEngine {
             .unwrap_or_else(|_| project_path.clone());
         let route = ProjectRouteKey::from_handshake(&canonical_project_path, handshake)?;
         let cached = {
-            let servers = self.project_servers.lock().await;
+            let servers = self.store_administration.project_servers().lock().await;
             servers
                 .get_route(&route)
                 .map(|(key, server)| (key.clone(), Arc::clone(server)))
         };
         if let Some((key, server)) = cached {
-            return Ok(self
-                .activate_project_server(key, canonical_project_path, handshake, server)
-                .await);
+            return Ok((key, canonical_project_path, server));
         }
 
         let gate = project_open_gate(&self.project_open_gates, &route).await;
         let _singleflight = gate.lock().await;
         let cached = {
-            let servers = self.project_servers.lock().await;
+            let servers = self.store_administration.project_servers().lock().await;
             servers
                 .get_route(&route)
                 .map(|(key, server)| (key.clone(), Arc::clone(server)))
         };
         if let Some((key, server)) = cached {
-            return Ok(self
-                .activate_project_server(key, canonical_project_path, handshake, server)
-                .await);
+            return Ok((key, canonical_project_path, server));
         }
 
         #[cfg(test)]
@@ -2318,7 +2218,7 @@ impl DaemonEngine {
         let key = ProjectServerKey::from_open_project(&cg, handshake)?;
 
         let existing = {
-            let mut servers = self.project_servers.lock().await;
+            let mut servers = self.store_administration.project_servers().lock().await;
             let server = servers.get(&key).cloned();
             if server.is_some() {
                 servers.bind_route(route.clone(), key.clone());
@@ -2326,9 +2226,7 @@ impl DaemonEngine {
             server
         };
         if let Some(server) = existing {
-            return Ok(self
-                .activate_project_server(key, canonical_project_path, handshake, server)
-                .await);
+            return Ok((key, canonical_project_path, server));
         }
 
         let accounting_db = accounting_db_for_handshake(handshake).await?;
@@ -2345,7 +2243,7 @@ impl DaemonEngine {
             Arc::clone(&route_registered),
             handshake.clone(),
         );
-        let candidate = crate::mcp::McpServer::new_with_dbs_and_reconcilers(
+        let candidate = crate::mcp::McpServer::new_with_dbs_and_reconcilers_and_writers(
             cg,
             handshake.scope_prefix.clone(),
             accounting_db,
@@ -2353,19 +2251,20 @@ impl DaemonEngine {
             false,
             Some(reconciler),
             Some(database_owner_reconciler),
+            coordinated_hook_branch_writer(self.store_administration.clone()),
+            coordinated_background_refresh_writer(self.store_administration.clone()),
         )
         .await;
-        let (server, inserted) =
-            self.project_servers
-                .lock()
-                .await
-                .bind_or_insert_route(route, key.clone(), candidate);
+        let (server, inserted) = self
+            .store_administration
+            .project_servers()
+            .lock()
+            .await
+            .bind_or_insert_route(route, key.clone(), candidate);
         if !inserted {
             route_registered.store(false, Ordering::Release);
         }
-        Ok(self
-            .activate_project_server(key, canonical_project_path, handshake, server)
-            .await)
+        Ok((key, canonical_project_path, server))
     }
 
     async fn activate_project_server(
@@ -2382,81 +2281,6 @@ impl DaemonEngine {
         server
     }
 
-    async fn ensure_automation_scheduler(
-        &self,
-        key: ProjectServerKey,
-        project_path: PathBuf,
-        handshake: DaemonHandshake,
-    ) {
-        if !self.lifecycle.accepting() {
-            return;
-        }
-        {
-            let schedulers = self.automation_schedulers.lock().await;
-            if schedulers.contains_key(&key) {
-                return;
-            }
-        }
-
-        let configured = match Box::pin(automation_scheduler_has_work_for_project(
-            &project_path,
-            &handshake,
-        ))
-        .await
-        {
-            Ok(configured) => configured,
-            Err(e) => {
-                log_daemon_event(
-                    "scheduler_config",
-                    &[
-                        ("project", project_path.display().to_string()),
-                        ("outcome", "error".to_string()),
-                        ("error", e.to_string()),
-                    ],
-                );
-                false
-            }
-        };
-        if !configured {
-            log_daemon_event(
-                "scheduler_config",
-                &[
-                    ("project", project_path.display().to_string()),
-                    ("outcome", "skipped".to_string()),
-                    ("reason", "not_configured".to_string()),
-                ],
-            );
-            return;
-        }
-
-        self.start_automation_scheduler(key, project_path, handshake)
-            .await;
-    }
-
-    fn automation_scheduler_reconciler(
-        &self,
-        current_key: Arc<tokio::sync::Mutex<ProjectServerKey>>,
-        project_path: PathBuf,
-        handshake: DaemonHandshake,
-    ) -> crate::dashboard::AutomationSchedulerReconciler {
-        let engine = self.clone();
-        std::sync::Arc::new(move || {
-            let engine = engine.clone();
-            let current_key = Arc::clone(&current_key);
-            let project_path = project_path.clone();
-            let handshake = handshake.clone();
-            tokio::spawn(async move {
-                let key = current_key.lock().await.clone();
-                engine
-                    .ensure_automation_scheduler(key.clone(), project_path, handshake)
-                    .await;
-                if let Some(handle) = engine.automation_schedulers.lock().await.get(&key) {
-                    handle.wake.notify_one();
-                }
-            });
-        })
-    }
-
     fn database_owner_reconciler(
         &self,
         current_key: Arc<tokio::sync::Mutex<ProjectServerKey>>,
@@ -2470,75 +2294,62 @@ impl DaemonEngine {
             let route_registered = Arc::clone(&route_registered);
             let handshake = handshake.clone();
             Box::pin(async move {
-                if !route_registered.load(Ordering::Acquire) {
-                    return;
-                }
-                let new_key = match ProjectServerKey::from_open_project(&fresh, &handshake) {
-                    Ok(key) => key,
-                    Err(error) => {
-                        eprintln!("[tracedecay] failed to rekey daemon database owner: {error}");
-                        return;
-                    }
-                };
-                let mut current = current_key.lock().await;
-                if *current == new_key {
-                    return;
-                }
-                let old_key = current.clone();
-                let rekeyed = engine
-                    .project_servers
-                    .lock()
-                    .await
-                    .rekey(&old_key, new_key.clone());
-                if !rekeyed {
-                    route_registered.store(false, Ordering::Release);
-                }
-                let removed_scheduler = {
-                    let mut schedulers = engine.automation_schedulers.lock().await;
-                    let removed = schedulers.remove(&old_key);
-                    if let Some(handle) = removed {
-                        if schedulers.contains_key(&new_key) {
-                            Some(handle)
-                        } else {
-                            schedulers.insert(new_key.clone(), handle);
-                            None
+                engine
+                    .store_administration
+                    .with_writer(|| async {
+                        if !route_registered.load(Ordering::Acquire) {
+                            return;
                         }
-                    } else {
-                        None
-                    }
-                };
-                if let Some(handle) = removed_scheduler {
-                    handle.task.abort();
-                }
-                *current = new_key;
+                        let new_key = match ProjectServerKey::from_open_project(&fresh, &handshake)
+                        {
+                            Ok(key) => key,
+                            Err(error) => {
+                                eprintln!(
+                                    "[tracedecay] failed to rekey daemon database owner: {error}"
+                                );
+                                return;
+                            }
+                        };
+                        let mut current = current_key.lock().await;
+                        if *current == new_key {
+                            return;
+                        }
+                        let old_key = current.clone();
+                        let rekeyed = engine
+                            .store_administration
+                            .project_servers()
+                            .lock()
+                            .await
+                            .rekey(&old_key, &new_key);
+                        if !rekeyed {
+                            route_registered.store(false, Ordering::Release);
+                        }
+                        let removed_scheduler = {
+                            let mut schedulers = engine
+                                .store_administration
+                                .automation_schedulers()
+                                .lock()
+                                .await;
+                            let removed = schedulers.remove(&old_key);
+                            if let Some(handle) = removed {
+                                if schedulers.contains_key(&new_key) {
+                                    Some(handle)
+                                } else {
+                                    schedulers.insert(new_key.clone(), handle);
+                                    None
+                                }
+                            } else {
+                                None
+                            }
+                        };
+                        if let Some(handle) = removed_scheduler {
+                            handle.task.abort();
+                        }
+                        *current = new_key;
+                    })
+                    .await;
             })
         })
-    }
-
-    async fn start_automation_scheduler(
-        &self,
-        key: ProjectServerKey,
-        project_path: PathBuf,
-        handshake: DaemonHandshake,
-    ) {
-        if !self.lifecycle.accepting() {
-            return;
-        }
-        let mut schedulers = self.automation_schedulers.lock().await;
-        if !self.lifecycle.accepting() || schedulers.contains_key(&key) {
-            return;
-        }
-        let wake = Arc::new(tokio::sync::Notify::new());
-        let loop_wake = Arc::clone(&wake);
-        let task = tokio::spawn(async move {
-            Box::pin(run_automation_scheduler_loop(
-                project_path,
-                handshake,
-                loop_wake,
-            ))
-            .await;
-        });
-        schedulers.insert(key, AutomationSchedulerHandle { task, wake });
     }
 
     async fn shutdown_background_tasks(&self) {
@@ -2551,33 +2362,19 @@ impl DaemonEngine {
         }
     }
 
-    async fn shutdown_automation_schedulers(&self) {
-        let scheduler_handles: Vec<JoinHandle<()>> = {
-            let mut schedulers = self.automation_schedulers.lock().await;
-            schedulers.drain().map(|(_, handle)| handle.task).collect()
-        };
-        let _child_shutdown = crate::sessions::codex_app_server::begin_codex_app_server_shutdown();
-        for handle in &scheduler_handles {
-            handle.abort();
-        }
-        let _ = timeout(DAEMON_TASK_ABORT_DEADLINE, async {
-            for handle in scheduler_handles {
-                let _ = handle.await;
-            }
-        })
-        .await;
-    }
-
     async fn shutdown_servers(&self) {
-        let servers: Vec<Arc<crate::mcp::McpServer>> = {
-            let servers = self.project_servers.lock().await;
-            let mut seen = HashSet::new();
-            servers
-                .values()
-                .filter(|server| seen.insert(Arc::as_ptr(server) as usize))
-                .cloned()
-                .collect()
-        };
+        let servers: Vec<Arc<crate::mcp::McpServer>> = self
+            .store_administration
+            .with_writer(|| async {
+                let servers = self.store_administration.project_servers().lock().await;
+                let mut seen = HashSet::new();
+                servers
+                    .values()
+                    .filter(|server| seen.insert(Arc::as_ptr(server) as usize))
+                    .cloned()
+                    .collect()
+            })
+            .await;
         for server in servers {
             server.shutdown().await;
         }
@@ -2591,693 +2388,14 @@ impl DaemonEngine {
     }
 }
 
-#[cfg(unix)]
-async fn run_automation_scheduler_loop(
-    project_path: PathBuf,
-    handshake: DaemonHandshake,
-    wake: Arc<tokio::sync::Notify>,
-) {
-    loop {
-        match Box::pin(automation_scheduler_has_work_for_project(
-            &project_path,
-            &handshake,
-        ))
-        .await
-        {
-            Ok(true) => {}
-            Ok(false) => {
-                log_daemon_event(
-                    "scheduler_exit",
-                    &[
-                        ("project", project_path.display().to_string()),
-                        ("reason", "not_configured".to_string()),
-                    ],
-                );
-                break;
-            }
-            Err(e) => {
-                // A transient failure (e.g. a momentarily corrupt jobs file or
-                // a project that cannot be opened this instant) must not
-                // permanently kill the scheduler loop. Surface the cause and
-                // retry on the next tick instead of exiting for good.
-                log_daemon_event(
-                    "scheduler_project_open",
-                    &[
-                        ("project", project_path.display().to_string()),
-                        ("outcome", "error".to_string()),
-                        ("error", e.to_string()),
-                    ],
-                );
-                tokio::time::sleep(Duration::from_secs(
-                    crate::automation::config::DEFAULT_SCHEDULER_TICK_SECS,
-                ))
-                .await;
-                continue;
-            }
-        }
-        log_daemon_event(
-            "scheduler_tick",
-            &[
-                ("project", project_path.display().to_string()),
-                ("outcome", "start".to_string()),
-            ],
-        );
-        if let Err(e) = Box::pin(run_automation_scheduler_tick(&project_path, &handshake)).await {
-            log_daemon_event(
-                "scheduler_tick",
-                &[
-                    ("project", project_path.display().to_string()),
-                    ("outcome", "error".to_string()),
-                    ("error", e.to_string()),
-                ],
-            );
-        }
-        if let Err(error) = Box::pin(run_host_receipt_review(&project_path, &handshake)).await {
-            log_daemon_event(
-                "host_receipt_review",
-                &[
-                    ("project", project_path.display().to_string()),
-                    ("outcome", "error".to_string()),
-                    ("error", error.to_string()),
-                ],
-            );
-        }
-        let tick_secs = Box::pin(automation_scheduler_tick_secs_for_project(
-            &project_path,
-            &handshake,
-        ))
-        .await;
-        log_daemon_event(
-            "scheduler_sleep",
-            &[
-                ("project", project_path.display().to_string()),
-                ("next_tick_secs", tick_secs.to_string()),
-            ],
-        );
-        tokio::select! {
-            () = tokio::time::sleep(Duration::from_secs(tick_secs)) => {}
-            () = wake.notified() => {
-                // Receipts arrive at tool cadence. Wait for a short quiet
-                // period and reset it for every later receipt, producing one
-                // review for the burst rather than one review per command.
-                loop {
-                    tokio::select! {
-                        () = tokio::time::sleep(Duration::from_secs(5)) => break,
-                        () = wake.notified() => {}
-                    }
-                }
-                if let Err(error) = Box::pin(run_host_receipt_review(&project_path, &handshake)).await {
-                    log_daemon_event(
-                        "host_receipt_review",
-                        &[
-                            ("project", project_path.display().to_string()),
-                            ("outcome", "error".to_string()),
-                            ("error", error.to_string()),
-                        ],
-                    );
-                }
-            }
-        }
-    }
-}
-
-#[cfg(unix)]
-async fn automation_scheduler_has_work_for_project(
-    project_path: &Path,
-    handshake: &DaemonHandshake,
-) -> Result<bool> {
-    let cg = Box::pin(open_existing_project_with_options(
-        project_path,
-        handshake.open_options(),
-    ))
-    .await?;
-    let config = effective_automation_config_for_project(&cg, &handshake.client_identity).await?;
-    automation_scheduler_has_work(&cg, &config).await
-}
-
-#[cfg(unix)]
-async fn automation_scheduler_tick_secs_for_project(
-    project_path: &Path,
-    handshake: &DaemonHandshake,
-) -> u64 {
-    match Box::pin(open_existing_project_with_options(
-        project_path,
-        handshake.open_options(),
-    ))
-    .await
-    {
-        Ok(cg) => {
-            match effective_automation_config_for_project(&cg, &handshake.client_identity).await {
-                Ok(config) => config.scheduler_tick_secs,
-                Err(e) => {
-                    log_daemon_event(
-                        "scheduler_config",
-                        &[
-                            ("project", project_path.display().to_string()),
-                            ("outcome", "error".to_string()),
-                            ("error", e.to_string()),
-                        ],
-                    );
-                    crate::automation::config::DEFAULT_SCHEDULER_TICK_SECS
-                }
-            }
-        }
-        Err(e) => {
-            log_daemon_event(
-                "scheduler_project_open",
-                &[
-                    ("project", project_path.display().to_string()),
-                    ("outcome", "error".to_string()),
-                    ("error", e.to_string()),
-                ],
-            );
-            crate::automation::config::DEFAULT_SCHEDULER_TICK_SECS
-        }
-    }
-}
-
-/// Minimum wall-clock interval between global-database retention passes,
-/// shared across every project's scheduler loop so retention runs at most
-/// this often no matter how many projects are active.
-#[cfg(unix)]
-const RETENTION_MIN_INTERVAL_SECS: u64 = 6 * 60 * 60;
-
-#[cfg(unix)]
-static LAST_GLOBAL_RETENTION: std::sync::Mutex<Option<std::time::Instant>> =
-    std::sync::Mutex::new(None);
-
-/// Returns whether a retention pass is due, recording `now` as the last run
-/// when it is. The gate is process-global so N project loops do not each run
-/// their own retention every tick.
-#[cfg(unix)]
-fn global_retention_pass_due(now: std::time::Instant) -> bool {
-    let mut guard = match LAST_GLOBAL_RETENTION.lock() {
-        Ok(guard) => guard,
-        Err(poisoned) => poisoned.into_inner(),
-    };
-    let due = guard.is_none_or(|last| {
-        now.duration_since(last) >= Duration::from_secs(RETENTION_MIN_INTERVAL_SECS)
-    });
-    if due {
-        *guard = Some(now);
-    }
-    due
-}
-
-/// Applies the configured retention windows to the global telemetry tables,
-/// at most once per [`RETENTION_MIN_INTERVAL_SECS`]. Best-effort: retention is
-/// housekeeping, so failures are logged and never abort a scheduler tick.
-#[cfg(unix)]
-async fn maybe_run_global_retention(
-    project_path: &Path,
-    config: &crate::automation::config::AutomationConfig,
-) {
-    if !global_retention_pass_due(std::time::Instant::now()) {
-        return;
-    }
-    let db = match crate::global_db::GlobalDb::try_open().await {
-        Ok(Some(db)) => db,
-        Ok(None) => return,
-        Err(error) => {
-            log_daemon_event(
-                "retention_prune",
-                &[
-                    ("project", project_path.display().to_string()),
-                    ("outcome", "open_rejected".to_string()),
-                    ("error", error.to_string()),
-                ],
-            );
-            return;
-        }
-    };
-    let now_secs = crate::tracedecay::current_timestamp();
-    match db.prune_global_retention(&config.retention, now_secs).await {
-        Ok(reports) => {
-            for report in reports {
-                if report.applied && report.rows > 0 {
-                    log_daemon_event(
-                        "retention_prune",
-                        &[
-                            ("project", project_path.display().to_string()),
-                            ("table", report.table.to_string()),
-                            ("rows", report.rows.to_string()),
-                            (
-                                "window_days",
-                                report
-                                    .window_days
-                                    .map_or_else(|| "unlimited".to_string(), |d| d.to_string()),
-                            ),
-                        ],
-                    );
-                }
-            }
-        }
-        Err(e) => {
-            log_daemon_event(
-                "retention_prune",
-                &[
-                    ("project", project_path.display().to_string()),
-                    ("outcome", "error".to_string()),
-                    ("error", e.to_string()),
-                ],
-            );
-        }
-    }
-}
-
-#[cfg(unix)]
-async fn run_automation_scheduler_tick(
-    project_path: &Path,
-    handshake: &DaemonHandshake,
-) -> Result<()> {
-    use crate::automation::backend::{AgentTaskKind, CodexAppServerBackend};
-    use crate::automation::run_ledger::AutomationTrigger;
-    use crate::automation::runner::{
-        CombinedReviewAutomationOptions, CombinedReviewDispatch, MemoryCuratorAutomationOptions,
-        SessionReflectorAutomationOptions, SkillWriterAutomationOptions,
-        run_combined_review_with_backend, run_memory_curator_with_backend,
-        run_session_reflector_with_backend, run_skill_writer_with_backend,
-    };
-
-    let cg = Box::pin(open_existing_project_with_options(
-        project_path,
-        handshake.open_options(),
-    ))
-    .await?;
-    let control =
-        crate::automation::scheduler::load_scheduler_control(&cg.store_layout().dashboard_root)
-            .await?;
-    if control.paused {
-        log_daemon_event(
-            "scheduler_tick",
-            &[
-                ("project", project_path.display().to_string()),
-                ("outcome", "skipped".to_string()),
-                ("reason", "paused".to_string()),
-            ],
-        );
-        return Ok(());
-    }
-    let config = effective_automation_config_for_project(&cg, &handshake.client_identity).await?;
-    if !automation_scheduler_has_work(&cg, &config).await? {
-        log_daemon_event(
-            "scheduler_tick",
-            &[
-                ("project", project_path.display().to_string()),
-                ("outcome", "skipped".to_string()),
-                ("reason", "not_configured".to_string()),
-            ],
-        );
-        return Ok(());
-    }
-    maybe_run_global_retention(project_path, &config).await;
-    let backend = CodexAppServerBackend::from_automation_config(&config);
-    let mut first_error: Option<TraceDecayError> = None;
-    let mut any_succeeded = false;
-
-    log_scheduler_task_start(project_path, AgentTaskKind::MemoryCurator);
-    match run_memory_curator_with_backend(
-        &cg,
-        &config,
-        &backend,
-        MemoryCuratorAutomationOptions {
-            trigger: AutomationTrigger::Scheduler,
-            ..MemoryCuratorAutomationOptions::default()
-        },
-    )
-    .await
-    {
-        Ok(run) => {
-            any_succeeded |= run.ledger_record.status
-                == crate::automation::run_ledger::AutomationRunStatus::Succeeded;
-            log_daemon_scheduler_record(project_path, &run.ledger_record);
-        }
-        Err(e) => {
-            log_scheduler_task_error(project_path, AgentTaskKind::MemoryCurator, &e);
-            first_error.get_or_insert(e);
-        }
-    }
-    // When both the reflector and the skill writer are due in this tick, the
-    // combined path serves them with one backend call. Any other outcome
-    // (combined mode disabled, only one task due, missing evidence) falls
-    // back to the sequential per-task runs below.
-    let mut combined_handled = false;
-    if config.combine_due_tasks {
-        log_scheduler_task_start(project_path, AgentTaskKind::CombinedReview);
-        match run_combined_review_with_backend(
-            &cg,
-            &config,
-            &backend,
-            CombinedReviewAutomationOptions::default(),
-        )
-        .await
-        {
-            Ok(CombinedReviewDispatch::Ran(run)) => {
-                any_succeeded |= run.session_reflector.ledger_record.status
-                    == crate::automation::run_ledger::AutomationRunStatus::Succeeded;
-                any_succeeded |= run.skill_writer.ledger_record.status
-                    == crate::automation::run_ledger::AutomationRunStatus::Succeeded;
-                log_daemon_scheduler_record(project_path, &run.session_reflector.ledger_record);
-                log_daemon_scheduler_record(project_path, &run.skill_writer.ledger_record);
-                combined_handled = true;
-            }
-            Ok(CombinedReviewDispatch::RecordedFailure { run, error }) => {
-                any_succeeded |= run.session_reflector.ledger_record.status
-                    == crate::automation::run_ledger::AutomationRunStatus::Succeeded;
-                any_succeeded |= run.skill_writer.ledger_record.status
-                    == crate::automation::run_ledger::AutomationRunStatus::Succeeded;
-                log_daemon_scheduler_record(project_path, &run.session_reflector.ledger_record);
-                log_daemon_scheduler_record(project_path, &run.skill_writer.ledger_record);
-                log_scheduler_task_error(project_path, AgentTaskKind::CombinedReview, &error);
-                first_error.get_or_insert(error);
-                combined_handled = true;
-            }
-            Ok(CombinedReviewDispatch::NotCombined { reason }) => {
-                log_daemon_event(
-                    "scheduler_task",
-                    &[
-                        ("project", project_path.display().to_string()),
-                        ("task", "combined_review".to_string()),
-                        ("outcome", "not_combined".to_string()),
-                        ("reason", reason.to_string()),
-                    ],
-                );
-            }
-            Err(e) => {
-                log_scheduler_task_error(project_path, AgentTaskKind::CombinedReview, &e);
-            }
-        }
-    }
-    if !combined_handled {
-        log_scheduler_task_start(project_path, AgentTaskKind::SessionReflector);
-        match run_session_reflector_with_backend(
-            &cg,
-            &config,
-            &backend,
-            SessionReflectorAutomationOptions {
-                trigger: AutomationTrigger::Scheduler,
-                ..SessionReflectorAutomationOptions::default()
-            },
-        )
-        .await
-        {
-            Ok(run) => {
-                any_succeeded |= run.ledger_record.status
-                    == crate::automation::run_ledger::AutomationRunStatus::Succeeded;
-                log_daemon_scheduler_record(project_path, &run.ledger_record);
-            }
-            Err(e) => {
-                log_scheduler_task_error(project_path, AgentTaskKind::SessionReflector, &e);
-                first_error.get_or_insert(e);
-            }
-        }
-        log_scheduler_task_start(project_path, AgentTaskKind::SkillWriter);
-        match run_skill_writer_with_backend(
-            &cg,
-            &config,
-            &backend,
-            SkillWriterAutomationOptions {
-                trigger: AutomationTrigger::Scheduler,
-                ..SkillWriterAutomationOptions::default()
-            },
-        )
-        .await
-        {
-            Ok(run) => {
-                any_succeeded |= run.ledger_record.status
-                    == crate::automation::run_ledger::AutomationRunStatus::Succeeded;
-                log_daemon_scheduler_record(project_path, &run.ledger_record);
-            }
-            Err(e) => {
-                log_scheduler_task_error(project_path, AgentTaskKind::SkillWriter, &e);
-                first_error.get_or_insert(e);
-            }
-        }
-    }
-    if any_succeeded {
-        log_automation_staged_if_pending(project_path, &cg.store_layout().dashboard_root).await;
-    }
-    run_user_jobs_scheduler_pass(
-        project_path,
-        &handshake.client_identity.profile_root,
-        &cg,
-        &config,
-        &backend,
-        &mut first_error,
-    )
-    .await;
-    match first_error {
-        Some(err) => Err(err),
-        None => Ok(()),
-    }
-}
-
-#[cfg(unix)]
-async fn run_host_receipt_review(project_path: &Path, handshake: &DaemonHandshake) -> Result<()> {
-    use crate::automation::backend::CodexAppServerBackend;
-    use crate::automation::run_ledger::AutomationTrigger;
-    use crate::automation::runner::{
-        CombinedReviewAutomationOptions, CombinedReviewDispatch, SessionReflectorAutomationOptions,
-        SkillWriterAutomationOptions, run_combined_review_with_backend,
-    };
-
-    let cg = Box::pin(open_existing_project_with_options(
-        project_path,
-        handshake.open_options(),
-    ))
-    .await?;
-    let dashboard_root = cg.store_layout().dashboard_root.clone();
-    let Some(ready) = crate::automation::host_receipts::oldest_ready(&dashboard_root).await? else {
-        return Ok(());
-    };
-    let pending = ready.pending;
-    if crate::automation::scheduler::load_scheduler_control(&dashboard_root)
-        .await?
-        .paused
-    {
-        return Ok(());
-    }
-    let config = effective_automation_config_for_project(&cg, &handshake.client_identity).await?;
-    let session_id = pending
-        .route
-        .as_ref()
-        .and_then(|route| route.session_id.clone());
-    let Some(session_db) =
-        crate::global_db::GlobalDb::open_read_only_at(&cg.store_layout().sessions_db_path).await
-    else {
-        return Ok(());
-    };
-    if session_db
-        .lcm_load_raw_message("hermes", &ready.transcript_watermark)
-        .await
-        .is_none()
-    {
-        // Never review a terminal receipt until the exact completed-turn
-        // watermark is durable in LCM.
-        return Ok(());
-    }
-    let backend = CodexAppServerBackend::from_automation_config(&config);
-    let result = run_combined_review_with_backend(
-        &cg,
-        &config,
-        &backend,
-        CombinedReviewAutomationOptions {
-            run_id: Some(format!("host_receipt_{}", pending.generation)),
-            session_reflector: SessionReflectorAutomationOptions {
-                trigger: AutomationTrigger::HostReceipt,
-                provider: "hermes".to_string(),
-                session_id,
-                ..SessionReflectorAutomationOptions::default()
-            },
-            skill_writer: SkillWriterAutomationOptions {
-                trigger: AutomationTrigger::HostReceipt,
-                provider: "hermes".to_string(),
-                ..SkillWriterAutomationOptions::default()
-            },
-            trigger: AutomationTrigger::HostReceipt,
-        },
-    )
-    .await?;
-    match result {
-        CombinedReviewDispatch::Ran(run) => {
-            log_daemon_scheduler_record(project_path, &run.session_reflector.ledger_record);
-            log_daemon_scheduler_record(project_path, &run.skill_writer.ledger_record);
-            if run.session_reflector.ledger_record.status
-                == crate::automation::run_ledger::AutomationRunStatus::Succeeded
-                && run.skill_writer.ledger_record.status
-                    == crate::automation::run_ledger::AutomationRunStatus::Succeeded
-            {
-                crate::automation::host_receipts::mark_consumed(
-                    &dashboard_root,
-                    &pending.session_key,
-                    pending.generation,
-                )
-                .await?;
-            }
-        }
-        CombinedReviewDispatch::RecordedFailure { run, error } => {
-            log_daemon_scheduler_record(project_path, &run.session_reflector.ledger_record);
-            log_daemon_scheduler_record(project_path, &run.skill_writer.ledger_record);
-            return Err(error);
-        }
-        CombinedReviewDispatch::NotCombined { reason } => {
-            log_daemon_event(
-                "host_receipt_review",
-                &[
-                    ("project", project_path.display().to_string()),
-                    ("outcome", "deferred".to_string()),
-                    ("reason", reason.to_string()),
-                ],
-            );
-        }
-    }
-    Ok(())
-}
-
-#[cfg(unix)]
-async fn effective_automation_config_for_project(
-    cg: &crate::tracedecay::TraceDecay,
-    client_identity: &DaemonClientIdentity,
-) -> Result<crate::automation::config::AutomationConfig> {
-    use crate::automation::config::{effective_config, load_project_config};
-
-    let global = user_config_for_client(client_identity).automation;
-    let project = load_project_config(&cg.store_layout().dashboard_root).await?;
-    effective_config(&global, project.as_ref())
-}
-
-#[cfg(unix)]
-fn user_config_for_client(
-    client_identity: &DaemonClientIdentity,
-) -> crate::user_config::UserConfig {
-    let path = client_identity.profile_root.join("config.toml");
-    let Ok(contents) = std::fs::read_to_string(&path) else {
-        return crate::user_config::UserConfig::default();
-    };
-    crate::user_config::parse_or_warn_default(&path, &contents)
-}
-
-#[cfg(unix)]
-fn automation_scheduler_configured(config: &crate::automation::config::AutomationConfig) -> bool {
-    use crate::automation::config::{AutomationBackend, AutomationHostMode};
-    use crate::automation::scheduler::{AutomationSchedule, parse_schedule};
-
-    if !config.enabled
-        || config.host_mode == AutomationHostMode::DelegatedHost
-        || config.backend != AutomationBackend::CodexAppServer
-    {
-        return false;
-    }
-    if config.combine_due_tasks
-        && config.tasks.session_reflector.enabled
-        && config.tasks.skill_writer.enabled
-    {
-        return true;
-    }
-    [
-        &config.tasks.memory_curator,
-        &config.tasks.session_reflector,
-        &config.tasks.skill_writer,
-    ]
-    .into_iter()
-    .any(|task| {
-        if !task.enabled {
-            return false;
-        }
-        match parse_schedule(task.schedule.as_deref()) {
-            Ok(AutomationSchedule::Manual) | Err(_) => false,
-            Ok(AutomationSchedule::ConfiguredInterval) => task.interval_secs.is_some(),
-            Ok(AutomationSchedule::Interval { .. } | AutomationSchedule::Cron(_)) => true,
-        }
-    })
-}
-
-/// True when the scheduler loop has anything to do for this project: a
-/// scheduled fixed task or a schedulable user-defined job.
-#[cfg(unix)]
-async fn automation_scheduler_has_work(
-    cg: &crate::tracedecay::TraceDecay,
-    config: &crate::automation::config::AutomationConfig,
-) -> Result<bool> {
-    use crate::automation::config::{AutomationBackend, AutomationHostMode};
-
-    if automation_scheduler_configured(config) {
-        return Ok(true);
-    }
-    if !config.enabled
-        || config.host_mode == AutomationHostMode::DelegatedHost
-        || config.backend != AutomationBackend::CodexAppServer
-    {
-        return Ok(false);
-    }
-    crate::automation::jobs::jobs_configured_for_scheduler(&cg.store_layout().dashboard_root).await
-}
-
-/// Ticks every schedulable user-defined job with the same lock/cooldown
-/// discipline as the fixed tasks (enforced inside the job runner).
-#[cfg(unix)]
-async fn run_user_jobs_scheduler_pass(
-    project_path: &Path,
-    profile_root: &Path,
-    cg: &crate::tracedecay::TraceDecay,
-    config: &crate::automation::config::AutomationConfig,
-    backend: &crate::automation::backend::CodexAppServerBackend,
-    first_error: &mut Option<TraceDecayError>,
-) {
-    let dashboard_root = cg.store_layout().dashboard_root.clone();
-    let jobs = match crate::automation::jobs::load_jobs(&dashboard_root).await {
-        Ok(jobs) => jobs,
-        Err(e) => {
-            log_daemon_event(
-                "scheduler_user_jobs",
-                &[
-                    ("project", project_path.display().to_string()),
-                    ("outcome", "error".to_string()),
-                    ("error", e.to_string()),
-                ],
-            );
-            first_error.get_or_insert(e);
-            return;
-        }
-    };
-    for job in jobs
-        .iter()
-        .filter(|job| crate::automation::jobs::job_is_schedulable(job))
-    {
-        log_scheduler_task_start(
-            project_path,
-            crate::automation::backend::AgentTaskKind::UserJob,
-        );
-        match crate::automation::jobs::run_user_job_with_backend(
-            &dashboard_root,
-            config,
-            backend,
-            job,
-            crate::automation::jobs::UserJobRunOptions {
-                trigger: crate::automation::run_ledger::AutomationTrigger::Scheduler,
-                profile_root: Some(profile_root.to_path_buf()),
-                project_root: Some(project_path.to_path_buf()),
-                ..crate::automation::jobs::UserJobRunOptions::default()
-            },
-        )
-        .await
-        {
-            Ok(run) => log_daemon_scheduler_record(project_path, &run.ledger_record),
-            Err(e) => {
-                log_scheduler_task_error(
-                    project_path,
-                    crate::automation::backend::AgentTaskKind::UserJob,
-                    &e,
-                );
-                first_error.get_or_insert(e);
-            }
-        }
-    }
-}
-
 #[cfg(all(unix, test))]
 async fn serve_socket_client(stream: tokio::net::UnixStream, engine: DaemonEngine) -> Result<()> {
-    serve_broker_socket_client(BrokerStream::Unix(stream), engine, None).await
+    Box::pin(serve_broker_socket_client(
+        BrokerStream::Unix(stream),
+        engine,
+        None,
+    ))
+    .await
 }
 
 #[cfg(unix)]
@@ -3286,7 +2404,7 @@ async fn serve_authenticated_socket_client(
     engine: DaemonEngine,
     auth_token: String,
 ) -> Result<()> {
-    serve_broker_socket_client(stream, engine, Some(auth_token)).await
+    Box::pin(serve_broker_socket_client(stream, engine, Some(auth_token))).await
 }
 
 async fn apply_daemon_initialize_route(
@@ -3398,6 +2516,22 @@ async fn serve_broker_socket_client(
     };
     let initialize_route =
         apply_daemon_initialize_route(&mut handshake, &first_request_line).await?;
+    if let Some(request) = parse_branch_admin_request(&first_request_line) {
+        let result = match request.action.clone() {
+            Ok(action) => engine.execute_branch_admin(&handshake, action).await,
+            Err(message) => Err(TraceDecayError::Config { message }),
+        };
+        drop(setup_activity);
+        write_branch_admin_response(&mut transport, request, result).await?;
+        return Ok(());
+    }
+    if let Some(request) = parse_branch_add_request(&first_request_line) {
+        let response =
+            branch_add_response(&engine.store_administration, &handshake, &request).await;
+        drop(setup_activity);
+        write_json_rpc_response(&mut transport, &response).await?;
+        return Ok(());
+    }
     let server = if handshake.project_path.is_some() {
         let server = match Box::pin(engine.project_server(&handshake)).await {
             Ok(server) => server,
@@ -3468,7 +2602,7 @@ async fn serve_windows_broker_client(
     stream: BrokerStream,
     auth_token: &str,
     lifecycle: &DaemonLifecycle,
-    project_servers: Arc<tokio::sync::Mutex<DatabaseOwnerRegistry>>,
+    store_administration: StoreAdministration,
     project_open_gates: Arc<tokio::sync::Mutex<ProjectOpenGates>>,
     #[cfg(test)] project_open_attempts: Option<Arc<AtomicUsize>>,
 ) -> Result<()> {
@@ -3497,94 +2631,49 @@ async fn serve_windows_broker_client(
     };
     let initialize_route =
         apply_daemon_initialize_route(&mut handshake, &first_request_line).await?;
+    if let Some(request) = parse_branch_admin_request(&first_request_line) {
+        let result = match request.action.clone() {
+            Ok(action) => {
+                store_administration
+                    .execute_branch_admin_for_handshake(&handshake, action)
+                    .await
+            }
+            Err(message) => Err(TraceDecayError::Config { message }),
+        };
+        drop(setup_activity);
+        write_branch_admin_response(&mut transport, request, result).await?;
+        return Ok(());
+    }
+    if let Some(request) = parse_branch_add_request(&first_request_line) {
+        let response = branch_add_response(&store_administration, &handshake, &request).await;
+        drop(setup_activity);
+        write_json_rpc_response(&mut transport, &response).await?;
+        return Ok(());
+    }
     if let Some(project_path) = handshake.project_path.as_deref() {
         let canonical_project_path = project_path
             .canonicalize()
             .unwrap_or_else(|_| project_path.to_path_buf());
-        let route = ProjectRouteKey::from_handshake(&canonical_project_path, &handshake)?;
-        let mut server = {
-            let servers = project_servers.lock().await;
-            servers
-                .get_route(&route)
-                .map(|(_, server)| Arc::clone(server))
-        };
-        if server.is_none() {
-            let gate = project_open_gate(&project_open_gates, &route).await;
-            let _singleflight = gate.lock().await;
-            server = {
-                let servers = project_servers.lock().await;
-                servers
-                    .get_route(&route)
-                    .map(|(_, server)| Arc::clone(server))
-            };
-            if server.is_none() {
-                #[cfg(test)]
-                if let Some(attempts) = &project_open_attempts {
-                    attempts.fetch_add(1, Ordering::Relaxed);
-                }
-                let cg = match Box::pin(open_project_for_handshake(
+        let server_result = store_administration
+            .with_writer(|| {
+                portable_project_server(
+                    &store_administration,
+                    &project_open_gates,
                     &canonical_project_path,
                     &handshake,
-                ))
-                .await
-                {
-                    Ok(cg) => cg,
-                    Err(error) => {
-                        let mut transport = ReplayTransport::new(transport);
-                        transport.push_replay(first_request_line);
-                        write_project_open_error(&mut transport, &error).await?;
-                        return Err(error);
-                    }
-                };
-                cg.register_project_store_in_global_registry().await;
-                let key = ProjectServerKey::from_open_project(&cg, &handshake)?;
-                let existing = {
-                    let mut servers = project_servers.lock().await;
-                    let existing = servers.get(&key).cloned();
-                    if existing.is_some() {
-                        servers.bind_route(route.clone(), key.clone());
-                    }
-                    existing
-                };
-                if let Some(existing) = existing {
-                    server = Some(existing);
-                } else {
-                    let current_key = Arc::new(tokio::sync::Mutex::new(key.clone()));
-                    let route_registered = Arc::new(AtomicBool::new(true));
-                    let database_owner_reconciler = portable_database_owner_reconciler(
-                        Arc::clone(&project_servers),
-                        current_key,
-                        Arc::clone(&route_registered),
-                        handshake.clone(),
-                    );
-                    let accounting_db = accounting_db_for_handshake(&handshake).await?;
-                    let registry_db = registry_db_for_handshake(&handshake).await?;
-                    let candidate = crate::mcp::McpServer::new_with_dbs_and_reconcilers(
-                        cg,
-                        handshake.scope_prefix.clone(),
-                        accounting_db,
-                        registry_db,
-                        false,
-                        None,
-                        Some(database_owner_reconciler),
-                    )
-                    .await;
-                    let (resolved, inserted) = project_servers.lock().await.bind_or_insert_route(
-                        route.clone(),
-                        key,
-                        candidate,
-                    );
-                    if !inserted {
-                        route_registered.store(false, Ordering::Release);
-                    }
-                    server = Some(resolved);
-                }
+                    #[cfg(test)]
+                    project_open_attempts.as_ref(),
+                )
+            })
+            .await;
+        let server = match server_result {
+            Ok(server) => server,
+            Err(error) => {
+                let mut transport = ReplayTransport::new(transport);
+                transport.push_replay(first_request_line);
+                write_project_open_error(&mut transport, &error).await?;
+                return Err(error);
             }
-        }
-        let Some(server) = server else {
-            return Err(TraceDecayError::Config {
-                message: "project route did not initialize a daemon server".to_string(),
-            });
         };
         drop(setup_activity);
         let initialize_handled = write_routed_initialize_response(
@@ -3611,6 +2700,93 @@ async fn serve_windows_broker_client(
         serve_projectless_client(&mut transport, &handshake.client_identity, lifecycle).await?;
     }
     Ok(())
+}
+
+#[cfg(any(not(unix), test))]
+async fn portable_project_server(
+    store_administration: &StoreAdministration,
+    project_open_gates: &tokio::sync::Mutex<ProjectOpenGates>,
+    canonical_project_path: &Path,
+    handshake: &DaemonHandshake,
+    #[cfg(test)] project_open_attempts: Option<&Arc<AtomicUsize>>,
+) -> Result<Arc<crate::mcp::McpServer>> {
+    let route = ProjectRouteKey::from_handshake(canonical_project_path, handshake)?;
+    if let Some(server) = store_administration
+        .project_servers()
+        .lock()
+        .await
+        .get_route(&route)
+        .map(|(_, server)| Arc::clone(server))
+    {
+        return Ok(server);
+    }
+
+    let gate = project_open_gate(project_open_gates, &route).await;
+    let _singleflight = gate.lock().await;
+    if let Some(server) = store_administration
+        .project_servers()
+        .lock()
+        .await
+        .get_route(&route)
+        .map(|(_, server)| Arc::clone(server))
+    {
+        return Ok(server);
+    }
+
+    #[cfg(test)]
+    if let Some(attempts) = project_open_attempts {
+        attempts.fetch_add(1, Ordering::Relaxed);
+    }
+    let cg = Box::pin(open_project_for_handshake(
+        canonical_project_path,
+        handshake,
+    ))
+    .await?;
+    cg.register_project_store_in_global_registry().await;
+    let key = ProjectServerKey::from_open_project(&cg, handshake)?;
+    let existing = {
+        let mut servers = store_administration.project_servers().lock().await;
+        let existing = servers.get(&key).cloned();
+        if existing.is_some() {
+            servers.bind_route(route.clone(), key.clone());
+        }
+        existing
+    };
+    if let Some(existing) = existing {
+        return Ok(existing);
+    }
+
+    let current_key = Arc::new(tokio::sync::Mutex::new(key.clone()));
+    let route_registered = Arc::new(AtomicBool::new(true));
+    let database_owner_reconciler = portable_database_owner_reconciler(
+        store_administration.clone(),
+        current_key,
+        Arc::clone(&route_registered),
+        handshake.clone(),
+    );
+    let accounting_db = accounting_db_for_handshake(handshake).await?;
+    let registry_db = registry_db_for_handshake(handshake).await?;
+    let candidate = crate::mcp::McpServer::new_with_dbs_and_reconcilers_and_writers(
+        cg,
+        handshake.scope_prefix.clone(),
+        accounting_db,
+        registry_db,
+        false,
+        None,
+        Some(database_owner_reconciler),
+        coordinated_hook_branch_writer(store_administration.clone()),
+        coordinated_background_refresh_writer(store_administration.clone()),
+    )
+    .await;
+    let (resolved, inserted) = store_administration
+        .project_servers()
+        .lock()
+        .await
+        .bind_or_insert_route(route, key, candidate);
+    if !inserted {
+        route_registered.store(false, Ordering::Release);
+    }
+    Ok(resolved)
 }
 
 #[cfg(unix)]

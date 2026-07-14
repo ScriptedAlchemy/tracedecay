@@ -314,16 +314,24 @@ pub(crate) fn tracedecay_dir_size(dir: &Path) -> u64 {
 ///
 /// `--all` returns every path tracked in the global DB (including stale rows).
 /// Otherwise returns the local discovery from cwd / ancestors / descendants.
+///
+/// Global discovery is deliberately fail-closed: destructive callers must not
+/// interpret an unavailable daemon or malformed registry response as an empty
+/// registry.
 pub(crate) async fn gather_target_projects(
     all: bool,
     home_tracedecay: &Option<std::path::PathBuf>,
-) -> Vec<std::path::PathBuf> {
+) -> tracedecay::errors::Result<Vec<std::path::PathBuf>> {
     if all {
-        let Ok(cwd) = std::env::current_dir() else {
-            return Vec::new();
-        };
+        let cwd = std::env::current_dir().map_err(|error| {
+            tracedecay::errors::TraceDecayError::Config {
+                message: format!(
+                    "failed to determine current directory for registry discovery: {error}"
+                ),
+            }
+        })?;
         let project_root = tracedecay::config::discover_project_root(&cwd);
-        let Ok(payload) = call_admin_cli(
+        let payload = call_admin_cli(
             project_root.as_deref(),
             serde_json::json!({
                 "action": "registry_list",
@@ -331,20 +339,38 @@ pub(crate) async fn gather_target_projects(
                 "query": null,
             }),
         )
-        .await
-        else {
-            return Vec::new();
-        };
-        payload["projects"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter_map(|project| project["project_root"].as_str())
-            .map(std::path::PathBuf::from)
-            .collect()
+        .await?;
+        registry_project_roots(&payload)
     } else {
-        gather_local_projects(home_tracedecay)
+        Ok(gather_local_projects(home_tracedecay))
     }
+}
+
+fn registry_project_roots(
+    payload: &serde_json::Value,
+) -> tracedecay::errors::Result<Vec<std::path::PathBuf>> {
+    let projects = payload
+        .get("projects")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| tracedecay::errors::TraceDecayError::Config {
+            message: "daemon registry list response omitted projects array".to_string(),
+        })?;
+
+    projects
+        .iter()
+        .enumerate()
+        .map(|(index, project)| {
+            project
+                .get("project_root")
+                .and_then(serde_json::Value::as_str)
+                .map(std::path::PathBuf::from)
+                .ok_or_else(|| tracedecay::errors::TraceDecayError::Config {
+                    message: format!(
+                        "daemon registry list response has no project_root for project at index {index}"
+                    ),
+                })
+        })
+        .collect()
 }
 
 async fn call_admin_cli(
@@ -822,6 +848,24 @@ mod gather_tests {
         let cwd = dir.path().canonicalize().unwrap();
         let out = gather_local_projects_from(&cwd, &None);
         assert!(out.is_empty(), "got {out:?}");
+    }
+
+    #[test]
+    fn registry_target_parser_rejects_malformed_rows() {
+        let error = registry_project_roots(&serde_json::json!({
+            "projects": [{ "project_id": "missing-root" }]
+        }))
+        .expect_err("malformed registry data must not become an empty target list");
+
+        assert!(error.to_string().contains("project_root"));
+    }
+
+    #[test]
+    fn registry_target_parser_preserves_an_explicitly_empty_registry() {
+        let paths = registry_project_roots(&serde_json::json!({ "projects": [] }))
+            .expect("an explicit empty registry is valid");
+
+        assert!(paths.is_empty());
     }
 
     #[test]

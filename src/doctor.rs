@@ -255,10 +255,10 @@ async fn daemon_project_status(project_path: &Path) -> crate::errors::Result<ser
         serde_json::json!({ "format": "json" }),
     )
     .await?;
-    daemon_tool_json(result)
+    daemon_tool_json(&result)
 }
 
-fn daemon_tool_json(result: serde_json::Value) -> crate::errors::Result<serde_json::Value> {
+fn daemon_tool_json(result: &serde_json::Value) -> crate::errors::Result<serde_json::Value> {
     let text = result
         .get("content")
         .and_then(serde_json::Value::as_array)
@@ -423,7 +423,7 @@ fn check_global_db(dc: &mut DoctorCounters) {
     }
 }
 
-/// Registry SQLite is owned by the daemon. The external doctor reports that
+/// Registry `SQLite` is owned by the daemon. The external doctor reports that
 /// ownership and leaves stale-row inspection/repair to daemon-backed tools.
 fn check_stale_stores(dc: &mut DoctorCounters, status: Option<&serde_json::Value>) {
     eprintln!("\n\x1b[1mStorage registry\x1b[0m");

@@ -41,7 +41,7 @@ pub(crate) fn adaptive_cache_sizes(db_file_size: u64) -> (u64, u64) {
 ///
 /// Graph-store mmap is disabled on every platform. Long-lived daemon handles
 /// and short-lived peers previously retained divergent mapped page views
-/// across WAL checkpoints; ordinary file I/O keeps SQLite's locking and WAL
+/// across WAL checkpoints; ordinary file I/O keeps `SQLite`'s locking and WAL
 /// coherence mechanisms authoritative.
 #[cfg(test)]
 pub(crate) fn platform_safe_mmap_size(_mmap: u64) -> u64 {
@@ -54,7 +54,7 @@ fn sqlite_unsafe_fast_enabled() -> bool {
 
 /// Returns the `journal_mode` safe for the current platform.
 ///
-/// Windows libsql/SQLite local databases can intermittently fault while closing
+/// Windows libsql/`SQLite` local databases can intermittently fault while closing
 /// WAL-mode databases under nextest's per-test process isolation. Disabling
 /// mmap removed one unsafe teardown path, but master CI still aborts in
 /// unrelated tests as different short-lived databases close. Use rollback

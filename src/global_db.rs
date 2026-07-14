@@ -1029,7 +1029,7 @@ impl GlobalDb {
     /// callers' entire session. Schema initialization is singleflight per
     /// canonical database identity; after it completes, every caller opens an
     /// independent connection so caller-managed transactions cannot interleave
-    /// on one shared libSQL session. SQLite still serializes actual writers.
+    /// on one shared libSQL session. `SQLite` still serializes actual writers.
     pub async fn open_at(db_path: &std::path::Path) -> Option<Self> {
         Self::best_effort_open(Self::try_open_at(db_path).await)
     }
@@ -1908,9 +1908,17 @@ impl GlobalDb {
         })
     }
 
-    pub async fn list_code_projects(&self, limit: usize) -> Vec<CodeProjectRecord> {
+    /// Lists registered code projects, preserving query and row-decoding errors.
+    ///
+    /// Destructive maintenance callers must use this instead of the best-effort
+    /// [`Self::list_code_projects`] wrapper so a registry failure cannot be
+    /// mistaken for an empty registry.
+    pub async fn try_list_code_projects(
+        &self,
+        limit: usize,
+    ) -> crate::errors::Result<Vec<CodeProjectRecord>> {
         let limit = i64::try_from(limit).unwrap_or(i64::MAX);
-        let Ok(mut rows) = self
+        let mut rows = self
             .conn
             .query(
                 "SELECT project_id, canonical_root, display_root, git_common_dir,
@@ -1920,17 +1928,23 @@ impl GlobalDb {
                  LIMIT ?1",
                 params![limit],
             )
-            .await
-        else {
-            return Vec::new();
-        };
+            .await?;
         let mut projects = Vec::new();
-        while let Ok(Some(row)) = rows.next().await {
-            if let Some(project) = row_to_code_project(&row, 0) {
-                projects.push(project);
-            }
+        while let Some(row) = rows.next().await? {
+            let project = row_to_code_project(&row, 0).ok_or_else(|| {
+                crate::errors::TraceDecayError::Database {
+                    message: "failed to decode code project registry row".to_string(),
+                    operation: "list code projects".to_string(),
+                }
+            })?;
+            projects.push(project);
         }
-        projects
+        Ok(projects)
+    }
+
+    /// Lists registered code projects on the daemon's best-effort path.
+    pub async fn list_code_projects(&self, limit: usize) -> Vec<CodeProjectRecord> {
+        self.try_list_code_projects(limit).await.unwrap_or_default()
     }
 
     /// Returns registered code projects whose `last_seen_at` is within the last

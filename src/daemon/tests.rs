@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 #[cfg(unix)]
 use std::process::Command;
+use std::sync::Arc;
 
 #[cfg(unix)]
 use serde_json::Value;
@@ -12,11 +13,11 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 use tokio::task::JoinHandle;
 
 #[cfg(unix)]
+use super::{AutomationSchedulerHandle, DaemonEngine, drain_client_tasks};
 use super::{
-    AutomationSchedulerHandle, DaemonEngine, DatabaseOwnerRegistry, ProjectRouteKey,
-    ProjectServerKey, StoreOwnerKey, drain_client_tasks,
+    DaemonClientIdentity, DaemonHandshake, DaemonLifecycle, DatabaseOwnerRegistry, ProjectRouteKey,
+    ProjectServerKey, StoreAdministration, StoreOwnerKey,
 };
-use super::{DaemonClientIdentity, DaemonHandshake, DaemonLifecycle};
 
 mod compatibility;
 
@@ -60,6 +61,7 @@ async fn portable_broker_requests_reuse_one_authenticated_project_owner() {
     let owners = std::sync::Arc::new(tokio::sync::Mutex::new(
         super::DatabaseOwnerRegistry::default(),
     ));
+    let store_administration = StoreAdministration::with_project_servers(Arc::clone(&owners));
     let gates = std::sync::Arc::new(tokio::sync::Mutex::new(super::ProjectOpenGates::default()));
     let attempts = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let lifecycle = DaemonLifecycle::default();
@@ -69,7 +71,7 @@ async fn portable_broker_requests_reuse_one_authenticated_project_owner() {
             .expect("loopback listener");
 
     let server = {
-        let owners = std::sync::Arc::clone(&owners);
+        let store_administration = store_administration.clone();
         let gates = std::sync::Arc::clone(&gates);
         let attempts = std::sync::Arc::clone(&attempts);
         let lifecycle = lifecycle.clone();
@@ -77,19 +79,19 @@ async fn portable_broker_requests_reuse_one_authenticated_project_owner() {
             let mut clients = tokio::task::JoinSet::new();
             for _ in 0..2 {
                 let stream = listener.accept().await.expect("accept client");
-                let owners = std::sync::Arc::clone(&owners);
+                let store_administration = store_administration.clone();
                 let gates = std::sync::Arc::clone(&gates);
                 let attempts = std::sync::Arc::clone(&attempts);
                 let lifecycle = lifecycle.clone();
                 clients.spawn(async move {
-                    super::serve_windows_broker_client(
+                    Box::pin(super::serve_windows_broker_client(
                         stream,
                         TOKEN,
                         &lifecycle,
-                        owners,
+                        store_administration,
                         gates,
                         Some(attempts),
-                    )
+                    ))
                     .await
                 });
             }
@@ -197,7 +199,7 @@ async fn one_shot_tool_call_aborts_when_daemon_liveness_fails_after_write() {
     let server = tokio::spawn(async move {
         let (_stream, _) = listener.accept().await.expect("accept tool call");
         drop(listener);
-        std::future::pending::<()>().await
+        std::future::pending::<()>().await;
     });
 
     let error = tokio::time::timeout(
@@ -233,7 +235,7 @@ async fn proxied_request_uses_shared_liveness_boundary_after_write() {
     let server = tokio::spawn(async move {
         let (_stream, _) = listener.accept().await.expect("accept proxied request");
         drop(listener);
-        std::future::pending::<()>().await
+        std::future::pending::<()>().await;
     });
     let request = json!({
         "jsonrpc": "2.0",
@@ -419,13 +421,18 @@ async fn daemon_scheduler_shutdown_aborts_and_joins_every_loop() {
         scope_prefix: None,
     };
     let task = tokio::spawn(std::future::pending::<()>());
-    engine.automation_schedulers.lock().await.insert(
-        key,
-        AutomationSchedulerHandle {
-            task,
-            wake: std::sync::Arc::new(tokio::sync::Notify::new()),
-        },
-    );
+    engine
+        .store_administration
+        .automation_schedulers()
+        .lock()
+        .await
+        .insert(
+            key,
+            AutomationSchedulerHandle {
+                task,
+                wake: std::sync::Arc::new(tokio::sync::Notify::new()),
+            },
+        );
 
     engine.lifecycle.begin_draining();
     tokio::time::timeout(
@@ -435,7 +442,14 @@ async fn daemon_scheduler_shutdown_aborts_and_joins_every_loop() {
     .await
     .expect("scheduler shutdown should not wait for its tick interval");
 
-    assert!(engine.automation_schedulers.lock().await.is_empty());
+    assert!(
+        engine
+            .store_administration
+            .automation_schedulers()
+            .lock()
+            .await
+            .is_empty()
+    );
 }
 
 #[cfg(unix)]
@@ -587,22 +601,30 @@ fn database_owner_registry_rekeys_and_evicts_stale_routes() {
         owner: feature_owner,
         scope_prefix: Some("src".to_string()),
     };
+    let route = ProjectRouteKey {
+        profile_root: PathBuf::from("/profile"),
+        global_db_path: PathBuf::from("/profile/global.db"),
+        project_path: PathBuf::from("/project"),
+        scope_prefix: Some("src".to_string()),
+    };
     let mut registry = DatabaseOwnerRegistry::<u8>::default();
     registry.insert(old.clone(), 7);
+    registry.bind_route(route.clone(), old.clone());
 
-    assert!(registry.rekey(&old, new.clone()));
+    assert!(registry.rekey(&old, &new));
 
     assert!(registry.get(&old).is_none());
     assert_eq!(registry.get(&new), Some(&7));
-    assert!(!registry.routes.contains_key(&old.owner));
-    assert!(registry.routes[&new.owner].contains(&new));
+    assert_eq!(registry.get_route(&route), Some((&new, &7)));
 
     let mut collision = DatabaseOwnerRegistry::<u8>::default();
     collision.insert(old.clone(), 7);
     collision.insert(new.clone(), 9);
-    assert!(!collision.rekey(&old, new.clone()));
+    collision.bind_route(route.clone(), old.clone());
+    assert!(!collision.rekey(&old, &new));
     assert!(collision.get(&old).is_none());
     assert_eq!(collision.get(&new), Some(&9));
+    assert!(collision.get_route(&route).is_none());
 }
 
 #[test]
@@ -716,7 +738,9 @@ async fn daemon_round_trip(
     let (server_stream, client_stream) =
         tokio::net::UnixStream::pair().expect("daemon socket pair");
     let server =
-        tokio::spawn(async move { super::serve_socket_client(server_stream, engine).await });
+        tokio::spawn(
+            async move { Box::pin(super::serve_socket_client(server_stream, engine)).await },
+        );
     let (reader, mut writer) = client_stream.into_split();
     writer
         .write_all(handshake.to_line().expect("handshake json").as_bytes())
@@ -1571,76 +1595,31 @@ fn daemon_handshake_requires_client_identity() {
     assert!(DaemonHandshake::from_line(&encoded).is_err());
 }
 
-#[derive(Debug, serde::Deserialize, serde::Serialize)]
-struct LegacyDaemonHandshake {
-    project_path: Option<PathBuf>,
-    scope_prefix: Option<String>,
-    timings: bool,
-    allow_init: bool,
-    client_identity: DaemonClientIdentity,
-}
-
-/// Old client → new daemon: handshakes without version/instance fields must
-/// still parse, with empty defaults.
-#[test]
-fn daemon_handshake_accepts_old_client_without_version() {
-    let legacy = LegacyDaemonHandshake {
-        project_path: Some(PathBuf::from("/work/repo")),
-        scope_prefix: None,
-        timings: false,
-        allow_init: false,
-        client_identity: test_client_identity(),
-    };
-    let encoded = serde_json::to_string(&legacy).expect("old handshake should encode");
-
-    let decoded = DaemonHandshake::from_line(&encoded).expect("old handshake should decode");
-
-    assert!(!decoded.allow_initialize_root_routing);
-    assert_eq!(decoded.client_version, "");
-    assert_eq!(decoded.client_instance_id, "");
-    assert!(!decoded.tool_list_changed_capable);
-    assert_eq!(decoded.catalog_version, "");
-}
-
-/// New client → old daemon: an actual legacy projection ignores new fields.
-#[test]
-fn daemon_handshake_ignores_unknown_fields_for_old_daemons() {
-    let handshake = test_handshake_defaults();
-    let decoded: LegacyDaemonHandshake =
-        serde_json::from_str(&handshake.to_line().expect("handshake should encode"))
-            .expect("old daemon should ignore new handshake fields");
-
-    assert_eq!(decoded.project_path, handshake.project_path);
-    assert_eq!(decoded.scope_prefix, handshake.scope_prefix);
-    assert_eq!(decoded.timings, handshake.timings);
-    assert_eq!(decoded.allow_init, handshake.allow_init);
-    assert_eq!(decoded.client_identity, handshake.client_identity);
-}
-
 #[tokio::test]
 async fn portable_broker_rejects_missing_auth_before_routing() {
     const TOKEN: &str = "0123456789abcdef0123456789abcdef";
     let owners = std::sync::Arc::new(tokio::sync::Mutex::new(
         super::DatabaseOwnerRegistry::default(),
     ));
+    let store_administration = StoreAdministration::with_project_servers(Arc::clone(&owners));
     let gates = std::sync::Arc::new(tokio::sync::Mutex::new(super::ProjectOpenGates::default()));
     let attempts = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let (listener, endpoint) =
         super::transport::BrokerListener::bind(&super::transport::default_loopback_endpoint())
             .await
             .expect("loopback listener");
-    let server_owners = std::sync::Arc::clone(&owners);
+    let server_administration = store_administration.clone();
     let server_attempts = std::sync::Arc::clone(&attempts);
     let server = tokio::spawn(async move {
         let stream = listener.accept().await.expect("accept client");
-        super::serve_windows_broker_client(
+        Box::pin(super::serve_windows_broker_client(
             stream,
             TOKEN,
             &DaemonLifecycle::default(),
-            server_owners,
+            server_administration,
             gates,
             Some(server_attempts),
-        )
+        ))
         .await
     });
     let mut handshake = test_handshake_defaults();
@@ -2222,7 +2201,11 @@ async fn daemon_ensure_scheduler_skips_before_project_has_configured_work() {
         .ensure_automation_scheduler(key.clone(), project, handshake)
         .await;
 
-    let schedulers = engine.automation_schedulers.lock().await;
+    let schedulers = engine
+        .store_administration
+        .automation_schedulers()
+        .lock()
+        .await;
     assert!(!schedulers.contains_key(&key));
 }
 
@@ -2258,7 +2241,14 @@ async fn daemon_ensure_scheduler_starts_after_project_configures_work() {
     engine
         .ensure_automation_scheduler(key.clone(), project.clone(), handshake.clone())
         .await;
-    assert!(!engine.automation_schedulers.lock().await.contains_key(&key));
+    assert!(
+        !engine
+            .store_administration
+            .automation_schedulers()
+            .lock()
+            .await
+            .contains_key(&key)
+    );
 
     save_project_config(
         &cg.store_layout().dashboard_root,
@@ -2280,7 +2270,11 @@ async fn daemon_ensure_scheduler_starts_after_project_configures_work() {
         .ensure_automation_scheduler(key.clone(), project, handshake)
         .await;
 
-    let schedulers = engine.automation_schedulers.lock().await;
+    let schedulers = engine
+        .store_administration
+        .automation_schedulers()
+        .lock()
+        .await;
     assert!(schedulers.contains_key(&key));
     drop(schedulers);
     engine.shutdown_all().await;

@@ -275,12 +275,12 @@ mod tests {
         )
         .unwrap()
         .unwrap();
-        assert_eq!(snapshot.today_cost, 1.5);
-        assert_eq!(snapshot.week_cost, 4.5);
+        assert!((snapshot.today_cost - 1.5).abs() < f64::EPSILON);
+        assert!((snapshot.week_cost - 4.5).abs() < f64::EPSILON);
         assert_eq!(snapshot.tokens_saved, 1200);
-        assert_eq!(snapshot.efficiency_pct, 60.0);
+        assert!((snapshot.efficiency_pct - 60.0).abs() < f64::EPSILON);
         assert_eq!(snapshot.top_model, "today-leader");
-        assert_eq!(snapshot.top_model_cost, 1.25);
+        assert!((snapshot.top_model_cost - 1.25).abs() < f64::EPSILON);
     }
 
     #[test]

@@ -9,9 +9,7 @@ use std::time::Duration;
 
 use serde_json::Value;
 
-use super::cursor_compact::{
-    CURSOR_PRE_COMPACT_SUMMARY_BUDGET, cursor_pre_compact_for_event_with_config,
-};
+use super::cursor_compact::cursor_pre_compact_via_daemon;
 use super::cursor_shell::paths_same;
 use super::memory_inject;
 use super::post_tool_use::{captured_tool_output, trusted_tool_failure};
@@ -249,19 +247,18 @@ pub async fn hook_cursor_stop() -> i32 {
 /// Cursor `preCompact` hook handler.
 ///
 /// Cursor's compaction event exposes pressure metadata but not Cursor's own
-/// generated summary text. At the boundary, `TraceDecay` ingests the current
-/// transcript tail, asks LCM for the compactable raw-message backlog, generates
-/// a summary through `cursor-agent -p`, and stores that summary as a normal LCM
-/// summary node. The hook is fail-open and emits Cursor's empty object shape.
+/// generated summary text. The hook delegates to the daemon, which ingests the
+/// current transcript tail, asks LCM for the compactable raw-message backlog,
+/// generates a summary through `cursor-agent -p`, and stores that summary as a
+/// normal LCM summary node. The hook is fail-open and emits Cursor's empty
+/// object shape.
 pub async fn hook_cursor_pre_compact() -> i32 {
     let event = read_hook_event!();
     let root = cursor_project_root_from_event_with_identity(&event).await;
     let _hook_telemetry =
         record_hook_invoked(root.as_deref(), HintAgent::Cursor, "preCompact", &event);
     if std::env::var(crate::sessions::cursor_agent::CURSOR_SUMMARY_CHILD_ENV).is_err() {
-        let mut config = crate::sessions::cursor_agent::CursorAgentSummaryConfig::from_env();
-        config.timeout = config.timeout.min(CURSOR_PRE_COMPACT_SUMMARY_BUDGET);
-        let outcome = cursor_pre_compact_for_event_with_config(&event, &config).await;
+        let outcome = cursor_pre_compact_via_daemon(&event).await;
         if outcome.status == "error" {
             eprintln!(
                 "tracedecay Cursor preCompact summary failed: {}",
@@ -810,9 +807,8 @@ async fn ingest_cursor_transcript_for_event_inner(
     max_new_bytes: Option<u64>,
     budget: Duration,
 ) -> CursorIngestOutcome {
-    let parsed = match serde_json::from_str::<Value>(event_json) {
-        Ok(parsed) => parsed,
-        Err(_) => return CursorIngestOutcome::default(),
+    let Ok(parsed) = serde_json::from_str::<Value>(event_json) else {
+        return CursorIngestOutcome::default();
     };
     let project_root = cursor_project_root_from_parsed_event_with_identity(&parsed).await;
     let mut args = serde_json::json!({

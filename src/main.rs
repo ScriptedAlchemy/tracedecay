@@ -234,8 +234,7 @@ fn maybe_run_extract_worker(command: &Commands) {
 }
 
 async fn run_startup_preamble(command: &Commands) {
-    let skip_startup_maintenance = should_skip_startup_maintenance(command);
-    let skip_agent_install_maintenance = should_skip_agent_install_maintenance(command);
+    let startup_policy = CommandStartupPolicy::for_command(command);
 
     // First-run notice (check BEFORE any config save creates the file)
     let is_first_run = tracedecay::user_config::UserConfig::is_fresh();
@@ -250,7 +249,7 @@ async fn run_startup_preamble(command: &Commands) {
     // makes a synchronous HTTP call (#84) which can add seconds to
     // `tracedecay serve` startup on slow networks — long enough to blow the
     // MCP client's 30 s `initialize` timeout.
-    if !skip_startup_maintenance {
+    if startup_policy.runs_startup_maintenance() {
         global::try_flush(&mut user_config, is_force_flush);
     }
     if !is_local_install_command(command) {
@@ -259,7 +258,7 @@ async fn run_startup_preamble(command: &Commands) {
         }
     }
 
-    if is_first_run && !skip_startup_maintenance {
+    if is_first_run && startup_policy.runs_startup_maintenance() {
         eprintln!(
             "note: tracedecay can optionally upload anonymous token savings counts to a worldwide counter.\n\
              \x20     Run `tracedecay enable-upload-counter` to opt in."
@@ -271,7 +270,7 @@ async fn run_startup_preamble(command: &Commands) {
     // and beta users now stay on beta until they explicitly switch off.
 
     // Best-effort check: warn if install needs re-running.
-    if !skip_agent_install_maintenance {
+    if startup_policy.runs_agent_install_maintenance() {
         tracedecay::agents::claude::check_install_stale();
         maybe_run_silent_reinstall(&mut user_config).await;
     }
@@ -800,69 +799,27 @@ async fn dispatch_command(command: Commands) -> tracedecay::errors::Result<()> {
     Ok(())
 }
 
-fn should_skip_startup_maintenance(command: &Commands) -> bool {
-    if hook_cmd::hook_input(command).is_some() {
-        return true;
-    }
-    matches!(
-        command,
-        Commands::Install { .. }
-            | Commands::Reinstall
-            | Commands::UpdatePlugin
-            | Commands::Upgrade { .. }
-            | Commands::Update { .. }
-            | Commands::Dogfood
-            | Commands::PostUpdate { .. }
-            | Commands::Uninstall { .. }
-            | Commands::Lsp { .. }
-            | Commands::Doctor { .. }
-            | Commands::Analytics { .. }
-            | Commands::Sessions {
-                action: SessionsAction::Unfinished { .. },
-            }
-            | Commands::Migrate { .. }
-            | Commands::Projects { .. }
-            | Commands::Daemon { .. }
-            // `Serve` is the hot path used by MCP clients (Claude Code,
-            // Codex, etc.). Clients impose a 30 s `initialize` timeout, so
-            // every pre-serve startup task — `try_flush` network round-trip,
-            // `check_install_stale`, the silent-reinstall loop over every
-            // tracked agent — risks pushing us past it on slow networks or
-            // big home-dir trees (#84). Skip them; the same maintenance
-            // runs on the user's next interactive `tracedecay …` invocation.
-            | Commands::Serve { .. }
-    )
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CommandStartupPolicy {
+    Full,
+    SkipAll,
 }
 
-fn should_skip_agent_install_maintenance(command: &Commands) -> bool {
-    if hook_cmd::hook_input(command).is_some() {
-        return true;
-    }
-    // Selectively gate the implicit `check_install_stale` + silent-reinstall
-    // path so agent permissions/hooks/MCP config stay in sync after a binary
-    // upgrade, without firing on paths where it would be wrong or wasteful:
-    //   - `Serve`: the MCP hot path with a 30 s client `initialize` timeout
-    //     (#84). Reinstalling every tracked agent before the stdio loop starts
-    //     can blow that budget, so it must stay off `serve`.
-    //   - `Install` / `Reinstall`: already perform installation — don't
-    //     double-install as an implicit prelude to the explicit command.
-    //   - `UpdatePlugin` / `Upgrade` / `Update`: explicit maintenance paths
-    //     that manage plugin refresh themselves (upgrade/update re-exec the
-    //     new binary's `post-update`); an implicit silent reinstall beforehand
-    //     would rewrite configs with the OLD binary and break the
-    //     update-plugin contract.
-    //   - `Uninstall`: about to remove agent configs — don't reinstall them
-    //     first (per the original #84 intent).
-    //   - `Doctor` / `Migrate`: diagnostics and explicitly confirmed storage
-    //     maintenance manage their own lifecycle and must not mutate agent
-    //     configs as a side effect.
-    //   - `Tool`: per-invocation tool calls are a hot-ish path; skip the
-    //     reinstall scan there too.
-    // Every other command (the normal everyday invocations) runs maintenance.
-    matches!(
-        command,
-        Commands::Serve { .. }
-            | Commands::Install { .. }
+impl CommandStartupPolicy {
+    fn for_command(command: &Commands) -> Self {
+        if hook_cmd::hook_input(command).is_some() {
+            return Self::SkipAll;
+        }
+
+        match command {
+            // Tool calls are the documented MCP fallback and must remain a local,
+            // latency-bounded protocol path. Unrelated counter uploads or agent
+            // maintenance belong on interactive commands and daemon background work.
+            Commands::Tool { .. } => Self::SkipAll,
+            // Explicit lifecycle/maintenance commands manage their own work.
+            // Serve is also latency-sensitive: clients impose a 30 s MCP
+            // initialize timeout, so no implicit startup work belongs there.
+            Commands::Install { .. }
             | Commands::Reinstall
             | Commands::UpdatePlugin
             | Commands::Upgrade { .. }
@@ -873,14 +830,34 @@ fn should_skip_agent_install_maintenance(command: &Commands) -> bool {
             | Commands::Lsp { .. }
             | Commands::Doctor { .. }
             | Commands::Analytics { .. }
-            | Commands::Migrate { .. }
-            | Commands::Projects { .. }
-            | Commands::Tool { .. }
             | Commands::Sessions {
                 action: SessionsAction::Unfinished { .. },
             }
+            | Commands::Migrate { .. }
+            | Commands::Projects { .. }
             | Commands::Daemon { .. }
-    )
+            | Commands::Serve { .. } => Self::SkipAll,
+            _ => Self::Full,
+        }
+    }
+
+    fn runs_startup_maintenance(self) -> bool {
+        !matches!(self, Self::SkipAll)
+    }
+
+    fn runs_agent_install_maintenance(self) -> bool {
+        matches!(self, Self::Full)
+    }
+}
+
+#[cfg(test)]
+fn should_skip_startup_maintenance(command: &Commands) -> bool {
+    !CommandStartupPolicy::for_command(command).runs_startup_maintenance()
+}
+
+#[cfg(test)]
+fn should_skip_agent_install_maintenance(command: &Commands) -> bool {
+    !CommandStartupPolicy::for_command(command).runs_agent_install_maintenance()
 }
 
 fn is_local_install_command(command: &Commands) -> bool {

@@ -71,7 +71,7 @@ impl DaemonAuthority {
     ) -> Result<Self> {
         let profile_root = canonical_identity_path(profile_root)?;
         std::fs::create_dir_all(&profile_root)
-            .map_err(|error| config_io("create", &profile_root, error))?;
+            .map_err(|error| config_io("create", &profile_root, &error))?;
         restrict_directory(&profile_root)?;
 
         let lock_path = profile_root.join(LOCK_FILE);
@@ -80,11 +80,11 @@ impl DaemonAuthority {
         configure_private_create(&mut lock_options, 0o600);
         let mut lock = lock_options
             .open(&lock_path)
-            .map_err(|error| config_io("open", &lock_path, error))?;
+            .map_err(|error| config_io("open", &lock_path, &error))?;
         restrict_file(&lock_path)?;
         if let Err(error) = lock.try_lock_exclusive() {
             if !is_lock_contended(&error) {
-                return Err(config_io("lock", &lock_path, error));
+                return Err(config_io("lock", &lock_path, &error));
             }
             let record = read_record_if_present(&profile_root.join(RECORD_FILE))
                 .ok()
@@ -125,17 +125,17 @@ impl DaemonAuthority {
         };
         write_record(&record_path, &record)?;
         lock.set_len(0)
-            .map_err(|error| config_io("truncate", &lock_path, error))?;
+            .map_err(|error| config_io("truncate", &lock_path, &error))?;
         lock.seek(SeekFrom::Start(0))
-            .map_err(|error| config_io("seek", &lock_path, error))?;
+            .map_err(|error| config_io("seek", &lock_path, &error))?;
         writeln!(
             lock,
             "pid={} run={} epoch={}",
             record.pid, record.process_run_id, record.epoch
         )
-        .map_err(|error| config_io("write", &lock_path, error))?;
+        .map_err(|error| config_io("write", &lock_path, &error))?;
         lock.sync_data()
-            .map_err(|error| config_io("sync", &lock_path, error))?;
+            .map_err(|error| config_io("sync", &lock_path, &error))?;
 
         Ok(Self {
             _lock: lock,
@@ -157,8 +157,8 @@ impl DaemonAuthority {
         &self.record.auth_token
     }
 
-    pub(super) fn publish_endpoint(&mut self, endpoint: DaemonEndpoint) -> Result<()> {
-        self.record.endpoint = canonical_endpoint(&endpoint)?;
+    pub(super) fn publish_endpoint(&mut self, endpoint: &DaemonEndpoint) -> Result<()> {
+        self.record.endpoint = canonical_endpoint(endpoint)?;
         write_record(&self.record_path, &self.record)?;
         self.endpoint_bound = true;
         Ok(())
@@ -219,7 +219,7 @@ pub(super) fn canonical_identity_path(path: &Path) -> Result<PathBuf> {
         path.to_path_buf()
     } else {
         std::env::current_dir()
-            .map_err(|error| config_io("resolve", path, error))?
+            .map_err(|error| config_io("resolve", path, &error))?
             .join(path)
     };
     if let Ok(canonical) = absolute.canonicalize() {
@@ -241,7 +241,7 @@ pub(super) fn canonical_identity_path(path: &Path) -> Result<PathBuf> {
     }
     let mut canonical = existing
         .canonicalize()
-        .map_err(|error| config_io("canonicalize", existing, error))?;
+        .map_err(|error| config_io("canonicalize", existing, &error))?;
     for component in suffix.iter().rev() {
         canonical.push(component);
     }
@@ -282,11 +282,11 @@ fn read_record_if_present(path: &Path) -> Result<Option<DaemonAuthorityRecord>> 
     let mut file = match File::open(path) {
         Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(config_io("open", path, error)),
+        Err(error) => return Err(config_io("open", path, &error)),
     };
     let mut contents = String::new();
     file.read_to_string(&mut contents)
-        .map_err(|error| config_io("read", path, error))?;
+        .map_err(|error| config_io("read", path, &error))?;
     serde_json::from_str(&contents)
         .map(Some)
         .map_err(|error| TraceDecayError::Config {
@@ -325,7 +325,7 @@ fn restrict_directory(path: &Path) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
 
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
-        .map_err(|error| config_io("restrict", path, error))
+        .map_err(|error| config_io("restrict", path, &error))
 }
 
 #[cfg(not(unix))]
@@ -338,7 +338,7 @@ fn restrict_file(path: &Path) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
 
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
-        .map_err(|error| config_io("restrict", path, error))
+        .map_err(|error| config_io("restrict", path, &error))
 }
 
 #[cfg(not(unix))]
@@ -371,11 +371,11 @@ fn remove_if_present(path: &Path) -> Result<()> {
     match std::fs::remove_file(path) {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(config_io("remove", path, error)),
+        Err(error) => Err(config_io("remove", path, &error)),
     }
 }
 
-fn config_io(operation: &str, path: &Path, error: std::io::Error) -> TraceDecayError {
+fn config_io(operation: &str, path: &Path, error: &std::io::Error) -> TraceDecayError {
     TraceDecayError::Config {
         message: format!("failed to {operation} '{}': {error}", path.display()),
     }
@@ -479,7 +479,7 @@ mod tests {
         let auth_token = authority.auth_token().to_string();
         let concrete = DaemonEndpoint::parse("tcp://127.0.0.1:43123").unwrap();
 
-        authority.publish_endpoint(concrete.clone()).unwrap();
+        authority.publish_endpoint(&concrete).unwrap();
 
         let published = current_record(&profile).unwrap().unwrap();
         assert_eq!(published.endpoint, concrete);
@@ -618,7 +618,11 @@ mod tests {
             DaemonAuthority::acquire(&profile, &DaemonEndpoint::Unix(socket.clone()), "test")
                 .unwrap();
 
-        assert_eq!(authority.endpoint(), &DaemonEndpoint::Unix(socket));
+        let canonical_socket = profile.canonicalize().unwrap().join("daemon.sock");
+        assert_eq!(
+            authority.endpoint(),
+            &DaemonEndpoint::Unix(canonical_socket)
+        );
         assert_eq!(std::fs::read(&target).unwrap(), b"keep");
     }
 }

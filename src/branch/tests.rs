@@ -28,7 +28,9 @@ fn unique_stem_keeps_free_name() {
     let meta = crate::branch_meta::BranchMeta::new("main");
     let dir = Path::new("/nonexistent-branches-dir-for-test");
     assert_eq!(
-        unique_branch_db_stem(&meta, dir, "feature/new").unwrap(),
+        unique_branch_db_stem(&meta, dir, "feature/new")
+            .unwrap()
+            .unwrap(),
         "feature_new"
     );
 }
@@ -39,7 +41,9 @@ fn unique_stem_disambiguates_sanitization_collision() {
     let mut meta = crate::branch_meta::BranchMeta::new("main");
     meta.add_branch("feature/foo", "branches/feature_foo.db", "main");
     let dir = Path::new("/nonexistent-branches-dir-for-test");
-    let stem = unique_branch_db_stem(&meta, dir, "feature_foo").unwrap();
+    let stem = unique_branch_db_stem(&meta, dir, "feature_foo")
+        .unwrap()
+        .unwrap();
     assert_ne!(
         stem, "feature_foo",
         "second branch must not reuse the first branch's DB file"
@@ -56,7 +60,9 @@ fn unique_stem_preserves_hashed_orphan_recovery_file() {
     std::fs::write(dir.path().join(format!("{hashed}.db")), b"recovery").unwrap();
 
     assert_eq!(
-        unique_branch_db_stem(&meta, dir.path(), "feature_foo").unwrap(),
+        unique_branch_db_stem(&meta, dir.path(), "feature_foo")
+            .unwrap()
+            .unwrap(),
         format!("{hashed}-1")
     );
 }
@@ -69,7 +75,9 @@ fn unique_stem_is_idempotent_for_same_branch() {
     meta.add_branch("feature/foo", "branches/feature_foo.db", "main");
     let dir = Path::new("/nonexistent-branches-dir-for-test");
     assert_eq!(
-        unique_branch_db_stem(&meta, dir, "feature/foo").unwrap(),
+        unique_branch_db_stem(&meta, dir, "feature/foo")
+            .unwrap()
+            .unwrap(),
         "feature_foo"
     );
 }
@@ -78,8 +86,33 @@ fn unique_stem_is_idempotent_for_same_branch() {
 fn unique_stem_rejects_empty_sanitization() {
     let meta = crate::branch_meta::BranchMeta::new("main");
     let dir = Path::new("/nonexistent-branches-dir-for-test");
-    assert!(unique_branch_db_stem(&meta, dir, "..").is_none());
-    assert!(unique_branch_db_stem(&meta, dir, "///").is_none());
+    assert!(unique_branch_db_stem(&meta, dir, "..").unwrap().is_none());
+    assert!(unique_branch_db_stem(&meta, dir, "///").unwrap().is_none());
+}
+
+#[test]
+fn unique_stem_never_reuses_a_deleted_database_path() {
+    let temp = tempfile::tempdir().unwrap();
+    let branches_dir = temp.path().join("branches");
+    std::fs::create_dir_all(&branches_dir).unwrap();
+    let retired = branches_dir.join("feature.db");
+    let fence = crate::db::DatabaseDeletionFence::acquire(
+        std::slice::from_ref(&retired),
+        "retire branch database path",
+    )
+    .unwrap();
+    fence.publish_deleting().unwrap();
+    fence.promote_deleted().unwrap();
+    drop(fence);
+
+    let meta = crate::branch_meta::BranchMeta::new("main");
+    let stem = unique_branch_db_stem(&meta, &branches_dir, "feature")
+        .unwrap()
+        .unwrap();
+
+    assert_ne!(stem, "feature");
+    assert!(stem.starts_with("feature-"), "got: {stem}");
+    assert!(crate::db::database_path_is_tombstoned(&retired).unwrap());
 }
 
 // --- git test harness (mirrors src/mcp/hook_events.rs tests) ------------

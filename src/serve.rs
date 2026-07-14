@@ -65,11 +65,13 @@ pub fn sanitize_serve_path_arg(path: Option<String>) -> Option<String> {
 /// project database in-process.
 ///
 /// Project databases are daemon-owned. Returning a local [`TraceDecay`] would
-/// reintroduce a second SQLite owner, so this API deliberately fails closed.
+/// reintroduce a second `SQLite` owner, so this API deliberately fails closed.
+#[allow(clippy::unused_async)]
 pub async fn ensure_initialized(project_path: &Path) -> Result<TraceDecay> {
     Err(direct_project_open_disabled(project_path))
 }
 
+#[allow(clippy::unused_async)]
 pub async fn ensure_initialized_with_options(
     project_path: &Path,
     _open_options: TraceDecayOpenOptions,
@@ -235,9 +237,8 @@ mod tests {
     #[tokio::test]
     async fn direct_project_open_fails_closed() {
         let path = Path::new("/tmp/tracedecay-direct-open-must-not-run");
-        let error = match ensure_initialized(path).await {
-            Ok(_) => panic!("legacy local open must fail closed"),
-            Err(error) => error,
+        let Err(error) = ensure_initialized(path).await else {
+            panic!("legacy local open must fail closed");
         };
         assert!(error.to_string().contains("managed TraceDecay daemon"));
     }

@@ -25,11 +25,23 @@ pub(super) fn open_lock_file(path: &Path) -> Result<File> {
 }
 
 pub(super) fn write_owner(path: &Path, owner: &WriterOwner) -> Result<()> {
+    let payload = format!(
+        "token={}\tpid={}\tstarted_epoch_ms={}\tversion={}\tintent={}\n",
+        owner.token, owner.pid, owner.started_epoch_ms, owner.version, owner.intent
+    );
+    write_record_atomically(path, payload.as_bytes(), "writer owner")
+}
+
+pub(super) fn write_record_atomically(
+    path: &Path,
+    payload: &[u8],
+    record_name: &str,
+) -> Result<()> {
     let file_name = path.file_name().ok_or_else(|| {
         access_error(
-            "write writer owner",
+            &format!("write {record_name}"),
             path,
-            "writer owner path has no file name",
+            &format!("{record_name} path has no file name"),
         )
     })?;
     let nonce = AUTHORITY_NONCE.fetch_add(1, Ordering::Relaxed);
@@ -39,16 +51,7 @@ pub(super) fn write_owner(path: &Path, owner: &WriterOwner) -> Result<()> {
         std::process::id(),
         nonce
     ));
-    let payload = format!(
-        "token={}\tpid={}\tstarted_epoch_ms={}\tversion={}\tintent={}",
-        owner.token, owner.pid, owner.started_epoch_ms, owner.version, owner.intent
-    );
-    publish_record_atomically(
-        &temporary,
-        path,
-        format!("{payload}\n").as_bytes(),
-        "writer owner",
-    )
+    publish_record_atomically(&temporary, path, payload, record_name)
 }
 
 pub(super) fn publish_record_atomically(
@@ -71,7 +74,7 @@ pub(super) fn publish_record_atomically(
         })?;
         created = true;
         file.write_all(payload)
-            .and_then(|_| file.sync_all())
+            .and_then(|()| file.sync_all())
             .map_err(|error| access_io_error(&format!("write {record_name}"), temporary, &error))?;
         replace_file_atomically(temporary, destination, record_name)?;
         sync_parent_directory(destination, record_name)
@@ -80,6 +83,72 @@ pub(super) fn publish_record_atomically(
         let _ = std::fs::remove_file(temporary);
     }
     publish
+}
+
+pub(super) fn read_record_strict(path: &Path, record_name: &str) -> Result<Option<String>> {
+    const MAX_RECORD_BYTES: u64 = 4096;
+
+    let metadata = match std::fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(access_io_error(
+                &format!("inspect {record_name}"),
+                path,
+                &error,
+            ));
+        }
+    };
+    if metadata.file_type().is_symlink() {
+        return Err(access_error(
+            &format!("read {record_name}"),
+            path,
+            &format!("{record_name} must not be a symlink"),
+        ));
+    }
+    if !metadata.is_file() {
+        return Err(access_error(
+            &format!("read {record_name}"),
+            path,
+            &format!("{record_name} is not a regular file"),
+        ));
+    }
+
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        const O_NOFOLLOW: i32 = 0o40_0000;
+        options.custom_flags(O_NOFOLLOW);
+    }
+    let file = options
+        .open(path)
+        .map_err(|error| access_io_error(&format!("read {record_name}"), path, &error))?;
+    let mut bytes = Vec::new();
+    file.take(MAX_RECORD_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| access_io_error(&format!("read {record_name}"), path, &error))?;
+    if bytes.len() as u64 > MAX_RECORD_BYTES {
+        return Err(access_error(
+            &format!("read {record_name}"),
+            path,
+            &format!("{record_name} exceeds {MAX_RECORD_BYTES} bytes"),
+        ));
+    }
+    String::from_utf8(bytes).map(Some).map_err(|_| {
+        access_error(
+            &format!("read {record_name}"),
+            path,
+            &format!("{record_name} is not valid UTF-8"),
+        )
+    })
+}
+
+pub(super) fn remove_record_durably(path: &Path, record_name: &str) -> Result<()> {
+    std::fs::remove_file(path)
+        .map_err(|error| access_io_error(&format!("remove {record_name}"), path, &error))?;
+    sync_parent_directory(path, record_name)
 }
 
 #[cfg(not(windows))]

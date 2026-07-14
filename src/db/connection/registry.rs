@@ -9,17 +9,19 @@ use crate::db::DatabaseAuthority;
 pub(super) struct DatabaseInner {
     pub(super) conn: Connection,
     /// Kept alive so the underlying database is not dropped.
-    pub(super) _db: LibsqlDatabase,
+    pub(super) db: LibsqlDatabase,
     pub(super) writable: bool,
     pub(super) _authority: DatabaseAuthority,
     pub(super) _slot: Option<DatabaseSlot>,
 }
 
-pub(super) type DatabaseSlot = Arc<tokio::sync::Mutex<Weak<DatabaseInner>>>;
+type DatabaseWeak = Weak<DatabaseInner>;
+pub(super) type DatabaseSlot = Arc<tokio::sync::Mutex<DatabaseWeak>>;
+type WeakDatabaseSlot = Weak<tokio::sync::Mutex<DatabaseWeak>>;
+type OpenDatabases = HashMap<PathBuf, WeakDatabaseSlot>;
 
-static OPEN_DATABASES: LazyLock<
-    Mutex<HashMap<PathBuf, Weak<tokio::sync::Mutex<Weak<DatabaseInner>>>>>,
-> = LazyLock::new(|| Mutex::new(HashMap::new()));
+static OPEN_DATABASES: LazyLock<Mutex<OpenDatabases>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 
 pub(super) fn database_slot(path: &Path) -> DatabaseSlot {
     let mut databases = OPEN_DATABASES

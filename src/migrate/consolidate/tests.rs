@@ -64,16 +64,15 @@ enum SnapshotEntry {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum TreeSnapshotEntry {
+    // Directory timestamps are derived state: creating and removing ignored
+    // authority-lock artifacts changes their parent directories' mtime/ctime.
+    // Topology, identity, permissions, and every non-ignored child remain
+    // snapshotted, so persistent input mutations are still detected.
     Directory {
-        modified: SystemTime,
         #[cfg(unix)]
         device: u64,
         #[cfg(unix)]
         inode: u64,
-        #[cfg(unix)]
-        changed_seconds: i64,
-        #[cfg(unix)]
-        changed_nanoseconds: i64,
         #[cfg(unix)]
         mode: u32,
     },
@@ -152,15 +151,10 @@ fn full_tree_snapshot(root: &Path) -> BTreeMap<PathBuf, TreeSnapshotEntry> {
             snapshot.insert(
                 relative,
                 TreeSnapshotEntry::Directory {
-                    modified: metadata.modified().unwrap(),
                     #[cfg(unix)]
                     device: metadata.dev(),
                     #[cfg(unix)]
                     inode: metadata.ino(),
-                    #[cfg(unix)]
-                    changed_seconds: metadata.ctime(),
-                    #[cfg(unix)]
-                    changed_nanoseconds: metadata.ctime_nsec(),
                     #[cfg(unix)]
                     mode: metadata.permissions().mode(),
                 },

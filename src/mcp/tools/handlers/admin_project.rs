@@ -199,7 +199,7 @@ pub(super) async fn handle_admin_project(
             run_automation(cg, global_db, task, options).await?
         }
     };
-    Ok(json_result(value))
+    Ok(json_result(&value))
 }
 
 async fn run_automation(
@@ -315,7 +315,7 @@ fn decode_options<T: serde::de::DeserializeOwned>(options: Value) -> Result<T> {
     })
 }
 
-fn json_result(value: Value) -> ToolResult {
+fn json_result(value: &Value) -> ToolResult {
     ToolResult::new(
         json!({
             "content": [{
@@ -331,11 +331,22 @@ fn json_result(value: Value) -> ToolResult {
 mod tests {
     use super::*;
 
-    fn tool_json(result: ToolResult) -> Value {
+    fn tool_json(result: &ToolResult) -> Value {
         let text = result.value["content"][0]["text"]
             .as_str()
             .expect("admin project result should contain JSON text");
         serde_json::from_str(text).expect("admin project result should be valid JSON")
+    }
+
+    fn automation_cli_source() -> String {
+        [
+            include_str!("../../../automation_cli/mod.rs"),
+            include_str!("../../../automation_cli/config.rs"),
+            include_str!("../../../automation_cli/facts.rs"),
+            include_str!("../../../automation_cli/runs.rs"),
+            include_str!("../../../automation_cli/skills.rs"),
+        ]
+        .concat()
     }
 
     #[tokio::test]
@@ -382,7 +393,7 @@ mod tests {
         .await
         .unwrap();
         let fact = tool_json(
-            handle_admin_project(
+            &handle_admin_project(
                 &cg,
                 json!({ "action": "fact_apply", "id": proposals[0].proposal_id.clone() }),
                 None,
@@ -395,7 +406,7 @@ mod tests {
         assert_eq!(fact.reviewer.as_deref(), Some("cli"));
 
         let automation = tool_json(
-            handle_admin_project(
+            &handle_admin_project(
                 &cg,
                 json!({
                     "action": "automation_run",
@@ -418,7 +429,7 @@ mod tests {
 
         let owner_after = crate::db::probe_writer_owner(&cg.store_layout().graph_db_path).unwrap();
         assert_eq!(owner_after, owner_before);
-        let client_source = include_str!("../../../automation_cli.rs");
+        let client_source = automation_cli_source();
         let direct_init = ["serve::ensure_", "initialized"].concat();
         let direct_apply = ["apply_fact_", "proposal("].concat();
         assert!(client_source.contains("tracedecay_admin_project"));
@@ -446,7 +457,7 @@ mod tests {
         assert!(matches!(task, AutomationRunTask::MemoryCuration));
         let options = decode_options::<MemoryCurationOptions>(options).unwrap();
         assert_eq!(options.max_clusters, 12);
-        assert_eq!(options.min_confidence, 0.75);
+        assert!((options.min_confidence - 0.75).abs() < f64::EPSILON);
 
         let typed_run = serde_json::from_value::<MemoryCuratorAutomationRun>(json!({
             "run_id": "run-5",
@@ -471,7 +482,7 @@ mod tests {
             serde_json::from_value::<MemoryCuratorAutomationRun>(client_run.clone()).unwrap();
         assert_eq!(round_trip, typed_run);
 
-        let client_source = include_str!("../../../automation_cli.rs");
+        let client_source = automation_cli_source();
         let direct_init = ["serve::ensure_", "initialized"].concat();
         let direct_apply = ["apply_fact_", "proposal("].concat();
         assert!(client_source.contains("tracedecay_admin_project"));

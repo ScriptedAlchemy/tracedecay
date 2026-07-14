@@ -843,7 +843,7 @@ fn plain_orphan_still_warns_with_update_remediation() {
 
 #[test]
 fn daemon_status_parser_extracts_storage_health() {
-    let parsed = super::daemon_tool_json(serde_json::json!({
+    let parsed = super::daemon_tool_json(&serde_json::json!({
         "content": [{
             "type": "text",
             "text": r#"{"storage_health":{"quick_check_ok":true,"daemon_generation":"run-7"}}"#
@@ -863,6 +863,6 @@ fn daemon_status_parser_extracts_storage_health() {
 
 #[test]
 fn daemon_status_parser_rejects_missing_json_payload() {
-    let error = super::daemon_tool_json(serde_json::json!({ "content": [] })).unwrap_err();
+    let error = super::daemon_tool_json(&serde_json::json!({ "content": [] })).unwrap_err();
     assert!(error.to_string().contains("invalid JSON"));
 }

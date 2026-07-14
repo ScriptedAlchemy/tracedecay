@@ -64,7 +64,7 @@ impl FromStr for DaemonEndpoint {
             if path.is_empty() {
                 return Err(config_error("daemon Unix endpoint path is empty"));
             }
-            return Ok(Self::Unix(PathBuf::from(path)));
+            Ok(Self::Unix(PathBuf::from(path)))
         }
         #[cfg(not(unix))]
         Err(config_error(

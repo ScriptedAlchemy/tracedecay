@@ -54,50 +54,116 @@ enum AdminCliAction {
     },
 }
 
+struct AdminCliContext<'a> {
+    global_db: &'a GlobalDb,
+    project: Option<&'a TraceDecay>,
+}
+
+impl<'a> AdminCliContext<'a> {
+    fn with_project(cg: &'a TraceDecay, global_db: &'a GlobalDb) -> Self {
+        Self {
+            global_db,
+            project: Some(cg),
+        }
+    }
+
+    fn projectless(global_db: &'a GlobalDb) -> Self {
+        Self {
+            global_db,
+            project: None,
+        }
+    }
+
+    fn require_project(&self) -> Result<&'a TraceDecay> {
+        self.project.ok_or_else(|| TraceDecayError::Config {
+            message: "requested admin action requires an initialized project".to_string(),
+        })
+    }
+
+    fn project_root(&self) -> Option<&'a Path> {
+        self.project.map(|cg| cg.project_root())
+    }
+}
+
 pub(super) async fn handle_admin_cli(
     cg: &TraceDecay,
     args: Value,
     global_db: Option<&GlobalDb>,
 ) -> Result<ToolResult> {
-    let action: AdminCliAction =
-        serde_json::from_value(args).map_err(|error| TraceDecayError::Config {
-            message: format!("invalid tracedecay_admin_cli arguments: {error}"),
-        })?;
+    let action = parse_admin_cli_action(args)?;
     let global_db = global_db.ok_or_else(|| TraceDecayError::Config {
         message: "daemon global database is unavailable".to_string(),
     })?;
+    dispatch_admin_cli(AdminCliContext::with_project(cg, global_db), action).await
+}
+
+pub(crate) async fn handle_projectless_admin_cli(
+    args: Value,
+    profile_root: &Path,
+) -> Result<ToolResult> {
+    let action = parse_admin_cli_action(args)?;
+    let global_db = GlobalDb::open_at(&profile_root.join("global.db"))
+        .await
+        .ok_or_else(|| TraceDecayError::Config {
+            message: "daemon global database is unavailable".to_string(),
+        })?;
+    dispatch_admin_cli(AdminCliContext::projectless(&global_db), action).await
+}
+
+fn parse_admin_cli_action(args: Value) -> Result<AdminCliAction> {
+    serde_json::from_value(args).map_err(|error| TraceDecayError::Config {
+        message: format!("invalid tracedecay_admin_cli arguments: {error}"),
+    })
+}
+
+async fn dispatch_admin_cli(
+    context: AdminCliContext<'_>,
+    action: AdminCliAction,
+) -> Result<ToolResult> {
+    let global_db = context.global_db;
     let value = match action {
         AdminCliAction::CostSummary { range } => cost_summary(global_db, &range).await,
-        AdminCliAction::SessionsIngest => sessions_ingest(cg).await?,
+        AdminCliAction::SessionsIngest => sessions_ingest(context.require_project()?).await?,
         AdminCliAction::SessionsGitBackfill {
             since,
             limit_sessions,
             dry_run,
-        } => sessions_git_backfill(cg, global_db, since, limit_sessions, dry_run).await?,
-        AdminCliAction::SessionsUnfinished { limit } => sessions_unfinished(cg, limit).await?,
+        } => {
+            sessions_git_backfill(
+                context.require_project()?,
+                global_db,
+                since,
+                limit_sessions,
+                dry_run,
+            )
+            .await?
+        }
+        AdminCliAction::SessionsUnfinished { limit } => {
+            sessions_unfinished(context.require_project()?, limit).await?
+        }
         AdminCliAction::AnalyticsSync => {
-            crate::analytics_bridge::analytics_sync_with_db(global_db, Some(cg.project_root()))
-                .await
+            crate::analytics_bridge::analytics_sync_with_db(global_db, context.project_root()).await
         }
         AdminCliAction::AnalyticsDiagnostics { all, no_sync } => {
             crate::analytics_bridge::analytics_diagnostics_with_db(
                 global_db,
-                Some(cg.project_root()),
+                context.project_root(),
                 all,
                 no_sync,
             )
             .await?
         }
         AdminCliAction::RegistryUpdate { tokens } => {
+            let cg = context.require_project()?;
             let previous = global_db.get_project_tokens(cg.project_root()).await;
             global_db.upsert(cg.project_root(), tokens).await;
             json!({ "previous": previous, "current": tokens })
         }
         AdminCliAction::RegistryList { limit, query } => {
-            registry_list(Some(cg), global_db, limit, query.as_deref()).await
+            registry_list(context.project, global_db, limit, query.as_deref()).await
         }
         AdminCliAction::RegistryContext { project_arg } => {
-            registry_context(Some(cg), global_db, project_arg.as_deref()).await
+            registry_context(context.project, global_db, project_arg.as_deref()).await
         }
         AdminCliAction::RegistryEmpty => registry_empty(global_db).await,
         AdminCliAction::RegistryProjectTokens { project_args } => {
@@ -109,56 +175,7 @@ pub(super) async fn handle_admin_cli(
             history,
         } => gain_query(global_db, project_arg.as_deref(), since, history).await,
     };
-    Ok(json_result(value))
-}
-
-pub(crate) async fn handle_projectless_admin_cli(
-    args: Value,
-    profile_root: &Path,
-) -> Result<ToolResult> {
-    let action: AdminCliAction =
-        serde_json::from_value(args).map_err(|error| TraceDecayError::Config {
-            message: format!("invalid tracedecay_admin_cli arguments: {error}"),
-        })?;
-    let global_db = GlobalDb::open_at(&profile_root.join("global.db"))
-        .await
-        .ok_or_else(|| TraceDecayError::Config {
-            message: "daemon global database is unavailable".to_string(),
-        })?;
-    let value = match action {
-        AdminCliAction::CostSummary { range } => cost_summary(&global_db, &range).await,
-        AdminCliAction::AnalyticsSync => {
-            crate::analytics_bridge::analytics_sync_with_db(&global_db, None).await
-        }
-        AdminCliAction::AnalyticsDiagnostics { all, no_sync } => {
-            crate::analytics_bridge::analytics_diagnostics_with_db(&global_db, None, all, no_sync)
-                .await?
-        }
-        AdminCliAction::RegistryList { limit, query } => {
-            registry_list(None, &global_db, limit, query.as_deref()).await
-        }
-        AdminCliAction::RegistryContext { project_arg } => {
-            registry_context(None, &global_db, project_arg.as_deref()).await
-        }
-        AdminCliAction::RegistryEmpty => registry_empty(&global_db).await,
-        AdminCliAction::RegistryProjectTokens { project_args } => {
-            registry_project_tokens(&global_db, &project_args).await
-        }
-        AdminCliAction::GainQuery {
-            project_arg,
-            since,
-            history,
-        } => gain_query(&global_db, project_arg.as_deref(), since, history).await,
-        AdminCliAction::SessionsIngest
-        | AdminCliAction::SessionsGitBackfill { .. }
-        | AdminCliAction::SessionsUnfinished { .. }
-        | AdminCliAction::RegistryUpdate { .. } => {
-            return Err(TraceDecayError::Config {
-                message: "requested admin action requires an initialized project".to_string(),
-            });
-        }
-    };
-    Ok(json_result(value))
+    Ok(json_result(&value))
 }
 
 async fn registry_empty(global_db: &GlobalDb) -> Value {
@@ -254,12 +271,12 @@ async fn registry_context(
         return json!({ "status": "invalid", "project": null });
     };
     let selector_text = selector.to_string_lossy();
-    let context = if !GlobalDb::is_explicit_project_path_selector(&selector_text) {
+    let context = if GlobalDb::is_explicit_project_path_selector(&selector_text) {
+        None
+    } else {
         global_db
             .project_registry_context_by_id(&selector_text)
             .await
-    } else {
-        None
     };
     let context = match context {
         Some(context) => Some(context),
@@ -406,7 +423,7 @@ async fn sessions_unfinished(cg: &TraceDecay, limit: usize) -> Result<Value> {
     Ok(json!({ "items": items }))
 }
 
-fn json_result(value: Value) -> ToolResult {
+fn json_result(value: &Value) -> ToolResult {
     ToolResult::new(
         json!({
             "content": [{

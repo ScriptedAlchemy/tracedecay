@@ -1,19 +1,13 @@
 //! Cursor `preCompact` machinery.
 //!
 //! Cursor's compaction event exposes pressure metadata but not Cursor's own
-//! generated summary text, so at the boundary `TraceDecay` ingests the current
-//! transcript tail, asks LCM for the compactable raw-message backlog,
-//! generates a summary through `cursor-agent -p`, and stores that summary as
-//! a normal LCM summary node.
+//! generated summary text. The hook delegates compaction to the daemon, which
+//! ingests the current transcript tail, asks LCM for the compactable raw-message
+//! backlog, generates a summary through `cursor-agent -p`, and stores that
+//! summary as a normal LCM summary node.
 
 use std::time::Duration;
 
-/// Budget for the auxiliary `cursor-agent` summary call inside the hook. Kept
-/// below the registered Cursor hook timeout so the child can be killed/reaped
-/// by `TraceDecay` rather than by Cursor killing the hook process. Sized so
-/// the ingest budget plus this cap stay below the overall preCompact budget,
-/// leaving slack for LCM prepare/persist and process overhead.
-pub(super) const CURSOR_PRE_COMPACT_SUMMARY_BUDGET: Duration = Duration::from_secs(75);
 /// Overall budget for the `preCompact` hook (registered with a 120s timeout).
 const CURSOR_PRE_COMPACT_BUDGET: Duration = Duration::from_secs(115);
 
@@ -45,13 +39,10 @@ impl CursorPreCompactOutcome {
     }
 }
 
-pub async fn cursor_pre_compact_for_event_with_config(
-    event_json: &str,
-    config: &crate::sessions::cursor_agent::CursorAgentSummaryConfig,
-) -> CursorPreCompactOutcome {
+pub async fn cursor_pre_compact_via_daemon(event_json: &str) -> CursorPreCompactOutcome {
     match tokio::time::timeout(
         CURSOR_PRE_COMPACT_BUDGET,
-        cursor_pre_compact_for_event_inner(event_json, config),
+        cursor_pre_compact_via_daemon_inner(event_json),
     )
     .await
     {
@@ -60,10 +51,7 @@ pub async fn cursor_pre_compact_for_event_with_config(
     }
 }
 
-async fn cursor_pre_compact_for_event_inner(
-    event_json: &str,
-    _config: &crate::sessions::cursor_agent::CursorAgentSummaryConfig,
-) -> CursorPreCompactOutcome {
+async fn cursor_pre_compact_via_daemon_inner(event_json: &str) -> CursorPreCompactOutcome {
     let root = serde_json::from_str::<serde_json::Value>(event_json)
         .ok()
         .as_ref()

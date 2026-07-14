@@ -2,18 +2,21 @@ use std::io::Write;
 
 use tempfile::TempDir;
 use tracedecay::global_db::GlobalDb;
-use tracedecay::hooks::cursor_pre_compact_for_event_with_config;
+#[cfg(unix)]
+use tracedecay::hooks::cursor_pre_compact_via_daemon;
 use tracedecay::sessions::cursor::{
     CursorSweepSource, cursor_project_slug, ingest_cursor_transcript_event,
     ingest_cursor_transcript_event_capped, ingest_cursor_user_transcript_event_capped,
     ingest_cursor_user_transcript_event_capped_with_registered_roots, open_project_session_db,
     project_session_db_path,
 };
-use tracedecay::sessions::cursor_agent::CursorAgentSummaryConfig;
+#[cfg(unix)]
 use tracedecay::sessions::lcm::{LcmDescribeRequest, LcmDescribeTarget};
 use tracedecay::sessions::source::ingest_source;
 use tracedecay::sessions::{SessionSearchFilters, SessionSearchScope, SessionSearchTimeRange};
 
+#[cfg(unix)]
+use crate::common::spawn_tracedecay_daemon;
 use crate::common::{EnvVarGuard, GLOBAL_DB_ENV, GLOBAL_DB_ENV_LOCK};
 use crate::support::{assert_metadata_path_eq, init_git_repo, init_project, init_project_at};
 
@@ -205,6 +208,7 @@ async fn user_cursor_event_without_workspace_fails_closed_on_slug_collision() {
     );
 }
 
+#[cfg(unix)]
 #[tokio::test]
 // Intentional: this test pins process-wide HOME/TRACEDECAY_GLOBAL_DB while the
 // hook resolves its storage paths.
@@ -214,10 +218,13 @@ async fn cursor_pre_compact_uses_cursor_agent_summary_for_lcm() {
     let _env_lock = GLOBAL_DB_ENV_LOCK
         .lock()
         .unwrap_or_else(|err| err.into_inner());
+    let home = tmp.path().join("home");
+    let profile = home.join(".tracedecay");
     let _env_guards = [
-        EnvVarGuard::set(GLOBAL_DB_ENV, tmp.path().join("global.db")),
-        EnvVarGuard::set("HOME", tmp.path().join("home")),
-        EnvVarGuard::set("USERPROFILE", tmp.path().join("home")),
+        EnvVarGuard::set("TRACEDECAY_DATA_DIR", &profile),
+        EnvVarGuard::set(GLOBAL_DB_ENV, profile.join("global.db")),
+        EnvVarGuard::set("HOME", &home),
+        EnvVarGuard::set("USERPROFILE", &home),
     ];
     let project = init_project(&tmp);
 
@@ -248,6 +255,16 @@ async fn cursor_pre_compact_uses_cursor_agent_summary_for_lcm() {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&fake_bin, std::fs::Permissions::from_mode(0o755)).unwrap();
     }
+    let _summary_env_guards = [
+        EnvVarGuard::set("TRACEDECAY_CURSOR_AGENT_BIN", &fake_bin),
+        EnvVarGuard::set("TRACEDECAY_CURSOR_SUMMARY_MODEL", "fake-cursor-model"),
+        EnvVarGuard::set("TRACEDECAY_CURSOR_SUMMARY_TIMEOUT_SECS", "5"),
+        EnvVarGuard::set(
+            "TRACEDECAY_CURSOR_SUMMARY_WORKSPACE",
+            tmp.path().join("summary-workspace"),
+        ),
+    ];
+    let _daemon = spawn_tracedecay_daemon(&home);
 
     let event = serde_json::json!({
         "hook_event_name": "preCompact",
@@ -260,14 +277,7 @@ async fn cursor_pre_compact_uses_cursor_agent_summary_for_lcm() {
         "context_tokens": 124000,
         "context_window_size": 128000
     });
-    let config = CursorAgentSummaryConfig {
-        cursor_agent_bin: fake_bin.to_string_lossy().to_string(),
-        model: Some("fake-cursor-model".to_string()),
-        timeout: std::time::Duration::from_secs(5),
-        workspace: Some(tmp.path().join("summary-workspace")),
-    };
-
-    let outcome = cursor_pre_compact_for_event_with_config(&event.to_string(), &config).await;
+    let outcome = cursor_pre_compact_via_daemon(&event.to_string()).await;
     assert_eq!(outcome.status, "ok", "{}", outcome.reason);
     assert_eq!(outcome.summary_nodes_created, 1);
 

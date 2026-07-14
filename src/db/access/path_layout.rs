@@ -88,10 +88,23 @@ pub(super) fn is_legacy_repository_database(database_path: &Path) -> bool {
 }
 
 pub(super) fn stable_path_hash(path: &Path) -> u64 {
-    let mut hash = 0xcbf29ce484222325_u64;
+    let mut hash = 0xcbf2_9ce4_8422_2325_u64;
     for byte in native_path_bytes(path) {
         hash ^= u64::from(byte);
-        hash = hash.wrapping_mul(0x100000001b3);
+        hash = hash.wrapping_mul(0x0100_0000_01b3);
+    }
+    hash
+}
+
+pub(super) fn stable_path_set_hash<'a>(paths: impl IntoIterator<Item = &'a Path>) -> u64 {
+    let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+    for path in paths {
+        for byte in native_path_bytes(path) {
+            hash ^= u64::from(byte);
+            hash = hash.wrapping_mul(0x0100_0000_01b3);
+        }
+        hash ^= u64::from(b'\0');
+        hash = hash.wrapping_mul(0x0100_0000_01b3);
     }
     hash
 }
