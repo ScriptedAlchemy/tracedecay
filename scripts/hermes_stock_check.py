@@ -80,6 +80,7 @@ def main():
     assert loaded is not None, f"tracedecay missing from {sorted(manager._plugins)}"
     assert loaded.enabled, f"tracedecay plugin not enabled: {loaded.error}"
     assert loaded.error is None, f"tracedecay plugin load error: {loaded.error}"
+    plugin = loaded.module
     ok("plugin loads via stock PluginManager")
     assert "pre_llm_call" in loaded.hooks_registered, loaded.hooks_registered
     ok("pre_llm_call hook registered")
@@ -216,9 +217,8 @@ def main():
     assert engine.should_compress_preflight([], current_tokens=1000) is False
     ok("should_compress_preflight honors the bool ABC contract")
 
-    status = unwrap_tool_json(
-        engine.handle_tool_call("lcm_status", {"format": "json"})
-    )
+    status = engine.status()
+    assert isinstance(status, dict) and "error" not in status, status
     if status.get("status") == "not_ingested":
         assert status.get("store_exists") is False, status
         ok("lcm_status dispatch round-trips", "not_ingested before compress")
@@ -353,11 +353,15 @@ def main():
     provider.sync_turn(
         "hello", "hi there", session_id="stock-check-session", messages=messages
     )
-    grep = unwrap_tool_json(
-        engine.handle_tool_call(
-            "lcm_grep",
-            {"query": "hello", "session_scope": "all", "format": "json"},
-        )
+    grep = plugin.call_tracedecay_json(
+        "tracedecay_lcm_grep",
+        {
+            "provider": "hermes",
+            "session_id": "stock-check-session",
+            "query": "hello",
+            "scope": "all",
+        },
+        project_root=project_root,
     )
     assert isinstance(grep, dict) and "error" not in grep, grep
     ok("sync_turn ingests the turn into the LCM raw store")
@@ -379,7 +383,6 @@ def main():
 
     # 4. Graph tool dispatch through generated tools.py against the real cwd,
     #    never the Hermes plugin/config directory.
-    plugin = loaded.module
     graph_status = plugin.call_tracedecay_json("tracedecay_status", {})
     assert graph_status.get("file_count", 0) >= 1, graph_status
     assert graph_status.get("node_count", 0) >= 1, graph_status
