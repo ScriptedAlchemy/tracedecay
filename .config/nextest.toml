@@ -1,5 +1,6 @@
 [profile.default]
-test-threads = 8
+# CI remains separately capped at 8 threads.
+test-threads = 16
 
 [profile.ci]
 fail-fast = false

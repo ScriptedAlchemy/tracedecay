@@ -188,11 +188,19 @@ jsonschema = { version = "0.46.8", default-features = false }
 name = "large_repos"
 harness = false
 
-# Full debuginfo makes each large integration-test binary 500-700 MB and
-# dominates local/CI link time. Level 1 preserves source line tables for
-# useful panic backtraces while substantially shrinking linker input/output.
+# Workspace crates retain line tables; dependencies omit debuginfo to reduce
+# compile, cache, and link costs.
+[profile.dev]
+debug = 1
+
 [profile.test]
 debug = 1
+
+[profile.dev.package."*"]
+debug = 0
+
+[profile.test.package."*"]
+debug = 0
 
 # Compile the SQLite stack with optimizations even in dev/test builds. The
 # bundled SQLite C sources in libsql-ffi are otherwise built at -O0 (cc honors
