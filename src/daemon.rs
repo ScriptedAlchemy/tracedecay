@@ -41,6 +41,15 @@ const HOOK_EVENT_NOTIFY_TIMEOUT: Duration = Duration::from_millis(750);
 const DAEMON_TOOL_LIVENESS_POLL_INTERVAL: Duration = Duration::from_secs(5);
 const DAEMON_TOOL_HEALTH_CONNECT_TIMEOUT: Duration = Duration::from_secs(1);
 
+fn coordinated_dashboard_automation_writer(
+    administration: StoreAdministration,
+) -> crate::dashboard::DashboardAutomationWriter {
+    Arc::new(move |operation| {
+        let administration = administration.clone();
+        Box::pin(async move { administration.with_writer(operation).await })
+    })
+}
+
 fn coordinated_background_refresh_writer(
     administration: StoreAdministration,
 ) -> crate::mcp::server::BackgroundRefreshWriter {
@@ -1003,7 +1012,7 @@ pub async fn run_foreground(_socket_path: PathBuf) -> Result<()> {
         &authority.record().process_run_id,
     )?;
     let (listener, endpoint) = BrokerListener::bind(authority.endpoint()).await?;
-    authority.publish_endpoint(endpoint.clone())?;
+    authority.publish_endpoint(&endpoint)?;
     log_daemon_event("daemon_listening", &[("endpoint", endpoint.to_string())]);
 
     let lifecycle = DaemonLifecycle::default();
@@ -1041,8 +1050,9 @@ pub async fn run_foreground(_socket_path: PathBuf) -> Result<()> {
     lifecycle.begin_draining();
     clients.abort_all();
     while clients.join_next().await.is_some() {}
-    authority.cleanup_owned_endpoint()?;
-    Ok(())
+    let endpoint_cleanup = authority.cleanup_owned_endpoint();
+    shutdown_project_servers(&store_administration).await;
+    endpoint_cleanup
 }
 
 #[cfg(unix)]
@@ -1615,7 +1625,7 @@ async fn run_foreground_unix(socket_path: PathBuf) -> Result<()> {
     // via `connect_with_restart_grace`) instead of a queued connection that
     // will never be served.
     drop(listener);
-    authority.cleanup_owned_endpoint()?;
+    let endpoint_cleanup = authority.cleanup_owned_endpoint();
     // Keep auxiliary process creation blocked until every scheduler and client
     // task is drained or abandoned. A killed app-server call may retry before
     // unwinding, so a shorter guard leaves a shutdown-time respawn race.
@@ -1658,7 +1668,7 @@ async fn run_foreground_unix(socket_path: PathBuf) -> Result<()> {
                 ),
             ],
         );
-        return Ok(());
+        return endpoint_cleanup;
     }
     // Graceful shutdown persists tokens-saved counters and checkpoints WALs
     // for every live project server sequentially; with many servers or large
@@ -1681,7 +1691,7 @@ async fn run_foreground_unix(socket_path: PathBuf) -> Result<()> {
             ],
         );
     }
-    Ok(())
+    endpoint_cleanup
 }
 
 #[cfg(unix)]
@@ -2251,6 +2261,7 @@ impl DaemonEngine {
             false,
             Some(reconciler),
             Some(database_owner_reconciler),
+            coordinated_dashboard_automation_writer(self.store_administration.clone()),
             coordinated_hook_branch_writer(self.store_administration.clone()),
             coordinated_background_refresh_writer(self.store_administration.clone()),
         )
@@ -2363,21 +2374,7 @@ impl DaemonEngine {
     }
 
     async fn shutdown_servers(&self) {
-        let servers: Vec<Arc<crate::mcp::McpServer>> = self
-            .store_administration
-            .with_writer(|| async {
-                let servers = self.store_administration.project_servers().lock().await;
-                let mut seen = HashSet::new();
-                servers
-                    .values()
-                    .filter(|server| seen.insert(Arc::as_ptr(server) as usize))
-                    .cloned()
-                    .collect()
-            })
-            .await;
-        for server in servers {
-            server.shutdown().await;
-        }
+        shutdown_project_servers(&self.store_administration).await;
     }
 
     #[cfg(test)]
@@ -2385,6 +2382,23 @@ impl DaemonEngine {
         self.lifecycle.begin_draining();
         self.shutdown_background_tasks().await;
         self.shutdown_servers().await;
+    }
+}
+
+async fn shutdown_project_servers(store_administration: &StoreAdministration) {
+    let servers: Vec<Arc<crate::mcp::McpServer>> = store_administration
+        .with_writer(|| async {
+            let servers = store_administration.project_servers().lock().await;
+            let mut seen = HashSet::new();
+            servers
+                .values()
+                .filter(|server| seen.insert(Arc::as_ptr(server) as usize))
+                .cloned()
+                .collect()
+        })
+        .await;
+    for server in servers {
+        server.shutdown().await;
     }
 }
 
@@ -2774,6 +2788,7 @@ async fn portable_project_server(
         false,
         None,
         Some(database_owner_reconciler),
+        coordinated_dashboard_automation_writer(store_administration.clone()),
         coordinated_hook_branch_writer(store_administration.clone()),
         coordinated_background_refresh_writer(store_administration.clone()),
     )

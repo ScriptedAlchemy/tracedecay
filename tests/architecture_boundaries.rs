@@ -595,13 +595,12 @@ fn git_tracked_rust_sources(
         .arg(repository)
         .args(["ls-files", "-z", "--"])
         .args(source_roots)
-        .output()
-        .map_err(|error| format!("cannot run git ls-files: {error}"))?;
+        .output();
+    let Ok(output) = output else {
+        return filesystem_rust_sources(repository, source_roots);
+    };
     if !output.status.success() {
-        return Err(format!(
-            "git ls-files failed: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        ));
+        return filesystem_rust_sources(repository, source_roots);
     }
 
     output
@@ -624,6 +623,51 @@ fn git_tracked_rust_sources(
             Err(error) => Some(Err(error)),
         })
         .collect()
+}
+
+fn filesystem_rust_sources(
+    repository: &Path,
+    source_roots: &BTreeSet<PathBuf>,
+) -> Result<BTreeSet<PathBuf>, String> {
+    let mut pending: Vec<_> = source_roots
+        .iter()
+        .map(|root| repository.join(root))
+        .collect();
+    let mut sources = BTreeSet::new();
+    while let Some(path) = pending.pop() {
+        if path.is_dir() {
+            let entries = fs::read_dir(&path).map_err(|error| {
+                format!("cannot read source directory '{}': {error}", path.display())
+            })?;
+            for entry in entries {
+                let entry = entry.map_err(|error| {
+                    format!(
+                        "cannot read entry in source directory '{}': {error}",
+                        path.display()
+                    )
+                })?;
+                let file_type = entry.file_type().map_err(|error| {
+                    format!(
+                        "cannot inspect source path '{}': {error}",
+                        entry.path().display()
+                    )
+                })?;
+                if file_type.is_dir() {
+                    pending.push(entry.path());
+                } else if file_type.is_file() && entry.path().extension() == Some(OsStr::new("rs"))
+                {
+                    let relative = entry.path().strip_prefix(repository).map_err(|_| {
+                        format!(
+                            "source path is outside repository: {}",
+                            entry.path().display()
+                        )
+                    })?;
+                    sources.insert(normalize_relative(relative)?);
+                }
+            }
+        }
+    }
+    Ok(sources)
 }
 
 #[test]

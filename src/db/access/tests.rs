@@ -429,8 +429,71 @@ fn deletion_reacquire_rejects_foreign_transaction() {
         "recover foreign deletion",
     )
     .unwrap_err();
-    assert!(error.to_string().contains("belongs to transaction"));
+    assert!(error.to_string().contains("transaction ID is invalid"));
     remove_record_durably(&identity.deletion_tombstone_path, "test tombstone cleanup").unwrap();
+}
+
+#[test]
+fn deletion_reacquire_rejects_transaction_for_another_path_set() {
+    let temp = tempfile::tempdir().unwrap();
+    let first = temp.path().join("first.db");
+    let second = temp.path().join("second.db");
+    let identity = DatabaseIdentity::for_path(&first).unwrap();
+    let fence =
+        DatabaseDeletionFence::acquire(std::slice::from_ref(&first), "delete database").unwrap();
+    fence.publish_deleting().unwrap();
+    let transaction_id = fence.transaction_id().to_string();
+    drop(fence);
+
+    let error = DatabaseDeletionFence::reacquire(
+        std::slice::from_ref(&second),
+        &transaction_id,
+        "recover wrong database",
+    )
+    .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("does not match the database path set")
+    );
+    remove_record_durably(&identity.deletion_tombstone_path, "test tombstone cleanup").unwrap();
+}
+
+#[cfg(any(windows, target_os = "macos"))]
+#[test]
+fn deletion_fence_collapses_and_locks_missing_case_variants() {
+    let temp = tempfile::tempdir().unwrap();
+    let upper = temp.path().join("MixedCase.DB");
+    let lower = temp.path().join("mixedcase.db");
+
+    let fence =
+        DatabaseDeletionFence::acquire(&[upper.clone(), lower.clone()], "delete missing database")
+            .unwrap();
+    assert_eq!(fence.database_paths().count(), 1);
+    let error = DatabaseAuthority::acquire_test(&lower, "create case variant").unwrap_err();
+    assert!(error.to_string().contains("case-variant first-create"));
+
+    drop(fence);
+    DatabaseAuthority::acquire_test(&lower, "create after deletion fence").unwrap();
+}
+
+#[cfg(any(windows, target_os = "macos"))]
+#[test]
+fn deletion_fence_retains_first_create_lock_after_database_removal() {
+    let temp = tempfile::tempdir().unwrap();
+    let upper = temp.path().join("MixedCase.DB");
+    let lower = temp.path().join("mixedcase.db");
+    std::fs::write(&upper, []).unwrap();
+
+    let fence =
+        DatabaseDeletionFence::acquire(std::slice::from_ref(&upper), "delete existing database")
+            .unwrap();
+    std::fs::remove_file(&upper).unwrap();
+    let error = DatabaseAuthority::acquire_test(&lower, "recreate case variant").unwrap_err();
+    assert!(error.to_string().contains("case-variant first-create"));
+
+    drop(fence);
+    DatabaseAuthority::acquire_test(&lower, "recreate after deletion fence").unwrap();
 }
 
 #[test]

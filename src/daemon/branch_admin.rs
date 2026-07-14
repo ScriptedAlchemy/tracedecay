@@ -8,10 +8,14 @@ use serde_json::json;
 use crate::errors::{Result, TraceDecayError};
 use crate::mcp::{ErrorCode, JsonRpcRequest, JsonRpcResponse, McpTransport};
 
+#[cfg(unix)]
+use super::AutomationSchedulerHandle;
 use super::{
-    AutomationSchedulerHandle, DaemonHandshake, DatabaseOwnerRegistry, ProjectServerKey, authority,
-    write_json_rpc_response,
+    DaemonHandshake, DatabaseOwnerRegistry, ProjectServerKey, authority, write_json_rpc_response,
 };
+
+#[cfg(not(unix))]
+type AutomationSchedulerHandle = ();
 
 const BRANCH_ADMIN_TOOL_NAME: &str = "tracedecay_admin_branch";
 
@@ -75,6 +79,7 @@ impl StoreAdministration {
         &self.automation_schedulers
     }
 
+    #[cfg_attr(not(test), allow(clippy::unused_self))]
     fn prove_no_external_branch_store_holders(&self, database_paths: &[PathBuf]) -> Result<()> {
         #[cfg(test)]
         if let Some(external_holder_verifier) = self.external_holder_verifier {

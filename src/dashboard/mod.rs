@@ -29,6 +29,9 @@ mod automation_jobs_api;
 mod automation_outcomes_api;
 mod automation_run_api;
 mod automation_run_service;
+pub(crate) use automation_run_service::{
+    DashboardAutomationWriter, direct_dashboard_automation_writer,
+};
 mod automation_scheduler_api;
 mod automation_skills_api;
 mod code_diagnostics_api;
@@ -128,6 +131,8 @@ pub(crate) struct DashboardState {
     /// dashboard server lifetime.
     pub(crate) code_diagnostics_backfill_started: Arc<AtomicBool>,
     pub(crate) automation_scheduler_reconciler: Option<AutomationSchedulerReconciler>,
+    /// Lifetime-owning capability for complete dashboard automation writes.
+    pub(crate) automation_writer: DashboardAutomationWriter,
 }
 
 impl DashboardState {
@@ -257,6 +262,7 @@ async fn build_state_inner(
     repair_memory_on_startup: bool,
     warm_token_counts: bool,
     automation_scheduler_reconciler: Option<AutomationSchedulerReconciler>,
+    automation_writer: DashboardAutomationWriter,
 ) -> DashboardState {
     let (mem_conn, mem_db_path, mem_guard) = resolve_project_memory_store(cg).await;
     let lcm = resolve_lcm_store(cg).await;
@@ -298,6 +304,7 @@ async fn build_state_inner(
         code_diagnostics: Arc::new(RwLock::new(code_diagnostics)),
         code_diagnostics_backfill_started: Arc::new(AtomicBool::new(false)),
         automation_scheduler_reconciler,
+        automation_writer,
     };
     if repair_memory_on_startup {
         if let Err(err) = memory_api::repair_derived_memory(&state).await {
@@ -316,20 +323,39 @@ async fn build_state_inner(
 /// `tracedecay_dashboard` MCP tool.
 #[allow(dead_code)]
 pub(crate) async fn build_state(cg: &TraceDecay) -> DashboardState {
-    build_state_inner(cg, true, true, None).await
+    build_state_inner(cg, true, true, None, direct_dashboard_automation_writer()).await
 }
 
 pub(crate) async fn build_state_with_automation_reconciler(
     cg: &TraceDecay,
     automation_scheduler_reconciler: Option<AutomationSchedulerReconciler>,
+    automation_writer: DashboardAutomationWriter,
 ) -> DashboardState {
-    build_state_inner(cg, true, true, automation_scheduler_reconciler).await
+    build_state_inner(
+        cg,
+        true,
+        true,
+        automation_scheduler_reconciler,
+        automation_writer,
+    )
+    .await
 }
 
 /// Builds a lightweight cached state for a non-active project selected from the
-/// dashboard project picker.
-pub(crate) async fn build_selected_project_state(cg: &TraceDecay) -> DashboardState {
-    build_state_inner(cg, false, false, None).await
+/// dashboard project picker. Automation authority is inherited from the active
+/// dashboard state so daemon-selected projects cannot fall back to direct open.
+pub(crate) async fn build_selected_project_state(
+    cg: &TraceDecay,
+    active: &DashboardState,
+) -> DashboardState {
+    build_state_inner(
+        cg,
+        false,
+        false,
+        None,
+        Arc::clone(&active.automation_writer),
+    )
+    .await
 }
 
 /// Detached catch-up ingest for transcript sources (Claude, Codex, Vibe,
@@ -447,6 +473,7 @@ where
         options.repair_memory_on_startup,
         options.warm_token_counts,
         None,
+        direct_dashboard_automation_writer(),
     )
     .await;
     if options.start_session_catch_up && state.lcm_scope != "global" {

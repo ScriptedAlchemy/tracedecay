@@ -273,105 +273,17 @@ async fn read_only_sqlite_snapshot_includes_committed_data() {
 }
 
 #[test]
-fn gc_removes_dead_stale_branch() {
+fn legacy_gc_wrapper_fails_closed() {
     let (_base, project_root, td) = setup_repo_with_meta();
-    // Ref-gone (never created) and last synced long ago (> 14d).
     let stale = now_unix_secs() - 20 * 86_400;
     let db = add_tracked_branch(&project_root, &td, "gone", stale, false);
     assert!(db.exists());
 
     let report = gc_dead_branch_stores(&project_root, &td, 14, 7);
 
-    assert_eq!(report.removed_tracked, vec!["gone".to_string()]);
-    assert!(!db.exists(), "dead branch DB should be deleted");
+    assert!(report.removed_tracked.is_empty());
+    assert!(report.removed_orphan_dbs.is_empty());
+    assert!(db.exists());
     let meta = crate::branch_meta::load_branch_meta(&td).unwrap();
-    assert!(!meta.is_tracked("gone"));
-}
-
-#[test]
-fn gc_keeps_default_branch() {
-    let (_base, project_root, td) = setup_repo_with_meta();
-    // Delete the git ref for main so only the never-remove-default guard
-    // protects it; also backdate would require touching main's entry.
-    run_git(&project_root, &["checkout", "--detach"]);
-    // Force main's ref away is unnecessary — GC skips default by name.
-    let report = gc_dead_branch_stores(&project_root, &td, 14, 7);
-    assert!(report.removed_tracked.is_empty());
-    let meta = crate::branch_meta::load_branch_meta(&td).unwrap();
-    assert!(meta.is_tracked("main"));
-    assert!(td.join("tracedecay.db").exists());
-}
-
-#[test]
-fn gc_keeps_fresh_dead_branch() {
-    let (_base, project_root, td) = setup_repo_with_meta();
-    // Ref gone but synced just now: within grace, keep it.
-    let db = add_tracked_branch(&project_root, &td, "recent", now_unix_secs(), false);
-    let report = gc_dead_branch_stores(&project_root, &td, 14, 7);
-    assert!(report.removed_tracked.is_empty());
-    assert!(db.exists());
-}
-
-#[test]
-fn gc_keeps_protected_ref_gone_stale_branch() {
-    let (_base, project_root, td) = setup_repo_with_meta();
-    let db = add_tracked_branch(&project_root, &td, "recovered/orphan", 0, false);
-    let mut meta = crate::branch_meta::load_branch_meta(&td).unwrap();
-    meta.branches
-        .get_mut("recovered/orphan")
-        .unwrap()
-        .gc_protected = true;
-    crate::branch_meta::save_branch_meta(&td, &meta).unwrap();
-
-    let report = gc_dead_branch_stores(&project_root, &td, 0, 0);
-
-    assert!(report.removed_tracked.is_empty());
-    assert!(db.exists());
-    let reloaded = crate::branch_meta::load_branch_meta(&td).unwrap();
-    assert!(reloaded.branches["recovered/orphan"].gc_protected);
-}
-
-#[test]
-fn gc_keeps_branch_with_live_ref() {
-    let (_base, project_root, td) = setup_repo_with_meta();
-    // Ref exists AND stale: still keep it, ref presence wins.
-    let stale = now_unix_secs() - 100 * 86_400;
-    let db = add_tracked_branch(&project_root, &td, "live", stale, true);
-    assert!(is_branch_ref_present(&project_root, "live"));
-    let report = gc_dead_branch_stores(&project_root, &td, 14, 7);
-    assert!(report.removed_tracked.is_empty());
-    assert!(db.exists());
-}
-
-#[test]
-fn gc_deletes_stale_orphan_db_keeps_fresh() {
-    let (_base, project_root, td) = setup_repo_with_meta();
-    let branches_dir = crate::branch_meta::ensure_branches_dir(&td).unwrap();
-
-    // Stale orphan: not in meta, mtime backdated > 7d.
-    let stale_orphan = branches_dir.join("orphan_stale.db");
-    std::fs::write(&stale_orphan, b"junk").unwrap();
-    let stale_wal = branches_dir.join("orphan_stale.db-wal");
-    std::fs::write(&stale_wal, b"wal").unwrap();
-    let old = std::time::SystemTime::now() - std::time::Duration::from_hours(720);
-    set_mtime(&stale_orphan, old);
-
-    // Fresh orphan: just created, must survive.
-    let fresh_orphan = branches_dir.join("orphan_fresh.db");
-    std::fs::write(&fresh_orphan, b"junk").unwrap();
-
-    let report = gc_dead_branch_stores(&project_root, &td, 14, 7);
-
-    assert!(!stale_orphan.exists(), "stale orphan should be deleted");
-    assert!(!stale_wal.exists(), "orphan sidecar should be deleted");
-    assert!(fresh_orphan.exists(), "fresh orphan should be kept");
-    assert!(report.removed_orphan_dbs.contains(&stale_orphan));
-    assert!(!report.removed_orphan_dbs.contains(&fresh_orphan));
-}
-
-fn set_mtime(path: &Path, when: std::time::SystemTime) {
-    // Best-effort mtime backdate via filetime-free approach: re-open and use
-    // the standard library's set_modified (stable since 1.75).
-    let f = std::fs::OpenOptions::new().write(true).open(path).unwrap();
-    f.set_modified(when).unwrap();
+    assert!(meta.is_tracked("gone"));
 }

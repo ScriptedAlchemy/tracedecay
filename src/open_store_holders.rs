@@ -140,7 +140,7 @@ fn scan_macos_with_lsof(
                 output = Some(candidate);
                 break;
             }
-            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
             Err(error) => return Err(error),
         }
     }
@@ -724,7 +724,7 @@ mod tests {
 
         let holders = scan_linux(
             &proc_root,
-            &[renamed.clone()],
+            std::slice::from_ref(&renamed),
             9000,
             &OpenStoreHolderScanOptions::default(),
             |_, _, _| None,

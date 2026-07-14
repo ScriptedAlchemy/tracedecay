@@ -455,6 +455,59 @@ fn metadata_commit_before_deleted_promotion_recovers_as_committed() {
 }
 
 #[test]
+fn committed_recovery_syncs_metadata_before_tombstone_transition() {
+    let (_temp, project_root, tracedecay_dir) = fixture();
+    let db = tracedecay_dir.join("branches/feature.db");
+    let metadata_path = tracedecay_dir.join(crate::storage::BRANCH_META_FILENAME);
+    let prepared = prepare_branch_admin_mutation(
+        &project_root,
+        &tracedecay_dir,
+        BranchAdminAction::Remove {
+            branch: "feature".to_string(),
+        },
+        0,
+        0,
+    )
+    .unwrap();
+    let fence =
+        crate::db::DatabaseDeletionFence::acquire(std::slice::from_ref(&db), "delete branch test")
+            .unwrap();
+    let transaction_id = fence.transaction_id().to_string();
+    prepared
+        .commit_with_transaction(
+            &transaction_id,
+            || fence.publish_deleting(),
+            |_| Ok(()),
+            || fence.rollback_deleting(),
+            || failpoint("crash before deleted promotion"),
+        )
+        .unwrap_err();
+    drop(fence);
+
+    let metadata = std::fs::read(&metadata_path).unwrap();
+    let recovery = prepare_pending_branch_admin_recovery(&tracedecay_dir)
+        .unwrap()
+        .unwrap();
+    std::fs::remove_file(&metadata_path).unwrap();
+    let transitioned = std::cell::Cell::new(false);
+    let error = recovery
+        .recover(
+            |_| Ok(()),
+            |_| {
+                transitioned.set(true);
+                Ok(())
+            },
+        )
+        .unwrap_err();
+
+    assert!(error.to_string().contains("failed to sync"));
+    assert!(!transitioned.get());
+    assert!(!quarantine_files(&tracedecay_dir).is_empty());
+    std::fs::write(metadata_path, metadata).unwrap();
+    recover_committed_with_fence(&tracedecay_dir, &transaction_id);
+}
+
+#[test]
 fn orphan_commit_before_deleted_promotion_recovers_as_committed() {
     let (_temp, project_root, tracedecay_dir) = fixture();
     let orphan = tracedecay_dir.join("branches/orphan.db");
@@ -494,6 +547,66 @@ fn orphan_commit_before_deleted_promotion_recovers_as_committed() {
     assert_eq!(states.deleting(), 1);
     assert!(quarantine_files(&tracedecay_dir).is_empty());
     assert!(crate::db::database_path_is_tombstoned(&orphan).unwrap());
+}
+
+#[test]
+fn committed_recovery_syncs_store_directory_before_tombstone_transition() {
+    let (_temp, project_root, tracedecay_dir) = fixture();
+    let orphan = tracedecay_dir.join("branches/orphan.db");
+    std::fs::write(&orphan, b"orphan").unwrap();
+    let prepared = prepare_branch_admin_mutation(
+        &project_root,
+        &tracedecay_dir,
+        BranchAdminAction::Gc,
+        u64::MAX,
+        0,
+    )
+    .unwrap();
+    let fence = crate::db::DatabaseDeletionFence::acquire(
+        std::slice::from_ref(&orphan),
+        "delete orphan branch test",
+    )
+    .unwrap();
+    let transaction_id = fence.transaction_id().to_string();
+    prepared
+        .commit_with_transaction(
+            &transaction_id,
+            || fence.publish_deleting(),
+            |_| Ok(()),
+            || fence.rollback_deleting(),
+            || failpoint("crash after orphan commit"),
+        )
+        .unwrap_err();
+    drop(fence);
+
+    let recovery = prepare_pending_branch_admin_recovery(&tracedecay_dir)
+        .unwrap()
+        .unwrap();
+    let branches = tracedecay_dir.join("branches");
+    let displaced = tracedecay_dir.join("branches-displaced");
+    std::fs::rename(&branches, &displaced).unwrap();
+    let transitioned = std::cell::Cell::new(false);
+    let error = recovery
+        .recover(
+            |_| Ok(()),
+            |_| {
+                transitioned.set(true);
+                Ok(())
+            },
+        )
+        .unwrap_err();
+
+    assert!(error.to_string().contains("failed to sync directory"));
+    assert!(!transitioned.get());
+    assert!(std::fs::read_dir(&displaced).unwrap().any(|entry| {
+        entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .contains(".branch-delete-")
+    }));
+    std::fs::rename(displaced, branches).unwrap();
+    recover_committed_with_fence(&tracedecay_dir, &transaction_id);
 }
 
 #[test]

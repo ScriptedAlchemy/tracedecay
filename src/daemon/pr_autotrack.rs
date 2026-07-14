@@ -821,7 +821,7 @@ async fn remove_pr_store(
         BranchAdminOutcome::Removed
         | BranchAdminOutcome::NotTracked
         | BranchAdminOutcome::NoTracking => Ok(()),
-        outcome => Err(format!(
+        outcome @ BranchAdminOutcome::NoChanges => Err(format!(
             "branch-store removal returned unexpected outcome {outcome:?}"
         )),
     }

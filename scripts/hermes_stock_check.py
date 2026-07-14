@@ -191,6 +191,8 @@ def main():
     ok("context engine activates via stock plugin fallback")
 
     engine.initialize(session_id="stock-check-session", cwd=project_root)
+    assert engine.project_root is not None
+    assert os.path.realpath(engine.project_root) == os.path.realpath(project_root)
     engine.update_model("stock-check-model", 128000)
     engine.update_from_response({"prompt_tokens": 120, "completion_tokens": 30})
     assert engine.last_total_tokens == 150
@@ -203,7 +205,7 @@ def main():
     cloned_engine = copy.deepcopy(engine)
     assert cloned_engine is not engine
     assert cloned_engine._state_lock is not engine._state_lock
-    assert cloned_engine.project_root == project_root
+    assert cloned_engine.project_root == engine.project_root
     assert cloned_engine.context_length == 128000
     assert cloned_engine.last_total_tokens == 150
     assert cloned_engine.agent is None

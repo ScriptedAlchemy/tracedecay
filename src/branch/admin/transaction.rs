@@ -103,6 +103,7 @@ impl PendingRecovery {
                 transition_tombstones(self.disposition)?;
             }
             RecoveryDisposition::CommittedCleanup => {
+                sync_committed_recovery_state(tracedecay_dir, &self.journal)?;
                 transition_tombstones(self.disposition)?;
                 cleanup_files(tracedecay_dir, &self.journal)?;
             }
@@ -271,7 +272,12 @@ where
             ));
         }
 
-        if journal.metadata_before != journal.metadata_after {
+        if journal.metadata_before == journal.metadata_after {
+            let mut committed = journal.clone();
+            committed.state = JournalState::CommittedOrphans;
+            persist_journal(tracedecay_dir, &committed)?;
+            journal = committed;
+        } else {
             hook(TransactionPhase::BeforeMetadataPublication)?;
             let after = journal.metadata_after.as_deref().ok_or_else(|| {
                 config_error("tracked branch deletion cannot remove branch metadata entirely")
@@ -279,11 +285,6 @@ where
             crate::branch_meta::save_branch_meta_serialized(tracedecay_dir, after)?;
             sync_file(&tracedecay_dir.join(BRANCH_META_FILENAME))?;
             sync_directory(tracedecay_dir)?;
-        } else {
-            let mut committed = journal.clone();
-            committed.state = JournalState::CommittedOrphans;
-            persist_journal(tracedecay_dir, &committed)?;
-            journal = committed;
         }
         hook(TransactionPhase::AfterCommitBeforeCleanup)?;
         cleanup_committed(tracedecay_dir, &journal)
@@ -643,6 +644,24 @@ fn rollback_files(tracedecay_dir: &Path, journal: &DeletionJournal) -> Result<()
 fn cleanup_committed(tracedecay_dir: &Path, journal: &DeletionJournal) -> Result<()> {
     cleanup_files(tracedecay_dir, journal)?;
     clear_journal(tracedecay_dir)
+}
+
+fn sync_committed_recovery_state(tracedecay_dir: &Path, journal: &DeletionJournal) -> Result<()> {
+    for entry in &journal.entries {
+        let database = tracedecay_dir.join(&entry.db_file);
+        let parent = database.parent().ok_or_else(|| {
+            config_error(format!(
+                "branch database path '{}' has no parent",
+                database.display()
+            ))
+        })?;
+        sync_directory(parent)?;
+    }
+    if journal.metadata_before != journal.metadata_after {
+        sync_file(&tracedecay_dir.join(BRANCH_META_FILENAME))?;
+        sync_directory(tracedecay_dir)?;
+    }
+    Ok(())
 }
 
 fn cleanup_files(tracedecay_dir: &Path, journal: &DeletionJournal) -> Result<()> {

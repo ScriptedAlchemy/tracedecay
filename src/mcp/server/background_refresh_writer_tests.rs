@@ -84,6 +84,7 @@ async fn read_refresh_uses_injected_writer_without_direct_fallback() {
         true,
         None,
         None,
+        crate::dashboard::direct_dashboard_automation_writer(),
         direct_hook_branch_writer(),
         refresh_writer,
     )

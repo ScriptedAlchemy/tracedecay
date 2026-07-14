@@ -94,16 +94,31 @@ pub(crate) async fn daemon_tool_json(
         false,
     )?;
     let result = crate::daemon::call_default_tool(&handshake, tool_name, arguments).await?;
-    let text = result
+    parse_daemon_tool_json_content(&result, tool_name)
+}
+
+fn parse_daemon_tool_json_content(result: &Value, tool_name: &str) -> crate::errors::Result<Value> {
+    let payloads = result
         .get("content")
         .and_then(Value::as_array)
         .into_iter()
         .flatten()
         .filter_map(|item| item.get("text").and_then(Value::as_str))
-        .collect::<String>();
-    serde_json::from_str(&text).map_err(|error| crate::errors::TraceDecayError::Config {
-        message: format!("daemon tool {tool_name} returned invalid JSON: {error}"),
-    })
+        .filter_map(|text| serde_json::from_str::<Value>(text).ok())
+        .collect::<Vec<_>>();
+
+    match payloads.as_slice() {
+        [payload] => Ok(payload.clone()),
+        [] => Err(crate::errors::TraceDecayError::Config {
+            message: format!("daemon tool {tool_name} returned no JSON payload"),
+        }),
+        _ => Err(crate::errors::TraceDecayError::Config {
+            message: format!(
+                "daemon tool {tool_name} returned multiple JSON payloads ({})",
+                payloads.len()
+            ),
+        }),
+    }
 }
 
 pub(crate) async fn daemon_hook_action(
@@ -115,7 +130,15 @@ pub(crate) async fn daemon_hook_action(
     if let Some(result) = take_test_daemon_hook_action(project_root, &arguments) {
         return result;
     }
-    daemon_tool_json(project_root, "tracedecay_hook_runtime", arguments).await
+    let handshake = crate::daemon::DaemonHandshake::for_current_client(
+        project_root.map(Path::to_path_buf),
+        None,
+        false,
+        project_root.is_some(),
+    )?;
+    let result =
+        crate::daemon::call_default_tool(&handshake, "tracedecay_hook_runtime", arguments).await?;
+    parse_daemon_tool_json_content(&result, "tracedecay_hook_runtime")
 }
 
 pub async fn hook_hermes_terminal_receipt() -> i32 {
@@ -995,7 +1018,45 @@ mod hint_analytics_tests {
 
 #[cfg(test)]
 mod tests {
-    use super::hook_route_metadata_from_event;
+    use super::{hook_route_metadata_from_event, parse_daemon_tool_json_content};
+
+    #[test]
+    fn daemon_tool_json_ignores_notices_and_returns_one_payload() {
+        let response = serde_json::json!({
+            "content": [
+                { "type": "text", "text": "write already accepted by daemon" },
+                { "type": "text", "text": r#"{"status":"ok"}"# },
+                { "type": "text", "text": "informational notice" }
+            ]
+        });
+
+        assert_eq!(
+            parse_daemon_tool_json_content(&response, "test").unwrap(),
+            serde_json::json!({ "status": "ok" })
+        );
+    }
+
+    #[test]
+    fn daemon_tool_json_rejects_zero_or_multiple_payloads() {
+        let no_payload = serde_json::json!({
+            "content": [{ "type": "text", "text": "notice only" }]
+        });
+        let error = parse_daemon_tool_json_content(&no_payload, "test").unwrap_err();
+        assert!(error.to_string().contains("returned no JSON payload"));
+
+        let multiple = serde_json::json!({
+            "content": [
+                { "type": "text", "text": "{}" },
+                { "type": "text", "text": "[]" }
+            ]
+        });
+        let error = parse_daemon_tool_json_content(&multiple, "test").unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("returned multiple JSON payloads (2)")
+        );
+    }
 
     #[test]
     fn hook_route_metadata_preserves_camel_case_session_ids() {

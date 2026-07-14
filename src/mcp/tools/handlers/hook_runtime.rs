@@ -95,7 +95,7 @@ pub async fn handle_projectless_hook_runtime(
 
 async fn codex_compact(cg: &TraceDecay, args: &Value) -> Result<Value> {
     let event_json = required_str(args, "event_json")?;
-    let db = crate::sessions::cursor::open_project_session_db(cg.project_root())
+    let db = GlobalDb::open_at(&cg.store_layout().sessions_db_path)
         .await
         .ok_or_else(|| config_error("daemon could not open project session database"))?;
     if let Some(source) = crate::sessions::codex::CodexSource::new() {
@@ -150,7 +150,7 @@ async fn cursor_compact(cg: &TraceDecay, args: &Value) -> Result<Value> {
         .find_map(|key| parsed.get(*key).and_then(Value::as_str))
         .filter(|value| !value.is_empty())
         .ok_or_else(|| config_error("Cursor preCompact event omitted session id"))?;
-    let db = crate::sessions::cursor::open_project_session_db(cg.project_root())
+    let db = GlobalDb::open_at(&cg.store_layout().sessions_db_path)
         .await
         .ok_or_else(|| config_error("daemon could not open project session database"))?;
     let ingest =

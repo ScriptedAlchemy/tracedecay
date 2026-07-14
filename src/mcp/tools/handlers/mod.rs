@@ -280,6 +280,7 @@ pub async fn handle_tool_call_with_registry(
             allow_default_registry_fallback,
             implicit_project_path: None,
             automation_scheduler_reconciler: None,
+            automation_writer: crate::dashboard::direct_dashboard_automation_writer(),
             diagnostics_cache: None,
             diagnostics_lsp: None,
         },
@@ -293,6 +294,7 @@ pub struct ToolCallRegistryOptions<'a> {
     pub allow_default_registry_fallback: bool,
     pub implicit_project_path: Option<&'a Path>,
     pub automation_scheduler_reconciler: Option<crate::dashboard::AutomationSchedulerReconciler>,
+    pub automation_writer: crate::dashboard::DashboardAutomationWriter,
     pub diagnostics_cache: Option<&'a crate::diagnostics::DiagnosticsCache>,
     pub diagnostics_lsp:
         Option<&'a tokio::sync::Mutex<crate::diagnostics::lsp::broker::DiagnosticBroker>>,
@@ -569,8 +571,13 @@ pub async fn handle_tool_call_with_registry_and_implicit_project(
         "tracedecay_skill_view" => skills::handle_skill_view(cg, args).await,
         "tracedecay_hermes_skill_bridge" => skills::handle_hermes_skill_bridge(cg, &args),
         "tracedecay_dashboard" => {
-            dashboard::handle_dashboard(cg, args, options.automation_scheduler_reconciler.clone())
-                .await
+            dashboard::handle_dashboard(
+                cg,
+                args,
+                options.automation_scheduler_reconciler.clone(),
+                options.automation_writer.clone(),
+            )
+            .await
         }
         "tracedecay_message_search" => {
             session::handle_message_search(

@@ -45,13 +45,22 @@ pub(super) fn write_record_atomically(
         )
     })?;
     let nonce = AUTHORITY_NONCE.fetch_add(1, Ordering::Relaxed);
-    let temporary = path.with_file_name(format!(
-        ".{}.{}.{}.tmp",
+    let temporary = temporary_record_path(path, file_name, nonce);
+    publish_record_atomically(&temporary, path, payload, record_name)
+}
+
+fn temporary_record_path(
+    path: &Path,
+    file_name: &std::ffi::OsStr,
+    nonce: u64,
+) -> std::path::PathBuf {
+    path.with_file_name(format!(
+        ".{}.{}.{}.{}.tmp",
         file_name.to_string_lossy(),
         std::process::id(),
+        crate::runtime_identity::process_run_id(),
         nonce
-    ));
-    publish_record_atomically(&temporary, path, payload, record_name)
+    ))
 }
 
 pub(super) fn publish_record_atomically(
@@ -277,6 +286,21 @@ pub(super) fn epoch_ms() -> u128 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn temporary_record_names_are_scoped_to_the_process_run() {
+        let path = Path::new("writer.owner");
+        let temporary = temporary_record_path(path, path.file_name().unwrap(), 17);
+        let name = temporary.file_name().unwrap().to_string_lossy();
+
+        assert!(name.contains(crate::runtime_identity::process_run_id()));
+        assert!(name.ends_with(".17.tmp"));
+    }
 }
 
 fn sanitize_metadata(value: &str) -> String {

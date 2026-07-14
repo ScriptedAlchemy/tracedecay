@@ -16,15 +16,68 @@ pub(crate) async fn daemon_tool_json(
         .ok_or_else(|| tracedecay::errors::TraceDecayError::Config {
             message: format!("daemon tool {tool_name} returned no content blocks"),
         })?;
-    for text in blocks
+    parse_daemon_tool_json_content(tool_name, blocks)
+}
+
+fn parse_daemon_tool_json_content(
+    tool_name: &str,
+    blocks: &[serde_json::Value],
+) -> tracedecay::errors::Result<serde_json::Value> {
+    let mut payloads = blocks
         .iter()
         .filter_map(|block| block.get("text").and_then(serde_json::Value::as_str))
-    {
-        if let Ok(value) = serde_json::from_str(text) {
-            return Ok(value);
-        }
+        .filter_map(|text| serde_json::from_str(text).ok());
+    let payload = payloads
+        .next()
+        .ok_or_else(|| tracedecay::errors::TraceDecayError::Config {
+            message: format!("daemon tool {tool_name} returned no JSON payload"),
+        })?;
+    if payloads.next().is_some() {
+        return Err(tracedecay::errors::TraceDecayError::Config {
+            message: format!("daemon tool {tool_name} returned multiple JSON payloads"),
+        });
     }
-    Err(tracedecay::errors::TraceDecayError::Config {
-        message: format!("daemon tool {tool_name} returned no JSON payload"),
-    })
+    Ok(payload)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_daemon_tool_json_content;
+    use serde_json::json;
+
+    #[test]
+    fn accepts_exactly_one_json_payload() {
+        let blocks = vec![json!({"text": "status"}), json!({"text": "{\"ok\":true}"})];
+
+        assert_eq!(
+            parse_daemon_tool_json_content("test", &blocks).unwrap(),
+            json!({"ok": true})
+        );
+    }
+
+    #[test]
+    fn rejects_multiple_json_payloads() {
+        let blocks = vec![json!({"text": "{\"first\":1}"}), json!({"text": "[2]"})];
+
+        let error = parse_daemon_tool_json_content("test", &blocks).unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("daemon tool test returned multiple JSON payloads")
+        );
+    }
+
+    #[test]
+    fn rejects_missing_json_payload() {
+        let blocks = vec![json!({"text": "status"}), json!({"type": "image"})];
+
+        let error = parse_daemon_tool_json_content("test", &blocks).unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("daemon tool test returned no JSON payload")
+        );
+    }
 }

@@ -905,6 +905,7 @@ pub struct McpServer {
     allow_default_registry_fallback: bool,
     automation_scheduler_reconciler: Option<crate::dashboard::AutomationSchedulerReconciler>,
     database_owner_reconciler: Option<DatabaseOwnerReconciler>,
+    dashboard_automation_writer: crate::dashboard::DashboardAutomationWriter,
     hook_branch_writer: HookBranchWriter,
     background_refresh_writer: BackgroundRefreshWriter,
     initialize_root_routing_enabled: AtomicBool,
@@ -1108,12 +1109,14 @@ impl McpServer {
             allow_default_registry_fallback,
             automation_scheduler_reconciler,
             database_owner_reconciler,
+            crate::dashboard::direct_dashboard_automation_writer(),
             direct_hook_branch_writer(),
             direct_background_refresh_writer(),
         )
         .await
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn new_with_dbs_and_reconcilers_and_writers(
         cg: TraceDecay,
         scope_prefix: Option<String>,
@@ -1122,6 +1125,7 @@ impl McpServer {
         allow_default_registry_fallback: bool,
         automation_scheduler_reconciler: Option<crate::dashboard::AutomationSchedulerReconciler>,
         database_owner_reconciler: Option<DatabaseOwnerReconciler>,
+        dashboard_automation_writer: crate::dashboard::DashboardAutomationWriter,
         hook_branch_writer: HookBranchWriter,
         background_refresh_writer: BackgroundRefreshWriter,
     ) -> Arc<Self> {
@@ -1178,6 +1182,7 @@ impl McpServer {
             allow_default_registry_fallback,
             automation_scheduler_reconciler,
             database_owner_reconciler,
+            dashboard_automation_writer,
             hook_branch_writer,
             background_refresh_writer,
             initialize_root_routing_enabled: AtomicBool::new(true),
@@ -2494,22 +2499,23 @@ impl McpServer {
                     root: root.to_path_buf(),
                     branch,
                     open_options: cg.open_options(),
-                    incremental_sync_agent: None,
+                    incremental_sync_agent: Some(agent),
                 };
                 match (self.hook_branch_writer)(request).await {
                     Ok(result) => match result.branch_outcome {
                         crate::branch::BranchAddOutcome::Added => {
                             self.reopen_after_branch_tracking_added().await;
                         }
-                        crate::branch::BranchAddOutcome::AlreadyTracked
-                        | crate::branch::BranchAddOutcome::Deferred => {
-                            self.run_hook_incremental_sync(cg, agent).await;
+                        crate::branch::BranchAddOutcome::AlreadyTracked => {
+                            if result.refresh_file_token_map {
+                                self.refresh_file_token_map().await;
+                            }
                         }
-                        crate::branch::BranchAddOutcome::NotIndexed => {}
+                        crate::branch::BranchAddOutcome::Deferred
+                        | crate::branch::BranchAddOutcome::NotIndexed => {}
                     },
                     Err(e) => {
                         eprintln!("[tracedecay] hook current branch tracking failed: {e}");
-                        self.run_hook_incremental_sync(cg, agent).await;
                     }
                 }
             }
@@ -2916,6 +2922,7 @@ impl McpServer {
                 allow_default_registry_fallback: self.allow_default_registry_fallback,
                 implicit_project_path,
                 automation_scheduler_reconciler: self.automation_scheduler_reconciler.clone(),
+                automation_writer: self.dashboard_automation_writer.clone(),
                 diagnostics_cache: Some(&self.diagnostics_cache),
                 diagnostics_lsp: Some(&self.diagnostics_lsp),
             },

@@ -414,11 +414,7 @@ struct DeletionTombstone {
 impl DatabaseDeletionFence {
     pub(crate) fn acquire(database_paths: &[PathBuf], intent: &str) -> Result<Self> {
         let identities = canonical_deletion_identities(database_paths, intent)?;
-        let identity_hash = stable_path_set_hash(
-            identities
-                .iter()
-                .map(|identity| identity.database_key.as_path()),
-        );
+        let identity_hash = deletion_identity_set_hash(&identities);
         let transaction_id = format!("{identity_hash:016x}:{}", authority_token());
         let (entries, state) = acquire_deletion_locks(
             identities,
@@ -438,8 +434,13 @@ impl DatabaseDeletionFence {
         transaction_id: &str,
         intent: &str,
     ) -> Result<(Self, DatabaseDeletionStates)> {
-        validate_deletion_transaction_id(transaction_id, intent, Path::new("<database deletion>"))?;
         let identities = canonical_deletion_identities(database_paths, intent)?;
+        validate_deletion_transaction_id(
+            transaction_id,
+            deletion_identity_set_hash(&identities),
+            intent,
+            Path::new("<database deletion>"),
+        )?;
         let (entries, states) = acquire_deletion_locks(
             identities,
             transaction_id,
@@ -588,21 +589,28 @@ impl DatabaseDeletionFence {
 
 impl Drop for DatabaseDeletionFence {
     fn drop(&mut self) {
-        let mut leases = PROCESS_LEASES
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        for entry in self.entries.iter().rev() {
-            let _ = fs2::FileExt::unlock(&entry.writer);
-            let _ = fs2::FileExt::unlock(&entry.access);
-            let owns_process_lease = matches!(
-                leases.get(&entry.identity.database_key),
-                Some(ProcessLease::Deletion { transaction_id, .. })
-                    if transaction_id == &self.transaction_id
-            );
-            if owns_process_lease {
-                leases.remove(&entry.identity.database_key);
+        {
+            let mut leases = PROCESS_LEASES
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            for entry in self.entries.iter().rev() {
+                let _ = fs2::FileExt::unlock(&entry.writer);
+                let _ = fs2::FileExt::unlock(&entry.access);
+                let owns_process_lease = matches!(
+                    leases.get(&entry.identity.database_key),
+                    Some(ProcessLease::Deletion { transaction_id, .. })
+                        if transaction_id == &self.transaction_id
+                );
+                if owns_process_lease {
+                    leases.remove(&entry.identity.database_key);
+                }
             }
         }
+        let bootstrap = DELETION_BOOTSTRAP_AUTHORITIES
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&self.transaction_id);
+        drop(bootstrap);
     }
 }
 
@@ -611,6 +619,9 @@ enum DeletionFenceAcquireMode {
     Fresh,
     Recovery,
 }
+
+static DELETION_BOOTSTRAP_AUTHORITIES: LazyLock<Mutex<HashMap<String, Vec<BootstrapAuthority>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 
 fn canonical_deletion_identities(
     database_paths: &[PathBuf],
@@ -627,9 +638,40 @@ fn canonical_deletion_identities(
         .iter()
         .map(|path| DatabaseIdentity::for_path(path))
         .collect::<Result<Vec<_>>>()?;
-    identities.sort_by(|left, right| left.database_key.cmp(&right.database_key));
-    identities.dedup_by(|left, right| left.database_key == right.database_key);
+    identities.sort_by_cached_key(deletion_identity_key);
+    identities.dedup_by(|left, right| deletion_identity_key(left) == deletion_identity_key(right));
     Ok(identities)
+}
+
+fn deletion_identity_key(identity: &DatabaseIdentity) -> PathBuf {
+    deletion_bootstrap_key(identity).unwrap_or_else(|| identity.database_key.clone())
+}
+
+fn deletion_bootstrap_key(identity: &DatabaseIdentity) -> Option<PathBuf> {
+    let parent = identity
+        .database_path
+        .parent()
+        .unwrap_or(&identity.profile_root);
+    let file_name = identity.database_path.file_name().unwrap_or_default();
+    bootstrap_database_key(parent, file_name)
+}
+
+fn deletion_bootstrap_lock_path(identity: &DatabaseIdentity) -> Option<PathBuf> {
+    deletion_bootstrap_key(identity).map(|key| {
+        let lock_root = identity
+            .access_lock_path
+            .parent()
+            .unwrap_or(&identity.profile_root);
+        lock_root.join(format!("{:016x}.bootstrap.lock", stable_path_hash(&key)))
+    })
+}
+
+fn deletion_identity_set_hash(identities: &[DatabaseIdentity]) -> u64 {
+    let keys = identities
+        .iter()
+        .map(deletion_identity_key)
+        .collect::<Vec<_>>();
+    stable_path_set_hash(keys.iter().map(PathBuf::as_path))
 }
 
 fn acquire_deletion_locks(
@@ -638,6 +680,15 @@ fn acquire_deletion_locks(
     intent: &str,
     mode: DeletionFenceAcquireMode,
 ) -> Result<(Vec<DeletionFenceEntry>, DatabaseDeletionStates)> {
+    let mut bootstrap_authorities = Vec::new();
+    for identity in &identities {
+        let mut bootstrap_identity = identity.clone();
+        bootstrap_identity.bootstrap_lock_path = deletion_bootstrap_lock_path(identity);
+        if let Some(authority) = acquire_bootstrap_authority(&bootstrap_identity, intent)? {
+            bootstrap_authorities.push(authority);
+        }
+    }
+
     let mut leases = PROCESS_LEASES
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -711,6 +762,25 @@ fn acquire_deletion_locks(
             return Err(error);
         }
     }
+    if !bootstrap_authorities.is_empty() {
+        let mut active = DELETION_BOOTSTRAP_AUTHORITIES
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match active.entry(transaction_id.to_string()) {
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                entry.insert(bootstrap_authorities);
+            }
+            std::collections::hash_map::Entry::Occupied(_) => {
+                drop(active);
+                unlock_deletion_entries(&entries);
+                return Err(access_error(
+                    intent,
+                    Path::new("<database deletion>"),
+                    "database deletion transaction is already active",
+                ));
+            }
+        }
+    }
     for entry in &entries {
         leases.insert(
             entry.identity.database_key.clone(),
@@ -732,18 +802,42 @@ fn unlock_deletion_entries(entries: &[DeletionFenceEntry]) {
 
 fn validate_deletion_transaction_id(
     transaction_id: &str,
+    expected_path_hash: u64,
     operation: &str,
     path: &Path,
 ) -> Result<()> {
-    if valid_deletion_transaction_id(transaction_id) {
-        Ok(())
-    } else {
-        Err(access_error(
+    if !valid_deletion_transaction_id(transaction_id) {
+        return Err(access_error(
             operation,
             path,
             "database deletion transaction ID is invalid",
-        ))
+        ));
     }
+    let Some((path_hash, token)) = transaction_id.split_once(':') else {
+        return Err(access_error(
+            operation,
+            path,
+            "database deletion transaction ID is invalid",
+        ));
+    };
+    let parsed_hash = (path_hash.len() == 16 && !token.is_empty())
+        .then(|| u64::from_str_radix(path_hash, 16).ok())
+        .flatten()
+        .ok_or_else(|| {
+            access_error(
+                operation,
+                path,
+                "database deletion transaction ID is invalid",
+            )
+        })?;
+    if parsed_hash != expected_path_hash {
+        return Err(access_error(
+            operation,
+            path,
+            "database deletion transaction ID does not match the database path set",
+        ));
+    }
+    Ok(())
 }
 
 fn valid_deletion_transaction_id(transaction_id: &str) -> bool {
@@ -921,15 +1015,15 @@ fn tombstone_transition_error(
     expected_transaction_id: &str,
     tombstone: &DeletionTombstone,
 ) -> TraceDecayError {
-    let message = if tombstone.transaction_id != expected_transaction_id {
-        format!(
-            "database deletion tombstone belongs to transaction {}, not {}",
-            tombstone.transaction_id, expected_transaction_id
-        )
-    } else {
+    let message = if tombstone.transaction_id == expected_transaction_id {
         format!(
             "database deletion tombstone is already {} and cannot perform this transition",
             tombstone.state.as_str()
+        )
+    } else {
+        format!(
+            "database deletion tombstone belongs to transaction {}, not {}",
+            tombstone.transaction_id, expected_transaction_id
         )
     };
     access_error(operation, &identity.database_path, &message)

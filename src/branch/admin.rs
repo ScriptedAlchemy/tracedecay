@@ -61,7 +61,7 @@ impl PreparedBranchAdminMutation {
         &self.report
     }
 
-    /// Quarantines the selected SQLite families under a durable journal and
+    /// Quarantines the selected `SQLite` families under a durable journal and
     /// publishes branch metadata as the tracked-branch commit point. Any failure
     /// before that point rolls every move back; failures after it retain recovery
     /// evidence for cleanup on the next branch-lock acquisition.
