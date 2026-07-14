@@ -1596,7 +1596,6 @@ fn branch_add_writes_new_branch_db_into_profile_shard() {
     git(&project_root, &["checkout", "-b", "feature/new"]);
     let project_id = default_profile_project_id(&project_root);
     let shard_root = profile_sharded_data_root(&profile_root(home.path()), &project_id);
-    #[cfg(unix)]
     let _daemon = crate::common::spawn_tracedecay_daemon(home.path());
     let mut command = tracedecay_command_without_daemon(home.path(), &project_root);
     command.args(["branch", "add", "feature/new"]);
