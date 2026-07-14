@@ -913,6 +913,7 @@ async fn initialize_root_routing_replaces_cached_project_and_scope() {
     base_handshake.client_identity = test_client_identity_for(profile.path().to_path_buf());
     base_handshake.client_identity.global_db_path = global_db_path;
     let mut routed_handshake = base_handshake.clone();
+    let store_administration = super::StoreAdministration::default();
 
     let line = json!({
         "jsonrpc": "2.0",
@@ -928,10 +929,11 @@ async fn initialize_root_routing_replaces_cached_project_and_scope() {
     .to_string();
 
     super::reset_proxy_handshake_for_initialize(&base_handshake, &mut routed_handshake, &line);
-    let route = super::apply_daemon_initialize_route(&mut routed_handshake, &line)
-        .await
-        .expect("daemon initialize routing should succeed")
-        .expect("registered initialize root should produce a route");
+    let route =
+        super::apply_daemon_initialize_route(&mut routed_handshake, &line, &store_administration)
+            .await
+            .expect("daemon initialize routing should succeed")
+            .expect("registered initialize root should produce a route");
     assert_eq!(route.project_path, project_b);
 
     assert_eq!(
@@ -953,10 +955,14 @@ async fn initialize_root_routing_replaces_cached_project_and_scope() {
         &rerun_without_roots,
     );
     assert!(
-        super::apply_daemon_initialize_route(&mut routed_handshake, &rerun_without_roots)
-            .await
-            .expect("daemon initialize reroute should succeed")
-            .is_none()
+        super::apply_daemon_initialize_route(
+            &mut routed_handshake,
+            &rerun_without_roots,
+            &store_administration,
+        )
+        .await
+        .expect("daemon initialize reroute should succeed")
+        .is_none()
     );
 
     assert_eq!(
@@ -995,6 +1001,7 @@ async fn daemon_resolves_registry_only_initialize_root_alias() {
     handshake.allow_initialize_root_routing = true;
     handshake.client_identity = test_client_identity_for(profile.path().to_path_buf());
     handshake.client_identity.global_db_path = global_db_path;
+    let store_administration = super::StoreAdministration::default();
     let line = json!({
         "jsonrpc": "2.0",
         "id": 1,
@@ -1003,7 +1010,7 @@ async fn daemon_resolves_registry_only_initialize_root_alias() {
     })
     .to_string();
 
-    let route = super::apply_daemon_initialize_route(&mut handshake, &line)
+    let route = super::apply_daemon_initialize_route(&mut handshake, &line, &store_administration)
         .await
         .expect("daemon initialize routing should succeed")
         .expect("authenticated daemon should resolve registry alias");
@@ -1047,8 +1054,9 @@ async fn initialize_root_routing_delegates_config_gated_git_auto_init() {
     .to_string();
 
     let mut routed_handshake = base_handshake.clone();
+    let store_administration = super::StoreAdministration::default();
     super::reset_proxy_handshake_for_initialize(&base_handshake, &mut routed_handshake, &line);
-    super::apply_daemon_initialize_route(&mut routed_handshake, &line)
+    super::apply_daemon_initialize_route(&mut routed_handshake, &line, &store_administration)
         .await
         .expect("daemon should delegate auto-init");
     assert_eq!(
@@ -1064,7 +1072,7 @@ async fn initialize_root_routing_delegates_config_gated_git_auto_init() {
     config.sync.auto_init = false;
     crate::config::save_config(&project, &config).expect("disable auto-init");
     super::reset_proxy_handshake_for_initialize(&base_handshake, &mut routed_handshake, &line);
-    super::apply_daemon_initialize_route(&mut routed_handshake, &line)
+    super::apply_daemon_initialize_route(&mut routed_handshake, &line, &store_administration)
         .await
         .expect("daemon should resolve git root with auto-init disabled");
     assert_eq!(
