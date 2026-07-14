@@ -22,6 +22,7 @@ use tracedecay::storage::{
     profile_sharded_layout, read_enrollment_marker, write_enrollment_marker,
     write_repository_identity_marker, write_store_manifest,
 };
+use tracedecay::tracedecay::{TraceDecay, TraceDecayOpenOptions};
 
 fn canonical_temp_path(path: &Path) -> PathBuf {
     path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
@@ -101,16 +102,20 @@ fn add_tracedecay_path_shim(command: &mut Command, home: &Path) -> PathBuf {
 /// not the behaviour under test.
 fn init_project_in_process(home: &Path, project: &Path) {
     let project = canonical_temp_path(project);
-    let output = tracedecay_command(home, &project)
-        .arg("init")
-        .output()
+    let profile_root = profile_root(home);
+    create_runtime().block_on(async {
+        let cg = TraceDecay::init_with_options(
+            &project,
+            TraceDecayOpenOptions {
+                global_db_path: Some(profile_root.join("global.db")),
+                profile_root: Some(profile_root),
+            },
+        )
+        .await
         .expect("fixture init should run");
-    assert!(
-        output.status.success(),
-        "fixture init failed\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
+        cg.checkpoint().await.expect("fixture checkpoint");
+        cg.close();
+    });
 }
 
 fn git(project: &Path, args: &[&str]) {
@@ -1591,6 +1596,7 @@ fn branch_add_writes_new_branch_db_into_profile_shard() {
     git(&project_root, &["checkout", "-b", "feature/new"]);
     let project_id = default_profile_project_id(&project_root);
     let shard_root = profile_sharded_data_root(&profile_root(home.path()), &project_id);
+    #[cfg(unix)]
     let _daemon = crate::common::spawn_tracedecay_daemon(home.path());
     let mut command = tracedecay_command_without_daemon(home.path(), &project_root);
     command.args(["branch", "add", "feature/new"]);
