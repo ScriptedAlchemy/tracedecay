@@ -216,7 +216,9 @@ def main():
     assert engine.should_compress_preflight([], current_tokens=1000) is False
     ok("should_compress_preflight honors the bool ABC contract")
 
-    status = unwrap_tool_json(engine.handle_tool_call("lcm_status", {}))
+    status = unwrap_tool_json(
+        engine.handle_tool_call("lcm_status", {"format": "json"})
+    )
     if status.get("status") == "not_ingested":
         assert status.get("store_exists") is False, status
         ok("lcm_status dispatch round-trips", "not_ingested before compress")
@@ -352,7 +354,10 @@ def main():
         "hello", "hi there", session_id="stock-check-session", messages=messages
     )
     grep = unwrap_tool_json(
-        engine.handle_tool_call("lcm_grep", {"query": "hello", "session_scope": "all"})
+        engine.handle_tool_call(
+            "lcm_grep",
+            {"query": "hello", "session_scope": "all", "format": "json"},
+        )
     )
     assert isinstance(grep, dict) and "error" not in grep, grep
     ok("sync_turn ingests the turn into the LCM raw store")
