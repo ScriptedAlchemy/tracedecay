@@ -37,15 +37,15 @@ def ok(label, detail=""):
     print(f"ok {PASS} - {label}{suffix}")
 
 
-def unwrap_tool_json(raw):
-    """Decode a generated-tools.py response: MCP envelope with JSON text."""
+def assert_tool_dispatch_success(raw):
+    """Validate the stock provider's raw MCP envelope without decoding its text."""
     outer = json.loads(raw)
+    assert isinstance(outer, dict), outer
     assert "error" not in outer, f"tool dispatch returned an error: {outer}"
+    assert outer.get("isError") is not True, f"tool dispatch failed: {outer}"
     content = outer["content"]
     assert content and content[0]["type"] == "text", outer
-    inner = json.loads(content[0]["text"])
-    assert "error" not in inner, f"tool payload carries an error: {inner}"
-    return inner
+    return outer
 
 
 def main():
@@ -263,7 +263,7 @@ def main():
 
     # Legacy fixed-action names still dispatch even though they no longer
     # cost schema footprint.
-    added = unwrap_tool_json(
+    assert_tool_dispatch_success(
         provider.handle_tool_call(
             "fact_add",
             {
@@ -273,18 +273,15 @@ def main():
             },
         )
     )
-    fact = added.get("fact") or {}
-    assert fact.get("content") == "stock hermes integration verified", added
-    found = unwrap_tool_json(
-        provider.handle_tool_call(
-            "fact_store",
-            {
-                "action": "search",
-                "query": "stock hermes integration",
-                "limit": 1,
-                "format": "json",
-            },
-        )
+    found = plugin.call_tracedecay_json(
+        "tracedecay_fact_store",
+        {
+            "action": "search",
+            "query": "stock hermes integration",
+            "limit": 1,
+            "format": "json",
+        },
+        project_root=project_root,
     )
     assert found.get("count", 0) >= 1, found
     ok("memory fact add/search round-trips through the binary")
@@ -315,23 +312,21 @@ def main():
         other_provider.project_root,
     )
     isolation_marker = "stock hermes project two isolated"
-    unwrap_tool_json(
+    assert_tool_dispatch_success(
         other_provider.handle_tool_call(
             "fact_add",
             {"content": isolation_marker, "fact_type": "decision", "format": "json"},
         )
     )
-    first_project_result = unwrap_tool_json(
-        provider.handle_tool_call(
-            "fact_store",
-            {"action": "list", "limit": 200, "format": "json"},
-        )
+    first_project_result = plugin.call_tracedecay_json(
+        "tracedecay_fact_store",
+        {"action": "list", "limit": 200, "format": "json"},
+        project_root=project_root,
     )
-    second_project_result = unwrap_tool_json(
-        other_provider.handle_tool_call(
-            "fact_store",
-            {"action": "list", "limit": 200, "format": "json"},
-        )
+    second_project_result = plugin.call_tracedecay_json(
+        "tracedecay_fact_store",
+        {"action": "list", "limit": 200, "format": "json"},
+        project_root=other_project,
     )
     first_contents = {
         item.get("fact", item).get("content") for item in first_project_result.get("facts", [])
@@ -373,16 +368,15 @@ def main():
     provider.on_memory_write(
         "add", "memory", "stock on-memory-write mirror fact", {"session_id": "s"}
     )
-    mirrored = unwrap_tool_json(
-        provider.handle_tool_call(
-            "fact_store",
-            {
-                "action": "search",
-                "query": "on-memory-write mirror",
-                "limit": 1,
-                "format": "json",
-            },
-        )
+    mirrored = plugin.call_tracedecay_json(
+        "tracedecay_fact_store",
+        {
+            "action": "search",
+            "query": "on-memory-write mirror",
+            "limit": 1,
+            "format": "json",
+        },
+        project_root=project_root,
     )
     assert mirrored.get("count", 0) >= 1, mirrored
     ok("on_memory_write mirrors built-in memory writes")
