@@ -114,10 +114,6 @@ jobs:
 
       - uses: ./.github/actions/setup-linux-mold
 
-      - uses: actions/setup-go@v6
-        with:
-          go-version: stable
-
       - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
@@ -125,10 +121,16 @@ jobs:
       - name: Install pinned privacy scanners
         env:
           GOBIN: ${{ runner.temp }}/scanner-bin
+          GITLEAKS_SHA256: 551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
         run: |
           set -euo pipefail
           mkdir -p "$GOBIN"
-          go install github.com/zricethezav/gitleaks/v8@v8.30.1
+          archive="$RUNNER_TEMP/gitleaks_8.30.1_linux_x64.tar.gz"
+          curl --fail --location --silent --show-error \
+            https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz \
+            --output "$archive"
+          echo "$GITLEAKS_SHA256  $archive" | sha256sum --check --status
+          tar -xzf "$archive" -C "$GOBIN" gitleaks
           "$GOBIN/gitleaks" version | grep -Fx '8.30.1'
           echo "$GOBIN" >> "$GITHUB_PATH"
           python -m pip install --disable-pip-version-check 'detect-secrets==1.5.0'
