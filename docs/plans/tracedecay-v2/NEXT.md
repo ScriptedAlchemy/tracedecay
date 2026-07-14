@@ -13,6 +13,7 @@ Create the first production `tracedecay-store` boundary and route one end-to-end
 - Move one real session/event persistence and recovery path behind the store API.
 - Keep the root binary operational throughout the migration; no parallel local-write fallback.
 - Add direct concurrency, restart, and recovery tests for the migrated path.
+- Do not block this slice on the closed-wire spike or introduce store, event, transaction, or recovery macros before repeated production patterns exist.
 
 ## Done when
 

@@ -22,4 +22,6 @@ Those systems modeled the rewrite instead of delivering it. They are intentional
 
 Each rewrite change must ship executable product behavior and direct tests of that behavior. Do not add a second metadata model of the product, generated plan views, or CI that validates planning artifacts.
 
+Custom Rust macros and generators have a separate negative-code admission budget. See [RUST-METAPROGRAMMING.md](RUST-METAPROGRAMMING.md) before introducing one.
+
 See [NEXT.md](NEXT.md) for the next implementation slice.
