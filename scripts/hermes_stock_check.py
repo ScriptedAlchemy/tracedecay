@@ -256,7 +256,7 @@ def main():
     assert provider.is_available() is True
     ok("memory provider discovered and available on stock")
 
-    provider.initialize("stock-check-session", cwd=project_root)
+    provider.initialize("stock-check-session", project_root=project_root)
     schema_names = [schema["name"] for schema in provider.get_tool_schemas()]
     assert schema_names == ["fact_store", "fact_feedback", "memory_status"], schema_names
     ok("memory tool schemas collapsed to fact_store/fact_feedback/memory_status")
@@ -304,7 +304,7 @@ def main():
     ).lower(), init_result.stderr
     other_provider = load_memory_provider("tracedecay")
     assert other_provider is not None and other_provider is not provider
-    other_provider.initialize("stock-check-session-two", cwd=other_project)
+    other_provider.initialize("stock-check-session-two", project_root=other_project)
     assert provider.project_root != other_provider.project_root, (
         provider.project_root,
         other_provider.project_root,
