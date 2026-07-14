@@ -109,7 +109,9 @@ async fn distinct_global_db_paths_do_not_share_an_initialization_lock() {
     .await
     .expect("unrelated global DB path waited on the first path's slot")
     .expect("open unrelated global DB path");
-    assert_eq!(second.db_path(), second_path.as_path());
+    let second_authority =
+        DatabaseAuthority::for_runtime(&second_path, "verify second global DB path").unwrap();
+    assert_eq!(second.db_path(), second_authority.canonical_database_path());
 }
 
 #[tokio::test]

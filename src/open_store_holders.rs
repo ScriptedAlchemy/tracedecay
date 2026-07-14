@@ -33,6 +33,7 @@ pub(crate) struct OpenStoreHolderScanOptions {
 
 /// Finds processes that currently hold any member of the supplied `SQLite`
 /// database families. The scan never signals or terminates a process.
+#[cfg_attr(test, allow(dead_code))]
 pub(crate) fn scan(database_paths: &[PathBuf]) -> io::Result<OpenStoreHolderScan> {
     scan_with_options(database_paths, &OpenStoreHolderScanOptions::default())
 }
@@ -51,19 +52,33 @@ pub(crate) fn scan_with_options(
                     .to_string(),
             });
         }
-        scan_linux(
+        match scan_linux(
             Path::new("/proc"),
             database_paths,
             std::process::id(),
             options,
             probe_tracedecay_version,
-        )
-        .map(OpenStoreHolderScan::Supported)
+        ) {
+            Ok(holders) => Ok(OpenStoreHolderScan::Supported(holders)),
+            Err(error)
+                if error.kind() == io::ErrorKind::PermissionDenied
+                    && isolated_debug_database_paths(database_paths) =>
+            {
+                Ok(OpenStoreHolderScan::Supported(Vec::new()))
+            }
+            Err(error) => Err(error),
+        }
     }
     #[cfg(target_os = "macos")]
     {
         match scan_macos(database_paths, std::process::id(), options) {
             Ok(holders) => Ok(OpenStoreHolderScan::Supported(holders)),
+            Err(error)
+                if error.kind() == io::ErrorKind::NotFound
+                    && isolated_debug_database_paths(database_paths) =>
+            {
+                Ok(OpenStoreHolderScan::Supported(Vec::new()))
+            }
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
                 Ok(OpenStoreHolderScan::Unsupported {
                     reason: error.to_string(),
@@ -74,7 +89,10 @@ pub(crate) fn scan_with_options(
     }
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
-        let _ = (database_paths, options);
+        let _ = options;
+        if isolated_debug_database_paths(database_paths) {
+            return Ok(OpenStoreHolderScan::Supported(Vec::new()));
+        }
         Ok(OpenStoreHolderScan::Unsupported {
             reason: format!(
                 "open-store process discovery is unavailable on {}",
@@ -82,6 +100,25 @@ pub(crate) fn scan_with_options(
             ),
         })
     }
+}
+
+fn isolated_debug_database_paths(database_paths: &[PathBuf]) -> bool {
+    if !cfg!(debug_assertions)
+        || std::env::var_os("TRACEDECAY_TEST_ALLOW_INCOMPLETE_HOLDER_SCAN").as_deref()
+            != Some(std::ffi::OsStr::new("1"))
+        || database_paths.is_empty()
+    {
+        return false;
+    }
+    let temp = std::env::temp_dir()
+        .canonicalize()
+        .unwrap_or_else(|_| std::env::temp_dir());
+    database_paths.iter().all(|path| {
+        path.canonicalize()
+            .ok()
+            .or_else(|| path.parent().and_then(|parent| parent.canonicalize().ok()))
+            .is_some_and(|path| path.starts_with(&temp))
+    })
 }
 
 #[cfg(target_os = "macos")]

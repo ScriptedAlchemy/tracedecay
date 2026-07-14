@@ -203,14 +203,7 @@ async fn call_cost_admin(range: &str) -> tracedecay::errors::Result<Value> {
         json!({ "action": "cost_summary", "range": range }),
     )
     .await?;
-    let text = result
-        .get("content")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(|item| item.get("text").and_then(Value::as_str))
-        .collect::<String>();
-    serde_json::from_str(&text).map_err(Into::into)
+    tracedecay::daemon::tool_json_payload(&result, "tracedecay_admin_cli")
 }
 
 fn print_cost_row(label: &str, cost: f64, input: u64, output: u64, cache_read: u64) {

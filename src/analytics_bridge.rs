@@ -328,15 +328,7 @@ async fn call_admin_cli(
         crate::daemon::DaemonHandshake::for_current_client(project_root, None, false, false)?;
     let result =
         crate::daemon::call_default_tool(&handshake, "tracedecay_admin_cli", arguments).await?;
-    let text = result
-        .get("content")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(|item| item.get("text").and_then(Value::as_str))
-        .collect::<String>();
-    serde_json::from_str(&text)
-        .map_err(|error| cli_error(format!("daemon admin response was invalid JSON: {error}")))
+    crate::daemon::tool_json_payload(&result, "tracedecay_admin_cli")
 }
 
 pub(crate) async fn analytics_sync_with_db(gdb: &GlobalDb, project_root: Option<&Path>) -> Value {

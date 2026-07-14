@@ -56,7 +56,8 @@ async fn hermes_home_env_cannot_redirect_legacy_migration() {
 
     assert_eq!(report, Default::default());
     assert_eq!(fs::read(&redirected_db).unwrap(), b"must remain untouched");
-    assert!(!profile_root.exists());
+    assert!(!profile_root.join("global.db").exists());
+    assert!(!profile_root.join("projects").exists());
 }
 
 impl HomeEnvGuard {

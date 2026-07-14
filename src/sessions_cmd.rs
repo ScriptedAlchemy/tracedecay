@@ -221,12 +221,5 @@ async fn call_daemon_tool(
         false,
     )?;
     let result = tracedecay::daemon::call_default_tool(&handshake, tool_name, arguments).await?;
-    let text = result
-        .get("content")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(|item| item.get("text").and_then(Value::as_str))
-        .collect::<String>();
-    serde_json::from_str(&text).map_err(Into::into)
+    tracedecay::daemon::tool_json_payload(&result, tool_name)
 }

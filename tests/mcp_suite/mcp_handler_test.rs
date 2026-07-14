@@ -1445,7 +1445,7 @@ async fn storage_status_tool_summarizes_active_project_store_health() {
     assert_eq!(payload["locks"]["sync_lock_exists"].as_bool(), Some(false));
     assert_eq!(
         payload["locks"]["branch_add_lock_exists"].as_bool(),
-        Some(false)
+        Some(layout.branch_add_lock_path.exists())
     );
     assert_eq!(payload["quotas"]["enforced"].as_bool(), Some(false));
     assert_eq!(payload["quotas"]["graph_db_size_limit_bytes"], Value::Null);
@@ -12432,9 +12432,10 @@ async fn message_search_preserves_provider_project_parent_scope_shape_after_lcm(
 async fn lcm_status_cli_bridge_accepts_json_args() {
     let (cg, _dir) = setup_project().await;
     let home = _dir.path().join("home");
-    let _daemon = common::spawn_tracedecay_daemon(&home);
     let outside_cwd = test_temp_dir();
     let project_arg = cg.project_root().display().to_string();
+    close_test_graph(cg).await;
+    let _daemon = common::spawn_tracedecay_daemon(&home);
     let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_tracedecay"));
     common::apply_tracedecay_home_env(&mut command, &home);
     let output = command
@@ -12476,8 +12477,28 @@ async fn user_message_search_cli_bridge_accepts_storage_scope() {
     let home_dir = test_temp_dir();
     let home = home_dir.path().join("home");
     std::fs::create_dir_all(&home).unwrap();
-    let _daemon = common::spawn_tracedecay_daemon(&home);
     let outside_cwd = test_temp_dir();
+    std::fs::create_dir_all(outside_cwd.path().join("src")).unwrap();
+    std::fs::write(
+        outside_cwd.path().join("src/lib.rs"),
+        "pub fn user_scope_bridge_fixture() {}\n",
+    )
+    .unwrap();
+
+    let mut init = std::process::Command::new(env!("CARGO_BIN_EXE_tracedecay"));
+    common::apply_tracedecay_home_env(&mut init, &home);
+    let init_output = init
+        .arg("init")
+        .current_dir(outside_cwd.path())
+        .output()
+        .unwrap();
+    assert!(
+        init_output.status.success(),
+        "fixture init failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&init_output.stdout),
+        String::from_utf8_lossy(&init_output.stderr)
+    );
+    let _daemon = common::spawn_tracedecay_daemon(&home);
 
     let mut ingest = std::process::Command::new(env!("CARGO_BIN_EXE_tracedecay"));
     common::apply_tracedecay_home_env(&mut ingest, &home);

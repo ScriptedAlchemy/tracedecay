@@ -19,6 +19,8 @@ mod unresolved;
 
 #[doc(hidden)]
 pub use access::enter_maintenance_database_scope;
+#[cfg(windows)]
+pub(crate) use access::windows_hard_link_count;
 pub use access::{DatabaseAuthority, DatabaseAuthorityRole};
 pub(crate) use access::{
     DatabaseDeletionFence, DatabaseDeletionStates, WriterOwnership, database_path_is_tombstoned,

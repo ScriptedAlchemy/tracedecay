@@ -1,4 +1,24 @@
 use super::*;
+use std::path::Path;
+
+async fn raw_quick_check_detects_corruption(db_path: &Path) -> bool {
+    let raw = libsql::Builder::new_local(db_path)
+        .flags(libsql::OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .build()
+        .await
+        .expect("build raw read-only database");
+    let conn = raw.connect().expect("connect raw read-only database");
+    let detected = match conn.query("PRAGMA quick_check", ()).await {
+        Ok(mut rows) => match rows.next().await {
+            Ok(Some(row)) => row.get::<String>(0).map_or(true, |result| result != "ok"),
+            Ok(None) | Err(_) => true,
+        },
+        Err(_) => true,
+    };
+    drop(conn);
+    drop(raw);
+    detected
+}
 
 #[tokio::test]
 async fn fts_corruption_falls_back_without_rebuild_or_write() {
@@ -46,23 +66,37 @@ async fn fts_corruption_falls_back_without_rebuild_or_write() {
     bytes[offset..offset + 8].fill(0xff);
     std::fs::write(&db_path, bytes).unwrap();
 
-    let (db, _) = crate::common::open_test_database(&db_path).await.unwrap();
     assert!(
-        !db.quick_check().await.unwrap(),
+        raw_quick_check_detects_corruption(&db_path).await,
         "fixture must trigger SQLite's FTS integrity failure"
     );
-    let changes_before = db.conn().total_changes();
+    let corrupted_bytes = std::fs::read(&db_path).unwrap();
 
-    let results = db.search_nodes("important_handler", 10).await.unwrap();
-    assert_eq!(results[0].node.id, "e1", "LIKE fallback must still match");
+    let raw = libsql::Builder::new_local(&db_path)
+        .flags(libsql::OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .build()
+        .await
+        .expect("build raw read-only database");
+    let conn = raw.connect().expect("connect raw read-only database");
+    let mut rows = conn
+        .query(
+            "SELECT id FROM nodes WHERE name LIKE '%important_handler%'",
+            (),
+        )
+        .await
+        .unwrap();
     assert_eq!(
-        db.conn().total_changes(),
-        changes_before,
-        "search must not rebuild or otherwise write"
+        rows.next()
+            .await
+            .unwrap()
+            .unwrap()
+            .get::<String>(0)
+            .unwrap(),
+        "e1",
+        "the intact nodes table must remain readable"
     );
-
-    let mut rows = db
-        .conn()
+    drop(rows);
+    let mut rows = conn
         .query(
             "SELECT rowid FROM nodes_fts WHERE nodes_fts MATCH '\"important_handler\"*'",
             (),
@@ -74,7 +108,25 @@ async fn fts_corruption_falls_back_without_rebuild_or_write() {
         "the corrupt FTS index must remain untouched for offline repair"
     );
     drop(rows);
-    close_db(db).await;
+    drop(conn);
+    drop(raw);
+
+    let error = match crate::common::open_test_database(&db_path).await {
+        Err(error) => error,
+        Ok((db, _)) => {
+            db.close();
+            panic!("writable open must fail closed on corruption");
+        }
+    };
+    assert!(
+        error.to_string().contains("database quick_check failed"),
+        "unexpected error: {error}"
+    );
+    assert_eq!(
+        std::fs::read(&db_path).unwrap(),
+        corrupted_bytes,
+        "failed open must not rebuild or otherwise write"
+    );
 }
 
 #[tokio::test]
@@ -125,17 +177,26 @@ async fn whole_database_corruption_propagates_without_write() {
     bytes[((root_page - 1) * page_size) as usize] = 0xff;
     std::fs::write(&db_path, bytes).unwrap();
 
-    let (db, _) = crate::common::open_test_database(&db_path).await.unwrap();
-    let changes_before = db.conn().total_changes();
-    let error = db.search_nodes("whole_db_probe", 10).await.unwrap_err();
+    let corrupted_bytes = std::fs::read(&db_path).unwrap();
     assert!(
-        Database::is_corruption_error(&error),
+        raw_quick_check_detects_corruption(&db_path).await,
+        "fixture must fail SQLite's read-only quick_check"
+    );
+
+    let error = match crate::common::open_test_database(&db_path).await {
+        Err(error) => error,
+        Ok((db, _)) => {
+            db.close();
+            panic!("writable open must fail closed on corruption");
+        }
+    };
+    assert!(
+        error.to_string().contains("database quick_check failed"),
         "unexpected error: {error}"
     );
     assert_eq!(
-        db.conn().total_changes(),
-        changes_before,
-        "search must not write while reporting whole-database corruption"
+        std::fs::read(&db_path).unwrap(),
+        corrupted_bytes,
+        "failed open must not write while reporting whole-database corruption"
     );
-    db.close();
 }

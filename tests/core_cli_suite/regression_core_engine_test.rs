@@ -388,6 +388,7 @@ async fn persistent_sync_lock_reuses_an_unlocked_legacy_file() {
 
     let guard = tracedecay::tracedecay::try_acquire_sync_lock(project)
         .expect("an unlocked legacy file must be reusable");
+    #[cfg(unix)]
     assert_eq!(
         fs::read_to_string(&lock_path).unwrap(),
         std::process::id().to_string()
@@ -401,6 +402,10 @@ async fn persistent_sync_lock_reuses_an_unlocked_legacy_file() {
     );
     assert_eq!(metadata["state"], "locked");
     drop(guard);
+    assert_eq!(
+        fs::read_to_string(&lock_path).unwrap(),
+        std::process::id().to_string()
+    );
     assert!(
         lock_path.exists(),
         "dropping the guard must leave the persistent lockfile in place"
@@ -433,18 +438,16 @@ async fn writable_open_reseeds_legacy_sync_owner_before_database_use() {
 }
 
 #[tokio::test]
-async fn live_legacy_pid_lock_is_not_reclaimed() {
+async fn live_sync_lock_is_not_reclaimed() {
     let dir = TempDir::new().unwrap();
     let project = dir.path();
     TraceDecay::init(project).await.unwrap();
-    let lock_path = resolve_layout_for_current_profile(project)
-        .unwrap()
-        .sync_lock_path;
-    // Our own PID is alive -> the lock must be treated as in-progress.
-    fs::write(&lock_path, format!("{}", std::process::id())).unwrap();
+    let guard =
+        tracedecay::tracedecay::try_acquire_sync_lock(project).expect("hold live sync lease");
 
     assert!(
         tracedecay::tracedecay::try_acquire_sync_lock(project).is_err(),
         "a live lock must not be reclaimed"
     );
+    drop(guard);
 }

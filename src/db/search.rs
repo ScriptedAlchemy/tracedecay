@@ -371,12 +371,13 @@ impl Database {
     /// Returns `true` if the error indicates `SQLite` database corruption.
     pub fn is_corruption_error(e: &TraceDecayError) -> bool {
         match e {
-            TraceDecayError::Database { message, .. } => {
+            TraceDecayError::Database { message, operation } => {
                 let message = message.to_ascii_lowercase();
                 message.contains("malformed")
                     || message.contains("corrupt")
                     || message.contains("disk image")
                     || message.contains("file is not a database")
+                    || (operation == "validate_integrity" && message.contains("quick_check failed"))
             }
             _ => false,
         }

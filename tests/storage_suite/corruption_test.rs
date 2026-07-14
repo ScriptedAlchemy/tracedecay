@@ -14,7 +14,7 @@ use crate::support;
 use std::io::{Seek, Write};
 use tempfile::TempDir;
 use tracedecay::db::Database;
-use tracedecay::tracedecay::{TraceDecay, TraceDecayOpenOptions, try_acquire_sync_lock};
+use tracedecay::tracedecay::{TraceDecay, TraceDecayOpenOptions, try_acquire_sync_lock_at};
 use tracedecay::types::*;
 
 /// Helper: create a temp database and return (Database, TempDir, db_path).
@@ -134,13 +134,15 @@ async fn quick_check_detects_page_level_corruption() {
         file.sync_all().unwrap();
     }
 
-    // Reopen — quick_check should detect the corruption
-    let (db2, _) = crate::common::open_test_database(&db_path)
-        .await
-        .expect("open should succeed even with corruption");
-    let intact = db2.quick_check().await.unwrap();
-    assert!(!intact, "quick_check should detect page-level corruption");
-    db2.close();
+    // Writable open validates first and must reject the damaged store.
+    let error = match crate::common::open_test_database(&db_path).await {
+        Ok(_) => panic!("writable open must reject page-level corruption"),
+        Err(error) => error,
+    };
+    assert!(
+        Database::is_corruption_error(&error),
+        "integrity rejection must be classified as corruption: {error}"
+    );
 }
 
 // ─── FTS rebuild ─────────────────────────────────────────────────────────
@@ -293,6 +295,15 @@ fn is_corruption_error_matches_file_is_not_a_database() {
 }
 
 #[test]
+fn is_corruption_error_matches_failed_integrity_validation() {
+    let e = tracedecay::errors::TraceDecayError::Database {
+        message: "database quick_check failed: Tree 2 page 2 returned error code 11".to_string(),
+        operation: "validate_integrity".to_string(),
+    };
+    assert!(Database::is_corruption_error(&e));
+}
+
+#[test]
 fn is_corruption_error_rejects_normal_errors() {
     let e = tracedecay::errors::TraceDecayError::Database {
         message: "no such table: foobar".to_string(),
@@ -358,13 +369,13 @@ fn dirty_sentinel_survives_drop() {
 #[tokio::test]
 async fn persistent_sync_lock_coordinates_processes_and_recovers_after_crash() {
     if let Ok(mode) = std::env::var("TRACEDECAY_TEST_LOCK_CHILD") {
-        let project = std::path::PathBuf::from(
-            std::env::var_os("TRACEDECAY_TEST_LOCK_PROJECT").expect("child project path"),
-        );
         let ready = std::path::PathBuf::from(
             std::env::var_os("TRACEDECAY_TEST_LOCK_READY").expect("child ready path"),
         );
-        let guard = try_acquire_sync_lock(&project).expect("child lock lease");
+        let lock_path = std::path::PathBuf::from(
+            std::env::var_os("TRACEDECAY_TEST_LOCK_PATH").expect("child lock path"),
+        );
+        let guard = try_acquire_sync_lock_at(&lock_path).expect("child lock lease");
         std::fs::write(&ready, b"ready").expect("publish child readiness");
         if mode == "crash" {
             std::mem::forget(guard);
@@ -381,11 +392,7 @@ async fn persistent_sync_lock_coordinates_processes_and_recovers_after_crash() {
     }
 
     let dir = TempDir::new().unwrap();
-    let project = dir.path().join("repo");
-    std::fs::create_dir_all(&project).unwrap();
-    let ts = TraceDecay::init(&project).await.unwrap();
-    let lock_path = ts.store_layout().sync_lock_path.clone();
-    ts.close();
+    let lock_path = dir.path().join("sync.lock");
 
     let run_child = |mode: &str, release: Option<&std::path::Path>| {
         let ready = dir.path().join(format!("{mode}.ready"));
@@ -394,10 +401,10 @@ async fn persistent_sync_lock_coordinates_processes_and_recovers_after_crash() {
             .arg("persistent_sync_lock_coordinates_processes_and_recovers_after_crash")
             .arg("--nocapture")
             .env("TRACEDECAY_TEST_LOCK_CHILD", mode)
-            .env("TRACEDECAY_TEST_LOCK_PROJECT", &project)
             .env("TRACEDECAY_TEST_LOCK_READY", &ready)
+            .env("TRACEDECAY_TEST_LOCK_PATH", &lock_path)
             .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null());
+            .stderr(std::process::Stdio::inherit());
         if let Some(path) = release {
             command.env("TRACEDECAY_TEST_LOCK_RELEASE", path);
         }
@@ -418,14 +425,12 @@ async fn persistent_sync_lock_coordinates_processes_and_recovers_after_crash() {
     let release = dir.path().join("release");
     let mut holder = run_child("hold", Some(&release));
     assert!(
-        try_acquire_sync_lock(&project).is_err(),
+        try_acquire_sync_lock_at(&lock_path).is_err(),
         "a second process must not enter while the kernel lease is held"
     );
     std::fs::write(&release, b"release").unwrap();
     assert!(holder.wait().unwrap().success());
 
-    let guard = try_acquire_sync_lock(&project).expect("released lease must be reusable");
-    drop(guard);
     assert!(lock_path.exists(), "the lockfile must persist after Drop");
     #[cfg(unix)]
     {
@@ -440,7 +445,10 @@ async fn persistent_sync_lock_coordinates_processes_and_recovers_after_crash() {
     let mut crashed = run_child("crash", None);
     assert_eq!(crashed.wait().unwrap().code(), Some(86));
     assert!(lock_path.exists(), "the lockfile must survive a crash");
-    drop(try_acquire_sync_lock(&project).expect("kernel must release a crashed lease"));
+    drop(
+        try_acquire_sync_lock_at(&lock_path)
+            .expect("released and crashed leases must both be reusable"),
+    );
 }
 
 #[tokio::test]
@@ -573,7 +581,13 @@ async fn dirty_open_does_not_race_an_active_sync_lock()
         "{}.sync.lock",
         layout.graph_db_path.file_name().unwrap().to_string_lossy()
     ));
-    std::fs::write(&active_lock, std::process::id().to_string())?;
+    let active_lock_file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&active_lock)?;
+    fs2::FileExt::try_lock_exclusive(&active_lock_file)?;
     std::fs::write(&layout.dirty_path, "pid=99999\nversion=test")?;
     let before = std::fs::read(&layout.graph_db_path)?;
 
@@ -588,6 +602,7 @@ async fn dirty_open_does_not_race_an_active_sync_lock()
     );
     assert_eq!(std::fs::read(&layout.graph_db_path)?, before);
     assert!(layout.dirty_path.exists());
+    drop(active_lock_file);
     Ok(())
 }
 

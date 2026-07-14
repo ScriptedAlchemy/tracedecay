@@ -47,13 +47,14 @@ async fn init_indexed_repo() -> (TraceDecay, TempDir, PinnedUserDataDir) {
 async fn read_refresh_uses_injected_writer_without_direct_fallback() {
     let (cg, dir, _pin) = init_indexed_repo().await;
     let root = dir.path().to_path_buf();
-    std::fs::write(
-        root.join("src/a.rs"),
-        "pub fn a() { println!(\"changed\"); }\n",
-    )
-    .expect("modify source");
-    git(&root, &["add", "."]);
-    git(&root, &["commit", "-q", "-m", "change source"]);
+    let source_path = root.join("src/a.rs");
+    std::fs::write(&source_path, "pub fn a() { println!(\"changed\"); }\n").expect("modify source");
+    std::fs::File::options()
+        .write(true)
+        .open(&source_path)
+        .expect("open modified source")
+        .set_modified(std::time::SystemTime::now() + Duration::from_secs(2))
+        .expect("advance source mtime");
     assert!(
         cg.find_stale_files()
             .await

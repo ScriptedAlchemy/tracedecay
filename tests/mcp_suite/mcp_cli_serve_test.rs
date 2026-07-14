@@ -264,6 +264,7 @@ async fn serve_stdio_smokes_managed_skill_list_and_view() {
     approve_managed_skill(&profile_root, "active-stdio-skill")
         .await
         .unwrap();
+    let _daemon = common::spawn_tracedecay_daemon(home.path());
 
     let mut child = tracedecay_command_with_home(home.path())
         .arg("serve")
@@ -412,6 +413,7 @@ async fn serve_stdio_smokes_automation_run_artifact_view() {
     )
     .await
     .unwrap();
+    let _daemon = common::spawn_tracedecay_daemon(home.path());
 
     let mut child = tracedecay_command_with_home(home.path())
         .arg("serve")

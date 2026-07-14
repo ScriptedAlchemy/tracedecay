@@ -205,9 +205,35 @@ pub(crate) async fn handle_list(all: bool) -> tracedecay::errors::Result<()> {
     let mut total_tokens: u64 = 0;
 
     for path in &project_paths {
-        let location =
-            global::classify_project_storage_with_registry(path, None, home_tracedecay.as_deref())
-                .await;
+        let mut location = global::classify_project_storage(path);
+        if location.status == global::ProjectStorageStatus::Stale
+            && let Some(profile_root) = home_tracedecay.as_deref()
+        {
+            let context = daemon_tool_json(
+                None,
+                "tracedecay_admin_cli",
+                serde_json::json!({
+                    "action": "registry_context",
+                    "project_arg": path,
+                }),
+            )
+            .await?;
+            if let Some(store) = context
+                .get("stores")
+                .and_then(serde_json::Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(|entry| entry.get("store"))
+                .find(|store| {
+                    store.get("store_kind").and_then(serde_json::Value::as_str)
+                        == Some("code_project")
+                })
+                && let Some(registry_location) =
+                    global::classify_registry_storage_value(path, profile_root, store)
+            {
+                location = registry_location;
+            }
+        }
         let has_data = location.data_root.exists();
         let size = if has_data {
             global::tracedecay_dir_size(&location.data_root)

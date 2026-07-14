@@ -264,9 +264,13 @@ fn deletion_fence_is_ordered_and_same_process_exclusive() {
         "delete databases",
     )
     .unwrap();
+    let canonical_temp = temp.path().canonicalize().unwrap();
     assert_eq!(
-        fence.database_paths().collect::<Vec<_>>(),
-        vec![first.as_path(), second.as_path()]
+        fence
+            .database_paths()
+            .map(Path::to_path_buf)
+            .collect::<Vec<_>>(),
+        vec![canonical_temp.join("a.db"), canonical_temp.join("b.db")]
     );
     assert!(fence.transaction_id().contains(':'));
     assert_eq!(fence.tombstone_paths().count(), 2);

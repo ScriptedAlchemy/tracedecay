@@ -102,14 +102,43 @@ fn classify_registry_storage(
     profile_root: &Path,
     store: &tracedecay::global_db::StoreInstanceRecord,
 ) -> Option<ProjectStorageLocation> {
-    if store.storage_mode != "profile_sharded" {
+    classify_registry_storage_fields(
+        project_root,
+        profile_root,
+        &store.storage_mode,
+        &store.store_relpath,
+        store.manifest_relpath.as_deref(),
+    )
+}
+
+pub(crate) fn classify_registry_storage_value(
+    project_root: &Path,
+    profile_root: &Path,
+    store: &serde_json::Value,
+) -> Option<ProjectStorageLocation> {
+    classify_registry_storage_fields(
+        project_root,
+        profile_root,
+        store.get("storage_mode")?.as_str()?,
+        store.get("store_relpath")?.as_str()?,
+        store
+            .get("manifest_relpath")
+            .and_then(serde_json::Value::as_str),
+    )
+}
+
+fn classify_registry_storage_fields(
+    project_root: &Path,
+    profile_root: &Path,
+    storage_mode: &str,
+    store_relpath: &str,
+    manifest_relpath: Option<&str>,
+) -> Option<ProjectStorageLocation> {
+    if storage_mode != "profile_sharded" {
         return None;
     }
-    let store_relpath = registry_relpath(&store.store_relpath);
-    let manifest_relpath = store
-        .manifest_relpath
-        .as_ref()
-        .map(|relpath| registry_relpath(relpath));
+    let store_relpath = registry_relpath(store_relpath);
+    let manifest_relpath = manifest_relpath.map(registry_relpath);
     let mut stale_location = None;
     let mut manifest_location = None;
     for profile_root in registry_profile_roots(profile_root) {
@@ -386,14 +415,7 @@ async fn call_admin_cli(
     let result =
         tracedecay::daemon::call_default_tool(&handshake, "tracedecay_admin_cli", arguments)
             .await?;
-    let text = result
-        .get("content")
-        .and_then(serde_json::Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(|item| item.get("text").and_then(serde_json::Value::as_str))
-        .collect::<String>();
-    serde_json::from_str(&text).map_err(Into::into)
+    tracedecay::daemon::tool_json_payload(&result, "tracedecay_admin_cli")
 }
 
 /// Returns project roots whose `.tracedecay` data dir lives in cwd, an

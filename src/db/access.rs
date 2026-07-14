@@ -11,6 +11,8 @@ mod lease;
 mod owner_io;
 mod path_layout;
 
+#[cfg(windows)]
+pub(crate) use bootstrap::windows_hard_link_count;
 use bootstrap::{BootstrapAuthority, acquire_bootstrap_authority, reject_hard_linked_database};
 pub use lease::enter_maintenance_database_scope;
 use lease::{acquire_process_lease, exact_scoped_runtime_role, scoped_runtime_role};

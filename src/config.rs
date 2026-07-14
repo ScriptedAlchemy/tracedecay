@@ -508,6 +508,14 @@ fn nextest_isolated_user_data_dir(path: PathBuf) -> PathBuf {
     }
 
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    std::env::var_os("NEXTEST_RUN_ID")
+        .unwrap_or_default()
+        .to_string_lossy()
+        .hash(&mut hasher);
+    std::env::var_os("NEXTEST_ATTEMPT_ID")
+        .unwrap_or_default()
+        .to_string_lossy()
+        .hash(&mut hasher);
     std::env::var_os("NEXTEST_BINARY_ID")
         .unwrap_or_default()
         .to_string_lossy()

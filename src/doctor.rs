@@ -259,16 +259,7 @@ async fn daemon_project_status(project_path: &Path) -> crate::errors::Result<ser
 }
 
 fn daemon_tool_json(result: &serde_json::Value) -> crate::errors::Result<serde_json::Value> {
-    let text = result
-        .get("content")
-        .and_then(serde_json::Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(|item| item.get("text").and_then(serde_json::Value::as_str))
-        .collect::<String>();
-    serde_json::from_str(&text).map_err(|error| crate::errors::TraceDecayError::Config {
-        message: format!("daemon status returned invalid JSON: {error}"),
-    })
+    crate::daemon::tool_json_payload(result, "tracedecay_status")
 }
 
 fn check_database(dc: &mut DoctorCounters, status: &serde_json::Value) -> bool {

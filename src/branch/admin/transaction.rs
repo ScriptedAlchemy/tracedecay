@@ -741,7 +741,20 @@ fn require_single_link(path: &Path, metadata: &std::fs::Metadata) -> Result<()> 
     }
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+fn require_single_link(path: &Path, _metadata: &std::fs::Metadata) -> Result<()> {
+    let links = crate::db::windows_hard_link_count(path)?;
+    if links == 1 {
+        Ok(())
+    } else {
+        Err(config_error(format!(
+            "branch store family member '{}' has {links} hard links; deletion identity is ambiguous",
+            path.display()
+        )))
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
 fn require_single_link(path: &Path, _metadata: &std::fs::Metadata) -> Result<()> {
     Err(config_error(format!(
         "cannot prove branch store family member '{}' has a single hard link on this platform",

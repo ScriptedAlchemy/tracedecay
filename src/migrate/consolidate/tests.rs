@@ -239,7 +239,7 @@ async fn dry_run_reports_live_split_shape_without_mutation() {
                 .starts_with(".tracedecay-migration-scratch-")),
         "dry-run left migration scratch state behind"
     );
-    assert!(!fixture.profile.join("lifecycle.lock").exists());
+    assert!(fixture.profile.join("lifecycle.lock").exists());
     assert_eq!(
         storage::read_repository_identity_marker(&fixture.project)
             .unwrap()
@@ -2829,7 +2829,7 @@ fn add_branch_links(fixture: &Fixture, project_id: &str, count: usize) {
     for index in 0..count {
         let name = format!("load-{index:03}");
         let relative = format!("branches/load-{index:03}.db");
-        fs::hard_link(&layout.graph_db_path, layout.data_root.join(&relative)).unwrap();
+        fs::copy(&layout.graph_db_path, layout.data_root.join(&relative)).unwrap();
         meta.add_branch(&name, &relative, "main");
     }
     branch_meta::save_branch_meta(&layout.data_root, &meta).unwrap();

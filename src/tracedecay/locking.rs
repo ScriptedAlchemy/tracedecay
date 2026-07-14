@@ -263,7 +263,8 @@ pub fn try_acquire_sync_lock(project_root: &Path) -> Result<SyncLockGuard> {
     try_acquire_sync_lock_at(&layout.sync_lock_path)
 }
 
-pub(super) fn try_acquire_sync_lock_at(lock_path: &Path) -> Result<SyncLockGuard> {
+#[doc(hidden)]
+pub fn try_acquire_sync_lock_at(lock_path: &Path) -> Result<SyncLockGuard> {
     let mut options = OpenOptions::new();
     options.read(true).write(true).create(true).truncate(false);
     #[cfg(unix)]
@@ -439,6 +440,9 @@ fn sync_parent_directory(_path: &Path) {}
 
 /// Returns `true` if a legacy process with the given PID is currently running.
 fn is_pid_alive(pid: u32) -> bool {
+    if pid == std::process::id() {
+        return true;
+    }
     #[cfg(unix)]
     {
         std::process::Command::new("kill")
@@ -570,11 +574,16 @@ mod tests {
             use std::os::unix::fs::MetadataExt;
             assert_eq!((before.dev(), before.ino()), (after.dev(), after.ino()));
         }
+        #[cfg(unix)]
         assert_eq!(
             std::fs::read_to_string(&path).unwrap(),
             std::process::id().to_string()
         );
         drop(guard);
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            std::process::id().to_string()
+        );
     }
 
     #[test]

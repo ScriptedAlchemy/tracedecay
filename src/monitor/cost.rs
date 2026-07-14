@@ -196,14 +196,7 @@ async fn call_cost_summary(handshake: &DaemonHandshake, range: &str) -> Result<s
         serde_json::json!({ "action": "cost_summary", "range": range }),
     )
     .await?;
-    let text = result
-        .get("content")
-        .and_then(serde_json::Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(|item| item.get("text").and_then(serde_json::Value::as_str))
-        .collect::<String>();
-    Ok(serde_json::from_str(&text)?)
+    crate::daemon::tool_json_payload(&result, "tracedecay_admin_cli")
 }
 
 async fn fetch_cost_snapshot() -> Result<Option<CostSnapshot>> {

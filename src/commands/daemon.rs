@@ -23,21 +23,7 @@ fn parse_daemon_tool_json_content(
     tool_name: &str,
     blocks: &[serde_json::Value],
 ) -> tracedecay::errors::Result<serde_json::Value> {
-    let mut payloads = blocks
-        .iter()
-        .filter_map(|block| block.get("text").and_then(serde_json::Value::as_str))
-        .filter_map(|text| serde_json::from_str(text).ok());
-    let payload = payloads
-        .next()
-        .ok_or_else(|| tracedecay::errors::TraceDecayError::Config {
-            message: format!("daemon tool {tool_name} returned no JSON payload"),
-        })?;
-    if payloads.next().is_some() {
-        return Err(tracedecay::errors::TraceDecayError::Config {
-            message: format!("daemon tool {tool_name} returned multiple JSON payloads"),
-        });
-    }
-    Ok(payload)
+    tracedecay::daemon::tool_json_payload(&serde_json::json!({ "content": blocks }), tool_name)
 }
 
 #[cfg(test)]

@@ -491,7 +491,15 @@ pub async fn notify_hook_event(project_path: &Path, event: DaemonHookEvent) {
 }
 
 async fn notify_hook_event_inner(project_path: &Path, event: DaemonHookEvent) {
-    let Ok(connection) = current_daemon_connection() else {
+    #[cfg(unix)]
+    let connection = std::env::var_os(SOCKET_ENV)
+        .filter(|path| !path.is_empty())
+        .map(|path| connection_for_socket_path(Path::new(&path)))
+        .map(Ok)
+        .unwrap_or_else(current_daemon_connection);
+    #[cfg(not(unix))]
+    let connection = current_daemon_connection();
+    let Ok(connection) = connection else {
         return;
     };
     let Ok(handshake) =
@@ -1525,6 +1533,36 @@ pub async fn call_default_tool(
 ) -> Result<serde_json::Value> {
     let socket_path = default_available_socket_path()?;
     call_tool(&socket_path, handshake, tool_name, arguments).await
+}
+
+/// Extracts the single JSON payload from an MCP tool result while ignoring
+/// human-facing notice blocks.
+#[doc(hidden)]
+pub fn tool_json_payload(
+    result: &serde_json::Value,
+    tool_name: &str,
+) -> crate::errors::Result<serde_json::Value> {
+    let blocks = result
+        .get("content")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| crate::errors::TraceDecayError::Config {
+            message: format!("daemon tool {tool_name} returned no content blocks"),
+        })?;
+    let mut payloads = blocks
+        .iter()
+        .filter_map(|block| block.get("text").and_then(serde_json::Value::as_str))
+        .filter_map(|text| serde_json::from_str(text).ok());
+    let payload = payloads
+        .next()
+        .ok_or_else(|| crate::errors::TraceDecayError::Config {
+            message: format!("daemon tool {tool_name} returned no JSON payload"),
+        })?;
+    if payloads.next().is_some() {
+        return Err(crate::errors::TraceDecayError::Config {
+            message: format!("daemon tool {tool_name} returned multiple JSON payloads"),
+        });
+    }
+    Ok(payload)
 }
 
 #[cfg(unix)]
@@ -2905,9 +2943,11 @@ async fn accounting_db_for_handshake(
 async fn registry_db_for_handshake(
     handshake: &DaemonHandshake,
 ) -> Result<Option<Arc<crate::global_db::GlobalDb>>> {
-    crate::global_db::GlobalDb::try_open_at(&handshake.client_identity.global_db_path)
-        .await
-        .map(|db| db.map(Arc::new))
+    Ok(
+        crate::global_db::GlobalDb::open_read_only_at(&handshake.client_identity.global_db_path)
+            .await
+            .map(Arc::new),
+    )
 }
 
 async fn write_project_open_error(

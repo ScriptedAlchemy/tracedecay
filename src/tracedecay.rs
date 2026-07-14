@@ -30,7 +30,7 @@ pub use diagnostics::{BranchDiagnostics, TrackedBranchDiagnostic};
 pub(crate) use lifecycle::git_remote_url;
 
 #[doc(hidden)]
-pub use locking::{SyncLockGuard, try_acquire_sync_lock};
+pub use locking::{SyncLockGuard, try_acquire_sync_lock, try_acquire_sync_lock_at};
 
 /// Central orchestrator that coordinates all subsystems of the code graph.
 ///

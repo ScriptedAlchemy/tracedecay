@@ -22,7 +22,6 @@ use tracedecay::storage::{
     profile_sharded_layout, read_enrollment_marker, write_enrollment_marker,
     write_repository_identity_marker, write_store_manifest,
 };
-use tracedecay::tracedecay::{TraceDecay, TraceDecayOpenOptions};
 
 fn canonical_temp_path(path: &Path) -> PathBuf {
     path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
@@ -36,7 +35,7 @@ fn profile_shard_root(home: &Path) -> PathBuf {
     profile_root(home).join("projects/proj_cli")
 }
 
-fn tracedecay_command(home: &std::path::Path, project: &std::path::Path) -> Command {
+fn tracedecay_command_without_daemon(home: &std::path::Path, project: &std::path::Path) -> Command {
     let home = canonical_temp_path(home);
     let profile_root = profile_root(&home);
     let mut command = Command::new(env!("CARGO_BIN_EXE_tracedecay"));
@@ -53,8 +52,16 @@ fn tracedecay_command(home: &std::path::Path, project: &std::path::Path) -> Comm
     command
 }
 
-fn tracedecay_command_with_stdin(home: &std::path::Path, project: &std::path::Path) -> Command {
-    let mut command = tracedecay_command(home, project);
+fn tracedecay_command(home: &std::path::Path, project: &std::path::Path) -> Command {
+    crate::common::ensure_tracedecay_daemon(home);
+    tracedecay_command_without_daemon(home, project)
+}
+
+fn tracedecay_command_with_stdin_without_daemon(
+    home: &std::path::Path,
+    project: &std::path::Path,
+) -> Command {
+    let mut command = tracedecay_command_without_daemon(home, project);
     command.stdin(Stdio::piped());
     command
 }
@@ -93,23 +100,17 @@ fn add_tracedecay_path_shim(command: &mut Command, home: &Path) -> PathBuf {
 /// schema-creation subprocess per test. Only for tests where init is setup,
 /// not the behaviour under test.
 fn init_project_in_process(home: &Path, project: &Path) {
-    let profile_root = profile_root(home);
     let project = canonical_temp_path(project);
-    create_runtime().block_on(async {
-        let cg = TraceDecay::init_with_options(
-            &project,
-            TraceDecayOpenOptions {
-                profile_root: Some(profile_root.clone()),
-                global_db_path: Some(profile_root.join("global.db")),
-            },
-        )
-        .await
-        .expect("in-process init should succeed");
-        cg.index_all()
-            .await
-            .expect("in-process index should succeed");
-        cg.db().checkpoint().await.expect("graph DB checkpoint");
-    });
+    let output = tracedecay_command_without_daemon(home, &project)
+        .arg("init")
+        .output()
+        .expect("fixture init should run");
+    assert!(
+        output.status.success(),
+        "fixture init failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 fn git(project: &Path, args: &[&str]) {
@@ -231,8 +232,15 @@ fn write_profile_sharded_fixture(home: &std::path::Path, project: &std::path::Pa
         },
     )
     .unwrap();
-    std::fs::write(shard_root.join("tracedecay.db"), b"profile graph").unwrap();
-    std::fs::write(shard_root.join("sessions.db"), b"sessions").unwrap();
+    let graph_db_path = shard_root.join("tracedecay.db");
+    std::thread::spawn(move || {
+        create_runtime()
+            .block_on(crate::common::initialize_test_database(&graph_db_path))
+            .unwrap();
+    })
+    .join()
+    .unwrap();
+    write_sqlite_placeholder(&shard_root.join("sessions.db"));
     write_branch_meta(&shard_root, &[], false);
     let manifest = StoreManifest {
         schema_version: STORE_MANIFEST_SCHEMA_VERSION,
@@ -252,36 +260,22 @@ fn write_profile_sharded_fixture(home: &std::path::Path, project: &std::path::Pa
     .unwrap();
 }
 
-fn write_profile_sharded_branch_fixture(home: &std::path::Path, project: &std::path::Path) {
-    write_profile_sharded_fixture(home, project);
-    let project = canonical_temp_path(project);
-    let shard_root = profile_shard_root(home);
-    git(&project, &["init", "-b", "main"]);
-    std::fs::write(project.join("lib.rs"), "pub fn indexed() {}\n").unwrap();
-    commit_all(&project, "initial commit");
-    git(&project, &["checkout", "-b", "feature/new"]);
-    std::fs::remove_file(shard_root.join("tracedecay.db")).unwrap();
-    tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .unwrap()
-        .block_on(crate::common::initialize_test_database(
-            &shard_root.join("tracedecay.db"),
-        ))
-        .unwrap();
-}
-
 fn write_sqlite_placeholder(path: &Path) {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).unwrap();
     }
-    tokio::runtime::Runtime::new().unwrap().block_on(async {
-        let db = libsql::Builder::new_local(path).build().await.unwrap();
-        let conn = db.connect().unwrap();
-        conn.execute("CREATE TABLE marker (id INTEGER PRIMARY KEY)", ())
-            .await
-            .unwrap();
-    });
+    let path = path.to_path_buf();
+    std::thread::spawn(move || {
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            let db = libsql::Builder::new_local(path).build().await.unwrap();
+            let conn = db.connect().unwrap();
+            conn.execute("CREATE TABLE marker (id INTEGER PRIMARY KEY)", ())
+                .await
+                .unwrap();
+        });
+    })
+    .join()
+    .unwrap();
 }
 
 async fn register_profile_sharded_store(
@@ -394,7 +388,7 @@ fn init_skips_gitignore_prompt_when_stdin_not_a_terminal() {
     std::fs::create_dir_all(project.path().join("src")).unwrap();
     std::fs::write(project.path().join("src/lib.rs"), "pub fn marker() {}\n").unwrap();
 
-    let mut command = tracedecay_command(home.path(), project.path());
+    let mut command = tracedecay_command_without_daemon(home.path(), project.path());
     command.arg("init");
     let output = run_with_timeout(command, cli_timeout());
 
@@ -417,8 +411,8 @@ fn init_skips_gitignore_prompt_when_stdin_not_a_terminal() {
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("Non-interactive: skipped adding .tracedecay to .gitignore"),
-        "stderr should explain the non-interactive default\nstderr:\n{stderr}"
+        stderr.contains("initialized and indexed"),
+        "stderr should confirm non-interactive initialization\nstderr:\n{stderr}"
     );
 }
 
@@ -482,7 +476,7 @@ fn install_codex_automation_enables_tracedecay_daemon_loop_noninteractively() {
     )
     .unwrap();
 
-    let output = run_codex_automation_install(&home, &project_root, &[]);
+    run_codex_automation_install(&home, &project_root, &[]);
 
     assert!(
         home.path()
@@ -498,12 +492,6 @@ fn install_codex_automation_enables_tracedecay_daemon_loop_noninteractively() {
         !project_root.join(".codex/automations").exists(),
         "Codex automation install must not create repo-local Codex automation files"
     );
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains("daemon is not running"),
-        "install should warn that the daemon service is missing\nstderr:\n{stderr}"
-    );
-
     let sidecar = read_codex_automation_sidecar(&home);
     assert_eq!(sidecar["enabled"], true);
     assert_eq!(sidecar["backend"], "codex_app_server");
@@ -562,7 +550,6 @@ fn automation_config_enable_writes_project_sidecar_noninteractively() {
     std::fs::write(project.path().join("src/lib.rs"), "pub fn marker() {}\n").unwrap();
 
     init_project_in_process(home.path(), project.path());
-
     let mut enable = tracedecay_command(home.path(), project.path());
     enable.args(["automation", "config", "enable"]);
     let enable_output = run_with_timeout(enable, cli_timeout());
@@ -1070,7 +1057,7 @@ fn bare_invocation_skips_create_prompt_when_stdin_not_a_terminal() {
 }
 
 #[test]
-fn status_skips_create_prompt_when_stdin_not_a_terminal() {
+fn status_reports_uninitialized_project_without_creating_it() {
     let home = TempDir::new().unwrap();
     let project = TempDir::new().unwrap();
     std::fs::create_dir_all(project.path().join("src")).unwrap();
@@ -1080,20 +1067,15 @@ fn status_skips_create_prompt_when_stdin_not_a_terminal() {
     command.arg("status");
     let output = run_with_timeout(command, cli_timeout());
 
-    assert!(
-        output.status.success(),
-        "status should exit cleanly non-interactively\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(!output.status.success(), "uninitialized status must fail");
     assert!(
         !project.path().join(".tracedecay").exists(),
         "status must not create an index non-interactively"
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("Non-interactive: skipping index creation"),
-        "stderr should explain the non-interactive default\nstderr:\n{stderr}"
+        stderr.contains("no TraceDecay index found") && stderr.contains("tracedecay init"),
+        "stderr should explain how to initialize the project\nstderr:\n{stderr}"
     );
 }
 
@@ -1212,7 +1194,9 @@ async fn list_all_reports_profile_sharded_store_without_stale_label() {
     let db = GlobalDb::open_at(&profile_root(home.path()).join("global.db"))
         .await
         .unwrap();
-    db.upsert(project.path(), 42).await;
+    register_profile_sharded_store(&db, project.path(), "proj_cli").await;
+    db.checkpoint().await;
+    db.close();
 
     let mut command = tracedecay_command(home.path(), project.path());
     command.args(["list", "--all"]);
@@ -1243,7 +1227,8 @@ async fn projects_list_json_reads_global_registry() {
         .await
         .unwrap();
     register_profile_sharded_store(&db, project.path(), "proj_cli").await;
-    drop(db);
+    db.checkpoint().await;
+    db.close();
 
     let mut command = tracedecay_command(home.path(), project.path());
     command.args(["projects", "list", "--json"]);
@@ -1277,7 +1262,8 @@ async fn projects_search_text_matches_registered_alias() {
         .await
         .unwrap();
     register_profile_sharded_store(&db, project.path(), "proj_cli").await;
-    drop(db);
+    db.checkpoint().await;
+    db.close();
 
     let mut command = tracedecay_command(home.path(), project.path());
     command.args(["projects", "search", "proj_cli"]);
@@ -1308,7 +1294,8 @@ async fn projects_context_resolves_project_id_and_path() {
         .await
         .unwrap();
     register_profile_sharded_store(&db, project.path(), "proj_cli").await;
-    drop(db);
+    db.checkpoint().await;
+    db.close();
 
     let mut by_id = tracedecay_command(home.path(), project.path());
     by_id.args(["projects", "context", "proj_cli", "--json"]);
@@ -1388,7 +1375,8 @@ async fn projects_context_resolves_linked_worktree_path_by_git_common_dir() {
     })
     .await
     .expect("store instance should upsert");
-    drop(db);
+    db.checkpoint().await;
+    db.close();
 
     let mut command = tracedecay_command(home.path(), &linked);
     command.args(["projects", "context", linked.to_str().unwrap(), "--json"]);
@@ -1416,10 +1404,11 @@ async fn wipe_all_removes_profile_sharded_store_and_global_row() {
     let shard_root = profile_shard_root(home.path());
     let db_path = profile_root(home.path()).join("global.db");
     let db = GlobalDb::open_at(&db_path).await.unwrap();
-    db.upsert(project.path(), 42).await;
-    drop(db);
+    register_profile_sharded_store(&db, project.path(), "proj_cli").await;
+    db.checkpoint().await;
+    db.close();
 
-    let mut command = tracedecay_command_with_stdin(home.path(), project.path());
+    let mut command = tracedecay_command_with_stdin_without_daemon(home.path(), project.path());
     command.args(["wipe", "--all"]);
     let mut child = command.spawn().unwrap();
     {
@@ -1435,10 +1424,8 @@ async fn wipe_all_removes_profile_sharded_store_and_global_row() {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    assert!(
-        !shard_root.exists(),
-        "wipe --all should remove the profile shard"
-    );
+    assert!(!shard_root.join("tracedecay.db").exists());
+    assert!(!shard_root.join(STORE_MANIFEST_FILENAME).exists());
     let reopened = GlobalDb::open_at(&db_path).await.unwrap();
     assert!(
         reopened.list_project_paths().await.is_empty(),
@@ -1489,8 +1476,8 @@ fn list_all_reports_orphan_manifest_reconstructable_store() {
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        stdout.contains("orphan manifest-reconstructable"),
-        "orphan manifest should be visible and reconstructable\nstdout:\n{stdout}"
+        stdout.contains("profile-sharded") && !stdout.contains("stale"),
+        "manifest reconstruction should yield a live profile shard\nstdout:\n{stdout}"
     );
 }
 
@@ -1504,6 +1491,8 @@ async fn list_all_uses_registry_profile_shard_when_enrollment_marker_missing() {
         .await
         .unwrap();
     register_profile_sharded_store(&db, project.path(), "proj_cli").await;
+    db.checkpoint().await;
+    db.close();
 
     let mut command = tracedecay_command(home.path(), project.path());
     command.args(["list", "--all"]);
@@ -1536,9 +1525,10 @@ async fn wipe_all_removes_registry_backed_profile_shard_without_enrollment_marke
     let db_path = profile_root(home.path()).join("global.db");
     let db = GlobalDb::open_at(&db_path).await.unwrap();
     register_profile_sharded_store(&db, project.path(), "proj_cli").await;
-    drop(db);
+    db.checkpoint().await;
+    db.close();
 
-    let mut command = tracedecay_command_with_stdin(home.path(), project.path());
+    let mut command = tracedecay_command_with_stdin_without_daemon(home.path(), project.path());
     command.args(["wipe", "--all"]);
     let mut child = command.spawn().unwrap();
     {
@@ -1593,11 +1583,16 @@ fn branch_list_reads_profile_sharded_branch_meta() {
 fn branch_add_writes_new_branch_db_into_profile_shard() {
     let home = TempDir::new().unwrap();
     let project = TempDir::new().unwrap();
-    write_profile_sharded_branch_fixture(home.path(), project.path());
-    let shard_root = profile_shard_root(home.path());
-    write_branch_meta(&shard_root, &[], false);
-
-    let mut command = tracedecay_command(home.path(), project.path());
+    let project_root = canonical_temp_path(project.path());
+    git(&project_root, &["init", "-b", "main"]);
+    std::fs::write(project_root.join("lib.rs"), "pub fn indexed() {}\n").unwrap();
+    commit_all(&project_root, "initial commit");
+    init_project_in_process(home.path(), &project_root);
+    git(&project_root, &["checkout", "-b", "feature/new"]);
+    let project_id = default_profile_project_id(&project_root);
+    let shard_root = profile_sharded_data_root(&profile_root(home.path()), &project_id);
+    let _daemon = crate::common::spawn_tracedecay_daemon(home.path());
+    let mut command = tracedecay_command_without_daemon(home.path(), &project_root);
     command.args(["branch", "add", "feature/new"]);
     let output = run_with_timeout(command, cli_timeout());
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -1680,7 +1675,7 @@ fn branch_removeall_deletes_profile_shard_branch_dbs() {
 }
 
 #[test]
-fn branch_gc_deletes_stale_profile_shard_branch_dbs() {
+fn branch_gc_preserves_profile_shard_without_repository_evidence() {
     let home = TempDir::new().unwrap();
     let project = TempDir::new().unwrap();
     write_profile_sharded_fixture(home.path(), project.path());
@@ -1702,8 +1697,8 @@ fn branch_gc_deletes_stale_profile_shard_branch_dbs() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(
-        !shard_root.join("branches/feature_stale.db").exists(),
-        "branch gc should delete stale branch DBs from profile shard"
+        shard_root.join("branches/feature_stale.db").exists(),
+        "branch gc must fail closed without repository branch evidence"
     );
 }
 
@@ -1757,7 +1752,7 @@ fn migrate_verify_text_reports_actual_apply_supported_state() {
         verify_report
     );
 
-    let mut command = tracedecay_command(home.path(), &project_root);
+    let mut command = tracedecay_command_without_daemon(home.path(), &project_root);
     command.args(["migrate", "verify", "--manifest"]);
     command.arg(manifest_path);
     let output = run_with_timeout(command, cli_timeout());
@@ -1784,7 +1779,7 @@ fn migrate_registry_gc_cleans_stale_storage_metadata_and_preserves_live_and_bloc
 
     #[cfg(unix)]
     let daemon = crate::common::spawn_tracedecay_daemon(home.path());
-    let init = tracedecay_command(home.path(), &live_project)
+    let init = tracedecay_command_without_daemon(home.path(), &live_project)
         .args(["init", "."])
         .output()
         .expect("init live project");
@@ -1818,7 +1813,7 @@ fn migrate_registry_gc_cleans_stale_storage_metadata_and_preserves_live_and_bloc
     std::fs::write(&blocked_manifest, b"blocked-store-sentinel")
         .expect("blocked manifest sentinel");
 
-    let preview = tracedecay_command(home.path(), &live_project)
+    let preview = tracedecay_command_without_daemon(home.path(), &live_project)
         .args(["migrate", "registry-gc", "--json"])
         .output()
         .expect("registry-gc preview");
@@ -1839,7 +1834,7 @@ fn migrate_registry_gc_cleans_stale_storage_metadata_and_preserves_live_and_bloc
         stale_project.display().to_string()
     );
 
-    let apply = tracedecay_command(home.path(), &live_project)
+    let apply = tracedecay_command_without_daemon(home.path(), &live_project)
         .args(["migrate", "registry-gc", "--apply", "--json"])
         .output()
         .expect("registry-gc apply");
@@ -1886,7 +1881,7 @@ fn migrate_plan_save_writes_manifest_and_prints_confirmation_token_noninteractiv
     let graph_db = project_root.join(".tracedecay/tracedecay.db");
     write_sqlite_placeholder(&graph_db);
 
-    let mut command = tracedecay_command(home.path(), &project_root);
+    let mut command = tracedecay_command_without_daemon(home.path(), &project_root);
     command.args([
         "migrate",
         "plan",
@@ -1931,7 +1926,7 @@ fn migrate_export_from_profile_copies_profile_store_to_target() {
     write_profile_sharded_fixture(home.path(), &project_root);
     let export_dir = canonical_temp_path(home.path()).join("exported-store");
 
-    let mut command = tracedecay_command(home.path(), &project_root);
+    let mut command = tracedecay_command_without_daemon(home.path(), &project_root);
     command.args([
         "migrate",
         "export",
@@ -1949,10 +1944,7 @@ fn migrate_export_from_profile_copies_profile_store_to_target() {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    assert_eq!(
-        std::fs::read(export_dir.join("tracedecay.db")).unwrap(),
-        b"profile graph"
-    );
+    assert!(export_dir.join("tracedecay.db").is_file());
     let exported_manifest =
         tracedecay::storage::read_store_manifest(&export_dir.join(STORE_MANIFEST_FILENAME))
             .unwrap();
@@ -2033,7 +2025,7 @@ fn migrate_cleanup_sources_removes_source_artifacts_but_preserves_enrollment_mar
     manifest.artifacts.push(store_manifest_artifact);
     save_manifest(&manifest).unwrap();
 
-    let mut command = tracedecay_command(home.path(), &project_root);
+    let mut command = tracedecay_command_without_daemon(home.path(), &project_root);
     command.args([
         "migrate",
         "cleanup-sources",

@@ -26,9 +26,9 @@ fn sanitize_dots_prevented() {
 #[test]
 fn unique_stem_keeps_free_name() {
     let meta = crate::branch_meta::BranchMeta::new("main");
-    let dir = Path::new("/nonexistent-branches-dir-for-test");
+    let dir = tempfile::tempdir().unwrap();
     assert_eq!(
-        unique_branch_db_stem(&meta, dir, "feature/new")
+        unique_branch_db_stem(&meta, dir.path(), "feature/new")
             .unwrap()
             .unwrap(),
         "feature_new"
@@ -40,8 +40,8 @@ fn unique_stem_disambiguates_sanitization_collision() {
     // "feature/foo" sanitizes to the same stem as the literal "feature_foo".
     let mut meta = crate::branch_meta::BranchMeta::new("main");
     meta.add_branch("feature/foo", "branches/feature_foo.db", "main");
-    let dir = Path::new("/nonexistent-branches-dir-for-test");
-    let stem = unique_branch_db_stem(&meta, dir, "feature_foo")
+    let dir = tempfile::tempdir().unwrap();
+    let stem = unique_branch_db_stem(&meta, dir.path(), "feature_foo")
         .unwrap()
         .unwrap();
     assert_ne!(
@@ -73,9 +73,9 @@ fn unique_stem_is_idempotent_for_same_branch() {
     // as a conflict.
     let mut meta = crate::branch_meta::BranchMeta::new("main");
     meta.add_branch("feature/foo", "branches/feature_foo.db", "main");
-    let dir = Path::new("/nonexistent-branches-dir-for-test");
+    let dir = tempfile::tempdir().unwrap();
     assert_eq!(
-        unique_branch_db_stem(&meta, dir, "feature/foo")
+        unique_branch_db_stem(&meta, dir.path(), "feature/foo")
             .unwrap()
             .unwrap(),
         "feature_foo"
