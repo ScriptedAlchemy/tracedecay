@@ -288,6 +288,10 @@ pub(super) fn epoch_ms() -> u128 {
         .as_millis()
 }
 
+fn sanitize_metadata(value: &str) -> String {
+    value.replace(['\t', '\r', '\n'], " ")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -301,8 +305,4 @@ mod tests {
         assert!(name.contains(crate::runtime_identity::process_run_id()));
         assert!(name.ends_with(".17.tmp"));
     }
-}
-
-fn sanitize_metadata(value: &str) -> String {
-    value.replace(['\t', '\r', '\n'], " ")
 }

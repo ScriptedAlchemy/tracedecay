@@ -157,6 +157,7 @@ pub(super) fn ensure_no_pending_recovery(tracedecay_dir: &Path) -> Result<()> {
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn commit_with_hook<P, V, R, H>(
     tracedecay_dir: &Path,
     supplied_transaction_id: Option<&str>,

@@ -864,7 +864,7 @@ fn now_unix_secs() -> u64 {
 
 /// Compatibility wrapper retained for callers that cannot reach the managed
 /// daemon. Physical branch-store GC requires daemon-owned store administration,
-/// so this API fails closed without mutating metadata or SQLite files.
+/// so this API fails closed without mutating metadata or `SQLite` files.
 pub fn gc_dead_branch_stores(
     _project_root: &Path,
     _tracedecay_dir: &Path,
