@@ -251,15 +251,35 @@ async fn daemon_project_status(project_path: &Path) -> crate::errors::Result<ser
     )?;
     let result = crate::daemon::call_default_tool(
         &handshake,
-        "tracedecay_status",
+        "tracedecay_runtime",
         serde_json::json!({ "format": "json" }),
     )
     .await?;
-    daemon_tool_json(&result)
+    daemon_runtime_status(&result)
 }
 
-fn daemon_tool_json(result: &serde_json::Value) -> crate::errors::Result<serde_json::Value> {
-    crate::daemon::tool_json_payload(result, "tracedecay_status")
+fn daemon_runtime_status(result: &serde_json::Value) -> crate::errors::Result<serde_json::Value> {
+    let runtime = crate::daemon::tool_json_payload(result, "tracedecay_runtime")?;
+    let mut storage =
+        runtime
+            .get("database")
+            .cloned()
+            .ok_or_else(|| crate::errors::TraceDecayError::Config {
+                message: "daemon runtime response omitted database telemetry".to_string(),
+            })?;
+    let storage =
+        storage
+            .as_object_mut()
+            .ok_or_else(|| crate::errors::TraceDecayError::Config {
+                message: "daemon runtime database telemetry was not an object".to_string(),
+            })?;
+    if let Some(pid) = runtime.pointer("/process/pid").cloned() {
+        storage.insert("daemon_owner_pid".to_string(), pid);
+    }
+    if let Some(version) = runtime.get("tracedecay_version").cloned() {
+        storage.insert("daemon_version".to_string(), version);
+    }
+    Ok(serde_json::json!({ "storage_health": storage }))
 }
 
 fn check_database(dc: &mut DoctorCounters, status: &serde_json::Value) -> bool {
@@ -423,12 +443,23 @@ fn check_stale_stores(dc: &mut DoctorCounters, status: Option<&serde_json::Value
             .get("daemon_owner_pid")
             .and_then(serde_json::Value::as_u64)
             .map_or_else(|| "unknown".to_string(), |pid| pid.to_string());
-        let generation = storage
+        let identity = storage
             .get("daemon_generation")
             .and_then(serde_json::Value::as_str)
-            .unwrap_or("unknown");
+            .map_or_else(
+                || {
+                    storage
+                        .get("daemon_version")
+                        .and_then(serde_json::Value::as_str)
+                        .map_or_else(
+                            || "identity=unknown".to_string(),
+                            |version| format!("version={version}"),
+                        )
+                },
+                |generation| format!("generation={generation}"),
+            );
         dc.pass(&format!(
-            "Registry/database inspection delegated to daemon owner pid={owner}, generation={generation}"
+            "Registry/database inspection delegated to daemon owner pid={owner}, {identity}"
         ));
     } else {
         dc.warn("Registry diagnostics unavailable because the daemon owner did not answer; doctor did not open the global DB");
