@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.67](https://github.com/ScriptedAlchemy/tracedecay/compare/v0.0.66...v0.0.67) - 2026-07-14
+
+### Fixed
+
+- *(doctor)* use compact daemon health snapshot
+- *(tests)* harden Windows daemon fixtures
+- *(storage)* harden cross-platform daemon authority
+- *(daemon)* release legacy sync ownership after writes
+- *(daemon)* reuse global database authority
+- *(storage)* stabilize daemon-owned database access
+- *(tests)* isolate database ownership fixtures
+- *(storage)* clear integrity clippy blockers
+- *(storage)* repair integrity follow-up build
+- *(storage)* close sole-daemon integrity gaps
+- *(storage)* finish sole-daemon ownership integration
+- *(storage)* enforce sole-daemon database ownership
+
+### Other
+
+- *(storage)* normalize Windows authority paths
+- *(daemon)* share initialize registry authority
+
 ## [0.0.66](https://github.com/ScriptedAlchemy/tracedecay/compare/v0.0.65...v0.0.66) - 2026-07-13
 
 ### Fixed
