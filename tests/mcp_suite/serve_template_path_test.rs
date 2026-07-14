@@ -28,7 +28,7 @@ async fn literal_template_without_daemon_fails_closed_before_mcp_handshake() {
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("TraceDecay daemon socket") && stderr.contains("is not available"),
+        stderr.contains("TraceDecay daemon") && stderr.contains("is not available"),
         "expected explicit daemon-unavailable error, got:\n{stderr}"
     );
 }

@@ -75,6 +75,9 @@ async fn assuming_schema_open_cannot_poison_full_schema_ensure() {
         rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap(),
         0
     );
+    drop(rows);
+    let raw_inner = Arc::downgrade(&raw.inner);
+    raw.close();
 
     let ensured = GlobalDb::open_at(&path).await.expect("full schema open");
     let mut rows = ensured
@@ -89,7 +92,7 @@ async fn assuming_schema_open_cannot_poison_full_schema_ensure() {
         rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap(),
         1
     );
-    assert!(!Arc::ptr_eq(&raw.inner, &ensured.inner));
+    assert!(raw_inner.upgrade().is_none());
 }
 
 #[tokio::test]
@@ -163,6 +166,12 @@ async fn try_open_at_preserves_authority_error() {
         "{message}"
     );
     assert!(message.contains("open global database"), "{message}");
+    #[cfg(windows)]
+    assert!(
+        message.contains(&format!(r"\\?\{}", path.display())),
+        "{message}"
+    );
+    #[cfg(not(windows))]
     assert!(message.contains(&path.display().to_string()), "{message}");
 }
 

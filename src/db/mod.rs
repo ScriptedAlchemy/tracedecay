@@ -24,7 +24,7 @@ pub(crate) use access::windows_hard_link_count;
 pub use access::{DatabaseAuthority, DatabaseAuthorityRole};
 pub(crate) use access::{
     DatabaseDeletionFence, DatabaseDeletionStates, WriterOwnership, database_path_is_tombstoned,
-    enter_daemon_database_scope, probe_writer_owner,
+    enter_daemon_database_scope, is_lock_contended, probe_writer_owner,
 };
 pub use connection::{Database, SQLITE_UNSAFE_FAST_ENV};
 pub(crate) use connection::{platform_safe_journal_mode, platform_safe_synchronous_mode};

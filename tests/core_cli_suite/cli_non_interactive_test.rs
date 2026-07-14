@@ -101,7 +101,7 @@ fn add_tracedecay_path_shim(command: &mut Command, home: &Path) -> PathBuf {
 /// not the behaviour under test.
 fn init_project_in_process(home: &Path, project: &Path) {
     let project = canonical_temp_path(project);
-    let output = tracedecay_command_without_daemon(home, &project)
+    let output = tracedecay_command(home, &project)
         .arg("init")
         .output()
         .expect("fixture init should run");

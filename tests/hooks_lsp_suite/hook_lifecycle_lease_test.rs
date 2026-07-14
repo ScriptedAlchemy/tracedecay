@@ -132,6 +132,7 @@ fn normal_lease_path_still_executes_a_direct_claude_stdin_hook() {
                 .success()
         );
     }
+    let _daemon = spawn_tracedecay_daemon(temp.path());
     assert!(
         tracedecay_command_with_home(temp.path())
             .arg("init")
@@ -140,7 +141,6 @@ fn normal_lease_path_still_executes_a_direct_claude_stdin_hook() {
             .unwrap()
             .success()
     );
-    let _daemon = spawn_tracedecay_daemon(temp.path());
     let event = format!(
         "{{\"hook_event_name\":\"SessionStart\",\"cwd\":{}}}",
         serde_json::to_string(&project.to_string_lossy()).unwrap()

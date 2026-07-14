@@ -429,6 +429,7 @@ fn cli_branch_add_refuses_corrupt_metadata_without_overwriting() {
     fs::write(project.join("src/lib.rs"), "pub fn main_only() {}\n").unwrap();
     commit_all(project, "initial commit");
 
+    let _daemon = common::spawn_tracedecay_daemon(env.home());
     let mut init_command = Command::new(env!("CARGO_BIN_EXE_tracedecay"));
     common::apply_tracedecay_home_env(&mut init_command, env.home());
     let init = init_command
@@ -442,8 +443,6 @@ fn cli_branch_add_refuses_corrupt_metadata_without_overwriting() {
         String::from_utf8_lossy(&init.stdout),
         String::from_utf8_lossy(&init.stderr)
     );
-
-    let _daemon = common::spawn_tracedecay_daemon(env.home());
 
     let tracedecay_dir = project_data_dir(project);
     let meta_path = tracedecay_dir.join("branch-meta.json");

@@ -19,10 +19,10 @@ use lease::{acquire_process_lease, exact_scoped_runtime_role, scoped_runtime_rol
 pub(crate) use lease::{
     database_path_is_tombstoned, enter_daemon_database_scope, probe_writer_owner,
 };
+pub(crate) use owner_io::is_lock_contended;
 use owner_io::{
-    authority_token, epoch_ms, is_lock_contended, open_lock_file, publish_record_atomically,
-    read_owner, read_record_strict, remove_record_durably, write_owner, write_record_atomically,
-    writer_owner,
+    authority_token, epoch_ms, open_lock_file, publish_record_atomically, read_owner,
+    read_record_strict, remove_record_durably, write_owner, write_record_atomically, writer_owner,
 };
 use path_layout::{
     bootstrap_database_key, canonical_profile_root, database_lock_root,

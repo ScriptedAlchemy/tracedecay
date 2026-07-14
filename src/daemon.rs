@@ -2925,6 +2925,14 @@ fn is_missing_index_error(err: &TraceDecayError) -> bool {
     )
 }
 
+fn is_readonly_database_error(err: &TraceDecayError) -> bool {
+    matches!(
+        err,
+        TraceDecayError::Database { message, .. }
+            if message.to_ascii_lowercase().contains("readonly database")
+    )
+}
+
 fn missing_index_error(project_path: &Path) -> TraceDecayError {
     TraceDecayError::Config {
         message: format!(
@@ -2938,15 +2946,26 @@ async fn open_existing_project_with_options(
     project_path: &Path,
     open_options: crate::tracedecay::TraceDecayOpenOptions,
 ) -> Result<crate::tracedecay::TraceDecay> {
-    crate::tracedecay::TraceDecay::open_with_options(project_path, open_options)
-        .await
-        .map_err(|error| {
-            if is_missing_index_error(&error) {
-                missing_index_error(project_path)
-            } else {
-                error
+    match crate::tracedecay::TraceDecay::open_with_options(project_path, open_options.clone()).await
+    {
+        Ok(cg) => Ok(cg),
+        Err(open_err) if is_readonly_database_error(&open_err) => {
+            match crate::tracedecay::TraceDecay::open_read_only_with_options(
+                project_path,
+                open_options,
+            )
+            .await
+            {
+                Ok(cg) => {
+                    cg.ensure_schema_current().await?;
+                    Ok(cg)
+                }
+                Err(_) => Err(open_err),
             }
-        })
+        }
+        Err(error) if is_missing_index_error(&error) => Err(missing_index_error(project_path)),
+        Err(error) => Err(error),
+    }
 }
 
 async fn write_project_open_error(

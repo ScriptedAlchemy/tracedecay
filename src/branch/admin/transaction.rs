@@ -1,3 +1,4 @@
+#[cfg(not(windows))]
 use std::fs::File;
 use std::path::{Component, Path, PathBuf};
 
@@ -578,16 +579,7 @@ fn quarantine_family_paths(database: &Path, transaction_id: &str) -> Result<[Pat
                 database.display()
             ))
         })?;
-    let transaction_component = transaction_id
-        .bytes()
-        .map(|byte| {
-            if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_') {
-                (byte as char).to_string()
-            } else {
-                format!("_{byte:02x}")
-            }
-        })
-        .collect::<String>();
+    let transaction_component = transaction_file_component(transaction_id);
     let database = parent.join(format!(
         ".{name}{QUARANTINE_MARKER}{transaction_component}.quarantine"
     ));
@@ -787,7 +779,8 @@ fn require_missing(path: &Path, description: &str) -> Result<()> {
 fn persist_journal(tracedecay_dir: &Path, journal: &DeletionJournal) -> Result<()> {
     validate_journal(tracedecay_dir, journal)?;
     let path = journal_path(tracedecay_dir);
-    let temp = tracedecay_dir.join(format!("{JOURNAL_FILENAME}.tmp-{}", journal.transaction_id));
+    let transaction_component = transaction_file_component(&journal.transaction_id);
+    let temp = tracedecay_dir.join(format!("{JOURNAL_FILENAME}.tmp-{transaction_component}"));
     let bytes = serde_json::to_vec_pretty(journal)?;
     if let Err(error) = PrivateStoreIo::write_file_atomically(&path, &temp, &bytes) {
         let _ = std::fs::remove_file(&temp);
@@ -867,10 +860,22 @@ fn clear_journal(tracedecay_dir: &Path) -> Result<()> {
     }
 }
 
+#[cfg(not(windows))]
 fn sync_file(path: &Path) -> Result<()> {
-    File::open(path)
+    std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path)
         .and_then(|file| file.sync_all())
         .map_err(|error| config_error(format!("failed to sync '{}': {error}", path.display())))
+}
+
+#[cfg(windows)]
+fn sync_file(_path: &Path) -> Result<()> {
+    // PrivateStoreIo publishes these records with MoveFileExW's
+    // MOVEFILE_WRITE_THROUGH. Reopening the replaced path for a second flush
+    // is not portable on Windows and can fail with ERROR_ACCESS_DENIED.
+    Ok(())
 }
 
 fn sync_directory(path: &Path) -> Result<()> {
@@ -902,6 +907,19 @@ fn transaction_id() -> String {
         .unwrap_or_default()
         .as_nanos();
     format!("{}-{nanos}", std::process::id())
+}
+
+fn transaction_file_component(transaction_id: &str) -> String {
+    transaction_id
+        .bytes()
+        .map(|byte| {
+            if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_') {
+                (byte as char).to_string()
+            } else {
+                format!("_{byte:02x}")
+            }
+        })
+        .collect()
 }
 
 fn config_error(message: impl Into<String>) -> TraceDecayError {

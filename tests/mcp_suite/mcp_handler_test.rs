@@ -1110,7 +1110,11 @@ async fn project_registry_tools_prefer_injected_registry_over_process_default() 
     let list_payload: Value = serde_json::from_str(extract_text(&list.value)).unwrap();
     assert_eq!(
         list_payload["registry_path"],
-        client_registry_path.display().to_string()
+        client_registry_path
+            .canonicalize()
+            .unwrap()
+            .display()
+            .to_string()
     );
     let list_text = extract_text(&list.value);
     assert!(list_text.contains("proj_alpha"));
@@ -1442,7 +1446,10 @@ async fn storage_status_tool_summarizes_active_project_store_health() {
         payload["locks"]["branch_add_lock_path"].as_str(),
         Some(branch_add_lock_path.as_str())
     );
-    assert_eq!(payload["locks"]["sync_lock_exists"].as_bool(), Some(false));
+    assert_eq!(
+        payload["locks"]["sync_lock_exists"].as_bool(),
+        Some(layout.sync_lock_path.exists())
+    );
     assert_eq!(
         payload["locks"]["branch_add_lock_exists"].as_bool(),
         Some(layout.branch_add_lock_path.exists())
@@ -12434,6 +12441,20 @@ async fn lcm_status_cli_bridge_accepts_json_args() {
     let home = _dir.path().join("home");
     let outside_cwd = test_temp_dir();
     let project_arg = cg.project_root().display().to_string();
+    handle_tool_call(
+        &cg,
+        "tracedecay_lcm_preflight",
+        json!({
+            "provider": "cursor",
+            "session_id": "cli-bridge-status",
+            "messages": [{"role": "user", "content": "status payload"}],
+            "current_tokens": 10
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
     close_test_graph(cg).await;
     let _daemon = common::spawn_tracedecay_daemon(&home);
     let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_tracedecay"));

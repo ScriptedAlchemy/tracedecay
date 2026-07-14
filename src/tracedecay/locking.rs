@@ -281,7 +281,7 @@ pub fn try_acquire_sync_lock_at(lock_path: &Path) -> Result<SyncLockGuard> {
 
     file.try_lock_exclusive()
         .map_err(|error| TraceDecayError::SyncLock {
-            message: if error.kind() == std::io::ErrorKind::WouldBlock {
+            message: if crate::db::is_lock_contended(&error) {
                 "another sync is already in progress".to_string()
             } else {
                 format!("could not lock sync lockfile: {error}")

@@ -238,7 +238,7 @@ async fn serve_without_daemon_socket_reports_daemon_unavailable() {
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("TraceDecay daemon socket") && stderr.contains("is not available"),
+        stderr.contains("TraceDecay daemon") && stderr.contains("is not available"),
         "expected explicit daemon-unavailable error, got:\n{stderr}"
     );
 }

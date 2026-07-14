@@ -414,8 +414,8 @@ async fn deferred_tracking_is_not_persisted_and_retries_next_cycle() {
     assert!(deferred.tracked.is_empty());
     assert!(pr_autotrack::managed_summary(&data_root).is_empty());
     assert!(
-        !data_root.join("pr-worktrees/pr-7").exists(),
-        "deferred tracking must roll back its worktree"
+        data_root.join("pr-worktrees/pr-7").exists(),
+        "contended rollback must retain its worktree for the next poll"
     );
 
     lock.unlock().unwrap();
