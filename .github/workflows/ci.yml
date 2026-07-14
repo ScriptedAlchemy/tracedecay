@@ -134,7 +134,7 @@ jobs:
           "$GOBIN/gitleaks" version | grep -Fx '8.30.1'
           echo "$GOBIN" >> "$GITHUB_PATH"
           python -m pip install --disable-pip-version-check 'detect-secrets==1.5.0'
-          detect-secrets --version | grep -Fx 'detect-secrets 1.5.0'
+          detect-secrets --version | grep -Ex '^(detect-secrets )?1\.5\.0$'
 
       - name: Run focused V2 privacy corpus tests
         run: cargo test --test v2_corpus_suite privacy
