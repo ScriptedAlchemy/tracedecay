@@ -190,7 +190,7 @@ def main():
     assert isinstance(engine, ContextEngine)
     ok("context engine activates via stock plugin fallback")
 
-    engine.initialize(session_id="stock-check-session", cwd=project_root)
+    engine.initialize(session_id="stock-check-session", project_root=project_root)
     assert engine.project_root is not None
     assert os.path.realpath(engine.project_root) == os.path.realpath(project_root)
     engine.update_model("stock-check-model", 128000)
