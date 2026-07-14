@@ -13,8 +13,11 @@ pub fn user_memory_db_path(profile_root: &Path) -> PathBuf {
 
 pub async fn open_user_memory_db(profile_root: &Path) -> Result<Database> {
     let path = user_memory_db_path(profile_root);
+    let authority = crate::db::DatabaseAuthority::for_runtime(&path, "open user memory")?;
     if path.is_file() {
-        return Database::open(&path).await.map(|(db, _)| db);
+        return Database::open(&path, &authority).await.map(|(db, _)| db);
     }
-    Database::initialize(&path).await.map(|(db, _)| db)
+    Database::initialize(&path, &authority)
+        .await
+        .map(|(db, _)| db)
 }

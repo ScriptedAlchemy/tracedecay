@@ -6,9 +6,38 @@ use crate::cli::{BranchAction, MemoryAction, MigrateAction};
 use crate::global;
 use tracedecay::tracedecay::TraceDecay;
 
-pub(crate) async fn handle_memory_action(action: MemoryAction) -> tracedecay::errors::Result<()> {
-    use tracedecay::dashboard::memory_curate::{MemoryCurateOptions, run_memory_curate};
+pub(crate) async fn daemon_tool_json(
+    project_path: Option<&std::path::Path>,
+    tool_name: &str,
+    arguments: serde_json::Value,
+) -> tracedecay::errors::Result<serde_json::Value> {
+    let handshake = tracedecay::daemon::DaemonHandshake::for_current_client(
+        project_path.map(std::path::Path::to_path_buf),
+        None,
+        false,
+        false,
+    )?;
+    let result = tracedecay::daemon::call_default_tool(&handshake, tool_name, arguments).await?;
+    let blocks = result
+        .get("content")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| tracedecay::errors::TraceDecayError::Config {
+            message: format!("daemon tool {tool_name} returned no content blocks"),
+        })?;
+    for text in blocks
+        .iter()
+        .filter_map(|block| block.get("text").and_then(serde_json::Value::as_str))
+    {
+        if let Ok(value) = serde_json::from_str(text) {
+            return Ok(value);
+        }
+    }
+    Err(tracedecay::errors::TraceDecayError::Config {
+        message: format!("daemon tool {tool_name} returned no JSON payload"),
+    })
+}
 
+pub(crate) async fn handle_memory_action(action: MemoryAction) -> tracedecay::errors::Result<()> {
     match action {
         MemoryAction::Status { .. } => unreachable!("memory status is handled in main.rs dispatch"),
         MemoryAction::Curate {
@@ -20,19 +49,23 @@ pub(crate) async fn handle_memory_action(action: MemoryAction) -> tracedecay::er
             path,
         } => {
             let project_path = tracedecay::config::resolve_path_with_discovery(path);
-            let cg = crate::serve::ensure_initialized(&project_path).await?;
             let llm_ops_value = match llm_ops {
                 Some(source) => Some(read_llm_ops_payload(&source)?),
                 None => None,
             };
-            let options = MemoryCurateOptions {
-                apply,
-                llm,
-                llm_ops: llm_ops_value,
-                max_clusters: max_clusters.clamp(1, 50),
-                min_confidence: min_confidence.clamp(0.0, 1.0),
-            };
-            let report = run_memory_curate(&cg, &options).await?;
+            let report = daemon_tool_json(
+                Some(&project_path),
+                "tracedecay_admin_project",
+                serde_json::json!({
+                    "action": "memory_curate",
+                    "apply": apply,
+                    "llm": llm,
+                    "llm_ops": llm_ops_value,
+                    "max_clusters": max_clusters,
+                    "min_confidence": min_confidence,
+                }),
+            )
+            .await?;
             println!(
                 "{}",
                 serde_json::to_string_pretty(&report).unwrap_or_default()
@@ -277,6 +310,11 @@ pub(crate) async fn handle_migrate_action(action: MigrateAction) -> tracedecay::
                 &target_profile_root,
                 "legacy store migration",
             )?;
+            let _database_scope = tracedecay::db::enter_maintenance_database_scope(
+                &_lifecycle_lease,
+                &target_profile_root,
+                "legacy store migration",
+            )?;
             let apply_report = tracedecay::migrate::manifest::apply_migration_manifest(
                 &mut manifest,
             )
@@ -293,10 +331,10 @@ pub(crate) async fn handle_migrate_action(action: MigrateAction) -> tracedecay::
                     ),
                 });
             }
-            let global_db = tracedecay::global_db::GlobalDb::open_at(
+            let global_db = tracedecay::global_db::GlobalDb::try_open_at(
                 &apply_report.profile_root.join("global.db"),
             )
-            .await
+            .await?
             .ok_or_else(|| tracedecay::errors::TraceDecayError::Config {
                 message: "could not open global DB for migrate apply".to_string(),
             })?;
@@ -386,6 +424,16 @@ pub(crate) async fn handle_migrate_action(action: MigrateAction) -> tracedecay::
                     )
                 })
                 .transpose()?;
+            let _database_scope = _lifecycle_lease
+                .as_ref()
+                .map(|lifecycle_lease| {
+                    tracedecay::db::enter_maintenance_database_scope(
+                        lifecycle_lease,
+                        &profile_root,
+                        "registry reconstruction",
+                    )
+                })
+                .transpose()?;
             let report = tracedecay::migrate::registry::scan_profile_store_manifests(
                 &profile_root,
                 tracedecay::tracedecay::current_timestamp(),
@@ -417,8 +465,8 @@ pub(crate) async fn handle_migrate_action(action: MigrateAction) -> tracedecay::
                     });
                 }
                 let global_db =
-                    tracedecay::global_db::GlobalDb::open_at(&profile_root.join("global.db"))
-                        .await
+                    tracedecay::global_db::GlobalDb::try_open_at(&profile_root.join("global.db"))
+                        .await?
                         .ok_or_else(|| tracedecay::errors::TraceDecayError::Config {
                             message: "could not open global DB for registry reconstruction"
                                 .to_string(),
@@ -482,11 +530,22 @@ pub(crate) async fn handle_migrate_action(action: MigrateAction) -> tracedecay::
             apply,
             json,
         } => {
-            let global_db = tracedecay::global_db::GlobalDb::open()
-                .await
-                .ok_or_else(|| tracedecay::errors::TraceDecayError::Config {
-                    message: "could not open global DB for registry cleanup".to_string(),
-                })?;
+            let profile_root = tracedecay::storage::default_profile_root()?;
+            let lifecycle_lease = tracedecay::lifecycle_lease::acquire_exclusive_for_profile(
+                &profile_root,
+                "registry cleanup",
+            )?;
+            let _database_scope = tracedecay::db::enter_maintenance_database_scope(
+                &lifecycle_lease,
+                &profile_root,
+                "registry cleanup",
+            )?;
+            let global_db =
+                tracedecay::global_db::GlobalDb::try_open_at(&profile_root.join("global.db"))
+                    .await?
+                    .ok_or_else(|| tracedecay::errors::TraceDecayError::Config {
+                        message: "could not open global DB for registry cleanup".to_string(),
+                    })?;
             let projects = global_db.list_code_projects(usize::MAX).await;
             let prefixes: Vec<PathBuf> = prefix.iter().map(PathBuf::from).collect();
             let stale = tracedecay::migrate::registry::stale_code_projects(
@@ -494,7 +553,6 @@ pub(crate) async fn handle_migrate_action(action: MigrateAction) -> tracedecay::
                 &prefixes,
                 tracedecay::migrate::registry::StaleRootScope::CanonicalRootMissing,
             );
-            let profile_root = tracedecay::config::user_data_dir();
             let mut stale_storage_projects = Vec::new();
             for project_path in global_db.list_project_paths().await {
                 let path = Path::new(&project_path);
@@ -504,7 +562,7 @@ pub(crate) async fn handle_migrate_action(action: MigrateAction) -> tracedecay::
                 let location = global::classify_project_storage_with_registry(
                     path,
                     Some(&global_db),
-                    profile_root.as_deref(),
+                    Some(&profile_root),
                 )
                 .await;
                 if location.status == global::ProjectStorageStatus::Stale {
@@ -629,71 +687,121 @@ pub(crate) async fn handle_branch_action(action: BranchAction) -> tracedecay::er
     match action {
         BranchAction::List { path } => {
             let project_path = tracedecay::config::resolve_path(path);
-            let opened = TraceDecay::open_read_only(&project_path).await.ok();
-            let tracedecay_dir = opened
-                .as_ref()
-                .map(|cg| cg.store_layout().data_root.clone())
-                .unwrap_or_else(|| fallback_branch_data_root(&project_path));
-            let Some(_meta) = branch_meta::load_branch_meta(&tracedecay_dir) else {
+            let status = daemon_tool_json(
+                Some(&project_path),
+                "tracedecay_status",
+                serde_json::json!({ "format": "json" }),
+            )
+            .await?;
+            let diagnostics = status.get("branch_diagnostics").ok_or_else(|| {
+                tracedecay::errors::TraceDecayError::Config {
+                    message: "daemon status omitted branch diagnostics".to_string(),
+                }
+            })?;
+            if !diagnostics
+                .get("tracking_enabled")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false)
+            {
                 eprintln!("No branch tracking configured. Run `tracedecay branch add` to start.");
                 return Ok(());
-            };
-            let diagnostics = opened
-                .as_ref()
-                .map(TraceDecay::branch_diagnostics)
-                .unwrap_or_else(|| TraceDecay::project_branch_diagnostics(&project_path));
+            }
             eprintln!(
                 "Default branch: {}",
-                diagnostics.default_branch.as_deref().unwrap_or("<unknown>")
+                diagnostics
+                    .get("default_branch")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("<unknown>")
             );
             eprintln!(
                 "Current branch: {}",
                 diagnostics
-                    .current_branch
-                    .as_deref()
+                    .get("current_branch")
+                    .and_then(serde_json::Value::as_str)
                     .unwrap_or("<detached HEAD>")
             );
-            if let Some(serving) = diagnostics.serving_branch.as_deref() {
-                let suffix = if diagnostics.is_fallback {
+            if let Some(serving) = diagnostics
+                .get("serving_branch")
+                .and_then(serde_json::Value::as_str)
+            {
+                let suffix = if diagnostics
+                    .get("is_fallback")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false)
+                {
                     " (fallback)"
                 } else {
                     ""
                 };
                 eprintln!("Serving branch: {serving}{suffix}");
             }
-            if diagnostics.branch_drifted {
+            if diagnostics
+                .get("branch_drifted")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false)
+            {
                 eprintln!(
                     "Opened branch: {}",
                     diagnostics
-                        .open_active_branch
-                        .as_deref()
+                        .get("open_active_branch")
+                        .and_then(serde_json::Value::as_str)
                         .unwrap_or("<detached HEAD>")
                 );
             }
             eprintln!();
-            for branch in &diagnostics.branches {
-                let size = if branch.db_exists {
-                    tracedecay::display::format_bytes(branch.size_bytes)
+            for branch in diagnostics
+                .get("branches")
+                .and_then(serde_json::Value::as_array)
+                .into_iter()
+                .flatten()
+            {
+                let db_exists = branch
+                    .get("db_exists")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false);
+                let size = if db_exists {
+                    tracedecay::display::format_bytes(
+                        branch
+                            .get("size_bytes")
+                            .and_then(serde_json::Value::as_u64)
+                            .unwrap_or(0),
+                    )
                 } else {
                     "missing".to_string()
                 };
                 let parent = branch
-                    .parent
-                    .as_deref()
+                    .get("parent")
+                    .and_then(serde_json::Value::as_str)
                     .map(|p| format!(" (from {p})"))
                     .unwrap_or_default();
-                let synced = branch_meta::format_timestamp(&branch.last_synced_at);
+                let last_synced_at = branch
+                    .get("last_synced_at")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("never");
+                let synced = branch_meta::format_timestamp(last_synced_at);
                 let mut flags = Vec::new();
-                if branch.is_default {
+                if branch
+                    .get("is_default")
+                    .and_then(serde_json::Value::as_bool)
+                    == Some(true)
+                {
                     flags.push("default");
                 }
-                if branch.is_current {
+                if branch
+                    .get("is_current")
+                    .and_then(serde_json::Value::as_bool)
+                    == Some(true)
+                {
                     flags.push("current");
                 }
-                if branch.is_serving {
+                if branch
+                    .get("is_serving")
+                    .and_then(serde_json::Value::as_bool)
+                    == Some(true)
+                {
                     flags.push("serving");
                 }
-                if !branch.db_exists {
+                if !db_exists {
                     flags.push("missing-db");
                 }
                 let flags = if flags.is_empty() {
@@ -703,12 +811,23 @@ pub(crate) async fn handle_branch_action(action: BranchAction) -> tracedecay::er
                 };
                 eprintln!(
                     "  {}{} — {}{}, synced {}",
-                    branch.name, flags, size, parent, synced
+                    branch
+                        .get("name")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("<unknown>"),
+                    flags,
+                    size,
+                    parent,
+                    synced
                 );
             }
-            if !diagnostics.warnings.is_empty() {
+            if let Some(warnings) = diagnostics
+                .get("warnings")
+                .and_then(serde_json::Value::as_array)
+                .filter(|warnings| !warnings.is_empty())
+            {
                 eprintln!();
-                for warning in diagnostics.warnings {
+                for warning in warnings.iter().filter_map(serde_json::Value::as_str) {
                     eprintln!("warning: {warning}");
                 }
             }
@@ -925,10 +1044,7 @@ async fn handle_branch_autotrack_action(
 }
 
 async fn resolve_branch_data_root(project_path: &Path) -> PathBuf {
-    TraceDecay::open_read_only(project_path)
-        .await
-        .map(|cg| cg.store_layout().data_root.clone())
-        .unwrap_or_else(|_| fallback_branch_data_root(project_path))
+    fallback_branch_data_root(project_path)
 }
 
 fn fallback_branch_data_root(project_path: &Path) -> PathBuf {
@@ -940,10 +1056,15 @@ fn fallback_branch_data_root(project_path: &Path) -> PathBuf {
 /// Handles the `wipe` and `wipe --all` commands.
 pub(crate) async fn handle_wipe(all: bool) -> tracedecay::errors::Result<()> {
     use std::fs;
-    let home_tracedecay = tracedecay::config::user_data_dir();
+    let profile_root = tracedecay::storage::default_profile_root()?;
+    let lifecycle_lease =
+        tracedecay::lifecycle_lease::acquire_exclusive_for_profile(&profile_root, "wipe")?;
+    let _database_scope =
+        tracedecay::db::enter_maintenance_database_scope(&lifecycle_lease, &profile_root, "wipe")?;
+    let home_tracedecay = Some(profile_root);
 
     let project_paths = global::gather_target_projects(all, &home_tracedecay).await;
-    let gdb = tracedecay::global_db::GlobalDb::open().await;
+    let gdb = tracedecay::global_db::GlobalDb::try_open().await?;
     let mut targets = Vec::new();
     for path in &project_paths {
         let location = global::classify_project_storage_with_registry(
@@ -1018,7 +1139,7 @@ pub(crate) async fn handle_wipe(all: bool) -> tracedecay::errors::Result<()> {
             );
         }
     } else if !wiped_paths.is_empty() {
-        if let Some(gdb) = tracedecay::global_db::GlobalDb::open().await {
+        if let Some(gdb) = tracedecay::global_db::GlobalDb::try_open().await? {
             let path_strs: Vec<String> = wiped_paths
                 .iter()
                 .map(|p| p.to_string_lossy().to_string())
@@ -1049,28 +1170,48 @@ pub(crate) async fn handle_list(all: bool) -> tracedecay::errors::Result<()> {
         return Ok(());
     }
 
-    let gdb = tracedecay::global_db::GlobalDb::open().await;
+    let token_result = daemon_tool_json(
+        None,
+        "tracedecay_admin_cli",
+        serde_json::json!({
+            "action": "registry_project_tokens",
+            "project_args": &project_paths,
+        }),
+    )
+    .await?;
+    let token_rows = token_result
+        .get("projects")
+        .and_then(serde_json::Value::as_array)
+        .cloned()
+        .unwrap_or_default();
     let mut rows: Vec<ListRow> = Vec::with_capacity(project_paths.len());
     let mut total_size: u64 = 0;
     let mut total_tokens: u64 = 0;
 
     for path in &project_paths {
-        let location = global::classify_project_storage_with_registry(
-            path,
-            gdb.as_ref(),
-            home_tracedecay.as_deref(),
-        )
-        .await;
+        let location =
+            global::classify_project_storage_with_registry(path, None, home_tracedecay.as_deref())
+                .await;
         let has_data = location.data_root.exists();
         let size = if has_data {
             global::tracedecay_dir_size(&location.data_root)
         } else {
             0
         };
-        let tokens = match &gdb {
-            Some(db) => db.get_project_tokens(path).await,
-            None => 0,
-        };
+        let project_key = tracedecay::global_db::GlobalDb::canonical_project_key(path);
+        let tokens = token_rows
+            .iter()
+            .find(|row| {
+                row.get("project")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|value| {
+                        tracedecay::global_db::GlobalDb::canonical_project_key(Path::new(value))
+                            == project_key
+                    })
+            })
+            .and_then(|row| row.get("tokens"))
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0);
         total_size = total_size.saturating_add(size);
         total_tokens = total_tokens.saturating_add(tokens);
         rows.push(ListRow {
@@ -1196,10 +1337,15 @@ fn append_orphan_manifest_rows(
 /// True when the global DB has zero registered projects (or can't be opened
 /// at all) — i.e. the user has not run `tracedecay init` anywhere yet.
 async fn is_fresh_install() -> bool {
-    match tracedecay::global_db::GlobalDb::open().await {
-        Some(gdb) => gdb.list_project_paths().await.is_empty(),
-        None => true,
-    }
+    daemon_tool_json(
+        None,
+        "tracedecay_admin_cli",
+        serde_json::json!({ "action": "registry_empty" }),
+    )
+    .await
+    .ok()
+    .and_then(|value| value.get("empty").and_then(serde_json::Value::as_bool))
+    .unwrap_or(false)
 }
 
 /// When invoked with no subcommand, offer to create the index if none exists.
@@ -1239,7 +1385,12 @@ pub(crate) async fn handle_no_command() -> tracedecay::errors::Result<()> {
     })?;
     let answer = answer.trim();
     if answer.is_empty() || answer.eq_ignore_ascii_case("y") {
-        init_and_index(&project_path, &[], &[], false).await?;
+        handle_init(
+            Some(project_path.to_string_lossy().into_owned()),
+            Vec::new(),
+            Vec::new(),
+        )
+        .await?;
     }
     Ok(())
 }
@@ -1250,20 +1401,27 @@ pub(crate) async fn handle_init(
     include_folders: Vec<String>,
 ) -> tracedecay::errors::Result<()> {
     let project_path = tracedecay::config::resolve_path(path);
-    if TraceDecay::has_initialized_store(&project_path).await {
-        eprintln!(
-            "\x1b[31merror:\x1b[0m TraceDecay is already initialized at '{}'.\n\
-             Use \x1b[1mtracedecay sync\x1b[0m to update the index, or \
-             \x1b[1mtracedecay sync --force\x1b[0m to rebuild it.",
-            project_path.display()
-        );
-        std::process::exit(1);
+    if !skip_folders.is_empty() || !include_folders.is_empty() {
+        return Err(tracedecay::errors::TraceDecayError::Config {
+            message: "brokered init does not yet support --skip-folders/--include-folders; configure tracedecay.toml first".to_string(),
+        });
     }
-
-    let version_handle = std::thread::spawn(tracedecay::cloud::fetch_latest_version);
-    let cg = init_and_index(&project_path, &skip_folders, &include_folders, false).await?;
-    close_project_graph(cg).await?;
-    maybe_print_parallel_update_notice(version_handle);
+    let handshake = tracedecay::daemon::DaemonHandshake::for_current_client(
+        Some(project_path.clone()),
+        None,
+        false,
+        true,
+    )?;
+    tracedecay::daemon::call_default_tool(
+        &handshake,
+        "tracedecay_status",
+        serde_json::json!({"format": "json"}),
+    )
+    .await?;
+    eprintln!(
+        "initialized and indexed {} via daemon",
+        project_path.display()
+    );
     Ok(())
 }
 
@@ -1276,94 +1434,33 @@ pub(crate) async fn handle_sync(
     verbose: bool,
 ) -> tracedecay::errors::Result<()> {
     let project_path = tracedecay::config::resolve_path_with_discovery(path);
-    if !TraceDecay::has_initialized_store(&project_path).await {
+    if !skip_folders.is_empty() || !include_folders.is_empty() {
+        return Err(tracedecay::errors::TraceDecayError::Config {
+            message: "brokered sync does not yet support --skip-folders/--include-folders; update tracedecay.toml first".to_string(),
+        });
+    }
+    let handshake = tracedecay::daemon::DaemonHandshake::for_current_client(
+        Some(project_path.clone()),
+        None,
+        false,
+        false,
+    )?;
+    let result = tracedecay::daemon::call_default_tool(
+        &handshake,
+        "tracedecay_admin_sync",
+        serde_json::json!({"force": force}),
+    )
+    .await?;
+    if verbose {
         eprintln!(
-            "\x1b[31merror:\x1b[0m no TraceDecay index found at '{}'.\n\
-             Run \x1b[1mtracedecay init\x1b[0m to create one first.",
-            project_path.display()
-        );
-        std::process::exit(1);
-    }
-    if project_path.join(".codegraph").is_dir() {
-        eprintln!(
-            "warning: found legacy .codegraph/ directory at '{}'. \
-             tracedecay now uses .tracedecay/ — the old directory can be safely deleted.",
-            project_path.display()
+            "{}",
+            serde_json::to_string_pretty(&result).unwrap_or_default()
         );
     }
-
-    let version_handle = std::thread::spawn(tracedecay::cloud::fetch_latest_version);
-
-    if force {
-        let cg = init_and_index(&project_path, &skip_folders, &include_folders, verbose).await?;
-        close_project_graph(cg).await?;
-    } else {
-        let mut cg = TraceDecay::open(&project_path).await?;
-        cg.add_skip_folders(&skip_folders);
-        cg.add_include_folders(&include_folders);
-        let spinner = Spinner::new();
-        let sync_start = std::time::Instant::now();
-        let result = cg
-            .sync_with_progress_verbose(
-                |current, total, detail| {
-                    if current == 0 {
-                        spinner.set_message(detail);
-                    } else {
-                        let elapsed = sync_start.elapsed().as_secs_f64();
-                        let eta = if current > 1 {
-                            let per_file = elapsed / (current - 1) as f64;
-                            let remaining = per_file * (total - current) as f64;
-                            if remaining >= 1.0 {
-                                format!(" (ETA: {remaining:.0}s)")
-                            } else {
-                                String::new()
-                            }
-                        } else {
-                            String::new()
-                        };
-                        spinner.set_message(&format!("[{current}/{total}] syncing {detail}{eta}"));
-                    }
-                },
-                |msg| {
-                    if verbose {
-                        eprintln!("  \x1b[2m[verbose]\x1b[0m {msg}");
-                    }
-                },
-            )
-            .await?;
-        let skipped_msg = if result.skipped_paths.is_empty() {
-            String::new()
-        } else {
-            format!(", {} skipped", result.skipped_paths.len())
-        };
-        spinner.done(&format!(
-            "sync done — {} added, {} modified, {} removed{skipped_msg} in {}ms",
-            result.files_added, result.files_modified, result.files_removed, result.duration_ms
-        ));
-        if !result.skipped_paths.is_empty() {
-            eprintln!();
-            eprintln!(
-                "\x1b[33mSkipped ({}) — files found but not readable:\x1b[0m",
-                result.skipped_paths.len()
-            );
-            for (path, reason) in &result.skipped_paths {
-                eprintln!("  ! {path}: {reason}");
-            }
-        }
-        if doctor {
-            print_sync_doctor(&result);
-        }
-        global::update_global_db(&cg).await;
-        close_project_graph(cg).await?;
+    eprintln!("sync completed via daemon for {}", project_path.display());
+    if doctor {
+        tracedecay::doctor::run_doctor(None).await?;
     }
-
-    maybe_print_parallel_update_notice(version_handle);
-    Ok(())
-}
-
-async fn close_project_graph(cg: TraceDecay) -> tracedecay::errors::Result<()> {
-    cg.checkpoint().await?;
-    cg.close();
     Ok(())
 }
 
@@ -1426,147 +1523,31 @@ pub(crate) async fn handle_bench(
     max_nodes: usize,
 ) -> tracedecay::errors::Result<()> {
     let project_path = tracedecay::config::resolve_path(path);
-    let cg = crate::serve::ensure_initialized(&project_path).await?;
-
-    let opts = tracedecay::bench::BenchOptions {
-        format: if json {
-            tracedecay::bench::OutputFormat::Json
-        } else {
-            tracedecay::bench::OutputFormat::Markdown
-        },
-        max_nodes,
-    };
-
-    let report = match queries {
-        Some(path) => tracedecay::bench::run_bench(&cg, std::path::Path::new(&path), opts).await?,
-        None => {
-            tracedecay::bench::run_bench_with_toml(
-                &cg,
-                tracedecay::bench::DEFAULT_QUERIES_TOML,
-                opts,
-            )
-            .await?
-        }
-    };
-
-    if json {
-        println!("{}", tracedecay::bench::format_report_json(&report));
-    } else {
-        print!("{}", tracedecay::bench::format_report_console(&report));
-    }
+    let queries_toml = queries
+        .map(std::fs::read_to_string)
+        .transpose()
+        .map_err(|error| tracedecay::errors::TraceDecayError::Config {
+            message: format!("failed to read query file: {error}"),
+        })?;
+    let result = daemon_tool_json(
+        Some(&project_path),
+        "tracedecay_admin_project",
+        serde_json::json!({
+            "action": "bench",
+            "queries_toml": queries_toml,
+            "json": json,
+            "max_nodes": max_nodes,
+        }),
+    )
+    .await?;
+    let output = result
+        .get("output")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| tracedecay::errors::TraceDecayError::Config {
+            message: "daemon bench response omitted output".to_string(),
+        })?;
+    print!("{output}");
     Ok(())
-}
-
-fn maybe_print_parallel_update_notice(version_handle: std::thread::JoinHandle<Option<String>>) {
-    if let Ok(Some(latest)) = version_handle.join() {
-        let current_version = env!("CARGO_PKG_VERSION");
-        let now = crate::current_unix_timestamp();
-        let mut config = tracedecay::user_config::UserConfig::load();
-        config.cached_latest_version = latest.clone();
-        config.last_version_check_at = now;
-        if let Err(err) = config.save_if_exists() {
-            eprintln!("warning: could not save tracedecay config: {err}");
-        }
-        if tracedecay::cloud::is_newer_version(current_version, &latest)
-            && now - config.last_version_warning_at >= 900
-        {
-            eprintln!(
-                "\n\x1b[33mUpdate available: v{} → v{}\x1b[0m\n  Run: \x1b[1mtracedecay upgrade\x1b[0m",
-                current_version, latest
-            );
-            config.last_version_warning_at = now;
-            if let Err(err) = config.save_if_exists() {
-                eprintln!("warning: could not save tracedecay config: {err}");
-            }
-        }
-    }
-}
-
-/// Initializes a new project (if needed) and runs a full index.
-pub(crate) async fn init_and_index(
-    project_path: &Path,
-    skip_folders: &[String],
-    include_folders: &[String],
-    verbose: bool,
-) -> tracedecay::errors::Result<TraceDecay> {
-    if !project_path.is_dir() {
-        return Err(tracedecay::errors::TraceDecayError::Config {
-            message: format!(
-                "project path is not a directory: {}",
-                project_path.display()
-            ),
-        });
-    }
-    if !project_path.is_absolute() {
-        return Err(tracedecay::errors::TraceDecayError::Config {
-            message: format!("project path must be absolute: {}", project_path.display()),
-        });
-    }
-    let mut cg = if TraceDecay::has_initialized_store(project_path).await {
-        TraceDecay::open(project_path).await?
-    } else {
-        let cg = TraceDecay::init(project_path).await?;
-        eprintln!("Initialized TraceDecay at {}", project_path.display());
-        let data_dir_name = tracedecay::config::get_tracedecay_dir(project_path)
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or(tracedecay::config::TRACEDECAY_DIR)
-            .to_string();
-        // Offer to add the resolved data directory to .gitignore if needed.
-        if !tracedecay::config::is_in_gitignore(project_path) {
-            if io::stdin().is_terminal() {
-                eprint!("Add {data_dir_name} to .gitignore? [Y/n] ");
-                io::stderr().flush().ok();
-                let mut answer = String::new();
-                if io::stdin().lock().read_line(&mut answer).is_ok() {
-                    let answer = answer.trim();
-                    if answer.is_empty() || answer.eq_ignore_ascii_case("y") {
-                        tracedecay::config::add_to_gitignore(project_path);
-                        eprintln!("Added {data_dir_name} to .gitignore");
-                    }
-                }
-            } else {
-                eprintln!(
-                    "Non-interactive: skipped adding {data_dir_name} to .gitignore (run interactively to opt in)."
-                );
-            }
-        }
-        cg
-    };
-    cg.add_skip_folders(skip_folders);
-    cg.add_include_folders(include_folders);
-    let spinner = Spinner::new();
-    let index_start = std::time::Instant::now();
-    let result = cg
-        .index_all_with_progress_verbose(
-            |current, total, file| {
-                let elapsed = index_start.elapsed().as_secs_f64();
-                let eta = if current > 1 {
-                    let per_file = elapsed / (current - 1) as f64;
-                    let remaining = per_file * (total - current) as f64;
-                    if remaining >= 1.0 {
-                        format!(" (ETA: {remaining:.0}s)")
-                    } else {
-                        String::new()
-                    }
-                } else {
-                    String::new()
-                };
-                spinner.set_message(&format!("[{current}/{total}] indexing {file}{eta}"));
-            },
-            |msg| {
-                if verbose {
-                    eprintln!("  \x1b[2m[verbose]\x1b[0m {msg}");
-                }
-            },
-        )
-        .await?;
-    spinner.done(&format!(
-        "indexing done — {} files, {} nodes, {} edges in {}ms",
-        result.file_count, result.node_count, result.edge_count, result.duration_ms
-    ));
-    global::update_global_db(&cg).await;
-    Ok(cg)
 }
 
 /// Convert raw tokens-saved into a USD estimate using Sonnet input pricing.
@@ -1592,14 +1573,6 @@ pub async fn handle_gain(
     json_output: bool,
 ) -> tracedecay::errors::Result<()> {
     tracedecay::accounting::pricing::refresh_if_stale();
-    let gdb = match tracedecay::global_db::GlobalDb::open().await {
-        Some(db) => db,
-        None => {
-            eprintln!("Could not open the global database (~/.tracedecay/global.db).");
-            return Ok(());
-        }
-    };
-
     let since = tracedecay::accounting::metrics::parse_range(range);
     let project_filter: Option<String> = if all {
         None
@@ -1609,10 +1582,38 @@ pub async fn handle_gain(
             .map(|p| p.to_string_lossy().into_owned())
     };
 
+    let result = daemon_tool_json(
+        None,
+        "tracedecay_admin_cli",
+        serde_json::json!({
+            "action": "gain_query",
+            "project_arg": project_filter,
+            "since": since as i64,
+            "history": history,
+        }),
+    )
+    .await?;
     if history {
-        let rows = gdb
-            .savings_history(project_filter.as_deref(), since as i64)
-            .await;
+        let rows = result
+            .get("history")
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+            .map(|row| tracedecay::global_db::SavingsDay {
+                day: row
+                    .get("day")
+                    .and_then(serde_json::Value::as_i64)
+                    .unwrap_or(0),
+                saved_tokens: row
+                    .get("saved_tokens")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(0),
+                calls: row
+                    .get("calls")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(0),
+            })
+            .collect::<Vec<_>>();
         if json_output {
             let arr: Vec<_> = rows
                 .iter()
@@ -1632,17 +1633,22 @@ pub async fn handle_gain(
         return Ok(());
     }
 
-    let total = gdb
-        .sum_savings(project_filter.as_deref(), since as i64)
-        .await;
-    let usd = estimate_dollars_saved(total.saved_tokens);
+    let saved_tokens = result
+        .get("saved_tokens")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    let calls = result
+        .get("calls")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    let usd = estimate_dollars_saved(saved_tokens);
 
     if json_output {
         let out = serde_json::json!({
             "range": range,
             "project": project_filter.clone().unwrap_or_else(|| "ALL".to_string()),
-            "saved_tokens": total.saved_tokens,
-            "calls": total.calls,
+            "saved_tokens": saved_tokens,
+            "calls": calls,
             "usd": usd,
         });
         println!("{}", serde_json::to_string_pretty(&out).unwrap_or_default());
@@ -1650,42 +1656,12 @@ pub async fn handle_gain(
         tracedecay::display::print_gain_total(
             project_filter.as_deref().unwrap_or("ALL projects"),
             range,
-            total.saved_tokens,
-            total.calls,
+            saved_tokens,
+            calls,
             usd,
         );
     }
     Ok(())
-}
-
-/// Print the `--doctor` report after an incremental sync.
-pub(crate) fn print_sync_doctor(result: &tracedecay::tracedecay::SyncResult) {
-    let has_changes = !result.added_paths.is_empty()
-        || !result.modified_paths.is_empty()
-        || !result.removed_paths.is_empty();
-    if !has_changes {
-        eprintln!("\n\x1b[2mNo files changed.\x1b[0m");
-        return;
-    }
-    eprintln!();
-    if !result.added_paths.is_empty() {
-        eprintln!("\x1b[32mAdded ({}):\x1b[0m", result.added_paths.len());
-        for p in &result.added_paths {
-            eprintln!("  + {p}");
-        }
-    }
-    if !result.modified_paths.is_empty() {
-        eprintln!("\x1b[33mModified ({}):\x1b[0m", result.modified_paths.len());
-        for p in &result.modified_paths {
-            eprintln!("  ~ {p}");
-        }
-    }
-    if !result.removed_paths.is_empty() {
-        eprintln!("\x1b[31mRemoved ({}):\x1b[0m", result.removed_paths.len());
-        for p in &result.removed_paths {
-            eprintln!("  - {p}");
-        }
-    }
 }
 
 #[cfg(test)]

@@ -100,6 +100,27 @@ pub struct GlobalDbInventory {
 }
 
 pub async fn build_inventory(options: MigrationInventoryOptions) -> Result<MigrationInventory> {
+    let profile_root = options
+        .global_db_path
+        .as_deref()
+        .and_then(Path::parent)
+        .map(Path::to_path_buf)
+        .map_or_else(crate::storage::default_profile_root, Ok)?;
+    let lifecycle = crate::lifecycle_lease::acquire_exclusive_for_profile(
+        &profile_root,
+        "migration inventory",
+    )?;
+    let _database_scope = crate::db::enter_maintenance_database_scope(
+        &lifecycle,
+        &profile_root,
+        "migration inventory",
+    )?;
+    build_inventory_in_scope(options).await
+}
+
+async fn build_inventory_in_scope(
+    options: MigrationInventoryOptions,
+) -> Result<MigrationInventory> {
     let mut stores = Vec::new();
     let mut skipped = Vec::new();
     let mut seen_data_dirs = HashSet::new();
@@ -559,31 +580,42 @@ async fn inspect_global_db(path: &Path, path_overridden: bool) -> GlobalDbInvent
     let mut warnings = Vec::new();
 
     if exists {
-        let db_result = Builder::new_local(path)
-            .flags(OpenFlags::SQLITE_OPEN_READ_ONLY)
-            .build()
-            .await;
-        match db_result {
-            Ok(db) => match db.connect() {
-                Ok(conn) => {
-                    if !sqlite_quick_check(path).await {
-                        warnings.push(format!("global DB '{}' failed quick_check", path.display()));
+        let authority =
+            crate::db::DatabaseAuthority::for_runtime(path, "inspect global database offline");
+        if let Err(error) = authority.as_ref() {
+            warnings.push(format!(
+                "global DB '{}' is owned by the daemon; stop it before offline inventory: {error}",
+                path.display()
+            ));
+        }
+        if authority.is_ok() {
+            let db_result = Builder::new_local(path)
+                .flags(OpenFlags::SQLITE_OPEN_READ_ONLY)
+                .build()
+                .await;
+            match db_result {
+                Ok(db) => match db.connect() {
+                    Ok(conn) => {
+                        if !sqlite_quick_check(path).await {
+                            warnings
+                                .push(format!("global DB '{}' failed quick_check", path.display()));
+                        }
+                        project_count = table_count(&conn, "projects").await;
+                        session_count = table_count(&conn, "sessions").await;
+                        lcm_raw_message_count = table_count(&conn, "lcm_raw_messages").await;
+                        token_cache_present = table_exists(&conn, "dashboard_token_counts").await;
+                        registered_project_paths = project_paths(&conn).await;
                     }
-                    project_count = table_count(&conn, "projects").await;
-                    session_count = table_count(&conn, "sessions").await;
-                    lcm_raw_message_count = table_count(&conn, "lcm_raw_messages").await;
-                    token_cache_present = table_exists(&conn, "dashboard_token_counts").await;
-                    registered_project_paths = project_paths(&conn).await;
-                }
+                    Err(err) => warnings.push(format!(
+                        "could not inspect global DB '{}': {err}",
+                        path.display()
+                    )),
+                },
                 Err(err) => warnings.push(format!(
                     "could not inspect global DB '{}': {err}",
                     path.display()
                 )),
-            },
-            Err(err) => warnings.push(format!(
-                "could not inspect global DB '{}': {err}",
-                path.display()
-            )),
+            }
         }
     }
 
@@ -603,6 +635,11 @@ async fn inspect_global_db(path: &Path, path_overridden: bool) -> GlobalDbInvent
 }
 
 async fn sqlite_quick_check(path: &Path) -> bool {
+    let Ok(_authority) =
+        crate::db::DatabaseAuthority::for_runtime(path, "quick-check SQLite database offline")
+    else {
+        return false;
+    };
     let Ok(db) = Builder::new_local(path)
         .flags(OpenFlags::SQLITE_OPEN_READ_ONLY)
         .build()

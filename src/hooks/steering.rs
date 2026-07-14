@@ -249,12 +249,23 @@ pub fn cursor_staleness_hint(age_secs: i64) -> String {
 
 /// Opens the index once and reads both session-steering signals.
 pub(super) async fn cursor_index_signals_for_root(root: &Path) -> (Option<String>, Option<u64>) {
-    let Ok(cg) = crate::tracedecay::TraceDecay::open(root).await else {
+    let Ok(status) = super::daemon_tool_json(
+        Some(root),
+        "tracedecay_status",
+        serde_json::json!({ "format": "json" }),
+    )
+    .await
+    else {
         return (None, None);
     };
-    let last = cg.last_sync_timestamp().await;
+    let last = status
+        .get("last_updated")
+        .and_then(serde_json::Value::as_i64)
+        .unwrap_or(0);
     let staleness = (last > 0).then(|| cursor_staleness_hint(now_unix_secs() - last));
-    let tokens_saved = cg.get_tokens_saved().await.ok();
+    let tokens_saved = status
+        .get("tokens_saved")
+        .and_then(serde_json::Value::as_u64);
     (staleness, tokens_saved)
 }
 

@@ -98,7 +98,7 @@ pub async fn ingest_user_codex_sessions(session_id: Option<String>) -> Transcrip
     ingest_user_codex_sessions_at(&profile_root, session_id, registered_roots).await
 }
 
-async fn ingest_user_codex_sessions_at(
+pub(crate) async fn ingest_user_codex_sessions_at(
     profile_root: &Path,
     session_id: Option<String>,
     registered_roots: Vec<PathBuf>,

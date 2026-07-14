@@ -14,7 +14,7 @@ async fn setup_db() -> (Database, TempDir) {
     let dir = TempDir::new().expect("failed to create temp dir");
     let db_path = dir.path().join("test.db");
     support::seed_latest_graph_db(&db_path).await;
-    let (db, migrated) = Database::open(&db_path)
+    let (db, migrated) = crate::common::open_test_database(&db_path)
         .await
         .expect("failed to open template database");
     assert!(!migrated, "template database should not require migration");
@@ -54,7 +54,7 @@ fn sample_node(id: &str, name: &str, file_path: &str) -> Node {
 async fn test_initialize_creates_database() {
     let dir = TempDir::new().expect("failed to create temp dir");
     let db_path = dir.path().join("subdir").join("code_graph.db");
-    let (_db, _) = Database::initialize(&db_path)
+    let (_db, _) = crate::common::initialize_test_database(&db_path)
         .await
         .expect("failed to initialize database");
     assert!(
@@ -68,7 +68,7 @@ async fn test_initialize_creates_database() {
 async fn test_open_read_only_reads_existing_database_without_write_pragmas() {
     let dir = TempDir::new().expect("failed to create temp dir");
     let db_path = dir.path().join("code_graph.db");
-    let (db, _) = Database::initialize(&db_path)
+    let (db, _) = crate::common::initialize_test_database(&db_path)
         .await
         .expect("failed to initialize database");
     db.insert_node(&sample_node("node-1", "process_data", "src/main.rs"))
@@ -84,7 +84,7 @@ async fn test_open_read_only_reads_existing_database_without_write_pragmas() {
     permissions.set_mode(0o444);
     std::fs::set_permissions(&db_path, permissions).expect("failed to mark database readonly");
 
-    let (db, migrated) = Database::open_read_only(&db_path)
+    let (db, migrated) = crate::common::open_test_database_read_only(&db_path)
         .await
         .expect("readonly database should open");
     let stats = db
@@ -548,7 +548,9 @@ async fn test_migrate_is_idempotent_at_latest() {
     // re-runs of v7's ALTER TABLE on an already-migrated DB.
     let dir = TempDir::new().expect("tempdir");
     let db_path = dir.path().join("idem.db");
-    let (db, _) = Database::initialize(&db_path).await.expect("initialize");
+    let (db, _) = crate::common::initialize_test_database(&db_path)
+        .await
+        .expect("initialize");
     drop(db);
 
     let lib_db = libsql::Builder::new_local(&db_path)

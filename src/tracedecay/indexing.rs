@@ -237,8 +237,7 @@ impl TraceDecay {
             "project root is not a directory"
         );
         self.ensure_branch_writable("full index")?;
-        let _lock = self.try_acquire_active_sync_lock()?;
-        self.write_active_dirty_sentinels();
+        let sync_lease = self.begin_active_sync()?;
         let start = Instant::now();
 
         // 1. Clear existing data and enter bulk-load mode
@@ -378,7 +377,7 @@ impl TraceDecay {
             "non-empty index completed in zero milliseconds"
         );
         self.db.checkpoint().await?;
-        self.clear_active_dirty_sentinels();
+        sync_lease.commit()?;
         Ok(result)
     }
 
@@ -419,16 +418,15 @@ impl TraceDecay {
 
         self.ensure_branch_writable("sync files")?;
 
-        let Ok(lock) = self.try_acquire_active_sync_lock() else {
+        let Ok(sync_lease) = self.begin_active_sync() else {
             return Ok(true);
         };
-        self.write_active_dirty_sentinels();
 
         let result = self.sync_single_files(&stale_files).await;
-        drop(lock);
 
         match result {
             Ok(()) => {
+                sync_lease.commit()?;
                 let still_stale_after = self.check_file_staleness(&stale_files).await;
                 Ok(!still_stale_after.is_empty())
             }
@@ -457,8 +455,8 @@ impl TraceDecay {
 
         self.ensure_branch_writable("sync files")?;
 
-        let lock = if let Ok(lock) = self.try_acquire_active_sync_lock() {
-            lock
+        let sync_lease = if let Ok(sync_lease) = self.begin_active_sync() {
+            sync_lease
         } else {
             // Peer is syncing. Wait for them to release the lock so the
             // caller (e.g. the embedded watcher's refresh hook) sees the
@@ -472,22 +470,22 @@ impl TraceDecay {
                     return Ok(());
                 }
                 tokio::time::sleep(Duration::from_millis(50)).await;
-                if let Ok(lock) = self.try_acquire_active_sync_lock() {
+                if let Ok(sync_lease) = self.begin_active_sync() {
                     // Peer released. If they covered our files, the DB is
                     // fresh and we're done; otherwise sync ourselves.
                     let still_stale = self.check_file_staleness(&stale_files).await;
                     if still_stale.is_empty() {
-                        drop(lock);
+                        sync_lease.commit()?;
                         return Ok(());
                     }
-                    break lock;
+                    break sync_lease;
                 }
             }
         };
-        self.write_active_dirty_sentinels();
 
-        let _ = self.sync_single_files(&stale_files).await;
-        drop(lock);
+        if self.sync_single_files(&stale_files).await.is_ok() {
+            sync_lease.commit()?;
+        }
         Ok(())
     }
 
@@ -597,7 +595,6 @@ impl TraceDecay {
             .await?;
 
         self.db.checkpoint().await?;
-        self.clear_active_dirty_sentinels();
         Ok(())
     }
 
@@ -633,7 +630,9 @@ impl TraceDecay {
         }
 
         if !accepted.is_empty() {
+            let sync_lease = self.begin_active_sync()?;
             self.sync_single_files(&accepted).await?;
+            sync_lease.commit()?;
         }
         Ok(accepted)
     }
@@ -781,8 +780,7 @@ impl TraceDecay {
             "sync: project root is not a directory"
         );
         self.ensure_branch_writable("sync")?;
-        let _lock = self.try_acquire_active_sync_lock()?;
-        self.write_active_dirty_sentinels();
+        let sync_lease = self.begin_active_sync()?;
         let start = Instant::now();
 
         on_progress(0, 0, "scanning files");
@@ -1047,7 +1045,7 @@ impl TraceDecay {
             .await?;
 
         self.db.checkpoint().await?;
-        self.clear_active_dirty_sentinels();
+        sync_lease.commit()?;
         Ok(SyncResult {
             files_added: new_files.len(),
             files_modified: stale.len(),

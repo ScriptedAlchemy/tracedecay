@@ -83,7 +83,8 @@ pub(super) async fn merge_graph_facts(
     let target_path = paths
         .first()
         .ok_or_else(|| db_message("merge_graph_facts", "no target graph database"))?;
-    let (target, _) = Database::open(target_path).await?;
+    let authority = crate::db::DatabaseAuthority::for_runtime(target_path, "merge graph facts")?;
+    let (target, _) = Database::open(target_path, &authority).await?;
     for offset in offsets {
         merge_one_graph(target.conn(), offset).await?;
     }
@@ -94,14 +95,16 @@ pub(super) async fn merge_graph_facts(
 }
 
 async fn normalize_graph(path: &Path) -> Result<()> {
-    let (db, _) = Database::open(path).await?;
+    let authority = crate::db::DatabaseAuthority::for_runtime(path, "normalize graph")?;
+    let (db, _) = Database::open(path, &authority).await?;
     db.checkpoint().await?;
     db.close();
     Ok(())
 }
 
 async fn graph_maxima(path: &Path) -> Result<(i64, i64, i64, i64)> {
-    let (db, _) = Database::open_read_only(path).await?;
+    let authority = crate::db::DatabaseAuthority::for_runtime(path, "read graph maxima")?;
+    let (db, _) = Database::open_read_only(path, &authority).await?;
     let result = (
         table_max(db.conn(), "memory_facts", "fact_id").await?,
         table_max(db.conn(), "memory_entities", "entity_id").await?,

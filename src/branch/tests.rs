@@ -198,7 +198,11 @@ async fn read_only_sqlite_snapshot_includes_committed_data() {
     let dir = tempfile::tempdir().unwrap();
     let src = dir.path().join("src.db");
     let dst = dir.path().join("dst.db");
-    let (writer, _) = crate::db::Database::initialize(&src).await.unwrap();
+    let authority =
+        crate::db::DatabaseAuthority::acquire_test(&src, "branch snapshot test").unwrap();
+    let (writer, _) = crate::db::Database::initialize(&src, &authority)
+        .await
+        .unwrap();
     writer
         .conn()
         .execute_batch(
@@ -207,10 +211,25 @@ async fn read_only_sqlite_snapshot_includes_committed_data() {
         )
         .await
         .unwrap();
+    writer.close();
 
-    writer.snapshot_to(&dst).await.unwrap();
+    let (source, _) = crate::db::Database::open_read_only(&src, &authority)
+        .await
+        .unwrap();
+    source.snapshot_to(&dst).await.unwrap();
+    assert!(
+        source
+            .conn()
+            .execute("CREATE TABLE forbidden_snapshot_write (id INTEGER)", ())
+            .await
+            .is_err()
+    );
 
-    let (snapshot, _) = crate::db::Database::open_read_only(&dst).await.unwrap();
+    let snapshot_authority =
+        crate::db::DatabaseAuthority::acquire_test(&dst, "branch snapshot verification").unwrap();
+    let (snapshot, _) = crate::db::Database::open_read_only(&dst, &snapshot_authority)
+        .await
+        .unwrap();
     let mut rows = snapshot
         .conn()
         .query("SELECT value FROM snapshot_probe", ())

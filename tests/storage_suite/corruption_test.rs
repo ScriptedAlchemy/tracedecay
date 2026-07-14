@@ -14,7 +14,7 @@ use crate::support;
 use std::io::{Seek, Write};
 use tempfile::TempDir;
 use tracedecay::db::Database;
-use tracedecay::tracedecay::{TraceDecay, TraceDecayOpenOptions};
+use tracedecay::tracedecay::{TraceDecay, TraceDecayOpenOptions, try_acquire_sync_lock};
 use tracedecay::types::*;
 
 /// Helper: create a temp database and return (Database, TempDir, db_path).
@@ -25,7 +25,7 @@ async fn setup_db() -> (Database, TempDir, std::path::PathBuf) {
     let dir = TempDir::new().expect("failed to create temp dir");
     let db_path = dir.path().join("test.db");
     support::seed_latest_graph_db(&db_path).await;
-    let (db, migrated) = Database::open(&db_path)
+    let (db, migrated) = crate::common::open_test_database(&db_path)
         .await
         .expect("failed to open template database");
     assert!(!migrated, "template database should not require migration");
@@ -38,7 +38,7 @@ async fn writable_open_bootstraps_a_missing_database_path() {
     let db_path = dir.path().join("new.db");
     assert!(!db_path.exists());
 
-    let (db, _) = Database::open(&db_path)
+    let (db, _) = crate::common::open_test_database(&db_path)
         .await
         .expect("writable open should preserve fresh-path bootstrap behavior");
     assert!(db_path.exists());
@@ -135,7 +135,7 @@ async fn quick_check_detects_page_level_corruption() {
     }
 
     // Reopen — quick_check should detect the corruption
-    let (db2, _) = Database::open(&db_path)
+    let (db2, _) = crate::common::open_test_database(&db_path)
         .await
         .expect("open should succeed even with corruption");
     let intact = db2.quick_check().await.unwrap();
@@ -355,6 +355,124 @@ fn dirty_sentinel_survives_drop() {
     assert!(dirty_path.exists(), "sentinel must survive scope drop");
 }
 
+#[tokio::test]
+async fn persistent_sync_lock_coordinates_processes_and_recovers_after_crash() {
+    if let Ok(mode) = std::env::var("TRACEDECAY_TEST_LOCK_CHILD") {
+        let project = std::path::PathBuf::from(
+            std::env::var_os("TRACEDECAY_TEST_LOCK_PROJECT").expect("child project path"),
+        );
+        let ready = std::path::PathBuf::from(
+            std::env::var_os("TRACEDECAY_TEST_LOCK_READY").expect("child ready path"),
+        );
+        let guard = try_acquire_sync_lock(&project).expect("child lock lease");
+        std::fs::write(&ready, b"ready").expect("publish child readiness");
+        if mode == "crash" {
+            std::mem::forget(guard);
+            std::process::exit(86);
+        }
+        let release = std::path::PathBuf::from(
+            std::env::var_os("TRACEDECAY_TEST_LOCK_RELEASE").expect("child release path"),
+        );
+        while !release.exists() {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        drop(guard);
+        return;
+    }
+
+    let dir = TempDir::new().unwrap();
+    let project = dir.path().join("repo");
+    std::fs::create_dir_all(&project).unwrap();
+    let ts = TraceDecay::init(&project).await.unwrap();
+    let lock_path = ts.store_layout().sync_lock_path.clone();
+    ts.close();
+
+    let run_child = |mode: &str, release: Option<&std::path::Path>| {
+        let ready = dir.path().join(format!("{mode}.ready"));
+        let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+        command
+            .arg("persistent_sync_lock_coordinates_processes_and_recovers_after_crash")
+            .arg("--nocapture")
+            .env("TRACEDECAY_TEST_LOCK_CHILD", mode)
+            .env("TRACEDECAY_TEST_LOCK_PROJECT", &project)
+            .env("TRACEDECAY_TEST_LOCK_READY", &ready)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        if let Some(path) = release {
+            command.env("TRACEDECAY_TEST_LOCK_RELEASE", path);
+        }
+        let mut child = command.spawn().unwrap();
+        for _ in 0..1_000 {
+            if ready.exists() {
+                return child;
+            }
+            if let Some(status) = child.try_wait().unwrap() {
+                panic!("lock child exited before acquiring its lease: {status}");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let _ = child.kill();
+        panic!("lock child did not acquire its lease");
+    };
+
+    let release = dir.path().join("release");
+    let mut holder = run_child("hold", Some(&release));
+    assert!(
+        try_acquire_sync_lock(&project).is_err(),
+        "a second process must not enter while the kernel lease is held"
+    );
+    std::fs::write(&release, b"release").unwrap();
+    assert!(holder.wait().unwrap().success());
+
+    let guard = try_acquire_sync_lock(&project).expect("released lease must be reusable");
+    drop(guard);
+    assert!(lock_path.exists(), "the lockfile must persist after Drop");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            std::fs::metadata(&lock_path).unwrap().permissions().mode() & 0o777,
+            0o600,
+            "persistent lock metadata must be owner-only"
+        );
+    }
+
+    let mut crashed = run_child("crash", None);
+    assert_eq!(crashed.wait().unwrap().code(), Some(86));
+    assert!(lock_path.exists(), "the lockfile must survive a crash");
+    drop(try_acquire_sync_lock(&project).expect("kernel must release a crashed lease"));
+}
+
+#[tokio::test]
+async fn structured_dirty_marker_is_cleared_after_epoch_owned_recovery()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    let dir = TempDir::new()?;
+    let project_root = dir.path().join("repo");
+    std::fs::create_dir_all(&project_root)?;
+    let open_options = TraceDecayOpenOptions {
+        profile_root: Some(dir.path().join("profile")),
+        global_db_path: Some(dir.path().join("global.db")),
+    };
+    let ts = TraceDecay::init_with_options(&project_root, open_options.clone()).await?;
+    let layout = ts.store_layout().clone();
+    ts.close();
+
+    std::fs::write(
+        &layout.dirty_path,
+        format!(
+            r#"{{"schema":2,"owner":{{"pid":{}}},"epoch":"fixture-epoch","state":"dirty","time":0,"version":"test"}}"#,
+            std::process::id()
+        ),
+    )?;
+    let recovered = TraceDecay::open_with_options(&project_root, open_options).await?;
+    assert!(
+        !layout.dirty_path.exists(),
+        "recovery may clear only the epoch it adopted under the lock lease"
+    );
+    recovered.close();
+    Ok(())
+}
+
 // ─── Full crash→detect→repair cycle ──────────────────────────────────────
 
 #[tokio::test]
@@ -534,7 +652,9 @@ async fn corrupt_db_detected_and_repaired_on_reopen() {
     let db_path = dir.path().join("test.db");
 
     // Create and populate a database
-    let (db, _) = Database::initialize(&db_path).await.unwrap();
+    let (db, _) = crate::common::initialize_test_database(&db_path)
+        .await
+        .unwrap();
     let nodes: Vec<Node> = (0..50)
         .map(|i| sample_node(&format!("d{i}"), &format!("func_{i}")))
         .collect();
@@ -556,7 +676,7 @@ async fn corrupt_db_detected_and_repaired_on_reopen() {
     }
 
     // Reopen — should be able to open but quick_check fails
-    let open_result = Database::open(&db_path).await;
+    let open_result = crate::common::open_test_database(&db_path).await;
     match open_result {
         Ok((db2, _)) => {
             let intact = db2.quick_check().await.unwrap();
@@ -583,7 +703,9 @@ async fn corrupt_db_detected_and_repaired_on_reopen() {
     wal.set_extension("db-shm");
     std::fs::remove_file(&wal).ok();
 
-    let (db3, _) = Database::initialize(&db_path).await.unwrap();
+    let (db3, _) = crate::common::initialize_test_database(&db_path)
+        .await
+        .unwrap();
     assert!(
         db3.quick_check().await.unwrap(),
         "fresh db after recovery should be healthy"
@@ -591,142 +713,4 @@ async fn corrupt_db_detected_and_repaired_on_reopen() {
     close_db(db3).await;
 }
 
-#[tokio::test]
-async fn fts_corruption_falls_back_without_rebuild_or_write() {
-    let (db, _dir, db_path) = setup_db().await;
-
-    // Insert data so FTS has content
-    let nodes = vec![
-        sample_node("e1", "important_handler"),
-        sample_node("e2", "other_helper"),
-    ];
-    db.insert_nodes(&nodes).await.unwrap();
-
-    // Verify search works
-    let results = db.search_nodes("important_handler", 10).await.unwrap();
-    assert_eq!(results[0].node.id, "e1");
-
-    // Capture an FTS segment, then corrupt only its payload on disk. The nodes
-    // table and primary database B-trees remain healthy.
-    let mut rows = db
-        .conn()
-        .query(
-            "SELECT block FROM nodes_fts_data WHERE id > 10 ORDER BY id DESC LIMIT 1",
-            (),
-        )
-        .await
-        .unwrap();
-    let segment = rows
-        .next()
-        .await
-        .unwrap()
-        .unwrap()
-        .get::<Vec<u8>>(0)
-        .unwrap();
-    drop(rows);
-    db.checkpoint().await.unwrap();
-    db.close();
-
-    // Corrupt both FTS and an unrelated table. Checking only `nodes` would
-    // incorrectly permit the LIKE fallback because its B-tree is still sound.
-    let mut bytes = std::fs::read(&db_path).unwrap();
-    let offset = bytes
-        .windows(segment.len())
-        .position(|candidate| candidate == segment)
-        .expect("FTS segment must be present in the checkpointed database");
-    bytes[offset..offset + 8].fill(0xff);
-    std::fs::write(&db_path, bytes).unwrap();
-
-    let (db, _) = Database::open(&db_path).await.unwrap();
-    assert!(
-        !db.quick_check().await.unwrap(),
-        "fixture must trigger SQLite's FTS integrity failure"
-    );
-    let changes_before = db.conn().total_changes();
-
-    let results = db.search_nodes("important_handler", 10).await.unwrap();
-    assert_eq!(results[0].node.id, "e1", "LIKE fallback must still match");
-    assert_eq!(
-        db.conn().total_changes(),
-        changes_before,
-        "search must not rebuild or otherwise write"
-    );
-
-    let mut rows = db
-        .conn()
-        .query(
-            "SELECT rowid FROM nodes_fts WHERE nodes_fts MATCH '\"important_handler\"*'",
-            (),
-        )
-        .await
-        .unwrap();
-    assert!(
-        rows.next().await.is_err(),
-        "the corrupt FTS index must remain untouched for offline repair"
-    );
-    drop(rows);
-    close_db(db).await;
-}
-
-#[tokio::test]
-async fn whole_database_corruption_propagates_without_write() {
-    let (db, _dir, db_path) = setup_db().await;
-    db.insert_nodes(&[sample_node("whole-db", "whole_db_probe")])
-        .await
-        .unwrap();
-
-    let mut rows = db
-        .conn()
-        .query(
-            "SELECT block FROM nodes_fts_data WHERE id > 10 ORDER BY id DESC LIMIT 1",
-            (),
-        )
-        .await
-        .unwrap();
-    let segment = rows
-        .next()
-        .await
-        .unwrap()
-        .unwrap()
-        .get::<Vec<u8>>(0)
-        .unwrap();
-    drop(rows);
-    let mut rows = db
-        .conn()
-        .query(
-            "SELECT rootpage FROM sqlite_schema WHERE name = 'edges'",
-            (),
-        )
-        .await
-        .unwrap();
-    let root_page = rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap() as u64;
-    drop(rows);
-    let mut rows = db.conn().query("PRAGMA page_size", ()).await.unwrap();
-    let page_size = rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap() as u64;
-    drop(rows);
-    db.checkpoint().await.unwrap();
-    db.close();
-
-    let mut bytes = std::fs::read(&db_path).unwrap();
-    let fts_offset = bytes
-        .windows(segment.len())
-        .position(|candidate| candidate == segment)
-        .expect("FTS segment must be present in the checkpointed database");
-    bytes[fts_offset..fts_offset + 8].fill(0xff);
-    bytes[((root_page - 1) * page_size) as usize] = 0xff;
-    std::fs::write(&db_path, bytes).unwrap();
-
-    let (db, _) = Database::open(&db_path).await.unwrap();
-    let changes_before = db.conn().total_changes();
-    let error = db.search_nodes("whole_db_probe", 10).await.unwrap_err();
-    assert!(
-        Database::is_corruption_error(&error),
-        "unexpected error: {error}"
-    );
-    assert_eq!(
-        db.conn().total_changes(),
-        changes_before,
-        "search must not write while reporting whole-database corruption"
-    );
-    db.close();
-}
+mod fallback;

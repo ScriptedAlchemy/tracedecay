@@ -742,7 +742,9 @@ async fn create_consistent_branch_snapshot(src: &Path, dst: &Path) -> crate::err
         std::process::id()
     ));
     let result = async {
-        let (source, _) = crate::db::Database::open_read_only(src).await?;
+        let authority =
+            crate::db::DatabaseAuthority::for_runtime(src, "create branch snapshot")?;
+        let (source, _) = crate::db::Database::open_read_only(src, &authority).await?;
         source.snapshot_to(&temp).await?;
         std::fs::hard_link(&temp, dst).map_err(|error| {
             crate::errors::TraceDecayError::Config {

@@ -11,6 +11,10 @@
 
 use std::path::{Path, PathBuf};
 
+mod cost;
+
+use cost::{CostCache, CostCacheState};
+
 // ── Layout constants ────────────────────────────────────────────────
 const HEADER_SIZE: usize = 32;
 const ENTRY_SIZE: usize = 128;
@@ -334,80 +338,6 @@ pub fn run() -> std::io::Result<()> {
     result
 }
 
-/// Cached cost data for the monitor panel, refreshed periodically.
-struct CostCache {
-    today_cost: f64,
-    week_cost: f64,
-    tokens_saved: u64,
-    efficiency_pct: f64,
-    top_model: String,
-    top_model_cost: f64,
-    last_refresh: std::time::Instant,
-}
-
-impl CostCache {
-    fn new() -> Self {
-        Self {
-            today_cost: 0.0,
-            week_cost: 0.0,
-            tokens_saved: 0,
-            efficiency_pct: 0.0,
-            top_model: String::new(),
-            top_model_cost: 0.0,
-            last_refresh: std::time::Instant::now()
-                .checked_sub(std::time::Duration::from_secs(999))
-                .unwrap_or_else(std::time::Instant::now),
-        }
-    }
-
-    fn is_stale(&self) -> bool {
-        self.last_refresh.elapsed() > std::time::Duration::from_secs(30)
-    }
-}
-
-/// Refresh cost data from the global DB. Best-effort, non-blocking.
-/// Uses a tokio runtime because `GlobalDb` is async.
-fn refresh_cost_cache(cache: &mut CostCache) {
-    let future = async {
-        let Some(gdb) = crate::global_db::GlobalDb::open().await else {
-            return;
-        };
-
-        // Ingest any new data first
-        crate::accounting::parser::ingest(&gdb).await;
-
-        let now_epoch = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-        let today_start = now_epoch - (now_epoch % 86400);
-        let week_start = now_epoch.saturating_sub(7 * 86400);
-
-        cache.today_cost = gdb.total_cost_since(today_start).await.unwrap_or(0.0);
-        cache.week_cost = gdb.total_cost_since(week_start).await.unwrap_or(0.0);
-
-        let week_consumed = gdb.total_tokens_since(week_start).await.unwrap_or(0);
-        cache.tokens_saved = gdb.global_tokens_saved().await.unwrap_or(0);
-
-        cache.efficiency_pct = if cache.tokens_saved + week_consumed > 0 {
-            (cache.tokens_saved as f64 / (cache.tokens_saved + week_consumed) as f64) * 100.0
-        } else {
-            0.0
-        };
-
-        let models = gdb.cost_by_model_since(today_start).await;
-        if let Some((model, cost, _)) = models.first() {
-            cache.top_model.clone_from(model);
-            cache.top_model_cost = *cost;
-        }
-    };
-    // monitor::run() is always invoked from inside #[tokio::main]'s
-    // multi-threaded runtime, so creating a new runtime would panic.
-    // Use block_in_place + the existing handle on every platform.
-    tokio::task::block_in_place(|| tokio::runtime::Handle::current().block_on(future));
-    cache.last_refresh = std::time::Instant::now();
-}
-
 fn monitor_loop(
     reader: &mut MmapReader,
     entries: &mut Vec<MonitorEntry>,
@@ -470,9 +400,9 @@ fn monitor_loop(
             *last_idx = current_idx;
         }
 
-        // Refresh cost cache every 30 seconds.
+        cost_cache.poll_refresh();
         if cost_cache.is_stale() {
-            refresh_cost_cache(&mut cost_cache);
+            cost_cache.begin_refresh();
         }
 
         // Render.
@@ -482,39 +412,52 @@ fn monitor_loop(
 
         execute!(stdout, cursor::MoveTo(0, 0))?;
 
-        // Layout: cost panel (3 lines) + separator + log + separator + footer (2 lines)
-        let has_cost = cost_cache.today_cost >= 0.001 || cost_cache.week_cost >= 0.001;
-        let cost_lines = if has_cost { 4 } else { 0 }; // 3 lines + separator
+        // Layout: optional cost/status panel + separator + log + footer.
+        let mut cost_panel = Vec::new();
+        if let Some(snapshot) = cost_cache
+            .snapshot
+            .as_ref()
+            .filter(|snapshot| snapshot.today_cost >= 0.001 || snapshot.week_cost >= 0.001)
+        {
+            let saved_str = crate::display::format_token_count(snapshot.tokens_saved);
+            cost_panel.push(format!(
+                "  Spent: ${:.2} today | ${:.2} 7d    Saved: {}",
+                snapshot.today_cost, snapshot.week_cost, saved_str
+            ));
+            cost_panel.push(format!(
+                "  Efficiency: {:.0}%    Top model: {} (${:.2})",
+                snapshot.efficiency_pct, snapshot.top_model, snapshot.top_model_cost
+            ));
+        }
+        match &cost_cache.state {
+            CostCacheState::Fresh => {}
+            CostCacheState::Stale(error) => {
+                cost_panel.push(format!("  Cost accounting stale: {error}"));
+            }
+            CostCacheState::Unavailable(error) => {
+                cost_panel.push(format!("  Cost accounting unavailable: {error}"));
+            }
+        }
+        let cost_lines = if cost_panel.is_empty() {
+            0
+        } else {
+            cost_panel.len() + 1
+        };
         let footer_lines = 4; // separator + 2 footer lines + bottom separator
         let log_lines = h.saturating_sub(cost_lines + footer_lines).max(1);
         last_log_lines = log_lines;
 
         // ── Cost panel ──
-        if has_cost {
+        if !cost_panel.is_empty() {
             let sep = "\u{2500}".repeat(w);
-
-            let saved_str = crate::display::format_token_count(cost_cache.tokens_saved);
-            let line1 = format!(
-                "  Spent: ${:.2} today | ${:.2} 7d    Saved: {}",
-                cost_cache.today_cost, cost_cache.week_cost, saved_str
-            );
-            let line2 = format!(
-                "  Efficiency: {:.0}%    Top model: {} (${:.2})",
-                cost_cache.efficiency_pct, cost_cache.top_model, cost_cache.top_model_cost
-            );
-
-            write!(
-                stdout,
-                "\r\x1b[36m{}\x1b[0m{}\r\n",
-                line1,
-                " ".repeat(w.saturating_sub(line1.len()))
-            )?;
-            write!(
-                stdout,
-                "\r\x1b[36m{}\x1b[0m{}\r\n",
-                line2,
-                " ".repeat(w.saturating_sub(line2.len()))
-            )?;
+            for line in &cost_panel {
+                write!(
+                    stdout,
+                    "\r\x1b[36m{}\x1b[0m{}\r\n",
+                    line,
+                    " ".repeat(w.saturating_sub(line.len()))
+                )?;
+            }
             write!(stdout, "\r{sep}\r\n")?;
         }
 
@@ -702,30 +645,5 @@ mod tests {
         assert_eq!(update_color_for(&recent, "p", "oldest"), "\x1b[33m");
         assert_eq!(update_color_for(&recent, "p", "other"), "");
         assert_eq!(update_color_for(&recent, "other_proj", "newest"), "");
-    }
-
-    /// Regression test for issue #39: `tracedecay monitor` panicked on
-    /// macOS/Linux with "Cannot start a runtime from within a runtime."
-    ///
-    /// `refresh_cost_cache` was building a fresh `tokio::runtime` and
-    /// calling `block_on` inside `#[tokio::main]`, which always panics on
-    /// a multi-thread runtime. The fix uses `block_in_place` +
-    /// `Handle::current().block_on()` — safe inside a multi-thread runtime.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn refresh_cost_cache_runtime_pattern_does_not_panic() {
-        let result = tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(async { 42 })
-        });
-        assert_eq!(result, 42);
-    }
-
-    /// Verify the pre-fix pattern (`Runtime::new()` inside a running
-    /// multi-thread runtime) panics — locking in the bug we are guarding
-    /// against. tokio's exact wording varies across versions, so we just
-    /// match on "runtime".
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    #[should_panic(expected = "runtime")]
-    async fn nested_runtime_new_panics() {
-        let _rt = tokio::runtime::Runtime::new().unwrap();
     }
 }

@@ -1,6 +1,129 @@
 use crate::cli::*;
+use crate::parse_lcm_scope_arg;
+use crate::resolve_cli_project_root;
 use crate::update_cmd::tracedecay_bin_on_path;
-use crate::{parse_lcm_scope_arg, resolve_cli_project_root};
+
+async fn daemon_project_dashboard_root(
+    project_path: &std::path::Path,
+) -> tracedecay::errors::Result<std::path::PathBuf> {
+    let context = crate::commands::daemon_tool_json(
+        Some(project_path),
+        "tracedecay_active_project",
+        serde_json::json!({ "format": "json" }),
+    )
+    .await?;
+    let data_root = context
+        .get("storage")
+        .and_then(|storage| storage.get("data_root"))
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| tracedecay::errors::TraceDecayError::Config {
+            message: "managed daemon returned no active project data_root".to_string(),
+        })?;
+    Ok(std::path::PathBuf::from(data_root).join("dashboard"))
+}
+
+async fn daemon_automation_action(
+    project_path: &std::path::Path,
+    args: serde_json::Value,
+) -> tracedecay::errors::Result<serde_json::Value> {
+    crate::commands::daemon_tool_json(Some(project_path), "tracedecay_admin_project", args).await
+}
+
+fn fact_apply_rpc_args(id: &str) -> serde_json::Value {
+    serde_json::json!({ "action": "fact_apply", "id": id })
+}
+
+fn automation_run_rpc_request(
+    action: AutomationRunAction,
+) -> tracedecay::errors::Result<(Option<String>, serde_json::Value)> {
+    let request = match action {
+        AutomationRunAction::MemoryCuration {
+            max_clusters,
+            min_confidence,
+            path,
+        } => (
+            path,
+            serde_json::json!({
+                "action": "automation_run",
+                "task": "memory_curation",
+                "options": {
+                    "max_clusters": max_clusters,
+                    "min_confidence": min_confidence,
+                },
+            }),
+        ),
+        AutomationRunAction::SessionReflection {
+            provider,
+            query,
+            evidence_limit,
+            scope,
+            session_id,
+            include_summaries,
+            sort,
+            source,
+            role,
+            start_time,
+            end_time,
+            path,
+        } => {
+            parse_lcm_scope_arg(&scope)?;
+            sort.parse::<tracedecay::sessions::lcm::LcmGrepSort>()
+                .map_err(|()| tracedecay::errors::TraceDecayError::Config {
+                    message: format!(
+                        "invalid session-reflection --sort '{sort}'; expected recency, relevance, or hybrid"
+                    ),
+                })?;
+            (
+                path,
+                serde_json::json!({
+                    "action": "automation_run",
+                    "task": "session_reflection",
+                    "options": {
+                        "provider": provider,
+                        "query": query,
+                        "evidence_limit": evidence_limit,
+                        "scope": scope,
+                        "session_id": session_id,
+                        "include_summaries": include_summaries,
+                        "sort": sort,
+                        "source": source,
+                        "role": role,
+                        "start_time": start_time,
+                        "end_time": end_time,
+                    },
+                }),
+            )
+        }
+        AutomationRunAction::SkillWriting {
+            provider,
+            query,
+            evidence_limit,
+            path,
+        } => (
+            path,
+            serde_json::json!({
+                "action": "automation_run",
+                "task": "skill_writing",
+                "options": {
+                    "provider": provider,
+                    "query": query,
+                    "evidence_limit": evidence_limit,
+                },
+            }),
+        ),
+    };
+    Ok(request)
+}
+
+fn automation_run_result(
+    payload: &serde_json::Value,
+) -> tracedecay::errors::Result<&serde_json::Value> {
+    payload
+        .get("run")
+        .ok_or_else(|| tracedecay::errors::TraceDecayError::Config {
+            message: "daemon automation response omitted run".to_string(),
+        })
+}
 
 pub(crate) async fn handle_automation_command(
     action: AutomationAction,
@@ -27,8 +150,7 @@ async fn handle_automation_runs_command(
         | AutomationRunsAction::Artifact { path, .. } => path.clone(),
     };
     let project_path = resolve_cli_project_root(path, None, None).await?;
-    let cg = crate::serve::ensure_initialized(&project_path).await?;
-    let dashboard_root = cg.store_layout().dashboard_root.clone();
+    let dashboard_root = daemon_project_dashboard_root(&project_path).await?;
 
     match action {
         AutomationRunsAction::List { limit, json, .. } => {
@@ -182,8 +304,7 @@ async fn handle_automation_facts_command(
     action: AutomationFactsAction,
 ) -> tracedecay::errors::Result<()> {
     use tracedecay::automation::fact_proposals::{
-        FactProposalState, apply_fact_proposal, list_fact_proposals, load_fact_proposal,
-        reject_fact_proposal,
+        FactProposalState, list_fact_proposals, load_fact_proposal, reject_fact_proposal,
     };
 
     let path = match &action {
@@ -193,10 +314,9 @@ async fn handle_automation_facts_command(
         | AutomationFactsAction::Reject { path, .. } => path.clone(),
     };
     let project_path = resolve_cli_project_root(path, None, None).await?;
-    let cg = crate::serve::ensure_initialized(&project_path).await?;
-    let dashboard_root = cg.store_layout().dashboard_root.clone();
     let payload = match action {
         AutomationFactsAction::List { state, limit, .. } => {
+            let dashboard_root = daemon_project_dashboard_root(&project_path).await?;
             let state = match state {
                 Some(value) => Some(FactProposalState::parse(&value)?),
                 None => None,
@@ -209,6 +329,7 @@ async fn handle_automation_facts_command(
             })
         }
         AutomationFactsAction::View { id, .. } => {
+            let dashboard_root = daemon_project_dashboard_root(&project_path).await?;
             let proposal = load_fact_proposal(&dashboard_root, &id)
                 .await?
                 .ok_or_else(|| tracedecay::errors::TraceDecayError::Config {
@@ -217,21 +338,10 @@ async fn handle_automation_facts_command(
             serde_json::json!({ "proposal": proposal })
         }
         AutomationFactsAction::Apply { id, .. } => {
-            let proposal = apply_fact_proposal(
-                &dashboard_root,
-                cg.db().conn(),
-                &id,
-                Some("cli".to_string()),
-            )
-            .await?;
-            tracedecay::automation::memory_digest::refresh_memory_digest_after_memory_change(
-                cg.db().conn(),
-                &project_path,
-            )
-            .await;
-            serde_json::json!({ "proposal": proposal })
+            daemon_automation_action(&project_path, fact_apply_rpc_args(&id)).await?
         }
         AutomationFactsAction::Reject { id, reason, .. } => {
+            let dashboard_root = daemon_project_dashboard_root(&project_path).await?;
             let proposal =
                 reject_fact_proposal(&dashboard_root, &id, Some("cli".to_string()), reason).await?;
             serde_json::json!({ "proposal": proposal })
@@ -457,145 +567,11 @@ fn print_managed_skill(skill: &tracedecay::automation::managed_skills::ManagedSk
 async fn handle_automation_run_command(
     action: AutomationRunAction,
 ) -> tracedecay::errors::Result<()> {
-    use tracedecay::automation::backend::CodexAppServerBackend;
-    use tracedecay::automation::config::{
-        AutomationBackend, effective_config, load_project_config,
-    };
-    use tracedecay::automation::runner::{
-        MemoryCuratorAutomationOptions, SessionReflectorAutomationOptions,
-        SkillWriterAutomationOptions, run_memory_curator_with_backend,
-        run_session_reflector_with_backend, run_skill_writer_with_backend,
-    };
-
-    match action {
-        AutomationRunAction::MemoryCuration {
-            max_clusters,
-            min_confidence,
-            path,
-        } => {
-            let project_path = resolve_cli_project_root(path, None, None).await?;
-            let cg = crate::serve::ensure_initialized(&project_path).await?;
-            let dashboard_root = cg.store_layout().dashboard_root.clone();
-            let global = tracedecay::user_config::UserConfig::load().automation;
-            let project = load_project_config(&dashboard_root).await?;
-            let effective = effective_config(&global, project.as_ref())?;
-            if effective.enabled && effective.backend == AutomationBackend::ExternalCommand {
-                return Err(tracedecay::errors::TraceDecayError::Config {
-                    message: "automation backend external_command is not implemented yet"
-                        .to_string(),
-                });
-            }
-            let backend = CodexAppServerBackend::from_automation_config(&effective);
-            let run = run_memory_curator_with_backend(
-                &cg,
-                &effective,
-                &backend,
-                MemoryCuratorAutomationOptions {
-                    trigger: tracedecay::automation::run_ledger::AutomationTrigger::ManualCli,
-                    run_id: None,
-                    max_clusters,
-                    min_confidence,
-                },
-            )
-            .await?;
-            println!("{}", serde_json::to_string_pretty(&run)?);
-        }
-        AutomationRunAction::SessionReflection {
-            provider,
-            query,
-            evidence_limit,
-            scope,
-            session_id,
-            include_summaries,
-            sort,
-            source,
-            role,
-            start_time,
-            end_time,
-            path,
-        } => {
-            let project_path = resolve_cli_project_root(path, None, None).await?;
-            let cg = crate::serve::ensure_initialized(&project_path).await?;
-            let dashboard_root = cg.store_layout().dashboard_root.clone();
-            let global = tracedecay::user_config::UserConfig::load().automation;
-            let project = load_project_config(&dashboard_root).await?;
-            let effective = effective_config(&global, project.as_ref())?;
-            if effective.enabled && effective.backend == AutomationBackend::ExternalCommand {
-                return Err(tracedecay::errors::TraceDecayError::Config {
-                    message: "automation backend external_command is not implemented yet"
-                        .to_string(),
-                });
-            }
-            let backend = CodexAppServerBackend::from_automation_config(&effective);
-            let lcm_scope = parse_lcm_scope_arg(&scope)?;
-            let lcm_sort = sort
-                .parse::<tracedecay::sessions::lcm::LcmGrepSort>()
-                .map_err(|()| tracedecay::errors::TraceDecayError::Config {
-                    message: format!(
-                        "invalid session-reflection --sort '{sort}'; expected recency, relevance, or hybrid"
-                    ),
-                })?;
-            let run = run_session_reflector_with_backend(
-                &cg,
-                &effective,
-                &backend,
-                SessionReflectorAutomationOptions {
-                    trigger: tracedecay::automation::run_ledger::AutomationTrigger::ManualCli,
-                    run_id: None,
-                    provider,
-                    query,
-                    scope: lcm_scope,
-                    session_id,
-                    include_summaries,
-                    evidence_limit,
-                    sort: lcm_sort,
-                    source,
-                    role,
-                    start_time,
-                    end_time,
-                    ..SessionReflectorAutomationOptions::default()
-                },
-            )
-            .await?;
-            println!("{}", serde_json::to_string_pretty(&run)?);
-        }
-        AutomationRunAction::SkillWriting {
-            provider,
-            query,
-            evidence_limit,
-            path,
-        } => {
-            let project_path = resolve_cli_project_root(path, None, None).await?;
-            let cg = crate::serve::ensure_initialized(&project_path).await?;
-            let dashboard_root = cg.store_layout().dashboard_root.clone();
-            let global = tracedecay::user_config::UserConfig::load().automation;
-            let project = load_project_config(&dashboard_root).await?;
-            let effective = effective_config(&global, project.as_ref())?;
-            if effective.enabled && effective.backend == AutomationBackend::ExternalCommand {
-                return Err(tracedecay::errors::TraceDecayError::Config {
-                    message: "automation backend external_command is not implemented yet"
-                        .to_string(),
-                });
-            }
-            let backend = CodexAppServerBackend::from_automation_config(&effective);
-            let run = run_skill_writer_with_backend(
-                &cg,
-                &effective,
-                &backend,
-                SkillWriterAutomationOptions {
-                    trigger: tracedecay::automation::run_ledger::AutomationTrigger::ManualCli,
-                    run_id: None,
-                    provider,
-                    query,
-                    evidence_limit,
-                    profile_root: None,
-                    ..SkillWriterAutomationOptions::default()
-                },
-            )
-            .await?;
-            println!("{}", serde_json::to_string_pretty(&run)?);
-        }
-    }
+    let (path, args) = automation_run_rpc_request(action)?;
+    let project_path = resolve_cli_project_root(path, None, None).await?;
+    let payload = daemon_automation_action(&project_path, args).await?;
+    let run = automation_run_result(&payload)?;
+    println!("{}", serde_json::to_string_pretty(run)?);
     Ok(())
 }
 
@@ -626,10 +602,10 @@ async fn handle_automation_config_command(
     let global = user_config.automation.clone();
     let project_context = if scope == AutomationConfigScope::Project {
         let project_path = resolve_cli_project_root(path, None, None).await?;
-        let cg = crate::serve::ensure_initialized(&project_path).await?;
+        let dashboard_root = daemon_project_dashboard_root(&project_path).await?;
         Some((
-            cg.store_layout().dashboard_root.clone(),
-            load_project_config(&cg.store_layout().dashboard_root).await?,
+            dashboard_root.clone(),
+            load_project_config(&dashboard_root).await?,
         ))
     } else {
         None
@@ -943,5 +919,105 @@ fn parse_automation_host_mode(
                 "unknown automation host mode '{value}' (expected standalone, delegated-host)"
             ),
         }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn automation_rpc_requests_preserve_fact_and_manual_run_arguments() {
+        assert_eq!(
+            fact_apply_rpc_args("fact-7"),
+            serde_json::json!({ "action": "fact_apply", "id": "fact-7" })
+        );
+
+        let (path, request) = automation_run_rpc_request(AutomationRunAction::MemoryCuration {
+            max_clusters: 9,
+            min_confidence: 0.7,
+            path: Some("/repo".to_string()),
+        })
+        .unwrap();
+        assert_eq!(path.as_deref(), Some("/repo"));
+        assert_eq!(
+            request,
+            serde_json::json!({
+                "action": "automation_run",
+                "task": "memory_curation",
+                "options": { "max_clusters": 9, "min_confidence": 0.7 },
+            })
+        );
+
+        let (path, request) = automation_run_rpc_request(AutomationRunAction::SessionReflection {
+            provider: "claude".to_string(),
+            query: "decisions".to_string(),
+            evidence_limit: 11,
+            scope: "session".to_string(),
+            session_id: Some("session-3".to_string()),
+            include_summaries: false,
+            sort: "hybrid".to_string(),
+            source: Some("assistant".to_string()),
+            role: Some("user".to_string()),
+            start_time: Some(10),
+            end_time: Some(20),
+            path: None,
+        })
+        .unwrap();
+        assert_eq!(path, None);
+        assert_eq!(
+            request,
+            serde_json::json!({
+                "action": "automation_run",
+                "task": "session_reflection",
+                "options": {
+                    "provider": "claude",
+                    "query": "decisions",
+                    "evidence_limit": 11,
+                    "scope": "session",
+                    "session_id": "session-3",
+                    "include_summaries": false,
+                    "sort": "hybrid",
+                    "source": "assistant",
+                    "role": "user",
+                    "start_time": 10,
+                    "end_time": 20,
+                },
+            })
+        );
+
+        let (_, request) = automation_run_rpc_request(AutomationRunAction::SkillWriting {
+            provider: "all".to_string(),
+            query: "repeated workflow".to_string(),
+            evidence_limit: 13,
+            path: None,
+        })
+        .unwrap();
+        assert_eq!(
+            request,
+            serde_json::json!({
+                "action": "automation_run",
+                "task": "skill_writing",
+                "options": {
+                    "provider": "all",
+                    "query": "repeated workflow",
+                    "evidence_limit": 13,
+                },
+            })
+        );
+    }
+
+    #[test]
+    fn automation_rpc_preserves_response_and_has_no_local_database_fallback() {
+        let payload = serde_json::json!({ "run": { "run_id": "run-5", "status": "ok" } });
+        assert_eq!(automation_run_result(&payload).unwrap(), &payload["run"]);
+        assert!(automation_run_result(&serde_json::json!({})).is_err());
+
+        let source = include_str!("automation_cli.rs");
+        let direct_init = ["serve::ensure_", "initialized"].concat();
+        let direct_apply = ["apply_fact_", "proposal("].concat();
+        assert!(!source.contains(&direct_init));
+        assert!(!source.contains(&direct_apply));
+        assert!(source.contains("tracedecay_admin_project"));
     }
 }

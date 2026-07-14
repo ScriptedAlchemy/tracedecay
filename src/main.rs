@@ -3,7 +3,7 @@
 // Updated 2026-03-23: compact bordered table for status output
 use clap::{CommandFactory, Parser};
 use std::io::{IsTerminal, Write};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process;
 
 mod agent_cmd;
@@ -361,35 +361,26 @@ async fn resolve_registered_project_root(
     project_id: Option<String>,
     project_path: Option<String>,
 ) -> tracedecay::errors::Result<Option<PathBuf>> {
-    let db = tracedecay::global_db::GlobalDb::open()
-        .await
-        .ok_or_else(|| tracedecay::errors::TraceDecayError::Config {
-            message: "could not open tracedecay project registry; run tracedecay init first"
-                .to_string(),
-        })?;
-    let context = if let Some(project_id) = project_id.as_deref() {
-        db.project_registry_context_by_id(project_id).await
-    } else if let Some(project_path) = project_path.as_deref() {
-        let project_path_arg = Path::new(project_path);
-        if let Some(context) = db.project_registry_context_by_alias(project_path_arg).await {
-            Some(context)
-        } else if tracedecay::global_db::GlobalDb::is_explicit_project_path_selector(project_path) {
-            let git_common_dir = tracedecay::worktree::git_common_dir(project_path_arg);
-            db.project_registry_context_by_identity(project_path_arg, git_common_dir.as_deref())
-                .await
-        } else {
-            None
-        }
-    } else {
+    let Some(selector) = project_id.or(project_path) else {
         return Ok(None);
     };
-
-    context
-        .map(|context| PathBuf::from(context.project.display_root))
+    let context = commands::daemon_tool_json(
+        None,
+        "tracedecay_admin_cli",
+        serde_json::json!({
+            "action": "registry_context",
+            "project_arg": selector,
+        }),
+    )
+    .await?;
+    let display_root = context
+        .get("project")
+        .and_then(|project| project.get("display_root"))
+        .and_then(serde_json::Value::as_str)
         .ok_or_else(|| tracedecay::errors::TraceDecayError::Config {
             message: "registered project not found for selector".to_string(),
-        })
-        .map(Some)
+        })?;
+    Ok(Some(PathBuf::from(display_root)))
 }
 
 pub(crate) async fn resolve_cli_project_root(
@@ -534,8 +525,33 @@ async fn dispatch_command(command: Commands) -> tracedecay::errors::Result<()> {
             open,
         } => {
             let project_path = tracedecay::config::resolve_path_with_discovery(path);
-            let cg = serve::ensure_initialized(&project_path).await?;
-            tracedecay::dashboard::run(&cg, &host, port, open).await?;
+            let result = commands::daemon_tool_json(
+                Some(&project_path),
+                "tracedecay_dashboard",
+                serde_json::json!({
+                    "action": "start",
+                    "host": host,
+                    "port": port,
+                    "format": "json",
+                }),
+            )
+            .await?;
+            let url = result
+                .get("url")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| tracedecay::errors::TraceDecayError::Config {
+                    message: "daemon dashboard response omitted URL".to_string(),
+                })?;
+            println!("tracedecay dashboard listening on {url}");
+            eprintln!("Serving project {}", project_path.display());
+            if open {
+                match open::that(url) {
+                    Ok(()) => eprintln!("Opened dashboard in default browser: {url}"),
+                    Err(error) => {
+                        eprintln!("Warning: could not open browser for {url}: {error}")
+                    }
+                }
+            }
         }
         Commands::Serve { path, timings } => {
             if matches!(std::env::var("DISABLE_TRACEDECAY").as_deref(), Ok("true")) {
@@ -620,15 +636,40 @@ async fn dispatch_command(command: Commands) -> tracedecay::errors::Result<()> {
         },
         Commands::CurrentCounter { path } => {
             let project_path = tracedecay::config::resolve_path(path);
-            let cg = serve::ensure_initialized(&project_path).await?;
-            let value = cg.get_local_counter().await?;
+            let result = commands::daemon_tool_json(
+                Some(&project_path),
+                "tracedecay_admin_project",
+                serde_json::json!({ "action": "counter_get" }),
+            )
+            .await?;
+            let value = result
+                .get("counter")
+                .and_then(serde_json::Value::as_u64)
+                .ok_or_else(|| tracedecay::errors::TraceDecayError::Config {
+                    message: "daemon counter response omitted counter".to_string(),
+                })?;
             println!("{value}");
         }
         Commands::ResetCounter { path } => {
             let project_path = tracedecay::config::resolve_path(path);
-            let cg = serve::ensure_initialized(&project_path).await?;
-            let prev = cg.get_local_counter().await?;
-            cg.reset_local_counter().await?;
+            let result = commands::daemon_tool_json(
+                Some(&project_path),
+                "tracedecay_admin_project",
+                serde_json::json!({ "action": "counter_get" }),
+            )
+            .await?;
+            let prev = result
+                .get("counter")
+                .and_then(serde_json::Value::as_u64)
+                .ok_or_else(|| tracedecay::errors::TraceDecayError::Config {
+                    message: "daemon counter response omitted counter".to_string(),
+                })?;
+            commands::daemon_tool_json(
+                Some(&project_path),
+                "tracedecay_admin_project",
+                serde_json::json!({ "action": "counter_reset" }),
+            )
+            .await?;
             eprintln!("Local counter reset (was {prev})");
         }
         Commands::DisableUploadCounter => {
@@ -641,7 +682,7 @@ async fn dispatch_command(command: Commands) -> tracedecay::errors::Result<()> {
             commands::handle_gitignore(path, action).await?;
         }
         Commands::Doctor { agent } => {
-            tracedecay::doctor::run_doctor(agent.as_deref()).await;
+            tracedecay::doctor::run_doctor(agent.as_deref()).await?;
         }
         Commands::Cost {
             range,
@@ -698,11 +739,25 @@ async fn dispatch_command(command: Commands) -> tracedecay::errors::Result<()> {
                 project_path,
             } => {
                 let project_path = resolve_cli_project_root(path, project_id, project_path).await?;
-                let cg = crate::serve::ensure_initialized(&project_path).await?;
-                let status = cg.project_memory_status().await?;
-                let largest_bank_fact_count =
-                    status_cmd::largest_memory_bank_fact_count_at(&cg.store_layout().graph_db_path)
-                        .await?;
+                let result = commands::daemon_tool_json(
+                    Some(&project_path),
+                    "tracedecay_admin_project",
+                    serde_json::json!({ "action": "memory_status" }),
+                )
+                .await?;
+                let status: tracedecay::memory::types::MemoryStatus =
+                    serde_json::from_value(result.get("status").cloned().ok_or_else(|| {
+                        tracedecay::errors::TraceDecayError::Config {
+                            message: "daemon memory response omitted status".to_string(),
+                        }
+                    })?)?;
+                let largest_bank_fact_count = result
+                    .get("largest_bank_fact_count")
+                    .and_then(serde_json::Value::as_u64)
+                    .and_then(|value| usize::try_from(value).ok())
+                    .ok_or_else(|| tracedecay::errors::TraceDecayError::Config {
+                        message: "daemon memory response omitted largest bank count".to_string(),
+                    })?;
                 let largest_bank_utilization_pct = if status.estimated_capacity > 0 {
                     largest_bank_fact_count as f64 / status.estimated_capacity as f64 * 100.0
                 } else {
@@ -836,7 +891,7 @@ fn is_local_install_command(command: &Commands) -> bool {
 mod startup_tests;
 
 // handle_branch_action, handle_wipe, handle_list, handle_no_command,
-// init_and_index, and print_sync_doctor have been moved to src/commands.rs.
+// init_and_index has been moved to src/commands.rs.
 //
 // update_global_db, try_flush, check_for_update, gather_target_projects,
 // gather_local_projects, gather_local_projects_from, find_descendant_tracedecay,

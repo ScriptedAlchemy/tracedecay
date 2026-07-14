@@ -332,9 +332,9 @@ pub struct HealthcheckContext {
 /// args/env wiring via an exhaustive `match`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum InstallScope {
-    /// User-global install: `serve` with the global DB enabled.
+    /// User-global install: `serve` without an explicit project path.
     Global,
-    /// Project-local install: `serve --path .` with no global DB.
+    /// Project-local install: `serve --path .` with an explicit project route.
     ProjectLocal,
 }
 
@@ -819,9 +819,6 @@ macro_rules! cli_fallback_args_invocation_lit {
 pipe it via `--args -` (a quoted heredoc) when it contains quotes or newlines"
     };
 }
-
-/// Shared `--args` invocation phrase for CLI-fallback steering surfaces.
-pub(crate) const CLI_FALLBACK_ARGS_INVOCATION: &str = cli_fallback_args_invocation_lit!();
 
 /// CLI-fallback steering paragraph shared by every host's prompt rules.
 ///

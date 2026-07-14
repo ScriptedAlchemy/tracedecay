@@ -10,7 +10,6 @@ use tracedecay::automation::run_ledger::{
     AutomationRunArtifactKind, AutomationRunLedgerRecord, append_run_record, write_run_artifact,
 };
 use tracedecay::branch_meta::BranchMeta;
-use tracedecay::db::Database;
 use tracedecay::global_db::{GlobalDb, StoreInstanceUpsert};
 use tracedecay::migrate::inventory::MigrationInventory;
 use tracedecay::migrate::manifest::{
@@ -266,7 +265,9 @@ fn write_profile_sharded_branch_fixture(home: &std::path::Path, project: &std::p
         .enable_all()
         .build()
         .unwrap()
-        .block_on(Database::initialize(&shard_root.join("tracedecay.db")))
+        .block_on(crate::common::initialize_test_database(
+            &shard_root.join("tracedecay.db"),
+        ))
         .unwrap();
 }
 
@@ -1116,7 +1117,9 @@ async fn status_surfaces_split_identity_conflict_without_suggesting_init() {
             },
         )
         .unwrap();
-        let (db, _) = Database::initialize(&layout.graph_db_path).await.unwrap();
+        let (db, _) = crate::common::initialize_test_database(&layout.graph_db_path)
+            .await
+            .unwrap();
         db.insert_node(&sample_node(node_id, node_id, "src/lib.rs"))
             .await
             .unwrap();
@@ -1175,7 +1178,9 @@ async fn status_json_reads_readonly_project_database() {
     )
     .unwrap();
     let db_path = profile_shard_root(home.path()).join("tracedecay.db");
-    let (db, _) = Database::initialize(&db_path).await.unwrap();
+    let (db, _) = crate::common::initialize_test_database(&db_path)
+        .await
+        .unwrap();
     db.insert_node(&sample_node("node-1", "process_data", "src/lib.rs"))
         .await
         .unwrap();
@@ -1777,6 +1782,8 @@ fn migrate_registry_gc_cleans_stale_storage_metadata_and_preserves_live_and_bloc
     std::fs::create_dir_all(&live_project).expect("live project dir");
     std::fs::write(live_project.join("lib.rs"), "pub fn live() {}\n").expect("live source");
 
+    #[cfg(unix)]
+    let daemon = crate::common::spawn_tracedecay_daemon(home.path());
     let init = tracedecay_command(home.path(), &live_project)
         .args(["init", "."])
         .output()
@@ -1787,6 +1794,8 @@ fn migrate_registry_gc_cleans_stale_storage_metadata_and_preserves_live_and_bloc
         String::from_utf8_lossy(&init.stdout),
         String::from_utf8_lossy(&init.stderr)
     );
+    #[cfg(unix)]
+    drop(daemon);
 
     let stale_project = canonical_temp_path(home.path()).join("gone-project");
     let global_db_path = profile_root(home.path()).join("global.db");
@@ -1794,6 +1803,7 @@ fn migrate_registry_gc_cleans_stale_storage_metadata_and_preserves_live_and_bloc
         let db = GlobalDb::open_at(&global_db_path)
             .await
             .expect("open global db");
+        db.upsert(&live_project, 1).await;
         db.upsert(&stale_project, 1).await;
         db.upsert_code_project("stale-identity", &stale_project, None, None, None)
             .await

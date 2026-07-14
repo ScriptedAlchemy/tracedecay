@@ -1,7 +1,6 @@
 use std::path::Path;
 
 use crate::current_unix_timestamp;
-use tracedecay::tracedecay::TraceDecay;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ProjectStorageStatus {
@@ -203,37 +202,6 @@ fn elapsed_since(now: i64, recorded_at: i64) -> i64 {
     }
 }
 
-/// Best-effort: register this project in the user-level global DB and
-/// accumulate the token savings delta into the pending upload counter.
-pub(crate) async fn update_global_db(cg: &TraceDecay) {
-    if !tracedecay::user_config::UserConfig::exists() {
-        return;
-    }
-    let tokens = match cg.get_tokens_saved().await {
-        Ok(tokens) => tokens,
-        Err(err) => {
-            eprintln!(
-                "[tracedecay] failed to read tokens-saved counter for {}: {err}",
-                cg.project_root().display()
-            );
-            return;
-        }
-    };
-    if let Some(gdb) = tracedecay::global_db::GlobalDb::open().await {
-        let previous = gdb.get_project_tokens(cg.project_root()).await;
-        gdb.upsert(cg.project_root(), tokens).await;
-
-        // Accumulate delta into pending upload
-        if tokens > previous {
-            let mut config = tracedecay::user_config::UserConfig::load();
-            config.pending_upload += tokens - previous;
-            if let Err(err) = config.save_if_exists() {
-                eprintln!("warning: could not save tracedecay config: {err}");
-            }
-        }
-    }
-}
-
 /// Best-effort: try to flush pending tokens to the worldwide counter.
 /// `force` = true on status/sync commands (always attempt), false on others
 /// (only flush if stale > 30s).
@@ -351,17 +319,55 @@ pub(crate) async fn gather_target_projects(
     home_tracedecay: &Option<std::path::PathBuf>,
 ) -> Vec<std::path::PathBuf> {
     if all {
-        let Some(gdb) = tracedecay::global_db::GlobalDb::open().await else {
+        let Ok(cwd) = std::env::current_dir() else {
             return Vec::new();
         };
-        gdb.list_project_paths()
-            .await
+        let project_root = tracedecay::config::discover_project_root(&cwd);
+        let Ok(payload) = call_admin_cli(
+            project_root.as_deref(),
+            serde_json::json!({
+                "action": "registry_list",
+                "limit": 100_000,
+                "query": null,
+            }),
+        )
+        .await
+        else {
+            return Vec::new();
+        };
+        payload["projects"]
+            .as_array()
             .into_iter()
+            .flatten()
+            .filter_map(|project| project["project_root"].as_str())
             .map(std::path::PathBuf::from)
             .collect()
     } else {
         gather_local_projects(home_tracedecay)
     }
+}
+
+async fn call_admin_cli(
+    project_root: Option<&Path>,
+    arguments: serde_json::Value,
+) -> tracedecay::errors::Result<serde_json::Value> {
+    let handshake = tracedecay::daemon::DaemonHandshake::for_current_client(
+        project_root.map(Path::to_path_buf),
+        None,
+        false,
+        false,
+    )?;
+    let result =
+        tracedecay::daemon::call_default_tool(&handshake, "tracedecay_admin_cli", arguments)
+            .await?;
+    let text = result
+        .get("content")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|item| item.get("text").and_then(serde_json::Value::as_str))
+        .collect::<String>();
+    serde_json::from_str(&text).map_err(Into::into)
 }
 
 /// Returns project roots whose `.tracedecay` data dir lives in cwd, an

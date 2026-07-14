@@ -24,7 +24,7 @@ async fn setup_db() -> TestDb {
     let dir = TempDir::new().expect("failed to create temp dir");
     let db_path = dir.path().join("test.db");
     support::seed_latest_graph_db(&db_path).await;
-    let (db, migrated) = Database::open(&db_path)
+    let (db, migrated) = crate::common::open_test_database(&db_path)
         .await
         .expect("failed to open template database");
     assert!(
@@ -107,7 +107,7 @@ async fn test_empty_db_template_cache_seeds_without_migration() {
         "template database should not be empty"
     );
 
-    let (_db, migrated) = Database::open(&db_path)
+    let (_db, migrated) = crate::common::open_test_database(&db_path)
         .await
         .expect("failed to open template database");
     assert!(
@@ -2527,7 +2527,7 @@ async fn test_fts_name_match_outranks_docstring_match() {
 #[tokio::test]
 async fn test_batch_incoming_call_counts() {
     let dir = tempfile::TempDir::new().unwrap();
-    let (db, _) = Database::initialize(&dir.path().join("test.db"))
+    let (db, _) = crate::common::initialize_test_database(&dir.path().join("test.db"))
         .await
         .unwrap();
 
@@ -2870,7 +2870,9 @@ async fn test_attrs_start_line_null_falls_back_to_start_line() {
     drop(conn);
     drop(raw);
 
-    let (db, _migrated) = Database::open(&db_path).await.expect("open db");
+    let (db, _migrated) = crate::common::open_test_database(&db_path)
+        .await
+        .expect("open db");
     let fetched = db
         .get_node_by_id("legacy")
         .await

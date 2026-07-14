@@ -29,7 +29,6 @@ use tracedecay::automation::run_ledger::{
 use tracedecay::automation::skill_usage::{
     SkillUsageAction, load_skill_usage_record, record_skill_usage,
 };
-use tracedecay::db::Database;
 use tracedecay::errors::TraceDecayError;
 use tracedecay::global_db::GlobalDb;
 use tracedecay::mcp::{ToolResult, get_tool_definitions};
@@ -8469,7 +8468,9 @@ async fn memory_fact_store_uses_project_store_when_serving_branch_db() {
         .as_i64()
         .expect("fact_store add should return numeric id");
 
-    let (branch_db, _) = Database::open(&cg.db_path()).await.unwrap();
+    let (branch_db, _) = crate::common::open_test_database(&cg.db_path())
+        .await
+        .unwrap();
     assert!(
         MemoryStore::new(branch_db.conn())
             .get_fact(fact_id)
@@ -8479,7 +8480,7 @@ async fn memory_fact_store_uses_project_store_when_serving_branch_db() {
         "MCP memory writes must not be scoped to the branch graph DB"
     );
 
-    let (project_db, _) = Database::open(&cg.store_layout().graph_db_path)
+    let (project_db, _) = crate::common::open_test_database(&cg.store_layout().graph_db_path)
         .await
         .unwrap();
     assert!(
@@ -9087,7 +9088,7 @@ async fn message_search_reads_profile_sharded_session_db() {
         serde_json::to_string_pretty(&config).unwrap(),
     )
     .unwrap();
-    Database::initialize(&shard_root.join("tracedecay.db"))
+    crate::common::initialize_test_database(&shard_root.join("tracedecay.db"))
         .await
         .unwrap();
     let meta = tracedecay::branch_meta::BranchMeta::new_for_dir(&shard_root, "main");
@@ -13090,7 +13091,7 @@ async fn memory_status_repairs_dirty_banks_before_reporting() {
     let added: Value = serde_json::from_str(extract_text(&added.value)).unwrap();
     let fact_id = added["fact"]["fact_id"].as_i64().unwrap();
     let db_path = project_graph_db(&cg);
-    let (db, _) = Database::open(&db_path).await.unwrap();
+    let (db, _) = crate::common::open_test_database(&db_path).await.unwrap();
     db.conn()
         .execute(
             "UPDATE memory_facts

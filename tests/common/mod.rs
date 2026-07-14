@@ -19,13 +19,30 @@ use tempfile::NamedTempFile;
 use tempfile::TempDir;
 use tokio::sync::OnceCell;
 use tracedecay::config::USER_DATA_DIR_ENV;
-use tracedecay::db::Database;
+use tracedecay::db::{Database, DatabaseAuthority};
 use tracedecay::global_db::GlobalDb;
 use tracedecay::sessions::{SessionMessageRecord, SessionRecord};
 use tracedecay::types::{Node, NodeKind, Visibility};
 
 static EMPTY_LCM_DB_TEMPLATE: OnceCell<Vec<u8>> = OnceCell::const_new();
 static EMPTY_GRAPH_DB_TEMPLATE: OnceCell<Vec<u8>> = OnceCell::const_new();
+
+pub async fn initialize_test_database(path: &Path) -> tracedecay::errors::Result<(Database, bool)> {
+    let authority = DatabaseAuthority::acquire_test(path, "integration test initialize")?;
+    Database::initialize(path, &authority).await
+}
+
+pub async fn open_test_database(path: &Path) -> tracedecay::errors::Result<(Database, bool)> {
+    let authority = DatabaseAuthority::acquire_test(path, "integration test open")?;
+    Database::open(path, &authority).await
+}
+
+pub async fn open_test_database_read_only(
+    path: &Path,
+) -> tracedecay::errors::Result<(Database, bool)> {
+    let authority = DatabaseAuthority::acquire_test(path, "integration test read-only open")?;
+    Database::open_read_only(path, &authority).await
+}
 
 /// Sets (or removes) an environment variable for its lifetime, restoring the
 /// previous value on drop.
@@ -671,7 +688,7 @@ pub async fn open_graph_db_from_template(db_path: &Path) -> Database {
         .get_or_init(|| async {
             let tmp = tempdir_or_panic();
             let template_path = tmp.path().join("template-graph.db");
-            let (db, _) = Database::initialize(&template_path)
+            let (db, _) = initialize_test_database(&template_path)
                 .await
                 .expect("template graph db initialize");
             db.checkpoint().await.expect("template graph db checkpoint");
@@ -698,7 +715,7 @@ pub async fn open_graph_db_from_template(db_path: &Path) -> Database {
             db_path.display()
         )
     });
-    let (db, _) = Database::open(db_path)
+    let (db, _) = open_test_database(db_path)
         .await
         .unwrap_or_else(|err| panic!("failed to open templated graph db: {err}"));
     db

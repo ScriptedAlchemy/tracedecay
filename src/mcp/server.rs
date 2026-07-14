@@ -6,7 +6,9 @@
 //! allowing AI assistants to query the code graph interactively.
 
 use std::collections::HashMap;
+use std::future::Future;
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
@@ -35,9 +37,7 @@ use super::tools::{
 use super::transport::{ErrorCode, JsonRpcRequest, JsonRpcResponse};
 
 /// Every JSON-RPC method surface the MCP server understands. This is the
-/// single source of truth for protocol dispatch, shared by the full server
-/// ([`McpServer::handle_request`]) and the degraded startup server
-/// ([`super::degraded`]) so the two surfaces cannot drift.
+/// single source of truth for [`McpServer::handle_request`] dispatch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum McpMethod {
     Initialize,
@@ -93,9 +93,7 @@ pub(crate) const SERVER_INSTRUCTIONS: &str = concat!(
     report the savings to the user (e.g. 'TraceDecay\\'d ~N tokens')."
 );
 
-/// The `initialize` result payload. One definition serves both the full
-/// server and the degraded startup server (which substitutes its recovery
-/// notice for the standard instructions).
+/// The `initialize` result payload.
 pub(crate) fn initialize_result(instructions: &str) -> Value {
     json!({
         "protocolVersion": "2024-11-05",
@@ -114,8 +112,7 @@ pub(crate) fn initialize_result(instructions: &str) -> Value {
     })
 }
 
-/// The `resources/list` result payload, shared with the degraded startup
-/// server (the resource catalog is static).
+/// The `resources/list` result payload.
 pub(crate) fn resources_list_result() -> Value {
     json!({
         "resources": [
@@ -731,6 +728,14 @@ struct VersionCheckState {
     checked_at: Option<Instant>,
 }
 
+/// Updates daemon ownership routing after this server changes physical graph DB.
+/// Implementations must not call back into this `McpServer`: reconciliation is
+/// awaited while the graph write guard is held so readers see the swap and
+/// registry rekey atomically.
+pub(crate) type DatabaseOwnerReconciler = Arc<
+    dyn Fn(Arc<TraceDecay>) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync + 'static,
+>;
+
 /// The MCP server wrapping a `TraceDecay` instance.
 // Lock ordering: file_token_map -> method/resource/tool call counts (never nested)
 pub struct McpServer {
@@ -768,6 +773,7 @@ pub struct McpServer {
     registry_db: Option<Arc<GlobalDb>>,
     allow_default_registry_fallback: bool,
     automation_scheduler_reconciler: Option<crate::dashboard::AutomationSchedulerReconciler>,
+    database_owner_reconciler: Option<DatabaseOwnerReconciler>,
     initialize_root_routing_enabled: AtomicBool,
     hook_project_routes: SharedHookProjectRouteCache,
     /// Cached latest-version check result.
@@ -940,6 +946,27 @@ impl McpServer {
         allow_default_registry_fallback: bool,
         automation_scheduler_reconciler: Option<crate::dashboard::AutomationSchedulerReconciler>,
     ) -> Arc<Self> {
+        Self::new_with_dbs_and_reconcilers(
+            cg,
+            scope_prefix,
+            global_db,
+            registry_db,
+            allow_default_registry_fallback,
+            automation_scheduler_reconciler,
+            None,
+        )
+        .await
+    }
+
+    pub(crate) async fn new_with_dbs_and_reconcilers(
+        cg: TraceDecay,
+        scope_prefix: Option<String>,
+        global_db: Option<Arc<GlobalDb>>,
+        registry_db: Option<Arc<GlobalDb>>,
+        allow_default_registry_fallback: bool,
+        automation_scheduler_reconciler: Option<crate::dashboard::AutomationSchedulerReconciler>,
+        database_owner_reconciler: Option<DatabaseOwnerReconciler>,
+    ) -> Arc<Self> {
         let file_token_map = cg.get_file_token_map().await.unwrap_or_default();
         let persisted = cg.get_tokens_saved().await.unwrap_or(0);
         let response_handle_project_root = cg.project_root().to_path_buf();
@@ -992,6 +1019,7 @@ impl McpServer {
             registry_db,
             allow_default_registry_fallback,
             automation_scheduler_reconciler,
+            database_owner_reconciler,
             initialize_root_routing_enabled: AtomicBool::new(true),
             hook_project_routes: SharedHookProjectRouteCache::default(),
             version_cache: std::sync::Mutex::new(VersionCheckState {
@@ -1189,7 +1217,11 @@ impl McpServer {
                         fresh.active_branch().unwrap_or("<detached>")
                     );
                     *guard = Arc::new(fresh);
-                    guard.clone()
+                    let fresh = guard.clone();
+                    if let Some(reconcile) = &self.database_owner_reconciler {
+                        reconcile(fresh.clone()).await;
+                    }
+                    fresh
                 }
                 Err(e) => {
                     eprintln!(
@@ -1216,7 +1248,11 @@ impl McpServer {
                         fresh.active_branch().unwrap_or("<detached>")
                     );
                     *guard = Arc::new(fresh);
-                    true
+                    let fresh = guard.clone();
+                    if let Some(reconcile) = &self.database_owner_reconciler {
+                        reconcile(fresh.clone()).await;
+                    }
+                    Some(fresh)
                 }
                 Err(e) => {
                     eprintln!(
@@ -1224,11 +1260,11 @@ impl McpServer {
                          continuing to serve branch '{}'",
                         guard.serving_branch().unwrap_or("<none>")
                     );
-                    false
+                    None
                 }
             }
         };
-        if reopened {
+        if reopened.is_some() {
             self.refresh_file_token_map().await;
         }
     }

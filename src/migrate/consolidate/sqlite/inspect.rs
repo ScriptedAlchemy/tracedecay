@@ -33,6 +33,7 @@ struct LcmMessageCollisionCounts {
 
 pub(in crate::migrate::consolidate) struct OfflineDatabaseGuards {
     _holds: Vec<(Connection, LibsqlDatabase)>,
+    _authorities: Vec<crate::db::DatabaseAuthority>,
 }
 
 #[derive(Default)]
@@ -101,7 +102,10 @@ pub(in crate::migrate::consolidate) async fn acquire_offline_guards(
     // Windows because open-holder discovery is unsupported; unit fixtures use
     // isolated stores and exercise the remaining migration semantics here.
     let _ = paths;
-    Ok(OfflineDatabaseGuards { _holds: Vec::new() })
+    Ok(OfflineDatabaseGuards {
+        _holds: Vec::new(),
+        _authorities: Vec::new(),
+    })
 }
 
 #[cfg(not(all(test, windows)))]
@@ -112,6 +116,7 @@ pub(in crate::migrate::consolidate) async fn acquire_offline_guards(
     ordered.sort();
     ordered.dedup();
     let mut holds = Vec::new();
+    let mut authorities = Vec::new();
     for path in ordered {
         if !crate::storage::has_sqlite_database_header(&path).map_err(|error| {
             db_error(
@@ -124,6 +129,10 @@ pub(in crate::migrate::consolidate) async fn acquire_offline_guards(
                 format!("file is not a database: '{}'", path.display()),
             ));
         }
+        let authority = crate::db::DatabaseAuthority::for_runtime(
+            &path,
+            "consolidate SQLite database offline",
+        )?;
         let db = Builder::new_local(&path)
             .build()
             .await
@@ -144,8 +153,12 @@ pub(in crate::migrate::consolidate) async fn acquire_offline_guards(
             )
         })?;
         holds.push((conn, db));
+        authorities.push(authority);
     }
-    Ok(OfflineDatabaseGuards { _holds: holds })
+    Ok(OfflineDatabaseGuards {
+        _holds: holds,
+        _authorities: authorities,
+    })
 }
 
 async fn read_fact_keys(conn: &Connection, identities: &mut HashSet<Vec<u8>>) -> Result<()> {
