@@ -408,11 +408,11 @@ fn twelve_mcp_cli_and_hook_clients_share_one_daemon_sqlite_owner() {
                         .spawn()
                         .expect("spawn hook client"),
                 );
-                hook.stdin
-                    .as_mut()
-                    .expect("hook stdin")
+                let mut stdin = hook.stdin.take().expect("hook stdin");
+                stdin
                     .write_all(hook_event.as_bytes())
                     .expect("write hook event");
+                drop(stdin);
                 let status = wait_for_exit(&mut hook)
                     .unwrap_or_else(|| panic!("hook client exceeded {PROCESS_TIMEOUT:?}"));
                 assert!(status.success(), "hook client failed");
@@ -572,11 +572,11 @@ fn split_brain_is_rejected_and_unavailable_daemon_fails_closed_until_restart() {
             .spawn()
             .expect("spawn unavailable-daemon hook client"),
     );
-    hook.stdin
-        .as_mut()
-        .expect("hook stdin")
+    let mut stdin = hook.stdin.take().expect("hook stdin");
+    stdin
         .write_all(hook_event.as_bytes())
         .expect("write hook event");
+    drop(stdin);
     assert!(
         wait_for_exit(&mut hook).is_some(),
         "unavailable-daemon hook client exceeded {PROCESS_TIMEOUT:?}"
