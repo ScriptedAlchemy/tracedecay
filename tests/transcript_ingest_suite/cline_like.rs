@@ -6,7 +6,10 @@ use tracedecay::sessions::source::ingest_source;
 
 use crate::support::{assert_metadata_path_eq, create_git_repo_with_linked_worktree, setup};
 
-fn vscode_storage_root(home: &std::path::Path, extension_id: &str) -> std::path::PathBuf {
+pub(super) fn vscode_storage_root(
+    home: &std::path::Path,
+    extension_id: &str,
+) -> std::path::PathBuf {
     tracedecay::agents::vscode_data_dir(home)
         .join("User/globalStorage")
         .join(extension_id)
@@ -34,7 +37,7 @@ async fn parse_offset_for_path(db: &GlobalDb, path: &std::path::Path) -> Option<
     None
 }
 
-async fn parse_offset_for_task_history(
+pub(super) async fn parse_offset_for_task_history(
     db: &GlobalDb,
     project: &std::path::Path,
     path: &std::path::Path,
@@ -75,7 +78,7 @@ async fn parse_offset_for_task_history(
     None
 }
 
-fn write_task(
+pub(super) fn write_task(
     root: &std::path::Path,
     project: &std::path::Path,
     task_id: &str,

@@ -101,6 +101,12 @@ pub(crate) struct DashboardState {
     pub(crate) lcm_conn: Option<libsql::Connection>,
     /// Keeps session-store authorities alive alongside `lcm_conn`.
     pub(crate) _global_database_guards: Vec<Arc<GlobalDb>>,
+    /// Authoritative LCM store for serialized dashboard mutations. Unlike
+    /// `authoritative_session_db`, this is present for the global fallback.
+    pub(crate) lcm_db: Option<Arc<GlobalDb>>,
+    /// Authoritative project session store used by startup recovery. This is
+    /// `None` when LCM reads fall back to the global database.
+    pub(crate) authoritative_session_db: Option<Arc<GlobalDb>>,
     /// Display path of the LCM session store actually being served.
     pub(crate) lcm_db_path: String,
     /// Which store `lcm_conn` points at, e.g. `"profile_sharded"` or `"global"`.
@@ -147,6 +153,8 @@ impl DashboardState {
 pub(crate) struct LcmStoreSelection {
     pub(crate) conn: Option<libsql::Connection>,
     pub(crate) guard: Option<Arc<GlobalDb>>,
+    pub(crate) lcm_db: Option<Arc<GlobalDb>>,
+    pub(crate) authoritative_session_db: Option<Arc<GlobalDb>>,
     pub(crate) path: String,
     pub(crate) scope: String,
 }
@@ -167,19 +175,24 @@ pub(crate) async fn resolve_lcm_store(cg: &TraceDecay) -> LcmStoreSelection {
     {
         if let Some(db) = GlobalDb::open_at(&project_db_path).await {
             let conn = db.dashboard_connection();
+            let db = Arc::new(db);
             return LcmStoreSelection {
                 conn: Some(conn),
-                guard: Some(Arc::new(db)),
+                guard: Some(Arc::clone(&db)),
+                lcm_db: Some(Arc::clone(&db)),
+                authoritative_session_db: Some(db),
                 path: project_db_path.display().to_string(),
                 scope: storage_mode_label(&cg.store_layout().storage_mode).to_string(),
             };
         }
     }
-    let global = GlobalDb::open().await;
-    let conn = global.as_ref().map(GlobalDb::dashboard_connection);
+    let global = GlobalDb::open().await.map(Arc::new);
+    let conn = global.as_ref().map(|db| db.dashboard_connection());
     LcmStoreSelection {
         conn,
-        guard: global.map(Arc::new),
+        guard: global.as_ref().map(Arc::clone),
+        lcm_db: global,
+        authoritative_session_db: None,
         path: crate::global_db::global_db_path()
             .map(|p| p.display().to_string())
             .unwrap_or_default(),
@@ -290,6 +303,8 @@ async fn build_state_inner(
         mem_db_path,
         lcm_conn: lcm.conn,
         _global_database_guards: lcm.guard.into_iter().collect(),
+        lcm_db: lcm.lcm_db,
+        authoritative_session_db: lcm.authoritative_session_db,
         lcm_db_path: lcm.path,
         lcm_scope: lcm.scope,
         savings_db,
@@ -365,16 +380,15 @@ pub(crate) async fn build_selected_project_state(
 /// via hooks; the sweep shares their parse offsets so it only picks up
 /// transcripts the hooks never saw. Fail-open and incremental
 /// (`parse_offsets` makes repeats cheap no-ops).
-fn spawn_session_catch_up_ingest(project_root: PathBuf) {
+fn spawn_session_catch_up_ingest(db: Arc<GlobalDb>, project_root: PathBuf) {
     tokio::spawn(async move {
-        if let Some(db) = crate::sessions::cursor::open_project_session_db(&project_root).await {
-            let stats = crate::sessions::ingest_global_sources(&db, &project_root).await;
-            if stats.sessions_upserted > 0 || stats.messages_upserted > 0 {
-                eprintln!(
-                    "Session catch-up ingest: {} session(s), {} message(s) updated.",
-                    stats.sessions_upserted, stats.messages_upserted
-                );
-            }
+        let stats =
+            crate::sessions::ingest_global_sources_for_startup(db.as_ref(), &project_root).await;
+        if stats.sessions_upserted > 0 || stats.messages_upserted > 0 {
+            eprintln!(
+                "Session catch-up ingest: {} session(s), {} message(s) updated.",
+                stats.sessions_upserted, stats.messages_upserted
+            );
         }
     });
 }
@@ -476,8 +490,15 @@ where
         direct_dashboard_automation_writer(),
     )
     .await;
-    if options.start_session_catch_up && state.lcm_scope != "global" {
-        spawn_session_catch_up_ingest(state.project_root.clone());
+    if options.start_session_catch_up {
+        if let Some(db) = state.authoritative_session_db.as_ref() {
+            spawn_session_catch_up_ingest(Arc::clone(db), state.project_root.clone());
+        } else {
+            eprintln!(
+                "Session catch-up ingest skipped: authoritative project session storage is unavailable for {}.",
+                state.project_root.display()
+            );
+        }
     }
     let app = router(state);
     let (listener, addr) = bind_dashboard(host, port).await?;

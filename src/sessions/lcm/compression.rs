@@ -426,6 +426,7 @@ pub(crate) async fn compress(
 
     ensure_session(conn, &request.provider, &request.session_id).await?;
     conn.execute("BEGIN IMMEDIATE", ()).await?;
+    let mut payload_rollback = payload::PayloadFileRollback::begin(storage_root);
 
     let ingested = match ingest_active_messages(
         conn,
@@ -434,12 +435,13 @@ pub(crate) async fn compress(
         &request.session_id,
         &request.messages,
         &request.ignore_message_patterns,
+        &mut payload_rollback,
     )
     .await
     {
         Ok(ingested) => ingested,
         Err(err) => {
-            let _ = conn.execute("ROLLBACK", ()).await;
+            rollback_ingest(conn, payload_rollback).await;
             return Err(err);
         }
     };
@@ -447,13 +449,20 @@ pub(crate) async fn compress(
     let summarizer = CompressionSummarizerAdapter::from_mode(request.summarizer.clone());
 
     if summarizer.is_noop() {
-        let frontier = lifecycle_state_or_default(
+        let frontier = match lifecycle_state_or_default(
             conn,
             &request.provider,
             &request.session_id,
             &request.session_id,
         )
-        .await?;
+        .await
+        {
+            Ok(frontier) => frontier,
+            Err(error) => {
+                rollback_ingest(conn, payload_rollback).await;
+                return Err(error);
+            }
+        };
         let response = compression_response(
             "ok",
             "noop_summarizer",
@@ -466,7 +475,7 @@ pub(crate) async fn compress(
         return match conn.execute("COMMIT", ()).await {
             Ok(_) => Ok(response),
             Err(err) => {
-                let _ = conn.execute("ROLLBACK", ()).await;
+                rollback_ingest(conn, payload_rollback).await;
                 Err(LcmError::Db(err.to_string()))
             }
         };
@@ -475,7 +484,7 @@ pub(crate) async fn compress(
     let response = match compress_in_transaction(conn, request, &summarizer).await {
         Ok(response) => response,
         Err(err) => {
-            let _ = conn.execute("ROLLBACK", ()).await;
+            rollback_ingest(conn, payload_rollback).await;
             return Err(err);
         }
     };
@@ -483,7 +492,7 @@ pub(crate) async fn compress(
     match conn.execute("COMMIT", ()).await {
         Ok(_) => Ok(response),
         Err(err) => {
-            let _ = conn.execute("ROLLBACK", ()).await;
+            rollback_ingest(conn, payload_rollback).await;
             Err(LcmError::Db(err.to_string()))
         }
     }
@@ -497,18 +506,36 @@ async fn ingest_active_messages_in_transaction(
     messages: &[Value],
     ignore_message_patterns: &[String],
 ) -> Result<IngestedActiveMessages, LcmError> {
-    util::with_immediate_tx(
+    conn.execute("BEGIN IMMEDIATE", ()).await?;
+    let mut payload_rollback = payload::PayloadFileRollback::begin(storage_root);
+    let result = ingest_active_messages(
         conn,
-        ingest_active_messages(
-            conn,
-            storage_root,
-            provider,
-            session_id,
-            messages,
-            ignore_message_patterns,
-        ),
+        storage_root,
+        provider,
+        session_id,
+        messages,
+        ignore_message_patterns,
+        &mut payload_rollback,
     )
-    .await
+    .await;
+    match result {
+        Ok(ingested) => match conn.execute("COMMIT", ()).await {
+            Ok(_) => Ok(ingested),
+            Err(error) => {
+                rollback_ingest(conn, payload_rollback).await;
+                Err(error.into())
+            }
+        },
+        Err(error) => {
+            rollback_ingest(conn, payload_rollback).await;
+            Err(error)
+        }
+    }
+}
+
+async fn rollback_ingest(conn: &Connection, payload_rollback: payload::PayloadFileRollback) {
+    let _ = conn.execute("ROLLBACK", ()).await;
+    let _ = payload_rollback.rollback(conn).await;
 }
 
 async fn compress_in_transaction(
@@ -1871,6 +1898,7 @@ async fn ingest_active_messages(
     session_id: &str,
     messages: &[Value],
     ignore_message_patterns: &[String],
+    payload_rollback: &mut payload::PayloadFileRollback,
 ) -> Result<IngestedActiveMessages, LcmError> {
     let mut replay_messages = Vec::with_capacity(messages.len());
     let mut changed_replay = false;
@@ -1972,7 +2000,13 @@ async fn ingest_active_messages(
             source_offset: None,
             metadata_json: Some(initial_metadata_json.clone()),
         };
-        let upsert = raw::upsert_raw_message_with_payload(conn, storage_root, &record).await?;
+        let upsert = raw::upsert_raw_message_with_payload_tracked(
+            conn,
+            storage_root,
+            &record,
+            payload_rollback,
+        )
+        .await?;
         let raw = super::schema::load_raw_message(conn, provider, &message_id)
             .await
             .ok_or_else(|| LcmError::Db("active message did not persist".to_string()))?;
@@ -1983,12 +2017,13 @@ async fn ingest_active_messages(
         }
         replay["content"] = replay_content;
         if let Some(tool_calls) = replay.get("tool_calls").cloned() {
-            let protected_tool_calls = raw::protect_replay_field_value(
+            let protected_tool_calls = raw::protect_replay_field_value_tracked(
                 conn,
                 storage_root,
                 &record,
                 "tool_calls",
                 &tool_calls,
+                payload_rollback,
             )
             .await?;
             if protected_tool_calls != tool_calls {

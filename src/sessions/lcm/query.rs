@@ -604,16 +604,16 @@ pub(crate) async fn expand(
                 offset: 0,
                 limit: usize::MAX,
             });
-            let store = payload::LcmStore::new(conn, storage_root.to_path_buf());
-            let expansion = store
-                .lcm_expand_payload(
-                    &request.provider,
-                    &request.session_id,
-                    &payload_ref,
-                    slice.offset,
-                    slice.limit,
-                )
-                .await?;
+            let expansion = payload::expand_payload(
+                conn,
+                storage_root,
+                &request.provider,
+                &request.session_id,
+                &payload_ref,
+                slice.offset,
+                slice.limit,
+            )
+            .await?;
             let range = LcmContentRange {
                 offset: expansion.offset,
                 limit: slice.limit as u64,

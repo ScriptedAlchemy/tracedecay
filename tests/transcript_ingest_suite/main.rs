@@ -18,4 +18,5 @@ mod cursor;
 mod cursor_composer;
 mod hermes;
 mod kiro;
+mod restart_atomicity;
 mod vibe;

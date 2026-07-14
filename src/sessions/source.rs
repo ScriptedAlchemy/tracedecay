@@ -9,9 +9,9 @@
 //! ## Incremental cursors
 //!
 //! Sources differ in how they store transcripts, so three cursor kinds are
-//! supported, all persisted through the existing `parse_offsets` table
-//! ([`GlobalDb::get_parse_offset`]/[`GlobalDb::set_parse_offset`]) keyed by file
-//! path. The stored [`StoredCursor`] is `(position, mtime)` where `position`
+//! supported, all persisted through the authoritative [`TranscriptStore`]
+//! implementation and its existing `parse_offsets` table keyed by file path.
+//! The stored [`StoredCursor`] is `(position, mtime)` where `position`
 //! means:
 //!
 //! * [`stream_new_jsonl`] — **`ByteOffset`**: append-only JSONL (Cursor, Claude,
@@ -36,8 +36,9 @@ use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 use sha2::{Digest, Sha256};
+use tracedecay_store::{ParseOffset, TranscriptStore, TranscriptWriteBatch};
 
-use crate::global_db::{GlobalDb, ParseOffset};
+use crate::global_db::GlobalDb;
 pub use crate::sessions::shared::{NewRows, StoredCursor, TranscriptIngestStats};
 #[allow(unused_imports)]
 pub(crate) use crate::sessions::shared::{
@@ -46,6 +47,7 @@ pub(crate) use crate::sessions::shared::{
     usage_counters_from,
 };
 use crate::sessions::{SessionMessageRecord, SessionRecord};
+use crate::store::GlobalDbTranscriptStore;
 
 fn log_source_skip(path: &Path, action: &'static str, error: &impl std::fmt::Display) {
     tracing::debug!(
@@ -133,25 +135,37 @@ pub async fn ingest_source(
     project_root: &Path,
     max_new_bytes: Option<u64>,
 ) -> TranscriptIngestStats {
+    let store = GlobalDbTranscriptStore::new(db);
+    ingest_source_with_store(&store, source, project_root, max_new_bytes).await
+}
+
+pub(crate) async fn ingest_source_with_store(
+    store: &GlobalDbTranscriptStore<'_>,
+    source: &dyn TranscriptSource,
+    project_root: &Path,
+    max_new_bytes: Option<u64>,
+) -> TranscriptIngestStats {
     let mut stats = TranscriptIngestStats::default();
     for path in source.transcript_paths(project_root) {
-        stats = stats.merge(ingest_one(db, source, &path, project_root, max_new_bytes).await);
+        stats = stats.merge(ingest_one(store, source, &path, project_root, max_new_bytes).await);
     }
     stats
 }
 
-/// Ingest one transcript file: load the prior cursor, parse new content, persist
-/// the advanced cursor, then upsert the session (merging preserved fields) and
-/// its new messages.
+/// Ingest one transcript file: load the prior durable cursor through the store
+/// contract, parse new content, and submit one atomic session/message/cursor
+/// batch. The root adapter extends that write with git evidence in the same
+/// authoritative `GlobalDb` transaction.
 async fn ingest_one(
-    db: &GlobalDb,
+    store: &GlobalDbTranscriptStore<'_>,
     source: &dyn TranscriptSource,
     path: &Path,
     project_root: &Path,
     max_new_bytes: Option<u64>,
 ) -> TranscriptIngestStats {
-    let path_str = path.to_string_lossy().to_string();
-    let prev_offset = db.get_parse_offset(&path_str).await.unwrap_or_default();
+    let Ok(prev_offset) = store.get_parse_offset(path).await else {
+        return TranscriptIngestStats::default();
+    };
     let prev = StoredCursor {
         position: prev_offset.byte_offset,
         mtime: prev_offset.mtime,
@@ -161,18 +175,36 @@ async fn ingest_one(
         return TranscriptIngestStats::default();
     };
 
+    let next_offset = ParseOffset {
+        byte_offset: parsed.new_cursor.position,
+        mtime: parsed.new_cursor.mtime,
+        file_id: parsed.new_cursor.file_id,
+    };
     if parsed.messages.is_empty() {
         // Non-message append (e.g. blank/undecodable rows) still advances the
         // cursor so the next ingest only sees genuinely new content.
-        db.set_parse_offset(
-            &path_str,
-            ParseOffset {
-                byte_offset: parsed.new_cursor.position,
-                mtime: parsed.new_cursor.mtime,
-                file_id: parsed.new_cursor.file_id,
-            },
-        )
-        .await;
+        let batch = match TranscriptWriteBatch::advance_offset(
+            path.to_path_buf(),
+            prev_offset,
+            next_offset,
+        ) {
+            Ok(batch) => batch,
+            Err(error) => {
+                tracing::debug!(
+                    transcript_path = %path.display(),
+                    error = %error,
+                    "rejected invalid transcript offset batch"
+                );
+                return TranscriptIngestStats::default();
+            }
+        };
+        if let Err(error) = store.persist_transcript_batch(batch).await {
+            tracing::debug!(
+                transcript_path = %path.display(),
+                error = %error,
+                "failed to persist parsed-empty transcript cursor"
+            );
+        }
         return TranscriptIngestStats::default();
     }
 
@@ -182,7 +214,9 @@ async fn ingest_one(
     let span_observations =
         crate::sessions::git_correlation::ingest_span_observations(&parsed.messages);
     let draft = parsed.draft;
-    let existing = db.get_session(provider, &draft.session_id).await;
+    let Ok(existing) = store.get_session(provider, &draft.session_id).await else {
+        return TranscriptIngestStats::default();
+    };
     // Preserve the session's original start time and title across appends; only
     // advance ended_at to the latest message seen.
     let started_at = existing
@@ -220,26 +254,33 @@ async fn ingest_one(
         parent_tool_use_id: draft.parent_tool_use_id,
     };
 
-    if !db
-        .upsert_transcript_batch_with_git_evidence(
-            &session,
-            &parsed.messages,
-            &commit_records,
-            &span_observations,
-            &path_str,
-            ParseOffset {
-                byte_offset: parsed.new_cursor.position,
-                mtime: parsed.new_cursor.mtime,
-                file_id: parsed.new_cursor.file_id,
-            },
-        )
+    let messages_upserted = parsed.messages.len() as u64;
+    let batch =
+        match TranscriptWriteBatch::upsert(session, parsed.messages, prev_offset, next_offset) {
+            Ok(batch) => batch,
+            Err(error) => {
+                tracing::debug!(
+                    transcript_path = %path.display(),
+                    error = %error,
+                    "rejected invalid transcript batch"
+                );
+                return TranscriptIngestStats::default();
+            }
+        };
+    if let Err(error) = store
+        .persist_transcript_batch_with_git_evidence(batch, &commit_records, &span_observations)
         .await
     {
+        tracing::debug!(
+            transcript_path = %path.display(),
+            error = %error,
+            "failed to persist transcript batch"
+        );
         return TranscriptIngestStats::default();
     }
     TranscriptIngestStats {
         sessions_upserted: 1,
-        messages_upserted: parsed.messages.len() as u64,
+        messages_upserted,
     }
 }
 

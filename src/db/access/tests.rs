@@ -706,6 +706,42 @@ fn stale_owner_metadata_never_establishes_ownership() {
 }
 
 #[test]
+fn stale_owner_metadata_cannot_bypass_a_competing_writer_lease() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("graph.db");
+    let identity = DatabaseIdentity::for_path(&path).unwrap();
+    let competing_writer = open_lock_file(&identity.writer_lock_path).unwrap();
+    fs2::FileExt::try_lock_exclusive(&competing_writer).unwrap();
+    std::fs::write(
+        &identity.writer_owner_path,
+        "token=stale\tpid=1\tstarted_epoch_ms=1\tversion=old\tintent=stale owner\n",
+    )
+    .unwrap();
+
+    let error = DatabaseAuthority::acquire_test(&path, "competing writer").unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("writer lease is held by another process")
+    );
+    assert!(
+        std::fs::read_to_string(&identity.writer_owner_path)
+            .unwrap()
+            .contains("token=stale"),
+        "a rejected contender must not publish replacement ownership"
+    );
+
+    fs2::FileExt::unlock(&competing_writer).unwrap();
+    assert_eq!(probe_writer_owner(&path).unwrap(), WriterOwnership::Idle);
+    let authority = DatabaseAuthority::acquire_test(&path, "writer after contention").unwrap();
+    assert_ne!(authority.token(), "stale");
+    assert!(matches!(
+        probe_writer_owner(&path).unwrap(),
+        WriterOwnership::Active(owner) if owner.token == authority.token()
+    ));
+}
+
+#[test]
 fn authority_is_bound_to_one_canonical_database() {
     let temp = tempfile::tempdir().unwrap();
     let first = temp.path().join("first.db");

@@ -49,17 +49,54 @@ const O_NOFOLLOW: i32 = 0o40_0000;
 pub struct LcmStore<'db> {
     conn: &'db Connection,
     storage_root: PathBuf,
+    transaction: &'db tokio::sync::Mutex<()>,
 }
 
+mod rollback;
+pub(crate) use rollback::PayloadFileRollback;
+
 impl<'db> LcmStore<'db> {
-    pub(crate) fn new(conn: &'db Connection, storage_root: PathBuf) -> Self {
-        Self { conn, storage_root }
+    pub(crate) fn new(
+        conn: &'db Connection,
+        storage_root: PathBuf,
+        transaction: &'db tokio::sync::Mutex<()>,
+    ) -> Self {
+        Self {
+            conn,
+            storage_root,
+            transaction,
+        }
     }
 
     pub async fn ingest_raw_message(&self, message: &SessionMessageRecord) -> Result<(), LcmError> {
-        raw::upsert_raw_message_with_payload(self.conn, &self.storage_root, message)
-            .await
-            .map(|_| ())
+        let _transaction = self.transaction.lock().await;
+        self.conn.execute("BEGIN IMMEDIATE", ()).await?;
+        let mut payload_rollback = PayloadFileRollback::begin(&self.storage_root);
+        let result = raw::upsert_raw_message_with_payload_tracked(
+            self.conn,
+            &self.storage_root,
+            message,
+            &mut payload_rollback,
+        )
+        .await;
+        match result {
+            Ok(_) => match self.conn.execute("COMMIT", ()).await {
+                Ok(_) => Ok(()),
+                Err(error) => {
+                    self.rollback_ingest(payload_rollback).await;
+                    Err(error.into())
+                }
+            },
+            Err(error) => {
+                self.rollback_ingest(payload_rollback).await;
+                Err(error)
+            }
+        }
+    }
+
+    async fn rollback_ingest(&self, payload_rollback: PayloadFileRollback) {
+        let _ = self.conn.execute("ROLLBACK", ()).await;
+        let _ = payload_rollback.rollback(self.conn).await;
     }
 
     pub async fn lcm_expand_payload(
@@ -85,6 +122,19 @@ impl<'db> LcmStore<'db> {
 
 pub fn payload_dir(storage_root: &Path) -> PathBuf {
     storage_root.join("lcm-payloads")
+}
+
+pub(super) async fn payload_metadata_exists(
+    conn: &Connection,
+    payload_ref: &str,
+) -> Result<bool, LcmError> {
+    let mut rows = conn
+        .query(
+            "SELECT 1 FROM lcm_external_payloads WHERE payload_ref = ?1 LIMIT 1",
+            params![payload_ref],
+        )
+        .await?;
+    Ok(rows.next().await?.is_some())
 }
 
 pub fn validate_payload_ref(payload_ref: &str) -> Result<&str, LcmError> {
@@ -148,6 +198,32 @@ fn is_external_payload_placeholder(value: &str) -> bool {
     .any(|prefix| lower.starts_with(prefix))
 }
 
+pub(crate) fn write_external_payload_tracked(
+    storage_root: &Path,
+    provider: &str,
+    session_id: &str,
+    message_id: &str,
+    kind: &str,
+    content: &str,
+    metadata_json: Option<String>,
+    rollback: &mut PayloadFileRollback,
+) -> Result<LcmPayloadRef, LcmError> {
+    let (payload, created) = write_external_payload_inner(
+        storage_root,
+        provider,
+        session_id,
+        message_id,
+        kind,
+        content,
+        metadata_json,
+    )?;
+    if created {
+        rollback.record_created(&payload.payload_ref);
+    }
+    Ok(payload)
+}
+
+#[cfg(test)]
 pub(crate) fn write_external_payload(
     storage_root: &Path,
     provider: &str,
@@ -157,6 +233,28 @@ pub(crate) fn write_external_payload(
     content: &str,
     metadata_json: Option<String>,
 ) -> Result<LcmPayloadRef, LcmError> {
+    let mut ignored = PayloadFileRollback::begin(storage_root);
+    write_external_payload_tracked(
+        storage_root,
+        provider,
+        session_id,
+        message_id,
+        kind,
+        content,
+        metadata_json,
+        &mut ignored,
+    )
+}
+
+fn write_external_payload_inner(
+    storage_root: &Path,
+    provider: &str,
+    session_id: &str,
+    message_id: &str,
+    kind: &str,
+    content: &str,
+    metadata_json: Option<String>,
+) -> Result<(LcmPayloadRef, bool), LcmError> {
     let content_hash = util::sha256_hex(content.as_bytes());
     let owner_hash = util::sha256_hex(
         format!("{provider}\0{session_id}\0{message_id}\0{content_hash}").as_bytes(),
@@ -167,20 +265,23 @@ pub(crate) fn write_external_payload(
     let dir = prepare_payload_dir(storage_root)?;
     let path = dir.join(&payload_ref);
     ensure_contained(&dir, &path)?;
-    write_private_file(&path, content.as_bytes())?;
+    let created = write_private_file(&path, content.as_bytes())?;
 
-    Ok(LcmPayloadRef {
-        payload_ref,
-        provider: provider.to_string(),
-        session_id: session_id.to_string(),
-        message_id: message_id.to_string(),
-        kind: kind.to_string(),
-        content_hash,
-        byte_count: content.len() as u64,
-        char_count: content.chars().count() as u64,
-        created_at: current_timestamp(),
-        metadata_json,
-    })
+    Ok((
+        LcmPayloadRef {
+            payload_ref,
+            provider: provider.to_string(),
+            session_id: session_id.to_string(),
+            message_id: message_id.to_string(),
+            kind: kind.to_string(),
+            content_hash,
+            byte_count: content.len() as u64,
+            char_count: content.chars().count() as u64,
+            created_at: current_timestamp(),
+            metadata_json,
+        },
+        created,
+    ))
 }
 
 /// Moves externalized payload ownership from one session id to another inside
@@ -242,7 +343,7 @@ pub(crate) async fn upsert_payload_metadata(
     Ok(())
 }
 
-async fn expand_payload(
+pub(crate) async fn expand_payload(
     conn: &Connection,
     storage_root: &Path,
     provider: &str,
@@ -803,7 +904,7 @@ pub(crate) fn ensure_contained(root: &Path, path: &Path) -> Result<(), LcmError>
     }
 }
 
-fn write_private_file(path: &Path, content: &[u8]) -> Result<(), LcmError> {
+fn write_private_file(path: &Path, content: &[u8]) -> Result<bool, LcmError> {
     let mut file = match private_file_options()
         .create_new(true)
         .write(true)
@@ -811,15 +912,17 @@ fn write_private_file(path: &Path, content: &[u8]) -> Result<(), LcmError> {
     {
         Ok(file) => file,
         Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
-            return ensure_existing_payload_matches(path, content);
+            ensure_existing_payload_matches(path, content)?;
+            return Ok(false);
         }
         Err(err) => return Err(LcmError::Io(err.to_string())),
     };
-    file.write_all(content)
-        .map_err(|err| LcmError::Io(err.to_string()))?;
-    file.sync_all()
-        .map_err(|err| LcmError::Io(err.to_string()))?;
-    Ok(())
+    if let Err(error) = file.write_all(content).and_then(|()| file.sync_all()) {
+        drop(file);
+        let _ = fs::remove_file(path);
+        return Err(LcmError::Io(error.to_string()));
+    }
+    Ok(true)
 }
 
 fn ensure_existing_payload_matches(path: &Path, content: &[u8]) -> Result<(), LcmError> {
@@ -873,3 +976,7 @@ fn private_file_options() -> fs::OpenOptions {
 fn set_private_dir_permissions(path: &Path) -> Result<(), LcmError> {
     crate::storage::set_private_dir_permissions(path).map_err(|err| LcmError::Io(err.to_string()))
 }
+
+#[cfg(test)]
+#[path = "payload/rollback_tests.rs"]
+mod rollback_tests;

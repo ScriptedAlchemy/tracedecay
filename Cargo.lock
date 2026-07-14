@@ -4902,6 +4902,7 @@ dependencies = [
  "toml",
  "tower 0.5.3",
  "tracedecay-domain",
+ "tracedecay-store",
  "tracing",
  "tree-sitter",
  "tree-sitter-hlsl",
@@ -4920,6 +4921,14 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "tracedecay-store"
+version = "0.1.0"
+dependencies = [
+ "serde",
  "thiserror 2.0.18",
 ]
 

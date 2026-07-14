@@ -1391,11 +1391,15 @@ async fn distinct_external_content_variant_preserves_owner_expansion_and_retry()
         variant_id
     );
     drop(owners);
-    let expanded = crate::sessions::lcm::payload::LcmStore::new(
+    let expanded = crate::sessions::lcm::payload::expand_payload(
         sessions.conn(),
-        applied.destination_data_root.clone(),
+        &applied.destination_data_root,
+        "codex",
+        "legacy-session",
+        &source_ref,
+        0,
+        100,
     )
-    .lcm_expand_payload("codex", "legacy-session", &source_ref, 0, 100)
     .await
     .unwrap();
     assert_eq!(expanded.content, "source external body");

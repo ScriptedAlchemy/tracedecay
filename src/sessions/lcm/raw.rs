@@ -90,6 +90,32 @@ struct IngestConfig {
     sensitive_patterns: Vec<String>,
 }
 
+struct PayloadExternalizer<'a> {
+    storage_root: &'a Path,
+    rollback: &'a mut payload::PayloadFileRollback,
+}
+
+impl PayloadExternalizer<'_> {
+    fn write(
+        &mut self,
+        message: &SessionMessageRecord,
+        kind: &str,
+        content: &str,
+        metadata_json: Option<String>,
+    ) -> Result<LcmPayloadRef, LcmError> {
+        payload::write_external_payload_tracked(
+            self.storage_root,
+            &message.provider,
+            &message.session_id,
+            &message.message_id,
+            kind,
+            content,
+            metadata_json,
+            self.rollback,
+        )
+    }
+}
+
 pub fn derived_text_for_index(raw: &str) -> String {
     derived_text_with_cap(raw, MAX_DERIVED_TEXT_CHARS)
 }
@@ -223,12 +249,17 @@ pub(crate) async fn reassign_session_messages(
     .map_err(|err| LcmError::Db(err.to_string()))
 }
 
-pub(crate) async fn upsert_raw_message_with_payload(
+pub(crate) async fn upsert_raw_message_with_payload_tracked(
     conn: &Connection,
     storage_root: &Path,
     message: &SessionMessageRecord,
+    rollback: &mut payload::PayloadFileRollback,
 ) -> Result<RawMessageUpsert, LcmError> {
-    let prepared = prepare_message(conn, storage_root, message).await?;
+    let mut externalizer = PayloadExternalizer {
+        storage_root,
+        rollback,
+    };
+    let prepared = prepare_message(conn, message, &mut externalizer).await?;
     if !security::should_externalize(&message.role, message.kind.as_deref(), &prepared.text) {
         let projection_text = derived_text_for_index(&prepared.text);
         return if upsert_inline_raw_message(
@@ -255,11 +286,8 @@ pub(crate) async fn upsert_raw_message_with_payload(
         .as_deref()
         .or(message.kind.as_deref())
         .unwrap_or("message");
-    let payload_ref = payload::write_external_payload(
-        storage_root,
-        &message.provider,
-        &message.session_id,
-        &message.message_id,
+    let payload_ref = externalizer.write(
+        message,
         kind,
         &prepared.text,
         payload_metadata_json(&prepared.protection),
@@ -318,13 +346,18 @@ pub(crate) async fn upsert_raw_message_with_payload(
 /// Applies ingest protection to an arbitrary replay field value (for example
 /// active-replay `tool_calls`) using the same redaction and substring media
 /// externalization primitives as raw-message ingest.
-pub(crate) async fn protect_replay_field_value(
+pub(crate) async fn protect_replay_field_value_tracked(
     conn: &Connection,
     storage_root: &Path,
     message: &SessionMessageRecord,
     field_path: &str,
     value: &JsonValue,
+    rollback: &mut payload::PayloadFileRollback,
 ) -> Result<JsonValue, LcmError> {
+    let mut externalizer = PayloadExternalizer {
+        storage_root,
+        rollback,
+    };
     let config = ingest_config(message.metadata_json.as_deref());
     let mut protected = value.clone();
 
@@ -347,10 +380,10 @@ pub(crate) async fn protect_replay_field_value(
     let mut payloads = Vec::new();
     protect_json_media_payloads(
         &mut protected,
-        storage_root,
         message,
         field_path,
         &mut payloads,
+        &mut externalizer,
     )?;
     for payload_ref in &payloads {
         payload::upsert_payload_metadata(conn, payload_ref).await?;
@@ -360,8 +393,8 @@ pub(crate) async fn protect_replay_field_value(
 
 async fn prepare_message(
     conn: &Connection,
-    storage_root: &Path,
     message: &SessionMessageRecord,
+    externalizer: &mut PayloadExternalizer<'_>,
 ) -> Result<PreparedMessage, LcmError> {
     let config = ingest_config(message.metadata_json.as_deref());
     let mut protection = IngestProtection::default();
@@ -394,10 +427,10 @@ async fn prepare_message(
             let mut nested_payloads = Vec::new();
             protect_json_media_payloads(
                 &mut value,
-                storage_root,
                 message,
                 "content",
                 &mut nested_payloads,
+                externalizer,
             )?;
             if !nested_payloads.is_empty() {
                 for payload_ref in &nested_payloads {
@@ -429,7 +462,7 @@ async fn prepare_message(
     {
         let mut span_payloads = Vec::new();
         if let Some(protected) =
-            replace_media_substrings(&text, storage_root, message, "content", &mut span_payloads)?
+            replace_media_substrings(&text, message, "content", &mut span_payloads, externalizer)?
         {
             for payload_ref in &span_payloads {
                 payload::upsert_payload_metadata(conn, payload_ref).await?;
@@ -457,10 +490,10 @@ async fn prepare_message(
 
 fn protect_json_media_payloads(
     value: &mut JsonValue,
-    storage_root: &Path,
     message: &SessionMessageRecord,
     field_path: &str,
     payloads: &mut Vec<LcmPayloadRef>,
+    externalizer: &mut PayloadExternalizer<'_>,
 ) -> Result<(), LcmError> {
     match value {
         JsonValue::Object(map) => {
@@ -472,10 +505,10 @@ fn protect_json_media_payloads(
                     let key_field_path = format!("{field_path}.<key>");
                     if let Some(protected_key) = replace_media_substrings(
                         &key,
-                        storage_root,
                         message,
                         &key_field_path,
                         payloads,
+                        externalizer,
                     )? {
                         replaced_key = Some(protected_key);
                     }
@@ -487,10 +520,10 @@ fn protect_json_media_payloads(
                 };
                 protect_json_media_payloads(
                     &mut child,
-                    storage_root,
                     message,
                     &child_path,
                     payloads,
+                    externalizer,
                 )?;
                 let protected_key = replaced_key.unwrap_or(key);
                 rebuilt.insert(protected_key, child);
@@ -500,7 +533,7 @@ fn protect_json_media_payloads(
         JsonValue::Array(items) => {
             for (index, child) in items.iter_mut().enumerate() {
                 let child_path = format!("{field_path}[{index}]");
-                protect_json_media_payloads(child, storage_root, message, &child_path, payloads)?;
+                protect_json_media_payloads(child, message, &child_path, payloads, externalizer)?;
             }
         }
         JsonValue::String(text) if security::contains_media_payload(text) => {
@@ -508,7 +541,7 @@ fn protect_json_media_payloads(
             // to nested strings: only the media spans are externalized while
             // surrounding text stays in place.
             if let Some(protected) =
-                replace_media_substrings(text, storage_root, message, field_path, payloads)?
+                replace_media_substrings(text, message, field_path, payloads, externalizer)?
             {
                 *text = protected;
             }
@@ -545,10 +578,10 @@ fn has_inline_scaffold_outside_media_spans(text: &str) -> bool {
 /// Returns `None` when nothing matched.
 fn replace_media_substrings(
     text: &str,
-    storage_root: &Path,
     message: &SessionMessageRecord,
     field_path: &str,
     payloads: &mut Vec<LcmPayloadRef>,
+    externalizer: &mut PayloadExternalizer<'_>,
 ) -> Result<Option<String>, LcmError> {
     let data_uri_spans = security::data_uri_spans(text);
     let after_data_uris = if data_uri_spans.is_empty() {
@@ -557,10 +590,10 @@ fn replace_media_substrings(
         externalize_spans(
             text,
             &data_uri_spans,
-            storage_root,
             message,
             field_path,
             payloads,
+            externalizer,
         )?
     };
     let run_spans = security::long_base64_run_spans(&after_data_uris);
@@ -570,10 +603,10 @@ fn replace_media_substrings(
     let protected = externalize_spans(
         &after_data_uris,
         &run_spans,
-        storage_root,
         message,
         field_path,
         payloads,
+        externalizer,
     )?;
     Ok(Some(protected))
 }
@@ -581,10 +614,10 @@ fn replace_media_substrings(
 fn externalize_spans(
     text: &str,
     spans: &[(usize, usize)],
-    storage_root: &Path,
     message: &SessionMessageRecord,
     field_path: &str,
     payloads: &mut Vec<LcmPayloadRef>,
+    externalizer: &mut PayloadExternalizer<'_>,
 ) -> Result<String, LcmError> {
     let mut protected = String::with_capacity(text.len());
     let mut cursor = 0usize;
@@ -599,15 +632,7 @@ fn externalize_spans(
             })
             .to_string(),
         );
-        let payload_ref = payload::write_external_payload(
-            storage_root,
-            &message.provider,
-            &message.session_id,
-            &message.message_id,
-            "ingest_payload",
-            span,
-            metadata_json,
-        )?;
+        let payload_ref = externalizer.write(message, "ingest_payload", span, metadata_json)?;
         protected.push_str(&ingest_payload_placeholder(&payload_ref, field_path));
         payloads.push(payload_ref);
         cursor = end;

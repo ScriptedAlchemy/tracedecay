@@ -14,6 +14,7 @@ fn split_brain_is_rejected_and_unavailable_daemon_fails_closed_until_restart() {
 
     let socket_before = file_identity(&socket_path).expect("owner socket identity");
     let authority_before = daemon_authority_record(&home_path);
+    let storage_before_contender = storage_snapshot(&db_path);
     let mut contender = ChildGuard::new(
         common::tracedecay_command_with_home(&home_path)
             .env_remove(SQLITE_UNSAFE_FAST_ENV)
@@ -46,6 +47,11 @@ fn split_brain_is_rejected_and_unavailable_daemon_fails_closed_until_restart() {
         daemon_authority_record(&home_path),
         authority_before,
         "rejected contender changed daemon authority generation"
+    );
+    assert_eq!(
+        storage_snapshot(&db_path),
+        storage_before_contender,
+        "rejected contender wrote through a competing or fallback database owner"
     );
 
     stop_child(&mut owner);

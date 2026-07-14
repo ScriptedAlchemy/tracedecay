@@ -14,6 +14,8 @@ use std::sync::{Arc, LazyLock, Weak};
 use libsql::{Builder, Connection, Database as LibsqlDatabase, OpenFlags, Value, params};
 use serde_json::Value as JsonValue;
 
+pub use tracedecay_store::ParseOffset;
+
 use crate::db::DatabaseAuthority;
 use crate::sessions::{
     SessionMessageRecord, SessionMessageSearchResult, SessionRecord, SessionSearchFilters,
@@ -22,6 +24,10 @@ use crate::sessions::{
         LcmSummarySourceMessage, LcmSummarySourceRange,
     },
 };
+
+mod transcript;
+
+pub(crate) use transcript::TranscriptPersistenceError;
 
 const UNIX_TIMESTAMP_MILLIS_THRESHOLD: i64 = 1_000_000_000_000;
 
@@ -282,17 +288,11 @@ pub struct SessionIngestHealth {
     pub last_ingest_unix: Option<i64>,
 }
 
-/// Persisted parse cursor for a transcript path.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-pub struct ParseOffset {
-    pub byte_offset: u64,
-    pub mtime: u64,
-    pub file_id: u64,
-}
-
-/// One transcript session plus its parsed messages, for multi-session batch
-/// upserts from SQLite-backed stores where a single store file holds every
-/// session (e.g. Hermes `state.db`).
+/// One transcript session plus its parsed messages, for projection-only
+/// multi-session upserts from stores such as Hermes `state.db`.
+///
+/// This compatibility DTO remains local because projection-only persistence is
+/// intentionally outside the authoritative transcript store contract.
 #[derive(Debug, Clone)]
 pub struct TranscriptBatch {
     pub session: SessionRecord,
@@ -301,12 +301,6 @@ pub struct TranscriptBatch {
 
 /// Whether a transcript batch writes the full dual store (LCM raw + searchable
 /// projection) or only the `session_messages` projection.
-#[derive(Debug, Clone, Copy)]
-enum TranscriptWriteMode {
-    Full,
-    ProjectionOnly,
-}
-
 /// User-level database tracking all `TraceDecay` projects.
 pub struct GlobalDb {
     inner: Arc<GlobalDbInner>,
@@ -315,6 +309,7 @@ pub struct GlobalDb {
 #[doc(hidden)]
 pub struct GlobalDbInner {
     conn: Connection,
+    transaction: tokio::sync::Mutex<()>,
     storage_root: PathBuf,
     db_path: PathBuf,
     _db: LibsqlDatabase,
@@ -558,20 +553,24 @@ fn truncate_summary_excerpt(text: &str, max_chars: usize) -> String {
 }
 
 fn row_to_session(row: &libsql::Row) -> Option<SessionRecord> {
-    Some(SessionRecord {
-        provider: row.get(0).ok()?,
-        session_id: row.get(1).ok()?,
-        project_key: row.get(2).ok()?,
-        project_path: row.get(3).ok()?,
-        title: row.get(4).ok()?,
-        started_at: row.get(5).ok()?,
-        ended_at: row.get(6).ok()?,
-        transcript_path: row.get(7).ok()?,
-        metadata_json: row.get(8).ok()?,
-        parent_session_id: row.get(9).ok()?,
-        is_subagent: row.get::<i64>(10).unwrap_or(0) != 0,
-        agent_id: row.get(11).ok()?,
-        parent_tool_use_id: row.get(12).ok()?,
+    row_to_session_result(row).ok()
+}
+
+fn row_to_session_result(row: &libsql::Row) -> libsql::Result<SessionRecord> {
+    Ok(SessionRecord {
+        provider: row.get(0)?,
+        session_id: row.get(1)?,
+        project_key: row.get(2)?,
+        project_path: row.get(3)?,
+        title: row.get(4)?,
+        started_at: row.get(5)?,
+        ended_at: row.get(6)?,
+        transcript_path: row.get(7)?,
+        metadata_json: row.get(8)?,
+        parent_session_id: row.get(9)?,
+        is_subagent: row.get::<i64>(10)? != 0,
+        agent_id: row.get(11)?,
+        parent_tool_use_id: row.get(12)?,
     })
 }
 
@@ -1010,6 +1009,7 @@ impl GlobalDb {
         Some(Self {
             inner: Arc::new(GlobalDbInner {
                 conn,
+                transaction: tokio::sync::Mutex::new(()),
                 storage_root,
                 db_path,
                 _db: db,
@@ -2794,6 +2794,18 @@ impl GlobalDb {
 
     /// Returns a single provider session by its provider-local ID.
     pub async fn get_session(&self, provider: &str, session_id: &str) -> Option<SessionRecord> {
+        self.get_session_result(provider, session_id)
+            .await
+            .ok()
+            .flatten()
+    }
+
+    pub(crate) async fn get_session_result(
+        &self,
+        provider: &str,
+        session_id: &str,
+    ) -> Result<Option<SessionRecord>, TranscriptPersistenceError> {
+        let _transaction = self.transaction.lock().await;
         let mut rows = self
             .conn
             .query(
@@ -2804,8 +2816,18 @@ impl GlobalDb {
                 params![provider, session_id],
             )
             .await
-            .ok()?;
-        row_to_session(&rows.next().await.ok()??)
+            .map_err(|error| {
+                TranscriptPersistenceError::storage("load transcript session", error)
+            })?;
+        let Some(row) = rows.next().await.map_err(|error| {
+            TranscriptPersistenceError::storage("load transcript session", error)
+        })?
+        else {
+            return Ok(None);
+        };
+        row_to_session_result(&row).map(Some).map_err(|error| {
+            TranscriptPersistenceError::storage("decode transcript session", error)
+        })
     }
 
     pub async fn append_analytics_event(
@@ -2856,6 +2878,7 @@ impl GlobalDb {
             return Ok(Vec::new());
         }
 
+        let _transaction = self.transaction.lock().await;
         self.conn
             .execute("BEGIN IMMEDIATE", ())
             .await
@@ -3238,45 +3261,66 @@ impl GlobalDb {
 
     /// Inserts or replaces a provider message. Returns `false` on any DB error.
     pub async fn upsert_session_message(&self, message: &SessionMessageRecord) -> bool {
-        if self.conn.execute("BEGIN IMMEDIATE", ()).await.is_err() {
+        let _transaction = self.transaction.lock().await;
+        if transcript::begin(&self.conn).await.is_err() {
             return false;
         }
+        let mut payload_rollback =
+            crate::sessions::lcm::payload::PayloadFileRollback::begin(&self.storage_root);
 
-        if !self.upsert_session_message_in_existing_tx(message).await {
-            let _ = self.conn.execute("ROLLBACK", ()).await;
+        if self
+            .upsert_session_message_in_existing_tx(message, &mut payload_rollback)
+            .await
+            .is_err()
+        {
+            transcript::rollback(&self.conn).await;
+            let _ = payload_rollback.rollback(&self.conn).await;
             return false;
         }
-        if self.conn.execute("COMMIT", ()).await.is_ok() {
+        if transcript::commit(&self.conn).await.is_ok() {
             return true;
         }
-        let _ = self.conn.execute("ROLLBACK", ()).await;
+        transcript::rollback(&self.conn).await;
+        let _ = payload_rollback.rollback(&self.conn).await;
         false
     }
 
-    async fn upsert_session_message_in_existing_tx(&self, message: &SessionMessageRecord) -> bool {
-        let raw_result = crate::sessions::lcm::raw::upsert_raw_message_with_payload(
+    async fn upsert_session_message_in_existing_tx(
+        &self,
+        message: &SessionMessageRecord,
+        payload_rollback: &mut crate::sessions::lcm::payload::PayloadFileRollback,
+    ) -> Result<(), TranscriptPersistenceError> {
+        let raw = crate::sessions::lcm::raw::upsert_raw_message_with_payload_tracked(
             &self.conn,
             &self.storage_root,
             message,
+            payload_rollback,
         )
-        .await;
-        match raw_result {
-            Ok(raw) => {
-                if !self
-                    .upsert_session_message_projection(
-                        message,
-                        &raw.projection_text,
-                        raw.projection_metadata_json.as_deref(),
-                    )
-                    .await
-                {
-                    return false;
-                }
-                self.upsert_lcm_summary_for_transcript_summary(message)
-                    .await
-            }
-            Err(_) => false,
+        .await
+        .map_err(|error| TranscriptPersistenceError::storage("upsert LCM raw message", error))?;
+        if !self
+            .upsert_session_message_projection(
+                message,
+                &raw.projection_text,
+                raw.projection_metadata_json.as_deref(),
+            )
+            .await
+        {
+            return Err(TranscriptPersistenceError::message(
+                "upsert session message projection",
+                "database write failed",
+            ));
         }
+        if !self
+            .upsert_lcm_summary_for_transcript_summary(message)
+            .await
+        {
+            return Err(TranscriptPersistenceError::message(
+                "upsert transcript summary projection",
+                "database write failed",
+            ));
+        }
+        Ok(())
     }
 
     /// Inserts messages whose `(provider, message_id)` key is absent, leaving
@@ -3304,9 +3348,12 @@ impl GlobalDb {
             return Some(0);
         }
 
-        if self.conn.execute("BEGIN IMMEDIATE", ()).await.is_err() {
+        let _transaction = self.transaction.lock().await;
+        if transcript::begin(&self.conn).await.is_err() {
             return None;
         }
+        let mut payload_rollback =
+            crate::sessions::lcm::payload::PayloadFileRollback::begin(&self.storage_root);
         let mut inserted = 0u64;
         for message in absent {
             // The presence probe ran outside this transaction, so a concurrent
@@ -3316,16 +3363,22 @@ impl GlobalDb {
             // the row re-parsed from the *same* transcript is byte-for-byte what
             // the racing writer stored — the update rewrites identical content
             // rather than clobbering the row with foreign data.
-            if !self.upsert_session_message_in_existing_tx(message).await {
-                let _ = self.conn.execute("ROLLBACK", ()).await;
+            if self
+                .upsert_session_message_in_existing_tx(message, &mut payload_rollback)
+                .await
+                .is_err()
+            {
+                transcript::rollback(&self.conn).await;
+                let _ = payload_rollback.rollback(&self.conn).await;
                 return None;
             }
             inserted += 1;
         }
-        if self.conn.execute("COMMIT", ()).await.is_ok() {
+        if transcript::commit(&self.conn).await.is_ok() {
             return Some(inserted);
         }
-        let _ = self.conn.execute("ROLLBACK", ()).await;
+        transcript::rollback(&self.conn).await;
+        let _ = payload_rollback.rollback(&self.conn).await;
         None
     }
 
@@ -3518,163 +3571,6 @@ impl GlobalDb {
             source_time_end,
             excerpts,
         })
-    }
-
-    /// Atomically upserts one transcript session + all parsed messages and then
-    /// advances the parse cursor. Any failure rolls back the entire batch so a
-    /// follow-up ingest can safely replay from the previous offset.
-    pub async fn upsert_transcript_batch(
-        &self,
-        session: &SessionRecord,
-        messages: &[SessionMessageRecord],
-        parse_offset_path: &str,
-        parse_offset: ParseOffset,
-    ) -> bool {
-        self.upsert_transcript_batch_with_git_evidence(
-            session,
-            messages,
-            &[],
-            &[],
-            parse_offset_path,
-            parse_offset,
-        )
-        .await
-    }
-
-    /// Atomically persists transcript rows, direct commit evidence, and the
-    /// parse cursor so a failed attribution write is replayed on the next sync.
-    pub(crate) async fn upsert_transcript_batch_with_git_evidence(
-        &self,
-        session: &SessionRecord,
-        messages: &[SessionMessageRecord],
-        commit_records: &[crate::sessions::git_correlation::CommitSessionRecord],
-        span_observations: &[crate::sessions::git_correlation::SpanObservation],
-        parse_offset_path: &str,
-        parse_offset: ParseOffset,
-    ) -> bool {
-        let batch = TranscriptBatch {
-            session: session.clone(),
-            messages: messages.to_vec(),
-        };
-        self.upsert_transcript_batches_inner(
-            std::slice::from_ref(&batch),
-            commit_records,
-            span_observations,
-            parse_offset_path,
-            parse_offset,
-            TranscriptWriteMode::Full,
-        )
-        .await
-    }
-
-    /// Atomically upserts several transcript sessions (and their messages),
-    /// writing only the searchable `session_messages` projection — never
-    /// `lcm_raw_messages` — and then advances one shared parse cursor.
-    ///
-    /// Used by the Hermes `state.db` sweep: Hermes already ingests its raw
-    /// conversation losslessly into the LCM store at runtime (the generated
-    /// plugin's `lcm_preflight` active-message ingest) and via the one-time
-    /// legacy-store migration, under its own message ids. Writing raw rows
-    /// again from the transcript sweep would duplicate the LCM store, so
-    /// Hermes transcripts only fill the provider-neutral projection. Any
-    /// failure rolls back the whole batch so a follow-up ingest can safely
-    /// replay from the previous cursor.
-    pub async fn upsert_transcript_projection_batches(
-        &self,
-        batches: &[TranscriptBatch],
-        parse_offset_path: &str,
-        parse_offset: ParseOffset,
-    ) -> bool {
-        self.upsert_transcript_batches_inner(
-            batches,
-            &[],
-            &[],
-            parse_offset_path,
-            parse_offset,
-            TranscriptWriteMode::ProjectionOnly,
-        )
-        .await
-    }
-
-    async fn upsert_transcript_batches_inner(
-        &self,
-        batches: &[TranscriptBatch],
-        commit_records: &[crate::sessions::git_correlation::CommitSessionRecord],
-        span_observations: &[crate::sessions::git_correlation::SpanObservation],
-        parse_offset_path: &str,
-        parse_offset: ParseOffset,
-        mode: TranscriptWriteMode,
-    ) -> bool {
-        if self.conn.execute("BEGIN IMMEDIATE", ()).await.is_err() {
-            return false;
-        }
-        for batch in batches {
-            if !self.upsert_session(&batch.session).await {
-                let _ = self.conn.execute("ROLLBACK", ()).await;
-                return false;
-            }
-            for message in &batch.messages {
-                let upserted = match mode {
-                    TranscriptWriteMode::Full => {
-                        self.upsert_session_message_in_existing_tx(message).await
-                    }
-                    TranscriptWriteMode::ProjectionOnly => {
-                        let text = crate::sessions::lcm::raw::derived_text_for_index(&message.text);
-                        self.upsert_session_message_projection(
-                            message,
-                            &text,
-                            message.metadata_json.as_deref(),
-                        )
-                        .await
-                    }
-                };
-                if !upserted {
-                    let _ = self.conn.execute("ROLLBACK", ()).await;
-                    return false;
-                }
-            }
-        }
-        for record in commit_records {
-            if crate::sessions::git_correlation::upsert_commit_session(&self.conn, record)
-                .await
-                .is_err()
-            {
-                let _ = self.conn.execute("ROLLBACK", ()).await;
-                return false;
-            }
-        }
-        for observation in span_observations {
-            if crate::sessions::git_correlation::record_span_observation_in_transaction(
-                &self.conn,
-                observation,
-                crate::sessions::git_correlation::DEFAULT_SPAN_MERGE_GAP_SECS,
-            )
-            .await
-            .is_err()
-            {
-                let _ = self.conn.execute("ROLLBACK", ()).await;
-                return false;
-            }
-        }
-        let cursor_set = match mode {
-            TranscriptWriteMode::Full => {
-                self.set_parse_offset_in_existing_tx(parse_offset_path, parse_offset)
-                    .await
-            }
-            TranscriptWriteMode::ProjectionOnly => {
-                self.set_parse_offset_monotonic_in_existing_tx(parse_offset_path, parse_offset)
-                    .await
-            }
-        };
-        if !cursor_set {
-            let _ = self.conn.execute("ROLLBACK", ()).await;
-            return false;
-        }
-        if self.conn.execute("COMMIT", ()).await.is_ok() {
-            return true;
-        }
-        let _ = self.conn.execute("ROLLBACK", ()).await;
-        false
     }
 
     async fn upsert_session_message_projection(
@@ -3964,6 +3860,7 @@ impl GlobalDb {
         }
         draft.metadata_json = Some(JsonValue::Object(metadata).to_string());
 
+        let _transaction = self.transaction.lock().await;
         self.conn.execute("BEGIN IMMEDIATE", ()).await?;
         let result = async {
             self.conn
@@ -4099,6 +3996,28 @@ impl GlobalDb {
         .await
     }
 
+    /// Applies payload GC while holding this connection's transaction authority.
+    pub async fn lcm_run_payload_gc_apply(
+        &self,
+        storage_root: &Path,
+        provider: &str,
+        session_id: Option<&str>,
+        gc_config: &crate::sessions::lcm::LcmGcConfig,
+        now: i64,
+    ) -> Result<crate::sessions::lcm::LcmGcReport, crate::sessions::lcm::LcmError> {
+        let _transaction = self.transaction.lock().await;
+        crate::sessions::lcm::gc::run_payload_gc_with_apply(
+            &self.conn,
+            storage_root,
+            provider,
+            session_id,
+            gc_config,
+            true,
+            now,
+        )
+        .await
+    }
+
     /// Runs LCM doctor diagnostics and safe repair planning/apply actions.
     pub async fn lcm_doctor(
         &self,
@@ -4109,6 +4028,7 @@ impl GlobalDb {
         clean_config: crate::sessions::lcm::LcmCleanConfig,
         gc_config: crate::sessions::lcm::LcmGcConfig,
     ) -> Result<serde_json::Value, crate::sessions::lcm::LcmError> {
+        let _transaction = self.transaction.lock().await;
         crate::sessions::lcm::doctor::doctor(
             &self.conn,
             crate::sessions::lcm::doctor::DoctorRequest {
@@ -4133,6 +4053,7 @@ impl GlobalDb {
         &self,
         update: crate::sessions::lcm::LcmLifecycleUpdate,
     ) -> Result<crate::sessions::lcm::LcmLifecycleState, crate::sessions::lcm::LcmError> {
+        let _transaction = self.transaction.lock().await;
         crate::sessions::lcm::compression::update_lifecycle(&self.conn, update).await
     }
 
@@ -4156,6 +4077,7 @@ impl GlobalDb {
         request: crate::sessions::lcm::LcmSessionBoundaryRequest,
     ) -> Result<crate::sessions::lcm::LcmSessionBoundaryResponse, crate::sessions::lcm::LcmError>
     {
+        let _transaction = self.transaction.lock().await;
         crate::sessions::lcm::compression::record_session_boundary(&self.conn, request).await
     }
 
@@ -4164,6 +4086,7 @@ impl GlobalDb {
         &self,
         request: crate::sessions::lcm::LcmPreflightRequest,
     ) -> Result<crate::sessions::lcm::LcmPreflightResponse, crate::sessions::lcm::LcmError> {
+        let _transaction = self.transaction.lock().await;
         crate::sessions::lcm::compression::preflight(&self.conn, &self.storage_root, request).await
     }
 
@@ -4172,6 +4095,7 @@ impl GlobalDb {
         &self,
         request: crate::sessions::lcm::LcmCompressionRequest,
     ) -> Result<crate::sessions::lcm::LcmCompressionResponse, crate::sessions::lcm::LcmError> {
+        let _transaction = self.transaction.lock().await;
         crate::sessions::lcm::compression::compress(&self.conn, &self.storage_root, request).await
     }
 
@@ -4186,6 +4110,7 @@ impl GlobalDb {
         crate::sessions::lcm::payload::LcmStore::new(
             &self.conn,
             storage_root.as_ref().to_path_buf(),
+            &self.transaction,
         )
     }
 
@@ -4197,6 +4122,7 @@ impl GlobalDb {
         &self,
         draft: crate::sessions::lcm::LcmSummaryNodeDraft,
     ) -> Result<crate::sessions::lcm::LcmSummaryNode, crate::sessions::lcm::LcmError> {
+        let _transaction = self.transaction.lock().await;
         crate::sessions::lcm::dag::insert_summary_node(&self.conn, draft).await
     }
 
@@ -4223,6 +4149,7 @@ impl GlobalDb {
         observation: &crate::sessions::git_correlation::SpanObservation,
         merge_gap_secs: i64,
     ) -> Result<i64, crate::sessions::git_correlation::GitCorrelationError> {
+        let _transaction = self.transaction.lock().await;
         crate::sessions::git_correlation::record_span_observation(
             &self.conn,
             observation,
@@ -4846,6 +4773,7 @@ impl GlobalDb {
 
     /// Insert parsed turns in one transaction, returning the number of new rows.
     pub async fn insert_turns(&self, turns: &[crate::types::CostTurn]) -> usize {
+        let _transaction = self.transaction.lock().await;
         if self.conn.execute("BEGIN IMMEDIATE", ()).await.is_err() {
             return 0;
         }
@@ -4989,120 +4917,6 @@ impl GlobalDb {
             out.push((cat, cost, count as u64));
         }
         out
-    }
-
-    // ── Accounting: parse_offsets table ────────────────────────────────
-
-    /// Returns the saved parse cursor for a JSONL file, including the
-    /// optional file identity id, or `None` if the path is not tracked.
-    pub async fn get_parse_offset(&self, path: &str) -> Option<ParseOffset> {
-        let Ok(mut rows) = self
-            .conn
-            .query(
-                "SELECT byte_offset, mtime, file_id FROM parse_offsets WHERE file_path = ?1",
-                params![path],
-            )
-            .await
-        else {
-            let mut rows = self
-                .conn
-                .query(
-                    "SELECT byte_offset, mtime FROM parse_offsets WHERE file_path = ?1",
-                    params![path],
-                )
-                .await
-                .ok()?;
-            let row = rows.next().await.ok()??;
-            let offset: i64 = row.get(0).ok()?;
-            let mtime: i64 = row.get(1).ok()?;
-            return Some(ParseOffset {
-                byte_offset: offset as u64,
-                mtime: mtime as u64,
-                file_id: 0,
-            });
-        };
-        let row = rows.next().await.ok()??;
-        let offset: i64 = row.get(0).ok()?;
-        let mtime: i64 = row.get(1).ok()?;
-        let file_id: i64 = row.get(2).ok()?;
-        Some(ParseOffset {
-            byte_offset: offset as u64,
-            mtime: mtime as u64,
-            file_id: file_id as u64,
-        })
-    }
-
-    /// Saves the parse cursor for a transcript path. Best-effort.
-    pub async fn set_parse_offset(&self, path: &str, offset: ParseOffset) {
-        let _ = self.set_parse_offset_in_existing_tx(path, offset).await;
-    }
-
-    /// Advances a row-style parse cursor without allowing an overlapping,
-    /// older sweep to move it backwards.
-    pub async fn advance_parse_offset(&self, path: &str, offset: ParseOffset) {
-        let _ = self
-            .set_parse_offset_monotonic_in_existing_tx(path, offset)
-            .await;
-    }
-
-    async fn set_parse_offset_monotonic_in_existing_tx(
-        &self,
-        path: &str,
-        offset: ParseOffset,
-    ) -> bool {
-        self.conn
-            .execute(
-                "INSERT INTO parse_offsets (file_path, byte_offset, mtime, file_id)
-                 VALUES (?1, ?2, ?3, ?4)
-                 ON CONFLICT(file_path) DO UPDATE SET
-                    byte_offset = excluded.byte_offset,
-                    mtime = excluded.mtime,
-                    file_id = excluded.file_id
-                 WHERE excluded.byte_offset >= parse_offsets.byte_offset",
-                params![
-                    path,
-                    offset.byte_offset as i64,
-                    offset.mtime as i64,
-                    offset.file_id as i64
-                ],
-            )
-            .await
-            .is_ok()
-    }
-
-    async fn set_parse_offset_in_existing_tx(&self, path: &str, offset: ParseOffset) -> bool {
-        if self
-            .conn
-            .execute(
-                "INSERT INTO parse_offsets (file_path, byte_offset, mtime, file_id)
-                 VALUES (?1, ?2, ?3, ?4)
-                 ON CONFLICT(file_path) DO UPDATE SET
-                    byte_offset = ?2,
-                    mtime = ?3,
-                    file_id = ?4",
-                params![
-                    path,
-                    offset.byte_offset as i64,
-                    offset.mtime as i64,
-                    offset.file_id as i64
-                ],
-            )
-            .await
-            .is_ok()
-        {
-            return true;
-        }
-        self.conn
-            .execute(
-                "INSERT INTO parse_offsets (file_path, byte_offset, mtime)
-                 VALUES (?1, ?2, ?3)
-                 ON CONFLICT(file_path) DO UPDATE SET
-                    byte_offset = ?2,
-                    mtime = ?3",
-                params![path, offset.byte_offset as i64, offset.mtime as i64],
-            )
-            .await
-            .is_ok()
     }
 
     /// Checkpoints the WAL. Best-effort.

@@ -353,8 +353,8 @@ pub(crate) async fn payloads_gc_apply(
     State(state): State<DashboardState>,
     Json(body): Json<PayloadGcApplyRequest>,
 ) -> LcmResult {
-    let conn = state
-        .lcm_conn
+    let db = state
+        .lcm_db
         .as_ref()
         .ok_or_else(|| err(StatusCode::SERVICE_UNAVAILABLE, "LCM store unavailable"))?;
     let provider = if body.provider.trim().is_empty() {
@@ -394,22 +394,21 @@ pub(crate) async fn payloads_gc_apply(
         }
     }
 
-    let report = gc::run_payload_gc_with_apply(
-        conn,
-        &lcm_storage_root(&state),
-        provider,
-        session_id,
-        &LcmGcConfig::default(),
-        true,
-        current_timestamp(),
-    )
-    .await
-    .map_err(|e| {
-        err(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("payload GC apply failed: {e}"),
+    let report = db
+        .lcm_run_payload_gc_apply(
+            &lcm_storage_root(&state),
+            provider,
+            session_id,
+            &LcmGcConfig::default(),
+            current_timestamp(),
         )
-    })?;
+        .await
+        .map_err(|e| {
+            err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("payload GC apply failed: {e}"),
+            )
+        })?;
     if let Ok(mut preview) = PAYLOAD_GC_PREVIEW.lock() {
         *preview = None;
     }

@@ -13,7 +13,7 @@ use crate::support::{assert_metadata_path_eq, init_git_repo, init_project_at, ru
 
 /// Writes a Claude Code transcript (one JSON object per line) for `session` whose
 /// recorded `cwd` is `project`.
-fn write_claude_transcript(
+pub(super) fn write_claude_transcript(
     home: &std::path::Path,
     project: &std::path::Path,
     session: &str,

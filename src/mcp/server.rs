@@ -898,6 +898,9 @@ pub struct McpServer {
     /// `Arc` so spawned savings-recording tasks can hold a cheap clone of
     /// the handle instead of opening a new connection per call.
     global_db: Option<Arc<GlobalDb>>,
+    /// Authoritative project session store retained for startup recovery.
+    /// Recovery borrows this handle and never discovers or opens another DB.
+    session_db: Option<Arc<GlobalDb>>,
     /// Registry used for project-selector reads. This remains available even
     /// when global accounting is disabled so daemon clients do not fall back
     /// to the daemon process profile for selector resolution.
@@ -1129,6 +1132,9 @@ impl McpServer {
         hook_branch_writer: HookBranchWriter,
         background_refresh_writer: BackgroundRefreshWriter,
     ) -> Arc<Self> {
+        let session_db = GlobalDb::open_at(&cg.store_layout().sessions_db_path)
+            .await
+            .map(Arc::new);
         let file_token_map = cg.get_file_token_map().await.unwrap_or_default();
         let persisted = cg.get_tokens_saved().await.unwrap_or(0);
         let response_handle_project_root = cg.project_root().to_path_buf();
@@ -1178,6 +1184,7 @@ impl McpServer {
             last_flushed_tokens: AtomicU64::new(persisted),
             last_flush_at: AtomicI64::new(0),
             global_db,
+            session_db,
             registry_db,
             allow_default_registry_fallback,
             automation_scheduler_reconciler,
@@ -1589,14 +1596,14 @@ impl McpServer {
         // flags via `wait_for_startup_catch_up`.
         {
             let project_root = cg.project_root().to_path_buf();
-            let session_db_path = cg.store_layout().sessions_db_path.clone();
+            let session_db = self.session_db.clone();
             let ingest_done_flag = Arc::clone(&self.transcript_ingest_done);
             let analytics_db = self.global_db.clone();
             tokio::spawn(async move {
                 let _ = tokio::time::timeout(std::time::Duration::from_secs(20), async move {
-                    if let Some(db) = GlobalDb::open_at(&session_db_path).await {
+                    if let Some(db) = session_db {
                         let _ = crate::sessions::ingest_global_sources_for_startup(
-                            &db,
+                            db.as_ref(),
                             &project_root,
                         )
                         .await;
@@ -1633,12 +1640,17 @@ impl McpServer {
                             let now = crate::tracedecay::current_timestamp();
                             let _ = crate::hooks::hint_outcomes::correlate_hint_outcomes(
                                 analytics_db,
-                                &db,
+                                db.as_ref(),
                                 &project_id,
                                 now,
                             )
                             .await;
                         }
+                    } else {
+                        eprintln!(
+                            "[tracedecay] startup transcript ingest skipped: authoritative project session storage is unavailable for {}",
+                            project_root.display()
+                        );
                     }
                 })
                 .await;

@@ -22,6 +22,7 @@ mod lcm_schema;
 mod message_search_eval_test;
 mod structured_backfill;
 mod transcript_backfill;
+mod transcript_store;
 
 #[test]
 #[ignore = "fresh-process child probe"]

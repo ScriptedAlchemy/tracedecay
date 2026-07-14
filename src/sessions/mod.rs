@@ -2,9 +2,12 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+pub use tracedecay_store::{SessionMessageRecord, SessionRecord};
+
 use crate::global_db::GlobalDb;
 use crate::sessions::shared::TranscriptIngestStats;
-use crate::sessions::source::{TranscriptSource, ingest_source};
+use crate::sessions::source::{TranscriptSource, ingest_source, ingest_source_with_store};
+use crate::store::GlobalDbTranscriptStore;
 
 pub mod claude;
 pub mod cline_like;
@@ -449,7 +452,9 @@ pub(crate) async fn finalize_project_ingest(db: &GlobalDb, project_root: &Path) 
 }
 
 /// Daemon-startup variant that coalesces the profile-wide user sweep while
-/// still running the active project's independent ingestion pass.
+/// still running the active project's independent ingestion pass. The supplied
+/// already-open `GlobalDb` is adapted through the same transcript-store path as
+/// normal ingestion, so restart recovery resumes from its durable cursor.
 pub(crate) async fn ingest_global_sources_for_startup(
     db: &GlobalDb,
     project_root: &Path,
@@ -557,47 +562,13 @@ pub(crate) async fn ingest_sources(
     project_root: &Path,
     sources: &[Box<dyn TranscriptSource>],
 ) -> TranscriptIngestStats {
+    let store = GlobalDbTranscriptStore::new(db);
     let mut stats = TranscriptIngestStats::default();
     for source in sources {
-        stats = stats.merge(ingest_source(db, source.as_ref(), project_root, None).await);
+        stats = stats
+            .merge(ingest_source_with_store(&store, source.as_ref(), project_root, None).await);
     }
     stats
-}
-
-/// Provider-neutral metadata for an indexed agent session.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SessionRecord {
-    pub provider: String,
-    pub session_id: String,
-    pub project_key: String,
-    pub project_path: String,
-    pub title: Option<String>,
-    pub started_at: Option<i64>,
-    pub ended_at: Option<i64>,
-    pub transcript_path: Option<String>,
-    pub metadata_json: Option<String>,
-    pub parent_session_id: Option<String>,
-    pub is_subagent: bool,
-    pub agent_id: Option<String>,
-    pub parent_tool_use_id: Option<String>,
-}
-
-/// Provider-neutral message payload extracted from an agent transcript.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SessionMessageRecord {
-    pub provider: String,
-    pub message_id: String,
-    pub session_id: String,
-    pub role: String,
-    pub timestamp: Option<i64>,
-    pub ordinal: i64,
-    pub text: String,
-    pub kind: Option<String>,
-    pub model: Option<String>,
-    pub tool_names: Option<String>,
-    pub source_path: Option<String>,
-    pub source_offset: Option<i64>,
-    pub metadata_json: Option<String>,
 }
 
 /// Search hit for session-message full-text lookup.
