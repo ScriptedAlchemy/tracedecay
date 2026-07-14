@@ -842,13 +842,13 @@ fn plain_orphan_still_warns_with_update_remediation() {
 }
 
 #[test]
-fn daemon_status_parser_extracts_storage_health() {
-    let parsed = super::daemon_tool_json(&serde_json::json!({
+fn daemon_runtime_parser_extracts_storage_health_and_owner() {
+    let parsed = super::daemon_runtime_status(&serde_json::json!({
         "content": [
             {"type": "text", "text": "daemon notice"},
             {
                 "type": "text",
-                "text": r#"{"storage_health":{"quick_check_ok":true,"daemon_generation":"run-7"}}"#
+                "text": r#"{"tracedecay_version":"0.0.66","process":{"pid":1234},"database":{"canonical_db_path":"/tmp/project.db","quick_check_ok":true,"dirty_marker":{"exists":false}}}"#
             }
         ]
     }))
@@ -859,13 +859,26 @@ fn daemon_status_parser_extracts_storage_health() {
         Some(&serde_json::Value::Bool(true))
     );
     assert_eq!(
-        parsed.pointer("/storage_health/daemon_generation"),
-        Some(&serde_json::Value::String("run-7".to_string()))
+        parsed.pointer("/storage_health/daemon_owner_pid"),
+        Some(&serde_json::json!(1234))
+    );
+    assert_eq!(
+        parsed.pointer("/storage_health/daemon_version"),
+        Some(&serde_json::json!("0.0.66"))
     );
 }
 
 #[test]
-fn daemon_status_parser_rejects_missing_json_payload() {
-    let error = super::daemon_tool_json(&serde_json::json!({ "content": [] })).unwrap_err();
+fn daemon_runtime_parser_rejects_missing_json_payload() {
+    let error = super::daemon_runtime_status(&serde_json::json!({ "content": [] })).unwrap_err();
     assert!(error.to_string().contains("returned no JSON payload"));
+}
+
+#[test]
+fn daemon_runtime_parser_rejects_missing_database_telemetry() {
+    let error = super::daemon_runtime_status(&serde_json::json!({
+        "content": [{"type": "text", "text": r#"{"process":{"pid":1234}}"#}]
+    }))
+    .unwrap_err();
+    assert!(error.to_string().contains("omitted database telemetry"));
 }
