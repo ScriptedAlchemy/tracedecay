@@ -7,6 +7,8 @@ contracts and DTOs; the daemon-owned `GlobalDb` adapter owns live connections
 and transactions. This boundary participates in vertical PRs and does not grow
 into a second database implementation. See [the plan index](00-plan-set-index.md)
 and [global ownership rules](README.md).
+Each store slice records its production baseline; [PR20](33-end-to-end-performance-optimization.md)
+owns measured cross-path database and write-amplification optimization.
 
 ## Outcome
 

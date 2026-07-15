@@ -8,6 +8,8 @@
   PR8+ reuse, dependency isolation, or compile-time savings justify the boundary.
 - PR7 adds facts and provenance, PR8 adds LCM/session retrieval, PR9 adds lexical code search, and PR10 adds semantic search.
 - PR11 composes query use cases in application and policy. PR12 exposes them through CLI, MCP, HTTP, and dashboard surfaces.
+- Each retrieval slice records representative latency, throughput, resource,
+  and no-op baselines for [PR20](33-end-to-end-performance-optimization.md).
 - If extracted, `tracedecay-query` is a transport-neutral execution library. It
   does not replace domain-specific query contracts with one universal language.
 

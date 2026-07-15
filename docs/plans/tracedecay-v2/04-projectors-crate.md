@@ -7,6 +7,8 @@ then in each active vertical PR that introduces or replaces a product view. It
 is not a standalone framework, registry, or generated-inventory project. See
 [the plan index](00-plan-set-index.md) for the owning slices and
 [the V2 overview](README.md) for global rules.
+Each projection/synchronization slice records lag, throughput, resource, and
+no-op baselines for [PR20](33-end-to-end-performance-optimization.md).
 
 ## Outcome
 
@@ -21,7 +23,7 @@ the same rows, order, provenance, coverage, and checkpoint.
 - Projector checkpoint semantics and dead-letter disposition required by the
   product view introduced in the same PR.
 - Rebuild validation and atomic publication when a view uses generations.
-- Doctor/operations read models introduced by the PR12 product slice.
+- Doctor/operations read models introduced by the PR14 product slice.
 
 ## Does not own
 
@@ -54,7 +56,7 @@ the same rows, order, provenance, coverage, and checkpoint.
 - Project facts and sessions are project-wide. Code projections require the
   exact repository, checkout, worktree, ref, snapshot, and generation and never
   fall back to an active branch.
-- PR12 Doctor/operations projections expose real health, lag, corruption,
+- PR14 Doctor/operations projections expose real health, lag, corruption,
   recovery, and repair receipts; they do not manufacture findings from source
   code or documentation metadata.
 
@@ -70,7 +72,7 @@ the same rows, order, provenance, coverage, and checkpoint.
   frontier and failed validation leaves the prior generation active.
 - Scope tests prove user/project ownership and reject base-checkout fallback for
   branch/worktree code graphs.
-- PR12 tests prove Doctor diagnosis remains read-only and repair views reflect
+- PR14 tests prove Doctor diagnosis remains read-only and repair views reflect
   only authoritative, receipt-bearing operations.
 - PR13 parity and restart tests must pass before any superseded V1 projection
   path is removed.

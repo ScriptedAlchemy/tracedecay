@@ -50,7 +50,9 @@ requirements and boundaries, not separate crate-first work queues.
   an automatic rewrite, workflow, agent, or no-progress timeout.
 - Keep privacy, recovery, concurrency, cross-platform, migration, and deletion
   gates with the product behavior they protect.
-- PR #421 merges only after PR19 completes and aggregate verification is stable.
+- Instrument each production path when it ships and retain a representative
+  baseline for [PR20 performance optimization](33-end-to-end-performance-optimization.md).
+- PR #421 merges only after PR20 completes and aggregate verification is stable.
 
 ## Removed permanently
 

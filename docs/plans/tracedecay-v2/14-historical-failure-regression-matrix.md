@@ -5,7 +5,7 @@
 Status: active cross-cutting test contract.
 
 Role: preserve observable failures learned from V1 and dogfooding while PR5 through
-PR19 replace implementation. This is a compact ownership map, not a numbered failure
+PR20 replace and optimize implementation. This is a compact ownership map, not a numbered failure
 ledger or compatibility inventory.
 
 ## Outcome
@@ -49,6 +49,7 @@ must cover prevention, visible state, retry or recovery, and restart behavior.
 | PR17 | Workflow scheduling, history, leases, effects, artifacts, retries, and cancellation share daemon authority and never duplicate observable effects. |
 | PR18 | Rust, TypeScript, and Python SDKs preserve the public contract, cancellation, retries, privacy, and transport-neutral errors. |
 | PR19 | Migration and cutover leave one writer and one canonical route, preserve rollback evidence, reject stale clients, and remove every superseded path. |
+| PR20 | Performance optimization never weakens semantics, authority, privacy, ordering, coverage, durability, or crash/restart correctness and cannot hide tail/resource regressions behind averages. |
 
 These tests must use synthetic or reviewed sanitized fixtures. A platform exclusion is a
 typed capability result, not silent coverage. Retrying a flaky test does not close the
@@ -56,7 +57,7 @@ failure class.
 
 ## Acceptance
 
-- Every PR5–PR19 description and test plan references its row before implementation is
+- Every PR5–PR20 description and test plan references its row before implementation is
   considered complete.
 - Each owned suite exercises failure injection plus retry/restart, not only validation
   errors before work begins.

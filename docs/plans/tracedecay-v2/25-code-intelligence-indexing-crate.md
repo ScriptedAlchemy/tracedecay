@@ -3,6 +3,8 @@
 ## Status / role
 
 Planned for PR9. This plan delivers the code-indexing product boundary after sanitized capture and durable storage exist. Start as a focused module; extract `tracedecay-code-index` only when independent reuse, dependency isolation, or compile-time savings justify a crate boundary.
+PR9/PR10 record incremental, no-op, generation, and resource baselines for
+[PR20](33-end-to-end-performance-optimization.md).
 
 ## Outcome
 

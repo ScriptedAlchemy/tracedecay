@@ -70,8 +70,9 @@ work and must not be rebuilt.
 | PR17 | Real typed dynamic workflows and automations: daemon-owned definitions, deterministic replay, and one shared scheduler/history/lease/effect/artifact kernel. |
 | PR18 | Official API stabilization and SDKs: frozen public contract, OpenAPI/schema publication, first-party Rust/TypeScript/Python SDKs, docs, and conformance. |
 | PR19 | Compatibility migration, defragmentation, cutover, and deletion: resumable backfill, shadow parity, bounded cutovers, rollback window, V2 default, and removal of every superseded V1 path. |
+| PR20 | End-to-end performance optimization: measured database, synchronization, projection, indexing, cache/generation, and query improvements with Linux/Windows and crash/restart regression gates. |
 
-PR #421 stays open through PR19. It merges only after PR19 and the aggregate
+PR #421 stays open through PR20. It merges only after PR20 and the aggregate
 Linux, Windows, migration, recovery, privacy, performance, and deletion gates
 are stable.
 
@@ -93,6 +94,8 @@ are stable.
 - Plan 32: PR17 typed dynamic-workflow product.
 - Plans 12, 13, 17, 19, and every component migration section: PR18–PR19
   publication, provenance, compatibility, cutover, and deletion.
+- Plan 33: PR20 end-to-end database, synchronization, indexing, and query
+  performance optimization. Owning slices provide instrumentation and baselines.
 - Plans 29–30 are deleted review artifacts. Any still-valid behavior belongs in
   the owning product plan and its direct regression tests.
 
