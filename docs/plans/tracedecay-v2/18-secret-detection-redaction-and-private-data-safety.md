@@ -39,12 +39,21 @@ durable or external sink enforces the same policy.
 
 2. Propagate safety state
    - Untrusted values enter as tainted.
+   - Unsaved LSP documents are tainted ephemeral session data. They may be
+     disclosed only to explicitly authorized analyzers; their content is never
+     persisted, logged, embedded, exported, or captured as a TraceDecay
+     observation.
+   - Remote analyzers are denied by default and require an explicit policy
+     capability and privacy disclosure, as specified by
+     [Plan 35](35-daemon-lsp-gateway-and-universal-diagnostics.md).
    - Redaction creates a safe representation without erasing the source's tainted provenance.
    - A verified-safe marker identifies the policy version and transformation that produced it.
    - Concatenation, formatting, summarization, and extraction preserve taint unless re-sanitized.
 
 3. Enforce sink firewalls
    - Every durable or externally visible sink accepts only verified-safe payloads.
+   - Diagnostic messages and provenance pass the same sink firewall without
+     retaining raw analyzer stderr, environment values, command lines, or source.
    - Missing, stale, or incompatible safety metadata fails closed with a structured error.
    - Derived indexes and caches cannot retain unsafe source text after remediation.
 
@@ -77,6 +86,9 @@ durable or external sink enforces the same policy.
 - Every sink rejects raw, tainted, unmarked, and stale-policy payloads.
 - End-to-end tests prove secrets do not appear in databases, indexes, facts, sessions, logs,
   analytics, API responses, UI payloads, exports, or diagnostic bundles.
+- LSP tests prove unsaved document content remains session-ephemeral, reaches
+  only authorized analyzers, and cannot reach remote analyzers without the
+  required capability and disclosure.
 - Remediation tests quarantine unsafe legacy data and rebuild clean derivatives after repair.
 - Doctor and UI expose actionable state without reproducing sensitive values.
 - Performance limits fail visibly and safely instead of skipping protection.

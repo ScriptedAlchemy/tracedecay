@@ -32,7 +32,9 @@ policy, lifecycle, or transport logic.
 ## Required behavior
 
 1. Daemon authority
-   - One daemon process owns product database connections, writes, migrations, and recovery.
+   - Before PR16, one local daemon owns product database connections, writes,
+     migrations, and recovery. PR16 preserves exactly one fenced daemon
+     authority per mutable shard; no client or peer becomes a second writer.
    - CLI, MCP, hooks, UI, SDKs, and other clients call daemon operations.
    - Hooks send bounded events or signals; they do not implement synchronization or storage policy.
 
@@ -67,6 +69,13 @@ policy, lifecycle, or transport logic.
    - Each replacement identifies its canonical owner and removes the superseded path.
    - Temporary adapters have an explicit deletion condition within the delivering PR sequence.
    - PR19 removes all satisfied shims, duplicate paths, dead feature flags, and obsolete dependencies.
+   - After [Plan 35](35-daemon-lsp-gateway-and-universal-diagnostics.md)
+     parity and rollback gates pass, PR19 removes legacy root-, dashboard-, and
+     host-owned analyzer lifecycle; direct per-language host plugins; duplicate
+     adapter or extension tables; direct diagnostic caches or stores; and every
+     writable fallback.
+   - The surviving diagnostic path is the daemon gateway plus thin bridge,
+     canonical registry/configuration, and canonical store/query operations.
    - Delete external `ast-grep` probing, subprocess outline/rewrite, duplicate
      parser acquisitions, surface-local handlers/query/render/database logic,
      and superseded semantic aliases after their bounded compatibility window.
@@ -90,6 +99,9 @@ policy, lifecycle, or transport logic.
 - Concurrent clients cannot become additional database authorities.
 - Every surviving crate has a documented ownership or dependency reason beyond file organization.
 - PR19 removes superseded implementations, compatibility shims, dead flags, and unused dependencies.
+- No client, dashboard, root compatibility path, or host plugin starts
+  analyzers, opens writable stores, owns diagnostic state, or bypasses the
+  canonical daemon gateway after cutover.
 - Every high-fan-in crate, heavy default feature, build script, and oversized
   shared test target has a current ownership reason or same-host evidence for
   retaining it; focused workflows do not compile unrelated heavy subsystems.

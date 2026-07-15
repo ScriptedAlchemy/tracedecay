@@ -38,13 +38,24 @@ Enrolled machines share one logical Brain through authenticated TraceDecay APIs 
 ### API-only clients and verified reads
 
 - Clients use the official API for queries, commands, progress, cancellation, and health.
+- The [Plan 35](35-daemon-lsp-gateway-and-universal-diagnostics.md) gateway runs
+  in the enrolled daemon on the node that owns the live workspace and local
+  analyzer processes. It reaches remote clean-generation authority only through
+  authenticated application APIs.
 - A read cache or replica is accepted only with a signed or authenticated manifest binding Brain, shard, generation, schema, privacy policy, watermark, and authority epoch.
 - Responses declare remote coverage, cache age, lag, unavailable shards, and pending local observations.
 - Stale or unverifiable caches may support explicitly stale reads but never writes, promotion, or healthy coverage claims.
 
 ### Offline event spool
 
-- Local hooks sanitize and append canonical events to a durable bounded spool when authority is unreachable.
+- Local hooks send bounded `HookEvent`s to the enrolled node-local daemon. That
+  daemon applies the canonical sanitizer and owns the durable bounded spool
+  when shard authority is unreachable; hooks never sanitize durable payloads
+  or append spool records.
+- Unsaved LSP documents, dirty-overlay diagnostics, document versions, analyzer
+  process state, and raw JSON-RPC frames are never spool records. Authority loss
+  makes their remote durable coverage partial or unavailable; it does not
+  create a database or analyzer fallback.
 - Spool frames carry deterministic observation identity, node identity, repository/worktree identity, privacy policy, ordering evidence, and integrity checks.
 - Reconnect replays idempotently through the current authority and deletes frames only after durable acknowledgement.
 - Overflow, corruption, policy change, revocation, and rejected replay remain visible and recoverable; no empty local database is created as fallback.
@@ -54,6 +65,10 @@ Enrolled machines share one logical Brain through authenticated TraceDecay APIs 
 - Correlate clones through verified Git repository evidence and explicit checkout, worktree, ref, and snapshot identities.
 - Never merge projects by hostname, directory name, or absolute path alone.
 - Preserve local-only and remotely eligible scopes end to end; remote enrollment cannot weaken existing privacy policy.
+- Dirty document content remains node-local by default and is never placed in a
+  verified read cache, replica, trace, backup, failover payload, or remote
+  analyzer request. A remote analyzer requires an explicit capability, policy
+  grant, and privacy disclosure.
 
 ### Backup and failover
 
@@ -65,7 +80,10 @@ Enrolled machines share one logical Brain through authenticated TraceDecay APIs 
 
 ### Operations
 
-- Settings, CLI, API, SDK, and Doctor expose topology, authority, placement, lag, spool, replica, backup, and failover state from one application model.
+- PR16 application/API contracts and the then-shipped Settings, CLI, API, and
+  Doctor surfaces expose topology, authority, placement, lag, spool, replica,
+  backup, and failover state from one application model. PR18 adds equivalent
+  SDK bindings and parity when the SDKs ship.
 - Human and structured health output use the same findings, coverage, and remediation identities.
 - Connectivity profiles are replaceable transports beneath the authenticated TraceDecay protocol.
 
@@ -74,8 +92,14 @@ Enrolled machines share one logical Brain through authenticated TraceDecay APIs 
 - Multi-process and multi-host fixtures prove exactly one accepted writer across startup races, partitions, lease expiry, process death, reconnect, and promotion.
 - A stale authority cannot commit or publish after any higher epoch is visible.
 - Offline events replay exactly once in order; crash, duplicate, corruption, overflow, revocation, and privacy-change cases preserve evidence.
+- Remote LSP fixtures prove overlays and analyzers stay on the workspace node,
+  clean diagnostic publication is fenced through the owning shard authority,
+  and authority loss never spools unsaved content or republishes stale cached
+  diagnostics as current.
 - Cache and replica fixtures reject wrong Brain, shard, generation, epoch, schema, policy, digest, and watermark claims.
 - Repository fixtures correlate verified clones while separating unrelated repositories, worktrees, refs, and local-only scopes.
 - Backup, staged restore, promotion, rollback, and old-authority rejoin tests never expose a partial generation or two writers.
-- All product surfaces report identical topology and coverage truth, including partial, stale, unknown, and unavailable states.
+- All surfaces shipped by PR16 report identical topology and coverage truth,
+  including partial, stale, unknown, and unavailable states; PR18 SDK
+  conformance proves the same values when SDK bindings ship.
 - Negative tests prove no client, hook, cache, replica, or offline path opens an authority database or uses a network filesystem.

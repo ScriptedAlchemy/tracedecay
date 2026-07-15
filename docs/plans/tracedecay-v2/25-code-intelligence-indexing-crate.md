@@ -5,6 +5,8 @@
 Planned for PR9. This plan delivers the code-indexing product boundary after sanitized capture and durable storage exist. Start as a focused module; extract `tracedecay-code-index` only when independent reuse, dependency isolation, or compile-time savings justify a crate boundary.
 PR9/PR10 record incremental, no-op, generation, and resource baselines for
 [PR20](33-end-to-end-performance-optimization.md).
+Generation-bound diagnostics compose with the daemon gateway defined by
+[Plan 35](35-daemon-lsp-gateway-and-universal-diagnostics.md).
 
 ## Outcome
 
@@ -14,9 +16,12 @@ TraceDecay builds deterministic, immutable code-intelligence generations from sa
 
 - Versioned tree-sitter grammar registration and deterministic language extraction.
 - One versioned language descriptor per language, shared by extraction,
-  structural search, outline, and rewrite.
+  structural search, outline, rewrite, analyzer routing, and host LSP
+  projection.
 - Canonical symbol, occurrence, relationship, diagnostic, and test-attribution records.
-- Content-addressed incremental reuse and bounded dirty overlays.
+- Content-addressed incremental reuse and bounded sanitized dirty-worktree
+  indexing overlays captured from repository state. Unsaved per-client LSP
+  document overlays are separate Plan 35 daemon session state.
 - Logical generation planning, sealing, digests, and lineage evidence.
 - Read-only conversion of V1 graph records into the V2 logical model.
 
@@ -26,6 +31,10 @@ TraceDecay builds deterministic, immutable code-intelligence generations from sa
 - Database connections, generation files, transactions, manifests, pointers, or publication; store owns those.
 - Projector scheduling, retries, or checkpoints.
 - Query ranking, semantic embedding inference, UI, or public transport bindings.
+- Analyzer executable commands or settings, which remain configuration-owned
+  by Plan 20.
+- A host-facing analyzer broker; the Plan 35 daemon gateway is the sole broker
+  presented to LSP hosts.
 - A second repository identity, intake queue, or write path.
 
 ## Required behavior
@@ -41,6 +50,9 @@ TraceDecay builds deterministic, immutable code-intelligence generations from sa
 - Select grammar, aliases, extensions, expando behavior, and extractor revision
   through one versioned registry. Duplicate language tables and parser
   acquisition paths are forbidden.
+- The same canonical descriptor supplies extension, language-ID, root-marker,
+  and capability facts for analyzer routing and host LSP projection. It does
+  not absorb configuration-owned executable commands or settings.
 - Acquire one Tree-sitter parser from that descriptor. Extraction and the
   in-process `ast-grep-core` structural-match/outline/rewrite kernel share its
   pinned grammar and source generation; no host `ast-grep` binary is authority.
@@ -77,7 +89,18 @@ TraceDecay builds deterministic, immutable code-intelligence generations from sa
 
 ### Diagnostics and tests
 
-- Attach compiler and language-server diagnostics to exact file and symbol occurrences when evidence permits.
+- Attach compiler and language-server diagnostics to exact file and symbol
+  occurrences only within the matching sanitized clean generation and content
+  digest.
+- Retain producer kind and identity, analyzer and configuration revisions,
+  evidence class, freshness, and clearing or supersession provenance.
+- Keep clean-generation persistence separate from unsaved LSP overlays.
+  Overlays remain ephemeral daemon session state and become durable only after
+  saved content passes the normal capture and generation pipeline with the same
+  digest.
+- Stale, cleared, historical, or cross-snapshot diagnostics remain evidence but
+  cannot publish as current. Plan 35's daemon gateway is the only host-facing
+  analyzer broker and cannot create a parallel diagnostic authority.
 - Map test definitions and runs to the generation, source revision, and candidate production symbols they cover.
 - Distinguish direct evidence, inferred candidates, stale evidence, and unknown attribution.
 
@@ -92,7 +115,13 @@ TraceDecay builds deterministic, immutable code-intelligence generations from sa
 - Identical sanitized fixtures produce byte-identical logical rows and generation digests across repeated and supported-host runs.
 - One-file edits re-extract only affected files and dependents; unchanged results are reused without changing their identities.
 - Rename, move, split, merge, ambiguous-lineage, parse-error, deletion, and unsupported-language fixtures remain truthful.
-- Diagnostic and test attribution never crosses snapshots and never upgrades inference to fact.
+- Diagnostic and test attribution never crosses snapshots, never upgrades
+  inference to fact, and never publishes stale or cleared evidence as current.
+- Canonical descriptor fixtures prove analyzer routing and host LSP projection
+  use the same extension, language-ID, root-marker, and capability facts without
+  copying executable commands or settings into this boundary.
+- Dirty-overlay fixtures create no durable generation rows, while matching
+  saved content preserves producer provenance through capture and publication.
 - Crash, cancellation, disk-full, stale-snapshot, and concurrent-build tests publish either one complete generation or none.
 - V1 fixtures migrate through logical batches with no indexer database open and no lost or duplicate supported records.
 - Direct behavior tests prove capture is the only intake and store/projector composition is the only publication path.

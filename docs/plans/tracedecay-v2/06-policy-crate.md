@@ -15,6 +15,8 @@ Hints, retrieval choices, routing, correlation, diagnostics, curation, schedulin
 
 - Versioned evaluator IDs, typed input snapshots, typed decisions, reason codes, score components, and configuration digests.
 - Ordinary pure Rust evaluators for hint eligibility and delivery, retrieval selection, tool/Git routing, correlation, diagnostics/curation, scheduler decisions, and memory proposals.
+- Pure analyzer eligibility and routing decisions for the daemon-hosted LSP
+  gateway in [35](35-daemon-lsp-gateway-and-universal-diagnostics.md).
 - Replay comparison over immutable recorded inputs and outputs.
 - One delivery arbiter that resolves eligible guidance by priority, relevance, repetition, cooldown, token budget, and host capability.
 - Deterministic conflict handling when several rules propose incompatible effects.
@@ -24,6 +26,8 @@ Hints, retrieval choices, routing, correlation, diagnostics, curation, schedulin
 - A custom bytecode VM, rule compiler, DSL, dynamic workflow runtime, or generated bundle language.
 - Queries, ranking execution, database access, files, clocks, randomness, network calls, host probes, model calls, queues, locks, or process execution.
 - Saving facts, sending hints, mutating config, scheduling runs, editing task plans, or applying any ProposedEffect.
+- Starting or supervising analyzers, handling LSP JSON-RPC, or fabricating an
+  analyzer or code-intelligence fallback.
 - Task decomposition, board state, work-item readiness, leases, attempts, fairness, packets, or executor lifecycle.
 - UI, API, CLI, MCP, hook rendering, experiment persistence, or generated inventories.
 
@@ -37,6 +41,10 @@ Hints, retrieval choices, routing, correlation, diagnostics, curation, schedulin
 - **PR11 — outcomes:** distinguish shown, suppressed, ignored, acted on, contradicted, expired, and unknown. Missing feedback is unknown, never success or failure.
 - **PR11 — retrieval:** select declared query/ranking profiles and candidate limits without opening stores or reranking results itself.
 - **PR11 — routing:** choose among cataloged capabilities using explicit availability, freshness, scope, effect, and truth-source metadata. Never invent a fallback capability.
+- **PR11 — analyzer routing:** decide only among cataloged analyzers and typed
+  code/diagnostic capabilities from explicit availability, privacy, scope,
+  configuration, and resource evidence. Application revalidates authorization,
+  freshness, limits, and effect preconditions before admission or execution.
 - **PR11 — correlation:** reconcile local code/session evidence with live Git delivery evidence while preserving separate watermarks and disagreements.
 - **PR11 — diagnostics/curation:** propose bounded remediation or fact changes with evidence and confidence; application revalidates authority and preconditions before applying.
 - **PR11 — scheduler:** decide eligibility from explicit config, activity, lock, retry, budget, and prior-run state; application owns clocks, leases, and execution.

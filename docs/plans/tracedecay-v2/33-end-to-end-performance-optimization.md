@@ -6,7 +6,8 @@
 [05 query](05-query-crate.md), [25 code indexing](25-code-intelligence-indexing-crate.md),
 [12 migration/cutover](12-root-compatibility-migration.md),
 [19 convergence](19-system-defragmentation-convergence-and-extensibility.md),
-and [26 observability](26-observability-accounting-and-usage.md).
+[26 observability](26-observability-accounting-and-usage.md), and
+[35 daemon LSP gateway](35-daemon-lsp-gateway-and-universal-diagnostics.md).
 
 ## Outcome
 
@@ -34,6 +35,10 @@ regression discovered by an earlier slice.
 - Report p50/p95/p99 latency and throughput for ingest, sync/catch-up,
   projection, index build/update, exact/temporal/graph/semantic query, and the
   representative end-to-end journeys.
+- Measure LSP cold and warm gateway/analyzer startup, workspace indexing,
+  hover and navigation, edit-to-diagnostic latency, clean cache reuse and
+  no-op work, concurrent isolated overlays, bridge reconnect, and analyzer
+  crash/recovery.
 - Report peak and steady memory, CPU time/utilization, database and generation
   bytes, temporary space, bytes read/written, and write amplification.
 - Separate queue, lock, I/O, parse, projection, model, merge, hydration, and
@@ -88,6 +93,15 @@ regression discovered by an earlier slice.
 - Bound cross-project fan-out, graph traversal, reranking, result buffering,
   and per-client concurrency with explicit partial or unavailable coverage.
 
+### LSP gateway and analyzers
+
+- Attribute gateway, queue, bridge, upstream analyzer, indexing, merge, and
+  publication latency and resource use without exposing private content.
+- Share analyzers, clean generations, and caches only when complete identity
+  matches and client overlay isolation remains exact.
+- Process reduction never justifies stale or cross-session results, weakened
+  cancellation, incomplete provenance, or disclosure of unsaved content.
+
 ### Developer build and verification
 
 - Reduce the frequently touched compilation graph by enforcing product crate
@@ -123,6 +137,8 @@ regression discovered by an earlier slice.
 - Include crash/restart, daemon reconnect, WAL/checkpoint interruption,
   projector replay, generation publication, cache loss, cancellation, and
   overload while load is active.
+- Include concurrent conflicting overlays, bridge reconnect, upstream analyzer
+  crash/restart, clean diagnostic cache hits, and no-op LSP sessions.
 - Publish concise aggregate benchmark artifacts through the existing
   observability contracts. No private corpus, prompt, source payload, separate
   telemetry database, benchmark service, or performance-only product path.
@@ -143,3 +159,5 @@ bounded implementations; realistic Linux and Windows comparisons meet reviewed
 regression gates; crash/restart and concurrency tests remain correct; and no
 optimization weakens product semantics, privacy, scope, durability, coverage,
 ordering, or daemon authority.
+No LSP process-sharing or cache optimization may trade correctness or privacy
+for lower process count or resource use.

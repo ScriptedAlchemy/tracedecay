@@ -16,6 +16,10 @@ Every user-visible operation has one direct typed application entry point. CLI, 
 - Command orchestration, validation, authorization, idempotency, and transaction boundaries.
 - Freshness, coverage, provenance, pagination, and partial-result semantics.
 - Stable progress and event contracts consumed by streaming adapters.
+- Typed transport-neutral operations and state contracts for LSP session
+  admission, current diagnostics, analyzer engine and coverage state, and code
+  navigation as required by
+  [35](35-daemon-lsp-gateway-and-universal-diagnostics.md).
 - Direct product operations for capture, search, context, sessions, memory, code, delivery, automation, Doctor, configuration, and workflows.
 - Canonical structural-search, source-outline, and source-rewrite operations
   backed by the PR9 in-process code-intelligence kernel.
@@ -25,9 +29,12 @@ Every user-visible operation has one direct typed application entry point. CLI, 
 ## Does not own
 
 - HTTP, SSE, MCP, CLI, hook, or frontend transport details.
+- LSP JSON-RPC framing, stdio or socket bridging, upstream process
+  supervision, or per-connection protocol buffers.
 - SQL, libSQL connections, filesystem layout, indexing, or migration mechanics.
 - Domain entity definitions or domain invariants.
 - A generic command bus, query bus, plugin framework, service locator, or runtime registry.
+- A generic LSP or JSON-RPC pass-through operation.
 - Developer plan parsing, Markdown execution, task scheduling, agent orchestration, edit bundles, generated inventories, or compatibility ledgers.
 - JavaScript workflow execution. PR17 workflows are real typed product operations, not developer-plan machinery.
 
@@ -37,6 +44,9 @@ Every user-visible operation has one direct typed application entry point. CLI, 
 - Depend only on domain types and narrow port traits. No adapter or root-crate imports.
 - Validate scope and capability before reads or writes; never infer authority from transport origin.
 - Preserve repository, worktree, branch, project, and user scope through every call.
+- LSP-facing operations preserve authorized workspace scope, deadline,
+  cancellation, document version, source generation, freshness, and coverage
+  without accepting transport-native arbitrary payloads.
 - Return structured freshness, coverage, provenance, warnings, and continuation data where relevant.
 - Make mutation retries safe through operation-specific idempotency keys and daemon-owned transactions.
 - Source edits use one journaled all-or-recoverable `EditTransaction`. Preview

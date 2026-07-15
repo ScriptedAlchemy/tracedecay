@@ -38,14 +38,14 @@ must cover prevention, visible state, retry or recovery, and restart behavior.
 | PR6 | Remaining providers preserve native identity/order; projection replay and backpressure never duplicate, skip, or corrupt observations. |
 | PR7 | Facts, memory, and stable anchors never cross owners; copied prompts never become authorship; correction, redaction, and deletion preserve safe lineage. |
 | PR8 | Temporal/LCM reads never repair storage; copies, summaries, supersession, cursors, stale shards, and no-result states remain truthful. |
-| PR9 | Code generations are deterministic; exact identifiers and phrases are not displaced by parse errors, echoes, wrong snapshots, or uncalibrated shard scores. |
+| PR9 | Code generations are deterministic; exact identifiers and phrases are not displaced by parse errors, echoes, wrong snapshots, or uncalibrated shard scores; stale, cross-generation, and dirty-overlay diagnostics never publish as current or enter clean generations. |
 | PR10 | Semantic search never substitutes models, crosses privacy domains, recomputes unchanged documents, or shortens lexical results after model failure. |
-| PR11 | Policy, application, settings, and catalog operations remain authorized, deterministic, idempotent, and free of alias-local business logic. |
-| PR12 | CLI, MCP, HTTP, and output bindings agree on schemas, defaults, errors, pagination, cancellation, formats, capabilities, and nonzero failure status. |
-| PR13 | Hooks stay fast and thin; Scout and host bundles preserve address, privacy, lifecycle ownership, and effects without local query/model/storage work. |
+| PR11 | Policy, application, settings, catalog, analyzer execution, and analyzer configuration remain authorized, deterministic, idempotent, privacy-safe, and free of alias-local business logic. |
+| PR12 | CLI, MCP, HTTP, output, and the [Plan 35](35-daemon-lsp-gateway-and-universal-diagnostics.md) LSP gateway agree on lifecycle, framing, capabilities, protocol/catalog versions, cancellation, schemas, defaults, errors, pagination, formats, and nonzero failure status; notifications cannot satisfy pending responses. |
+| PR13 | Hooks stay fast and thin; Scout and host bundles preserve address, privacy, lifecycle ownership, and effects without local query/model/storage work; conflicting extension claims require safe discovery, explicit replacement confirmation, configuration preservation, and rollback. |
 | PR14 | Dashboard, Doctor, observability, and configuration views use canonical daemon operations, distinguish empty/stale/error/locked/partial, and offer executable recovery. |
-| PR15 | Explicit repository/worktree/ref targets never fall back to CWD; cross-project results exact-load globally; dirty/stale graph coverage is explicit. |
-| PR16 | Remote authority, offline replay, cache verification, backup, restore, and failover never admit two writers or hide incomplete coverage. |
+| PR15 | Explicit repository/worktree/ref and LSP workspace-folder targets never fall back to CWD, first workspace, or active checkout; cross-project results exact-load globally; dirty/stale graph and multi-root diagnostic coverage is explicit. |
+| PR16 | Remote authority, offline replay, cache verification, backup, restore, and failover never admit two writers or hide incomplete coverage; unsaved LSP content, overlays, and analyzer state remain node-local and never enter spools or replicas. |
 | PR17 | Workflow scheduling, history, leases, effects, artifacts, retries, and cancellation share daemon authority and never duplicate observable effects. |
 | PR18 | Rust, TypeScript, and Python SDKs preserve the public contract, cancellation, retries, privacy, and transport-neutral errors. |
 | PR19 | Migration and cutover leave one writer and one canonical route, preserve rollback evidence, reject stale clients, and remove every superseded path. |
@@ -64,6 +64,9 @@ failure class.
 - Corruption, disk-full, concurrent writer, process death, partial shard, wrong scope,
   stale identity, provider ambiguity, secret canary, and unsupported-platform cases have
   end-to-end coverage in their owning slices.
+- LSP suites include stale generations, conflicting dirty overlays, malformed or
+  interleaved frames, notification/response confusion, cancellation races,
+  analyzer restart exhaustion, and competing extension claims.
 - Aggregate verification reports failures by product test, without parsing this file or
   generating a second inventory.
 - Removing V1 code cannot remove the last direct test for one of these classes.

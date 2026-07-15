@@ -20,12 +20,17 @@ The daemon remains the only process that reads or writes product storage.
 - Rust, TypeScript, and Python client libraries.
 - Authentication and connection mechanics for local and remote daemon clients.
 - Cancellation, backpressure, idempotency, and retry-safe operation metadata.
+- The versioned authenticated bidirectional daemon-session contract used by
+  [Plan 35's](35-daemon-lsp-gateway-and-universal-diagnostics.md) transport-only
+  LSP bridge.
 - Direct parity tests across CLI, MCP, HTTP, and all SDKs.
 
 ## Does not own
 
 - Domain rules, query semantics, privacy policy, configuration semantics, or storage implementation.
 - Direct database access from clients or language bindings.
+- LSP JSON-RPC framing, document lifecycle, analyzer supervision, or an
+  SDK-visible arbitrary LSP payload tunnel.
 - A generated compatibility inventory or a second model of the product.
 - Markdown parsers, plan trackers, task executors, or workflow JavaScript.
 - Dynamic workflow execution. PR17 stores typed workflow definitions and invokes existing daemon
@@ -52,6 +57,10 @@ The daemon remains the only process that reads or writes product storage.
    - Additive changes preserve compatibility within a major version.
    - Breaking changes require a new major protocol version and an actionable negotiation error.
    - Unknown fields are handled consistently and documented per protocol version.
+   - The LSP bridge session negotiates protocol, catalog, project, and client
+     revisions before document content is accepted, and preserves ordered
+     bidirectional events, cancellation, backpressure, and bounded terminal
+     errors without exposing arbitrary daemon invocation.
 
 5. Usable SDKs
    - Rust, TypeScript, and Python expose typed sync or async APIs idiomatic to each ecosystem.
@@ -69,5 +78,8 @@ The daemon remains the only process that reads or writes product storage.
 - PR18 ships usable, documented, tested Rust, TypeScript, and Python SDKs.
 - The three SDK suites pass the same contract fixtures against one daemon build.
 - Cancellation, reconnect, idempotent retry, pagination, and streaming tests pass.
+- LSP bridge contract tests cover negotiation, ordered bidirectional delivery,
+  cancellation, backpressure, reconnect, stale revisions, and authentication
+  without adding a raw LSP tunnel to the public SDKs.
 - A client cannot open product storage or bypass daemon authorization and privacy enforcement.
 - Contract drift is detected by executable adapter and SDK tests, not generated inventory files.

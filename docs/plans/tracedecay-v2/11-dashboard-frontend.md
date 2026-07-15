@@ -18,6 +18,9 @@ The dashboard presents TraceDecay as one connected brain across projects while p
 ## Does not own
 
 - Business rules, authorization decisions, storage, indexing, migration, or repair execution.
+- The frontend never starts analyzers, opens LSP connections, merges
+  diagnostics, or infers health; it only consumes typed daemon APIs defined by
+  [Plan 35](35-daemon-lsp-gateway-and-universal-diagnostics.md).
 - A Kanban board, developer plan parser, task executor, scheduler console, orchestration lab, or edit-bundle editor.
 - Arbitrary JavaScript workflow authoring or execution.
 - Generated compatibility views, route inventories, or a second model of backend behavior.
@@ -29,11 +32,11 @@ The dashboard presents TraceDecay as one connected brain across projects while p
 - Loom: interactive temporal and causal traces linking prompts, reasoning, tools, subagents, code changes, branches, commits, PRs, and outcomes.
 - Sessions: transcript search, LCM summaries, raw-message drill-down, compaction boundaries, replay context, and provider identity.
 - Agents: agent/subagent trees, status, model/provider, handoffs, tool activity, outputs, and failure context.
-- Code: symbol search, references, call paths, diagnostics, affected tests, code health, and branch-aware graph freshness.
+- Code: symbol search, references, call paths, diagnostics, affected tests, code health, and branch-aware graph freshness; diagnostics show canonical provenance, coverage, freshness, analyzer/gateway state, and conflicts from typed daemon APIs.
 - Knowledge: facts, memories, evidence, contradictions, supersession, curation, and cross-project relationships.
 - Delivery: changes, commits, branches, worktrees, pull requests, CI, releases, and typed PR17 workflow runs tied to product delivery.
 - Automations: schedules, run history, artifacts, approvals, generated skills, memory curation, session reflection, and bounded controls.
-- Observatory: hook hints, event flow, latency, failures, daemon health, storage health, queues, and product diagnostics.
+- Observatory: hook hints, event flow, latency, failures, daemon health, storage health, queues, and product diagnostics, including canonical analyzer/gateway state, conflicts, coverage, and freshness.
 - Costs: provider/model usage, tokens, latency, estimated cost, cache effects, and time/project/session breakdowns.
 - Settings: effective layered configuration, safe edits, validation, provider integration, privacy controls, retention, and feature controls.
 - Every view preserves and displays active scope; cross-scope transitions are explicit.

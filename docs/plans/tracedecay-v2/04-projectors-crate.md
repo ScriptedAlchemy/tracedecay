@@ -23,6 +23,8 @@ the same rows, order, provenance, coverage, and checkpoint.
 - Projector checkpoint semantics and dead-letter disposition required by the
   product view introduced in the same PR.
 - Rebuild validation and atomic publication when a view uses generations.
+- PR9 current-diagnostic derivation from sanitized, identity-matched clean
+  generation evidence.
 - Doctor/operations read models introduced by the PR14 product slice.
 
 ## Does not own
@@ -32,6 +34,9 @@ the same rows, order, provenance, coverage, and checkpoint.
   the daemon store adapter implements those contracts.
 - Query parsing/ranking, policy execution, application commands, transport,
   rendering, repair execution, scheduling, or task/workflow execution.
+- Dirty LSP overlay diagnostics or per-client document state; those remain
+  ephemeral daemon session state under
+  [Plan 35](35-daemon-lsp-gateway-and-universal-diagnostics.md).
 - A complete projector registry, dependency planner, compatibility metamodel,
   speculative view family, or copied canonical transcript store.
 
@@ -46,6 +51,14 @@ the same rows, order, provenance, coverage, and checkpoint.
   the checkpoint at the prior committed input.
 - Duplicate delivery is a no-op. Late and corrected evidence produces explicit
   provenance or supersession rather than an in-place historical rewrite.
+- PR9 projects only sanitized diagnostics whose repository, snapshot,
+  generation, file identity, and content digest match the clean code view.
+  Dirty-overlay diagnostics bypass durable projection and become eligible only
+  after saved content enters the normal capture and generation pipeline with
+  the same digest.
+- Current and rebuilt diagnostic views honor clearing and supersession evidence;
+  they never revive or publish stale, historical, or cross-snapshot findings as
+  current.
 - Incremental and rebuild execution at the same frontier are byte-stable for
   rows whose representation is ordered; generated views publish only after
   validation and keep the prior validated generation on failure.
@@ -70,6 +83,9 @@ the same rows, order, provenance, coverage, and checkpoint.
   checkpoint together, then succeeds on replay.
 - Each view PR using generations proves rebuild equals incremental at a frozen
   frontier and failed validation leaves the prior generation active.
+- PR9 diagnostic tests prove dirty overlays create no durable projection,
+  mismatched identities cannot enter current views, and rebuild preserves
+  clears and supersession without reviving stale findings.
 - Scope tests prove user/project ownership and reject base-checkout fallback for
   branch/worktree code graphs.
 - PR14 tests prove Doctor diagnosis remains read-only and repair views reflect

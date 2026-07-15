@@ -4,7 +4,8 @@
 
 - Status: pending for PR11.
 - PR11 implements the minimal runtime catalog with application and policy consumers.
-- PR12 binds the catalog to CLI, MCP, HTTP, dashboard, SDK, and discovery surfaces.
+- PR12 binds the catalog to CLI, MCP, HTTP, LSP, dashboard, and discovery
+  surfaces. PR18 adds SDK bindings only when the official SDK methods ship.
 - tracedecay-tool-catalog describes callable product capabilities. It does not discover them by parsing source code.
 
 ## Outcome
@@ -16,6 +17,9 @@ Every public surface resolves stable capability IDs to the same application use 
 - Stable CapabilityId, UseCaseId, and BindingId values.
 - Small immutable definitions for capability identity, user-facing description, input/output schema references, effect class, scope requirements, privacy class, availability, deprecation, and surface binding.
 - Explicit surface profiles, including bounded MCP profiles and their capability ceilings.
+- Typed standard-LSP bindings from navigation and diagnostic methods to the
+  existing code and diagnostic capabilities and application handlers defined
+  for [35](35-daemon-lsp-gateway-and-universal-diagnostics.md).
 - Immutable catalog snapshot assembly from reviewed contributions registered beside implemented application use cases.
 - Pure validation and lookup by stable ID, surface, profile, and availability.
 
@@ -25,7 +29,10 @@ Every public surface resolves stable capability IDs to the same application use 
 - catalog-gen, inventory JSON, generated architecture views, frozen tool counts, checked-in generated SDK/UI/plugin trees, or CI that reconstructs the product from source text.
 - A universal operation registry containing speculative future features.
 - Capability execution, authorization, persistence, network I/O, rendering, host probing, installation, or daemon routing.
+- LSP lifecycle, JSON-RPC framing, document synchronization notifications,
+  connection state, or other protocol mechanics.
 - A generic invoke-anything tool or compatibility aliases for retired names.
+- An arbitrary JSON-RPC proxy capability.
 - Task graph, plan editor, workflow executor, or generated agent orchestration operations.
 
 ## Required behavior
@@ -44,12 +51,25 @@ Every public surface resolves stable capability IDs to the same application use 
 - **PR11 — daemon:** bind each executable capability to the single tracedecayd/application authority. Catalog consumers never open a database or bypass application authorization.
 - **PR11 — profiles:** define explicit capability sets and hard ceilings for default, compact, administrative, and host-limited surfaces. Absence is explicit, not a hidden fallback.
 - **PR11 — compatibility:** retain a current public name only when a direct compatibility test requires it. Retired names are absent and return typed discovery guidance.
-- **PR12 — bindings:** map CLI commands, MCP tools, HTTP operations, dashboard actions, and SDK methods to the same CapabilityId and typed application handler.
+- **PR12 — bindings:** map CLI commands, MCP tools, HTTP operations, LSP
+  methods, and dashboard actions to the same CapabilityId and typed application
+  handler where the protocol exposes a callable product operation.
+- **PR12 — LSP bindings:** map each supported standard navigation or diagnostic
+  method to an existing typed code or diagnostic capability and handler.
+  Lifecycle, framing, and document notifications remain protocol mechanics,
+  not callable catalog capabilities.
+- **PR12 — LSP extensions:** require every vendor extension to have an explicit
+  typed catalog entry, bounded schema, policy classification, and tested
+  handler. Never expose arbitrary method or payload forwarding.
 - **PR12 — schemas:** surface adapters use reviewed typed schemas or schema references from the owning contract. The catalog does not generate domain types from prose or source parsing.
 - **PR12 — discovery:** return bounded capability metadata filtered by surface, profile, availability, scope, and authorization. Never expose secrets, config bodies, private paths, or unavailable administrative details.
 - **PR12 — output:** all surfaces consume the same typed application result before rendering. Markdown is the human/agent default where appropriate; structured JSON remains explicit.
 - **PR12 — drift:** direct tests enumerate compiled bindings and assert each references a valid catalog entry and handler. This is runtime contract validation, not source extraction.
 - **PR13 — hooks:** hook adapters use cataloged host capabilities only through application/daemon responses; hooks do not resolve or execute catalog entries locally.
+- **PR18 — SDK bindings:** add Rust, TypeScript, and Python SDK BindingIds only
+  with the shipped typed methods and conformance fixtures. PR12 may describe
+  future SDK availability as unavailable protocol metadata but cannot advertise
+  an unimplemented SDK method.
 
 ## Acceptance
 
@@ -57,6 +77,8 @@ Every public surface resolves stable capability IDs to the same application use 
 - PR11 integration tests prove every catalog entry resolves to one real application handler with matching scope, effect, privacy, and schema contracts.
 - Policy tests cover routing among available entries, missing capability, denied scope, stale availability, and no silent substitution.
 - PR12 parity tests invoke representative read, write, administrative, streaming, and long-running use cases through each supported surface and compare typed results before rendering.
+- PR18 SDK parity tests require every advertised SDK binding to resolve to the
+  shipped typed method and canonical application handler.
 - Discovery tests prove compact profiles stay bounded and administrative/private capabilities are filtered correctly.
 - Compatibility tests cover only currently supported names and typed guidance for retired names; no frozen total-count assertion is allowed.
 - Architecture tests reject source parsers, generators, generated inventories, plan/workflow dependencies, execution logic, storage, transport implementations, and UI code from tracedecay-tool-catalog.

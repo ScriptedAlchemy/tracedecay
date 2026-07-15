@@ -5,7 +5,7 @@
 Status: active product plan.
 
 Role: PR15 makes repository, project, checkout, worktree, ref, and global activity scope
-consistent across query, CLI, MCP, HTTP, and UI consumers.
+consistent across query, CLI, MCP, HTTP, LSP, and UI consumers.
 
 ## Outcome
 
@@ -73,6 +73,16 @@ choreography or storage knowledge.
     path alone never proves success or authorizes deletion.
 15. Related-project suggestions are explicit and bounded. A query, hint, model, task title,
     or agent cannot silently expand one repository into all projects.
+16. The [Plan 35](35-daemon-lsp-gateway-and-universal-diagnostics.md) gateway
+    resolves every LSP workspace folder through this same application resolver.
+    Before PR15 it supports only PR12's explicitly resolved single-project
+    admission; after PR15, nested roots and multi-root workspaces bind each
+    document, analyzer session, code generation, and diagnostic to its exact
+    owning folder.
+17. An unresolved, ambiguous, denied, stale, or unsupported LSP folder remains
+    unavailable with explicit coverage. The gateway never substitutes CWD, the
+    first workspace folder, the active checkout, or another folder's analyzer
+    or graph generation.
 
 ## Acceptance
 
@@ -83,8 +93,11 @@ choreography or storage knowledge.
   repositories, preserves source class, and exact-loads every returned session/entity.
 - Project facts and sessions are identical from two worktrees while their code queries
   select different declared snapshots.
-- CLI, MCP, HTTP, and UI conformance returns the same resolution, ambiguity candidates,
+- CLI, MCP, HTTP, LSP, and UI conformance returns the same resolution, ambiguity candidates,
   coverage, cursor binding, and errors.
+- LSP fixtures cover same-name repositories, nested roots, linked worktrees,
+  symlink escapes, ambiguous folders, denied neighbors, and partial multi-root
+  coverage without cross-folder document or diagnostic state.
 - Worktree discovery is idempotent; safe cleanup blocks every unsafe case, revalidates at
   mutation time, preserves branches, and reconciles crash outcomes.
 - No public or internal PR15 operation creates a worktree or opens a worktree-local fact,

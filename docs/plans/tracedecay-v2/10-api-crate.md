@@ -23,6 +23,8 @@ Local and remote clients receive one stable, bounded, observable public service 
 - Business rules, authorization policy, queries, commands, or transaction boundaries.
 - Database connections, SQL, indexing, migration, or direct filesystem access.
 - MCP or CLI presentation.
+- LSP lifecycle, JSON-RPC framing, document synchronization, analyzer
+  supervision, or an LSP tunnel.
 - An exhaustive hand-maintained endpoint registry or generated compatibility inventory.
 - Task-plan, Kanban, executor, scheduler, edit-bundle, or arbitrary workflow-edit APIs.
 - JavaScript execution. PR17 workflow endpoints adapt typed product operations only.
@@ -30,6 +32,11 @@ Local and remote clients receive one stable, bounded, observable public service 
 ## Required behavior
 
 - Handlers extract transport inputs, build `RequestContext`, call one application use case, and encode its result.
+- HTTP/SSE and the daemon LSP gateway in
+  [35](35-daemon-lsp-gateway-and-universal-diagnostics.md) are sibling adapters
+  over shared typed application contracts. HTTP neither owns nor tunnels LSP
+  JSON-RPC.
+- Do not add an HTTP endpoint that forwards an arbitrary LSP method or payload.
 - All mutable routes require explicit authentication, capability checks in the application layer, bounded bodies, and idempotency where applicable.
 - Read routes preserve project/repository/worktree scope and expose freshness, coverage, provenance, and pagination metadata.
 - Use one stable error envelope with machine code, safe message, request ID, retry guidance, and bounded details.

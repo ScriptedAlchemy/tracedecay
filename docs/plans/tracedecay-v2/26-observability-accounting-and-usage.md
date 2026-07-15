@@ -33,6 +33,11 @@ Every operational and product metric states what was measured, over which popula
 ### Canonical events
 
 - Emit versioned events through the same authoritative event/store path as other V2 observations.
+- Emit privacy-safe [Plan 35](35-daemon-lsp-gateway-and-universal-diagnostics.md)
+  events for sessions; methods, outcomes, and latency; queueing and
+  cancellation; analyzer startup and restart; cache reuse; diagnostic add and
+  clear; partial coverage and drops; and bridge reconnect.
+- LSP telemetry contains no paths, source, symbols, or diagnostic messages.
 - Identify scope, capability, operation, result, event and observation time, duration or quantity, unit, producer revision, trace, and privacy classification.
 - Use stable idempotency keys so retries and replay cannot double count.
 - Record terminal outcomes separately from attempts and preserve cancellation, rejection, timeout, partial success, and unknown outcomes.
@@ -55,6 +60,8 @@ Every operational and product metric states what was measured, over which popula
 - Automation admission, execution, useful work, effect, recovery, and terminal outcome funnels.
 - Usage, cost, and measured savings with declared pricing inputs, exclusions, and confidence.
 - Store, index, daemon, hook, and remote-coverage health derived from canonical facts rather than incidental row presence.
+- Diagnostic coverage distinguishes missing analyzers, unsupported languages,
+  and daemon unavailability from a successful zero-diagnostic result.
 
 ### Rejected-argument analytics
 
@@ -95,7 +102,9 @@ decision with collision, ambiguity, maintenance, and privacy review.
 
 ### Observatory and Costs
 
-- PR14 exposes shared typed read models through application queries and thin CLI, MCP, HTTP, SDK, and dashboard adapters.
+- PR14 exposes shared typed read models through application queries and the
+  then-shipped CLI, MCP, HTTP, and dashboard adapters. PR18 adds SDK adapters
+  and parity when the official SDKs ship.
 - Every card, chart, and export shows scope, horizon, freshness, coverage, unit, and denominator.
 - Users can drill from an aggregate to safe trace or retrieval anchors and see why data is partial or unknown.
 - UI and transports consume the same values; none recompute business metrics locally.
@@ -106,8 +115,13 @@ decision with collision, ambiguity, maintenance, and privacy review.
 - Missing denominators and incomplete coverage render unknown or partial on every transport, never zero or 100%.
 - Aggregates reconcile to canonical events for pinned watermarks and remain reproducible after projector rebuilds.
 - Lag, SLO, adoption, hint, automation, usage, cost, and savings fixtures verify units, populations, horizons, and exclusions.
-- Observatory, CLI, MCP, HTTP, SDK, and exports pass value and coverage parity tests.
+- Observatory, CLI, MCP, HTTP, and exports pass value and coverage parity tests
+  in PR14; PR18 SDK conformance adds the same parity fixtures for each shipped
+  SDK.
 - Privacy fixtures prove events and drill-down anchors contain no prohibited raw content.
+- LSP fixtures reconcile session, request, analyzer, cache, diagnostic,
+  coverage, drop, and reconnect events while proving paths, source, symbols,
+  and messages never enter telemetry.
 - Rejected-argument fixtures reconcile exact frequencies and eligible-attempt
   rates by tool/command, safe rejected name, error class, schema/version,
   transport, provider, model family, and agent-host kind for pinned watermarks.

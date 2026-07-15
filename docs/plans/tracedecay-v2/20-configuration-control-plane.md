@@ -20,6 +20,10 @@ opaque and operators can see which revision the running system actually uses.
 - Atomic mutation, revision history, compare-and-set conflict handling, and audit metadata.
 - Direct activation and observed daemon/component revision state.
 - Opaque credential references and write-only credential mutation surfaces.
+- One typed analyzer configuration source for enablement, executable reference,
+  arguments, initialization options, settings, environment allowlist, privacy
+  class, resource limits, restart policy, and per-language selection for
+  [35](35-daemon-lsp-gateway-and-universal-diagnostics.md).
 - CLI, API, MCP, and UI configuration surfaces.
 - Doctor diagnostics and safe repairs for configuration state.
 
@@ -31,12 +35,24 @@ opaque and operators can see which revision the running system actually uses.
 - Preview/apply/rollback ceremonies for normal configuration changes.
 - Dynamic workflow definitions; PR17 stores those as typed product data using daemon operations.
 - Generated inventories, Markdown parsers, trackers, executors, or workflow JavaScript.
+- Static extension, language-ID, root-marker, and parser facts owned by
+  [25](25-code-intelligence-indexing-crate.md).
 
 ## Required behavior
 
 1. One typed source
    - Each setting declares its key, type, default, validation, sensitivity, scope, and documentation.
    - CLI, API, MCP, UI, Doctor, and persisted encoding use that definition directly.
+   - Analyzer settings cover enablement, executable reference, arguments,
+     initialization options, settings, environment allowlist, privacy class,
+     limits, restart policy, and per-language selection without duplicating
+     Plan 25's static language facts.
+   - Host plugin projection may consume only the non-sensitive enabled-language
+     registration selection. Executable references, arguments, initialization
+     options, settings, environment, and credentials never enter host
+     registration artifacts.
+   - Untrusted LSP requests cannot select analyzer commands, arguments,
+     initialization options, settings, or environment values.
    - Unknown and deprecated keys produce structured, actionable diagnostics.
 
 2. Deterministic resolution
@@ -52,6 +68,8 @@ opaque and operators can see which revision the running system actually uses.
 
 4. Observed state
    - The daemon records which configuration revision each long-lived component has loaded.
+   - Gateway and analyzer state names the loaded configuration revision,
+     analyzer definition revision, and activation or restart failures.
    - Surfaces distinguish desired revision from observed revision and show pending restart or failure.
    - Activation failures preserve the last working runtime state and expose an actionable error.
 

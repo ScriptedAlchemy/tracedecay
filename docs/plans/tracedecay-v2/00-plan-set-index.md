@@ -10,9 +10,11 @@ not require one crate-first pull request per document.
 
 TraceDecay V2 converges capture, sessions, memory, code intelligence, search,
 policy, automation, tools, APIs, integrations, observability, and the dashboard
-into one local-first Brain. One daemon is the physical database authority.
-Clients, hooks, MCP servers, dashboard handlers, workers, and remote nodes use
-typed daemon/application operations; none opens a fallback writable database.
+into one local-first Brain. Before remote delivery, one local daemon is the
+physical database authority; PR16 generalizes this to exactly one fenced daemon
+authority per mutable shard. Clients, hooks, MCP servers, dashboard handlers,
+workers, and remote nodes use typed daemon/application operations; none opens a
+fallback writable database.
 
 ## Completed foundation
 
@@ -49,8 +51,9 @@ not be rebuilt.
 - Each product mechanism has one typed kernel. Surface names and compatibility
   aliases are bindings only; they never acquire their own query, edit, storage,
   rendering, scheduling, or health logic.
-- The daemon remains the sole mutable SQLite authority. Producers send typed
-  commands or observations; readers use daemon/application APIs.
+- Exactly one fenced daemon remains the sole mutable SQLite authority for each
+  shard. Producers send typed commands or observations; readers use
+  daemon/application APIs.
 - Project facts and project sessions are project-wide. User activity is
   profile-wide. Only code indexes vary by branch/worktree/snapshot.
 - Missing authority, scope, privacy state, or recovery proof fails closed.
@@ -85,14 +88,14 @@ not be rebuilt.
 | PR6 | Provider coverage and event normalization: remaining hosts/sources, durable spools, identities, dedupe, partial input, backpressure, and canonical event relations. |
 | PR7 | Memory, facts, and provenance: project/profile ownership, evidence, corrections, trust, curation, migration, and deletion lineage. |
 | PR8 | Session/LCM temporal retrieval: occurrences, copies, summaries, supersession, current/as-of/evolution retrieval, and stable context assembly. |
-| PR9 | Code intelligence and lexical retrieval: deterministic extraction, generations, lineage, diagnostics/tests, exact/phrase/BM25 search, and V1 parity. |
+| PR9 | Code intelligence and lexical retrieval: deterministic extraction, generations, lineage, generation-bound managed diagnostics/tests, exact/phrase/BM25 search, and V1 parity. |
 | PR10 | Native semantic retrieval and ranking: gated FastEmbed artifacts, immutable vector generations, hybrid ranking, redundancy augmentation, evaluation, and lexical fallback. |
-| PR11 | Policy, application, catalog, and configuration core: typed use cases, grants, routing, replay, operations, capabilities, settings, and one runtime configuration authority. |
-| PR12 | CLI, MCP, HTTP API, and output convergence: one schema registry, dispatcher, and binding taxonomy; stable errors/cursors, compact Markdown, canonical JSON, SSE, cancellation, and surface parity. |
-| PR13 | Hooks, Context Scout, and host bundles: bounded hook ingestion, asynchronous suggestions, Codex/Claude/Cursor/Hermes projections, install/repair, and stock-host conformance. |
+| PR11 | Policy, application, catalog, and configuration core: typed use cases, grants, routing, replay, operations, capabilities, analyzer policy/settings, and one runtime configuration authority. |
+| PR12 | CLI, MCP, HTTP API, LSP gateway, and output convergence: one schema registry, dispatcher, and binding taxonomy; stable errors/cursors, compact Markdown, canonical JSON, SSE, cancellation, managed diagnostics, and surface parity. |
+| PR13 | Hooks, Context Scout, and host bundles: bounded hook ingestion, asynchronous suggestions, Codex/Claude/Cursor/Hermes/Kiro projections, universal TraceDecay LSP registration, install/repair, and stock-host conformance. |
 | PR14 | Dashboard, Doctor, observability, and configuration operations: Brain/Explorer/Loom foundations, one truthful health/recovery kernel, metrics/SLOs, Settings, and direct remediation. |
-| PR15 | Cross-project, repository, and worktree behavior: canonical scope resolution, federation, globally routable evidence, graph/query coverage, and multi-repository workflows. |
-| PR16 | Remote shared Brain: enrolled nodes, one fenced authority per shard, offline sanitized capture, verified caches/replicas, Git correlation, backup, restore, and failover. |
+| PR15 | Cross-project, repository, and worktree behavior: canonical scope resolution, federation, globally routable evidence, graph/query/LSP workspace coverage, and multi-repository workflows. |
+| PR16 | Remote shared Brain: enrolled nodes, one fenced authority per shard, offline sanitized capture, verified caches/replicas, node-local LSP overlays/analyzers, Git correlation, backup, restore, and failover. |
 | PR17 | Real typed dynamic workflows and automations: daemon-owned definitions, deterministic replay, and one shared scheduler/history/lease/effect/artifact kernel. |
 | PR18 | Official API stabilization and SDKs: frozen public contract, OpenAPI/schema publication, first-party Rust/TypeScript/Python SDKs, docs, and conformance. |
 | PR19 | Compatibility migration, defragmentation, cutover, and deletion: resumable backfill, shadow parity, bounded cutovers, rollback window, V2 default, and removal of every superseded V1 path. |
@@ -112,16 +115,21 @@ are stable.
   [34](34-workspace-refactoring-and-api-migration.md): PR11–PR12 application,
   policy, configuration, catalog, transport, presentation, public contracts, and
   safe workspace refactoring.
-- Plans 07, 22, and 27: PR13 hook, Scout, host integration, bundle, and
-  conformance behavior.
-- Plans 11, 14, 19, and 26: PR14 product UI, Doctor, observability, regression,
-  convergence, and operational quality.
+- Plans 07 and 27: PR6 host/hook baseline and canonical integration model, then
+  PR13 daemon cutover, host bundles, lifecycle, and conformance. Plan 22 owns
+  PR13 Context Scout behavior.
+- Plan [35](35-daemon-lsp-gateway-and-universal-diagnostics.md): PR9,
+  PR11–PR13, PR15, and PR16 generation-bound diagnostics, analyzer policy,
+  daemon LSP gateway, universal host plugin, multi-root scope, and remote-node
+  behavior.
+- Plans 11, 14, and 26: PR14 product UI, Doctor, observability, regression, and
+  operational quality.
 - Plan 16: PR15 canonical scope. Plan 24 is a permanent tombstone for the
   removed task-plan parser, tracker, and multi-agent executor product.
 - Plan 28: PR16 remote topology and authority.
 - Plan 32: PR17 typed dynamic-workflow product.
-- Plans 12, 13, 17, 19, and every component migration section: PR18–PR19
-  publication, provenance, compatibility, cutover, and deletion.
+- Plans 08, 12, 13, 17, 19, and every component migration section: PR18–PR19
+  SDK binding, publication, provenance, compatibility, cutover, and deletion.
 - Plan 33: PR20 end-to-end database, synchronization, indexing, query, and
   repository-controlled developer-build performance optimization. Owning slices
   provide instrumentation and baselines.

@@ -1,22 +1,36 @@
-# TraceDecay V2 CLI, MCP, and Output Unification
+# TraceDecay V2 CLI, MCP, LSP, and Output Unification
 
 **Delivery:** PR 12
 
 **Status:** planned product work
-**Depends on:** [08 tool catalog](08-tool-catalog-crate.md), [09 application](09-application-crate.md), [16 scope](16-cross-project-repository-worktree-scope.md), [18 privacy](18-secret-detection-redaction-and-private-data-safety.md), and [20 configuration](20-configuration-control-plane.md).
+**Depends on:** [08 tool catalog](08-tool-catalog-crate.md), [09 application](09-application-crate.md), [18 privacy](18-secret-detection-redaction-and-private-data-safety.md), and [20 configuration](20-configuration-control-plane.md). PR12 ships Plan 35's explicitly resolved single-project LSP admission; [16 scope](16-cross-project-repository-worktree-scope.md) extends it to canonical multi-root admission in PR15 and is not a PR12 prerequisite.
 
 ## Outcome
 
-CLI and MCP are thin clients over the same daemon-owned application use cases. Each use case returns one typed result. Human output is compact Markdown or terminal text; machine output is canonical JSON serialized from that same result.
+CLI and MCP are thin clients over the same daemon-owned application use cases.
+LSP is a stateful sibling adapter over the same typed code and diagnostic
+contracts. CLI and MCP render typed results as compact human output or canonical
+JSON; LSP uses protocol-native JSON-RPC responses and diagnostics.
 
 This plan does not create a generated surface inventory, plan parser, command generator, parity matrix, task editor, or workflow executor.
 
 ## Boundaries
 
-- `tracedecayd` is the sole application and database authority.
+- The routed `tracedecayd` is the sole application and database authority for
+  each selected mutable shard; PR16 preserves exactly one fenced daemon
+  authority per shard.
+- `tracedecayd` owns the LSP gateway, session state, routing, diagnostics, and
+  analyzer lifecycle defined by Plan 35. The stdio bridge contains only
+  authenticated framing and transport logic.
 - CLI and MCP resolve transport input, call the daemon, and render the response. They never open a business database or run query, policy, migration, or repair logic locally.
+- The stdio bridge never opens a business database, starts an analyzer, or
+  implements admission, routing, merge, privacy, or fallback policy.
 - A missing or incompatible daemon fails closed with one actionable problem. No client silently falls back to an embedded writer.
-- HTTP and SDK bindings remain owned by [17](17-official-public-api-and-sdks.md). Dynamic workflow semantics remain owned by [32](32-dynamic-workflow-runtime-and-sdk.md).
+- HTTP routing, extraction, and encoding remain owned by
+  [10](10-api-crate.md); public protocol versioning and SDK bindings remain
+  owned by [17](17-official-public-api-and-sdks.md). Shared schema and binding
+  references do not transfer adapter lifecycle ownership. Dynamic workflow
+  semantics remain owned by [32](32-dynamic-workflow-runtime-and-sdk.md).
 - Developer plans and Markdown files are documentation, not runtime input.
 
 ## Typed application result
@@ -54,14 +68,36 @@ Use one protocol implementation with isolated per-connection lifecycle, authenti
 
 MCP tools and resources call the same explicit application methods as CLI. MCP task IDs, retrieval anchors, sessions, and workflow IDs remain distinct types. MCP clients cannot choose hidden bindings or bypass authorization through a generic invoke tool.
 
-Multiple MCP clients may connect concurrently, but all business reads and writes are brokered through the one daemon authority established by PR 4.
+Multiple MCP clients may connect concurrently, but all business reads and writes are brokered through the owning daemon authority established locally by PR4 and generalized per shard by PR16.
+
+## LSP adapter
+
+LSP is stateful and protocol-native; it does not use canonical CLI/MCP
+rendering. The daemon gateway owns initialization, shutdown, capability
+negotiation, workspace and document lifecycle, document versions, cancellation,
+notifications versus responses, bounded queues, and backpressure.
+
+Each supported standard method resolves through an explicit catalog binding to
+a typed application/query operation. No adapter or bridge may blindly proxy an
+unknown method or arbitrary JSON-RPC payload. Notifications cannot satisfy
+pending requests, and cancelled or superseded document versions cannot publish
+results.
+
+A missing, incompatible, or failed daemon produces one bounded protocol-native
+startup or session failure; the bridge starts no local fallback. Conformance
+fixtures compare navigation, diagnostics, lifecycle, cancellation, ordering,
+and failure semantics with direct use of each supported upstream analyzer,
+allowing only documented TraceDecay provenance, bounds, and exact graph
+augmentation.
 
 ## Canonical dispatch and tool families
 
-One typed schema registry and dispatcher binds CLI, MCP, and HTTP names to
-cataloged application operations. Bindings may validate transport syntax and
-render results; aliases contain zero authorization, query, mutation, storage,
-availability, or fallback logic.
+One typed schema registry and canonical binding taxonomy maps CLI, MCP, HTTP,
+and LSP names to cataloged application operations. The CLI/MCP dispatcher,
+Plan 10 HTTP router, and Plan 35 LSP gateway consume those references through
+their own protocol adapters. Bindings may validate transport syntax and render
+protocol-native results; aliases contain zero authorization, query, mutation,
+storage, availability, or fallback logic.
 
 - `search`, `find_exact`, qualified-name lookup, similar-symbol lookup, and
   signature search are views over one symbol kernel.
@@ -128,14 +164,18 @@ Parity is verified from public behavior, not from a generated inventory:
 3. verify compact human output preserves identity, coverage, blockers, and continuation;
 4. test missing daemon, stale client, denied scope, empty, partial, redacted, paged, oversized, cancelled, and failed states;
 5. run concurrent-client tests proving clients never open writable databases;
-6. test stdout, stderr, exit codes, MCP lifecycle, framing, cancellation, and reconnect behavior directly.
+6. test stdout, stderr, exit codes, MCP lifecycle, framing, cancellation, and reconnect behavior directly;
 7. submit equivalent unknown, removed, misplaced, duplicate, and invalid-shape arguments through CLI, MCP, and HTTP and assert one schema-identical rejection event per attempt;
 8. prove values, payloads, paths, hostnames, identifiers, prompts, secrets, and unsafe names never enter events, logs, or typed problems, while redacted and dropped-event coverage remains visible;
-9. verify replay/retry idempotency, unavailable provider/model/host metadata, bounded name/cardinality limits, and daemon-unavailable client rejection behavior.
+9. verify replay/retry idempotency, unavailable provider/model/host metadata, bounded name/cardinality limits, and daemon-unavailable client rejection behavior;
+10. run LSP lifecycle, negotiation, document-version, cancellation,
+    notification/response separation, backpressure, daemon-failure, and direct
+    upstream semantic-parity fixtures.
 
 ## PR 12 deliverables
 
 - one daemon client shared by CLI and MCP adapters;
+- one daemon-owned stateful LSP gateway and transport-only stdio bridge;
 - sealed application-result serialization;
 - compact Markdown/terminal presenters for shipped use cases;
 - canonical JSON and cursor/anchor handling;
@@ -149,6 +189,8 @@ Parity is verified from public behavior, not from a generated inventory:
 
 - One typed application result drives CLI and MCP output.
 - CLI and MCP contain transport and presentation logic only.
+- LSP uses typed application/query operations and protocol-native output; no
+  bridge or gateway binding exposes a blind JSON-RPC proxy.
 - All business access goes through the daemon.
 - Compact Markdown and canonical JSON agree semantically.
 - Direct tests cover every shipped binding and failure class touched by PR 12.

@@ -6,7 +6,11 @@ Normative PR19 plan. This is the bounded final cutover from the V1 root implemen
 
 ## Outcome
 
-One daemon is the sole database authority. Thin clients and hooks communicate with it through supported APIs. Existing user data is migrated once, verified, cut over safely, archived for the defined recovery window, and then deleted under explicit policy.
+Before remote delivery, one local daemon is the sole database authority; PR16
+preserves exactly one fenced daemon authority per mutable shard. Thin clients
+and hooks communicate with the owning authority through supported APIs.
+Existing user data is migrated once, verified, cut over safely, archived for
+the defined recovery window, and then deleted under explicit policy.
 
 ## Owns
 
@@ -26,7 +30,8 @@ One daemon is the sole database authority. Thin clients and hooks communicate wi
 
 ## Required behavior
 
-- The daemon alone opens live project and profile databases for reads and writes; MCP, CLI, hooks, API, and dashboard are clients.
+- The owning daemon alone opens each live project or profile database for reads
+  and writes; MCP, CLI, hooks, API, LSP bridges, and dashboard are clients.
 - Hooks send bounded events or signals and return; daemon scheduling, deduplication, sync, retries, and writes are authoritative.
 - Refuse concurrent migration for the same store and record a durable migration ID and phase.
 - Preflight identifies every supported V1 data family, schema/version, source path, destination scope, required space, and blocking corruption.
@@ -49,7 +54,9 @@ One daemon is the sole database authority. Thin clients and hooks communicate wi
   duplicate transport/admin handlers, handler-local query/render/database logic,
   and semantic aliases whose compatibility window has closed. Surviving names
   delegate to canonical application operations until their stated removal.
-- Remote/shared-brain support must still route through one authoritative daemon per live store; it never introduces extra database clients.
+- Remote/shared-brain support must still route through exactly one fenced
+  authoritative daemon per mutable shard; it never introduces extra database
+  clients.
 - Use measured focused-test compilation to right-size integration-test targets.
   Split an oversized shared test binary when a narrow test selection repeatedly
   recompiles unrelated subsystems; do not multiply binaries when the added link
