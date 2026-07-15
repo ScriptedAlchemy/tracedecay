@@ -152,24 +152,22 @@ impl PreparedBranchAdminMutation {
                 metadata_before: self.metadata_before,
                 metadata_after: self.metadata_after,
             },
-            transaction::CommitHooks {
-                publish_deleting,
-                validate_precommit: move |quarantine_paths| {
-                    validate_quarantined_stores(quarantine_paths)?;
-                    for branch in &gc_branches {
-                        if super::is_branch_ref_present(&project_root, branch) {
-                            return Err(crate::errors::TraceDecayError::Config {
-                                message: format!(
-                                    "branch ref '{branch}' reappeared before GC metadata publication; deletion rolled back"
-                                ),
-                            });
-                        }
+            publish_deleting,
+            move |quarantine_paths| {
+                validate_quarantined_stores(quarantine_paths)?;
+                for branch in &gc_branches {
+                    if super::is_branch_ref_present(&project_root, branch) {
+                        return Err(crate::errors::TraceDecayError::Config {
+                            message: format!(
+                                "branch ref '{branch}' reappeared before GC metadata publication; deletion rolled back"
+                            ),
+                        });
                     }
-                    Ok(())
-                },
-                rollback_deleting,
-                hook,
+                }
+                Ok(())
             },
+            rollback_deleting,
+            hook,
         )?;
         Ok(self.report)
     }

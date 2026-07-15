@@ -37,7 +37,6 @@ pub(super) struct MergeSnapshotRequest<'a> {
 pub(super) async fn merge_snapshot(
     request: MergeSnapshotRequest<'_>,
 ) -> Result<MergeOutcome, String> {
-    let source = request.source;
     let source_path = request.source_path;
     let target = request.target;
     let target_path = request.target_path;

@@ -166,16 +166,12 @@ pub(super) struct CommitRequest<'a> {
     pub(super) metadata_after: Option<String>,
 }
 
-pub(super) struct CommitHooks<P, V, R, H> {
-    pub(super) publish_deleting: P,
-    pub(super) validate_precommit: V,
-    pub(super) rollback_deleting: R,
-    pub(super) hook: H,
-}
-
 pub(super) fn commit_with_hook<P, V, R, H>(
     request: CommitRequest<'_>,
-    hooks: CommitHooks<P, V, R, H>,
+    publish_deleting: P,
+    validate_precommit: V,
+    rollback_deleting: R,
+    mut hook: H,
 ) -> Result<()>
 where
     P: FnOnce() -> Result<()>,
@@ -190,12 +186,6 @@ where
         metadata_before,
         metadata_after,
     } = request;
-    let CommitHooks {
-        publish_deleting,
-        validate_precommit,
-        rollback_deleting,
-        mut hook,
-    } = hooks;
     if database_paths.is_empty() {
         validate_precommit(&[])?;
         let current = read_current_metadata(tracedecay_dir)?;
