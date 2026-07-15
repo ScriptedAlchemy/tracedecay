@@ -497,8 +497,7 @@ async fn notify_hook_event_inner(project_path: &Path, event: DaemonHookEvent) {
     let connection = std::env::var_os(SOCKET_ENV)
         .filter(|path| !path.is_empty())
         .map(|path| connection_for_socket_path(Path::new(&path)))
-        .map(Ok)
-        .unwrap_or_else(current_daemon_connection);
+        .map_or_else(current_daemon_connection, Ok);
     #[cfg(not(unix))]
     let connection = current_daemon_connection();
     let Ok(connection) = connection else {
@@ -1310,8 +1309,7 @@ async fn send_daemon_request_line_with_liveness_poll(
     let request_id = request.as_ref().and_then(|request| request.id.clone());
     let request_label = request
         .as_ref()
-        .map(|request| request.method.as_str())
-        .unwrap_or("daemon request");
+        .map_or("daemon request", |request| request.method.as_str());
     let mut responses = Vec::new();
     let mut matched_response = request_id.is_none();
     while let Some(response_line) = next_daemon_response_line(

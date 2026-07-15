@@ -751,10 +751,10 @@ fn response_item_reasoning_summary_text(payload: &Value) -> Option<String> {
 }
 
 fn compact_response_item_value(value: &Value) -> String {
-    value
-        .as_str()
-        .map(str::to_string)
-        .unwrap_or_else(|| serde_json::to_string(value).unwrap_or_else(|_| value.to_string()))
+    value.as_str().map_or_else(
+        || serde_json::to_string(value).unwrap_or_else(|_| value.to_string()),
+        str::to_string,
+    )
 }
 
 fn response_item_tool_metadata(

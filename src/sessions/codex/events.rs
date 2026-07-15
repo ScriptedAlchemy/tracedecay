@@ -1202,13 +1202,15 @@ fn web_search_row(
     let queries: Vec<Value> = payload
         .pointer("/action/queries")
         .and_then(Value::as_array)
-        .map(|arr| {
-            arr.iter()
-                .filter_map(Value::as_str)
-                .map(|q| Value::String(q.to_string()))
-                .collect()
-        })
-        .unwrap_or_else(|| vec![Value::String(query.to_string())]);
+        .map_or_else(
+            || vec![Value::String(query.to_string())],
+            |arr| {
+                arr.iter()
+                    .filter_map(Value::as_str)
+                    .map(|q| Value::String(q.to_string()))
+                    .collect()
+            },
+        );
 
     let mut metadata = base_metadata("codex_web_search", "web_search_end");
     insert_str(&mut metadata, "call_id", payload.get("call_id"));

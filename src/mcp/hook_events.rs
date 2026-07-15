@@ -130,20 +130,22 @@ pub(crate) fn plan_hook_event(
         HookEventKind::TerminalReceipt | HookEventKind::TurnCompleted => event
             .receipt
             .clone()
-            .map(|receipt| HookEventPlan::RecordTerminalReceipt {
-                route: event.route.clone(),
-                receipt,
-            })
-            .unwrap_or(HookEventPlan::Noop),
+            .map_or(HookEventPlan::Noop, |receipt| {
+                HookEventPlan::RecordTerminalReceipt {
+                    route: event.route.clone(),
+                    receipt,
+                }
+            }),
         HookEventKind::TurnIngested => event
             .receipt
             .as_ref()
             .and_then(|receipt| receipt.transcript_watermark.clone())
-            .map(|transcript_watermark| HookEventPlan::MarkTurnIngested {
-                route: event.route.clone(),
-                transcript_watermark,
-            })
-            .unwrap_or(HookEventPlan::Noop),
+            .map_or(HookEventPlan::Noop, |transcript_watermark| {
+                HookEventPlan::MarkTurnIngested {
+                    route: event.route.clone(),
+                    transcript_watermark,
+                }
+            }),
     }
 }
 

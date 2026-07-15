@@ -347,8 +347,7 @@ fn move_result_md(result: &crate::types::MoveResult) -> String {
         for hint in &result.impact {
             let loc = hint
                 .line
-                .map(|l| format!("{}:{}", hint.file, l))
-                .unwrap_or_else(|| hint.file.clone());
+                .map_or_else(|| hint.file.clone(), |l| format!("{}:{}", hint.file, l));
             let _ = writeln!(out, "- **{}** ({}) — {}", hint.kind, loc, hint.detail);
             if let Some(sug) = &hint.suggestion {
                 let _ = writeln!(out, "  - suggestion: {sug}");

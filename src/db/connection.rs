@@ -44,9 +44,7 @@ impl Database {
             }
             return Ok((Self { inner }, false));
         }
-        let is_fresh = std::fs::metadata(db_path)
-            .map(|metadata| metadata.len() == 0)
-            .unwrap_or(true);
+        let is_fresh = std::fs::metadata(db_path).map_or(true, |metadata| metadata.len() == 0);
         if !is_fresh {
             integrity::validate_sqlite_header(db_path, "initialize", false)?;
             integrity::validate_read_only(db_path).await?;
@@ -114,9 +112,7 @@ impl Database {
             }
             return Ok((Self { inner }, false));
         }
-        let is_fresh = std::fs::metadata(db_path)
-            .map(|metadata| metadata.len() == 0)
-            .unwrap_or(true);
+        let is_fresh = std::fs::metadata(db_path).map_or(true, |metadata| metadata.len() == 0);
         integrity::validate_sqlite_header(db_path, "open", true)?;
         if !is_fresh {
             integrity::validate_read_only(db_path).await?;

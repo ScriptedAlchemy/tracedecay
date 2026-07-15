@@ -1285,14 +1285,12 @@ pub(super) async fn handle_rename_preview(cg: &TraceDecay, args: Value) -> Resul
     // preview, so occurrences in wholly unrelated files are not counted.
     let mut text_only_matches: Vec<Value> = Vec::new();
     for file in &touched_files {
-        let total = cached_file_lines(cg, &mut lines_cache, file)
-            .map(|lines| {
-                lines
-                    .iter()
-                    .map(|line| count_identifier_occurrences(line, &symbol_name))
-                    .sum::<usize>()
-            })
-            .unwrap_or(0);
+        let total = cached_file_lines(cg, &mut lines_cache, file).map_or(0, |lines| {
+            lines
+                .iter()
+                .map(|line| count_identifier_occurrences(line, &symbol_name))
+                .sum::<usize>()
+        });
         let graph = graph_counts.get(file).copied().unwrap_or(0);
         let text_only = total.saturating_sub(graph);
         if text_only > 0 {

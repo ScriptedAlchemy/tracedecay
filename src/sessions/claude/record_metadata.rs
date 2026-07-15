@@ -336,8 +336,7 @@ fn marker_message_id(record: &Value, session_id: &str, kind: &str, offset: i64) 
 fn render_scalar(value: &Value) -> String {
     value
         .as_str()
-        .map(str::to_string)
-        .unwrap_or_else(|| value.to_string())
+        .map_or_else(|| value.to_string(), str::to_string)
 }
 
 pub(super) fn session_metadata(

@@ -1134,8 +1134,7 @@ fn path_parent(path: &Path) -> &Path {
 pub(crate) fn append_lock_path(path: &Path) -> PathBuf {
     let mut lock_name = path
         .file_name()
-        .map(std::ffi::OsStr::to_os_string)
-        .unwrap_or_else(|| OsString::from("append"));
+        .map_or_else(|| OsString::from("append"), std::ffi::OsStr::to_os_string);
     lock_name.push(".lock");
     path.with_file_name(lock_name)
 }

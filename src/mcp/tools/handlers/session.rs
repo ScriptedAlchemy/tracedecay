@@ -3258,9 +3258,10 @@ async fn upsert_live_transcript_projection(
     session_id: &str,
     messages: &[Value],
 ) {
-    let project = project_root
-        .map(|root| root.to_string_lossy().to_string())
-        .unwrap_or_else(|| "user".to_string());
+    let project = project_root.map_or_else(
+        || "user".to_string(),
+        |root| root.to_string_lossy().to_string(),
+    );
     let storage_scope = if project_root.is_some() {
         "project"
     } else {

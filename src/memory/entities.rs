@@ -136,12 +136,8 @@ fn extract_quoted(text: &str, delimiter: char) -> Vec<(usize, String)> {
         if delimiter == '\'' {
             let prev_alnum = i
                 .checked_sub(1)
-                .map(|j| chars[j].1.is_alphanumeric())
-                .unwrap_or(false);
-            let next_alnum = chars
-                .get(i + 1)
-                .map(|(_, c)| c.is_alphanumeric())
-                .unwrap_or(false);
+                .is_some_and(|j| chars[j].1.is_alphanumeric());
+            let next_alnum = chars.get(i + 1).is_some_and(|(_, c)| c.is_alphanumeric());
             if prev_alnum && next_alnum {
                 continue;
             }

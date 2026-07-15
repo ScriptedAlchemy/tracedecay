@@ -389,9 +389,10 @@ async fn resolve_branch_data_root(project_path: &Path) -> PathBuf {
 }
 
 fn fallback_branch_data_root(project_path: &Path) -> PathBuf {
-    tracedecay::storage::resolve_layout_for_current_profile(project_path)
-        .map(|layout| layout.data_root)
-        .unwrap_or_else(|_| tracedecay::config::get_tracedecay_dir(project_path))
+    tracedecay::storage::resolve_layout_for_current_profile(project_path).map_or_else(
+        |_| tracedecay::config::get_tracedecay_dir(project_path),
+        |layout| layout.data_root,
+    )
 }
 
 #[cfg(test)]

@@ -279,13 +279,12 @@ impl std::error::Error for ConfigSaveError {
 fn temp_write_path(path: &Path) -> PathBuf {
     let unique = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
+        .map_or(0, |d| d.as_nanos());
     let pid = std::process::id();
-    let mut name = path
-        .file_name()
-        .map(std::ffi::OsStr::to_os_string)
-        .unwrap_or_else(|| std::ffi::OsString::from("config.toml"));
+    let mut name = path.file_name().map_or_else(
+        || std::ffi::OsString::from("config.toml"),
+        std::ffi::OsStr::to_os_string,
+    );
     name.push(format!(".tmp-{pid}-{unique}"));
     path.with_file_name(name)
 }
@@ -296,12 +295,11 @@ fn temp_write_path(path: &Path) -> PathBuf {
 fn corrupt_backup_path(path: &Path) -> PathBuf {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    let mut name = path
-        .file_name()
-        .map(std::ffi::OsStr::to_os_string)
-        .unwrap_or_else(|| std::ffi::OsString::from("config.toml"));
+        .map_or(0, |d| d.as_secs());
+    let mut name = path.file_name().map_or_else(
+        || std::ffi::OsString::from("config.toml"),
+        std::ffi::OsStr::to_os_string,
+    );
     name.push(format!(".corrupt-{now}"));
     path.with_file_name(name)
 }

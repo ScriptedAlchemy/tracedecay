@@ -188,8 +188,7 @@ fn resolve_backfill_since(since: Option<&str>) -> tracedecay::errors::Result<i64
     let Some(raw) = since.map(str::trim).filter(|value| !value.is_empty()) else {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs() as i64)
-            .unwrap_or(0);
+            .map_or(0, |d| d.as_secs() as i64);
         return Ok((now - GIT_BACKFILL_DEFAULT_WINDOW_SECS).max(0));
     };
     if let Ok(unix) = raw.parse::<i64>() {

@@ -16608,14 +16608,13 @@ async fn test_move_symbol_clean_move_has_empty_impact() {
     let p = move_payload(&result);
     assert_eq!(p["success"], true, "payload: {p}");
     assert!(
-        p["impact"].as_array().map(|a| a.is_empty()).unwrap_or(true),
+        p["impact"].as_array().map_or(true, |a| a.is_empty()),
         "clean move should have empty impact: {p}"
     );
     assert!(
         p["applied_imports"]
             .as_array()
-            .map(|a| a.is_empty())
-            .unwrap_or(true),
+            .map_or(true, |a| a.is_empty()),
         "clean move needs no imports: {p}"
     );
 }

@@ -361,8 +361,7 @@ impl<S: ObservationStore> ObservationApplication<S> {
         if !has_more && observations.len() == limit && lookahead.is_none() {
             let after_sequence = observations
                 .last()
-                .map(StoredObservation::sequence)
-                .unwrap_or(request.after_sequence());
+                .map_or(request.after_sequence(), StoredObservation::sequence);
             let probe = ObservationReplayRequest::new(after_sequence, 1)?;
             if cancellation.is_cancelled() {
                 return Err(ObservationApplicationError::Cancelled);

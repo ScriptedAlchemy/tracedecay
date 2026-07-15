@@ -1033,8 +1033,7 @@ pub(crate) fn probe_writer_owner(db_path: &Path) -> Result<WriterOwnership> {
             Ok(WriterOwnership::Idle)
         }
         Err(error) if is_lock_contended(&error) => Ok(read_owner(&identity.writer_owner_path)
-            .map(WriterOwnership::Active)
-            .unwrap_or(WriterOwnership::ActiveUnknown)),
+            .map_or(WriterOwnership::ActiveUnknown, WriterOwnership::Active)),
         Err(error) => Err(access_io_error(
             "probe writer",
             &identity.writer_lock_path,

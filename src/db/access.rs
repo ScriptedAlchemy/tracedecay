@@ -384,8 +384,7 @@ impl DatabaseIdentity {
         };
         let profile_root = lock_root
             .parent()
-            .map(Path::to_path_buf)
-            .unwrap_or_else(|| parent.to_path_buf());
+            .map_or_else(|| parent.to_path_buf(), Path::to_path_buf);
         Ok(Self {
             allows_ambient_profile_scope: is_legacy_repository_database(&database_path),
             database_path,

@@ -135,8 +135,7 @@ fn render_project_context_payload(payload: &Value) -> String {
             for artifact in store_context["artifacts"].as_array().into_iter().flatten() {
                 let size = artifact["size_bytes"]
                     .as_u64()
-                    .map(|bytes| bytes.to_string())
-                    .unwrap_or_else(|| "-".to_string());
+                    .map_or_else(|| "-".to_string(), |bytes| bytes.to_string());
                 let _ = writeln!(
                     out,
                     "    artifact {} path={} size={}",
@@ -207,8 +206,7 @@ fn render_project_context_text(context: &ProjectRegistryContext) -> String {
             for artifact in &store_context.artifacts {
                 let size = artifact
                     .size_bytes
-                    .map(|bytes| bytes.to_string())
-                    .unwrap_or_else(|| "-".to_string());
+                    .map_or_else(|| "-".to_string(), |bytes| bytes.to_string());
                 let _ = writeln!(
                     out,
                     "    artifact {} path={} size={}",

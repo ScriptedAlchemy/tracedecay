@@ -511,9 +511,8 @@ async fn resolve_plan_inner(
     let destination_data_root =
         storage::profile_sharded_data_root(&profile_root, &destination_project_id);
     let backup_root = profile_root.join(BACKUP_DIR).join(&migration_id);
-    let state = load_ledger(&ledger_path)?
-        .map(|ledger| ledger.state)
-        .unwrap_or(ConsolidationState::Planned);
+    let state =
+        load_ledger(&ledger_path)?.map_or(ConsolidationState::Planned, |ledger| ledger.state);
     Ok(ResolvedPlan {
         report: ConsolidationReport {
             migration_id,

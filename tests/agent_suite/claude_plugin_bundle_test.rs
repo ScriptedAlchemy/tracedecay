@@ -558,8 +558,10 @@ fn cursor_and_codex_agents_are_generated_from_the_canonical_catalog() {
         let cursor = cursor_files
             .iter()
             .find(|(path, _)| *path == format!("agents/{agent}"))
-            .map(|(_, contents)| *contents)
-            .unwrap_or_else(|| panic!("missing generated Cursor adapter for {agent}"));
+            .map_or_else(
+                || panic!("missing generated Cursor adapter for {agent}"),
+                |(_, contents)| *contents,
+            );
         let codex_path = temp
             .path()
             .join(".codex/agents")

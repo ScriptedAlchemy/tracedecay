@@ -43,8 +43,7 @@ fn print_lsp_servers_table(adapters: &[lsp_adapters::LspAdapterDefinition]) {
         let install = adapter
             .install_options
             .first()
-            .map(|option| option.command.as_str())
-            .unwrap_or("");
+            .map_or("", |option| option.command.as_str());
         println!(
             "{:<14} {:<12} {:<28} {}",
             adapter.language,

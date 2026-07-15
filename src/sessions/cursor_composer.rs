@@ -848,10 +848,9 @@ fn is_edit_tool(name: &str) -> bool {
 
 fn json_field_len(value: Option<&Value>) -> u64 {
     value.map_or(0, |v| {
-        v.as_str().map_or_else(
-            || serde_json::to_string(v).map(|s| s.len()).unwrap_or(0),
-            str::len,
-        ) as u64
+        v.as_str()
+            .map_or_else(|| serde_json::to_string(v).map_or(0, |s| s.len()), str::len)
+            as u64
     })
 }
 

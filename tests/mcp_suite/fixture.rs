@@ -139,8 +139,7 @@ impl SeedTargets {
     fn from_env() -> Option<Self> {
         let profile_root = default_profile_root().ok()?;
         let global_db_path = std::env::var_os(GLOBAL_DB_ENV)
-            .map(PathBuf::from)
-            .unwrap_or_else(|| profile_root.join("global.db"));
+            .map_or_else(|| profile_root.join("global.db"), PathBuf::from);
         Some(Self {
             profile_root,
             global_db_path,

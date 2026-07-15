@@ -10,9 +10,7 @@ use super::daemon::daemon_tool_json;
 /// (it used to fire for every history row and for every unit test process).
 pub(crate) fn estimate_dollars_saved(saved_tokens: u64) -> f64 {
     use tracedecay::accounting::pricing;
-    let price = pricing::lookup("claude-sonnet-4")
-        .map(|p| p.input_per_mtok)
-        .unwrap_or(3.0);
+    let price = pricing::lookup("claude-sonnet-4").map_or(3.0, |p| p.input_per_mtok);
     (saved_tokens as f64) * price / 1_000_000.0
 }
 

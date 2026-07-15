@@ -105,11 +105,14 @@ pub(crate) async fn handle_migrate_action(action: MigrateAction) -> tracedecay::
                     project_id.ok_or_else(|| tracedecay::errors::TraceDecayError::Config {
                         message: "--project-id is required when saving a manifest".to_string(),
                     })?;
-                let manifest_path = manifest.map(PathBuf::from).unwrap_or_else(|| {
-                    PathBuf::from(&profile_root)
-                        .join("migration-inventory")
-                        .join(format!("{migration_id}.json"))
-                });
+                let manifest_path = manifest.map_or_else(
+                    || {
+                        PathBuf::from(&profile_root)
+                            .join("migration-inventory")
+                            .join(format!("{migration_id}.json"))
+                    },
+                    PathBuf::from,
+                );
                 let confirmation_token = format!("confirm-{migration_id}");
                 let manifest = tracedecay::migrate::manifest::build_plan_manifest(
                     report,
@@ -162,14 +165,14 @@ pub(crate) async fn handle_migrate_action(action: MigrateAction) -> tracedecay::
             let project_id = match project_id {
                 Some(project_id) => project_id,
                 None => {
-                    let project_root =
-                        project
-                            .map(PathBuf::from)
-                            .unwrap_or(std::env::current_dir().map_err(|e| {
-                                tracedecay::errors::TraceDecayError::Config {
-                                    message: format!("could not determine current directory: {e}"),
-                                }
-                            })?);
+                    let project_root = project.map_or(
+                        std::env::current_dir().map_err(|e| {
+                            tracedecay::errors::TraceDecayError::Config {
+                                message: format!("could not determine current directory: {e}"),
+                            }
+                        })?,
+                        PathBuf::from,
+                    );
                     let marker = tracedecay::storage::read_enrollment_marker(&project_root)?
                         .ok_or_else(|| tracedecay::errors::TraceDecayError::Config {
                             message: format!(

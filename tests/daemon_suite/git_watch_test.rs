@@ -176,9 +176,7 @@ async fn external_checkout_creates_branch_store() {
 
     // Not tracked yet.
     assert!(
-        load_branch_meta(&project_data_dir(&project))
-            .map(|m| !m.is_tracked("feat/x"))
-            .unwrap_or(true),
+        load_branch_meta(&project_data_dir(&project)).map_or(true, |m| !m.is_tracked("feat/x")),
         "branch should be untracked before the watcher reacts"
     );
 
@@ -300,7 +298,7 @@ async fn fifty_commit_rebase_needs_one_sync() {
     let base2 = cg.last_synced_commit().await.expect("base advanced");
     let followup = cg.stale_files_since_commit(&base2, 500);
     assert!(
-        followup.map(|f| f.is_empty()).unwrap_or(true),
+        followup.map_or(true, |f| f.is_empty()),
         "no second sync should be needed after the coalesced pass"
     );
 }
@@ -366,9 +364,7 @@ async fn deleted_branch_store_gc_fails_closed_without_daemon_administration() {
     git(&project, &["checkout", "main"]);
     let data_dir = project_data_dir(&project);
     assert!(
-        load_branch_meta(&data_dir)
-            .map(|m| m.is_tracked("feat/dead"))
-            .unwrap_or(false),
+        load_branch_meta(&data_dir).is_some_and(|m| m.is_tracked("feat/dead")),
         "branch should be tracked before its ref is deleted"
     );
 
@@ -380,9 +376,7 @@ async fn deleted_branch_store_gc_fails_closed_without_daemon_administration() {
         "unmanaged GC must fail closed, report: {report:?}"
     );
     assert!(
-        load_branch_meta(&data_dir)
-            .map(|m| m.is_tracked("feat/dead"))
-            .unwrap_or(false),
+        load_branch_meta(&data_dir).is_some_and(|m| m.is_tracked("feat/dead")),
         "unmanaged GC must preserve branch metadata"
     );
 }

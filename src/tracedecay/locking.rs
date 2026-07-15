@@ -121,9 +121,9 @@ fn clear_marker_if_matches(path: &Path, expected: &MarkerIdentity) -> std::io::R
 /// interrupted). Legacy unstructured markers remain dirty by definition.
 pub(super) fn has_dirty_sentinel_at(path: &Path) -> bool {
     match std::fs::read(path) {
-        Ok(contents) => serde_json::from_slice::<DirtyMarker>(&contents)
-            .map(|marker| marker.schema != MARKER_SCHEMA || marker.state == MarkerState::Dirty)
-            .unwrap_or(true),
+        Ok(contents) => serde_json::from_slice::<DirtyMarker>(&contents).map_or(true, |marker| {
+            marker.schema != MARKER_SCHEMA || marker.state == MarkerState::Dirty
+        }),
         Err(error) => error.kind() != std::io::ErrorKind::NotFound,
     }
 }

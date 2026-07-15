@@ -77,8 +77,7 @@ pub(super) fn mcp_tool_analytics_event(input: McpToolAnalyticsEvent<'_>) -> Anal
         metadata["failure_reason"] = json!(
             input
                 .failure_reason
-                .map(bounded_failure_reason)
-                .unwrap_or_else(|| "tool_dispatch_error".to_string())
+                .map_or_else(|| "tool_dispatch_error".to_string(), bounded_failure_reason)
         );
     }
     if crate::analytics::is_skill_view_tool(input.tool_name) {

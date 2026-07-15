@@ -108,8 +108,7 @@ impl DaemonAuthority {
         let prior_epoch = read_record_if_present(&record_path)
             .ok()
             .flatten()
-            .map(|record| record.epoch)
-            .unwrap_or(0);
+            .map_or(0, |record| record.epoch);
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default();

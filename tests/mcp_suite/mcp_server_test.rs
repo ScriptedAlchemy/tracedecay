@@ -476,12 +476,9 @@ async fn test_tools_call_search() {
     assert!(resp["error"].is_null(), "search should not error");
     let content = resp["result"]["content"].as_array().unwrap();
     // At least one content item should contain "helper".
-    let has_helper = content.iter().any(|c| {
-        c["text"]
-            .as_str()
-            .map(|t| t.contains("helper"))
-            .unwrap_or(false)
-    });
+    let has_helper = content
+        .iter()
+        .any(|c| c["text"].as_str().is_some_and(|t| t.contains("helper")));
     assert!(has_helper, "search results should contain 'helper'");
 }
 

@@ -263,8 +263,7 @@ fn validate_tool_args(def: &ToolDefinition, args: &Map<String, Value>) -> Result
                 .collect();
             let displayed = value
                 .as_str()
-                .map(str::to_string)
-                .unwrap_or_else(|| value.to_string());
+                .map_or_else(|| value.to_string(), str::to_string);
             return Err(TraceDecayError::Config {
                 message: format!(
                     "--{}: `{displayed}` is not one of: {}",

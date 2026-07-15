@@ -120,7 +120,7 @@ fn test_install_deploys_plugin_hooks() {
         h.get("matcher").and_then(|m| m.as_str()) == Some("Agent")
             && h.get("hooks")
                 .and_then(|a| a.as_array())
-                .map(|arr| {
+                .is_some_and(|arr| {
                     arr.iter().any(|entry| {
                         entry
                             .get("command")
@@ -128,7 +128,6 @@ fn test_install_deploys_plugin_hooks() {
                             .is_some_and(|c| c.contains("tracedecay"))
                     })
                 })
-                .unwrap_or(false)
     });
     assert!(
         tracedecay_hook.is_some(),
@@ -707,11 +706,11 @@ fn test_uninstall_removes_hook_from_settings() {
         let settings = read_json(&settings_path);
         let has_hook = settings["hooks"]["PreToolUse"]
             .as_array()
-            .map(|arr| {
+            .is_some_and(|arr| {
                 arr.iter().any(|h| {
                     h.get("hooks")
                         .and_then(|a| a.as_array())
-                        .map(|arr| {
+                        .is_some_and(|arr| {
                             arr.iter().any(|entry| {
                                 entry
                                     .get("command")
@@ -719,10 +718,8 @@ fn test_uninstall_removes_hook_from_settings() {
                                     .is_some_and(|c| c.contains("tracedecay"))
                             })
                         })
-                        .unwrap_or(false)
                 })
-            })
-            .unwrap_or(false);
+            });
         assert!(
             !has_hook,
             "PreToolUse should not contain tracedecay hook after uninstall"
@@ -744,13 +741,12 @@ fn test_uninstall_removes_permissions_from_settings() {
         let settings = read_json(&settings_path);
         let has_ts_perm = settings["permissions"]["allow"]
             .as_array()
-            .map(|arr| {
+            .is_some_and(|arr| {
                 arr.iter().any(|v| {
                     v.as_str()
                         .is_some_and(|s| s.starts_with("mcp__tracedecay__"))
                 })
-            })
-            .unwrap_or(false);
+            });
         assert!(
             !has_ts_perm,
             "permissions.allow should not contain mcp__tracedecay__* after uninstall"

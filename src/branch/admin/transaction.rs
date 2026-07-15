@@ -222,9 +222,7 @@ where
         )));
     }
 
-    let transaction_id = supplied_transaction_id
-        .map(str::to_string)
-        .unwrap_or_else(transaction_id);
+    let transaction_id = supplied_transaction_id.map_or_else(transaction_id, str::to_string);
     let mut entries = database_paths
         .iter()
         .map(|path| snapshot_entry(tracedecay_dir, path))

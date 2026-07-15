@@ -195,8 +195,7 @@ fn append_fact_md(md: &mut Md, fact: &Value, envelope: &Value) {
     let id = fact
         .get("fact_id")
         .and_then(Value::as_i64)
-        .map(|id| format!("#{id}"))
-        .unwrap_or_else(|| "#?".to_string());
+        .map_or_else(|| "#?".to_string(), |id| format!("#{id}"));
     let category = compact_scalar(fact.get("category"));
     let trust = fact
         .get("trust_score")

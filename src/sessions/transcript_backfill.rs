@@ -458,8 +458,7 @@ fn structured_backfill_target_version(provider: &str) -> i64 {
     STRUCTURED_BACKFILL_VERSIONS
         .iter()
         .find(|(name, _)| *name == provider)
-        .map(|(_, version)| *version)
-        .unwrap_or(0)
+        .map_or(0, |(_, version)| *version)
 }
 
 #[derive(Default, Clone, Copy)]
@@ -480,10 +479,10 @@ struct StructuredCandidate {
 /// filesystem lock two of them could sweep the same store at once and race the
 /// watermark backwards.
 fn structured_backfill_lock_path(db_path: &Path) -> PathBuf {
-    let mut lock_name = db_path
-        .file_name()
-        .map(std::ffi::OsStr::to_os_string)
-        .unwrap_or_else(|| std::ffi::OsString::from("session"));
+    let mut lock_name = db_path.file_name().map_or_else(
+        || std::ffi::OsString::from("session"),
+        std::ffi::OsStr::to_os_string,
+    );
     lock_name.push(".structured-backfill.lock");
     db_path.with_file_name(lock_name)
 }
