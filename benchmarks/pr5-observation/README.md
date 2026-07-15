@@ -5,6 +5,11 @@ scan/parse, sanitizer, authoritative commit, projection/V1 fold, and bounded
 replay path. The [raw result](result-2026-07-15-b05b4cd5.json) was captured from
 clean commit `b05b4cd570ab8e3385604c0fef31902fdc3f1e8b` with:
 
+> **Historical/stale evidence:** this result predates the benchmark integrity
+> fixes on the current PR5 integration branch. Retain it only for provenance;
+> it is not acceptance evidence for the current HEAD. A final clean-HEAD run
+> must replace the summary and raw result before PR5 is complete.
+
 ```console
 cargo test --quiet --release --lib sessions::claude_observation_benchmark::production_observation_pipeline_baseline -- --ignored --exact --nocapture --test-threads=1
 ```
@@ -24,5 +29,5 @@ deviation method.
   p99 2,577,411 ns; 50 ms CPU total; zero process write bytes, database growth,
   observation-count change, and coordinator work counters.
 
-The high pipeline tail variance is retained rather than filtered. This is a
-baseline observation, not an optimization claim.
+The historical run's high pipeline tail variance is retained rather than
+filtered. It is not an optimization claim.

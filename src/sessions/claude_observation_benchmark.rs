@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Instant;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tempfile::TempDir;
 use tracedecay_domain::ObservationScopeV1;
@@ -21,13 +21,19 @@ use tracedecay_store::{ObservationReplayRequest, ObservationStore};
 
 use super::claude::ClaudeSource;
 use super::claude_observation::{ClaudeObservationIngestStats, ingest_source_with_observations};
+use super::shared::TranscriptIngestStats;
 use crate::application::observation::ObservationCancellation;
 use crate::store::GlobalDbObservationStore;
 
+const RESULT_SCHEMA_VERSION: u32 = 1;
 const WORKLOAD_ID: &str = "pr5-observation-pipeline-v1";
 const WARMUP_REPETITIONS: usize = 3;
 const MEASURED_REPETITIONS: usize = 30;
 const RECORDS_PER_REPETITION: usize = 64;
+const CONCURRENCY: usize = 1;
+const BENCHMARK_COMMAND: &str = "cargo test --quiet --release --lib sessions::claude_observation_benchmark::production_observation_pipeline_baseline -- --ignored --exact --nocapture --test-threads=1";
+const WORKLOAD_IMPLEMENTATION: &str = "src/sessions/claude_observation_benchmark.rs";
+const WORKLOAD_MANIFEST: &str = include_str!("../../benchmarks/pr5-observation/workload-v1.json");
 
 struct Fixture {
     _temp: TempDir,
@@ -97,13 +103,47 @@ impl Fixture {
     async fn replay_count(&self) -> usize {
         GlobalDbObservationStore::new(&self.db)
             .replay_observations(
-                ObservationReplayRequest::new(0, RECORDS_PER_REPETITION)
+                ObservationReplayRequest::new(0, RECORDS_PER_REPETITION + 1)
                     .expect("bounded replay request"),
             )
             .await
             .expect("replay committed benchmark observations")
             .len()
     }
+}
+
+#[derive(Deserialize)]
+struct WorkloadManifest {
+    schema_version: u32,
+    workload_id: String,
+    implementation: String,
+    platform: String,
+    profile: String,
+    warmup_repetitions: usize,
+    measured_repetitions: usize,
+    records_per_repetition: usize,
+    concurrency: usize,
+    command: String,
+}
+
+fn validate_workload_manifest() {
+    let manifest = serde_json::from_str::<WorkloadManifest>(WORKLOAD_MANIFEST)
+        .expect("deserialize PR5 benchmark workload manifest");
+    assert_eq!(manifest.schema_version, RESULT_SCHEMA_VERSION);
+    assert_eq!(manifest.workload_id, WORKLOAD_ID);
+    assert_eq!(manifest.implementation, WORKLOAD_IMPLEMENTATION);
+    assert_eq!(manifest.platform, "Linux");
+    assert_eq!(manifest.profile, "release");
+    assert_eq!(manifest.warmup_repetitions, WARMUP_REPETITIONS);
+    assert_eq!(manifest.measured_repetitions, MEASURED_REPETITIONS);
+    assert_eq!(manifest.records_per_repetition, RECORDS_PER_REPETITION);
+    assert_eq!(manifest.concurrency, CONCURRENCY);
+    assert_eq!(manifest.command, BENCHMARK_COMMAND);
+}
+
+#[test]
+fn workload_manifest_matches_executable_contract() {
+    validate_workload_manifest();
 }
 
 fn write_records(path: &Path, session_id: &str) {
@@ -198,20 +238,78 @@ struct RawPhaseSample {
     replayed_observations: usize,
 }
 
+struct PhaseSnapshot {
+    started: Instant,
+    cpu_ticks: u64,
+    process_write_bytes: u64,
+    database_storage_bytes: u64,
+}
+
+impl PhaseSnapshot {
+    fn start(db_path: &Path) -> Self {
+        reset_peak_rss();
+        let database_storage_bytes = database_storage_bytes(db_path);
+        let cpu_ticks = process_cpu_ticks();
+        let process_write_bytes = process_write_bytes();
+        Self {
+            started: Instant::now(),
+            cpu_ticks,
+            process_write_bytes,
+            database_storage_bytes,
+        }
+    }
+
+    fn finish(
+        self,
+        db_path: &Path,
+        repetition: usize,
+        replayed_observations: usize,
+    ) -> RawPhaseSample {
+        let latency_ns = elapsed_ns(self.started);
+        RawPhaseSample {
+            repetition,
+            latency_ns,
+            cpu_ticks: process_cpu_ticks().saturating_sub(self.cpu_ticks),
+            process_write_bytes: process_write_bytes().saturating_sub(self.process_write_bytes),
+            database_storage_growth_bytes: database_storage_bytes(db_path)
+                .saturating_sub(self.database_storage_bytes),
+            peak_rss_kib: process_peak_rss_kib(),
+            replayed_observations,
+        }
+    }
+}
+
 impl NoOpTotals {
     fn add(&mut self, stats: ClaudeObservationIngestStats) {
-        self.sessions_upserted += stats.transcript.sessions_upserted;
-        self.messages_upserted += stats.transcript.messages_upserted;
-        self.observations_committed += stats.observations_committed;
-        self.observation_duplicates += stats.observation_duplicates;
-        self.cursor_advances += stats.cursor_advances;
-        self.cursor_duplicates += stats.cursor_duplicates;
-        self.records_rejected += stats.records_rejected;
-        self.records_quarantined += stats.records_quarantined;
-        self.projections_completed += stats.projections_completed;
-        self.projections_skipped += stats.projections_skipped;
-        self.projection_duplicates += stats.projection_duplicates;
-        self.deferred_sources += stats.deferred_sources;
+        let ClaudeObservationIngestStats {
+            transcript,
+            observations_committed,
+            observation_duplicates,
+            cursor_advances,
+            cursor_duplicates,
+            records_rejected,
+            records_quarantined,
+            projections_completed,
+            projections_skipped,
+            projection_duplicates,
+            deferred_sources,
+        } = stats;
+        let TranscriptIngestStats {
+            sessions_upserted,
+            messages_upserted,
+        } = transcript;
+        self.sessions_upserted += sessions_upserted;
+        self.messages_upserted += messages_upserted;
+        self.observations_committed += observations_committed;
+        self.observation_duplicates += observation_duplicates;
+        self.cursor_advances += cursor_advances;
+        self.cursor_duplicates += cursor_duplicates;
+        self.records_rejected += records_rejected;
+        self.records_quarantined += records_quarantined;
+        self.projections_completed += projections_completed;
+        self.projections_skipped += projections_skipped;
+        self.projection_duplicates += projection_duplicates;
+        self.deferred_sources += deferred_sources;
     }
 
     fn is_zero(&self) -> bool {
@@ -269,6 +367,7 @@ struct BenchmarkResult {
 #[tokio::test]
 #[ignore = "release-mode PR5 performance baseline; run the documented exact command"]
 async fn production_observation_pipeline_baseline() {
+    validate_workload_manifest();
     for repetition in 0..WARMUP_REPETITIONS {
         let fixture = Fixture::new(repetition).await;
         let source = fixture.source();
@@ -303,32 +402,15 @@ async fn production_observation_pipeline_baseline() {
     for repetition in 0..MEASURED_REPETITIONS {
         let fixture = Fixture::new(WARMUP_REPETITIONS + repetition).await;
         let source = fixture.source();
-        reset_peak_rss();
-        let storage_before = database_storage_bytes(&fixture.db_path);
-        let cpu_before = process_cpu_ticks();
-        let write_before = process_write_bytes();
-        let started = Instant::now();
+        let pipeline_phase = PhaseSnapshot::start(&fixture.db_path);
         let stats = fixture.ingest(&source).await;
         let replayed = fixture.replay_count().await;
-        let latency_ns = elapsed_ns(started);
-        let cpu_ticks = process_cpu_ticks().saturating_sub(cpu_before);
-        let sample_write_bytes = process_write_bytes().saturating_sub(write_before);
-        let storage_growth_bytes =
-            database_storage_bytes(&fixture.db_path).saturating_sub(storage_before);
-        let sample_peak_rss_kib = process_peak_rss_kib();
-        pipeline_cpu_ticks += cpu_ticks;
-        pipeline_process_write_bytes += sample_write_bytes;
-        database_storage_growth_bytes += storage_growth_bytes;
-        peak_rss_kib = peak_rss_kib.max(sample_peak_rss_kib);
-        pipeline_raw_samples.push(RawPhaseSample {
-            repetition,
-            latency_ns,
-            cpu_ticks,
-            process_write_bytes: sample_write_bytes,
-            database_storage_growth_bytes: storage_growth_bytes,
-            peak_rss_kib: sample_peak_rss_kib,
-            replayed_observations: replayed,
-        });
+        let pipeline_sample = pipeline_phase.finish(&fixture.db_path, repetition, replayed);
+        pipeline_cpu_ticks += pipeline_sample.cpu_ticks;
+        pipeline_process_write_bytes += pipeline_sample.process_write_bytes;
+        database_storage_growth_bytes += pipeline_sample.database_storage_growth_bytes;
+        peak_rss_kib = peak_rss_kib.max(pipeline_sample.peak_rss_kib);
+        pipeline_raw_samples.push(pipeline_sample);
         assert_eq!(
             stats.observations_committed as usize,
             RECORDS_PER_REPETITION
@@ -340,33 +422,19 @@ async fn production_observation_pipeline_baseline() {
         );
         assert_eq!(replayed, RECORDS_PER_REPETITION);
 
-        let no_op_storage_before = database_storage_bytes(&fixture.db_path);
-        let no_op_cpu_before = process_cpu_ticks();
-        let no_op_write_before = process_write_bytes();
-        let no_op_started = Instant::now();
+        let no_op_phase = PhaseSnapshot::start(&fixture.db_path);
         let no_op_stats = fixture.ingest(&source).await;
         let replayed_after_no_op = fixture.replay_count().await;
-        let no_op_latency_ns = elapsed_ns(no_op_started);
-        let no_op_sample_cpu_ticks = process_cpu_ticks().saturating_sub(no_op_cpu_before);
-        let no_op_sample_write_bytes = process_write_bytes().saturating_sub(no_op_write_before);
-        let no_op_sample_storage_growth =
-            database_storage_bytes(&fixture.db_path).saturating_sub(no_op_storage_before);
-        let no_op_peak_rss_kib = process_peak_rss_kib();
-        no_op_cpu_ticks += no_op_sample_cpu_ticks;
-        no_op_process_write_bytes += no_op_sample_write_bytes;
-        no_op_database_storage_growth_bytes += no_op_sample_storage_growth;
-        no_op_observation_count_delta += replayed_after_no_op as i64 - replayed as i64;
+        let no_op_sample = no_op_phase.finish(&fixture.db_path, repetition, replayed_after_no_op);
+        no_op_cpu_ticks += no_op_sample.cpu_ticks;
+        no_op_process_write_bytes += no_op_sample.process_write_bytes;
+        no_op_database_storage_growth_bytes += no_op_sample.database_storage_growth_bytes;
+        no_op_observation_count_delta += i64::try_from(replayed_after_no_op)
+            .expect("bounded replay count fits i64")
+            - i64::try_from(replayed).expect("bounded replay count fits i64");
         no_op_totals.add(no_op_stats);
-        peak_rss_kib = peak_rss_kib.max(no_op_peak_rss_kib);
-        no_op_raw_samples.push(RawPhaseSample {
-            repetition,
-            latency_ns: no_op_latency_ns,
-            cpu_ticks: no_op_sample_cpu_ticks,
-            process_write_bytes: no_op_sample_write_bytes,
-            database_storage_growth_bytes: no_op_sample_storage_growth,
-            peak_rss_kib: no_op_peak_rss_kib,
-            replayed_observations: replayed_after_no_op,
-        });
+        peak_rss_kib = peak_rss_kib.max(no_op_sample.peak_rss_kib);
+        no_op_raw_samples.push(no_op_sample);
     }
 
     assert_eq!(no_op_observation_count_delta, 0);
@@ -385,15 +453,11 @@ async fn production_observation_pipeline_baseline() {
     let total_pipeline_ns = pipeline_samples.iter().sum::<u64>();
     let measured_records = MEASURED_REPETITIONS * RECORDS_PER_REPETITION;
     let result = BenchmarkResult {
-        schema_version: 1,
+        schema_version: RESULT_SCHEMA_VERSION,
         workload_id: WORKLOAD_ID,
         benchmark_commit: command_output("git", &["rev-parse", "HEAD"]),
-        benchmark_commit_dirty: !Command::new("git")
-            .args(["diff", "--quiet", "--ignore-submodules", "HEAD"])
-            .status()
-            .expect("inspect benchmark worktree")
-            .success(),
-        command: "cargo test --quiet --release --lib sessions::claude_observation_benchmark::production_observation_pipeline_baseline -- --ignored --exact --nocapture --test-threads=1",
+        benchmark_commit_dirty: worktree_is_dirty(),
+        command: BENCHMARK_COMMAND,
         rustc: command_output("rustc", &["-Vv"]),
         cargo: command_output("cargo", &["-V"]),
         kernel: command_output("uname", &["-srmo"]),
@@ -449,6 +513,20 @@ fn command_output(command: &str, args: &[&str]) -> String {
         .expect("command output is UTF-8")
         .trim()
         .to_string()
+}
+
+fn worktree_is_dirty() -> bool {
+    let output = Command::new("git")
+        .args([
+            "status",
+            "--porcelain=v1",
+            "--untracked-files=normal",
+            "--ignore-submodules=none",
+        ])
+        .output()
+        .expect("inspect benchmark worktree, including untracked files");
+    assert!(output.status.success(), "git status failed");
+    !output.stdout.is_empty()
 }
 
 fn process_cpu_ticks() -> u64 {

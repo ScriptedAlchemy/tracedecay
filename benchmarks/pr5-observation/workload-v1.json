@@ -21,7 +21,7 @@
     "sanitize every record",
     "atomically commit observations, receipts, cursors, and projection work",
     "drain the production projector and V1 fold",
-    "bounded replay of every committed observation"
+    "bounded replay of every committed observation, requesting one extra row to detect overproduction"
   ],
   "setup_excluded_from_latency_cpu_and_io": [
     "temporary directory creation",
@@ -33,11 +33,12 @@
     "latency": "monotonic-clock batch nanoseconds; nearest-rank p50/p95/p99 plus min/max/mean/sample standard deviation",
     "throughput": "committed and replayed input records divided by summed timed-pipeline duration",
     "cpu": "Linux /proc/self/stat user plus system ticks for timed code only, converted with getconf CLK_TCK",
-    "peak_memory": "Linux /proc/self/status VmHWM after /proc/self/clear_refs reset immediately before each measured pipeline",
+    "peak_memory": "Linux /proc/self/status VmHWM after /proc/self/clear_refs reset immediately before each timed pipeline or no-op phase",
     "bytes_written": "Linux /proc/self/io write_bytes delta while the production pipeline runs; the process performs no other file writes in the interval",
     "database_storage_growth": "sum of SQLite database, WAL, and SHM file-length growth",
     "no_op_work": "latency, CPU ticks, process write bytes, database storage growth, observation-count delta, and every coordinator work counter",
-    "raw_samples": "each measured repetition preserves latency, CPU ticks, process write bytes, database storage growth, peak RSS, and replayed observation count"
+    "raw_samples": "each measured repetition preserves latency, CPU ticks, process write bytes, database storage growth, peak RSS, and replayed observation count",
+    "manifest_validation": "a normal unit test deserializes this file and checks its schema, workload identity, implementation, platform, profile, constants, concurrency, and command against the executable harness"
   },
   "command": "cargo test --quiet --release --lib sessions::claude_observation_benchmark::production_observation_pipeline_baseline -- --ignored --exact --nocapture --test-threads=1"
 }
