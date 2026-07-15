@@ -552,8 +552,20 @@ async fn projection_failure_rolls_back_effect_fts_provenance_checkpoint_and_queu
             matches!(error, ProjectionStoreError::Storage { .. }),
             "{stage} failure surfaced as {error:?}"
         );
+
+        drop(raw_conn);
+        drop(raw_db);
+        drop(store);
+        drop(db);
+
+        let reopened_db = open_lcm_db(&tmp).await;
+        let reopened_store = GlobalDbObservationStore::new(&reopened_db);
         assert_eq!(
-            store.projection_checkpoint().await.unwrap().last_sequence(),
+            reopened_store
+                .projection_checkpoint()
+                .await
+                .unwrap()
+                .last_sequence(),
             0,
             "{stage} failure advanced the checkpoint"
         );
@@ -562,34 +574,61 @@ async fn projection_failure_rolls_back_effect_fts_provenance_checkpoint_and_queu
             (0, 0, 0, 0, 0, 1),
             "{stage} failure committed partial projection state"
         );
+        assert_eq!(
+            (
+                table_count(&tmp, "sanitization_receipts").await,
+                table_count(&tmp, "observations").await,
+                table_count(&tmp, "source_cursors").await,
+            ),
+            (1, 1, 1),
+            "{stage} failure changed durable ingestion rows"
+        );
         assert!(
-            db.search_session_messages("claude", Some("user"), &searchable, 10)
+            projection_provenance_rows(&tmp).await.is_empty(),
+            "{stage} failure committed projection provenance"
+        );
+        assert!(
+            reopened_db
+                .search_session_messages("claude", Some("user"), &searchable, 10)
                 .await
                 .is_empty(),
             "{stage} failure leaked a searchable message"
         );
+        let stored = reopened_store
+            .get_observation(candidate.observation_id())
+            .await
+            .unwrap()
+            .expect("failed projection must preserve the durable observation");
         assert_eq!(
-            store
-                .get_observation(candidate.observation_id())
-                .await
-                .unwrap()
-                .unwrap()
-                .projection_status(),
+            stored.observation(),
+            &candidate,
+            "{stage} failure changed the durable observation"
+        );
+        assert_eq!(
+            stored.projection_status(),
             ObservationProjectionStatus::Queued,
             "{stage} failure consumed the queue item"
         );
 
-        raw_conn
+        let trigger_db = libsql::Builder::new_local(isolated_lcm_db_path(&tmp))
+            .build()
+            .await
+            .unwrap();
+        let trigger_conn = trigger_db.connect().unwrap();
+        trigger_conn
             .execute_batch(&format!("DROP TRIGGER fail_projection_{stage};"))
             .await
             .unwrap();
-        store
+        drop(trigger_conn);
+        drop(trigger_db);
+        reopened_store
             .project_observation(candidate.observation_id())
             .await
             .unwrap();
         assert_eq!(projection_counts(&tmp).await, (1, 1, 1, 1, 0, 0));
         assert_eq!(
-            db.search_session_messages("claude", Some("user"), &searchable, 10)
+            reopened_db
+                .search_session_messages("claude", Some("user"), &searchable, 10)
                 .await
                 .len(),
             1
