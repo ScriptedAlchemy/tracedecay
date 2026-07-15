@@ -71,7 +71,7 @@ fn has_medium_grammar_tier() -> bool {
 
 /// Cached map of language key -> `Language` built once from the enabled grammar tiers.
 static LANGUAGES: LazyLock<HashMap<&'static str, Language>> = LazyLock::new(|| {
-    let mut map: HashMap<&'static str, Language> = HashMap::new();
+    let languages = std::iter::empty::<(&'static str, Language)>();
 
     #[cfg(any(
         feature = "lite",
@@ -81,7 +81,7 @@ static LANGUAGES: LazyLock<HashMap<&'static str, Language>> = LazyLock::new(|| {
         feature = "lang-bash",
         feature = "lang-lua"
     ))]
-    map.extend(
+    let languages = languages.chain(
         tracedecay_medium_treesitters::all_languages()
             .into_iter()
             .map(|(name, lang_fn)| (name, lang_fn.into())),
@@ -119,20 +119,23 @@ static LANGUAGES: LazyLock<HashMap<&'static str, Language>> = LazyLock::new(|| {
         feature = "lang-toml",
         feature = "lang-lean"
     ))]
-    map.extend(
+    let languages = languages.chain(
         tracedecay_large_treesitters::all_languages()
             .into_iter()
             .map(|(name, lang_fn)| (name, lang_fn.into())),
     );
 
     #[cfg(feature = "lang-wgsl")]
-    map.insert("wgsl", wgsl_grammar::LANGUAGE.into());
+    let languages = languages.chain(std::iter::once(("wgsl", wgsl_grammar::LANGUAGE.into())));
 
     // HLSL uses the newer LanguageFn API.
     #[cfg(feature = "lang-hlsl")]
-    map.insert("hlsl", tree_sitter_hlsl::LANGUAGE_HLSL.into());
+    let languages = languages.chain(std::iter::once((
+        "hlsl",
+        tree_sitter_hlsl::LANGUAGE_HLSL.into(),
+    )));
 
-    map
+    languages.collect()
 });
 
 /// Returns the `tree_sitter::Language` for the given extractor language key.
