@@ -208,8 +208,25 @@ async fn register_observation_store(
     let store_root = profile_root.join(format!("projects/{project_id}"));
     let database_path = store_root.join("sessions.db");
     fs::create_dir_all(&store_root).unwrap();
-    fs::write(store_root.join(STORE_MANIFEST_FILENAME), b"{}").unwrap();
-    fs::write(&database_path, b"").unwrap();
+    write_store_manifest_to_path(
+        &store_root.join(STORE_MANIFEST_FILENAME),
+        &StoreManifest {
+            schema_version: STORE_MANIFEST_SCHEMA_VERSION,
+            project_id: Some(project_id.to_string()),
+            store_kind: StoreKind::CodeProject,
+            storage_mode: StorageMode::ProfileSharded,
+            project_root: project_root.to_path_buf(),
+            data_root: store_root.clone(),
+            graph_db_relpath: PathBuf::from("tracedecay.db"),
+            sessions_db_relpath: PathBuf::from("sessions.db"),
+            branch_meta_relpath: PathBuf::from("branch-meta.json"),
+        },
+    )
+    .unwrap();
+    let (database, _) = crate::common::initialize_test_database(&database_path)
+        .await
+        .unwrap();
+    drop(database);
     (store_root, database_path)
 }
 
@@ -873,10 +890,10 @@ async fn observation_store_resolver_uses_repository_marker_after_checkout_move()
         .resolve_project_observation_store(&moved)
         .await
         .expect("the durable repository marker should preserve project identity");
-    assert_eq!(resolution.project.project_id, project_id);
-    assert_eq!(resolution.store_root, store_root.canonicalize().unwrap());
+    assert_eq!(resolution.project().project_id, project_id);
+    assert_eq!(resolution.store_root(), store_root.canonicalize().unwrap());
     assert_eq!(
-        resolution.database_path,
+        resolution.database_path(),
         database_path.canonicalize().unwrap()
     );
     db.close();

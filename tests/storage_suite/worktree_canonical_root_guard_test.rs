@@ -144,7 +144,10 @@ async fn observation_store_resolver_maps_primary_and_linked_worktree_to_same_sto
     let store_root = fx.profile_root.join(format!("projects/{project_id}"));
     let database_path = store_root.join("sessions.db");
     if !database_path.exists() {
-        std::fs::write(&database_path, b"").unwrap();
+        let (database, _) = crate::common::initialize_test_database(&database_path)
+            .await
+            .unwrap();
+        drop(database);
     }
     let marker_path = tracedecay::storage::repository_identity_path(&fx.main)
         .expect("primary checkout should have a repository identity path");
@@ -169,13 +172,16 @@ async fn observation_store_resolver_maps_primary_and_linked_worktree_to_same_sto
         .await
         .expect("the linked worktree should resolve through its git common-dir alias");
 
-    assert_eq!(primary.project.project_id, project_id);
-    assert_eq!(linked.project.project_id, project_id);
-    assert_eq!(linked.store, primary.store);
-    assert_eq!(linked.store_root, primary.store_root);
-    assert_eq!(linked.database_path, primary.database_path);
-    assert_eq!(primary.store_root, store_root.canonicalize().unwrap());
-    assert_eq!(primary.database_path, database_path.canonicalize().unwrap());
+    assert_eq!(primary.project().project_id, project_id);
+    assert_eq!(linked.project().project_id, project_id);
+    assert_eq!(linked.store(), primary.store());
+    assert_eq!(linked.store_root(), primary.store_root());
+    assert_eq!(linked.database_path(), primary.database_path());
+    assert_eq!(primary.store_root(), store_root.canonicalize().unwrap());
+    assert_eq!(
+        primary.database_path(),
+        database_path.canonicalize().unwrap()
+    );
     db.close();
 }
 

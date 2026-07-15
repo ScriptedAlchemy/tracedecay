@@ -7,6 +7,10 @@ use tracedecay::global_db::{
     GlobalDb, GraphScopeUpsert, ProjectObservationStoreError, StoreArtifactUpsert,
     StoreInstanceUpsert,
 };
+use tracedecay::storage::{
+    BRANCH_META_FILENAME, SESSIONS_DB_FILENAME, STORE_MANIFEST_SCHEMA_VERSION, StorageMode,
+    StoreKind, StoreManifest, write_store_manifest_to_path,
+};
 
 static GLOBAL_REGISTRY_TEST_LOCK: Mutex<()> = Mutex::const_new(());
 
@@ -49,14 +53,41 @@ fn observation_store_paths(profile_root: &Path, project_id: &str) -> (PathBuf, P
     (store_root, manifest_path, database_path)
 }
 
-fn create_observation_store_artifacts(
+fn write_observation_store_manifest(
     profile_root: &Path,
+    project_root: &Path,
     project_id: &str,
 ) -> (PathBuf, PathBuf, PathBuf) {
     let paths = observation_store_paths(profile_root, project_id);
     fs::create_dir_all(&paths.0).unwrap();
-    fs::write(&paths.1, b"{}").unwrap();
-    fs::write(&paths.2, b"").unwrap();
+    write_store_manifest_to_path(
+        &paths.1,
+        &StoreManifest {
+            schema_version: STORE_MANIFEST_SCHEMA_VERSION,
+            project_id: Some(project_id.to_string()),
+            store_kind: StoreKind::CodeProject,
+            storage_mode: StorageMode::ProfileSharded,
+            project_root: project_root.to_path_buf(),
+            data_root: paths.0.clone(),
+            graph_db_relpath: PathBuf::from("tracedecay.db"),
+            sessions_db_relpath: PathBuf::from(SESSIONS_DB_FILENAME),
+            branch_meta_relpath: PathBuf::from(BRANCH_META_FILENAME),
+        },
+    )
+    .unwrap();
+    paths
+}
+
+async fn create_observation_store_artifacts(
+    profile_root: &Path,
+    project_root: &Path,
+    project_id: &str,
+) -> (PathBuf, PathBuf, PathBuf) {
+    let paths = write_observation_store_manifest(profile_root, project_root, project_id);
+    let (database, _) = crate::common::initialize_test_database(&paths.2)
+        .await
+        .unwrap();
+    drop(database);
     paths
 }
 
@@ -429,18 +460,18 @@ async fn observation_store_resolver_returns_canonical_registered_paths() {
     .await
     .unwrap();
     let (store_root, _, database_path) =
-        create_observation_store_artifacts(&profile_root, project_id);
+        create_observation_store_artifacts(&profile_root, &project_root, project_id).await;
 
     let resolution = db
         .resolve_project_observation_store(&project_root.join("."))
         .await
         .unwrap();
 
-    assert_eq!(resolution.project.project_id, project_id);
-    assert_eq!(resolution.store.store_id, "store_observation");
-    assert_eq!(resolution.store_root, store_root.canonicalize().unwrap());
+    assert_eq!(resolution.project().project_id, project_id);
+    assert_eq!(resolution.store().store_id, "store_observation");
+    assert_eq!(resolution.store_root(), store_root.canonicalize().unwrap());
     assert_eq!(
-        resolution.database_path,
+        resolution.database_path(),
         database_path.canonicalize().unwrap()
     );
     close_global_db(db).await;
@@ -511,7 +542,7 @@ async fn observation_store_resolver_rejects_multiple_stores_without_newest_fallb
     ))
     .await
     .unwrap();
-    create_observation_store_artifacts(&profile_root, project_id);
+    create_observation_store_artifacts(&profile_root, &project_root, project_id).await;
 
     let legacy = db
         .resolve_project_store_by_alias(&project_root)
@@ -557,7 +588,7 @@ async fn observation_store_resolver_rejects_unverified_store_as_stale() {
     db.upsert_store_instance(observation_store_upsert(project_id, store_id, None))
         .await
         .unwrap();
-    create_observation_store_artifacts(&profile_root, project_id);
+    create_observation_store_artifacts(&profile_root, &project_root, project_id).await;
 
     let error = db
         .resolve_project_observation_store(&project_root)
@@ -588,7 +619,7 @@ async fn observation_store_resolver_requires_exact_canonical_store_metadata() {
     db.upsert_code_project(project_id, &project_root, None, None, None)
         .await
         .unwrap();
-    create_observation_store_artifacts(&profile_root, project_id);
+    create_observation_store_artifacts(&profile_root, &project_root, project_id).await;
     let canonical = observation_store_upsert(project_id, store_id, Some(100));
     let cases = [
         (
@@ -706,6 +737,14 @@ async fn observation_store_resolver_requires_existing_artifacts_and_creates_noth
     );
 
     fs::write(&manifest_path, b"{}").unwrap();
+    assert!(matches!(
+        db.resolve_project_observation_store(&project_root)
+            .await
+            .unwrap_err(),
+        ProjectObservationStoreError::NonCanonicalStore { .. }
+    ));
+
+    write_observation_store_manifest(&profile_root, &project_root, project_id);
     let error = db
         .resolve_project_observation_store(&project_root)
         .await
@@ -719,12 +758,57 @@ async fn observation_store_resolver_requires_existing_artifacts_and_creates_noth
         "resolver must not create sessions.db"
     );
 
-    fs::write(&database_path, b"").unwrap();
+    fs::write(&database_path, b"not a database").unwrap();
+    assert!(matches!(
+        db.resolve_project_observation_store(&project_root)
+            .await
+            .unwrap_err(),
+        ProjectObservationStoreError::NonCanonicalStore { .. }
+    ));
+    fs::remove_file(&database_path).unwrap();
+    let (database, _) = crate::common::initialize_test_database(&database_path)
+        .await
+        .unwrap();
+    drop(database);
     assert!(
         db.resolve_project_observation_store(&project_root)
             .await
             .is_ok()
     );
+    close_global_db(db).await;
+}
+
+#[tokio::test]
+async fn observation_store_resolver_rejects_a_registered_but_missing_checkout() {
+    let _guard = GLOBAL_REGISTRY_TEST_LOCK.lock().await;
+    let dir = TempDir::new().unwrap();
+    let profile_root = dir.path().join("profile");
+    let project_root = dir.path().join("repo");
+    fs::create_dir_all(&project_root).unwrap();
+    let db = GlobalDb::open_at(&profile_root.join("global.db"))
+        .await
+        .unwrap();
+    let project_id = "proj_missing_checkout";
+    db.upsert_code_project(project_id, &project_root, None, None, None)
+        .await
+        .unwrap();
+    db.upsert_store_instance(observation_store_upsert(
+        project_id,
+        "store_missing_checkout",
+        Some(100),
+    ))
+    .await
+    .unwrap();
+    create_observation_store_artifacts(&profile_root, &project_root, project_id).await;
+    fs::remove_dir_all(&project_root).unwrap();
+
+    assert!(matches!(
+        db.resolve_project_observation_store(&project_root)
+            .await
+            .unwrap_err(),
+        ProjectObservationStoreError::UnavailableProject { project_root: missing }
+            if missing == project_root
+    ));
     close_global_db(db).await;
 }
 
@@ -783,7 +867,7 @@ async fn observation_store_resolver_rejects_symlinked_store_artifacts() {
     ));
 
     fs::remove_file(&manifest_path).unwrap();
-    fs::write(&manifest_path, b"{}").unwrap();
+    write_observation_store_manifest(&profile_root, &project_root, project_id);
     fs::remove_file(&database_path).unwrap();
     let outside_database = dir.path().join("outside-sessions.db");
     fs::write(&outside_database, b"").unwrap();

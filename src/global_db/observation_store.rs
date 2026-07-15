@@ -12,14 +12,35 @@ use super::{CodeProjectRecord, GlobalDb, StoreInstanceRecord, project_identity_a
 /// repository. Constructing it never creates a directory, database, or registry row.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProjectObservationStoreResolution {
-    pub project: CodeProjectRecord,
-    pub store: StoreInstanceRecord,
-    pub store_root: PathBuf,
-    pub database_path: PathBuf,
+    project: CodeProjectRecord,
+    store: StoreInstanceRecord,
+    store_root: PathBuf,
+    database_path: PathBuf,
+}
+
+impl ProjectObservationStoreResolution {
+    pub fn project(&self) -> &CodeProjectRecord {
+        &self.project
+    }
+
+    pub fn store(&self) -> &StoreInstanceRecord {
+        &self.store
+    }
+
+    pub fn store_root(&self) -> &Path {
+        &self.store_root
+    }
+
+    pub fn database_path(&self) -> &Path {
+        &self.database_path
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProjectObservationStoreError {
+    UnavailableProject {
+        project_root: PathBuf,
+    },
     ProjectNotRegistered {
         project_root: PathBuf,
     },
@@ -53,6 +74,11 @@ pub enum ProjectObservationStoreError {
 impl fmt::Display for ProjectObservationStoreError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::UnavailableProject { project_root } => write!(
+                formatter,
+                "project observation root is unavailable at '{}'",
+                project_root.display()
+            ),
             Self::ProjectNotRegistered { project_root } => write!(
                 formatter,
                 "project observation authority is not registered for '{}'",
@@ -120,24 +146,23 @@ impl GlobalDb {
         &self,
         project_root: &Path,
     ) -> Result<ProjectObservationStoreResolution, ProjectObservationStoreError> {
-        let project_ids = self.observation_project_ids(project_root).await?;
+        let project_root = canonical_project_directory(project_root)?;
+        let project_ids = self.observation_project_ids(&project_root).await?;
         let project_id = match project_ids.as_slice() {
             [] => {
-                return Err(ProjectObservationStoreError::ProjectNotRegistered {
-                    project_root: project_root.to_path_buf(),
-                });
+                return Err(ProjectObservationStoreError::ProjectNotRegistered { project_root });
             }
             [project_id] => project_id.clone(),
             _ => {
                 return Err(ProjectObservationStoreError::AmbiguousProjectIdentity {
-                    project_root: project_root.to_path_buf(),
+                    project_root,
                     project_ids,
                 });
             }
         };
         let project = self.get_code_project(&project_id).await.ok_or_else(|| {
             ProjectObservationStoreError::ProjectNotRegistered {
-                project_root: project_root.to_path_buf(),
+                project_root: project_root.clone(),
             }
         })?;
         let mut stores = self.list_store_contexts_for_project(&project_id).await;
@@ -145,7 +170,11 @@ impl GlobalDb {
             0 => {
                 return Err(ProjectObservationStoreError::StoreNotRegistered { project_id });
             }
-            1 => stores.pop().expect("one store context"),
+            1 => stores
+                .pop()
+                .ok_or_else(|| ProjectObservationStoreError::StoreNotRegistered {
+                    project_id: project_id.clone(),
+                })?,
             _ => {
                 let mut store_ids = stores
                     .into_iter()
@@ -265,8 +294,19 @@ impl GlobalDb {
 
         let manifest_path = profile_root.join(expected_manifest_relpath);
         require_regular_file(&project, &store, &manifest_path)?;
+        validate_store_manifest(&project, &store, &canonical_store_root, &manifest_path)?;
         let database_path = store_root.join(crate::storage::SESSIONS_DB_FILENAME);
         require_regular_file(&project, &store, &database_path)?;
+        match crate::storage::has_sqlite_database_header(&database_path) {
+            Ok(true) => {}
+            Ok(false) => {
+                return Err(noncanonical(format!(
+                    "'{}' is not a SQLite database",
+                    database_path.display()
+                )));
+            }
+            Err(_) => return Err(unavailable(&project, &store, &database_path)),
+        }
 
         Ok(ProjectObservationStoreResolution {
             project,
@@ -277,6 +317,80 @@ impl GlobalDb {
                 .map_err(|_| unavailable_path(&project_id, &store_id, &database_path))?,
         })
     }
+}
+
+fn canonical_project_directory(
+    project_root: &Path,
+) -> Result<PathBuf, ProjectObservationStoreError> {
+    let canonical = project_root.canonicalize().map_err(|_| {
+        ProjectObservationStoreError::UnavailableProject {
+            project_root: project_root.to_path_buf(),
+        }
+    })?;
+    if !canonical.is_dir() {
+        return Err(ProjectObservationStoreError::UnavailableProject {
+            project_root: canonical,
+        });
+    }
+    Ok(canonical)
+}
+
+fn validate_store_manifest(
+    project: &CodeProjectRecord,
+    store: &StoreInstanceRecord,
+    store_root: &Path,
+    manifest_path: &Path,
+) -> Result<(), ProjectObservationStoreError> {
+    let manifest = crate::storage::read_store_manifest(manifest_path).map_err(|error| {
+        ProjectObservationStoreError::NonCanonicalStore {
+            project_id: project.project_id.clone(),
+            store_id: store.store_id.clone(),
+            reason: format!("store manifest is invalid: {error}"),
+        }
+    })?;
+    let invalid = |reason: String| ProjectObservationStoreError::NonCanonicalStore {
+        project_id: project.project_id.clone(),
+        store_id: store.store_id.clone(),
+        reason,
+    };
+    if manifest.schema_version != crate::storage::STORE_MANIFEST_SCHEMA_VERSION {
+        return Err(invalid(format!(
+            "manifest schema must be {}, found {}",
+            crate::storage::STORE_MANIFEST_SCHEMA_VERSION,
+            manifest.schema_version
+        )));
+    }
+    if manifest.project_id.as_deref() != Some(project.project_id.as_str()) {
+        return Err(invalid(
+            "manifest project id does not match the registry".to_string(),
+        ));
+    }
+    if manifest.store_kind != crate::storage::StoreKind::CodeProject {
+        return Err(invalid(
+            "manifest store kind must be 'code_project'".to_string(),
+        ));
+    }
+    if manifest.storage_mode != crate::storage::StorageMode::ProfileSharded {
+        return Err(invalid(
+            "manifest storage mode must be 'profile_sharded'".to_string(),
+        ));
+    }
+    if manifest.sessions_db_relpath != Path::new(crate::storage::SESSIONS_DB_FILENAME) {
+        return Err(invalid(format!(
+            "manifest sessions database path must be '{}'",
+            crate::storage::SESSIONS_DB_FILENAME
+        )));
+    }
+    let manifest_data_root = manifest
+        .data_root
+        .canonicalize()
+        .map_err(|_| invalid("manifest data root is unavailable".to_string()))?;
+    if manifest_data_root != store_root {
+        return Err(invalid(
+            "manifest data root does not match the registered store".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 fn require_regular_directory(
