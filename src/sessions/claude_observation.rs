@@ -27,8 +27,8 @@ use crate::application::observation::{
 };
 use crate::privacy::{ClaudeRecordSanitizerV1, PrivacySanitizerError};
 use crate::sessions::claude::{
-    ClaudeSkippedFrame, ClaudeSkippedFrameReason, ClaudeSource, ClaudeSourceFrame,
-    identify_claude_source, scan_claude_source_frames,
+    ClaudeFrameCoverage, ClaudeSkippedFrame, ClaudeSkippedFrameReason, ClaudeSource,
+    ClaudeSourceFrame, identify_claude_source, scan_claude_source_frames,
 };
 use crate::sessions::shared::{StoredCursor, TranscriptIngestStats};
 use crate::sessions::source::{
@@ -331,6 +331,19 @@ async fn process_source(
             ..ClaudeObservationIngestStats::default()
         });
     }
+    if matches!(
+        scan.coverage,
+        ClaudeFrameCoverage::Deferred {
+            start_offset,
+            covered_through,
+            ..
+        } if start_offset == covered_through
+    ) {
+        return Ok(ClaudeObservationIngestStats {
+            deferred_sources: 1,
+            ..ClaudeObservationIngestStats::default()
+        });
+    }
 
     let generation = ClaudeFileGenerationV1::new(scan.file_generation)?;
     let sanitizer = ClaudeRecordSanitizerV1::pr5()?;
@@ -597,12 +610,16 @@ mod tests {
     use super::*;
     use crate::application::observation::ReplayObservationsRequest;
 
-    const OBSERVATION_STATE_TABLES: &[&str] = &[
+    const INGEST_STATE_TABLES: &[&str] = &[
         "sanitization_receipts",
         "observations",
         "source_cursors",
         "projection_queue",
         "observation_projection_checkpoints",
+        "parse_offsets",
+        "sessions",
+        "session_messages",
+        "session_messages_fts",
     ];
 
     struct Fixture {
@@ -676,7 +693,7 @@ mod tests {
         }
     }
 
-    async fn observation_state_counts(fixture: &Fixture) -> Vec<i64> {
+    async fn ingest_state_counts(fixture: &Fixture) -> Vec<i64> {
         let database = libsql::Builder::new_local(fixture.profile.join("sessions.db"))
             .build()
             .await
@@ -684,8 +701,8 @@ mod tests {
         let connection = database
             .connect()
             .expect("connect observation state database");
-        let mut counts = Vec::with_capacity(OBSERVATION_STATE_TABLES.len());
-        for table in OBSERVATION_STATE_TABLES {
+        let mut counts = Vec::with_capacity(INGEST_STATE_TABLES.len());
+        for table in INGEST_STATE_TABLES {
             let mut rows = connection
                 .query(&format!("SELECT COUNT(*) FROM {table}"), ())
                 .await
@@ -708,7 +725,7 @@ mod tests {
         let source_adapter = fixture.source(session_id);
         let source = ClaudeSourceIdentityV1::new(SessionId::new(session_id).unwrap()).unwrap();
         let store = GlobalDbObservationStore::new(&fixture.db);
-        let before = observation_state_counts(&fixture).await;
+        let before = ingest_state_counts(&fixture).await;
 
         let stats = fixture
             .ingest(&source_adapter, None, ObservationCancellation::default())
@@ -719,7 +736,9 @@ mod tests {
         assert_eq!(stats.observation_duplicates, 0);
         assert_eq!(stats.cursor_advances, 0);
         assert_eq!(stats.projections_completed, 0);
-        assert_eq!(observation_state_counts(&fixture).await, before);
+        assert_eq!(stats.deferred_sources, 1);
+        assert_eq!(stats.transcript, TranscriptIngestStats::default());
+        assert_eq!(ingest_state_counts(&fixture).await, before);
         assert!(
             store
                 .get_source_cursor(&source, &ObservationScopeV1::Profile)
