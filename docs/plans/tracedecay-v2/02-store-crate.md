@@ -2,7 +2,7 @@
 
 ## Status / Role
 
-PR4 production authority is complete. `tracedecay-store` owns persistence
+PR5 production observation persistence is complete. `tracedecay-store` owns persistence
 contracts and DTOs; the daemon-owned `GlobalDb` adapter owns live connections
 and transactions. This boundary participates in vertical PRs and does not grow
 into a second database implementation. See [the plan index](00-plan-set-index.md)
@@ -21,7 +21,7 @@ Committed data, receipts, and progress cannot diverge after crashes or retries.
 - Store-facing records, batches, errors, and persistence traits.
 - The transcript contract landed in PR4, including explicit physical transcript
   identity and separate opaque cursor identity.
-- PR5 atomic append contract for sanitized observations, receipts, and offsets.
+- Shipped atomic append contract for sanitized observations, receipts, and offsets.
 - Atomic projection-effect and checkpoint contracts added with each consuming
   view slice.
 - Contract-level idempotency, compare-and-set, read-only, and recovery outcomes.

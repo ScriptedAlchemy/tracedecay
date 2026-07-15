@@ -2,8 +2,8 @@
 
 ## Status / Role
 
-Projection participates in PR5 by pinning the first observation-to-view contract,
-then in each active vertical PR that introduces or replaces a product view. It
+PR5 pinned the first production observation-to-view contract. Projection now
+participates in each active vertical PR that introduces or replaces a product view. It
 is not a standalone framework, registry, or generated-inventory project. See
 [the plan index](00-plan-set-index.md) for the owning slices and
 [the V2 overview](README.md) for global rules.

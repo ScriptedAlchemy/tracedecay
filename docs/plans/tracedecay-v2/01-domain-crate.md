@@ -2,7 +2,7 @@
 
 ## Status / Role
 
-PR4 foundation is complete. `tracedecay-domain` is the pure value-and-validation
+PR5 observation contracts are complete. `tracedecay-domain` is the pure value-and-validation
 boundary used by vertical product PRs. It is not a standalone framework roadmap.
 Delivery order and global rules live in [the plan index](00-plan-set-index.md)
 and [the V2 overview](README.md).
@@ -18,7 +18,7 @@ consumer.
 
 - Versioned value types, identifiers, validation, and deterministic encoding.
 - Pure research/evidence contracts already landed in PR4.
-- PR5 observation, source-position, sanitization-receipt, sensitivity, and
+- Shipped observation, source-position, sanitization-receipt, sensitivity, and
   retention values required by capture and persistence.
 - Scope values that distinguish profile-wide user data, project-wide facts and
   sessions, and branch/worktree-scoped code graphs.

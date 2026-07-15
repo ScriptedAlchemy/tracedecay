@@ -2,7 +2,7 @@
 
 ## Status / Role
 
-- Cross-cutting V2 safety requirement beginning in PR5.
+- Cross-cutting V2 safety requirement; its PR5 capture foundation is complete.
 - Mandatory for every later ingestion, storage, indexing, retrieval, logging, and export path.
 - Delivered as product behavior, remediation, Doctor checks, and UI state; none is deferred.
 
@@ -72,7 +72,7 @@ durable or external sink enforces the same policy.
 
 ## Acceptance
 
-- PR5 establishes shared parsing, detection, redaction, taint, and safe-marker primitives.
+- PR5 established shared parsing, detection, redaction, receipt, and safe-marker primitives.
 - Representative structured and malformed inputs prove parse-before-scan behavior.
 - Every sink rejects raw, tainted, unmarked, and stale-policy payloads.
 - End-to-end tests prove secrets do not appear in databases, indexes, facts, sessions, logs,

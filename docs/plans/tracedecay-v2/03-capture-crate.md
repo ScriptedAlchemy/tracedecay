@@ -2,7 +2,8 @@
 
 ## Status / Role
 
-This boundary owns PR5 sanitized capture and PR6 provider expansion. It moves
+PR5 sanitized Claude capture is complete. This boundary now owns PR6 provider
+expansion. It moves
 existing product ingestion behind one deterministic privacy boundary; it is not
 a crate-first framework project. Shared sequence and ownership rules are in
 [the plan index](00-plan-set-index.md) and [the V2 overview](README.md).
@@ -37,7 +38,7 @@ never skip a suffix.
 
 ## Required behavior
 
-- PR5 routes one existing provider from its current parser through
+- PR5 routed one existing provider from its current parser through
   classification, sanitization, receipt creation, atomic persistence, and replay.
 - Raw content remains transient until sanitized. Logs and errors contain only
   safe reason codes, counts, and identifiers.

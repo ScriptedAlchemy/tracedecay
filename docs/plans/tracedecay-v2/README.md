@@ -1,6 +1,7 @@
 # TraceDecay V2 rewrite
 
-Status: active product rewrite. PR4 is complete; PR #421 remains open.
+Status: active product rewrite. PR5 is complete, PR6 is next, and PR #421
+remains open.
 
 The authoritative delivery order is [00-plan-set-index.md](00-plan-set-index.md).
 The next executable slice is [NEXT.md](NEXT.md). Numbered plans define component
@@ -21,6 +22,12 @@ requirements and boundaries, not separate crate-first work queues.
 - Direct tests cover Claude, Cursor, Cline-like input, partial records, replay,
   rollback, restart, concurrency, and Windows behavior.
 - Existing Doctor, daemon, storage, hooks, MCP, and CLI remain product code.
+- Claude production capture now emits path-independent sanitized observations,
+  typed receipts, durable cursors, and deterministic searchable projections.
+- Observation, receipt, cursor, enqueue, projection effects, and checkpoints
+  preserve atomic restart/retry behavior; exact no-op replay performs no writes.
+- The committed PR5 workload and clean-commit acceptance artifact record the
+  production parse/sanitize/commit/project/replay baseline for PR20.
 
 ## Storage and authority
 

@@ -3,7 +3,7 @@
 ## Status / Role
 
 - Status: modules first after the completed PR4 authoritative store boundary.
-- PR5 adds only the observation read/replay needed by its capture vertical in
+- PR5 added only the observation read/replay needed by its capture vertical in
   existing store and application modules. Extract `tracedecay-query` only when
   PR8+ reuse, dependency isolation, or compile-time savings justify the boundary.
 - PR7 adds facts and provenance, PR8 adds LCM/session retrieval, PR9 adds lexical code search, and PR10 adds semantic search.

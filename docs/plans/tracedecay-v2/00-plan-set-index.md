@@ -1,6 +1,6 @@
 # TraceDecay V2 roadmap
 
-Status: active product rewrite. PR4 is complete. PR5 is next.
+Status: active product rewrite. PR5 is complete. PR6 is next.
 
 This file owns delivery order. The master and numbered plans define product
 requirements and component boundaries; they are not independent queues and do
@@ -26,8 +26,19 @@ PR4 delivered:
 - RAII rollback for database changes and external payload files;
 - direct Claude, Cursor, Cline-like, concurrency, recovery, and Windows tests.
 
-PR1–PR3 planning/evidence machinery is superseded. It is not unfinished product
-work and must not be rebuilt.
+PR5 delivered:
+
+- the production Claude parser through mandatory structured sanitization;
+- path-independent observation, source, cursor, receipt, and payload contracts;
+- atomic observation, receipt, cursor, projection-enqueue, and checkpoint state;
+- deterministic projection into the existing searchable V1 session/message view;
+- bounded replay, restart, duplicate, collision, partial-input, cancellation,
+  stale-authority, migration, consolidation, and crash/retry coverage;
+- a clean-commit production benchmark with 30 measured repetitions and a
+  verified exact no-op replay that performs no writes or durable work.
+
+The removed planning/evidence machinery is not unfinished product work and must
+not be rebuilt.
 
 ## Delivery invariants
 
@@ -55,7 +66,7 @@ work and must not be rebuilt.
 
 | PR | Product delivery |
 |---|---|
-| PR5 | Sanitized observation vertical: one real provider from parse through sanitizer, daemon-owned persistence, replay, and restart. |
+| PR5 (complete) | Sanitized observation vertical: one real provider from parse through sanitizer, daemon-owned persistence, replay, and restart. |
 | PR6 | Provider coverage and event normalization: remaining hosts/sources, durable spools, identities, dedupe, partial input, backpressure, and canonical event relations. |
 | PR7 | Memory, facts, and provenance: project/profile ownership, evidence, corrections, trust, curation, migration, and deletion lineage. |
 | PR8 | Session/LCM temporal retrieval: occurrences, copies, summaries, supersession, current/as-of/evolution retrieval, and stable context assembly. |
@@ -96,7 +107,7 @@ are stable.
   publication, provenance, compatibility, cutover, and deletion.
 - Plan 33: PR20 end-to-end database, synchronization, indexing, and query
   performance optimization. Owning slices provide instrumentation and baselines.
-- Plans 29–30 are deleted review artifacts. Any still-valid behavior belongs in
+- The retired Plans 29–30 review artifacts are deleted. Any still-valid behavior belongs in
   the owning product plan and its direct regression tests.
 
 ## Rejected rewrite machinery

@@ -1,91 +1,121 @@
-# PR5: sanitized observation vertical
+# PR6: provider coverage and event normalization
 
-PR4 established the daemon-owned transcript persistence boundary. PR5 moves one
-existing provider end to end through typed capture, mandatory sanitization,
-authoritative persistence, replay, and restart.
+PR5 completed the production Claude observation path. PR6 moves every remaining
+supported session source onto that same sanitizer, daemon authority, durable
+cursor, replay, and projection contract while preserving provider-native facts.
 
 ## Product slice
 
-Use one existing production provider path. Preserve its current parser and V1
-behavior while adding the V2 observation path behind the same daemon and
-`GlobalDb` authority.
+Cover the currently supported Codex, Cursor, Hermes, Kiro, and Cline-like
+sources. Reuse the shipped Claude observation contracts and rolling JSONL
+scanner where their semantics match. Provider adapters remain small and retain
+native identity, ordering, usage, tool, agent, reasoning-visibility, and source
+generation evidence.
 
-The vertical path is:
+The shared path is:
 
 ```text
-provider record
-  -> bounded parse
-  -> typed sanitizer input
-  -> sanitization receipt and observation identity
-  -> daemon command
-  -> atomic observation, source cursor, and projection enqueue
-  -> replay/read with explicit coverage
+provider source or daemon-admitted host event
+  -> bounded discovery and framing
+  -> provider parse with explicit coverage
+  -> canonical event plus provider evidence and relations
+  -> mandatory sanitizer and receipt
+  -> daemon-owned atomic observation/cursor/projection commit
+  -> deterministic V1 compatibility projection and bounded replay
 ```
 
 ## Required behavior
 
-- Define ordinary Rust types for source identity, source generation/cursor,
-  canonical observation identity, sanitizer disposition, receipt, payload
-  reference, and idempotency key.
-- Parse structure before scanning content. Apply the mandatory sanitizer before
-  any database, payload file, log, metric, dead letter, replay, or export sink.
-- Persist only receipt-bound sanitized content. Rejected or quarantined content
-  must not leak through error messages or recovery artifacts.
-- Send observations to the daemon. Hooks and provider adapters may frame and
-  spool events but cannot open or mutate SQLite.
-- Reuse the already-open `GlobalDb` and `tracedecay-store` boundary. Commit the
-  observation, durable source cursor/offset, and projection enqueue atomically.
-- Keep project observations in the canonical project-wide store and
-  profile-wide observations in the profile store. Do not derive ownership from
-  CWD, provider cache paths, or transcript filenames alone.
-- Resolve worktrees through the project registry and Git common directory.
-  Missing, ambiguous, stale, or unavailable authority fails closed.
-- Defer partial records without advancing the durable cursor. An exact retry is
-  idempotent; the same identity with different content is a typed collision.
-- Bound record size, decoding, queues, retry state, and error output. Preserve
-  explicit cancellation; add no automatic workflow or agent timeout.
-- Expose enough replay/read behavior to prove the stored observation is usable;
-  do not stop at schemas or unused scaffolding.
-- Record a bounded representative baseline for parse/sanitize/commit/replay
-  latency, throughput, CPU, memory, bytes written, and no-op replay work using
-  only existing bounded local measurements available to PR5. PR5 neither adds
-  nor depends on Plan26/PR14 observability infrastructure. This is input to
-  [PR20](33-end-to-end-performance-optimization.md), not a reason to widen PR5.
-  Retain the versioned [workload](../../../benchmarks/pr5-observation/workload-v1.json)
-  and [raw baseline result](../../../benchmarks/pr5-observation/result-2026-07-15-b05b4cd5.json).
+- Implement every supported provider listed above in this PR; none remains on a
+  private durable write, sanitizer, cursor, or projection path.
+- Keep one provider-neutral observation envelope and typed relations for
+  session, thread, Turn, message, agent/subagent, tool invocation/result,
+  compaction, usage, Git, and workflow evidence. An absent or unsupported native
+  fact stays unknown rather than being inferred.
+- Preserve the native record identity and ordering domain. File offsets,
+  provider sequences, timestamps, and content hashes remain distinct cursor
+  evidence and are never compared under the wrong rule.
+- Derive public source and observation identity without absolute paths, CWD,
+  hostnames, mutable display labels, or database row IDs.
+- Detect append, truncation, replacement, rotation, incomplete tails, malformed
+  records, unknown versions, and duplicate delivery. Advance only through the
+  last completely framed and dispositioned record.
+- Parse structured fields before scanning values. All providers use the PR5
+  classification, sanitizer, receipt, safe error, and sink-firewall path.
+- Commit observation, receipt, durable source cursor, projection enqueue, and
+  any provider coverage state atomically through the already-open daemon
+  authority. No adapter, hook, client, or recovery path opens another writer.
+- Use authoritative provider transcripts for catch-up when they are replayable.
+  A source that is not replayable may use a bounded daemon-owned admission spool
+  with checksummed frames, explicit overflow/corruption state, and delete-after-
+  commit semantics. Hooks never own a spool database or storage authority.
+- Make exact duplicate input a durable no-op: no observation, cursor, frontier,
+  projection, or compatibility-view write. A conflicting identity fails without
+  overwriting evidence or advancing progress.
+- Bound discovery, records, decoded values, per-source work, total pass work,
+  queue depth, memory, retries, and projection batches. Backpressure and partial
+  coverage are typed outcomes; fair rotation prevents one source from starving
+  another without writing scheduling state for a fully covered pass.
+- Isolate a failed source. Successfully committed work remains available, the
+  failed source keeps its prior frontier, and retry resumes without replaying an
+  acknowledged suffix.
+- Project canonical events deterministically into existing searchable V1 views
+  with provider-compatible identity and content. Projector effects and
+  checkpoints commit together; rebuild and incremental replay converge.
+- Keep project sessions project-wide and user activity profile-wide. Resolve
+  linked worktrees through canonical project identity; missing or ambiguous
+  authority fails closed without a fallback store.
+- Preserve explicitly exposed reasoning only with its provider visibility and
+  retention state. Never infer hidden reasoning or treat protocol echoes as
+  authored messages.
+- Capture direct, redacted host-event fixtures for Codex, Claude Code, Cursor,
+  Hermes, and Kiro so PR13 can later replace hook execution without guessing
+  current event or response semantics. PR6 does not move query, model, sync, or
+  storage work into hooks.
+- Record bounded per-provider parse/commit/replay, no-op, backlog, and resource
+  baselines for later PR20 comparison. A severe regression or unbounded path
+  found here is fixed here, not deferred.
 
 ## Direct tests
 
-- valid record persists and replays with its receipt and source identity;
-- secret-shaped fields are rejected, redacted, or quarantined before every sink;
-- malformed and partial records do not advance the cursor;
-- duplicate replay inserts nothing and preserves the original receipt;
-- identity/digest collision fails without overwriting either record;
-- crash before commit advances neither data nor cursor;
-- crash after commit before acknowledgement replays idempotently;
-- suffix resume neither skips nor duplicates observations;
-- restart catch-up uses the daemon-owned authority;
-- stale owner, missing project/profile authority, and worktree ambiguity fail
-  without creating a fallback database;
-- concurrent clients still produce one committed observation sequence;
-- Linux and Windows stock Cargo tests pass.
+- golden parse and normalized-event fixtures for every supported provider;
+- stable identity and canonical encoding across restart, path relocation, and
+  scan order;
+- append, partial tail, malformed frame, oversized frame, truncation,
+  replacement, rotation, unknown version, and unsupported native fact;
+- exact duplicate, conflicting duplicate, reordered input, late input, and
+  repeated daemon admission;
+- sanitizer redaction/rejection/quarantine before every durable or visible sink;
+- crash before commit and after commit-before-acknowledgement, followed by exact
+  retry and restart catch-up;
+- bounded backlog, fair multi-source progress, spool overflow/corruption where
+  applicable, cancellation, and daemon backpressure;
+- deterministic incremental/rebuild projection and atomic effect/checkpoint
+  rollback;
+- provider-specific tool, usage, agent lineage, compaction, reasoning
+  visibility, and event mapping without invented equivalence;
+- missing daemon, stale authority, ambiguous scope, linked worktree, and
+  concurrent-client cases without another database writer;
+- direct host fixtures distinguish supported, degraded, unavailable, and
+  unknown events and legal responses;
+- stock Linux and Windows format, compile, Clippy, focused, and workspace tests.
 
 ## Prohibited scope
 
-- no plan parser, completion tracker, PR DAG, next-ready controller, rewrite
-  executor, compatibility inventory, generated plan view, or baseline packet;
-- no Claude workflow JavaScript or other host-specific rewrite workflow;
-- no macro DSL, procedural macro, parallel schema model, or crate created only
-  to satisfy a plan document;
-- no second database connection authority, fallback writer, network-mounted
-  SQLite, direct hook write, or source-adjacent durable store;
-- no broad provider rewrite, semantic search, dashboard redesign, or remote
-  replication in this slice.
+- no new observation schema, sanitizer, database authority, compatibility store,
+  provider-local durable queue, or hook-side sync path;
+- no universal event shape that discards provider evidence or invents ordering,
+  authorship, reasoning, tool, or agent semantics;
+- no plan parser, tracker, PR executor, generated provider inventory, workflow
+  JavaScript, source-derived architecture model, or planning CI;
+- no PR7 memory/fact model, PR8 temporal retrieval, PR9 code indexing, PR10
+  semantics, PR11 policy/catalog, PR12 surface rewrite, or PR13 hook cutover.
 
 ## Done
 
-PR5 is complete when one real provider record can be captured, sanitized,
-committed, replayed, and recovered through the production daemon; every failure
-boundary preserves atomic data/cursor state; no unsanitized durable byte or
-fallback writer exists; direct focused tests and relevant Linux/Windows stock
-Cargo gates pass.
+PR6 is complete when every supported provider produces sanitized immutable
+observations through one daemon-owned atomic path; provider-native identity and
+relations survive replay; partial, duplicate, replacement, backlog, crash, and
+restart behavior is gap-free and bounded; V1 projections remain compatible;
+host-event baselines are executable; and no provider or hook retains another
+durable writer, sanitizer, cursor, or projection authority.
