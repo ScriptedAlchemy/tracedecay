@@ -539,17 +539,21 @@ mod tests {
         let scope = ObservationScopeV1::Project {
             project_id: ProjectId::new("project.application-test").unwrap(),
         };
+        let generation = ClaudeFileGenerationV1::new(1).unwrap();
+        let expected_cursor = (start != 0).then(|| {
+            ClaudeSourceCursorV1::new(source.clone(), scope.clone(), generation, start).unwrap()
+        });
         let identity = ClaudeObservationIdentityMaterialV1::new(
             source,
             scope,
-            ClaudeFileGenerationV1::new(1).unwrap(),
+            generation,
             ClaudeByteRangeV1::new(start, end).unwrap(),
         )
         .unwrap();
         CaptureClaudeObservationRequest::new(
             parsed_record,
             identity,
-            None,
+            expected_cursor,
             RetentionClass::new("retention.application-test").unwrap(),
             cancellation,
         )
@@ -734,20 +738,20 @@ mod tests {
     #[tokio::test]
     async fn replay_reports_partial_coverage_and_a_truthful_continuation() {
         let application = application();
-        for (index, start) in [0, 100, 200].into_iter().enumerate() {
+        let mut start = 0;
+        for index in 0..3 {
+            let record = json!({
+                "type": "user",
+                "message": {
+                    "role": "user",
+                    "content": format!("message {index}")
+                }
+            });
             application
-                .capture_claude_observation(request_at(
-                    &json!({
-                        "type": "user",
-                        "message": {
-                            "role": "user",
-                            "content": format!("message {index}")
-                        }
-                    }),
-                    start,
-                ))
+                .capture_claude_observation(request_at(&record, start))
                 .await
                 .unwrap();
+            start += u64::try_from(serde_json::to_vec(&record).unwrap().len()).unwrap();
         }
 
         let first = application

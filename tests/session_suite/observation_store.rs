@@ -32,16 +32,30 @@ fn scope() -> ObservationScopeV1 {
 }
 
 fn cursor(byte_offset: u64) -> ClaudeSourceCursorV1 {
+    cursor_in_generation(GENERATION, byte_offset)
+}
+
+fn cursor_in_generation(generation: u64, byte_offset: u64) -> ClaudeSourceCursorV1 {
     ClaudeSourceCursorV1::new(
         source(),
         scope(),
-        ClaudeFileGenerationV1::new(GENERATION).unwrap(),
+        ClaudeFileGenerationV1::new(generation).unwrap(),
         byte_offset,
     )
     .unwrap()
 }
 
 fn observation(start: u64, end: u64, receipt_id: &str, body: &str) -> DurableClaudeObservationV1 {
+    observation_in_generation(GENERATION, start, end, receipt_id, body)
+}
+
+fn observation_in_generation(
+    generation: u64,
+    start: u64,
+    end: u64,
+    receipt_id: &str,
+    body: &str,
+) -> DurableClaudeObservationV1 {
     let payload = json!({
         "kind": "assistant_message",
         "body": body,
@@ -61,7 +75,7 @@ fn observation(start: u64, end: u64, receipt_id: &str, body: &str) -> DurableCla
     let identity = ClaudeObservationIdentityMaterialV1::new(
         source(),
         scope(),
-        ClaudeFileGenerationV1::new(GENERATION).unwrap(),
+        ClaudeFileGenerationV1::new(generation).unwrap(),
         ClaudeByteRangeV1::new(start, end).unwrap(),
     )
     .unwrap();
@@ -101,11 +115,59 @@ fn cursor_advance(
 }
 
 #[test]
-fn observation_write_retains_cursor_specific_validation() {
-    let candidate = observation(0, 100, "receipt.cursor-contract", "sanitized payload");
-
+fn observation_write_requires_exact_source_contiguity() {
+    let initial = observation(0, 100, "receipt.cursor-initial", "initial payload");
+    assert!(ObservationWrite::new(initial.clone(), None, cursor(100)).is_ok());
     assert!(matches!(
-        ObservationWrite::new(candidate, None, cursor(99)),
+        ObservationWrite::new(initial, None, cursor(99)),
+        Err(ObservationStoreError::CursorObservationMismatch)
+    ));
+
+    let initial_gap = observation(1, 100, "receipt.cursor-initial-gap", "initial gap");
+    assert!(matches!(
+        ObservationWrite::new(initial_gap, None, cursor(100)),
+        Err(ObservationStoreError::CursorObservationMismatch)
+    ));
+
+    let contiguous = observation(100, 200, "receipt.cursor-contiguous", "contiguous");
+    assert!(ObservationWrite::new(contiguous.clone(), Some(cursor(100)), cursor(200)).is_ok());
+    for non_contiguous in [cursor(99), cursor(101)] {
+        assert!(matches!(
+            ObservationWrite::new(contiguous.clone(), Some(non_contiguous), cursor(200)),
+            Err(ObservationStoreError::CursorObservationMismatch)
+        ));
+    }
+
+    let replacement_generation = GENERATION + 1;
+    let replacement = observation_in_generation(
+        replacement_generation,
+        0,
+        100,
+        "receipt.cursor-replacement",
+        "replacement",
+    );
+    assert!(
+        ObservationWrite::new(
+            replacement,
+            Some(cursor(200)),
+            cursor_in_generation(replacement_generation, 100),
+        )
+        .is_ok()
+    );
+
+    let replacement_gap = observation_in_generation(
+        replacement_generation,
+        1,
+        100,
+        "receipt.cursor-replacement-gap",
+        "replacement gap",
+    );
+    assert!(matches!(
+        ObservationWrite::new(
+            replacement_gap,
+            Some(cursor(200)),
+            cursor_in_generation(replacement_generation, 100),
+        ),
         Err(ObservationStoreError::CursorObservationMismatch)
     ));
 }
@@ -360,7 +422,7 @@ async fn legacy_idempotency_column_rows_remain_readable_and_writable() {
 
     let next = observation(100, 200, "receipt.legacy.next", "next payload");
     store
-        .persist_observation(write(next.clone(), None))
+        .persist_observation(write(next.clone(), Some(original_cursor)))
         .await
         .unwrap();
     let verify_db = libsql::Builder::new_local(&db_path).build().await.unwrap();
@@ -463,7 +525,7 @@ async fn cursor_only_progress_persists_no_skipped_rows_and_retries_idempotently(
 }
 
 #[tokio::test]
-async fn covered_gap_and_observation_commit_atomically() {
+async fn contiguous_observation_commit_is_atomic() {
     let tmp = TempDir::new().unwrap();
     let db = open_lcm_db(&tmp).await;
     let store = GlobalDbObservationStore::new(&db);
@@ -476,7 +538,7 @@ async fn covered_gap_and_observation_commit_atomically() {
         ))
         .await
         .unwrap();
-    let candidate = observation(20, 30, "receipt.covered-gap", "retained payload");
+    let candidate = observation(10, 30, "receipt.contiguous", "retained payload");
     let write = write(candidate.clone(), Some(cursor(10)));
 
     let raw_db = libsql::Builder::new_local(isolated_lcm_db_path(&tmp))
@@ -486,9 +548,9 @@ async fn covered_gap_and_observation_commit_atomically() {
     let raw_conn = raw_db.connect().unwrap();
     raw_conn
         .execute_batch(
-            "CREATE TRIGGER fail_covered_gap_enqueue
+            "CREATE TRIGGER fail_contiguous_enqueue
              BEFORE INSERT ON projection_queue BEGIN
-                SELECT RAISE(ABORT, 'injected covered gap failure');
+                SELECT RAISE(ABORT, 'injected contiguous write failure');
              END;",
         )
         .await
@@ -510,7 +572,7 @@ async fn covered_gap_and_observation_commit_atomically() {
     );
 
     raw_conn
-        .execute_batch("DROP TRIGGER fail_covered_gap_enqueue")
+        .execute_batch("DROP TRIGGER fail_contiguous_enqueue")
         .await
         .unwrap();
     store.persist_observation(write).await.unwrap();
@@ -915,7 +977,7 @@ async fn stale_exact_cas_cursor_conflict_rolls_back_every_candidate_write() {
     let db = open_lcm_db(&tmp).await;
     let store = GlobalDbObservationStore::new(&db);
     let first = observation(0, 100, "receipt.cas.first", "first payload");
-    let stale_candidate = observation(100, 200, "receipt.cas.stale", "stale payload");
+    let stale_candidate = observation(0, 200, "receipt.cas.stale", "stale payload");
 
     store
         .persist_observation(write(first.clone(), None))

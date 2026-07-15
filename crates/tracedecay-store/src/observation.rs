@@ -30,16 +30,22 @@ impl ObservationWrite {
         {
             return Err(ObservationStoreError::CursorObservationMismatch);
         }
-        if let Some(expected) = &expected_cursor {
-            if expected.source() != next_cursor.source() || expected.scope() != next_cursor.scope()
+        let frame_start = observation.identity().position().start();
+        let contiguous = match &expected_cursor {
+            None => frame_start == 0,
+            Some(expected)
+                if expected.source() != next_cursor.source()
+                    || expected.scope() != next_cursor.scope() =>
             {
-                return Err(ObservationStoreError::CursorObservationMismatch);
+                false
             }
-            if expected.generation() == next_cursor.generation()
-                && expected.byte_offset() > observation.identity().position().start()
-            {
-                return Err(ObservationStoreError::CursorObservationMismatch);
+            Some(expected) if expected.generation() == next_cursor.generation() => {
+                expected.byte_offset() == frame_start
             }
+            Some(_) => frame_start == 0,
+        };
+        if !contiguous {
+            return Err(ObservationStoreError::CursorObservationMismatch);
         }
         Ok(Self {
             observation,
