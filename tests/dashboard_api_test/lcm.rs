@@ -7,17 +7,18 @@
 use std::path::Path;
 
 use crate::common::{
-    EnvVarGuard, GLOBAL_DB_ENV_LOCK as ENV_LOCK, MessageRecordBuilder, create_runtime, get_json,
-    http_agent, pick_free_port, response_to_json, wait_for_dashboard, write_empty_global_db_schema,
+    EnvVarGuard, GLOBAL_DB_ENV_LOCK as ENV_LOCK, create_runtime, get_json, http_agent,
+    pick_free_port, response_to_json, wait_for_dashboard, write_empty_global_db_schema,
 };
+use crate::dashboard_api_support::{MessageDetails, message};
 
 use serde_json::{Value, json};
 use tempfile::TempDir;
 use tracedecay::dashboard;
 use tracedecay::global_db::GlobalDb;
+use tracedecay::sessions::SessionRecord;
 use tracedecay::sessions::cursor::project_session_db_path;
 use tracedecay::sessions::lcm::{LcmCleanConfig, LcmGcConfig, LcmSourceRef, LcmSummaryNodeDraft};
-use tracedecay::sessions::{SessionMessageRecord, SessionRecord};
 use tracedecay::tracedecay::TraceDecay;
 
 struct Fixture {
@@ -54,29 +55,6 @@ fn session(session_id: &str, project: &Path, started_at: i64, title: &str) -> Se
         agent_id: None,
         parent_tool_use_id: None,
     }
-}
-
-struct MessageDetails<'a> {
-    timestamp: i64,
-    model: Option<&'a str>,
-    metadata_json: Option<&'a str>,
-}
-
-fn message(
-    message_id: &str,
-    session_id: &str,
-    role: &str,
-    ordinal: i64,
-    text: &str,
-    details: MessageDetails<'_>,
-) -> SessionMessageRecord {
-    MessageRecordBuilder::new(
-        "cursor", message_id, session_id, role, ordinal, text, "message",
-    )
-    .with_timestamp(Some(details.timestamp))
-    .with_model(details.model)
-    .with_metadata(details.metadata_json)
-    .build()
 }
 
 async fn lookup_store_id(db_path: &Path, message_id: &str) -> i64 {
