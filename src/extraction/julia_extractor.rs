@@ -55,6 +55,57 @@ impl ExtractionState {
             .unwrap_or("<invalid utf8>")
             .to_string()
     }
+
+    fn push_node(
+        &mut self,
+        kind: NodeKind,
+        name: String,
+        qualified_name: String,
+        node: TsNode<'_>,
+        signature: Option<String>,
+        docstring: Option<String>,
+        metrics: ComplexityMetrics,
+    ) -> String {
+        let start_line = node.start_position().row as u32;
+        let id = generate_node_id(&self.file_path, &kind, &name, start_line);
+        let graph_node = Node {
+            id: id.clone(),
+            kind,
+            name,
+            qualified_name,
+            file_path: self.file_path.clone(),
+            start_line,
+            attrs_start_line: start_line,
+            end_line: node.end_position().row as u32,
+            start_column: node.start_position().column as u32,
+            end_column: node.end_position().column as u32,
+            signature,
+            docstring,
+            visibility: Visibility::Pub,
+            is_async: false,
+            branches: metrics.branches,
+            loops: metrics.loops,
+            returns: metrics.returns,
+            max_nesting: metrics.max_nesting,
+            unsafe_blocks: 0,
+            unchecked_calls: 0,
+            assertions: metrics.assertions,
+            updated_at: self.timestamp,
+            parent_id: None,
+        };
+        self.nodes.push(graph_node);
+
+        if let Some(parent_id) = self.parent_node_id() {
+            self.edges.push(Edge {
+                source: parent_id.to_string(),
+                target: id.clone(),
+                kind: EdgeKind::Contains,
+                line: Some(start_line),
+            });
+        }
+
+        id
+    }
 }
 
 impl JuliaExtractor {
@@ -148,9 +199,7 @@ impl JuliaExtractor {
         let name = state.node_text(name_node);
         let docstring = Self::extract_docstring(state, node);
         let sig = Self::first_line(state, node);
-        let start_line = node.start_position().row as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::Function, &name, start_line);
 
         let metrics = if node.child_count() > 0 {
             count_complexity(node, &JULIA_COMPLEXITY, &state.source)
@@ -158,20 +207,14 @@ impl JuliaExtractor {
             ComplexityMetrics::default()
         };
 
-        Self::push_node(
-            state,
-            id.clone(),
+        let id = state.push_node(
             NodeKind::Function,
             name.clone(),
             qualified_name,
             node,
             sig,
             docstring,
-            metrics.branches,
-            metrics.loops,
-            metrics.returns,
-            metrics.max_nesting,
-            metrics.assertions,
+            metrics,
         );
 
         if let Some(body) = node.child_by_field_name("body") {
@@ -185,24 +228,16 @@ impl JuliaExtractor {
         };
         let name = format!("@{}", state.node_text(name_node));
         let sig = Self::first_line(state, node);
-        let start_line = node.start_position().row as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::Function, &name, start_line);
 
-        Self::push_node(
-            state,
-            id,
+        state.push_node(
             NodeKind::Function,
             name,
             qualified_name,
             node,
             sig,
             None,
-            0,
-            0,
-            0,
-            0,
-            0,
+            ComplexityMetrics::default(),
         );
     }
 
@@ -213,25 +248,23 @@ impl JuliaExtractor {
         let name = state.node_text(name_node);
         let docstring = Self::extract_docstring(state, node);
         let sig = Self::first_line(state, node);
-        let start_line = node.start_position().row as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::Class, &name, start_line);
+        let id = generate_node_id(
+            &state.file_path,
+            &NodeKind::Class,
+            &name,
+            node.start_position().row as u32,
+        );
 
         state.node_stack.push((name.clone(), id.clone()));
-        Self::push_node(
-            state,
-            id,
+        state.push_node(
             NodeKind::Class,
             name,
             qualified_name,
             node,
             sig,
             docstring,
-            0,
-            0,
-            0,
-            0,
-            0,
+            ComplexityMetrics::default(),
         );
         state.node_stack.pop();
     }
@@ -242,24 +275,16 @@ impl JuliaExtractor {
         };
         let name = state.node_text(name_node);
         let sig = Self::first_line(state, node);
-        let start_line = node.start_position().row as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::Class, &name, start_line);
 
-        Self::push_node(
-            state,
-            id,
+        state.push_node(
             NodeKind::Class,
             name,
             qualified_name,
             node,
             sig,
             None,
-            0,
-            0,
-            0,
-            0,
-            0,
+            ComplexityMetrics::default(),
         );
     }
 
@@ -268,24 +293,16 @@ impl JuliaExtractor {
             return;
         };
         let name = state.node_text(name_node);
-        let start_line = node.start_position().row as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::Module, &name, start_line);
 
-        Self::push_node(
-            state,
-            id.clone(),
+        let id = state.push_node(
             NodeKind::Module,
             name.clone(),
             qualified_name,
             node,
             None,
             None,
-            0,
-            0,
-            0,
-            0,
-            0,
+            ComplexityMetrics::default(),
         );
 
         state.node_stack.push((name, id));
@@ -334,59 +351,6 @@ impl JuliaExtractor {
                 target: id,
                 kind: EdgeKind::Contains,
                 line: Some(start_line),
-            });
-        }
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn push_node(
-        state: &mut ExtractionState,
-        id: String,
-        kind: NodeKind,
-        name: String,
-        qualified_name: String,
-        node: TsNode<'_>,
-        signature: Option<String>,
-        docstring: Option<String>,
-        branches: u32,
-        loops: u32,
-        returns: u32,
-        max_nesting: u32,
-        assertions: u32,
-    ) {
-        let graph_node = Node {
-            id: id.clone(),
-            kind,
-            name,
-            qualified_name,
-            file_path: state.file_path.clone(),
-            start_line: node.start_position().row as u32,
-            attrs_start_line: node.start_position().row as u32,
-            end_line: node.end_position().row as u32,
-            start_column: node.start_position().column as u32,
-            end_column: node.end_position().column as u32,
-            signature,
-            docstring,
-            visibility: Visibility::Pub,
-            is_async: false,
-            branches,
-            loops,
-            returns,
-            max_nesting,
-            unsafe_blocks: 0,
-            unchecked_calls: 0,
-            assertions,
-            updated_at: state.timestamp,
-            parent_id: None,
-        };
-        state.nodes.push(graph_node);
-
-        if let Some(parent_id) = state.parent_node_id() {
-            state.edges.push(Edge {
-                source: parent_id.to_string(),
-                target: id,
-                kind: EdgeKind::Contains,
-                line: Some(node.start_position().row as u32),
             });
         }
     }
