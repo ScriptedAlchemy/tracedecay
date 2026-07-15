@@ -2523,10 +2523,10 @@ async fn observation_authority_merge_is_lossless_idempotent_and_replayable() {
     source.checkpoint().await;
     source.close();
 
-    copy_sqlite_family_exact(&target_path, &target_input_path).unwrap();
     let offsets = sqlite::plan_session_offsets(&target_path, &source_path)
         .await
         .unwrap();
+    copy_sqlite_family_exact(&target_path, &target_input_path).unwrap();
     sqlite::merge_sessions(
         &target_path,
         &source_path,
