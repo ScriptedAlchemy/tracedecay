@@ -4268,7 +4268,11 @@ async fn create_shard(
     let layout = layout_for_id(project, profile, project_id).unwrap();
     fs::create_dir_all(&layout.data_root).unwrap();
     let (graph, _) = test_initialize(&layout.graph_db_path).await;
-    let memory = MemoryStore::new(graph.conn());
+    let writer = graph
+        .writer_connection("seed consolidation shard fixture")
+        .await
+        .unwrap();
+    let memory = writer.memory_store();
     let outcome = memory
         .add_fact(
             AddFactRequest {
@@ -4295,6 +4299,8 @@ async fn create_shard(
             .await
             .unwrap();
     }
+    drop(memory);
+    drop(writer);
     graph.checkpoint().await.unwrap();
     graph.close();
 
@@ -4363,7 +4369,11 @@ async fn add_fact_to_shard(
 ) {
     let layout = layout_for_id(&fixture.project, &fixture.profile, project_id).unwrap();
     let (graph, _) = test_open(&layout.graph_db_path).await;
-    let memory = MemoryStore::new(graph.conn());
+    let writer = graph
+        .writer_connection("seed consolidation memory fixture")
+        .await
+        .unwrap();
+    let memory = writer.memory_store();
     let outcome = memory
         .add_fact(
             AddFactRequest {
@@ -4390,6 +4400,8 @@ async fn add_fact_to_shard(
             .await
             .unwrap();
     }
+    drop(memory);
+    drop(writer);
     graph.checkpoint().await.unwrap();
     graph.close();
 }
