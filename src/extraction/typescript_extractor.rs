@@ -1459,19 +1459,19 @@ impl TypeScriptExtractor {
     fn extract_jsdoc(state: &ExtractionState, node: TsNode<'_>) -> Option<String> {
         // In TS, we also need to check the parent if this is inside an export_statement.
         let mut target = node;
-        if let Some(parent) = node.parent() {
-            if parent.kind() == "export_statement" {
-                target = parent;
-            }
+        if let Some(parent) = node.parent()
+            && parent.kind() == "export_statement"
+        {
+            target = parent;
         }
 
         let current = target.prev_named_sibling();
-        if let Some(sibling) = current {
-            if sibling.kind() == "comment" {
-                let text = state.node_text(sibling);
-                if text.starts_with("/**") {
-                    return Some(Self::clean_jsdoc(&text));
-                }
+        if let Some(sibling) = current
+            && sibling.kind() == "comment"
+        {
+            let text = state.node_text(sibling);
+            if text.starts_with("/**") {
+                return Some(Self::clean_jsdoc(&text));
             }
         }
         None

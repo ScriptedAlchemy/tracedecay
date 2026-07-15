@@ -431,10 +431,10 @@ impl ElixirExtractor {
                 }
                 // For `def name(args)` the function name might be directly a `call`
                 // child (a call of name/args).
-                if child.kind() == "call" {
-                    if let Some(inner_head) = Self::call_head(state, child) {
-                        return Some(inner_head);
-                    }
+                if child.kind() == "call"
+                    && let Some(inner_head) = Self::call_head(state, child)
+                {
+                    return Some(inner_head);
                 }
                 if child.kind() == "alias" || child.kind() == "identifier" {
                     let text = state.node_text(child);
@@ -500,20 +500,20 @@ impl ElixirExtractor {
                 let child = cursor.node();
                 if child.kind() == "call" {
                     let head = Self::call_head(state, child);
-                    if let Some(name) = head {
-                        if !matches!(
+                    if let Some(name) = head
+                        && !matches!(
                             name.as_str(),
                             "def" | "defp" | "defmacro" | "defmacrop" | "defmodule"
-                        ) {
-                            state.unresolved_refs.push(UnresolvedRef {
-                                from_node_id: fn_id.to_string(),
-                                reference_name: name,
-                                reference_kind: EdgeKind::Calls,
-                                line: child.start_position().row as u32,
-                                column: child.start_position().column as u32,
-                                file_path: state.file_path.clone(),
-                            });
-                        }
+                        )
+                    {
+                        state.unresolved_refs.push(UnresolvedRef {
+                            from_node_id: fn_id.to_string(),
+                            reference_name: name,
+                            reference_kind: EdgeKind::Calls,
+                            line: child.start_position().row as u32,
+                            column: child.start_position().column as u32,
+                            file_path: state.file_path.clone(),
+                        });
                     }
                     Self::extract_calls(state, child, fn_id);
                 } else {

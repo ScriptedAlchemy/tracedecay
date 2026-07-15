@@ -1525,13 +1525,12 @@ pub fn offer_git_post_commit_hook(tracedecay_bin: &str) {
     let hook_path = hooks_dir.join("post-commit");
 
     // Check if already installed.
-    if hook_path.exists() {
-        if let Ok(contents) = std::fs::read_to_string(&hook_path) {
-            if contents.contains(HOOK_MARKER) {
-                eprintln!("  Global git post-commit hook already contains tracedecay, skipping");
-                return;
-            }
-        }
+    if hook_path.exists()
+        && let Ok(contents) = std::fs::read_to_string(&hook_path)
+        && contents.contains(HOOK_MARKER)
+    {
+        eprintln!("  Global git post-commit hook already contains tracedecay, skipping");
+        return;
     }
 
     // Only prompt on a real terminal.
@@ -1673,16 +1672,16 @@ fn parse_gitconfig_value(path: &Path, section: &str, key: &str) -> Option<String
             continue;
         }
         // Parse key = value
-        if let Some((k, v)) = trimmed.split_once('=') {
-            if k.trim().to_ascii_lowercase() == key_lower {
-                let v = v.trim();
-                // Strip surrounding quotes if present.
-                let v = v
-                    .strip_prefix('"')
-                    .and_then(|s| s.strip_suffix('"'))
-                    .unwrap_or(v);
-                return Some(v.to_string());
-            }
+        if let Some((k, v)) = trimmed.split_once('=')
+            && k.trim().to_ascii_lowercase() == key_lower
+        {
+            let v = v.trim();
+            // Strip surrounding quotes if present.
+            let v = v
+                .strip_prefix('"')
+                .and_then(|s| s.strip_suffix('"'))
+                .unwrap_or(v);
+            return Some(v.to_string());
         }
     }
     None

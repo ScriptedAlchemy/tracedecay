@@ -286,10 +286,10 @@ async fn gc_stale_temp_registry_rows(
 fn temp_dir_prefixes() -> Vec<PathBuf> {
     let temp_dir = std::env::temp_dir();
     let mut prefixes = vec![temp_dir.clone()];
-    if let Ok(canonical) = temp_dir.canonicalize() {
-        if !prefixes.contains(&canonical) {
-            prefixes.push(canonical);
-        }
+    if let Ok(canonical) = temp_dir.canonicalize()
+        && !prefixes.contains(&canonical)
+    {
+        prefixes.push(canonical);
     }
     prefixes
 }

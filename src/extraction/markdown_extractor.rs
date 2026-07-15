@@ -257,12 +257,11 @@ impl MarkdownExtractor {
     fn heading_level(node: TsNode<'_>) -> usize {
         for child in node.children(&mut node.walk()) {
             let k = child.kind();
-            if let Some(rest) = k.strip_prefix("atx_h") {
-                if let Some(d) = rest.strip_suffix("_marker") {
-                    if let Ok(n) = d.parse::<usize>() {
-                        return n.clamp(1, 6);
-                    }
-                }
+            if let Some(rest) = k.strip_prefix("atx_h")
+                && let Some(d) = rest.strip_suffix("_marker")
+                && let Ok(n) = d.parse::<usize>()
+            {
+                return n.clamp(1, 6);
             }
             if k == "setext_h1_underline" {
                 return 1;

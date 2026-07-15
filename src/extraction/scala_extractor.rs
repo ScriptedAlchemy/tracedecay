@@ -1082,11 +1082,11 @@ impl ScalaExtractor {
         }
         // Cut at first '=' for expression-bodied definitions (but not inside type bounds).
         // Only if there's a body field (function_definition, val_definition).
-        if node.child_by_field_name("body").is_some() || node.child_by_field_name("value").is_some()
+        if (node.child_by_field_name("body").is_some()
+            || node.child_by_field_name("value").is_some())
+            && let Some(eq_pos) = text.find('=')
         {
-            if let Some(eq_pos) = text.find('=') {
-                return text[..eq_pos].trim().to_string();
-            }
+            return text[..eq_pos].trim().to_string();
         }
         text.lines().next().unwrap_or("").trim().to_string()
     }
@@ -1369,10 +1369,10 @@ impl ScalaExtractor {
                 return state.node_text(child);
             }
             // generic_function wraps the callee
-            if child.kind() == "generic_function" {
-                if let Some(inner) = child.child(0) {
-                    return state.node_text(inner);
-                }
+            if child.kind() == "generic_function"
+                && let Some(inner) = child.child(0)
+            {
+                return state.node_text(inner);
             }
             return state.node_text(child);
         }

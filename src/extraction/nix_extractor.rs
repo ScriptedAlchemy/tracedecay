@@ -187,10 +187,10 @@ impl NixExtractor {
 
         // Process the body field (the expression after `in`).
         // If it's an attrset, extract its bindings and inherits.
-        if let Some(body) = node.child_by_field_name("body") {
-            if body.kind() == "attrset_expression" {
-                Self::visit_attrset_bindings(state, body);
-            }
+        if let Some(body) = node.child_by_field_name("body")
+            && body.kind() == "attrset_expression"
+        {
+            Self::visit_attrset_bindings(state, body);
         }
     }
 
@@ -412,17 +412,12 @@ impl NixExtractor {
 
                 // Enhancement 1: If this is a builder call, extract derivation fields.
                 if is_builder {
-                    if let Some(expr_node) = expr {
-                        if let Some((_callee, attrset_node)) =
+                    if let Some(expr_node) = expr
+                        && let Some((_callee, attrset_node)) =
                             Self::is_builder_call(state, expr_node)
-                        {
-                            let parent_id_for_fields = id;
-                            Self::extract_derivation_fields(
-                                state,
-                                attrset_node,
-                                &parent_id_for_fields,
-                            );
-                        }
+                    {
+                        let parent_id_for_fields = id;
+                        Self::extract_derivation_fields(state, attrset_node, &parent_id_for_fields);
                     }
                 } else {
                     // Enhancement 2: Check for import paths in non-function bindings.
@@ -695,63 +690,63 @@ impl NixExtractor {
                     if inner.goto_first_child() {
                         loop {
                             let item = inner.node();
-                            if item.kind() == "binding" {
-                                if let Some(field_name) = Self::extract_binding_name(state, item) {
-                                    let start_line = item.start_position().row as u32;
-                                    let end_line = item.end_position().row as u32;
-                                    let start_column = item.start_position().column as u32;
-                                    let end_column = item.end_position().column as u32;
-                                    let kind = NodeKind::Field;
-                                    let qualified_name =
-                                        format!("{}::{}", state.qualified_prefix(), field_name);
-                                    let id = generate_node_id(
-                                        &state.file_path,
-                                        &kind,
-                                        &field_name,
-                                        start_line,
-                                    );
+                            if item.kind() == "binding"
+                                && let Some(field_name) = Self::extract_binding_name(state, item)
+                            {
+                                let start_line = item.start_position().row as u32;
+                                let end_line = item.end_position().row as u32;
+                                let start_column = item.start_position().column as u32;
+                                let end_column = item.end_position().column as u32;
+                                let kind = NodeKind::Field;
+                                let qualified_name =
+                                    format!("{}::{}", state.qualified_prefix(), field_name);
+                                let id = generate_node_id(
+                                    &state.file_path,
+                                    &kind,
+                                    &field_name,
+                                    start_line,
+                                );
 
-                                    let text = state.node_text(item);
-                                    let signature = text
-                                        .lines()
-                                        .next()
-                                        .map(|l| l.trim().to_string())
-                                        .filter(|l| !l.is_empty());
+                                let text = state.node_text(item);
+                                let signature = text
+                                    .lines()
+                                    .next()
+                                    .map(|l| l.trim().to_string())
+                                    .filter(|l| !l.is_empty());
 
-                                    let graph_node = Node {
-                                        id: id.clone(),
-                                        kind,
-                                        name: field_name,
-                                        qualified_name,
-                                        file_path: state.file_path.clone(),
-                                        start_line,
-                                        attrs_start_line: start_line,
-                                        end_line,
-                                        start_column,
-                                        end_column,
-                                        signature,
-                                        docstring: None,
-                                        visibility: Visibility::Pub,
-                                        is_async: false,
-                                        branches: 0,
-                                        loops: 0,
-                                        returns: 0,
-                                        max_nesting: 0,
-                                        unsafe_blocks: 0,
-                                        unchecked_calls: 0,
-                                        assertions: 0,
-                                        updated_at: state.timestamp,
-                                        parent_id: None,
-                                    };
-                                    state.nodes.push(graph_node);
+                                let graph_node = Node {
+                                    id: id.clone(),
+                                    kind,
+                                    name: field_name,
+                                    qualified_name,
+                                    file_path: state.file_path.clone(),
+                                    start_line,
+                                    attrs_start_line: start_line,
+                                    end_line,
+                                    start_column,
+                                    end_column,
+                                    signature,
+                                    docstring: None,
+                                    visibility: Visibility::Pub,
+                                    is_async: false,
+                                    branches: 0,
+                                    loops: 0,
+                                    returns: 0,
+                                    max_nesting: 0,
+                                    unsafe_blocks: 0,
+                                    unchecked_calls: 0,
+                                    assertions: 0,
+                                    updated_at: state.timestamp,
+                                    parent_id: None,
+                                };
+                                state.nodes.push(graph_node);
 
-                                    state.edges.push(Edge {
-                                        source: parent_id.to_string(),
-                                        target: id,
-                                        kind: EdgeKind::Contains,
-                                        line: Some(start_line),
-                                    });
-                                }
+                                state.edges.push(Edge {
+                                    source: parent_id.to_string(),
+                                    target: id,
+                                    kind: EdgeKind::Contains,
+                                    line: Some(start_line),
+                                });
                             }
                             if !inner.goto_next_sibling() {
                                 break;
@@ -815,12 +810,11 @@ impl NixExtractor {
         // If no previous sibling at this level, check the parent's previous sibling.
         // This handles cases where the comment is a child of `let_expression` or
         // `attrset_expression` but the binding is inside `binding_set`.
-        if prev.is_none() {
-            if let Some(parent) = node.parent() {
-                if parent.kind() == "binding_set" {
-                    prev = parent.prev_named_sibling();
-                }
-            }
+        if prev.is_none()
+            && let Some(parent) = node.parent()
+            && parent.kind() == "binding_set"
+        {
+            prev = parent.prev_named_sibling();
         }
 
         while let Some(prev_node) = prev {
@@ -869,13 +863,12 @@ impl NixExtractor {
                         // Enhancement 2: Import path resolution.
                         // When the callee is `import` and the argument is a path_expression,
                         // emit a Use node and an unresolved Uses ref for cross-file tracking.
-                        if callee_name.as_deref() == Some("import") {
-                            if let Some(arg) = child.child_by_field_name("argument") {
-                                if arg.kind() == "path_expression" {
-                                    let path_text = state.node_text(arg);
-                                    Self::emit_import_use_node(state, &path_text, child);
-                                }
-                            }
+                        if callee_name.as_deref() == Some("import")
+                            && let Some(arg) = child.child_by_field_name("argument")
+                            && arg.kind() == "path_expression"
+                        {
+                            let path_text = state.node_text(arg);
+                            Self::emit_import_use_node(state, &path_text, child);
                         }
 
                         // Recurse into the apply_expression for nested calls.
@@ -900,13 +893,12 @@ impl NixExtractor {
             let callee_name = node
                 .child_by_field_name("function")
                 .and_then(|func_node| Self::extract_callee_name(state, func_node));
-            if callee_name.as_deref() == Some("import") {
-                if let Some(arg) = node.child_by_field_name("argument") {
-                    if arg.kind() == "path_expression" {
-                        let path_text = state.node_text(arg);
-                        Self::emit_import_use_node(state, &path_text, node);
-                    }
-                }
+            if callee_name.as_deref() == Some("import")
+                && let Some(arg) = node.child_by_field_name("argument")
+                && arg.kind() == "path_expression"
+            {
+                let path_text = state.node_text(arg);
+                Self::emit_import_use_node(state, &path_text, node);
             }
         }
         // Recurse into children

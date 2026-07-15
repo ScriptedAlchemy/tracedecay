@@ -118,26 +118,28 @@ pub fn count_complexity(
         }
 
         // Name-based detection for call expressions (unchecked methods + assertions).
-        if !source.is_empty() && config.call_expression_types.contains(&kind) {
-            if let Some(name) = extract_call_name(current, config.call_method_field, source) {
-                if config.unchecked_methods.contains(&name.as_str()) {
-                    metrics.unchecked_calls += 1;
-                }
-                if config.assertion_names.contains(&name.as_str()) {
-                    metrics.assertions += 1;
-                }
+        if !source.is_empty()
+            && config.call_expression_types.contains(&kind)
+            && let Some(name) = extract_call_name(current, config.call_method_field, source)
+        {
+            if config.unchecked_methods.contains(&name.as_str()) {
+                metrics.unchecked_calls += 1;
+            }
+            if config.assertion_names.contains(&name.as_str()) {
+                metrics.assertions += 1;
             }
         }
 
         // Name-based detection for macro invocations (Rust assert!, debug_assert!, etc.).
-        if !source.is_empty() && config.macro_invocation_types.contains(&kind) {
-            if let Some(name) = extract_macro_name(current, source) {
-                if config.assertion_names.contains(&name.as_str()) {
-                    metrics.assertions += 1;
-                }
-                if config.unchecked_methods.contains(&name.as_str()) {
-                    metrics.unchecked_calls += 1;
-                }
+        if !source.is_empty()
+            && config.macro_invocation_types.contains(&kind)
+            && let Some(name) = extract_macro_name(current, source)
+        {
+            if config.assertion_names.contains(&name.as_str()) {
+                metrics.assertions += 1;
+            }
+            if config.unchecked_methods.contains(&name.as_str()) {
+                metrics.unchecked_calls += 1;
             }
         }
 
@@ -197,14 +199,14 @@ fn push_children<'a>(stack: &mut Vec<(TsNode<'a>, u32)>, parent: TsNode<'a>, dep
 /// or a `field_expression`/`member_expression` selector.
 fn extract_call_name(node: TsNode<'_>, method_field: &str, source: &[u8]) -> Option<String> {
     // Try the configured field name first.
-    if !method_field.is_empty() {
-        if let Some(field_node) = node.child_by_field_name(method_field) {
-            // For chained calls like `x.unwrap()`, the field may be a
-            // field_expression / member_expression — grab the rightmost identifier.
-            let text = rightmost_identifier(field_node, source);
-            if !text.is_empty() {
-                return Some(text);
-            }
+    if !method_field.is_empty()
+        && let Some(field_node) = node.child_by_field_name(method_field)
+    {
+        // For chained calls like `x.unwrap()`, the field may be a
+        // field_expression / member_expression — grab the rightmost identifier.
+        let text = rightmost_identifier(field_node, source);
+        if !text.is_empty() {
+            return Some(text);
         }
     }
 
@@ -214,10 +216,10 @@ fn extract_call_name(node: TsNode<'_>, method_field: &str, source: &[u8]) -> Opt
         loop {
             let child = cursor.node();
             let ck = child.kind();
-            if ck == "identifier" || ck == "field_identifier" || ck == "property_identifier" {
-                if let Ok(text) = child.utf8_text(source) {
-                    return Some(text.to_string());
-                }
+            if (ck == "identifier" || ck == "field_identifier" || ck == "property_identifier")
+                && let Ok(text) = child.utf8_text(source)
+            {
+                return Some(text.to_string());
             }
             // member_expression / field_expression: grab the property/field child.
             if ck.contains("member_expression") || ck.contains("field_expression") {
@@ -243,10 +245,10 @@ fn extract_macro_name(node: TsNode<'_>, source: &[u8]) -> Option<String> {
         loop {
             let child = cursor.node();
             let ck = child.kind();
-            if ck == "identifier" || ck == "scoped_identifier" {
-                if let Ok(text) = child.utf8_text(source) {
-                    return Some(text.trim_end_matches('!').to_string());
-                }
+            if (ck == "identifier" || ck == "scoped_identifier")
+                && let Ok(text) = child.utf8_text(source)
+            {
+                return Some(text.trim_end_matches('!').to_string());
             }
             if !cursor.goto_next_sibling() {
                 break;
@@ -271,10 +273,10 @@ fn rightmost_identifier(node: TsNode<'_>, source: &[u8]) -> String {
         loop {
             let child = cursor.node();
             let ck = child.kind();
-            if ck == "identifier" || ck == "field_identifier" || ck == "property_identifier" {
-                if let Ok(text) = child.utf8_text(source) {
-                    found = text.to_string();
-                }
+            if (ck == "identifier" || ck == "field_identifier" || ck == "property_identifier")
+                && let Ok(text) = child.utf8_text(source)
+            {
+                found = text.to_string();
             }
             if !cursor.goto_next_sibling() {
                 break;

@@ -232,11 +232,11 @@ fn replace_default(new_exe: &Path) -> Result<Option<PathBuf>> {
     #[cfg(unix)]
     {
         let canonical = exe.as_ref().and_then(|e| e.canonicalize().ok());
-        if let (Some(exe), Some(canonical)) = (&exe, canonical) {
-            if exe.as_path() != canonical.as_path() {
-                install_binary(new_exe, &canonical)?;
-                return Ok(Some(canonical));
-            }
+        if let (Some(exe), Some(canonical)) = (&exe, canonical)
+            && exe.as_path() != canonical.as_path()
+        {
+            install_binary(new_exe, &canonical)?;
+            return Ok(Some(canonical));
         }
     }
 
@@ -534,25 +534,24 @@ fn replace_for_brew(new_exe: &Path, new_version: &str) -> Result<Option<PathBuf>
 
                 // Step 3: update the symlink at <prefix>/bin/<binary>.
                 let symlink_path = prefix.join("bin").join(bin_name);
-                if let Ok(meta) = std::fs::symlink_metadata(&symlink_path) {
-                    if meta.file_type().is_symlink() {
-                        match retarget_homebrew_symlink(&symlink_path, &old_version, new_version) {
-                            Ok(()) => installed_at = symlink_path,
-                            Err(error) => {
-                                warn_best_effort("could not update Homebrew symlink", &error);
-                            }
+                if let Ok(meta) = std::fs::symlink_metadata(&symlink_path)
+                    && meta.file_type().is_symlink()
+                {
+                    match retarget_homebrew_symlink(&symlink_path, &old_version, new_version) {
+                        Ok(()) => installed_at = symlink_path,
+                        Err(error) => {
+                            warn_best_effort("could not update Homebrew symlink", &error);
                         }
                     }
                 }
 
                 // Step 4: patch INSTALL_RECEIPT.json so `brew info` is accurate.
                 let receipt = new_version_dir.join("INSTALL_RECEIPT.json");
-                if receipt.exists() {
-                    if let Err(error) =
+                if receipt.exists()
+                    && let Err(error) =
                         rewrite_homebrew_install_receipt(&receipt, &old_version, new_version)
-                    {
-                        warn_best_effort("could not rewrite Homebrew INSTALL_RECEIPT.json", &error);
-                    }
+                {
+                    warn_best_effort("could not rewrite Homebrew INSTALL_RECEIPT.json", &error);
                 }
             }
             Err(e) => {

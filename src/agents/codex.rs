@@ -648,10 +648,10 @@ fn write_codex_plugin_files(
 
 fn codex_plugin_manifest(raw: &str, policy: CodexBundlePolicy) -> Result<String> {
     super::plugin_bundle::stamp_manifest_version_with(raw, |manifest| {
-        if !policy.include_hooks() {
-            if let Some(object) = manifest.as_object_mut() {
-                object.remove("hooks");
-            }
+        if !policy.include_hooks()
+            && let Some(object) = manifest.as_object_mut()
+        {
+            object.remove("hooks");
         }
     })
 }

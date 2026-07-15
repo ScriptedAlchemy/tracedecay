@@ -332,15 +332,15 @@ impl DartExtractor {
 
     /// Extract the import path from an import/export statement text.
     fn extract_import_path(text: &str) -> String {
-        if let Some(start) = text.find('\'') {
-            if let Some(end) = text[start + 1..].find('\'') {
-                return text[start + 1..start + 1 + end].to_string();
-            }
+        if let Some(start) = text.find('\'')
+            && let Some(end) = text[start + 1..].find('\'')
+        {
+            return text[start + 1..start + 1 + end].to_string();
         }
-        if let Some(start) = text.find('"') {
-            if let Some(end) = text[start + 1..].find('"') {
-                return text[start + 1..start + 1 + end].to_string();
-            }
+        if let Some(start) = text.find('"')
+            && let Some(end) = text[start + 1..].find('"')
+        {
+            return text[start + 1..start + 1 + end].to_string();
         }
         text.trim().to_string()
     }
@@ -504,18 +504,18 @@ impl DartExtractor {
         }
 
         // Extract superclass extends reference.
-        if let Some(superclass) = node.child_by_field_name("superclass") {
-            if let Some(type_id) = find_direct_child_by_kind(superclass, "type_identifier") {
-                let type_name = state.node_text(type_id);
-                state.unresolved_refs.push(UnresolvedRef {
-                    from_node_id: id.clone(),
-                    reference_name: type_name,
-                    reference_kind: EdgeKind::Extends,
-                    line: superclass.start_position().row as u32,
-                    column: superclass.start_position().column as u32,
-                    file_path: state.file_path.clone(),
-                });
-            }
+        if let Some(superclass) = node.child_by_field_name("superclass")
+            && let Some(type_id) = find_direct_child_by_kind(superclass, "type_identifier")
+        {
+            let type_name = state.node_text(type_id);
+            state.unresolved_refs.push(UnresolvedRef {
+                from_node_id: id.clone(),
+                reference_name: type_name,
+                reference_kind: EdgeKind::Extends,
+                line: superclass.start_position().row as u32,
+                column: superclass.start_position().column as u32,
+                file_path: state.file_path.clone(),
+            });
         }
 
         // Extract annotation usages (e.g. @JsonSerializable).
@@ -1387,11 +1387,11 @@ impl DartExtractor {
         if cursor.goto_first_child() {
             loop {
                 let child = cursor.node();
-                if child.kind() == "initialized_identifier" {
-                    if let Some(ident) = find_direct_child_by_kind(child, "identifier") {
-                        let name = state.node_text(ident);
-                        Self::emit_field(state, decl_node, &name);
-                    }
+                if child.kind() == "initialized_identifier"
+                    && let Some(ident) = find_direct_child_by_kind(child, "identifier")
+                {
+                    let name = state.node_text(ident);
+                    Self::emit_field(state, decl_node, &name);
                 }
                 if !cursor.goto_next_sibling() {
                     break;
@@ -1410,11 +1410,11 @@ impl DartExtractor {
         if cursor.goto_first_child() {
             loop {
                 let child = cursor.node();
-                if child.kind() == "static_final_declaration" {
-                    if let Some(ident) = find_direct_child_by_kind(child, "identifier") {
-                        let name = state.node_text(ident);
-                        Self::emit_field(state, decl_node, &name);
-                    }
+                if child.kind() == "static_final_declaration"
+                    && let Some(ident) = find_direct_child_by_kind(child, "identifier")
+                {
+                    let name = state.node_text(ident);
+                    Self::emit_field(state, decl_node, &name);
                 }
                 if !cursor.goto_next_sibling() {
                     break;
@@ -1555,20 +1555,19 @@ impl DartExtractor {
                 "identifier" => {
                     let callee_name = state.node_text(child);
                     // Check if the next sibling is a selector containing argument_part.
-                    if let Some(next) = child.next_named_sibling() {
-                        if next.kind() == "selector"
-                            && (find_direct_child_by_kind(next, "argument_part").is_some()
-                                || find_direct_child_by_kind(next, "arguments").is_some())
-                        {
-                            state.unresolved_refs.push(UnresolvedRef {
-                                from_node_id: fn_node_id.to_string(),
-                                reference_name: callee_name,
-                                reference_kind: EdgeKind::Calls,
-                                line: child.start_position().row as u32,
-                                column: child.start_position().column as u32,
-                                file_path: state.file_path.clone(),
-                            });
-                        }
+                    if let Some(next) = child.next_named_sibling()
+                        && next.kind() == "selector"
+                        && (find_direct_child_by_kind(next, "argument_part").is_some()
+                            || find_direct_child_by_kind(next, "arguments").is_some())
+                    {
+                        state.unresolved_refs.push(UnresolvedRef {
+                            from_node_id: fn_node_id.to_string(),
+                            reference_name: callee_name,
+                            reference_kind: EdgeKind::Calls,
+                            line: child.start_position().row as u32,
+                            column: child.start_position().column as u32,
+                            file_path: state.file_path.clone(),
+                        });
                     }
                 }
                 // A selector that contains an identifier and argument_part: method call.
@@ -1579,18 +1578,17 @@ impl DartExtractor {
                         // Look for identifier inside unconditional_assignable_selector.
                         if let Some(uas) =
                             find_direct_child_by_kind(child, "unconditional_assignable_selector")
+                            && let Some(ident) = find_direct_child_by_kind(uas, "identifier")
                         {
-                            if let Some(ident) = find_direct_child_by_kind(uas, "identifier") {
-                                let callee_name = state.node_text(ident);
-                                state.unresolved_refs.push(UnresolvedRef {
-                                    from_node_id: fn_node_id.to_string(),
-                                    reference_name: callee_name,
-                                    reference_kind: EdgeKind::Calls,
-                                    line: child.start_position().row as u32,
-                                    column: child.start_position().column as u32,
-                                    file_path: state.file_path.clone(),
-                                });
-                            }
+                            let callee_name = state.node_text(ident);
+                            state.unresolved_refs.push(UnresolvedRef {
+                                from_node_id: fn_node_id.to_string(),
+                                reference_name: callee_name,
+                                reference_kind: EdgeKind::Calls,
+                                line: child.start_position().row as u32,
+                                column: child.start_position().column as u32,
+                                file_path: state.file_path.clone(),
+                            });
                         }
                     }
                     // Also recurse into selectors for nested calls in arguments.

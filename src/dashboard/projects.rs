@@ -73,12 +73,12 @@ impl DashboardRuntime {
             .project_registry_context_by_id(project_id)
             .await
             .ok_or_else(|| config_error(format!("registered project not found: {project_id}")))?;
-        if let Some(cached) = self.project_states.read().await.get(project_id).cloned() {
-            if cached.registry_context == context {
-                return Ok(SelectedProjectState {
-                    state: cached.state,
-                });
-            }
+        if let Some(cached) = self.project_states.read().await.get(project_id).cloned()
+            && cached.registry_context == context
+        {
+            return Ok(SelectedProjectState {
+                state: cached.state,
+            });
         }
         let project_root = PathBuf::from(&context.project.canonical_root);
         let cg = TraceDecay::open_read_only(&project_root).await?;
@@ -90,12 +90,12 @@ impl DashboardRuntime {
         }
         let state = build_selected_project_state(&cg, &self.active).await;
         let mut project_states = self.project_states.write().await;
-        if let Some(cached) = project_states.get(project_id).cloned() {
-            if cached.registry_context == context {
-                return Ok(SelectedProjectState {
-                    state: cached.state,
-                });
-            }
+        if let Some(cached) = project_states.get(project_id).cloned()
+            && cached.registry_context == context
+        {
+            return Ok(SelectedProjectState {
+                state: cached.state,
+            });
         }
         project_states.insert(
             project_id.to_string(),

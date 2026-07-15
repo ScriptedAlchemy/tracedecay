@@ -75,10 +75,10 @@ pub(crate) struct PriceTable {
 }
 
 fn cache_path() -> Option<PathBuf> {
-    if let Ok(path) = std::env::var(CACHE_PATH_ENV) {
-        if !path.is_empty() {
-            return Some(PathBuf::from(path));
-        }
+    if let Ok(path) = std::env::var(CACHE_PATH_ENV)
+        && !path.is_empty()
+    {
+        return Some(PathBuf::from(path));
     }
     let home = dirs::home_dir()?;
     Some(home.join(".tracedecay").join("model-prices.json"))
@@ -160,16 +160,15 @@ fn file_mtime_unix(path: &std::path::Path) -> Option<i64> {
 /// stale), bundled snapshot otherwise. Cheap enough to call per request —
 /// the dashboard is a local single-user server.
 pub(crate) fn load_table() -> PriceTable {
-    if let Some(path) = cache_path() {
-        if let Ok(body) = std::fs::read_to_string(&path) {
-            if let Some(models) = parse_openrouter_json(&body) {
-                return PriceTable {
-                    models,
-                    source: "cache",
-                    fetched_at: file_mtime_unix(&path),
-                };
-            }
-        }
+    if let Some(path) = cache_path()
+        && let Ok(body) = std::fs::read_to_string(&path)
+        && let Some(models) = parse_openrouter_json(&body)
+    {
+        return PriceTable {
+            models,
+            source: "cache",
+            fetched_at: file_mtime_unix(&path),
+        };
     }
     PriceTable {
         models: parse_openrouter_json(FALLBACK_JSON).unwrap_or_default(),

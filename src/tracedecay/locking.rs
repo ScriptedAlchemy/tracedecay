@@ -99,12 +99,12 @@ fn clear_marker_if_matches(path: &Path, expected: &MarkerIdentity) -> std::io::R
         )));
     }
 
-    if let Ok(mut marker) = serde_json::from_slice::<DirtyMarker>(&contents) {
-        if marker.schema == MARKER_SCHEMA {
-            marker.state = MarkerState::Clean;
-            let clean = serde_json::to_vec(&marker).map_err(std::io::Error::other)?;
-            publish_marker(path, &clean)?;
-        }
+    if let Ok(mut marker) = serde_json::from_slice::<DirtyMarker>(&contents)
+        && marker.schema == MARKER_SCHEMA
+    {
+        marker.state = MarkerState::Clean;
+        let clean = serde_json::to_vec(&marker).map_err(std::io::Error::other)?;
+        publish_marker(path, &clean)?;
     }
 
     match std::fs::remove_file(path) {
@@ -299,13 +299,13 @@ pub fn try_acquire_sync_lock_at(lock_path: &Path) -> Result<SyncLockGuard> {
     // legacy owners are overwritten in place; the path is never unlinked.
     let mut previous = String::new();
     let _ = file.read_to_string(&mut previous);
-    if let Ok(pid) = previous.trim().parse::<u32>() {
-        if is_pid_alive(pid) {
-            let _ = FileExt::unlock(&file);
-            return Err(TraceDecayError::SyncLock {
-                message: format!("another sync is already in progress (legacy PID {pid})"),
-            });
-        }
+    if let Ok(pid) = previous.trim().parse::<u32>()
+        && is_pid_alive(pid)
+    {
+        let _ = FileExt::unlock(&file);
+        return Err(TraceDecayError::SyncLock {
+            message: format!("another sync is already in progress (legacy PID {pid})"),
+        });
     }
 
     let epoch = next_epoch();

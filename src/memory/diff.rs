@@ -71,10 +71,11 @@ pub fn normalized_equivalent(a: &str, b: &str) -> bool {
 pub fn combined_similarity(new_content: &str, existing_content: &str, cosine: Option<f64>) -> f64 {
     let (_, token_overlap, _) = lexical_overlap(new_content, existing_content);
     let mut similarity = token_overlap;
-    if let Some(cos) = cosine {
-        if cos >= COSINE_CONTRIBUTION_FLOOR && cos > similarity {
-            similarity = cos;
-        }
+    if let Some(cos) = cosine
+        && cos >= COSINE_CONTRIBUTION_FLOOR
+        && cos > similarity
+    {
+        similarity = cos;
     }
     similarity
 }

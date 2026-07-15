@@ -322,10 +322,10 @@ fn origin_is_github(repo_root: &Path) -> bool {
     static CACHE: std::sync::OnceLock<std::sync::Mutex<HashMap<PathBuf, bool>>> =
         std::sync::OnceLock::new();
     let cache = CACHE.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
-    if let Ok(map) = cache.lock() {
-        if let Some(&cached) = map.get(repo_root) {
-            return cached;
-        }
+    if let Ok(map) = cache.lock()
+        && let Some(&cached) = map.get(repo_root)
+    {
+        return cached;
     }
     let result = run_git(repo_root, &["remote", "get-url", "origin"])
         .and_then(|o| String::from_utf8(o.stdout).ok())
@@ -368,13 +368,14 @@ fn gh_available() -> bool {
 /// mass-untrack the managed set. An empty `Ok` result means the remote genuinely
 /// has no open PRs.
 pub fn discover_open_prs(repo_root: &Path) -> Result<PrDiscovery, String> {
-    if origin_is_github(repo_root) && gh_available() {
-        if let Some(discovery) = discover_via_gh(repo_root) {
-            return Ok(discovery);
-        }
-        // `gh` failed (rate limit, auth, transient). Fall through to ls-remote,
-        // which propagates its own failure as `Err` rather than empty.
+    if origin_is_github(repo_root)
+        && gh_available()
+        && let Some(discovery) = discover_via_gh(repo_root)
+    {
+        return Ok(discovery);
     }
+    // `gh` failed (rate limit, auth, transient). Fall through to ls-remote,
+    // which propagates its own failure as `Err` rather than empty.
     discover_via_ls_remote(repo_root)
 }
 

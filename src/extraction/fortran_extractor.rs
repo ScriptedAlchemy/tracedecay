@@ -607,57 +607,57 @@ impl FortranExtractor {
 
         // Look for init_declarator child with left (name) and right (value).
         let declarator = node.child_by_field_name("declarator");
-        if let Some(decl) = declarator {
-            if decl.kind() == "init_declarator" {
-                let name = decl
-                    .child_by_field_name("left")
-                    .map_or_else(|| "<anonymous>".to_string(), |n| state.node_text(n));
+        if let Some(decl) = declarator
+            && decl.kind() == "init_declarator"
+        {
+            let name = decl
+                .child_by_field_name("left")
+                .map_or_else(|| "<anonymous>".to_string(), |n| state.node_text(n));
 
-                let docstring = Self::extract_docstring(state, node);
-                let start_line = node.start_position().row as u32;
-                let end_line = node.end_position().row as u32;
-                let start_column = node.start_position().column as u32;
-                let end_column = node.end_position().column as u32;
-                let text = state.node_text(node);
-                let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-                let id = generate_node_id(&state.file_path, &NodeKind::Const, &name, start_line);
+            let docstring = Self::extract_docstring(state, node);
+            let start_line = node.start_position().row as u32;
+            let end_line = node.end_position().row as u32;
+            let start_column = node.start_position().column as u32;
+            let end_column = node.end_position().column as u32;
+            let text = state.node_text(node);
+            let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
+            let id = generate_node_id(&state.file_path, &NodeKind::Const, &name, start_line);
 
-                let graph_node = Node {
-                    id: id.clone(),
-                    kind: NodeKind::Const,
-                    name,
-                    qualified_name,
-                    file_path: state.file_path.clone(),
-                    start_line,
-                    attrs_start_line: start_line,
-                    end_line,
-                    start_column,
-                    end_column,
-                    signature: Some(text.trim().to_string()),
-                    docstring,
-                    visibility: Visibility::Pub,
-                    is_async: false,
-                    branches: 0,
-                    loops: 0,
-                    returns: 0,
-                    max_nesting: 0,
-                    unsafe_blocks: 0,
-                    unchecked_calls: 0,
-                    assertions: 0,
-                    updated_at: state.timestamp,
-                    parent_id: None,
-                };
-                state.nodes.push(graph_node);
+            let graph_node = Node {
+                id: id.clone(),
+                kind: NodeKind::Const,
+                name,
+                qualified_name,
+                file_path: state.file_path.clone(),
+                start_line,
+                attrs_start_line: start_line,
+                end_line,
+                start_column,
+                end_column,
+                signature: Some(text.trim().to_string()),
+                docstring,
+                visibility: Visibility::Pub,
+                is_async: false,
+                branches: 0,
+                loops: 0,
+                returns: 0,
+                max_nesting: 0,
+                unsafe_blocks: 0,
+                unchecked_calls: 0,
+                assertions: 0,
+                updated_at: state.timestamp,
+                parent_id: None,
+            };
+            state.nodes.push(graph_node);
 
-                // Contains edge from parent.
-                if let Some(parent_id) = state.parent_node_id() {
-                    state.edges.push(Edge {
-                        source: parent_id.to_string(),
-                        target: id,
-                        kind: EdgeKind::Contains,
-                        line: Some(start_line),
-                    });
-                }
+            // Contains edge from parent.
+            if let Some(parent_id) = state.parent_node_id() {
+                state.edges.push(Edge {
+                    source: parent_id.to_string(),
+                    target: id,
+                    kind: EdgeKind::Contains,
+                    line: Some(start_line),
+                });
             }
         }
     }
@@ -860,18 +860,18 @@ impl FortranExtractor {
                     }
                     "call_expression" => {
                         // call_expression: first named child is typically the identifier.
-                        if let Some(ident) = child.named_child(0) {
-                            if ident.kind() == "identifier" {
-                                let callee_name = state.node_text(ident);
-                                state.unresolved_refs.push(UnresolvedRef {
-                                    from_node_id: fn_node_id.to_string(),
-                                    reference_name: callee_name,
-                                    reference_kind: EdgeKind::Calls,
-                                    line: child.start_position().row as u32,
-                                    column: child.start_position().column as u32,
-                                    file_path: state.file_path.clone(),
-                                });
-                            }
+                        if let Some(ident) = child.named_child(0)
+                            && ident.kind() == "identifier"
+                        {
+                            let callee_name = state.node_text(ident);
+                            state.unresolved_refs.push(UnresolvedRef {
+                                from_node_id: fn_node_id.to_string(),
+                                reference_name: callee_name,
+                                reference_kind: EdgeKind::Calls,
+                                line: child.start_position().row as u32,
+                                column: child.start_position().column as u32,
+                                file_path: state.file_path.clone(),
+                            });
                         }
                         // Recurse into arguments for nested calls.
                         Self::extract_call_sites(state, child, fn_node_id);

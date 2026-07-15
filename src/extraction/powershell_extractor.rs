@@ -164,10 +164,10 @@ impl PowerShellExtractor {
         // A pipeline wraps either an assignment_expression or a pipeline_chain > command.
         if let Some(assignment) = find_direct_child_by_kind(node, "assignment_expression") {
             Self::visit_assignment(state, assignment, node);
-        } else if let Some(chain) = find_direct_child_by_kind(node, "pipeline_chain") {
-            if let Some(command) = find_direct_child_by_kind(chain, "command") {
-                Self::visit_command(state, command);
-            }
+        } else if let Some(chain) = find_direct_child_by_kind(node, "pipeline_chain")
+            && let Some(command) = find_direct_child_by_kind(chain, "command")
+        {
+            Self::visit_command(state, command);
         }
     }
 
@@ -311,11 +311,11 @@ impl PowerShellExtractor {
 
         if cmd_name == "Import-Module" {
             // Extract the module name from command_elements.
-            if let Some(elements) = node.child_by_field_name("command_elements") {
-                if let Some(token) = find_direct_child_by_kind(elements, "generic_token") {
-                    let module_name = state.node_text(token);
-                    Self::emit_use_node(state, node, &module_name);
-                }
+            if let Some(elements) = node.child_by_field_name("command_elements")
+                && let Some(token) = find_direct_child_by_kind(elements, "generic_token")
+            {
+                let module_name = state.node_text(token);
+                Self::emit_use_node(state, node, &module_name);
             }
         } else if find_direct_child_by_kind(node, "command_invokation_operator").is_some() {
             // Dot-source command: `. .\Utils.ps1`

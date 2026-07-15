@@ -267,10 +267,10 @@ fn hash_call_sequence(root: Node<'_>, source: &[u8]) -> String {
     let mut stack: Vec<Node<'_>> = vec![root];
     while let Some(node) = stack.pop() {
         let kind = node.kind();
-        if is_call_kind(kind) {
-            if let Some(name) = leftmost_callable_name(node, source) {
-                calls.push(name);
-            }
+        if is_call_kind(kind)
+            && let Some(name) = leftmost_callable_name(node, source)
+        {
+            calls.push(name);
         }
         let mut cursor = node.walk();
         if cursor.goto_first_child() {
@@ -328,10 +328,10 @@ fn leftmost_callable_name(node: Node<'_>, source: &[u8]) -> Option<String> {
                 loop {
                     let ic = inner.node();
                     let ik = ic.kind();
-                    if ik.contains("identifier") {
-                        if let Ok(t) = ic.utf8_text(source) {
-                            last_id = Some(t.to_string());
-                        }
+                    if ik.contains("identifier")
+                        && let Ok(t) = ic.utf8_text(source)
+                    {
+                        last_id = Some(t.to_string());
                     }
                     if !inner.goto_next_sibling() {
                         break;

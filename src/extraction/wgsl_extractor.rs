@@ -514,18 +514,18 @@ impl WgslExtractor {
                 let child = cursor.node();
                 // WGSL: func_call_statement is a statement-level call.
                 // The callee name is the first named child (the callable ident).
-                if child.kind() == "func_call_statement" {
-                    if let Some(callee) = child.named_child(0) {
-                        let callee_name = state.node_text(callee);
-                        state.unresolved_refs.push(UnresolvedRef {
-                            from_node_id: fn_node_id.to_string(),
-                            reference_name: callee_name,
-                            reference_kind: EdgeKind::Calls,
-                            line: child.start_position().row as u32,
-                            column: child.start_position().column as u32,
-                            file_path: state.file_path.clone(),
-                        });
-                    }
+                if child.kind() == "func_call_statement"
+                    && let Some(callee) = child.named_child(0)
+                {
+                    let callee_name = state.node_text(callee);
+                    state.unresolved_refs.push(UnresolvedRef {
+                        from_node_id: fn_node_id.to_string(),
+                        reference_name: callee_name,
+                        reference_kind: EdgeKind::Calls,
+                        line: child.start_position().row as u32,
+                        column: child.start_position().column as u32,
+                        file_path: state.file_path.clone(),
+                    });
                 }
                 Self::extract_call_sites(state, child, fn_node_id);
                 if !cursor.goto_next_sibling() {

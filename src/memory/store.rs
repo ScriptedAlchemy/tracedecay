@@ -140,26 +140,24 @@ impl<'a> MemoryStore<'a> {
             // A >0.9 near-duplicate may skip the insert ONLY when the content
             // is normalized-equivalent (case/whitespace) to the closest fact.
             // Anything weaker still inserts and merely reports.
-            if diff.diff == AddFactDiffKind::NearDuplicate {
-                if let Some(closest_id) = diff.closest_fact_id {
-                    if let Some(closest) = self.get_fact(closest_id).await? {
-                        if normalized_equivalent(&content, &closest.content) {
-                            let fact = self
-                                .merge_duplicate_add(closest, &entities, &request.metadata)
-                                .await?;
-                            self.mark_fact_banks_dirty(fact.category).await?;
-                            return Ok(AddFactOutcome {
-                                fact: Some(fact),
-                                diff: AddFactDiff {
-                                    reason: Some(format!(
-                                        "content-normalized equivalent of fact #{closest_id}; insert skipped"
-                                    )),
-                                    ..diff
-                                },
-                            });
-                        }
-                    }
-                }
+            if diff.diff == AddFactDiffKind::NearDuplicate
+                && let Some(closest_id) = diff.closest_fact_id
+                && let Some(closest) = self.get_fact(closest_id).await?
+                && normalized_equivalent(&content, &closest.content)
+            {
+                let fact = self
+                    .merge_duplicate_add(closest, &entities, &request.metadata)
+                    .await?;
+                self.mark_fact_banks_dirty(fact.category).await?;
+                return Ok(AddFactOutcome {
+                    fact: Some(fact),
+                    diff: AddFactDiff {
+                        reason: Some(format!(
+                            "content-normalized equivalent of fact #{closest_id}; insert skipped"
+                        )),
+                        ..diff
+                    },
+                });
             }
             diff
         };
@@ -366,32 +364,29 @@ impl<'a> MemoryStore<'a> {
     }
 
     pub async fn update_fact(&self, request: UpdateFactRequest) -> Result<FactRecord> {
-        if let Some(content) = request.content.as_ref().map(|value| value.trim()) {
-            if !content.is_empty() {
-                if let Some(reason) = detect_secret_like(content) {
-                    self.get_fact(request.fact_id).await?.ok_or_else(|| {
-                        db_message(
-                            "update_fact",
-                            format!("fact {} does not exist", request.fact_id),
-                        )
-                    })?;
-                    self.log_oplog(
-                        "reject_secret_like",
-                        Some(request.fact_id),
-                        &serde_json::json!({
-                            "content_hash": content_hash(content),
-                            "reason": reason
-                        }),
-                    )
-                    .await?;
-                    return Err(db_message(
-                        "update_fact",
-                        format!(
-                            "rejected_secret_like: content matched secret-likeness rule: {reason}"
-                        ),
-                    ));
-                }
-            }
+        if let Some(content) = request.content.as_ref().map(|value| value.trim())
+            && !content.is_empty()
+            && let Some(reason) = detect_secret_like(content)
+        {
+            self.get_fact(request.fact_id).await?.ok_or_else(|| {
+                db_message(
+                    "update_fact",
+                    format!("fact {} does not exist", request.fact_id),
+                )
+            })?;
+            self.log_oplog(
+                "reject_secret_like",
+                Some(request.fact_id),
+                &serde_json::json!({
+                    "content_hash": content_hash(content),
+                    "reason": reason
+                }),
+            )
+            .await?;
+            return Err(db_message(
+                "update_fact",
+                format!("rejected_secret_like: content matched secret-likeness rule: {reason}"),
+            ));
         }
         self.with_immediate_tx("update_fact", self.update_fact_inner(request))
             .await
@@ -413,13 +408,11 @@ impl<'a> MemoryStore<'a> {
         if content.is_empty() {
             return Err(db_message("update_fact", "fact content cannot be empty"));
         }
-        if content_was_supplied {
-            if let Some(reason) = detect_secret_like(&content) {
-                return Err(db_message(
-                    "update_fact",
-                    format!("rejected_secret_like: content matched secret-likeness rule: {reason}"),
-                ));
-            }
+        if content_was_supplied && let Some(reason) = detect_secret_like(&content) {
+            return Err(db_message(
+                "update_fact",
+                format!("rejected_secret_like: content matched secret-likeness rule: {reason}"),
+            ));
         }
 
         let category = request.category.unwrap_or(existing.category);
@@ -576,20 +569,20 @@ impl<'a> MemoryStore<'a> {
             )
             .await
             .map_err(|e| db_error("remove_fact", e))?;
-        if changed > 0 {
-            if let Some(fact) = existing {
-                self.mark_fact_banks_dirty(fact.category).await?;
-                // Deletes log a content hash, never the content itself.
-                self.log_oplog(
-                    "remove",
-                    Some(fact_id),
-                    &serde_json::json!({
-                        "category": fact.category.as_str(),
-                        "content_hash": content_hash(&fact.content),
-                    }),
-                )
-                .await?;
-            }
+        if changed > 0
+            && let Some(fact) = existing
+        {
+            self.mark_fact_banks_dirty(fact.category).await?;
+            // Deletes log a content hash, never the content itself.
+            self.log_oplog(
+                "remove",
+                Some(fact_id),
+                &serde_json::json!({
+                    "category": fact.category.as_str(),
+                    "content_hash": content_hash(&fact.content),
+                }),
+            )
+            .await?;
         }
         Ok(changed > 0)
     }
@@ -744,10 +737,10 @@ impl<'a> MemoryStore<'a> {
                 let value = row
                     .get::<libsql::Value>(1)
                     .map_err(|e| db_error("fact_vectors", e))?;
-                if let libsql::Value::Blob(bytes) = value {
-                    if let Ok(vector) = HolographicEncoder::deserialize(&bytes) {
-                        vectors.insert(fact_id, vector);
-                    }
+                if let libsql::Value::Blob(bytes) = value
+                    && let Ok(vector) = HolographicEncoder::deserialize(&bytes)
+                {
+                    vectors.insert(fact_id, vector);
                 }
             }
         }
@@ -1857,13 +1850,13 @@ impl<'a> MemoryStore<'a> {
                         ));
                     }
                     let key = (*source_fact_id, *target_fact_id);
-                    if let Some(other) = proposed_relations.insert(key, *relation) {
-                        if relations_conflict(other, *relation) {
-                            return Err(db_message(
-                                "apply_grooming_batch",
-                                "batch proposes contradictory relation kinds for the same facts",
-                            ));
-                        }
+                    if let Some(other) = proposed_relations.insert(key, *relation)
+                        && relations_conflict(other, *relation)
+                    {
+                        return Err(db_message(
+                            "apply_grooming_batch",
+                            "batch proposes contradictory relation kinds for the same facts",
+                        ));
                     }
                     if existing_relations.iter().any(|existing| {
                         existing.source_fact_id == *source_fact_id

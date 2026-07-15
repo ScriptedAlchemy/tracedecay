@@ -516,10 +516,10 @@ impl HlslExtractor {
                 return Some(state.node_text(ident));
             }
             // array_declarator: identifier "[" ... "]"
-            if let Some(arr) = find_direct_child_by_kind(decl, "array_declarator") {
-                if let Some(ident) = find_direct_child_by_kind(arr, "identifier") {
-                    return Some(state.node_text(ident));
-                }
+            if let Some(arr) = find_direct_child_by_kind(decl, "array_declarator")
+                && let Some(ident) = find_direct_child_by_kind(arr, "identifier")
+            {
+                return Some(state.node_text(ident));
             }
         }
         // Fallback: any identifier child

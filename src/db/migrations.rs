@@ -1182,11 +1182,11 @@ async fn migrate_v9(conn: &Connection) -> Result<()> {
             message: format!("v9: failed to read table_info row: {e}"),
             operation: "migrate_v9".to_string(),
         })? {
-            if let Ok(name) = row.get::<String>(1) {
-                if name == "parent_id" {
-                    found = true;
-                    break;
-                }
+            if let Ok(name) = row.get::<String>(1)
+                && name == "parent_id"
+            {
+                found = true;
+                break;
             }
         }
         found

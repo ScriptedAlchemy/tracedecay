@@ -197,11 +197,12 @@ impl ZigExtractor {
                 "field_expression" => {
                     // Handle `const mem = @import("std").mem` where the object
                     // of the field_expression is a builtin_function (@import).
-                    if let Some(obj) = val.child_by_field_name("object") {
-                        if obj.kind() == "builtin_function" && Self::is_import_call(state, obj) {
-                            Self::visit_import(state, node, obj, &name);
-                            return;
-                        }
+                    if let Some(obj) = val.child_by_field_name("object")
+                        && obj.kind() == "builtin_function"
+                        && Self::is_import_call(state, obj)
+                    {
+                        Self::visit_import(state, node, obj, &name);
+                        return;
                     }
                 }
                 _ => {}

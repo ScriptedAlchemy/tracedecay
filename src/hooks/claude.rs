@@ -109,10 +109,10 @@ pub fn evaluate_hook_decision(tool_input: &str) -> String {
         return block_msg().to_string();
     }
 
-    if let Some(prompt) = parsed.get("prompt").and_then(|v| v.as_str()) {
-        if is_code_research_prompt(prompt) {
-            return block_msg().to_string();
-        }
+    if let Some(prompt) = parsed.get("prompt").and_then(|v| v.as_str())
+        && is_code_research_prompt(prompt)
+    {
+        return block_msg().to_string();
     }
 
     String::new()
@@ -172,10 +172,10 @@ pub async fn hook_claude_session_start() -> i32 {
     // safe on every session start and never blocks it. Gated on a resolved
     // project root and the real session cwd so the linked-worktree detection in
     // `plan_hook_event` sees the session tree rather than the daemon's cwd.
-    if let Some(root) = root.as_ref() {
-        if let Some(event) = claude_session_start_hook_event(&parsed) {
-            crate::daemon::notify_hook_event(root, event).await;
-        }
+    if let Some(root) = root.as_ref()
+        && let Some(event) = claude_session_start_hook_event(&parsed)
+    {
+        crate::daemon::notify_hook_event(root, event).await;
     }
     if session_start_from_compaction(&event) {
         append_context_recovery_hint(&mut context);

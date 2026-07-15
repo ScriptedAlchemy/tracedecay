@@ -329,10 +329,8 @@ async fn build_state_inner(
         automation_scheduler_reconciler,
         automation_writer,
     };
-    if repair_memory_on_startup {
-        if let Err(err) = memory_api::repair_derived_memory(&state).await {
-            eprintln!("Dashboard memory repair skipped: {err}");
-        }
+    if repair_memory_on_startup && let Err(err) = memory_api::repair_derived_memory(&state).await {
+        eprintln!("Dashboard memory repair skipped: {err}");
     }
     // Pre-count non-usage messages in the background so the first Savings
     // tab paint doesn't pay the initial BPE pass over the session store.

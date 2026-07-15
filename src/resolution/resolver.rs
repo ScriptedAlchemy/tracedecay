@@ -419,36 +419,34 @@ impl<'a> ReferenceResolver<'a> {
     /// Strategy 1: try matching the reference name against qualified names.
     fn try_qualified_match(&self, uref: &UnresolvedRef) -> Option<ResolvedRef> {
         // Direct lookup first
-        if let Some(candidates) = self.qualified_name_cache.get(&uref.reference_name) {
-            if let Some(node) = candidates
+        if let Some(candidates) = self.qualified_name_cache.get(&uref.reference_name)
+            && let Some(node) = candidates
                 .iter()
                 .find(|n| kind_compatible(uref.reference_kind, &n.kind))
-            {
-                return Some(ResolvedRef {
-                    original: uref.clone(),
-                    target_node_id: node.id.clone(),
-                    confidence: 0.95,
-                    resolved_by: "qualified-match".to_string(),
-                });
-            }
+        {
+            return Some(ResolvedRef {
+                original: uref.clone(),
+                target_node_id: node.id.clone(),
+                confidence: 0.95,
+                resolved_by: "qualified-match".to_string(),
+            });
         }
 
         // Suffix match via pre-built suffix index — O(1) lookup instead of
         // scanning the entire qualified_name_cache.
         if let Some(full_names) = self.suffix_cache.get(&uref.reference_name) {
             for full_name in full_names {
-                if let Some(candidates) = self.qualified_name_cache.get(full_name) {
-                    if let Some(node) = candidates
+                if let Some(candidates) = self.qualified_name_cache.get(full_name)
+                    && let Some(node) = candidates
                         .iter()
                         .find(|n| kind_compatible(uref.reference_kind, &n.kind))
-                    {
-                        return Some(ResolvedRef {
-                            original: uref.clone(),
-                            target_node_id: node.id.clone(),
-                            confidence: 0.95,
-                            resolved_by: "qualified-match".to_string(),
-                        });
-                    }
+                {
+                    return Some(ResolvedRef {
+                        original: uref.clone(),
+                        target_node_id: node.id.clone(),
+                        confidence: 0.95,
+                        resolved_by: "qualified-match".to_string(),
+                    });
                 }
             }
         }
@@ -671,10 +669,10 @@ impl<'a> ReferenceResolver<'a> {
             }
 
             // Import match bonus: caller explicitly imports a name that matches
-            if let Some(imports) = import_index.get(&uref.file_path) {
-                if imports.contains(&node.name) {
-                    score += 30;
-                }
+            if let Some(imports) = import_index.get(&uref.file_path)
+                && imports.contains(&node.name)
+            {
+                score += 30;
             }
 
             if score > best_score {

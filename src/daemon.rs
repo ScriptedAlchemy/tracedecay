@@ -2642,11 +2642,10 @@ async fn serve_broker_socket_client(
     if let Some(key) = engine
         .claim_catalog_refresh(&handshake, &first_request_line)
         .await
+        && let Err(error) = write_tool_list_changed_notification(&mut transport).await
     {
-        if let Err(error) = write_tool_list_changed_notification(&mut transport).await {
-            engine.release_catalog_refresh(key).await;
-            return Err(error);
-        }
+        engine.release_catalog_refresh(key).await;
+        return Err(error);
     }
     let initialize_handled = match server.as_deref() {
         Some(server) => {

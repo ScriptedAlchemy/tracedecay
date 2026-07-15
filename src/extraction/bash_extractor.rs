@@ -233,52 +233,52 @@ impl BashExtractor {
         }
 
         // Find the variable_assignment child to get the name.
-        if let Some(assignment) = find_direct_child_by_kind(node, "variable_assignment") {
-            if let Some(name_node) = assignment.child_by_field_name("name") {
-                let name = state.node_text(name_node);
-                let start_line = node.start_position().row as u32;
-                let end_line = node.end_position().row as u32;
-                let start_column = node.start_position().column as u32;
-                let end_column = node.end_position().column as u32;
-                let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-                let id = generate_node_id(&state.file_path, &NodeKind::Const, &name, start_line);
+        if let Some(assignment) = find_direct_child_by_kind(node, "variable_assignment")
+            && let Some(name_node) = assignment.child_by_field_name("name")
+        {
+            let name = state.node_text(name_node);
+            let start_line = node.start_position().row as u32;
+            let end_line = node.end_position().row as u32;
+            let start_column = node.start_position().column as u32;
+            let end_column = node.end_position().column as u32;
+            let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
+            let id = generate_node_id(&state.file_path, &NodeKind::Const, &name, start_line);
 
-                let graph_node = Node {
-                    id: id.clone(),
-                    kind: NodeKind::Const,
-                    name,
-                    qualified_name,
-                    file_path: state.file_path.clone(),
-                    start_line,
-                    attrs_start_line: start_line,
-                    end_line,
-                    start_column,
-                    end_column,
-                    signature: Some(text.trim().to_string()),
-                    docstring: None,
-                    visibility: Visibility::Pub,
-                    is_async: false,
-                    branches: 0,
-                    loops: 0,
-                    returns: 0,
-                    max_nesting: 0,
-                    unsafe_blocks: 0,
-                    unchecked_calls: 0,
-                    assertions: 0,
-                    updated_at: state.timestamp,
-                    parent_id: None,
-                };
-                state.nodes.push(graph_node);
+            let graph_node = Node {
+                id: id.clone(),
+                kind: NodeKind::Const,
+                name,
+                qualified_name,
+                file_path: state.file_path.clone(),
+                start_line,
+                attrs_start_line: start_line,
+                end_line,
+                start_column,
+                end_column,
+                signature: Some(text.trim().to_string()),
+                docstring: None,
+                visibility: Visibility::Pub,
+                is_async: false,
+                branches: 0,
+                loops: 0,
+                returns: 0,
+                max_nesting: 0,
+                unsafe_blocks: 0,
+                unchecked_calls: 0,
+                assertions: 0,
+                updated_at: state.timestamp,
+                parent_id: None,
+            };
+            state.nodes.push(graph_node);
 
-                // Contains edge from parent.
-                if let Some(parent_id) = state.parent_node_id() {
-                    state.edges.push(Edge {
-                        source: parent_id.to_string(),
-                        target: id,
-                        kind: EdgeKind::Contains,
-                        line: Some(start_line),
-                    });
-                }
+            // Contains edge from parent.
+            if let Some(parent_id) = state.parent_node_id() {
+                state.edges.push(Edge {
+                    source: parent_id.to_string(),
+                    target: id,
+                    kind: EdgeKind::Contains,
+                    line: Some(start_line),
+                });
             }
         }
     }

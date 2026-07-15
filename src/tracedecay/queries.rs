@@ -32,10 +32,11 @@ impl TraceDecay {
         // candidate set with exact `name = query` hits first, then dedup.
         if !trimmed_query.is_empty() {
             let mut exact_names = vec![trimmed_query.to_string()];
-            if let Some(short) = trimmed_query.rsplit("::").next() {
-                if short != trimmed_query && !short.is_empty() {
-                    exact_names.push(short.to_string());
-                }
+            if let Some(short) = trimmed_query.rsplit("::").next()
+                && short != trimmed_query
+                && !short.is_empty()
+            {
+                exact_names.push(short.to_string());
             }
             let exact = self
                 .db
@@ -845,10 +846,10 @@ fn normalize_lookup_path(project_root: &std::path::Path, raw: &str) -> String {
         // symlinks, `..` segments, and trailing slashes uniformly. If
         // either fails (file doesn't exist on disk, project root
         // moved), fall back to a raw prefix strip.
-        if let (Ok(abs), Ok(root)) = (path.canonicalize(), project_root.canonicalize()) {
-            if let Ok(rel) = abs.strip_prefix(&root) {
-                return rel.to_string_lossy().replace('\\', "/");
-            }
+        if let (Ok(abs), Ok(root)) = (path.canonicalize(), project_root.canonicalize())
+            && let Ok(rel) = abs.strip_prefix(&root)
+        {
+            return rel.to_string_lossy().replace('\\', "/");
         }
         let root_str = project_root.to_string_lossy();
         if let Some(rel) = forward.strip_prefix(root_str.as_ref()) {

@@ -107,10 +107,10 @@ pub async fn find_stale_files(
 ) -> Result<Vec<String>> {
     let mut stale = Vec::new();
     for (path, current_hash) in current_hashes {
-        if let Some(file_record) = db.get_file(path).await? {
-            if file_record.content_hash != *current_hash {
-                stale.push(path.clone());
-            }
+        if let Some(file_record) = db.get_file(path).await?
+            && file_record.content_hash != *current_hash
+        {
+            stale.push(path.clone());
         }
     }
     Ok(stale)

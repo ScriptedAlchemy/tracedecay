@@ -208,12 +208,11 @@ impl Drop for AuthorityInner {
                 }
                 ProcessLease::Authority { .. } | ProcessLease::Deletion { .. } => false,
             });
-        if should_remove {
-            if let Some(ProcessLease::Authority { held, .. }) =
+        if should_remove
+            && let Some(ProcessLease::Authority { held, .. }) =
                 leases.remove(&self.identity.database_key)
-            {
-                unlock_held(held);
-            }
+        {
+            unlock_held(held);
         }
     }
 }

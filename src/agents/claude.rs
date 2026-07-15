@@ -1090,27 +1090,24 @@ fn install_clean_local_config() {
     let project_path = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
 
     let mcp_json_path = project_path.join(".mcp.json");
-    if mcp_json_path.exists() {
-        if let Ok(contents) = std::fs::read_to_string(&mcp_json_path) {
-            if let Ok(mut mcp_val) = serde_json::from_str::<serde_json::Value>(&contents) {
-                if let Some(servers) = mcp_val
-                    .get_mut("mcpServers")
-                    .and_then(|v| v.as_object_mut())
-                {
-                    let removed = servers.remove("tracedecay").is_some();
-                    if removed {
-                        if servers.is_empty() {
-                            std::fs::remove_file(&mcp_json_path).ok();
-                            eprintln!(
-                                "\x1b[32m✔\x1b[0m Removed local .mcp.json (plugin provides the MCP server)"
-                            );
-                        } else if backup_and_write_json(&mcp_json_path, &mcp_val) {
-                            eprintln!(
-                                "\x1b[32m✔\x1b[0m Removed tracedecay from local .mcp.json (plugin provides the MCP server)"
-                            );
-                        }
-                    }
-                }
+    if mcp_json_path.exists()
+        && let Ok(contents) = std::fs::read_to_string(&mcp_json_path)
+        && let Ok(mut mcp_val) = serde_json::from_str::<serde_json::Value>(&contents)
+        && let Some(servers) = mcp_val
+            .get_mut("mcpServers")
+            .and_then(|v| v.as_object_mut())
+    {
+        let removed = servers.remove("tracedecay").is_some();
+        if removed {
+            if servers.is_empty() {
+                std::fs::remove_file(&mcp_json_path).ok();
+                eprintln!(
+                    "\x1b[32m✔\x1b[0m Removed local .mcp.json (plugin provides the MCP server)"
+                );
+            } else if backup_and_write_json(&mcp_json_path, &mcp_val) {
+                eprintln!(
+                    "\x1b[32m✔\x1b[0m Removed tracedecay from local .mcp.json (plugin provides the MCP server)"
+                );
             }
         }
     }
@@ -1214,14 +1211,13 @@ fn uninstall_stale_mcp(settings: &mut serde_json::Value) -> bool {
     if let Some(servers) = settings
         .get_mut("mcpServers")
         .and_then(|v| v.as_object_mut())
+        && servers.remove("tracedecay").is_some()
     {
-        if servers.remove("tracedecay").is_some() {
-            if servers.is_empty() {
-                settings.as_object_mut().map(|o| o.remove("mcpServers"));
-            }
-            eprintln!("\x1b[32m✔\x1b[0m Removed stale tracedecay MCP server from settings.json");
-            return true;
+        if servers.is_empty() {
+            settings.as_object_mut().map(|o| o.remove("mcpServers"));
         }
+        eprintln!("\x1b[32m✔\x1b[0m Removed stale tracedecay MCP server from settings.json");
+        return true;
     }
     false
 }
@@ -1696,20 +1692,20 @@ pub fn check_install_stale() {
     if !plugin_marketplace_manifest_path(&home).exists() {
         // Still warn if the current version expects permissions not present.
         let user_settings_path = home.join(".claude").join("settings.json");
-        if let Ok(contents) = std::fs::read_to_string(&user_settings_path) {
-            if let Ok(settings) = serde_json::from_str::<serde_json::Value>(&contents) {
-                warn_missing_permissions(&settings);
-            }
+        if let Ok(contents) = std::fs::read_to_string(&user_settings_path)
+            && let Ok(settings) = serde_json::from_str::<serde_json::Value>(&contents)
+        {
+            warn_missing_permissions(&settings);
         }
         return;
     }
 
     // --- user-level: permissions warning + config-managed migration ---
     let user_settings_path = home.join(".claude").join("settings.json");
-    if let Ok(contents) = std::fs::read_to_string(&user_settings_path) {
-        if let Ok(settings) = serde_json::from_str::<serde_json::Value>(&contents) {
-            warn_missing_permissions(&settings);
-        }
+    if let Ok(contents) = std::fs::read_to_string(&user_settings_path)
+        && let Ok(settings) = serde_json::from_str::<serde_json::Value>(&contents)
+    {
+        warn_missing_permissions(&settings);
     }
     migrate_off_config_managed(&home);
 

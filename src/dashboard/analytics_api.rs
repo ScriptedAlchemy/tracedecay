@@ -173,8 +173,8 @@ async fn durable_analytics_rows(
     lcm_conn: Option<&libsql::Connection>,
     project_id: &str,
 ) -> Option<Vec<Value>> {
-    if let Some(db) = global_db {
-        if let Ok(events) = db
+    if let Some(db) = global_db
+        && let Ok(events) = db
             .query_analytics_events(&AnalyticsEventQuery {
                 provider: None,
                 project_id: Some(project_id.to_string()),
@@ -184,11 +184,9 @@ async fn durable_analytics_rows(
                 limit: ANALYTICS_EVENT_LIMIT,
             })
             .await
-        {
-            if !events.is_empty() {
-                return Some(events.iter().map(durable_analytics_event_row).collect());
-            }
-        }
+        && !events.is_empty()
+    {
+        return Some(events.iter().map(durable_analytics_event_row).collect());
     }
 
     let rows = query_rows(

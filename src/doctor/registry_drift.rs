@@ -144,17 +144,17 @@ fn reconcile_one_store_root(
         .map(|parent| parent.join(crate::config::CONFIG_FILENAME));
     let mut config_rewritten = None;
     let mut warning = None;
-    if let Some(config_path) = config_path {
-        if config_path.is_file() {
-            match reconcile_config_root_dir(&config_path, canonical) {
-                Ok(true) => config_rewritten = Some(config_path),
-                Ok(false) => {}
-                Err(message) => {
-                    if manifest_rewritten {
-                        warning = Some(message);
-                    } else {
-                        return Err(message);
-                    }
+    if let Some(config_path) = config_path
+        && config_path.is_file()
+    {
+        match reconcile_config_root_dir(&config_path, canonical) {
+            Ok(true) => config_rewritten = Some(config_path),
+            Ok(false) => {}
+            Err(message) => {
+                if manifest_rewritten {
+                    warning = Some(message);
+                } else {
+                    return Err(message);
                 }
             }
         }

@@ -483,10 +483,10 @@ impl<'a> GraphQueryManager<'a> {
             let src: String = row.get(0).unwrap_or_default();
             let tgt: String = row.get(1).unwrap_or_default();
 
-            if let Some(ref pfx) = prefix {
-                if !src.starts_with(pfx.as_str()) || !tgt.starts_with(pfx.as_str()) {
-                    continue;
-                }
+            if let Some(ref pfx) = prefix
+                && (!src.starts_with(pfx.as_str()) || !tgt.starts_with(pfx.as_str()))
+            {
+                continue;
             }
 
             adj.entry(src).or_default().insert(tgt);
@@ -495,10 +495,10 @@ impl<'a> GraphQueryManager<'a> {
         // Ensure every known file appears as a key (even leaf nodes with no deps).
         let all_files = self.db.get_all_files().await?;
         for file in all_files {
-            if let Some(ref pfx) = prefix {
-                if !file.path.starts_with(pfx.as_str()) {
-                    continue;
-                }
+            if let Some(ref pfx) = prefix
+                && !file.path.starts_with(pfx.as_str())
+            {
+                continue;
             }
             adj.entry(file.path).or_default();
         }

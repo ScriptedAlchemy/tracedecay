@@ -747,18 +747,18 @@ impl ObjcExtractor {
         if cursor.goto_first_child() {
             loop {
                 let child = cursor.node();
-                if child.kind() == "type_name" {
-                    if let Some(type_id) = find_direct_child_by_kind(child, "type_identifier") {
-                        let name = state.node_text(type_id);
-                        state.unresolved_refs.push(UnresolvedRef {
-                            from_node_id: from_node_id.to_string(),
-                            reference_name: name,
-                            reference_kind: EdgeKind::Implements,
-                            line,
-                            column: type_id.start_position().column as u32,
-                            file_path: state.file_path.clone(),
-                        });
-                    }
+                if child.kind() == "type_name"
+                    && let Some(type_id) = find_direct_child_by_kind(child, "type_identifier")
+                {
+                    let name = state.node_text(type_id);
+                    state.unresolved_refs.push(UnresolvedRef {
+                        from_node_id: from_node_id.to_string(),
+                        reference_name: name,
+                        reference_kind: EdgeKind::Implements,
+                        line,
+                        column: type_id.start_position().column as u32,
+                        file_path: state.file_path.clone(),
+                    });
                 }
                 if !cursor.goto_next_sibling() {
                     break;
@@ -845,22 +845,20 @@ impl ObjcExtractor {
 
     /// Extract the property name from a `property_declaration` node.
     fn extract_property_name(state: &ExtractionState, node: TsNode<'_>) -> Option<String> {
-        if let Some(struct_decl) = find_direct_child_by_kind(node, "struct_declaration") {
-            if let Some(struct_declarator) =
+        if let Some(struct_decl) = find_direct_child_by_kind(node, "struct_declaration")
+            && let Some(struct_declarator) =
                 find_direct_child_by_kind(struct_decl, "struct_declarator")
+        {
+            // Direct identifier
+            if let Some(ident) = find_direct_child_by_kind(struct_declarator, "identifier") {
+                return Some(state.node_text(ident));
+            }
+            // Pointer declarator (NSString *name)
+            if let Some(ptr_decl) =
+                find_direct_child_by_kind(struct_declarator, "pointer_declarator")
+                && let Some(ident) = find_direct_child_by_kind(ptr_decl, "identifier")
             {
-                // Direct identifier
-                if let Some(ident) = find_direct_child_by_kind(struct_declarator, "identifier") {
-                    return Some(state.node_text(ident));
-                }
-                // Pointer declarator (NSString *name)
-                if let Some(ptr_decl) =
-                    find_direct_child_by_kind(struct_declarator, "pointer_declarator")
-                {
-                    if let Some(ident) = find_direct_child_by_kind(ptr_decl, "identifier") {
-                        return Some(state.node_text(ident));
-                    }
-                }
+                return Some(state.node_text(ident));
             }
         }
         None
@@ -1314,10 +1312,10 @@ impl ObjcExtractor {
 
     /// Extract the function name from a `function_definition` or declaration node.
     fn extract_function_name(state: &ExtractionState, node: TsNode<'_>) -> Option<String> {
-        if let Some(declarator) = find_descendant_by_kind(node, "function_declarator") {
-            if let Some(ident) = find_direct_child_by_kind(declarator, "identifier") {
-                return Some(state.node_text(ident));
-            }
+        if let Some(declarator) = find_descendant_by_kind(node, "function_declarator")
+            && let Some(ident) = find_direct_child_by_kind(declarator, "identifier")
+        {
+            return Some(state.node_text(ident));
         }
         None
     }

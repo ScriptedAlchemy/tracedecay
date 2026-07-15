@@ -755,10 +755,10 @@ impl<'a> GraphTraverser<'a> {
 
     /// Checks whether a node passes the optional `node_kinds` filter.
     fn node_matches_filter(node: &Node, opts: &TraversalOptions) -> bool {
-        if let Some(ref kinds) = opts.node_kinds {
-            if !kinds.is_empty() {
-                return kinds.contains(&node.kind);
-            }
+        if let Some(ref kinds) = opts.node_kinds
+            && !kinds.is_empty()
+        {
+            return kinds.contains(&node.kind);
         }
         true
     }

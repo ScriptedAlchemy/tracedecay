@@ -90,18 +90,17 @@ pub(crate) async fn patch_project_settings(
             "max_file_size must be at least 1 byte",
         ));
     }
-    if let Some(sync) = &patch.sync {
-        if let Some(secs) = sync.auto_track_pr_poll_secs {
-            if secs < crate::config::MIN_AUTO_TRACK_PR_POLL_SECS {
-                errors.push(validation_error(
-                    "auto_track_pr_poll_secs",
-                    &format!(
-                        "auto_track_pr_poll_secs must be at least {} seconds",
-                        crate::config::MIN_AUTO_TRACK_PR_POLL_SECS
-                    ),
-                ));
-            }
-        }
+    if let Some(sync) = &patch.sync
+        && let Some(secs) = sync.auto_track_pr_poll_secs
+        && secs < crate::config::MIN_AUTO_TRACK_PR_POLL_SECS
+    {
+        errors.push(validation_error(
+            "auto_track_pr_poll_secs",
+            &format!(
+                "auto_track_pr_poll_secs must be at least {} seconds",
+                crate::config::MIN_AUTO_TRACK_PR_POLL_SECS
+            ),
+        ));
     }
     if !errors.is_empty() {
         return Err(validation_failed(&errors));
@@ -158,13 +157,13 @@ pub(crate) async fn patch_user_settings(
         .map_err(|err| patch_shape_error("user settings", &err))?;
 
     let mut errors = Vec::new();
-    if let Some(debounce) = &patch.watcher_debounce {
-        if user_config::parse_duration(debounce).is_none() {
-            errors.push(validation_error(
-                "watcher_debounce",
-                "watcher_debounce must be a duration like \"2s\", \"15s\", or \"1m\"",
-            ));
-        }
+    if let Some(debounce) = &patch.watcher_debounce
+        && user_config::parse_duration(debounce).is_none()
+    {
+        errors.push(validation_error(
+            "watcher_debounce",
+            "watcher_debounce must be a duration like \"2s\", \"15s\", or \"1m\"",
+        ));
     }
     if patch.extraction_timeout_secs == Some(0) {
         errors.push(validation_error(

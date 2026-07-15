@@ -306,11 +306,11 @@ pub fn run() -> std::io::Result<()> {
         };
         for i in 0..populated {
             let slot = (start_slot + i) % RING_CAPACITY;
-            if let Some(e) = reader.entry(slot) {
-                if e.delta > 0 {
-                    push_recent_update(&mut recent_updates, &e.project, &e.tool_name);
-                    entries.push(e);
-                }
+            if let Some(e) = reader.entry(slot)
+                && e.delta > 0
+            {
+                push_recent_update(&mut recent_updates, &e.project, &e.tool_name);
+                entries.push(e);
             }
         }
     }
@@ -354,35 +354,35 @@ fn monitor_loop(
 
     loop {
         // Poll for key events (100ms timeout = our refresh rate).
-        if event::poll(std::time::Duration::from_millis(100))? {
-            if let event::Event::Key(key) = event::read()? {
-                match key.code {
-                    event::KeyCode::Char('c')
-                        if key.modifiers.contains(event::KeyModifiers::CONTROL) =>
-                    {
-                        break;
-                    }
-                    event::KeyCode::Char('r')
-                        if key.modifiers.contains(event::KeyModifiers::CONTROL) =>
-                    {
-                        entries.clear();
-                        recent_updates.clear();
-                        scroll_offset = 0;
-                    }
-                    event::KeyCode::Up => {
-                        scroll_offset = scroll_offset.saturating_add(1);
-                    }
-                    event::KeyCode::Down => {
-                        scroll_offset = scroll_offset.saturating_sub(1);
-                    }
-                    event::KeyCode::PageUp => {
-                        scroll_offset = scroll_offset.saturating_add(last_log_lines.max(1));
-                    }
-                    event::KeyCode::PageDown => {
-                        scroll_offset = scroll_offset.saturating_sub(last_log_lines.max(1));
-                    }
-                    _ => {}
+        if event::poll(std::time::Duration::from_millis(100))?
+            && let event::Event::Key(key) = event::read()?
+        {
+            match key.code {
+                event::KeyCode::Char('c')
+                    if key.modifiers.contains(event::KeyModifiers::CONTROL) =>
+                {
+                    break;
                 }
+                event::KeyCode::Char('r')
+                    if key.modifiers.contains(event::KeyModifiers::CONTROL) =>
+                {
+                    entries.clear();
+                    recent_updates.clear();
+                    scroll_offset = 0;
+                }
+                event::KeyCode::Up => {
+                    scroll_offset = scroll_offset.saturating_add(1);
+                }
+                event::KeyCode::Down => {
+                    scroll_offset = scroll_offset.saturating_sub(1);
+                }
+                event::KeyCode::PageUp => {
+                    scroll_offset = scroll_offset.saturating_add(last_log_lines.max(1));
+                }
+                event::KeyCode::PageDown => {
+                    scroll_offset = scroll_offset.saturating_sub(last_log_lines.max(1));
+                }
+                _ => {}
             }
         }
 

@@ -71,10 +71,8 @@ pub(crate) fn shell_invocations(command: &str) -> Vec<ShellInvocation> {
 }
 
 fn shell_words_for_platform(command: &str, windows: bool) -> Vec<String> {
-    if !windows {
-        if let Ok(words) = shell_words::split(command) {
-            return words;
-        }
+    if !windows && let Ok(words) = shell_words::split(command) {
+        return words;
     }
     fallback_shell_words(command, windows)
 }

@@ -1056,10 +1056,10 @@ impl GoExtractor {
         if let Some(type_id) = find_direct_child_by_kind(param, "type_identifier") {
             return Some(state.node_text(type_id));
         }
-        if let Some(ptr_type) = find_direct_child_by_kind(param, "pointer_type") {
-            if let Some(type_id) = find_direct_child_by_kind(ptr_type, "type_identifier") {
-                return Some(state.node_text(type_id));
-            }
+        if let Some(ptr_type) = find_direct_child_by_kind(param, "pointer_type")
+            && let Some(type_id) = find_direct_child_by_kind(ptr_type, "type_identifier")
+        {
+            return Some(state.node_text(type_id));
         }
         None
     }

@@ -214,10 +214,10 @@ pub(crate) async fn non_usage_message_tokens(
 
     let fingerprint = overlay_fingerprint(conn).await?;
     let mut cached = state.token_counts.overlay.lock().await;
-    if let Some(existing) = cached.as_ref() {
-        if existing.fingerprint == fingerprint {
-            return Some(existing.overlay.clone());
-        }
+    if let Some(existing) = cached.as_ref()
+        && existing.fingerprint == fingerprint
+    {
+        return Some(existing.overlay.clone());
     }
 
     let overlay = Arc::new(build_overlay(state, conn).await?);

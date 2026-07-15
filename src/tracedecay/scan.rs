@@ -181,14 +181,14 @@ impl TraceDecay {
                 // Prune directories covered by an exclude glob before descending.
                 // This prevents entering large trees (e.g. node_modules) and
                 // avoids following symlinks that cycle back into source directories.
-                if e.file_type().is_dir() {
-                    if let Ok(rel) = e.path().strip_prefix(root) {
-                        let rel_str = rel.to_string_lossy().replace('\\', "/");
-                        if is_excluded_dir(&rel_str, config)
-                            && !include_may_match_descendant(&rel_str, config)
-                        {
-                            return false;
-                        }
+                if e.file_type().is_dir()
+                    && let Ok(rel) = e.path().strip_prefix(root)
+                {
+                    let rel_str = rel.to_string_lossy().replace('\\', "/");
+                    if is_excluded_dir(&rel_str, config)
+                        && !include_may_match_descendant(&rel_str, config)
+                    {
+                        return false;
                     }
                 }
                 true
@@ -310,10 +310,10 @@ impl TraceDecay {
             if !entry.file_type().is_file() {
                 continue;
             }
-            if let Some(rel_str) = self.accept_file(entry.path(), supported_exts) {
-                if is_included(&rel_str, &self.config) {
-                    files.push(rel_str);
-                }
+            if let Some(rel_str) = self.accept_file(entry.path(), supported_exts)
+                && is_included(&rel_str, &self.config)
+            {
+                files.push(rel_str);
             }
         }
         files

@@ -239,10 +239,10 @@ fn project_entry(
 fn repo_label(project: &CodeProjectRecord) -> String {
     if let Some(git_common_dir) = &project.git_common_dir {
         let path = Path::new(git_common_dir);
-        if path.file_name().and_then(|name| name.to_str()) == Some(".git") {
-            if let Some(parent) = path.parent() {
-                return path_label(parent.to_string_lossy().as_ref());
-            }
+        if path.file_name().and_then(|name| name.to_str()) == Some(".git")
+            && let Some(parent) = path.parent()
+        {
+            return path_label(parent.to_string_lossy().as_ref());
         }
     }
     path_label(&project.display_root)

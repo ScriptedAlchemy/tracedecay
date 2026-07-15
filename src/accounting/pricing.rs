@@ -137,10 +137,10 @@ fn parse_litellm_json(json: &str) -> Option<HashMap<String, ModelPricing>> {
 
         // Skip Bedrock/Vertex provider-prefixed entries -- we want the
         // canonical model names that match what Claude Code reports.
-        if let Some(provider) = entry.get("litellm_provider").and_then(|v| v.as_str()) {
-            if provider.starts_with("bedrock") || provider.starts_with("vertex") {
-                continue;
-            }
+        if let Some(provider) = entry.get("litellm_provider").and_then(|v| v.as_str())
+            && (provider.starts_with("bedrock") || provider.starts_with("vertex"))
+        {
+            continue;
         }
 
         let input = entry

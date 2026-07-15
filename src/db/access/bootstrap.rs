@@ -148,10 +148,8 @@ impl Drop for BootstrapAuthority {
             lease.refs = lease.refs.saturating_sub(1);
             lease.refs == 0
         });
-        if should_remove {
-            if let Some(lease) = leases.remove(&self.lock_path) {
-                let _ = fs2::FileExt::unlock(&lease.held);
-            }
+        if should_remove && let Some(lease) = leases.remove(&self.lock_path) {
+            let _ = fs2::FileExt::unlock(&lease.held);
         }
     }
 }

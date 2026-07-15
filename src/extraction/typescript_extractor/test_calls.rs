@@ -229,14 +229,13 @@ fn visit_test_body(state: &mut ExtractionState, body: TsNode<'_>, test_id: &str)
     loop {
         let stmt = cursor.node();
         let mut handled = false;
-        if stmt.kind() == "expression_statement" {
-            if let Some(call) = find_direct_child_by_kind(stmt, "call_expression") {
-                if is_test_framework_call(state, call) {
-                    // Nested describe/it — recurse as its own test node.
-                    visit_test_call(state, call);
-                    handled = true;
-                }
-            }
+        if stmt.kind() == "expression_statement"
+            && let Some(call) = find_direct_child_by_kind(stmt, "call_expression")
+            && is_test_framework_call(state, call)
+        {
+            // Nested describe/it — recurse as its own test node.
+            visit_test_call(state, call);
+            handled = true;
         }
         if !handled {
             // Declarations inside describe (helpers, consts, nested classes)

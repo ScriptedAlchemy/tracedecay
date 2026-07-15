@@ -75,11 +75,12 @@ pub(super) async fn merge_snapshot(
                     rows_copied: prior_rows_copied.saturating_add(outcome.rows_copied),
                 },
             )?;
-            if let Some(marker) = existing_marker {
-                if outcome.rows_copied == 0 && !repaired_payloads {
-                    outcome.already_migrated = true;
-                    outcome.rows_copied = marker.rows_copied;
-                }
+            if let Some(marker) = existing_marker
+                && outcome.rows_copied == 0
+                && !repaired_payloads
+            {
+                outcome.already_migrated = true;
+                outcome.rows_copied = marker.rows_copied;
             }
             Ok(outcome)
         }

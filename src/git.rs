@@ -40,10 +40,10 @@ pub fn git_program() -> &'static OsStr {
 fn resolve_git_program() -> OsString {
     // 1. Explicit override wins. Empty values are ignored so an accidental
     //    `GIT=` does not break spawns.
-    if let Some(value) = std::env::var_os("GIT") {
-        if !value.is_empty() {
-            return value;
-        }
+    if let Some(value) = std::env::var_os("GIT")
+        && !value.is_empty()
+    {
+        return value;
     }
 
     // 2. which-style lookup over PATH (+ PATHEXT on Windows).

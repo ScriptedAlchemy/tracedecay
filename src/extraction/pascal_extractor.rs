@@ -1310,27 +1310,26 @@ impl PascalExtractor {
                         // In tree-sitter-pascal, a bare procedure call appears as
                         // statement > identifier > ;
                         let first_child = child.named_child(0);
-                        if let Some(fc) = first_child {
-                            if fc.kind() == "identifier" {
-                                // Check there's no exprCall - just a bare identifier.
-                                let has_call =
-                                    find_direct_child_by_kind(child, "exprCall").is_some();
-                                if !has_call {
-                                    let callee_name = state.node_text(fc);
-                                    // Skip some keywords that aren't calls.
-                                    if !matches!(
-                                        callee_name.as_str(),
-                                        "inherited" | "break" | "continue" | "exit"
-                                    ) {
-                                        state.unresolved_refs.push(UnresolvedRef {
-                                            from_node_id: fn_node_id.to_string(),
-                                            reference_name: callee_name,
-                                            reference_kind: EdgeKind::Calls,
-                                            line: fc.start_position().row as u32,
-                                            column: fc.start_position().column as u32,
-                                            file_path: state.file_path.clone(),
-                                        });
-                                    }
+                        if let Some(fc) = first_child
+                            && fc.kind() == "identifier"
+                        {
+                            // Check there's no exprCall - just a bare identifier.
+                            let has_call = find_direct_child_by_kind(child, "exprCall").is_some();
+                            if !has_call {
+                                let callee_name = state.node_text(fc);
+                                // Skip some keywords that aren't calls.
+                                if !matches!(
+                                    callee_name.as_str(),
+                                    "inherited" | "break" | "continue" | "exit"
+                                ) {
+                                    state.unresolved_refs.push(UnresolvedRef {
+                                        from_node_id: fn_node_id.to_string(),
+                                        reference_name: callee_name,
+                                        reference_kind: EdgeKind::Calls,
+                                        line: fc.start_position().row as u32,
+                                        column: fc.start_position().column as u32,
+                                        file_path: state.file_path.clone(),
+                                    });
                                 }
                             }
                         }

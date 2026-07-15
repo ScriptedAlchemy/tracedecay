@@ -216,10 +216,10 @@ impl GlslExtractor {
     }
 
     fn extract_function_name(state: &ExtractionState, node: TsNode<'_>) -> Option<String> {
-        if let Some(declarator) = find_descendant_by_kind(node, "function_declarator") {
-            if let Some(ident) = find_direct_child_by_kind(declarator, "identifier") {
-                return Some(state.node_text(ident));
-            }
+        if let Some(declarator) = find_descendant_by_kind(node, "function_declarator")
+            && let Some(ident) = find_direct_child_by_kind(declarator, "identifier")
+        {
+            return Some(state.node_text(ident));
         }
         None
     }
@@ -380,10 +380,10 @@ impl GlslExtractor {
                 return Some(state.node_text(ident));
             }
             // array declarator: `float arr[3] = ...`
-            if let Some(arr) = find_direct_child_by_kind(init_decl, "array_declarator") {
-                if let Some(ident) = find_direct_child_by_kind(arr, "identifier") {
-                    return Some(state.node_text(ident));
-                }
+            if let Some(arr) = find_direct_child_by_kind(init_decl, "array_declarator")
+                && let Some(ident) = find_direct_child_by_kind(arr, "identifier")
+            {
+                return Some(state.node_text(ident));
             }
         }
         // Direct identifier: `uniform vec3 lightPos;`
@@ -391,10 +391,10 @@ impl GlslExtractor {
             return Some(state.node_text(ident));
         }
         // Array declarator without init: `in vec2 texCoords[];`
-        if let Some(arr) = find_direct_child_by_kind(node, "array_declarator") {
-            if let Some(ident) = find_direct_child_by_kind(arr, "identifier") {
-                return Some(state.node_text(ident));
-            }
+        if let Some(arr) = find_direct_child_by_kind(node, "array_declarator")
+            && let Some(ident) = find_direct_child_by_kind(arr, "identifier")
+        {
+            return Some(state.node_text(ident));
         }
         None
     }
@@ -664,11 +664,11 @@ impl GlslExtractor {
                     return true;
                 }
                 // Wrapped in type_qualifier: `type_qualifier > const`
-                if kind == "type_qualifier" {
-                    if let Some(inner) = find_direct_child_by_kind(child, qualifier) {
-                        let _ = inner;
-                        return true;
-                    }
+                if kind == "type_qualifier"
+                    && let Some(inner) = find_direct_child_by_kind(child, qualifier)
+                {
+                    let _ = inner;
+                    return true;
                 }
                 if !cursor.goto_next_sibling() {
                     break;

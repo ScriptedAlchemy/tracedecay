@@ -109,18 +109,17 @@ fn parse_line(line: &str, project_hash: &str, session_id: &str) -> Option<CostTu
 
     if let Some(blocks) = content {
         for block in blocks {
-            if block.get("type").and_then(|t| t.as_str()) == Some("tool_use") {
-                if let Some(name) = block.get("name").and_then(|n| n.as_str()) {
-                    tool_names_vec.push(name.to_string());
-                    if name == "Bash" {
-                        if let Some(cmd) = block
-                            .get("input")
-                            .and_then(|i| i.get("command"))
-                            .and_then(|c| c.as_str())
-                        {
-                            bash_commands.push(cmd.to_string());
-                        }
-                    }
+            if block.get("type").and_then(|t| t.as_str()) == Some("tool_use")
+                && let Some(name) = block.get("name").and_then(|n| n.as_str())
+            {
+                tool_names_vec.push(name.to_string());
+                if name == "Bash"
+                    && let Some(cmd) = block
+                        .get("input")
+                        .and_then(|i| i.get("command"))
+                        .and_then(|c| c.as_str())
+                {
+                    bash_commands.push(cmd.to_string());
                 }
             }
         }

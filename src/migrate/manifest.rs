@@ -239,12 +239,11 @@ pub fn save_manifest(manifest: &MigrationManifest) -> io::Result<()> {
     })();
     if lock_written {
         let cleanup_result = fs::remove_file(&protocol.lock_path);
-        if result.is_ok() {
-            if let Err(err) = cleanup_result {
-                if err.kind() != io::ErrorKind::NotFound {
-                    return Err(err);
-                }
-            }
+        if result.is_ok()
+            && let Err(err) = cleanup_result
+            && err.kind() != io::ErrorKind::NotFound
+        {
+            return Err(err);
         }
     }
     result
@@ -398,15 +397,15 @@ pub fn verify_migration_manifest(manifest: &MigrationManifest) -> MigrationVerif
             ));
             continue;
         }
-        if let Some(target) = artifact.target_path.as_ref() {
-            if let Err(err) = verify_artifact_contents(&artifact.source_path, target) {
-                issues.push(format!(
-                    "artifact '{}' target '{}' does not match source '{}': {err}",
-                    artifact.kind,
-                    target.display(),
-                    artifact.source_path.display()
-                ));
-            }
+        if let Some(target) = artifact.target_path.as_ref()
+            && let Err(err) = verify_artifact_contents(&artifact.source_path, target)
+        {
+            issues.push(format!(
+                "artifact '{}' target '{}' does not match source '{}': {err}",
+                artifact.kind,
+                target.display(),
+                artifact.source_path.display()
+            ));
         }
     }
     for artifact in manifest
@@ -421,15 +420,15 @@ pub fn verify_migration_manifest(manifest: &MigrationManifest) -> MigrationVerif
             ));
             continue;
         }
-        if let Some(target) = artifact.target_path.as_ref() {
-            if let Err(err) = verify_artifact_contents(&artifact.source_path, target) {
-                issues.push(format!(
-                    "backup artifact '{}' target '{}' does not match source '{}': {err}",
-                    artifact.kind,
-                    target.display(),
-                    artifact.source_path.display()
-                ));
-            }
+        if let Some(target) = artifact.target_path.as_ref()
+            && let Err(err) = verify_artifact_contents(&artifact.source_path, target)
+        {
+            issues.push(format!(
+                "backup artifact '{}' target '{}' does not match source '{}': {err}",
+                artifact.kind,
+                target.display(),
+                artifact.source_path.display()
+            ));
         }
     }
     let marker_matches = match (

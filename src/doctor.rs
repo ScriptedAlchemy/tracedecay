@@ -358,14 +358,12 @@ fn report_daemon_diagnostics_unavailable(
 }
 
 fn fallback_database_path(project_path: &Path) -> Option<PathBuf> {
-    if let Ok(Some(marker)) = crate::storage::read_enrollment_marker(project_path) {
-        if let Ok(profile_root) = crate::storage::default_profile_root() {
-            if let Ok(layout) =
-                crate::storage::profile_sharded_layout(project_path, &profile_root, &marker)
-            {
-                return Some(layout.graph_db_path);
-            }
-        }
+    if let Ok(Some(marker)) = crate::storage::read_enrollment_marker(project_path)
+        && let Ok(profile_root) = crate::storage::default_profile_root()
+        && let Ok(layout) =
+            crate::storage::profile_sharded_layout(project_path, &profile_root, &marker)
+    {
+        return Some(layout.graph_db_path);
     }
     let data_root = crate::config::get_tracedecay_dir(project_path);
     let db_path = data_root.join(crate::config::db_filename(&data_root));
@@ -618,10 +616,10 @@ fn registry_relpath(value: &str) -> PathBuf {
 
 fn registry_profile_roots(profile_root: &Path) -> Vec<PathBuf> {
     let mut roots = vec![profile_root.to_path_buf()];
-    if let Ok(canonical) = profile_root.canonicalize() {
-        if !roots.iter().any(|root| root == &canonical) {
-            roots.push(canonical);
-        }
+    if let Ok(canonical) = profile_root.canonicalize()
+        && !roots.iter().any(|root| root == &canonical)
+    {
+        roots.push(canonical);
     }
     roots
 }

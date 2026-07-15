@@ -103,10 +103,10 @@ impl PreparedBranchAdminMutation {
             validate_quarantined_stores,
             rollback_deleting,
             move |phase| {
-                if phase == transaction::TransactionPhase::AfterCommitBeforeCleanup {
-                    if let Some(on_commit) = on_commit.take() {
-                        on_commit()?;
-                    }
+                if phase == transaction::TransactionPhase::AfterCommitBeforeCleanup
+                    && let Some(on_commit) = on_commit.take()
+                {
+                    on_commit()?;
                 }
                 Ok(())
             },

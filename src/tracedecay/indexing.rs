@@ -894,15 +894,15 @@ impl TraceDecay {
         let mut stale: Vec<String> = Vec::new();
         let mut mtime_only_changed: Vec<String> = Vec::new();
         for path in &stat_changed {
-            if let Some(new_hash) = hash_map.get(path) {
-                if let Some(record) = db_map.get(path) {
-                    if record.content_hash == *new_hash {
-                        // mtime changed but content identical (e.g. touch) —
-                        // update stored mtime so we skip it next time
-                        mtime_only_changed.push(path.clone());
-                    } else {
-                        stale.push(path.clone());
-                    }
+            if let Some(new_hash) = hash_map.get(path)
+                && let Some(record) = db_map.get(path)
+            {
+                if record.content_hash == *new_hash {
+                    // mtime changed but content identical (e.g. touch) —
+                    // update stored mtime so we skip it next time
+                    mtime_only_changed.push(path.clone());
+                } else {
+                    stale.push(path.clone());
                 }
             }
         }
@@ -1090,15 +1090,15 @@ impl TraceDecay {
                     if !file_exists {
                         // Indexed but deleted — DB needs cleanup.
                         stale.push(normalized);
-                    } else if let Ok(metadata) = std::fs::metadata(&abs_path) {
-                        if let Ok(mtime) = metadata.modified() {
-                            let mtime_secs = mtime
-                                .duration_since(std::time::UNIX_EPOCH)
-                                .unwrap_or_default()
-                                .as_secs() as i64;
-                            if mtime_secs > record.indexed_at {
-                                stale.push(normalized);
-                            }
+                    } else if let Ok(metadata) = std::fs::metadata(&abs_path)
+                        && let Ok(mtime) = metadata.modified()
+                    {
+                        let mtime_secs = mtime
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_secs() as i64;
+                        if mtime_secs > record.indexed_at {
+                            stale.push(normalized);
                         }
                     }
                 }
@@ -1179,10 +1179,10 @@ impl TraceDecay {
     /// answer on quiet repos because `indexed_at` is per-file and only moves
     /// when a file is reindexed, which is exactly the bug #86 was reporting.
     pub async fn last_sync_timestamp(&self) -> i64 {
-        if let Ok(Some(raw)) = self.db.get_metadata("last_sync_at").await {
-            if let Ok(t) = raw.parse::<i64>() {
-                return t;
-            }
+        if let Ok(Some(raw)) = self.db.get_metadata("last_sync_at").await
+            && let Ok(t) = raw.parse::<i64>()
+        {
+            return t;
         }
         self.db.last_index_time().await.unwrap_or(0)
     }

@@ -1162,10 +1162,10 @@ impl KotlinExtractor {
     /// Extract the property name from a `property_declaration` node.
     fn extract_property_name(state: &ExtractionState, node: TsNode<'_>) -> String {
         // property_declaration has variable_declaration child which has simple_identifier
-        if let Some(var_decl) = find_direct_child_by_kind(node, "variable_declaration") {
-            if let Some(ident) = find_direct_child_by_kind(var_decl, "simple_identifier") {
-                return state.node_text(ident);
-            }
+        if let Some(var_decl) = find_direct_child_by_kind(node, "variable_declaration")
+            && let Some(ident) = find_direct_child_by_kind(var_decl, "simple_identifier")
+        {
+            return state.node_text(ident);
         }
         // Fallback: look for multi_variable_declaration
         if let Some(multi) = find_direct_child_by_kind(node, "multi_variable_declaration") {
@@ -1319,10 +1319,10 @@ impl KotlinExtractor {
             return text[..brace_pos].trim().to_string();
         }
         // Cut at first '=' for expression-bodied definitions.
-        if find_direct_child_by_kind(node, "function_body").is_some() {
-            if let Some(eq_pos) = text.find('=') {
-                return text[..eq_pos].trim().to_string();
-            }
+        if find_direct_child_by_kind(node, "function_body").is_some()
+            && let Some(eq_pos) = text.find('=')
+        {
+            return text[..eq_pos].trim().to_string();
         }
         text.lines().next().unwrap_or("").trim().to_string()
     }
@@ -1432,13 +1432,13 @@ impl KotlinExtractor {
     /// Extract the name from an annotation node.
     fn extract_annotation_name(state: &ExtractionState, node: TsNode<'_>) -> String {
         // annotation has constructor_invocation or user_type children.
-        if let Some(ci) = find_direct_child_by_kind(node, "constructor_invocation") {
-            if let Some(ut) = find_direct_child_by_kind(ci, "user_type") {
-                if let Some(ti) = find_direct_child_by_kind(ut, "type_identifier") {
-                    return state.node_text(ti);
-                }
-                return state.node_text(ut);
+        if let Some(ci) = find_direct_child_by_kind(node, "constructor_invocation")
+            && let Some(ut) = find_direct_child_by_kind(ci, "user_type")
+        {
+            if let Some(ti) = find_direct_child_by_kind(ut, "type_identifier") {
+                return state.node_text(ti);
             }
+            return state.node_text(ut);
         }
         if let Some(ut) = find_direct_child_by_kind(node, "user_type") {
             if let Some(ti) = find_direct_child_by_kind(ut, "type_identifier") {

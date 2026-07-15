@@ -379,16 +379,14 @@ fn collect_skill_view_metadata(value: &Value, out: &mut Vec<String>) {
             }
         }
         Value::Object(map) => {
-            if let Some(function) = map.get("function").and_then(Value::as_object) {
-                if function
+            if let Some(function) = map.get("function").and_then(Value::as_object)
+                && function
                     .get("name")
                     .and_then(Value::as_str)
                     .is_some_and(is_skill_view_tool)
-                {
-                    if let Some(arguments) = function.get("arguments") {
-                        collect_skill_view_arguments(arguments, out);
-                    }
-                }
+                && let Some(arguments) = function.get("arguments")
+            {
+                collect_skill_view_arguments(arguments, out);
             }
             for value in map.values() {
                 collect_skill_view_metadata(value, out);
@@ -405,10 +403,9 @@ fn collect_skill_view_arguments(value: &Value, out: &mut Vec<String>) {
                 .get("id")
                 .or_else(|| map.get("name"))
                 .and_then(Value::as_str)
+                && let Some(skill) = normalize_skill_name(name)
             {
-                if let Some(skill) = normalize_skill_name(name) {
-                    out.push(skill);
-                }
+                out.push(skill);
             }
         }
         Value::String(raw) => {

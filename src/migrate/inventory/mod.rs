@@ -77,23 +77,21 @@ async fn build_inventory_in_scope(
         .unwrap_or_default();
 
     let include_registered_roots = options.roots.is_empty() || options.include_all_registered;
-    if include_registered_roots {
-        if let Some(global) = &global_db {
-            for root in &global.registered_project_paths {
-                let before = stores.len();
-                project::inspect_data_dir_candidate(
-                    root,
-                    TRACEDECAY_DIR,
-                    options.follow_symlinks,
-                    &mut seen_data_dirs,
-                    &mut stores,
-                    &mut skipped,
-                    StoreRole::CodeProjectStore,
-                )
-                .await?;
-                if stores.len() == before {
-                    stores.push(project::missing_registered_store(root));
-                }
+    if include_registered_roots && let Some(global) = &global_db {
+        for root in &global.registered_project_paths {
+            let before = stores.len();
+            project::inspect_data_dir_candidate(
+                root,
+                TRACEDECAY_DIR,
+                options.follow_symlinks,
+                &mut seen_data_dirs,
+                &mut stores,
+                &mut skipped,
+                StoreRole::CodeProjectStore,
+            )
+            .await?;
+            if stores.len() == before {
+                stores.push(project::missing_registered_store(root));
             }
         }
     }

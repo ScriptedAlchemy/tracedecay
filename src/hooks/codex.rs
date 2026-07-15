@@ -117,10 +117,10 @@ pub async fn hook_codex_user_prompt_submit() -> i32 {
 
 pub async fn codex_user_prompt_submit_context_for_event(event: &str) -> String {
     let (mut context, status) = codex_session_context_for_event(event).await;
-    if !matches!(status, HookWorkspaceStatus::Generic) {
-        if let Some(hint) = codex_prompt_hint(event) {
-            append_tool_hint(&mut context, &hint);
-        }
+    if !matches!(status, HookWorkspaceStatus::Generic)
+        && let Some(hint) = codex_prompt_hint(event)
+    {
+        append_tool_hint(&mut context, &hint);
     }
     if let Some(recall) = Box::pin(codex_prompt_memory_recall(event)).await {
         append_context_block(&mut context, &recall);
@@ -607,10 +607,10 @@ pub fn codex_apply_patch_rel_paths(command: &str, cwd: &Path, project_root: &Pat
                 } else {
                     cwd.join(candidate)
                 };
-                if let Some(rel) = rel_under_root(project_root, &abs) {
-                    if !rels.contains(&rel) {
-                        rels.push(rel);
-                    }
+                if let Some(rel) = rel_under_root(project_root, &abs)
+                    && !rels.contains(&rel)
+                {
+                    rels.push(rel);
                 }
             }
         }

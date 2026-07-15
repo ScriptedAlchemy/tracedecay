@@ -150,10 +150,10 @@ where
     if scc.len() >= 2 {
         return true;
     }
-    if let Some(only) = scc.first() {
-        if let Some(neighbors) = adj.get(only) {
-            return neighbors.contains(only);
-        }
+    if let Some(only) = scc.first()
+        && let Some(neighbors) = adj.get(only)
+    {
+        return neighbors.contains(only);
     }
     false
 }

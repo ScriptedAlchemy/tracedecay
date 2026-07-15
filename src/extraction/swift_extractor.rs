@@ -1089,10 +1089,10 @@ impl SwiftExtractor {
             return state.node_text(pattern);
         }
         // Fallback: find pattern child then simple_identifier.
-        if let Some(pattern) = find_direct_child_by_kind(node, "pattern") {
-            if let Some(ident) = find_direct_child_by_kind(pattern, "simple_identifier") {
-                return state.node_text(ident);
-            }
+        if let Some(pattern) = find_direct_child_by_kind(node, "pattern")
+            && let Some(ident) = find_direct_child_by_kind(pattern, "simple_identifier")
+        {
+            return state.node_text(ident);
         }
         "<anonymous>".to_string()
     }
@@ -1105,15 +1105,15 @@ impl SwiftExtractor {
         if cursor.goto_first_child() {
             loop {
                 let child = cursor.node();
-                if child.kind() == "modifiers" {
-                    if let Some(vis_mod) = find_direct_child_by_kind(child, "visibility_modifier") {
-                        let text = state.node_text(vis_mod);
-                        return match text.as_str() {
-                            "private" | "fileprivate" => Visibility::Private,
-                            "internal" => Visibility::PubCrate,
-                            _ => Visibility::Pub,
-                        };
-                    }
+                if child.kind() == "modifiers"
+                    && let Some(vis_mod) = find_direct_child_by_kind(child, "visibility_modifier")
+                {
+                    let text = state.node_text(vis_mod);
+                    return match text.as_str() {
+                        "private" | "fileprivate" => Visibility::Private,
+                        "internal" => Visibility::PubCrate,
+                        _ => Visibility::Pub,
+                    };
                 }
                 if !cursor.goto_next_sibling() {
                     break;

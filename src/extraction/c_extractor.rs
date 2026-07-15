@@ -428,10 +428,10 @@ impl CExtractor {
                 return Some(state.node_text(ident));
             }
             // Could be a pointer declarator: `int *x = NULL;`
-            if let Some(ptr_decl) = find_direct_child_by_kind(init_decl, "pointer_declarator") {
-                if let Some(ident) = find_direct_child_by_kind(ptr_decl, "identifier") {
-                    return Some(state.node_text(ident));
-                }
+            if let Some(ptr_decl) = find_direct_child_by_kind(init_decl, "pointer_declarator")
+                && let Some(ident) = find_direct_child_by_kind(ptr_decl, "identifier")
+            {
+                return Some(state.node_text(ident));
             }
         }
         // Direct identifier child (e.g., `int x;`)
@@ -439,10 +439,10 @@ impl CExtractor {
             return Some(state.node_text(ident));
         }
         // Pointer declarator without init (e.g., `char *name;`)
-        if let Some(ptr_decl) = find_direct_child_by_kind(node, "pointer_declarator") {
-            if let Some(ident) = find_direct_child_by_kind(ptr_decl, "identifier") {
-                return Some(state.node_text(ident));
-            }
+        if let Some(ptr_decl) = find_direct_child_by_kind(node, "pointer_declarator")
+            && let Some(ident) = find_direct_child_by_kind(ptr_decl, "identifier")
+        {
+            return Some(state.node_text(ident));
         }
         None
     }
@@ -752,16 +752,15 @@ impl CExtractor {
         // In `typedef int (*name)(args)`, the name is inside
         // function_declarator -> parenthesized_declarator -> pointer_declarator -> identifier
         // or function_declarator -> parenthesized_declarator -> identifier
-        if let Some(func_decl) = find_descendant_by_kind(node, "function_declarator") {
-            if let Some(paren_decl) =
+        if let Some(func_decl) = find_descendant_by_kind(node, "function_declarator")
+            && let Some(paren_decl) =
                 find_direct_child_by_kind(func_decl, "parenthesized_declarator")
-            {
-                if let Some(ident) = find_descendant_by_kind(paren_decl, "identifier") {
-                    return Some(state.node_text(ident));
-                }
-                if let Some(ident) = find_descendant_by_kind(paren_decl, "type_identifier") {
-                    return Some(state.node_text(ident));
-                }
+        {
+            if let Some(ident) = find_descendant_by_kind(paren_decl, "identifier") {
+                return Some(state.node_text(ident));
+            }
+            if let Some(ident) = find_descendant_by_kind(paren_decl, "type_identifier") {
+                return Some(state.node_text(ident));
             }
         }
         None

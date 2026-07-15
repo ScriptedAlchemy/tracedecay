@@ -696,13 +696,12 @@ fn classify_token(
 
     if clean.contains("::") {
         // Qualified path: extract last segment and full path
-        if let Some(last) = clean.rsplit("::").next() {
-            if !last.is_empty()
-                && !stop_words.contains(last.to_lowercase().as_str())
-                && seen.insert(last.to_string())
-            {
-                symbols.push(last.to_string());
-            }
+        if let Some(last) = clean.rsplit("::").next()
+            && !last.is_empty()
+            && !stop_words.contains(last.to_lowercase().as_str())
+            && seen.insert(last.to_string())
+        {
+            symbols.push(last.to_string());
         }
         let full = clean.to_string();
         if seen.insert(full.clone()) {

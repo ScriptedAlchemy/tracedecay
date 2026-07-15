@@ -9,11 +9,11 @@ use crate::memory::encoding::HolographicEncoder;
 pub(crate) type VectorStateFingerprint = (i64, i64, i64, u64);
 
 pub(crate) fn normalize_fact_metadata(mut row: Value) -> Value {
-    if let Some(obj) = row.as_object_mut() {
-        if let Some(raw) = obj.get("metadata").and_then(Value::as_str) {
-            let parsed = serde_json::from_str::<Value>(raw).unwrap_or(Value::Null);
-            obj.insert("metadata".to_string(), parsed);
-        }
+    if let Some(obj) = row.as_object_mut()
+        && let Some(raw) = obj.get("metadata").and_then(Value::as_str)
+    {
+        let parsed = serde_json::from_str::<Value>(raw).unwrap_or(Value::Null);
+        obj.insert("metadata".to_string(), parsed);
     }
     row
 }

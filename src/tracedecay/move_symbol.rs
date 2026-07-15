@@ -584,10 +584,10 @@ impl TraceDecay {
         let needle_a = format!("mod {stem};");
         let needle_b = format!("mod {stem} ");
         for candidate in parent_module_candidates(dest_rel) {
-            if let Ok(text) = std::fs::read_to_string(self.project_root.join(&candidate)) {
-                if text.contains(&needle_a) || text.contains(&needle_b) {
-                    return true;
-                }
+            if let Ok(text) = std::fs::read_to_string(self.project_root.join(&candidate))
+                && (text.contains(&needle_a) || text.contains(&needle_b))
+            {
+                return true;
             }
         }
         false
@@ -875,15 +875,15 @@ fn parse_use_statements_ts(source: &str) -> Option<Vec<UseStatement>> {
 /// [`UseStatement`]s.
 fn collect_use_declarations(node: TsNode<'_>, src: &[u8], out: &mut Vec<UseStatement>) {
     if node.kind() == "use_declaration" {
-        if let Ok(text) = node.utf8_text(src) {
-            if let Some((glob, leaves)) = parse_use_bindings(text) {
-                out.push(UseStatement {
-                    text: text.to_string(),
-                    line: node.start_position().row as u32 + 1,
-                    glob,
-                    leaves,
-                });
-            }
+        if let Ok(text) = node.utf8_text(src)
+            && let Some((glob, leaves)) = parse_use_bindings(text)
+        {
+            out.push(UseStatement {
+                text: text.to_string(),
+                line: node.start_position().row as u32 + 1,
+                glob,
+                leaves,
+            });
         }
         // `use_declaration` nodes do not nest; no need to descend further.
         return;

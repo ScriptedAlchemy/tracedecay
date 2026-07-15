@@ -165,10 +165,8 @@ impl QuintExtractor {
                 // is a terminator handled below.
                 let extends_import = matches!(kind, "identifier")
                     || (kind == "operator" && state.node_text(child) == ".");
-                if !extends_import {
-                    if let Some((parts, line)) = import_collect.take() {
-                        Self::commit_import(state, &parts, line);
-                    }
+                if !extends_import && let Some((parts, line)) = import_collect.take() {
+                    Self::commit_import(state, &parts, line);
                 }
 
                 match kind {

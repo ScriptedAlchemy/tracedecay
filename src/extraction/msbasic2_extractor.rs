@@ -158,10 +158,10 @@ impl MsBasic2Extractor {
         if cursor.goto_first_child() {
             loop {
                 let node = cursor.node();
-                if node.kind() == "line" {
-                    if let Some(basic_line) = Self::parse_line(state, node) {
-                        lines.push(basic_line);
-                    }
+                if node.kind() == "line"
+                    && let Some(basic_line) = Self::parse_line(state, node)
+                {
+                    lines.push(basic_line);
                 }
                 if !cursor.goto_next_sibling() {
                     break;

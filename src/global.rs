@@ -209,10 +209,10 @@ fn registry_relpath(value: &str) -> std::path::PathBuf {
 
 fn registry_profile_roots(profile_root: &std::path::Path) -> Vec<std::path::PathBuf> {
     let mut roots = vec![profile_root.to_path_buf()];
-    if let Ok(canonical) = profile_root.canonicalize() {
-        if !roots.iter().any(|root| root == &canonical) {
-            roots.push(canonical);
-        }
+    if let Ok(canonical) = profile_root.canonicalize()
+        && !roots.iter().any(|root| root == &canonical)
+    {
+        roots.push(canonical);
     }
     roots
 }
@@ -450,10 +450,10 @@ pub(crate) fn gather_local_projects_from(
     let mut seen: HashSet<PathBuf> = HashSet::new();
 
     let is_home_tracedecay = |ts: &Path| -> bool {
-        if let Some(ref canon) = canon_home_ts {
-            if ts.canonicalize().ok().as_ref() == Some(canon) {
-                return true;
-            }
+        if let Some(ref canon) = canon_home_ts
+            && ts.canonicalize().ok().as_ref() == Some(canon)
+        {
+            return true;
         }
         false
     };
@@ -522,17 +522,17 @@ pub(crate) fn find_descendant_tracedecay(
                 // Only canonicalize when the entry could match the home skip;
                 // doing it for every dir entry would mean one syscall per
                 // entry on tree walks of arbitrary size.
-                if let Some(canon) = canon_home_ts {
-                    if path.canonicalize().ok().as_ref() == Some(canon) {
-                        continue;
-                    }
+                if let Some(canon) = canon_home_ts
+                    && path.canonicalize().ok().as_ref() == Some(canon)
+                {
+                    continue;
                 }
-                if let Some(parent) = path.parent() {
-                    if local_project_marker_exists(parent, &path) {
-                        let pb = parent.to_path_buf();
-                        if seen.insert(pb.clone()) {
-                            out.push(pb);
-                        }
+                if let Some(parent) = path.parent()
+                    && local_project_marker_exists(parent, &path)
+                {
+                    let pb = parent.to_path_buf();
+                    if seen.insert(pb.clone()) {
+                        out.push(pb);
                     }
                 }
                 continue;
@@ -624,10 +624,8 @@ pub(crate) fn print_flash_warning(all: bool, targets: &[ProjectStorageLocation])
             }
         }
     }
-    if all {
-        if let Some(p) = tracedecay::global_db::global_db_path() {
-            eprintln!("  \x1b[31m✗\x1b[0m {} (global DB)", p.display());
-        }
+    if all && let Some(p) = tracedecay::global_db::global_db_path() {
+        eprintln!("  \x1b[31m✗\x1b[0m {} (global DB)", p.display());
     }
     eprintln!();
     eprintln!("\x1b[1;5;33mThis cannot be undone.\x1b[0m");

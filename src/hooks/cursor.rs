@@ -668,10 +668,10 @@ pub fn cursor_after_file_edit_rel_paths(event_json: &str, project_root: &Path) -
 
     let mut rels: Vec<String> = Vec::new();
     for abs in abs_paths {
-        if let Some(rel) = rel_under_root(project_root, Path::new(&abs)) {
-            if !rels.contains(&rel) {
-                rels.push(rel);
-            }
+        if let Some(rel) = rel_under_root(project_root, Path::new(&abs))
+            && !rels.contains(&rel)
+        {
+            rels.push(rel);
         }
     }
     rels

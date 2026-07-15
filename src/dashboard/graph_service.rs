@@ -174,10 +174,10 @@ async fn degree_summary(state: &DashboardState) -> Arc<DegreeSummary> {
     let cache = DEGREE_CACHE.get_or_init(|| tokio::sync::Mutex::new(HashMap::new()));
     // Held across the rebuild so concurrent requests share one aggregation.
     let mut guard = cache.lock().await;
-    if let Some(existing) = guard.get(&state.graph_db_path) {
-        if existing.fingerprint == fingerprint {
-            return existing.clone();
-        }
+    if let Some(existing) = guard.get(&state.graph_db_path)
+        && existing.fingerprint == fingerprint
+    {
+        return existing.clone();
     }
 
     let pool = graph_queries::degree_pool_rows(&state.graph_conn, DEGREE_POOL_CAP)
@@ -446,10 +446,10 @@ pub(crate) async fn subgraph_payload(
     let mut all_ids = Vec::new();
     let mut seen = BTreeSet::new();
     for row in candidate_rows {
-        if let Some(id) = row.get("id").and_then(Value::as_str) {
-            if seen.insert(id.to_string()) {
-                all_ids.push(id.to_string());
-            }
+        if let Some(id) = row.get("id").and_then(Value::as_str)
+            && seen.insert(id.to_string())
+        {
+            all_ids.push(id.to_string());
         }
     }
 

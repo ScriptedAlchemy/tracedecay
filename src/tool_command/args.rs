@@ -251,27 +251,27 @@ fn validate_tool_args(def: &ToolDefinition, args: &Map<String, Value>) -> Result
             continue;
         }
 
-        if let Some(allowed) = schema.get("enum").and_then(Value::as_array) {
-            if !allowed.iter().any(|candidate| candidate == value) {
-                let allowed: Vec<String> = allowed
-                    .iter()
-                    .map(|v| match v {
-                        Value::String(s) => s.clone(),
-                        other => other.to_string(),
-                    })
-                    .collect();
-                let displayed = value
-                    .as_str()
-                    .map(str::to_string)
-                    .unwrap_or_else(|| value.to_string());
-                return Err(TraceDecayError::Config {
-                    message: format!(
-                        "--{}: `{displayed}` is not one of: {}",
-                        key.replace('_', "-"),
-                        allowed.join(", ")
-                    ),
-                });
-            }
+        if let Some(allowed) = schema.get("enum").and_then(Value::as_array)
+            && !allowed.iter().any(|candidate| candidate == value)
+        {
+            let allowed: Vec<String> = allowed
+                .iter()
+                .map(|v| match v {
+                    Value::String(s) => s.clone(),
+                    other => other.to_string(),
+                })
+                .collect();
+            let displayed = value
+                .as_str()
+                .map(str::to_string)
+                .unwrap_or_else(|| value.to_string());
+            return Err(TraceDecayError::Config {
+                message: format!(
+                    "--{}: `{displayed}` is not one of: {}",
+                    key.replace('_', "-"),
+                    allowed.join(", ")
+                ),
+            });
         }
 
         if let Some(expected) = schema.get("type").and_then(Value::as_str) {
@@ -615,10 +615,10 @@ fn coerce_value(key: &str, prop_schema: Option<&Value>, raw: &str) -> Result<Val
         // comma-split/repetition behavior via `finalize_arrays`, and objects
         // are caught by `validate_tool_args` with a corrective error.
         "array" | "object" => {
-            if let Ok(parsed) = serde_json::from_str::<Value>(raw) {
-                if value_matches_type(&parsed, ty) {
-                    return Ok(parsed);
-                }
+            if let Ok(parsed) = serde_json::from_str::<Value>(raw)
+                && value_matches_type(&parsed, ty)
+            {
+                return Ok(parsed);
             }
             Ok(Value::String(raw.to_string()))
         }

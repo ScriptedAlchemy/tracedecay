@@ -290,10 +290,10 @@ pub fn kiro_post_tool_use_rel_paths(event_json: &str, project_root: &Path) -> Ve
         } else {
             cwd.join(path)
         };
-        if let Some(rel) = rel_under_root(project_root, &abs) {
-            if !rels.contains(&rel) {
-                rels.push(rel);
-            }
+        if let Some(rel) = rel_under_root(project_root, &abs)
+            && !rels.contains(&rel)
+        {
+            rels.push(rel);
         }
     }
     rels

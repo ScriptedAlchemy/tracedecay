@@ -155,17 +155,15 @@ pub fn detect_default_branch(project_root: &Path) -> Option<String> {
     let repo = gix::open(project_root).ok()?;
 
     // Try symbolic-ref first (refs/remotes/origin/HEAD -> refs/remotes/origin/<branch>)
-    if let Ok(reference) = repo.find_reference("refs/remotes/origin/HEAD") {
-        if let Some(Ok(target)) = reference.follow() {
-            if let Some(name) = target
-                .name()
-                .as_bstr()
-                .to_string()
-                .strip_prefix("refs/remotes/origin/")
-            {
-                return Some(name.to_string());
-            }
-        }
+    if let Ok(reference) = repo.find_reference("refs/remotes/origin/HEAD")
+        && let Some(Ok(target)) = reference.follow()
+        && let Some(name) = target
+            .name()
+            .as_bstr()
+            .to_string()
+            .strip_prefix("refs/remotes/origin/")
+    {
+        return Some(name.to_string());
     }
 
     // Fall back to heuristics
@@ -343,10 +341,9 @@ pub fn resolve_branch_db_path(
     // Prevent path traversal: resolved path must stay within tracedecay_dir
     if let (Ok(canonical_dir), Ok(canonical_path)) =
         (tracedecay_dir.canonicalize(), resolved.canonicalize())
+        && !canonical_path.starts_with(&canonical_dir)
     {
-        if !canonical_path.starts_with(&canonical_dir) {
-            return None;
-        }
+        return None;
     }
     Some(resolved)
 }

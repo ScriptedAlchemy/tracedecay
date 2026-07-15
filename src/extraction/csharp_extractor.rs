@@ -1677,10 +1677,10 @@ impl CSharpExtractor {
             return state.node_text(func_node);
         }
         // Fallback: first child
-        if let Some(first) = node.child(0) {
-            if first.kind() != "argument_list" {
-                return state.node_text(first);
-            }
+        if let Some(first) = node.child(0)
+            && first.kind() != "argument_list"
+        {
+            return state.node_text(first);
         }
         state.node_text(node)
     }

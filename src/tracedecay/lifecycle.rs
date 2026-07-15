@@ -186,20 +186,18 @@ impl TraceDecay {
             .flatten();
         if selected.is_none()
             && let Some(global_db) = open_options.open_global_db().await
-        {
-            if let Some(resolution) = global_db
+            && let Some(resolution) = global_db
                 .resolve_project_store_by_identity(project_root, git_common_dir.as_deref())
                 .await
-            {
-                selected = Some(storage::profile_sharded_layout(
-                    project_root,
-                    &profile_root,
-                    &storage::EnrollmentMarker {
-                        project_id: resolution.project.project_id,
-                        storage_mode: storage::StorageMode::ProfileSharded,
-                    },
-                )?);
-            }
+        {
+            selected = Some(storage::profile_sharded_layout(
+                project_root,
+                &profile_root,
+                &storage::EnrollmentMarker {
+                    project_id: resolution.project.project_id,
+                    storage_mode: storage::StorageMode::ProfileSharded,
+                },
+            )?);
         }
 
         let selected_id = selected
@@ -644,26 +642,25 @@ impl TraceDecay {
         };
 
         // Exact match: branch is tracked
-        if let Some(path) = branch::resolve_branch_db_path(tracedecay_dir, branch, &meta) {
-            if path.exists() {
-                return (path, Some(branch.to_string()), None);
-            }
+        if let Some(path) = branch::resolve_branch_db_path(tracedecay_dir, branch, &meta)
+            && path.exists()
+        {
+            return (path, Some(branch.to_string()), None);
         }
 
         // Fallback: find nearest tracked ancestor
-        if let Some(ancestor) = branch::find_nearest_tracked_ancestor(project_root, branch, &meta) {
-            if let Some(path) = branch::resolve_branch_db_path(tracedecay_dir, &ancestor, &meta) {
-                if path.exists() {
-                    return (
-                        path,
-                        Some(ancestor.clone()),
-                        Some(format!(
-                            "branch '{branch}' is not tracked — serving from '{ancestor}'. \
+        if let Some(ancestor) = branch::find_nearest_tracked_ancestor(project_root, branch, &meta)
+            && let Some(path) = branch::resolve_branch_db_path(tracedecay_dir, &ancestor, &meta)
+            && path.exists()
+        {
+            return (
+                path,
+                Some(ancestor.clone()),
+                Some(format!(
+                    "branch '{branch}' is not tracked — serving from '{ancestor}'. \
                              Run `tracedecay branch add {branch}` to track it."
-                        )),
-                    );
-                }
-            }
+                )),
+            );
         }
 
         // Last resort: default branch DB

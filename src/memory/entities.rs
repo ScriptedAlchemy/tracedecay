@@ -193,11 +193,11 @@ fn take_entity_phrase(text: &str) -> String {
             break;
         }
 
-        if let Some(ch) = rest.chars().next() {
-            if matches!(ch, ',' | '.' | ';' | '"' | '\'') {
-                end = index;
-                break;
-            }
+        if let Some(ch) = rest.chars().next()
+            && matches!(ch, ',' | '.' | ';' | '"' | '\'')
+        {
+            end = index;
+            break;
         }
     }
 
@@ -272,10 +272,8 @@ fn push_capitalized_sequence(
         // "Project Phoenix" keep the phrase as the entity and intentionally do
         // not emit the bare head noun, which would add noisy single-word
         // entities (Corp/Memory/Lens) and worsen retrieval Risk G.
-        if stripped_verb {
-            if let Some(last_word) = words.last() {
-                push_single_capitalized(results, start_index, last_word);
-            }
+        if stripped_verb && let Some(last_word) = words.last() {
+            push_single_capitalized(results, start_index, last_word);
         }
         return;
     }

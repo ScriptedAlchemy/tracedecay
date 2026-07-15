@@ -286,12 +286,11 @@ impl CppExtractor {
     /// Check if a `function_definition` is a constructor.
     fn is_constructor(state: &ExtractionState, node: TsNode<'_>) -> bool {
         let name = Self::extract_function_name(state, node);
-        if let Some(name) = &name {
-            if let Some((class_name, _)) = state.node_stack.last() {
-                if name == class_name {
-                    return true;
-                }
-            }
+        if let Some(name) = &name
+            && let Some((class_name, _)) = state.node_stack.last()
+            && name == class_name
+        {
+            return true;
         }
         false
     }
@@ -299,10 +298,10 @@ impl CppExtractor {
     /// Check if a `function_definition` is a destructor.
     fn is_destructor(state: &ExtractionState, node: TsNode<'_>) -> bool {
         let name = Self::extract_function_name(state, node);
-        if let Some(name) = &name {
-            if name.starts_with('~') {
-                return true;
-            }
+        if let Some(name) = &name
+            && name.starts_with('~')
+        {
+            return true;
         }
         find_descendant_by_kind(node, "destructor_name").is_some()
     }
@@ -444,16 +443,16 @@ impl CppExtractor {
                 return Some(state.node_text(ident));
             }
             // Could be a qualified_identifier
-            if let Some(qi) = find_direct_child_by_kind(declarator, "qualified_identifier") {
-                if let Some(ident) = find_direct_child_by_kind(qi, "identifier") {
-                    return Some(state.node_text(ident));
-                }
+            if let Some(qi) = find_direct_child_by_kind(declarator, "qualified_identifier")
+                && let Some(ident) = find_direct_child_by_kind(qi, "identifier")
+            {
+                return Some(state.node_text(ident));
             }
             // Could be inside a pointer_declarator -> function_declarator
-            if let Some(ident) = find_direct_child_by_kind(declarator, "parenthesized_declarator") {
-                if let Some(inner_ident) = find_descendant_by_kind(ident, "identifier") {
-                    return Some(state.node_text(inner_ident));
-                }
+            if let Some(ident) = find_direct_child_by_kind(declarator, "parenthesized_declarator")
+                && let Some(inner_ident) = find_descendant_by_kind(ident, "identifier")
+            {
+                return Some(state.node_text(inner_ident));
             }
             // type_identifier (for constructors, the name matches the class)
             if let Some(ident) = find_direct_child_by_kind(declarator, "type_identifier") {
@@ -519,57 +518,56 @@ impl CppExtractor {
             Self::extract_function_name(state, node).unwrap_or_else(|| "<anonymous>".to_string());
 
         // Check if constructor
-        if let Some((class_name, _)) = state.node_stack.last() {
-            if name == *class_name {
-                let text = state.node_text(node);
-                let signature = Some(text.trim().trim_end_matches(';').trim().to_string());
-                let docstring = Self::extract_docstring(state, node);
-                let start_line = node.start_position().row as u32;
-                let end_line = node.end_position().row as u32;
-                let start_column = node.start_position().column as u32;
-                let end_column = node.end_position().column as u32;
-                let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-                let id =
-                    generate_node_id(&state.file_path, &NodeKind::Constructor, &name, start_line);
+        if let Some((class_name, _)) = state.node_stack.last()
+            && name == *class_name
+        {
+            let text = state.node_text(node);
+            let signature = Some(text.trim().trim_end_matches(';').trim().to_string());
+            let docstring = Self::extract_docstring(state, node);
+            let start_line = node.start_position().row as u32;
+            let end_line = node.end_position().row as u32;
+            let start_column = node.start_position().column as u32;
+            let end_column = node.end_position().column as u32;
+            let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
+            let id = generate_node_id(&state.file_path, &NodeKind::Constructor, &name, start_line);
 
-                let metrics = count_complexity(node, &CPP_COMPLEXITY, &state.source);
-                let graph_node = Node {
-                    id: id.clone(),
-                    kind: NodeKind::Constructor,
-                    name,
-                    qualified_name,
-                    file_path: state.file_path.clone(),
-                    start_line,
-                    attrs_start_line: start_line,
-                    end_line,
-                    start_column,
-                    end_column,
-                    signature,
-                    docstring,
-                    visibility: state.access_specifier.clone(),
-                    is_async: false,
-                    branches: metrics.branches,
-                    loops: metrics.loops,
-                    returns: metrics.returns,
-                    max_nesting: metrics.max_nesting,
-                    unsafe_blocks: metrics.unsafe_blocks,
-                    unchecked_calls: metrics.unchecked_calls,
-                    assertions: metrics.assertions,
-                    updated_at: state.timestamp,
-                    parent_id: None,
-                };
-                state.nodes.push(graph_node);
+            let metrics = count_complexity(node, &CPP_COMPLEXITY, &state.source);
+            let graph_node = Node {
+                id: id.clone(),
+                kind: NodeKind::Constructor,
+                name,
+                qualified_name,
+                file_path: state.file_path.clone(),
+                start_line,
+                attrs_start_line: start_line,
+                end_line,
+                start_column,
+                end_column,
+                signature,
+                docstring,
+                visibility: state.access_specifier.clone(),
+                is_async: false,
+                branches: metrics.branches,
+                loops: metrics.loops,
+                returns: metrics.returns,
+                max_nesting: metrics.max_nesting,
+                unsafe_blocks: metrics.unsafe_blocks,
+                unchecked_calls: metrics.unchecked_calls,
+                assertions: metrics.assertions,
+                updated_at: state.timestamp,
+                parent_id: None,
+            };
+            state.nodes.push(graph_node);
 
-                if let Some(parent_id) = state.parent_node_id() {
-                    state.edges.push(Edge {
-                        source: parent_id.to_string(),
-                        target: id,
-                        kind: EdgeKind::Contains,
-                        line: Some(start_line),
-                    });
-                }
-                return;
+            if let Some(parent_id) = state.parent_node_id() {
+                state.edges.push(Edge {
+                    source: parent_id.to_string(),
+                    target: id,
+                    kind: EdgeKind::Contains,
+                    line: Some(start_line),
+                });
             }
+            return;
         }
 
         let text = state.node_text(node);
@@ -804,19 +802,19 @@ impl CppExtractor {
             if let Some(ident) = find_direct_child_by_kind(init_decl, "identifier") {
                 return Some(state.node_text(ident));
             }
-            if let Some(ptr_decl) = find_direct_child_by_kind(init_decl, "pointer_declarator") {
-                if let Some(ident) = find_direct_child_by_kind(ptr_decl, "identifier") {
-                    return Some(state.node_text(ident));
-                }
+            if let Some(ptr_decl) = find_direct_child_by_kind(init_decl, "pointer_declarator")
+                && let Some(ident) = find_direct_child_by_kind(ptr_decl, "identifier")
+            {
+                return Some(state.node_text(ident));
             }
         }
         if let Some(ident) = find_direct_child_by_kind(node, "identifier") {
             return Some(state.node_text(ident));
         }
-        if let Some(ptr_decl) = find_direct_child_by_kind(node, "pointer_declarator") {
-            if let Some(ident) = find_direct_child_by_kind(ptr_decl, "identifier") {
-                return Some(state.node_text(ident));
-            }
+        if let Some(ptr_decl) = find_direct_child_by_kind(node, "pointer_declarator")
+            && let Some(ident) = find_direct_child_by_kind(ptr_decl, "identifier")
+        {
+            return Some(state.node_text(ident));
         }
         None
     }
@@ -1248,10 +1246,10 @@ impl CppExtractor {
         }
 
         // If the template wraps a function, extract call sites
-        if let Some(func_def) = find_direct_child_by_kind(node, "function_definition") {
-            if let Some(body) = find_direct_child_by_kind(func_def, "compound_statement") {
-                Self::extract_call_sites(state, body, &id);
-            }
+        if let Some(func_def) = find_direct_child_by_kind(node, "function_definition")
+            && let Some(body) = find_direct_child_by_kind(func_def, "compound_statement")
+        {
+            Self::extract_call_sites(state, body, &id);
         }
     }
 
@@ -1554,16 +1552,15 @@ impl CppExtractor {
         state: &ExtractionState,
         node: TsNode<'_>,
     ) -> Option<String> {
-        if let Some(func_decl) = find_descendant_by_kind(node, "function_declarator") {
-            if let Some(paren_decl) =
+        if let Some(func_decl) = find_descendant_by_kind(node, "function_declarator")
+            && let Some(paren_decl) =
                 find_direct_child_by_kind(func_decl, "parenthesized_declarator")
-            {
-                if let Some(ident) = find_descendant_by_kind(paren_decl, "identifier") {
-                    return Some(state.node_text(ident));
-                }
-                if let Some(ident) = find_descendant_by_kind(paren_decl, "type_identifier") {
-                    return Some(state.node_text(ident));
-                }
+        {
+            if let Some(ident) = find_descendant_by_kind(paren_decl, "identifier") {
+                return Some(state.node_text(ident));
+            }
+            if let Some(ident) = find_descendant_by_kind(paren_decl, "type_identifier") {
+                return Some(state.node_text(ident));
             }
         }
         None

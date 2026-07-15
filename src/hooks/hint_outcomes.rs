@@ -232,16 +232,15 @@ fn row_tools(row: &crate::global_db::SessionActivityRow) -> Vec<String> {
     if let Some(names) = &row.tool_names {
         tools.extend(crate::analytics::split_tool_names(names));
     }
-    if let Some(metadata) = &row.metadata_json {
-        if let Ok(value) = serde_json::from_str::<Value>(metadata) {
-            if let Some(events) = value.get("tool_events").and_then(Value::as_array) {
-                for event in events {
-                    if let Some(name) = event.get("tool_name").and_then(Value::as_str) {
-                        if !name.is_empty() {
-                            tools.push(name.to_string());
-                        }
-                    }
-                }
+    if let Some(metadata) = &row.metadata_json
+        && let Ok(value) = serde_json::from_str::<Value>(metadata)
+        && let Some(events) = value.get("tool_events").and_then(Value::as_array)
+    {
+        for event in events {
+            if let Some(name) = event.get("tool_name").and_then(Value::as_str)
+                && !name.is_empty()
+            {
+                tools.push(name.to_string());
             }
         }
     }

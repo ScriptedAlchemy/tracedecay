@@ -397,72 +397,72 @@ impl PerlExtractor {
     ///   - right child: integer(3)
     fn visit_binary_expression_for_const(state: &mut ExtractionState, node: TsNode<'_>) {
         let left = node.child_by_field_name("variable");
-        if let Some(left_node) = left {
-            if left_node.kind() == "variable_declaration" {
-                let scope_node = find_direct_child_by_kind(left_node, "scope");
-                let is_our = scope_node.is_some_and(|s| state.node_text(s) == "our");
+        if let Some(left_node) = left
+            && left_node.kind() == "variable_declaration"
+        {
+            let scope_node = find_direct_child_by_kind(left_node, "scope");
+            let is_our = scope_node.is_some_and(|s| state.node_text(s) == "our");
 
-                if is_our {
-                    // Get the variable name from scalar_variable child.
-                    let var_name = left_node
-                        .child_by_field_name("variable_name")
-                        .map(|n| state.node_text(n))
-                        .unwrap_or_default();
+            if is_our {
+                // Get the variable name from scalar_variable child.
+                let var_name = left_node
+                    .child_by_field_name("variable_name")
+                    .map(|n| state.node_text(n))
+                    .unwrap_or_default();
 
-                    // Only treat ALL_CAPS variables as constants.
-                    let bare_name = var_name.trim_start_matches('$');
-                    if !bare_name.is_empty()
-                        && bare_name
-                            .chars()
-                            .all(|c| c.is_ascii_uppercase() || c == '_')
-                    {
-                        let name = bare_name.to_string();
-                        let start_line = node.start_position().row as u32;
-                        let end_line = node.end_position().row as u32;
-                        let start_column = node.start_position().column as u32;
-                        let end_column = node.end_position().column as u32;
-                        let text = state.node_text(node);
-                        let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-                        let id =
-                            generate_node_id(&state.file_path, &NodeKind::Const, &name, start_line);
-                        let docstring = Self::extract_docstring(state, node);
+                // Only treat ALL_CAPS variables as constants.
+                let bare_name = var_name.trim_start_matches('$');
+                if !bare_name.is_empty()
+                    && bare_name
+                        .chars()
+                        .all(|c| c.is_ascii_uppercase() || c == '_')
+                {
+                    let name = bare_name.to_string();
+                    let start_line = node.start_position().row as u32;
+                    let end_line = node.end_position().row as u32;
+                    let start_column = node.start_position().column as u32;
+                    let end_column = node.end_position().column as u32;
+                    let text = state.node_text(node);
+                    let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
+                    let id =
+                        generate_node_id(&state.file_path, &NodeKind::Const, &name, start_line);
+                    let docstring = Self::extract_docstring(state, node);
 
-                        let graph_node = Node {
-                            id: id.clone(),
-                            kind: NodeKind::Const,
-                            name,
-                            qualified_name,
-                            file_path: state.file_path.clone(),
-                            start_line,
-                            attrs_start_line: start_line,
-                            end_line,
-                            start_column,
-                            end_column,
-                            signature: Some(text.trim().to_string()),
-                            docstring,
-                            visibility: Visibility::Pub,
-                            is_async: false,
-                            branches: 0,
-                            loops: 0,
-                            returns: 0,
-                            max_nesting: 0,
-                            unsafe_blocks: 0,
-                            unchecked_calls: 0,
-                            assertions: 0,
-                            updated_at: state.timestamp,
-                            parent_id: None,
-                        };
-                        state.nodes.push(graph_node);
+                    let graph_node = Node {
+                        id: id.clone(),
+                        kind: NodeKind::Const,
+                        name,
+                        qualified_name,
+                        file_path: state.file_path.clone(),
+                        start_line,
+                        attrs_start_line: start_line,
+                        end_line,
+                        start_column,
+                        end_column,
+                        signature: Some(text.trim().to_string()),
+                        docstring,
+                        visibility: Visibility::Pub,
+                        is_async: false,
+                        branches: 0,
+                        loops: 0,
+                        returns: 0,
+                        max_nesting: 0,
+                        unsafe_blocks: 0,
+                        unchecked_calls: 0,
+                        assertions: 0,
+                        updated_at: state.timestamp,
+                        parent_id: None,
+                    };
+                    state.nodes.push(graph_node);
 
-                        // Contains edge from parent.
-                        if let Some(parent_id) = state.parent_node_id() {
-                            state.edges.push(Edge {
-                                source: parent_id.to_string(),
-                                target: id,
-                                kind: EdgeKind::Contains,
-                                line: Some(start_line),
-                            });
-                        }
+                    // Contains edge from parent.
+                    if let Some(parent_id) = state.parent_node_id() {
+                        state.edges.push(Edge {
+                            source: parent_id.to_string(),
+                            target: id,
+                            kind: EdgeKind::Contains,
+                            line: Some(start_line),
+                        });
                     }
                 }
             }
@@ -546,21 +546,20 @@ impl PerlExtractor {
                         // Also check for qualified calls (e.g., main::log_message)
                         if let Some(ceb) =
                             find_direct_child_by_kind(child, "call_expression_with_bareword")
+                            && let Some(pkg) = ceb.child_by_field_name("package_name")
                         {
-                            if let Some(pkg) = ceb.child_by_field_name("package_name") {
-                                let pkg_name = state.node_text(pkg);
-                                if let Some(fn_name) = ceb.child_by_field_name("function_name") {
-                                    let fn_text = state.node_text(fn_name);
-                                    let qualified = format!("{pkg_name}::{fn_text}");
-                                    state.unresolved_refs.push(UnresolvedRef {
-                                        from_node_id: fn_node_id.to_string(),
-                                        reference_name: qualified,
-                                        reference_kind: EdgeKind::Calls,
-                                        line: child.start_position().row as u32,
-                                        column: child.start_position().column as u32,
-                                        file_path: state.file_path.clone(),
-                                    });
-                                }
+                            let pkg_name = state.node_text(pkg);
+                            if let Some(fn_name) = ceb.child_by_field_name("function_name") {
+                                let fn_text = state.node_text(fn_name);
+                                let qualified = format!("{pkg_name}::{fn_text}");
+                                state.unresolved_refs.push(UnresolvedRef {
+                                    from_node_id: fn_node_id.to_string(),
+                                    reference_name: qualified,
+                                    reference_kind: EdgeKind::Calls,
+                                    line: child.start_position().row as u32,
+                                    column: child.start_position().column as u32,
+                                    file_path: state.file_path.clone(),
+                                });
                             }
                         }
                         // Recurse into the call for nested calls.

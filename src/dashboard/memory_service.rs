@@ -289,10 +289,10 @@ pub(crate) async fn graph_payload(
     }
 
     for (category, count) in &category_counts {
-        if let Some(node) = nodes.get_mut(&format!("category:{category}")) {
-            if let Some(obj) = node.as_object_mut() {
-                obj.insert("fact_count".into(), count.clone());
-            }
+        if let Some(node) = nodes.get_mut(&format!("category:{category}"))
+            && let Some(obj) = node.as_object_mut()
+        {
+            obj.insert("fact_count".into(), count.clone());
         }
     }
 
@@ -421,10 +421,10 @@ pub(crate) async fn projection_payload(state: &DashboardState, query: &str, limi
 
     let cache = PROJECTION_CACHE.get_or_init(|| tokio::sync::Mutex::new(HashMap::new()));
     let mut guard = cache.lock().await;
-    if let Some(existing) = guard.get(&state.mem_db_path) {
-        if existing.key == key {
-            return projection_response(existing, obj);
-        }
+    if let Some(existing) = guard.get(&state.mem_db_path)
+        && existing.key == key
+    {
+        return projection_response(existing, obj);
     }
 
     let rows = match memory_queries::vector_facts(state, query, limit).await {
@@ -465,10 +465,10 @@ pub(crate) async fn similarity_computation(
     let key = memory_queries::vector_state_fingerprint(state).await?;
     let cache = SIMILARITY_CACHE.get_or_init(|| tokio::sync::Mutex::new(HashMap::new()));
     let mut guard = cache.lock().await;
-    if let Some(existing) = guard.get(&state.mem_db_path) {
-        if existing.key == key {
-            return Ok(existing.clone());
-        }
+    if let Some(existing) = guard.get(&state.mem_db_path)
+        && existing.key == key
+    {
+        return Ok(existing.clone());
     }
 
     let rows = memory_queries::vector_facts(state, "", SIMILARITY_FACT_CAP).await?;

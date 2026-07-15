@@ -68,13 +68,13 @@ impl HookImportOutcome {
 /// user-level fallback file shared by every project.
 pub fn hook_import_sources(project_root: Option<&Path>) -> Vec<HookImportSource> {
     let mut sources = Vec::new();
-    if let Some(root) = project_root {
-        if let Ok(layout) = crate::storage::resolve_layout_for_current_profile(root) {
-            sources.push(HookImportSource {
-                path: layout.data_root.join("hook_analytics.jsonl"),
-                default_project_root: Some(root.to_path_buf()),
-            });
-        }
+    if let Some(root) = project_root
+        && let Ok(layout) = crate::storage::resolve_layout_for_current_profile(root)
+    {
+        sources.push(HookImportSource {
+            path: layout.data_root.join("hook_analytics.jsonl"),
+            default_project_root: Some(root.to_path_buf()),
+        });
     }
     if let Ok(profile_root) = crate::storage::default_profile_root() {
         let path = profile_root.join("hook_analytics.jsonl");

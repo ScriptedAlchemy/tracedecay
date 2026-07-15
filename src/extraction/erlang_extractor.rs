@@ -184,10 +184,10 @@ impl ErlangExtractor {
         if cursor.goto_first_child() {
             loop {
                 let child = cursor.node();
-                if child.kind() == "function_clause" {
-                    if let Some(body) = child.child_by_field_name("body") {
-                        Self::extract_calls(state, body, &id);
-                    }
+                if child.kind() == "function_clause"
+                    && let Some(body) = child.child_by_field_name("body")
+                {
+                    Self::extract_calls(state, body, &id);
                 }
                 if !cursor.goto_next_sibling() {
                     break;

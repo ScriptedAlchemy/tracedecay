@@ -926,10 +926,10 @@ pub fn is_included(path: &str, config: &TraceDecayConfig) -> bool {
     };
 
     for pattern_str in &config.include {
-        if let Ok(pattern) = Pattern::new(pattern_str) {
-            if pattern.matches_with(path, match_opts) {
-                return true;
-            }
+        if let Ok(pattern) = Pattern::new(pattern_str)
+            && pattern.matches_with(path, match_opts)
+        {
+            return true;
         }
     }
 
@@ -946,12 +946,11 @@ pub fn is_included_dir(dir_path: &str, config: &TraceDecayConfig) -> bool {
     };
 
     for pattern_str in &config.include {
-        if let Ok(pattern) = Pattern::new(pattern_str) {
-            if pattern.matches_with(dir_path, match_opts)
-                || pattern.matches_with(&format!("{dir_path}/_"), match_opts)
-            {
-                return true;
-            }
+        if let Ok(pattern) = Pattern::new(pattern_str)
+            && (pattern.matches_with(dir_path, match_opts)
+                || pattern.matches_with(&format!("{dir_path}/_"), match_opts))
+        {
+            return true;
         }
     }
 
@@ -995,10 +994,10 @@ pub fn is_excluded(file_path: &str, config: &TraceDecayConfig) -> bool {
     };
 
     for pattern_str in &config.exclude {
-        if let Ok(pattern) = Pattern::new(pattern_str) {
-            if pattern.matches_with(file_path, match_opts) {
-                return true;
-            }
+        if let Ok(pattern) = Pattern::new(pattern_str)
+            && pattern.matches_with(file_path, match_opts)
+        {
+            return true;
         }
     }
 

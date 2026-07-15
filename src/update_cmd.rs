@@ -467,10 +467,10 @@ async fn run_post_update_mutations(
         // undo the skip on the next ordinary command and reinstall everything
         // anyway. The next real upgrade re-arms the reinstall as usual.
         let mut config = UserConfig::load();
-        if config.mark_version_installed(env!("CARGO_PKG_VERSION")) {
-            if let Err(err) = config.save() {
-                eprintln!("warning: could not save tracedecay config: {err}");
-            }
+        if config.mark_version_installed(env!("CARGO_PKG_VERSION"))
+            && let Err(err) = config.save()
+        {
+            eprintln!("warning: could not save tracedecay config: {err}");
         }
         return Ok(());
     }
@@ -499,10 +499,10 @@ async fn run_post_update_mutations(
     config
         .installed_agents
         .retain(|id| tracedecay::agents::get_integration(id).is_ok());
-    if config.installed_agents.len() != before {
-        if let Err(err) = config.save() {
-            eprintln!("warning: could not save tracedecay config: {err}");
-        }
+    if config.installed_agents.len() != before
+        && let Err(err) = config.save()
+    {
+        eprintln!("warning: could not save tracedecay config: {err}");
     }
     if config.installed_agents.is_empty() {
         eprintln!("Refreshing agent integrations: nothing to refresh");
@@ -514,10 +514,10 @@ async fn run_post_update_mutations(
     }
     match reinstall_tracked_agents(&config).await {
         ReinstallOutcome::AllOk => {
-            if config.mark_version_installed(env!("CARGO_PKG_VERSION")) {
-                if let Err(err) = config.save() {
-                    eprintln!("warning: could not save tracedecay config: {err}");
-                }
+            if config.mark_version_installed(env!("CARGO_PKG_VERSION"))
+                && let Err(err) = config.save()
+            {
+                eprintln!("warning: could not save tracedecay config: {err}");
             }
         }
         ReinstallOutcome::PartialFailure { failed } => {
