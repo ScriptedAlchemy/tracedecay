@@ -176,7 +176,7 @@ async fn external_checkout_creates_branch_store() {
 
     // Not tracked yet.
     assert!(
-        load_branch_meta(&project_data_dir(&project)).map_or(true, |m| !m.is_tracked("feat/x")),
+        load_branch_meta(&project_data_dir(&project)).is_none_or(|m| !m.is_tracked("feat/x")),
         "branch should be untracked before the watcher reacts"
     );
 
@@ -298,7 +298,7 @@ async fn fifty_commit_rebase_needs_one_sync() {
     let base2 = cg.last_synced_commit().await.expect("base advanced");
     let followup = cg.stale_files_since_commit(&base2, 500);
     assert!(
-        followup.map_or(true, |f| f.is_empty()),
+        followup.is_none_or(|f| f.is_empty()),
         "no second sync should be needed after the coalesced pass"
     );
 }

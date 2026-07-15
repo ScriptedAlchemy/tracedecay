@@ -2194,10 +2194,12 @@ async fn grep_does_not_match_role_or_metadata_text() {
         "fts-scope-message",
         "session-fts-scope",
         1,
-        "assistant",
-        "zephyrsource",
-        1_715_000_001,
         "deploy pipeline ready",
+        RawMessageContext {
+            role: "assistant",
+            source: "zephyrsource",
+            timestamp: 1_715_000_001,
+        },
     );
     assert!(db.upsert_session_message(&message).await);
 
@@ -2685,10 +2687,12 @@ async fn grep_collapses_parent_prompt_copies_from_eight_subagents() {
             "parent-prompt",
             "parent",
             1,
-            "user",
-            "codex_rollout",
-            1_715_000_001,
             prompt,
+            RawMessageContext {
+                role: "user",
+                source: "codex_rollout",
+                timestamp: 1_715_000_001,
+            },
         ))
         .await
     );
@@ -2709,10 +2713,12 @@ async fn grep_collapses_parent_prompt_copies_from_eight_subagents() {
                 &format!("child-prompt-{index}"),
                 &session_id,
                 index + 2,
-                "user",
-                "codex_rollout",
-                1_715_000_002 + index,
                 prompt,
+                RawMessageContext {
+                    role: "user",
+                    source: "codex_rollout",
+                    timestamp: 1_715_000_002 + index,
+                },
             ))
             .await
         );
@@ -2768,10 +2774,12 @@ async fn grep_disclosed_cap_reserves_a_tool_slot_for_capped_sessions() {
             "busy-tool-call",
             "busy-session",
             9,
-            "tool",
-            "codex_rollout",
-            1_715_000_009,
             "gh pr merge 366 quokka merge exact command",
+            RawMessageContext {
+                role: "tool",
+                source: "codex_rollout",
+                timestamp: 1_715_000_009,
+            },
         ))
         .await
     );

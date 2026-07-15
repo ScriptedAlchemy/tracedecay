@@ -2854,9 +2854,9 @@ async fn search_large_response_uses_retrievable_truncation_handle() {
     let (cg, _env) = init_test_project(project).await;
     let mut source = String::new();
     for i in 0..LARGE_RESPONSE_MARKER_COUNT {
-        let _ = write!(
+        let _ = writeln!(
             source,
-            "pub fn reversible_search_marker_{i:03}() -> &'static str {{ \"marker-{i:03}\" }}\n"
+            "pub fn reversible_search_marker_{i:03}() -> &'static str {{ \"marker-{i:03}\" }}"
         );
     }
     fs::write(project.join("src/large_search.rs"), source).unwrap();
@@ -3805,9 +3805,9 @@ async fn diff_context_large_response_uses_retrievable_truncation_handle() {
     let (cg, _env) = init_test_project(project).await;
     let mut source = String::new();
     for i in 0..LARGE_RESPONSE_MARKER_COUNT {
-        let _ = write!(
+        let _ = writeln!(
             source,
-            "pub fn reversible_diff_context_marker_{i:03}() -> &'static str {{ \"marker-{i:03}\" }}\n"
+            "pub fn reversible_diff_context_marker_{i:03}() -> &'static str {{ \"marker-{i:03}\" }}"
         );
     }
     fs::write(project.join("src/large_diff.rs"), source).unwrap();
@@ -14541,7 +14541,7 @@ async fn pr_context_collapses_cargo_toml_keys() {
         "[package]\nname = \"x\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\n",
     );
     for i in 0..50 {
-        let _ = write!(bloated, "dep{i} = \"0.1.{i}\"\n");
+        let _ = writeln!(bloated, "dep{i} = \"0.1.{i}\"");
     }
     fs::write(project.join("Cargo.toml"), &bloated).unwrap();
     git(project, &["add", "."]);
@@ -16627,13 +16627,11 @@ async fn test_move_symbol_clean_move_has_empty_impact() {
     let p = move_payload(&result);
     assert_eq!(p["success"], true, "payload: {p}");
     assert!(
-        p["impact"].as_array().map_or(true, |a| a.is_empty()),
+        p["impact"].as_array().is_none_or(|a| a.is_empty()),
         "clean move should have empty impact: {p}"
     );
     assert!(
-        p["applied_imports"]
-            .as_array()
-            .map_or(true, |a| a.is_empty()),
+        p["applied_imports"].as_array().is_none_or(|a| a.is_empty()),
         "clean move needs no imports: {p}"
     );
 }
