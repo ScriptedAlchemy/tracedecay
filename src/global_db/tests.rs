@@ -65,10 +65,11 @@ async fn try_open_at_reports_observation_schema_failure() {
     let Err(error) = GlobalDb::try_open_at(&db_path).await else {
         panic!("observation schema conflict unexpectedly opened");
     };
-    let TraceDecayError::Database { message, operation } = error else {
+    let TraceDecayError::DatabaseOperation { operation, source } = error else {
         panic!("unexpected error: {error}");
     };
     assert_eq!(operation, "initialize observation schema");
+    let message = source.to_string();
     assert!(message.contains("observations"), "{message}");
     assert!(GlobalDb::open_at(&db_path).await.is_none());
 }
@@ -82,11 +83,12 @@ async fn try_open_at_reports_observation_projection_schema_failure() {
     let Err(error) = GlobalDb::try_open_at(&db_path).await else {
         panic!("observation projection schema conflict unexpectedly opened");
     };
-    let TraceDecayError::Database { message, operation } = error else {
+    let TraceDecayError::DatabaseOperation { operation, source } = error else {
         panic!("unexpected error: {error}");
     };
     assert_eq!(operation, "initialize observation projection schema");
-    assert!(message.contains("projector_version"), "{message}");
+    let message = source.to_string();
+    assert!(message.contains("view"), "{message}");
     assert!(GlobalDb::open_at(&db_path).await.is_none());
 }
 
@@ -123,6 +125,169 @@ async fn try_open_at_rejects_observation_table_without_authority_constraints() {
 }
 
 #[tokio::test]
+async fn schema_validation_accepts_equivalent_table_level_primary_key() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let db_path = dir.path().join("global.db");
+    let raw_db = Builder::new_local(&db_path).build().await.unwrap();
+    let raw_conn = raw_db.connect().unwrap();
+    raw_conn
+        .execute_batch(
+            "CREATE TABLE projects (
+                path TEXT,
+                tokens_saved INTEGER NOT NULL DEFAULT (0),
+                PRIMARY KEY (path)
+            )",
+        )
+        .await
+        .unwrap();
+    drop(raw_conn);
+    drop(raw_db);
+
+    GlobalDb::try_open_at(&db_path)
+        .await
+        .expect("structurally equivalent schema should open")
+        .expect("global database");
+}
+
+#[tokio::test]
+async fn schema_validation_rejects_incomplete_registry_table() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let db_path = dir.path().join("global.db");
+    let raw_db = Builder::new_local(&db_path).build().await.unwrap();
+    let raw_conn = raw_db.connect().unwrap();
+    raw_conn
+        .execute_batch(
+            "CREATE TABLE code_projects (
+                project_id TEXT PRIMARY KEY,
+                canonical_root TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                last_seen_at INTEGER NOT NULL
+            )",
+        )
+        .await
+        .unwrap();
+    drop(raw_conn);
+    drop(raw_db);
+
+    let Err(error) = GlobalDb::try_open_at(&db_path).await else {
+        panic!("incomplete registry schema unexpectedly opened");
+    };
+    assert!(
+        error.to_string().contains("incompatible number of columns"),
+        "{error}"
+    );
+}
+
+#[tokio::test]
+async fn cross_table_identity_constraints_reject_mismatched_rows() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let db = GlobalDb::open_at(&dir.path().join("global.db"))
+        .await
+        .expect("open global db");
+    let first_root = dir.path().join("first");
+    let second_root = dir.path().join("second");
+    db.upsert_code_project("project_one", &first_root, None, None, None)
+        .await
+        .unwrap();
+    db.upsert_code_project("project_two", &second_root, None, None, None)
+        .await
+        .unwrap();
+    db.conn
+        .execute(
+            "INSERT INTO store_instances
+             (store_id, project_id, store_kind, storage_mode, store_relpath, created_at)
+             VALUES ('store_one', 'project_one', 'sessions', 'central', 'sessions', 1)",
+            (),
+        )
+        .await
+        .unwrap();
+    let graph_error = db
+        .conn
+        .execute(
+            "INSERT INTO graph_scopes
+             (graph_scope_id, project_id, store_id, branch_name, db_relpath)
+             VALUES ('scope_bad', 'project_two', 'store_one', 'main', 'graph.db')",
+            (),
+        )
+        .await
+        .unwrap_err();
+    assert!(graph_error.to_string().contains("store/project mismatch"));
+
+    db.conn
+        .execute_batch(
+            "INSERT INTO sanitization_receipts
+             (receipt_id, sanitizer_version, payload_digest, receipt_json)
+             VALUES ('receipt_one', 'v1', 'digest_one', '{}');
+             INSERT INTO sanitization_receipts
+             (receipt_id, sanitizer_version, payload_digest, receipt_json)
+             VALUES ('receipt_two', 'v1', 'digest_two', '{}');
+             INSERT INTO observations
+             (observation_id, payload_digest, receipt_id, observation_json, committed_cursor_json)
+             VALUES ('observation_one', 'digest_one', 'receipt_one', '{}', '{}');",
+        )
+        .await
+        .unwrap();
+    let mut rows = db
+        .conn
+        .query(
+            "SELECT sequence FROM observations WHERE observation_id = 'observation_one'",
+            (),
+        )
+        .await
+        .unwrap();
+    let sequence = rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap();
+    drop(rows);
+
+    let queue_error = db
+        .conn
+        .execute(
+            "INSERT INTO projection_queue(observation_id, observation_sequence)
+             VALUES ('observation_one', ?1)",
+            params![sequence + 1],
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        queue_error
+            .to_string()
+            .contains("observation identity mismatch")
+    );
+
+    let provenance_error = db
+        .conn
+        .execute(
+            "INSERT INTO observation_projection_provenance
+             (projector_version, observation_id, receipt_id, output_provider,
+              output_message_id, output_digest, message_created)
+             VALUES ('v1', 'observation_one', 'receipt_two', 'claude', 'message', 'digest', 1)",
+            (),
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        provenance_error
+            .to_string()
+            .contains("provenance receipt mismatch")
+    );
+
+    let disposition_error = db
+        .conn
+        .execute(
+            "INSERT INTO observation_projection_dispositions
+             (projector_version, observation_id, receipt_id, reason)
+             VALUES ('v1', 'observation_one', 'receipt_two', 'invalid')",
+            (),
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        disposition_error
+            .to_string()
+            .contains("disposition receipt mismatch")
+    );
+}
+
+#[tokio::test]
 async fn try_open_at_propagates_project_row_migration_failure() {
     let dir = tempfile::TempDir::new().unwrap();
     let db_path = dir.path().join("global.db");
@@ -138,11 +303,65 @@ async fn try_open_at_propagates_project_row_migration_failure() {
     let Err(error) = GlobalDb::try_open_at(&db_path).await else {
         panic!("invalid projects table unexpectedly opened");
     };
-    let TraceDecayError::Database { message, operation } = error else {
+    let TraceDecayError::DatabaseOperation { operation, source } = error else {
         panic!("unexpected error: {error}");
     };
     assert_eq!(operation, "migrate global project rows");
+    let message = source.to_string();
     assert!(message.contains("tokens_saved"), "{message}");
+}
+
+#[tokio::test]
+async fn canonical_project_migration_rolls_back_insert_when_delete_fails() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let project = dir.path().join("project");
+    std::fs::create_dir(&project).unwrap();
+    let legacy = format!("{}/.", project.display());
+    let canonical = project.display().to_string();
+    let db_path = dir.path().join("global.db");
+    let raw_db = Builder::new_local(&db_path).build().await.unwrap();
+    let raw_conn = raw_db.connect().unwrap();
+    raw_conn
+        .execute_batch(
+            "CREATE TABLE projects (
+                path TEXT PRIMARY KEY,
+                tokens_saved INTEGER NOT NULL DEFAULT 0
+            );
+             CREATE TRIGGER reject_project_delete
+             BEFORE DELETE ON projects
+             BEGIN SELECT RAISE(ABORT, 'delete rejected'); END;",
+        )
+        .await
+        .unwrap();
+    raw_conn
+        .execute(
+            "INSERT INTO projects(path, tokens_saved) VALUES (?1, 7)",
+            params![legacy.as_str()],
+        )
+        .await
+        .unwrap();
+    drop(raw_conn);
+    drop(raw_db);
+
+    let Err(error) = GlobalDb::try_open_at(&db_path).await else {
+        panic!("failing canonical migration unexpectedly opened");
+    };
+    assert!(error.to_string().contains("delete rejected"), "{error}");
+
+    let raw_db = Builder::new_local(&db_path).build().await.unwrap();
+    let raw_conn = raw_db.connect().unwrap();
+    let mut rows = raw_conn
+        .query(
+            "SELECT path FROM projects WHERE path IN (?1, ?2) ORDER BY path",
+            params![legacy.as_str(), canonical.as_str()],
+        )
+        .await
+        .unwrap();
+    let mut paths = Vec::new();
+    while let Some(row) = rows.next().await.unwrap() {
+        paths.push(row.get::<String>(0).unwrap());
+    }
+    assert_eq!(paths, vec![legacy]);
 }
 
 #[cfg(any(unix, windows))]
@@ -221,9 +440,70 @@ async fn bulk_project_deletion_preserves_native_non_unicode_aliases() {
     db.upsert(&first, 11).await;
     db.upsert(&second, 22).await;
 
-    assert_eq!(db.delete_projects(std::slice::from_ref(&first)).await, 1);
+    assert_eq!(
+        db.delete_project_paths(std::slice::from_ref(&first)).await,
+        1
+    );
     assert_eq!(db.get_project_tokens(&first).await, 0);
     assert_eq!(db.get_project_tokens(&second).await, 22);
+}
+
+#[cfg(any(unix, windows))]
+#[tokio::test]
+async fn code_project_listing_uses_latest_lossless_primary_root() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let db = GlobalDb::open_at(&dir.path().join("global.db"))
+        .await
+        .expect("open global db");
+    let (first, second) = colliding_non_unicode_project_paths(dir.path());
+    db.upsert_code_project("proj_moved", &first, None, None, None)
+        .await
+        .expect("register first root");
+    db.upsert_code_project("proj_moved", &second, None, None, None)
+        .await
+        .expect("move primary root");
+
+    assert_eq!(
+        db.try_list_code_project_paths(usize::MAX).await.unwrap(),
+        vec![second]
+    );
+    assert_eq!(
+        db.project_id_by_alias_key(&project_path_alias_key(&first))
+            .await
+            .as_deref(),
+        Some("proj_moved")
+    );
+}
+
+#[cfg(any(unix, windows))]
+#[tokio::test]
+async fn legacy_code_project_listing_fails_closed_on_ambiguous_native_roots() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let db = GlobalDb::open_at(&dir.path().join("global.db"))
+        .await
+        .expect("open global db");
+    let (first, second) = colliding_non_unicode_project_paths(dir.path());
+    db.upsert_code_project("proj_legacy", &first, None, None, None)
+        .await
+        .expect("register project");
+    db.upsert_project_alias(&second, "proj_legacy")
+        .await
+        .expect("register historical alias");
+    db.conn
+        .execute(
+            "UPDATE code_projects SET primary_root_platform = NULL,
+             primary_root_bytes = NULL, primary_root_last_seen_at = NULL
+             WHERE project_id = 'proj_legacy'",
+            (),
+        )
+        .await
+        .unwrap();
+
+    let error = db
+        .try_list_code_project_paths(usize::MAX)
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("ambiguous legacy"), "{error}");
 }
 
 #[tokio::test]
@@ -236,6 +516,7 @@ async fn bulk_project_deletion_accepts_string_paths() {
     let project_text = project.to_string_lossy().into_owned();
     db.upsert(&project, 11).await;
 
+    assert_eq!(db.delete_projects(&[]).await, 0);
     assert_eq!(db.delete_projects(&[project_text]).await, 1);
     assert_eq!(db.get_project_tokens(&project).await, 0);
 }
@@ -775,7 +1056,7 @@ async fn session_column_migration_tolerates_duplicate_column_race() {
     .unwrap();
 
     assert!(
-        !session_column_exists(&conn, "parent_session_id")
+        !table_column_exists(&conn, "sessions", "parent_session_id")
             .await
             .unwrap()
     );
@@ -785,8 +1066,9 @@ async fn session_column_migration_tolerates_duplicate_column_race() {
         .unwrap();
 
     assert!(
-        add_session_parent_column_after_missing_check(
+        add_table_column_after_missing_check(
             &conn,
+            "sessions",
             "parent_session_id",
             "ALTER TABLE sessions ADD COLUMN parent_session_id TEXT",
         )

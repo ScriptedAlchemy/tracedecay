@@ -489,7 +489,9 @@ pub(crate) async fn handle_migrate_action(action: MigrateAction) -> tracedecay::
                     .collect();
                 (
                     global_db.delete_code_projects(&project_ids).await,
-                    global_db.delete_projects(&stale_storage_projects).await,
+                    global_db
+                        .delete_project_paths(&stale_storage_projects)
+                        .await,
                 )
             } else {
                 (0, 0)

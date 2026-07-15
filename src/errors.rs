@@ -17,6 +17,13 @@ pub enum TraceDecayError {
     #[error("database error: {message} (operation: {operation})")]
     Database { message: String, operation: String },
 
+    #[error("database error: {source} (operation: {operation})")]
+    DatabaseOperation {
+        operation: String,
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
+
     #[error("search error: {message} (query: {query})")]
     Search { message: String, query: String },
 

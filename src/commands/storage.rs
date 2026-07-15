@@ -200,7 +200,7 @@ pub(crate) async fn handle_wipe(all: bool) -> tracedecay::errors::Result<()> {
     } else if !wiped_paths.is_empty()
         && let Some(gdb) = gdb.as_ref()
     {
-        gdb.delete_projects(&wiped_paths).await;
+        gdb.delete_project_paths(&wiped_paths).await;
     }
 
     eprintln!();

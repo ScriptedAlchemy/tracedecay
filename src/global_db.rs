@@ -33,7 +33,10 @@ use crate::sessions::{
 mod observation;
 mod observation_projection;
 mod observation_store;
+mod schema_contract;
 mod transcript;
+
+use schema_contract::{ensure_cross_identity_triggers, validate_global_schema_contract};
 
 pub use observation_store::{ProjectObservationStoreError, ProjectObservationStoreResolution};
 pub(crate) use transcript::TranscriptPersistenceError;
@@ -406,212 +409,22 @@ fn global_db_mmap_size_guard() -> u64 {
 
 fn global_db_operation_error(
     operation: &'static str,
-    error: impl std::fmt::Display,
+    source: impl std::error::Error + Send + Sync + 'static,
+) -> TraceDecayError {
+    TraceDecayError::DatabaseOperation {
+        operation: operation.to_string(),
+        source: Box::new(source),
+    }
+}
+
+fn global_db_operation_message(
+    operation: &'static str,
+    message: impl Into<String>,
 ) -> TraceDecayError {
     TraceDecayError::Database {
-        message: error.to_string(),
+        message: message.into(),
         operation: operation.to_string(),
     }
-}
-
-struct SchemaContract {
-    object_type: &'static str,
-    name: &'static str,
-    required_sql: &'static [&'static str],
-}
-
-const GLOBAL_SCHEMA_CONTRACTS: &[SchemaContract] = &[
-    SchemaContract {
-        object_type: "table",
-        name: "projects",
-        required_sql: &[
-            "path TEXT PRIMARY KEY",
-            "tokens_saved INTEGER NOT NULL DEFAULT 0",
-        ],
-    },
-    SchemaContract {
-        object_type: "table",
-        name: "code_projects",
-        required_sql: &[
-            "project_id TEXT PRIMARY KEY",
-            "canonical_root TEXT NOT NULL",
-            "display_root TEXT NOT NULL",
-        ],
-    },
-    SchemaContract {
-        object_type: "table",
-        name: "project_aliases",
-        required_sql: &[
-            "alias_path TEXT PRIMARY KEY",
-            "project_id TEXT NOT NULL",
-            "FOREIGN KEY(project_id) REFERENCES code_projects(project_id) ON DELETE CASCADE",
-        ],
-    },
-    SchemaContract {
-        object_type: "table",
-        name: "store_instances",
-        required_sql: &[
-            "store_id TEXT PRIMARY KEY",
-            "project_id TEXT NOT NULL",
-            "FOREIGN KEY(project_id) REFERENCES code_projects(project_id) ON DELETE CASCADE",
-        ],
-    },
-    SchemaContract {
-        object_type: "table",
-        name: "graph_scopes",
-        required_sql: &[
-            "graph_scope_id TEXT PRIMARY KEY",
-            "project_id TEXT NOT NULL",
-            "store_id TEXT NOT NULL",
-            "FOREIGN KEY(project_id) REFERENCES code_projects(project_id) ON DELETE CASCADE",
-            "FOREIGN KEY(store_id) REFERENCES store_instances(store_id) ON DELETE CASCADE",
-        ],
-    },
-    SchemaContract {
-        object_type: "table",
-        name: "store_artifacts",
-        required_sql: &[
-            "store_id TEXT NOT NULL",
-            "PRIMARY KEY (store_id, artifact_kind, relpath)",
-            "FOREIGN KEY(store_id) REFERENCES store_instances(store_id) ON DELETE CASCADE",
-        ],
-    },
-    SchemaContract {
-        object_type: "index",
-        name: "idx_project_aliases_project_id",
-        required_sql: &["ON project_aliases(project_id)"],
-    },
-    SchemaContract {
-        object_type: "index",
-        name: "idx_store_instances_project_id",
-        required_sql: &["ON store_instances(project_id)"],
-    },
-    SchemaContract {
-        object_type: "index",
-        name: "idx_graph_scopes_project_store",
-        required_sql: &["ON graph_scopes(project_id, store_id)"],
-    },
-    SchemaContract {
-        object_type: "table",
-        name: "sanitization_receipts",
-        required_sql: &["receipt_id TEXT PRIMARY KEY"],
-    },
-    SchemaContract {
-        object_type: "table",
-        name: "observations",
-        required_sql: &[
-            "sequence INTEGER PRIMARY KEY AUTOINCREMENT",
-            "observation_id TEXT NOT NULL UNIQUE",
-            "FOREIGN KEY(receipt_id) REFERENCES sanitization_receipts(receipt_id)",
-        ],
-    },
-    SchemaContract {
-        object_type: "table",
-        name: "source_cursors",
-        required_sql: &["PRIMARY KEY(source_json, scope_json)"],
-    },
-    SchemaContract {
-        object_type: "table",
-        name: "projection_queue",
-        required_sql: &[
-            "observation_id TEXT PRIMARY KEY",
-            "observation_sequence INTEGER NOT NULL UNIQUE",
-            "FOREIGN KEY(observation_id) REFERENCES observations(observation_id)",
-        ],
-    },
-    SchemaContract {
-        object_type: "trigger",
-        name: "observations_immutable_update",
-        required_sql: &[
-            "BEFORE UPDATE ON observations",
-            "RAISE(ABORT, 'observations are immutable')",
-        ],
-    },
-    SchemaContract {
-        object_type: "trigger",
-        name: "observations_immutable_delete",
-        required_sql: &[
-            "BEFORE DELETE ON observations",
-            "RAISE(ABORT, 'observations are immutable')",
-        ],
-    },
-    SchemaContract {
-        object_type: "table",
-        name: "observation_projection_provenance",
-        required_sql: &[
-            "PRIMARY KEY(projector_version, observation_id)",
-            "CHECK(message_created IN (0, 1))",
-            "FOREIGN KEY(observation_id) REFERENCES observations(observation_id)",
-            "FOREIGN KEY(receipt_id) REFERENCES sanitization_receipts(receipt_id)",
-        ],
-    },
-    SchemaContract {
-        object_type: "table",
-        name: "observation_projection_checkpoints",
-        required_sql: &[
-            "projector_version TEXT PRIMARY KEY",
-            "CHECK(last_sequence >= 0)",
-        ],
-    },
-    SchemaContract {
-        object_type: "table",
-        name: "observation_projection_dispositions",
-        required_sql: &[
-            "PRIMARY KEY(projector_version, observation_id)",
-            "FOREIGN KEY(observation_id) REFERENCES observations(observation_id)",
-            "FOREIGN KEY(receipt_id) REFERENCES sanitization_receipts(receipt_id)",
-        ],
-    },
-];
-
-fn normalize_schema_sql(sql: &str) -> String {
-    sql.chars()
-        .filter(|character| !character.is_whitespace())
-        .collect::<String>()
-        .to_ascii_lowercase()
-}
-
-async fn validate_global_schema_contract(conn: &Connection) -> crate::errors::Result<()> {
-    const OPERATION: &str = "validate global database schema";
-
-    for contract in GLOBAL_SCHEMA_CONTRACTS {
-        let mut rows = conn
-            .query(
-                "SELECT sql FROM sqlite_master WHERE type = ?1 AND name = ?2",
-                params![contract.object_type, contract.name],
-            )
-            .await
-            .map_err(|error| global_db_operation_error(OPERATION, error))?;
-        let row = rows
-            .next()
-            .await
-            .map_err(|error| global_db_operation_error(OPERATION, error))?
-            .ok_or_else(|| {
-                global_db_operation_error(
-                    OPERATION,
-                    format!(
-                        "required {} '{}' is missing",
-                        contract.object_type, contract.name
-                    ),
-                )
-            })?;
-        let sql = row
-            .get::<String>(0)
-            .map_err(|error| global_db_operation_error(OPERATION, error))?;
-        let normalized_sql = normalize_schema_sql(&sql);
-        for required_sql in contract.required_sql {
-            if !normalized_sql.contains(&normalize_schema_sql(required_sql)) {
-                return Err(global_db_operation_error(
-                    OPERATION,
-                    format!(
-                        "{} '{}' is missing required invariant: {required_sql}",
-                        contract.object_type, contract.name
-                    ),
-                ));
-            }
-        }
-    }
-    Ok(())
 }
 
 /// Returns the path to the global database: `global.db` inside the user-level
@@ -1055,26 +868,99 @@ fn project_path_alias_key(project_path: &Path) -> String {
 
 #[cfg(unix)]
 fn native_project_path_alias_key(path: &Path) -> String {
-    use std::os::unix::ffi::OsStrExt as _;
-
-    encode_native_project_path_alias("unix-bytes", path.as_os_str().as_bytes())
+    encode_native_project_path_alias(
+        native_project_path_platform(),
+        &encode_native_project_path(path),
+    )
 }
 
 #[cfg(windows)]
 fn native_project_path_alias_key(path: &Path) -> String {
-    use std::os::windows::ffi::OsStrExt as _;
-
-    let bytes = path
-        .as_os_str()
-        .encode_wide()
-        .flat_map(u16::to_le_bytes)
-        .collect::<Vec<_>>();
-    encode_native_project_path_alias("windows-utf16le", &bytes)
+    encode_native_project_path_alias(
+        native_project_path_platform(),
+        &encode_native_project_path(path),
+    )
 }
 
 #[cfg(not(any(unix, windows)))]
 fn native_project_path_alias_key(path: &Path) -> String {
-    encode_native_project_path_alias("rust-os-str", path.as_os_str().as_encoded_bytes())
+    encode_native_project_path_alias(
+        native_project_path_platform(),
+        &encode_native_project_path(path),
+    )
+}
+
+#[cfg(unix)]
+fn native_project_path_platform() -> &'static str {
+    "unix-bytes"
+}
+
+#[cfg(windows)]
+fn native_project_path_platform() -> &'static str {
+    "windows-utf16le"
+}
+
+#[cfg(not(any(unix, windows)))]
+fn native_project_path_platform() -> &'static str {
+    "rust-os-str"
+}
+
+#[cfg(unix)]
+fn encode_native_project_path(path: &Path) -> Vec<u8> {
+    use std::os::unix::ffi::OsStrExt as _;
+    path.as_os_str().as_bytes().to_vec()
+}
+
+#[cfg(windows)]
+fn encode_native_project_path(path: &Path) -> Vec<u8> {
+    use std::os::windows::ffi::OsStrExt as _;
+    path.as_os_str()
+        .encode_wide()
+        .flat_map(u16::to_le_bytes)
+        .collect()
+}
+
+#[cfg(not(any(unix, windows)))]
+fn encode_native_project_path(path: &Path) -> Vec<u8> {
+    path.as_os_str().as_encoded_bytes().to_vec()
+}
+
+#[cfg(unix)]
+fn decode_native_project_path(platform: &str, bytes: Vec<u8>) -> Result<PathBuf, String> {
+    use std::ffi::OsString;
+    use std::os::unix::ffi::OsStringExt as _;
+
+    if platform != native_project_path_platform() {
+        return Err(format!(
+            "native project path belongs to platform '{platform}'"
+        ));
+    }
+    Ok(PathBuf::from(OsString::from_vec(bytes)))
+}
+
+#[cfg(windows)]
+fn decode_native_project_path(platform: &str, bytes: Vec<u8>) -> Result<PathBuf, String> {
+    use std::ffi::OsString;
+    use std::os::windows::ffi::OsStringExt as _;
+
+    if platform != native_project_path_platform() {
+        return Err(format!(
+            "native project path belongs to platform '{platform}'"
+        ));
+    }
+    if bytes.len() % 2 != 0 {
+        return Err("native Windows project path has odd byte length".to_string());
+    }
+    let wide = bytes
+        .chunks_exact(2)
+        .map(|chunk| u16::from_le_bytes([chunk[0], chunk[1]]))
+        .collect::<Vec<_>>();
+    Ok(PathBuf::from(OsString::from_wide(&wide)))
+}
+
+#[cfg(not(any(unix, windows)))]
+fn decode_native_project_path(_platform: &str, _bytes: Vec<u8>) -> Result<PathBuf, String> {
+    Err("native project paths are unsupported on this platform".to_string())
 }
 
 fn encode_native_project_path_alias(platform: &str, native_path: &[u8]) -> String {
@@ -1148,36 +1034,72 @@ fn normalize_git_remote_url(remote: &str) -> Option<String> {
     Some(normalized.to_ascii_lowercase())
 }
 
-async fn session_column_exists(conn: &Connection, column: &str) -> Result<bool, libsql::Error> {
-    let mut rows = conn.query("PRAGMA table_info(sessions)", ()).await?;
-    while let Some(row) = rows.next().await? {
-        if row.get::<String>(1)?.as_str() == column {
-            return Ok(true);
+async fn table_column_exists(
+    conn: &Connection,
+    table: &str,
+    column: &str,
+) -> Result<bool, libsql::Error> {
+    let mut rows = conn
+        .query(
+            "SELECT 1 FROM pragma_table_info(?1) WHERE name = ?2 COLLATE NOCASE",
+            params![table, column],
+        )
+        .await?;
+    Ok(rows.next().await?.is_some())
+}
+
+async fn add_table_column_after_missing_check(
+    conn: &Connection,
+    table: &str,
+    column: &str,
+    ddl: &str,
+) -> Result<bool, libsql::Error> {
+    match conn.execute(ddl, ()).await {
+        Ok(_) => Ok(true),
+        Err(error) => {
+            if table_column_exists(conn, table, column).await? {
+                Ok(false)
+            } else {
+                Err(error)
+            }
         }
     }
-    Ok(false)
+}
+
+async fn ensure_table_columns(
+    conn: &Connection,
+    table: &str,
+    columns: &[(&str, &str)],
+) -> Result<(), libsql::Error> {
+    for &(column, ddl) in columns {
+        if !table_column_exists(conn, table, column).await? {
+            add_table_column_after_missing_check(conn, table, column, ddl).await?;
+        }
+    }
+    Ok(())
 }
 
 async fn ensure_session_parent_columns(conn: &Connection) -> Result<(), libsql::Error> {
-    for (column, ddl) in [
-        (
-            "parent_session_id",
-            "ALTER TABLE sessions ADD COLUMN parent_session_id TEXT",
-        ),
-        (
-            "is_subagent",
-            "ALTER TABLE sessions ADD COLUMN is_subagent INTEGER NOT NULL DEFAULT 0",
-        ),
-        ("agent_id", "ALTER TABLE sessions ADD COLUMN agent_id TEXT"),
-        (
-            "parent_tool_use_id",
-            "ALTER TABLE sessions ADD COLUMN parent_tool_use_id TEXT",
-        ),
-    ] {
-        if !session_column_exists(conn, column).await? {
-            add_session_parent_column_after_missing_check(conn, column, ddl).await?;
-        }
-    }
+    ensure_table_columns(
+        conn,
+        "sessions",
+        &[
+            (
+                "parent_session_id",
+                "ALTER TABLE sessions ADD COLUMN parent_session_id TEXT",
+            ),
+            (
+                "is_subagent",
+                "ALTER TABLE sessions ADD COLUMN is_subagent INTEGER NOT NULL DEFAULT 0",
+            ),
+            ("agent_id", "ALTER TABLE sessions ADD COLUMN agent_id TEXT"),
+            (
+                "parent_tool_use_id",
+                "ALTER TABLE sessions ADD COLUMN parent_tool_use_id TEXT",
+            ),
+        ],
+    )
+    .await?;
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_sessions_parent
             ON sessions(provider, parent_session_id)",
@@ -1187,63 +1109,38 @@ async fn ensure_session_parent_columns(conn: &Connection) -> Result<(), libsql::
     Ok(())
 }
 
-async fn parse_offsets_column_exists(
-    conn: &Connection,
-    column: &str,
-) -> Result<bool, libsql::Error> {
-    let mut rows = conn.query("PRAGMA table_info(parse_offsets)", ()).await?;
-    while let Some(row) = rows.next().await? {
-        if row.get::<String>(1)?.as_str() == column {
-            return Ok(true);
-        }
-    }
-    Ok(false)
-}
-
-async fn add_parse_offset_column_after_missing_check(
-    conn: &Connection,
-    column: &str,
-    ddl: &str,
-) -> Result<(), libsql::Error> {
-    match conn.execute(ddl, ()).await {
-        Ok(_) => Ok(()),
-        Err(error) => {
-            if parse_offsets_column_exists(conn, column).await? {
-                Ok(())
-            } else {
-                Err(error)
-            }
-        }
-    }
-}
-
 async fn ensure_parse_offset_columns(conn: &Connection) -> Result<(), libsql::Error> {
-    if !parse_offsets_column_exists(conn, "file_id").await? {
-        add_parse_offset_column_after_missing_check(
-            conn,
+    ensure_table_columns(
+        conn,
+        "parse_offsets",
+        &[(
             "file_id",
             "ALTER TABLE parse_offsets ADD COLUMN file_id INTEGER NOT NULL DEFAULT 0",
-        )
-        .await?;
-    }
-    Ok(())
+        )],
+    )
+    .await
 }
 
-async fn add_session_parent_column_after_missing_check(
-    conn: &Connection,
-    column: &str,
-    ddl: &str,
-) -> Result<(), libsql::Error> {
-    match conn.execute(ddl, ()).await {
-        Ok(_) => Ok(()),
-        Err(error) => {
-            if session_column_exists(conn, column).await? {
-                Ok(())
-            } else {
-                Err(error)
-            }
-        }
-    }
+async fn ensure_code_project_native_root_columns(conn: &Connection) -> Result<(), libsql::Error> {
+    ensure_table_columns(
+        conn,
+        "code_projects",
+        &[
+            (
+                "primary_root_platform",
+                "ALTER TABLE code_projects ADD COLUMN primary_root_platform TEXT",
+            ),
+            (
+                "primary_root_bytes",
+                "ALTER TABLE code_projects ADD COLUMN primary_root_bytes BLOB",
+            ),
+            (
+                "primary_root_last_seen_at",
+                "ALTER TABLE code_projects ADD COLUMN primary_root_last_seen_at INTEGER",
+            ),
+        ],
+    )
+    .await
 }
 
 /// Process-global switch for the detached structured-row backfill sweep that
@@ -1479,6 +1376,9 @@ impl GlobalDb {
                 project_id TEXT PRIMARY KEY,
                 canonical_root TEXT NOT NULL,
                 display_root TEXT NOT NULL,
+                primary_root_platform TEXT,
+                primary_root_bytes BLOB,
+                primary_root_last_seen_at INTEGER,
                 git_common_dir TEXT,
                 git_remote_url TEXT,
                 default_branch TEXT,
@@ -1535,6 +1435,11 @@ impl GlobalDb {
             .await
             .map_err(|error| {
                 global_db_operation_error("initialize global project registry schema", error)
+            })?;
+        ensure_code_project_native_root_columns(&db.conn)
+            .await
+            .map_err(|error| {
+                global_db_operation_error("ensure native code project root schema", error)
             })?;
         db.migrate_project_rows_to_canonical_keys()
             .await
@@ -1682,37 +1587,16 @@ impl GlobalDb {
         observation::ensure_observation_schema(&db.conn)
             .await
             .map_err(|error| global_db_operation_error("initialize observation schema", error))?;
-        for query in [
-            "SELECT receipt_id, sanitizer_version, payload_digest, receipt_json
-             FROM sanitization_receipts LIMIT 0",
-            "SELECT sequence, observation_id, payload_digest, receipt_id, observation_json,
-                    committed_cursor_json
-             FROM observations LIMIT 0",
-            "SELECT source_json, scope_json, cursor_json FROM source_cursors LIMIT 0",
-            "SELECT observation_id, observation_sequence FROM projection_queue LIMIT 0",
-        ] {
-            db.conn.query(query, ()).await.map_err(|error| {
-                global_db_operation_error("initialize observation schema", error)
-            })?;
-        }
         observation_projection::ensure_observation_projection_schema(&db.conn)
             .await
             .map_err(|error| {
                 global_db_operation_error("initialize observation projection schema", error)
             })?;
-        for query in [
-            "SELECT projector_version, observation_id, receipt_id, output_provider,
-                    output_message_id, output_digest, message_created
-             FROM observation_projection_provenance LIMIT 0",
-            "SELECT projector_version, last_sequence
-             FROM observation_projection_checkpoints LIMIT 0",
-            "SELECT projector_version, observation_id, receipt_id, reason
-             FROM observation_projection_dispositions LIMIT 0",
-        ] {
-            db.conn.query(query, ()).await.map_err(|error| {
-                global_db_operation_error("initialize observation projection schema", error)
+        ensure_cross_identity_triggers(&db.conn)
+            .await
+            .map_err(|error| {
+                global_db_operation_error("ensure cross-table identity constraints", error)
             })?;
-        }
         validate_global_schema_contract(&db.conn).await?;
         crate::sessions::lcm::schema::ensure_lcm_schema(&db.conn)
             .await
@@ -2017,8 +1901,8 @@ impl GlobalDb {
     }
 
     async fn migrate_project_rows_to_canonical_keys(&self) -> Result<(), libsql::Error> {
-        let mut rows = self
-            .conn
+        let transaction = self.begin_authoritative_transaction().await?;
+        let mut rows = transaction
             .query("SELECT path, tokens_saved FROM projects", ())
             .await?;
         let mut replacements = Vec::new();
@@ -2033,7 +1917,7 @@ impl GlobalDb {
         drop(rows);
 
         for (old_path, canonical_path, tokens_saved) in replacements {
-            self.conn
+            transaction
                 .execute(
                     "INSERT INTO projects (path, tokens_saved) VALUES (?1, ?2)
                      ON CONFLICT(path) DO UPDATE SET
@@ -2041,11 +1925,11 @@ impl GlobalDb {
                     params![canonical_path, tokens_saved],
                 )
                 .await?;
-            self.conn
+            transaction
                 .execute("DELETE FROM projects WHERE path = ?1", params![old_path])
                 .await?;
         }
-        Ok(())
+        transaction.commit().await
     }
 
     pub async fn upsert_code_project(
@@ -2057,18 +1941,25 @@ impl GlobalDb {
         default_branch: Option<&str>,
     ) -> Option<CodeProjectRecord> {
         let now = crate::tracedecay::current_timestamp();
-        let canonical_root = Self::canonical_project_key(project_root);
+        let canonical_project_root = canonical_project_path(project_root);
+        let canonical_root = canonical_project_root.to_string_lossy().into_owned();
         let display_root = project_root.to_string_lossy().to_string();
+        let primary_root_platform = native_project_path_platform();
+        let primary_root_bytes = encode_native_project_path(&canonical_project_root);
         let git_common_dir_text = git_common_dir.map(|path| path.to_string_lossy().to_string());
         self.conn
             .execute(
                 "INSERT INTO code_projects
-                 (project_id, canonical_root, display_root, git_common_dir, git_remote_url,
-                  default_branch, created_at, last_seen_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7)
+                 (project_id, canonical_root, display_root, primary_root_platform,
+                  primary_root_bytes, primary_root_last_seen_at, git_common_dir,
+                  git_remote_url, default_branch, created_at, last_seen_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?6, ?6)
                  ON CONFLICT(project_id) DO UPDATE SET
                     canonical_root = excluded.canonical_root,
                     display_root = excluded.display_root,
+                    primary_root_platform = excluded.primary_root_platform,
+                    primary_root_bytes = excluded.primary_root_bytes,
+                    primary_root_last_seen_at = excluded.primary_root_last_seen_at,
                     git_common_dir = excluded.git_common_dir,
                     git_remote_url = excluded.git_remote_url,
                     default_branch = excluded.default_branch,
@@ -2077,10 +1968,12 @@ impl GlobalDb {
                     project_id,
                     canonical_root,
                     display_root,
+                    primary_root_platform,
+                    primary_root_bytes,
+                    now,
                     opt_text(git_common_dir_text.as_deref()),
                     opt_text(git_remote_url),
                     opt_text(default_branch),
-                    now,
                 ],
             )
             .await
@@ -2385,25 +2278,19 @@ impl GlobalDb {
         const OPERATION: &str = "list native code project paths";
 
         let limit = i64::try_from(limit).unwrap_or(i64::MAX);
-        let native_alias_pattern = format!("{NATIVE_PROJECT_PATH_ALIAS_PREFIX}-%");
         let mut rows = self
             .conn
             .query(
-                "SELECT project_id, display_root,
-                        (SELECT alias_path
-                         FROM project_aliases
-                         WHERE project_aliases.project_id = code_projects.project_id
-                           AND alias_path LIKE ?1
-                         ORDER BY alias_path
-                         LIMIT 1)
+                "SELECT project_id, display_root, primary_root_platform,
+                        primary_root_bytes, primary_root_last_seen_at
                  FROM code_projects
                  ORDER BY last_seen_at DESC, project_id
-                 LIMIT ?2",
-                params![native_alias_pattern, limit],
+                 LIMIT ?1",
+                params![limit],
             )
             .await
             .map_err(|error| global_db_operation_error(OPERATION, error))?;
-        let mut paths = Vec::new();
+        let mut roots = Vec::new();
         while let Some(row) = rows
             .next()
             .await
@@ -2415,28 +2302,104 @@ impl GlobalDb {
             let display_root = row
                 .get::<String>(1)
                 .map_err(|error| global_db_operation_error(OPERATION, error))?;
-            let native_alias = row
+            let platform = row
                 .get::<Option<String>>(2)
                 .map_err(|error| global_db_operation_error(OPERATION, error))?;
-            let path = match native_alias {
-                Some(alias) => decode_native_project_path_alias(&alias)
-                    .map_err(|error| {
-                        global_db_operation_error(
+            let bytes = row
+                .get::<Option<Vec<u8>>>(3)
+                .map_err(|error| global_db_operation_error(OPERATION, error))?;
+            let last_seen_at = row
+                .get::<Option<i64>>(4)
+                .map_err(|error| global_db_operation_error(OPERATION, error))?;
+            roots.push((project_id, display_root, platform, bytes, last_seen_at));
+        }
+        drop(rows);
+
+        let mut paths = Vec::with_capacity(roots.len());
+        for (project_id, display_root, platform, bytes, last_seen_at) in roots {
+            let path = match (platform, bytes, last_seen_at) {
+                (Some(platform), Some(bytes), Some(_)) => {
+                    decode_native_project_path(&platform, bytes).map_err(|error| {
+                        global_db_operation_message(
                             OPERATION,
-                            format!("invalid native alias for project '{project_id}': {error}"),
+                            format!("invalid primary root for project '{project_id}': {error}"),
                         )
                     })?
-                    .ok_or_else(|| {
-                        global_db_operation_error(
-                            OPERATION,
-                            format!("invalid native alias for project '{project_id}'"),
-                        )
-                    })?,
-                None => PathBuf::from(display_root),
+                }
+                (None, None, None) => {
+                    self.legacy_code_project_path(&project_id, &display_root)
+                        .await?
+                }
+                _ => {
+                    return Err(global_db_operation_message(
+                        OPERATION,
+                        format!("project '{project_id}' has an incomplete primary root"),
+                    ));
+                }
             };
+            if !path.is_absolute() {
+                return Err(global_db_operation_message(
+                    OPERATION,
+                    format!("project '{project_id}' has a non-absolute root"),
+                ));
+            }
             paths.push(path);
         }
         Ok(paths)
+    }
+
+    async fn legacy_code_project_path(
+        &self,
+        project_id: &str,
+        display_root: &str,
+    ) -> crate::errors::Result<PathBuf> {
+        const OPERATION: &str = "list native code project paths";
+        let native_alias_pattern = format!("{NATIVE_PROJECT_PATH_ALIAS_PREFIX}-%");
+        let mut rows = self
+            .conn
+            .query(
+                "SELECT alias_path FROM project_aliases
+                 WHERE project_id = ?1 AND alias_path LIKE ?2
+                 ORDER BY alias_path",
+                params![project_id, native_alias_pattern],
+            )
+            .await
+            .map_err(|error| global_db_operation_error(OPERATION, error))?;
+        let mut aliases = Vec::new();
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|error| global_db_operation_error(OPERATION, error))?
+        {
+            aliases.push(
+                row.get::<String>(0)
+                    .map_err(|error| global_db_operation_error(OPERATION, error))?,
+            );
+        }
+        match aliases.as_slice() {
+            [alias] => decode_native_project_path_alias(alias)
+                .map_err(|error| {
+                    global_db_operation_message(
+                        OPERATION,
+                        format!("invalid native alias for project '{project_id}': {error}"),
+                    )
+                })?
+                .ok_or_else(|| {
+                    global_db_operation_message(
+                        OPERATION,
+                        format!("invalid native alias for project '{project_id}'"),
+                    )
+                }),
+            [] if !display_root.contains('\u{fffd}') => Ok(PathBuf::from(display_root)),
+            [] => Err(global_db_operation_message(
+                OPERATION,
+                format!("project '{project_id}' has only a lossy legacy display root"),
+            )),
+            _ => Err(global_db_operation_message(
+                OPERATION,
+                format!("project '{project_id}' has ambiguous legacy native roots"),
+            )),
+        }
     }
 
     /// Lists registered code projects on the daemon's best-effort path.
@@ -3200,7 +3163,11 @@ impl GlobalDb {
     /// Chunks the input at 256 paths per statement to stay well clear of
     /// `SQLite`'s default 999-parameter limit while still reducing N round trips
     /// to ⌈N/256⌉.
-    pub async fn delete_projects<P: AsRef<Path>>(&self, project_paths: &[P]) -> usize {
+    pub async fn delete_projects(&self, project_paths: &[String]) -> usize {
+        self.delete_project_paths(project_paths).await
+    }
+
+    pub async fn delete_project_paths<P: AsRef<Path>>(&self, project_paths: &[P]) -> usize {
         const CHUNK: usize = 256;
         let mut total: usize = 0;
         for chunk in project_paths.chunks(CHUNK) {

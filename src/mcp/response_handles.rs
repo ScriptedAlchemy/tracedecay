@@ -635,7 +635,7 @@ fn error_class(error: &TraceDecayError) -> &'static str {
     match error {
         TraceDecayError::File { .. } => "file",
         TraceDecayError::Parse { .. } => "parse",
-        TraceDecayError::Database { .. } => "database",
+        TraceDecayError::Database { .. } | TraceDecayError::DatabaseOperation { .. } => "database",
         TraceDecayError::Search { .. } => "search",
         TraceDecayError::Config { .. } => "config",
         TraceDecayError::SyncLock { .. } => "sync_lock",

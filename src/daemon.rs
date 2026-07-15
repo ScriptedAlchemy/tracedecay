@@ -2953,11 +2953,16 @@ fn is_missing_index_error(err: &TraceDecayError) -> bool {
 }
 
 fn is_readonly_database_error(err: &TraceDecayError) -> bool {
-    matches!(
-        err,
-        TraceDecayError::Database { message, .. }
-            if message.to_ascii_lowercase().contains("readonly database")
-    )
+    match err {
+        TraceDecayError::Database { message, .. } => {
+            message.to_ascii_lowercase().contains("readonly database")
+        }
+        TraceDecayError::DatabaseOperation { source, .. } => source
+            .to_string()
+            .to_ascii_lowercase()
+            .contains("readonly database"),
+        _ => false,
+    }
 }
 
 fn missing_index_error(project_path: &Path) -> TraceDecayError {
