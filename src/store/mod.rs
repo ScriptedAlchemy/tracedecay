@@ -11,8 +11,10 @@ use crate::sessions::SessionRecord;
 use crate::sessions::git_correlation::{CommitSessionRecord, SpanObservation};
 
 pub mod global_db;
+pub mod observation;
 
 pub use global_db::GlobalDbTranscriptStore;
+pub use observation::GlobalDbObservationStore;
 
 /// Application boundary required by production transcript ingestion.
 ///

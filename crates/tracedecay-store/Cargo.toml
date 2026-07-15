@@ -9,3 +9,4 @@ repository = "https://github.com/ScriptedAlchemy/tracedecay"
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 thiserror = "2"
+tracedecay-domain = { path = "../tracedecay-domain", version = "0.1.0" }
