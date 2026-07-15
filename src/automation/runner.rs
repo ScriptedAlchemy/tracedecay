@@ -371,13 +371,13 @@ async fn run_session_reflector_for_store(
         memory_conn,
         digest_root,
         &finalizer,
-        &run.dashboard_root,
-        &run.run_id,
-        &response,
-        &evidence,
-        evidence_hash,
-        &proposed_ops,
-        &proposals,
+        ProposedAgentOutput {
+            response: &response,
+            evidence: &evidence,
+            evidence_hash,
+            proposed_ops: &proposed_ops,
+            proposals: &proposals,
+        },
     )
     .await?;
     let record = finalizer
@@ -394,19 +394,29 @@ async fn run_session_reflector_for_store(
 
 /// Validates and stages the `facts` half of a reflector (or combined) run,
 /// returning the report plus the not-yet-appended success ledger record.
-#[allow(clippy::too_many_arguments)]
+struct ProposedAgentOutput<'a> {
+    response: &'a AgentTaskResponse,
+    evidence: &'a Value,
+    evidence_hash: Option<String>,
+    proposed_ops: &'a Value,
+    proposals: &'a [Value],
+}
+
 async fn finalize_session_reflector_success(
     memory_conn: &libsql::Connection,
     digest_root: Option<&std::path::Path>,
     finalizer: &AgentRunFinalizer<'_>,
-    dashboard_root: &std::path::Path,
-    run_id: &str,
-    response: &AgentTaskResponse,
-    evidence: &Value,
-    evidence_hash: Option<String>,
-    proposed_ops: &Value,
-    proposals: &[Value],
+    output: ProposedAgentOutput<'_>,
 ) -> Result<(Value, AutomationRunLedgerRecord)> {
+    let ProposedAgentOutput {
+        response,
+        evidence,
+        evidence_hash,
+        proposed_ops,
+        proposals,
+    } = output;
+    let dashboard_root = finalizer.dashboard_root();
+    let run_id = finalizer.run_id();
     let (accepted_facts, rejected_facts) =
         validate_fact_proposals_on_connection(memory_conn, proposals, evidence).await?;
     let accepted_count = accepted_facts.len();
@@ -688,16 +698,16 @@ async fn run_skill_writer_for_store(
         )
         .await?;
     let (report, record) = finalize_skill_writer_success(
-        config,
         &finalizer,
         &profile_root,
-        &run.run_id,
-        &response,
-        &evidence,
-        evidence_hash,
         activation_policy,
-        &proposed_ops,
-        &proposals,
+        ProposedAgentOutput {
+            response: &response,
+            evidence: &evidence,
+            evidence_hash,
+            proposed_ops: &proposed_ops,
+            proposals: &proposals,
+        },
     )
     .await?;
     let record = finalizer
@@ -716,19 +726,21 @@ async fn run_skill_writer_for_store(
 /// run, returning the report plus the not-yet-appended success ledger record.
 /// A skill-proposal validation failure appends a failed record before
 /// bubbling the error.
-#[allow(clippy::too_many_arguments)]
 async fn finalize_skill_writer_success(
-    config: &AutomationConfig,
     finalizer: &AgentRunFinalizer<'_>,
     profile_root: &std::path::Path,
-    run_id: &str,
-    response: &AgentTaskResponse,
-    evidence: &Value,
-    evidence_hash: Option<String>,
     activation_policy: &'static str,
-    proposed_ops: &Value,
-    proposals: &[Value],
+    output: ProposedAgentOutput<'_>,
 ) -> Result<(Value, AutomationRunLedgerRecord)> {
+    let ProposedAgentOutput {
+        response,
+        evidence,
+        evidence_hash,
+        proposed_ops,
+        proposals,
+    } = output;
+    let config = finalizer.config();
+    let run_id = finalizer.run_id();
     let proposal_outcome = match validate_and_apply_skill_proposals(
         profile_root,
         run_id,
@@ -1368,13 +1380,13 @@ pub async fn run_combined_review_with_backend(
         memory_db.conn(),
         Some(cg.store_layout().project_root.as_path()),
         &reflector_finalizer,
-        &dashboard_root,
-        &reflector_run_id,
-        &response,
-        &reflector_bundle.evidence,
-        reflector_bundle.evidence_hash.clone(),
-        &output,
-        &facts,
+        ProposedAgentOutput {
+            response: &response,
+            evidence: &reflector_bundle.evidence,
+            evidence_hash: reflector_bundle.evidence_hash.clone(),
+            proposed_ops: &output,
+            proposals: &facts,
+        },
     )
     .await?;
     let reflector_record = reflector_finalizer
@@ -1382,16 +1394,16 @@ pub async fn run_combined_review_with_backend(
         .await?;
 
     let (skill_report, skill_record) = finalize_skill_writer_success(
-        config,
         &skill_finalizer,
         &skill_bundle.profile_root,
-        &skill_run_id,
-        &response,
-        &skill_bundle.evidence,
-        skill_bundle.evidence_hash.clone(),
         activation_policy,
-        &output,
-        &skills,
+        ProposedAgentOutput {
+            response: &response,
+            evidence: &skill_bundle.evidence,
+            evidence_hash: skill_bundle.evidence_hash.clone(),
+            proposed_ops: &output,
+            proposals: &skills,
+        },
     )
     .await?;
     let skill_record = skill_finalizer

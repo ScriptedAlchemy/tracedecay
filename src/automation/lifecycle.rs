@@ -97,19 +97,7 @@ impl<'a> AgentTaskRunContext<'a> {
         reason: &str,
         report_task_key: Option<&'static str>,
     ) -> Result<(Value, AutomationRunLedgerRecord)> {
-        skipped_run_parts(
-            &self.dashboard_root,
-            &self.run_id,
-            self.trigger,
-            self.config,
-            self.task,
-            evidence_hash,
-            reason,
-            self.started_at(),
-            report_task_key,
-            self.scheduler_skip_is_repeat(reason),
-        )
-        .await
+        skipped_run_parts(self, evidence_hash, reason, report_task_key).await
     }
 
     /// Computes the repeat-skip dedup decision from the records cached by
@@ -221,31 +209,21 @@ pub(crate) async fn task_run_gate(
 /// Appends a skipped run record unless the caller already determined it is a
 /// repeat scheduler skip. Performs no ledger reads: `is_repeat` must be
 /// computed from the records the gate evaluation loaded.
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn append_skipped_record(
-    dashboard_root: &Path,
-    run_id: &str,
-    trigger: AutomationTrigger,
-    config: &AutomationConfig,
-    task: AgentTaskKind,
+    run: &AgentTaskRunContext<'_>,
     evidence_hash: Option<String>,
     reason: &str,
-    started_at: &str,
     is_repeat: bool,
 ) -> Result<AutomationRunLedgerRecord> {
-    let record = ledger_record(
-        run_id,
-        trigger,
-        config,
-        task,
-        AutomationRunStatus::Skipped,
+    let record = run.finalizer(None).record(RunRecordOutcome {
+        model: None,
+        status: AutomationRunStatus::Skipped,
         evidence_hash,
-        None,
-        0,
-        0,
-        Some(reason.to_string()),
-        started_at,
-    );
+        proposed_ops: None,
+        accepted_count: 0,
+        rejected_count: 0,
+        error: Some(reason.to_string()),
+    });
     // Scheduler ticks re-evaluate every task every few seconds, so a standing
     // skip condition (interval not elapsed, task disabled, ...) would append
     // thousands of identical records and drown real runs out of the ledger.
@@ -254,10 +232,10 @@ pub(crate) async fn append_skipped_record(
     // The gate's ledger read and this append are not atomic: two concurrent
     // writers can both observe no prior skip and each append the "first"
     // record. The duplicate is benign, so no cross-process locking is done.
-    if trigger == AutomationTrigger::Scheduler && is_repeat {
+    if run.trigger == AutomationTrigger::Scheduler && is_repeat {
         return Ok(record);
     }
-    append_run_record(dashboard_root, &record).await?;
+    append_run_record(&run.dashboard_root, &record).await?;
     Ok(record)
 }
 
@@ -281,18 +259,11 @@ fn is_repeat_scheduler_skip(
         })
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn skipped_run_parts(
-    dashboard_root: &Path,
-    run_id: &str,
-    trigger: AutomationTrigger,
-    config: &AutomationConfig,
-    task: AgentTaskKind,
+    run: &AgentTaskRunContext<'_>,
     evidence_hash: Option<String>,
     reason: &str,
-    started_at: &str,
     report_task_key: Option<&'static str>,
-    is_repeat: bool,
 ) -> Result<(Value, AutomationRunLedgerRecord)> {
     let mut report = json!({
         "status": "skipped",
@@ -305,15 +276,10 @@ pub(crate) async fn skipped_run_parts(
         }
     }
     let record = append_skipped_record(
-        dashboard_root,
-        run_id,
-        trigger,
-        config,
-        task,
+        run,
         evidence_hash,
         reason,
-        started_at,
-        is_repeat,
+        run.scheduler_skip_is_repeat(reason),
     )
     .await?;
     Ok((report, record))
@@ -333,65 +299,14 @@ pub(crate) fn failed_backend_fallback_report(record: &AutomationRunLedgerRecord)
     })
 }
 
-#[allow(clippy::too_many_arguments)]
-fn ledger_record_with_model(
-    run_id: &str,
-    trigger: AutomationTrigger,
-    config: &AutomationConfig,
+struct RunRecordOutcome {
     model: Option<String>,
-    task: AgentTaskKind,
     status: AutomationRunStatus,
     evidence_hash: Option<String>,
     proposed_ops: Option<Value>,
     accepted_count: usize,
     rejected_count: usize,
     error: Option<String>,
-    started_at: &str,
-) -> AutomationRunLedgerRecord {
-    let completed_at = current_timestamp().to_string();
-    let error_classification = (status == AutomationRunStatus::Failed)
-        .then(|| error.as_deref().map(classify_agent_task_error_message))
-        .flatten();
-    let contract = agent_task_contract(task);
-    AutomationRunLedgerRecord {
-        schema_version: 2,
-        run_id: run_id.to_string(),
-        trigger,
-        task,
-        task_key: Some(task_key(task).to_string()),
-        backend: config.backend.as_str().to_string(),
-        host_mode: Some(config.host_mode.as_str().to_string()),
-        prompt_version: Some(prompt_version(task).to_string()),
-        response_schema: Some(contract.response_schema),
-        strict_json: Some(contract.strict_json),
-        model,
-        status,
-        evidence_hash,
-        input_hash: None,
-        output_hash: None,
-        proposed_ops,
-        applied_ops: None,
-        rejected_ops: None,
-        validation_report: None,
-        reviewed_count: accepted_count + rejected_count,
-        accepted_count,
-        rejected_count,
-        skipped_count: usize::from(status == AutomationRunStatus::Skipped),
-        fallback_status: (status == AutomationRunStatus::Skipped)
-            .then(|| error.clone())
-            .flatten(),
-        error,
-        error_classification,
-        error_retryable: error_classification
-            .map(super::backend::AgentTaskFailureClass::is_retryable),
-        report_ref: Some(json!({
-            "dashboard_runs": "/api/plugins/holographic/curation/runs",
-            "run_id": run_id,
-        })),
-        artifacts: Vec::new(),
-        started_at: started_at.to_string(),
-        completed_at,
-    }
 }
 
 pub(crate) struct AgentRunFinalizer<'a> {
@@ -438,21 +353,36 @@ impl<'a> AgentRunFinalizer<'a> {
         self
     }
 
+    pub(crate) fn dashboard_root(&self) -> &Path {
+        self.dashboard_root
+    }
+
+    pub(crate) fn run_id(&self) -> &str {
+        self.run_id
+    }
+
+    pub(crate) fn config(&self) -> &AutomationConfig {
+        self.config
+    }
+
     pub(crate) async fn append_backend_fallback_record(
         &self,
         evidence_hash: Option<String>,
         error: String,
     ) -> Result<AutomationRunLedgerRecord> {
-        let mut record = failed_backend_fallback_record(
-            self.run_id,
-            self.trigger,
-            self.config,
-            self.task,
+        let fallback_output = noop_output_for_task(self.task);
+        let mut record = self.record(RunRecordOutcome {
+            model: None,
+            status: AutomationRunStatus::Failed,
             evidence_hash,
-            self.input_hash.clone(),
-            error,
-            self.started_at,
-        );
+            proposed_ops: Some(fallback_output),
+            accepted_count: 0,
+            rejected_count: 0,
+            error: Some(error),
+        });
+        record.input_hash.clone_from(&self.input_hash);
+        record.output_hash = record.proposed_ops.as_ref().map(sha256_json);
+        record.fallback_status = Some("backend_failed_noop".to_string());
         self.annotate_combined_run(&mut record);
         append_run_record(self.dashboard_root, &record).await?;
         Ok(record)
@@ -482,20 +412,15 @@ impl<'a> AgentRunFinalizer<'a> {
         proposed_ops: Option<Value>,
         error: String,
     ) -> Result<AutomationRunLedgerRecord> {
-        let mut record = ledger_record_with_model(
-            self.run_id,
-            self.trigger,
-            self.config,
+        let mut record = self.record(RunRecordOutcome {
             model,
-            self.task,
-            AutomationRunStatus::Failed,
+            status: AutomationRunStatus::Failed,
             evidence_hash,
             proposed_ops,
-            0,
-            0,
-            Some(error),
-            self.started_at,
-        );
+            accepted_count: 0,
+            rejected_count: 0,
+            error: Some(error),
+        });
         self.finish_record(&mut record);
         append_run_record(self.dashboard_root, &record).await?;
         Ok(record)
@@ -509,20 +434,15 @@ impl<'a> AgentRunFinalizer<'a> {
         accepted_count: usize,
         rejected_count: usize,
     ) -> AutomationRunLedgerRecord {
-        ledger_record_with_model(
-            self.run_id,
-            self.trigger,
-            self.config,
-            response.model.clone(),
-            self.task,
-            AutomationRunStatus::Succeeded,
+        self.record(RunRecordOutcome {
+            model: response.model.clone(),
+            status: AutomationRunStatus::Succeeded,
             evidence_hash,
             proposed_ops,
             accepted_count,
             rejected_count,
-            None,
-            self.started_at,
-        )
+            error: None,
+        })
     }
 
     pub(crate) async fn append_success_record(
@@ -602,6 +522,58 @@ impl<'a> AgentRunFinalizer<'a> {
         self.annotate_combined_run(record);
     }
 
+    fn record(&self, outcome: RunRecordOutcome) -> AutomationRunLedgerRecord {
+        let completed_at = current_timestamp().to_string();
+        let error_classification = (outcome.status == AutomationRunStatus::Failed)
+            .then(|| {
+                outcome
+                    .error
+                    .as_deref()
+                    .map(classify_agent_task_error_message)
+            })
+            .flatten();
+        let contract = agent_task_contract(self.task);
+        AutomationRunLedgerRecord {
+            schema_version: 2,
+            run_id: self.run_id.to_string(),
+            trigger: self.trigger,
+            task: self.task,
+            task_key: Some(task_key(self.task).to_string()),
+            backend: self.config.backend.as_str().to_string(),
+            host_mode: Some(self.config.host_mode.as_str().to_string()),
+            prompt_version: Some(prompt_version(self.task).to_string()),
+            response_schema: Some(contract.response_schema),
+            strict_json: Some(contract.strict_json),
+            model: outcome.model,
+            status: outcome.status,
+            evidence_hash: outcome.evidence_hash,
+            input_hash: None,
+            output_hash: None,
+            proposed_ops: outcome.proposed_ops,
+            applied_ops: None,
+            rejected_ops: None,
+            validation_report: None,
+            reviewed_count: outcome.accepted_count + outcome.rejected_count,
+            accepted_count: outcome.accepted_count,
+            rejected_count: outcome.rejected_count,
+            skipped_count: usize::from(outcome.status == AutomationRunStatus::Skipped),
+            fallback_status: (outcome.status == AutomationRunStatus::Skipped)
+                .then(|| outcome.error.clone())
+                .flatten(),
+            error: outcome.error,
+            error_classification,
+            error_retryable: error_classification
+                .map(super::backend::AgentTaskFailureClass::is_retryable),
+            report_ref: Some(json!({
+                "dashboard_runs": "/api/plugins/holographic/curation/runs",
+                "run_id": self.run_id,
+            })),
+            artifacts: Vec::new(),
+            started_at: self.started_at.to_string(),
+            completed_at,
+        }
+    }
+
     fn annotate_combined_run(&self, record: &mut AutomationRunLedgerRecord) {
         let Some(combined_run_id) = &self.combined_run_id else {
             return;
@@ -661,67 +633,6 @@ pub(crate) fn generated_run_id(prefix: &str) -> String {
     };
     let counter = RUN_ID_COUNTER.fetch_add(1, Ordering::Relaxed);
     format!("{prefix}_{}_{counter}_{entropy}", current_timestamp())
-}
-
-#[allow(clippy::too_many_arguments)]
-fn ledger_record(
-    run_id: &str,
-    trigger: AutomationTrigger,
-    config: &AutomationConfig,
-    task: AgentTaskKind,
-    status: AutomationRunStatus,
-    evidence_hash: Option<String>,
-    proposed_ops: Option<Value>,
-    accepted_count: usize,
-    rejected_count: usize,
-    error: Option<String>,
-    started_at: &str,
-) -> AutomationRunLedgerRecord {
-    ledger_record_with_model(
-        run_id,
-        trigger,
-        config,
-        None,
-        task,
-        status,
-        evidence_hash,
-        proposed_ops,
-        accepted_count,
-        rejected_count,
-        error,
-        started_at,
-    )
-}
-
-#[allow(clippy::too_many_arguments)]
-fn failed_backend_fallback_record(
-    run_id: &str,
-    trigger: AutomationTrigger,
-    config: &AutomationConfig,
-    task: AgentTaskKind,
-    evidence_hash: Option<String>,
-    input_hash: Option<String>,
-    error: String,
-    started_at: &str,
-) -> AutomationRunLedgerRecord {
-    let fallback_output = noop_output_for_task(task);
-    let mut record = ledger_record(
-        run_id,
-        trigger,
-        config,
-        task,
-        AutomationRunStatus::Failed,
-        evidence_hash,
-        Some(fallback_output),
-        0,
-        0,
-        Some(error),
-        started_at,
-    );
-    record.input_hash = input_hash;
-    record.output_hash = record.proposed_ops.as_ref().map(sha256_json);
-    record.fallback_status = Some("backend_failed_noop".to_string());
-    record
 }
 
 fn noop_output_for_task(task: AgentTaskKind) -> Value {
@@ -937,19 +848,18 @@ mod tests {
         // append path must not perform its own ledger read to second-guess
         // the flag computed from the gate's cached records.
         for run_id in ["run-1", "run-2"] {
-            append_skipped_record(
-                root,
-                run_id,
+            let run = AgentTaskRunContext::new(
+                root.to_path_buf(),
+                root.join("sessions.db"),
+                Some(run_id.to_string()),
+                "memory_curator",
                 AutomationTrigger::Scheduler,
                 &config,
                 task,
-                None,
-                "scheduler_interval_not_elapsed",
-                "1000",
-                false,
-            )
-            .await
-            .expect("append skipped record");
+            );
+            append_skipped_record(&run, None, "scheduler_interval_not_elapsed", false)
+                .await
+                .expect("append skipped record");
         }
         let records = load_run_records(root, 50).await.expect("load records");
         assert_eq!(
@@ -958,19 +868,18 @@ mod tests {
             "append path must trust the caller-computed repeat flag"
         );
 
-        append_skipped_record(
-            root,
-            "run-3",
+        let run = AgentTaskRunContext::new(
+            root.to_path_buf(),
+            root.join("sessions.db"),
+            Some("run-3".to_string()),
+            "memory_curator",
             AutomationTrigger::Scheduler,
             &config,
             task,
-            None,
-            "scheduler_interval_not_elapsed",
-            "1000",
-            true,
-        )
-        .await
-        .expect("append skipped record");
+        );
+        append_skipped_record(&run, None, "scheduler_interval_not_elapsed", true)
+            .await
+            .expect("append skipped record");
         let records = load_run_records(root, 50).await.expect("load records");
         assert_eq!(records.len(), 2, "is_repeat=true must suppress the append");
     }
