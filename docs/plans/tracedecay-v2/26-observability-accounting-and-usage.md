@@ -3,8 +3,10 @@
 ## Status / role
 
 Cross-cutting instrumentation is implemented with each owning product slice. PR14 completes the Observatory and Costs experience over the resulting canonical read models. This plan is a product observability contract, not a plan compiler or delivery tracker.
-Its versioned measurements and coverage semantics are the only telemetry input
-to [PR20 performance optimization](33-end-to-end-performance-optimization.md).
+Its versioned measurements and coverage semantics are the canonical product
+telemetry input to [PR20 performance optimization](33-end-to-end-performance-optimization.md).
+Versioned benchmark, profiler, and operating-system measurements remain valid
+PR20 evidence under that plan's measurement contract.
 
 ## Outcome
 
