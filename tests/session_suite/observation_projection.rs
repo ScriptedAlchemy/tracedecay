@@ -23,10 +23,18 @@ fn source(session_id: &str) -> ClaudeSourceIdentityV1 {
 }
 
 fn cursor(session_id: &str, byte_offset: u64) -> ClaudeSourceCursorV1 {
+    cursor_in_generation(session_id, GENERATION, byte_offset)
+}
+
+fn cursor_in_generation(
+    session_id: &str,
+    generation: u64,
+    byte_offset: u64,
+) -> ClaudeSourceCursorV1 {
     ClaudeSourceCursorV1::new(
         source(session_id),
         ObservationScopeV1::Profile,
-        ClaudeFileGenerationV1::new(GENERATION).unwrap(),
+        ClaudeFileGenerationV1::new(generation).unwrap(),
         byte_offset,
     )
     .unwrap()
@@ -53,11 +61,22 @@ fn observation(
     receipt_id: &str,
     payload: Value,
 ) -> DurableClaudeObservationV1 {
+    observation_in_generation(session_id, GENERATION, start, end, receipt_id, payload)
+}
+
+fn observation_in_generation(
+    session_id: &str,
+    generation: u64,
+    start: u64,
+    end: u64,
+    receipt_id: &str,
+    payload: Value,
+) -> DurableClaudeObservationV1 {
     DurableClaudeObservationV1::new(
         ClaudeObservationIdentityMaterialV1::new(
             source(session_id),
             ObservationScopeV1::Profile,
-            ClaudeFileGenerationV1::new(GENERATION).unwrap(),
+            ClaudeFileGenerationV1::new(generation).unwrap(),
             ClaudeByteRangeV1::new(start, end).unwrap(),
         )
         .unwrap(),
@@ -72,8 +91,9 @@ fn write(
     observation: DurableClaudeObservationV1,
     expected_cursor: Option<ClaudeSourceCursorV1>,
 ) -> ObservationWrite {
-    let next_cursor = cursor(
+    let next_cursor = cursor_in_generation(
         observation.source().session_id().as_str(),
+        observation.identity().generation().file_id(),
         observation.identity().position().end(),
     );
     ObservationWrite::new(observation, expected_cursor, next_cursor).unwrap()
@@ -91,6 +111,12 @@ async fn persist(
     {
         ObservationPersistOutcome::Committed(receipt) => receipt.sequence(),
         other => panic!("new observation must commit, got {other:?}"),
+    }
+}
+
+async fn drain_projection_queue(store: &GlobalDbObservationStore<'_>) {
+    while let Some(observation_id) = store.next_queued_observation().await.unwrap() {
+        store.project_observation(&observation_id).await.unwrap();
     }
 }
 
@@ -120,6 +146,42 @@ async fn table_count(tmp: &TempDir, table: &str) -> i64 {
         .await
         .unwrap();
     rows.next().await.unwrap().unwrap().get(0).unwrap()
+}
+
+async fn reinstall_legacy_projection_provenance_schema(tmp: &TempDir) {
+    let db = libsql::Builder::new_local(isolated_lcm_db_path(tmp))
+        .build()
+        .await
+        .unwrap();
+    let conn = db.connect().unwrap();
+    conn.execute_batch(
+        "BEGIN IMMEDIATE;
+         CREATE TABLE observation_projection_provenance_legacy (
+            projector_version TEXT NOT NULL,
+            observation_id TEXT NOT NULL,
+            receipt_id TEXT NOT NULL,
+            output_provider TEXT NOT NULL,
+            output_message_id TEXT NOT NULL,
+            output_digest TEXT NOT NULL,
+            message_created INTEGER NOT NULL CHECK(message_created IN (0, 1)),
+            PRIMARY KEY(projector_version, observation_id),
+            UNIQUE(projector_version, output_provider, output_message_id),
+            FOREIGN KEY(observation_id) REFERENCES observations(observation_id),
+            FOREIGN KEY(receipt_id) REFERENCES sanitization_receipts(receipt_id)
+         );
+         INSERT INTO observation_projection_provenance_legacy
+            (projector_version, observation_id, receipt_id, output_provider,
+             output_message_id, output_digest, message_created)
+         SELECT projector_version, observation_id, receipt_id, output_provider,
+                output_message_id, output_digest, message_created
+         FROM observation_projection_provenance;
+         DROP TABLE observation_projection_provenance;
+         ALTER TABLE observation_projection_provenance_legacy
+            RENAME TO observation_projection_provenance;
+         COMMIT;",
+    )
+    .await
+    .unwrap();
 }
 
 async fn projection_counts(tmp: &TempDir) -> (i64, i64, i64, i64, i64, i64) {
@@ -827,4 +889,155 @@ async fn reordered_delivery_then_frozen_frontier_rebuild_converges() {
     assert_eq!(rebuilt_full.projected_rows(), 3);
     assert_eq!(rebuilt_full.skipped_observations(), 0);
     assert_eq!(projection_counts(&tmp).await, (1, 3, 3, 1, 0, 0));
+}
+
+#[tokio::test]
+async fn generation_rollover_coalesces_same_and_changed_native_output() {
+    let tmp = TempDir::new().unwrap();
+    let first = observation_in_generation(
+        "session-generation",
+        GENERATION,
+        0,
+        100,
+        "receipt.generation-1",
+        conversational_payload("message-generation", "generation original canary"),
+    );
+    let same_content = observation_in_generation(
+        "session-generation",
+        GENERATION + 1,
+        0,
+        100,
+        "receipt.generation-2",
+        conversational_payload("message-generation", "generation original canary"),
+    );
+    let replacement = observation_in_generation(
+        "session-generation",
+        GENERATION + 2,
+        0,
+        100,
+        "receipt.generation-3",
+        conversational_payload("message-generation", "generation replacement canary"),
+    );
+
+    {
+        let db = open_lcm_db(&tmp).await;
+        let store = GlobalDbObservationStore::new(&db);
+        persist(&store, first.clone(), None).await;
+        store
+            .project_observation(first.observation_id())
+            .await
+            .unwrap();
+    }
+    reinstall_legacy_projection_provenance_schema(&tmp).await;
+
+    let db = open_lcm_db(&tmp).await;
+    let store = GlobalDbObservationStore::new(&db);
+    persist(
+        &store,
+        same_content.clone(),
+        Some(cursor_in_generation("session-generation", GENERATION, 100)),
+    )
+    .await;
+    persist(
+        &store,
+        replacement.clone(),
+        Some(cursor_in_generation(
+            "session-generation",
+            GENERATION + 1,
+            100,
+        )),
+    )
+    .await;
+    drain_projection_queue(&store).await;
+
+    assert_eq!(projection_counts(&tmp).await, (1, 1, 3, 1, 0, 0));
+    let provenance = projection_provenance_rows(&tmp).await;
+    assert_eq!(provenance.len(), 3);
+    assert!(provenance.iter().all(|row| row.4 == "message-generation"));
+    assert_eq!(
+        provenance
+            .iter()
+            .map(|row| row.5.as_str())
+            .collect::<std::collections::BTreeSet<_>>()
+            .len(),
+        3,
+        "generation-owned metadata and replacement content retain distinct lineage digests"
+    );
+    let texts = projected_message_texts(&tmp).await;
+    assert_eq!(texts.len(), 1);
+    assert!(texts[0].contains("generation replacement canary"));
+
+    for candidate in [&first, &same_content, &replacement] {
+        assert!(matches!(
+            store
+                .project_observation(candidate.observation_id())
+                .await
+                .unwrap(),
+            ProjectionPersistOutcome::ExactDuplicate(_)
+        ));
+    }
+    store.rebuild_projection(0).await.unwrap();
+    assert_eq!(projection_counts(&tmp).await, (1, 0, 0, 1, 0, 3));
+    drain_projection_queue(&store).await;
+    assert_eq!(projection_counts(&tmp).await, (1, 1, 3, 1, 0, 0));
+    let texts = projected_message_texts(&tmp).await;
+    assert_eq!(texts.len(), 1);
+    assert!(texts[0].contains("generation replacement canary"));
+}
+
+#[tokio::test]
+async fn durable_projection_alias_survives_rebuild_without_rewriting_observation() {
+    let tmp = TempDir::new().unwrap();
+    let db = open_lcm_db(&tmp).await;
+    let store = GlobalDbObservationStore::new(&db);
+    let candidate = observation(
+        "session-alias",
+        0,
+        100,
+        "receipt.alias",
+        conversational_payload("message-alias", "durable alias canary"),
+    );
+    persist(&store, candidate.clone(), None).await;
+
+    let raw_db = libsql::Builder::new_local(isolated_lcm_db_path(&tmp))
+        .build()
+        .await
+        .unwrap();
+    let raw_conn = raw_db.connect().unwrap();
+    raw_conn
+        .execute(
+            "INSERT INTO observation_projection_aliases
+                (projector_version, observation_id, output_provider, output_message_id)
+             VALUES (?1, ?2, 'claude', 'consolidated/source/message-alias')",
+            libsql::params![
+                CLAUDE_SESSION_MESSAGE_PROJECTOR_VERSION,
+                candidate.observation_id().as_str()
+            ],
+        )
+        .await
+        .unwrap();
+    drop(raw_conn);
+    drop(raw_db);
+
+    drain_projection_queue(&store).await;
+    let provenance = projection_provenance_rows(&tmp).await;
+    assert_eq!(provenance[0].4, "consolidated/source/message-alias");
+    assert_eq!(table_count(&tmp, "observation_projection_aliases").await, 1);
+    assert_eq!(
+        store
+            .get_observation(candidate.observation_id())
+            .await
+            .unwrap()
+            .unwrap()
+            .observation()
+            .payload()["message"]["id"],
+        "message-alias"
+    );
+
+    store.rebuild_projection(0).await.unwrap();
+    assert_eq!(table_count(&tmp, "observation_projection_aliases").await, 1);
+    drain_projection_queue(&store).await;
+    let provenance = projection_provenance_rows(&tmp).await;
+    assert_eq!(provenance[0].4, "consolidated/source/message-alias");
+    assert_eq!(projected_message_texts(&tmp).await.len(), 1);
 }
