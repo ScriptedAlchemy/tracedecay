@@ -11,7 +11,7 @@ use super::detect::{
     DetectionConfidenceV1, DetectionError, PrivacyDetectorV1, SanitizationActionV1,
     SanitizationFindingV1, normalize_key, redact_sensitive_values,
 };
-use super::parse::{ClaudeRecordParseErrorV1, ParseLimits, ParsedClaudeRecordV1};
+use super::parse::{ParseLimits, ParsedClaudeRecordV1, ParsedPolicyLimitViolation};
 
 pub const PR5_CLAUDE_SANITIZER_VERSION: &str = "privacy.claude-record.v1";
 
@@ -176,31 +176,21 @@ impl ClaudeRecordSanitizerV1 {
 
     fn non_durable_outcome_from_digest(
         &self,
-        kind: ClaudeRecordParseErrorV1,
+        kind: ParsedPolicyLimitViolation,
         raw_digest: &[u8; 32],
         identity: &ClaudeObservationIdentityMaterialV1,
     ) -> Result<ClaudeSanitizationOutcomeV1, PrivacySanitizerError> {
         let (disposition, detector, action) = match kind {
-            ClaudeRecordParseErrorV1::TooDeep | ClaudeRecordParseErrorV1::TooManyValues => (
+            ParsedPolicyLimitViolation::TooDeep | ParsedPolicyLimitViolation::TooManyValues => (
                 SanitizerDispositionV1::Quarantined,
                 PrivacyDetectorV1::StructureLimit,
                 SanitizationActionV1::Quarantined,
             ),
-            ClaudeRecordParseErrorV1::TooLarge => (
+            ParsedPolicyLimitViolation::TooLarge => (
                 SanitizerDispositionV1::Rejected,
                 PrivacyDetectorV1::RecordSizeLimit,
                 SanitizationActionV1::Rejected,
             ),
-            ClaudeRecordParseErrorV1::Empty
-            | ClaudeRecordParseErrorV1::Malformed
-            | ClaudeRecordParseErrorV1::NonObject => (
-                SanitizerDispositionV1::Rejected,
-                PrivacyDetectorV1::MalformedRecord,
-                SanitizationActionV1::Rejected,
-            ),
-            ClaudeRecordParseErrorV1::RangeLengthMismatch => {
-                return Err(PrivacySanitizerError::SourceRangeMismatch);
-            }
         };
         let receipt_ref = CanonicalClaudeSanitizationReceiptMaterialV1::new(
             identity,

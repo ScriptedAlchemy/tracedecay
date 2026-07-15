@@ -25,6 +25,13 @@ pub enum ClaudeRecordParseErrorV1 {
     TooManyValues,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum ParsedPolicyLimitViolation {
+    TooLarge,
+    TooDeep,
+    TooManyValues,
+}
+
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct ParseLimits {
     pub record_bytes: usize,
@@ -77,18 +84,18 @@ impl ParsedClaudeRecordV1 {
         &self.raw_digest
     }
 
-    pub(crate) fn verify_limits(
+    pub(super) fn verify_limits(
         &self,
         limits: ParseLimits,
-    ) -> Result<(), ClaudeRecordParseErrorV1> {
+    ) -> Result<(), ParsedPolicyLimitViolation> {
         if self.encoded_len > limits.record_bytes {
-            return Err(ClaudeRecordParseErrorV1::TooLarge);
+            return Err(ParsedPolicyLimitViolation::TooLarge);
         }
         if self.observed_depth > limits.depth {
-            return Err(ClaudeRecordParseErrorV1::TooDeep);
+            return Err(ParsedPolicyLimitViolation::TooDeep);
         }
         if self.observed_values > limits.values {
-            return Err(ClaudeRecordParseErrorV1::TooManyValues);
+            return Err(ParsedPolicyLimitViolation::TooManyValues);
         }
         Ok(())
     }
