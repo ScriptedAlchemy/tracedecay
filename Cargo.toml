@@ -4,7 +4,7 @@ resolver = "3"
 
 [package]
 name = "tracedecay"
-version = "0.0.67"
+version = "0.0.66"
 edition = "2024"
 description = "Code intelligence tool that builds a semantic knowledge graph from Rust, Go, Java, Scala, TypeScript, Python, C, C++, Kotlin, C#, Swift, and many more codebases"
 license = "MIT"
@@ -110,7 +110,7 @@ path = "src/main.rs"
 [dependencies]
 axum = "0.8"
 tower = "0.5"
-libsql = "0.9.30"
+libsql = { version = "0.9.30", default-features = false, features = ["core"] }
 tree-sitter = "0.26"
 tree-sitter-language = "0.1"
 # In-process structural-search engine. ast-grep-core is generic over a
@@ -213,9 +213,6 @@ debug = 0
 opt-level = 2
 
 [profile.dev.package.libsql-sys]
-opt-level = 2
-
-[profile.dev.package.libsql-rusqlite]
 opt-level = 2
 
 # The first token count pays a one-time BPE model load (embedded-vocabulary
