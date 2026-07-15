@@ -10,6 +10,7 @@ use crate::sessions::source::{TranscriptSource, ingest_source, ingest_source_wit
 use crate::store::GlobalDbTranscriptStore;
 
 pub mod claude;
+pub(crate) mod claude_observation;
 pub mod cline_like;
 pub mod codex;
 pub mod codex_app_server;
@@ -249,8 +250,23 @@ async fn ingest_user_global_sources_for_provider_with_roots(
         stats = stats.merge(hermes::ingest_user_sessions(db, &roots).await);
     }
     if provider_selected(provider, SessionProvider::Claude) {
-        stats =
-            stats.merge(claude::ingest_user_sessions(db, profile_root, None, roots.clone()).await);
+        match claude_observation::ingest_user_sessions(
+            db,
+            profile_root,
+            None,
+            roots.clone(),
+            None,
+            crate::application::observation::ObservationCancellation::default(),
+        )
+        .await
+        {
+            Ok(observation_stats) => {
+                stats = stats.merge(observation_stats.transcript);
+            }
+            Err(_) => {
+                tracing::warn!("startup Claude observation catch-up failed");
+            }
+        }
     }
     let mut sources: Vec<Box<dyn TranscriptSource>> = Vec::new();
     if provider_selected(provider, SessionProvider::Vibe)

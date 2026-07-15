@@ -310,6 +310,7 @@ async fn ingest_transcript(
         .and_then(Value::as_bool)
         .unwrap_or(false);
     let max_new_bytes = args.get("max_new_bytes").and_then(Value::as_u64);
+    let mut claude_observation_stats = None;
     let messages_upserted = match (provider, user_scope) {
         ("claude", true) => {
             let profile_root =
@@ -320,9 +321,22 @@ async fn ingest_transcript(
             let roots = crate::sessions::registered_project_roots_from(global_db)
                 .await
                 .ok_or_else(|| config_error("daemon project registry is unavailable"))?;
-            crate::sessions::claude::ingest_user_sessions(db, profile_root, Some(session_id), roots)
-                .await
-                .messages_upserted
+            let stats = crate::sessions::claude_observation::ingest_user_sessions(
+                db,
+                profile_root,
+                Some(session_id),
+                roots,
+                Some(
+                    max_new_bytes
+                        .unwrap_or(crate::sessions::claude_observation::CLAUDE_HOOK_MAX_NEW_BYTES),
+                ),
+                crate::application::observation::ObservationCancellation::default(),
+            )
+            .await
+            .map_err(|_| config_error("Claude observation ingest failed"))?;
+            let messages_upserted = stats.transcript.messages_upserted;
+            claude_observation_stats = Some(stats);
+            messages_upserted
         }
         ("codex", true) => {
             let profile_root =
@@ -403,13 +417,26 @@ async fn ingest_transcript(
             )));
         }
     };
-    Ok(json!({
+    let mut output = json!({
         "action": "ingest_transcript",
         "provider": provider,
         "user_scope": user_scope,
         "completed": true,
         "messages_upserted": messages_upserted,
-    }))
+    });
+    if let Some(stats) = claude_observation_stats {
+        output["observations_committed"] = json!(stats.observations_committed);
+        output["observation_duplicates"] = json!(stats.observation_duplicates);
+        output["cursor_advances"] = json!(stats.cursor_advances);
+        output["cursor_duplicates"] = json!(stats.cursor_duplicates);
+        output["records_rejected"] = json!(stats.records_rejected);
+        output["records_quarantined"] = json!(stats.records_quarantined);
+        output["projections_completed"] = json!(stats.projections_completed);
+        output["projections_skipped"] = json!(stats.projections_skipped);
+        output["projection_duplicates"] = json!(stats.projection_duplicates);
+        output["deferred_sources"] = json!(stats.deferred_sources);
+    }
+    Ok(output)
 }
 
 async fn user_review(args: &Value, profile_root: &Path) -> Result<Value> {
