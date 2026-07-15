@@ -358,6 +358,11 @@ async fn composer_tolerates_malformed_and_reads_store_db() {
         .await
         .expect("store.db chat session stored");
     assert_eq!(store_session.project_path, project.to_string_lossy());
+    let expected_store_path = agent_dir.join("store.db");
+    assert_eq!(
+        store_session.transcript_path.as_deref(),
+        Some(expected_store_path.to_string_lossy().as_ref())
+    );
 }
 
 /// Build a `store.db` whose root node blob references three JSON message leaves

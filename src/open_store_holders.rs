@@ -2,7 +2,9 @@
 
 use std::collections::BTreeSet;
 use std::io;
-use std::path::{Path, PathBuf};
+#[cfg(any(target_os = "linux", target_os = "macos", all(test, unix)))]
+use std::path::Path;
+use std::path::PathBuf;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct OpenStoreHolder {

@@ -23,7 +23,7 @@ pub use definitions::{
 pub(crate) use dispatch_policy::tool_dispatches_registered_project_reader;
 pub use handlers::memory::handle_user_memory_tool;
 pub use handlers::{
-    ToolCallRegistryOptions, handle_tool_call, handle_tool_call_with_registry,
+    SessionAuthorities, ToolCallRegistryOptions, handle_tool_call, handle_tool_call_with_registry,
     handle_tool_call_with_registry_and_implicit_project, handle_user_lcm_tool,
 };
 pub(crate) use handlers::{handle_projectless_admin_cli, handle_projectless_hook_runtime};

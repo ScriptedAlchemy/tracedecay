@@ -168,14 +168,21 @@ async fn transcript_batch_survives_restart_and_replay_is_idempotent() {
 async fn late_cursor_failure_rolls_back_every_transcript_write_then_retries() {
     let tmp = TempDir::new().unwrap();
     let transcript_path = tmp.path().join("late-cursor-failure.jsonl");
+    let payload_dir =
+        tracedecay::sessions::lcm::payload::payload_dir(&tmp.path().join(".tracedecay"));
+    std::fs::create_dir_all(&payload_dir).unwrap();
+    let sentinel_path = payload_dir.join("preexisting.payload");
+    std::fs::write(&sentinel_path, "must survive rollback").unwrap();
     let mut session = sample_session("codex", "atomic-session", "project-a");
     session.transcript_path = Some(transcript_path.to_string_lossy().to_string());
-    let source = sample_message(
+    let mut source = sample_message(
         "codex",
         "source-message",
         "atomic-session",
-        "Visible source before compaction.",
+        &format!("oversized tool payload\n{}", "P".repeat(300_000)),
     );
+    source.role = "tool".to_string();
+    source.kind = Some("tool_result".to_string());
     let mut summary = sample_message(
         "codex",
         "summary-message",
@@ -226,7 +233,25 @@ async fn late_cursor_failure_rolls_back_every_transcript_write_then_retries() {
         .await
         .expect_err("the late cursor write must fail the batch");
     assert!(matches!(error, TranscriptStoreError::Storage { .. }));
+    assert_eq!(
+        db.get_parse_offset(transcript_path.to_string_lossy().as_ref())
+            .await,
+        None
+    );
     drop(db);
+
+    assert_eq!(
+        std::fs::read_to_string(&sentinel_path).unwrap(),
+        "must survive rollback"
+    );
+    let remaining_payload_files = std::fs::read_dir(&payload_dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        remaining_payload_files,
+        vec![std::ffi::OsString::from("preexisting.payload")]
+    );
 
     assert_eq!(
         store_counts(&tmp, "codex", "atomic-session", &transcript_path).await,
@@ -253,6 +278,16 @@ async fn late_cursor_failure_rolls_back_every_transcript_write_then_retries() {
         .persist_transcript_batch(batch)
         .await
         .unwrap();
+    let raw = reopened
+        .lcm_load_raw_message("codex", "source-message")
+        .await
+        .expect("oversized message must persist on retry");
+    let payload_ref = raw.payload_ref.expect("oversized message must externalize");
+    assert!(payload_dir.join(payload_ref).is_file());
+    assert_eq!(
+        std::fs::read_to_string(&sentinel_path).unwrap(),
+        "must survive rollback"
+    );
     drop(reopened);
 
     assert_eq!(
@@ -312,30 +347,28 @@ async fn invalid_batch_mutates_no_transcript_state() {
 }
 
 #[tokio::test]
-async fn concurrent_batches_reject_stale_owner_without_duplicate_rows() {
+async fn stale_higher_batch_is_rejected_until_reparsed_from_durable_cursor() {
     let tmp = TempDir::new().unwrap();
     let transcript_path = tmp.path().join("concurrent.jsonl");
     let db = open_lcm_db(&tmp).await;
     let store = GlobalDbTranscriptStore::new(&db);
-    let mut first_session = sample_session("cursor", "concurrent-first", "project-a");
-    first_session.transcript_path = Some(transcript_path.to_string_lossy().to_string());
-    let mut second_session = sample_session("cursor", "concurrent-second", "project-a");
-    second_session.transcript_path = Some(transcript_path.to_string_lossy().to_string());
+    let mut session = sample_session("cursor", "concurrent-session", "project-a");
+    session.transcript_path = Some(transcript_path.to_string_lossy().to_string());
     let first_message = sample_message(
         "cursor",
         "concurrent-first-message",
-        "concurrent-first",
+        "concurrent-session",
         "first committed transcript message",
     );
-    let second_message = sample_message(
+    let mut second_message = sample_message(
         "cursor",
         "concurrent-second-message",
-        "concurrent-second",
+        "concurrent-session",
         "second committed transcript message",
     );
-    let first_summary = summary_message("cursor", "concurrent-first-summary", "concurrent-first");
-    let second_summary =
-        summary_message("cursor", "concurrent-second-summary", "concurrent-second");
+    second_message.ordinal = 2;
+    let mut summary = summary_message("cursor", "concurrent-summary", "concurrent-session");
+    summary.ordinal = 3;
     let first_offset = ParseOffset {
         byte_offset: 100,
         mtime: 1_000,
@@ -347,90 +380,280 @@ async fn concurrent_batches_reject_stale_owner_without_duplicate_rows() {
         file_id: 7,
     };
 
-    let (first_result, second_result) = tokio::join!(
-        store.persist_transcript_batch(
+    store
+        .persist_transcript_batch(
             TranscriptWriteBatch::upsert(
-                first_session,
-                vec![first_message, first_summary],
+                session.clone(),
+                vec![first_message.clone()],
                 ParseOffset::default(),
                 first_offset,
             )
             .unwrap(),
-        ),
-        store.persist_transcript_batch(
+        )
+        .await
+        .unwrap();
+    let stale_higher_error = store
+        .persist_transcript_batch(
             TranscriptWriteBatch::upsert(
-                second_session,
-                vec![second_message, second_summary],
+                session.clone(),
+                vec![
+                    first_message.clone(),
+                    second_message.clone(),
+                    summary.clone(),
+                ],
                 ParseOffset::default(),
                 second_offset,
             )
             .unwrap(),
-        ),
-    );
-
-    let (winner_offset, winner_session, loser_session, conflict) =
-        match (first_result, second_result) {
-            (Ok(()), Err(conflict @ TranscriptStoreError::Conflict { .. })) => (
-                first_offset,
-                "concurrent-first",
-                "concurrent-second",
-                conflict,
-            ),
-            (Err(conflict @ TranscriptStoreError::Conflict { .. }), Ok(())) => (
-                second_offset,
-                "concurrent-second",
-                "concurrent-first",
-                conflict,
-            ),
-            outcomes => panic!("expected exactly one commit and one conflict, got {outcomes:?}"),
-        };
-    match conflict {
+        )
+        .await
+        .expect_err("a pre-parsed batch must not change its observed cursor and retry");
+    assert!(matches!(
+        stale_higher_error,
         TranscriptStoreError::Conflict {
-            transcript_path: conflict_path,
             expected,
             actual,
-        } => {
-            assert_eq!(conflict_path, transcript_path);
-            assert_eq!(expected, ParseOffset::default());
-            assert_eq!(actual, winner_offset);
-        }
-        _ => unreachable!(),
-    }
+            ..
+        } if expected == ParseOffset::default() && actual == first_offset
+    ));
 
     assert_eq!(
         db.get_parse_offset(transcript_path.to_string_lossy().as_ref())
             .await,
-        Some(winner_offset)
+        Some(first_offset)
     );
+    assert!(
+        db.get_session_message("cursor", "concurrent-second-message")
+            .await
+            .is_none(),
+        "the stale parse products must roll back with the cursor conflict"
+    );
+
+    // A runtime boundary may re-read the winner and reparse the suffix/full
+    // source. That fresh batch carries the actually observed durable cursor.
+    store
+        .persist_transcript_batch(
+            TranscriptWriteBatch::upsert(
+                session,
+                vec![first_message, second_message, summary],
+                first_offset,
+                second_offset,
+            )
+            .unwrap(),
+        )
+        .await
+        .expect("a freshly parsed batch may advance from the durable winner");
+
+    let mut stale_session = sample_session("cursor", "concurrent-session", "project-a");
+    stale_session.transcript_path = Some(transcript_path.to_string_lossy().to_string());
+    let stale_error = store
+        .persist_transcript_batch(
+            TranscriptWriteBatch::upsert(
+                stale_session,
+                vec![sample_message(
+                    "cursor",
+                    "concurrent-stale-message",
+                    "concurrent-session",
+                    "stale transcript message",
+                )],
+                ParseOffset::default(),
+                first_offset,
+            )
+            .unwrap(),
+        )
+        .await
+        .expect_err("a lower stale cursor must not replace the converged maximum");
+    assert!(matches!(
+        stale_error,
+        TranscriptStoreError::Conflict {
+            actual,
+            ..
+        } if actual == second_offset
+    ));
     drop(db);
     assert_eq!(
-        store_counts(&tmp, "cursor", winner_session, &transcript_path).await,
+        store_counts(&tmp, "cursor", "concurrent-session", &transcript_path).await,
         StoreCounts {
             sessions: 1,
-            projections: 2,
-            raw_messages: 2,
-            raw_fts: 2,
-            all_raw_fts: 2,
+            projections: 3,
+            raw_messages: 3,
+            raw_fts: 3,
+            all_raw_fts: 3,
             summaries: 1,
-            cursors: 1,
-        }
-    );
-    assert_eq!(
-        store_counts(&tmp, "cursor", loser_session, &transcript_path).await,
-        StoreCounts {
-            sessions: 0,
-            projections: 0,
-            raw_messages: 0,
-            raw_fts: 0,
-            all_raw_fts: 2,
-            summaries: 0,
             cursors: 1,
         }
     );
 }
 
 #[tokio::test]
-async fn concurrent_empty_advances_reject_stale_owner_without_rows() {
+async fn concurrent_full_batches_converge_without_split_brain_or_partial_writes() {
+    let tmp = TempDir::new().unwrap();
+    let transcript_path = tmp.path().join("concurrent-full-batches.jsonl");
+    let db = open_lcm_db(&tmp).await;
+    let first_store = GlobalDbTranscriptStore::new(&db);
+    let second_store = GlobalDbTranscriptStore::new(&db);
+    let mut session = sample_session("cursor", "concurrent-full-session", "project-a");
+    session.transcript_path = Some(transcript_path.to_string_lossy().to_string());
+    let first_message = sample_message(
+        "cursor",
+        "concurrent-full-message-1",
+        "concurrent-full-session",
+        "first concurrent transcript message",
+    );
+    let mut second_message = sample_message(
+        "cursor",
+        "concurrent-full-message-2",
+        "concurrent-full-session",
+        "second concurrent transcript message",
+    );
+    second_message.ordinal = 2;
+    let mut summary = summary_message(
+        "cursor",
+        "concurrent-full-summary",
+        "concurrent-full-session",
+    );
+    summary.ordinal = 3;
+    let first_offset = ParseOffset {
+        byte_offset: 100,
+        mtime: 1_000,
+        file_id: 7,
+    };
+    let higher_offset = ParseOffset {
+        byte_offset: 200,
+        mtime: 2_000,
+        file_id: 7,
+    };
+    let first_batch = TranscriptWriteBatch::upsert(
+        session.clone(),
+        vec![first_message.clone()],
+        ParseOffset::default(),
+        first_offset,
+    )
+    .unwrap();
+    let competing_batch = TranscriptWriteBatch::upsert(
+        session.clone(),
+        vec![second_message.clone()],
+        ParseOffset::default(),
+        first_offset,
+    )
+    .unwrap();
+
+    let (first_result, competing_result) = tokio::join!(
+        first_store.persist_transcript_batch(first_batch),
+        second_store.persist_transcript_batch(competing_batch),
+    );
+
+    let conflict_actual = match (first_result, competing_result) {
+        (Ok(()), Err(TranscriptStoreError::Conflict { actual, .. }))
+        | (Err(TranscriptStoreError::Conflict { actual, .. }), Ok(())) => actual,
+        outcomes => panic!("exactly one concurrent full batch must commit, got {outcomes:?}"),
+    };
+    assert_eq!(conflict_actual, first_offset);
+    assert_eq!(
+        db.get_parse_offset(transcript_path.to_string_lossy().as_ref())
+            .await,
+        Some(first_offset)
+    );
+    assert_eq!(
+        store_counts(&tmp, "cursor", "concurrent-full-session", &transcript_path,).await,
+        StoreCounts {
+            sessions: 1,
+            projections: 1,
+            raw_messages: 1,
+            raw_fts: 1,
+            all_raw_fts: 1,
+            summaries: 0,
+            cursors: 1,
+        }
+    );
+
+    first_store
+        .persist_transcript_batch(
+            TranscriptWriteBatch::upsert(
+                session.clone(),
+                vec![first_message, second_message, summary],
+                conflict_actual,
+                higher_offset,
+            )
+            .unwrap(),
+        )
+        .await
+        .expect("a freshly parsed batch must advance from the returned durable cursor");
+    assert_eq!(
+        db.get_parse_offset(transcript_path.to_string_lossy().as_ref())
+            .await,
+        Some(higher_offset)
+    );
+
+    let stale_error = first_store
+        .persist_transcript_batch(
+            TranscriptWriteBatch::upsert(
+                session.clone(),
+                vec![sample_message(
+                    "cursor",
+                    "concurrent-full-stale-message",
+                    "concurrent-full-session",
+                    "stale owner must not mutate state",
+                )],
+                first_offset,
+                ParseOffset {
+                    byte_offset: 150,
+                    mtime: 1_500,
+                    file_id: 7,
+                },
+            )
+            .unwrap(),
+        )
+        .await
+        .expect_err("a stale owner behind the durable maximum must be rejected");
+    assert!(matches!(
+        stale_error,
+        TranscriptStoreError::Conflict { actual, .. } if actual == higher_offset
+    ));
+
+    let competing_error = second_store
+        .persist_transcript_batch(
+            TranscriptWriteBatch::upsert(
+                session,
+                vec![sample_message(
+                    "cursor",
+                    "concurrent-full-competing-message",
+                    "concurrent-full-session",
+                    "competing file identity must not mutate state",
+                )],
+                ParseOffset::default(),
+                ParseOffset {
+                    byte_offset: 400,
+                    mtime: 4_000,
+                    file_id: 8,
+                },
+            )
+            .unwrap(),
+        )
+        .await
+        .expect_err("a competing file identity must be rejected");
+    assert!(matches!(
+        competing_error,
+        TranscriptStoreError::Conflict { actual, .. } if actual == higher_offset
+    ));
+
+    drop(db);
+    assert_eq!(
+        store_counts(&tmp, "cursor", "concurrent-full-session", &transcript_path,).await,
+        StoreCounts {
+            sessions: 1,
+            projections: 3,
+            raw_messages: 3,
+            raw_fts: 3,
+            all_raw_fts: 3,
+            summaries: 1,
+            cursors: 1,
+        }
+    );
+}
+
+#[tokio::test]
+async fn concurrent_empty_advances_converge_to_highest_compatible_offset_without_rows() {
     let tmp = TempDir::new().unwrap();
     let db = open_lcm_db(&tmp).await;
     let store = GlobalDbTranscriptStore::new(&db);
@@ -465,31 +688,57 @@ async fn concurrent_empty_advances_reject_stale_owner_without_rows() {
         ),
     );
 
-    let (winner_offset, conflict) = match (first_result, second_result) {
-        (Ok(()), Err(conflict @ TranscriptStoreError::Conflict { .. })) => (first_offset, conflict),
-        (Err(conflict @ TranscriptStoreError::Conflict { .. }), Ok(())) => {
-            (second_offset, conflict)
-        }
-        outcomes => panic!("expected exactly one advance and one conflict, got {outcomes:?}"),
-    };
-    match conflict {
-        TranscriptStoreError::Conflict {
-            transcript_path: conflict_path,
-            expected,
-            actual,
-        } => {
-            assert_eq!(conflict_path, transcript_path);
-            assert_eq!(expected, ParseOffset::default());
-            assert_eq!(actual, winner_offset);
-        }
-        _ => unreachable!(),
+    match (first_result, second_result) {
+        (Ok(()), Ok(())) | (Err(TranscriptStoreError::Conflict { .. }), Ok(())) => {}
+        outcomes => panic!("higher compatible cursor must converge, got {outcomes:?}"),
     }
 
     assert_eq!(
         db.get_parse_offset(transcript_path.to_string_lossy().as_ref())
             .await,
-        Some(winner_offset)
+        Some(second_offset)
     );
+    let incompatible_error = store
+        .persist_transcript_batch(
+            TranscriptWriteBatch::advance_offset(
+                transcript_path.clone(),
+                ParseOffset::default(),
+                ParseOffset {
+                    byte_offset: 320,
+                    mtime: 3_000,
+                    file_id: 10,
+                },
+            )
+            .unwrap(),
+        )
+        .await
+        .expect_err("a different file identity must not be merged as an append");
+    assert!(matches!(
+        incompatible_error,
+        TranscriptStoreError::Conflict {
+            actual,
+            ..
+        } if actual == second_offset
+    ));
+    let regressing_mtime_error = store
+        .persist_transcript_batch(
+            TranscriptWriteBatch::advance_offset(
+                transcript_path.clone(),
+                ParseOffset::default(),
+                ParseOffset {
+                    byte_offset: 320,
+                    mtime: 500,
+                    file_id: second_offset.file_id,
+                },
+            )
+            .unwrap(),
+        )
+        .await
+        .expect_err("a higher byte offset must not move the file mtime backwards");
+    assert!(matches!(
+        regressing_mtime_error,
+        TranscriptStoreError::Conflict { actual, .. } if actual == second_offset
+    ));
     drop(db);
     assert_eq!(
         store_counts(&tmp, "cursor", "parsed-but-empty", &transcript_path).await,
@@ -502,5 +751,112 @@ async fn concurrent_empty_advances_reject_stale_owner_without_rows() {
             summaries: 0,
             cursors: 1,
         }
+    );
+}
+
+#[tokio::test]
+async fn duplicate_empty_advances_are_idempotent_under_concurrency() {
+    let tmp = TempDir::new().unwrap();
+    let db = open_lcm_db(&tmp).await;
+    let first_store = GlobalDbTranscriptStore::new(&db);
+    let second_store = GlobalDbTranscriptStore::new(&db);
+    let transcript_path = tmp.path().join("duplicate-empty.jsonl");
+    let next_offset = ParseOffset {
+        byte_offset: 96,
+        mtime: 1_500,
+        file_id: 11,
+    };
+
+    let (first_result, second_result) = tokio::join!(
+        first_store.persist_transcript_batch(
+            TranscriptWriteBatch::advance_offset(
+                transcript_path.clone(),
+                ParseOffset::default(),
+                next_offset,
+            )
+            .unwrap(),
+        ),
+        second_store.persist_transcript_batch(
+            TranscriptWriteBatch::advance_offset(
+                transcript_path.clone(),
+                ParseOffset::default(),
+                next_offset,
+            )
+            .unwrap(),
+        ),
+    );
+
+    assert!(first_result.is_ok(), "first duplicate: {first_result:?}");
+    assert!(second_result.is_ok(), "second duplicate: {second_result:?}");
+    assert_eq!(
+        db.get_parse_offset(transcript_path.to_string_lossy().as_ref())
+            .await,
+        Some(next_offset)
+    );
+    drop(db);
+    assert_eq!(
+        store_counts(&tmp, "cursor", "duplicate-empty", &transcript_path).await,
+        StoreCounts {
+            sessions: 0,
+            projections: 0,
+            raw_messages: 0,
+            raw_fts: 0,
+            all_raw_fts: 0,
+            summaries: 0,
+            cursors: 1,
+        }
+    );
+}
+
+#[tokio::test]
+async fn content_hash_offsets_never_retry_by_numeric_order() {
+    let tmp = TempDir::new().unwrap();
+    let db = open_lcm_db(&tmp).await;
+    let store = GlobalDbTranscriptStore::new(&db);
+    let transcript_path = tmp.path().join("content-hash.json");
+    let durable_hash = ParseOffset {
+        byte_offset: 900,
+        mtime: 1_000,
+        file_id: 0,
+    };
+
+    store
+        .persist_transcript_batch(
+            TranscriptWriteBatch::advance_offset(
+                transcript_path.clone(),
+                ParseOffset::default(),
+                durable_hash,
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    let error = store
+        .persist_transcript_batch(
+            TranscriptWriteBatch::advance_offset(
+                transcript_path.clone(),
+                ParseOffset::default(),
+                ParseOffset {
+                    byte_offset: 1_200,
+                    mtime: 1_000,
+                    file_id: 0,
+                },
+            )
+            .unwrap(),
+        )
+        .await
+        .expect_err("content hashes are identities, not monotonic byte offsets");
+
+    assert!(matches!(
+        error,
+        TranscriptStoreError::Conflict {
+            actual,
+            ..
+        } if actual == durable_hash
+    ));
+    assert_eq!(
+        db.get_parse_offset(transcript_path.to_string_lossy().as_ref())
+            .await,
+        Some(durable_hash)
     );
 }

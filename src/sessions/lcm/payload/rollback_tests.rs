@@ -1,97 +1,62 @@
-use libsql::{Builder, Connection, params};
 use tempfile::TempDir;
 
+use crate::global_db::GlobalDb;
 use crate::sessions::SessionMessageRecord;
 
-use super::{LcmStore, PayloadFileRollback, payload_dir, write_external_payload_tracked};
-
-async fn metadata_connection() -> Connection {
-    let db = Builder::new_local(":memory:").build().await.unwrap();
-    let conn = db.connect().unwrap();
-    conn.execute(
-        "CREATE TABLE lcm_external_payloads (payload_ref TEXT PRIMARY KEY)",
-        (),
-    )
-    .await
-    .unwrap();
-    conn
-}
+use super::{
+    ExternalPayloadWrite, LcmStore, PayloadFileRollback, payload_dir,
+    write_external_payload_tracked,
+};
 
 #[tokio::test]
-async fn removes_only_new_unowned_files() {
+async fn cancellation_guard_removes_new_file_on_drop() {
     let tmp = TempDir::new().unwrap();
     let storage_root = tmp.path().join(".tracedecay");
     std::fs::create_dir(&storage_root).unwrap();
-    let conn = metadata_connection().await;
-    let mut existing_write = PayloadFileRollback::begin(&storage_root);
-    let existing = write_external_payload_tracked(
-        &storage_root,
-        "cursor",
-        "session-1",
-        "existing",
-        "tool_result",
-        "existing payload",
-        None,
-        &mut existing_write,
-    )
-    .unwrap();
-    let mut rollback = PayloadFileRollback::begin(&storage_root);
+    let mut rollback = PayloadFileRollback::begin_cancellation_safe(&storage_root);
     let created = write_external_payload_tracked(
         &storage_root,
-        "cursor",
-        "session-1",
-        "created",
-        "tool_result",
-        "created payload",
-        None,
+        ExternalPayloadWrite {
+            provider: "cursor",
+            session_id: "session-1",
+            message_id: "created",
+            kind: "tool_result",
+            content: "created payload",
+            metadata_json: None,
+        },
         &mut rollback,
     )
     .unwrap();
 
-    assert_eq!(rollback.rollback(&conn).await.unwrap(), 1);
-    assert!(
-        payload_dir(&storage_root)
-            .join(existing.payload_ref)
-            .exists()
-    );
-    assert!(
-        !payload_dir(&storage_root)
-            .join(created.payload_ref)
-            .exists()
-    );
+    let payload_path = payload_dir(&storage_root).join(created.payload_ref);
+    assert!(payload_path.exists());
+    drop(rollback);
+    assert!(!payload_path.exists());
 }
 
 #[tokio::test]
-async fn preserves_newly_owned_file() {
+async fn disarmed_guard_preserves_committed_file() {
     let tmp = TempDir::new().unwrap();
     let storage_root = tmp.path().join(".tracedecay");
     std::fs::create_dir(&storage_root).unwrap();
-    let conn = metadata_connection().await;
-    let mut rollback = PayloadFileRollback::begin(&storage_root);
+    let mut rollback = PayloadFileRollback::begin_cancellation_safe(&storage_root);
     let created = write_external_payload_tracked(
         &storage_root,
-        "claude",
-        "session-1",
-        "created",
-        "tool_result",
-        "created payload",
-        None,
+        ExternalPayloadWrite {
+            provider: "claude",
+            session_id: "session-1",
+            message_id: "created",
+            kind: "tool_result",
+            content: "created payload",
+            metadata_json: None,
+        },
         &mut rollback,
     )
     .unwrap();
-    conn.execute(
-        "INSERT INTO lcm_external_payloads (payload_ref) VALUES (?1)",
-        params![created.payload_ref.as_str()],
-    )
-    .await
-    .unwrap();
 
-    assert_eq!(rollback.rollback(&conn).await.unwrap(), 0);
-    assert!(
-        payload_dir(&storage_root)
-            .join(created.payload_ref)
-            .exists()
-    );
+    let payload_path = payload_dir(&storage_root).join(created.payload_ref);
+    rollback.disarm();
+    assert!(payload_path.exists());
 }
 
 #[tokio::test]
@@ -99,41 +64,12 @@ async fn direct_store_failure_rolls_back_metadata_and_payload_file() {
     let tmp = TempDir::new().unwrap();
     let storage_root = tmp.path().join(".tracedecay");
     std::fs::create_dir(&storage_root).unwrap();
-    let db = Builder::new_local(":memory:").build().await.unwrap();
-    let conn = db.connect().unwrap();
+    let db = GlobalDb::open_at(&tmp.path().join("global.db"))
+        .await
+        .unwrap();
+    let conn = db.conn();
     conn.execute_batch(
-        "CREATE TABLE lcm_external_payloads (
-            payload_ref TEXT PRIMARY KEY,
-            provider TEXT NOT NULL,
-            session_id TEXT NOT NULL,
-            message_id TEXT NOT NULL,
-            kind TEXT NOT NULL,
-            content_hash TEXT NOT NULL,
-            byte_count INTEGER NOT NULL,
-            char_count INTEGER NOT NULL,
-            created_at INTEGER NOT NULL,
-            metadata_json TEXT
-        );
-        CREATE TABLE lcm_raw_messages (
-            store_id INTEGER PRIMARY KEY AUTOINCREMENT,
-            provider TEXT NOT NULL,
-            message_id TEXT NOT NULL,
-            session_id TEXT NOT NULL,
-            role TEXT NOT NULL,
-            ordinal INTEGER NOT NULL,
-            timestamp INTEGER,
-            content TEXT,
-            content_hash TEXT NOT NULL,
-            storage_kind TEXT NOT NULL,
-            payload_ref TEXT,
-            snippet_text TEXT NOT NULL,
-            index_text TEXT NOT NULL,
-            legacy_source INTEGER NOT NULL,
-            legacy_truncated INTEGER NOT NULL,
-            metadata_json TEXT,
-            UNIQUE(provider, message_id)
-        );
-        CREATE TRIGGER reject_raw_message
+        "CREATE TRIGGER reject_raw_message
         BEFORE INSERT ON lcm_raw_messages
         BEGIN
             SELECT RAISE(ABORT, 'late raw failure');
@@ -156,10 +92,8 @@ async fn direct_store_failure_rolls_back_metadata_and_payload_file() {
         source_offset: None,
         metadata_json: None,
     };
-    let transaction = tokio::sync::Mutex::new(());
-
     assert!(
-        LcmStore::new(&conn, storage_root.clone(), &transaction)
+        LcmStore::new(&db, storage_root.clone())
             .ingest_raw_message(&message)
             .await
             .is_err()

@@ -105,6 +105,19 @@ impl StoreAdministration {
         Ok(database)
     }
 
+    pub(super) async fn user_session_database(
+        &self,
+        global_db_path: &Path,
+    ) -> Result<Arc<crate::global_db::GlobalDb>> {
+        let profile_root = global_db_path
+            .parent()
+            .ok_or_else(|| TraceDecayError::Config {
+                message: "could not resolve daemon profile root".to_string(),
+            })?;
+        self.global_database(&crate::sessions::user_sessions_db_path(profile_root))
+            .await
+    }
+
     pub(super) fn automation_schedulers(
         &self,
     ) -> &Arc<tokio::sync::Mutex<HashMap<ProjectServerKey, AutomationSchedulerHandle>>> {

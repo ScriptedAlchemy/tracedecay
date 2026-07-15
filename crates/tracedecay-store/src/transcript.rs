@@ -51,7 +51,7 @@ pub struct ParseOffset {
 /// Validated authoritative transcript persistence request.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TranscriptWriteBatch {
-    transcript_path: PathBuf,
+    cursor_path: PathBuf,
     kind: TranscriptWriteKind,
 }
 
@@ -65,7 +65,7 @@ pub enum TranscriptWriteKind {
     },
     /// Atomically persists a session, its messages, and the next cursor.
     Upsert {
-        session: SessionRecord,
+        session: Box<SessionRecord>,
         messages: Vec<SessionMessageRecord>,
         expected_offset: ParseOffset,
         next_offset: ParseOffset,
@@ -75,16 +75,16 @@ pub enum TranscriptWriteKind {
 impl TranscriptWriteBatch {
     /// Builds an offset-only write for parsed input that emitted no messages.
     pub fn advance_offset(
-        transcript_path: PathBuf,
+        cursor_path: PathBuf,
         expected_offset: ParseOffset,
         next_offset: ParseOffset,
     ) -> TranscriptStoreResult<Self> {
-        if transcript_path.as_os_str().is_empty() {
-            return Err(TranscriptStoreError::InvalidTranscriptPath);
+        if cursor_path.as_os_str().is_empty() {
+            return Err(TranscriptStoreError::InvalidCursorPath);
         }
 
         Ok(Self {
-            transcript_path,
+            cursor_path,
             kind: TranscriptWriteKind::AdvanceOffset {
                 expected_offset,
                 next_offset,
@@ -99,7 +99,7 @@ impl TranscriptWriteBatch {
         expected_offset: ParseOffset,
         next_offset: ParseOffset,
     ) -> TranscriptStoreResult<Self> {
-        let transcript_path = session
+        let cursor_path = session
             .transcript_path
             .as_deref()
             .map(PathBuf::from)
@@ -107,8 +107,32 @@ impl TranscriptWriteBatch {
                 provider: session.provider.clone(),
                 session_id: session.session_id.clone(),
             })?;
-        if transcript_path.as_os_str().is_empty() {
+        Self::upsert_with_cursor(cursor_path, session, messages, expected_offset, next_offset)
+    }
+
+    /// Builds a full atomic write whose durable cursor key differs from the
+    /// session's physical transcript path.
+    ///
+    /// Virtual transcript sources use a stable logical cursor while retaining
+    /// the real source path in [`SessionRecord::transcript_path`].
+    pub fn upsert_with_cursor(
+        cursor_path: PathBuf,
+        session: SessionRecord,
+        messages: Vec<SessionMessageRecord>,
+        expected_offset: ParseOffset,
+        next_offset: ParseOffset,
+    ) -> TranscriptStoreResult<Self> {
+        let session_path = session.transcript_path.as_deref().ok_or_else(|| {
+            TranscriptStoreError::MissingTranscriptPath {
+                provider: session.provider.clone(),
+                session_id: session.session_id.clone(),
+            }
+        })?;
+        if session_path.is_empty() {
             return Err(TranscriptStoreError::InvalidTranscriptPath);
+        }
+        if cursor_path.as_os_str().is_empty() {
+            return Err(TranscriptStoreError::InvalidCursorPath);
         }
 
         if let Some(message) = messages.iter().find(|message| {
@@ -124,9 +148,9 @@ impl TranscriptWriteBatch {
         }
 
         Ok(Self {
-            transcript_path,
+            cursor_path,
             kind: TranscriptWriteKind::Upsert {
-                session,
+                session: Box::new(session),
                 messages,
                 expected_offset,
                 next_offset,
@@ -134,9 +158,9 @@ impl TranscriptWriteBatch {
         })
     }
 
-    /// Returns the single authoritative path represented by this write.
-    pub fn transcript_path(&self) -> &Path {
-        &self.transcript_path
+    /// Returns the durable cursor identity represented by this write.
+    pub fn cursor_path(&self) -> &Path {
+        &self.cursor_path
     }
 
     /// Returns the durable cursor that the writer observed before parsing.
@@ -153,13 +177,15 @@ impl TranscriptWriteBatch {
 
     /// Consumes this validated request for persistence.
     pub fn into_parts(self) -> (PathBuf, TranscriptWriteKind) {
-        (self.transcript_path, self.kind)
+        (self.cursor_path, self.kind)
     }
 }
 
 /// Explicit failure returned by the authoritative transcript store.
 #[derive(Debug, thiserror::Error)]
 pub enum TranscriptStoreError {
+    #[error("transcript cursor path must not be empty")]
+    InvalidCursorPath,
     #[error("transcript path must not be empty")]
     InvalidTranscriptPath,
     #[error("session {provider}/{session_id} has no transcript path")]
@@ -178,10 +204,10 @@ pub enum TranscriptStoreError {
         actual_session_id: String,
     },
     #[error(
-        "transcript cursor conflict for {transcript_path:?}: expected {expected:?}, found {actual:?}"
+        "transcript cursor conflict for {cursor_path:?}: expected {expected:?}, found {actual:?}"
     )]
     Conflict {
-        transcript_path: PathBuf,
+        cursor_path: PathBuf,
         expected: ParseOffset,
         actual: ParseOffset,
     },
@@ -204,7 +230,7 @@ pub trait TranscriptStore: Send + Sync {
     /// Loads the durable cursor, returning the default cursor when untracked.
     fn get_parse_offset(
         &self,
-        path: &Path,
+        cursor_path: &Path,
     ) -> impl Future<Output = TranscriptStoreResult<ParseOffset>> + Send;
 
     /// Persists one offset-only or full atomic write in the authoritative store.
@@ -267,7 +293,7 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(batch.transcript_path(), Path::new("session.jsonl"));
+        assert_eq!(batch.cursor_path(), Path::new("session.jsonl"));
     }
 
     #[test]
@@ -280,7 +306,43 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(batch.transcript_path(), Path::new("session.jsonl"));
+        assert_eq!(batch.cursor_path(), Path::new("session.jsonl"));
+    }
+
+    #[test]
+    fn upsert_with_cursor_preserves_the_physical_session_path() {
+        let batch = TranscriptWriteBatch::upsert_with_cursor(
+            PathBuf::from("cursor-chat:agent-1"),
+            session(Some("/physical/store.db")),
+            Vec::new(),
+            ParseOffset::default(),
+            ParseOffset::default(),
+        )
+        .unwrap();
+
+        assert_eq!(batch.cursor_path(), Path::new("cursor-chat:agent-1"));
+        let (_, kind) = batch.into_parts();
+        assert!(matches!(
+            kind,
+            TranscriptWriteKind::Upsert { session, .. }
+                if session.transcript_path.as_deref() == Some("/physical/store.db")
+        ));
+    }
+
+    #[test]
+    fn upsert_with_cursor_rejects_an_empty_cursor_path() {
+        let batch = TranscriptWriteBatch::upsert_with_cursor(
+            PathBuf::new(),
+            session(Some("/physical/store.db")),
+            Vec::new(),
+            ParseOffset::default(),
+            ParseOffset::default(),
+        );
+
+        assert!(matches!(
+            batch,
+            Err(TranscriptStoreError::InvalidCursorPath)
+        ));
     }
 
     #[test]
@@ -299,7 +361,7 @@ mod tests {
     }
 
     #[test]
-    fn advance_offset_rejects_an_empty_transcript_path() {
+    fn advance_offset_rejects_an_empty_cursor_path() {
         let batch = TranscriptWriteBatch::advance_offset(
             PathBuf::new(),
             ParseOffset::default(),
@@ -308,7 +370,7 @@ mod tests {
 
         assert!(matches!(
             batch,
-            Err(TranscriptStoreError::InvalidTranscriptPath)
+            Err(TranscriptStoreError::InvalidCursorPath)
         ));
     }
 
@@ -372,8 +434,8 @@ mod tests {
         .unwrap();
 
         assert_eq!(batch.expected_offset(), expected_offset);
-        let (transcript_path, kind) = batch.into_parts();
-        assert_eq!(transcript_path, PathBuf::from("session.jsonl"));
+        let (cursor_path, kind) = batch.into_parts();
+        assert_eq!(cursor_path, PathBuf::from("session.jsonl"));
         assert!(matches!(
             kind,
             TranscriptWriteKind::AdvanceOffset {

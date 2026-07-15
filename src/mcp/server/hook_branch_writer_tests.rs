@@ -119,6 +119,8 @@ async fn add_branch_plan_uses_injected_writer_without_direct_fallback() {
         None,
         None,
         None,
+        None,
+        None,
         true,
         None,
         None,
@@ -165,6 +167,8 @@ async fn add_branch_at_plan_delegates_open_and_sync_without_direct_fallback() {
     );
     let server = McpServer::new_with_dbs_and_reconcilers_and_writers(
         cg,
+        None,
+        None,
         None,
         None,
         None,
@@ -220,6 +224,8 @@ async fn sync_current_branch_deferred_writer_does_not_fall_back_to_direct_sync()
         None,
         None,
         None,
+        None,
+        None,
         true,
         None,
         None,
@@ -266,6 +272,8 @@ async fn sync_current_branch_writer_error_does_not_fall_back_to_direct_sync() {
     let observed = Arc::new(Mutex::new(Vec::new()));
     let server = McpServer::new_with_dbs_and_reconcilers_and_writers(
         cg,
+        None,
+        None,
         None,
         None,
         None,

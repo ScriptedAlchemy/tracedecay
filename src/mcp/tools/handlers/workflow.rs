@@ -5,8 +5,8 @@
 //! already attached to the symbols they affect.
 
 use std::collections::{HashMap, HashSet};
-use std::path::Path;
-use std::process::Output;
+use std::future::Future;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use serde_json::{Value, json};
@@ -425,6 +425,49 @@ fn severity_string(s: Severity) -> &'static str {
 
 /// Handles `tracedecay_run_affected_tests`.
 pub(super) async fn handle_run_affected_tests(cg: &TraceDecay, args: Value) -> Result<ToolResult> {
+    handle_run_affected_tests_with_runner(cg, args, run_cargo_tests).await
+}
+
+#[derive(Debug)]
+struct TestRunOutput {
+    exit_code: Option<i32>,
+    stdout: String,
+    stderr: String,
+}
+
+#[derive(Debug)]
+enum TestRunFailure {
+    Spawn(String),
+    Timeout,
+}
+
+async fn run_cargo_tests(
+    project_root: PathBuf,
+    profile: String,
+    test_names: Vec<String>,
+    timeout_duration: Duration,
+) -> std::result::Result<TestRunOutput, TestRunFailure> {
+    let mut cmd = cargo_test_command(&project_root, &profile, &test_names);
+    match timeout(timeout_duration, cmd.output()).await {
+        Ok(Ok(output)) => Ok(TestRunOutput {
+            exit_code: output.status.code(),
+            stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+        }),
+        Ok(Err(error)) => Err(TestRunFailure::Spawn(error.to_string())),
+        Err(_) => Err(TestRunFailure::Timeout),
+    }
+}
+
+async fn handle_run_affected_tests_with_runner<Runner, RunFuture>(
+    cg: &TraceDecay,
+    args: Value,
+    runner: Runner,
+) -> Result<ToolResult>
+where
+    Runner: FnOnce(PathBuf, String, Vec<String>, Duration) -> RunFuture,
+    RunFuture: Future<Output = std::result::Result<TestRunOutput, TestRunFailure>>,
+{
     let run_args = RunAffectedArgs::parse(&args);
     let project_root = cg.project_root().to_path_buf();
 
@@ -455,19 +498,24 @@ pub(super) async fn handle_run_affected_tests(cg: &TraceDecay, args: Value) -> R
 
     // 3) Run cargo test --no-fail-fast with each test name as a libtest
     // filter. We use `--` to pass them through.
-    let mut cmd = cargo_test_command(&project_root, &run_args.profile, &test_names);
-    let run = cmd.output();
-    let output = match timeout(Duration::from_secs(run_args.timeout_secs), run).await {
-        Ok(Ok(o)) => o,
-        Ok(Err(e)) => {
+    let output = match runner(
+        project_root.clone(),
+        run_args.profile,
+        test_names.clone(),
+        Duration::from_secs(run_args.timeout_secs),
+    )
+    .await
+    {
+        Ok(output) => output,
+        Err(TestRunFailure::Spawn(error)) => {
             return Ok(error_result(
                 &args,
                 "cargo",
                 "test",
-                &format!("failed to spawn cargo test: {e}"),
+                &format!("failed to spawn cargo test: {error}"),
             ));
         }
-        Err(_) => {
+        Err(TestRunFailure::Timeout) => {
             return Ok(error_result(
                 &args,
                 "cargo",
@@ -477,19 +525,17 @@ pub(super) async fn handle_run_affected_tests(cg: &TraceDecay, args: Value) -> R
         }
     };
 
-    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-    let results = parse_libtest_output(&stdout);
+    let results = parse_libtest_output(&output.stdout);
 
     let touched_files: Vec<String> = unique_file_paths(changed_paths.iter().map(String::as_str));
     let body = run_affected_tests_body(
-        &output,
+        output.exit_code,
         &results,
         &test_names,
         truncated,
         &selected_targets,
-        &stderr,
-        &stdout,
+        &output.stderr,
+        &output.stdout,
     );
 
     let text = render::finalize(Some(cg.project_root()), &args, &body, || {
@@ -650,7 +696,7 @@ fn cargo_test_args(profile: &str, test_names: &[String]) -> Vec<String> {
 }
 
 fn run_affected_tests_body(
-    output: &Output,
+    exit_code: Option<i32>,
     results: &[(String, bool)],
     test_names: &[String],
     truncated: bool,
@@ -662,7 +708,7 @@ fn run_affected_tests_body(
     let failed = results.iter().filter(|(_, ok)| !*ok).count();
 
     json!({
-        "exit_code": output.status.code(),
+        "exit_code": exit_code,
         "passed": passed,
         "failed": failed,
         "total_observed": results.len(),
@@ -799,6 +845,61 @@ fn parse_libtest_output(stdout: &str) -> Vec<(String, bool)> {
 #[allow(clippy::expect_used)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn directly_changed_test_file_is_dispatched_without_toolchain_execution() {
+        let _profile = crate::config::PinnedUserDataDir::new();
+        let dir = tempfile::TempDir::new().unwrap();
+        let project = dir.path();
+        std::fs::create_dir_all(project.join("src")).unwrap();
+        std::fs::create_dir_all(project.join("tests")).unwrap();
+        std::fs::write(project.join("src/lib.rs"), "pub fn util() -> u32 { 1 }\n").unwrap();
+        std::fs::write(
+            project.join("Cargo.toml"),
+            "[package]\nname = \"t\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            project.join("tests/edited_only.rs"),
+            "#[test]\nfn edited_only_test() {\n    assert_eq!(2, 2);\n}\n",
+        )
+        .unwrap();
+
+        let cg = TraceDecay::init(project).await.unwrap();
+        cg.index_all().await.unwrap();
+        let expected_root = project.to_path_buf();
+        let result = handle_run_affected_tests_with_runner(
+            &cg,
+            json!({
+                "changed_paths": ["tests/edited_only.rs"],
+                "timeout_secs": 60,
+                "max_tests": 5,
+                "format": "json"
+            }),
+            move |root, profile, tests, timeout_duration| async move {
+                assert_eq!(root, expected_root);
+                assert_eq!(profile, "debug");
+                assert_eq!(timeout_duration, Duration::from_mins(1));
+                assert_eq!(tests, ["edited_only_test"]);
+                Ok(TestRunOutput {
+                    exit_code: Some(0),
+                    stdout: "test edited_only_test ... ok\n".to_string(),
+                    stderr: String::new(),
+                })
+            },
+        )
+        .await
+        .unwrap();
+
+        let text = result.value["content"][0]["text"].as_str().unwrap();
+        let output: Value = serde_json::from_str(text).unwrap();
+        assert_eq!(output["dispatched_tests"], json!(["edited_only_test"]));
+        assert_eq!(output["results"][0]["test"], "edited_only_test");
+        assert_eq!(output["passed"], 1);
+
+        cg.checkpoint().await.unwrap();
+        cg.close();
+    }
 
     #[test]
     fn parses_libtest_pass_and_fail() {

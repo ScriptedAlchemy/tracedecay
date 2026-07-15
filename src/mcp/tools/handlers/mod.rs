@@ -29,6 +29,7 @@ pub mod workflow;
 pub mod workflow_query;
 
 use std::path::Path;
+use std::sync::Arc;
 
 use serde_json::{Value, json};
 
@@ -42,6 +43,16 @@ pub async fn handle_user_lcm_tool(
     tool_name: &str,
     args: Value,
     profile_root: &Path,
+) -> Result<crate::mcp::tools::ToolResult> {
+    handle_user_lcm_tool_with_db(tool_name, args, profile_root, None, true).await
+}
+
+async fn handle_user_lcm_tool_with_db(
+    tool_name: &str,
+    args: Value,
+    profile_root: &Path,
+    retained_session_db: Option<&Arc<GlobalDb>>,
+    allow_owned_session_db: bool,
 ) -> Result<crate::mcp::tools::ToolResult> {
     if args.get("storage_scope").and_then(Value::as_str) != Some("user") {
         return Err(TraceDecayError::Config {
@@ -65,10 +76,24 @@ pub async fn handle_user_lcm_tool(
         });
     }
     if tool_name == "tracedecay_message_search" {
-        return session::handle_user_message_search(profile_root, args).await;
+        return session::handle_user_message_search(
+            profile_root,
+            args,
+            retained_session_db,
+            allow_owned_session_db,
+        )
+        .await;
     }
     let sessions_db_path = crate::sessions::user_sessions_db_path(profile_root);
-    let context = session::LcmHandlerContext::user(&sessions_db_path);
+    let context = session::LcmHandlerContext::user(&sessions_db_path, retained_session_db);
+    dispatch_lcm_tool(tool_name, args, context).await
+}
+
+async fn dispatch_lcm_tool(
+    tool_name: &str,
+    args: Value,
+    context: session::LcmHandlerContext<'_>,
+) -> Result<crate::mcp::tools::ToolResult> {
     match tool_name {
         "tracedecay_lcm_status" => session::handle_lcm_status(context, args).await,
         "tracedecay_lcm_doctor" => session::handle_lcm_doctor(context, args).await,
@@ -85,6 +110,21 @@ pub async fn handle_user_lcm_tool(
         _ => Err(TraceDecayError::Config {
             message: format!("unknown user-scoped LCM tool: {tool_name}"),
         }),
+    }
+}
+
+/// Database authorities retained by the owning MCP server for its lifetime.
+/// Hook and LCM handlers borrow these capabilities; they never rediscover or
+/// reopen a session database while dispatching an action.
+#[derive(Clone, Copy, Default)]
+pub struct SessionAuthorities<'a> {
+    pub(crate) project: Option<&'a Arc<GlobalDb>>,
+    pub(crate) user: Option<&'a Arc<GlobalDb>>,
+}
+
+impl<'a> SessionAuthorities<'a> {
+    pub const fn new(project: Option<&'a Arc<GlobalDb>>, user: Option<&'a Arc<GlobalDb>>) -> Self {
+        Self { project, user }
     }
 }
 
@@ -283,6 +323,7 @@ pub async fn handle_tool_call_with_registry(
             automation_writer: crate::dashboard::direct_dashboard_automation_writer(),
             diagnostics_cache: None,
             diagnostics_lsp: None,
+            session_authorities: SessionAuthorities::default(),
         },
     )
     .await
@@ -298,6 +339,7 @@ pub struct ToolCallRegistryOptions<'a> {
     pub diagnostics_cache: Option<&'a crate::diagnostics::DiagnosticsCache>,
     pub diagnostics_lsp:
         Option<&'a tokio::sync::Mutex<crate::diagnostics::lsp::broker::DiagnosticBroker>>,
+    pub session_authorities: SessionAuthorities<'a>,
 }
 
 pub async fn handle_tool_call_with_registry_and_implicit_project(
@@ -335,7 +377,14 @@ pub async fn handle_tool_call_with_registry_and_implicit_project(
                     options.global_db,
                     options.allow_default_registry_fallback,
                 )?;
-                return handle_user_lcm_tool(tool_name, args, &profile_root).await;
+                return handle_user_lcm_tool_with_db(
+                    tool_name,
+                    args,
+                    &profile_root,
+                    options.session_authorities.user,
+                    options.allow_default_registry_fallback,
+                )
+                .await;
             }
             "project" => {
                 if let Some(object) = args.as_object_mut() {
@@ -383,6 +432,11 @@ pub async fn handle_tool_call_with_registry_and_implicit_project(
         scope_prefix
     };
     let cg = selected_cg.as_ref().unwrap_or(cg);
+    let active_project_session_db = selected_cg
+        .is_none()
+        .then_some(options.session_authorities.project)
+        .flatten();
+    let active_lcm_context = session::LcmHandlerContext::active(cg, active_project_session_db);
     match tool_name {
         "tracedecay_search" => graph::handle_search(cg, args, selected_scope_prefix).await,
         "tracedecay_grep" => grep::handle_grep(cg, args, selected_scope_prefix).await,
@@ -397,7 +451,13 @@ pub async fn handle_tool_call_with_registry_and_implicit_project(
         "tracedecay_node" => graph::handle_node(cg, args).await,
         "tracedecay_status" => info::handle_status(cg, args, server_stats, scope_prefix).await,
         "tracedecay_hook_runtime" => {
-            hook_runtime::handle_hook_runtime(cg, args, options.global_db).await
+            hook_runtime::handle_hook_runtime(
+                cg,
+                args,
+                options.global_db,
+                options.session_authorities,
+            )
+            .await
         }
         "tracedecay_admin_branch_add" => git::handle_admin_branch_add(cg, args).await,
         "tracedecay_admin_sync" => info::handle_admin_sync(cg, args).await,
@@ -574,6 +634,7 @@ pub async fn handle_tool_call_with_registry_and_implicit_project(
             dashboard::handle_dashboard(
                 cg,
                 args,
+                active_project_session_db,
                 options.automation_scheduler_reconciler.clone(),
                 options.automation_writer.clone(),
             )
@@ -585,40 +646,15 @@ pub async fn handle_tool_call_with_registry_and_implicit_project(
                 args,
                 options.global_db,
                 options.allow_default_registry_fallback,
+                active_project_session_db,
+                options.session_authorities.user,
             )
             .await
         }
         "tracedecay_sessions_for" => session::handle_sessions_for(cg, args).await,
         "tracedecay_workflows" => workflow_query::handle_workflows(cg, args).await,
-        "tracedecay_lcm_status" => {
-            session::handle_lcm_status(session::LcmHandlerContext::active(cg), args).await
-        }
-        "tracedecay_lcm_doctor" => {
-            session::handle_lcm_doctor(session::LcmHandlerContext::active(cg), args).await
-        }
-        "tracedecay_lcm_load_session" => {
-            session::handle_lcm_load_session(session::LcmHandlerContext::active(cg), args).await
-        }
-        "tracedecay_lcm_grep" => {
-            session::handle_lcm_grep(session::LcmHandlerContext::active(cg), args).await
-        }
-        "tracedecay_lcm_describe" => {
-            session::handle_lcm_describe(session::LcmHandlerContext::active(cg), args).await
-        }
-        "tracedecay_lcm_expand" => {
-            session::handle_lcm_expand(session::LcmHandlerContext::active(cg), args).await
-        }
-        "tracedecay_lcm_expand_query" => {
-            session::handle_lcm_expand_query(session::LcmHandlerContext::active(cg), args).await
-        }
-        "tracedecay_lcm_preflight" => {
-            session::handle_lcm_preflight(session::LcmHandlerContext::active(cg), args).await
-        }
-        "tracedecay_lcm_compress" => {
-            session::handle_lcm_compress(session::LcmHandlerContext::active(cg), args).await
-        }
-        "tracedecay_lcm_session_boundary" => {
-            session::handle_lcm_session_boundary(session::LcmHandlerContext::active(cg), args).await
+        name if name.starts_with("tracedecay_lcm_") => {
+            dispatch_lcm_tool(name, args, active_lcm_context).await
         }
         _ => Err(TraceDecayError::Config {
             message: format!("unknown tool: {tool_name}"),
@@ -701,7 +737,7 @@ mod tests {
 
     fn dispatch_tool_names_from_source(function_name: &str) -> BTreeSet<String> {
         let source = include_str!("mod.rs");
-        let fn_marker = format!("pub async fn {function_name}");
+        let fn_marker = format!("async fn {function_name}");
         let function_source = source
             .split_once(&fn_marker)
             .unwrap_or_else(|| panic!("missing function source for {function_name}"))
@@ -753,6 +789,7 @@ mod tests {
             .map(|tool| tool.name)
             .collect::<BTreeSet<_>>();
         let mut handler_names = dispatch_tool_names_from_source("handle_tool_call");
+        handler_names.extend(dispatch_tool_names_from_source("dispatch_lcm_tool"));
         for internal in INTERNAL_DAEMON_TOOL_NAMES {
             handler_names.remove(*internal);
         }

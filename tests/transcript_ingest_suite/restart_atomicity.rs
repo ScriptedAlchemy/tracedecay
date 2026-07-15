@@ -3,12 +3,32 @@ use std::io::Write;
 use tempfile::TempDir;
 use tracedecay::sessions::claude::ClaudeSource;
 use tracedecay::sessions::cline_like::ClineLikeSource;
-use tracedecay::sessions::cursor::{ingest_cursor_transcript_event, open_project_session_db};
+use tracedecay::sessions::cursor::{
+    ingest_cursor_transcript_event, open_project_session_db, project_session_db_path,
+};
 use tracedecay::sessions::source::ingest_source;
 
 use crate::claude::write_claude_transcript;
 use crate::cline_like::{parse_offset_for_task_history, vscode_storage_root, write_task};
 use crate::support::{init_project, setup};
+
+async fn set_session_message_projection_failure(project: &std::path::Path, enabled: bool) {
+    let db = libsql::Builder::new_local(project_session_db_path(project))
+        .build()
+        .await
+        .unwrap();
+    let conn = db.connect().unwrap();
+    let statement = if enabled {
+        "CREATE TRIGGER fail_claude_suffix_projection
+         BEFORE INSERT ON session_messages
+         BEGIN
+            SELECT RAISE(ABORT, 'projection failure');
+         END;"
+    } else {
+        "DROP TRIGGER fail_claude_suffix_projection;"
+    };
+    conn.execute_batch(statement).await.unwrap();
+}
 
 #[tokio::test]
 async fn claude_restart_ingests_only_the_appended_suffix() {
@@ -21,6 +41,7 @@ async fn claude_restart_ingests_only_the_appended_suffix() {
     let first = ingest_source(&db, &ClaudeSource::with_home(&home), &project, None).await;
     assert_eq!(first.messages_upserted, 2);
     let first_offset = db.get_parse_offset(&path_key).await.unwrap();
+    let first_session = db.get_session("claude", "claude-restart").await.unwrap();
 
     let mut transcript = std::fs::OpenOptions::new()
         .append(true)
@@ -42,6 +63,31 @@ async fn claude_restart_ingests_only_the_appended_suffix() {
     drop(transcript);
     drop(db);
 
+    set_session_message_projection_failure(&project, true).await;
+
+    let rejected = open_project_session_db(&project).await.unwrap();
+    let failed = ingest_source(&rejected, &ClaudeSource::with_home(&home), &project, None).await;
+    assert_eq!(failed.messages_upserted, 0);
+    assert_eq!(
+        rejected.get_parse_offset(&path_key).await,
+        Some(first_offset)
+    );
+    assert_eq!(rejected.session_message_count().await.unwrap(), 2);
+    assert_eq!(
+        rejected.get_session("claude", "claude-restart").await,
+        Some(first_session)
+    );
+    assert!(rejected.get_session_message("claude", "u3").await.is_none());
+    assert!(
+        rejected
+            .lcm_load_raw_message("claude", "u3")
+            .await
+            .is_none()
+    );
+    drop(rejected);
+
+    set_session_message_projection_failure(&project, false).await;
+
     let reopened = open_project_session_db(&project).await.unwrap();
     let suffix = ingest_source(&reopened, &ClaudeSource::with_home(&home), &project, None).await;
     assert_eq!(suffix.messages_upserted, 1);
@@ -62,7 +108,65 @@ async fn claude_restart_ingests_only_the_appended_suffix() {
 }
 
 #[tokio::test]
-async fn cline_content_hash_cursor_survives_restart() {
+async fn claude_restart_defers_a_partial_final_line() {
+    let tmp = TempDir::new().unwrap();
+    let (home, project) = setup(&tmp);
+    let path = write_claude_transcript(&home, &project, "claude-partial");
+    let path_key = path.to_string_lossy().to_string();
+    let complete_len = std::fs::metadata(&path).unwrap().len();
+    let partial = serde_json::json!({
+        "type": "user",
+        "cwd": project,
+        "sessionId": "claude-partial",
+        "uuid": "u3",
+        "timestamp": "2026-01-01T00:00:10.000Z",
+        "message": {"role": "user", "content": "Deferred Claude partial line."}
+    })
+    .to_string();
+    std::fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .unwrap()
+        .write_all(partial.as_bytes())
+        .unwrap();
+
+    let db = open_project_session_db(&project).await.unwrap();
+    let first = ingest_source(&db, &ClaudeSource::with_home(&home), &project, None).await;
+    assert_eq!(first.messages_upserted, 2);
+    let committed_offset = db.get_parse_offset(&path_key).await.unwrap();
+    assert_eq!(committed_offset.byte_offset, complete_len);
+    drop(db);
+
+    let reopened = open_project_session_db(&project).await.unwrap();
+    let still_partial =
+        ingest_source(&reopened, &ClaudeSource::with_home(&home), &project, None).await;
+    assert_eq!(still_partial.messages_upserted, 0);
+    assert_eq!(
+        reopened.get_parse_offset(&path_key).await,
+        Some(committed_offset)
+    );
+
+    std::fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .unwrap()
+        .write_all(b"\n")
+        .unwrap();
+    let completed = ingest_source(&reopened, &ClaudeSource::with_home(&home), &project, None).await;
+    assert_eq!(completed.messages_upserted, 1);
+    assert_eq!(reopened.session_message_count().await.unwrap(), 3);
+    assert_eq!(
+        reopened
+            .get_parse_offset(&path_key)
+            .await
+            .unwrap()
+            .byte_offset,
+        std::fs::metadata(path).unwrap().len()
+    );
+}
+
+#[tokio::test]
+async fn cline_content_hash_cursor_survives_restart_and_incomplete_rewrite() {
     let tmp = TempDir::new().unwrap();
     let (home, project) = setup(&tmp);
     let history_path = write_task(
@@ -94,6 +198,62 @@ async fn cline_content_hash_cursor_survives_restart() {
             .await
             .len(),
         2
+    );
+    drop(reopened);
+
+    std::fs::write(
+        &history_path,
+        r#"[{"role":"user","content":"Incomplete Cline rewrite."}"#,
+    )
+    .unwrap();
+    let incomplete = open_project_session_db(&project).await.unwrap();
+    let deferred = ingest_source(&incomplete, &source, &project, None).await;
+    assert_eq!(deferred.messages_upserted, 0);
+    assert_eq!(incomplete.session_message_count().await.unwrap(), 2);
+    let incomplete_offset = parse_offset_for_task_history(&incomplete, &project, &history_path)
+        .await
+        .unwrap();
+    assert_ne!(incomplete_offset, offset);
+    drop(incomplete);
+
+    std::fs::write(
+        &history_path,
+        serde_json::to_string_pretty(&serde_json::json!([
+            {
+                "role": "user",
+                "content": "Investigate the billing pipeline regression",
+                "ts": 1_800_000_000_i64
+            },
+            {
+                "role": "assistant",
+                "content": "The billing pipeline regression is fixed.",
+                "ts": 1_800_000_010_i64
+            },
+            {
+                "role": "user",
+                "content": "Verify the completed Cline rewrite.",
+                "ts": 1_800_000_020_i64
+            }
+        ]))
+        .unwrap(),
+    )
+    .unwrap();
+    let completed = open_project_session_db(&project).await.unwrap();
+    let recovered = ingest_source(&completed, &source, &project, None).await;
+    assert_eq!(recovered.messages_upserted, 3);
+    assert_eq!(completed.session_message_count().await.unwrap(), 3);
+    assert_eq!(
+        completed
+            .search_session_messages("cline", None, "completed Cline rewrite", 10)
+            .await
+            .len(),
+        1
+    );
+    assert_ne!(
+        parse_offset_for_task_history(&completed, &project, &history_path)
+            .await
+            .unwrap(),
+        incomplete_offset
     );
 }
 

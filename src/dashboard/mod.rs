@@ -10,7 +10,7 @@
 //! - `/api/plugins/hermes-lcm/*`   → LCM session store
 //!   (`lcm_raw_messages` / `lcm_summary_nodes` in the resolved active project
 //!   store where transcript ingest writes; see [`resolve_lcm_store`] for the
-//!   global-DB fallback)
+//!   fail-closed authority selection)
 //!
 //! The endpoint paths and JSON payload shapes intentionally mirror the
 //! original Hermes plugin APIs (`plugins/memory/holographic_plus/dashboard/
@@ -96,21 +96,20 @@ pub(crate) struct DashboardState {
     pub(crate) mem_conn: libsql::Connection,
     /// Display path of the project memory database.
     pub(crate) mem_db_path: String,
-    /// LCM session store for the resolved active project store, or the global
-    /// fallback when no project store is available.
+    /// LCM session store for the resolved active project store. Absent when
+    /// project authority is unavailable; the accounting DB is never used.
     pub(crate) lcm_conn: Option<libsql::Connection>,
-    /// Keeps session-store authorities alive alongside `lcm_conn`.
-    pub(crate) _global_database_guards: Vec<Arc<GlobalDb>>,
-    /// Authoritative LCM store for serialized dashboard mutations. Unlike
-    /// `authoritative_session_db`, this is present for the global fallback.
+    /// Authoritative LCM store for serialized dashboard mutations. Retaining
+    /// this authority also keeps `lcm_conn` alive.
     pub(crate) lcm_db: Option<Arc<GlobalDb>>,
-    /// Authoritative project session store used by startup recovery. This is
-    /// `None` when LCM reads fall back to the global database.
-    pub(crate) authoritative_session_db: Option<Arc<GlobalDb>>,
     /// Display path of the LCM session store actually being served.
     pub(crate) lcm_db_path: String,
-    /// Which store `lcm_conn` points at, e.g. `"profile_sharded"` or `"global"`.
+    /// Which store `lcm_conn` points at: project storage mode or `"unavailable"`.
     pub(crate) lcm_scope: String,
+    /// Standalone CLI dashboards may open their resolved project session DB.
+    /// Daemon-started dashboards inherit `false` and fail closed if a retained
+    /// authority is unavailable, including for project-picker states.
+    pub(crate) allow_direct_session_open: bool,
     /// Global accounting DB (savings ledger, lifetime counters, turns) used
     /// by the Savings & Cost tab, when available.
     pub(crate) savings_db: Option<Arc<GlobalDb>>,
@@ -152,9 +151,7 @@ impl DashboardState {
 /// The LCM session store the dashboard will serve.
 pub(crate) struct LcmStoreSelection {
     pub(crate) conn: Option<libsql::Connection>,
-    pub(crate) guard: Option<Arc<GlobalDb>>,
     pub(crate) lcm_db: Option<Arc<GlobalDb>>,
-    pub(crate) authoritative_session_db: Option<Arc<GlobalDb>>,
     pub(crate) path: String,
     pub(crate) scope: String,
 }
@@ -165,38 +162,48 @@ pub(crate) struct LcmStoreSelection {
 /// storage resolver. For profile-backed projects, that is the user-level shard
 /// under `~/.tracedecay/projects/<project_id>/`, not a repo-local DB.
 ///
-/// The global DB is only a fallback for sessions. `TRACEDECAY_GLOBAL_DB`
-/// still controls the savings/accounting ledger, but it must not pull the
-/// dashboard away from the resolved active project store transcript ingest uses.
-pub(crate) async fn resolve_lcm_store(cg: &TraceDecay) -> LcmStoreSelection {
+/// Session storage fails closed when the project authority is unavailable;
+/// the global accounting DB is never a fallback LCM destination.
+pub(crate) async fn resolve_lcm_store(
+    cg: &TraceDecay,
+    retained_project_session_db: Option<Arc<GlobalDb>>,
+    allow_direct_session_open: bool,
+) -> LcmStoreSelection {
     let project_root = cg.project_root();
-    if let Some(project_db_path) =
-        crate::sessions::cursor::resolved_project_session_db_path(project_root).await
-    {
-        if let Some(db) = GlobalDb::open_at(&project_db_path).await {
-            let conn = db.dashboard_connection();
-            let db = Arc::new(db);
-            return LcmStoreSelection {
-                conn: Some(conn),
-                guard: Some(Arc::clone(&db)),
-                lcm_db: Some(Arc::clone(&db)),
-                authoritative_session_db: Some(db),
-                path: project_db_path.display().to_string(),
-                scope: storage_mode_label(&cg.store_layout().storage_mode).to_string(),
-            };
-        }
+    if let Some(db) = retained_project_session_db {
+        return LcmStoreSelection {
+            conn: Some(db.dashboard_connection()),
+            path: db.db_path().display().to_string(),
+            lcm_db: Some(db),
+            scope: storage_mode_label(&cg.store_layout().storage_mode).to_string(),
+        };
     }
-    let global = GlobalDb::open().await.map(Arc::new);
-    let conn = global.as_ref().map(|db| db.dashboard_connection());
+    if !allow_direct_session_open {
+        return LcmStoreSelection {
+            conn: None,
+            lcm_db: None,
+            path: cg.store_layout().sessions_db_path.display().to_string(),
+            scope: "unavailable".to_string(),
+        };
+    }
+    let project_db_path = crate::sessions::cursor::resolved_project_session_db_path(project_root)
+        .await
+        .unwrap_or_else(|| cg.store_layout().sessions_db_path.clone());
+    if let Some(db) = GlobalDb::open_at(&project_db_path).await {
+        let conn = db.dashboard_connection();
+        let db = Arc::new(db);
+        return LcmStoreSelection {
+            conn: Some(conn),
+            lcm_db: Some(db),
+            path: project_db_path.display().to_string(),
+            scope: storage_mode_label(&cg.store_layout().storage_mode).to_string(),
+        };
+    }
     LcmStoreSelection {
-        conn,
-        guard: global.as_ref().map(Arc::clone),
-        lcm_db: global,
-        authoritative_session_db: None,
-        path: crate::global_db::global_db_path()
-            .map(|p| p.display().to_string())
-            .unwrap_or_default(),
-        scope: "global".to_string(),
+        conn: None,
+        lcm_db: None,
+        path: project_db_path.display().to_string(),
+        scope: "unavailable".to_string(),
     }
 }
 
@@ -272,13 +279,15 @@ pub(crate) async fn resolve_project_memory_store(
 
 async fn build_state_inner(
     cg: &TraceDecay,
+    retained_project_session_db: Option<Arc<GlobalDb>>,
+    allow_direct_session_open: bool,
     repair_memory_on_startup: bool,
     warm_token_counts: bool,
     automation_scheduler_reconciler: Option<AutomationSchedulerReconciler>,
     automation_writer: DashboardAutomationWriter,
 ) -> DashboardState {
     let (mem_conn, mem_db_path, mem_guard) = resolve_project_memory_store(cg).await;
-    let lcm = resolve_lcm_store(cg).await;
+    let lcm = resolve_lcm_store(cg, retained_project_session_db, allow_direct_session_open).await;
     let dashboard_root = cg.store_layout().dashboard_root.clone();
     let store_root = cg.store_layout().data_root.clone();
     let config_path = cg.store_layout().config_path.clone();
@@ -302,11 +311,10 @@ async fn build_state_inner(
         mem_conn,
         mem_db_path,
         lcm_conn: lcm.conn,
-        _global_database_guards: lcm.guard.into_iter().collect(),
         lcm_db: lcm.lcm_db,
-        authoritative_session_db: lcm.authoritative_session_db,
         lcm_db_path: lcm.path,
         lcm_scope: lcm.scope,
+        allow_direct_session_open,
         savings_db,
         savings_db_path,
         project_root: cg.project_root().to_path_buf(),
@@ -338,16 +346,28 @@ async fn build_state_inner(
 /// `tracedecay_dashboard` MCP tool.
 #[allow(dead_code)]
 pub(crate) async fn build_state(cg: &TraceDecay) -> DashboardState {
-    build_state_inner(cg, true, true, None, direct_dashboard_automation_writer()).await
+    build_state_inner(
+        cg,
+        None,
+        true,
+        true,
+        true,
+        None,
+        direct_dashboard_automation_writer(),
+    )
+    .await
 }
 
 pub(crate) async fn build_state_with_automation_reconciler(
     cg: &TraceDecay,
+    retained_project_session_db: Option<Arc<GlobalDb>>,
     automation_scheduler_reconciler: Option<AutomationSchedulerReconciler>,
     automation_writer: DashboardAutomationWriter,
 ) -> DashboardState {
     build_state_inner(
         cg,
+        retained_project_session_db,
+        false,
         true,
         true,
         automation_scheduler_reconciler,
@@ -365,6 +385,8 @@ pub(crate) async fn build_selected_project_state(
 ) -> DashboardState {
     build_state_inner(
         cg,
+        None,
+        active.allow_direct_session_open,
         false,
         false,
         None,
@@ -380,10 +402,32 @@ pub(crate) async fn build_selected_project_state(
 /// via hooks; the sweep shares their parse offsets so it only picks up
 /// transcripts the hooks never saw. Fail-open and incremental
 /// (`parse_offsets` makes repeats cheap no-ops).
-fn spawn_session_catch_up_ingest(db: Arc<GlobalDb>, project_root: PathBuf) {
+fn spawn_session_catch_up_ingest(
+    db: Arc<GlobalDb>,
+    registry_db: Option<Arc<GlobalDb>>,
+    project_root: PathBuf,
+) {
     tokio::spawn(async move {
-        let stats =
-            crate::sessions::ingest_global_sources_for_startup(db.as_ref(), &project_root).await;
+        let mut stats = crate::sessions::ingest_project_sources_for_provider(
+            db.as_ref(),
+            &project_root,
+            None,
+            true,
+        )
+        .await;
+        if let Some(registry_db) = registry_db
+            && let Ok(profile_root) = crate::storage::default_profile_root()
+            && let Some(user_db) = crate::sessions::open_user_session_db(&profile_root).await
+        {
+            stats = stats.merge(
+                crate::sessions::ingest_user_global_sources_for_startup_with_db(
+                    &user_db,
+                    registry_db.as_ref(),
+                    &profile_root,
+                )
+                .await,
+            );
+        }
         if stats.sessions_upserted > 0 || stats.messages_upserted > 0 {
             eprintln!(
                 "Session catch-up ingest: {} session(s), {} message(s) updated.",
@@ -484,6 +528,8 @@ where
 {
     let state = build_state_inner(
         cg,
+        None,
+        true,
         options.repair_memory_on_startup,
         options.warm_token_counts,
         None,
@@ -491,8 +537,12 @@ where
     )
     .await;
     if options.start_session_catch_up {
-        if let Some(db) = state.authoritative_session_db.as_ref() {
-            spawn_session_catch_up_ingest(Arc::clone(db), state.project_root.clone());
+        if let Some(db) = state.lcm_db.as_ref() {
+            spawn_session_catch_up_ingest(
+                Arc::clone(db),
+                state.savings_db.clone(),
+                state.project_root.clone(),
+            );
         } else {
             eprintln!(
                 "Session catch-up ingest skipped: authoritative project session storage is unavailable for {}.",
@@ -980,4 +1030,58 @@ async fn plugins_list() -> Json<Value> {
             })
             .collect::<Vec<_>>()
     ))
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod authority_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn retained_project_session_authority_is_reused_exactly() {
+        let _pin = crate::config::PinnedUserDataDir::new();
+        let project = tempfile::tempdir().expect("project tempdir");
+        std::fs::write(project.path().join("lib.rs"), "pub fn fixture() {}\n")
+            .expect("fixture source");
+        let cg = TraceDecay::init(project.path())
+            .await
+            .expect("project init");
+        let retained = Arc::new(
+            GlobalDb::open_at(&cg.store_layout().sessions_db_path)
+                .await
+                .expect("project session DB"),
+        );
+
+        let selected = resolve_lcm_store(&cg, Some(Arc::clone(&retained)), false).await;
+
+        assert!(Arc::ptr_eq(
+            selected.lcm_db.as_ref().expect("retained LCM authority"),
+            &retained,
+        ));
+        assert_eq!(selected.path, retained.db_path().display().to_string());
+        assert_ne!(selected.scope, "global");
+    }
+
+    #[tokio::test]
+    async fn daemon_dashboard_without_retained_authority_fails_closed() {
+        let _pin = crate::config::PinnedUserDataDir::new();
+        let project = tempfile::tempdir().expect("project tempdir");
+        std::fs::write(project.path().join("lib.rs"), "pub fn fixture() {}\n")
+            .expect("fixture source");
+        let cg = TraceDecay::init(project.path())
+            .await
+            .expect("project init");
+        let db_path = cg.store_layout().sessions_db_path.clone();
+        assert!(!db_path.exists());
+
+        let selected = resolve_lcm_store(&cg, None, false).await;
+
+        assert!(selected.conn.is_none());
+        assert!(selected.lcm_db.is_none());
+        assert_eq!(selected.scope, "unavailable");
+        assert!(
+            !db_path.exists(),
+            "fail-closed selection must not create a DB"
+        );
+    }
 }

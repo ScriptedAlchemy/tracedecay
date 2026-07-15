@@ -48,25 +48,3 @@ pub(crate) async fn count_by_provider_session(
     )
     .await
 }
-
-/// Runs `work` inside a `BEGIN IMMEDIATE` transaction, committing on success
-/// and rolling back on error.
-pub(crate) async fn with_immediate_tx<T>(
-    conn: &Connection,
-    work: impl std::future::Future<Output = Result<T, LcmError>>,
-) -> Result<T, LcmError> {
-    conn.execute("BEGIN IMMEDIATE", ()).await?;
-    match work.await {
-        Ok(value) => {
-            if let Err(err) = conn.execute("COMMIT", ()).await {
-                let _ = conn.execute("ROLLBACK", ()).await;
-                return Err(err.into());
-            }
-            Ok(value)
-        }
-        Err(err) => {
-            let _ = conn.execute("ROLLBACK", ()).await;
-            Err(err)
-        }
-    }
-}

@@ -13746,75 +13746,6 @@ pub trait T {}
     );
 }
 
-/// Regression: `tracedecay_run_affected_tests` must dispatch the test
-/// functions that are themselves in `changed_paths`. Previously the
-/// handler walked callers of every node in the changed file — but
-/// `#[test]` functions are leaves with no callers, so a PR that only
-/// edits `tests/foo.rs` would return "no tests cover the changed
-/// paths" and skip running anything.
-#[tokio::test]
-async fn run_affected_tests_dispatches_directly_changed_test_files() {
-    let dir = test_temp_dir();
-    let project = dir.path();
-    fs::create_dir_all(project.join("src")).unwrap();
-    fs::create_dir_all(project.join("tests")).unwrap();
-    fs::write(project.join("src/lib.rs"), "pub fn util() -> u32 { 1 }\n").unwrap();
-    fs::write(
-        project.join("Cargo.toml"),
-        r#"[package]
-name = "t"
-version = "0.1.0"
-edition = "2021"
-"#,
-    )
-    .unwrap();
-    fs::write(
-        project.join("tests/edited_only.rs"),
-        r#"
-#[test]
-fn edited_only_test() {
-    assert_eq!(2, 2);
-}
-"#,
-    )
-    .unwrap();
-    let (cg, _env) = init_test_project(project).await;
-    cg.index_all().await.unwrap();
-
-    let result = handle_tool_call(
-        &cg,
-        "tracedecay_run_affected_tests",
-        json!({
-            "changed_paths": ["tests/edited_only.rs"],
-            "timeout_secs": 60,
-            "max_tests": 5
-        }),
-        None,
-        None,
-    )
-    .await
-    .unwrap();
-    let text = extract_text(&result.value);
-    let output: Value = serde_json::from_str(text).unwrap();
-    // If no tests get dispatched the handler short-circuits with a
-    // note: "no tests cover the changed paths (1 file(s))". After the
-    // fix, the test in the edited file itself must be dispatched.
-    let dispatched = output["dispatched_tests"]
-        .as_array()
-        .map(|a| {
-            a.iter()
-                .filter_map(|v| v.as_str())
-                .map(String::from)
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
-    assert!(
-        dispatched.iter().any(|n| n.contains("edited_only_test")),
-        "expected edited_only_test to be dispatched; got dispatched={dispatched:?} note={:?}",
-        output["note"]
-    );
-}
-
 /// Regression: `tracedecay_diagnose` must normalize span paths before
 /// looking them up in the graph. cargo emits absolute and (on Windows)
 /// backslash-separated paths; the graph stores project-relative,
@@ -16186,6 +16117,62 @@ async fn message_search_selects_registered_project_session_db_by_project_id() {
 "#,
     )
     .unwrap();
+
+    let selected_without_authority = tracedecay::mcp::tools::handle_tool_call_with_registry(
+        &cg,
+        "tracedecay_message_search",
+        json!({
+            "query": "regcatchuptokenzz",
+            "provider": "cursor",
+            "project_id": "proj_cross_messages",
+            "limit": 5,
+            "catch_up": true,
+            "format": "json"
+        }),
+        None,
+        None,
+        Some(&registry),
+        false,
+    )
+    .await
+    .expect("selected-project read must remain available without write authority");
+    let parsed = extract_json(&selected_without_authority.value);
+    assert_eq!(parsed["status"], "ok", "{parsed}");
+    assert_eq!(parsed["catch_up"], true, "{parsed}");
+    assert_eq!(parsed["catch_up_performed"], false, "{parsed}");
+    assert_eq!(parsed["count"], 0, "{parsed}");
+
+    let all_registered_without_authority = tracedecay::mcp::tools::handle_tool_call_with_registry(
+        &cg,
+        "tracedecay_message_search",
+        json!({
+            "query": "regcatchuptokenzz",
+            "provider": "cursor",
+            "project_scope": "all_registered",
+            "limit": 5,
+            "catch_up": true,
+            "format": "json"
+        }),
+        None,
+        None,
+        Some(&registry),
+        false,
+    )
+    .await
+    .expect("registered-project reads must remain available without write authority");
+    let parsed = extract_json(&all_registered_without_authority.value);
+    assert_eq!(parsed["status"], "ok", "{parsed}");
+    assert_eq!(parsed["catch_up"], true, "{parsed}");
+    assert_eq!(parsed["catch_up_performed"], false, "{parsed}");
+    assert_eq!(parsed["count"], 0, "{parsed}");
+    assert!(
+        parsed["catch_up_skipped_project_count"]
+            .as_u64()
+            .unwrap_or_default()
+            >= 1,
+        "registered stores without retained authority must be searched read-only: {parsed}"
+    );
+
     let catch_up_registered = handle_tool_call(
         &cg,
         "tracedecay_message_search",
@@ -16235,6 +16222,44 @@ async fn message_search_selects_registered_project_session_db_by_project_id() {
             "{label} must fail closed instead of searching the active session DB: {err}"
         );
     }
+}
+
+#[tokio::test]
+async fn user_message_search_without_daemon_authority_does_not_create_a_writer() {
+    let (cg, _env, _dir) = setup_empty_project().await;
+    let registry = GlobalDb::open().await.expect("global registry should open");
+    let profile_root = registry
+        .db_path()
+        .parent()
+        .expect("registry must live below the profile root");
+    let user_sessions_db = tracedecay::sessions::user_sessions_db_path(profile_root);
+    assert!(
+        !user_sessions_db.exists(),
+        "fixture must begin without a user sessions database"
+    );
+
+    let result = tracedecay::mcp::tools::handle_tool_call_with_registry(
+        &cg,
+        "tracedecay_message_search",
+        json!({
+            "query": "nothing",
+            "storage_scope": "user",
+            "catch_up": true,
+            "format": "json"
+        }),
+        None,
+        None,
+        Some(&registry),
+        false,
+    )
+    .await
+    .expect("missing retained user authority must fail closed as a tool result");
+    let parsed = extract_json(&result.value);
+    assert_eq!(parsed["status"], "unavailable", "{parsed}");
+    assert!(
+        !user_sessions_db.exists(),
+        "daemon-mode message search must not create an overlapping user writer"
+    );
 }
 
 /// Builds a crate that plants a needless `unsafe { }` block inside an

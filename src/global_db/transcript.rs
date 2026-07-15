@@ -1,13 +1,13 @@
 use std::error::Error;
 
-use libsql::{Connection, params};
+use libsql::{Connection, Transaction, params};
 
 use super::{GlobalDb, ParseOffset, TranscriptBatch};
 use crate::sessions::{SessionMessageRecord, SessionRecord};
 
 #[derive(Debug, Clone, Copy)]
-enum TranscriptWriteMode {
-    Full,
+enum TranscriptWritePolicy {
+    Full { expected_offset: ParseOffset },
     ProjectionOnly,
 }
 
@@ -39,24 +39,6 @@ impl TranscriptPersistenceError {
     }
 }
 
-pub(super) async fn begin(conn: &Connection) -> Result<(), TranscriptPersistenceError> {
-    conn.execute("BEGIN IMMEDIATE", ())
-        .await
-        .map(|_| ())
-        .map_err(|error| TranscriptPersistenceError::storage("begin transcript batch", error))
-}
-
-pub(super) async fn commit(conn: &Connection) -> Result<(), TranscriptPersistenceError> {
-    conn.execute("COMMIT", ())
-        .await
-        .map(|_| ())
-        .map_err(|error| TranscriptPersistenceError::storage("commit transcript batch", error))
-}
-
-pub(super) async fn rollback(conn: &Connection) {
-    let _ = conn.execute("ROLLBACK", ()).await;
-}
-
 pub(super) async fn get_parse_offset(
     conn: &Connection,
     path: &str,
@@ -67,30 +49,27 @@ pub(super) async fn get_parse_offset(
             params![path],
         )
         .await;
-    let mut rows = match rows {
-        Ok(rows) => rows,
-        Err(_) => {
-            let mut legacy_rows = conn
-                .query(
-                    "SELECT byte_offset, mtime FROM parse_offsets WHERE file_path = ?1",
-                    params![path],
-                )
-                .await
-                .map_err(|error| {
-                    TranscriptPersistenceError::storage("read transcript parse offset", error)
-                })?;
-            let Some(row) = legacy_rows.next().await.map_err(|error| {
+    let Ok(mut rows) = rows else {
+        let mut legacy_rows = conn
+            .query(
+                "SELECT byte_offset, mtime FROM parse_offsets WHERE file_path = ?1",
+                params![path],
+            )
+            .await
+            .map_err(|error| {
                 TranscriptPersistenceError::storage("read transcript parse offset", error)
-            })?
-            else {
-                return Ok(None);
-            };
-            return Ok(Some(ParseOffset {
-                byte_offset: decode_u64(&row, 0, "decode transcript byte offset")?,
-                mtime: decode_u64(&row, 1, "decode transcript mtime")?,
-                file_id: 0,
-            }));
-        }
+            })?;
+        let Some(row) = legacy_rows.next().await.map_err(|error| {
+            TranscriptPersistenceError::storage("read transcript parse offset", error)
+        })?
+        else {
+            return Ok(None);
+        };
+        return Ok(Some(ParseOffset {
+            byte_offset: decode_u64(&row, 0, "decode transcript byte offset")?,
+            mtime: decode_u64(&row, 1, "decode transcript mtime")?,
+            file_id: 0,
+        }));
     };
     let Some(row) = rows.next().await.map_err(|error| {
         TranscriptPersistenceError::storage("read transcript parse offset", error)
@@ -153,6 +132,14 @@ pub(super) async fn set_parse_offset(
 }
 
 impl GlobalDb {
+    pub(super) async fn begin_transcript_transaction(
+        &self,
+    ) -> Result<Transaction, TranscriptPersistenceError> {
+        self.begin_authoritative_transaction()
+            .await
+            .map_err(|error| TranscriptPersistenceError::storage("begin transcript batch", error))
+    }
+
     /// Atomically upserts one transcript session + all parsed messages and then
     /// advances the parse cursor. Any failure rolls back the entire batch so a
     /// follow-up ingest can safely replay from the previous offset.
@@ -185,9 +172,12 @@ impl GlobalDb {
         expected_offset: ParseOffset,
         parse_offset: ParseOffset,
     ) -> Result<(), TranscriptPersistenceError> {
+        let batch = TranscriptBatch {
+            session: session.clone(),
+            messages: messages.to_vec(),
+        };
         self.persist_transcript_batch_with_git_evidence_result(
-            session,
-            messages,
+            &batch,
             &[],
             &[],
             parse_offset_path,
@@ -204,47 +194,33 @@ impl GlobalDb {
         parse_offset: ParseOffset,
     ) -> Result<(), TranscriptPersistenceError> {
         let _transaction = self.transaction.lock().await;
-        begin(&self.conn).await?;
-        let write_result = async {
-            require_expected_offset(&self.conn, parse_offset_path, expected_offset).await?;
-            set_parse_offset(&self.conn, parse_offset_path, parse_offset).await
-        }
-        .await;
-        if let Err(error) = write_result {
-            rollback(&self.conn).await;
-            return Err(error);
-        }
-        if let Err(error) = commit(&self.conn).await {
-            rollback(&self.conn).await;
-            return Err(error);
-        }
-        Ok(())
+        let transaction = self.begin_transcript_transaction().await?;
+        require_expected_offset(&transaction, parse_offset_path, expected_offset).await?;
+        set_parse_offset(&transaction, parse_offset_path, parse_offset).await?;
+        transaction
+            .commit()
+            .await
+            .map_err(|error| TranscriptPersistenceError::storage("commit transcript batch", error))
     }
 
     /// Atomically persists transcript rows, direct commit evidence, and the
     /// parse cursor so a failed attribution write is replayed on the next sync.
     pub(crate) async fn persist_transcript_batch_with_git_evidence_result(
         &self,
-        session: &SessionRecord,
-        messages: &[SessionMessageRecord],
+        batch: &TranscriptBatch,
         commit_records: &[crate::sessions::git_correlation::CommitSessionRecord],
         span_observations: &[crate::sessions::git_correlation::SpanObservation],
         parse_offset_path: &str,
         expected_offset: ParseOffset,
         parse_offset: ParseOffset,
     ) -> Result<(), TranscriptPersistenceError> {
-        let batch = TranscriptBatch {
-            session: session.clone(),
-            messages: messages.to_vec(),
-        };
         self.upsert_transcript_batches_inner(
-            std::slice::from_ref(&batch),
+            std::slice::from_ref(batch),
             commit_records,
             span_observations,
             parse_offset_path,
-            Some(expected_offset),
             parse_offset,
-            TranscriptWriteMode::Full,
+            TranscriptWritePolicy::Full { expected_offset },
         )
         .await
     }
@@ -263,9 +239,8 @@ impl GlobalDb {
             &[],
             &[],
             parse_offset_path,
-            None,
             parse_offset,
-            TranscriptWriteMode::ProjectionOnly,
+            TranscriptWritePolicy::ProjectionOnly,
         )
         .await
         .is_ok()
@@ -277,45 +252,47 @@ impl GlobalDb {
         commit_records: &[crate::sessions::git_correlation::CommitSessionRecord],
         span_observations: &[crate::sessions::git_correlation::SpanObservation],
         parse_offset_path: &str,
-        expected_offset: Option<ParseOffset>,
         parse_offset: ParseOffset,
-        mode: TranscriptWriteMode,
+        policy: TranscriptWritePolicy,
     ) -> Result<(), TranscriptPersistenceError> {
         let _transaction = self.transaction.lock().await;
-        begin(&self.conn).await?;
+        let transaction = self.begin_transcript_transaction().await?;
         let mut payload_rollback =
-            crate::sessions::lcm::payload::PayloadFileRollback::begin(&self.storage_root);
+            crate::sessions::lcm::payload::PayloadFileRollback::begin_cancellation_safe(
+                &self.storage_root,
+            );
 
-        let write_result = async {
-            if let Some(expected_offset) = expected_offset {
-                require_expected_offset(&self.conn, parse_offset_path, expected_offset).await?;
+        let write_result: Result<(), TranscriptPersistenceError> = async {
+            if let TranscriptWritePolicy::Full { expected_offset } = policy {
+                require_expected_offset(&transaction, parse_offset_path, expected_offset).await?;
             }
             for batch in batches {
-                if !self.upsert_session(&batch.session).await {
+                if !Self::upsert_session_in_existing_tx(&transaction, &batch.session).await {
                     return Err(TranscriptPersistenceError::message(
                         "upsert transcript session",
                         "database write failed",
                     ));
                 }
                 for message in &batch.messages {
-                    match mode {
-                        TranscriptWriteMode::Full => {
+                    match policy {
+                        TranscriptWritePolicy::Full { .. } => {
                             self.upsert_session_message_in_existing_tx(
+                                &transaction,
                                 message,
                                 &mut payload_rollback,
                             )
                             .await?;
                         }
-                        TranscriptWriteMode::ProjectionOnly => {
+                        TranscriptWritePolicy::ProjectionOnly => {
                             let text =
                                 crate::sessions::lcm::raw::derived_text_for_index(&message.text);
-                            if !self
-                                .upsert_session_message_projection(
-                                    message,
-                                    &text,
-                                    message.metadata_json.as_deref(),
-                                )
-                                .await
+                            if !Self::upsert_session_message_projection(
+                                &transaction,
+                                message,
+                                &text,
+                                message.metadata_json.as_deref(),
+                            )
+                            .await
                             {
                                 return Err(TranscriptPersistenceError::message(
                                     "upsert session message projection",
@@ -327,7 +304,7 @@ impl GlobalDb {
                 }
             }
             for record in commit_records {
-                crate::sessions::git_correlation::upsert_commit_session(&self.conn, record)
+                crate::sessions::git_correlation::upsert_commit_session(&transaction, record)
                     .await
                     .map_err(|error| {
                         TranscriptPersistenceError::storage("upsert commit evidence", error)
@@ -335,7 +312,7 @@ impl GlobalDb {
             }
             for observation in span_observations {
                 crate::sessions::git_correlation::record_span_observation_in_transaction(
-                    &self.conn,
+                    &transaction,
                     observation,
                     crate::sessions::git_correlation::DEFAULT_SPAN_MERGE_GAP_SECS,
                 )
@@ -344,32 +321,28 @@ impl GlobalDb {
                     TranscriptPersistenceError::storage("upsert span evidence", error)
                 })?;
             }
-            if expected_offset.is_some() {
-                set_parse_offset(&self.conn, parse_offset_path, parse_offset).await?;
+            if matches!(policy, TranscriptWritePolicy::Full { .. }) {
+                set_parse_offset(&transaction, parse_offset_path, parse_offset).await?;
             } else {
-                self.set_parse_offset_monotonic_in_existing_tx(parse_offset_path, parse_offset)
-                    .await
-                    .map_err(|message| {
-                        TranscriptPersistenceError::message(
-                            "advance projection parse offset",
-                            message,
-                        )
-                    })?;
+                Self::set_parse_offset_monotonic_in_existing_tx(
+                    &transaction,
+                    parse_offset_path,
+                    parse_offset,
+                )
+                .await
+                .map_err(|message| {
+                    TranscriptPersistenceError::message("advance projection parse offset", message)
+                })?;
             }
             Ok(())
         }
         .await;
 
-        if let Err(error) = write_result {
-            rollback(&self.conn).await;
-            let _ = payload_rollback.rollback(&self.conn).await;
-            return Err(error);
-        }
-        if let Err(error) = commit(&self.conn).await {
-            rollback(&self.conn).await;
-            let _ = payload_rollback.rollback(&self.conn).await;
-            return Err(error);
-        }
+        write_result?;
+        transaction.commit().await.map_err(|error| {
+            TranscriptPersistenceError::storage("commit transcript batch", error)
+        })?;
+        payload_rollback.disarm();
         Ok(())
     }
 
@@ -389,7 +362,7 @@ impl GlobalDb {
     /// Saves the parse cursor for a transcript path. Best-effort.
     pub async fn set_parse_offset(&self, path: &str, offset: ParseOffset) {
         let _transaction = self.transaction.lock().await;
-        let _ = self.set_parse_offset_in_existing_tx(path, offset).await;
+        let _ = Self::set_parse_offset_in_existing_tx(&self.conn, path, offset).await;
     }
 
     /// Advances a transcript cursor without allowing an older sweep to move it backwards.
@@ -403,18 +376,16 @@ impl GlobalDb {
         offset: ParseOffset,
     ) -> Result<(), String> {
         let _transaction = self.transaction.lock().await;
-        self.set_parse_offset_monotonic_in_existing_tx(path, offset)
-            .await
+        Self::set_parse_offset_monotonic_in_existing_tx(&self.conn, path, offset).await
     }
 
     async fn set_parse_offset_monotonic_in_existing_tx(
-        &self,
+        conn: &Connection,
         path: &str,
         offset: ParseOffset,
     ) -> Result<(), String> {
-        self.conn
-            .execute(
-                "INSERT INTO parse_offsets (file_path, byte_offset, mtime, file_id)
+        conn.execute(
+            "INSERT INTO parse_offsets (file_path, byte_offset, mtime, file_id)
                  VALUES (?1, ?2, ?3, ?4)
                  ON CONFLICT(file_path) DO UPDATE SET
                     byte_offset = excluded.byte_offset,
@@ -424,21 +395,24 @@ impl GlobalDb {
                     OR excluded.mtime > parse_offsets.mtime
                     OR (excluded.mtime = parse_offsets.mtime
                         AND excluded.byte_offset >= parse_offsets.byte_offset)",
-                params![
-                    path,
-                    offset.byte_offset as i64,
-                    offset.mtime as i64,
-                    offset.file_id as i64
-                ],
-            )
-            .await
-            .map(|_| ())
-            .map_err(|error| format!("failed to advance transcript parse offset: {error}"))
+            params![
+                path,
+                offset.byte_offset as i64,
+                offset.mtime as i64,
+                offset.file_id as i64
+            ],
+        )
+        .await
+        .map(|_| ())
+        .map_err(|error| format!("failed to advance transcript parse offset: {error}"))
     }
 
-    async fn set_parse_offset_in_existing_tx(&self, path: &str, offset: ParseOffset) -> bool {
-        if self
-            .conn
+    async fn set_parse_offset_in_existing_tx(
+        conn: &Connection,
+        path: &str,
+        offset: ParseOffset,
+    ) -> bool {
+        if conn
             .execute(
                 "INSERT INTO parse_offsets (file_path, byte_offset, mtime, file_id)
                  VALUES (?1, ?2, ?3, ?4)
@@ -458,16 +432,15 @@ impl GlobalDb {
         {
             return true;
         }
-        self.conn
-            .execute(
-                "INSERT INTO parse_offsets (file_path, byte_offset, mtime)
+        conn.execute(
+            "INSERT INTO parse_offsets (file_path, byte_offset, mtime)
                  VALUES (?1, ?2, ?3)
                  ON CONFLICT(file_path) DO UPDATE SET
                     byte_offset = ?2,
                     mtime = ?3",
-                params![path, offset.byte_offset as i64, offset.mtime as i64],
-            )
-            .await
-            .is_ok()
+            params![path, offset.byte_offset as i64, offset.mtime as i64],
+        )
+        .await
+        .is_ok()
     }
 }

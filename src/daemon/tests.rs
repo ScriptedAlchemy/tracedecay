@@ -49,6 +49,10 @@ async fn portable_broker_requests_reuse_one_authenticated_project_owner() {
             .await
             .expect("initialize project"),
     );
+    let mut config = crate::config::load_config(&project).expect("load project config");
+    config.sync.session_start_sync = false;
+    crate::config::save_config(&project, &config)
+        .expect("disable unrelated startup transcript ingestion");
     let _database_scope =
         crate::db::enter_daemon_database_scope(&profile_root, 1, "portable-owner-cache-test")
             .expect("daemon database scope");
@@ -2478,6 +2482,10 @@ async fn daemon_linked_worktree_route_repairs_primary_identity_and_keeps_alias()
         .clone()
         .expect("profile project id");
     drop(primary_cg);
+    let mut config = crate::config::load_config(&linked).expect("load project config");
+    config.sync.session_start_sync = false;
+    crate::config::save_config(&linked, &config)
+        .expect("disable unrelated startup transcript ingestion");
 
     let registry = crate::global_db::GlobalDb::open_at(&client_identity.global_db_path)
         .await

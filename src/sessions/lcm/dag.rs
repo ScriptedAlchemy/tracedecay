@@ -7,13 +7,6 @@ use super::{
     LcmSummaryNode, LcmSummaryNodeDraft, raw, util,
 };
 
-pub(crate) async fn insert_summary_node(
-    conn: &Connection,
-    draft: LcmSummaryNodeDraft,
-) -> Result<LcmSummaryNode, LcmError> {
-    util::with_immediate_tx(conn, insert_summary_node_in_transaction(conn, draft)).await
-}
-
 pub(crate) async fn insert_summary_node_in_transaction(
     conn: &Connection,
     draft: LcmSummaryNodeDraft,

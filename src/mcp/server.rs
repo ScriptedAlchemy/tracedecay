@@ -901,6 +901,9 @@ pub struct McpServer {
     /// Authoritative project session store retained for startup recovery.
     /// Recovery borrows this handle and never discovers or opens another DB.
     session_db: Option<Arc<GlobalDb>>,
+    /// Daemon-owned user-scope session store. All project servers borrow this
+    /// shared authority instead of reopening `user-sessions.db` per tool call.
+    user_session_db: Option<Arc<GlobalDb>>,
     /// Registry used for project-selector reads. This remains available even
     /// when global accounting is disabled so daemon clients do not fall back
     /// to the daemon process profile for selector resolution.
@@ -982,8 +985,8 @@ pub struct McpServer {
     /// hot path never re-reads the config file per `tools/call`.
     sync_config: crate::config::SyncConfig,
     /// Flipped to `true` when the detached transcript-ingest task spawned
-    /// inside [`Self::run_startup_catch_up_sync`] completes (success or
-    /// timeout). Stored as `Arc<AtomicBool>` so the spawned task can hold a
+    /// inside [`Self::run_startup_catch_up_sync`] completes. Stored as
+    /// `Arc<AtomicBool>` so the spawned task can hold a
     /// cheap clone and signal completion without a raw-pointer round-trip.
     transcript_ingest_done: Arc<AtomicBool>,
     /// Savings-ledger recorder tasks spawned so far / finished so far, plus
@@ -1025,6 +1028,46 @@ pub struct McpServer {
     /// be grouped. It is deliberately kept out of the `session_id` column so it
     /// never masquerades as a real session.
     mcp_instance_id: String,
+}
+
+/// Runs the project and user transcript portions of startup recovery against
+/// daemon-retained authorities. Project recovery is independent: a missing
+/// user or registry authority skips only the user sweep.
+async fn run_startup_session_catch_up(
+    session_db: Option<Arc<GlobalDb>>,
+    user_session_db: Option<Arc<GlobalDb>>,
+    registry_db: Option<Arc<GlobalDb>>,
+    project_root: &Path,
+) -> Option<Arc<GlobalDb>> {
+    let Some(db) = session_db else {
+        eprintln!(
+            "[tracedecay] startup project transcript ingest skipped: authoritative project session storage is unavailable for {}",
+            project_root.display()
+        );
+        return None;
+    };
+    let _ =
+        crate::sessions::ingest_project_sources_for_provider(db.as_ref(), project_root, None, true)
+            .await;
+    if let (Some(user_db), Some(registry_db)) = (user_session_db, registry_db) {
+        if let Some(profile_root) = user_db.db_path().parent() {
+            let _ = crate::sessions::ingest_user_global_sources_for_startup_with_db(
+                user_db.as_ref(),
+                registry_db.as_ref(),
+                profile_root,
+            )
+            .await;
+        } else {
+            eprintln!(
+                "[tracedecay] startup user transcript ingest skipped: authoritative user session storage has no profile root"
+            );
+        }
+    } else {
+        eprintln!(
+            "[tracedecay] startup user transcript ingest skipped: authoritative user session or registry storage is unavailable"
+        );
+    }
+    Some(db)
 }
 
 impl McpServer {
@@ -1104,11 +1147,33 @@ impl McpServer {
         automation_scheduler_reconciler: Option<crate::dashboard::AutomationSchedulerReconciler>,
         database_owner_reconciler: Option<DatabaseOwnerReconciler>,
     ) -> Arc<Self> {
+        let profile_root = registry_db
+            .as_ref()
+            .and_then(|db| db.db_path().parent().map(Path::to_path_buf))
+            .or_else(|| {
+                if allow_default_registry_fallback {
+                    crate::storage::default_profile_root().ok()
+                } else {
+                    None
+                }
+            });
+        let user_session_db = if let Some(profile_root) = profile_root {
+            GlobalDb::open_at(&crate::sessions::user_sessions_db_path(&profile_root))
+                .await
+                .map(Arc::new)
+        } else {
+            None
+        };
+        let session_db = GlobalDb::open_at(&cg.store_layout().sessions_db_path)
+            .await
+            .map(Arc::new);
         Self::new_with_dbs_and_reconcilers_and_writers(
             cg,
             scope_prefix,
             global_db,
             registry_db,
+            session_db,
+            user_session_db,
             allow_default_registry_fallback,
             automation_scheduler_reconciler,
             database_owner_reconciler,
@@ -1125,6 +1190,8 @@ impl McpServer {
         scope_prefix: Option<String>,
         global_db: Option<Arc<GlobalDb>>,
         registry_db: Option<Arc<GlobalDb>>,
+        session_db: Option<Arc<GlobalDb>>,
+        user_session_db: Option<Arc<GlobalDb>>,
         allow_default_registry_fallback: bool,
         automation_scheduler_reconciler: Option<crate::dashboard::AutomationSchedulerReconciler>,
         database_owner_reconciler: Option<DatabaseOwnerReconciler>,
@@ -1132,9 +1199,6 @@ impl McpServer {
         hook_branch_writer: HookBranchWriter,
         background_refresh_writer: BackgroundRefreshWriter,
     ) -> Arc<Self> {
-        let session_db = GlobalDb::open_at(&cg.store_layout().sessions_db_path)
-            .await
-            .map(Arc::new);
         let file_token_map = cg.get_file_token_map().await.unwrap_or_default();
         let persisted = cg.get_tokens_saved().await.unwrap_or(0);
         let response_handle_project_root = cg.project_root().to_path_buf();
@@ -1186,6 +1250,7 @@ impl McpServer {
             global_db,
             session_db,
             registry_db,
+            user_session_db,
             allow_default_registry_fallback,
             automation_scheduler_reconciler,
             database_owner_reconciler,
@@ -1590,70 +1655,67 @@ impl McpServer {
         // Best-effort transcript ingestion sweep for hookless agents (Claude,
         // Codex, Gemini). Cursor ingests via its own end-of-turn hook; these
         // agents register no hook, so their transcripts are reconciled here.
-        // Detached + timeout-guarded so it never delays MCP readiness.
+        // Detached so it never delays MCP readiness. Do not wrap the database
+        // work in a timeout: cancelling it after BEGIN could leave the shared
+        // connection inside an open transaction. Callers that need a bounded
+        // readiness wait use `wait_for_startup_catch_up` instead.
         // `transcript_ingest_done` is flipped inside the spawn (via an Arc
         // clone) so tests that assert on LCM store content can wait for both
         // flags via `wait_for_startup_catch_up`.
         {
             let project_root = cg.project_root().to_path_buf();
             let session_db = self.session_db.clone();
+            let user_session_db = self.user_session_db.clone();
+            let registry_db = self.registry_db.clone();
             let ingest_done_flag = Arc::clone(&self.transcript_ingest_done);
             let analytics_db = self.global_db.clone();
             tokio::spawn(async move {
-                let _ = tokio::time::timeout(std::time::Duration::from_secs(20), async move {
-                    if let Some(db) = session_db {
-                        let _ = crate::sessions::ingest_global_sources_for_startup(
-                            db.as_ref(),
-                            &project_root,
+                if let Some(db) = run_startup_session_catch_up(
+                    session_db,
+                    user_session_db,
+                    registry_db,
+                    &project_root,
+                )
+                .await
+                {
+                    // Historical git-span correlation is only ever written by
+                    // live hook events (which never fire for stdio/daemonless
+                    // deployments) or a manual CLI backfill. Neither runs for
+                    // most projects, leaving `session_git_spans` empty so
+                    // `sessions_for` silently returns nothing. Drain that
+                    // history here — one bounded, watermarked pass per startup
+                    // — so correlation self-heals without a manual invocation.
+                    let git = crate::sessions::git_correlation::SystemGit;
+                    let _ = db
+                        .git_run_incremental_backfill(
+                            &git,
+                            crate::sessions::git_correlation::DEFAULT_AUTO_BACKFILL_SESSIONS_PER_PASS,
                         )
                         .await;
-                        // Historical git-span correlation is only ever written by
-                        // live hook events (which never fire for stdio/daemonless
-                        // deployments) or a manual CLI backfill. Neither runs for
-                        // most projects, leaving `session_git_spans` empty so
-                        // `sessions_for` silently returns nothing. Drain that
-                        // history here — one bounded, watermarked pass per startup
-                        // — so correlation self-heals without a manual invocation.
-                        let git = crate::sessions::git_correlation::SystemGit;
-                        let _ = db
-                            .git_run_incremental_backfill(
-                                &git,
-                                crate::sessions::git_correlation::DEFAULT_AUTO_BACKFILL_SESSIONS_PER_PASS,
-                            )
-                            .await;
-                        // With transcripts freshly ingested into `db`'s
-                        // session_messages, close the hint-efficacy loop: import
-                        // any new hook telemetry into the durable analytics store
-                        // and correlate emitted hints against the tool activity
-                        // that followed them. Best-effort and idempotent (own
-                        // parse cursors + hint_outcome watermark), so it never
-                        // blocks readiness and re-runs safely each startup.
-                        if let Some(analytics_db) = analytics_db.as_deref() {
-                            let sources =
-                                crate::analytics_bridge::hook_import_sources(Some(&project_root));
-                            let _ = crate::analytics_bridge::import_hook_analytics(
-                                analytics_db,
-                                &sources,
-                            )
-                            .await;
-                            let project_id = GlobalDb::canonical_project_key(&project_root);
-                            let now = crate::tracedecay::current_timestamp();
-                            let _ = crate::hooks::hint_outcomes::correlate_hint_outcomes(
-                                analytics_db,
-                                db.as_ref(),
-                                &project_id,
-                                now,
-                            )
-                            .await;
-                        }
-                    } else {
-                        eprintln!(
-                            "[tracedecay] startup transcript ingest skipped: authoritative project session storage is unavailable for {}",
-                            project_root.display()
-                        );
+                    // With transcripts freshly ingested into `db`'s
+                    // session_messages, close the hint-efficacy loop: import
+                    // any new hook telemetry into the durable analytics store
+                    // and correlate emitted hints against the tool activity
+                    // that followed them. Best-effort and idempotent (own
+                    // parse cursors + hint_outcome watermark), so it never
+                    // blocks readiness and re-runs safely each startup.
+                    if let Some(analytics_db) = analytics_db.as_deref() {
+                        let sources =
+                            crate::analytics_bridge::hook_import_sources(Some(&project_root));
+                        let _ =
+                            crate::analytics_bridge::import_hook_analytics(analytics_db, &sources)
+                                .await;
+                        let project_id = GlobalDb::canonical_project_key(&project_root);
+                        let now = crate::tracedecay::current_timestamp();
+                        let _ = crate::hooks::hint_outcomes::correlate_hint_outcomes(
+                            analytics_db,
+                            db.as_ref(),
+                            &project_id,
+                            now,
+                        )
+                        .await;
                     }
-                })
-                .await;
+                }
                 ingest_done_flag.store(true, Ordering::Release);
             });
         }
@@ -1670,8 +1732,7 @@ impl McpServer {
     }
 
     /// Returns `true` once the detached transcript-ingest task spawned by
-    /// [`Self::run_startup_catch_up_sync`] has completed (success, error,
-    /// or 20 s timeout).
+    /// [`Self::run_startup_catch_up_sync`] has completed (success or error).
     pub fn transcript_ingest_done(&self) -> bool {
         self.transcript_ingest_done.load(Ordering::Acquire)
     }
@@ -2937,6 +2998,10 @@ impl McpServer {
                 automation_writer: self.dashboard_automation_writer.clone(),
                 diagnostics_cache: Some(&self.diagnostics_cache),
                 diagnostics_lsp: Some(&self.diagnostics_lsp),
+                session_authorities: crate::mcp::tools::SessionAuthorities::new(
+                    self.session_db.as_ref(),
+                    self.user_session_db.as_ref(),
+                ),
             },
         )
         .await;
@@ -3334,6 +3399,15 @@ impl McpServer {
             return;
         };
         let project_root = PathBuf::from(project_root);
+        let active_project_root = self.cg_snapshot().await.project_root().to_path_buf();
+        if GlobalDb::canonical_project_key(&project_root)
+            != GlobalDb::canonical_project_key(&active_project_root)
+        {
+            return;
+        }
+        let Some(db) = self.session_db.clone() else {
+            return;
+        };
 
         // Worktree preference: the routed worktree, else the cwd's git
         // worktree root, else the resolved project root. Never fabricated.
@@ -3381,12 +3455,6 @@ impl McpServer {
             source: SpanSource::HookRoute,
         };
         self.spawn_observed_ledger_write(async move {
-            let Ok(db_path) = crate::storage::resolve_project_session_db_path(&project_root) else {
-                return;
-            };
-            let Some(db) = GlobalDb::open_at(&db_path).await else {
-                return;
-            };
             if let Err(e) = db
                 .git_record_span_observation(&observation, DEFAULT_SPAN_MERGE_GAP_SECS)
                 .await

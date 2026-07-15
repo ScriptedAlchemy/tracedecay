@@ -82,6 +82,8 @@ async fn read_refresh_uses_injected_writer_without_direct_fallback() {
         None,
         None,
         None,
+        None,
+        None,
         true,
         None,
         None,

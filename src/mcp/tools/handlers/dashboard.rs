@@ -6,8 +6,10 @@
 //! action to shut down a previously-started instance.
 
 use serde_json::{Value, json};
+use std::sync::Arc;
 
 use crate::errors::{Result, TraceDecayError};
+use crate::global_db::GlobalDb;
 use crate::tracedecay::TraceDecay;
 
 use super::super::ToolResult;
@@ -62,6 +64,7 @@ fn dashboard_tool_result(cg: &TraceDecay, args: &Value, payload: &Value) -> Tool
 pub(super) async fn handle_dashboard(
     cg: &TraceDecay,
     args: Value,
+    retained_project_session_db: Option<&Arc<GlobalDb>>,
     automation_scheduler_reconciler: Option<AutomationSchedulerReconciler>,
     automation_writer: DashboardAutomationWriter,
 ) -> Result<ToolResult> {
@@ -116,6 +119,7 @@ pub(super) async fn handle_dashboard(
             // MCP server already swept hookless transcripts at startup.
             let state = build_state_with_automation_reconciler(
                 cg,
+                retained_project_session_db.cloned(),
                 automation_scheduler_reconciler,
                 automation_writer,
             )

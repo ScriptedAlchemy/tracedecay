@@ -2,12 +2,13 @@ use std::fs;
 use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
 
-use libsql::{Connection, params};
+use libsql::{Connection, TransactionBehavior, params};
 
+use crate::global_db::GlobalDb;
 use crate::sessions::SessionMessageRecord;
 use crate::tracedecay::current_timestamp;
 
-use super::{LcmError, LcmPayloadExpansion, LcmPayloadRef, gc, raw, util};
+use super::{LcmError, LcmPayloadExpansion, LcmPayloadRef, gc, util};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DeleteOpts {
@@ -47,56 +48,22 @@ struct PayloadFileIdentity {
 const O_NOFOLLOW: i32 = 0o40_0000;
 
 pub struct LcmStore<'db> {
-    conn: &'db Connection,
+    db: &'db GlobalDb,
     storage_root: PathBuf,
-    transaction: &'db tokio::sync::Mutex<()>,
 }
 
 mod rollback;
 pub(crate) use rollback::PayloadFileRollback;
 
 impl<'db> LcmStore<'db> {
-    pub(crate) fn new(
-        conn: &'db Connection,
-        storage_root: PathBuf,
-        transaction: &'db tokio::sync::Mutex<()>,
-    ) -> Self {
-        Self {
-            conn,
-            storage_root,
-            transaction,
-        }
+    pub(crate) fn new(db: &'db GlobalDb, storage_root: PathBuf) -> Self {
+        Self { db, storage_root }
     }
 
     pub async fn ingest_raw_message(&self, message: &SessionMessageRecord) -> Result<(), LcmError> {
-        let _transaction = self.transaction.lock().await;
-        self.conn.execute("BEGIN IMMEDIATE", ()).await?;
-        let mut payload_rollback = PayloadFileRollback::begin(&self.storage_root);
-        let result = raw::upsert_raw_message_with_payload_tracked(
-            self.conn,
-            &self.storage_root,
-            message,
-            &mut payload_rollback,
-        )
-        .await;
-        match result {
-            Ok(_) => match self.conn.execute("COMMIT", ()).await {
-                Ok(_) => Ok(()),
-                Err(error) => {
-                    self.rollback_ingest(payload_rollback).await;
-                    Err(error.into())
-                }
-            },
-            Err(error) => {
-                self.rollback_ingest(payload_rollback).await;
-                Err(error)
-            }
-        }
-    }
-
-    async fn rollback_ingest(&self, payload_rollback: PayloadFileRollback) {
-        let _ = self.conn.execute("ROLLBACK", ()).await;
-        let _ = payload_rollback.rollback(self.conn).await;
+        self.db
+            .ingest_lcm_raw_message(&self.storage_root, message)
+            .await
     }
 
     pub async fn lcm_expand_payload(
@@ -108,7 +75,7 @@ impl<'db> LcmStore<'db> {
         limit: usize,
     ) -> Result<LcmPayloadExpansion, LcmError> {
         expand_payload(
-            self.conn,
+            self.db.conn(),
             &self.storage_root,
             provider,
             session_id,
@@ -122,19 +89,6 @@ impl<'db> LcmStore<'db> {
 
 pub fn payload_dir(storage_root: &Path) -> PathBuf {
     storage_root.join("lcm-payloads")
-}
-
-pub(super) async fn payload_metadata_exists(
-    conn: &Connection,
-    payload_ref: &str,
-) -> Result<bool, LcmError> {
-    let mut rows = conn
-        .query(
-            "SELECT 1 FROM lcm_external_payloads WHERE payload_ref = ?1 LIMIT 1",
-            params![payload_ref],
-        )
-        .await?;
-    Ok(rows.next().await?.is_some())
 }
 
 pub fn validate_payload_ref(payload_ref: &str) -> Result<&str, LcmError> {
@@ -198,25 +152,21 @@ fn is_external_payload_placeholder(value: &str) -> bool {
     .any(|prefix| lower.starts_with(prefix))
 }
 
+pub(crate) struct ExternalPayloadWrite<'a> {
+    pub provider: &'a str,
+    pub session_id: &'a str,
+    pub message_id: &'a str,
+    pub kind: &'a str,
+    pub content: &'a str,
+    pub metadata_json: Option<String>,
+}
+
 pub(crate) fn write_external_payload_tracked(
     storage_root: &Path,
-    provider: &str,
-    session_id: &str,
-    message_id: &str,
-    kind: &str,
-    content: &str,
-    metadata_json: Option<String>,
+    write: ExternalPayloadWrite<'_>,
     rollback: &mut PayloadFileRollback,
 ) -> Result<LcmPayloadRef, LcmError> {
-    let (payload, created) = write_external_payload_inner(
-        storage_root,
-        provider,
-        session_id,
-        message_id,
-        kind,
-        content,
-        metadata_json,
-    )?;
+    let (payload, created) = write_external_payload_inner(storage_root, write)?;
     if created {
         rollback.record_created(&payload.payload_ref);
     }
@@ -233,28 +183,32 @@ pub(crate) fn write_external_payload(
     content: &str,
     metadata_json: Option<String>,
 ) -> Result<LcmPayloadRef, LcmError> {
-    let mut ignored = PayloadFileRollback::begin(storage_root);
-    write_external_payload_tracked(
+    write_external_payload_inner(
         storage_root,
+        ExternalPayloadWrite {
+            provider,
+            session_id,
+            message_id,
+            kind,
+            content,
+            metadata_json,
+        },
+    )
+    .map(|(payload, _)| payload)
+}
+
+fn write_external_payload_inner(
+    storage_root: &Path,
+    write: ExternalPayloadWrite<'_>,
+) -> Result<(LcmPayloadRef, bool), LcmError> {
+    let ExternalPayloadWrite {
         provider,
         session_id,
         message_id,
         kind,
         content,
         metadata_json,
-        &mut ignored,
-    )
-}
-
-fn write_external_payload_inner(
-    storage_root: &Path,
-    provider: &str,
-    session_id: &str,
-    message_id: &str,
-    kind: &str,
-    content: &str,
-    metadata_json: Option<String>,
-) -> Result<(LcmPayloadRef, bool), LcmError> {
+    } = write;
     let content_hash = util::sha256_hex(content.as_bytes());
     let owner_hash = util::sha256_hex(
         format!("{provider}\0{session_id}\0{message_id}\0{content_hash}").as_bytes(),
@@ -420,6 +374,22 @@ pub async fn delete_external_payload(
     payload_ref: &str,
     opts: &DeleteOpts,
 ) -> Result<DeleteOutcome, LcmError> {
+    let transaction = conn
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .await?;
+    let outcome =
+        delete_external_payload_in_transaction(&transaction, storage_root, payload_ref, opts)
+            .await?;
+    transaction.commit().await?;
+    Ok(outcome)
+}
+
+pub(crate) async fn delete_external_payload_in_transaction(
+    conn: &Connection,
+    storage_root: &Path,
+    payload_ref: &str,
+    opts: &DeleteOpts,
+) -> Result<DeleteOutcome, LcmError> {
     validate_payload_ref(payload_ref)?;
     // The DB-side cleanup below must still run for a store whose payload
     // directory is gone — the file simply counts as already removed.
@@ -459,41 +429,29 @@ pub async fn delete_external_payload(
     let expected_bytes = metadata.as_ref().map_or(0, |payload| payload.byte_count);
     let mut placeholders_rewritten = 0usize;
 
-    conn.execute("BEGIN IMMEDIATE", ()).await?;
-    let tx_result: Result<(), LcmError> = async {
-        let tombstone_missing_payload =
-            opts.rewrite_placeholders && !opts.remove_file && !opts.verify_hash;
-        if let Some(metadata) = metadata.as_ref() {
-            if gc::referenced_payload_refs(conn, &metadata.provider, None)
-                .await?
-                .contains(payload_ref)
-                && !tombstone_missing_payload
-            {
-                return Err(LcmError::StillReferenced);
-            }
+    let tombstone_missing_payload =
+        opts.rewrite_placeholders && !opts.remove_file && !opts.verify_hash;
+    if let Some(metadata) = metadata.as_ref() {
+        if gc::referenced_payload_refs(conn, &metadata.provider, None)
+            .await?
+            .contains(payload_ref)
+            && !tombstone_missing_payload
+        {
+            return Err(LcmError::StillReferenced);
         }
-        conn.execute(
-            "DELETE FROM lcm_external_payloads WHERE payload_ref = ?1",
-            params![payload_ref],
-        )
-        .await?;
-        conn.execute(
-            "DELETE FROM lcm_gc_marks WHERE payload_ref = ?1",
-            params![payload_ref],
-        )
-        .await?;
-        if opts.rewrite_placeholders {
-            placeholders_rewritten = tombstone_residual_placeholders(conn, payload_ref).await?;
-        }
-        Ok(())
     }
-    .await;
-    match tx_result {
-        Ok(()) => conn.execute("COMMIT", ()).await.map(|_| ())?,
-        Err(err) => {
-            let _ = conn.execute("ROLLBACK", ()).await;
-            return Err(err);
-        }
+    conn.execute(
+        "DELETE FROM lcm_external_payloads WHERE payload_ref = ?1",
+        params![payload_ref],
+    )
+    .await?;
+    conn.execute(
+        "DELETE FROM lcm_gc_marks WHERE payload_ref = ?1",
+        params![payload_ref],
+    )
+    .await?;
+    if opts.rewrite_placeholders {
+        placeholders_rewritten = tombstone_residual_placeholders(conn, payload_ref).await?;
     }
 
     let file_removed = match (dir.as_deref(), opts.remove_file && file_existed) {

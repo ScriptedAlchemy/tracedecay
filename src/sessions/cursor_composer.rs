@@ -43,10 +43,12 @@ use std::path::{Path, PathBuf};
 
 use libsql::{Builder, OpenFlags};
 use serde_json::{Value, json};
+use tracedecay_store::{TranscriptStore, TranscriptWriteBatch};
 
 use crate::global_db::{GlobalDb, ParseOffset};
 use crate::sessions::shared::path_belongs_to_project;
 use crate::sessions::{SessionMessageRecord, SessionRecord};
+use crate::store::GlobalDbTranscriptStore;
 
 /// `SQLITE_OPEN_URI` — not exposed by libsql's [`OpenFlags`], so we OR the raw
 /// bit in (libsql forwards `flags.bits()` verbatim to `sqlite3_open_v2`). This
@@ -118,11 +120,12 @@ impl CursorComposerSource {
         envelope_cap: usize,
     ) -> CursorComposerSweepOutcome {
         let mut outcome = CursorComposerSweepOutcome::default();
+        let store = GlobalDbTranscriptStore::new(db);
         // ws-hash -> workspace fsPath, harvested from envelopes so per-session
         // store.db files (which key only by ws-hash) can be scoped to a project.
         let mut workspace_paths: HashMap<String, String> = HashMap::new();
         self.ingest_state_vscdb(
-            db,
+            &store,
             Some(project_root),
             &[],
             envelope_cap,
@@ -130,8 +133,14 @@ impl CursorComposerSource {
             &mut workspace_paths,
         )
         .await;
-        self.ingest_chat_store_dbs(db, Some(project_root), &[], &workspace_paths, &mut outcome)
-            .await;
+        self.ingest_chat_store_dbs(
+            &store,
+            Some(project_root),
+            &[],
+            &workspace_paths,
+            &mut outcome,
+        )
+        .await;
         outcome
     }
 
@@ -142,9 +151,10 @@ impl CursorComposerSource {
         envelope_cap: usize,
     ) -> CursorComposerSweepOutcome {
         let mut outcome = CursorComposerSweepOutcome::default();
+        let store = GlobalDbTranscriptStore::new(db);
         let mut workspace_paths = HashMap::new();
         self.ingest_state_vscdb(
-            db,
+            &store,
             None,
             registered_roots,
             envelope_cap,
@@ -152,14 +162,20 @@ impl CursorComposerSource {
             &mut workspace_paths,
         )
         .await;
-        self.ingest_chat_store_dbs(db, None, registered_roots, &workspace_paths, &mut outcome)
-            .await;
+        self.ingest_chat_store_dbs(
+            &store,
+            None,
+            registered_roots,
+            &workspace_paths,
+            &mut outcome,
+        )
+        .await;
         outcome
     }
 
     async fn ingest_state_vscdb(
         &self,
-        db: &GlobalDb,
+        store: &GlobalDbTranscriptStore<'_>,
         project_root: Option<&Path>,
         registered_roots: &[PathBuf],
         envelope_cap: usize,
@@ -235,7 +251,9 @@ impl CursorComposerSource {
                 .unwrap_or_default();
             let watermark = headers.len() as u64;
             let offset_key = format!("cursor-composer:{composer_id}");
-            let prev = db.get_parse_offset(&offset_key).await.unwrap_or_default();
+            let Ok(prev) = store.get_parse_offset(Path::new(&offset_key)).await else {
+                continue;
+            };
             let last_updated = epoch_secs_u64(envelope_epoch(&envelope, "lastUpdatedAt"));
             // Unchanged since last pass -> skip without touching bubbles.
             if watermark != 0 && watermark <= prev.byte_offset && prev.mtime == last_updated {
@@ -258,12 +276,13 @@ impl CursorComposerSource {
                 mtime: last_updated,
                 file_id: 0,
             };
-            if db
-                .upsert_transcript_batch(&session, &messages, &offset_key, advanced)
-                .await
-            {
+            let message_count = messages.len() as u64;
+            let Ok(batch) = TranscriptWriteBatch::upsert(session, messages, prev, advanced) else {
+                continue;
+            };
+            if store.persist_transcript_batch(batch).await.is_ok() {
                 ingested_this_pass += 1;
-                outcome.add(1, messages.len() as u64);
+                outcome.add(1, message_count);
             }
         }
     }
@@ -306,7 +325,7 @@ impl CursorComposerSource {
 
     async fn ingest_chat_store_dbs(
         &self,
-        db: &GlobalDb,
+        store: &GlobalDbTranscriptStore<'_>,
         project_root: Option<&Path>,
         registered_roots: &[PathBuf],
         workspace_paths: &HashMap<String, String>,
@@ -343,7 +362,7 @@ impl CursorComposerSource {
                 if !store_path.is_file() {
                     continue;
                 }
-                self.ingest_one_store_db(db, &store_path, &project_path, outcome)
+                self.ingest_one_store_db(store, &store_path, &project_path, outcome)
                     .await;
             }
         }
@@ -351,7 +370,7 @@ impl CursorComposerSource {
 
     async fn ingest_one_store_db(
         &self,
-        db: &GlobalDb,
+        store: &GlobalDbTranscriptStore<'_>,
         store_path: &Path,
         project_path: &str,
         outcome: &mut CursorComposerSweepOutcome,
@@ -375,7 +394,9 @@ impl CursorComposerSource {
         outcome.owned_session_ids.insert(session_id.clone());
 
         let offset_key = format!("cursor-chat:{}", meta.agent_id);
-        let prev = db.get_parse_offset(&offset_key).await.unwrap_or_default();
+        let Ok(prev) = store.get_parse_offset(Path::new(&offset_key)).await else {
+            return;
+        };
         let watermark = ordered.len() as u64;
         let created_secs = epoch_secs_u64(meta.created_at);
         if watermark != 0 && watermark <= prev.byte_offset && prev.mtime == created_secs {
@@ -440,11 +461,18 @@ impl CursorComposerSource {
             mtime: created_secs,
             file_id: 0,
         };
-        if db
-            .upsert_transcript_batch(&session, &messages, &offset_key, advanced)
-            .await
-        {
-            outcome.add(1, messages.len() as u64);
+        let message_count = messages.len() as u64;
+        let Ok(batch) = TranscriptWriteBatch::upsert_with_cursor(
+            PathBuf::from(offset_key),
+            session,
+            messages,
+            prev,
+            advanced,
+        ) else {
+            return;
+        };
+        if store.persist_transcript_batch(batch).await.is_ok() {
+            outcome.add(1, message_count);
         }
     }
 }

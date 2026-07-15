@@ -189,6 +189,27 @@ async fn startup_catch_up_spawned_once_per_server() {
     );
 }
 
+#[tokio::test]
+async fn project_startup_catch_up_succeeds_without_user_session_authority() {
+    let (cg, _dir, _pin) = init_indexed_repo().await;
+    let project_db = Arc::new(
+        crate::global_db::GlobalDb::open_at(&cg.store_layout().sessions_db_path)
+            .await
+            .expect("project session DB"),
+    );
+
+    let completed = super::run_startup_session_catch_up(
+        Some(Arc::clone(&project_db)),
+        None,
+        None,
+        cg.project_root(),
+    )
+    .await
+    .expect("project catch-up must not depend on user session storage");
+
+    assert!(Arc::ptr_eq(&completed, &project_db));
+}
+
 // ---- ledger settle is bounded when a recorder task wedges ---------
 
 // A dedicated multi-thread runtime keeps the timer driver off the same worker

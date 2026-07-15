@@ -36,6 +36,275 @@ async fn concurrent_full_opens_singleflight_schema_but_use_independent_connectio
 }
 
 #[tokio::test]
+async fn cancelled_authoritative_transaction_isolated_from_retained_connection_and_cleans_payload()
+{
+    let dir = tempfile::TempDir::new().unwrap();
+    let path = dir.path().join("global.db");
+    let db = Arc::new(GlobalDb::open_at(&path).await.expect("global DB open"));
+    let session = SessionRecord {
+        provider: "codex".to_string(),
+        session_id: "cancelled-transaction".to_string(),
+        project_key: "project".to_string(),
+        project_path: dir.path().display().to_string(),
+        title: None,
+        started_at: None,
+        ended_at: None,
+        transcript_path: Some(dir.path().join("session.jsonl").display().to_string()),
+        metadata_json: None,
+        parent_session_id: None,
+        is_subagent: false,
+        agent_id: None,
+        parent_tool_use_id: None,
+    };
+    let (created_tx, created_rx) = tokio::sync::oneshot::channel();
+    let task_db = Arc::clone(&db);
+    let task_session = session.clone();
+    let task = tokio::spawn(async move {
+        let _writer = task_db.transaction.lock().await;
+        let transaction = task_db.begin_authoritative_transaction().await.unwrap();
+        assert!(GlobalDb::upsert_session_in_existing_tx(&transaction, &task_session).await);
+        let mut payload_rollback =
+            crate::sessions::lcm::payload::PayloadFileRollback::begin_cancellation_safe(
+                &task_db.storage_root,
+            );
+        let payload = crate::sessions::lcm::payload::write_external_payload_tracked(
+            &task_db.storage_root,
+            crate::sessions::lcm::payload::ExternalPayloadWrite {
+                provider: "codex",
+                session_id: "cancelled-transaction",
+                message_id: "cancelled-message",
+                kind: "tool_output",
+                content: "payload created inside a transaction that will be cancelled",
+                metadata_json: None,
+            },
+            &mut payload_rollback,
+        )
+        .unwrap();
+        created_tx.send(payload.payload_ref).unwrap();
+        std::future::pending::<()>().await;
+    });
+
+    let payload_ref = created_rx.await.expect("payload creation signal");
+    let payload_path =
+        crate::sessions::lcm::payload::payload_dir(&db.storage_root).join(&payload_ref);
+    assert!(payload_path.is_file());
+
+    let mut rows = db
+        .conn()
+        .query(
+            "SELECT 1 FROM sessions WHERE provider = ?1 AND session_id = ?2",
+            params!["codex", "cancelled-transaction"],
+        )
+        .await
+        .expect("retained read must not join the fresh transaction");
+    assert!(rows.next().await.unwrap().is_none());
+    drop(rows);
+
+    db.conn()
+        .execute_batch("PRAGMA busy_timeout = 0;")
+        .await
+        .unwrap();
+    assert!(!GlobalDb::upsert_session_in_existing_tx(&db.conn, &session).await);
+
+    task.abort();
+    assert!(task.await.unwrap_err().is_cancelled());
+    assert!(!payload_path.exists());
+    db.conn()
+        .execute_batch("PRAGMA busy_timeout = 5000;")
+        .await
+        .unwrap();
+    assert!(
+        db.get_session("codex", "cancelled-transaction")
+            .await
+            .is_none()
+    );
+    assert!(db.upsert_session(&session).await);
+    assert!(
+        db.get_session("codex", "cancelled-transaction")
+            .await
+            .is_some()
+    );
+}
+
+#[tokio::test]
+async fn cancelled_lcm_lifecycle_mutation_rolls_back_and_releases_writer() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let db = Arc::new(
+        GlobalDb::open_at(&dir.path().join("global.db"))
+            .await
+            .expect("global DB open"),
+    );
+    let update = crate::sessions::lcm::LcmLifecycleUpdate {
+        provider: "cursor".to_string(),
+        conversation_id: "cancelled-lifecycle".to_string(),
+        current_session_id: "cancelled-lifecycle".to_string(),
+        current_frontier_store_id: None,
+        last_finalized_session_id: None,
+        last_finalized_frontier_store_id: None,
+        maintenance_debt: vec![crate::sessions::lcm::LcmMaintenanceDebt::RawBacklog {
+            from_store_id: 1,
+            to_store_id: 2,
+        }],
+    };
+    let (written_tx, written_rx) = tokio::sync::oneshot::channel();
+    let task_db = Arc::clone(&db);
+    let task_update = update.clone();
+    let task = tokio::spawn(async move {
+        let _writer = task_db.transaction.lock().await;
+        let transaction = task_db.begin_authoritative_transaction().await.unwrap();
+        crate::sessions::lcm::compression::update_lifecycle(&transaction, task_update)
+            .await
+            .unwrap();
+        written_tx.send(()).unwrap();
+        std::future::pending::<()>().await;
+    });
+
+    written_rx.await.expect("lifecycle write signal");
+    assert!(
+        db.lcm_lifecycle_state("cursor", "cancelled-lifecycle")
+            .await
+            .is_err(),
+        "retained reader must not observe the uncommitted lifecycle state"
+    );
+
+    task.abort();
+    assert!(task.await.unwrap_err().is_cancelled());
+    assert!(
+        db.lcm_lifecycle_state("cursor", "cancelled-lifecycle")
+            .await
+            .is_err(),
+        "cancellation must roll back lifecycle state and maintenance debt"
+    );
+
+    let state = db
+        .lcm_update_lifecycle(update.clone())
+        .await
+        .expect("writer must be reusable after cancellation");
+    assert_eq!(state.provider, update.provider);
+    assert_eq!(state.conversation_id, update.conversation_id);
+    assert_eq!(state.maintenance_debt, update.maintenance_debt);
+}
+
+#[tokio::test]
+async fn analytics_batch_error_rolls_back_prior_rows_and_releases_writer() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let db = GlobalDb::open_at(&dir.path().join("global.db"))
+        .await
+        .expect("global DB open");
+    db.conn()
+        .execute_batch(
+            "CREATE TRIGGER fail_analytics_batch
+             BEFORE INSERT ON analytics_events
+             WHEN NEW.event_kind = 'force_failure'
+             BEGIN
+                 SELECT RAISE(ABORT, 'forced analytics failure');
+             END;",
+        )
+        .await
+        .unwrap();
+
+    let event = |event_kind: &str| AnalyticsEventInsert {
+        provider: "codex".to_string(),
+        project_id: "project".to_string(),
+        session_id: Some("session".to_string()),
+        timestamp: 1,
+        event_kind: event_kind.to_string(),
+        hook_name: None,
+        tool_name: None,
+        tool_category: None,
+        skill_name: None,
+        hint_category: None,
+        hint_id: None,
+        outcome: None,
+        metadata_json: None,
+    };
+    assert!(
+        db.append_analytics_events(&[event("valid"), event("force_failure")])
+            .await
+            .is_err()
+    );
+
+    let mut rows = db
+        .conn()
+        .query("SELECT COUNT(*) FROM analytics_events", ())
+        .await
+        .unwrap();
+    assert_eq!(
+        rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap(),
+        0
+    );
+    drop(rows);
+
+    db.conn()
+        .execute("DROP TRIGGER fail_analytics_batch", ())
+        .await
+        .unwrap();
+    assert_eq!(
+        db.append_analytics_events(&[event("after_failure")])
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn turn_batch_error_rolls_back_prior_rows_and_releases_writer() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let db = GlobalDb::open_at(&dir.path().join("global.db"))
+        .await
+        .expect("global DB open");
+    db.conn()
+        .execute_batch(
+            "CREATE TRIGGER fail_turn_batch
+             BEFORE INSERT ON turns
+             WHEN NEW.message_id = 'force-failure'
+             BEGIN
+                 SELECT RAISE(ABORT, 'forced turn failure');
+             END;",
+        )
+        .await
+        .unwrap();
+
+    let turn = |message_id: &str| crate::types::CostTurn {
+        message_id: message_id.to_string(),
+        project_hash: "project".to_string(),
+        session_id: "session".to_string(),
+        model: "test-model".to_string(),
+        timestamp: 1,
+        input_tokens: 1,
+        output_tokens: 1,
+        cache_write_tokens: 0,
+        cache_read_tokens: 0,
+        cost_usd: 0.01,
+        category: "test".to_string(),
+        tool_names: String::new(),
+    };
+    assert_eq!(
+        db.insert_turns(&[turn("valid"), turn("force-failure")])
+            .await,
+        0
+    );
+
+    let mut rows = db
+        .conn()
+        .query("SELECT COUNT(*) FROM turns", ())
+        .await
+        .unwrap();
+    assert_eq!(
+        rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap(),
+        0
+    );
+    drop(rows);
+
+    db.conn()
+        .execute("DROP TRIGGER fail_turn_batch", ())
+        .await
+        .unwrap();
+    assert_eq!(db.insert_turns(&[turn("after-failure")]).await, 1);
+}
+
+#[tokio::test]
 async fn global_db_slot_uses_database_authority_canonical_identity() {
     let dir = tempfile::TempDir::new().unwrap();
     std::fs::create_dir(dir.path().join("nested")).unwrap();

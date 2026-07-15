@@ -3,7 +3,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use libsql::{Connection, params};
+use libsql::{Connection, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -330,6 +330,62 @@ pub async fn run_payload_gc_with_apply(
     apply: bool,
     now: i64,
 ) -> Result<LcmGcReport, LcmError> {
+    if !apply {
+        return run_payload_gc_in_transaction(
+            conn,
+            storage_root,
+            provider,
+            session_id,
+            cfg,
+            false,
+            now,
+        )
+        .await;
+    }
+
+    prepare_payload_gc_apply(conn, storage_root, cfg).await?;
+    let transaction = conn
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .await?;
+    let report = run_payload_gc_in_transaction(
+        &transaction,
+        storage_root,
+        provider,
+        session_id,
+        cfg,
+        true,
+        now,
+    )
+    .await?;
+    transaction.commit().await?;
+    Ok(report)
+}
+
+pub(crate) async fn prepare_payload_gc_apply(
+    conn: &Connection,
+    storage_root: &Path,
+    cfg: &LcmGcConfig,
+) -> Result<(), LcmError> {
+    if !cfg.backup_before_reap {
+        return Ok(());
+    }
+    let dir = payload::existing_payload_dir_opt(storage_root)?;
+    let all_metadata_refs = all_payload_metadata_refs(conn).await?;
+    if dir.is_some() || !all_metadata_refs.is_empty() {
+        checkpoint_wal_for_backup(conn).await?;
+    }
+    Ok(())
+}
+
+pub(crate) async fn run_payload_gc_in_transaction(
+    conn: &Connection,
+    storage_root: &Path,
+    provider: &str,
+    session_id: Option<&str>,
+    cfg: &LcmGcConfig,
+    apply: bool,
+    now: i64,
+) -> Result<LcmGcReport, LcmError> {
     let started = Instant::now();
     let cfg = cfg.clone().normalized();
     let mut report = LcmGcReport::new(provider, session_id, &cfg, apply, now);
@@ -346,7 +402,6 @@ pub async fn run_payload_gc_with_apply(
     let all_metadata_refs = all_payload_metadata_refs(conn).await?;
 
     if apply && cfg.backup_before_reap && (dir.is_some() || !all_metadata_refs.is_empty()) {
-        checkpoint_wal_for_backup(conn).await?;
         report.backup = Some(backup_database(
             &gc_database_path(storage_root),
             storage_root,
@@ -546,7 +601,7 @@ async fn reap_unreferenced_metadata(
         }
         let bytes = metadata_bytes.get(payload_ref).copied().unwrap_or_default();
         if apply {
-            match payload::delete_external_payload(
+            match payload::delete_external_payload_in_transaction(
                 conn,
                 storage_root,
                 payload_ref,
@@ -636,7 +691,7 @@ async fn reap_missing_metadata(
             report.batch_cap(1);
             continue;
         }
-        match payload::delete_external_payload(
+        match payload::delete_external_payload_in_transaction(
             conn,
             storage_root,
             payload_ref,
@@ -690,7 +745,7 @@ pub async fn rewrite_dangling_placeholders(
             continue;
         }
         let changed = if apply {
-            tombstone_dangling_ref(conn, payload_ref, provider, session_id).await?
+            tombstone_dangling_ref_in_transaction(conn, payload_ref, provider, session_id).await?
         } else {
             0
         };
@@ -702,73 +757,80 @@ pub async fn rewrite_dangling_placeholders(
     Ok(())
 }
 
-async fn tombstone_dangling_ref(
+async fn tombstone_dangling_ref_in_transaction(
     conn: &Connection,
     payload_ref: &str,
     provider: &str,
     session_id: Option<&str>,
 ) -> Result<usize, LcmError> {
-    conn.execute("BEGIN IMMEDIATE", ()).await?;
-    let result: Result<usize, LcmError> = async {
-        let mut rows = conn
-            .query(
-                "SELECT store_id, content, snippet_text, index_text, metadata_json
+    let mut rows = conn
+        .query(
+            "SELECT store_id, content, snippet_text, index_text, metadata_json
                  FROM lcm_raw_messages
                  WHERE provider = ?1 AND (?2 IS NULL OR session_id = ?2)
                    AND (content LIKE ?3 OR snippet_text LIKE ?3 OR index_text LIKE ?3 OR metadata_json LIKE ?3)",
-                params![provider, util::opt_text(session_id), format!("%{payload_ref}%")],
-            )
-            .await?;
-        let mut updates = Vec::new();
-        while let Some(row) = rows.next().await? {
-            let store_id: i64 = row.get(0)?;
-            let content: Option<String> = row.get(1).unwrap_or(None);
-            let snippet_text: String = row.get(2)?;
-            let index_text: String = row.get(3)?;
-            let metadata_json: Option<String> = row.get(4).unwrap_or(None);
-            let mut changed = 0usize;
-            let new_content = content.map(|text| {
-                let tombstoned = tombstone_placeholder_in_text(&text, payload_ref);
-                if tombstoned != text { changed += 1; }
-                tombstoned
-            });
-            let new_snippet = tombstone_placeholder_in_text(&snippet_text, payload_ref);
-            if new_snippet != snippet_text { changed += 1; }
-            let new_index = tombstone_placeholder_in_text(&index_text, payload_ref);
-            if new_index != index_text { changed += 1; }
-            let new_metadata = metadata_json.map(|text| {
-                let tombstoned = tombstone_placeholder_in_text(&text, payload_ref);
-                if tombstoned != text { changed += 1; }
-                tombstoned
-            });
-            if changed > 0 {
-                updates.push((store_id, new_content, new_snippet, new_index, new_metadata, changed));
+            params![provider, util::opt_text(session_id), format!("%{payload_ref}%")],
+        )
+        .await?;
+    let mut updates = Vec::new();
+    while let Some(row) = rows.next().await? {
+        let store_id: i64 = row.get(0)?;
+        let content: Option<String> = row.get(1).unwrap_or(None);
+        let snippet_text: String = row.get(2)?;
+        let index_text: String = row.get(3)?;
+        let metadata_json: Option<String> = row.get(4).unwrap_or(None);
+        let mut changed = 0usize;
+        let new_content = content.map(|text| {
+            let tombstoned = tombstone_placeholder_in_text(&text, payload_ref);
+            if tombstoned != text {
+                changed += 1;
             }
+            tombstoned
+        });
+        let new_snippet = tombstone_placeholder_in_text(&snippet_text, payload_ref);
+        if new_snippet != snippet_text {
+            changed += 1;
         }
-        let mut total = 0usize;
-        for (store_id, content, snippet_text, index_text, metadata_json, changed) in updates {
-            conn.execute(
-                "UPDATE lcm_raw_messages
+        let new_index = tombstone_placeholder_in_text(&index_text, payload_ref);
+        if new_index != index_text {
+            changed += 1;
+        }
+        let new_metadata = metadata_json.map(|text| {
+            let tombstoned = tombstone_placeholder_in_text(&text, payload_ref);
+            if tombstoned != text {
+                changed += 1;
+            }
+            tombstoned
+        });
+        if changed > 0 {
+            updates.push((
+                store_id,
+                new_content,
+                new_snippet,
+                new_index,
+                new_metadata,
+                changed,
+            ));
+        }
+    }
+    let mut total = 0usize;
+    for (store_id, content, snippet_text, index_text, metadata_json, changed) in updates {
+        conn.execute(
+            "UPDATE lcm_raw_messages
                  SET content = ?2, snippet_text = ?3, index_text = ?4, metadata_json = ?5
                  WHERE store_id = ?1",
-                params![store_id, util::opt_text(content.as_deref()), snippet_text, index_text, util::opt_text(metadata_json.as_deref())],
-            )
-            .await?;
-            total += changed;
-        }
-        Ok(total)
+            params![
+                store_id,
+                util::opt_text(content.as_deref()),
+                snippet_text,
+                index_text,
+                util::opt_text(metadata_json.as_deref())
+            ],
+        )
+        .await?;
+        total += changed;
     }
-    .await;
-    match result {
-        Ok(total) => {
-            conn.execute("COMMIT", ()).await?;
-            Ok(total)
-        }
-        Err(err) => {
-            let _ = conn.execute("ROLLBACK", ()).await;
-            Err(err)
-        }
-    }
+    Ok(total)
 }
 
 async fn gc_mark(conn: &Connection, payload_ref: &str) -> Result<Option<(String, i64)>, LcmError> {

@@ -36,7 +36,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use tracedecay_store::{ParseOffset, TranscriptStore, TranscriptWriteBatch};
+use tracedecay_store::{ParseOffset, TranscriptWriteBatch};
 
 use crate::global_db::GlobalDb;
 pub use crate::sessions::shared::{NewRows, StoredCursor, TranscriptIngestStats};
@@ -47,7 +47,7 @@ pub(crate) use crate::sessions::shared::{
     usage_counters_from,
 };
 use crate::sessions::{SessionMessageRecord, SessionRecord};
-use crate::store::GlobalDbTranscriptStore;
+use crate::store::{GlobalDbTranscriptStore, TranscriptIngestStore};
 
 fn log_source_skip(path: &Path, action: &'static str, error: &impl std::fmt::Display) {
     tracing::debug!(
@@ -139,8 +139,8 @@ pub async fn ingest_source(
     ingest_source_with_store(&store, source, project_root, max_new_bytes).await
 }
 
-pub(crate) async fn ingest_source_with_store(
-    store: &GlobalDbTranscriptStore<'_>,
+pub(crate) async fn ingest_source_with_store<S: TranscriptIngestStore>(
+    store: &S,
     source: &dyn TranscriptSource,
     project_root: &Path,
     max_new_bytes: Option<u64>,
@@ -156,8 +156,8 @@ pub(crate) async fn ingest_source_with_store(
 /// contract, parse new content, and submit one atomic session/message/cursor
 /// batch. The root adapter extends that write with git evidence in the same
 /// authoritative `GlobalDb` transaction.
-async fn ingest_one(
-    store: &GlobalDbTranscriptStore<'_>,
+async fn ingest_one<S: TranscriptIngestStore>(
+    store: &S,
     source: &dyn TranscriptSource,
     path: &Path,
     project_root: &Path,
@@ -584,6 +584,30 @@ fn stable_jsonl_file_id(path: &Path, meta: &std::fs::Metadata) -> Option<u64> {
         hasher.update(meta.dev().to_le_bytes());
         hasher.update(meta.ino().to_le_bytes());
     }
+    #[cfg(windows)]
+    {
+        use std::hash::{Hash, Hasher};
+        use std::os::windows::fs::MetadataExt;
+
+        // `same-file` hashes the native volume serial and file index. Creation
+        // time also protects against the filesystem reusing an index after an
+        // atomic transcript replacement.
+        if let Ok(handle) = same_file::Handle::from_path(path) {
+            let mut native_hasher = std::collections::hash_map::DefaultHasher::new();
+            handle.hash(&mut native_hasher);
+            hasher.update(native_hasher.finish().to_le_bytes());
+        }
+        hasher.update(meta.creation_time().to_le_bytes());
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        // Creation time is stable across appends and changes when a transcript
+        // is replaced on platforms without a native file-id implementation.
+        if let Ok(created) = meta.created() {
+            let created = created.duration_since(std::time::UNIX_EPOCH).ok()?;
+            hasher.update(created.as_nanos().to_le_bytes());
+        }
+    }
     hasher.update(jsonl_head_fingerprint(path)?.to_le_bytes());
     let digest = hasher.finalize();
     let mut bytes = [0_u8; 8];
@@ -685,6 +709,33 @@ mod tests {
         assert_eq!(rewritten.lines.len(), 2);
         assert_eq!(rewritten.lines[0].value["a"], 9);
         assert_eq!(rewritten.lines[1].value["a"], 8);
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn stream_new_jsonl_resets_when_replaced_file_keeps_same_head() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t.jsonl");
+        let replacement = dir.path().join("replacement.jsonl");
+        std::fs::write(&path, "{\"same\":1}\n{\"old\":2}\n").unwrap();
+
+        let first = stream_new_jsonl(&path, StoredCursor::default(), None).unwrap();
+        assert_eq!(first.lines.len(), 2);
+
+        // Create the replacement before removing the original so its native
+        // identity cannot be recycled, while retaining the same head line.
+        std::fs::write(&replacement, "{\"same\":1}\n{\"new\":2}\n").unwrap();
+        std::fs::remove_file(&path).unwrap();
+        std::fs::rename(&replacement, &path).unwrap();
+
+        let stale = StoredCursor {
+            mtime: 0,
+            ..first.new_cursor
+        };
+        let rewritten = stream_new_jsonl(&path, stale, None).unwrap();
+        assert_eq!(rewritten.lines.len(), 2);
+        assert_eq!(rewritten.lines[0].value["same"], 1);
+        assert_eq!(rewritten.lines[1].value["new"], 2);
     }
 
     #[test]

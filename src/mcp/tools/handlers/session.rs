@@ -338,20 +338,29 @@ fn collect_readable_text(value: &Value, out: &mut String, budget: usize) {
 pub(super) struct LcmHandlerContext<'a> {
     project_root: Option<&'a Path>,
     project_session_db_path: Option<&'a Path>,
+    retained_session_db: Option<&'a Arc<GlobalDb>>,
 }
 
 impl<'a> LcmHandlerContext<'a> {
-    pub(super) fn active(cg: &'a TraceDecay) -> Self {
+    pub(super) fn active(
+        cg: &'a TraceDecay,
+        retained_session_db: Option<&'a Arc<GlobalDb>>,
+    ) -> Self {
         Self {
             project_root: Some(cg.project_root()),
             project_session_db_path: Some(cg.store_layout().sessions_db_path.as_path()),
+            retained_session_db,
         }
     }
 
-    pub(super) fn user(sessions_db_path: &'a Path) -> Self {
+    pub(super) fn user(
+        sessions_db_path: &'a Path,
+        retained_session_db: Option<&'a Arc<GlobalDb>>,
+    ) -> Self {
         Self {
             project_root: None,
             project_session_db_path: Some(sessions_db_path),
+            retained_session_db,
         }
     }
 }
@@ -1738,11 +1747,11 @@ fn project_local_storage_without_project(args: &Value) -> ToolResult {
 }
 
 struct LcmStorage {
-    db: GlobalDb,
+    db: Arc<GlobalDb>,
 }
 
 fn available_lcm_storage(db: GlobalDb) -> LcmStorageResolution {
-    LcmStorageResolution::Available(Box::new(LcmStorage { db }))
+    LcmStorageResolution::Available(Box::new(LcmStorage { db: Arc::new(db) }))
 }
 
 /// Database paths whose schema (sessions DDL + LCM migrations) has already
@@ -1755,11 +1764,9 @@ fn available_lcm_storage(db: GlobalDb) -> LcmStorageResolution {
 /// underneath a long-lived server. One-shot CLI invocations open each path
 /// once, so their behavior is unchanged.
 ///
-/// Connections are deliberately NOT cached: each call still opens a fresh
-/// libsql local connection. Sharing a long-lived handle across tool calls
-/// would have to prove cross-process WAL safety and stale-handle recovery
-/// (other processes checkpoint and write the same file), which is not worth
-/// the risk for a per-call open that is cheap once the DDL is skipped.
+/// Connections opened through this fallback path are deliberately not cached:
+/// each call opens a fresh libsql local connection. Daemon-owned session stores
+/// bypass this path and supply their retained writer authority directly.
 static ENSURED_SCHEMA_DB_PATHS: LazyLock<Mutex<HashSet<PathBuf>>> =
     LazyLock::new(|| Mutex::new(HashSet::new()));
 
@@ -1861,6 +1868,9 @@ async fn open_lcm_storage(
     let db_path = db_path.to_path_buf();
     if mode == LcmOpenMode::ReadOnlyOrMissing && !db_path.is_file() {
         return LcmStorageResolution::Unavailable(lcm_not_yet_ingested(args));
+    }
+    if let Some(db) = context.retained_session_db {
+        return LcmStorageResolution::Available(Box::new(LcmStorage { db: Arc::clone(db) }));
     }
     let Some(db) = open_lcm_db_at(&db_path, mode).await else {
         return LcmStorageResolution::Unavailable(lcm_unavailable(args));
@@ -2257,6 +2267,8 @@ pub(super) async fn handle_message_search(
     args: Value,
     global_db: Option<&GlobalDb>,
     allow_default_registry_fallback: bool,
+    retained_project_db: Option<&Arc<GlobalDb>>,
+    retained_user_db: Option<&Arc<GlobalDb>>,
 ) -> Result<ToolResult> {
     let request = parse_message_search_request(&args)?;
     let project_scope = args
@@ -2312,25 +2324,11 @@ pub(super) async fn handle_message_search(
             .ok_or_else(|| TraceDecayError::Config {
                 message: "could not resolve tracedecay profile root".to_string(),
             })?;
-        let catch_up_leader = if request.catch_up {
-            let key = format!(
-                "all-registered:{}:{}",
-                profile_root.display(),
-                request.provider_scope.response_label()
-            );
-            match claim_message_catch_up(key) {
-                MessageCatchUpClaim::Wait(done) => {
-                    wait_for_message_catch_up(done).await;
-                    None
-                }
-                MessageCatchUpClaim::Leader(leader) => Some(leader),
-            }
-        } else {
-            None
-        };
-        let perform_catch_up = catch_up_leader.is_some();
+        let retained_user_db = retained_user_db
+            .filter(|db| db.db_path() == crate::sessions::user_sessions_db_path(&profile_root));
         let mut destinations = Vec::new();
         let mut skipped_project_count = 0usize;
+        let mut catch_up_skipped_project_count = 0usize;
         for project in global.list_code_projects(usize::MAX).await {
             let Some(context) = global
                 .project_registry_context_by_id(&project.project_id)
@@ -2350,42 +2348,89 @@ pub(super) async fn handle_message_search(
                 skipped_project_count += 1;
                 continue;
             };
-            let db = if perform_catch_up {
-                open_session_db_for_bulk_catch_up(&db_path).await
+            let retained_db = retained_project_db.filter(|db| db.db_path() == db_path);
+            let has_write_authority = retained_db.is_some() || allow_default_registry_fallback;
+            let db = if let Some(db) = retained_db {
+                Some(Arc::clone(db))
+            } else if request.catch_up && allow_default_registry_fallback {
+                open_session_db_for_bulk_catch_up(&db_path)
+                    .await
+                    .map(Arc::new)
             } else {
-                GlobalDb::open_read_only_at(&db_path).await
+                GlobalDb::open_read_only_at(&db_path).await.map(Arc::new)
             };
             let Some(db) = db else {
                 skipped_project_count += 1;
                 continue;
             };
+            if request.catch_up && !has_write_authority {
+                catch_up_skipped_project_count += 1;
+            }
             let display_root = Path::new(&context.project.display_root);
             let project_root = if display_root.is_absolute() {
                 display_root.to_path_buf()
             } else {
                 PathBuf::from(&context.project.canonical_root)
             };
-            destinations.push((db, project_root));
+            destinations.push((db, project_root, has_write_authority));
         }
+        let catch_up_authorized = request.catch_up
+            && destinations
+                .iter()
+                .any(|(_, _, has_write_authority)| *has_write_authority);
+        let catch_up_leader = if catch_up_authorized {
+            let key = format!(
+                "all-registered:{}:{}",
+                profile_root.display(),
+                request.provider_scope.response_label()
+            );
+            match claim_message_catch_up(key) {
+                MessageCatchUpClaim::Wait(done) => {
+                    wait_for_message_catch_up(done).await;
+                    None
+                }
+                MessageCatchUpClaim::Leader(leader) => Some(leader),
+            }
+        } else {
+            None
+        };
+        let perform_catch_up = catch_up_leader.is_some();
         if perform_catch_up {
             let provider = request.provider_scope.provider();
-            let _ = crate::sessions::ingest_user_global_sources_for_provider(provider).await;
+            if let Some(user_db) = retained_user_db
+                && let Some(user_profile_root) = user_db.db_path().parent()
+            {
+                let _ = crate::sessions::ingest_user_global_sources_for_provider_at_with_db(
+                    user_db.as_ref(),
+                    user_profile_root,
+                    provider,
+                )
+                .await;
+            } else if allow_default_registry_fallback {
+                let _ = crate::sessions::ingest_user_global_sources_for_provider(provider).await;
+            }
             if provider.is_none() || provider == Some(crate::sessions::SessionProvider::Hermes) {
-                let hermes_destinations =
-                    destinations
-                        .iter()
-                        .map(|(db, project_root)| {
-                            crate::sessions::hermes::ProjectIngestDestination { db, project_root }
-                        })
-                        .collect::<Vec<_>>();
+                let hermes_destinations = destinations
+                    .iter()
+                    .filter(|(_, _, has_write_authority)| *has_write_authority)
+                    .map(|(db, project_root, _)| {
+                        crate::sessions::hermes::ProjectIngestDestination { db, project_root }
+                    })
+                    .collect::<Vec<_>>();
                 let _ = crate::sessions::hermes::ingest_for_projects(&hermes_destinations).await;
             }
             if provider == Some(crate::sessions::SessionProvider::Hermes) {
-                for (db, project_root) in &destinations {
+                for (db, project_root, _) in destinations
+                    .iter()
+                    .filter(|(_, _, has_write_authority)| *has_write_authority)
+                {
                     crate::sessions::finalize_project_ingest(db, project_root).await;
                 }
             } else {
-                for (db, project_root) in &destinations {
+                for (db, project_root, _) in destinations
+                    .iter()
+                    .filter(|(_, _, has_write_authority)| *has_write_authority)
+                {
                     let _ = crate::sessions::ingest_project_sources_for_provider(
                         db,
                         project_root,
@@ -2399,12 +2444,12 @@ pub(super) async fn handle_message_search(
         drop(catch_up_leader);
         let searched_project_count = destinations.len();
         let mut results = Vec::new();
-        for (db, _) in &destinations {
-            let mut project_results = search_session_messages_in_db(&db, &request).await;
+        for (db, _, _) in &destinations {
+            let mut project_results = search_session_messages_in_db(db, &request).await;
             results.append(&mut project_results);
         }
         sort_and_truncate_message_results_by_relevance(&mut results, request.limit);
-        let mut payload = message_search_payload(&request, &results, request.catch_up);
+        let mut payload = message_search_payload(&request, &results, catch_up_authorized);
         if let Some(map) = payload.as_object_mut() {
             map.insert(
                 "project_scope".to_string(),
@@ -2417,6 +2462,10 @@ pub(super) async fn handle_message_search(
             map.insert(
                 "skipped_project_count".to_string(),
                 json!(skipped_project_count),
+            );
+            map.insert(
+                "catch_up_skipped_project_count".to_string(),
+                json!(catch_up_skipped_project_count),
             );
         }
         return Ok(tool_json_with_md(
@@ -2447,7 +2496,16 @@ pub(super) async fn handle_message_search(
             }),
         ));
     };
-    let catch_up_leader = if request.catch_up {
+    let retained_project_db = retained_project_db.filter(|db| db.db_path() == db_path);
+    let retained_user_db = profile_root_for_global_db(global_db, allow_default_registry_fallback)
+        .ok()
+        .and_then(|profile_root| {
+            retained_user_db
+                .filter(|db| db.db_path() == crate::sessions::user_sessions_db_path(&profile_root))
+        });
+    let catch_up_authorized =
+        request.catch_up && (retained_project_db.is_some() || allow_default_registry_fallback);
+    let catch_up_leader = if catch_up_authorized {
         let key = format!(
             "project:{}:{}",
             db_path.display(),
@@ -2464,31 +2522,60 @@ pub(super) async fn handle_message_search(
         None
     };
     let perform_catch_up = catch_up_leader.is_some();
-    let db = if request.catch_up && !perform_catch_up {
-        GlobalDb::open_read_only_at(&db_path).await
-    } else {
-        open_session_db_with_cached_ensure(&db_path).await
-    };
-    let Some(db) = db else {
-        return Ok(tool_json(
-            Some(cg.project_root()),
+    if !request.catch_up && retained_project_db.is_none() && !db_path.is_file() {
+        let mut payload = message_search_payload(&request, &[], false);
+        if let Some(map) = payload.as_object_mut() {
+            map.insert("selected_project_root".to_string(), json!(target_root));
+        }
+        return Ok(tool_json_with_md(
+            Some(&target_root),
             &args,
-            &json!({
-                "status": "unavailable",
-                "message": "could not open selected project tracedecay session database",
-                "results": [],
-                "count": 0
-            }),
+            &payload,
+            || render_message_search_md(&payload),
         ));
+    }
+    let opened_db;
+    let db = if let Some(db) = retained_project_db {
+        db.as_ref()
+    } else {
+        let opened = if perform_catch_up {
+            open_session_db_with_cached_ensure(&db_path).await
+        } else {
+            GlobalDb::open_read_only_at(&db_path).await
+        };
+        let Some(db) = opened else {
+            return Ok(tool_json(
+                Some(cg.project_root()),
+                &args,
+                &json!({
+                    "status": "unavailable",
+                    "message": "could not open selected project tracedecay session database",
+                    "results": [],
+                    "count": 0
+                }),
+            ));
+        };
+        opened_db = db;
+        &opened_db
     };
-    let catch_up_performed = request.catch_up;
+    let catch_up_performed = catch_up_authorized;
     if perform_catch_up {
-        let _ = crate::sessions::ingest_global_sources_for_provider(
-            &db,
-            &target_root,
-            request.provider_scope.provider(),
-        )
-        .await;
+        let provider = request.provider_scope.provider();
+        if let Some(user_db) = retained_user_db
+            && let Some(profile_root) = user_db.db_path().parent()
+        {
+            let _ = crate::sessions::ingest_user_global_sources_for_provider_at_with_db(
+                user_db.as_ref(),
+                profile_root,
+                provider,
+            )
+            .await;
+        } else if allow_default_registry_fallback {
+            let _ = crate::sessions::ingest_user_global_sources_for_provider(provider).await;
+        }
+        let _ =
+            crate::sessions::ingest_project_sources_for_provider(db, &target_root, provider, true)
+                .await;
     }
     drop(catch_up_leader);
     // Build the workflow-run scope filter and, separately, resolve the run's
@@ -2506,7 +2593,7 @@ pub(super) async fn handle_message_search(
         db.recent_session_goals(request.project_key, request.limit)
             .await
     } else {
-        search_session_messages_in_db(&db, &request).await
+        search_session_messages_in_db(db, &request).await
     };
     let mut payload = message_search_payload(&request, &results, catch_up_performed);
     if let Some(map) = payload.as_object_mut() {
@@ -2529,10 +2616,15 @@ pub(super) async fn handle_message_search(
 pub(super) async fn handle_user_message_search(
     profile_root: &Path,
     args: Value,
+    retained_session_db: Option<&Arc<GlobalDb>>,
+    allow_owned_session_db: bool,
 ) -> Result<ToolResult> {
     let request = parse_message_search_request(&args)?;
     let sessions_db_path = crate::sessions::user_sessions_db_path(profile_root);
-    let catch_up_leader = if request.catch_up {
+    let retained_session_db = retained_session_db.filter(|db| db.db_path() == sessions_db_path);
+    let catch_up_authorized =
+        request.catch_up && (retained_session_db.is_some() || allow_owned_session_db);
+    let catch_up_leader = if catch_up_authorized {
         let key = format!(
             "user:{}:{}",
             sessions_db_path.display(),
@@ -2549,32 +2641,48 @@ pub(super) async fn handle_user_message_search(
         None
     };
     if catch_up_leader.is_some() {
-        let _ = crate::sessions::ingest_user_global_sources_for_provider_at(
-            profile_root,
-            request.provider_scope.provider(),
-        )
-        .await;
+        if let Some(db) = retained_session_db {
+            let _ = crate::sessions::ingest_user_global_sources_for_provider_at_with_db(
+                db.as_ref(),
+                profile_root,
+                request.provider_scope.provider(),
+            )
+            .await;
+        } else if allow_owned_session_db {
+            let _ = crate::sessions::ingest_user_global_sources_for_provider_at(
+                profile_root,
+                request.provider_scope.provider(),
+            )
+            .await;
+        }
     }
     drop(catch_up_leader);
-    let Some(db) = GlobalDb::open_read_only_at(&sessions_db_path).await else {
-        return Ok(tool_json(
-            None,
-            &args,
-            &json!({
-                "status": "unavailable",
-                "message": "could not open user tracedecay session database",
-                "results": [],
-                "count": 0
-            }),
-        ));
+    let opened_db;
+    let db = if let Some(db) = retained_session_db {
+        db.as_ref()
+    } else {
+        let Some(db) = GlobalDb::open_read_only_at(&sessions_db_path).await else {
+            return Ok(tool_json(
+                None,
+                &args,
+                &json!({
+                    "status": "unavailable",
+                    "message": "could not open user tracedecay session database",
+                    "results": [],
+                    "count": 0
+                }),
+            ));
+        };
+        opened_db = db;
+        &opened_db
     };
     let results = if request.goals {
         db.recent_session_goals(request.project_key, request.limit)
             .await
     } else {
-        search_session_messages_in_db(&db, &request).await
+        search_session_messages_in_db(db, &request).await
     };
-    let payload = message_search_payload(&request, &results, request.catch_up);
+    let payload = message_search_payload(&request, &results, catch_up_authorized);
     Ok(tool_json_with_md(None, &args, &payload, || {
         render_message_search_md(&payload)
     }))

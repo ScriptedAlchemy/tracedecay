@@ -4,6 +4,8 @@ use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+#[cfg(test)]
+use libsql::TransactionBehavior;
 use libsql::{Connection, Value as SqlValue, params};
 use serde_json::{Value, json};
 
@@ -31,6 +33,14 @@ pub(crate) struct DoctorRequest<'a> {
     pub(crate) apply: bool,
     pub(crate) clean_config: LcmCleanConfig,
     pub(crate) gc_config: LcmGcConfig,
+}
+
+pub(crate) fn request_mutates(request: &DoctorRequest<'_>) -> bool {
+    request.apply && matches!(request.mode, "repair" | "clean" | "gc")
+}
+
+pub(crate) async fn prepare_apply(conn: &Connection) -> Result<(), LcmError> {
+    checkpoint_wal_for_backup(conn).await
 }
 
 struct RepairRequest<'a> {
@@ -165,7 +175,6 @@ async fn plan_and_apply_repairs(
         .as_bool()
         .unwrap_or(false);
     if mode == "repair" && apply && (raw_rebuild_needed || summary_rebuild_needed) {
-        checkpoint_wal_for_backup(conn).await?;
         backup = backup_database(db_path, storage_root)?;
     }
 
@@ -216,7 +225,7 @@ async fn plan_and_apply_repairs(
             });
             planned.push(action.clone());
             if apply {
-                let (backup_result, deleted) = backup_and_delete_clean_candidates(
+                let (backup_result, deleted) = backup_and_delete_clean_candidates_in_transaction(
                     conn,
                     db_path,
                     storage_root,
@@ -236,7 +245,7 @@ async fn plan_and_apply_repairs(
     }
 
     if mode == "gc" {
-        let report = gc::run_payload_gc_with_apply(
+        let report = gc::run_payload_gc_in_transaction(
             conn,
             storage_root,
             provider,
@@ -1033,7 +1042,7 @@ async fn checkpoint_wal_for_backup(conn: &Connection) -> Result<(), LcmError> {
     Ok(())
 }
 
-async fn backup_and_delete_clean_candidates(
+async fn backup_and_delete_clean_candidates_in_transaction(
     conn: &Connection,
     db_path: &Path,
     storage_root: &Path,
@@ -1041,7 +1050,7 @@ async fn backup_and_delete_clean_candidates(
     session_id: Option<&str>,
     clean_config: &LcmCleanConfig,
 ) -> Result<(Value, Value), LcmError> {
-    backup_and_delete_clean_candidates_with_backup(
+    backup_and_delete_clean_candidates_in_transaction_with_backup(
         conn,
         provider,
         session_id,
@@ -1051,6 +1060,7 @@ async fn backup_and_delete_clean_candidates(
     .await
 }
 
+#[cfg(test)]
 async fn backup_and_delete_clean_candidates_with_backup<F, Fut>(
     conn: &Connection,
     provider: &str,
@@ -1063,35 +1073,39 @@ where
     Fut: Future<Output = Result<Value, LcmError>>,
 {
     checkpoint_wal_for_backup(conn).await?;
-    conn.execute("BEGIN IMMEDIATE", ()).await?;
-    let result = async {
-        let (session_ids, message_store_ids) =
-            collect_clean_delete_targets(conn, provider, session_id, clean_config).await?;
-        let backup_result = backup().await?;
-        let deleted = delete_clean_candidates_in_transaction(
-            conn,
-            provider,
-            &session_ids,
-            &message_store_ids,
-        )
+    let transaction = conn
+        .transaction_with_behavior(TransactionBehavior::Immediate)
         .await?;
-        Ok((backup_result, deleted))
-    }
-    .await;
+    let values = backup_and_delete_clean_candidates_in_transaction_with_backup(
+        &transaction,
+        provider,
+        session_id,
+        clean_config,
+        backup,
+    )
+    .await?;
+    transaction.commit().await?;
+    Ok(values)
+}
 
-    match result {
-        Ok(values) => match conn.execute("COMMIT", ()).await {
-            Ok(_) => Ok(values),
-            Err(err) => {
-                let _ = conn.execute("ROLLBACK", ()).await;
-                Err(LcmError::Db(err.to_string()))
-            }
-        },
-        Err(err) => {
-            let _ = conn.execute("ROLLBACK", ()).await;
-            Err(err)
-        }
-    }
+async fn backup_and_delete_clean_candidates_in_transaction_with_backup<F, Fut>(
+    conn: &Connection,
+    provider: &str,
+    session_id: Option<&str>,
+    clean_config: &LcmCleanConfig,
+    backup: F,
+) -> Result<(Value, Value), LcmError>
+where
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = Result<Value, LcmError>>,
+{
+    let (session_ids, message_store_ids) =
+        collect_clean_delete_targets(conn, provider, session_id, clean_config).await?;
+    let backup_result = backup().await?;
+    let deleted =
+        delete_clean_candidates_in_transaction(conn, provider, &session_ids, &message_store_ids)
+            .await?;
+    Ok((backup_result, deleted))
 }
 
 async fn collect_clean_delete_targets(

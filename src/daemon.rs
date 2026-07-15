@@ -11,7 +11,9 @@ use serde_json::json;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 #[cfg(unix)]
 use tokio::net::UnixStream;
-use tokio::task::{JoinHandle, JoinSet};
+#[cfg(unix)]
+use tokio::task::JoinHandle;
+use tokio::task::JoinSet;
 use tokio::time::{Duration, timeout};
 
 use crate::client_identity::DaemonClientIdentity;
@@ -2294,6 +2296,14 @@ impl DaemonEngine {
             .store_administration
             .global_database(&handshake.client_identity.global_db_path)
             .await?;
+        let session_db = self
+            .store_administration
+            .global_database(&cg.store_layout().sessions_db_path)
+            .await?;
+        let user_session_db = self
+            .store_administration
+            .user_session_database(&handshake.client_identity.global_db_path)
+            .await?;
         let accounting_db =
             crate::global_db::global_accounting_enabled().then(|| Arc::clone(&registry_db));
         let registry_db = Some(registry_db);
@@ -2314,6 +2324,8 @@ impl DaemonEngine {
             handshake.scope_prefix.clone(),
             accounting_db,
             registry_db,
+            Some(session_db),
+            Some(user_session_db),
             false,
             Some(reconciler),
             Some(database_owner_reconciler),
@@ -2847,6 +2859,12 @@ async fn portable_project_server(
     let registry_db = store_administration
         .global_database(&handshake.client_identity.global_db_path)
         .await?;
+    let session_db = store_administration
+        .global_database(&cg.store_layout().sessions_db_path)
+        .await?;
+    let user_session_db = store_administration
+        .user_session_database(&handshake.client_identity.global_db_path)
+        .await?;
     let accounting_db =
         crate::global_db::global_accounting_enabled().then(|| Arc::clone(&registry_db));
     let registry_db = Some(registry_db);
@@ -2855,6 +2873,8 @@ async fn portable_project_server(
         handshake.scope_prefix.clone(),
         accounting_db,
         registry_db,
+        Some(session_db),
+        Some(user_session_db),
         false,
         None,
         Some(database_owner_reconciler),
@@ -3083,9 +3103,29 @@ async fn projectless_tools_call_response(
         }
     };
     if tool_name == "tracedecay_hook_runtime" {
+        let global_db = match store_administration
+            .global_database(&client_identity.global_db_path)
+            .await
+        {
+            Ok(global_db) => global_db,
+            Err(error) => {
+                return JsonRpcResponse::error(id, ErrorCode::InternalError, error.to_string());
+            }
+        };
+        let user_session_db = match store_administration
+            .user_session_database(&client_identity.global_db_path)
+            .await
+        {
+            Ok(user_session_db) => user_session_db,
+            Err(error) => {
+                return JsonRpcResponse::error(id, ErrorCode::InternalError, error.to_string());
+            }
+        };
         return match crate::mcp::tools::handle_projectless_hook_runtime(
             arguments,
             &client_identity.profile_root,
+            global_db.as_ref(),
+            crate::mcp::tools::SessionAuthorities::new(None, Some(&user_session_db)),
         )
         .await
         {

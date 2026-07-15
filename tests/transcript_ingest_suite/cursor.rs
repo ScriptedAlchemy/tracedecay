@@ -281,6 +281,9 @@ async fn cursor_pre_compact_uses_cursor_agent_summary_for_lcm() {
     assert_eq!(outcome.status, "ok", "{}", outcome.reason);
     assert_eq!(outcome.summary_nodes_created, 1);
 
+    // The daemon is the sole writer authority for its session store. Stop it
+    // before opening the persisted database directly for post-run assertions.
+    drop(_daemon);
     let db = open_project_session_db(&project).await.unwrap();
     let node_id = outcome
         .summary_node_ids

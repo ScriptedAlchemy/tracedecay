@@ -105,12 +105,14 @@ impl PayloadExternalizer<'_> {
     ) -> Result<LcmPayloadRef, LcmError> {
         payload::write_external_payload_tracked(
             self.storage_root,
-            &message.provider,
-            &message.session_id,
-            &message.message_id,
-            kind,
-            content,
-            metadata_json,
+            payload::ExternalPayloadWrite {
+                provider: &message.provider,
+                session_id: &message.session_id,
+                message_id: &message.message_id,
+                kind,
+                content,
+                metadata_json,
+            },
             self.rollback,
         )
     }

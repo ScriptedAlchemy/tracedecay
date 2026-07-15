@@ -1,66 +1,46 @@
 use std::path::{Path, PathBuf};
 
-use libsql::Connection;
-
-use super::{
-    LcmError, existing_payload_dir_opt, payload_metadata_exists, safe_remove_payload_file,
-};
+use super::{existing_payload_dir_opt, safe_remove_payload_file};
 
 /// Tracks only payload files created by a caller-managed database transaction.
 /// Existing files are never journaled, making cleanup O(new files).
 pub(crate) struct PayloadFileRollback {
     storage_root: PathBuf,
     created_refs: Vec<String>,
+    cleanup_on_drop: bool,
 }
 
 impl PayloadFileRollback {
-    pub(crate) fn begin(storage_root: &Path) -> Self {
+    /// Arms synchronous file cleanup when the owning database transaction is
+    /// dropped before commit. The caller must disarm this guard only after the
+    /// transaction has committed successfully.
+    pub(crate) fn begin_cancellation_safe(storage_root: &Path) -> Self {
         Self {
             storage_root: storage_root.to_path_buf(),
             created_refs: Vec::new(),
+            cleanup_on_drop: true,
         }
+    }
+
+    pub(crate) fn disarm(mut self) {
+        self.cleanup_on_drop = false;
     }
 
     pub(super) fn record_created(&mut self, payload_ref: &str) {
         self.created_refs.push(payload_ref.to_string());
     }
+}
 
-    pub(crate) async fn rollback(self, conn: &Connection) -> Result<usize, LcmError> {
-        if self.created_refs.is_empty() {
-            return Ok(0);
+impl Drop for PayloadFileRollback {
+    fn drop(&mut self) {
+        if !self.cleanup_on_drop || self.created_refs.is_empty() {
+            return;
         }
-        conn.execute("BEGIN IMMEDIATE", ()).await?;
-        let result = self.rollback_while_writer_locked(conn).await;
-        match result {
-            Ok(removed) => {
-                conn.execute("COMMIT", ()).await?;
-                Ok(removed)
-            }
-            Err(error) => {
-                let _ = conn.execute("ROLLBACK", ()).await;
-                Err(error)
-            }
-        }
-    }
-
-    async fn rollback_while_writer_locked(self, conn: &Connection) -> Result<usize, LcmError> {
-        let Some(dir) = existing_payload_dir_opt(&self.storage_root)? else {
-            return Ok(0);
+        let Ok(Some(dir)) = existing_payload_dir_opt(&self.storage_root) else {
+            return;
         };
-        let mut removed = 0;
-        let mut first_error = None;
-        for payload_ref in self.created_refs {
-            if payload_metadata_exists(conn, &payload_ref).await? {
-                continue;
-            }
-            match safe_remove_payload_file(&dir, &payload_ref) {
-                Ok(true) => removed += 1,
-                Ok(false) => {}
-                Err(error) => {
-                    first_error.get_or_insert(error);
-                }
-            }
+        for payload_ref in &self.created_refs {
+            let _ = safe_remove_payload_file(&dir, payload_ref);
         }
-        first_error.map_or(Ok(removed), Err)
     }
 }

@@ -11,7 +11,10 @@ use std::ops::Deref;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock, Weak};
 
-use libsql::{Builder, Connection, Database as LibsqlDatabase, OpenFlags, Value, params};
+use libsql::{
+    Builder, Connection, Database as LibsqlDatabase, OpenFlags, Transaction, TransactionBehavior,
+    Value, params,
+};
 use serde_json::Value as JsonValue;
 
 pub use tracedecay_store::ParseOffset;
@@ -312,7 +315,7 @@ pub struct GlobalDbInner {
     transaction: tokio::sync::Mutex<()>,
     storage_root: PathBuf,
     db_path: PathBuf,
-    _db: LibsqlDatabase,
+    db: LibsqlDatabase,
     _authority: DatabaseAuthority,
     _slot: Option<GlobalDbSlot>,
 }
@@ -983,6 +986,14 @@ impl GlobalDb {
         let db = builder.build().await.ok()?;
         let conn = db.connect().ok()?;
 
+        // Install the lock wait before journal-mode negotiation. Fresh daemon
+        // startup can briefly overlap another connection creating this file;
+        // without an earlier busy timeout, `PRAGMA journal_mode` fails
+        // immediately with `database is locked` and disables the store.
+        conn.execute_batch("PRAGMA busy_timeout = 5000;")
+            .await
+            .ok()?;
+
         conn.execute_batch(&format!(
             "PRAGMA mmap_size = {};",
             global_db_mmap_size_guard()
@@ -991,15 +1002,12 @@ impl GlobalDb {
         .ok()?;
 
         let pragmas = if read_only {
-            "PRAGMA busy_timeout = 5000;
-             PRAGMA foreign_keys = ON;"
-                .to_string()
+            "PRAGMA foreign_keys = ON;".to_string()
         } else {
             let journal_mode = crate::db::platform_safe_journal_mode();
             let synchronous = crate::db::platform_safe_synchronous_mode();
             format!(
                 "PRAGMA journal_mode = {journal_mode};
-                 PRAGMA busy_timeout = 5000;
                  PRAGMA synchronous = {synchronous};
                  PRAGMA foreign_keys = ON;"
             )
@@ -1012,7 +1020,7 @@ impl GlobalDb {
                 transaction: tokio::sync::Mutex::new(()),
                 storage_root,
                 db_path,
-                _db: db,
+                db,
                 _authority: authority,
                 _slot: slot,
             }),
@@ -1385,6 +1393,18 @@ impl GlobalDb {
 
     pub(crate) fn conn(&self) -> &Connection {
         &self.conn
+    }
+
+    /// Opens an isolated writer connection and starts a cancellation-safe
+    /// immediate transaction owned by this authoritative database handle.
+    /// Dropping the returned RAII transaction rolls back unfinished work
+    /// without leaving the retained read connection inside a transaction.
+    async fn begin_authoritative_transaction(&self) -> Result<Transaction, libsql::Error> {
+        let conn = self.db.connect()?;
+        conn.execute_batch("PRAGMA busy_timeout = 5000; PRAGMA foreign_keys = ON;")
+            .await?;
+        conn.transaction_with_behavior(TransactionBehavior::Immediate)
+            .await
     }
 
     /// Schedules the structured-row backfill sweep on a detached task so the
@@ -2753,9 +2773,13 @@ impl GlobalDb {
 
     /// Inserts or replaces a provider session. Returns `false` on any DB error.
     pub async fn upsert_session(&self, session: &SessionRecord) -> bool {
-        self.conn
-            .execute(
-                "INSERT INTO sessions
+        let _transaction = self.transaction.lock().await;
+        Self::upsert_session_in_existing_tx(&self.conn, session).await
+    }
+
+    async fn upsert_session_in_existing_tx(conn: &Connection, session: &SessionRecord) -> bool {
+        conn.execute(
+            "INSERT INTO sessions
                  (provider, session_id, project_key, project_path, title, started_at, ended_at,
                   transcript_path, metadata_json, parent_session_id, is_subagent, agent_id,
                   parent_tool_use_id)
@@ -2772,24 +2796,24 @@ impl GlobalDb {
                     is_subagent = excluded.is_subagent,
                     agent_id = excluded.agent_id,
                     parent_tool_use_id = excluded.parent_tool_use_id",
-                params![
-                    session.provider.as_str(),
-                    session.session_id.as_str(),
-                    session.project_key.as_str(),
-                    session.project_path.as_str(),
-                    opt_text(session.title.as_deref()),
-                    opt_i64(session.started_at),
-                    opt_i64(session.ended_at),
-                    opt_text(session.transcript_path.as_deref()),
-                    opt_text(session.metadata_json.as_deref()),
-                    opt_text(session.parent_session_id.as_deref()),
-                    i64::from(session.is_subagent),
-                    opt_text(session.agent_id.as_deref()),
-                    opt_text(session.parent_tool_use_id.as_deref()),
-                ],
-            )
-            .await
-            .is_ok()
+            params![
+                session.provider.as_str(),
+                session.session_id.as_str(),
+                session.project_key.as_str(),
+                session.project_path.as_str(),
+                opt_text(session.title.as_deref()),
+                opt_i64(session.started_at),
+                opt_i64(session.ended_at),
+                opt_text(session.transcript_path.as_deref()),
+                opt_text(session.metadata_json.as_deref()),
+                opt_text(session.parent_session_id.as_deref()),
+                i64::from(session.is_subagent),
+                opt_text(session.agent_id.as_deref()),
+                opt_text(session.parent_tool_use_id.as_deref()),
+            ],
+        )
+        .await
+        .is_ok()
     }
 
     /// Returns a single provider session by its provider-local ID.
@@ -2834,8 +2858,15 @@ impl GlobalDb {
         &self,
         event: &AnalyticsEventInsert,
     ) -> Result<i64, String> {
-        let mut rows = self
-            .conn
+        let _transaction = self.transaction.lock().await;
+        Self::append_analytics_event_in_existing_tx(&self.conn, event).await
+    }
+
+    async fn append_analytics_event_in_existing_tx(
+        conn: &Connection,
+        event: &AnalyticsEventInsert,
+    ) -> Result<i64, String> {
+        let mut rows = conn
             .query(
                 "INSERT INTO analytics_events
                  (provider, project_id, session_id, timestamp, event_kind, hook_name,
@@ -2878,27 +2909,21 @@ impl GlobalDb {
             return Ok(Vec::new());
         }
 
-        let _transaction = self.transaction.lock().await;
-        self.conn
-            .execute("BEGIN IMMEDIATE", ())
+        let _writer = self.transaction.lock().await;
+        let transaction = self
+            .begin_authoritative_transaction()
             .await
             .map_err(|e| format!("failed to begin analytics event batch: {e}"))?;
 
         let mut ids = Vec::with_capacity(events.len());
         for event in events {
-            match self.append_analytics_event(event).await {
-                Ok(id) => ids.push(id),
-                Err(err) => {
-                    let _ = self.conn.execute("ROLLBACK", ()).await;
-                    return Err(err);
-                }
-            }
+            ids.push(Self::append_analytics_event_in_existing_tx(&transaction, event).await?);
         }
 
-        if let Err(err) = self.conn.execute("COMMIT", ()).await {
-            let _ = self.conn.execute("ROLLBACK", ()).await;
-            return Err(format!("failed to commit analytics event batch: {err}"));
-        }
+        transaction
+            .commit()
+            .await
+            .map_err(|err| format!("failed to commit analytics event batch: {err}"))?;
 
         Ok(ids)
     }
@@ -3262,59 +3287,56 @@ impl GlobalDb {
     /// Inserts or replaces a provider message. Returns `false` on any DB error.
     pub async fn upsert_session_message(&self, message: &SessionMessageRecord) -> bool {
         let _transaction = self.transaction.lock().await;
-        if transcript::begin(&self.conn).await.is_err() {
+        let Ok(transaction) = self.begin_transcript_transaction().await else {
             return false;
-        }
+        };
         let mut payload_rollback =
-            crate::sessions::lcm::payload::PayloadFileRollback::begin(&self.storage_root);
+            crate::sessions::lcm::payload::PayloadFileRollback::begin_cancellation_safe(
+                &self.storage_root,
+            );
 
         if self
-            .upsert_session_message_in_existing_tx(message, &mut payload_rollback)
+            .upsert_session_message_in_existing_tx(&transaction, message, &mut payload_rollback)
             .await
             .is_err()
         {
-            transcript::rollback(&self.conn).await;
-            let _ = payload_rollback.rollback(&self.conn).await;
             return false;
         }
-        if transcript::commit(&self.conn).await.is_ok() {
-            return true;
+        if transaction.commit().await.is_err() {
+            return false;
         }
-        transcript::rollback(&self.conn).await;
-        let _ = payload_rollback.rollback(&self.conn).await;
-        false
+        payload_rollback.disarm();
+        true
     }
 
     async fn upsert_session_message_in_existing_tx(
         &self,
+        conn: &Connection,
         message: &SessionMessageRecord,
         payload_rollback: &mut crate::sessions::lcm::payload::PayloadFileRollback,
     ) -> Result<(), TranscriptPersistenceError> {
         let raw = crate::sessions::lcm::raw::upsert_raw_message_with_payload_tracked(
-            &self.conn,
+            conn,
             &self.storage_root,
             message,
             payload_rollback,
         )
         .await
         .map_err(|error| TranscriptPersistenceError::storage("upsert LCM raw message", error))?;
-        if !self
-            .upsert_session_message_projection(
-                message,
-                &raw.projection_text,
-                raw.projection_metadata_json.as_deref(),
-            )
-            .await
+        if !Self::upsert_session_message_projection(
+            conn,
+            message,
+            &raw.projection_text,
+            raw.projection_metadata_json.as_deref(),
+        )
+        .await
         {
             return Err(TranscriptPersistenceError::message(
                 "upsert session message projection",
                 "database write failed",
             ));
         }
-        if !self
-            .upsert_lcm_summary_for_transcript_summary(message)
-            .await
-        {
+        if !Self::upsert_lcm_summary_for_transcript_summary(conn, message).await {
             return Err(TranscriptPersistenceError::message(
                 "upsert transcript summary projection",
                 "database write failed",
@@ -3349,11 +3371,13 @@ impl GlobalDb {
         }
 
         let _transaction = self.transaction.lock().await;
-        if transcript::begin(&self.conn).await.is_err() {
+        let Ok(transaction) = self.begin_transcript_transaction().await else {
             return None;
-        }
+        };
         let mut payload_rollback =
-            crate::sessions::lcm::payload::PayloadFileRollback::begin(&self.storage_root);
+            crate::sessions::lcm::payload::PayloadFileRollback::begin_cancellation_safe(
+                &self.storage_root,
+            );
         let mut inserted = 0u64;
         for message in absent {
             // The presence probe ran outside this transaction, so a concurrent
@@ -3364,22 +3388,19 @@ impl GlobalDb {
             // the racing writer stored — the update rewrites identical content
             // rather than clobbering the row with foreign data.
             if self
-                .upsert_session_message_in_existing_tx(message, &mut payload_rollback)
+                .upsert_session_message_in_existing_tx(&transaction, message, &mut payload_rollback)
                 .await
                 .is_err()
             {
-                transcript::rollback(&self.conn).await;
-                let _ = payload_rollback.rollback(&self.conn).await;
                 return None;
             }
             inserted += 1;
         }
-        if transcript::commit(&self.conn).await.is_ok() {
-            return Some(inserted);
+        if transaction.commit().await.is_err() {
+            return None;
         }
-        transcript::rollback(&self.conn).await;
-        let _ = payload_rollback.rollback(&self.conn).await;
-        None
+        payload_rollback.disarm();
+        Some(inserted)
     }
 
     /// Collects the `(provider, message_id)` keys from `messages` that already
@@ -3435,7 +3456,7 @@ impl GlobalDb {
     }
 
     async fn upsert_lcm_summary_for_transcript_summary(
-        &self,
+        conn: &Connection,
         message: &SessionMessageRecord,
     ) -> bool {
         if message.kind.as_deref() != Some("summary") {
@@ -3450,7 +3471,7 @@ impl GlobalDb {
         if metadata.get("source").and_then(JsonValue::as_str) != Some("codex_context_compacted") {
             return true;
         }
-        let Ok(sources) = self.transcript_summary_sources(message).await else {
+        let Ok(sources) = Self::transcript_summary_sources(conn, message).await else {
             return false;
         };
         if sources.refs.is_empty() {
@@ -3494,17 +3515,16 @@ impl GlobalDb {
             expand_hint: Some("Codex context compaction boundary".to_string()),
             metadata_json: summary_metadata_json.or_else(|| Some(metadata_json.to_string())),
         };
-        crate::sessions::lcm::dag::insert_summary_node_in_transaction(&self.conn, draft)
+        crate::sessions::lcm::dag::insert_summary_node_in_transaction(conn, draft)
             .await
             .is_ok()
     }
 
     async fn transcript_summary_sources(
-        &self,
+        conn: &Connection,
         message: &SessionMessageRecord,
     ) -> Result<TranscriptSummarySources, libsql::Error> {
-        let mut rows = self
-            .conn
+        let mut rows = conn
             .query(
                 "SELECT r.store_id, r.timestamp,
                         length(COALESCE(r.content, r.snippet_text, '')),
@@ -3574,14 +3594,13 @@ impl GlobalDb {
     }
 
     async fn upsert_session_message_projection(
-        &self,
+        conn: &Connection,
         message: &SessionMessageRecord,
         text: &str,
         metadata_json: Option<&str>,
     ) -> bool {
-        self.conn
-            .execute(
-                "INSERT INTO session_messages
+        conn.execute(
+            "INSERT INTO session_messages
                  (provider, message_id, session_id, role, timestamp, ordinal, text, kind, model,
                   tool_names, source_path, source_offset, metadata_json)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
@@ -3597,24 +3616,24 @@ impl GlobalDb {
                     source_path = excluded.source_path,
                     source_offset = excluded.source_offset,
                     metadata_json = excluded.metadata_json",
-                params![
-                    message.provider.as_str(),
-                    message.message_id.as_str(),
-                    message.session_id.as_str(),
-                    message.role.as_str(),
-                    opt_i64(message.timestamp),
-                    message.ordinal,
-                    text,
-                    opt_text(message.kind.as_deref()),
-                    opt_text(message.model.as_deref()),
-                    opt_text(message.tool_names.as_deref()),
-                    opt_text(message.source_path.as_deref()),
-                    opt_i64(message.source_offset),
-                    opt_text(metadata_json),
-                ],
-            )
-            .await
-            .is_ok()
+            params![
+                message.provider.as_str(),
+                message.message_id.as_str(),
+                message.session_id.as_str(),
+                message.role.as_str(),
+                opt_i64(message.timestamp),
+                message.ordinal,
+                text,
+                opt_text(message.kind.as_deref()),
+                opt_text(message.model.as_deref()),
+                opt_text(message.tool_names.as_deref()),
+                opt_text(message.source_path.as_deref()),
+                opt_i64(message.source_offset),
+                opt_text(metadata_json),
+            ],
+        )
+        .await
+        .is_ok()
     }
 
     /// Returns a single provider message by its provider-local ID.
@@ -3860,34 +3879,25 @@ impl GlobalDb {
         }
         draft.metadata_json = Some(JsonValue::Object(metadata).to_string());
 
-        let _transaction = self.transaction.lock().await;
-        self.conn.execute("BEGIN IMMEDIATE", ()).await?;
-        let result = async {
-            self.conn
-                .execute(
-                    "DELETE FROM lcm_summary_sources WHERE node_id = ?1",
-                    params![node_id],
-                )
+        let _writer = self.transaction.lock().await;
+        let transaction = self.begin_authoritative_transaction().await?;
+        transaction
+            .execute(
+                "DELETE FROM lcm_summary_sources WHERE node_id = ?1",
+                params![node_id],
+            )
+            .await?;
+        transaction
+            .execute(
+                "DELETE FROM lcm_summary_nodes WHERE node_id = ?1",
+                params![node_id],
+            )
+            .await?;
+        let node =
+            crate::sessions::lcm::dag::insert_summary_node_in_transaction(&transaction, draft)
                 .await?;
-            self.conn
-                .execute(
-                    "DELETE FROM lcm_summary_nodes WHERE node_id = ?1",
-                    params![node_id],
-                )
-                .await?;
-            crate::sessions::lcm::dag::insert_summary_node_in_transaction(&self.conn, draft).await
-        }
-        .await;
-        match result {
-            Ok(node) => {
-                self.conn.execute("COMMIT", ()).await?;
-                Ok(node)
-            }
-            Err(err) => {
-                let _ = self.conn.execute("ROLLBACK", ()).await;
-                Err(err)
-            }
-        }
+        transaction.commit().await?;
+        Ok(node)
     }
 
     async fn codex_compaction_summary_draft(
@@ -4005,9 +4015,12 @@ impl GlobalDb {
         gc_config: &crate::sessions::lcm::LcmGcConfig,
         now: i64,
     ) -> Result<crate::sessions::lcm::LcmGcReport, crate::sessions::lcm::LcmError> {
-        let _transaction = self.transaction.lock().await;
-        crate::sessions::lcm::gc::run_payload_gc_with_apply(
-            &self.conn,
+        let _writer = self.transaction.lock().await;
+        crate::sessions::lcm::gc::prepare_payload_gc_apply(&self.conn, storage_root, gc_config)
+            .await?;
+        let transaction = self.begin_authoritative_transaction().await?;
+        let report = crate::sessions::lcm::gc::run_payload_gc_in_transaction(
+            &transaction,
             storage_root,
             provider,
             session_id,
@@ -4015,7 +4028,9 @@ impl GlobalDb {
             true,
             now,
         )
-        .await
+        .await?;
+        transaction.commit().await?;
+        Ok(report)
     }
 
     /// Runs LCM doctor diagnostics and safe repair planning/apply actions.
@@ -4028,21 +4043,26 @@ impl GlobalDb {
         clean_config: crate::sessions::lcm::LcmCleanConfig,
         gc_config: crate::sessions::lcm::LcmGcConfig,
     ) -> Result<serde_json::Value, crate::sessions::lcm::LcmError> {
-        let _transaction = self.transaction.lock().await;
-        crate::sessions::lcm::doctor::doctor(
-            &self.conn,
-            crate::sessions::lcm::doctor::DoctorRequest {
-                storage_root: &self.storage_root,
-                db_path: &self.db_path,
-                provider,
-                session_id,
-                mode,
-                apply,
-                clean_config,
-                gc_config,
-            },
-        )
-        .await
+        let request = crate::sessions::lcm::doctor::DoctorRequest {
+            storage_root: &self.storage_root,
+            db_path: &self.db_path,
+            provider,
+            session_id,
+            mode,
+            apply,
+            clean_config,
+            gc_config,
+        };
+        let _writer = self.transaction.lock().await;
+        if !crate::sessions::lcm::doctor::request_mutates(&request) {
+            return crate::sessions::lcm::doctor::doctor(&self.conn, request).await;
+        }
+
+        crate::sessions::lcm::doctor::prepare_apply(&self.conn).await?;
+        let transaction = self.begin_authoritative_transaction().await?;
+        let result = crate::sessions::lcm::doctor::doctor(&transaction, request).await?;
+        transaction.commit().await?;
+        Ok(result)
     }
 
     /// Updates durable LCM lifecycle/frontier state and replaces maintenance debt.
@@ -4053,8 +4073,12 @@ impl GlobalDb {
         &self,
         update: crate::sessions::lcm::LcmLifecycleUpdate,
     ) -> Result<crate::sessions::lcm::LcmLifecycleState, crate::sessions::lcm::LcmError> {
-        let _transaction = self.transaction.lock().await;
-        crate::sessions::lcm::compression::update_lifecycle(&self.conn, update).await
+        let _writer = self.transaction.lock().await;
+        let transaction = self.begin_authoritative_transaction().await?;
+        let state =
+            crate::sessions::lcm::compression::update_lifecycle(&transaction, update).await?;
+        transaction.commit().await?;
+        Ok(state)
     }
 
     /// Loads durable LCM lifecycle/frontier state for a provider conversation.
@@ -4077,8 +4101,13 @@ impl GlobalDb {
         request: crate::sessions::lcm::LcmSessionBoundaryRequest,
     ) -> Result<crate::sessions::lcm::LcmSessionBoundaryResponse, crate::sessions::lcm::LcmError>
     {
-        let _transaction = self.transaction.lock().await;
-        crate::sessions::lcm::compression::record_session_boundary(&self.conn, request).await
+        let _writer = self.transaction.lock().await;
+        let transaction = self.begin_authoritative_transaction().await?;
+        let response =
+            crate::sessions::lcm::compression::record_session_boundary(&transaction, request)
+                .await?;
+        transaction.commit().await?;
+        Ok(response)
     }
 
     /// Ingests active messages and reports whether deterministic replay changed.
@@ -4086,8 +4115,22 @@ impl GlobalDb {
         &self,
         request: crate::sessions::lcm::LcmPreflightRequest,
     ) -> Result<crate::sessions::lcm::LcmPreflightResponse, crate::sessions::lcm::LcmError> {
-        let _transaction = self.transaction.lock().await;
-        crate::sessions::lcm::compression::preflight(&self.conn, &self.storage_root, request).await
+        let _writer = self.transaction.lock().await;
+        let transaction = self.begin_authoritative_transaction().await?;
+        let mut payload_rollback =
+            crate::sessions::lcm::payload::PayloadFileRollback::begin_cancellation_safe(
+                &self.storage_root,
+            );
+        let response = crate::sessions::lcm::compression::preflight(
+            &transaction,
+            &self.storage_root,
+            request,
+            &mut payload_rollback,
+        )
+        .await?;
+        transaction.commit().await?;
+        payload_rollback.disarm();
+        Ok(response)
     }
 
     /// Runs deterministic LCM compression without invoking an auxiliary LLM.
@@ -4095,8 +4138,45 @@ impl GlobalDb {
         &self,
         request: crate::sessions::lcm::LcmCompressionRequest,
     ) -> Result<crate::sessions::lcm::LcmCompressionResponse, crate::sessions::lcm::LcmError> {
-        let _transaction = self.transaction.lock().await;
-        crate::sessions::lcm::compression::compress(&self.conn, &self.storage_root, request).await
+        let _writer = self.transaction.lock().await;
+        let transaction = self.begin_authoritative_transaction().await?;
+        let mut payload_rollback =
+            crate::sessions::lcm::payload::PayloadFileRollback::begin_cancellation_safe(
+                &self.storage_root,
+            );
+        let response = crate::sessions::lcm::compression::compress(
+            &transaction,
+            &self.storage_root,
+            request,
+            &mut payload_rollback,
+        )
+        .await?;
+        transaction.commit().await?;
+        payload_rollback.disarm();
+        Ok(response)
+    }
+
+    pub(crate) async fn ingest_lcm_raw_message(
+        &self,
+        storage_root: &Path,
+        message: &SessionMessageRecord,
+    ) -> Result<(), crate::sessions::lcm::LcmError> {
+        let _writer = self.transaction.lock().await;
+        let transaction = self.begin_authoritative_transaction().await?;
+        let mut payload_rollback =
+            crate::sessions::lcm::payload::PayloadFileRollback::begin_cancellation_safe(
+                storage_root,
+            );
+        crate::sessions::lcm::raw::upsert_raw_message_with_payload_tracked(
+            &transaction,
+            storage_root,
+            message,
+            &mut payload_rollback,
+        )
+        .await?;
+        transaction.commit().await?;
+        payload_rollback.disarm();
+        Ok(())
     }
 
     /// Returns an LCM store bound to an explicit storage root for payload files.
@@ -4107,11 +4187,7 @@ impl GlobalDb {
         &self,
         storage_root: impl AsRef<Path>,
     ) -> crate::sessions::lcm::payload::LcmStore<'_> {
-        crate::sessions::lcm::payload::LcmStore::new(
-            &self.conn,
-            storage_root.as_ref().to_path_buf(),
-            &self.transaction,
-        )
+        crate::sessions::lcm::payload::LcmStore::new(self, storage_root.as_ref().to_path_buf())
     }
 
     /// Inserts or updates an LCM summary node and its ordered source lineage.
@@ -4122,8 +4198,13 @@ impl GlobalDb {
         &self,
         draft: crate::sessions::lcm::LcmSummaryNodeDraft,
     ) -> Result<crate::sessions::lcm::LcmSummaryNode, crate::sessions::lcm::LcmError> {
-        let _transaction = self.transaction.lock().await;
-        crate::sessions::lcm::dag::insert_summary_node(&self.conn, draft).await
+        let _writer = self.transaction.lock().await;
+        let transaction = self.begin_authoritative_transaction().await?;
+        let summary =
+            crate::sessions::lcm::dag::insert_summary_node_in_transaction(&transaction, draft)
+                .await?;
+        transaction.commit().await?;
+        Ok(summary)
     }
 
     /// Expands one summary node to its direct raw-message or summary-node sources.
@@ -4773,15 +4854,14 @@ impl GlobalDb {
 
     /// Insert parsed turns in one transaction, returning the number of new rows.
     pub async fn insert_turns(&self, turns: &[crate::types::CostTurn]) -> usize {
-        let _transaction = self.transaction.lock().await;
-        if self.conn.execute("BEGIN IMMEDIATE", ()).await.is_err() {
+        let _writer = self.transaction.lock().await;
+        let Ok(transaction) = self.begin_authoritative_transaction().await else {
             return 0;
-        }
+        };
 
         let mut inserted = 0;
         for turn in turns {
-            let result = self
-                .conn
+            let result = transaction
                 .execute(
                     "INSERT OR IGNORE INTO turns
                      (message_id, project_hash, session_id, model, timestamp,
@@ -4807,15 +4887,13 @@ impl GlobalDb {
             if let Ok(n) = result {
                 inserted += n as usize;
             } else {
-                let _ = self.conn.execute("ROLLBACK", ()).await;
                 return 0;
             }
         }
 
-        if self.conn.execute("COMMIT", ()).await.is_ok() {
+        if transaction.commit().await.is_ok() {
             inserted
         } else {
-            let _ = self.conn.execute("ROLLBACK", ()).await;
             0
         }
     }

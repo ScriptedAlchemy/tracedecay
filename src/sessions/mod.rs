@@ -109,11 +109,20 @@ pub(crate) async fn ingest_user_codex_sessions_at(
     let Some(db) = open_user_session_db(profile_root).await else {
         return TranscriptIngestStats::default();
     };
+    ingest_user_codex_sessions_with_db(&db, profile_root, session_id, registered_roots).await
+}
+
+pub(crate) async fn ingest_user_codex_sessions_with_db(
+    db: &GlobalDb,
+    profile_root: &Path,
+    session_id: Option<String>,
+    registered_roots: Vec<PathBuf>,
+) -> TranscriptIngestStats {
     let Some(source) = codex::CodexSource::new() else {
         return TranscriptIngestStats::default();
     };
     let source = source.for_user_scope(session_id, registered_roots);
-    ingest_source(&db, &source, profile_root, None).await
+    ingest_source(db, &source, profile_root, None).await
 }
 
 pub async fn ingest_user_cursor_sessions() -> TranscriptIngestStats {
@@ -133,11 +142,19 @@ async fn ingest_user_cursor_sessions_at(
     let Some(db) = open_user_session_db(profile_root).await else {
         return TranscriptIngestStats::default();
     };
+    ingest_user_cursor_sessions_with_db(&db, profile_root, registered_roots).await
+}
+
+async fn ingest_user_cursor_sessions_with_db(
+    db: &GlobalDb,
+    profile_root: &Path,
+    registered_roots: Vec<PathBuf>,
+) -> TranscriptIngestStats {
     let (composer_stats, owned) = if let Some(source) = cursor_composer::CursorComposerSource::new()
     {
         let outcome = source
             .ingest_user(
-                &db,
+                db,
                 &registered_roots,
                 cursor_composer::DEFAULT_COMPOSER_ENVELOPE_CAP,
             )
@@ -161,7 +178,7 @@ async fn ingest_user_cursor_sessions_at(
     let source = source
         .with_skip_session_ids(owned)
         .for_user_scope(&registered_roots);
-    composer_stats.merge(ingest_source(&db, &source, profile_root, None).await)
+    composer_stats.merge(ingest_source(db, &source, profile_root, None).await)
 }
 
 pub async fn ingest_user_global_sources() -> TranscriptIngestStats {
@@ -183,7 +200,10 @@ pub async fn ingest_user_global_sources_for_provider(
     let Some(roots) = try_registered_project_roots().await else {
         return TranscriptIngestStats::default();
     };
-    ingest_user_global_sources_for_provider_with_roots(&profile_root, provider, roots).await
+    let Some(db) = open_user_session_db(&profile_root).await else {
+        return TranscriptIngestStats::default();
+    };
+    ingest_user_global_sources_for_provider_with_roots(&db, &profile_root, provider, roots).await
 }
 
 pub(crate) async fn ingest_user_global_sources_for_provider_at(
@@ -193,30 +213,44 @@ pub(crate) async fn ingest_user_global_sources_for_provider_at(
     let Some(roots) = try_registered_project_roots_at(profile_root).await else {
         return TranscriptIngestStats::default();
     };
-    ingest_user_global_sources_for_provider_with_roots(profile_root, provider, roots).await
+    let Some(db) = open_user_session_db(profile_root).await else {
+        return TranscriptIngestStats::default();
+    };
+    ingest_user_global_sources_for_provider_with_roots(&db, profile_root, provider, roots).await
+}
+
+pub(crate) async fn ingest_user_global_sources_for_provider_at_with_db(
+    db: &GlobalDb,
+    profile_root: &Path,
+    provider: Option<SessionProvider>,
+) -> TranscriptIngestStats {
+    let Some(roots) = try_registered_project_roots_at(profile_root).await else {
+        return TranscriptIngestStats::default();
+    };
+    ingest_user_global_sources_for_provider_with_roots(db, profile_root, provider, roots).await
 }
 
 async fn ingest_user_global_sources_for_provider_with_roots(
+    db: &GlobalDb,
     profile_root: &Path,
     provider: Option<SessionProvider>,
     roots: Vec<PathBuf>,
 ) -> TranscriptIngestStats {
     let mut stats = TranscriptIngestStats::default();
     if provider_selected(provider, SessionProvider::Codex) {
-        stats = stats.merge(ingest_user_codex_sessions_at(profile_root, None, roots.clone()).await);
+        stats = stats
+            .merge(ingest_user_codex_sessions_with_db(db, profile_root, None, roots.clone()).await);
     }
     if provider_selected(provider, SessionProvider::Cursor) {
-        stats = stats.merge(ingest_user_cursor_sessions_at(profile_root, roots.clone()).await);
+        stats =
+            stats.merge(ingest_user_cursor_sessions_with_db(db, profile_root, roots.clone()).await);
     }
-    let Some(db) = open_user_session_db(profile_root).await else {
-        return stats;
-    };
     if provider_selected(provider, SessionProvider::Hermes) {
-        stats = stats.merge(hermes::ingest_user_sessions(&db, &roots).await);
+        stats = stats.merge(hermes::ingest_user_sessions(db, &roots).await);
     }
     if provider_selected(provider, SessionProvider::Claude) {
         stats =
-            stats.merge(claude::ingest_user_sessions(&db, profile_root, None, roots.clone()).await);
+            stats.merge(claude::ingest_user_sessions(db, profile_root, None, roots.clone()).await);
     }
     let mut sources: Vec<Box<dyn TranscriptSource>> = Vec::new();
     if provider_selected(provider, SessionProvider::Vibe)
@@ -245,7 +279,7 @@ async fn ingest_user_global_sources_for_provider_with_roots(
         sources.push(Box::new(source.for_user_scope(roots)));
     }
     for source in sources {
-        let source_stats = ingest_source(&db, source.as_ref(), profile_root, None).await;
+        let source_stats = ingest_source(db, source.as_ref(), profile_root, None).await;
         stats = stats.merge(source_stats);
     }
     if stats.messages_upserted > 0 {
@@ -317,14 +351,19 @@ impl Drop for StartupUserIngestGuard {
 /// server created during daemon startup. Live hooks still call
 /// [`ingest_user_global_sources`] directly, so the cooldown cannot hide a
 /// completed turn.
-pub(crate) async fn ingest_user_global_sources_for_startup() -> TranscriptIngestStats {
-    let Ok(profile_root) = crate::storage::default_profile_root() else {
+pub(crate) async fn ingest_user_global_sources_for_startup_with_db(
+    db: &GlobalDb,
+    registry_db: &GlobalDb,
+    profile_root: &Path,
+) -> TranscriptIngestStats {
+    let Some(mut guard) = StartupUserIngestGuard::claim(profile_root.to_path_buf()) else {
         return TranscriptIngestStats::default();
     };
-    let Some(mut guard) = StartupUserIngestGuard::claim(profile_root) else {
+    let Some(roots) = registered_project_roots_from(registry_db).await else {
         return TranscriptIngestStats::default();
     };
-    let stats = ingest_user_global_sources().await;
+    let stats =
+        ingest_user_global_sources_for_provider_with_roots(db, profile_root, None, roots).await;
     guard.completed = true;
     stats
 }
@@ -449,18 +488,6 @@ pub(crate) async fn finalize_project_ingest(db: &GlobalDb, project_root: &Path) 
     // a workflow-ingest hiccup only logs at debug, never blocks session ingest.
     // Runs live in their own tables, so they do not affect `stats`.
     let _ = workflow_ingest::ingest_workflow_runs(db, project_root).await;
-}
-
-/// Daemon-startup variant that coalesces the profile-wide user sweep while
-/// still running the active project's independent ingestion pass. The supplied
-/// already-open `GlobalDb` is adapted through the same transcript-store path as
-/// normal ingestion, so restart recovery resumes from its durable cursor.
-pub(crate) async fn ingest_global_sources_for_startup(
-    db: &GlobalDb,
-    project_root: &Path,
-) -> TranscriptIngestStats {
-    let user = ingest_user_global_sources_for_startup().await;
-    user.merge(ingest_project_sources_for_provider(db, project_root, None, true).await)
 }
 
 /// Runs the bounded commit-attribution sweep against the correlation store.

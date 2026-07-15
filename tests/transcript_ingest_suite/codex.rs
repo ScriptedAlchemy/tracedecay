@@ -4,7 +4,7 @@ use tempfile::TempDir;
 use tracedecay::global_db::GlobalDb;
 use tracedecay::global_db::ParseOffset;
 use tracedecay::sessions::codex::CodexSource;
-use tracedecay::sessions::cursor::open_project_session_db;
+use tracedecay::sessions::cursor::{open_project_session_db, resolved_project_session_db_path};
 use tracedecay::sessions::lcm::{
     LcmContentSlice, LcmDescribeRequest, LcmDescribeTarget, LcmExpandRequest, LcmExpandTarget,
 };
@@ -1589,6 +1589,74 @@ async fn codex_compaction_summary_can_be_replaced_with_auxiliary_summary() {
 
     let status = db.lcm_status("codex", Some("codex-compact")).await.unwrap();
     assert_eq!(status.summary_node_count, 1);
+}
+
+#[tokio::test]
+async fn codex_compaction_summary_replacement_rolls_back_and_reuses_writer_after_failure() {
+    let tmp = TempDir::new().unwrap();
+    let (home, project) = setup(&tmp);
+    write_codex_rollout_with_compaction(&home, &project, "codex-compact-rollback");
+
+    let db = open_project_session_db(&project).await.unwrap();
+    let source = CodexSource::with_home(&home);
+    ingest_source(&db, &source, &project, None).await;
+    let pending = db
+        .pending_codex_compaction_summary_requests(Some("codex-compact-rollback"), 10)
+        .await
+        .unwrap();
+    let original_node_id = pending[0].node_id.clone();
+
+    let db_path = resolved_project_session_db_path(&project).await.unwrap();
+    let trigger_db = libsql::Builder::new_local(db_path).build().await.unwrap();
+    let trigger_conn = trigger_db.connect().unwrap();
+    trigger_conn
+        .execute_batch(
+            "CREATE TRIGGER fail_codex_summary_replacement
+             BEFORE INSERT ON lcm_summary_nodes
+             BEGIN
+                SELECT RAISE(ABORT, 'forced summary replacement failure');
+             END;",
+        )
+        .await
+        .unwrap();
+
+    let error = db
+        .replace_codex_compaction_summary(
+            &original_node_id,
+            "Failed replacement",
+            "codex_app_server",
+            None,
+        )
+        .await
+        .expect_err("trigger should abort replacement");
+    assert!(
+        format!("{error:?}").contains("forced summary replacement failure"),
+        "unexpected error: {error:?}"
+    );
+    let pending_after_failure = db
+        .pending_codex_compaction_summary_requests(Some("codex-compact-rollback"), 10)
+        .await
+        .unwrap();
+    assert_eq!(pending_after_failure[0].node_id, original_node_id);
+
+    trigger_conn
+        .execute_batch("DROP TRIGGER fail_codex_summary_replacement;")
+        .await
+        .unwrap();
+    drop(trigger_conn);
+    drop(trigger_db);
+
+    let replacement = db
+        .replace_codex_compaction_summary(
+            &original_node_id,
+            "Successful replacement",
+            "codex_app_server",
+            None,
+        )
+        .await
+        .expect("writer should remain reusable after rollback");
+    assert_eq!(replacement.summary_text, "Successful replacement");
+    assert_ne!(replacement.node_id, original_node_id);
 }
 
 #[tokio::test]

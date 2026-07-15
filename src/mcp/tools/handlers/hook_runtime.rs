@@ -7,7 +7,7 @@ use crate::global_db::GlobalDb;
 use crate::mcp::tools::ToolResult;
 use crate::tracedecay::TraceDecay;
 
-use super::render;
+use super::{SessionAuthorities, render};
 
 fn config_error(message: impl Into<String>) -> TraceDecayError {
     TraceDecayError::Config {
@@ -34,6 +34,7 @@ pub async fn handle_hook_runtime(
     cg: &TraceDecay,
     args: Value,
     global_db: Option<&GlobalDb>,
+    session_authorities: SessionAuthorities<'_>,
 ) -> Result<ToolResult> {
     let action = required_str(&args, "action")?;
     let output = match action {
@@ -48,15 +49,19 @@ pub async fn handle_hook_runtime(
                     "user transcript ingest requires projectless daemon routing",
                 ));
             }
-            ingest_transcript(Some(cg), &args, None, None).await?
+            ingest_transcript(Some(cg), &args, None, global_db, session_authorities).await?
         }
         "user_review" | "hermes_receipt" => {
             return Err(config_error(format!(
                 "hook action `{action}` requires projectless daemon routing"
             )));
         }
-        "codex_compact" => codex_compact(cg, &args).await?,
-        "cursor_compact" => cursor_compact(cg, &args).await?,
+        "codex_compact" => {
+            codex_compact(cg, &args, required_project_db(session_authorities)?).await?
+        }
+        "cursor_compact" => {
+            cursor_compact(&args, required_project_db(session_authorities)?).await?
+        }
         other => {
             return Err(config_error(format!(
                 "unknown hook runtime action: {other}"
@@ -69,37 +74,59 @@ pub async fn handle_hook_runtime(
 pub async fn handle_projectless_hook_runtime(
     args: Value,
     profile_root: &Path,
+    global_db: &GlobalDb,
+    session_authorities: SessionAuthorities<'_>,
 ) -> Result<ToolResult> {
     let action = required_str(&args, "action")?;
-    let allowed = matches!(action, "user_review" | "hermes_receipt")
-        || (action == "ingest_transcript"
-            && args.get("user_scope").and_then(Value::as_bool) == Some(true));
-    if !allowed {
+    if !projectless_action_allowed(action, &args) {
         return Err(config_error(format!(
             "projectless hook runtime action `{action}` is forbidden"
         )));
     }
-    let global_db = GlobalDb::open_at(&profile_root.join("global.db"))
-        .await
-        .ok_or_else(|| config_error("daemon could not open client registry database"))?;
     let output = match action {
         "ingest_transcript" => {
-            ingest_transcript(None, &args, Some(profile_root), Some(&global_db)).await?
+            ingest_transcript(
+                None,
+                &args,
+                Some(profile_root),
+                Some(global_db),
+                session_authorities,
+            )
+            .await?
         }
         "user_review" => user_review(&args, profile_root).await?,
-        "hermes_receipt" => hermes_receipt(&args, profile_root).await?,
+        "hermes_receipt" => {
+            hermes_receipt(&args, profile_root, required_user_db(session_authorities)?).await?
+        }
         _ => unreachable!("projectless hook action validated above"),
     };
     Ok(rendered(None, &args, &output))
 }
 
-async fn codex_compact(cg: &TraceDecay, args: &Value) -> Result<Value> {
+fn projectless_action_allowed(action: &str, args: &Value) -> bool {
+    matches!(action, "user_review" | "hermes_receipt")
+        || (action == "ingest_transcript"
+            && args.get("user_scope").and_then(Value::as_bool) == Some(true))
+}
+
+fn required_project_db(authorities: SessionAuthorities<'_>) -> Result<&GlobalDb> {
+    authorities
+        .project
+        .map(AsRef::as_ref)
+        .ok_or_else(|| config_error("daemon project session database is unavailable"))
+}
+
+fn required_user_db(authorities: SessionAuthorities<'_>) -> Result<&GlobalDb> {
+    authorities
+        .user
+        .map(AsRef::as_ref)
+        .ok_or_else(|| config_error("daemon user session database is unavailable"))
+}
+
+async fn codex_compact(cg: &TraceDecay, args: &Value, db: &GlobalDb) -> Result<Value> {
     let event_json = required_str(args, "event_json")?;
-    let db = GlobalDb::open_at(&cg.store_layout().sessions_db_path)
-        .await
-        .ok_or_else(|| config_error("daemon could not open project session database"))?;
     if let Some(source) = crate::sessions::codex::CodexSource::new() {
-        let _ = crate::sessions::source::ingest_source(&db, &source, cg.project_root(), None).await;
+        let _ = crate::sessions::source::ingest_source(db, &source, cg.project_root(), None).await;
     }
     let session_id = serde_json::from_str::<Value>(event_json)
         .ok()
@@ -142,7 +169,7 @@ async fn codex_compact(cg: &TraceDecay, args: &Value) -> Result<Value> {
     }))
 }
 
-async fn cursor_compact(cg: &TraceDecay, args: &Value) -> Result<Value> {
+async fn cursor_compact(args: &Value, db: &GlobalDb) -> Result<Value> {
     let event_json = required_str(args, "event_json")?;
     let parsed: Value = serde_json::from_str(event_json)?;
     let session_id = ["session_id", "conversation_id", "chat_id"]
@@ -150,11 +177,8 @@ async fn cursor_compact(cg: &TraceDecay, args: &Value) -> Result<Value> {
         .find_map(|key| parsed.get(*key).and_then(Value::as_str))
         .filter(|value| !value.is_empty())
         .ok_or_else(|| config_error("Cursor preCompact event omitted session id"))?;
-    let db = GlobalDb::open_at(&cg.store_layout().sessions_db_path)
-        .await
-        .ok_or_else(|| config_error("daemon could not open project session database"))?;
     let ingest =
-        crate::sessions::cursor::ingest_cursor_transcript_event_capped(event_json, &db, None).await;
+        crate::sessions::cursor::ingest_cursor_transcript_event_capped(event_json, db, None).await;
     let messages_to_compact = event_usize(&parsed, &["messages_to_compact", "compact_count"]);
     if messages_to_compact == Some(0) {
         return Ok(cursor_compact_skipped("no messages to compact"));
@@ -291,6 +315,7 @@ async fn ingest_transcript(
     args: &Value,
     profile_root: Option<&Path>,
     global_db: Option<&GlobalDb>,
+    session_authorities: SessionAuthorities<'_>,
 ) -> Result<Value> {
     let provider = required_str(args, "provider")?;
     let user_scope = args
@@ -304,20 +329,13 @@ async fn ingest_transcript(
                 profile_root.ok_or_else(|| config_error("missing client profile"))?;
             let global_db = global_db.ok_or_else(|| config_error("missing client registry"))?;
             let session_id = required_str(args, "session_id")?.to_string();
-            let db = crate::sessions::open_user_session_db(profile_root)
-                .await
-                .ok_or_else(|| config_error("daemon could not open user session database"))?;
+            let db = required_user_db(session_authorities)?;
             let roots = crate::sessions::registered_project_roots_from(global_db)
                 .await
                 .ok_or_else(|| config_error("daemon project registry is unavailable"))?;
-            crate::sessions::claude::ingest_user_sessions(
-                &db,
-                profile_root,
-                Some(session_id),
-                roots,
-            )
-            .await
-            .messages_upserted
+            crate::sessions::claude::ingest_user_sessions(db, profile_root, Some(session_id), roots)
+                .await
+                .messages_upserted
         }
         ("codex", true) => {
             let profile_root =
@@ -327,24 +345,26 @@ async fn ingest_transcript(
             let roots = crate::sessions::registered_project_roots_from(global_db)
                 .await
                 .ok_or_else(|| config_error("daemon project registry is unavailable"))?;
-            crate::sessions::ingest_user_codex_sessions_at(profile_root, Some(session_id), roots)
-                .await
-                .messages_upserted
+            crate::sessions::ingest_user_codex_sessions_with_db(
+                required_user_db(session_authorities)?,
+                profile_root,
+                Some(session_id),
+                roots,
+            )
+            .await
+            .messages_upserted
         }
         ("cursor", true) => {
-            let profile_root =
-                profile_root.ok_or_else(|| config_error("missing client profile"))?;
+            profile_root.ok_or_else(|| config_error("missing client profile"))?;
             let global_db = global_db.ok_or_else(|| config_error("missing client registry"))?;
             let event_json = required_str(args, "event_json")?;
-            let db = crate::sessions::open_user_session_db(profile_root)
-                .await
-                .ok_or_else(|| config_error("daemon could not open user session database"))?;
+            let db = required_user_db(session_authorities)?;
             let roots = crate::sessions::registered_project_roots_from(global_db)
                 .await
                 .ok_or_else(|| config_error("daemon project registry is unavailable"))?;
             crate::sessions::cursor::ingest_cursor_user_transcript_event_capped_with_registered_roots(
                 event_json,
-                &db,
+                db,
                 max_new_bytes,
                 &roots,
             )
@@ -352,15 +372,12 @@ async fn ingest_transcript(
             .messages_upserted
         }
         ("cursor", false) => {
-            let cg =
-                cg.ok_or_else(|| config_error("project transcript ingest requires a project"))?;
+            cg.ok_or_else(|| config_error("project transcript ingest requires a project"))?;
             let event_json = required_str(args, "event_json")?;
-            let db = crate::sessions::cursor::open_project_session_db(cg.project_root())
-                .await
-                .ok_or_else(|| config_error("daemon could not open project session database"))?;
+            let db = required_project_db(session_authorities)?;
             crate::sessions::cursor::ingest_cursor_transcript_event_capped(
                 event_json,
-                &db,
+                db,
                 max_new_bytes,
             )
             .await
@@ -370,16 +387,14 @@ async fn ingest_transcript(
             let profile_root =
                 profile_root.ok_or_else(|| config_error("missing client profile"))?;
             let global_db = global_db.ok_or_else(|| config_error("missing client registry"))?;
-            let db = crate::sessions::open_user_session_db(profile_root)
-                .await
-                .ok_or_else(|| config_error("daemon could not open user session database"))?;
+            let db = required_user_db(session_authorities)?;
             let source = crate::sessions::kiro::KiroSource::new()
                 .ok_or_else(|| config_error("Kiro transcript source is unavailable"))?;
             let roots = crate::sessions::registered_project_roots_from(global_db)
                 .await
                 .ok_or_else(|| config_error("daemon project registry is unavailable"))?;
             crate::sessions::source::ingest_source(
-                &db,
+                db,
                 &source.for_user_scope(roots),
                 profile_root,
                 max_new_bytes,
@@ -390,10 +405,8 @@ async fn ingest_transcript(
         ("kiro", false) => {
             let cg =
                 cg.ok_or_else(|| config_error("project transcript ingest requires a project"))?;
-            let db = crate::sessions::cursor::open_project_session_db(cg.project_root())
-                .await
-                .ok_or_else(|| config_error("daemon could not open project session database"))?;
-            crate::sessions::kiro::ingest_kiro_for_project(&db, cg.project_root(), max_new_bytes)
+            let db = required_project_db(session_authorities)?;
+            crate::sessions::kiro::ingest_kiro_for_project(db, cg.project_root(), max_new_bytes)
                 .await
                 .messages_upserted
         }
@@ -498,7 +511,7 @@ async fn run_user_review(
     .await
 }
 
-async fn hermes_receipt(args: &Value, profile_root: &Path) -> Result<Value> {
+async fn hermes_receipt(args: &Value, profile_root: &Path, session_db: &GlobalDb) -> Result<Value> {
     let event: crate::daemon::DaemonHookEvent = serde_json::from_value(
         args.get("event")
             .cloned()
@@ -530,10 +543,6 @@ async fn hermes_receipt(args: &Value, profile_root: &Path) -> Result<Value> {
             else {
                 return Ok(json!({ "action": "hermes_receipt", "status": "ingested" }));
             };
-            let sessions_path = crate::sessions::user_sessions_db_path(profile_root);
-            let session_db = crate::global_db::GlobalDb::open_read_only_at(&sessions_path)
-                .await
-                .ok_or_else(|| config_error("daemon could not open user session database"))?;
             if session_db
                 .lcm_load_raw_message("hermes", &ready.transcript_watermark)
                 .await
@@ -593,29 +602,17 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn projectless_runtime_rejects_project_database_actions() {
-        assert!(
-            handle_projectless_hook_runtime(
-                json!({ "action": "reset_counter" }),
-                Path::new("/not-used"),
-            )
-            .await
-            .is_err()
-        );
-        assert!(
-            handle_projectless_hook_runtime(
-                json!({
-                    "action": "ingest_transcript",
-                    "provider": "cursor",
-                    "user_scope": false,
-                    "event_json": "{}",
-                }),
-                Path::new("/not-used")
-            )
-            .await
-            .is_err()
-        );
+    #[test]
+    fn projectless_runtime_rejects_project_database_actions() {
+        assert!(!projectless_action_allowed("reset_counter", &json!({})));
+        assert!(!projectless_action_allowed(
+            "ingest_transcript",
+            &json!({ "user_scope": false }),
+        ));
+        assert!(projectless_action_allowed(
+            "ingest_transcript",
+            &json!({ "user_scope": true }),
+        ));
     }
 
     #[test]
@@ -626,6 +623,13 @@ mod tests {
         assert_eq!(outcome.reason, "no messages to compact");
         assert_eq!(outcome.summary_nodes_created, 0);
         assert!(outcome.summary_node_ids.is_empty());
+    }
+
+    #[test]
+    fn session_authority_roles_fail_closed_independently() {
+        let none = SessionAuthorities::default();
+        assert!(required_project_db(none).is_err());
+        assert!(required_user_db(none).is_err());
     }
 
     #[test]
