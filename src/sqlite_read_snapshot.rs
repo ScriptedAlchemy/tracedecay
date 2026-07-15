@@ -85,6 +85,7 @@ pub(crate) struct SnapshotSet {
 }
 
 impl SnapshotSet {
+    #[cfg(test)]
     pub(crate) async fn capture(paths: &[PathBuf]) -> io::Result<Self> {
         let root = default_scratch_root(paths)?;
         Self::capture_in(paths, &root).await
@@ -196,6 +197,7 @@ struct FileState {
 /// Opens one source family without mutating it. Checkpointed DBs are read
 /// directly through `SQLite` immutable mode. WAL-backed DBs are reflinked when
 /// supported, then fall back to one full copy with WAL/SHM copied alongside.
+#[cfg(test)]
 pub(crate) async fn open(path: &Path) -> io::Result<SnapshotDatabase> {
     let mut snapshots = SnapshotSet::capture(&[path.to_path_buf()]).await?;
     snapshots.databases.remove(path).ok_or_else(|| {
@@ -435,6 +437,7 @@ fn create_scratch_directory(
     ))
 }
 
+#[cfg(test)]
 fn default_scratch_root(paths: &[PathBuf]) -> io::Result<PathBuf> {
     #[cfg(unix)]
     {

@@ -276,7 +276,7 @@ mod tests {
         assert_eq!(fingerprint.source_hash, source_hash_a);
         let pairs = db.fresh_redundancy_pairs_for_node("node-a").await.unwrap();
         assert_eq!(pairs.len(), 1);
-        assert_eq!(pairs[0].ranking_score, ranking_score);
+        assert!((pairs[0].ranking_score - ranking_score).abs() < f64::EPSILON);
     }
 
     #[tokio::test]

@@ -606,9 +606,7 @@ async fn migrate_candidate_snapshot(
     let fingerprint = logical_source_fingerprint(
         source,
         candidate.primary_path(),
-        source_memory
-            .zip(candidate.source_memory_db.as_deref())
-            .map(|(connection, path)| (connection, path)),
+        source_memory.zip(candidate.source_memory_db.as_deref()),
     )
     .await
     .map_err(CandidateError::Failed)?;

@@ -388,19 +388,12 @@ impl GlobalDbWriterConnection<'_> {
         self.conn.execute(sql, params).await
     }
 
+    #[cfg(test)]
     pub(crate) async fn execute_batch(
         &self,
         sql: &str,
     ) -> Result<libsql::BatchRows, libsql::Error> {
         self.conn.execute_batch(sql).await
-    }
-
-    pub(crate) async fn query(
-        &self,
-        sql: &str,
-        params: impl libsql::params::IntoParams,
-    ) -> Result<libsql::Rows, libsql::Error> {
-        self.conn.query(sql, params).await
     }
 
     async fn drain_pending_payload_deletes(
@@ -5277,7 +5270,7 @@ impl GlobalDb {
         out
     }
 
-    /// Checkpoints the WAL and preserves SQLite's completion status.
+    /// Checkpoints the WAL and preserves `SQLite`'s completion status.
     pub(crate) async fn checkpoint_result(&self) -> Result<(), TraceDecayError> {
         let _writer = self.transaction.lock().await;
         let conn = self

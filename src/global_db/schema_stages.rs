@@ -296,10 +296,10 @@ pub(super) async fn ensure_composed_context(db: &GlobalDb) -> crate::errors::Res
         .begin_write_transaction()
         .await
         .map_err(|error| global_db_operation_error("begin composed context schema", error))?;
-    crate::sessions::lcm::schema::ensure_lcm_schema(&transaction)
+    crate::sessions::lcm::schema::ensure_lcm_schema_in_transaction(&transaction)
         .await
         .map_err(|error| global_db_operation_error("initialize LCM schema", error))?;
-    crate::sessions::git_correlation::ensure_git_correlation_schema(&transaction)
+    crate::sessions::git_correlation::ensure_git_correlation_schema_in_transaction(&transaction)
         .await
         .map_err(|error| global_db_operation_error("initialize git correlation schema", error))?;
     crate::sessions::workflow_index::ensure_workflow_index_schema(&transaction)

@@ -570,19 +570,6 @@ fn parse_fact_proposal_state(
         .map_err(|error| error.to_string())
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn fact_proposal_state_filter_accepts_applying() {
-        assert_eq!(
-            parse_fact_proposal_state(Some("applying")).unwrap(),
-            Some(crate::automation::fact_proposals::FactProposalState::Applying)
-        );
-    }
-}
-
 fn fact_proposal_error(err: &crate::errors::TraceDecayError) -> (StatusCode, Json<Value>) {
     let message = err.to_string();
     let status = if message.contains("not found") {
@@ -638,4 +625,17 @@ pub(crate) async fn oplog(
 ) -> Json<Value> {
     let limit = coerce_limit(params.limit, 50, 300);
     Json(memory_service::oplog_payload(&state, limit).await)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fact_proposal_state_filter_accepts_applying() {
+        assert_eq!(
+            parse_fact_proposal_state(Some("applying")).unwrap(),
+            Some(crate::automation::fact_proposals::FactProposalState::Applying)
+        );
+    }
 }

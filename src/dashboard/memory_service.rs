@@ -898,21 +898,20 @@ pub(crate) async fn curate_apply_payload(state: &DashboardState, ops: &[Value]) 
         )
         .await;
     }
-    if deleted > 0 || merged > 0 {
-        if let Ok(writer) = state
+    if (deleted > 0 || merged > 0)
+        && let Ok(writer) = state
             .mem_db
             .writer_connection("record dashboard curation operation")
             .await
-        {
-            let _ = writer
-                .memory_store()
-                .record_oplog(
-                    "curate_apply",
-                    None,
-                    &json!({ "mode": "ops", "deleted": deleted, "merged": merged, "errors": errors }),
-                )
-                .await;
-        }
+    {
+        let _ = writer
+            .memory_store()
+            .record_oplog(
+                "curate_apply",
+                None,
+                &json!({ "mode": "ops", "deleted": deleted, "merged": merged, "errors": errors }),
+            )
+            .await;
     }
     push_curation_activity(
         state,

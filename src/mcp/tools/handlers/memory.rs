@@ -348,7 +348,7 @@ async fn handle_fact_store_for_target(
                 .await?,
         )
     };
-    let conn = reader.as_ref().map_or_else(|| db.conn(), |reader| reader);
+    let conn = reader.as_ref().map_or(db.conn(), |reader| reader);
     let store = MemoryStore::new(conn);
     let mut refresh_digest = false;
     let out = match action {

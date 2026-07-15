@@ -105,7 +105,7 @@ fn allocate_backup_directory(
         let staging = backup_root.join(format!(".{name}.tmp"));
         match fs::create_dir(&staging) {
             Ok(()) => return Ok((staging, published)),
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
             Err(error) => return Err(LcmError::Io(error.to_string())),
         }
     }

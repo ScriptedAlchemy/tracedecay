@@ -34,7 +34,7 @@ pub async fn list_unfinished(
     limit: usize,
 ) -> Result<Vec<WorkflowStateItem>, String> {
     let conn = db.read_connection();
-    query_unfinished(&conn, limit).await
+    query_unfinished(conn, limit).await
 }
 
 async fn query_unfinished(

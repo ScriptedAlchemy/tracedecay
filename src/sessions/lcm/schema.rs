@@ -83,7 +83,24 @@ pub(crate) async fn rebuild_raw_fts(conn: &Connection) -> Option<()> {
     Some(())
 }
 
+#[derive(Clone, Copy)]
+enum SchemaTransaction {
+    Managed,
+    CallerOwned,
+}
+
 pub(crate) async fn ensure_lcm_schema(conn: &Connection) -> Result<(), LcmError> {
+    ensure_lcm_schema_with_transaction(conn, SchemaTransaction::Managed).await
+}
+
+pub(crate) async fn ensure_lcm_schema_in_transaction(conn: &Connection) -> Result<(), LcmError> {
+    ensure_lcm_schema_with_transaction(conn, SchemaTransaction::CallerOwned).await
+}
+
+async fn ensure_lcm_schema_with_transaction(
+    conn: &Connection,
+    transaction: SchemaTransaction,
+) -> Result<(), LcmError> {
     // Mirrors hermes-lcm `run_versioned_migrations`: version steps are
     // monotonic, so a database written by a newer release is left untouched
     // (no marker downgrade, no carry-forward re-run against newer data).
@@ -283,7 +300,12 @@ pub(crate) async fn ensure_lcm_schema(conn: &Connection) -> Result<(), LcmError>
         )
         .await;
 
-    carry_forward_legacy_messages(conn).await?;
+    match transaction {
+        SchemaTransaction::Managed => carry_forward_legacy_messages(conn).await?,
+        SchemaTransaction::CallerOwned => {
+            carry_forward_legacy_messages_in_transaction(conn).await?;
+        }
+    }
     conn.execute(
         "INSERT INTO session_schema_migrations(name, version)
          VALUES (?1, ?2)

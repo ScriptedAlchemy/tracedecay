@@ -9,7 +9,9 @@
 use std::collections::HashSet;
 use std::fmt::Write as _;
 
-use libsql::{Connection, TransactionBehavior, Value, params};
+#[cfg(test)]
+use libsql::TransactionBehavior;
+use libsql::{Connection, Value, params};
 use serde::{Deserialize, Serialize};
 
 use super::SessionMessageRecord;
@@ -518,8 +520,27 @@ pub fn span_debounce_key(
 
 /// Creates the correlation tables when missing. Version-gated via
 /// `session_schema_migrations` like the LCM schema; idempotent.
+#[derive(Clone, Copy)]
+enum SchemaTransaction {
+    Managed,
+    CallerOwned,
+}
+
 pub(crate) async fn ensure_git_correlation_schema(
     conn: &Connection,
+) -> Result<(), GitCorrelationError> {
+    ensure_git_correlation_schema_with_transaction(conn, SchemaTransaction::Managed).await
+}
+
+pub(crate) async fn ensure_git_correlation_schema_in_transaction(
+    conn: &Connection,
+) -> Result<(), GitCorrelationError> {
+    ensure_git_correlation_schema_with_transaction(conn, SchemaTransaction::CallerOwned).await
+}
+
+async fn ensure_git_correlation_schema_with_transaction(
+    conn: &Connection,
+    transaction: SchemaTransaction,
 ) -> Result<(), GitCorrelationError> {
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS session_schema_migrations (
@@ -542,7 +563,9 @@ pub(crate) async fn ensure_git_correlation_schema(
     }
     let rebuild_commit_table = table_exists(conn, "commit_sessions").await?;
 
-    conn.execute("BEGIN IMMEDIATE", ()).await?;
+    if matches!(transaction, SchemaTransaction::Managed) {
+        conn.execute("BEGIN IMMEDIATE", ()).await?;
+    }
     let migration = async {
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS session_git_spans (
@@ -643,6 +666,9 @@ pub(crate) async fn ensure_git_correlation_schema(
         Ok::<(), GitCorrelationError>(())
     }
     .await;
+    if matches!(transaction, SchemaTransaction::CallerOwned) {
+        return migration;
+    }
     match migration {
         Ok(()) => {
             if let Err(err) = conn.execute("COMMIT", ()).await {
@@ -885,6 +911,7 @@ fn metadata_worktree(metadata: &serde_json::Map<String, serde_json::Value>) -> O
 ///
 /// Runs in a `BEGIN IMMEDIATE` transaction so concurrent writers converge on
 /// widened spans instead of interleaved half-updates.
+#[cfg(test)]
 pub(crate) async fn record_span_observation(
     conn: &Connection,
     observation: &SpanObservation,

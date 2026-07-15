@@ -339,10 +339,10 @@ pub(super) fn rollback_published_branch_tracking(
     let mut meta = meta.ok_or_else(|| crate::errors::TraceDecayError::Config {
         message: format!("cannot roll back branch '{branch_name}': branch metadata is missing"),
     })?;
-    if !meta
+    if meta
         .branches
         .get(branch_name)
-        .is_some_and(|entry| entry.db_file == db_file)
+        .is_none_or(|entry| entry.db_file != db_file)
     {
         return Err(crate::errors::TraceDecayError::Config {
             message: format!(

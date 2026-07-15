@@ -1481,7 +1481,7 @@ fn fingerprint_file(path: &Path) -> io::Result<SqliteFileFingerprint> {
     require_regular_file(path, "SQLite fingerprint source")?;
     let mut file = fs::File::open(path)?;
     let mut digest = Sha256::new();
-    let mut buffer = [0_u8; 128 * 1024];
+    let mut buffer = vec![0_u8; 128 * 1024];
     let mut size_bytes = 0_u64;
     loop {
         let read = file.read(&mut buffer)?;

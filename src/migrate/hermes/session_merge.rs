@@ -213,32 +213,6 @@ async fn merge_snapshot_in_transaction(
     })
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn cancellation_removes_armed_payloads() {
-        let temp = tempfile::tempdir().unwrap();
-        let payload = temp.path().join("copied-payload");
-        fs::write(&payload, b"payload").unwrap();
-        let task_payload = payload.clone();
-        let (armed_tx, armed_rx) = tokio::sync::oneshot::channel();
-        let task = tokio::spawn(async move {
-            let mut created = CreatedPayloads::armed();
-            created.paths_mut().push(task_payload);
-            armed_tx.send(()).unwrap();
-            std::future::pending::<()>().await;
-            created.disarm();
-        });
-
-        armed_rx.await.unwrap();
-        task.abort();
-        assert!(task.await.unwrap_err().is_cancelled());
-        assert!(!payload.exists());
-    }
-}
-
 fn marker_path(target_db_path: &Path, fingerprint: &str) -> Result<PathBuf, String> {
     if fingerprint.len() != 64 || !fingerprint.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         return Err("invalid legacy-store fingerprint".to_string());
@@ -400,5 +374,31 @@ fn fail_after(table: &str, requested: Option<&str>) -> Result<(), String> {
         Err(format!("injected migration failure after {table}"))
     } else {
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn cancellation_removes_armed_payloads() {
+        let temp = tempfile::tempdir().unwrap();
+        let payload = temp.path().join("copied-payload");
+        fs::write(&payload, b"payload").unwrap();
+        let task_payload = payload.clone();
+        let (armed_tx, armed_rx) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(async move {
+            let mut created = CreatedPayloads::armed();
+            created.paths_mut().push(task_payload);
+            armed_tx.send(()).unwrap();
+            std::future::pending::<()>().await;
+            created.disarm();
+        });
+
+        armed_rx.await.unwrap();
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        assert!(!payload.exists());
     }
 }

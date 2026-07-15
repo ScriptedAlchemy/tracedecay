@@ -36,17 +36,15 @@ pub(crate) struct DatabaseWriterConnection<'a> {
 /// An immediate transaction that retains the canonical writer lane until the
 /// transaction commits, rolls back, or is dropped.
 pub(crate) struct DatabaseWriteTransaction<'a> {
-    transaction: Option<Transaction>,
-    _guard: tokio::sync::MutexGuard<'a, ()>,
+    transaction: Transaction,
+    guard: tokio::sync::MutexGuard<'a, ()>,
 }
 
 impl Deref for DatabaseWriteTransaction<'_> {
     type Target = Transaction;
 
     fn deref(&self) -> &Self::Target {
-        self.transaction
-            .as_ref()
-            .expect("database write transaction consumed once")
+        &self.transaction
     }
 }
 
@@ -59,6 +57,7 @@ impl DatabaseWriterConnection<'_> {
         self.conn.execute(sql, params).await
     }
 
+    #[cfg(test)]
     pub(crate) async fn execute_batch(&self, sql: &str) -> libsql::Result<libsql::BatchRows> {
         self.conn.execute_batch(sql).await
     }
@@ -82,12 +81,8 @@ impl DatabaseWriterConnection<'_> {
 
 impl DatabaseWriteTransaction<'_> {
     pub(crate) async fn commit(self) -> Result<()> {
-        let guard = self._guard;
-        let transaction = self
-            .transaction
-            .expect("database write transaction consumed once")
-            .commit()
-            .await;
+        let Self { transaction, guard } = self;
+        let transaction = transaction.commit().await;
         drop(guard);
         transaction.map_err(|error| TraceDecayError::Database {
             message: format!("failed to commit isolated writer transaction: {error}"),
@@ -97,12 +92,8 @@ impl DatabaseWriteTransaction<'_> {
 
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) async fn rollback(self) -> Result<()> {
-        let guard = self._guard;
-        let transaction = self
-            .transaction
-            .expect("database write transaction consumed once")
-            .rollback()
-            .await;
+        let Self { transaction, guard } = self;
+        let transaction = transaction.rollback().await;
         drop(guard);
         transaction.map_err(|error| TraceDecayError::Database {
             message: format!("failed to roll back isolated writer transaction: {error}"),
@@ -427,10 +418,7 @@ impl Database {
                 message: format!("failed to begin isolated writer transaction: {error}"),
                 operation: operation.to_string(),
             })?;
-        Ok(DatabaseWriteTransaction {
-            transaction: Some(transaction),
-            _guard: guard,
-        })
+        Ok(DatabaseWriteTransaction { transaction, guard })
     }
 
     /// Releases this database handle.
