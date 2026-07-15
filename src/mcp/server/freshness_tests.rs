@@ -1,6 +1,6 @@
 use super::{
-    DatabaseOwnerReconciler, McpServer, StalenessBannerInputs, format_index_age_phrase,
-    staleness_banner,
+    DatabaseOwnerReconciler, McpServer, McpServerConstructionContext, StalenessBannerInputs,
+    format_index_age_phrase, staleness_banner,
 };
 use crate::config::PinnedUserDataDir;
 use crate::tracedecay::TraceDecay;
@@ -68,9 +68,10 @@ async fn branch_drift_reconciles_database_owner_before_returning() {
             })
         })
     };
-    let server =
-        McpServer::new_with_dbs_and_reconcilers(main, None, None, None, true, None, Some(callback))
-            .await;
+    let server = McpServer::new_with_context(
+        McpServerConstructionContext::direct(main, None).with_database_owner_reconciler(callback),
+    )
+    .await;
 
     git(root, &["checkout", "-q", "feature"]);
     let fresh = server.reopen_if_branch_drifted().await;

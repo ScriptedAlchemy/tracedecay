@@ -1,7 +1,6 @@
 use super::writer_test_support::init_indexed_repo;
 use super::{
     BackgroundRefreshRequest, BackgroundRefreshWriter, McpServer, McpServerConstructionContext,
-    direct_hook_branch_writer,
 };
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -43,22 +42,11 @@ async fn read_refresh_uses_injected_writer_without_direct_fallback() {
             })
         })
     };
-    let server =
-        McpServer::new_with_dbs_and_reconcilers_and_writers(McpServerConstructionContext {
-            cg,
-            scope_prefix: None,
-            global_db: None,
-            registry_db: None,
-            session_db: None,
-            user_session_db: None,
-            allow_default_registry_fallback: true,
-            automation_scheduler_reconciler: None,
-            database_owner_reconciler: None,
-            dashboard_automation_writer: crate::dashboard::direct_dashboard_automation_writer(),
-            hook_branch_writer: direct_hook_branch_writer(),
-            background_refresh_writer: refresh_writer,
-        })
-        .await;
+    let server = McpServer::new_with_context(
+        McpServerConstructionContext::direct(cg, None)
+            .with_background_refresh_writer(refresh_writer),
+    )
+    .await;
     let snapshot = server.cg_snapshot().await;
     server
         .background_refresh_running

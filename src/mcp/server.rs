@@ -872,19 +872,126 @@ pub(crate) async fn execute_background_refresh_direct(
 /// Keeping these values together makes explicit that all of them describe one
 /// server instance, rather than independent configuration parameters.
 pub(crate) struct McpServerConstructionContext {
-    pub(crate) cg: TraceDecay,
-    pub(crate) scope_prefix: Option<String>,
-    pub(crate) global_db: Option<Arc<GlobalDb>>,
-    pub(crate) registry_db: Option<Arc<GlobalDb>>,
-    pub(crate) session_db: Option<Arc<GlobalDb>>,
-    pub(crate) user_session_db: Option<Arc<GlobalDb>>,
-    pub(crate) allow_default_registry_fallback: bool,
-    pub(crate) automation_scheduler_reconciler:
-        Option<crate::dashboard::AutomationSchedulerReconciler>,
-    pub(crate) database_owner_reconciler: Option<DatabaseOwnerReconciler>,
-    pub(crate) dashboard_automation_writer: crate::dashboard::DashboardAutomationWriter,
-    pub(crate) hook_branch_writer: HookBranchWriter,
-    pub(crate) background_refresh_writer: BackgroundRefreshWriter,
+    cg: TraceDecay,
+    scope_prefix: Option<String>,
+    global_db: Option<Arc<GlobalDb>>,
+    registry_db: Option<Arc<GlobalDb>>,
+    session_db: Option<Arc<GlobalDb>>,
+    user_session_db: Option<Arc<GlobalDb>>,
+    allow_default_registry_fallback: bool,
+    automation_scheduler_reconciler: Option<crate::dashboard::AutomationSchedulerReconciler>,
+    database_owner_reconciler: Option<DatabaseOwnerReconciler>,
+    dashboard_automation_writer: crate::dashboard::DashboardAutomationWriter,
+    hook_branch_writer: HookBranchWriter,
+    background_refresh_writer: BackgroundRefreshWriter,
+}
+
+pub(crate) struct McpServerWriters {
+    dashboard_automation: crate::dashboard::DashboardAutomationWriter,
+    hook_branch: HookBranchWriter,
+    background_refresh: BackgroundRefreshWriter,
+}
+
+impl McpServerWriters {
+    pub(crate) fn daemon_owned(
+        dashboard_automation: crate::dashboard::DashboardAutomationWriter,
+        hook_branch: HookBranchWriter,
+        background_refresh: BackgroundRefreshWriter,
+    ) -> Self {
+        Self {
+            dashboard_automation,
+            hook_branch,
+            background_refresh,
+        }
+    }
+}
+
+impl McpServerConstructionContext {
+    fn direct(cg: TraceDecay, scope_prefix: Option<String>) -> Self {
+        Self {
+            cg,
+            scope_prefix,
+            global_db: None,
+            registry_db: None,
+            session_db: None,
+            user_session_db: None,
+            allow_default_registry_fallback: true,
+            automation_scheduler_reconciler: None,
+            database_owner_reconciler: None,
+            dashboard_automation_writer: crate::dashboard::direct_dashboard_automation_writer(),
+            hook_branch_writer: direct_hook_branch_writer(),
+            background_refresh_writer: direct_background_refresh_writer(),
+        }
+    }
+
+    fn with_direct_databases(
+        mut self,
+        global_db: Option<Arc<GlobalDb>>,
+        registry_db: Option<Arc<GlobalDb>>,
+        session_db: Option<Arc<GlobalDb>>,
+        user_session_db: Option<Arc<GlobalDb>>,
+        allow_default_registry_fallback: bool,
+    ) -> Self {
+        self.global_db = global_db;
+        self.registry_db = registry_db;
+        self.session_db = session_db;
+        self.user_session_db = user_session_db;
+        self.allow_default_registry_fallback = allow_default_registry_fallback;
+        self
+    }
+
+    pub(crate) fn daemon_owned(
+        cg: TraceDecay,
+        scope_prefix: Option<String>,
+        global_db: Option<Arc<GlobalDb>>,
+        registry_db: Arc<GlobalDb>,
+        session_db: Arc<GlobalDb>,
+        user_session_db: Arc<GlobalDb>,
+        writers: McpServerWriters,
+    ) -> Self {
+        Self {
+            cg,
+            scope_prefix,
+            global_db,
+            registry_db: Some(registry_db),
+            session_db: Some(session_db),
+            user_session_db: Some(user_session_db),
+            allow_default_registry_fallback: false,
+            automation_scheduler_reconciler: None,
+            database_owner_reconciler: None,
+            dashboard_automation_writer: writers.dashboard_automation,
+            hook_branch_writer: writers.hook_branch,
+            background_refresh_writer: writers.background_refresh,
+        }
+    }
+
+    pub(crate) fn with_automation_scheduler_reconciler(
+        mut self,
+        reconciler: crate::dashboard::AutomationSchedulerReconciler,
+    ) -> Self {
+        self.automation_scheduler_reconciler = Some(reconciler);
+        self
+    }
+
+    pub(crate) fn with_database_owner_reconciler(
+        mut self,
+        reconciler: DatabaseOwnerReconciler,
+    ) -> Self {
+        self.database_owner_reconciler = Some(reconciler);
+        self
+    }
+
+    #[cfg(test)]
+    fn with_hook_branch_writer(mut self, writer: HookBranchWriter) -> Self {
+        self.hook_branch_writer = writer;
+        self
+    }
+
+    #[cfg(test)]
+    fn with_background_refresh_writer(mut self, writer: BackgroundRefreshWriter) -> Self {
+        self.background_refresh_writer = writer;
+        self
+    }
 }
 
 struct McpToolErrorAnalyticsRequest<'a> {
@@ -1137,46 +1244,6 @@ impl McpServer {
         registry_db: Option<Arc<GlobalDb>>,
         allow_default_registry_fallback: bool,
     ) -> Arc<Self> {
-        Self::new_with_dbs_and_automation_reconciler(
-            cg,
-            scope_prefix,
-            global_db,
-            registry_db,
-            allow_default_registry_fallback,
-            None,
-        )
-        .await
-    }
-
-    pub(crate) async fn new_with_dbs_and_automation_reconciler(
-        cg: TraceDecay,
-        scope_prefix: Option<String>,
-        global_db: Option<Arc<GlobalDb>>,
-        registry_db: Option<Arc<GlobalDb>>,
-        allow_default_registry_fallback: bool,
-        automation_scheduler_reconciler: Option<crate::dashboard::AutomationSchedulerReconciler>,
-    ) -> Arc<Self> {
-        Self::new_with_dbs_and_reconcilers(
-            cg,
-            scope_prefix,
-            global_db,
-            registry_db,
-            allow_default_registry_fallback,
-            automation_scheduler_reconciler,
-            None,
-        )
-        .await
-    }
-
-    pub(crate) async fn new_with_dbs_and_reconcilers(
-        cg: TraceDecay,
-        scope_prefix: Option<String>,
-        global_db: Option<Arc<GlobalDb>>,
-        registry_db: Option<Arc<GlobalDb>>,
-        allow_default_registry_fallback: bool,
-        automation_scheduler_reconciler: Option<crate::dashboard::AutomationSchedulerReconciler>,
-        database_owner_reconciler: Option<DatabaseOwnerReconciler>,
-    ) -> Arc<Self> {
         let profile_root = registry_db
             .as_ref()
             .and_then(|db| db.db_path().parent().map(Path::to_path_buf))
@@ -1197,26 +1264,19 @@ impl McpServer {
         let session_db = GlobalDb::open_at(&cg.store_layout().sessions_db_path)
             .await
             .map(Arc::new);
-        Self::new_with_dbs_and_reconcilers_and_writers(McpServerConstructionContext {
-            cg,
-            scope_prefix,
-            global_db,
-            registry_db,
-            session_db,
-            user_session_db,
-            allow_default_registry_fallback,
-            automation_scheduler_reconciler,
-            database_owner_reconciler,
-            dashboard_automation_writer: crate::dashboard::direct_dashboard_automation_writer(),
-            hook_branch_writer: direct_hook_branch_writer(),
-            background_refresh_writer: direct_background_refresh_writer(),
-        })
+        Self::new_with_context(
+            McpServerConstructionContext::direct(cg, scope_prefix).with_direct_databases(
+                global_db,
+                registry_db,
+                session_db,
+                user_session_db,
+                allow_default_registry_fallback,
+            ),
+        )
         .await
     }
 
-    pub(crate) async fn new_with_dbs_and_reconcilers_and_writers(
-        context: McpServerConstructionContext,
-    ) -> Arc<Self> {
+    pub(crate) async fn new_with_context(context: McpServerConstructionContext) -> Arc<Self> {
         let McpServerConstructionContext {
             cg,
             scope_prefix,
