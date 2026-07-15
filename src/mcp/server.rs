@@ -3571,3 +3571,6 @@ mod hook_branch_writer_tests;
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod staleness_banner_tests;
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod writer_test_support;

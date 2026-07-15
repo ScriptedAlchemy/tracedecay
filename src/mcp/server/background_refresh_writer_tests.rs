@@ -1,47 +1,12 @@
+use super::writer_test_support::init_indexed_repo;
 use super::{
     BackgroundRefreshRequest, BackgroundRefreshWriter, McpServer, direct_hook_branch_writer,
 };
-use crate::config::PinnedUserDataDir;
-use crate::tracedecay::TraceDecay;
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use tempfile::TempDir;
-
-fn git(root: &Path, args: &[&str]) {
-    let output = std::process::Command::new(crate::git::git_program())
-        .current_dir(root)
-        .args(args)
-        .output()
-        .expect("git runs");
-    assert!(
-        output.status.success(),
-        "git {args:?} failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-}
-
-async fn init_indexed_repo() -> (TraceDecay, TempDir, PinnedUserDataDir) {
-    let pin = PinnedUserDataDir::new();
-    let dir = TempDir::new().expect("temp repo");
-    let root = dir.path();
-    git(root, &["init", "-q", "-b", "main"]);
-    git(root, &["config", "user.email", "t@t.com"]);
-    git(root, &["config", "user.name", "T"]);
-    std::fs::write(root.join(".gitignore"), ".tracedecay/\n").expect("write gitignore");
-    std::fs::create_dir_all(root.join("src")).expect("create src");
-    std::fs::write(root.join("src/a.rs"), "pub fn a() {}\n").expect("write source");
-    git(root, &["add", "."]);
-    git(root, &["commit", "-q", "-m", "initial"]);
-    let cg = TraceDecay::init(root).await.expect("init");
-    cg.index_all().await.expect("index");
-    let mut config = crate::config::load_config(root).expect("load config");
-    config.sync.session_start_sync = false;
-    crate::config::save_config(root, &config).expect("disable startup sync");
-    (cg, dir, pin)
-}
 
 #[tokio::test]
 async fn read_refresh_uses_injected_writer_without_direct_fallback() {

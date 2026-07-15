@@ -135,6 +135,26 @@ use super::dispatch_policy::{
 use super::render;
 use support::{profile_root_for_global_db, project_registry_context, project_selector_present};
 
+pub(super) fn text_tool_result(text: &str) -> ToolResult {
+    ToolResult::new(
+        json!({ "content": [{ "type": "text", "text": text }] }),
+        Vec::new(),
+    )
+}
+
+pub(super) fn rendered_tool_json(
+    project_root: Option<&Path>,
+    args: &Value,
+    value: &Value,
+) -> ToolResult {
+    let text = render::finalize(project_root, args, value, || render::generic_md(value));
+    text_tool_result(&text)
+}
+
+pub(super) fn json_result(value: &Value) -> ToolResult {
+    text_tool_result(&serde_json::to_string(value).unwrap_or_default())
+}
+
 #[cfg(test)]
 const INTERNAL_DAEMON_TOOL_NAMES: &[&str] = &[
     "tracedecay_admin_branch_add",

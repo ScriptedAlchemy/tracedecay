@@ -1,33 +1,20 @@
 use serde_json::{Value, json};
 use std::path::Path;
 
+use crate::automation::config_error;
 use crate::automation::run_ledger::AutomationRunStatus;
-use crate::errors::{Result, TraceDecayError};
+use crate::errors::Result;
 use crate::global_db::GlobalDb;
 use crate::mcp::tools::ToolResult;
 use crate::tracedecay::TraceDecay;
 
-use super::{SessionAuthorities, render};
-
-fn config_error(message: impl Into<String>) -> TraceDecayError {
-    TraceDecayError::Config {
-        message: message.into(),
-    }
-}
+use super::{SessionAuthorities, rendered_tool_json};
 
 fn required_str<'a>(args: &'a Value, key: &str) -> Result<&'a str> {
     args.get(key)
         .and_then(Value::as_str)
         .filter(|value| !value.is_empty())
         .ok_or_else(|| config_error(format!("missing required parameter `{key}`")))
-}
-
-fn rendered(project_root: Option<&std::path::Path>, args: &Value, value: &Value) -> ToolResult {
-    let text = render::finalize(project_root, args, value, || render::generic_md(value));
-    ToolResult::new(
-        json!({ "content": [{ "type": "text", "text": text }] }),
-        vec![],
-    )
 }
 
 pub async fn handle_hook_runtime(
@@ -68,7 +55,7 @@ pub async fn handle_hook_runtime(
             )));
         }
     };
-    Ok(rendered(Some(cg.project_root()), &args, &output))
+    Ok(rendered_tool_json(Some(cg.project_root()), &args, &output))
 }
 
 pub async fn handle_projectless_hook_runtime(
@@ -100,7 +87,7 @@ pub async fn handle_projectless_hook_runtime(
         }
         _ => unreachable!("projectless hook action validated above"),
     };
-    Ok(rendered(None, &args, &output))
+    Ok(rendered_tool_json(None, &args, &output))
 }
 
 fn projectless_action_allowed(action: &str, args: &Value) -> bool {

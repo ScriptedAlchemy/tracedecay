@@ -24,6 +24,7 @@ use super::support::{
     profile_root_for_global_db, project_registry_context, project_selector_present,
     safe_profile_relpath, string_array_values,
 };
+use super::{rendered_tool_json, text_tool_result};
 
 const DEFAULT_FACT_LIMIT: usize = 20;
 const MAX_FACT_LIMIT: usize = 200;
@@ -58,18 +59,6 @@ async fn open_user_memory_target(profile_root: &Path) -> Result<TargetMemoryDb<'
         project_root: profile_root.to_path_buf(),
         user_scope: true,
     })
-}
-
-fn text_tool_result(text: &str) -> ToolResult {
-    ToolResult::new(
-        json!({ "content": [{ "type": "text", "text": text }] }),
-        vec![],
-    )
-}
-
-fn rendered_tool_json(project_root: Option<&Path>, args: &Value, value: &Value) -> ToolResult {
-    let text = render::finalize(project_root, args, value, || render::generic_md(value));
-    text_tool_result(&text)
 }
 
 fn rendered_fact_store(project_root: Option<&Path>, args: &Value, value: &Value) -> ToolResult {

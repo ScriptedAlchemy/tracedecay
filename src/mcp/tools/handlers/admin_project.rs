@@ -8,6 +8,7 @@ use crate::global_db::GlobalDb;
 use crate::tracedecay::TraceDecay;
 
 use super::super::ToolResult;
+use super::json_result;
 
 static FACT_APPLY_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
@@ -313,18 +314,6 @@ fn decode_options<T: serde::de::DeserializeOwned>(options: Value) -> Result<T> {
     serde_json::from_value(options).map_err(|error| TraceDecayError::Config {
         message: format!("invalid tracedecay_admin_project automation options: {error}"),
     })
-}
-
-fn json_result(value: &Value) -> ToolResult {
-    ToolResult::new(
-        json!({
-            "content": [{
-                "type": "text",
-                "text": serde_json::to_string(&value).unwrap_or_default(),
-            }]
-        }),
-        Vec::new(),
-    )
 }
 
 #[cfg(test)]

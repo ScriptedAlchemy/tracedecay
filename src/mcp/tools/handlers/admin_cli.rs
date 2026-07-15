@@ -10,6 +10,7 @@ use crate::global_db::{AnalyticsEventQuery, GlobalDb};
 use crate::tracedecay::TraceDecay;
 
 use super::super::ToolResult;
+use super::json_result;
 
 const GIT_BACKFILL_ANALYTICS_LIMIT: usize = 500_000;
 
@@ -416,18 +417,6 @@ async fn sessions_unfinished(cg: &TraceDecay, limit: usize) -> Result<Value> {
         .await
         .map_err(|message| TraceDecayError::Config { message })?;
     Ok(json!({ "items": items }))
-}
-
-fn json_result(value: &Value) -> ToolResult {
-    ToolResult::new(
-        json!({
-            "content": [{
-                "type": "text",
-                "text": serde_json::to_string(&value).unwrap_or_default(),
-            }]
-        }),
-        Vec::new(),
-    )
 }
 
 #[cfg(test)]
