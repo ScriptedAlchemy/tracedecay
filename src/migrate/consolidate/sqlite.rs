@@ -1,4 +1,5 @@
 use std::cmp::Ordering;
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use libsql::{Connection, params};
@@ -384,7 +385,10 @@ pub(super) async fn merge_sessions(
     )
     .await
     {
-        Ok(()) => merge_sessions_tx(target.conn(), offsets).await,
+        Ok(()) => match preflight_observation_merge(target.conn()).await {
+            Ok(()) => merge_sessions_tx(target.conn(), offsets).await,
+            Err(error) => Err(error),
+        },
         Err(error) => Err(error),
     };
     match result {
@@ -1124,8 +1128,99 @@ async fn merge_observation_authority(conn: &Connection) -> Result<()> {
 
     merge_source_cursors(conn).await?;
     conn.execute_batch(
-        "DELETE FROM observation_projection_provenance;
-         DELETE FROM observation_projection_dispositions;
+        "INSERT INTO observation_projection_aliases(
+             projector_version, observation_id, output_provider, output_message_id
+         )
+         SELECT projector_version, observation_id, output_provider, output_message_id
+         FROM (
+             SELECT a.projector_version, a.observation_id, a.output_provider,
+                    COALESCE(m.mapped_id, a.output_message_id) AS output_message_id
+             FROM source.observation_projection_aliases AS a
+             LEFT JOIN consolidation_message_map AS m
+               ON m.provider=a.output_provider AND m.original_id=a.output_message_id
+             UNION
+             SELECT p.projector_version, p.observation_id, p.output_provider, m.mapped_id
+             FROM source.observation_projection_provenance AS p
+             JOIN consolidation_message_map AS m
+               ON m.provider=p.output_provider AND m.original_id=p.output_message_id
+         )
+         WHERE 1
+         ON CONFLICT(projector_version, observation_id) DO NOTHING;
+
+         DELETE FROM session_messages AS message
+         WHERE EXISTS (
+             SELECT 1
+             FROM source.observation_projection_provenance AS p
+             JOIN consolidation_message_map AS m
+               ON m.provider=p.output_provider AND m.original_id=p.output_message_id
+             WHERE p.message_created=1
+               AND message.provider=p.output_provider
+               AND message.message_id=m.mapped_id
+               AND NOT EXISTS (
+                   SELECT 1
+                   FROM source.observation_projection_provenance AS retained_owner
+                   WHERE retained_owner.output_provider=p.output_provider
+                     AND retained_owner.output_message_id=p.output_message_id
+                     AND retained_owner.message_created=0
+               )
+               AND NOT EXISTS (
+                   SELECT 1
+                   FROM observation_projection_provenance AS retained_owner
+                   WHERE retained_owner.output_provider=message.provider
+                     AND retained_owner.output_message_id=message.message_id
+                     AND NOT EXISTS (
+                         SELECT 1
+                         FROM source.observation_projection_provenance AS source_owner
+                         JOIN consolidation_message_map AS owner_map
+                           ON owner_map.provider=source_owner.output_provider
+                          AND owner_map.original_id=source_owner.output_message_id
+                         WHERE source_owner.projector_version=retained_owner.projector_version
+                           AND source_owner.observation_id=retained_owner.observation_id
+                           AND owner_map.mapped_id=message.message_id
+                     )
+               )
+         );
+
+         DELETE FROM observation_projection_provenance AS existing
+         WHERE EXISTS (
+             SELECT 1
+             FROM source.observation_projection_provenance AS p
+             JOIN consolidation_message_map AS m
+               ON m.provider=p.output_provider AND m.original_id=p.output_message_id
+             WHERE p.projector_version=existing.projector_version
+               AND p.observation_id=existing.observation_id
+         );
+
+         INSERT INTO observation_projection_provenance(
+             projector_version, observation_id, receipt_id, output_provider,
+             output_message_id, output_digest, message_created
+         )
+         SELECT p.projector_version, p.observation_id, p.receipt_id,
+                p.output_provider, COALESCE(m.mapped_id, p.output_message_id),
+                p.output_digest,
+                CASE WHEN EXISTS (
+                      SELECT 1 FROM target_input.session_messages AS t
+                      WHERE t.provider=p.output_provider
+                        AND t.message_id=p.output_message_id
+                  ) THEN 0
+                  ELSE p.message_created
+                END
+         FROM source.observation_projection_provenance AS p
+         LEFT JOIN consolidation_message_map AS m
+           ON m.provider=p.output_provider AND m.original_id=p.output_message_id
+         WHERE m.mapped_id IS NULL
+         ON CONFLICT(projector_version, observation_id) DO UPDATE SET
+             message_created=MIN(
+                 observation_projection_provenance.message_created,
+                 excluded.message_created
+             );
+
+         INSERT OR IGNORE INTO observation_projection_dispositions(
+             projector_version, observation_id, receipt_id, reason
+         )
+         SELECT projector_version, observation_id, receipt_id, reason
+         FROM source.observation_projection_dispositions;
+
          DELETE FROM observation_projection_checkpoints;
          DELETE FROM projection_queue;
          INSERT INTO projection_queue(observation_id, observation_sequence)
@@ -1136,59 +1231,104 @@ async fn merge_observation_authority(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-async fn merge_source_cursors(conn: &Connection) -> Result<()> {
-    let mut rows = conn
-        .query(
-            "SELECT source_json, scope_json, cursor_json
-             FROM source.source_cursors ORDER BY source_json, scope_json",
-            (),
-        )
-        .await
-        .map_err(|error| db_error("merge_source_cursors", error))?;
-    let mut source_rows = Vec::new();
-    while let Some(row) = rows
-        .next()
-        .await
-        .map_err(|error| db_error("merge_source_cursors", error))?
-    {
-        source_rows.push((
-            row.get::<String>(0)
-                .map_err(|error| db_error("merge_source_cursors", error))?,
-            row.get::<String>(1)
-                .map_err(|error| db_error("merge_source_cursors", error))?,
-            row.get::<String>(2)
-                .map_err(|error| db_error("merge_source_cursors", error))?,
+async fn preflight_observation_merge(conn: &Connection) -> Result<()> {
+    let target_cursors = read_source_cursor_rows(conn, "target_input").await?;
+    let source_cursors = read_source_cursor_rows(conn, "source").await?;
+    for (key, (_, source_cursor)) in &source_cursors {
+        if let Some((_, target_cursor)) = target_cursors.get(key) {
+            source_cursor.checked_cmp(target_cursor).map_err(|_| {
+                db_message(
+                    "merge_source_cursors",
+                    "cursor generations are not comparable",
+                )
+            })?;
+        }
+    }
+
+    let alias_conflicts = query_i64(
+        conn,
+        "WITH claims AS (
+             SELECT projector_version, observation_id, output_provider, output_message_id
+             FROM main.observation_projection_aliases
+             UNION ALL
+             SELECT a.projector_version, a.observation_id, a.output_provider,
+                    COALESCE(m.mapped_id, a.output_message_id)
+             FROM source.observation_projection_aliases AS a
+             LEFT JOIN consolidation_message_map AS m
+               ON m.provider=a.output_provider AND m.original_id=a.output_message_id
+             UNION ALL
+             SELECT p.projector_version, p.observation_id, p.output_provider, m.mapped_id
+             FROM source.observation_projection_provenance AS p
+             JOIN consolidation_message_map AS m
+               ON m.provider=p.output_provider AND m.original_id=p.output_message_id
+         )
+         SELECT COUNT(*) FROM (
+             SELECT projector_version, observation_id
+             FROM claims
+             GROUP BY projector_version, observation_id
+             HAVING MIN(output_provider) IS NOT MAX(output_provider)
+                 OR MIN(output_message_id) IS NOT MAX(output_message_id)
+         )",
+    )
+    .await?;
+    if alias_conflicts != 0 {
+        return Err(db_message(
+            "merge_observation_authority",
+            "projection output collision cannot be represented by one durable alias",
         ));
     }
-    drop(rows);
 
-    for (source_json, scope_json, cursor_json) in source_rows {
-        let source_cursor = decode_source_cursor(&source_json, &scope_json, &cursor_json)?;
-        let mut target_rows = conn
-            .query(
-                "SELECT cursor_json FROM source_cursors
-                 WHERE source_json = ?1 AND scope_json = ?2",
-                params![source_json.as_str(), scope_json.as_str()],
-            )
-            .await
-            .map_err(|error| db_error("merge_source_cursors", error))?;
-        let target_json = target_rows
-            .next()
-            .await
-            .map_err(|error| db_error("merge_source_cursors", error))?
-            .map(|row| {
-                row.get::<String>(0)
-                    .map_err(|error| db_error("merge_source_cursors", error))
-            })
-            .transpose()?;
-        drop(target_rows);
+    let provenance_conflicts = query_i64(
+        conn,
+        "SELECT COUNT(*)
+         FROM main.observation_projection_provenance AS t
+         JOIN source.observation_projection_provenance AS s
+           ON s.projector_version=t.projector_version
+          AND s.observation_id=t.observation_id
+         LEFT JOIN consolidation_message_map AS m
+           ON m.provider=s.output_provider AND m.original_id=s.output_message_id
+         WHERE m.mapped_id IS NULL
+           AND (t.receipt_id IS NOT s.receipt_id
+            OR t.output_provider IS NOT s.output_provider
+            OR t.output_message_id IS NOT COALESCE(m.mapped_id, s.output_message_id)
+            OR t.output_digest IS NOT s.output_digest)",
+    )
+    .await?;
+    if provenance_conflicts != 0 {
+        return Err(db_message(
+            "merge_observation_authority",
+            "projection provenance collision cannot be represented losslessly",
+        ));
+    }
 
-        let replace = match target_json {
+    let disposition_conflicts = query_i64(
+        conn,
+        "SELECT COUNT(*)
+         FROM main.observation_projection_dispositions AS t
+         JOIN source.observation_projection_dispositions AS s
+           ON s.projector_version=t.projector_version
+          AND s.observation_id=t.observation_id
+         WHERE t.receipt_id IS NOT s.receipt_id OR t.reason IS NOT s.reason",
+    )
+    .await?;
+    if disposition_conflicts != 0 {
+        return Err(db_message(
+            "merge_observation_authority",
+            "projection disposition collision cannot be represented losslessly",
+        ));
+    }
+    Ok(())
+}
+
+async fn merge_source_cursors(conn: &Connection) -> Result<()> {
+    let target_rows = read_source_cursor_rows(conn, "main").await?;
+    let source_rows = read_source_cursor_rows(conn, "source").await?;
+    for ((source_json, scope_json), (cursor_json, source_cursor)) in source_rows {
+        let replace = match target_rows.get(&(source_json.clone(), scope_json.clone())) {
             None => true,
-            Some(target_json) => {
-                let target_cursor = decode_source_cursor(&source_json, &scope_json, &target_json)?;
+            Some((_, target_cursor)) => {
                 matches!(
-                    source_cursor.checked_cmp(&target_cursor).map_err(|_| {
+                    source_cursor.checked_cmp(target_cursor).map_err(|_| {
                         db_message(
                             "merge_source_cursors",
                             "cursor generations are not comparable",
@@ -1211,6 +1351,40 @@ async fn merge_source_cursors(conn: &Connection) -> Result<()> {
         }
     }
     Ok(())
+}
+
+pub(super) async fn read_source_cursor_rows(
+    conn: &Connection,
+    schema: &str,
+) -> Result<BTreeMap<(String, String), (String, ClaudeSourceCursorV1)>> {
+    let sql = format!(
+        "SELECT source_json, scope_json, cursor_json
+         FROM {}.source_cursors ORDER BY source_json, scope_json",
+        quote_identifier(schema)
+    );
+    let mut rows = conn
+        .query(&sql, ())
+        .await
+        .map_err(|error| db_error("read_source_cursor_rows", error))?;
+    let mut cursors = BTreeMap::new();
+    while let Some(row) = rows
+        .next()
+        .await
+        .map_err(|error| db_error("read_source_cursor_rows", error))?
+    {
+        let source_json = row
+            .get::<String>(0)
+            .map_err(|error| db_error("read_source_cursor_rows", error))?;
+        let scope_json = row
+            .get::<String>(1)
+            .map_err(|error| db_error("read_source_cursor_rows", error))?;
+        let cursor_json = row
+            .get::<String>(2)
+            .map_err(|error| db_error("read_source_cursor_rows", error))?;
+        let cursor = decode_source_cursor(&source_json, &scope_json, &cursor_json)?;
+        cursors.insert((source_json, scope_json), (cursor_json, cursor));
+    }
+    Ok(cursors)
 }
 
 fn decode_source_cursor(

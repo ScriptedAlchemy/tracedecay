@@ -1,10 +1,12 @@
+use std::cmp::Ordering;
+use std::collections::BTreeMap;
 use std::path::Path;
 
 use libsql::Connection;
 
 use super::{
     SessionMergeOffsets, attach_as, build_consolidation_message_map, db_error, db_message,
-    mapped_parent_metadata, mapped_turn_message_id, query_i64,
+    mapped_parent_metadata, mapped_turn_message_id, query_i64, read_source_cursor_rows,
 };
 use crate::errors::Result;
 
@@ -73,11 +75,7 @@ async fn verify_attached_tables(conn: &Connection, offsets: &SessionMergeOffsets
         verify_table(conn, &spec).await?;
     }
     verify_observation_cursors(conn).await?;
-    for table in [
-        "observation_projection_checkpoints",
-        "observation_projection_dispositions",
-        "observation_projection_provenance",
-    ] {
+    for table in ["observation_projection_checkpoints"] {
         if query_i64(conn, &format!("SELECT COUNT(*) FROM {table}")).await? != 0 {
             return Err(db_message(
                 "verify_consolidation",
@@ -119,44 +117,38 @@ async fn verify_attached_tables(conn: &Connection, offsets: &SessionMergeOffsets
 }
 
 async fn verify_observation_cursors(conn: &Connection) -> Result<()> {
-    let differences = query_i64(
-        conn,
-        "WITH input_cursors AS (
-             SELECT source_json, scope_json, cursor_json FROM target_input.source_cursors
-             UNION ALL
-             SELECT source_json, scope_json, cursor_json FROM source_input.source_cursors
-         ), expected AS (
-             SELECT source_json, scope_json,
-                    MIN(json_extract(cursor_json, '$.generation')) AS generation_min,
-                    MAX(json_extract(cursor_json, '$.generation')) AS generation_max,
-                    MAX(CAST(json_extract(cursor_json, '$.byte_offset') AS INTEGER)) AS byte_offset
-             FROM input_cursors GROUP BY source_json, scope_json
-         )
-         SELECT
-           (SELECT COUNT(*) FROM (
-                SELECT source_json, scope_json FROM expected
-                EXCEPT SELECT source_json, scope_json FROM main.source_cursors
-            ))
-         + (SELECT COUNT(*) FROM (
-                SELECT source_json, scope_json FROM main.source_cursors
-                EXCEPT SELECT source_json, scope_json FROM expected
-            ))
-         + (SELECT COUNT(*)
-              FROM expected AS e
-              JOIN main.source_cursors AS d
-                ON d.source_json=e.source_json AND d.scope_json=e.scope_json
-             WHERE e.generation_min IS NOT e.generation_max
-                OR json_extract(d.cursor_json, '$.generation') IS NOT e.generation_max
-                OR CAST(json_extract(d.cursor_json, '$.byte_offset') AS INTEGER)
-                   IS NOT e.byte_offset)",
-    )
-    .await?;
-    if differences != 0 {
+    let mut expected = read_source_cursor_rows(conn, "target_input").await?;
+    for (key, source_value) in read_source_cursor_rows(conn, "source_input").await? {
+        match expected.get(&key) {
+            None => {
+                expected.insert(key, source_value);
+            }
+            Some((_, target_cursor)) => {
+                let ordering = source_value.1.checked_cmp(target_cursor).map_err(|_| {
+                    db_message(
+                        "verify_consolidation",
+                        "frozen source cursor generations are not comparable",
+                    )
+                })?;
+                if ordering == Ordering::Greater {
+                    expected.insert(key, source_value);
+                }
+            }
+        }
+    }
+    let actual = read_source_cursor_rows(conn, "main").await?;
+    let expected_typed = expected
+        .into_iter()
+        .map(|(key, (_, cursor))| (key, cursor))
+        .collect::<BTreeMap<_, _>>();
+    let actual_typed = actual
+        .into_iter()
+        .map(|(key, (_, cursor))| (key, cursor))
+        .collect::<BTreeMap<_, _>>();
+    if actual_typed != expected_typed {
         return Err(db_message(
             "verify_consolidation",
-            format!(
-                "destination source cursor union differs from frozen inputs: {differences} difference(s)"
-            ),
+            "destination source cursor union differs from frozen inputs",
         ));
     }
     Ok(())
@@ -310,9 +302,26 @@ fn verification_specs(offsets: &SessionMergeOffsets) -> Vec<TableVerification> {
              FROM source_input.session_messages s
              LEFT JOIN consolidation_message_map m
                ON m.provider=s.provider AND m.original_id=s.message_id
-             WHERE m.mapped_id IS NOT NULL OR NOT EXISTS (
+             WHERE (m.mapped_id IS NOT NULL OR NOT EXISTS (
                  SELECT 1 FROM target_input.session_messages t
                  WHERE t.provider=s.provider AND t.message_id=s.message_id
+             ))
+             AND NOT (
+                 m.mapped_id IS NOT NULL
+                 AND EXISTS (
+                     SELECT 1
+                     FROM source_input.observation_projection_provenance p
+                     WHERE p.output_provider=s.provider
+                       AND p.output_message_id=s.message_id
+                       AND p.message_created=1
+                 )
+                 AND NOT EXISTS (
+                     SELECT 1
+                     FROM source_input.observation_projection_provenance p
+                     WHERE p.output_provider=s.provider
+                       AND p.output_message_id=s.message_id
+                       AND p.message_created=0
+                 )
              )"),
         ),
         custom(
@@ -343,6 +352,63 @@ fn verification_specs(offsets: &SessionMergeOffsets) -> Vec<TableVerification> {
              UNION
              SELECT observation_id, payload_digest, receipt_id, observation_json,
                     committed_cursor_json FROM source_input.observations",
+        ),
+        custom(
+            "observation projection alias",
+            "observation_projection_aliases",
+            "projector_version, observation_id, output_provider, output_message_id",
+            "SELECT projector_version, observation_id, output_provider, output_message_id
+             FROM target_input.observation_projection_aliases
+             UNION
+             SELECT a.projector_version, a.observation_id, a.output_provider,
+                    COALESCE(m.mapped_id, a.output_message_id)
+             FROM source_input.observation_projection_aliases AS a
+             LEFT JOIN consolidation_message_map AS m
+               ON m.provider=a.output_provider AND m.original_id=a.output_message_id
+             UNION
+             SELECT p.projector_version, p.observation_id, p.output_provider, m.mapped_id
+             FROM source_input.observation_projection_provenance AS p
+             JOIN consolidation_message_map AS m
+               ON m.provider=p.output_provider AND m.original_id=p.output_message_id",
+        ),
+        custom(
+            "observation projection provenance",
+            "observation_projection_provenance",
+            "projector_version, observation_id, receipt_id, output_provider, output_message_id, output_digest, message_created",
+            "WITH merged AS (
+                 SELECT projector_version, observation_id, receipt_id, output_provider,
+                        output_message_id, output_digest, message_created
+                 FROM target_input.observation_projection_provenance
+                 UNION ALL
+                 SELECT p.projector_version, p.observation_id, p.receipt_id,
+                        p.output_provider, p.output_message_id,
+                        p.output_digest,
+                        CASE WHEN EXISTS (
+                              SELECT 1 FROM target_input.session_messages AS t
+                              WHERE t.provider=p.output_provider
+                                AND t.message_id=p.output_message_id
+                          ) THEN 0
+                          ELSE p.message_created
+                        END
+                 FROM source_input.observation_projection_provenance AS p
+                 LEFT JOIN consolidation_message_map AS m
+                   ON m.provider=p.output_provider AND m.original_id=p.output_message_id
+                 WHERE m.mapped_id IS NULL
+             )
+             SELECT projector_version, observation_id, MIN(receipt_id),
+                    MIN(output_provider), MIN(output_message_id), MIN(output_digest),
+                    MIN(message_created)
+             FROM merged GROUP BY projector_version, observation_id",
+        ),
+        custom(
+            "observation projection disposition",
+            "observation_projection_dispositions",
+            "projector_version, observation_id, receipt_id, reason",
+            "SELECT projector_version, observation_id, receipt_id, reason
+             FROM target_input.observation_projection_dispositions
+             UNION
+             SELECT projector_version, observation_id, receipt_id, reason
+             FROM source_input.observation_projection_dispositions",
         ),
         custom(
             "observation projection queue",
