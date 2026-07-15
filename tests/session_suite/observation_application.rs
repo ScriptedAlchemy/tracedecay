@@ -6,7 +6,8 @@ use tracedecay::application::observation::{
     ReplayObservationsRequest,
 };
 use tracedecay::privacy::{
-    ClaudeRecordSanitizerV1, ClaudeSanitizerPolicyV1, parse_claude_record_v1,
+    ClaudeRecordParseErrorV1, ClaudeRecordSanitizerV1, ClaudeSanitizerPolicyV1,
+    PR5_MAX_CLAUDE_RECORD_BYTES, parse_claude_record_v1,
 };
 use tracedecay::store::GlobalDbObservationStore;
 use tracedecay_domain::{
@@ -335,5 +336,56 @@ async fn rejected_and_quarantined_records_leave_every_authoritative_state_unchan
             .unwrap()
             .observations()
             .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn malformed_partial_and_oversized_frames_leave_authoritative_state_unchanged() {
+    let tmp = TempDir::new().unwrap();
+    let db = open_lcm_db(&tmp).await;
+    let application = ObservationApplication::new(
+        GlobalDbObservationStore::new(&db),
+        ClaudeRecordSanitizerV1::pr5().unwrap(),
+    );
+    let session_id = "session.observation-invalid-frame";
+    let before = table_counts(&tmp).await;
+
+    for frame in [
+        br#"{"type":"user",malformed}"#.as_slice(),
+        br#"{"type":"user""#.as_slice(),
+    ] {
+        let frame_end = u64::try_from(frame.len()).unwrap();
+        assert_eq!(
+            parse_claude_record_v1(frame, ClaudeByteRangeV1::new(0, frame_end).unwrap()).err(),
+            Some(ClaudeRecordParseErrorV1::Malformed)
+        );
+    }
+    let oversized = vec![b'x'; PR5_MAX_CLAUDE_RECORD_BYTES + 1];
+    assert_eq!(
+        parse_claude_record_v1(
+            &oversized,
+            ClaudeByteRangeV1::new(0, u64::try_from(oversized.len()).unwrap()).unwrap(),
+        )
+        .err(),
+        Some(ClaudeRecordParseErrorV1::TooLarge)
+    );
+
+    assert_eq!(table_counts(&tmp).await, before);
+    assert!(
+        application
+            .store()
+            .get_source_cursor(&source(session_id), &ObservationScopeV1::Profile)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        application
+            .store()
+            .projection_checkpoint()
+            .await
+            .unwrap()
+            .last_sequence(),
+        0
     );
 }
